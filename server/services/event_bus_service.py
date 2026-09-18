@@ -78,6 +78,11 @@ EVENT_MEDIA_READY = "media_ready"
 # The site's arming mode changed (services/site_mode.py). Site-wide: it
 # names no camera and reaches every subscriber entitled to its type.
 EVENT_SITE_MODE = "site_mode"
+# Server-described entities (services/entity_descriptors.py, HA-114): a
+# resolved state or a fired event entity, and "re-fetch GET /entities".
+# Both v2-only: v1 sockets never see them.
+EVENT_ENTITY_STATE = "entity_state"
+EVENT_DESCRIPTORS_CHANGED = "descriptors_changed"
 
 # Reasonable default for a single slow WebSocket client. Bumping this trades
 # memory for tolerance of bursty traffic.
@@ -143,6 +148,8 @@ class _Subscriber:
         self.created_at = time.time()
 
     def matches(self, event: dict[str, Any]) -> bool:
+        if event.get("v2_only") is True and not self.with_seq:
+            return False
         # Entitlement first: a subscriber never sees a camera it was not
         # granted, whatever it asked to filter on.
         site_wide = event.get("site_wide") is True
@@ -307,6 +314,11 @@ class EventBus:
     def subscriber_count(self) -> int:
         return len(self._subscribers)
 
+    @property
+    def v2_subscriber_count(self) -> int:
+        """Sockets on protocol v2 (the only ones that receive entity_state)."""
+        return sum(1 for s in self._subscribers if s.with_seq)
+
 
 # Singleton accessor — matches the pattern used by other services
 # (inference_manager, kai_c_service, etc.).
@@ -379,6 +391,32 @@ async def publish_site_mode(value: dict[str, Any]) -> None:
         "site_wide": True,
         "task": "site_mode",
         "payload": value,
+    })
+
+
+async def publish_entity_state(
+    *, key: str, camera_id: int | None, required_scope: str, payload: dict[str, Any],
+) -> None:
+    """A descriptor's new state, or an event entity firing (HA-114). The v2
+    socket delivers it only to connections holding ``required_scope``."""
+    event: dict[str, Any] = {
+        "event_type": EVENT_ENTITY_STATE,
+        "task": "entity",
+        "v2_only": True,
+        "required_scope": required_scope,
+        "payload": payload,
+    }
+    if camera_id is None:
+        event["site_wide"] = True
+    else:
+        event["camera_id"] = camera_id
+    await get_event_bus().publish(event)
+
+
+async def publish_descriptors_changed(etag: str) -> None:
+    await get_event_bus().publish({
+        "event_type": EVENT_DESCRIPTORS_CHANGED, "task": "entity", "v2_only": True,
+        "site_wide": True, "payload": {"etag": etag},
     })
 
 

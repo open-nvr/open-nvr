@@ -1414,15 +1414,18 @@ async def invoke_app_action(
             camera_id_from_handle, manageable_camera_ids,
         )
 
-        scope = None
+        unset = object()
+        scope = unset
         for key in ("camera_id", "camera"):
             target = params.get(key)
             if target is None:
                 continue
             cam_id = camera_id_from_handle(target)
-            if scope is None:
+            if scope is unset:
                 scope = manageable_camera_ids(db, current_user)
-            if cam_id is None or cam_id not in scope:
+            # None = every camera: an API token whose owner is a superuser
+            # (the token itself is never one) and that has no allow-list.
+            if cam_id is None or (scope is not None and cam_id not in scope):
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Not permitted to control this camera",

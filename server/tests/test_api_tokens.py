@@ -142,7 +142,7 @@ def env(monkeypatch):
         "routers.system", "routers.cameras", "routers.api_tokens",
         "routers.recordings", "routers.audit_logs", "routers.events",
         "routers.timeline_events", "routers.zones", "routers.live_state", "routers.media",
-        "routers.alerts_inbox", "routers.site_mode")]
+        "routers.alerts_inbox", "routers.site_mode", "routers.entities")]
     for mod in routers:
         app.include_router(mod.router, prefix="/api/v1")
     # Override EVERY get_db these routers depend on, not just the one in
@@ -393,7 +393,7 @@ def test_every_token_route_is_a_real_route():
     for mod in ("routers.system", "routers.cameras", "routers.recordings",
                 "routers.streams", "routers.timeline_events", "routers.alerts_inbox",
                 "routers.events", "routers.zones", "routers.live_state", "routers.media",
-                "routers.site_mode"):
+                "routers.site_mode", "routers.entities"):
         app.include_router(importlib.import_module(mod).router, prefix="/api/v1")
     # OpenAPI paths are full templates on every FastAPI version; app.routes
     # nests included routers from 0.140 on.
@@ -521,7 +521,7 @@ def test_a_token_socket_keeps_the_tokens_cameras_and_scopes(env):
     assert hello["event_type"] == "subscribed"
     assert hello["filters"]["event_types"] == sorted(
         ["camera_status", "camera_event", "tracks", "inference_result", "inference_error",
-         "live_state", "media_ready", "site_mode"])
+         "live_state", "media_ready", "site_mode", "entity_state", "descriptors_changed"])
 
     # A camera outside the allow-list is refused, not silently empty.
     from starlette.websockets import WebSocketDisconnect
@@ -544,7 +544,8 @@ def test_a_token_socket_is_scoped_to_what_the_owner_sees(env):
             ws.receive_json()
     t = _ws_ticket(env, tok).json()["ticket"]
     with _open(env.client, t, camera_id=3) as ws:
-        assert ws.receive_json()["filters"]["event_types"] == ["camera_status", "live_state"]
+        assert ws.receive_json()["filters"]["event_types"] == [
+            "camera_status", "descriptors_changed", "entity_state", "live_state"]
 
 
 def test_ws_ticket_needs_cameras_view(env):
@@ -660,3 +661,48 @@ def test_a_token_is_judged_by_its_owners_camera_rights(env):
     tok = _mint(env, scopes=["cameras.view", "cameras.manage"])["token"]
     assert env.client.put("/api/v1/cameras/2", headers=_as(tok),
                           json={"detection_enabled": False}).status_code == 200
+
+
+@pytest.mark.parametrize("version", ["1", "2"])
+def test_revoking_a_token_closes_its_open_sockets(env, monkeypatch, version):  # noqa: F811
+    """M1 review: sockets used to live on after a revoke until the client
+    reconnected (days, for Home Assistant). Now re-checked while open."""
+    ev = importlib.import_module("routers.events")
+    from starlette.websockets import WebSocketDisconnect
+
+    monkeypatch.setattr(ev, "WS_RECHECK_S", 0.2)
+    monkeypatch.setattr(ev, "V2_HEARTBEAT_S", 0.2)   # the v2 loop wakes on it
+    out = _mint(env)
+    t = _ws_ticket(env, out["token"]).json()["ticket"]
+    with _open(env.client, t, v=version) as ws:
+        ws.receive_json()
+        if version == "2":
+            ws.receive_json()          # the snapshot
+        env.client.delete(f"/api/v1/api-tokens/{out['id']}", headers=env.jwt("admin"))
+        with pytest.raises(WebSocketDisconnect) as exc:
+            for _ in range(20):
+                ws.receive_json()
+    assert exc.value.code == 4401
+
+
+def test_a_scope_change_closes_the_socket_too(env, monkeypatch):  # noqa: F811
+    ev = importlib.import_module("routers.events")
+    from starlette.websockets import WebSocketDisconnect
+
+    monkeypatch.setattr(ev, "WS_RECHECK_S", 0.2)
+    monkeypatch.setattr(ev, "V2_HEARTBEAT_S", 0.2)   # the v2 loop wakes on it
+    tok = _mint(env, who="vera", scopes=["cameras.view", "live.view"])["token"]
+    t = _ws_ticket(env, tok).json()["ticket"]
+    with _open(env.client, t, v="2") as ws:
+        ws.receive_json()
+        ws.receive_json()
+        # vera's role loses live.view: the token's event types shrink.
+        s = env.Session()
+        s.query(env.models.RolePermission).filter_by(
+            role_id=env.ids["viewer_role"], permission_id=env.ids["live"]).delete()
+        s.commit()
+        s.close()
+        with pytest.raises(WebSocketDisconnect) as exc:
+            for _ in range(20):
+                ws.receive_json()
+    assert exc.value.code == 4401

@@ -230,7 +230,8 @@ class _Bus:
 
 def _run(msg, monkeypatch):
     """The OVERLAY events one message produces. Live-state events (HA-110)
-    ride the same bus and have their own tests (test_live_state.py); each
+    and detection entity events (HA-114) ride the same bus and have their
+    own tests (test_live_state.py, test_entities.py); each
     run gets a fresh live state so no test sees another's tracks."""
     import services.live_state as ls_mod
 
@@ -240,7 +241,8 @@ def _run(msg, monkeypatch):
     monkeypatch.setattr(ls_mod, "_instance", ls_mod.LiveState())
     monkeypatch.setattr(ls_mod, "refresh_zones_if_due", lambda cid, now=None: None)
     asyncio.run(tc._handle_message(msg))
-    return [e for e in bus.published if e.get("event_type") != "live_state"]
+    return [e for e in bus.published
+            if e.get("event_type") not in ("live_state", "entity_state")]
 
 
 def test_camera_handle_is_mapped_to_the_integer_id(monkeypatch):

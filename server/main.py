@@ -59,6 +59,7 @@ from routers import (
     live_state as live_state_router,
     media as media_router,
     site_mode as site_mode_router,
+    entities as entities_router,
     apps,
     audit_logs,
     auth,
@@ -661,6 +662,17 @@ async def lifespan(app: FastAPI):
 
     spawn_background(background_live_state_sweeper(), name="live-state-sweeper")
 
+    # Server-described entities (HA-114): one resolver for the site.
+    async def background_entity_states():
+        async def _loop():
+            from services.entity_state_publisher import run_forever
+
+            await run_forever()
+
+        await run_consumer_forever("entity-state publisher", _loop)
+
+    spawn_background(background_entity_states(), name="entity-state-publisher")
+
     # Operator alert inbox: consume opennvr.alerts.> (the SDK apps'
     # NatsAlertChannel) into app_alerts so the UI bell can ring and
     # acknowledge. Same best-effort posture — no bus, no inbox, no crash.
@@ -884,6 +896,7 @@ app.include_router(zones_router.router, prefix=settings.api_prefix)
 app.include_router(live_state_router.router, prefix=settings.api_prefix)
 app.include_router(media_router.router, prefix=settings.api_prefix)
 app.include_router(site_mode_router.router, prefix=settings.api_prefix)
+app.include_router(entities_router.router, prefix=settings.api_prefix)
 app.include_router(recordings.router, prefix=settings.api_prefix)
 app.include_router(orphaned_recordings.router, prefix=settings.api_prefix)
 app.include_router(

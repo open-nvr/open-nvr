@@ -216,10 +216,18 @@ async def _update_live_state(camera_id: int, raw: dict[str, Any]) -> None:
     live = get_live_state()
     delta = live.update(camera_id, raw)
     if delta["changed"] or delta["started"] or delta["ended"]:
-        from services.event_bus_service import publish_live_state
+        from services.event_bus_service import publish_entity_state, publish_live_state
 
         await publish_live_state(camera_id=camera_id, state=live.camera(camera_id),
                                  started=delta["started"], ended=delta["ended"])
+        # The detection event entities (HA-114): camera-wide and per zone.
+        for s in delta["started"]:
+            attrs = {"track_id": s["track_id"], "zones": s["zones"]}
+            for key in [f"camera.{camera_id}.detections"] + [
+                    f"zone.{z}.detections" for z in s["zones"]]:
+                await publish_entity_state(
+                    key=key, camera_id=camera_id, required_scope="cameras.view",
+                    payload={"key": key, "event": {"type": s["label"], "attributes": attrs}})
 
 
 async def run_live_state_sweeper(interval_s: float = 1.0) -> None:

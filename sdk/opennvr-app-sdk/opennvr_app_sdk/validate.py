@@ -208,6 +208,7 @@ def check_manifest(m: AppManifest, report: Report, cls: type | None = None) -> N
     for name in action_names:
         if action_names.count(name) > 1:
             report.error(f"actions: {name!r} declared twice")
+    _check_entities(m, report, set(action_names))
     view_names = [getattr(v, "name", None) or getattr(v, "title", "") for v in m.state_schema]
     for name in view_names:
         if name and view_names.count(name) > 1:
@@ -237,6 +238,36 @@ def check_manifest(m: AppManifest, report: Report, cls: type | None = None) -> N
     if m.has_ui and cls is not None and m.ui_mode == "internal":
         if not any(hasattr(parent, "render_ui") or hasattr(parent, "ui_html") for parent in cls.__mro__):
             report.note("has_ui=True: make sure the contract server serves GET /ui")
+
+
+def _check_entities(m: AppManifest, report: Report, actions: set[str]) -> None:
+    """HA-114 entities: well-formed keys, known platforms, controls that
+    name one of the app's own actions, values that say where they come from."""
+    from .manifest import ENTITY_CONTROL_PLATFORMS, ENTITY_PLATFORMS
+
+    seen: set[str] = set()
+    for e in getattr(m, "entities", None) or []:
+        where = f"entities: {e.key!r}"
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", e.key or ""):
+            report.error(f"{where}: key must be snake_case")
+        if e.key in seen:
+            report.error(f"{where}: declared twice")
+        seen.add(e.key)
+        if e.platform not in ENTITY_PLATFORMS:
+            report.error(f"{where}: unknown platform {e.platform!r} "
+                         f"(one of {', '.join(ENTITY_PLATFORMS)})")
+            continue
+        if e.platform in ENTITY_CONTROL_PLATFORMS:
+            if not e.action:
+                report.error(f"{where}: a {e.platform} needs action=")
+            elif e.action not in actions:
+                report.error(f"{where}: action {e.action!r} is not one of the app's actions")
+        elif e.action:
+            report.warn(f"{where}: a {e.platform} ignores action=")
+        if e.platform not in ("button", "event") and not e.state_path:
+            report.error(f"{where}: a {e.platform} needs state_path=")
+        if "{camera}" in (e.state_path or "") and not e.per_camera:
+            report.error(f"{where}: {{camera}} in state_path needs per_camera=True")
 
 
 def _check_param(p: Param, seen: set[str], report: Report) -> None:

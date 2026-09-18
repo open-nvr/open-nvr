@@ -51,6 +51,8 @@ ALLOWED_SCOPES: frozenset[str] = frozenset({
     # Only ever used for PUT /site-mode (routes are opt-in, see TOKEN_ROUTES):
     # Home Assistant's alarm panel arms and disarms the site.
     "settings.manage",
+    # App-declared entities (HA-114): read / drive an app's own entities.
+    "apps.view",
 })
 
 _A = "/api/v1"
@@ -70,6 +72,10 @@ TOKEN_ROUTES: dict[tuple[str, str], str] = {
     ("POST", f"{_A}/media/sign"): "cameras.view",
     ("GET", f"{_A}/site-mode"): "settings.view",
     ("PUT", f"{_A}/site-mode"): "settings.manage",
+    # Each descriptor's own required_scope is checked by routers/entities.py.
+    ("GET", f"{_A}/entities"): "cameras.view",
+    ("GET", f"{_A}/entities/states"): "cameras.view",
+    ("POST", f"{_A}/entities/{{key}}/command"): "cameras.view",
     # Only TOKEN_CAMERA_FIELDS may be changed (routers/cameras.update_camera).
     ("PUT", f"{_A}/cameras/{{camera_id}}"): "cameras.manage",
     # The route checks the site flag and recordings.pause itself.
@@ -411,6 +417,9 @@ TOKEN_EVENT_SCOPES: dict[str, str] = {
     "live_state": "cameras.view",
     "media_ready": "recordings.view",
     "site_mode": "settings.view",
+    # Further filtered per entity by its required_scope (routers/events.py).
+    "entity_state": "cameras.view",
+    "descriptors_changed": "cameras.view",
 }
 
 

@@ -10,6 +10,8 @@ says the key is good.
 
 ::: opennvr_app_sdk.Action
 
+::: opennvr_app_sdk.Entity
+
 ::: opennvr_app_sdk.ContractServer
 
 ::: opennvr_app_sdk.Entitlement

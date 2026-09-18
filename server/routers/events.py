@@ -377,6 +377,16 @@ async def events_stream(
         # session for the same reason: this reads the owner's role.
         event_types = (api_tokens.token_event_types(user)
                        if api_tokens.is_token_principal(user) else None)
+        # Entity scopes this connection holds (HA-114), for entity_state.
+        from services.entity_descriptors import held_scopes
+
+        held = held_scopes(user) if user is not None and user is not SERVICE else None
+        # What the socket was opened with, for the periodic re-check of a
+        # token socket (a revoke or a scope change must not wait for HA to
+        # reconnect, which can be days).
+        recheck = (TokenRecheck(user.token_id, user.username, get_client_ip(websocket),
+                                allowed, event_types, held)
+                   if api_tokens.is_token_principal(user) else None)
     finally:
         # Mirror FastAPI's get_db teardown without relying on Depends here
         # (WebSocket routes can't use Depends() for request-scoped DB sessions
@@ -414,7 +424,8 @@ async def events_stream(
 
     if v == 2:
         await _stream_v2(websocket, user, allowed, event_types, camera_id=camera_id,
-                         task=task, since=since, epoch=epoch, types=types)
+                         task=task, since=since, epoch=epoch, types=types, held=held,
+                         recheck=recheck)
         return
 
     bus = get_event_bus()
@@ -441,7 +452,17 @@ async def events_stream(
         )
         try:
             while True:
-                event: dict[str, Any] = await sub.queue.get()
+                try:
+                    event: dict[str, Any] = await asyncio.wait_for(
+                        sub.queue.get(), WS_RECHECK_S)
+                except TimeoutError:
+                    if recheck is not None and not await recheck.still_ok():
+                        await recheck.close(websocket)
+                        break
+                    continue
+                if recheck is not None and not await recheck.still_ok():
+                    await recheck.close(websocket)
+                    break
                 await websocket.send_text(json.dumps(event, default=str))
 
                 # Surface cumulative drops so slow clients know they missed data.
@@ -465,6 +486,60 @@ async def events_stream(
             main_logger.info(
                 "events_stream closed: user=%s dropped=%d", user.username, sub.dropped,
             )
+
+
+# ── token sockets are re-checked while open ──────────────────────────────
+
+#: How often an open token socket re-validates its token (and the camera
+#: and event scope it was opened with).
+WS_RECHECK_S = 30.0
+
+
+class TokenRecheck:
+    """Re-validate a token socket at most every WS_RECHECK_S.
+
+    Closes (4401) when the token was revoked or expired, the owner disabled,
+    the address left ``allowed_cidrs``, or its cameras / event types /
+    entity scopes changed. The client reconnects and gets exactly what it
+    may now have; a revoked token gets nothing.
+    """
+
+    def __init__(self, token_id, username, ip, allowed, event_types, held):
+        self.token_id, self.username, self.ip = token_id, username, ip
+        self.opened_with = (allowed, event_types, held)
+        self.checked_at = time.monotonic()
+        self.ok = True
+
+    def _check(self) -> bool:
+        from core.database import SessionLocal
+        from services.entity_descriptors import held_scopes
+
+        with SessionLocal() as db:
+            p = api_tokens.principal_for_ws(db, self.token_id, self.ip)
+            if p is None or p.username != self.username:
+                return False
+            now = (_ws_scope_for(p, db), api_tokens.token_event_types(p), held_scopes(p))
+        return now == self.opened_with
+
+    async def still_ok(self) -> bool:
+        if not self.ok:
+            return False
+        if time.monotonic() - self.checked_at < WS_RECHECK_S:
+            return True
+        self.checked_at = time.monotonic()
+        try:
+            self.ok = await asyncio.to_thread(self._check)
+        except Exception:  # noqa: BLE001 - fail closed
+            self.ok = False
+        return self.ok
+
+    async def close(self, websocket) -> None:
+        main_logger.info("events_stream: closing token socket (token %s revoked or changed)",
+                         self.token_id)
+        try:
+            await websocket.close(code=4401, reason="token revoked or changed")
+        except Exception:  # noqa: BLE001
+            pass
 
 
 # ── v2 (HA-111) ───────────────────────────────────────────────────────────
@@ -493,6 +568,15 @@ def _v2_snapshot_cameras(allowed: set[int] | None, camera_id: int | None) -> lis
     return [{**live.camera(cid), "online": online.get(cid)} for cid in ids]
 
 
+def _v2_entity_states(event_types, held, allowed) -> dict:
+    """Every resolved entity state this socket may see, for the snapshot."""
+    if event_types is not None and "entity_state" not in event_types:
+        return {}
+    from services.entity_state_publisher import visible_states
+
+    return visible_states(held, allowed)
+
+
 def _v2_site_mode(event_types) -> dict | None:
     """The site mode for the snapshot, when this socket may see it."""
     if event_types is not None and "site_mode" not in event_types:
@@ -504,8 +588,21 @@ def _v2_site_mode(event_types) -> dict | None:
         return site_mode.get(db)
 
 
+def _v2_may_send(event: dict, held: set[str] | None) -> bool:
+    """entity_state carries its descriptor's scope; the rest were filtered
+    by the bus."""
+    if event.get("event_type") == "entity_state" and held is not None:
+        return event.get("required_scope") in held
+    return True
+
+
+def _v2_frame(seq: int, event: dict) -> str:
+    out = {k: v for k, v in event.items() if k not in ("v2_only", "required_scope")}
+    return json.dumps({"v": 2, "seq": seq, **out}, default=str)
+
+
 async def _stream_v2(websocket, user, allowed, event_types, *, camera_id, task,
-                     since, epoch, types) -> None:
+                     since, epoch, types, held=None, recheck=None) -> None:
     """The v2 stream.
 
     Order matters and is what makes resume lossless: subscribe FIRST (from
@@ -533,8 +630,8 @@ async def _stream_v2(websocket, user, allowed, event_types, *, camera_id, task,
             await websocket.send_text(json.dumps(hello))
             if complete:
                 for seq, event in replayed:
-                    await websocket.send_text(json.dumps({"v": 2, "seq": seq, **event},
-                                                         default=str))
+                    if _v2_may_send(event, held):
+                        await websocket.send_text(_v2_frame(seq, event))
             else:
                 cameras = await asyncio.to_thread(_v2_snapshot_cameras, allowed, camera_id)
                 await websocket.send_text(json.dumps({
@@ -544,6 +641,7 @@ async def _stream_v2(websocket, user, allowed, event_types, *, camera_id, task,
                     "resync": since is not None,
                     "cameras": cameras,
                     "site_mode": await asyncio.to_thread(_v2_site_mode, event_types),
+                    "entity_states": _v2_entity_states(event_types, held, allowed),
                 }, default=str))
             main_logger.info("events_stream v2 opened: user=%s since=%s resumed=%s",
                              user.username, since, complete)
@@ -552,11 +650,18 @@ async def _stream_v2(websocket, user, allowed, event_types, *, camera_id, task,
                 try:
                     seq, event = await asyncio.wait_for(sub.queue.get(), V2_HEARTBEAT_S)
                 except TimeoutError:
+                    if recheck is not None and not await recheck.still_ok():
+                        await recheck.close(websocket)
+                        break
                     await websocket.send_text(json.dumps(
                         {"v": 2, "event_type": "heartbeat", "seq": bus.current_seq}))
                     continue
-                await websocket.send_text(json.dumps({"v": 2, "seq": seq, **event},
-                                                     default=str))
+                if recheck is not None and not await recheck.still_ok():
+                    await recheck.close(websocket)
+                    break
+                if not _v2_may_send(event, held):
+                    continue
+                await websocket.send_text(_v2_frame(seq, event))
                 if sub.dropped > reported_drops:
                     # Events were dropped for this slow client: it can
                     # reconnect with since=<last seq it got> to fill the gap.

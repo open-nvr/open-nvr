@@ -376,6 +376,20 @@ async def _handle_message(msg) -> None:
                      # POST /media/sign {kind: alert_image} (HA-113).
                      "images": stored.get("image_names") or []},
         )
+        cam_num = _camera_num(envelope.get("camera_id"))
+        if cam_num is not None:
+            # The camera's "alert" event entity (HA-114).
+            from services.event_bus_service import publish_entity_state
+
+            key = f"camera.{cam_num}.alerts"
+            await publish_entity_state(
+                key=key, camera_id=cam_num, required_scope="alerts.view",
+                payload={"key": key, "event": {"type": "alert", "attributes": {
+                    "id": stored.get("id"), "alert_id": stored.get("alert_id"),
+                    "severity": stored.get("severity"), "title": stored.get("title"),
+                    "source": stored.get("source_name"),
+                    "correlation_id": stored.get("correlation_id"),
+                    "images": stored.get("image_names") or []}}})
         from services.media_ready import schedule_for_alert
 
         schedule_for_alert(stored, _camera_num(envelope.get("camera_id")), stored.get("at"))

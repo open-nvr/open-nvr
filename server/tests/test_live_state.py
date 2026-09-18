@@ -147,7 +147,10 @@ def test_the_handler_never_draws_boxes_with_the_overlay_off(consumer, monkeypatc
     tc, live, sent = consumer
     monkeypatch.setattr(tc, "_overlay_enabled", lambda: False)
     asyncio.run(tc._handle_message(_msg({"camera_id": "cam1", **_frame(_t(1))})))
-    assert [e["event_type"] for e in sent] == ["live_state"]
+    # live_state, and the camera's "detection" event entity firing (HA-114).
+    assert [e["event_type"] for e in sent] == ["live_state", "entity_state"]
+    det = sent[1]["payload"]
+    assert det["key"] == "camera.1.detections" and det["event"]["type"] == "person"
     assert live.camera(1)["objects"] == {"person": {"total": 1, "active": 1}}
 
 
