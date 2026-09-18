@@ -20,6 +20,13 @@ Paths (``<entry>`` is the config entry id):
 * ``/api/opennvr/<entry>/alert/<alert_id>/<name>``: an alert's image;
 * ``/api/opennvr/<entry>/clip/<camera_id>/<start_epoch>/<seconds>``: an MP4
   of that camera's recording.
+
+And one view WITHOUT Home Assistant auth, for notifications (a phone's
+notification fetcher cannot log in): ``/api/opennvr/<site_id>/m/<token>``
+relays one OpenNVR signed-media token to OpenNVR's ``/api/v1/media/s/``. It
+accepts nothing but the token's shape; OpenNVR checks its signature, expiry
+and the one object it names, so the relay unlocks exactly what the token
+does, for as long as it does, and nothing else.
 """
 
 from __future__ import annotations
@@ -48,9 +55,17 @@ SIGNED_TTL_S = 120
 MAX_CLIP_S = 3600
 EVENT_IMAGES = ("evidence", "scene", "plate", "plate_frame")
 _ALERT_IMAGE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+#: OpenNVR's signed-media token: ``m1.<payload>.<signature>``, base64url.
+_SIGNED_TOKEN = re.compile(r"^m1\.[A-Za-z0-9_-]{1,2048}\.[A-Za-z0-9_-]{16,128}$")
 #: Response headers worth passing on from OpenNVR.
 _PASS_HEADERS = ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges",
                  "Content-Disposition")
+
+
+def relay_path(site_id: str, signed_url: str) -> str | None:
+    """The relay path for an OpenNVR signed-media URL (``.../media/s/<token>``)."""
+    token = signed_url.rsplit("/media/s/", 1)[-1]
+    return f"{URL_BASE}/{site_id}/m/{token}" if _SIGNED_TOKEN.fullmatch(token) else None
 
 
 def event_image_path(entry_id: str, event_id: int, image: str = "evidence") -> str:
@@ -89,14 +104,19 @@ class _MediaView(HomeAssistantView):
         except OpenNVRError as err:
             _LOGGER.debug("Signing OpenNVR media failed: %s", err)
             raise web.HTTPBadGateway from err
+        return await self._stream(request, client, media.url)
+
+    async def _stream(self, request: web.Request, client, url: str) -> web.StreamResponse:
         session = async_get_clientsession(self.hass, client.ssl is not False)
         headers = {"Range": request.headers["Range"]} if "Range" in request.headers else {}
         response: web.StreamResponse | None = None
         try:
-            async with session.get(media.url, ssl=client.ssl, headers=headers,
+            async with session.get(url, ssl=client.ssl, headers=headers,
                                    timeout=ClientTimeout(total=None, sock_connect=10,
                                                          sock_read=60)) as upstream:
-                if upstream.status == HTTPStatus.NOT_FOUND:
+                if upstream.status in (HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN,
+                                       HTTPStatus.NOT_FOUND, HTTPStatus.GONE):
+                    # Invalid, expired or not permitted: to the caller, gone.
                     raise web.HTTPNotFound
                 if upstream.status not in (HTTPStatus.OK, HTTPStatus.PARTIAL_CONTENT):
                     _LOGGER.debug("OpenNVR media answered %s", upstream.status)
@@ -160,6 +180,28 @@ class ClipView(_MediaView):
             ttl_s=SIGNED_TTL_S))
 
 
+class RelayView(_MediaView):
+    """Signed media for notifications; see the module docstring."""
+
+    requires_auth = False
+    url = URL_BASE + "/{site_id}/m/{token}"
+    name = f"api:{DOMAIN}:relay"
+
+    async def get(self, request: web.Request, site_id: str,
+                  token: str) -> web.StreamResponse:
+        if not _SIGNED_TOKEN.fullmatch(token):
+            raise web.HTTPNotFound
+        entry = next((e for e in self.hass.config_entries.async_entries(DOMAIN)
+                      if e.unique_id == site_id
+                      and e.state is ConfigEntryState.LOADED), None)
+        if entry is None:
+            raise web.HTTPNotFound
+        client = entry.runtime_data.client
+        # Built from the configured site and the checked token only.
+        return await self._stream(request, client,
+                                  f"{client.base_url}/api/v1/media/s/{token}")
+
+
 def async_register_views(hass: HomeAssistant) -> None:
-    for view in (EventImageView, AlertImageView, ClipView):
+    for view in (EventImageView, AlertImageView, ClipView, RelayView):
         hass.http.register_view(view(hass))

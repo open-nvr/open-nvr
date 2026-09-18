@@ -23,6 +23,7 @@ from .const import DOMAIN, PLATFORMS
 from .coordinator import OpenNVRCoordinator
 from .descriptor import async_prune, wanted_device_identifiers
 from .entity import async_register_devices
+from .notifications import async_setup_notifications
 from .services import async_setup_services
 from .views import async_register_views
 
@@ -65,6 +66,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenNVRConfigEntry) -> b
     entry.async_on_unload(coordinator.async_add_listener(
         lambda: async_register_devices(hass, coordinator)))
 
+    async_setup_notifications(hass, entry)
     coordinator.async_start_stream()
     entry.async_on_unload(coordinator.async_stop_stream)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

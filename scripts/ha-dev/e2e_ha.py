@@ -302,6 +302,24 @@ async def check_media(ha: HAClient, entry_id: str, cameras: list[dict]) -> None:
         vid = f"clip {r.status} {r.content_type} {len(head)}+ bytes"
     check("media browser plays through HA", img_ok and clip_ok, f"{img}; {vid}")
 
+    # A search result's thumbnail is a relay URL: fetched with NO login, as a
+    # phone's notification fetcher does; OpenNVR's signature is the credential.
+    async with ha.s.post(f"{HA}/api/services/opennvr/search_events?return_response",
+                         json={"limit": 10}, headers=ha.h) as r:
+        rows = ((await r.json()).get("service_response") or {}).get("results", [])
+    relay = next((row["thumbnail_url"] for row in rows
+                  if str(row.get("thumbnail_url", "")).startswith("/api/opennvr/")), None)
+    if relay is None:
+        check("notification relay works without login", False, "no relay thumbnail")
+        return
+    async with ha.s.get(f"{HA}{relay}") as r:                    # no Authorization
+        ok = r.status == 200 and r.content_type.startswith("image/")
+        detail = f"{r.status} {r.content_type}"
+    async with ha.s.get(f"{HA}{relay[:-4]}AAAA") as r:          # tampered signature
+        detail += f"; tampered {r.status}"
+        ok = ok and r.status == 404
+    check("notification relay works without login", ok, detail)
+
 
 async def check_correlation(s: aiohttp.ClientSession, ha: HAClient, entry_id: str) -> None:
     ents = await registry(ha, entry_id)
