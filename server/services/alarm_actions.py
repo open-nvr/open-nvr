@@ -199,6 +199,18 @@ def dispatch_alarm_actions(alert: dict, *, force: bool = False) -> list[dict]:
     results: list[dict] = []
     severity = str(alert.get("severity") or "high")
     if not force:
+        # Disarmed (HA-118): the alert is stored and shown, but nobody is
+        # phoned. The test button (force) still exercises the chain.
+        from services.site_mode import alarm_actions_allowed
+
+        db = SessionLocal()
+        try:
+            allowed = alarm_actions_allowed(db)
+        finally:
+            db.close()
+        if not allowed:
+            logger.info("alarm actions skipped: site is disarmed")
+            return results
         if (_SEVERITY_RANK.get(severity, 2)
                 < _SEVERITY_RANK[cfg["min_severity"]]):
             return results

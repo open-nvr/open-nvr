@@ -48,6 +48,9 @@ ALLOWED_SCOPES: frozenset[str] = frozenset({
     "cameras.view", "cameras.manage", "live.view", "ptz.control",
     "recordings.view", "recordings.pause", "alerts.view", "alerts.manage",
     "events.create", "apps.actions", "settings.view",
+    # Only ever used for PUT /site-mode (routes are opt-in, see TOKEN_ROUTES):
+    # Home Assistant's alarm panel arms and disarms the site.
+    "settings.manage",
 })
 
 _A = "/api/v1"
@@ -65,6 +68,8 @@ TOKEN_ROUTES: dict[tuple[str, str], str] = {
     ("GET", f"{_A}/live-state"): "cameras.view",
     # The route checks the kind's own permission and the camera.
     ("POST", f"{_A}/media/sign"): "cameras.view",
+    ("GET", f"{_A}/site-mode"): "settings.view",
+    ("PUT", f"{_A}/site-mode"): "settings.manage",
     # Only TOKEN_CAMERA_FIELDS may be changed (routers/cameras.update_camera).
     ("PUT", f"{_A}/cameras/{{camera_id}}"): "cameras.manage",
     # The route checks the site flag and recordings.pause itself.
@@ -405,6 +410,7 @@ TOKEN_EVENT_SCOPES: dict[str, str] = {
     "app_alert": "alerts.view",
     "live_state": "cameras.view",
     "media_ready": "recordings.view",
+    "site_mode": "settings.view",
 }
 
 

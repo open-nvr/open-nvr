@@ -493,6 +493,17 @@ def _v2_snapshot_cameras(allowed: set[int] | None, camera_id: int | None) -> lis
     return [{**live.camera(cid), "online": online.get(cid)} for cid in ids]
 
 
+def _v2_site_mode(event_types) -> dict | None:
+    """The site mode for the snapshot, when this socket may see it."""
+    if event_types is not None and "site_mode" not in event_types:
+        return None
+    from core.database import SessionLocal
+    from services import site_mode
+
+    with SessionLocal() as db:
+        return site_mode.get(db)
+
+
 async def _stream_v2(websocket, user, allowed, event_types, *, camera_id, task,
                      since, epoch, types) -> None:
     """The v2 stream.
@@ -532,6 +543,7 @@ async def _stream_v2(websocket, user, allowed, event_types, *, camera_id, task,
                     # it missed events and must rebuild its state from this.
                     "resync": since is not None,
                     "cameras": cameras,
+                    "site_mode": await asyncio.to_thread(_v2_site_mode, event_types),
                 }, default=str))
             main_logger.info("events_stream v2 opened: user=%s since=%s resumed=%s",
                              user.username, since, complete)

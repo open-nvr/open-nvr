@@ -75,6 +75,9 @@ EVENT_LIVE_STATE = "live_state"
 # An event's media can be fetched now (services/media_ready.py): which
 # images it has and the clip range, once that clip is playable.
 EVENT_MEDIA_READY = "media_ready"
+# The site's arming mode changed (services/site_mode.py). Site-wide: it
+# names no camera and reaches every subscriber entitled to its type.
+EVENT_SITE_MODE = "site_mode"
 
 # Reasonable default for a single slow WebSocket client. Bumping this trades
 # memory for tolerance of bursty traffic.
@@ -142,14 +145,16 @@ class _Subscriber:
     def matches(self, event: dict[str, Any]) -> bool:
         # Entitlement first: a subscriber never sees a camera it was not
         # granted, whatever it asked to filter on.
-        if self.allowed_camera_ids is not None:
+        site_wide = event.get("site_wide") is True
+        if self.allowed_camera_ids is not None and not site_wide:
             cam = event.get("camera_id")
             if cam is None or cam not in self.allowed_camera_ids:
                 return False
         if (self.allowed_event_types is not None
                 and event.get("event_type") not in self.allowed_event_types):
             return False
-        if self.camera_id is not None and event.get("camera_id") != self.camera_id:
+        if (self.camera_id is not None and not site_wide
+                and event.get("camera_id") != self.camera_id):
             return False
         if self.tasks is not None and event.get("task") not in self.tasks:
             return False
@@ -362,6 +367,18 @@ async def publish_media_ready(*, camera_id: int, payload: dict[str, Any]) -> Non
         "camera_id": camera_id,
         "task": payload.get("source") or "event",
         "payload": payload,
+    })
+
+
+async def publish_site_mode(value: dict[str, Any]) -> None:
+    """Publish a site-mode change (HA-118). ``site_wide`` lets it through
+    camera entitlement: it carries no camera data, only the mode. Only
+    ever set here, on events that are about the site, not a camera."""
+    await get_event_bus().publish({
+        "event_type": EVENT_SITE_MODE,
+        "site_wide": True,
+        "task": "site_mode",
+        "payload": value,
     })
 
 
