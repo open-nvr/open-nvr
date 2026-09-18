@@ -1,0 +1,33 @@
+{
+  "camera_id": 1,
+  "zones": [
+    {
+      "id": 3,
+      "camera_id": 1,
+      "name": "Driveway",
+      "polygon": [
+        [
+          0.0,
+          0.6
+        ],
+        [
+          0.5,
+          0.6
+        ],
+        [
+          0.5,
+          1.0
+        ],
+        [
+          0.0,
+          1.0
+        ]
+      ],
+      "labels": [
+        "car"
+      ],
+      "created_at": "2026-09-18T10:00:00+00:00",
+      "updated_at": null
+    }
+  ]
+}

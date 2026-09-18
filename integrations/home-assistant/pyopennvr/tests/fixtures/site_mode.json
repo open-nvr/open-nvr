@@ -1,0 +1,10 @@
+{
+  "mode": "armed_away",
+  "changed_at": "2026-09-18T08:00:00+00:00",
+  "changed_by": "token:home-assistant",
+  "modes": [
+    "disarmed",
+    "armed_home",
+    "armed_away"
+  ]
+}

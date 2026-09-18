@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pyopennvr"
-version = "0.0.1"
+version = "0.1.0"
 description = "Async Python client for the OpenNVR API (REST, event websocket v2, WHEP)."
 readme = "README.md"
 license = "Apache-2.0"
@@ -21,7 +21,6 @@ Homepage = "https://github.com/open-nvr/open-nvr"
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
-    "aioresponses>=0.7",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -30,3 +29,6 @@ packages = ["src/pyopennvr"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# The shared test image also carries Home Assistant's pytest plugin (for the
+# integration); a plain library must not run under it.
+addopts = "-p no:homeassistant"
