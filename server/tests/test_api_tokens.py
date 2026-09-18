@@ -263,6 +263,22 @@ def test_system_info_describes_the_calling_token(env):
     assert user == {"kind": "user", "username": "admin"}
 
 
+def test_system_info_reports_time_and_network(env, monkeypatch):
+    from core.config import settings
+
+    info = env.client.get("/api/v1/system/info", headers=env.jwt("admin")).json()
+    skew = datetime.fromisoformat(info["server_time"]) - datetime.now(UTC)
+    assert abs(skew.total_seconds()) < 5
+    assert info["network"]["rtsps_exposed"] is False          # default: loopback only
+    assert isinstance(info["network"]["webrtc_ice_hosts"], bool)
+    monkeypatch.setattr(settings, "mediamtx_external_rtsps_url", "rtsps://192.168.1.20:8322")
+    info = env.client.get("/api/v1/system/info", headers=env.jwt("admin")).json()
+    assert info["network"]["rtsps_exposed"] is True
+    monkeypatch.setattr(settings, "mediamtx_external_rtsps_url", "rtsps://127.0.0.1:8322")
+    info = env.client.get("/api/v1/system/info", headers=env.jwt("admin")).json()
+    assert info["network"]["rtsps_exposed"] is False
+
+
 def test_camera_gate_in_path_and_query(env):
     tok = _mint(env, camera_ids=[1])["token"]
     assert env.client.get("/api/v1/cameras/1/stats", headers=_as(tok)).status_code == 200
@@ -316,7 +332,12 @@ def test_allowed_cidrs(env):
     inside = _mint(env, name="lan", allowed_cidrs=["192.168.1.0/24"])["token"]
     outside = _mint(env, name="far", allowed_cidrs=["10.0.0.0/8"])["token"]
     assert env.client.get("/api/v1/system/info", headers=_as(inside)).status_code == 200
-    assert env.client.get("/api/v1/system/info", headers=_as(outside)).status_code == 403
+    r = env.client.get("/api/v1/system/info", headers=_as(outside))
+    # Named, so a client can tell "fix the token's addresses" from a missing scope.
+    assert r.status_code == 403 and r.headers["X-OpenNVR-Error"] == "token_address"
+    r = env.client.get("/api/v1/system/info", headers=_as(_mint(env, name="x",
+                                                                 scopes=["cameras.view"])["token"]))
+    assert r.status_code == 403 and "X-OpenNVR-Error" not in r.headers
 
 
 def test_cannot_grant_more_than_you_hold(env):

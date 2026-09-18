@@ -13,6 +13,16 @@ The token needs `settings.view` and `cameras.view`. Without `live.view`, `record
 
 If the token is revoked or expires, Home Assistant asks for a new one (reauthentication). If the server moves, use **Reconfigure**. The **Options** change the cameras and how long notification links stay valid.
 
+## Repairs
+Home Assistant raises a repair, and clears it once fixed, when:
+- the token no longer works, or expires within 7 days (the fix asks for a new token);
+- the token may not be used from Home Assistant's address;
+- the server is too old for the integration, or the integration too old for the server;
+- OpenNVR advertises no WebRTC address other devices can reach (`MEDIAMTX_WEBRTC_HOSTS`);
+- Home Assistant asked for an RTSP stream that OpenNVR doesn't publish;
+- the two clocks differ by more than a minute;
+- certificate verification is off.
+
 ## Development
 - **Tests:** run `scripts/ha-dev/test-integration.ps1` from the open-nvr repo root. Tests run in a Linux Python 3.14 container, because Home Assistant 2026.9 needs Python ≥ 3.14.2 and doesn't support Windows.
 - **Live instance:** run `scripts/ha-dev/run-ha.ps1` to start a dev Home Assistant with this integration mounted.

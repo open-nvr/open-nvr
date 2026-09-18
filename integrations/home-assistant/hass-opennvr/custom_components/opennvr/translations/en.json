@@ -118,6 +118,12 @@
     },
     "command_failed": {
       "message": "The OpenNVR command failed: {detail}"
+    },
+    "server_too_old": {
+      "message": "This OpenNVR server is too old for Home Assistant. Update OpenNVR."
+    },
+    "firewall_blocked": {
+      "message": "OpenNVR refuses this API token from Home Assistant's address."
     }
   },
   "entity": {
@@ -130,6 +136,64 @@
       "server": {
         "name": "Server"
       }
+    }
+  },
+  "issues": {
+    "token_revoked": {
+      "title": "OpenNVR API token no longer works",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Enter a new API token",
+            "description": "The API token for {name} was refused: it was revoked, expired, or lost a scope Home Assistant needs. Create a new token in OpenNVR under Settings > API Tokens, then continue to enter it."
+          }
+        },
+        "abort": {
+          "entry_removed": "The OpenNVR entry no longer exists."
+        }
+      }
+    },
+    "token_expiring": {
+      "title": "OpenNVR API token expires soon",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Replace the API token",
+            "description": "The API token for {name} expires on {expires}. Create a new token in OpenNVR under Settings > API Tokens, then continue to enter it."
+          }
+        },
+        "abort": {
+          "entry_removed": "The OpenNVR entry no longer exists."
+        }
+      }
+    },
+    "firewall_blocked": {
+      "title": "OpenNVR refuses Home Assistant's address",
+      "description": "The API token for {name} may only be used from certain addresses, and Home Assistant's is not one of them. In OpenNVR, under Settings > API Tokens, create a token whose allowed addresses include Home Assistant's (or leave them empty)."
+    },
+    "server_too_old": {
+      "title": "OpenNVR server too old",
+      "description": "{name} runs OpenNVR {server} (contract {version}), which this integration cannot use. Update OpenNVR."
+    },
+    "integration_too_old": {
+      "title": "OpenNVR integration too old",
+      "description": "{name} runs OpenNVR {server}, which speaks contract {version}. This version of the integration does not support it: update the OpenNVR integration."
+    },
+    "webrtc_hosts_unset": {
+      "title": "OpenNVR live video may not reach your devices",
+      "description": "OpenNVR's media server advertises no address other devices can reach, so live video over WebRTC can fail from phones and other computers. Set MEDIAMTX_WEBRTC_HOSTS to the OpenNVR host's LAN address (or open live view once in the OpenNVR web app from another device, which teaches it the address)."
+    },
+    "rtsp_not_exposed": {
+      "title": "OpenNVR RTSP stream not available",
+      "description": "Home Assistant asked {name} for an RTSP stream (used for recording clips in Home Assistant and HLS), but OpenNVR publishes RTSPS only to itself. Live view does not need it. To enable it, set RTSPS_BIND_HOST and MEDIAMTX_EXTERNAL_RTSPS_URL in OpenNVR's .env."
+    },
+    "clock_skew": {
+      "title": "OpenNVR and Home Assistant clocks differ",
+      "description": "The clocks of {name} and Home Assistant differ by {seconds} seconds. Signed links and token expiry follow OpenNVR's clock, so notifications can carry links that have already expired. Enable time synchronisation (NTP) on both machines."
+    },
+    "ssl_unverified": {
+      "title": "OpenNVR certificate is not verified",
+      "description": "Home Assistant connects to {name} without verifying its certificate (OpenNVR's default certificate is self-signed). Anyone who can intercept that connection could read the API token. Install a trusted certificate on OpenNVR, then reconfigure the integration with certificate verification on."
     }
   }
 }

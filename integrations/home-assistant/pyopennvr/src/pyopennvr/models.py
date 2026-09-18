@@ -37,6 +37,11 @@ class SystemInfo:
     #: Who asked (contract 1.1, ``caller_info``): for a token its name,
     #: effective scopes, cameras and expiry. Empty from older servers.
     caller: dict = field(compare=False, default_factory=dict)
+    #: The server's clock (contract 1.1, ``network_info``); None from older servers.
+    server_time: str | None = None
+    #: ``{"webrtc_ice_hosts": bool|None, "rtsps_exposed": bool}``; empty from
+    #: older servers.
+    network: dict = field(compare=False, default_factory=dict)
     raw: dict = field(repr=False, compare=False, default_factory=dict)
 
     @classmethod
@@ -48,7 +53,8 @@ class SystemInfo:
                    recording_pause_enabled=bool(_get(d, "recording_pause_enabled", False)),
                    uptime_s=int(_get(d, "uptime_s", 0)),
                    latest_version=d.get("latest_version"),
-                   caller=dict(d.get("caller") or {}), raw=d)
+                   caller=dict(d.get("caller") or {}), server_time=d.get("server_time"),
+                   network=dict(d.get("network") or {}), raw=d)
 
     def has(self, feature: str) -> bool:
         return feature in self.features

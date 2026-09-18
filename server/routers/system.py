@@ -24,6 +24,7 @@ import json
 import platform
 import subprocess
 import time
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -74,7 +75,32 @@ async def get_system_info(
         "uptime_s": int(time.monotonic() - _STARTED_MONOTONIC),
         "latest_version": await latest_version(),
         "caller": describe_caller(db, current_user),
+        # Clients compare it with their own clock: signed media and token
+        # expiry are judged by the server's.
+        "server_time": datetime.now(UTC).isoformat(),
+        "network": _network_facts(db),
     }
+
+
+def _network_facts(db: Session) -> dict:
+    """What a client on another machine can reach (docs/HOME_ASSISTANT.md):
+    whether MediaMTX advertises any WebRTC ICE host (configured or learned),
+    and whether RTSPS is published beyond loopback. Booleans only."""
+    import ipaddress
+    from urllib.parse import urlsplit
+
+    from services.webrtc_ice_host_service import WebRTCIceHostService
+
+    try:
+        ice = bool(WebRTCIceHostService.resolve(db))
+    except Exception:  # noqa: BLE001 - a fact we can't read is not a fact
+        ice = None
+    host = urlsplit(settings.mediamtx_external_rtsps_url or "").hostname or ""
+    try:
+        loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = host in ("", "localhost")
+    return {"webrtc_ice_hosts": ice, "rtsps_exposed": not loopback}
 
 
 @router.get("/posture")

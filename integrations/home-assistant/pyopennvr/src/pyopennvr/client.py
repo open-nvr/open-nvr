@@ -37,6 +37,8 @@ from .models import (
 )
 
 API = "/api/v1"
+#: Names why a request was refused, when the client must act differently.
+ERROR_HEADER = "X-OpenNVR-Error"
 #: Contract major versions this library speaks (design §6.11).
 SUPPORTED_CONTRACT_MAJOR = 1
 
@@ -115,7 +117,8 @@ class OpenNVRClient:
                 timeout=self._timeout, ssl=self._ssl,
             ) as resp:
                 if resp.status in (401, 403):
-                    raise OpenNVRAuthError(await _detail(resp), resp.status)
+                    raise OpenNVRAuthError(await _detail(resp), resp.status,
+                                           resp.headers.get(ERROR_HEADER))
                 if resp.status == 404:
                     raise OpenNVRNotFoundError(await _detail(resp))
                 if resp.status >= 500:

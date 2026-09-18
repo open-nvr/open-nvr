@@ -42,6 +42,8 @@ async def test_system_info_and_contract():
     assert info.site_id == "0755a940-1ff5-4861-ac08-1f57bb29a180"
     assert info.has("entities") and not info.recording_pause_enabled
     assert "settings.view" in info.scopes and info.token_expires_at is None
+    assert info.server_time and info.network == {"webrtc_ice_hosts": True,
+                                                 "rtsps_exposed": False}
     check_contract(info)
     older = pyopennvr.SystemInfo.from_dict({k: v for k, v in fixture("system_info").items()
                                             if k != "caller"})
@@ -62,6 +64,15 @@ async def test_requests_carry_the_token_and_correlation_id():
     assert req["headers"]["X-Correlation-Id"] == "ha-automation-7"
     assert req["body"] == b'{"mode": "armed_away", "reason": null}'
     assert mode.mode == "armed_away"
+
+
+async def test_a_named_refusal_carries_its_code():
+    async with fake_site({("GET", "/api/v1/site-mode"): (
+            403, {"detail": "This API token may not be used from this address"},
+            {"X-OpenNVR-Error": "token_address"})}) as (base, session, _):
+        with pytest.raises(OpenNVRAuthError) as exc:
+            await OpenNVRClient(base, TOKEN, session).get_site_mode()
+    assert exc.value.status == 403 and exc.value.code == "token_address"
 
 
 @pytest.mark.parametrize("status, error", [

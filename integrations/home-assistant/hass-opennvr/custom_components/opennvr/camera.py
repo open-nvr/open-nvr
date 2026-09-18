@@ -37,7 +37,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from . import OpenNVRConfigEntry
+from . import OpenNVRConfigEntry, issues
 from .const import DOMAIN
 from .coordinator import OpenNVRCoordinator
 from .entity import OpenNVREntity
@@ -184,7 +184,14 @@ class OpenNVRCamera(OpenNVREntity, Camera):
         except OpenNVRError as err:
             _LOGGER.debug("Stream info of camera %s failed: %s", self.camera_id, err)
             return None
-        return rtsps_source(info.rtsps_url, info.token)
+        source = rtsps_source(info.rtsps_url, info.token)
+        # Raised only when something in HA actually asked for an RTSP stream
+        # (recording, HLS); live view (WebRTC) never needs it.
+        if source is None:
+            issues.async_raise(self.hass, self.coordinator.config_entry, "rtsp_not_exposed")
+        else:
+            issues.async_clear(self.hass, self.coordinator.config_entry, "rtsp_not_exposed")
+        return source
 
     async def async_handle_async_webrtc_offer(self, offer_sdp: str, session_id: str,
                                               send_message: WebRTCSendMessage) -> None:

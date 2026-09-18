@@ -1,6 +1,6 @@
 {
   "contract_version": "1.1.0",
-  "about": "The HA-facing API of OpenNVR (design §6.11). Additive changes bump MINOR; removing or renaming anything bumps MAJOR with a two-release deprecation window. Checked by scripts/contract_check.py and server/tests/test_contract.py.",
+  "about": "The HA-facing API of OpenNVR (design \u00a76.11). Additive changes bump MINOR; removing or renaming anything bumps MAJOR with a two-release deprecation window. Checked by scripts/contract_check.py and server/tests/test_contract.py.",
   "features": [
     "correlation_id",
     "ws_device_firewall",
@@ -20,7 +20,8 @@
     "site_mode",
     "entities",
     "search",
-    "caller_info"
+    "caller_info",
+    "network_info"
   ],
   "rest": [
     {
@@ -416,6 +417,23 @@
                 "string",
                 "null"
               ]
+            }
+          }
+        },
+        "server_time": {
+          "type": "string"
+        },
+        "network": {
+          "type": "object",
+          "properties": {
+            "webrtc_ice_hosts": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "rtsps_exposed": {
+              "type": "boolean"
             }
           }
         }
@@ -929,6 +947,12 @@
           ]
         }
       }
+    }
+  },
+  "errors": {
+    "header": "X-OpenNVR-Error",
+    "codes": {
+      "token_address": "403: the API token's allowed addresses exclude the caller (fix the token, not its scopes)"
     }
   }
 }

@@ -822,7 +822,9 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         ip_address=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
     )
-    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    from core.http_errors import http_exception_response
+
+    return http_exception_response(exc)
 
 
 # Global exception handler (catch-all)

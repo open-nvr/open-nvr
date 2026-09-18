@@ -40,6 +40,9 @@ from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 TOKEN_PREFIX = "onvr_"
+#: Response header naming why a token request was refused, where a client
+#: must act differently (contract.json ``errors``).
+ERROR_HEADER = "X-OpenNVR-Error"
 _TOKEN_RE = re.compile(r"^onvr_([A-Za-z0-9]{8})_([A-Za-z0-9_-]{32,64})$")
 
 #: Permissions a token may be granted. Never ``full_access``: a token is
@@ -388,8 +391,11 @@ def authorize_request(request, db: Session, plain: str) -> TokenPrincipal:
 
     ip = get_client_ip(request) if request is not None else ""
     if not _ip_allowed(ip, row.allowed_cidrs):
+        # Machine-readable, so a client can tell "fix the token's allowed
+        # addresses" from "the token lacks a scope" (contract: errors).
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
-                            detail="This API token may not be used from this address")
+                            detail="This API token may not be used from this address",
+                            headers={ERROR_HEADER: "token_address"})
 
     principal = _principal(owner, row)
     cameras = principal.camera_ids

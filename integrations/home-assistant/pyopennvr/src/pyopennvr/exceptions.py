@@ -23,11 +23,18 @@ class OpenNVRSSLError(OpenNVRConnectionError):
 
 
 class OpenNVRAuthError(OpenNVRError):
-    """401/403: the token is wrong, revoked, expired, or lacks a scope."""
+    """401/403: the token is wrong, revoked, expired, or lacks a scope.
 
-    def __init__(self, message: str, status: int | None = None) -> None:
+    ``code`` is the server's ``X-OpenNVR-Error`` when it names the reason,
+    e.g. ``token_address``: the token may not be used from this address, so
+    a new token with the same settings would not help.
+    """
+
+    def __init__(self, message: str, status: int | None = None,
+                 code: str | None = None) -> None:
         super().__init__(message)
         self.status = status
+        self.code = code
 
 
 class OpenNVRNotFoundError(OpenNVRError):

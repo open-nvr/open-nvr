@@ -30,7 +30,9 @@ from pyopennvr import (
     OpenNVRConnectionError,
     OpenNVRContractError,
     OpenNVRError,
+    OpenNVRNotFoundError,
     SiteMode,
+    SUPPORTED_CONTRACT_MAJOR,
     SystemInfo,
     check_contract,
 )
@@ -41,6 +43,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
+from . import issues
 from .const import (
     CONF_CAMERAS,
     DOMAIN,
@@ -99,41 +102,63 @@ class OpenNVRCoordinator(DataUpdateCoordinator[OpenNVRSiteData]):
         try:
             info = await self.client.get_system_info()
         except OpenNVRAuthError as err:
-            raise ConfigEntryAuthFailed(translation_domain=DOMAIN,
-                                        translation_key="auth_failed") from err
+            raise self._refused(err) from err
+        except OpenNVRNotFoundError as err:
+            # No /system/info: an OpenNVR from before Home Assistant support.
+            issues.async_raise(self.hass, self.config_entry, "server_too_old",
+                               version="-", server="-")
+            raise ConfigEntryError(translation_domain=DOMAIN,
+                                   translation_key="server_too_old") from err
         except OpenNVRError as err:
             raise UpdateFailed(translation_domain=DOMAIN, translation_key="cannot_connect",
                                translation_placeholders={"error": str(err)}) from err
-        try:
-            check_contract(info)
-        except OpenNVRContractError as err:
-            raise ConfigEntryError(
-                translation_domain=DOMAIN, translation_key="unsupported_contract",
-                translation_placeholders={"version": info.contract_version}) from err
+        self._check_contract(info, ConfigEntryError)
         if self.config_entry.unique_id and info.site_id != self.config_entry.unique_id:
             # Another OpenNVR answers at this URL now. Its entities must not
             # be mixed into this site's; the user reconfigures.
             raise ConfigEntryError(translation_domain=DOMAIN, translation_key="wrong_site")
 
+    def _check_contract(self, info: SystemInfo, error: type[Exception]) -> None:
+        try:
+            check_contract(info)
+        except OpenNVRContractError as err:
+            major = info.contract_version.split(".", 1)[0]
+            kind = ("integration_too_old" if major.isdigit()
+                    and int(major) > SUPPORTED_CONTRACT_MAJOR else "server_too_old")
+            issues.async_raise(self.hass, self.config_entry, kind,
+                               version=info.contract_version, server=info.version)
+            raise error(translation_domain=DOMAIN, translation_key="unsupported_contract",
+                        translation_placeholders={"version": info.contract_version}) from err
+
+    def _refused(self, err: OpenNVRAuthError) -> Exception:
+        """What a refused token means. Refused for the ADDRESS HA calls from:
+        a new token with the same settings would not help (firewall issue,
+        retry). Otherwise revoked, expired, or a needed scope removed: reauth."""
+        entry = self.config_entry
+        if err.code == "token_address":
+            issues.async_raise(self.hass, entry, "firewall_blocked")
+            return UpdateFailed(translation_domain=DOMAIN, translation_key="firewall_blocked")
+        issues.async_raise(self.hass, entry, "token_revoked")
+        return ConfigEntryAuthFailed(translation_domain=DOMAIN, translation_key="auth_failed")
+
     async def _async_update_data(self) -> OpenNVRSiteData:
         old = self.data
         try:
             info = await self.client.get_system_info()
+            self._check_contract(info, UpdateFailed)
             all_cameras = {c.id: c for c in await self.client.get_cameras()}
             catalog = await self.client.get_entities(etag=old.catalog.etag if old else None)
             states = await self.client.get_entity_states()
             site_mode = await self._site_mode(info)
         except OpenNVRAuthError as err:
-            # Revoked, expired, or a scope it cannot work without was taken
-            # away: only a new token helps.
-            raise ConfigEntryAuthFailed(translation_domain=DOMAIN,
-                                        translation_key="auth_failed") from err
+            raise self._refused(err) from err
         except OpenNVRConnectionError as err:
             raise UpdateFailed(translation_domain=DOMAIN, translation_key="cannot_connect",
                                translation_placeholders={"error": str(err)}) from err
         except OpenNVRError as err:
             raise UpdateFailed(translation_domain=DOMAIN, translation_key="unexpected",
                                translation_placeholders={"error": str(err)}) from err
+        issues.async_check_site(self.hass, self.config_entry, info)
         if catalog is None:  # 304: unchanged
             catalog = old.catalog if old else EntityCatalog(etag="", descriptors=())
         chosen = self.config_entry.options.get(CONF_CAMERAS)
@@ -219,6 +244,7 @@ class OpenNVRCoordinator(DataUpdateCoordinator[OpenNVRSiteData]):
         _LOGGER.debug("OpenNVR events stream: %s", state)
         if state == "auth_failed":
             # The token was revoked or its scopes changed while connected.
+            issues.async_raise(self.hass, self.config_entry, "token_revoked")
             self.config_entry.async_start_reauth(self.hass)
 
     @callback

@@ -40,4 +40,5 @@ FEATURES: tuple[str, ...] = (
     "entities",             # HA-114: server-described entities
     "search",               # HA-116
     "caller_info",          # HA-202: /system/info reports the caller (token scopes, expiry)
+    "network_info",         # HA-206: /system/info server_time and network facts; X-OpenNVR-Error
 )

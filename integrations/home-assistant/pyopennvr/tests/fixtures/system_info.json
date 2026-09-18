@@ -9,7 +9,8 @@
     "ws_v2",
     "entities",
     "site_mode",
-    "caller_info"
+    "caller_info",
+    "network_info"
   ],
   "recording_pause_enabled": false,
   "uptime_s": 3600,
@@ -26,5 +27,10 @@
     ],
     "camera_ids": null,
     "expires_at": null
+  },
+  "server_time": "2026-09-18T08:00:00+00:00",
+  "network": {
+    "webrtc_ice_hosts": true,
+    "rtsps_exposed": false
   }
 }
