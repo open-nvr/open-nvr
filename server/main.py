@@ -56,6 +56,7 @@ from routers import (
     alerts_inbox,
     api_tokens as api_tokens_router,
     zones as zones_router,
+    live_state as live_state_router,
     apps,
     audit_logs,
     auth,
@@ -646,6 +647,18 @@ async def lifespan(app: FastAPI):
     spawn_background(background_tier0_track_consumer(),
                      name="tier0-track-consumer")
 
+    # Live state (HA-110): Tier-0 sends nothing when nothing is detected,
+    # so a quiet camera is noticed by this sweeper, not by a frame.
+    async def background_live_state_sweeper():
+        async def _loop():
+            from services.tier0_track_consumer import run_live_state_sweeper
+
+            await run_live_state_sweeper()
+
+        await run_consumer_forever("live-state sweeper", _loop)
+
+    spawn_background(background_live_state_sweeper(), name="live-state-sweeper")
+
     # Operator alert inbox: consume opennvr.alerts.> (the SDK apps'
     # NatsAlertChannel) into app_alerts so the UI bell can ring and
     # acknowledge. Same best-effort posture — no bus, no inbox, no crash.
@@ -866,6 +879,7 @@ app.include_router(mediamtx_hooks.router, prefix=settings.api_prefix)
 app.include_router(audit_logs.router, prefix=settings.api_prefix)
 app.include_router(api_tokens_router.router, prefix=settings.api_prefix)
 app.include_router(zones_router.router, prefix=settings.api_prefix)
+app.include_router(live_state_router.router, prefix=settings.api_prefix)
 app.include_router(recordings.router, prefix=settings.api_prefix)
 app.include_router(orphaned_recordings.router, prefix=settings.api_prefix)
 app.include_router(

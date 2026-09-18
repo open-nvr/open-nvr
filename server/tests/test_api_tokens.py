@@ -141,7 +141,7 @@ def env(monkeypatch):
     routers = [importlib.import_module(m) for m in (
         "routers.system", "routers.cameras", "routers.api_tokens",
         "routers.recordings", "routers.audit_logs", "routers.events",
-        "routers.timeline_events", "routers.zones")]
+        "routers.timeline_events", "routers.zones", "routers.live_state")]
     for mod in routers:
         app.include_router(mod.router, prefix="/api/v1")
     # Override EVERY get_db these routers depend on, not just the one in
@@ -391,7 +391,7 @@ def test_every_token_route_is_a_real_route():
     app = FastAPI()
     for mod in ("routers.system", "routers.cameras", "routers.recordings",
                 "routers.streams", "routers.timeline_events", "routers.alerts_inbox",
-                "routers.events", "routers.zones"):
+                "routers.events", "routers.zones", "routers.live_state"):
         app.include_router(importlib.import_module(mod).router, prefix="/api/v1")
     # OpenAPI paths are full templates on every FastAPI version; app.routes
     # nests included routers from 0.140 on.
@@ -518,7 +518,8 @@ def test_a_token_socket_keeps_the_tokens_cameras_and_scopes(env):
         hello = ws.receive_json()
     assert hello["event_type"] == "subscribed"
     assert hello["filters"]["event_types"] == sorted(
-        ["camera_status", "camera_event", "tracks", "inference_result", "inference_error"])
+        ["camera_status", "camera_event", "tracks", "inference_result", "inference_error",
+         "live_state"])
 
     # A camera outside the allow-list is refused, not silently empty.
     from starlette.websockets import WebSocketDisconnect
@@ -541,7 +542,7 @@ def test_a_token_socket_is_scoped_to_what_the_owner_sees(env):
             ws.receive_json()
     t = _ws_ticket(env, tok).json()["ticket"]
     with _open(env.client, t, camera_id=3) as ws:
-        assert ws.receive_json()["filters"]["event_types"] == ["camera_status"]
+        assert ws.receive_json()["filters"]["event_types"] == ["camera_status", "live_state"]
 
 
 def test_ws_ticket_needs_cameras_view(env):

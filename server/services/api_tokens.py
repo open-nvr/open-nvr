@@ -62,6 +62,7 @@ TOKEN_ROUTES: dict[tuple[str, str], str] = {
     ("GET", f"{_A}/cameras/{{camera_id}}"): "cameras.view",
     ("GET", f"{_A}/cameras/{{camera_id}}/stats"): "cameras.view",
     ("GET", f"{_A}/cameras/{{camera_id}}/zones"): "cameras.view",
+    ("GET", f"{_A}/live-state"): "cameras.view",
     # Only TOKEN_CAMERA_FIELDS may be changed (routers/cameras.update_camera).
     ("PUT", f"{_A}/cameras/{{camera_id}}"): "cameras.manage",
     # The route checks the site flag and recordings.pause itself.
@@ -400,6 +401,7 @@ TOKEN_EVENT_SCOPES: dict[str, str] = {
     "inference_error": "live.view",
     "camera_event": "recordings.view",
     "app_alert": "alerts.view",
+    "live_state": "cameras.view",
 }
 
 

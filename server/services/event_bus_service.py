@@ -67,6 +67,9 @@ EVENT_APP_ALERT = "app_alert"
 # AI Detection Results table, and 5 fps of tracker output per camera
 # would flood it. Consumers that want boxes opt in by name.
 EVENT_TRACKS = "tracks"
+# What a camera sees now (services/live_state.py): counts per label and
+# zone, motion, and the tracks that just started or ended. Sent on change.
+EVENT_LIVE_STATE = "live_state"
 
 # Reasonable default for a single slow WebSocket client. Bumping this trades
 # memory for tolerance of bursty traffic.
@@ -255,6 +258,23 @@ async def publish_inference_result(
         "model_id": model_id,
         "task": task,
         "payload": payload,
+    })
+
+
+async def publish_live_state(
+    *,
+    camera_id: int,
+    state: dict[str, Any],
+    started: list[dict[str, Any]] | None = None,
+    ended: list[dict[str, Any]] | None = None,
+) -> None:
+    """Publish a camera's live state after it changed (HA-110). Per-camera
+    entitlement applies like every camera event."""
+    await get_event_bus().publish({
+        "event_type": EVENT_LIVE_STATE,
+        "camera_id": camera_id,
+        "task": "live_state",
+        "payload": {"state": state, "started": started or [], "ended": ended or []},
     })
 
 

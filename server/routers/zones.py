@@ -25,6 +25,7 @@ from models import Camera, CameraZone, User
 from services import zones as zone_service
 from services.audit_service import audit_request
 from services.camera_scope import can_view_camera
+from services.live_state import invalidate_zones
 
 router = APIRouter(prefix="/cameras", tags=["zones"])
 
@@ -107,6 +108,7 @@ async def create_zone(
         db.rollback()
         raise HTTPException(status_code=409, detail="A zone with that name exists") from exc
     db.refresh(zone)
+    invalidate_zones(camera.id)
     audit_request(db, request, action="zone.create", user_id=current_user.id,
                   entity_type="camera_zone", entity_id=zone.id,
                   details={"camera_id": camera.id, "name": zone.name})
@@ -131,6 +133,7 @@ async def update_zone(
         db.rollback()
         raise HTTPException(status_code=409, detail="A zone with that name exists") from exc
     db.refresh(zone)
+    invalidate_zones(camera.id)
     audit_request(db, request, action="zone.update", user_id=current_user.id,
                   entity_type="camera_zone", entity_id=zone.id,
                   details={"camera_id": camera.id, "name": zone.name})
@@ -150,6 +153,7 @@ async def delete_zone(
     name = zone.name
     db.delete(zone)
     db.commit()
+    invalidate_zones(camera.id)
     audit_request(db, request, action="zone.delete", user_id=current_user.id,
                   entity_type="camera_zone", entity_id=zone_id,
                   details={"camera_id": camera.id, "name": name})
