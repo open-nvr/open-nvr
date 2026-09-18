@@ -2227,6 +2227,34 @@ def stream_urls(
     return {"whep": whep, "hls": hls}
 
 
+@router.get("/{camera_id}/stats")
+async def get_camera_stats(
+    camera_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Health numbers for one camera: stream up, bitrate, detection fps,
+    inference time, skipped frames, recording state, days of footage kept.
+
+    Any user who can view the camera may read them. Sources that are absent
+    (detect-pipeline not deployed, camera paused) read as null, not errors.
+    Bitrate is measured between two reads, so the first call returns null.
+    """
+    from services.camera_scope import can_view_camera
+    from services.camera_stats import get_camera_stats as _stats
+
+    cam = (
+        db.query(Camera)
+        .filter(Camera.id == camera_id, Camera.deleted_at.is_(None))
+        .first()
+    )
+    if cam is None:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    if not can_view_camera(db, current_user, camera_id):
+        raise HTTPException(status_code=403, detail="Not allowed to view this camera")
+    return await _stats(db, cam)
+
+
 # ============================================================================
 # PTZ Control Endpoints - Uses camera credentials from database
 # ============================================================================
