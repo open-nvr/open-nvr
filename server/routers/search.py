@@ -1,0 +1,389 @@
+# Copyright (c) 2026 OpenNVR
+# This file is part of OpenNVR.
+#
+# OpenNVR is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# OpenNVR is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
+
+"""Footage search — "find me…" over the canonical event store.
+
+``GET /search?q=red truck at the dock yesterday`` parses the sentence,
+searches the visits, and answers with three things: what it understood,
+the rows, and where in the footage each row lives.
+
+**The interpretation is part of the answer, not debug output.** Natural
+language search fails by parsing a query wrongly and then answering
+confidently with nothing; showing what was understood — and letting the
+caller override any part of it with an explicit parameter — is what
+makes that recoverable. Editing a chip in the UI is exactly passing the
+parameter.
+
+This replaces the footage-search app's private SQLite index, which
+answered the same questions from a second copy of the same data, with no
+camera scoping, no evidence, and no way to open the clip.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from sqlalchemy.orm import Session
+
+from core.auth import get_current_active_user
+from core.database import get_db
+from models import Camera, User
+
+# The internal door is defined once, next to the pipeline's write routes;
+# the metrics scrape is the same door and should not grow a second lock.
+from routers.internal_camera_agent import _platform_only, _require_internal_key
+from services import search_metrics as metrics
+from services.camera_scope import visible_camera_ids
+from services.search_query import ParsedQuery, parse_query
+from services.search_service import anchor_for, count_search_events, search_events
+
+router = APIRouter(tags=["search"])
+
+#: A page of results is a screen of thumbnails, not a report.
+DEFAULT_LIMIT = 25
+MAX_LIMIT = 200
+
+
+def _visible_cameras(db: Session, scope: set[int] | None) -> dict[int, str]:
+    """{id: name} for the cameras this caller may see — the vocabulary
+    "at the dock" is resolved against, and the scope results obey.
+
+    Takes the scope rather than recomputing it: it is a query of its own,
+    and a search that asked twice could, in principle, answer from two
+    different answers."""
+    q = db.query(Camera.id, Camera.name)
+    if scope is not None:
+        if not scope:
+            return {}
+        q = q.filter(Camera.id.in_(scope))
+    return {row[0]: row[1] or f"cam{row[0]}" for row in q.all()}
+
+
+def _record_search(shape: str, parsed: ParsedQuery, page, count, total: int, *,
+                   parse: bool, overridden: bool) -> None:
+    """One search, as numbers.
+
+    Kept out of the handler because none of it may change the answer: a
+    metrics failure must never turn a working search into a 500, so
+    everything here is best-effort and swallows.
+    """
+    try:
+        metrics.SEARCH_SECONDS.observe(page.seconds, {"shape": shape})
+        metrics.COUNT_SECONDS.observe(count.seconds, {"shape": shape})
+        metrics.RESULT_COUNT.observe(total, {"shape": shape})
+        metrics.QUERIES.inc({"shape": shape, "outcome": "hit" if total else "empty"})
+
+        # Parse coverage. ``matched`` is what the sentence gave us,
+        # ``ignored`` what was thrown away — the ratio is the only
+        # accuracy signal available with nobody labelling anything.
+        if parsed.matched or parsed.ignored:
+            used = sum(len(str(v).split()) for v in parsed.matched.values())
+            metrics.QUERY_WORDS.inc({"state": "matched"}, used)
+            metrics.QUERY_WORDS.inc({"state": "ignored"}, len(parsed.ignored))
+            metrics.IGNORED_WORDS.observe(len(parsed.ignored))
+
+        if not parse:
+            metrics.REFINEMENTS.inc({"kind": "explicit"})
+        elif overridden:
+            metrics.REFINEMENTS.inc({"kind": "corrected"})
+    except Exception:  # pragma: no cover - instrumentation is never load-bearing
+        from core.logging_config import main_logger
+
+        main_logger.debug("search metrics not recorded", exc_info=True)
+
+
+@router.get("/search/metrics")
+async def search_metrics(
+    db: Session = Depends(get_db),
+    principal=Depends(_require_internal_key),
+):
+    """Prometheus exposition for search (site key, like every other
+    internal door).
+
+    Not under the user API: these are operational numbers about the
+    deployment, not about the caller's cameras, and a scraper is a
+    platform component rather than a person. The coverage gauges are
+    sampled on a timer inside, so scraping this often is cheap.
+    """
+    _platform_only(principal)
+    metrics.COVERAGE.maybe_refresh(db)
+    return Response(content=metrics.render(), media_type="text/plain; version=0.0.4")
+
+
+@router.post("/search/opened")
+async def search_opened(
+    rank: int = Query(..., ge=1, le=10_000, description="1-based position in the result list."),
+    current_user: User = Depends(get_current_active_user),
+):
+    """The operator opened this result.
+
+    The only relevance judgement a system with no labelled footage can
+    collect: not whether the answer was right, but where in the list the
+    thing they wanted actually was. Consistently rank 1 to 3 means ranking
+    works; rank 11 means it does not; nothing opened at all means neither
+    does the search.
+
+    Deliberately anonymous — a position and nothing else. Who searched
+    for what is not an operational metric, and a search log that names
+    people and plates is a liability rather than an asset.
+    """
+    metrics.OPENED.inc()
+    metrics.OPEN_RANK.observe(rank)
+    return {"ok": True}
+
+
+@router.get("/search/journey")
+async def journey(
+    event_id: int = Query(..., description="The visit to follow."),
+    window_minutes: float = Query(30.0, ge=1, le=240),
+    max_hops: int = Query(6, ge=1, le=12),
+    min_score: float = Query(0.35, ge=0.0, le=1.0),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Where this object went — the route across cameras.
+
+    Answers the question the event store cannot answer on its own, since
+    ``track_id`` belongs to one camera. Two ways, and the response always
+    says which was used:
+
+    * ``identity`` — the same plate or the same recognised face on the
+      next camera. Both come from KAI-C adapters, both are exact, and no
+      inference is involved.
+    * ``evidence`` — for everything with no exact identity (a person in
+      a crowd, an unplated van, a trolley): the learned camera graph says
+      where it could have gone and in what time, and the descriptors
+      those same KAI-C skills wrote say which candidate fits. The more
+      skills a deployment runs, the sharper this gets.
+
+    Every hop carries its reasons, including the ones against it, because
+    a route is used to say where somebody was and one that cannot be
+    audited is not evidence.
+    """
+    from services.journey import find_journey
+
+    with metrics.Timer() as timer:
+        result = find_journey(
+            db,
+            event_id=event_id,
+            scope=visible_camera_ids(db, current_user),
+            window_minutes=window_minutes,
+            max_hops=max_hops,
+            min_score=min_score,
+        )
+    if result is None:
+        raise HTTPException(status_code=404, detail="unknown or unreachable event")
+    # The method mix is the point: a deployment answering mostly
+    # "time-only" is guessing, and that should be visible on a dashboard
+    # rather than only in the caveat on each answer.
+    metrics.JOURNEYS.inc({"method": result.method})
+    metrics.JOURNEY_HOPS.observe(len(result.hops))
+    metrics.JOURNEY_SECONDS.observe(timer.seconds, {"method": result.method})
+    body = result.as_dict()
+    cameras = _visible_cameras(db, visible_camera_ids(db, current_user))
+    body["anchor"]["camera_name"] = cameras.get(result.anchor.camera_id)
+    for hop in body["hops"]:
+        hop["camera_name"] = cameras.get(hop["camera_id"])
+    return body
+
+
+@router.get("/search/enrichment-plan")
+async def enrichment_plan(
+    label: str | None = Query(None, description="Narrow to what is worth running on this class."),
+    current_user: User = Depends(get_current_active_user),
+):
+    """The skills that could describe a visit on this box, right now.
+
+    Registered in KAI-C AND healthy — asked rather than assumed, because
+    it differs per deployment and changes while running. An enricher uses
+    it to decide what to run; the UI uses it to say what searching by
+    colour or by face would even mean here, instead of offering filters
+    that can never match.
+    """
+    from services.enrichment_plan import CACHE, build_plan, plan_for_label
+    from services.kai_c_service import KaiCService
+
+    plan = CACHE.get()
+    if plan is None:
+        svc = KaiCService()
+        caps: dict = {}
+        health: dict = {}
+        try:
+            caps = await svc.get_capabilities()
+        except Exception:
+            # A registry that cannot be reached means "nothing extra can be
+            # run right now", not an error page: the visit still has its
+            # class, camera and time, and enrichment is additive by design.
+            caps = {}
+            metrics.REGISTRY_UNREACHABLE.inc()
+        try:
+            health = await svc.check_kai_c_health()
+        except Exception:
+            health = {}
+        plan = CACHE.put(build_plan(caps, health))
+        # What KAI-C makes available right now. Coverage is produced from
+        # this, so a fall here is tomorrow's recall complaint.
+        metrics.SKILLS.set(len(plan), {"state": "registered"})
+        metrics.SKILLS.set(sum(1 for s in plan if s.healthy), {"state": "healthy"})
+
+    shown = plan_for_label(plan, label) if label else plan
+    kinds = sorted({k for s in shown if s.healthy for k in s.descriptor_kinds})
+    return {
+        "skills": [s.as_dict() for s in shown],
+        # The descriptor kinds this deployment can actually produce — what
+        # a "colour" or "face" filter is worth offering at all.
+        "descriptor_kinds": kinds,
+        "label": label,
+    }
+
+
+@router.get("/search")
+async def search(
+    q: str = Query("", description="Natural-language query, e.g. 'red truck at the dock yesterday'."),
+    # Explicit overrides. Any of these WINS over what the sentence was
+    # taken to mean — which is how a corrected chip reaches the query.
+    label: list[str] | None = Query(None, description="Object class; repeatable (OR)."),
+    camera_id: list[int] | None = Query(None, description="Camera; repeatable (OR)."),
+    text: str | None = Query(None, description="Words to match in captions/attributes."),
+    plate: str | None = Query(None),
+    from_: datetime | None = Query(default=None, alias="from"),
+    to: datetime | None = Query(default=None),
+    source: str | None = Query(None, description="tier0 | camera | app | adapter"),
+    attr: list[str] | None = Query(
+        None,
+        description="A claim a skill made, as kind:value (colour:red, "
+                    "vehicle_type:van, face_id:ravi). Repeatable, ANDed — "
+                    "the same visit must carry all of them.",
+    ),
+    parse: bool = Query(
+        True,
+        description="Parse q into filters. false = the explicit parameters "
+                    "are the whole query (how a UI driving from edited chips "
+                    "clears a filter the sentence implied).",
+    ),
+    skip: int = Query(0, ge=0, le=100_000),
+    limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Search visits. Returns the interpretation, the page, and the total.
+
+    Scoping is the store's own: a caller sees results only from cameras
+    they can view, and the camera vocabulary the parser matches names
+    against is the same set — so "the dock" cannot even name a camera
+    somebody else owns.
+    """
+    scope = visible_camera_ids(db, current_user)
+    cameras = _visible_cameras(db, scope)
+    parsed = parse_query(q, cameras=cameras) if parse else ParsedQuery()
+
+    # Explicit parameters beat the parse, field by field, so a caller can
+    # correct one part without having to restate the rest. A UI driving
+    # entirely from edited chips passes parse=false and owns every filter
+    # — which is also the only way to CLEAR something the sentence
+    # implied, since an absent parameter means "no opinion", not "none".
+    labels = [s for s in (label or []) if s] or parsed.labels
+    cams = [c for c in (camera_id or []) if c] or parsed.camera_ids
+    words = text if text is not None else parsed.text
+    plate_q = plate if plate is not None else parsed.plate
+    start = from_ if from_ is not None else parsed.from_
+    end = to if to is not None else parsed.to
+
+    # kind:value pairs, skipping anything malformed rather than 422ing a
+    # whole search over one bad chip.
+    attrs: list[tuple[str, str]] = []
+    for raw in attr or []:
+        kind, sep, value = str(raw).partition(":")
+        if sep and kind.strip() and value.strip():
+            attrs.append((kind.strip().lower(), value.strip().lower()))
+
+    filters = dict(
+        from_=start, to=end, plate=plate_q or None, source=source, scope=scope,
+    )
+    shape = metrics.query_shape(
+        labels=labels, camera_ids=cams, text=words or "", attrs=attrs,
+        plate=plate_q or "", from_=start, to=end,
+    )
+    with metrics.Timer() as page_timer:
+        hits = search_events(
+            db, labels=labels, camera_ids=cams, text=words or "", attrs=attrs,
+            limit=limit, skip=skip, **filters,
+        )
+    with metrics.Timer() as count_timer:
+        total = count_search_events(
+            db, labels=labels, camera_ids=cams, text=words or "", attrs=attrs, **filters
+        )
+    _record_search(shape, parsed, page_timer, count_timer, total, parse=parse,
+                   overridden=bool(label or camera_id or text or plate or from_
+                                   or to or source or attr))
+
+    interpretation = parsed.as_dict()
+    interpretation.update({
+        # Whether these filters came from the sentence or from the caller.
+        "source": "parsed" if parse else "explicit",
+        "labels": labels,
+        "camera_ids": cams,
+        "text": words or "",
+        "plate": plate_q or "",
+        "attrs": [f"{k}:{v}" for k, v in attrs],
+        "from": start.isoformat() if start else None,
+        "to": end.isoformat() if end else None,
+        # Which parts the CALLER pinned, so the UI can render those chips
+        # as edited rather than as the parser's guess.
+        "overridden": sorted(
+            k for k, v in (
+                ("labels", label), ("camera_ids", camera_id), ("text", text),
+                ("plate", plate), ("from", from_), ("to", to), ("source", source),
+                ("attrs", attr),
+            ) if v
+        ),
+    })
+
+    return {
+        "query": q,
+        "interpretation": interpretation,
+        "results": [
+            {
+                "id": h.event.id,
+                "camera_id": h.event.camera_id,
+                "camera_name": cameras.get(h.event.camera_id),
+                "label": h.event.label,
+                "score": round(h.score, 4),
+                "started_at": h.event.started_at.isoformat() if h.event.started_at else None,
+                "ended_at": h.event.ended_at.isoformat() if h.event.ended_at else None,
+                "plate_text": h.event.plate_text,
+                "caption": h.caption,
+                "attributes": h.attributes,
+                # What the skills claimed, each with the skill that said
+                # it — a result that can be justified, not just returned.
+                "claims": h.claims,
+                "source": h.event.source,
+                "event_type": h.event.event_type,
+                # The evidence photo is served by the timeline router,
+                # which owns the on-disk evidence store and its auth.
+                "evidence_url": (
+                    f"/api/v1/events/{h.event.id}/evidence" if h.event.evidence_path else None
+                ),
+                # Where a player should open. The route is the UI's to
+                # build; the API says which camera and which instant.
+                "anchor": anchor_for(h.event),
+            }
+            for h in hits
+        ],
+        "count": len(hits),
+        "total": total,
+    }

@@ -18,7 +18,7 @@
 
 import { Outlet, NavLink, Link, useLocation } from 'react-router-dom'
 import { DeviceBlockedOverlay } from '../components/DeviceBlockedOverlay'
-import { AlertTriangle, Bell, Boxes, Brain, Briefcase, Camera, Car, ChevronDown, Cloud, Cpu, Database, FileCheck, FileSearch, GitCommitHorizontal, Hourglass, KeyRound, Layers, LifeBuoy, LogOut, Maximize, Menu, Minimize, Monitor, MonitorPlay, Moon, Network, Plug, RefreshCcw, Settings as SettingsIcon, Shield, ShieldAlert, ShieldCheck, Sun, User as UserIcon, UserRound, Users } from 'lucide-react'
+import { AlertTriangle, Bell, Boxes, Brain, Briefcase, Camera, Car, ChevronDown, Cloud, Cpu, Database, FileCheck, FileSearch, GitCommitHorizontal, Hourglass, KeyRound, Layers, LifeBuoy, LogOut, Maximize, Menu, Minimize, Monitor, MonitorPlay, Moon, Network, Plug, RefreshCcw, Search as SearchIcon, Settings as SettingsIcon, Shield, ShieldAlert, ShieldCheck, Sun, User as UserIcon, UserRound, Users } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import { apiService } from '../lib/apiService'
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
@@ -68,6 +68,7 @@ const NAV_GROUPS: NavGroup[] = [
       { to: '/', label: 'Dashboard', icon: <Monitor size={16} />, perm: '/' },
       { to: '/live', label: 'Live View', icon: <Camera size={16} />, perm: '/live' },
       { to: '/playback/sync', label: 'Recordings', icon: <MonitorPlay size={16} />, perm: '/playback/sync' },
+      { to: '/search', label: 'Search', icon: <SearchIcon size={16} />, perm: '/search' },
       { to: '/cameras', label: 'Cameras', icon: <Camera size={16} />, perm: '/cameras' },
     ],
   },
@@ -115,7 +116,8 @@ const NAV_GROUPS: NavGroup[] = [
 ]
 
 const NAV_LABEL_KEYS: Record<string, string> = {
-  Dashboard: 'nav.dashboard', 'Live View': 'nav.liveView', Recordings: 'nav.recordings', Cameras: 'nav.cameras',
+  Dashboard: 'nav.dashboard', 'Live View': 'nav.liveView', Recordings: 'nav.recordings',
+  Search: 'nav.search', Cameras: 'nav.cameras',
   'AI & Detections': 'nav.aiDetections', 'AI Engine': 'nav.aiEngine', 'AI Models (BYOM)': 'nav.aiModels',
   'Detection Results': 'nav.detectionResults', 'AI Adapters': 'nav.aiAdapters', 'Security & Network': 'nav.securityNetwork',
   Network: 'nav.network', 'Logs & Forensics': 'nav.logsForensics', Governance: 'nav.governance', 'Audit Logs': 'nav.auditLogs',
