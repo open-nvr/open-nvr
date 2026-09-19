@@ -23,7 +23,10 @@
     "caller_info",
     "network_info",
     "card_session",
-    "mqtt_discovery"
+    "mqtt_discovery",
+    "footage_search",
+    "search_summary",
+    "camera_describe"
   ],
   "rest": [
     {
@@ -217,6 +220,18 @@
       "path": "/api/v1/search",
       "token_scope": "cameras.view",
       "response": "search"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/search/summary",
+      "token_scope": "cameras.view",
+      "response": "search_summary"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/cameras/{camera_id}/describe",
+      "token_scope": "live.view",
+      "response": "camera_describe"
     },
     {
       "method": "POST",
@@ -914,6 +929,12 @@
         },
         "semantic": {
           "type": "boolean"
+        },
+        "semantic_sources": {
+          "type": "array"
+        },
+        "semantic_errors": {
+          "type": "array"
         }
       }
     },
@@ -994,6 +1015,104 @@
           "items": {
             "type": "integer"
           }
+        }
+      }
+    },
+    "search_summary": {
+      "type": "object",
+      "required": [
+        "from",
+        "to",
+        "cameras",
+        "site_alerts",
+        "totals"
+      ],
+      "properties": {
+        "cameras": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "camera_id",
+              "name",
+              "events",
+              "event_count",
+              "first_event",
+              "last_event",
+              "alerts",
+              "alert_count"
+            ],
+            "properties": {
+              "camera_id": {
+                "type": "integer"
+              },
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "events": {
+                "type": "object"
+              },
+              "event_count": {
+                "type": "integer"
+              },
+              "alerts": {
+                "type": "object"
+              },
+              "alert_count": {
+                "type": "integer"
+              }
+            }
+          }
+        },
+        "site_alerts": {
+          "type": "object"
+        },
+        "totals": {
+          "type": "object",
+          "required": [
+            "events",
+            "alerts"
+          ]
+        }
+      }
+    },
+    "camera_describe": {
+      "type": "object",
+      "required": [
+        "camera_id",
+        "at",
+        "available",
+        "description",
+        "model",
+        "task"
+      ],
+      "properties": {
+        "camera_id": {
+          "type": "integer"
+        },
+        "available": {
+          "type": "boolean"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     }

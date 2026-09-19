@@ -43,4 +43,7 @@ FEATURES: tuple[str, ...] = (
     "network_info",         # HA-206: /system/info server_time and network facts; X-OpenNVR-Error
     "card_session",         # HA-304: POST /api-tokens/session; passthrough_allowlist
     "mqtt_discovery",       # HA-402: Home Assistant MQTT discovery; /system/info says if on
+    "footage_search",       # HA-502: /search?q= also asks footage-search apps (kind footage)
+    "search_summary",       # HA-502: GET /search/summary
+    "camera_describe",      # HA-501: POST /cameras/{id}/describe
 )

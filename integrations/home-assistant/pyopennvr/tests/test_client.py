@@ -226,3 +226,19 @@ async def test_open_session():
     assert got == out and rec.requests[0]["body"] == b'{"camera_ids": [1], "ttl_s": 300}'
     assert "/api/v1/cameras/" in pyopennvr.SystemInfo.from_dict(
         fixture("system_info")).passthrough_allowlist
+
+
+async def test_search_summary_and_describe():
+    async with fake_site({("GET", "/api/v1/search/summary"): fixture("search_summary"),
+                          ("POST", "/api/v1/cameras/2/describe"): fixture("camera_describe")}) as (
+            base, session, rec):
+        client = OpenNVRClient(base, TOKEN, session)
+        summary = await client.search_summary("2026-09-18T00:00:00+00:00", camera_id=2)
+        described = await client.describe_camera(2, "is the gate open?", correlation_id="c1")
+        await client.describe_camera(2)
+    assert summary["totals"] == {"events": 8, "alerts": 2}
+    assert rec.requests[0]["query"] == {"from": "2026-09-18T00:00:00+00:00", "camera_id": "2"}
+    assert described["available"] is True and described["description"].startswith("A white van")
+    assert rec.requests[1]["body"] == b'{"question": "is the gate open?"}'
+    assert rec.requests[1]["headers"]["X-Correlation-Id"] == "c1"
+    assert rec.requests[2]["body"] == b"{}"

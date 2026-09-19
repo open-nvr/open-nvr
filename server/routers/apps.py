@@ -1431,8 +1431,7 @@ async def invoke_app_action(
                     detail="Not permitted to control this camera",
                 )
 
-    base_url = row.url.rstrip("/")
-    if validate_app_url(base_url) is not None:
+    if validate_app_url(row.url.rstrip("/")) is not None:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="App URL is blocked by the registry's URL policy",
@@ -1453,6 +1452,22 @@ async def invoke_app_action(
         },
     )
 
+    return await call_app_action(db, row, action_name, params, current_user)
+
+
+async def call_app_action(db: Session, row: InstalledApp, action_name: str,
+                          params: dict[str, Any], current_user,
+                          *, timeout: float = ACTION_PROXY_TIMEOUT_S) -> Any:
+    """POST one action to the app's contract surface as ``current_user``
+    and return its JSON. The caller has already checked the declaration,
+    params, camera and audit (``invoke_app_action``; ``GET /search``'s
+    footage query). An app error or non-JSON answer is a 502."""
+    base_url = row.url.rstrip("/")
+    if validate_app_url(base_url) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="App URL is blocked by the registry's URL policy",
+        )
     # Transport auth between core and the app: a per-app signed call
     # token (SDK ≥ 0.6), and the site key only for apps too old to verify
     # one (services/app_user_context.call_headers). The JWT gate above
@@ -1464,7 +1479,7 @@ async def invoke_app_action(
     # for this app (services/app_user_context.py) so it can render or
     # refuse per user without a login of its own.
     headers.update(user_context_headers(db, row, current_user, purpose="action"))
-    async with httpx.AsyncClient(timeout=ACTION_PROXY_TIMEOUT_S, verify=app_verify()) as client:
+    async with httpx.AsyncClient(timeout=timeout, verify=app_verify()) as client:
         try:
             resp = await client.post(
                 f"{base_url}/actions/{action_name}",

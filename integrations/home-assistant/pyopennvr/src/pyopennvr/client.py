@@ -300,6 +300,24 @@ class OpenNVRClient:
             filters["from"] = filters.pop("from_")
         return await self.request("GET", "/search", params=filters)
 
+    async def search_summary(self, from_: str, to: str | None = None, *,
+                             camera_id: int | None = None) -> dict:
+        """``GET /search/summary`` (contract 1.1, ``search_summary``): per
+        camera, events by label and alerts by severity in a period of at
+        most 31 days; ``site_alerts`` and ``totals``."""
+        return await self.request("GET", "/search/summary", params={
+            "from": from_, "to": to, "camera_id": camera_id})
+
+    async def describe_camera(self, camera_id: int, question: str | None = None, *,
+                              correlation_id: str | None = None) -> dict:
+        """``POST /cameras/{id}/describe`` (contract 1.1, ``camera_describe``):
+        the current view in words, or the answer to ``question``, from the
+        server's caption / visual-QA model. ``available`` is false when it
+        has none. Rate-limited (429)."""
+        return await self.request("POST", f"/cameras/{camera_id}/describe",
+                                  json=_body({"question": question}),
+                                  correlation_id=correlation_id)
+
     # ── entities ─────────────────────────────────────────────────────────
 
     async def get_entities(self, etag: str | None = None) -> EntityCatalog | None:

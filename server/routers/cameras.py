@@ -2792,3 +2792,48 @@ async def get_camera_snapshot(
         # aggressively cache image GETs otherwise.
         headers={"Cache-Control": "no-store"},
     )
+
+
+class DescribeIn(BaseModel):
+    question: str | None = Field(None, max_length=300)
+
+
+@router.post("/{camera_id}/describe")
+async def describe_camera(
+    camera_id: int,
+    request: Request,
+    body: DescribeIn | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """The camera's current view in words, from a caption or visual-QA
+    adapter through KAI-C (services/scene_description.py); with
+    ``question``, its answer. ``available: false`` when no such adapter is
+    installed or it declined. Audited: a frame went to a model. 429 past a
+    few a minute; 503 when no frame can be captured."""
+    from services import scene_description
+
+    camera = CameraService.get_camera_by_id(db, camera_id, current_user.id)
+    if not camera:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Camera not found")
+    question = ((body.question or "").strip() or None) if body is not None else None
+    token_id = getattr(current_user, "token_id", None)
+    caller = f"token:{token_id}" if token_id is not None else f"user:{current_user.id}"
+    try:
+        result = await scene_description.describe(camera, caller, question)
+    except scene_description.RateLimited:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                            detail="Too many descriptions; try again in a minute",
+                            headers={"Retry-After": "60"})
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+    write_audit_log(
+        db, action="camera.describe", user_id=current_user.id, entity_type="camera",
+        entity_id=camera.id,
+        # Not the question or the answer: they may describe people.
+        details={"model": result["model"], "task": result["task"],
+                 "answered": result["available"], "question": question is not None},
+        ip=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return {"camera_id": camera.id, "at": datetime.now(UTC).isoformat(), **result}

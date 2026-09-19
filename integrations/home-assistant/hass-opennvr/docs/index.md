@@ -101,6 +101,35 @@ Diagnostic entities (FPS, inference time, bitrate, CPU, memory) are disabled by 
 
 With more than one OpenNVR site, pass `config_entry_id` to the actions that take no camera.
 
+`query` is plain language ("red truck at the gate"). When OpenNVR runs the
+**footage-search** app, it answers too, and its matches come back as
+`kind: footage` with the detected objects and a caption.
+
+## Assist
+
+The integration adds an LLM API named **OpenNVR**. Select it (alongside
+*Assist*, if you like) in a conversation agent's options, and ask things like
+"did a white van come to the gate yesterday?", "what happened overnight?" or
+"is the garage door open?". The agent gets five tools:
+
+| Tool | What it does |
+|---|---|
+| `opennvr_search_events` | searches detections, alerts and footage (plain language, or by camera, object, zone, plate, time) |
+| `opennvr_summarize_period` | counts per camera what was detected and alerted in a period (up to 31 days) |
+| `opennvr_list_alerts` | lists alerts, optionally only unacknowledged ones |
+| `opennvr_describe_camera` | describes a camera's current view, or answers a question about it, with OpenNVR's image model |
+| `opennvr_ptz_goto_preset` | moves a PTZ camera to a saved preset |
+
+The tools reach only cameras that are **exposed to the assistant**
+(*Settings > Voice assistants > Expose*), shown by the integration, and
+allowed by the token. Camera entities are not exposed by default, so expose
+the ones Assist may talk about. Describing needs a caption or visual-question
+model in OpenNVR (for example the Ollama VLM adapter) and the token's
+`live.view`; each description is audited in OpenNVR and limited to a few a
+minute. Moving to a preset needs `ptz.control`. Summaries need OpenNVR with
+the `search_summary` feature. What the model says about a picture can be
+wrong; the camera entity's snapshot is the ground truth.
+
 ## Media browser
 
 **Media > OpenNVR** contains:
