@@ -53,6 +53,8 @@ def mock_client() -> Generator[MagicMock]:
     with (
         patch("custom_components.opennvr.OpenNVRClient", return_value=client),
         patch("custom_components.opennvr.config_flow.OpenNVRClient", return_value=client),
+        # The viewer client (a card-session token) is the same mock here.
+        patch("custom_components.opennvr.coordinator.OpenNVRClient", return_value=client),
     ):
         yield client
 

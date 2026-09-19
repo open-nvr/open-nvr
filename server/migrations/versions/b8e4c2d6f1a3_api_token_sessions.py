@@ -21,13 +21,19 @@ depends_on = None
 
 def upgrade() -> None:
     # Idempotent: core/database._backfill_additive_columns may already have
-    # added the column on a database that booted with the new models.
+    # added the column (without its key and index) on a database that booted
+    # with the new models, so each part is added only where missing.
     inspector = sa.inspect(op.get_bind())
-    if "parent_id" not in {c["name"] for c in inspector.get_columns("api_tokens")}:
-        with op.batch_alter_table("api_tokens") as batch:
+    columns = {c["name"] for c in inspector.get_columns("api_tokens")}
+    fks = {tuple(f["constrained_columns"]) for f in inspector.get_foreign_keys("api_tokens")}
+    indexes = {i["name"] for i in inspector.get_indexes("api_tokens")}
+    with op.batch_alter_table("api_tokens") as batch:
+        if "parent_id" not in columns:
             batch.add_column(sa.Column("parent_id", sa.Integer(), nullable=True))
+        if ("parent_id",) not in fks:
             batch.create_foreign_key("fk_api_tokens_parent_id", "api_tokens",
                                      ["parent_id"], ["id"], ondelete="CASCADE")
+        if "ix_api_tokens_parent_id" not in indexes:
             batch.create_index("ix_api_tokens_parent_id", ["parent_id"])
 
 

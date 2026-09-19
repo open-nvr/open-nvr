@@ -152,11 +152,15 @@ def _ttl_s(entry) -> int:
     return int(entry.options.get(CONF_MEDIA_TTL, DEFAULT_MEDIA_TTL)) * 3600
 
 
-def _utc_iso(value: datetime) -> str:
+def _aware(value: datetime) -> datetime:
     """HA's datetime selector gives local wall-clock time without a zone."""
     if value.tzinfo is None:
         value = value.replace(tzinfo=dt_util.get_default_time_zone())
-    return dt_util.as_utc(value).isoformat()
+    return dt_util.as_utc(value)
+
+
+def _utc_iso(value: datetime) -> str:
+    return _aware(value).isoformat()
 
 
 # ── the actions ──────────────────────────────────────────────────────────
@@ -203,7 +207,7 @@ async def _end_event(hass: HomeAssistant, call: ServiceCall) -> None:
 
 async def _export_recording(hass: HomeAssistant, call: ServiceCall) -> ServiceResponse:
     entry, cid = _camera(hass, call.data[ATTR_CAMERA])
-    start, end = call.data["start"], call.data["end"]
+    start, end = _aware(call.data["start"]), _aware(call.data["end"])
     duration = (end - start).total_seconds()
     if not 0 < duration <= MAX_CLIP_S:
         raise _invalid("bad_clip_range", max=MAX_CLIP_S)
@@ -250,12 +254,14 @@ async def _protect_recording(hass: HomeAssistant, call: ServiceCall) -> None:
 async def _ack_alerts(hass: HomeAssistant, call: ServiceCall) -> ServiceResponse:
     ids = call.data.get("alert_ids")
     source, severity = call.data.get("source"), call.data.get("severity")
-    if ids and (source or severity):
+    if ids is not None and (source or severity):
         # The server refuses both too: they are two different intentions.
         raise _invalid("ack_ids_or_filter")
     entry = _entry(hass, call)
+    # An EMPTY list acknowledges nothing (a template that found no alerts
+    # must not silence every alarm on the site).
     result = await _run(entry.runtime_data.client.ack_alerts(
-        ids=ids or None, source=source, severity=severity, correlation_id=call.context.id))
+        ids=ids, source=source, severity=severity, correlation_id=call.context.id))
     return {"count": int(result.get("acknowledged", 0))}
 
 
@@ -272,7 +278,9 @@ async def _search_events(hass: HomeAssistant, call: ServiceCall) -> ServiceRespo
         zone=data.get("zone"), plate=data.get("plate"),
         from_=_utc_iso(data["start"]) if data.get("start") else None,
         to=_utc_iso(data["end"]) if data.get("end") else None, limit=data["limit"]))
-    results = list(found.get("results", []))
+    shown = entry.runtime_data.coordinator.data.cameras
+    results = [r for r in found.get("results", [])
+               if r.get("camera_id") is None or r.get("camera_id") in shown]
     limit = asyncio.Semaphore(8)
 
     async def thumbnail(row: dict[str, Any]) -> None:

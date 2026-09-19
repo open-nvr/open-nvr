@@ -113,6 +113,12 @@ SESSION_SCOPES: frozenset[str] = frozenset({
     "cameras.view", "live.view", "recordings.view", "alerts.view", "settings.view"})
 #: Longest life of a session token, in seconds.
 SESSION_MAX_TTL_S = 600
+#: The only non-GET routes a session token may call: opening the events
+#: socket and signing media for display. Nothing that changes state.
+SESSION_WRITES: frozenset[tuple[str, str]] = frozenset({
+    ("POST", "/api/v1/events/ws-ticket"), ("POST", "/api/v1/media/sign")})
+#: Sessions a token may open per minute (a card reopens one about every eight).
+SESSION_MINTS_PER_MINUTE = 30
 
 #: Read-only API paths an integration may relay for a browser that cannot
 #: reach OpenNVR itself (Home Assistant's card passthrough, design §7.8).
@@ -367,8 +373,29 @@ def _ip_allowed(ip: str, cidrs: list[str] | None) -> bool:
     return False
 
 
+_session_mints: dict[int, list[float]] = {}
+
+
+def allow_session_mint(parent_id: int) -> bool:
+    """Rate limit per parent token: a card renews its session every ~8 min,
+    so anything near the limit is a misbehaving client, not a dashboard."""
+    now = time.monotonic()
+    recent = [t for t in _session_mints.get(parent_id, []) if now - t < 60.0]
+    if len(recent) >= SESSION_MINTS_PER_MINUTE:
+        _session_mints[parent_id] = recent
+        return False
+    recent.append(now)
+    _session_mints[parent_id] = recent
+    return True
+
+
 def _touch_last_used(token_id: int, ip: str) -> None:
     now = time.monotonic()
+    if len(_last_used_written) > 1000:
+        # Short-lived session tokens each add an id: forget the stale ones.
+        for stale in [k for k, v in _last_used_written.items()
+                      if now - v >= LAST_USED_WRITE_INTERVAL_S]:
+            _last_used_written.pop(stale, None)
     last = _last_used_written.get(token_id)
     if last is not None and now - last < LAST_USED_WRITE_INTERVAL_S:
         return
@@ -424,6 +451,11 @@ def authorize_request(request, db: Session, plain: str) -> TokenPrincipal:
     if not token_has_permission(principal, required):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
                             detail=f"This API token lacks the '{required}' permission")
+    if row.parent_id is not None and key[0] != "GET" and key not in SESSION_WRITES:
+        # A card's session reads. Its scopes are all "view" scopes, but a few
+        # view-gated routes still change something (protecting footage).
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="A session token can only read")
 
     if cameras is not None:
         named, bad = _camera_ids_named(request)

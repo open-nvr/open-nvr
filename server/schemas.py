@@ -27,7 +27,7 @@ from datetime import datetime
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_serializer, field_validator
 
 from core.config import settings
 
@@ -733,6 +733,20 @@ class CameraResponse(CameraBase):
     # edit with 409/502 instead, so the DB and MediaMTX cannot disagree about
     # where a camera's video comes from.
     stream_warning: str | None = None
+
+    @field_serializer("rtsp_url", "substream_url")
+    def _no_credentials_for_tokens(self, value: str | None) -> str | None:
+        """An API token (Home Assistant, a dashboard card's session) never
+        gets the camera's stream credentials: it streams through OpenNVR.
+        Users keep seeing the URL they configured."""
+        from core.request_context import current
+
+        ctx = current()
+        if value and ctx is not None and (ctx.actor or "").startswith("token:"):
+            from utils.url_redaction import redact_url_credentials
+
+            return redact_url_credentials(value)
+        return value
 
     class Config:
         from_attributes = True

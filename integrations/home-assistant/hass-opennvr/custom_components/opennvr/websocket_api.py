@@ -56,7 +56,7 @@ async def ws_card_session(hass: HomeAssistant, connection: websocket_api.ActiveC
     entry = loaded[0]
     coordinator = entry.runtime_data.coordinator
     shown = set(coordinator.data.cameras)
-    wanted = set(msg.get("camera_ids") or shown)
+    wanted = set(msg["camera_ids"]) if "camera_ids" in msg else shown
     cameras = sorted(wanted & shown)
     if not cameras:
         connection.send_error(msg["id"], "not_found", "None of those cameras is shown here")

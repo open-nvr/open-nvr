@@ -173,12 +173,18 @@ async def create_session_token(
     (the Home Assistant integration) for a browser: its parent's scopes
     limited to reading, its parent's cameras (or fewer), at most ten
     minutes and never past the parent's expiry; revoked with the parent.
-    A session token cannot mint another."""
+    A session token cannot mint another, and calls nothing that writes.
+
+    It does NOT inherit the parent's ``allowed_cidrs``: it is for the
+    viewer's browser, whose address is not Home Assistant's. What bounds it
+    instead is the short life, reading only, and the cameras."""
     if not api_tokens.is_token_principal(current_user):
         raise HTTPException(status_code=403, detail="Only an API token can open a session")
     parent = db.query(ApiToken).filter(ApiToken.id == current_user.token_id).first()
     if parent is None or parent.parent_id is not None:
         raise HTTPException(status_code=403, detail="A session token cannot open a session")
+    if not api_tokens.allow_session_mint(parent.id):
+        raise HTTPException(status_code=429, detail="Too many sessions; try again in a minute")
     scopes = sorted(s for s in api_tokens.SESSION_SCOPES
                     if api_tokens.token_has_permission(current_user, s))
     if not scopes:

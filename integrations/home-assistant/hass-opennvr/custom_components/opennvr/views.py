@@ -54,7 +54,7 @@ SIGNED_TTL_S = 120
 #: The server's own limit for one clip.
 MAX_CLIP_S = 3600
 EVENT_IMAGES = ("evidence", "scene", "plate", "plate_frame")
-_ALERT_IMAGE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+ALERT_IMAGE_NAME = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 #: OpenNVR's signed-media token: ``m1.<payload>.<signature>``, base64url.
 _SIGNED_TOKEN = re.compile(r"^m1\.[A-Za-z0-9_-]{1,2048}\.[A-Za-z0-9_-]{16,128}$")
 #: Response headers worth passing on from OpenNVR.
@@ -87,12 +87,22 @@ class _MediaView(HomeAssistantView):
     def __init__(self, hass: HomeAssistant) -> None:
         self.hass = hass
 
-    def _client(self, entry_id: str):
+    def _entry(self, entry_id: str):
         entry = self.hass.config_entries.async_get_entry(entry_id)
         if (entry is None or entry.domain != DOMAIN
                 or entry.state is not ConfigEntryState.LOADED):
             raise web.HTTPNotFound
-        return entry.runtime_data.client
+        return entry
+
+    async def _client(self, entry_id: str):
+        """The viewer client: this entry's cameras only, reading only."""
+        entry = self._entry(entry_id)
+        try:
+            return await entry.runtime_data.coordinator.async_viewer_client()
+        except OpenNVRAuthError as err:
+            raise web.HTTPForbidden from err
+        except OpenNVRError as err:
+            raise web.HTTPBadGateway from err
 
     async def _proxy(self, request: web.Request, client, sign) -> web.StreamResponse:
         try:
@@ -108,7 +118,12 @@ class _MediaView(HomeAssistantView):
 
     async def _stream(self, request: web.Request, client, url: str) -> web.StreamResponse:
         session = async_get_clientsession(self.hass, client.ssl is not False)
-        headers = {"Range": request.headers["Range"]} if "Range" in request.headers else {}
+        # Identity: the body is passed on as it comes, and must be the bytes
+        # the Content-Length we copy describes (a transparently decompressed
+        # gzip body would be cut short at the compressed length).
+        headers = {"Accept-Encoding": "identity"}
+        if "Range" in request.headers:
+            headers["Range"] = request.headers["Range"]
         response: web.StreamResponse | None = None
         try:
             async with session.get(url, ssl=client.ssl, headers=headers,
@@ -122,8 +137,9 @@ class _MediaView(HomeAssistantView):
                     _LOGGER.debug("OpenNVR media answered %s", upstream.status)
                     raise web.HTTPBadGateway
                 response = web.StreamResponse(status=upstream.status)
+                encoded = "Content-Encoding" in upstream.headers
                 for name in _PASS_HEADERS:
-                    if name in upstream.headers:
+                    if name in upstream.headers and not (encoded and name == "Content-Length"):
                         response.headers[name] = upstream.headers[name]
                 response.headers["Cache-Control"] = "private, max-age=300"
                 await response.prepare(request)
@@ -146,7 +162,7 @@ class EventImageView(_MediaView):
                   image: str) -> web.StreamResponse:
         if image not in EVENT_IMAGES:
             raise web.HTTPNotFound
-        client = self._client(entry_id)
+        client = await self._client(entry_id)
         return await self._proxy(request, client, lambda: client.sign_media(
             "event", id=int(event_id), name=image, ttl_s=SIGNED_TTL_S))
 
@@ -157,9 +173,9 @@ class AlertImageView(_MediaView):
 
     async def get(self, request: web.Request, entry_id: str, alert_id: str,
                   name: str) -> web.StreamResponse:
-        if not _ALERT_IMAGE.fullmatch(name):
+        if not ALERT_IMAGE_NAME.fullmatch(name):
             raise web.HTTPNotFound
-        client = self._client(entry_id)
+        client = await self._client(entry_id)
         return await self._proxy(request, client, lambda: client.sign_media(
             "alert_image", id=int(alert_id), name=name, ttl_s=SIGNED_TTL_S))
 
@@ -173,7 +189,9 @@ class ClipView(_MediaView):
         duration = int(seconds)
         if not 0 < duration <= MAX_CLIP_S:
             raise web.HTTPNotFound
-        client = self._client(entry_id)
+        if int(camera_id) not in self._entry(entry_id).runtime_data.coordinator.data.cameras:
+            raise web.HTTPNotFound  # a camera this entry doesn't show
+        client = await self._client(entry_id)
         begin = datetime.fromtimestamp(int(start), UTC).isoformat()
         return await self._proxy(request, client, lambda: client.sign_media(
             "clip", camera_id=int(camera_id), start=begin, duration_s=duration,
@@ -235,8 +253,8 @@ class PassthroughView(_MediaView):
         if not passthrough_allowed(full,
                                    entry.runtime_data.coordinator.data.info.passthrough_allowlist):
             raise web.HTTPNotFound
-        client = entry.runtime_data.client
         try:
+            client = await entry.runtime_data.coordinator.async_viewer_client()
             data = await client.request("GET", full[len("/api/v1"):], params=dict(request.query))
         except OpenNVRNotFoundError as err:
             raise web.HTTPNotFound from err

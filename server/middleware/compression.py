@@ -13,6 +13,7 @@ from starlette.middleware.gzip import GZipMiddleware
 _MEDIA_PREFIXES = (
     "/api/v1/recordings/playback/hls",  # HLS manifests + byte-range media
     "/api/v1/recordings/export",  # clip export proxy (streams video)
+    "/api/v1/media/s/",  # signed media (HA-112): images and clips
 )
 
 # Evidence JPEGs. Same argument as the media plane — already-compressed bytes,
@@ -34,6 +35,8 @@ _IMAGE_SUFFIXES = (
 def _is_media_path(path: str) -> bool:
     if path.startswith(_MEDIA_PREFIXES):
         return True
+    if path.startswith("/api/v1/alerts-inbox/") and "/images/" in path:
+        return True  # alert images; the inbox's JSON still compresses
     return path.startswith(_EVENTS_PREFIX) and path.endswith(_IMAGE_SUFFIXES)
 
 

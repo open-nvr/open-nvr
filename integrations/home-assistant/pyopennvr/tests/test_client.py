@@ -183,8 +183,10 @@ async def test_ack_by_ids_or_by_filter():
         await client.ack_alerts(ids=[1, 2])
         await client.ack_alerts(source="loitering", severity="high")
         await client.ack_alerts()
+        await client.ack_alerts(ids=[])            # an empty list means NONE, not all
     assert [r["body"] for r in rec.requests] == [
-        b'{"ids": [1, 2]}', b'{"source_name": "loitering", "severity": "high"}', b"{}"]
+        b'{"ids": [1, 2]}', b'{"source_name": "loitering", "severity": "high"}', b"{}",
+        b'{"ids": []}']
 
 
 async def test_cameras_include_turned_off_ones_across_pages():

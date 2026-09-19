@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from datetime import datetime, timedelta
 from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 import logging
@@ -43,6 +44,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 from homeassistant.util.async_ import create_eager_task
 
 from . import issues
@@ -59,6 +61,10 @@ if TYPE_CHECKING:
     from . import OpenNVRConfigEntry
 
 _LOGGER = logging.getLogger(__name__)
+
+#: The viewer session's life, and how early it is renewed.
+VIEWER_TTL_S = 600
+VIEWER_RENEW_BEFORE = timedelta(seconds=120)
 
 KeyListener = Callable[[dict[str, Any]], None]
 
@@ -102,6 +108,9 @@ class OpenNVRCoordinator(DataUpdateCoordinator[OpenNVRSiteData]):
         self.refreshes = 0
         #: Unique id -> refresh count when its entity was first found missing.
         self.prune_missing: dict[str, int] = {}
+        self._viewer: OpenNVRClient | None = None
+        self._viewer_until: datetime | None = None
+        self._viewer_lock = asyncio.Lock()
         #: Recent frames, for diagnostics.
         self.recent_frames: deque[dict[str, Any]] = deque(maxlen=RECENT_FRAMES)
 
@@ -240,6 +249,28 @@ class OpenNVRCoordinator(DataUpdateCoordinator[OpenNVRSiteData]):
         if self._inflight is not None:
             self._inflight["site_mode"] = mode
         self.async_update_listeners()
+
+    async def async_viewer_client(self) -> OpenNVRClient:
+        """A client for what Home Assistant USERS look at (media, the card
+        passthrough): a short, read-only session token for exactly the
+        cameras this entry shows, so OpenNVR itself enforces both. Falls
+        back to the entry's token on a server without card sessions."""
+        if self.data is None or not self.data.info.has("card_session"):
+            return self.client
+        async with self._viewer_lock:
+            now = dt_util.utcnow()
+            if (self._viewer is not None and self._viewer_until is not None
+                    and self._viewer_until - now > VIEWER_RENEW_BEFORE):
+                return self._viewer
+            session = await self.client.open_session(
+                camera_ids=sorted(self.data.cameras), ttl_s=VIEWER_TTL_S)
+            verify = self.client.ssl is not False
+            self._viewer = OpenNVRClient(self.client.base_url, session["token"],
+                                         async_get_clientsession(self.hass, verify),
+                                         verify_ssl=verify)
+            self._viewer_until = (dt_util.parse_datetime(session.get("expires_at") or "")
+                                  or now + timedelta(seconds=VIEWER_TTL_S))
+            return self._viewer
 
     @callback
     def async_add_key_listener(self, key: str, listener: KeyListener) -> CALLBACK_TYPE:

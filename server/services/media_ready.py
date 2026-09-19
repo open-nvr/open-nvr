@@ -98,5 +98,8 @@ def schedule_for_alert(stored: dict[str, Any], camera_id: int | None,
     ready_at = clip.pop("ready_at")
     _schedule(camera_id, {
         "source": "alert", "id": stored.get("id"), "alert_id": stored.get("alert_id"),
+        # What a notification says, so a client needn't have seen the alert.
+        "severity": stored.get("severity"), "title": stored.get("title"),
+        "app": stored.get("source_name"),
         "images": stored.get("image_names") or [], "clip": clip,
     }, ready_at)

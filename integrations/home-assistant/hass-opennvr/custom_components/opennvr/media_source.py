@@ -40,7 +40,13 @@ from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
-from .views import MAX_CLIP_S, alert_image_path, clip_path, event_image_path
+from .views import (
+    ALERT_IMAGE_NAME,
+    MAX_CLIP_S,
+    alert_image_path,
+    clip_path,
+    event_image_path,
+)
 
 PAGE = 50
 SEVERITIES = ("critical", "high", "medium", "low")
@@ -162,7 +168,8 @@ class OpenNVRMediaSource(MediaSource):
         raise BrowseError(f"Not an OpenNVR folder: {item.identifier}")
 
     async def _alerts(self, entry, rest: list[str]) -> BrowseMediaSource:
-        client, eid = entry.runtime_data.client, entry.entry_id
+        eid = entry.entry_id
+        client = await self._call(entry.runtime_data.coordinator.async_viewer_client())
         if not rest:
             base = _folder(f"{eid}/alerts", "Alerts")
             base.children = []
@@ -182,7 +189,8 @@ class OpenNVRMediaSource(MediaSource):
                        children_class=MediaClass.IMAGE)
         base.children = []
         for alert in found.get("alerts", []):
-            images = alert.get("images") or []
+            # Only names the proxy serves (views.ALERT_IMAGE_NAME) make a playable item.
+            images = [n for n in alert.get("images") or [] if ALERT_IMAGE_NAME.fullmatch(str(n))]
             title = f"{_local(alert.get('fired_at'))} · {alert.get('title') or 'Alert'}"
             if images:
                 path = alert_image_path(eid, alert["id"], images[0])
@@ -214,7 +222,8 @@ class OpenNVRMediaSource(MediaSource):
                                                   *((lb, lb.title()) for lb in labels)]]
             return base
         label, page = rest[1], int(rest[2]) if len(rest) > 2 else 0
-        found = await self._call(entry.runtime_data.client.get_events(
+        client = await self._call(coordinator.async_viewer_client())
+        found = await self._call(client.get_events(
             camera_id=cid, label=None if label == "all" else label, skip=page * PAGE,
             limit=PAGE))
         base = _folder(f"{eid}/events/{cid}/{label}/{page}",
@@ -258,17 +267,20 @@ class OpenNVRMediaSource(MediaSource):
                                          for n in range(RECORDING_DAYS))]
             return base
         day = datetime.fromisoformat(rest[1]).date()
-        midnight = dt_util.start_of_local_day(day)
-        now = dt_util.now()
+        # Hours are stepped in UTC: a DST day has 23 or 25 of them, and
+        # wall-clock arithmetic would skip or repeat one.
+        start = dt_util.as_utc(dt_util.start_of_local_day(day))
+        end = dt_util.as_utc(dt_util.start_of_local_day(day + timedelta(days=1)))
+        now = dt_util.utcnow()
         base = _folder(f"{eid}/recordings/{cid}/{day.isoformat()}",
                        f"{cameras[cid].name}: {day.isoformat()}",
                        children_class=MediaClass.VIDEO)
-        base.children = []
-        for hour in range(23, -1, -1):
-            start = midnight + timedelta(hours=hour)
-            if start > now:
-                continue
-            base.children.append(_leaf(f"{eid}/rec/{cid}/{int(start.timestamp())}",
-                                       f"{start:%H}:00–{(start + timedelta(hours=1)):%H}:00",
-                                       MediaClass.VIDEO, "video/mp4"))
+        hours = []
+        while start < end and start <= now:
+            local = dt_util.as_local(start)
+            after = dt_util.as_local(start + timedelta(hours=1))
+            hours.append(_leaf(f"{eid}/rec/{cid}/{int(start.timestamp())}",
+                               f"{local:%H}:00–{after:%H}:00", MediaClass.VIDEO, "video/mp4"))
+            start += timedelta(hours=1)
+        base.children = list(reversed(hours))
         return base

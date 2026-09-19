@@ -50,6 +50,10 @@ def create_mock_client() -> MagicMock:
     client.get_entities.return_value = EntityCatalog.from_dict(load_fixture("entity_list"))
     client.get_entity_states.return_value = load_fixture("entity_states")["states"]
     client.get_site_mode.return_value = SiteMode.from_dict(load_fixture("site_mode"))
+    client.open_session.return_value = {
+        "token": "onvr_viewer01_abcdefghijklmnopqrstuvwxyz0123456789",
+        "expires_at": "2099-01-01T00:00:00+00:00",
+        "scopes": ["cameras.view", "live.view"], "camera_ids": [1, 3]}
     return client
 
 

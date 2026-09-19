@@ -263,7 +263,7 @@ class OpenNVRClient:
         """Acknowledge these alert ids, or every unacknowledged alert matching
         ``source``/``severity``, or (neither) every unacknowledged alert the
         token can see. Ids and filters are exclusive (the server refuses both)."""
-        body = ({"ids": ids} if ids else
+        body = ({"ids": list(ids)} if ids is not None else
                 _body({"source_name": source, "severity": severity}))
         return await self.request("POST", "/alerts-inbox/ack", json=body,
                                   correlation_id=correlation_id)

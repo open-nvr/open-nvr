@@ -279,6 +279,17 @@ async def check_restart(ha: HAClient, entry_id: str) -> None:
           is not None else f"back={back} setup={setup_s}")
 
 
+JPEG_START, JPEG_END = bytes([0xFF, 0xD8]), bytes([0xFF, 0xD9])
+
+
+def _whole_jpeg(resp, body: bytes) -> bool:
+    """A complete JPEG, and exactly the length announced (a proxied gzip body
+    cut at the compressed length once truncated every small image)."""
+    length = resp.headers.get("Content-Length")
+    return (resp.content_type.startswith("image/") and body[:2] == JPEG_START
+            and body[-2:] == JPEG_END and (length is None or int(length) == len(body)))
+
+
 async def check_media(ha: HAClient, entry_id: str, cameras: list[dict]) -> None:
     """The media browser lists events, and a thumbnail and a clip play
     through Home Assistant's own URL (the proxy), not OpenNVR's."""
@@ -296,8 +307,9 @@ async def check_media(ha: HAClient, entry_id: str, cameras: list[dict]) -> None:
         check("media browser plays through HA", False, "no event with a thumbnail")
         return
     async with ha.s.get(f"{HA}{thumb}", headers=ha.h) as r:
-        img_ok = r.status == 200 and r.content_type.startswith("image/")
-        img = f"thumbnail {r.status} {r.content_type}"
+        body = await r.read()
+        img_ok = r.status == 200 and _whole_jpeg(r, body)
+        img = f"thumbnail {r.status} {r.content_type} {len(body)} B"
     resolved = await ha.ws({"type": "media_source/resolve_media", "media_content_id": clip})
     async with ha.s.get(f"{HA}{resolved['url']}") as r:          # HA-signed path
         head = await r.content.read(64 * 1024)
@@ -316,8 +328,9 @@ async def check_media(ha: HAClient, entry_id: str, cameras: list[dict]) -> None:
         check("notification relay works without login", False, "no relay thumbnail")
         return
     async with ha.s.get(f"{HA}{relay}") as r:                    # no Authorization
-        ok = r.status == 200 and r.content_type.startswith("image/")
-        detail = f"{r.status} {r.content_type}"
+        body = await r.read()
+        ok = r.status == 200 and _whole_jpeg(r, body)
+        detail = f"{r.status} {r.content_type} {len(body)} B"
     async with ha.s.get(f"{HA}{relay[:-4]}AAAA") as r:          # tampered signature
         detail += f"; tampered {r.status}"
         ok = ok and r.status == 404
