@@ -13,7 +13,6 @@
     "network_info",
     "card_session",
     "mqtt_discovery",
-    "footage_search",
     "search_summary",
     "camera_describe"
   ],

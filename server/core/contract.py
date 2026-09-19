@@ -38,12 +38,11 @@ FEATURES: tuple[str, ...] = (
     "media_ready",          # HA-113
     "site_mode",            # HA-118
     "entities",             # HA-114: server-described entities
-    "search",               # HA-116
+    "search",               # HA-116; since the merge of main: its plain-language /search
     "caller_info",          # HA-202: /system/info reports the caller (token scopes, expiry)
     "network_info",         # HA-206: /system/info server_time and network facts; X-OpenNVR-Error
     "card_session",         # HA-304: POST /api-tokens/session; passthrough_allowlist
     "mqtt_discovery",       # HA-402: Home Assistant MQTT discovery; /system/info says if on
-    "footage_search",       # HA-502: /search?q= also asks footage-search apps (kind footage)
     "search_summary",       # HA-502: GET /search/summary
     "camera_describe",      # HA-501: POST /cameras/{id}/describe
 )

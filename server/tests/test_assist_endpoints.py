@@ -1,9 +1,9 @@
 # Copyright (c) 2026 OpenNVR
 # Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0)
-"""HA-501/502: what Assist asks core.
+"""What Home Assistant and Assist ask core (HA-116, HA-501/502).
 
-* ``GET /search?q=`` also asks footage-search apps; their rows are scoped to
-  the caller's cameras and filters, and a failing app is named, not fatal;
+* main's plain-language ``GET /search`` (its own tests are test_search.py):
+  the ``zone`` filter added for Home Assistant, and API-token scoping;
 * ``GET /search/summary`` counts events by label and alerts by severity per
   camera, scoped like ``/search``;
 * ``POST /cameras/{id}/describe`` words from a caption/VQA adapter, audited
@@ -17,124 +17,73 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from services import footage_query, scene_description
+from services import scene_description
 from tests.test_api_tokens import _as, _mint, env  # noqa: F401 - shared fixture
-from tests.test_search import T0, data  # noqa: F401 - shared fixture
 
+T0 = datetime(2026, 9, 18, 8, 0, tzinfo=UTC)
 SEARCH_ACTION = {"name": "search", "params": [{"name": "query", "type": "str"},
                                               {"name": "limit", "type": "int"}]}
 
 
 @pytest.fixture()
-def footage_app(env, monkeypatch):  # noqa: F811
+def data(env):  # noqa: F811
     s = env.Session()
-    s.add(env.models.InstalledApp(
-        id="footage-search", name="Footage search", version="1.0.0",
-        url="http://footage-search:9215", enabled=True,
-        manifest_json={"name": "footage-search", "actions": [SEARCH_ACTION]}, config_json={}))
+    Z = env.models.CameraZone
+    drive = Z(camera_id=1, name="Driveway", polygon=[[0, 0], [1, 0], [1, 1]])
+    porch = Z(camera_id=2, name="Porch", polygon=[[0, 0], [1, 0], [1, 1]])
+    s.add_all([drive, porch])
     s.commit()
+    E = env.models.TimelineEvent
+
+    def ev(cam, label, minutes, zones=None, plate=None):
+        s.add(E(camera_id=cam, source="tier0", event_type="track", label=label,
+                started_at=T0 + timedelta(minutes=minutes),
+                ended_at=T0 + timedelta(minutes=minutes, seconds=20),
+                zone_ids=zones, plate_text=plate))
+
+    ev(1, "car", 0, [drive.id], plate="KA01AB1234")
+    ev(1, "person", 5, [3, drive.id])
+    ev(1, "person", 10, [drive.id + 10])       # zone 1x, not zone x
+    ev(2, "person", 15, [porch.id])
+    ev(3, "dog", 20)
+    s.add(env.models.AppAlert(alert_id="a1", fired_at=T0 + timedelta(minutes=7),
+                              severity="critical", title="Person loitering at gate",
+                              camera_id="cam1", source_name="loitering"))
+    s.add(env.models.AppAlert(alert_id="a2", fired_at=T0 + timedelta(minutes=8),
+                              severity="low", title="Plate read", camera_id="cam2",
+                              source_name="anpr"))
+    s.commit()
+    ids = {"drive": drive.id, "porch": porch.id}
     s.close()
-    asked: list[dict] = []
-    answer: dict = {"results": [
-        {"camera": "cam-1", "when": (T0 + timedelta(minutes=30)).isoformat(),
-         "labels": "car truck", "caption": "a red truck near the gate"},
-        {"camera": "2", "when": (T0 + timedelta(minutes=31)).isoformat(),
-         "labels": "truck", "caption": "a red truck on the porch"},
-        {"camera": "cam-9", "when": (T0 + timedelta(minutes=32)).isoformat(),
-         "labels": "truck", "caption": "not a camera anyone has"},
-        {"camera": None, "when": "garbage", "labels": "", "caption": "dropped"},
-    ]}
-
-    async def fake_call(db, row, action, params, user, *, timeout=10.0):
-        asked.append({"app": row.id, "action": action, "params": params, "user": user.id})
-        if answer.get("fail"):
-            raise RuntimeError("app down")
-        return answer
-
-    import routers.apps as apps_router
-
-    monkeypatch.setattr(apps_router, "call_app_action", fake_call)
-    return asked, answer
+    return ids
 
 
-def _search(env, headers=None, **params):  # noqa: F811
+def _search(env, headers=None, status=200, **params):  # noqa: F811
     r = env.client.get("/api/v1/search", headers=headers or env.jwt("admin"), params=params)
-    assert r.status_code == 200, r.text
+    assert r.status_code == status, r.text
     return r.json()
 
 
-def test_plain_language_query_asks_footage_apps(env, data, footage_app):  # noqa: F811
-    asked, _ = footage_app
-    out = _search(env, q="red truck yesterday")
-    assert out["semantic"] is True and out["semantic_sources"] == ["footage-search"]
-    footage = [r for r in out["results"] if r["kind"] == "footage"]
-    # Unknown camera 9 and the row with no camera are dropped.
-    assert [(r["camera_id"], r["caption"]) for r in footage] == [
-        (2, "a red truck on the porch"), (1, "a red truck near the gate")]
-    assert footage[1]["labels"] == ["car", "truck"] and footage[0]["source"] == "footage-search"
-    assert asked[0]["params"] == {"query": "red truck yesterday", "limit": 25}
-    # Filters core applies to the app's rows.
-    assert [r["camera_id"] for r in _search(env, q="truck", camera_id=1)["results"]
-            if r["kind"] == "footage"] == [1]
-    assert [r["camera_id"] for r in _search(env, q="truck", label="car")["results"]
-            if r["kind"] == "footage"] == [1]
-    late = (T0 + timedelta(minutes=31)).isoformat()
-    assert [r["camera_id"] for r in _search(env, q="truck", **{"from": late})["results"]
-            if r["kind"] == "footage"] == [2]
-    # The audit names the app, never the words.
-    s = env.Session()
-    try:
-        rows = s.query(env.models.AuditLog).filter_by(action="search.footage").all()
-        assert rows and "red truck" not in json.dumps([str(r.details) for r in rows])
-    finally:
-        s.close()
+def test_zone_filter_by_id_or_name_never_by_prefix(env, data):  # noqa: F811
+    drive = _search(env, parse=False, zone=str(data["drive"]))
+    # The car (only zone) and the person (last of two zones); NOT the event in
+    # zone drive+10, which a prefix match would also have returned.
+    assert [r["label"] for r in drive["results"]] == ["person", "car"]
+    assert drive["interpretation"]["zone_id"] == data["drive"]
+    assert "zone_id" in drive["interpretation"]["overridden"]
+    assert [r["camera_id"] for r in _search(env, parse=False, zone="porch")["results"]] == [2]
+    _search(env, status=404, parse=False, zone="garden")
+    _search(env, status=404, parse=False, zone="drive%")          # no wildcards
+    # vera (camera 3 only) cannot probe the Porch zone on camera 2.
+    _search(env, env.jwt("vera"), status=404, parse=False, zone="Porch")
 
 
-def test_footage_is_scoped_and_needs_recordings_view(env, data, footage_app):  # noqa: F811
-    asked, _ = footage_app
+def test_tokens_need_recordings_view_and_keep_to_their_cameras(env, data):  # noqa: F811
     tok = _mint(env, scopes=["cameras.view", "recordings.view"], camera_ids=[2])["token"]
-    got = [r for r in _search(env, _as(tok), q="truck")["results"] if r["kind"] == "footage"]
-    assert [r["camera_id"] for r in got] == [2]
-    n = len(asked)
-    alerts_only = _mint(env, name="a", scopes=["cameras.view", "alerts.view"])["token"]
-    out = _search(env, _as(alerts_only), q="truck")
-    assert out["semantic"] is False and len(asked) == n        # the app was not asked
-
-
-def test_filters_apps_cannot_apply_skip_them(env, data, footage_app):  # noqa: F811
-    asked, _ = footage_app
-    for params in ({"zone": "Porch"}, {"plate": "KA01"}, {"severity": "low"},
-                   {"type": "alerts"}, {}):
-        assert _search(env, **({"q": "truck"} if params else {}), **params)["semantic"] is False
-    assert asked == []
-
-
-def test_a_failing_app_is_named_not_fatal(env, data, footage_app):  # noqa: F811
-    _, answer = footage_app
-    answer["fail"] = True
-    out = _search(env, q="dog")
-    assert out["semantic_errors"] == ["footage-search"]
-    assert [r["label"] for r in out["results"]] == ["dog"]
-
-
-def test_providers_need_an_enabled_search_action_with_a_query(env):  # noqa: F811
-    s = env.Session()
-    M = env.models.InstalledApp
-    s.add_all([
-        M(id="off", name="x", version="1", url="http://a:1", enabled=False,
-          manifest_json={"actions": [SEARCH_ACTION]}, config_json={}),
-        M(id="other", name="x", version="1", url="http://a:1", enabled=True,
-          manifest_json={"actions": [{"name": "search", "params": [{"name": "text"}]}]},
-          config_json={}),
-        M(id="yes", name="x", version="1", url="http://a:1", enabled=True,
-          manifest_json={"actions": [{"name": "search", "params": [{"name": "query"}]}]},
-          config_json={}),
-    ])
-    s.commit()
-    try:
-        assert [(r.id, lim) for r, lim in footage_query.providers(s)] == [("yes", False)]
-    finally:
-        s.close()
+    got = _search(env, _as(tok), parse=False)
+    assert {r["camera_id"] for r in got["results"]} == {2}
+    no_rec = _mint(env, name="n", scopes=["cameras.view", "alerts.view"])["token"]
+    _search(env, _as(no_rec), status=403, parse=False)
 
 
 # ── summary ─────────────────────────────────────────────────────────────
@@ -265,28 +214,6 @@ _ = datetime, UTC
 
 
 # ── review hardening (HA-503) ───────────────────────────────────────────
-
-
-def test_narrowed_searches_ask_for_the_apps_maximum(env, data, footage_app):  # noqa: F811
-    asked, _ = footage_app
-    _search(env, q="truck")                                   # admin, no filter
-    _search(env, q="truck", camera_id=1)                      # core filters afterwards
-    tok = _mint(env, scopes=["cameras.view", "recordings.view"], camera_ids=[2])["token"]
-    _search(env, _as(tok), q="truck")                          # a scoped caller
-    assert [a["params"]["limit"] for a in asked] == [25, 200, 200]
-
-
-def test_only_read_shaped_search_actions_are_used(env):  # noqa: F811
-    s = env.Session()
-    s.add(env.models.InstalledApp(
-        id="verb", name="x", version="1", url="http://a:1", enabled=True, config_json={},
-        manifest_json={"actions": [{"name": "search", "params": [
-            {"name": "query"}, {"name": "delete_matches"}]}]}))
-    s.commit()
-    try:
-        assert footage_query.providers(s) == []
-    finally:
-        s.close()
 
 
 def test_call_app_action_as_a_token(env, monkeypatch):  # noqa: F811

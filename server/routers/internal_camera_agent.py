@@ -14,18 +14,36 @@ import asyncio
 import binascii
 import logging
 import secrets
-from datetime import datetime
+from datetime import UTC, datetime
 from urllib.parse import quote as urlquote
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    Header,
+    HTTPException,
+    Query,
+    status,
+)
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from core.config import settings
 from core.database import get_db, release
-from models import Camera, SecuritySetting
+from models import (
+    Camera,
+    EventText,
+    SecuritySetting,
+    TimelineEvent,
+    VisitDescriptor,
+)
+from services import search_metrics as metrics
 from services.app_keys import (
-    AppPrincipal, app_camera_ids, looks_like_app_key, resolve_app_key,
+    AppPrincipal,
+    app_camera_ids,
+    looks_like_app_key,
+    resolve_app_key,
 )
 from services.skill_assignments import camera_adopted, camera_skills
 from services.stream_service import _build_stream_name
@@ -187,8 +205,10 @@ async def ingest_track_event(
         # the same trap the same way.
         import base64 as _b64s
 
-        from services.evidence_store import MAX_EVIDENCE_BYTES as _MAXS
-        from services.evidence_store import save_evidence_jpeg as _save_scene
+        from services.evidence_store import (
+            MAX_EVIDENCE_BYTES as _MAXS,
+            save_evidence_jpeg as _save_scene,
+        )
 
         # Drop the image, never the visit. The evidence branch above 422s,
         # which raises BEFORE record_track_visit — correct for the primary
@@ -253,15 +273,16 @@ async def ingest_track_event(
     # PR-C: vehicle visit with evidence -> queue ONE OCR pass over the best
     # frame (background — never on the ingest path). Best-effort: no adapter,
     # no plate, no problem.
-    from services.plate_enrichment import (
-        MAX_INGEST_ATTEMPTS, enrich_event_plate, wants_plate,
-    )
-
     # Multi-frame OCR, latency half: an early attempt may already have
     # read this vehicle's plate while it was still in frame — claim it
     # (time-window checked; recycled track ids from a restarted worker
     # fail the window and are ignored).
-    from services.plate_enrichment import VEHICLE_LABELS as _VEHICLES
+    from services.plate_enrichment import (
+        MAX_INGEST_ATTEMPTS,
+        VEHICLE_LABELS as _VEHICLES,
+        enrich_event_plate,
+        wants_plate,
+    )
 
     # Duplicate-sighting dedup: a fragmented track re-reads the car we
     # just read. When the claimed early read matches a plate seen on
@@ -274,8 +295,11 @@ async def ingest_track_event(
             and payload.track_id and not row.plate_text:
         from services.plate_attempt_cache import cache as _attempt_cache
         from services.plate_enrichment import (
-            dedup_window_s, is_duplicate_sighting, note_sighting,
-            observed_dt, stamp_plate_evidence,
+            dedup_window_s,
+            is_duplicate_sighting,
+            note_sighting,
+            observed_dt,
+            stamp_plate_evidence,
         )
 
         pending = _attempt_cache.claim(
@@ -443,7 +467,9 @@ async def run_early_plate_attempt(
     # visit skip its whole OCR sweep — but skip the race-cover row
     # write; the claim path makes the fold decision with fresher state.
     from services.plate_enrichment import (
-        is_duplicate_sighting, note_sighting, stamp_plate_evidence,
+        is_duplicate_sighting,
+        note_sighting,
+        stamp_plate_evidence,
     )
 
     if is_duplicate_sighting(camera_id, read["plate"]):
@@ -451,12 +477,12 @@ async def run_early_plate_attempt(
         return
     # Race cover: visit already ingested and still unplated → apply now.
     try:
-        from datetime import timedelta, timezone as _tz
+        from datetime import timedelta
 
         from core.database import SessionLocal
         from models import TimelineEvent
 
-        attempt_dt = datetime.fromtimestamp(ts, tz=_tz.utc)
+        attempt_dt = datetime.fromtimestamp(ts, tz=UTC)
         db = SessionLocal()
         try:
             row = (
@@ -494,6 +520,164 @@ async def run_early_plate_attempt(
             db.close()
     except Exception:
         logger.debug("early plate attempt row-apply failed", exc_info=True)
+
+
+class EventTextIn(BaseModel):
+    """Searchable words for one visit, posted by an enricher."""
+
+    event_id: int
+    #: What a captioner said about the frame.
+    caption: str | None = None
+    #: Space-joined attribute words ("red van rear-door") from an
+    #: enricher that classifies rather than describes.
+    attributes: str | None = None
+    #: Which enricher wrote this, so a bad one can be found and re-run.
+    source: str | None = None
+
+
+@router.post("/events/text", status_code=204)
+async def ingest_event_text(
+    payload: EventTextIn,
+    principal=Depends(_require_internal_key),
+    db: Session = Depends(get_db),
+):
+    """Attach or replace the searchable text on a visit.
+
+    Enrichment runs behind Tier-0 and is re-runnable, so this is an
+    upsert rather than an insert: a captioner that improves, or a second
+    pass with a better model, overwrites its own row instead of
+    multiplying it. Writing nothing at all (both fields empty) DELETES
+    the row — how an enricher retracts a caption it should not have
+    made, which matters because these words are what search will show an
+    operator as fact.
+
+    An unknown event id is a 404 rather than a silent no-op: an enricher
+    posting into the void should find out on the first row, not after a
+    day of work nobody can find.
+    """
+    row = db.get(TimelineEvent, int(payload.event_id))
+    if row is None:
+        raise HTTPException(status_code=404, detail="unknown event")
+    caption = (payload.caption or "").strip() or None
+    attributes = (payload.attributes or "").strip() or None
+    existing = db.get(EventText, row.id)
+    if caption is None and attributes is None:
+        if existing is not None:
+            db.delete(existing)
+            db.commit()
+        return None
+    if existing is None:
+        existing = EventText(event_id=row.id)
+        db.add(existing)
+    existing.caption = caption
+    existing.attributes = attributes
+    existing.source = (payload.source or "")[:60] or None
+    existing.updated_at = datetime.now(UTC)
+    db.commit()
+    return None
+
+
+class DescriptorIn(BaseModel):
+    """One claim a skill makes about a visit."""
+
+    kind: str
+    value: str
+    confidence: float | None = None
+    source_task: str | None = None
+    source_adapter: str | None = None
+    model_fingerprint: str | None = None
+
+
+class DescriptorsIn(BaseModel):
+    """Everything one enrichment pass learned about one visit."""
+
+    event_id: int
+    descriptors: list[DescriptorIn] = []
+    #: Tasks that were RUN and found nothing. Recorded so a reader can
+    #: tell "nobody looked" from "looked and saw no plate" — the
+    #: distinction every attribute-matching scheme gets wrong, because
+    #: treating the two alike makes a missing skill look like a mismatch.
+    ran_tasks: list[str] = []
+
+
+@router.post("/events/descriptors", status_code=200)
+async def ingest_event_descriptors(
+    payload: DescriptorsIn,
+    principal=Depends(_require_internal_key),
+    db: Session = Depends(get_db),
+):
+    """Attach what the skills said about a visit.
+
+    Upsert per (visit, kind, task): re-running a skill replaces what IT
+    said, while a second task's disagreement is kept — two views of the
+    same object is information about the skills, not a conflict to
+    resolve here.
+
+    Returns the tasks recorded, so an enricher can log what it actually
+    contributed rather than assuming.
+    """
+    row = db.get(TimelineEvent, int(payload.event_id))
+    if row is None:
+        raise HTTPException(status_code=404, detail="unknown event")
+
+    written = 0
+    for d in payload.descriptors:
+        kind = (d.kind or "").strip().lower()[:40]
+        value = (d.value or "").strip().lower()[:120]
+        if not kind or not value:
+            continue
+        task = (d.source_task or "")[:40] or None
+        existing = (
+            db.query(VisitDescriptor)
+            .filter(
+                VisitDescriptor.event_id == row.id,
+                VisitDescriptor.kind == kind,
+                VisitDescriptor.source_task.is_(task) if task is None
+                else VisitDescriptor.source_task == task,
+            )
+            .one_or_none()
+        )
+        if existing is None:
+            # Another TASK may already have claimed this kind. That is a
+            # disagreement between skills, not a duplicate to overwrite,
+            # and counting it is the only way a skill quietly going wrong
+            # shows up before somebody acts on its answer.
+            other = (
+                db.query(VisitDescriptor)
+                .filter(
+                    VisitDescriptor.event_id == row.id,
+                    VisitDescriptor.kind == kind,
+                    VisitDescriptor.value != value,
+                )
+                .first()
+            )
+            if other is not None:
+                metrics.DESCRIPTOR_CONFLICTS.inc({"kind": kind})
+            existing = VisitDescriptor(event_id=row.id, kind=kind, source_task=task)
+            db.add(existing)
+        existing.value = value
+        existing.confidence = (
+            None if d.confidence is None else max(0.0, min(1.0, float(d.confidence)))
+        )
+        existing.source_adapter = (d.source_adapter or "")[:60] or None
+        existing.model_fingerprint = (d.model_fingerprint or "")[:120] or None
+        written += 1
+        # Attribution: which KAI-C skill is actually contributing claims.
+        metrics.DESCRIPTORS_WRITTEN.inc({
+            "kind": kind, "task": task or "unknown",
+            "adapter": existing.source_adapter or "unknown",
+        })
+
+    if payload.ran_tasks:
+        # "Looked and found nothing" belongs on the row, not in a log:
+        # the next reader has no other way to tell it from "never looked".
+        seen = dict(row.payload or {})
+        ran = sorted({*(seen.get("enriched_by") or []), *[str(t)[:40] for t in payload.ran_tasks]})
+        seen["enriched_by"] = ran
+        row.payload = seen
+    db.commit()
+    return {"ok": True, "written": written,
+            "enriched_by": (row.payload or {}).get("enriched_by", [])}
 
 
 @router.post("/plates/attempt", status_code=202)

@@ -1,0 +1,551 @@
+/**
+ * Copyright (c) 2026 OpenNVR
+ * This file is part of OpenNVR.
+ *
+ * OpenNVR is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * OpenNVR is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+// Search — "find me the red truck at the dock yesterday", over the
+// canonical event store.
+//
+// Three things make this page rather than a box that returns JSON:
+//
+// 1. The interpretation is shown as chips, and each one can be removed.
+//    Natural-language search fails by parsing a query wrongly and then
+//    answering confidently with nothing; a chip row turns that dead end
+//    into one click. Removing a chip re-runs with parse=false and the
+//    remaining chips as explicit filters — the API's own contract.
+// 2. Every result is a picture. The visit's best frame is already on
+//    disk, chosen at capture time, so a result is recognisable at a
+//    glance instead of being a row of text to decode.
+// 3. Every result opens the footage. A card links to Recordings at that
+//    camera and that instant — the whole point of searching, and the
+//    step that used to be left to the operator and a wristwatch.
+
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { useSearchParams } from 'react-router-dom'
+import {
+  Camera as CameraIcon, CarFront, Clock, ImageOff, Info, Search as SearchIcon,
+  Sparkles, Tag, Type, X,
+} from 'lucide-react'
+import { Link } from 'react-router-dom'
+import { api } from '../lib/api'
+import { useTranslation } from '../i18n'
+import {
+  Badge, Button, Card, CardContent, EmptyState, PageHeader, Skeleton,
+} from '../components/ui'
+
+type Interpretation = {
+  labels: string[]
+  camera_ids: number[]
+  from: string | null
+  to: string | null
+  text: string
+  plate: string
+  attrs: string[]
+  matched: Record<string, string>
+  ignored: string[]
+  source: 'parsed' | 'explicit' | string
+  overridden: string[]
+}
+type Claim = {
+  kind: string
+  value: string
+  confidence: number | null
+  task: string | null
+  adapter: string | null
+}
+type Hit = {
+  id: number
+  camera_id: number
+  camera_name: string | null
+  label: string | null
+  score: number
+  started_at: string | null
+  ended_at: string | null
+  plate_text: string | null
+  caption: string | null
+  attributes: string | null
+  source: string
+  event_type: string
+  evidence_url: string | null
+  claims: Claim[]
+  anchor: { camera_id: number; at: string | null; ended_at: string | null }
+}
+type SearchResponse = {
+  query: string
+  interpretation: Interpretation
+  results: Hit[]
+  count: number
+  total: number
+}
+
+/** The filters the page owns, which are exactly the API's parameters. */
+type Filters = {
+  labels: string[]
+  cameraIds: number[]
+  from: string | null
+  to: string | null
+  text: string
+  plate: string
+  /** kind:value claims a skill made, ANDed. */
+  attrs: string[]
+}
+
+const PAGE = 24
+
+const EXAMPLES = [
+  'red truck at the dock yesterday',
+  'person in the last 10 minutes',
+  'plate ka01ab1234',
+  'bicycle last night',
+]
+
+function when(iso: string | null): string {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  const today = new Date()
+  const sameDay = d.toDateString() === today.toDateString()
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  return sameDay ? time : `${d.toLocaleDateString([], { day: 'numeric', month: 'short' })} ${time}`
+}
+
+function rangeLabel(from: string | null, to: string | null): string {
+  if (!from && !to) return ''
+  const f = from ? new Date(from) : null
+  const t = to ? new Date(to) : null
+  const d = (x: Date) => x.toLocaleString([], {
+    day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
+  })
+  if (f && t) return `${d(f)} → ${d(t)}`
+  return f ? `after ${d(f)}` : `before ${d(t!)}`
+}
+
+/* ----------------------------- Page ----------------------------- */
+
+export function Search() {
+  const { t } = useTranslation()
+  const [params, setParams] = useSearchParams()
+  const [draft, setDraft] = useState(params.get('q') ?? '')
+  // The query that has actually been run, and the filters it produced.
+  const [sentence, setSentence] = useState(params.get('q') ?? '')
+  const [filters, setFilters] = useState<Filters | null>(null)
+  const [page, setPage] = useState(0)
+  const boxRef = useRef<HTMLInputElement>(null)
+
+  // A search page that needs a click before you can type is a search page
+  // people stop using. Focus only on a cold open: arriving back from a
+  // result with a query already in the URL should leave the page scrolled
+  // where it was, not yank the caret.
+  useEffect(() => {
+    if (!params.get('q')) boxRef.current?.focus()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Typing a new sentence puts the page back under the parser's control;
+  // editing chips takes it away. That is the whole state machine.
+  const editing = filters !== null
+
+  const request = useMemo(() => {
+    const qs = new URLSearchParams()
+    qs.set('limit', String(PAGE))
+    qs.set('skip', String(page * PAGE))
+    if (editing) {
+      qs.set('parse', 'false')
+      for (const l of filters!.labels) qs.append('label', l)
+      for (const c of filters!.cameraIds) qs.append('camera_id', String(c))
+      for (const a of filters!.attrs) qs.append('attr', a)
+      if (filters!.text) qs.set('text', filters!.text)
+      if (filters!.plate) qs.set('plate', filters!.plate)
+      if (filters!.from) qs.set('from', filters!.from)
+      if (filters!.to) qs.set('to', filters!.to)
+    } else if (sentence) {
+      qs.set('q', sentence)
+    }
+    return qs
+  }, [editing, filters, sentence, page])
+
+  // Names for the camera chip: "Loading dock" says what "1 camera"
+  // cannot, and the id alone tells an operator nothing.
+  const camerasQuery = useQuery({
+    queryKey: ['cameras'],
+    queryFn: async () => {
+      const { data } = await api.get('/api/v1/cameras')
+      const list = Array.isArray(data) ? data : (data as any)?.cameras
+      return (Array.isArray(list) ? list : []) as { id: number; name: string }[]
+    },
+    retry: 0,
+    staleTime: 5 * 60_000,
+  })
+  const cameraName = (id: number) =>
+    camerasQuery.data?.find((c) => c.id === id)?.name ?? `cam${id}`
+
+  const searchQuery = useQuery({
+    queryKey: ['footage-search', request.toString()],
+    queryFn: async () => {
+      const { data } = await api.get(`/api/v1/search?${request.toString()}`)
+      return data as SearchResponse
+    },
+    retry: 0,
+  })
+
+  const data = searchQuery.data
+  const interp = data?.interpretation
+
+  // Keep the URL in step with the sentence, so a search can be shared or
+  // reloaded. Chip edits deliberately do NOT rewrite it: they are a
+  // refinement of this search, not a new one.
+  useEffect(() => {
+    const current = params.get('q') ?? ''
+    if (current !== sentence) {
+      const next = new URLSearchParams(params)
+      if (sentence) next.set('q', sentence)
+      else next.delete('q')
+      setParams(next, { replace: true })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sentence])
+
+  const run = (text: string) => {
+    setSentence(text)
+    setDraft(text)
+    setFilters(null)      // a new sentence hands control back to the parser
+    setPage(0)
+  }
+
+  /** Start editing from whatever is on screen now. */
+  const asFilters = (): Filters => ({
+    labels: [...(interp?.labels ?? [])],
+    cameraIds: [...(interp?.camera_ids ?? [])],
+    from: interp?.from ?? null,
+    to: interp?.to ?? null,
+    text: interp?.text ?? '',
+    plate: interp?.plate ?? '',
+    attrs: [...(interp?.attrs ?? [])],
+  })
+
+  const drop = (part: keyof Filters, value?: string) => {
+    const base = editing ? { ...filters! } : asFilters()
+    if (part === 'labels') base.labels = []
+    if (part === 'cameraIds') base.cameraIds = []
+    if (part === 'text') base.text = ''
+    if (part === 'plate') base.plate = ''
+    if (part === 'from' || part === 'to') { base.from = null; base.to = null }
+    // One claim at a time: dropping "colour:red" must not also drop
+    // "vehicle_type:van" that is narrowing the same search.
+    if (part === 'attrs') base.attrs = base.attrs.filter((a) => a !== value)
+    setFilters(base)
+    setPage(0)
+  }
+
+  /** "Every other red van" — refine by something a skill actually saw. */
+  const addAttr = (claim: Claim) => {
+    const pair = `${claim.kind}:${claim.value}`
+    const base = editing ? { ...filters! } : asFilters()
+    if (!base.attrs.includes(pair)) base.attrs = [...base.attrs, pair]
+    setFilters(base)
+    setPage(0)
+  }
+
+  const results = data?.results ?? []
+  const total = data?.total ?? 0
+  const pages = Math.ceil(total / PAGE)
+  const nothingAsked = !sentence && !editing
+
+  const chips = interp
+    ? [
+        interp.labels.length > 0 && {
+          key: 'labels' as const,
+          icon: <Tag size={12} />,
+          label: interp.labels.join(' or '),
+          title: 'Object class. Several classes mean "any of these" — one visit is one object.',
+        },
+        interp.camera_ids.length > 0 && {
+          key: 'cameraIds' as const,
+          icon: <CameraIcon size={12} />,
+          label: interp.camera_ids.length === 1
+            ? cameraName(interp.camera_ids[0])
+            : `${interp.camera_ids.length} cameras`,
+          title: interp.camera_ids.map(cameraName).join(', '),
+        },
+        (interp.from || interp.to) && {
+          key: 'from' as const,
+          icon: <Clock size={12} />,
+          // Your word, not the machine's expansion of it: "yesterday" is
+          // what you typed and what you would edit, and the range it
+          // became is one hover away.
+          label: interp.matched?.when || rangeLabel(interp.from, interp.to),
+          title: interp.matched?.when
+            ? `"${interp.matched.when}" = ${rangeLabel(interp.from, interp.to)}`
+            : 'The time window searched.',
+        },
+        interp.text && {
+          key: 'text' as const,
+          icon: <Type size={12} />,
+          label: `"${interp.text}"`,
+          title: 'Matched against what a captioner wrote about the frame.',
+        },
+        ...(interp.attrs ?? []).map((pair) => ({
+          key: 'attrs' as const,
+          value: pair,
+          icon: <Sparkles size={12} />,
+          label: pair.split(':').slice(1).join(':'),
+          title: `${pair.split(':')[0]} — what a skill claimed about the object.`,
+        })),
+        interp.plate && {
+          key: 'plate' as const,
+          icon: <CarFront size={12} />,
+          label: interp.plate,
+          title: 'Plate reads containing this.',
+        },
+      ].filter(Boolean) as {
+        key: keyof Filters; value?: string; icon: React.ReactNode; label: string; title: string
+      }[]
+    : []
+
+  return (
+    <section className="space-y-4">
+      <PageHeader title={t('search.title')} description={t('search.description')} />
+
+      {/* ── The box ── */}
+      <Card>
+        <CardContent className="py-3 space-y-3">
+          <form
+            className="flex items-center gap-2"
+            onSubmit={(e) => { e.preventDefault(); run(draft.trim()) }}
+          >
+            <SearchIcon size={18} className="text-[var(--text-dim)] shrink-0" />
+            <input
+              ref={boxRef}
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              placeholder={t('search.placeholder')}
+              aria-label={t('search.title')}
+              className="flex-1 bg-transparent outline-none text-sm py-1.5 placeholder:text-[var(--text-dim)]"
+            />
+            {draft && (
+              <Button size="sm" variant="ghost" onClick={() => { setDraft(''); run('') }}
+                      title="Clear">
+                <X size={14} />
+              </Button>
+            )}
+            <Button size="sm" variant="primary" type="submit">Search</Button>
+          </form>
+
+          {/* What it understood — and the way out of a wrong guess. */}
+          {chips.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span className="text-[var(--text-dim)]">
+                {editing ? 'Filters:' : 'Understood as:'}
+              </span>
+              {chips.map((c) => (
+                <span
+                  key={`${c.key}:${c.value ?? ''}`}
+                  title={c.title}
+                  className="inline-flex items-center gap-1 rounded border border-[var(--border)] bg-[var(--bg-2)] pl-2 pr-1 py-0.5"
+                >
+                  {c.icon}
+                  <span>{c.label}</span>
+                  <button
+                    type="button"
+                    aria-label={`Remove ${c.label}`}
+                    className="ml-0.5 rounded p-0.5 text-[var(--text-dim)] hover:text-[var(--danger)]"
+                    onClick={() => drop(c.key, c.value)}
+                  >
+                    <X size={11} />
+                  </button>
+                </span>
+              ))}
+              {editing && (
+                <Button size="sm" variant="ghost" onClick={() => { setFilters(null); setPage(0) }}>
+                  Reset to my words
+                </Button>
+              )}
+            </div>
+          )}
+
+          {interp && interp.ignored.length > 0 && (
+            <div className="flex items-center gap-1.5 text-xs text-[var(--text-dim)]">
+              <Info size={12} />
+              Ignored: {interp.ignored.join(', ')} — bare numbers match too much to be useful.
+            </div>
+          )}
+
+          {nothingAsked && (
+            <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--text-dim)]">
+              Try:
+              {EXAMPLES.map((e) => (
+                <button
+                  key={e}
+                  type="button"
+                  className="rounded border border-[var(--border)] px-2 py-0.5 hover:border-[var(--accent)] hover:text-[var(--text)]"
+                  onClick={() => run(e)}
+                >
+                  {e}
+                </button>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* ── Results ── */}
+      {searchQuery.isError ? (
+        <EmptyState
+          icon={<SearchIcon size={24} />}
+          title={t('search.failed')}
+          description="The search service did not answer. The event store is part of core, so this usually means core itself is unreachable rather than anything to do with a missing app."
+        />
+      ) : searchQuery.isPending ? (
+        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
+          {Array.from({ length: 8 }).map((_, i) => <Skeleton key={i} className="h-44" />)}
+        </div>
+      ) : results.length === 0 ? (
+        <EmptyState
+          icon={<SearchIcon size={24} />}
+          title={nothingAsked ? t('search.startTitle') : t('search.noneTitle')}
+          description={
+            nothingAsked
+              ? 'Ask for what you are looking for in your own words. Everything Tier-0 sees is already indexed — no app to install, and nothing is re-scanned when you search.'
+              : chips.length > 1
+                ? 'Nothing matched all of those at once. Remove a chip above — the time window and the words are the two that usually narrow it too far.'
+                : 'Nothing matched. Words only match what a captioner wrote about a frame, so a deployment with no captioner can search classes, cameras, times and plates, but not colours.'
+          }
+        />
+      ) : (
+        <>
+          <div className="flex items-center gap-2 text-xs text-[var(--text-dim)] px-0.5">
+            <span>
+              {total} {total === 1 ? 'result' : 'results'}
+              {pages > 1 && ` · page ${page + 1} of ${pages}`}
+            </span>
+            {searchQuery.isFetching && <span>updating…</span>}
+          </div>
+
+          <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
+            {results.map((h, i) => (
+              <ResultCard
+                key={h.id}
+                hit={h}
+                rank={page * PAGE + i + 1}
+                onRefine={addAttr}
+              />
+            ))}
+          </div>
+
+          {pages > 1 && (
+            <div className="flex items-center justify-center gap-2 pt-1">
+              <Button size="sm" variant="outline" disabled={page === 0}
+                      onClick={() => setPage((p) => Math.max(0, p - 1))}>
+                Newer
+              </Button>
+              <Button size="sm" variant="outline" disabled={page + 1 >= pages}
+                      onClick={() => setPage((p) => p + 1)}>
+                Older
+              </Button>
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  )
+}
+
+/* --------------------------- Pieces ----------------------------- */
+
+function ResultCard(
+  { hit, rank, onRefine }: { hit: Hit; rank: number; onRefine: (c: Claim) => void },
+) {
+  const at = hit.anchor?.at ?? hit.started_at
+  // Recordings opens on this camera, this day, this instant.
+  const href = at
+    ? `/playback/sync?camera=${hit.camera_id}&at=${encodeURIComponent(at)}`
+    : '/playback/sync'
+  // Which position in the list was worth opening — the only relevance
+  // judgement available without somebody labelling footage. The POSITION
+  // and nothing else: not the query, not the result, not who searched.
+  // Fire-and-forget, and a failure is ignored, because a metric must
+  // never get between an operator and the video.
+  const opened = () => {
+    api.post(`/api/v1/search/opened?rank=${rank}`).catch(() => {})
+  }
+  return (
+    <div className="rounded border border-[var(--border)] bg-[var(--panel)] overflow-hidden">
+    <Link
+      onClick={opened}
+      to={href}
+      className="group block hover:opacity-95 focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+      title={at ? `Open the recording at ${new Date(at).toLocaleString()}` : 'Open recordings'}
+    >
+      <div className="relative aspect-video bg-[var(--bg-2)] flex items-center justify-center">
+        {hit.evidence_url ? (
+          <img
+            src={hit.evidence_url}
+            alt={`${hit.label ?? 'object'} on ${hit.camera_name ?? hit.camera_id}`}
+            loading="lazy"
+            className="h-full w-full object-cover"
+          />
+        ) : (
+          <span className="text-[var(--text-dim)] flex flex-col items-center gap-1 text-[11px]">
+            <ImageOff size={18} />
+            no frame kept
+          </span>
+        )}
+        <span className="absolute left-1.5 top-1.5">
+          <Badge variant="neutral">{hit.label ?? hit.event_type}</Badge>
+        </span>
+        {hit.plate_text && (
+          <span className="absolute right-1.5 top-1.5">
+            <Badge variant="info">{hit.plate_text}</Badge>
+          </span>
+        )}
+        <span className="absolute inset-x-0 bottom-0 bg-black/55 text-white text-[11px] px-2 py-1 opacity-0 group-hover:opacity-100 transition-opacity">
+          Open the recording here
+        </span>
+      </div>
+      <div className="p-2 space-y-0.5">
+        <div className="flex items-center gap-2 text-xs">
+          <span className="font-medium truncate">{hit.camera_name ?? `cam${hit.camera_id}`}</span>
+          <span className="ml-auto tabular-nums text-[var(--text-dim)]">{when(at)}</span>
+        </div>
+        {hit.caption && (
+          <div className="text-[11px] text-[var(--text-dim)] line-clamp-2">{hit.caption}</div>
+        )}
+      </div>
+    </Link>
+    {/* What the skills said — outside the link, because each claim is
+        itself a way to search: one click finds every other red van. The
+        skill and its confidence ride the tooltip, so a result can always
+        be asked who said this. */}
+    {hit.claims.length > 0 && (
+      <div className="flex flex-wrap gap-1 px-2 pb-2">
+        {hit.claims.map((c) => (
+          <button
+            key={`${c.kind}:${c.value}`}
+            type="button"
+            onClick={() => onRefine(c)}
+            title={`${c.kind} = ${c.value}${c.confidence != null ? ` (${Math.round(c.confidence * 100)}%)` : ''}`
+              + `${c.task ? ` · ${c.task}` : ''}${c.adapter ? ` · ${c.adapter}` : ''}`
+              + ' — click to find others'}
+            className="rounded border border-[var(--border)] bg-[var(--bg-2)] px-1.5 py-0.5 text-[10px] text-[var(--text-dim)] hover:text-[var(--text)] hover:border-[var(--accent)]"
+          >
+            {c.value}
+          </button>
+        ))}
+      </div>
+    )}
+    </div>
+  )
+}

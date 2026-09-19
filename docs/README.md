@@ -33,6 +33,7 @@ Start here. Pick the row that matches what you're doing.
 ## Build on the AI layer
 - **[CONTRIBUTING_ADAPTERS.md](CONTRIBUTING_ADAPTERS.md)** — publish a model: the task-convention bargain, the conformance bar, and the adapters-index listing that makes it installable.
 - **[AI_ADAPTER_CONTRACT.md](AI_ADAPTER_CONTRACT.md)** — the REST/WebSocket wire spec adapters implement.
+- **[KAI_C_USAGE.md](KAI_C_USAGE.md)** — the register of KAI-C in OpenNVR: every place the platform calls it, what each call buys, and the three-state (registered / healthy / unreachable) and provenance rules that go with it.
 - **[apps-index-entry.template.yml](apps-index-entry.template.yml)** — template for an App Store catalog entry.
 
 ## Security, compliance & deployment

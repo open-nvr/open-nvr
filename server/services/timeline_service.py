@@ -136,6 +136,22 @@ def end_manual_event(db: Session, row: TimelineEvent, ended_at: datetime) -> Tim
     return row
 
 
+def zone_filter(zone_id: int):
+    """``zone_id`` in the JSON list ``events.zone_ids`` (HA-109), dialect-neutral.
+
+    The column holds ``json.dumps`` text (``[1, 4]``) on every backend, so
+    four LIKE shapes cover first/only/last/middle without JSON operators
+    that SQLite and Postgres spell differently, and never a prefix match
+    (zone 1 is not zone 11).
+    """
+    from sqlalchemy import String, cast, or_
+
+    text = cast(TimelineEvent.zone_ids, String)
+    z = str(int(zone_id))
+    return or_(text.like(f"[{z}]"), text.like(f"[{z},%"),
+               text.like(f"%, {z}]"), text.like(f"%, {z},%"))
+
+
 def _events_query(
     db: Session,
     *,
@@ -147,6 +163,7 @@ def _events_query(
     scope: set[int] | None = None,
     plate: str | None = None,
     has_plate: bool = False,
+    zone_id: int | None = None,
 ):
     """Scope + filters, with NO ordering, offset or limit.
 
@@ -165,6 +182,8 @@ def _events_query(
     q = scope_query(q, TimelineEvent.camera_id, scope)
     if camera_id is not None:
         q = q.filter(TimelineEvent.camera_id == camera_id)
+    if zone_id is not None:
+        q = q.filter(zone_filter(zone_id))
     if label:
         q = q.filter(TimelineEvent.label == label.strip().lower())
     if source:

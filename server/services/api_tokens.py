@@ -79,8 +79,8 @@ TOKEN_ROUTES: dict[tuple[str, str], str] = {
     ("GET", f"{_A}/entities"): "cameras.view",
     ("GET", f"{_A}/entities/states"): "cameras.view",
     ("POST", f"{_A}/entities/{{key}}/command"): "cameras.view",
-    # Results are further limited to recordings.view / alerts.view.
-    ("GET", f"{_A}/search"): "cameras.view",
+    # Recorded visits (main's plain-language search), scoped to the cameras.
+    ("GET", f"{_A}/search"): "recordings.view",
     ("GET", f"{_A}/search/summary"): "cameras.view",
     # A frame to a caption/VQA model (HA-501): as seeing the camera live.
     ("POST", f"{_A}/cameras/{{camera_id}}/describe"): "live.view",

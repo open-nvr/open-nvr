@@ -502,6 +502,11 @@ class TimelineEvent(Base):
         # same way (#451).
         Index("ix_events_cam_seen", "camera_id",
               text("coalesce(observed_at, started_at)")),
+        # Search without a camera — "trucks yesterday", fleet-wide — matches
+        # a class and then a range. On ix_events_label alone that range is
+        # filtered against every row the class ever produced, which for
+        # "person" is most of the table (migration c1d2e3f4a5b6).
+        Index("ix_events_label_start", "label", "started_at"),
         # One visit = one (camera, track, start): ingest retries are
         # idempotent. NULLs (alarm/alert rows) never collide by SQL semantics.
         Index("uq_events_visit", "camera_id", "track_id", "started_at",
@@ -573,6 +578,116 @@ class TimelineEvent(Base):
     # row from before zones); [] = computed, in no zone.
     zone_ids = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class EventText(Base):
+    """The searchable words attached to one visit — what search matches
+    "red" or "delivery van" against, since the visit row itself carries a
+    class label and a plate, not a description.
+
+    A sidecar, not columns on ``events``, because enrichment is optional,
+    arrives later than the visit, and is re-runnable: rewriting a caption
+    must not touch the row that alarms and reports point at. Most visits
+    never get text, so the cost is paid only by the ones that do. On
+    Postgres a GIN index over ``to_tsvector('simple', caption ||
+    attributes)`` serves the match; on SQLite (tests) the same query
+    degrades to LIKE — see services/search_service.py."""
+
+    __tablename__ = "event_text"
+
+    event_id = Column(
+        Integer, ForeignKey("events.id", ondelete="CASCADE"), primary_key=True
+    )
+    #: Free description of the frame, from a captioner.
+    caption = Column(Text, nullable=True)
+    #: Space-joined attribute words ("red van rear-door") from any
+    #: enricher that classifies rather than describes.
+    attributes = Column(Text, nullable=True)
+    #: Which enricher wrote this, so a bad one can be found and re-run.
+    source = Column(String(60), nullable=True)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class VisitDescriptor(Base):
+    """One thing a skill said about one visit.
+
+    ``EventText`` holds words; this holds claims — kind, value, the
+    confidence the skill gave it, and which task and adapter produced it.
+    Rows rather than columns because the set of claims depends on what is
+    registered and healthy in KAI-C when the visit is enriched: a site
+    with LPR and a colour classifier writes different kinds from one with
+    a captioner, and neither should need a migration.
+
+    Uniqueness is (event, kind, task): re-running a skill replaces what
+    IT said, while two different tasks may still disagree — which is
+    information about the skills, not a conflict to resolve in the
+    schema."""
+
+    __tablename__ = "visit_descriptors"
+    __table_args__ = (
+        UniqueConstraint("event_id", "kind", "source_task", name="uq_descriptor_claim"),
+        Index("ix_descriptor_event", "event_id"),
+        # Filtering ("every red van") and counting — how common a value is
+        # in this deployment is what decides whether it is weak evidence
+        # or nearly an identifier.
+        Index("ix_descriptor_kind_value", "kind", "value"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    event_id = Column(
+        Integer, ForeignKey("events.id", ondelete="CASCADE"), nullable=False
+    )
+    #: colour | vehicle_type | face_id | plate | clothing_top | carrying …
+    #: An open vocabulary: a new skill must not need a migration.
+    kind = Column(String(40), nullable=False)
+    #: Lowercased by the writer, so "Red" and "red" are one value and can
+    #: be counted as one.
+    value = Column(String(120), nullable=False)
+    #: What the skill thought of its own claim — without it a 0.51 guess
+    #: weighs the same as a 0.99 read.
+    confidence = Column(Float, nullable=True)
+    source_task = Column(String(40), nullable=True)
+    source_adapter = Column(String(60), nullable=True)
+    model_fingerprint = Column(String(120), nullable=True)
+    #: The KAI-C correlation id of the inference behind this claim — the
+    #: join back to KAI-C's audit line, and so to the adapter and model
+    #: version that made it. It is the difference between a descriptor
+    #: being an assertion and being evidence.
+    correlation_id = Column(String(64), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class CameraTransition(Base):
+    """How long it takes to get from one camera to the next, learned.
+
+    Cross-camera questions ("where did it go after the dock?") are only
+    tractable if you know which cameras can follow which, and how long
+    that takes. Nobody wants to survey that by hand, and it changes when
+    a gate is closed or a camera is re-aimed.
+
+    So it is learned from the journeys the system is already certain
+    about: two visits carrying the SAME exact identity — a plate read or
+    a recognised face, both of which come from KAI-C adapters — are one
+    observed trip from A to B. Those trips give the median and the spread
+    that later let an object with NO exact identity be followed: the
+    topology says where to look and how long to allow, and the
+    descriptors say which candidate fits."""
+
+    __tablename__ = "camera_transitions"
+    __table_args__ = (
+        UniqueConstraint("from_camera_id", "to_camera_id", name="uq_transition_pair"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    from_camera_id = Column(Integer, ForeignKey("cameras.id"), nullable=False)
+    to_camera_id = Column(Integer, ForeignKey("cameras.id"), nullable=False)
+    #: How many confirmed trips this edge is built from. A one-sample
+    #: edge is a coincidence; the score says so.
+    samples = Column(Integer, nullable=False, default=0)
+    median_seconds = Column(Float, nullable=True)
+    #: The slow tail, so a legitimate dawdle is not scored as impossible.
+    p90_seconds = Column(Float, nullable=True)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
 class CameraEvent(Base):

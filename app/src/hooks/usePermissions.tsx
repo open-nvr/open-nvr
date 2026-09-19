@@ -141,6 +141,9 @@ export const NAV_PERMISSIONS = {
   // snapshots — the alerts tier, like the other incident pages.
   '/left-items': 'alerts.view',
   '/playback': 'recordings.view',
+  // Search answers with evidence photos and opens recordings — it is
+  // the recordings workflow, and carries its tier.
+  '/search': 'recordings.view',
   '/playback/sync': 'recordings.view',
   '/cameras': 'cameras.view',
   '/rbac': 'users.view',
