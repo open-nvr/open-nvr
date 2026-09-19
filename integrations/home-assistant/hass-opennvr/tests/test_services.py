@@ -147,11 +147,14 @@ async def test_ack_alerts(hass: HomeAssistant, mock_client: MagicMock,
 async def test_search_events(hass: HomeAssistant, mock_client: MagicMock,
                              mock_stream: type[FakeStream]) -> None:
     await _setup(hass)
-    mock_client.search.return_value = {"results": [
-        {"kind": "event", "id": 5, "camera_id": 1, "label": "car",
+    mock_client.search.return_value = {"total": 3, "interpretation": {"labels": ["car"]},
+                                       "results": [
+        {"id": 5, "camera_id": 1, "label": "car", "started_at": "2026-09-18T01:00:00+00:00",
          "evidence_url": "/api/v1/events/5/evidence"},
-        {"kind": "event", "id": 6, "camera_id": 1, "label": "car", "evidence_url": None},
-        {"kind": "alert", "id": 2, "camera_id": 3, "title": "Loitering"},
+        {"id": 6, "camera_id": 1, "label": "car", "started_at": "2026-09-18T00:30:00+00:00",
+         "evidence_url": None},
+        {"id": 7, "camera_id": 9, "label": "car", "started_at": "2026-09-18T00:20:00+00:00",
+         "evidence_url": "/api/v1/events/7/evidence"},             # a camera not shown
     ]}
     mock_client.sign_media.return_value = SignedMedia(url=f"{URL}/api/v1/media/s/m1.t",
                                                       expires_at="x")
@@ -162,8 +165,10 @@ async def test_search_events(hass: HomeAssistant, mock_client: MagicMock,
     assert kw["camera_id"] == 1 and kw["label"] == "car" and kw["limit"] == 10
     assert kw["from_"] == "2026-09-18T00:00:00+00:00" and kw["to"] is None
     rows = result["results"]
+    assert [r["id"] for r in rows] == [5, 6]
     assert rows[0]["thumbnail_url"].endswith("/m1.t") and "evidence_url" not in rows[0]
-    assert "thumbnail_url" not in rows[1] and "thumbnail_url" not in rows[2]
+    assert "thumbnail_url" not in rows[1]
+    assert result["interpretation"] == {"labels": ["car"]} and result["total"] == 3
     assert mock_client.sign_media.call_args.kwargs["name"] == "evidence"
 
 

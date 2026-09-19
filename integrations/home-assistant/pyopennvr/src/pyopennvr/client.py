@@ -295,7 +295,11 @@ class OpenNVRClient:
             "unacked": unacked, "skip": skip, "limit": limit})
 
     async def search(self, **filters: Any) -> dict:
-        """``GET /search``; ``from_`` is sent as ``from``."""
+        """``GET /search``: plain-language search over recorded visits. ``q`` is
+        parsed by the server; explicit filters (``label``, ``camera_id``,
+        ``zone``, ``plate``, ``from_``, ``to``, ``text``) win over its reading.
+        ``{"query", "interpretation", "results", "count", "total"}``; ``from_``
+        is sent as ``from``."""
         if "from_" in filters:
             filters["from"] = filters.pop("from_")
         return await self.request("GET", "/search", params=filters)

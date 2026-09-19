@@ -274,7 +274,7 @@ async def _search_events(hass: HomeAssistant, call: ServiceCall) -> ServiceRespo
         entry = _entry(hass, call)
     client = entry.runtime_data.client
     found = await _run(client.search(
-        q=data.get("query"), camera_id=camera_id, label=data.get("label"),
+        q=data.get("query") or "", camera_id=camera_id, label=data.get("label"),
         zone=data.get("zone"), plate=data.get("plate"),
         from_=_utc_iso(data["start"]) if data.get("start") else None,
         to=_utc_iso(data["end"]) if data.get("end") else None, limit=data["limit"]))
@@ -284,7 +284,7 @@ async def _search_events(hass: HomeAssistant, call: ServiceCall) -> ServiceRespo
     limit = asyncio.Semaphore(8)
 
     async def thumbnail(row: dict[str, Any]) -> None:
-        if row.get("kind") != "event" or not row.get("evidence_url"):
+        if not row.get("evidence_url") or row.get("id") is None:
             return
         async with limit:
             try:
@@ -297,7 +297,8 @@ async def _search_events(hass: HomeAssistant, call: ServiceCall) -> ServiceRespo
     await asyncio.gather(*(thumbnail(r) for r in results))
     for row in results:
         row.pop("evidence_url", None)  # an API path needing auth; the signed URL replaces it
-    return {"results": results}
+    return {"results": results, "total": found.get("total", len(results)),
+            "interpretation": found.get("interpretation")}
 
 
 HANDLERS = {

@@ -159,9 +159,12 @@ def _correlation(llm_context: llm.LLMContext) -> str | None:
 class SearchEventsTool(_OpenNVRTool):
     name = "opennvr_search_events"
     description = (
-        "Search OpenNVR's recorded detections, alerts and footage. 'query' is plain "
-        "language (e.g. 'white van', 'person in a red jacket'); the other fields "
-        "narrow it. Newest first.")
+        "Search what OpenNVR recorded: each result is one visit (an object seen on a "
+        "camera, with its time, class, plate and caption). 'query' is plain language "
+        "(e.g. 'white van', 'person with a red bag'); OpenNVR says how it understood "
+        "it. Put the camera and the times in their own fields, not in 'query': they "
+        "always win over how the words are read. Best matches first. For alerts use "
+        "opennvr_list_alerts.")
     parameters = vol.Schema({
         vol.Optional("query"): cv.string,
         vol.Optional("camera"): cv.string,
@@ -178,37 +181,38 @@ class SearchEventsTool(_OpenNVRTool):
         start, end = _time(args.get("start")), _time(args.get("end"))
         names = {(c.entry.entry_id, c.camera_id): c.name for c in cams}
         rows: list[dict[str, Any]] = []
-        semantic = False
+        understood: list[dict[str, Any]] = []
         for entry in _entries(cams, cam):
             client = await entry.runtime_data.coordinator.async_viewer_client()
             found = await client.search(
-                q=args.get("query"), camera_id=cam.camera_id if cam else None,
+                q=args.get("query") or "", camera_id=cam.camera_id if cam else None,
                 label=args.get("label"), zone=args.get("zone"), plate=args.get("plate"),
                 from_=start.isoformat() if start else None,
                 to=end.isoformat() if end else None,
                 limit=_page(entry, cams, cam, args["limit"]))
-            semantic = semantic or bool(found.get("semantic"))
+            if isinstance(found.get("interpretation"), dict):
+                i = found["interpretation"]
+                understood.append({k: i.get(k) for k in ("labels", "text", "plate", "from",
+                                                         "to") if i.get(k)})
             for r in found.get("results", []):
                 camera = names.get((entry.entry_id, r.get("camera_id")))
                 if r.get("camera_id") is not None and camera is None:
                     continue  # not exposed
                 rows.append(_row(r, camera))
-        rows.sort(key=lambda r: r.get("at") or "", reverse=True)
         return {"results": rows[:args["limit"]], "count": len(rows[:args["limit"]]),
-                "plain_language_search": semantic}
+                "understood_as": understood[0] if len(understood) == 1 else understood}
 
 
 def _row(r: dict[str, Any], camera: str | None) -> dict[str, Any]:
-    kind = r.get("kind")
-    row: dict[str, Any] = {"kind": kind, "at": _local(r.get("at")), "camera": camera}
-    if kind == "event":
-        row.update({k: r[k] for k in ("label", "plate_text", "ended_at") if r.get(k)})
-        if row.get("ended_at"):
-            row["ended_at"] = _local(row["ended_at"])
-    elif kind == "alert":
-        row.update({k: r.get(k) for k in ("title", "severity", "source", "acknowledged")})
-    elif kind == "footage":
-        row.update({"labels": r.get("labels"), "description": r.get("caption")})
+    """A visit, in the words and times the model should use."""
+    row: dict[str, Any] = {"at": _local(r.get("started_at")), "camera": camera,
+                           "object": r.get("label")}
+    if r.get("ended_at"):
+        row["until"] = _local(r["ended_at"])
+    if r.get("plate_text"):
+        row["plate"] = r["plate_text"]
+    if r.get("caption"):
+        row["description"] = r["caption"]
     return row
 
 

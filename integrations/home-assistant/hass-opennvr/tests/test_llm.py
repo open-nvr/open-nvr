@@ -68,26 +68,26 @@ async def test_only_exposed_cameras(hass: HomeAssistant, api, mock_client: Magic
 
 async def test_search(hass: HomeAssistant, api, mock_client: MagicMock) -> None:
     async_expose_entity(hass, "conversation", FRONT, True)
-    mock_client.search.return_value = {"semantic": True, "results": [
-        {"kind": "footage", "at": "2026-09-18T08:31:00+00:00", "camera_id": 1,
-         "labels": ["truck"], "caption": "a white van at the door"},
-        {"kind": "event", "at": "2026-09-18T08:30:00+00:00", "camera_id": 3,
-         "label": "car"},                                                  # not exposed
-        {"kind": "event", "at": "2026-09-18T08:00:00+00:00", "camera_id": 1,
-         "label": "car", "plate_text": "KA01AB1234", "evidence_url": "/api/v1/x"},
-        {"kind": "alert", "at": "2026-09-18T07:00:00+00:00", "camera_id": None,
-         "title": "Disk", "severity": "high", "source": "core", "acknowledged": False},
-    ]}
+    mock_client.search.return_value = {
+        "interpretation": {"labels": ["truck"], "text": "white", "camera_ids": [1]},
+        "total": 3, "results": [
+            {"id": 9, "started_at": "2026-09-18T08:31:00+00:00", "camera_id": 1,
+             "label": "truck", "caption": "a white van at the door"},
+            {"id": 8, "started_at": "2026-09-18T08:30:00+00:00", "camera_id": 3,
+             "label": "car"},                                              # not exposed
+            {"id": 7, "started_at": "2026-09-18T08:00:00+00:00", "camera_id": 1,
+             "label": "car", "plate_text": "KA01AB1234", "evidence_url": "/api/v1/x"},
+        ]}
     out = await _tool(hass, "opennvr_search_events", query="white van", camera="front door",
                       start="2026-09-18", end="2026-09-18T12:00")
     kwargs = mock_client.search.call_args.kwargs
     assert kwargs["q"] == "white van" and kwargs["camera_id"] == 1 and kwargs["limit"] == 10
     assert kwargs["from_"].endswith("+00:00") and kwargs["to"].endswith("+00:00")
-    assert out["plain_language_search"] is True
-    assert [(r["kind"], r["camera"]) for r in out["results"]] == [
-        ("footage", "Front door"), ("event", "Front door"), ("alert", None)]
+    assert out["understood_as"] == {"labels": ["truck"], "text": "white"}
+    assert [(r["object"], r["camera"]) for r in out["results"]] == [
+        ("truck", "Front door"), ("car", "Front door")]              # camera 3 dropped
     assert out["results"][0]["description"] == "a white van at the door"
-    assert out["results"][1]["plate_text"] == "KA01AB1234" and "evidence_url" not in \
+    assert out["results"][1]["plate"] == "KA01AB1234" and "evidence_url" not in \
         out["results"][1]
     bad = await _tool(hass, "opennvr_search_events", start="last tuesday")
     assert bad["error"].startswith("Not a time")

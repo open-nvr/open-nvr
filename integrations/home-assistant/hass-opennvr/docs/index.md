@@ -97,13 +97,16 @@ Diagnostic entities (FPS, inference time, bitrate, CPU, memory) are disabled by 
 | `opennvr.export_recording` | `camera`, `start`, `end` (≤ 1 h), `with_hash` | `url`, `direct_url`, `expires_at`, and `sha256` and `bytes` when `with_hash` is set |
 | `opennvr.protect_recording` | `event_id`, `pre_s`, `post_s` | — |
 | `opennvr.ack_alerts` | `alert_ids`, or `source` and/or `severity` | `count` |
-| `opennvr.search_events` | `query`, `camera`, `label`, `zone`, `plate`, `start`, `end`, `limit` | `results`, with a `thumbnail_url` on events |
+| `opennvr.search_events` | `query`, `camera`, `label`, `zone`, `plate`, `start`, `end`, `limit` | `results` (visits, with a `thumbnail_url` when there is a photo), `total`, `interpretation` |
 
 With more than one OpenNVR site, pass `config_entry_id` to the actions that take no camera.
 
-`query` is plain language ("red truck at the gate"). When OpenNVR runs the
-**footage-search** app, it answers too, and its matches come back as
-`kind: footage` with the detected objects and a caption.
+`query` is plain language ("red truck at the gate yesterday"): OpenNVR works
+out the objects, cameras, times, plates and words it means and says so in
+`interpretation`; any field you pass explicitly wins over its reading. Each
+result is one visit (an object seen on a camera) with its time, class, plate
+and caption. Alerts aren't part of this search: find them under **Media >
+OpenNVR > Alerts**, or ask Assist (`opennvr_list_alerts`).
 
 ## Assist
 
@@ -114,7 +117,7 @@ The integration adds an LLM API named **OpenNVR**. Select it (alongside
 
 | Tool | What it does |
 |---|---|
-| `opennvr_search_events` | searches detections, alerts and footage (plain language, or by camera, object, zone, plate, time) |
+| `opennvr_search_events` | searches what was recorded (plain language, or by camera, object, zone, plate, time) and says how it understood the question |
 | `opennvr_summarize_period` | counts per camera what was detected and alerted in a period (up to 31 days) |
 | `opennvr_list_alerts` | lists alerts, optionally only unacknowledged ones |
 | `opennvr_describe_camera` | describes a camera's current view, or answers a question about it, with OpenNVR's image model |
