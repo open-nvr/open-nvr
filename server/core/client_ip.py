@@ -68,33 +68,56 @@ def _in_nets(ip: str, nets: tuple[ipaddress._BaseNetwork, ...]) -> bool:
     return any(addr in net for net in nets)
 
 
-def get_client_ip(request: Request) -> str:
-    """Best-effort real client IP.
+def _parse_hop(raw: str) -> str | None:
+    """One X-Forwarded-For entry as a bare IP, or None if it is not one."""
+    hop = raw.strip()
+    if hop.startswith("[") and "]" in hop:          # [v6]:port
+        hop = hop[1:hop.index("]")]
+    elif hop.count(":") == 1:                       # v4:port
+        hop = hop.rsplit(":", 1)[0]
+    try:
+        return str(ipaddress.ip_address(hop))
+    except ValueError:
+        return None
 
-    If the socket peer is a trusted proxy, take the left-most (original client)
-    entry of ``X-Forwarded-For``; otherwise use the socket peer directly. Falls
-    back to the peer if the header is malformed.
+
+def get_client_ip(request: Request) -> str:
+    """Best-effort real client IP, safe against a forged X-Forwarded-For.
+
+    Only a request whose socket peer is a trusted proxy may speak through
+    X-Forwarded-For at all. The header is then read from the RIGHT: each
+    proxy APPENDS the address it saw (nginx: ``$proxy_add_x_forwarded_for``),
+    so the right-most entries were written by our own proxies and the
+    left-most by whoever sent the request. Walking right to left, trusted
+    proxy hops are skipped and the first other address is the client.
+
+    The old rule took the left-most entry, which the client chooses: sending
+    ``X-Forwarded-For: 127.0.0.1`` through nginx arrived as ``"127.0.0.1,
+    <real ip>"`` and resolved to loopback, which the device firewall exempts.
+
+    If every hop is trusted (the client itself sits inside a trusted range),
+    the right-most hop is returned: the address our own proxy actually saw.
+    ``X-Real-IP`` (nginx overwrites it with ``$remote_addr``) is the fallback
+    when X-Forwarded-For is absent or unusable.
     """
     peer = request.client.host if request.client else ""
-    if peer and _in_nets(peer, _trusted_proxy_nets()):
-        xff = request.headers.get("x-forwarded-for", "")
-        if xff:
-            # left-most is the original client; strip any port suffix
-            first = xff.split(",")[0].strip()
-            first = first.rsplit(":", 1)[0] if first.count(":") == 1 else first
-            try:
-                ipaddress.ip_address(first)
-                return first
-            except ValueError:
-                pass
-        real = request.headers.get("x-real-ip", "").strip()
-        if real:
-            try:
-                ipaddress.ip_address(real)
-                return real
-            except ValueError:
-                pass
-    return peer
+    if not (peer and _in_nets(peer, _trusted_proxy_nets())):
+        return peer
+    hops = [_parse_hop(h) for h in request.headers.get("x-forwarded-for", "").split(",")
+            if h.strip()]
+    trusted = _trusted_proxy_nets()
+    nearest_valid: str | None = None
+    for hop in reversed(hops):
+        if hop is None:
+            # A malformed hop: nothing to its left can be trusted either.
+            break
+        nearest_valid = nearest_valid or hop
+        if not _in_nets(hop, trusted):
+            return hop
+    if nearest_valid:
+        return nearest_valid
+    real = _parse_hop(request.headers.get("x-real-ip", ""))
+    return real or peer
 
 
 def is_loopback(ip: str) -> bool:

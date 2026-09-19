@@ -1,0 +1,28 @@
+{
+  "v": 2,
+  "event_type": "state_snapshot",
+  "seq": 316,
+  "resync": false,
+  "cameras": [
+    {
+      "camera_id": 1,
+      "stale": false,
+      "last_frame_at": null,
+      "motion": false,
+      "objects": {},
+      "zones": [],
+      "online": true
+    }
+  ],
+  "site_mode": {
+    "mode": "armed_away",
+    "changed_at": null,
+    "changed_by": null
+  },
+  "entity_states": {
+    "camera.1.detection": {
+      "state": true,
+      "attributes": {}
+    }
+  }
+}

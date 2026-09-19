@@ -1,0 +1,24 @@
+# Test image for pyopennvr and the OpenNVR Home Assistant integration.
+#
+# Home Assistant 2026.9 needs Python >= 3.14.2 and does not support Windows,
+# so these tests run here rather than on a developer's host Python.
+# pytest-homeassistant-custom-component 0.13.365 pins homeassistant==2026.9.2.
+#
+# The repo is bind-mounted at /src at run time (see scripts/ha-dev/test-integration.ps1);
+# only dependencies are baked into the image so it is rebuilt rarely.
+FROM python:3.14-slim
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+RUN pip install \
+        "pytest-homeassistant-custom-component==0.13.365" \
+        "aioresponses>=0.7"
+
+# Requirements of the HA components the integration's platforms load in tests
+# (phcc installs Home Assistant, not each component's requirements). A layer
+# of its own so the big one above stays cached.
+RUN pip install "PyTurboJPEG==1.8.3"
+
+WORKDIR /src

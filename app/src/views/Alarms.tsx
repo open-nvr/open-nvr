@@ -18,7 +18,7 @@
 
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { BellRing, PhoneCall, Volume2 } from 'lucide-react'
+import { BellRing, PhoneCall, Shield, Volume2 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { playTestSound } from '../components/AlertBell'
 import { useAuth } from '../auth/AuthContext'
@@ -289,6 +289,7 @@ export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
         </div>
         )}
 
+        <SiteModeCard canChange={isAdmin} />
         {isAdmin && <AlarmActionsCard />}
       </div>
 
@@ -364,6 +365,61 @@ export function Alarms({ embedded = false }: { embedded?: boolean } = {}) {
           </>
         }
       />
+    </div>
+  )
+}
+
+// ── Site mode (HA-118) ─────────────────────────────────────────────
+
+const SITE_MODES = ['disarmed', 'armed_home', 'armed_away'] as const
+
+// Arming, usually driven by Home Assistant's alarm panel. Shown to everyone
+// on this page because "why did nobody get called?" is answered here.
+function SiteModeCard({ canChange }: { canChange: boolean }) {
+  const { t } = useTranslation()
+  const qc = useQueryClient()
+  const mode = useQuery({
+    queryKey: ['site-mode'],
+    queryFn: async () => {
+      const { data } = await alertsInboxService.getSiteMode()
+      return data as { mode: string; changed_at: string | null; changed_by: string | null }
+    },
+    staleTime: 10_000,
+    refetchInterval: 30_000,
+  })
+  const set = useMutation({
+    mutationFn: async (m: string) => alertsInboxService.setSiteMode(m),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['site-mode'] }),
+  })
+  if (!mode.data) return null
+  const current = mode.data.mode
+  return (
+    <div className="border border-[var(--border)] rounded p-3 space-y-2 md:col-span-2" data-testid="site-mode-card">
+      <div className="flex items-center gap-2 font-medium">
+        <Shield size={14} /> {t('siteMode.title')}
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {SITE_MODES.map((m) => (
+          <Button
+            key={m}
+            size="sm"
+            variant={m === current ? 'primary' : 'outline'}
+            disabled={!canChange || set.isPending || m === current}
+            onClick={() => set.mutate(m)}
+          >
+            {t(`siteMode.${m}`)}
+          </Button>
+        ))}
+      </div>
+      <div className="text-[12px] text-[var(--text-dim)]">
+        {current === 'disarmed' ? t('siteMode.disarmedHint') : t('siteMode.armedHint')}
+        {mode.data.changed_by && (
+          <> · {t('siteMode.changedBy', {
+            by: mode.data.changed_by,
+            at: mode.data.changed_at ? new Date(mode.data.changed_at).toLocaleString() : '',
+          })}</>
+        )}
+      </div>
     </div>
   )
 }

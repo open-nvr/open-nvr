@@ -36,6 +36,7 @@ from core.auth import get_current_superuser
 from core.client_ip import get_client_ip
 from core.database import get_db
 from services import device_firewall_service as dfw
+from services.audit_service import audit_request
 
 router = APIRouter(prefix="/device-firewall", tags=["device-firewall"])
 
@@ -91,18 +92,25 @@ async def list_devices(
 @router.put("/enforcement")
 async def set_enforcement(
     payload: EnforcementUpdate,
-    _user=Depends(get_current_superuser),
+    request: Request,
+    user=Depends(get_current_superuser),
     db: Session = Depends(get_db),
 ):
     """Turn enforcement on/off. Returns the *effective* state — the env
     break-glass can force it off even when the admin asks for on."""
     effective = dfw.set_enforcement(db, payload.active)
+    audit_request(
+        db, request, action="device_firewall.enforcement", user_id=user.id,
+        entity_type="device_firewall",
+        details={"requested": payload.active, "effective": effective},
+    )
     return {"requested": payload.active, "enforcement_active": effective}
 
 
 @router.post("/devices/{device_id}/approve")
 async def approve_device(
     device_id: int,
+    request: Request,
     payload: DeviceLabel | None = None,
     user=Depends(get_current_superuser),
     db: Session = Depends(get_db),
@@ -112,25 +120,42 @@ async def approve_device(
     )
     if dev is None:
         raise HTTPException(status_code=404, detail="Device not found")
+    audit_request(
+        db, request, action="device_firewall.approve", user_id=user.id,
+        entity_type="trusted_device", entity_id=device_id,
+        details={"label": payload.label if payload else None},
+    )
     return _serialize(dev)
 
 
 @router.post("/devices/{device_id}/block")
 async def block_device(
     device_id: int,
-    _user=Depends(get_current_superuser),
+    request: Request,
+    user=Depends(get_current_superuser),
     db: Session = Depends(get_db),
 ):
     dev = dfw.block(db, device_id)
     if dev is None:
         raise HTTPException(status_code=404, detail="Device not found")
+    audit_request(
+        db, request, action="device_firewall.block", user_id=user.id,
+        entity_type="trusted_device", entity_id=device_id,
+    )
     return _serialize(dev)
 
 
 @router.delete("/devices/{device_id}")
 async def delete_device(
     device_id: int,
-    _user=Depends(get_current_superuser),
+    request: Request,
+    user=Depends(get_current_superuser),
     db: Session = Depends(get_db),
 ):
-    return {"deleted": dfw.delete(db, device_id)}
+    deleted = dfw.delete(db, device_id)
+    if deleted:
+        audit_request(
+            db, request, action="device_firewall.delete", user_id=user.id,
+            entity_type="trusted_device", entity_id=device_id,
+        )
+    return {"deleted": deleted}

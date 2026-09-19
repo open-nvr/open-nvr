@@ -367,6 +367,11 @@ class HomeAssistantRelay(AlertSubscriber):
         # ``once`` onto that instead of the loop-level stop.
         if once:
             self._once_mode = True
+        logger.warning(
+            "home-assistant-relay is deprecated: use the OpenNVR Home Assistant "
+            "integration, or turn on Home Assistant discovery on an MQTT "
+            "integration (Settings > Integrations). See docs/HOME_ASSISTANT.md."
+        )
         logger.info(
             "subscribing to %r on %s (backend=%s)",
             self.cfg.subject_pattern,

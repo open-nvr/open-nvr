@@ -1,5 +1,18 @@
 # home-assistant-relay example app
 
+> **Deprecated.** It still works, but it only turns alerts into binary
+> sensors. Two replacements cover far more (cameras, live video, controls,
+> health, events, availability):
+>
+> - the **OpenNVR Home Assistant integration**
+>   ([`integrations/home-assistant/`](../../integrations/home-assistant/));
+> - **Home Assistant MQTT discovery**, built into OpenNVR: add an MQTT
+>   integration under *Settings > Integrations* with discovery on, and Home
+>   Assistant's own MQTT integration finds every device and entity.
+>
+> See [docs/HOME_ASSISTANT.md](../../docs/HOME_ASSISTANT.md#two-ways-in). Use
+> one of them, not the relay alongside them: alerts would show twice.
+
 **Every OpenNVR alert in your Home Assistant dashboard.** Subscribes
 to NATS `opennvr.alerts.>`, maps each alert envelope onto a Home
 Assistant entity, and publishes via MQTT discovery (recommended) or

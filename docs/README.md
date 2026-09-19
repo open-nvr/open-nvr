@@ -8,6 +8,7 @@ Start here. Pick the row that matches what you're doing.
 
 ## Run it
 - **[../DOCKER_QUICKSTART.md](../DOCKER_QUICKSTART.md)** — Docker install, retention, production hardening, compose-file reference.
+- **[HOME_ASSISTANT.md](HOME_ASSISTANT.md)** — network setup when Home Assistant runs on another machine: WebRTC hosts, optional RTSPS, CORS, mDNS discovery, tokens.
 - **[LOCAL_SETUP.md](LOCAL_SETUP.md)** — run the backend / frontend / KAI-C from source for development.
 - **[../USER_MANUAL.md](../USER_MANUAL.md)** — day-to-day operator guide (add cameras, playback, users).
 

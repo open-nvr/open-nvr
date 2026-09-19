@@ -1,0 +1,59 @@
+{
+  "etag": "30f8c49d34740e63",
+  "descriptor_version": 1,
+  "entities": [
+    {
+      "key": "camera.1.count.person",
+      "platform": "sensor",
+      "name": "person count",
+      "device": {
+        "kind": "camera",
+        "id": 1
+      },
+      "required_scope": "cameras.view",
+      "origin": "core",
+      "camera_id": 1,
+      "translation_key": "count_label",
+      "state_class": "measurement",
+      "enabled_default": true,
+      "descriptor_version": 1
+    },
+    {
+      "key": "camera.1.detection",
+      "platform": "switch",
+      "name": "Object detection",
+      "device": {
+        "kind": "camera",
+        "id": 1
+      },
+      "required_scope": "cameras.manage",
+      "origin": "core",
+      "camera_id": 1,
+      "translation_key": "detection_switch",
+      "enabled_default": true,
+      "descriptor_version": 1,
+      "command": {
+        "type": "core_control",
+        "control": "detection"
+      }
+    },
+    {
+      "key": "app.abandoned-object.3.acknowledge",
+      "platform": "button",
+      "name": "Acknowledge abandoned items",
+      "device": {
+        "kind": "camera",
+        "id": 3
+      },
+      "required_scope": "apps.actions",
+      "origin": "app:abandoned-object",
+      "camera_id": 3,
+      "enabled_default": true,
+      "descriptor_version": 1,
+      "command": {
+        "type": "app_action",
+        "action": "acknowledge"
+      }
+    }
+  ]
+}

@@ -1273,6 +1273,8 @@ services:
   # cleanly without HA configured; set HA_MQTT_HOST (or switch the
   # template to backend: rest with HA_URL + HA_TOKEN) in .env to
   # start forwarding. Contract surface on :9209.
+  # Deprecated: use the Home Assistant integration or the MQTT
+  # integration's built-in discovery instead (docs/HOME_ASSISTANT.md).
   # ──────────────────────────────────────────────────────────────
   home-assistant-relay-config-init:
     profiles: [apps, home-assistant-relay]

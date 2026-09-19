@@ -263,6 +263,11 @@ class Camera(Base):
     # Nullable so the additive column self-heal can add it to old
     # create_all databases.
     assignments = Column(JSON, nullable=True)
+    # Tier-0 object detection on this camera. Off keeps streaming and
+    # recording; detect-pipeline just stops analysing it (the camera-agent
+    # roster's ``analyze``). NULL = on: nullable so the additive column
+    # self-heal can add it, and so every existing camera keeps detecting.
+    detection_enabled = Column(Boolean, nullable=True, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
@@ -568,6 +573,10 @@ class TimelineEvent(Base):
     # this column existed: readers fall back to started_at.
     observed_at = Column(DateTime(timezone=True), nullable=True)
     payload = Column(JSON, nullable=True)
+    # Ids of the CameraZones this visit passed through (HA-109), computed at
+    # ingest from the track's path. NULL = not computed (no path sent, or a
+    # row from before zones); [] = computed, in no zone.
+    zone_ids = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -1065,6 +1074,11 @@ class AuditLog(Base):
     # Actor
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
 
+    # Correlation id of the request that caused this row: the client's
+    # X-Correlation-Id when it sent a valid one (e.g. Home Assistant's context
+    # id), else the request's own id. Joins an external action to our audit trail.
+    correlation_id = Column(String(64), nullable=True, index=True)
+
 
 class AIModel(Base):
     """AI Model configuration for inference tasks."""
@@ -1294,6 +1308,45 @@ class TenantQuota(Base):
     )
 
 
+class ApiToken(Base):
+    """A long-lived API credential for a non-browser client (HA-101).
+
+    Created by a user for, typically, the Home Assistant integration. The
+    secret (``onvr_<prefix>_<random>``) is shown once and only its SHA-256 is
+    stored. A token acts as its owner but can never exceed them: its
+    effective permissions are its ``scopes`` intersected with the owner's,
+    and its cameras are ``camera_ids`` intersected with the owner's visible
+    cameras. It is also limited to the API routes listed in
+    ``services.api_tokens.TOKEN_ROUTES``, and it never counts as a superuser.
+    """
+
+    __tablename__ = "api_tokens"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(64), nullable=False)
+    #: Public, non-secret part of the token, for display and lookup.
+    prefix = Column(String(16), nullable=False, unique=True, index=True)
+    token_hash = Column(String(64), nullable=False)
+    owner_user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"),
+                           nullable=False, index=True)
+    #: Permission names this token may use (JSON list).
+    scopes = Column(JSON, nullable=False)
+    #: Camera ids this token may touch (JSON list); NULL = all the owner can see.
+    camera_ids = Column(JSON, nullable=True)
+    #: CIDRs the token may be used from (JSON list); NULL = anywhere.
+    allowed_cidrs = Column(JSON, nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    last_used_at = Column(DateTime(timezone=True), nullable=True)
+    last_used_ip = Column(String(64), nullable=True)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    #: Set on a short-lived, read-only session token minted BY another token
+    #: (``POST /api-tokens/session``, a dashboard card): it never outlives,
+    #: and is revoked with, its parent.
+    parent_id = Column(Integer, ForeignKey("api_tokens.id", ondelete="CASCADE"),
+                       nullable=True, index=True)
+
+
 class InstalledApp(Base):
     """One registered vertical-detector app (App SDK spec §05).
 
@@ -1493,3 +1546,28 @@ class OccupancyFootfall(Base):
     dwell_seconds = Column(Float, nullable=False, default=0.0)
     dwell_max_seconds = Column(Float, nullable=False, default=0.0)
     updated_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class CameraZone(Base):
+    """A named area of one camera's picture (HA-109).
+
+    ``polygon`` is ``[[x, y], ...]`` normalised to 0..1 of the frame, the
+    same space as the overlay boxes. A visit is "in" a zone when a point of
+    its path (the bottom-centre of the box: where the object stands) falls
+    inside. ``labels`` optionally limits the zone to some object labels.
+    """
+
+    __tablename__ = "camera_zones"
+    __table_args__ = (
+        UniqueConstraint("camera_id", "name", name="uq_camera_zone_name"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    camera_id = Column(
+        Integer, ForeignKey("cameras.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name = Column(String(60), nullable=False)
+    polygon = Column(JSON, nullable=False)
+    labels = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())

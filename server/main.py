@@ -54,6 +54,13 @@ from routers import (
     adapters_catalog,
     ai_models,
     alerts_inbox,
+    api_tokens as api_tokens_router,
+    zones as zones_router,
+    live_state as live_state_router,
+    media as media_router,
+    site_mode as site_mode_router,
+    entities as entities_router,
+    search as search_router,
     apps,
     audit_logs,
     auth,
@@ -216,47 +223,24 @@ async def lifespan(app: FastAPI):
 
             # Idempotently seed permissions added in later releases (e.g.
             # apps.install); the full seed above only runs on an empty table.
+            # Grants that preserve behaviour happen only on the creating boot
+            # (see services/permission_catalog.py).
             try:
-                from models import Permission as _Permission2
-                from services.apps_view_backfill import backfill_apps_view
+                from services.permission_catalog import seed_new_permissions
 
-                for _pname, _pdesc in (
-                    (
-                        "apps.install",
-                        "Install/uninstall curated App Store apps",
-                    ),
-                    (
-                        "apps.view",
-                        "Browse the App Catalog and view installed apps",
-                    ),
-                ):
-                    if (
-                        db.query(_Permission2)
-                        .filter(_Permission2.name == _pname)
-                        .first()
-                        is None
-                    ):
-                        db.add(_Permission2(name=_pname, description=_pdesc))
-                        db.commit()
-                        main_logger.info(
-                            "Seeded new permission %r (upgrade path)", _pname
-                        )
-                        # apps.view took the App Catalog off ai.view.
-                        # Creating the row alone would REVOKE the catalog
-                        # from everyone who could open it yesterday, so
-                        # backfill it to whoever holds ai.view — but ONLY
-                        # on the boot that creates it. Doing it every boot
-                        # would undo a deliberate revoke.
-                        if _pname == "apps.view":
-                            _granted = backfill_apps_view(db)
-                            main_logger.info(
-                                "Granted apps.view to %d role(s) holding "
-                                "ai.view", _granted
-                            )
+                for _pname, _granted, _source in seed_new_permissions(db):
+                    main_logger.info(
+                        "Seeded new permission %r (upgrade path)%s", _pname,
+                        f"; granted to {_granted} role(s) holding {_source}"
+                        if _source else "",
+                    )
             except Exception:
                 main_logger.warning(
                     "Upgrade-path permission seeding failed", exc_info=True
                 )
+                # The rest of startup reuses this session; a failed flush
+                # would otherwise leave it unusable (PendingRollbackError).
+                db.rollback()
 
             # Apps bus: (re)render the per-app NATS users file so the
             # nats-apps leaf server knows every app that holds a key —
@@ -409,6 +393,18 @@ async def lifespan(app: FastAPI):
             main_logger.error(
                 f"[MTX] Background provisioning failed: {e}", exc_info=True
             )
+        finally:
+            # Whatever provisioning did (ran, was disabled, or failed):
+            # reschedule automatic recording resumes (HA-108) and resume the
+            # overdue ones, so a restart never turns "pause for an hour"
+            # into "pause forever".
+            try:
+                from services.recording_pause import restore_on_startup
+
+                await restore_on_startup()
+            except Exception as e:  # noqa: BLE001
+                main_logger.error(f"[MTX] recording-pause restore failed: {e}",
+                                  exc_info=True)
 
     # Start background provisioning task
     import asyncio
@@ -656,6 +652,41 @@ async def lifespan(app: FastAPI):
     spawn_background(background_tier0_track_consumer(),
                      name="tier0-track-consumer")
 
+    # Live state (HA-110): Tier-0 sends nothing when nothing is detected,
+    # so a quiet camera is noticed by this sweeper, not by a frame.
+    async def background_live_state_sweeper():
+        async def _loop():
+            from services.tier0_track_consumer import run_live_state_sweeper
+
+            await run_live_state_sweeper()
+
+        await run_consumer_forever("live-state sweeper", _loop)
+
+    spawn_background(background_live_state_sweeper(), name="live-state-sweeper")
+
+    # Server-described entities (HA-114): one resolver for the site.
+    async def background_entity_states():
+        async def _loop():
+            from services.entity_state_publisher import run_forever
+
+            await run_forever()
+
+        await run_consumer_forever("entity-state publisher", _loop)
+
+    spawn_background(background_entity_states(), name="entity-state-publisher")
+
+    # Home Assistant MQTT discovery (HA-402): one bridge per enabled MQTT
+    # integration with discovery on. No integration, nothing runs.
+    async def background_mqtt_bridges():
+        try:
+            from services.ha_mqtt_discovery import manager
+
+            await manager.reload()
+        except Exception as e:  # never block startup on a broker
+            main_logger.error(f"MQTT bridges not started: {e}")
+
+    spawn_background(background_mqtt_bridges(), name="mqtt-bridges")
+
     # Operator alert inbox: consume opennvr.alerts.> (the SDK apps'
     # NatsAlertChannel) into app_alerts so the UI bell can ring and
     # acknowledge. Same best-effort posture — no bus, no inbox, no crash.
@@ -691,6 +722,13 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     main_logger.info("Shutting down FastAPI application...")
+
+    try:
+        from services.ha_mqtt_discovery import manager as mqtt_manager
+
+        await mqtt_manager.stop()
+    except Exception as e:
+        main_logger.error(f"Error stopping MQTT bridges: {e}")
 
     # Stop all running inference tasks
     try:
@@ -760,8 +798,14 @@ app.add_middleware(
         "Accept",
         "Origin",
         "X-Requested-With",
+        # Lets a browser client (e.g. a Home Assistant card) tag its request
+        # so the resulting audit row can be traced back to it.
+        "X-Correlation-Id",
     ],  # Explicit headers
-    expose_headers=["Content-Range", "Accept-Ranges", "Content-Length"],
+    expose_headers=[
+        "Content-Range", "Accept-Ranges", "Content-Length",
+        "X-Correlation-Id", "X-Request-ID",
+    ],
 )
 
 # Compress text responses (JSON, HTML, JS/CSS when served by uvicorn directly).
@@ -798,7 +842,9 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         ip_address=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
     )
-    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    from core.http_errors import http_exception_response
+
+    return http_exception_response(exc)
 
 
 # Global exception handler (catch-all)
@@ -869,6 +915,13 @@ app.include_router(media_source.router, prefix=settings.api_prefix)
 app.include_router(mediamtx_admin.router, prefix=settings.api_prefix)
 app.include_router(mediamtx_hooks.router, prefix=settings.api_prefix)
 app.include_router(audit_logs.router, prefix=settings.api_prefix)
+app.include_router(api_tokens_router.router, prefix=settings.api_prefix)
+app.include_router(zones_router.router, prefix=settings.api_prefix)
+app.include_router(live_state_router.router, prefix=settings.api_prefix)
+app.include_router(media_router.router, prefix=settings.api_prefix)
+app.include_router(site_mode_router.router, prefix=settings.api_prefix)
+app.include_router(entities_router.router, prefix=settings.api_prefix)
+app.include_router(search_router.router, prefix=settings.api_prefix)
 app.include_router(recordings.router, prefix=settings.api_prefix)
 app.include_router(orphaned_recordings.router, prefix=settings.api_prefix)
 app.include_router(

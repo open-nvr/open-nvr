@@ -27,7 +27,7 @@ from datetime import datetime
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_serializer, field_validator
 
 from core.config import settings
 
@@ -468,6 +468,11 @@ class CameraUpdate(BaseModel):
     vlan: str | None = Field(None, max_length=50)
     status: str | None = Field(None, max_length=20)
     is_active: bool | None = None
+    # Tier-0 object detection on/off; the camera keeps recording either way.
+    detection_enabled: bool | None = None
+    # Why, for the audit log only (e.g. the Home Assistant automation that
+    # asked). Never stored on the camera.
+    reason: str | None = Field(None, max_length=200)
     # Per-camera capability assignment (see CameraAssignment). Send the FULL
     # list each time — this replaces, it does not merge. [] clears.
     assignments: list[CameraAssignment] | None = None
@@ -687,6 +692,14 @@ class CameraResponse(CameraBase):
     # assigned": eligible for any skill's picker, adopted by none, so no
     # app inference runs on it. The UI reads eligibility off this.
     assignments: list[CameraAssignment] | None = None
+    # NULL in the database means on (cameras from before the column).
+    detection_enabled: bool = True
+
+    @field_validator("detection_enabled", mode="before")
+    @classmethod
+    def _null_detection_means_on(cls, v: bool | None) -> bool:
+        return True if v is None else v
+
     deleted_at: datetime | None = None
     created_at: datetime
     updated_at: datetime | None = None
@@ -720,6 +733,20 @@ class CameraResponse(CameraBase):
     # edit with 409/502 instead, so the DB and MediaMTX cannot disagree about
     # where a camera's video comes from.
     stream_warning: str | None = None
+
+    @field_serializer("rtsp_url", "substream_url")
+    def _no_credentials_for_tokens(self, value: str | None) -> str | None:
+        """An API token (Home Assistant, a dashboard card's session) never
+        gets the camera's stream credentials: it streams through OpenNVR.
+        Users keep seeing the URL they configured."""
+        from core.request_context import current
+
+        ctx = current()
+        if value and ctx is not None and (ctx.actor or "").startswith("token:"):
+            from utils.url_redaction import redact_url_credentials
+
+            return redact_url_credentials(value)
+        return value
 
     class Config:
         from_attributes = True
@@ -854,6 +881,7 @@ class AuditLogResponse(BaseModel):
     details: dict | str | None = None
     ip: str | None = None
     user_agent: str | None = None
+    correlation_id: str | None = None
 
     class Config:
         from_attributes = True

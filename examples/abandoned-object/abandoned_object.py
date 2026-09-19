@@ -77,6 +77,7 @@ from opennvr_app_sdk import (
     Alert,
     AlertType,
     AppManifest,
+    Entity,
     Detector,
     Param,
     StateView,
@@ -212,6 +213,21 @@ MANIFEST = AppManifest(
             description="Forget the spots marked as fixtures (leave the camera blank for "
                         "every camera).",
         ),
+    ],
+    # Home Assistant entities (HA-114): the counts per site and per camera,
+    # and an "acknowledge" button per camera. Values come from /state below.
+    entities=[
+        Entity("unattended_now", "sensor", "Unattended items", state_path="unattended_now",
+               state_class="measurement", icon="mdi:bag-personal-off"),
+        Entity("abandoned_now", "sensor", "Abandoned items", state_path="abandoned_now",
+               state_class="measurement", icon="mdi:bag-personal-off"),
+        Entity("alerts_today", "sensor", "Abandoned-object alerts today",
+               state_path="today.alerts", state_class="total_increasing"),
+        Entity("unattended", "sensor", "Unattended items", per_camera=True,
+               state_path="per_camera[camera={camera}].unattended",
+               state_class="measurement", icon="mdi:bag-personal-off"),
+        Entity("acknowledge", "button", "Acknowledge abandoned items", per_camera=True,
+               action="acknowledge"),
     ],
     has_ui=True,   # GET /ui dashboard, proxied at /api/v1/apps/{id}/ui
 )

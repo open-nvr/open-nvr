@@ -79,7 +79,7 @@ from .frame_sources import (
 from .geometry import Point, Tripwire, Zone, bbox_center
 from .manifest import (
     DETECTION_LABELS, ENTITLEMENT_MODES, PRICING_MODELS, Action, AlertType, AppManifest,
-    Param, StateView,
+    Entity, Param, StateView,
 )
 from .state import KeyedState, StateRecord, keyed_state
 from .domain_events import DomainEventPublisher, domain_envelope, domain_subject
@@ -221,6 +221,7 @@ PLATFORM: tuple[str, ...] = (
 SURFACES: tuple[str, ...] = (
     "StateView",
     "Action",
+    "Entity",
     "ContractServer",
     "Entitlement",
     "PRICING_MODELS",

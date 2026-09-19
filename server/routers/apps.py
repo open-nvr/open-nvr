@@ -45,7 +45,7 @@ from urllib.parse import urlparse
 
 import httpx
 import yaml
-from fastapi import APIRouter, Body, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, model_validator
 from sqlalchemy.exc import IntegrityError
@@ -563,6 +563,7 @@ def _internal_api_key() -> str:
 
 
 def get_register_principal(
+    request: Request,
     x_internal_api_key: str | None = Header(default=None, alias="X-Internal-Api-Key"),
     credentials: HTTPAuthorizationCredentials | None = Depends(_optional_bearer),
     db: Session = Depends(get_db),
@@ -573,13 +574,14 @@ def get_register_principal(
     service-key path (audit-logged as the ``app-sdk`` service
     identity). Raises 401 when neither credential is valid.
     """
-    return _service_or_user_principal(x_internal_api_key, credentials, db)
+    return _service_or_user_principal(x_internal_api_key, credentials, db, request)
 
 
 def _service_or_user_principal(
     x_internal_api_key: str | None,
     credentials: HTTPAuthorizationCredentials | None,
     db: Session,
+    request: Request | None = None,
 ) -> User | AppPrincipal | None:
     """Shared body of the two service-capable principals.
 
@@ -616,6 +618,12 @@ def _service_or_user_principal(
             )
 
     if credentials is not None:
+        from services import api_tokens
+
+        if api_tokens.looks_like_token(credentials.credentials):
+            # An API token (HA-101): same route table, permission and
+            # camera checks as core.auth. Raises 401/403 itself.
+            return api_tokens.authorize_request(request, db, credentials.credentials)
         token_data = verify_token(credentials.credentials)
         if token_data is not None:
             user = (
@@ -648,6 +656,7 @@ def _own_app_only(principal, app_id: str) -> None:
 
 
 def get_read_principal(
+    request: Request,
     x_internal_api_key: str | None = Header(default=None, alias="X-Internal-Api-Key"),
     credentials: HTTPAuthorizationCredentials | None = Depends(_optional_bearer),
     db: Session = Depends(get_db),
@@ -669,7 +678,7 @@ def get_read_principal(
     stay strictly ``get_current_active_user`` (register additionally
     accepts the key via :func:`get_register_principal`).
     """
-    return _service_or_user_principal(x_internal_api_key, credentials, db)
+    return _service_or_user_principal(x_internal_api_key, credentials, db, request)
 
 
 
@@ -1405,22 +1414,24 @@ async def invoke_app_action(
             camera_id_from_handle, manageable_camera_ids,
         )
 
-        scope = None
+        unset = object()
+        scope = unset
         for key in ("camera_id", "camera"):
             target = params.get(key)
             if target is None:
                 continue
             cam_id = camera_id_from_handle(target)
-            if scope is None:
+            if scope is unset:
                 scope = manageable_camera_ids(db, current_user)
-            if cam_id is None or cam_id not in scope:
+            # None = every camera: an API token whose owner is a superuser
+            # (the token itself is never one) and that has no allow-list.
+            if cam_id is None or (scope is not None and cam_id not in scope):
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Not permitted to control this camera",
                 )
 
-    base_url = row.url.rstrip("/")
-    if validate_app_url(base_url) is not None:
+    if validate_app_url(row.url.rstrip("/")) is not None:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="App URL is blocked by the registry's URL policy",
@@ -1441,6 +1452,22 @@ async def invoke_app_action(
         },
     )
 
+    return await call_app_action(db, row, action_name, params, current_user)
+
+
+async def call_app_action(db: Session, row: InstalledApp, action_name: str,
+                          params: dict[str, Any], current_user,
+                          *, timeout: float = ACTION_PROXY_TIMEOUT_S) -> Any:
+    """POST one action to the app's contract surface as ``current_user``
+    and return its JSON. The caller has already checked the declaration,
+    params, camera and audit (``invoke_app_action``; ``GET /search``'s
+    footage query). An app error or non-JSON answer is a 502."""
+    base_url = row.url.rstrip("/")
+    if validate_app_url(base_url) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="App URL is blocked by the registry's URL policy",
+        )
     # Transport auth between core and the app: a per-app signed call
     # token (SDK ≥ 0.6), and the site key only for apps too old to verify
     # one (services/app_user_context.call_headers). The JWT gate above
@@ -1452,7 +1479,7 @@ async def invoke_app_action(
     # for this app (services/app_user_context.py) so it can render or
     # refuse per user without a login of its own.
     headers.update(user_context_headers(db, row, current_user, purpose="action"))
-    async with httpx.AsyncClient(timeout=ACTION_PROXY_TIMEOUT_S, verify=app_verify()) as client:
+    async with httpx.AsyncClient(timeout=timeout, verify=app_verify()) as client:
         try:
             resp = await client.post(
                 f"{base_url}/actions/{action_name}",

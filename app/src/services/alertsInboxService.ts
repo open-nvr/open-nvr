@@ -136,6 +136,9 @@ export const alertsInboxService = {
 
   // Beyond the browser: phone call / SMS (Twilio) + hooter relay.
   getAlarmActions: () => api.get('/api/v1/alerts-inbox/actions'),
+  // Site arming mode (HA-118): disarmed pauses calls/SMS/hooter only.
+  getSiteMode: () => api.get('/api/v1/site-mode'),
+  setSiteMode: (mode: string) => api.put('/api/v1/site-mode', { mode }),
   putAlarmActions: (actions: Record<string, unknown>) =>
     api.put('/api/v1/alerts-inbox/actions', actions),
   testAlarmActions: () => api.post('/api/v1/alerts-inbox/actions/test', {}),

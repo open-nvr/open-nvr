@@ -148,6 +148,18 @@ server/test_*.py
 !server/tests/**/test_*.py
 # KAI-C's pytest suite (A2.4): same negation pattern as server/tests/.
 !kai-c/test/test_*.py
+# The end-to-end suite (tests/e2e/): same negation pattern again. Without
+# these, `test_*.py` above silently swallows every journey in the suite and
+# the commit ships a harness with no tests in it.
+!tests/e2e/tests/test_*.py
+# Recursive too, like server/tests above: without this the browser tier
+# under tests/e2e/tests/ui/ stays invisible and the commit ships an API
+# suite claiming to have GUI coverage.
+!tests/e2e/tests/**/test_*.py
+!tests/e2e/_template_test.py
+!tests/e2e/_template_ui_test.py
+# The mDNS announcer keeps its unit tests beside it (HA-117).
+!scripts/mdns-announcer/test_*.py
 # Example-app pytest suites (A2.5+): each example/{slug}/tests/ is part
 # of the shipped artifact and must be tracked.
 !examples/**/tests/test_*.py
@@ -161,6 +173,9 @@ server/test_*.py
 # The privileged installer's and the egress proxy's suites, same pattern.
 !scripts/app-installer/tests/test_*.py
 !scripts/egress-proxy/tests/test_*.py
+# Home Assistant integration and pyopennvr suites, same pattern (see
+# docs/design/home-assistant-integration-implementation-plan.md).
+!integrations/home-assistant/**/tests/test_*.py
 # App template smoke test: part of the shipped scaffold — the generator
 # copies it into every new app and FIRST_DETECTOR.md promises it passes
 # out of the box. Without this negation the blanket ``test_*.py`` above
@@ -280,3 +295,11 @@ sdk/opennvr-app-sdk/docs/api/
 
 # make sdk-site output (the published reference; rebuild, never commit)
 sdk/opennvr-app-sdk/site/
+
+# ---------------------------------------------------------------------------
+# End-to-end suite scratch (tests/e2e/run.py)
+# ---------------------------------------------------------------------------
+# Generated secrets (credentials.json, e2e.env), the throwaway stack's
+# recordings, and per-run failure bundles. All reproducible; none of it
+# belongs in git.
+tests/e2e/.artifacts/

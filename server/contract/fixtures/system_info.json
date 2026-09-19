@@ -1,0 +1,51 @@
+{
+  "site_id": "0755a940-1ff5-4861-ac08-1f57bb29a180",
+  "name": "OpenNVR",
+  "version": "0.1.5",
+  "contract_version": "1.1.0",
+  "features": [
+    "correlation_id",
+    "api_tokens",
+    "ws_v2",
+    "entities",
+    "site_mode",
+    "caller_info",
+    "network_info",
+    "card_session",
+    "mqtt_discovery",
+    "search_summary",
+    "camera_describe"
+  ],
+  "recording_pause_enabled": false,
+  "uptime_s": 3600,
+  "latest_version": null,
+  "caller": {
+    "kind": "token",
+    "name": "home-assistant",
+    "scopes": [
+      "alerts.view",
+      "cameras.view",
+      "live.view",
+      "recordings.view",
+      "settings.view"
+    ],
+    "camera_ids": null,
+    "expires_at": null
+  },
+  "server_time": "2026-09-18T08:00:00+00:00",
+  "network": {
+    "webrtc_ice_hosts": true,
+    "rtsps_exposed": false
+  },
+  "passthrough_allowlist": [
+    "/api/v1/cameras/",
+    "/api/v1/live-state",
+    "/api/v1/entities",
+    "/api/v1/events",
+    "/api/v1/alerts-inbox",
+    "/api/v1/search",
+    "/api/v1/site-mode",
+    "/api/v1/system/info"
+  ],
+  "mqtt_discovery": false
+}

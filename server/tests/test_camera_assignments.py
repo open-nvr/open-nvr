@@ -207,3 +207,27 @@ def test_update_dump_round_trips_through_the_model(seeded_client):
     upd = CameraUpdate(assignments=[{"skill": "occupancy_counting"}])
     dumped = upd.model_dump(exclude_unset=True)["assignments"]
     assert dumped == [{"skill": "occupancy_counting"}]
+
+
+def test_roster_analyze_follows_detection_enabled(monkeypatch):
+    """HA-106: detection off drops the camera from Tier-0 (analyze=false);
+    NULL, from cameras that predate the column, means on."""
+    from core.config import settings
+
+    monkeypatch.setattr(settings, "inference_use_mediamtx_tap", False)
+    app, session_factory = _make_app()
+    session = session_factory()
+    session.add(Role(id=1, name="admin"))
+    session.add(User(id=1, username="op", email="op@x", hashed_password="x", role_id=1))
+    for cid, flag in ((1, None), (2, True), (3, False)):
+        session.add(Camera(id=cid, name=f"c{cid}", ip_address=f"10.0.0.{cid}", owner_id=1,
+                           is_active=True, rtsp_url=f"rtsp://cam{cid}/s",
+                           detection_enabled=flag))
+    session.commit()
+    session.close()
+    with TestClient(app) as client:
+        cams = {c["camera_id"]: c for c in
+                client.get("/internal/camera-agent/cameras").json()["cameras"]}
+    assert cams["cam1"]["analyze"] is True
+    assert cams["cam2"]["analyze"] is True
+    assert cams["cam3"]["analyze"] is False

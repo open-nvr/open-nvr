@@ -1,0 +1,161 @@
+blueprint:
+  name: OpenNVR alert notification
+  description: >-
+    Send a phone notification with the picture and a link to the clip when an
+    OpenNVR alert's media is ready. Filter by severity, camera and site mode,
+    keep quiet hours, and throttle with a cooldown. The notification offers
+    "Acknowledge" (acknowledges the alert in OpenNVR) and "Live view".
+    Picture and clip links go through Home Assistant's own address, so they
+    work wherever the phone can reach Home Assistant.
+  domain: automation
+  source_url: https://github.com/open-nvr/open-nvr/blob/main/integrations/home-assistant/hass-opennvr/blueprints/automation/opennvr/alert_notification.yaml
+  input:
+    notify_service:
+      name: Notify action
+      description: The notify action of the phone, for example notify.mobile_app_pixel_8.
+      selector:
+        text:
+    min_severity:
+      name: Minimum severity
+      default: high
+      selector:
+        select:
+          options:
+            - low
+            - medium
+            - high
+            - critical
+    cameras:
+      name: Cameras
+      description: Only alerts from these cameras. Leave empty for all.
+      default: []
+      selector:
+        entity:
+          integration: opennvr
+          domain: camera
+          multiple: true
+    alarm_panel:
+      name: Site mode panel
+      description: The OpenNVR site mode panel. Leave empty to notify in every mode.
+      default: ""
+      selector:
+        entity:
+          integration: opennvr
+          domain: alarm_control_panel
+    site_modes:
+      name: Notify in these site modes
+      default:
+        - armed_home
+        - armed_away
+      selector:
+        select:
+          multiple: true
+          options:
+            - disarmed
+            - armed_home
+            - armed_away
+    quiet_start:
+      name: Quiet hours start
+      description: No notifications from this time...
+      default: "00:00:00"
+      selector:
+        time:
+    quiet_end:
+      name: Quiet hours end
+      description: ...until this time. Same as the start means no quiet hours.
+      default: "00:00:00"
+      selector:
+        time:
+    cooldown:
+      name: Cooldown
+      description: At most one notification per this many minutes.
+      default: 2
+      selector:
+        number:
+          min: 0
+          max: 120
+          unit_of_measurement: min
+
+# Parallel: each run may wait up to an hour for the "Acknowledge" tap, and
+# the next alert must not wait for it.
+mode: parallel
+max: 25
+
+triggers:
+  - trigger: event
+    event_type: opennvr_media_ready
+    event_data:
+      source: alert
+  # An alert about no particular camera has no clip, so no media_ready.
+  - trigger: event
+    event_type: opennvr_alert
+
+variables:
+  min_severity: !input min_severity
+  cameras: !input cameras
+  alarm_panel: !input alarm_panel
+  site_modes: !input site_modes
+  quiet_start: !input quiet_start
+  quiet_end: !input quiet_end
+  cooldown: !input cooldown
+  ranks:
+    low: 1
+    medium: 2
+    high: 3
+    critical: 4
+  alert: "{{ trigger.event.data }}"
+  severity: "{{ alert.severity or 'high' }}"
+  ack_action: "OPENNVR_ACK_{{ alert.config_entry_id }}_{{ alert.id }}"
+
+conditions:
+  - >-
+    {{ trigger.event.event_type == 'opennvr_media_ready'
+       or alert.camera_id is none }}
+  - "{{ ranks.get(severity, 3) >= ranks.get(min_severity, 3) }}"
+  - "{{ not cameras or alert.camera_entity_id in cameras }}"
+  - "{{ not alarm_panel or states(alarm_panel) in site_modes }}"
+  - >-
+    {% set now_t = now().strftime('%H:%M:%S') %}
+    {% if quiet_start == quiet_end %} true
+    {% elif quiet_start < quiet_end %} {{ not (quiet_start <= now_t < quiet_end) }}
+    {% else %} {{ not (now_t >= quiet_start or now_t < quiet_end) }}
+    {% endif %}
+  - >-
+    {{ this.attributes.last_triggered is none or
+       (now() - this.attributes.last_triggered).total_seconds() >= cooldown * 60 }}
+
+actions:
+  - action: !input notify_service
+    data:
+      title: "{{ severity | title }}: {{ alert.title or 'OpenNVR alert' }}"
+      message: >-
+        {{ (state_attr(alert.camera_entity_id, 'friendly_name') if alert.camera_entity_id else none) or 'OpenNVR' }}{% if alert.app %} · {{ alert.app }}{% endif %}
+      data:
+        image: "{{ alert.image_url or '' }}"
+        video: "{{ alert.clip_url or '' }}"
+        url: "{{ alert.clip_url or '' }}"
+        clickAction: "{{ alert.clip_url or '' }}"
+        tag: "opennvr-alert-{{ alert.id }}"
+        group: opennvr
+        push:
+          interruption-level: "{{ 'critical' if severity == 'critical' else 'time-sensitive' if severity == 'high' else 'active' }}"
+        # Live view only for an alert about a camera.
+        actions: >-
+          {% set acts = [{'action': ack_action, 'title': 'Acknowledge'}] %}
+          {% if alert.camera_entity_id %}
+          {% set acts = acts + [{'action': 'URI', 'title': 'Live view',
+                                 'uri': 'entityId:' ~ alert.camera_entity_id}] %}
+          {% endif %}
+          {{ acts }}
+  - wait_for_trigger:
+      - trigger: event
+        event_type: mobile_app_notification_action
+        event_data:
+          action: "{{ ack_action }}"
+    timeout: "01:00:00"
+    continue_on_timeout: false
+  - action: opennvr.ack_alerts
+    data:
+      config_entry_id: "{{ alert.config_entry_id }}"
+      alert_ids:
+        - "{{ alert.id }}"

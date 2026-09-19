@@ -85,6 +85,10 @@ class IntegrationService:
                 return await IntegrationService._test_email(integration.config)
             elif integration.type in ["webhook", "slack", "teams"]:
                 return await IntegrationService._test_webhook(integration)
+            elif integration.type == "mqtt":
+                from services.mqtt_settings import test_connection
+
+                return await test_connection(integration.config)
             else:
                 # For other types, we just acknowledge for now
                 return {
@@ -235,7 +239,7 @@ class IntegrationService:
         finally:
             db.close()
 
-        for integration in rows:
+        async def deliver(integration) -> None:
             try:
                 if integration.type == "email":
                     result = await IntegrationService._send_email(
@@ -250,8 +254,15 @@ class IntegrationService:
                         integration,
                         {"subject": subject, "message": message, **payload},
                     )
+                elif integration.type == "mqtt":
+                    from services.mqtt_settings import publish_once
+
+                    result = await publish_once(
+                        integration.config, "alerts",
+                        {"subject": subject, "message": message, **payload},
+                    )
                 else:
-                    continue
+                    return
                 if not result.get("success"):
                     logger.warning(
                         f"Alert delivery to integration '{integration.name}' "
@@ -261,3 +272,9 @@ class IntegrationService:
                 logger.warning(
                     f"Alert delivery to integration '{integration.name}' raised: {e}"
                 )
+
+        # Side by side: an unreachable broker or mail server must not delay
+        # the others by its connect timeout.
+        import asyncio
+
+        await asyncio.gather(*(deliver(i) for i in rows))

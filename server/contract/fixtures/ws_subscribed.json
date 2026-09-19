@@ -1,0 +1,16 @@
+{
+  "v": 2,
+  "event_type": "subscribed",
+  "epoch": "03f394eb2729",
+  "seq": 316,
+  "filters": {
+    "camera_id": null,
+    "task": null,
+    "types": null,
+    "event_types": [
+      "camera_status",
+      "entity_state"
+    ]
+  },
+  "resumed": false
+}

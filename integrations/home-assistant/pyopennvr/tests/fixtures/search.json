@@ -1,0 +1,43 @@
+{
+  "query": "car at the gate this morning",
+  "interpretation": {
+    "source": "parsed",
+    "labels": [
+      "car"
+    ],
+    "camera_ids": [
+      1
+    ],
+    "text": "",
+    "plate": "",
+    "attrs": [],
+    "zone_id": null,
+    "from": "2026-09-18T00:30:00+00:00",
+    "to": "2026-09-18T06:30:00+00:00",
+    "overridden": []
+  },
+  "results": [
+    {
+      "id": 42,
+      "camera_id": 1,
+      "camera_name": "Gate",
+      "label": "car",
+      "score": 1.0,
+      "started_at": "2026-09-18T05:12:09+00:00",
+      "ended_at": "2026-09-18T05:12:31+00:00",
+      "plate_text": "KA01AB1234",
+      "caption": "a white car at the gate",
+      "attributes": null,
+      "claims": [],
+      "source": "tier0",
+      "event_type": "track",
+      "evidence_url": "/api/v1/events/42/evidence",
+      "anchor": {
+        "camera_id": 1,
+        "at": "2026-09-18T05:12:09+00:00"
+      }
+    }
+  ],
+  "count": 1,
+  "total": 1
+}

@@ -338,8 +338,10 @@ class Indexer(Detector):
             # One fresh connection PER ACTION — it must close with the
             # request or N searches leak N file descriptors (review H1).
             read_store.close()
+        # Hit count only, never the words: the state is shown to every
+        # operator, and a query may come from someone's voice assistant.
         self._recent.append({
-            "message": f"“{query}” — {len(results)} hit"
+            "message": f"search: {len(results)} hit"
                        f"{'' if len(results) == 1 else 's'}",
             "time": _dt.datetime.now(tz=_dt.timezone.utc).isoformat(
                 timespec="seconds"),
