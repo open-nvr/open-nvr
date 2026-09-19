@@ -22,7 +22,8 @@
     "search",
     "caller_info",
     "network_info",
-    "card_session"
+    "card_session",
+    "mqtt_discovery"
   ],
   "rest": [
     {
@@ -449,6 +450,9 @@
           "items": {
             "type": "string"
           }
+        },
+        "mqtt_discovery": {
+          "type": "boolean"
         }
       }
     },

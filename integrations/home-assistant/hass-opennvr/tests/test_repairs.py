@@ -195,3 +195,11 @@ async def test_rtsp_not_exposed_only_when_asked(hass: HomeAssistant, mock_client
         "urls": {"webrtc": f"{URL}/webrtc/cam-1/whep", "rtsps": "rtsps://10.0.0.2:8322/cam-1"}})
     assert await async_get_stream_source(hass, "camera.front_door")
     assert "rtsp_not_exposed" not in _issues(hass, entry)
+
+
+async def test_mqtt_discovery_alongside_warns(hass: HomeAssistant, mock_client: MagicMock,
+                                              mock_stream: type[FakeStream]) -> None:
+    mock_client.get_system_info.return_value = _now_info(mqtt_discovery=True)
+    entry = create_mock_config_entry()
+    await setup_mock_config_entry(hass, entry)
+    assert "mqtt_duplicate" in _issues(hass, entry)

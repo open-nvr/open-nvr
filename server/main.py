@@ -674,6 +674,18 @@ async def lifespan(app: FastAPI):
 
     spawn_background(background_entity_states(), name="entity-state-publisher")
 
+    # Home Assistant MQTT discovery (HA-402): one bridge per enabled MQTT
+    # integration with discovery on. No integration, nothing runs.
+    async def background_mqtt_bridges():
+        try:
+            from services.ha_mqtt_discovery import manager
+
+            await manager.reload()
+        except Exception as e:  # never block startup on a broker
+            main_logger.error(f"MQTT bridges not started: {e}")
+
+    spawn_background(background_mqtt_bridges(), name="mqtt-bridges")
+
     # Operator alert inbox: consume opennvr.alerts.> (the SDK apps'
     # NatsAlertChannel) into app_alerts so the UI bell can ring and
     # acknowledge. Same best-effort posture — no bus, no inbox, no crash.
@@ -709,6 +721,13 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     main_logger.info("Shutting down FastAPI application...")
+
+    try:
+        from services.ha_mqtt_discovery import manager as mqtt_manager
+
+        await mqtt_manager.stop()
+    except Exception as e:
+        main_logger.error(f"Error stopping MQTT bridges: {e}")
 
     # Stop all running inference tasks
     try:

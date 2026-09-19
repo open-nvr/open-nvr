@@ -81,7 +81,18 @@ async def get_system_info(
         "network": _network_facts(db),
         # Read-only paths an integration may relay for a dashboard card.
         "passthrough_allowlist": list(PASSTHROUGH_ALLOWLIST),
+        # Home Assistant MQTT discovery is publishing (HA-402): the native
+        # integration warns, since running both duplicates every entity.
+        "mqtt_discovery": _mqtt_discovery_active(),
     }
+
+
+def _mqtt_discovery_active() -> bool:
+    try:
+        from services.ha_mqtt_discovery import manager
+    except Exception:  # noqa: BLE001 - aiomqtt missing: not active
+        return False
+    return manager.active()
 
 
 def _network_facts(db: Session) -> dict:

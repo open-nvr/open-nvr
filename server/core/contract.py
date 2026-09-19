@@ -42,4 +42,5 @@ FEATURES: tuple[str, ...] = (
     "caller_info",          # HA-202: /system/info reports the caller (token scopes, expiry)
     "network_info",         # HA-206: /system/info server_time and network facts; X-OpenNVR-Error
     "card_session",         # HA-304: POST /api-tokens/session; passthrough_allowlist
+    "mqtt_discovery",       # HA-402: Home Assistant MQTT discovery; /system/info says if on
 )

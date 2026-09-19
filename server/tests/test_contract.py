@@ -66,7 +66,6 @@ def test_every_endpoint_exists_with_its_token_scope():
 
 
 def test_ws_types_and_descriptor_fields_match_the_code():
-    from routers import entities as ent
     from services import entity_descriptors as ed, event_bus_service as ebs
 
     published = {v for k, v in vars(ebs).items() if k.startswith("EVENT_")}
@@ -80,7 +79,10 @@ def test_ws_types_and_descriptor_fields_match_the_code():
     produced = {f.name for f in dataclasses.fields(ed.Descriptor)} - {"state_path"}
     assert produced | {"descriptor_version"} == fields
     handled = {c for c in d["core_controls"]}
-    source = Path(ent.__file__).read_text(encoding="utf-8")
+    # Commands run in services/entity_commands.py (HTTP and MQTT alike).
+    import services.entity_commands as cmds
+
+    source = Path(cmds.__file__).read_text(encoding="utf-8")
     for control in handled:
         assert f'"{control}"' in source, f"core control {control!r} is not handled"
 

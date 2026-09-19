@@ -11,7 +11,8 @@
     "site_mode",
     "caller_info",
     "network_info",
-    "card_session"
+    "card_session",
+    "mqtt_discovery"
   ],
   "recording_pause_enabled": false,
   "uptime_s": 3600,
@@ -43,5 +44,6 @@
     "/api/v1/search",
     "/api/v1/site-mode",
     "/api/v1/system/info"
-  ]
+  ],
+  "mqtt_discovery": false
 }

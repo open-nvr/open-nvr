@@ -55,6 +55,8 @@ export function Integrations() {
   const [type, setType] = useState<IntegrationType>('webhook')
   const [enabled, setEnabled] = useState(true)
   const [config, setConfig] = useState<any>({})
+  // API tokens an MQTT integration can act as (Home Assistant discovery).
+  const [tokens, setTokens] = useState<any[]>([])
 
   const fetchIntegrations = async () => {
     try {
@@ -72,6 +74,10 @@ export function Integrations() {
 
   useEffect(() => {
     fetchIntegrations()
+    apiService.listApiTokens()
+      .then(({ data }: any) => setTokens(
+        (data?.tokens || []).filter((tk: any) => !tk.revoked_at)))
+      .catch(() => setTokens([]))
   }, [])
 
   const resetForm = () => {
@@ -239,6 +245,31 @@ export function Integrations() {
             <Field label="Topic Prefix">
               <input className="input" value={config.topic_prefix || 'opennvr'} onChange={e => setConfig({...config, topic_prefix: e.target.value})} />
             </Field>
+            <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={config.ha_discovery !== false}
+                onChange={e => setConfig({...config, ha_discovery: e.target.checked})} />
+              Home Assistant discovery (devices and entities appear in Home Assistant's MQTT integration)
+            </label>
+            {config.ha_discovery !== false && (
+              <>
+                <Field label="Act as API token">
+                  <select className="input" value={config.api_token_id ?? ''} required
+                    onChange={e => setConfig({...config, api_token_id: e.target.value ? Number(e.target.value) : undefined})}>
+                    <option value="">Choose a token…</option>
+                    {tokens.map(tk => <option key={tk.id} value={tk.id}>{tk.name} ({tk.prefix})</option>)}
+                  </select>
+                  <p className="text-xs text-[var(--text-dim)] mt-1">
+                    Its scopes and cameras decide what is published and which commands Home Assistant may send. Create one under Settings &gt; API Tokens.
+                  </p>
+                </Field>
+                <Field label="Discovery Prefix">
+                  <input className="input" value={config.discovery_prefix || 'homeassistant'} onChange={e => setConfig({...config, discovery_prefix: e.target.value})} />
+                </Field>
+                <p className="text-xs text-[var(--text-dim)]">
+                  Use either this or the native OpenNVR integration in Home Assistant, not both: every entity would appear twice.
+                </p>
+              </>
+            )}
             <Field label="Events">
               <EventsMatrix value={config.events || {}} onChange={v => setConfig({...config, events: v})} />
             </Field>

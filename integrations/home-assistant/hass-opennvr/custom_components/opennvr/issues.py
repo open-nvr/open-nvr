@@ -11,6 +11,7 @@
 | ``rtsp_not_exposed`` | HA asked for an RTSP stream OpenNVR does not publish | ``MEDIAMTX_EXTERNAL_RTSPS_URL`` (optional) |
 | ``clock_skew`` | the clocks differ by more than a minute | NTP |
 | ``ssl_unverified`` | certificate verification is off | a trusted certificate, then reconfigure |
+| ``mqtt_duplicate`` | OpenNVR also publishes MQTT discovery | use one of the two |
 
 Issue ids carry the entry id, so two OpenNVR sites keep separate issues.
 Each is cleared as soon as the condition is gone.
@@ -53,6 +54,7 @@ _SEVERITY = {
     "rtsp_not_exposed": ir.IssueSeverity.WARNING,
     "clock_skew": ir.IssueSeverity.WARNING,
     "ssl_unverified": ir.IssueSeverity.WARNING,
+    "mqtt_duplicate": ir.IssueSeverity.WARNING,
 }
 _LEARN_MORE = {
     "firewall_blocked": f"{DOCS}#tokens",
@@ -116,3 +118,10 @@ def async_check_site(hass: HomeAssistant, entry: ConfigEntry, info: SystemInfo) 
         async_clear(hass, entry, "ssl_unverified")
     else:
         async_raise(hass, entry, "ssl_unverified")
+
+    # OpenNVR's MQTT discovery publishes the same entities to HA's MQTT
+    # integration: running both shows everything twice.
+    if info.raw.get("mqtt_discovery") is True:
+        async_raise(hass, entry, "mqtt_duplicate")
+    else:
+        async_clear(hass, entry, "mqtt_duplicate")

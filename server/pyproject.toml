@@ -27,6 +27,7 @@ dependencies = [
     "SQLAlchemy>=2.0.23",
     "uvicorn[standard]>=0.27.0",
     "WSDiscovery>=2.0.0",
+    "aiomqtt>=2.3",
 ]
 
 [dependency-groups]

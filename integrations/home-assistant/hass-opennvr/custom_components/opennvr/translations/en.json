@@ -222,6 +222,10 @@
     "ssl_unverified": {
       "title": "OpenNVR certificate is not verified",
       "description": "Home Assistant connects to {name} without verifying its certificate (OpenNVR's default certificate is self-signed). Anyone who can intercept that connection could read the API token. Install a trusted certificate on OpenNVR, then reconfigure the integration with certificate verification on."
+    },
+    "mqtt_duplicate": {
+      "title": "OpenNVR entities may appear twice",
+      "description": "{name} also publishes Home Assistant MQTT discovery (an MQTT integration in OpenNVR with Home Assistant discovery on). If Home Assistant's MQTT integration uses the same broker, every OpenNVR entity appears twice. Use one of the two: this integration (live video, media browser, actions) or MQTT discovery (no install), not both."
     }
   },
   "services": {

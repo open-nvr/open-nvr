@@ -85,6 +85,10 @@ class IntegrationService:
                 return await IntegrationService._test_email(integration.config)
             elif integration.type in ["webhook", "slack", "teams"]:
                 return await IntegrationService._test_webhook(integration)
+            elif integration.type == "mqtt":
+                from services.mqtt_settings import test_connection
+
+                return await test_connection(integration.config)
             else:
                 # For other types, we just acknowledge for now
                 return {
@@ -248,6 +252,13 @@ class IntegrationService:
                 elif integration.type == "webhook":
                     result = await IntegrationService._send_webhook(
                         integration,
+                        {"subject": subject, "message": message, **payload},
+                    )
+                elif integration.type == "mqtt":
+                    from services.mqtt_settings import publish_once
+
+                    result = await publish_once(
+                        integration.config, "alerts",
                         {"subject": subject, "message": message, **payload},
                     )
                 else:
