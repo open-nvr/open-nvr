@@ -1,9 +1,55 @@
-# Home Assistant: network setup
+# Home Assistant: setup
 
 Home Assistant talks to OpenNVR over the same HTTPS address your browser uses
 (nginx on port 443). This page lists what to open, and why, when Home
 Assistant runs on **another machine** on your LAN. When it runs on the same
 host, the defaults already work.
+
+## Two ways in
+
+| | OpenNVR integration (recommended) | MQTT discovery |
+|---|---|---|
+| Install | the `opennvr` integration in Home Assistant (HACS) | nothing in Home Assistant beyond its MQTT integration |
+| Needs | an OpenNVR API token | an MQTT broker both can reach, and an API token |
+| Live video, snapshots, media browser, actions, notifications with media, Assist | yes | no |
+| Sensors, switches, selects, buttons, numbers, events, site mode | yes | yes (the same entities) |
+
+Use **one of the two**, not both: every entity would appear twice. The
+integration raises a repair (*"OpenNVR entities may appear twice"*) if
+it sees both running. The older `examples/home-assistant-relay` app is
+deprecated in favour of either.
+
+### MQTT discovery
+In OpenNVR, go to *Settings > Integrations* and add an **MQTT** integration:
+
+- **Broker URL**: `mqtt://host:1883`, or `mqtts://host:8883` for TLS, plus a
+  username and password if the broker needs them;
+- **Home Assistant discovery**: on;
+- **Act as API token**: the token whose scopes and cameras decide what is
+  published and which commands Home Assistant may send. Create a dedicated
+  token under *Settings > API Tokens*: `cameras.view`, and `settings.view`
+  for site entities; add `cameras.manage` (switches), `ptz.control`,
+  `settings.manage` (site mode) only if Home Assistant should control them;
+- **Discovery prefix**: Home Assistant's, `homeassistant` unless you
+  changed it.
+
+*Test* publishes one message. Once saved, Home Assistant's MQTT integration
+lists a device for the server and one for each camera, zone and app.
+
+What goes where (`<site>` is the start of the site id):
+
+| Topic | Content |
+|---|---|
+| `homeassistant/device/opennvr_<site>_<device>/config` | discovery, retained |
+| `opennvr/<site>/status` | `online`, or `offline` (the broker's Last Will) |
+| `opennvr/<site>/<key>/state`, `.../attributes` | the value and its attributes, retained |
+| `opennvr/<site>/<key>/set` | commands from Home Assistant, run as the token and audited as `mqtt:<integration name>` |
+| `opennvr/<site>/<key>/event` | events, as CloudEvents 1.0 JSON |
+| `opennvr/alerts` | every alert, as with the webhook integrations |
+
+Revoking the token takes the devices offline within a minute. Deleting the
+integration, turning discovery off, or moving it to another broker, prefix
+or token removes its devices from Home Assistant.
 
 ## What Home Assistant uses
 

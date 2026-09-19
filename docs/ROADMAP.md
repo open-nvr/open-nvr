@@ -61,6 +61,8 @@ The current release. Everything below is in main and runnable today.
 - `camera-agent` — voice loop over Pipecat + Whisper + Ollama + Piper,
   with BLIP / YOLOv8 / InsightFace as grounded tools.
 - `home-assistant-relay` — MQTT-discovery bridge for HA dashboards.
+  **Deprecated** in favour of the Home Assistant integration and the
+  built-in MQTT discovery (v0.2, below).
 
 ### Developer surface
 - `opennvr-adapter-sdk` published from source (PyPI release wires off
@@ -153,6 +155,22 @@ The headline themes are *new AI capabilities* and *operator polish*.
   decision, not vibes. Motivating case: moondream answering "appears to
   be empty" on a frame with a person directly in front of the lens,
   where qwen3-vl:4b answers correctly.
+
+### Home Assistant
+Design: [docs/design/home-assistant-integration.md](design/home-assistant-integration.md).
+- **Native integration** (`integrations/home-assistant/`: `hass-opennvr`
+  and the `pyopennvr` client library): cameras with WebRTC live view,
+  controls, health, alerts, the media browser, actions, notifications
+  with media relayed through Home Assistant, and a dashboard card
+  session. It connects with a scoped, per-camera **API token**, and
+  every action it takes is audited. Installable once `pyopennvr` is on
+  PyPI and the two repos are split out.
+- **Built-in MQTT discovery**: an MQTT integration with discovery on
+  publishes the same devices and entities to Home Assistant's own MQTT
+  integration, with commands running as the bound API token. It replaces
+  `home-assistant-relay`.
+- **Assist** (tools for Home Assistant's voice and LLM agents), then spikes
+  on an ONVIF server and a Matter bridge.
 
 ### Operator polish
 - **Active Directory / SAML SSO** for staff authentication. v0.1 uses
