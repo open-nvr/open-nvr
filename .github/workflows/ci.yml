@@ -87,6 +87,32 @@ jobs:
         working-directory: sdk/opennvr-app-sdk
         run: uv run --frozen --group dev pytest -q
 
+  # ── Home Assistant integration ───────────────────────────────────
+  # pyopennvr and the integration (integrations/home-assistant/), on the
+  # Python Home Assistant 2026.9 needs; pytest-homeassistant-custom-component
+  # pins homeassistant itself. PyTurboJPEG is the camera component's own
+  # requirement. hassfest validates the manifest, translations, services.
+  home-assistant:
+    name: home-assistant (pytest, hassfest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Install
+        run: |
+          pip install "pytest-homeassistant-custom-component==0.13.365" "PyTurboJPEG==1.8.3"
+          pip install -e integrations/home-assistant/pyopennvr
+      - name: pyopennvr
+        working-directory: integrations/home-assistant/pyopennvr
+        run: python -m pytest -q
+      - name: integration
+        working-directory: integrations/home-assistant/hass-opennvr
+        run: python -m pytest -q -p no:cacheprovider --cov=custom_components.opennvr --cov-fail-under=95
+      - name: hassfest
+        run: docker run --rm -v "$PWD/integrations/home-assistant/hass-opennvr:/github/workspace" ghcr.io/home-assistant/hassfest
+
   # ── KAI-C middleware ─────────────────────────────────────────────
   # kai-c/ uses [dependency-groups] for dev deps (pytest + pytest-
   # asyncio); pyproject sets testpaths = ["test"] (singular) so a

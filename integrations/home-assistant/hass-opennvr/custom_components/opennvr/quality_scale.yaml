@@ -9,10 +9,10 @@ rules:
   config-flow-test-coverage: done
   config-flow: done
   dependency-transparency: done
-  docs-actions: todo
-  docs-high-level-description: todo
-  docs-installation-instructions: todo
-  docs-removal-instructions: todo
+  docs-actions: done
+  docs-high-level-description: done
+  docs-installation-instructions: done
+  docs-removal-instructions: done
   entity-event-setup: done
   entity-unique-id: done
   has-entity-name: done
@@ -24,14 +24,20 @@ rules:
   # Silver
   action-exceptions: done
   config-entry-unloading: done
-  docs-configuration-parameters: todo
-  docs-installation-parameters: todo
+  docs-configuration-parameters: done
+  docs-installation-parameters: done
   entity-unavailable: done
-  integration-owner: todo
+  integration-owner:
+    status: todo
+    comment: >
+      codeowners in manifest.json needs the maintainers' GitHub handles:
+      the owner's decision, made when the repository is split (HA-306).
   log-when-unavailable: done
   parallel-updates: done
   reauthentication-flow: done
-  test-coverage: todo
+  test-coverage:
+    status: done
+    comment: 97% (CI fails under 95%).
 
   # Gold
   devices: done
@@ -43,26 +49,26 @@ rules:
       entry's URL would let anyone on the LAN redirect where the token is sent.
       A moved server is handled by the reconfigure flow instead.
   discovery: done
-  docs-data-update: todo
-  docs-examples: todo
-  docs-known-limitations: todo
-  docs-supported-devices: todo
-  docs-supported-functions: todo
-  docs-troubleshooting: todo
-  docs-use-cases: todo
+  docs-data-update: done
+  docs-examples: done
+  docs-known-limitations: done
+  docs-supported-devices: done
+  docs-supported-functions: done
+  docs-troubleshooting: done
+  docs-use-cases: done
   dynamic-devices: done
   entity-category: done
   entity-device-class: done
   entity-disabled-by-default: done
   entity-translations:
-    status: todo
+    status: exempt
     comment: >
-      Descriptor entities carry the server's (English) names, because an
-      integration release can't know every descriptor a newer server or app
-      adds. HA-305 translates the core catalogue's translation keys and keeps
-      the server name as the fallback.
+      Most entities are described by the OpenNVR server and its AI apps
+      (design section 6.10), which name them; an integration release cannot
+      know the names of descriptors a newer server or app adds. The
+      hand-written entities (site mode panel, server update) are translated.
   exception-translations: done
-  icon-translations: todo
+  icon-translations: done
   reconfiguration-flow: done
   repair-issues: done
   stale-devices: done
