@@ -10,7 +10,8 @@ asked to answer it (``visual_qa``); without, to caption the scene.
 
 No such adapter: ``available: false`` and no description; the caller still
 knows the camera is there. A VLM on a CPU is slow, so one description runs
-at a time and each caller gets a few a minute.
+at a time, at most three wait (each up to 30 s, else ``Busy``), and each
+person gets a few a minute.
 """
 
 from __future__ import annotations
@@ -28,6 +29,9 @@ QA_TASKS = ("visual_qa",)
 #: Descriptions per caller per minute.
 PER_MINUTE = 6
 TIMEOUT_S = 45.0
+#: At most this many callers wait for the model, each at most LOCK_WAIT_S.
+MAX_WAITING = 3
+LOCK_WAIT_S = 30.0
 _ADAPTERS_TTL_S = 60.0
 
 _lock = asyncio.Lock()
@@ -35,12 +39,21 @@ _calls: dict[str, deque[float]] = {}
 _adapters: tuple[float, list[dict]] | None = None
 
 
+_waiting = 0
+
+
 class RateLimited(Exception):
     pass
 
 
+class Busy(Exception):
+    """The model is taken and the queue is full, or the wait ran out."""
+
+
 def _allow(caller: str, now: float | None = None) -> bool:
     now = time.monotonic() if now is None else now
+    for key in [k for k, v in _calls.items() if not v or now - v[-1] > 60]:
+        del _calls[key]  # nobody left in the window: no entry either
     q = _calls.setdefault(caller, deque())
     while q and now - q[0] > 60:
         q.popleft()
@@ -112,8 +125,9 @@ def text_of(body: Any) -> str | None:
 
 
 async def describe(camera, caller: str, question: str | None = None) -> dict[str, Any]:
-    """``{available, description, model, task}``. Raises RateLimited, or
-    LookupError when no frame can be captured."""
+    """``{available, description, model, task}``. Raises RateLimited, Busy,
+    or LookupError when no frame can be captured."""
+    global _waiting
     import httpx
 
     from core.config import settings
@@ -122,6 +136,8 @@ async def describe(camera, caller: str, question: str | None = None) -> dict[str
 
     if not _allow(caller):
         raise RateLimited()
+    if _waiting >= MAX_WAITING:  # refuse before grabbing a frame for nothing
+        raise Busy()
     choice = pick(await _registry(), question)
     if choice is None:
         return {"available": False, "description": None, "model": None, "task": None}
@@ -133,7 +149,16 @@ async def describe(camera, caller: str, question: str | None = None) -> dict[str
     if question:
         params["question"] = params["prompt"] = question
     payload = build_infer_payload(task=task, jpeg_bytes=jpeg, params=params)
-    async with _lock:  # one VLM call at a time
+    if _waiting >= MAX_WAITING:
+        raise Busy()
+    _waiting += 1
+    try:
+        await asyncio.wait_for(_lock.acquire(), LOCK_WAIT_S)
+    except TimeoutError as exc:
+        raise Busy() from exc
+    finally:
+        _waiting -= 1
+    try:  # one VLM call at a time
         try:
             async with httpx.AsyncClient(timeout=TIMEOUT_S, trust_env=False) as client:
                 resp = await client.post(f"{settings.kai_c_url}/api/v1/infer/{name}",
@@ -141,6 +166,8 @@ async def describe(camera, caller: str, question: str | None = None) -> dict[str
         except httpx.HTTPError as exc:
             logger.info("scene description: %s unreachable: %s", name, exc)
             return {"available": False, "description": None, "model": name, "task": task}
+    finally:
+        _lock.release()
     if resp.status_code != 200:
         # 403: refused by KAI-C (sovereignty, approval); 404: gone.
         logger.info("scene description: %s answered %s", name, resp.status_code)

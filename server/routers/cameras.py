@@ -2811,29 +2811,42 @@ async def describe_camera(
     ``question``, its answer. ``available: false`` when no such adapter is
     installed or it declined. Audited: a frame went to a model. 429 past a
     few a minute; 503 when no frame can be captured."""
-    from services import scene_description
+    from types import SimpleNamespace
 
-    camera = CameraService.get_camera_by_id(db, camera_id, current_user.id)
-    if not camera:
+    from core.database import SessionLocal, release
+    from services import scene_description
+    from services.camera_scope import can_view_camera
+
+    row = db.query(Camera).filter(Camera.id == camera_id, Camera.deleted_at.is_(None)).first()
+    if row is None or not can_view_camera(db, current_user, camera_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Camera not found")
+    camera = SimpleNamespace(id=row.id, rtsp_url=row.rtsp_url)
     question = ((body.question or "").strip() or None) if body is not None else None
-    token_id = getattr(current_user, "token_id", None)
-    caller = f"token:{token_id}" if token_id is not None else f"user:{current_user.id}"
+    user_id = current_user.id   # a token's owner: the limit is per person
+    ip = request.client.host if request.client else None
+    agent = request.headers.get("user-agent")
+    # Nothing below needs this session: the frame grab and the model take up
+    # to a minute, and a connection must not sit idle in a transaction.
+    release(db)
     try:
-        result = await scene_description.describe(camera, caller, question)
+        result = await scene_description.describe(camera, f"user:{user_id}", question)
     except scene_description.RateLimited:
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                             detail="Too many descriptions; try again in a minute",
                             headers={"Retry-After": "60"})
+    except scene_description.Busy:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="The image model is busy; try again shortly",
+                            headers={"Retry-After": "30"})
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
-    write_audit_log(
-        db, action="camera.describe", user_id=current_user.id, entity_type="camera",
-        entity_id=camera.id,
-        # Not the question or the answer: they may describe people.
-        details={"model": result["model"], "task": result["task"],
-                 "answered": result["available"], "question": question is not None},
-        ip=request.client.host if request.client else None,
-        user_agent=request.headers.get("user-agent"),
-    )
+    with SessionLocal() as audit_db:
+        write_audit_log(
+            audit_db, action="camera.describe", user_id=user_id, entity_type="camera",
+            entity_id=camera.id,
+            # Not the question or the answer: they may describe people.
+            details={"model": result["model"], "task": result["task"],
+                     "answered": result["available"], "question": question is not None},
+            ip=ip, user_agent=agent,
+        )
     return {"camera_id": camera.id, "at": datetime.now(UTC).isoformat(), **result}

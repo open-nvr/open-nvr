@@ -150,3 +150,28 @@ async def test_ptz_goto_preset(hass: HomeAssistant, api, mock_client: MagicMock)
     assert mock_client.ptz_goto_preset.call_args.kwargs["correlation_id"]
     out = await _tool(hass, "opennvr_ptz_goto_preset", camera="Front door", preset="moon")
     assert out["error"] == "Front door has no preset 'moon'. Presets: Gate"
+
+
+async def test_hidden_cameras_widen_the_page(hass: HomeAssistant, api,
+                                             mock_client: MagicMock) -> None:
+    """Garage is shown but not exposed: its rows are dropped after the
+    server's cut, so the site is asked for a full page."""
+    async_expose_entity(hass, "conversation", FRONT, True)
+    mock_client.search.return_value = {"results": []}
+    await _tool(hass, "opennvr_search_events", query="van")
+    assert mock_client.search.call_args.kwargs["limit"] == 100
+    await _tool(hass, "opennvr_search_events", query="van", camera="Front door")
+    assert mock_client.search.call_args.kwargs["limit"] == 10
+    async_expose_entity(hass, "conversation", "camera.garage", True)
+    await _tool(hass, "opennvr_search_events", query="van")
+    assert mock_client.search.call_args.kwargs["limit"] == 10
+
+
+def test_a_name_on_two_sites_is_ambiguous() -> None:
+    from custom_components.opennvr.llm import _Cam, _find, _ToolError
+
+    a = _Cam(entry=object(), camera_id=1, name="Gate", entity_id="camera.gate")
+    b = _Cam(entry=object(), camera_id=4, name="Gate", entity_id="camera.gate_2")
+    with pytest.raises(_ToolError, match="camera.gate, camera.gate_2"):
+        _find([a, b], "gate")
+    assert _find([a, b], "camera.gate_2") is b

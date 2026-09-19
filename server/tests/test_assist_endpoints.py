@@ -231,7 +231,7 @@ def test_describe_route(env, monkeypatch):  # noqa: F811
     tok = _mint(env, scopes=["cameras.view", "live.view"], camera_ids=[1])
     assert env.client.post("/api/v1/cameras/1/describe",
                            headers=_as(tok["token"])).status_code == 200
-    assert calls[-1][1] == f"token:{tok['id']}"
+    assert calls[-1][1] == "user:1"   # the token's owner: the limit is per person
     assert env.client.post("/api/v1/cameras/2/describe",
                            headers=_as(tok["token"])).status_code == 403
     no_live = _mint(env, name="n", scopes=["cameras.view"])["token"]
@@ -262,3 +262,136 @@ def test_describe_without_an_adapter(monkeypatch):
 
 
 _ = datetime, UTC
+
+
+# ── review hardening (HA-503) ───────────────────────────────────────────
+
+
+def test_narrowed_searches_ask_for_the_apps_maximum(env, data, footage_app):  # noqa: F811
+    asked, _ = footage_app
+    _search(env, q="truck")                                   # admin, no filter
+    _search(env, q="truck", camera_id=1)                      # core filters afterwards
+    tok = _mint(env, scopes=["cameras.view", "recordings.view"], camera_ids=[2])["token"]
+    _search(env, _as(tok), q="truck")                          # a scoped caller
+    assert [a["params"]["limit"] for a in asked] == [25, 200, 200]
+
+
+def test_only_read_shaped_search_actions_are_used(env):  # noqa: F811
+    s = env.Session()
+    s.add(env.models.InstalledApp(
+        id="verb", name="x", version="1", url="http://a:1", enabled=True, config_json={},
+        manifest_json={"actions": [{"name": "search", "params": [
+            {"name": "query"}, {"name": "delete_matches"}]}]}))
+    s.commit()
+    try:
+        assert footage_query.providers(s) == []
+    finally:
+        s.close()
+
+
+def test_call_app_action_as_a_token(env, monkeypatch):  # noqa: F811
+    """The factored-out transport, called with a TokenPrincipal: posts the
+    params to the app's action and returns its JSON, with the timeout given."""
+    import routers.apps as apps_router
+    from services import api_tokens
+
+    seen = {}
+
+    class FakeClient:
+        def __init__(self, timeout=None, verify=None):
+            seen["timeout"] = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            seen.update(url=url, json=json, headers=headers)
+            import httpx
+
+            return httpx.Response(200, json={"results": []})
+
+    monkeypatch.setattr(apps_router.httpx, "AsyncClient", FakeClient)
+    minted = _mint(env, scopes=["cameras.view", "recordings.view"], camera_ids=[1])
+    s = env.Session()
+    try:
+        s.add(env.models.InstalledApp(
+            id="fs", name="x", version="1", url="http://footage-search:9215", enabled=True,
+            manifest_json={"actions": [SEARCH_ACTION]}, config_json={}))
+        s.commit()
+        row = s.get(env.models.InstalledApp, "fs")
+        token = s.get(env.models.ApiToken, minted["id"])
+        owner = s.get(env.models.User, token.owner_user_id)
+        principal = api_tokens._principal(owner, token)
+        import asyncio
+
+        out = asyncio.run(apps_router.call_app_action(s, row, "search", {"query": "x"},
+                                                      principal, timeout=8.0))
+    finally:
+        s.close()
+    assert out == {"results": []} and seen["timeout"] == 8.0
+    assert seen["url"] == "http://footage-search:9215/actions/search"
+    assert seen["json"] == {"query": "x"}
+
+
+def test_describe_calls_kai_c_one_at_a_time(monkeypatch):
+    import asyncio
+
+    import httpx
+
+    import services.kai_c_service as kcs
+
+    async def registry():
+        return [{"name": "moondream", "tasks_advertised": ["visual_qa"]}]
+
+    class Capture:
+        async def capture_frame_bytes(self, url, cid):
+            return b"\xff\xd8jpeg"
+
+    calls = []
+
+    class FakeClient:
+        def __init__(self, timeout=None, trust_env=None):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            calls.append((url, json["params"] if "params" in json else json))
+            await asyncio.sleep(0.05)
+            return httpx.Response(200, json={"result": {"answer": "Yes, a van."}})
+
+    monkeypatch.setattr(scene_description, "_registry", registry)
+    monkeypatch.setattr(kcs, "get_kai_c_service", lambda: Capture())
+    monkeypatch.setattr(scene_description.httpx if hasattr(scene_description, "httpx")
+                        else httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(scene_description, "MAX_WAITING", 1)
+    scene_description._calls.clear()
+    cam = type("C", (), {"id": 4, "rtsp_url": ""})()
+
+    async def scenario():
+        return await asyncio.gather(
+            scene_description.describe(cam, "a", "a van?"),
+            scene_description.describe(cam, "b", "a van?"),
+            scene_description.describe(cam, "c", "a van?"), return_exceptions=True)
+
+    out = asyncio.run(scenario())
+    answered = [o for o in out if isinstance(o, dict)]
+    assert answered and all(o["description"] == "Yes, a van." for o in answered)
+    assert any(isinstance(o, scene_description.Busy) for o in out)   # the queue is full
+    assert calls[0][0].endswith("/api/v1/infer/moondream")
+
+
+def test_describe_route_releases_and_reports_busy(env, monkeypatch):  # noqa: F811
+    async def busy(camera, caller, question=None):
+        raise scene_description.Busy()
+
+    monkeypatch.setattr(scene_description, "describe", busy)
+    r = env.client.post("/api/v1/cameras/1/describe", headers=env.jwt("admin"))
+    assert r.status_code == 503 and r.headers.get("Retry-After") == "30"

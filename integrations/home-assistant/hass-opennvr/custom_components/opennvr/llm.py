@@ -70,9 +70,12 @@ def _cameras(hass: HomeAssistant, assistant: str) -> list[_Cam]:
 
 def _find(cams: list[_Cam], name: str | None) -> _Cam:
     wanted = (name or "").strip().casefold()
-    for cam in cams:
-        if wanted in (cam.name.casefold(), cam.entity_id.casefold()):
-            return cam
+    found = [c for c in cams if wanted in (c.name.casefold(), c.entity_id.casefold())]
+    if len(found) > 1:  # the same name on two sites: the entity id decides
+        raise _ToolError(f"Several cameras are named {name!r}; use one of: "
+                         + ", ".join(c.entity_id for c in found))
+    if found:
+        return found[0]
     raise _ToolError(f"No camera named {name!r}. Cameras: "
                      + (", ".join(c.name for c in cams) or "none exposed"))
 
@@ -96,6 +99,19 @@ def _time(value: str | None) -> datetime | None:
 def _local(iso: str | None) -> str | None:
     parsed = dt_util.parse_datetime(iso or "")
     return dt_util.as_local(parsed).isoformat(timespec="seconds") if parsed else iso
+
+
+#: Rows asked of a site when some of its shown cameras aren't exposed (the
+#: server's own maximum): hidden cameras' rows are dropped here, after the cut.
+WIDE_PAGE = 100
+
+
+def _page(entry: Any, cams: list[_Cam], cam: _Cam | None, limit: int) -> int:
+    if cam is not None:
+        return limit
+    exposed = {c.camera_id for c in cams if c.entry.entry_id == entry.entry_id}
+    shown = set(entry.runtime_data.coordinator.data.cameras)
+    return limit if shown <= exposed else WIDE_PAGE
 
 
 def _entries(cams: list[_Cam], cam: _Cam | None) -> list[Any]:
@@ -169,7 +185,8 @@ class SearchEventsTool(_OpenNVRTool):
                 q=args.get("query"), camera_id=cam.camera_id if cam else None,
                 label=args.get("label"), zone=args.get("zone"), plate=args.get("plate"),
                 from_=start.isoformat() if start else None,
-                to=end.isoformat() if end else None, limit=args["limit"])
+                to=end.isoformat() if end else None,
+                limit=_page(entry, cams, cam, args["limit"]))
             semantic = semantic or bool(found.get("semantic"))
             for r in found.get("results", []):
                 camera = names.get((entry.entry_id, r.get("camera_id")))
@@ -214,9 +231,11 @@ class SummarizePeriodTool(_OpenNVRTool):
         names = {(c.entry.entry_id, c.camera_id): c.name for c in cams}
         cameras: list[dict[str, Any]] = []
         site_alerts: dict[str, int] = {}
-        for entry in _entries(cams, cam):
-            if not entry.runtime_data.coordinator.data.info.has("search_summary"):
-                raise _ToolError("This OpenNVR is too old to summarise; update it.")
+        entries = [e for e in _entries(cams, cam)
+                   if e.runtime_data.coordinator.data.info.has("search_summary")]
+        if not entries:
+            raise _ToolError("This OpenNVR is too old to summarise; update it.")
+        for entry in entries:  # a site too old to summarise is left out
             client = await entry.runtime_data.coordinator.async_viewer_client()
             out = await client.search_summary(start.isoformat(), end.isoformat(),
                                               camera_id=cam.camera_id if cam else None)
@@ -255,7 +274,7 @@ class ListAlertsTool(_OpenNVRTool):
             # so one camera is picked here, from a wider page.
             out = await client.get_alerts(
                 severity=args.get("severity"), unacked=args["unacknowledged_only"],
-                limit=100 if cam else args["limit"])
+                limit=WIDE_PAGE if cam else _page(entry, cams, None, args["limit"]))
             for a in out.get("alerts", []):
                 cid = _camera_num(a.get("camera_id"))
                 if cam is not None and cid != cam.camera_id:

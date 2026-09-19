@@ -4,7 +4,9 @@
 
 ``GET /search?q=`` answers structured questions from core's own tables.
 For descriptive ones ("a red truck at the dock yesterday") it also asks
-every enabled app that declares a ``search`` action taking a ``query``:
+every enabled app that declares a **read-shaped** ``search`` action: its
+parameters are ``query`` and optionally ``limit``, nothing else (an action
+taking anything more is an operator verb, and stays behind the action gate):
 today that is ``examples/footage-search``, which indexes detector labels
 and captioner text off the bus. Reusing it keeps one index and one parser;
 core adds scoping, so a caller only ever sees rows for its own cameras.
@@ -29,6 +31,8 @@ logger = logging.getLogger(__name__)
 
 #: One provider gets this long; Assist waits on the answer.
 PROVIDER_TIMEOUT_S = 8.0
+#: The most rows asked of a provider (footage-search's own ceiling).
+PROVIDER_MAX_ROWS = 200
 
 
 def providers(db: Session) -> list[Any]:
@@ -41,7 +45,7 @@ def providers(db: Session) -> list[Any]:
             if not isinstance(action, dict) or action.get("name") != "search":
                 continue
             names = {p.get("name") for p in action.get("params") or [] if isinstance(p, dict)}
-            if "query" in names:
+            if "query" in names and names <= {"query", "limit"}:
                 found.append((row, "limit" in names))
                 break
     return found
@@ -100,21 +104,33 @@ async def search(db: Session, user, query: str, *, limit: int, scope: set[int] |
     """``(results, sources asked, sources that failed)``. The audit row
     names the apps asked, never the query (operators' words stay out of
     the log, as with app actions)."""
-    from routers.apps import call_app_action
+    from routers.apps import call_app_action, validate_app_config
     from services.audit_service import write_audit_log
 
     found = providers(db)
     if not found:
         return [], [], []
-    if scope is None:  # every camera: every camera that still exists
-        from models import Camera
+    from models import Camera
 
-        scope = {cid for (cid,) in db.query(Camera.id).filter(Camera.deleted_at.is_(None))}
+    every = {cid for (cid,) in db.query(Camera.id).filter(Camera.deleted_at.is_(None))}
+    # The app ranks across all its cameras and times: when core narrows its
+    # rows afterwards, ask for as many as it gives, or a scoped caller's
+    # matches can all fall below the cut.
+    narrowed = ((scope is not None and not every <= scope) or camera_id is not None
+                or bool(label) or from_ is not None or to is not None)
+    want = PROVIDER_MAX_ROWS if narrowed else limit
+    if scope is None:  # every camera: every camera that still exists
+        scope = every
 
     async def ask(row, takes_limit: bool):
         params: dict[str, Any] = {"query": query}
         if takes_limit:
-            params["limit"] = min(max(limit, 1), 200)
+            params["limit"] = min(max(want, 1), PROVIDER_MAX_ROWS)
+        action = next(a for a in row.manifest_json.get("actions") or []
+                      if isinstance(a, dict) and a.get("name") == "search")
+        errors = validate_app_config({"params": action.get("params") or []}, params)
+        if errors:  # the same check the action gate makes
+            raise ValueError("; ".join(errors))
         return await asyncio.wait_for(
             call_app_action(db, row, "search", params, user, timeout=PROVIDER_TIMEOUT_S),
             PROVIDER_TIMEOUT_S + 1)
