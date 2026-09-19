@@ -120,8 +120,9 @@ def async_check_site(hass: HomeAssistant, entry: ConfigEntry, info: SystemInfo) 
         async_raise(hass, entry, "ssl_unverified")
 
     # OpenNVR's MQTT discovery publishes the same entities to HA's MQTT
-    # integration: running both shows everything twice.
-    if info.raw.get("mqtt_discovery") is True:
+    # integration: running both shows everything twice. Only a warning when
+    # this Home Assistant has an MQTT integration to receive them.
+    if info.raw.get("mqtt_discovery") is True and hass.config_entries.async_entries("mqtt"):
         async_raise(hass, entry, "mqtt_duplicate")
     else:
         async_clear(hass, entry, "mqtt_duplicate")

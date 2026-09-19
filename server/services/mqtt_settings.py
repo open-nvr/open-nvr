@@ -66,7 +66,7 @@ class MqttSettings:
         token_id = c.get("api_token_id")
         if token_id is not None and (isinstance(token_id, bool) or not str(token_id).isdigit()):
             raise ValueError("api_token_id must be a token id")
-        ha = c.get("ha_discovery", True) is not False
+        ha = _bool(c.get("ha_discovery", True), "ha_discovery")
         if ha and token_id is None:
             raise ValueError("Home Assistant discovery needs an API token (api_token_id): "
                              "it decides which cameras and entities are published")
@@ -74,7 +74,19 @@ class MqttSettings:
                    username=c.get("username") or None, password=c.get("password") or None,
                    topic_prefix=prefix, ha_discovery=ha, discovery_prefix=discovery,
                    api_token_id=int(token_id) if token_id is not None else None,
-                   tls_insecure=bool(c.get("tls_insecure", False)))
+                   tls_insecure=_bool(c.get("tls_insecure", False), "tls_insecure"))
+
+
+def _bool(value: Any, name: str) -> bool:
+    """A JSON boolean, or its usual spellings; the string "false" is false."""
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ("true", "1", "yes", "on"):
+        return True
+    if text in ("false", "0", "no", "off", "", "none"):
+        return False
+    raise ValueError(f"{name} must be true or false")
 
 
 def _refuse_metadata(host: str) -> None:
@@ -86,6 +98,47 @@ def _refuse_metadata(host: str) -> None:
         return  # a name, not an address
     if addr in _METADATA_ADDRESSES:
         raise ValueError("Refusing to connect to the cloud metadata address")
+
+
+async def check_resolved(host: str) -> None:
+    """Refuse a broker NAME that resolves to the cloud metadata address
+    (``from_config`` only sees literal addresses)."""
+    import asyncio
+    import socket
+
+    from core.config import _METADATA_ADDRESSES
+
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(host, None,
+                                                             type=socket.SOCK_STREAM)
+    except OSError:
+        return  # unresolvable: the connection fails on its own
+    for info in infos:
+        try:
+            addr = ipaddress.ip_address(str(info[4][0]).split("%")[0])
+        except ValueError:
+            continue
+        if addr in _METADATA_ADDRESSES:
+            raise ValueError("Refusing to connect to the cloud metadata address")
+
+
+def failure(exc: BaseException) -> str:
+    """Why a connection failed, in words that don't echo the socket error
+    (which would make the Test button a port scanner's oracle)."""
+    text = str(exc).lower()
+    for needle, words in (
+            ("not authorized", "the broker refused the username or password"),
+            ("bad user name or password", "the broker refused the username or password"),
+            ("certificate", "the broker's TLS certificate did not verify"),
+            ("ssl", "the TLS handshake failed"),
+            ("refused", "the connection was refused"),
+            ("timed out", "the connection timed out"),
+            ("name or service not known", "the broker's name did not resolve"),
+            ("nodename nor servname", "the broker's name did not resolve"),
+            ("temporary failure in name resolution", "the broker's name did not resolve")):
+        if needle in text:
+            return words
+    return "the broker could not be reached"
 
 
 def client(settings: MqttSettings, *, identifier: str | None = None, will=None):
@@ -110,10 +163,13 @@ async def test_connection(config: dict[str, Any]) -> dict[str, Any]:
     except ValueError as exc:
         return {"success": False, "message": str(exc)}
     try:
+        await check_resolved(settings.host)
         async with client(settings) as c:
             await c.publish(f"{settings.topic_prefix}/test", "OpenNVR MQTT test", qos=1)
-    except Exception as exc:  # reported to the operator
-        return {"success": False, "message": f"Could not reach the broker: {exc}"}
+    except ValueError as exc:
+        return {"success": False, "message": str(exc)}
+    except Exception as exc:  # reported to the operator, classified
+        return {"success": False, "message": f"Could not reach the broker: {failure(exc)}"}
     return {"success": True,
             "message": f"Connected to {settings.host}:{settings.port} and published "
                        f"to {settings.topic_prefix}/test"}
@@ -126,9 +182,12 @@ async def publish_once(config: dict[str, Any], suffix: str, payload: dict[str, A
 
     try:
         settings = MqttSettings.from_config({**config, "ha_discovery": False})
+        await check_resolved(settings.host)
         async with client(settings) as c:
             await c.publish(f"{settings.topic_prefix}/{suffix}",
                             json.dumps(payload, default=str), qos=1)
-    except Exception as exc:  # reported per integration by the caller
+    except ValueError as exc:
         return {"success": False, "message": str(exc)}
+    except Exception as exc:  # reported per integration by the caller
+        return {"success": False, "message": failure(exc)}
     return {"success": True, "message": "published"}

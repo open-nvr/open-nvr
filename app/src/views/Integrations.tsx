@@ -76,7 +76,8 @@ export function Integrations() {
     fetchIntegrations()
     apiService.listApiTokens()
       .then(({ data }: any) => setTokens(
-        (data?.tokens || []).filter((tk: any) => !tk.revoked_at)))
+        // Address-limited tokens can't be bound: MQTT commands come from the broker.
+        (data?.tokens || []).filter((tk: any) => !tk.revoked_at && !tk.allowed_cidrs?.length)))
       .catch(() => setTokens([]))
   }, [])
 

@@ -8,7 +8,10 @@ from unittest.mock import MagicMock
 from freezegun.api import FrozenDateTimeFactory
 from pyopennvr import OpenNVRAuthError, OpenNVRNotFoundError, StreamInfo
 import pytest
-from pytest_homeassistant_custom_component.common import async_fire_time_changed
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    async_fire_time_changed,
+)
 from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
 
 from homeassistant.components.camera import async_get_stream_source
@@ -202,4 +205,8 @@ async def test_mqtt_discovery_alongside_warns(hass: HomeAssistant, mock_client: 
     mock_client.get_system_info.return_value = _now_info(mqtt_discovery=True)
     entry = create_mock_config_entry()
     await setup_mock_config_entry(hass, entry)
+    # No MQTT integration in this Home Assistant: nothing would show twice.
+    assert "mqtt_duplicate" not in _issues(hass, entry)
+    MockConfigEntry(domain="mqtt", data={"broker": "b"}).add_to_hass(hass)
+    await entry.runtime_data.coordinator.async_refresh()
     assert "mqtt_duplicate" in _issues(hass, entry)

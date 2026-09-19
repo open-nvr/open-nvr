@@ -29,7 +29,9 @@ In OpenNVR, go to *Settings > Integrations* and add an **MQTT** integration:
   published and which commands Home Assistant may send. Create a dedicated
   token under *Settings > API Tokens*: `cameras.view`, and `settings.view`
   for site entities; add `cameras.manage` (switches), `ptz.control`,
-  `settings.manage` (site mode) only if Home Assistant should control them;
+  `settings.manage` (site mode as an alarm panel; without it, a read-only
+  sensor) only if Home Assistant should control them. A token limited to
+  certain addresses can't be used: commands come from the broker;
 - **Discovery prefix**: Home Assistant's, `homeassistant` unless you
   changed it.
 
@@ -47,9 +49,16 @@ What goes where (`<site>` is the start of the site id):
 | `opennvr/<site>/<key>/event` | events, as CloudEvents 1.0 JSON |
 | `opennvr/alerts` | every alert, as with the webhook integrations |
 
+**The broker is the trust boundary.** Anyone who can publish to it can send
+every command the token allows, so give the broker usernames and passwords
+(and ACLs, if it has them), and give the token no more than Home Assistant
+needs. Retained command messages are ignored, and commands are rate-limited.
+
 Revoking the token takes the devices offline within a minute. Deleting the
 integration, turning discovery off, or moving it to another broker, prefix
-or token removes its devices from Home Assistant.
+or token removes its devices from Home Assistant and clears what it left on
+the broker. That needs the broker to be reachable at that moment; if it
+isn't, delete the devices in Home Assistant by hand.
 
 ## What Home Assistant uses
 

@@ -239,7 +239,7 @@ class IntegrationService:
         finally:
             db.close()
 
-        for integration in rows:
+        async def deliver(integration) -> None:
             try:
                 if integration.type == "email":
                     result = await IntegrationService._send_email(
@@ -262,7 +262,7 @@ class IntegrationService:
                         {"subject": subject, "message": message, **payload},
                     )
                 else:
-                    continue
+                    return
                 if not result.get("success"):
                     logger.warning(
                         f"Alert delivery to integration '{integration.name}' "
@@ -272,3 +272,9 @@ class IntegrationService:
                 logger.warning(
                     f"Alert delivery to integration '{integration.name}' raised: {e}"
                 )
+
+        # Side by side: an unreachable broker or mail server must not delay
+        # the others by its connect timeout.
+        import asyncio
+
+        await asyncio.gather(*(deliver(i) for i in rows))

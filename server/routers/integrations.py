@@ -53,6 +53,12 @@ def _check_mqtt(db: Session, config: dict | None) -> None:
                                         ApiToken.parent_id.is_(None)).first()
         if row is None or row.revoked_at is not None:
             raise HTTPException(status_code=422, detail="api_token_id: no such live API token")
+        if row.allowed_cidrs:
+            raise HTTPException(
+                status_code=422,
+                detail="api_token_id: this token is limited to certain addresses, and MQTT "
+                       "commands arrive from the broker, not an address. Use a token "
+                       "without address restrictions, made for MQTT.")
 
 
 def _reload_mqtt() -> None:
