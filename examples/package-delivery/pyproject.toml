@@ -1,17 +1,14 @@
 [project]
 name = "opennvr-example-package-delivery"
-version = "1.0.0"
-description = "OpenNVR package-delivery example app — porch package arrive / pick-up state machine driven by YOLOv8 through KAI-C"
+version = "1.1.0"
+description = "OpenNVR package-delivery example app — what is waiting at each door, who brought it and who took it; Tier-0 for who and when, a KAI-C skill for what"
 requires-python = ">=3.11"
 license = { text = "AGPL-3.0" }
 
-# The SDK owns the runtime stack (httpx KAI-C calls + webhooks, PyYAML
-# config, nats-py alert fan-out, the FrameApp poll loop and frame
-# sources) — see docs/design/app-sdk-spec.html. Pillow stays local:
-# reading frame dimensions is this app's pipeline concern.
+# The SDK owns the runtime stack: the NATS loop, the platform client
+# (snapshots, evidence, KAI-C inference), alerts and the contract server.
 dependencies = [
     "opennvr-app-sdk",
-    "Pillow>=10.0",
 ]
 
 [tool.uv.sources]
@@ -30,6 +27,9 @@ dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23",
 ]
+
+[project.scripts]
+package-delivery = "package_delivery:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -254,6 +254,17 @@ def test_reconcile_restarts_worker_when_labels_change():
     mgr.reconcile()
     assert len(made) == 4 and made[3].spec.labels is None
 
+    # An app picked for camera b widens its set → b's worker is rebuilt
+    # with the wider allowlist; a is left alone.
+    prov.specs = [
+        _spec("a"),
+        CameraSpec("b", "b", "rtsp://h/b", extra_labels=frozenset({"backpack"})),
+    ]
+    mgr.reconcile()
+    assert len(made) == 5
+    assert made[4].spec.extra_labels == frozenset({"backpack"})
+    assert made[1].stopped and not made[3].stopped
+
 
 def test_reconcile_restarts_worker_when_nvr_camera_id_changes():
     # The worker bakes nvr_camera_id into its VisitLifecycle at start, so a

@@ -96,6 +96,16 @@ export const APP_VERTICALS: AppVertical[] = [
     legacy: (m) => (m.requires_tasks ?? []).includes('abandoned_object'),
   },
   {
+    capability: 'deliveries',
+    to: '/deliveries',
+    // What is waiting at each door, who brought it, who took it, and
+    // today's drop-offs. Named for the thing an operator manages —
+    // "package detection" is the analytic, "deliveries" is what a
+    // homeowner or a front desk actually keeps track of.
+    label: 'Deliveries',
+    legacy: (m) => (m.requires_tasks ?? []).includes('package_delivery'),
+  },
+  {
     capability: 'people',
     to: '/people',
     // The face directory: who is enrolled, who the door just saw, and

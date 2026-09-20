@@ -18,7 +18,7 @@
 
 import { Outlet, NavLink, Link, useLocation } from 'react-router-dom'
 import { DeviceBlockedOverlay } from '../components/DeviceBlockedOverlay'
-import { AlertTriangle, Bell, Boxes, Brain, Briefcase, Camera, Car, ChevronDown, Cloud, Cpu, Database, FileCheck, FileSearch, GitCommitHorizontal, Hourglass, KeyRound, Layers, LifeBuoy, LogOut, Maximize, Menu, Minimize, Monitor, MonitorPlay, Moon, Network, Plug, RefreshCcw, Search as SearchIcon, Settings as SettingsIcon, Shield, ShieldAlert, ShieldCheck, Sun, User as UserIcon, UserRound, Users } from 'lucide-react'
+import { AlertTriangle, Bell, Boxes, Brain, Briefcase, Camera, Car, ChevronDown, Cloud, Cpu, Database, FileCheck, FileSearch, GitCommitHorizontal, Hourglass, KeyRound, Layers, LifeBuoy, LogOut, Maximize, Menu, Minimize, Monitor, MonitorPlay, Moon, Network, PackageCheck, Plug, RefreshCcw, Search as SearchIcon, Settings as SettingsIcon, Shield, ShieldAlert, ShieldCheck, Sun, User as UserIcon, UserRound, Users } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import { apiService } from '../lib/apiService'
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
@@ -198,6 +198,7 @@ export function AppShell() {
     '/loitering': <Hourglass size={16} />,
     '/perimeter': <ShieldAlert size={16} />,
     '/left-items': <Briefcase size={16} />,
+    '/deliveries': <PackageCheck size={16} />,
   }
   const enabledRoutes = enabledVerticals.map((v) => v.to).join(',')
 

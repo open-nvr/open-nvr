@@ -100,6 +100,9 @@ The dialog's **Used by** line lists the apps this camera is selected for.
 
 * **Tier-0**: an `object_detection` row with labels narrows that camera's
   detected classes — the global `DETECT_LABELS` applies everywhere else.
+  An app selected for the camera adds the classes its manifest's
+  `tier0_labels` names on top of either (the narrowing still stands for
+  what it names; see [tier0-consumption.md](tier0-consumption.md)).
   With `DETECT_SKIP_UNASSIGNED=true` in `.env` (off by default), a camera
   whose claims are all detection-free skips Tier-0 entirely. Cameras
   selected for a detection app (occupancy, loitering, line-crossing,

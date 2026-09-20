@@ -35,6 +35,18 @@ def test_manifest_checks():
     assert any("ui_url" in e for e in _report(has_ui=True, ui_mode="external", ui_url="http://{host}:1/").errors) is False
 
 
+def test_tier0_labels_checks():
+    """Tier-0 matches labels lowercased, so a capitalised or padded label
+    would widen nothing — exactly the silent failure the field exists to
+    prevent. Duplicates are harmless, so only a warning."""
+    assert _report(tier0_labels=["backpack", "suitcase"]).ok
+    assert any("lowercase" in e for e in _report(tier0_labels=["Backpack"]).errors)
+    assert any("lowercase" in e for e in _report(tier0_labels=[" suitcase"]).errors)
+    assert any("non-empty string" in e for e in _report(tier0_labels=[""]).errors)
+    dup = _report(tier0_labels=["backpack", "backpack"])
+    assert dup.ok and any("listed twice" in w for w in dup.warnings)
+
+
 def test_param_checks():
     ok = _report(params=[Param("watch_labels", list, default=["person"], suggestions=["car"]),
                          Param("zone", "geometry.polygon", default=[], per_camera=True),

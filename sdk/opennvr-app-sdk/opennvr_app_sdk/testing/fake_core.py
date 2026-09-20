@@ -5,7 +5,7 @@
 Serves the internal routes the platform client (``OpenNVR`` /
 ``AsyncOpenNVR``) and the SDK's registration use, on a loopback port,
 from plain dicts you set up: cameras with assignments, snapshots,
-per-app state (a dict), an alerts inbox, and ``POST /apps/register``
+per-app state (a dict), an alerts inbox, the site mode, and ``POST /apps/register``
 (issues a key on first registration like core does). Every request is
 recorded in ``requests`` so a test can assert what the app asked for.
 
@@ -35,6 +35,9 @@ class FakeCore:
         self.alerts = list(alerts or [])
         self.events = list(events or [])
         self.state: dict[str, Any] = {}
+        #: What ``GET /internal/app/site-mode`` answers; a test flips it to
+        #: "disarmed" to exercise an app's quiet-while-home behaviour.
+        self.site_mode: str = "armed_away"
         self.registrations: list[dict[str, Any]] = []
         self.requests: list[dict[str, Any]] = []
         self.app_key = app_key
@@ -138,6 +141,9 @@ class FakeCore:
             return 200, {"events": self.events}, "application/json"
         if method == "GET" and p == "/api/v1/internal/app/alerts":
             return 200, {"alerts": self.alerts}, "application/json"
+        if method == "GET" and p == "/api/v1/internal/app/site-mode":
+            return 200, {"mode": self.site_mode, "changed_at": None, "changed_by": None,
+                         "modes": ["disarmed", "armed_home", "armed_away"]}, "application/json"
         if p == "/api/v1/internal/app/state" and method == "GET":
             prefix = (query.get("prefix") or [""])[0]
             return 200, {"items": [{"key": k, "value": v} for k, v in self.state.items()

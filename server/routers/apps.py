@@ -937,6 +937,13 @@ async def register_app(
     row.manifest_json = manifest
     row.status = "registered"
     row.last_seen = datetime.now(UTC)
+    # A manifest that gains (or changes) ``tier0_labels`` must reach the
+    # cameras picked BEFORE this version, or the upgrade silently changes
+    # nothing until every camera is unpicked and re-picked.
+    if not created:
+        from services.skill_assignments import sync_app_pick_labels
+
+        sync_app_pick_labels(db, app_id)
     # Per-app credential: issued on first registration, and re-issued
     # whenever the app registers with the SITE key (or a user) and says
     # it holds no key of its own (a fresh container with no persisted

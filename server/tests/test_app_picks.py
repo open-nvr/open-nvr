@@ -315,6 +315,24 @@ def test_an_app_can_declare_it_takes_no_picks(world):
     assert apps["occupancy-counting"]["camera_picker"] is False
 
 
+def test_reregistering_refreshes_pick_labels_from_the_manifest(world):
+    """The boot-time re-register is where an upgraded manifest lands, so
+    that is where picks made before the upgrade learn its tier0_labels."""
+    tc, ids, Session = world["tc"], world["ids"], world["Session"]
+    _pick(Session, "occupancy-counting", ids["gate"])
+    manifest = {**_manifest("occupancy-counting", ["occupancy"]),
+                "tier0_labels": ["backpack", "suitcase"]}
+    r = tc.post("/apps/register", json={"url": "http://occupancy-counting:9200",
+                                        "manifest": manifest},
+                headers={"X-Internal-Api-Key": SITE_KEY})
+    assert r.status_code == 200, r.text
+    s = Session()
+    cam = s.query(Camera).get(ids["gate"])
+    assert cam.assignments == [
+        {"skill": "occupancy_counting", "labels": ["backpack", "suitcase"]}]
+    s.close()
+
+
 def test_uninstall_releases_the_apps_picks():
     """Source lockstep: uninstall must release picks, or plate OCR and
     compute keep running for an app that is gone."""

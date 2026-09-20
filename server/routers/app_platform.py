@@ -19,6 +19,7 @@ Routes (prefix ``/api/v1/internal/app``):
 * ``GET  /plates/stats|summary|sessions``     — the Vehicles-page aggregates
 * ``POST /evidence``                          — store a JPEG, get its path
 * ``GET  /alerts``                            — the app's own inbox rows
+* ``GET  /site-mode``                         — the site's arming state (read-only)
 * ``GET|PUT|DELETE /state[/{key}]``           — durable per-app key/value
 
 Nothing here is reachable with a user JWT: people use the operator API,
@@ -347,6 +348,30 @@ async def app_alerts(
     from routers.alerts_inbox import _row_out
 
     return {"alerts": [_row_out(a) for a in rows]}
+
+
+# ── Site mode: is the site armed? ───────────────────────────────────
+
+
+@router.get("/site-mode")
+async def app_site_mode(
+    principal=Depends(_require_internal_key),
+    db: Session = Depends(get_db),
+):
+    """The site's arming state (HA-118), read-only, same body as the
+    operator's ``GET /site-mode``.
+
+    Deployment-wide rather than roster-scoped: "is anyone home" is a
+    property of the site, not of a camera. An app reads it so a doorbell
+    can stay quiet while the family is in, or a package watcher only
+    escalates when nobody is — instead of each app growing its own
+    schedule knob that drifts from the alarm panel. Arming stays an
+    operator verb (``PUT /site-mode``, ``settings.manage``); no app
+    credential can change it.
+    """
+    from services import site_mode
+
+    return {**site_mode.get(db), "modes": list(site_mode.MODES)}
 
 
 # ── Durable per-app state ───────────────────────────────────────────

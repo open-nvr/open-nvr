@@ -63,6 +63,10 @@ class _FakeCore(BaseHTTPRequestHandler):
             return self._reply(200, b"\xff\xd8ev", "image/jpeg")
         if p == "/api/v1/internal/app/plates/stats":
             return self._reply(200, {"total_reads": 3})
+        if p == "/api/v1/internal/app/site-mode":
+            return self._reply(200, {"mode": "armed_home", "changed_at": None,
+                                     "changed_by": None,
+                                     "modes": ["disarmed", "armed_home", "armed_away"]})
         if p == "/api/v1/internal/app/alerts":
             return self._reply(200, {"alerts": [{"id": 1, "acknowledged_at": None}]})
         if p == "/api/v1/internal/app/state":
@@ -135,6 +139,17 @@ def test_timeline_and_alerts(core):
     assert nvr.timeline.plate_stats(days=3) == {"total_reads": 3}
     assert nvr.alerts.inbox(unacked=True) == [{"id": 1, "acknowledged_at": None}]
     assert _FakeCore.log[-1]["query"]["unacked"] == "true"
+
+
+def test_site_mode_is_read_through_the_app_door(core):
+    """Deployment-wide, read-only, and carried by the app key like every
+    other read — an app never needs an operator JWT to know whether the
+    site is armed."""
+    nvr = OpenNVR(core)
+    mode = nvr.site_mode()
+    assert mode["mode"] == "armed_home" and "disarmed" in mode["modes"]
+    assert _FakeCore.log[-1]["path"] == "/api/v1/internal/app/site-mode"
+    assert _FakeCore.log[-1]["key"] == APP_KEY
 
 
 def test_state_roundtrip_and_write_errors(core):

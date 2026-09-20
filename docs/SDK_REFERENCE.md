@@ -48,7 +48,7 @@ CLI, loads config, wires signals).
 
 | Name | Purpose |
 |---|---|
-| `AppManifest` | Identity + schema: `id`, `name`, `version`, `category`, `summary`, `requires_tasks`, `requires_adapters`, `requires_scopes`, `provides`, `subscribes`, `params`, `emits`, `state_schema`, `actions`, `has_ui` / `ui_mode` / `ui_url`, `description`, `author`, `website`, `license`, `use_cases`, `contact`, `pricing`, `price_note`, `entitlement` |
+| `AppManifest` | Identity + schema: `id`, `name`, `version`, `category`, `summary`, `requires_tasks`, `requires_adapters`, `requires_scopes`, `provides`, `subscribes`, `params`, `emits`, `state_schema`, `actions`, `tier0_labels` (classes the app needs Tier-0 to track; the platform widens Tier-0 with them on the cameras picked for the app — see [tier0-consumption.md](tier0-consumption.md)), `has_ui` / `ui_mode` / `ui_url`, `description`, `author`, `website`, `license`, `use_cases`, `contact`, `pricing`, `price_note`, `entitlement` |
 | `Param` | One config field the catalog renders (`key`, `type`, `default`, `per_camera`, …) |
 | `AlertType` | One kind of alert the app `emits` |
 | `StateView` | One live view of `/state` the catalog renders (`state_schema`) |
@@ -72,6 +72,7 @@ nvr = OpenNVR()                      # OPENNVR_URL + the app's own key
 | `.recordings(camera)` → `RecordingsAPI` | `.list(start, end)`, `.url(start, duration)`, `.frame_at(at)` |
 | `.timeline` → `TimelineAPI` | `.search(camera=, label=, …)`, `.evidence(event_id)`, `.plate_stats()`, `.plate_summary()`, `.plate_sessions()` |
 | `.alerts` → `AlertsAPI` | `.inbox(unacked=, limit=, after_id=)` — what this app raised, and whether anyone acknowledged it |
+| `.site_mode() -> dict \| None` | The site's arming state (`mode`: `disarmed` / `armed_home` / `armed_away`, plus `changed_at`, `changed_by`, `modes`); deployment-wide and read-only — arming is the operator's verb. `None` = core could not be asked, not "disarmed" |
 | `.state` → `StateAPI` | `.get`, `.set`, `.delete`, `.items(prefix)` — durable per-app key/value in core |
 | `.ai` → `AIAPI` | `.capabilities()`, `.infer(adapter, jpeg, task=…)`, `.stream(adapter, camera_id=…)` |
 | `Camera` | `id`, `handle` (`camN`), `name`, `role`, `frame_url`, `assignments`; `.has_skill(s)` |

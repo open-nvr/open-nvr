@@ -103,6 +103,7 @@ def test_timeline_alerts_state(stack):
         assert await nvr.timeline.evidence(9) == b"\xff\xd8ev"
         assert await nvr.timeline.plate_stats(days=3) == {"total_reads": 3}
         assert await nvr.alerts.inbox(unacked=True) == [{"id": 1, "acknowledged_at": None}]
+        assert (await nvr.site_mode())["mode"] == "armed_home"
         assert await nvr.state.get("missing", default="d") == "d"
         await nvr.state.set("cooldown", {"cam1": 12.5})
         assert await nvr.state.get("cooldown") == {"cam1": 12.5}

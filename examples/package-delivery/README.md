@@ -1,230 +1,140 @@
-# package-delivery example app
+# Package Delivery
 
-The fourth producer-side first-party OpenNVR example. Watches a porch
-camera, drives YOLOv8 object detection through KAI-C, runs a per-track
-state machine, and fires alerts when a package **arrives**, optionally
-when it has been **lingering** for too long, and when it's **gone** —
-with severity routed by whether a person was seen at pickup time.
+What is waiting at each door, who brought it, and who took it.
 
-The whole point of this example is the **state machine**: most OpenNVR
-examples are stateless predicates ("is there a person in this zone right
-now?"). Package delivery is a duration-based predicate ("did something
-arrive, sit, and then disappear?") and the predicate forks easily into
-"car arrived and stayed", "dog left the yard", "shed door open longer
-than X" — copy this folder and replace the state machine with yours.
+The question a person has about their doorstep is not "was a suitcase
+detected" but "is my parcel still there, and if not, who has it". This
+app answers that, and it gets a first-class page — **Deliveries** — with
+the doors, what is waiting since when, today's deliveries with their
+before/after photos, and the buttons a person actually needs: collected,
+not a package, snooze, acknowledge, check now.
 
-## What it does
+## How it works
 
-```
-┌─────────────┐    every poll_interval_seconds
-│  Porch cam  │ ────────────────────────────────┐
-└─────────────┘                                 │
-                                                ▼
-                              ┌───────────────────────────────────┐
-                              │ frame_sources.fetch (HTTP / file) │
-                              └──────────────┬────────────────────┘
-                                             │ frame JPEG bytes
-                                             ▼
-                              ┌───────────────────────────────────┐
-                              │ KAI-C → YOLOv8 adapter            │
-                              │  POST /api/v1/infer/yolov8        │
-                              │  body: {"frame_b64": "<...>"}     │
-                              └──────────────┬────────────────────┘
-                                             │ Detection[]
-                                             ▼
-                              ┌───────────────────────────────────┐
-                              │ PackagePipeline                   │
-                              │   • filter to package_labels      │
-                              │   • apply per-camera ROI          │
-                              │   • split person sightings out    │
-                              └──────────────┬────────────────────┘
-                                             │ FrameReads
-                                             ▼
-                              ┌───────────────────────────────────┐
-                              │ IouTracker (per camera)           │
-                              │   • greedy IoU match              │
-                              │   • per-track hits / misses       │
-                              └──────────────┬────────────────────┘
-                                             │ track ids
-                                             ▼
-                              ┌───────────────────────────────────┐
-                              │ PackageDelivery state machine     │
-                              │   new → arrived → (lingering) →   │
-                              │     gone (owner | stranger)       │
-                              └──────────────┬────────────────────┘
-                                             │ Alert
-                                             ▼
-                              ┌───────────────────────────────────┐
-                              │  AlertDispatcher                  │
-                              │  stdout / webhook / NATS          │
-                              └───────────────────────────────────┘
-```
+Two kinds of evidence, each used for what it is good at.
 
-A single `correlation_id` flows through every step so KAI-C's audit
-log joins the chain end-to-end: detector inference → state-machine
-event → alert.
+**Tier-0, always on, for who and when.** The detection stream the
+platform already produces says when a person walks up to the door and
+leaves, and whether a van or a car stopped outside. That is the trigger:
+somebody left the doorstep, so the doorstep may have changed. It costs
+nothing extra — no frame is fetched and no model runs during the hours
+in which nobody comes.
 
-## Why the state machine matters
+**A KAI-C skill, on demand, for what.** COCO, which Tier-0 runs, has no
+package class at all. So when the trigger fires the app waits a few
+seconds for the courier to clear the step, takes one snapshot, and asks
+the best skill this box has to count the parcels inside the drawn porch
+zone. It asks KAI-C what is registered and chooses, best first:
 
-Stateless predicates are easy: "person in zone right now → fire."
-Duration-based predicates need state: a single missed detection
-shouldn't fire "package gone" if the package will reappear in the next
-frame; a single false positive shouldn't fire "package arrived" if it
-won't show up again. The state machine here is two integers per track
-(`hits`, `misses`) and a `state` string:
+| Skill registered in KAI-C | How parcels are counted | Quality |
+| --- | --- | --- |
+| an adapter advertising `package_detection` | its detections inside the zone | good |
+| an object detector whose classes include a box/parcel | those detections inside the zone | good |
+| a VQA model (`vqa` — moondream, qwen-vl, …) | "How many parcels or boxes are on the doorstep? Answer with a number." | fair |
+| none of the above | the COCO bag classes on the Tier-0 stream stand in (`suitcase`, `backpack`, `handbag`) | proxy |
 
-| State | Enters when | Exits to |
-|---|---|---|
-| `new` | track is created (first detection) | `arrived` once `hits >= arrive_consecutive_hits` |
-| `arrived` | arrival fires | `lingering` if `linger_alert_after_seconds > 0` and the threshold elapses (one-shot — fires once per track); `gone` if `misses >= gone_consecutive_misses` |
-| `lingering` | linger alert fires | `gone` if `misses >= gone_consecutive_misses` |
-| `gone` | gone alert fires | track dropped from the tracker |
+The choice is re-made every five minutes, so installing a package
+model this afternoon takes effect this afternoon, and the page says
+which skill is counting and how far to trust it. On a stock install
+the platform widens Tier-0 to the stand-in classes on the cameras
+picked for this app (`tier0_labels` in the manifest), so the proxy works
+without touching `DETECT_LABELS`.
 
-Tuning the two thresholds is the operator's main knob: bump
-`arrive_consecutive_hits` to reduce false-positive arrivals; bump
-`gone_consecutive_misses` to ride through a single noisy frame where the
-detector misses the box.
+Re-counts also run on a cadence — every 15 minutes while parcels wait,
+hourly otherwise — to catch the collection nobody walked past the
+camera for and the delivery Tier-0 missed.
 
-## Owner vs porch pirate
+### Delivered, collected, taken
 
-When a package disappears, the orchestrator looks back
-`pickup_person_lookback_seconds` for a person detection inside the same
-porch ROI. If it finds one, the pickup is filed as **owner** (info
-severity); if not, as **stranger** (high severity). It's a heuristic —
-trees can flag as persons in some YOLOv8 weights, a delivery person
-might also count as "stranger" — but it's a useful first filter so
-homelab users aren't getting high-severity alerts every time they bring
-in their own boxes.
+A count going up after someone left is a delivery; a count going down is
+a pick-up. The severity of a pick-up is decided by evidence, and every
+reason is kept and shown on the page and in the alert:
 
-Set `pickup_person_lookback_seconds: 0` in config to disable the
-heuristic entirely; every disappearance then fires as "info" so you
-review every pickup yourself.
+- **a known face** at that door within the window — Smart Doorbell's
+  `known_visitor` alert on the bus — makes it an owner pick-up;
+- **the same person who brought it** taking it straight back is a
+  courier correcting a mis-delivery, not a theft;
+- **outside delivery hours**, a **quick grab** by somebody else within
+  minutes of the delivery (the follow-the-van pattern), and a site that
+  is **armed away** each weigh towards *taken*; a site that is *disarmed*
+  weighs the other way;
+- a vehicle that stopped outside is recorded as context — thieves drive
+  too, so it decides nothing on its own;
+- **nobody seen** at all (wind, a courier out of view, a count that
+  wobbled) is reported gently, never as an accusation.
 
-The snapshot attached to a "gone" alert is the **camera frame at the
-moment the disappearance was confirmed** (i.e. after
-`gone_consecutive_misses` blank frames) — NOT a snapshot of the
-pickup itself. The pickup happened some seconds earlier. For
-pickup-moment evidence, configure the camera to publish continuous
-inference events through KAI-C and pair this example with
-`alerts-subscriber/` riding the same NATS subject.
+A pick-up with no identity information is reported as *unknown* at low
+severity, not dressed up as theft. The person can say who it was from
+the page; a *taken* alert is high severity and always fires.
 
-## Honesty up front
+Parcels are state, not events: a parcel waiting since 12:18 is one parcel
+with one clock however many times a shadow moves over it. Reminders
+come on the cadence you set, stop when acknowledged or snoozed, and stop
+for good when it is collected — the next delivery starts them again.
 
-Real-world failure modes the example does NOT yet handle:
+### What the platform gives Home Assistant
 
-* **No "package" class in stock YOLOv8.** The COCO model the YOLOv8
-  adapter ships with knows `suitcase`, `backpack`, `handbag` — not
-  `package`. The defaults use those three COCO labels as proxies,
-  which works for medium-large cardboard boxes and soft parcels but
-  misses small envelopes. For a real package detector, swap in custom
-  YOLOv8 weights trained on your porch footage via the YOLOv8
-  adapter's `OPENNVR_YOLOV8_MODEL` env var.
-* **Track identity across long gaps.** The IoU tracker matches frame
-  to frame. If a package is moved (kicked aside, repositioned by the
-  homeowner) by more than its own size, it drops the track and starts
-  a new one — which fires a fresh "arrived" event. Increasing the
-  poll interval or the IoU threshold makes this worse, not better.
-* **Stranger ≠ porch pirate.** YOLOv8's `person` class fires for
-  delivery drivers, neighbours, kids playing — anyone with a body.
-  The heuristic flags "person was here when the package vanished",
-  not "person who took the package wasn't authorised". For real
-  identity matching, chain the InsightFace adapter (see
-  `smart-doorbell/` for the pattern).
-* **Weather / lighting.** The detector is what KAI-C / YOLOv8 ship.
-  Heavy rain, a brown box on a brown door, harsh midday shadows — all
-  push confidence below the threshold. Set `detection_confidence`
-  conservatively and review false negatives over a real day's footage
-  before relying on the alerts.
+Declared in the manifest, rendered by the platform: parcels waiting
+(site and per door, as a count and as an occupancy sensor), deliveries
+and parcels taken today, last delivery per door, and *Collected* and
+*Acknowledge* buttons per door.
 
-## Quick start
+## Setup
+
+Install from the App Catalog, pick the doors, and **draw the porch zone**
+around the step where parcels are actually left. Nothing drawn means the
+whole frame, which counts the plant pot and the doormat too; the page
+says which doors still need one. Set the delivery hours for your area.
+
+For the best counts, register a package-capable skill with KAI-C: a
+dedicated package detector, an object detector with a box class, or a
+VQA model. The page shows what is in use. The shipped Moondream adapter
+(`moondream-vlm` in AI Adapters) is enough to move the counter from
+*proxy* to *fair* on a stock install.
+
+### Accuracy, and fine-tuning for your porch
+
+No general model knows *your* doorstep. A parcel in the rain on a dark
+mat, a padded mailer against a stone step, a camera looking straight
+down — each of these is where a stock detector wobbles, and where a
+model trained on that one camera's frames does better. The app is
+designed so that this is a skill you add, not a change to the app: a
+`package_detection` adapter fine-tuned on frames from your own cameras
+registers with KAI-C and is picked over everything else the next time
+the app looks (within five minutes), with no restart.
+
+Where to start is the openly licensed *package at front door* set
+(1,293 doorstep images, MIT) and Roboflow's public *packages* set
+(CC0), fine-tuned on a small YOLO and packaged with the adapter contract
+(`docs/AI_ADAPTER_CONTRACT.md`, `docs/CONTRIBUTING_ADAPTERS.md`). For a
+deployment where the counts matter — a building lobby, a business
+receiving stock — plan on fine-tuning with a few hundred frames from
+the actual cameras; the *Not a package* and *Collected* buttons on the
+Deliveries page are the corrections such a set is built from. If you
+would like help training a model for your site, or want your adapter
+listed in the catalog, open an issue on the OpenNVR repository.
+
+## Standalone
 
 ```bash
-# 1. Start the YOLOv8 adapter (in the ai-adapter repo)
-#    YOLOv8 ships with the OpenNVR ai-adapter image. First boot
-#    downloads the ~50MB ONNX weights to /app/model_weights —
-#    mount a host directory there so the download persists.
-cd ai-adapter
-docker build -f adapters/yolov8/Dockerfile -t opennvr/yolov8-adapter:local .
-OPENNVR_ADAPTER_TOKEN=$(openssl rand -hex 16)
-mkdir -p model-weights
-docker run --rm -d --name yolov8 -p 9001:9001 \
-  -e OPENNVR_ADAPTER_TOKEN=$OPENNVR_ADAPTER_TOKEN \
-  -v $(pwd)/model-weights:/app/model_weights \
-  opennvr/yolov8-adapter:local
-
-# 2. Start KAI-C and register the adapter
-cd ../open-nvr/kai-c
-INTERNAL_API_KEY=$(openssl rand -hex 32)
-AI_SOVEREIGNTY=local_only INTERNAL_API_KEY=$INTERNAL_API_KEY \
-  python -m uvicorn main:app --host 0.0.0.0 --port 8100 &
-curl -X POST http://localhost:8100/api/v1/adapters/register \
-  -H "X-Internal-Api-Key: $INTERNAL_API_KEY" -H "Content-Type: application/json" \
-  -d '{"name":"yolov8","url":"http://127.0.0.1:9001"}'
-
-# 3. Configure
-cd ../examples/package-delivery
-cp config.example.yml config.yml
-# edit config.yml: kaic_api_key, camera frame_url, porch roi (optional but
-# strongly recommended — otherwise every backpack crossing the frame fires)
-
-# 4. Run the daemon
-python package_delivery.py --config config.yml
+cp config.example.yml config.yml   # nats_url, cameras with porch zones
+uv sync && uv run package-delivery --config config.yml
+uv run pytest
 ```
 
-You'll see lines like:
+`config.example.yml` documents every key. With `opennvr_url` set and no
+`cameras:` list, cameras and zones come from the App Catalog. Set
+`KAIC_URL` (or `kaic_url`) so the app can ask KAI-C what can count.
 
-```
-2026-05-23T14:10:43+00:00 INFO  package-delivery: started: 1 cameras, poll=3.0s, package_labels=['suitcase', 'backpack', 'handbag']
-ALERT [INFO] 2026-05-23T14:11:02+00:00 camera=front-porch title='Package arrived on front-porch' correlation_id=a4f1b... alert_id=alrt_8c2d31
-ALERT [HIGH] 2026-05-23T16:02:54+00:00 camera=front-porch title='Package gone from front-porch (no person seen)' correlation_id=8d3f5... alert_id=alrt_91e2bb
-```
+## Upgrading from 1.0
 
-## Telegram / ntfy / Discord delivery
-
-Same shape as `smart-doorbell`: every alert ships a base64 JPEG in
-`evidence.snapshot_b64`. A small downstream relay (≈15 lines of
-Python, n8n, or Node-RED) reads the field and forwards the image to
-your channel of choice. See `alerts-subscriber/` for the template.
-
-## Operate
-
-| Mode | Command |
-|---|---|
-| Daemon (continuous polling) | `python package_delivery.py --config config.yml` |
-| Single cycle (debug / cron) | `python package_delivery.py --config config.yml --once` |
-| Verbose logs | `python package_delivery.py --config config.yml --log-level DEBUG` |
-
-## Configure
-
-See `config.example.yml` for the full set. The interesting knobs:
-
-| Field | Default | Effect |
-|---|---|---|
-| `package_labels` | `[suitcase, backpack, handbag]` | COCO classes that count as "package". Swap in your custom class name once you have a trained model. |
-| `person_labels` | `[person]` | Used only for the owner-vs-stranger heuristic. Set `[]` to disable. |
-| `detection_confidence` | `0.35` | YOLOv8 confidence floor. Start here; tighten if you see false arrivals. |
-| `arrive_consecutive_hits` | `2` | Frames in a row before "arrived" fires. Higher = less flicker, more latency. |
-| `gone_consecutive_misses` | `3` | Missed frames before "gone" fires. Higher = ride through detector blips. |
-| `iou_threshold` | `0.30` | IoU threshold for matching detections to existing tracks across frames. |
-| `linger_alert_after_seconds` | `0` | Fire one "still here after Xh" alert per package. `0` disables. |
-| `pickup_person_lookback_seconds` | `8.0` | Window for the owner-vs-stranger heuristic. `0` disables (every pickup fires info). |
-| `cameras[].roi` | unset | Per-camera porch ROI. Detections outside are ignored. Highly recommended; without it, every backpack crossing the frame can fire. |
-
-## Tests
-
-```
-cd examples/package-delivery
-uv sync --extra dev
-uv run pytest -q
-```
-
-Tests cover:
-
-* Config validation (kaic url, malformed ROIs, label normalisation)
-* Bbox parsing across the §5.1 canonical dict shape + list shapes
-* ROI point-in-polygon + AABB
-* IoU helper + greedy tracker matching
-* State machine transitions: arrival threshold, gone threshold, linger
-* Owner-vs-stranger severity routing
-* Snapshot attachment + size cap behaviour
-* Dedup of repeat arrivals within the window
+1.0 drove its own detector through KAI-C every three seconds and could
+only see the COCO bag classes; it rated a pick-up by whether *anybody*
+was seen, which told you nothing about who. 1.1 rides Tier-0, counts
+on demand with whatever skill the box has, and rates pick-ups by
+evidence. The `roi` per-camera key still loads (it is the `zone` now);
+the 1.0 tuning knobs (`poll_interval_seconds`, `arrive_consecutive_hits`,
+`gone_consecutive_misses`, `linger_alert_after_seconds`,
+`pickup_person_lookback_seconds`, `dedup_window_seconds`) are ignored.
+Alert kinds are `package_delivered`, `package_picked_up`,
+`package_taken` and `package_reminder`.

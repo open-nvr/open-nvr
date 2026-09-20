@@ -85,6 +85,27 @@ Use `opennvr_app_sdk.tier0.tier0_to_detections(event)` instead of
 hand-rolling the bbox maths — it does the pixel→normalised conversion and
 skips malformed tracks.
 
+## Classes Tier-0 does not track by default
+
+Tier-0 tracks only the deployment's `DETECT_LABELS` (default `person,
+car, truck, bus, motorcycle, bicycle, cat, dog`). An app that rides it for
+anything else — a bag, a parcel — sees nothing on a stock install, with
+no error anywhere. Declare what you need in the manifest:
+
+```python
+MANIFEST = AppManifest(..., tier0_labels=["backpack", "handbag", "suitcase"])
+```
+
+When an operator picks a camera for the app, the platform stores those
+labels on the app's pick and Tier-0 **widens** that camera's tracked set
+with them (an upgraded manifest reaches cameras picked earlier on the
+app's next registration). Widening is additive: the global set, or an
+operator's `object_detection` narrowing on the camera page, still
+decides the base — narrowing keeps winning for what it names — and every
+picked app's classes are added on top. Cameras the app is not picked
+for are untouched. Lowercase COCO names; a custom Tier-0 model's classes
+work the same way.
+
 ## What Tier-0 gives you for free
 
 Beyond costing nothing (one detector, N subscribers — versus every app

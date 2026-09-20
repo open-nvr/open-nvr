@@ -492,6 +492,23 @@ class OpenNVR:
     def recordings(self, camera) -> RecordingsAPI:
         return RecordingsAPI(self._http, _camera_id(camera))
 
+    # ── site ───────────────────────────────────────────────────────
+
+    def site_mode(self) -> dict | None:
+        """The site's arming state: ``{"mode", "changed_at", "changed_by",
+        "modes"}``, or ``None`` when core cannot be asked.
+
+        ``mode`` is ``"disarmed"``, ``"armed_home"`` or ``"armed_away"``
+        (the full list rides along as ``modes``). Deployment-wide, not
+        per camera: a doorbell that should stay quiet while the family
+        is home, or a package watcher that only escalates when nobody
+        is in, reads this rather than growing its own schedule knob.
+        Read-only — arming is the operator's (and Home Assistant's) verb,
+        never an app's. Treat ``None`` as "unknown", not "disarmed".
+        """
+        body = self._http.get_json("/api/v1/internal/app/site-mode")
+        return body if isinstance(body, dict) else None
+
     def close(self) -> None:
         self._http.close()
 

@@ -164,6 +164,14 @@ class CameraSpec:
     # nothing declared. In _baked, so an assignment change restarts the
     # worker on the next reconcile tick like a label change does.
     skills: frozenset[str] | None = None
+    # Labels the camera's app picks ADD to its tracked set (from each
+    # app's manifest ``tier0_labels``, projected onto the pick's entry by
+    # core). Kept apart from ``labels`` because that field's None means
+    # "the global set", and the union has to be taken against the real
+    # global set — see allowed_labels_for. In _baked like the others, so
+    # an app being picked for a camera restarts its worker with the
+    # wider set on the next reconcile tick.
+    extra_labels: frozenset[str] | None = None
 
 
 def hwaccel_for(spec: "CameraSpec", default: str) -> str:
@@ -180,12 +188,19 @@ def hwaccel_for(spec: "CameraSpec", default: str) -> str:
 def allowed_labels_for(spec: "CameraSpec") -> frozenset[str] | None:
     """The label allowlist THIS camera's pipeline should run with.
 
-    The camera's assignment wins when declared; else the global env
-    (DETECT_LABELS, defaulting to the curated track set). Factored out of
-    the worker so the precedence is testable without opening a stream."""
-    if spec.labels is not None:
-        return spec.labels
-    return _env_labels("DETECT_LABELS", DEFAULT_TRACK_LABELS)
+    The camera's ``object_detection`` assignment wins when declared; else
+    the global env (DETECT_LABELS, defaulting to the curated track set).
+    On top of EITHER, the classes the camera's app picks asked for
+    (``extra_labels``) are added — an operator narrowing to "person"
+    still gets the bag the abandoned-object app needs, and the app still
+    sees it. A global "all" (None) already tracks everything, so there
+    is nothing to add. Factored out of the worker so the precedence is
+    testable without opening a stream."""
+    base = spec.labels if spec.labels is not None else _env_labels(
+        "DETECT_LABELS", DEFAULT_TRACK_LABELS)
+    if base is None or not spec.extra_labels:
+        return base
+    return base | spec.extra_labels
 
 
 class CameraProvider(Protocol):
@@ -614,6 +629,11 @@ class CameraWorker:
             log.info(
                 "tier0 %s: per-camera assignment labels active: %s",
                 self.spec.camera_id, ", ".join(sorted(self.spec.labels)) or "-",
+            )
+        if self.spec.extra_labels:
+            log.info(
+                "tier0 %s: app picks widen the tracked set with: %s",
+                self.spec.camera_id, ", ".join(sorted(self.spec.extra_labels)),
             )
         log.info("tier0 %s: started (%dx%d)", self.spec.camera_id, w, h)
         adaptive: AdaptiveDecode | None = None

@@ -79,7 +79,13 @@ the view from layer 3 — everything in OpenNVR that leans on it.
 | `server/routers/cameras.py` | Assignable skills per camera. Note the rule it enforces: KAI-C unreachable means *unknown*, never *empty* — the UI must not grey out a skill because a probe failed. |
 | `server/routers/internal_camera_agent.py` | The camera agent's view of the same derivation (same `_kai_c_view`, same TTL), plus descriptor and text ingestion from enrichment runs. |
 
-### 2.4 Models, catalog, operator surfaces
+### 2.4 Apps that ask KAI-C what the box can do
+
+| Where | What it does |
+| --- | --- |
+| `examples/package-delivery` | The Deliveries app rides Tier-0 for *who and when* and asks KAI-C for *what*: COCO has no package class, so on each trigger it reads `ai.capabilities()` and counts the doorstep with the best registered skill — a `package_detection` adapter, an object detector with a box class, or a VQA model — through `ai.infer(adapter, jpeg, task=…, camera_id=…)`, falling back to the Tier-0 bag classes when none is registered. The choice is re-made every five minutes and shown on the page as good / fair / proxy / none, because it decides how far the counts can be trusted. A model call happens only when somebody left the doorstep or on the re-count cadence, never per frame. |
+
+### 2.5 Models, catalog, operator surfaces
 
 | Where | What it does |
 | --- | --- |

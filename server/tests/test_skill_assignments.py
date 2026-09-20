@@ -194,6 +194,111 @@ def test_labels_merge_additively_and_unrestricted_wins(db):
     assert _assignments_of(s, gate) == [{"skill": "object_detection"}]
 
 
+# ── App widening: a pick carries the app's manifest tier0_labels ────
+#
+# Tier-0 tracks only the global DETECT_LABELS, so an app that rides it
+# for other classes sees nothing on a stock install. The manifest names
+# the classes; the pick names the cameras; declare() joins them so the
+# projection entry Tier-0 reads carries the labels to ADD.
+
+
+def _install(s, app_id, **manifest_extra):
+    manifest = {"id": app_id, "name": app_id, "version": "1.0.0", **manifest_extra}
+    s.add(models.InstalledApp(id=app_id, name=app_id, version="1.0.0",
+                              url=f"http://{app_id}:9200", enabled=True,
+                              manifest_json=manifest, config_json={}))
+    s.commit()
+
+
+def _pick(s, app_id, cam_id, params=None):
+    svc.declare(s, skill=svc.app_pick_skill(app_id), camera_id=cam_id,
+                consumer=svc.app_consumer(app_id), params=params)
+    s.commit()
+
+
+def test_a_pick_carries_the_apps_tier0_labels(db):
+    s, (gate, _) = db
+    _install(s, "abandoned-object", tier0_labels=["Suitcase", "backpack", " handbag "])
+    _pick(s, "abandoned-object", gate)
+    # Cleaned like every other label set: lowercased, trimmed, sorted.
+    assert _assignments_of(s, gate) == [
+        {"skill": "abandoned_object", "labels": ["backpack", "handbag", "suitcase"]},
+    ]
+    # ...and stored on the row, not just projected, so the skill view
+    # shows why the camera tracks bags.
+    row = s.query(models.SkillAssignment).one()
+    assert row.params == {"labels": ["backpack", "handbag", "suitcase"]}
+
+
+def test_a_caller_naming_labels_keeps_them(db):
+    """Filled in only when the caller passed none: a claim that names
+    its own labels is not second-guessed against the manifest."""
+    s, (gate, _) = db
+    _install(s, "abandoned-object", tier0_labels=["backpack"])
+    _pick(s, "abandoned-object", gate, params={"labels": ["suitcase"], "note": 1})
+    assert _assignments_of(s, gate) == [
+        {"skill": "abandoned_object", "labels": ["suitcase"]},
+    ]
+    assert s.query(models.SkillAssignment).one().params == {
+        "labels": ["suitcase"], "note": 1}
+
+
+def test_an_app_without_tier0_labels_picks_plainly(db):
+    s, (gate, _) = db
+    _install(s, "loitering-detection")                 # no tier0_labels at all
+    _pick(s, "loitering-detection", gate)
+    _pick(s, "not-installed", gate)                    # unknown app: untouched
+    assert _assignments_of(s, gate) == [
+        {"skill": "loitering_detection"}, {"skill": "not_installed"},
+    ]
+
+
+def test_reregistering_with_new_labels_refreshes_existing_picks(db):
+    """A manifest that gains tier0_labels after the cameras were picked
+    must reach those cameras, or the upgrade changes nothing until every
+    camera is unpicked and re-picked. The manifest is the truth both
+    ways: dropping the field takes the labels off again."""
+    s, (gate, yard) = db
+    _install(s, "package-delivery")
+    _pick(s, "package-delivery", gate)
+    _pick(s, "package-delivery", yard)
+    assert _assignments_of(s, gate) == [{"skill": "package_delivery"}]
+
+    app = s.query(models.InstalledApp).get("package-delivery")
+    app.manifest_json = {**app.manifest_json, "tier0_labels": ["suitcase", "handbag"]}
+    s.commit()
+    assert svc.sync_app_pick_labels(s, "package-delivery") == 2
+    s.commit()
+    for cam in (gate, yard):
+        assert _assignments_of(s, cam) == [
+            {"skill": "package_delivery", "labels": ["handbag", "suitcase"]},
+        ]
+    # Idempotent: the same manifest again changes no row.
+    assert svc.sync_app_pick_labels(s, "package-delivery") == 0
+
+    app.manifest_json = {k: v for k, v in app.manifest_json.items() if k != "tier0_labels"}
+    s.commit()
+    assert svc.sync_app_pick_labels(s, "package-delivery") == 2
+    s.commit()
+    assert _assignments_of(s, gate) == [{"skill": "package_delivery"}]
+
+
+def test_app_widening_leaves_operator_narrowing_alone(db):
+    """Operator narrowing keeps its own object_detection entry with
+    replace semantics; the app's labels ride the app's own entry. Tier-0
+    unions the two (detect-pipeline _assignment_view)."""
+    s, (gate, _) = db
+    cam = s.query(models.Camera).get(gate)
+    svc.set_operator_assignments(s, cam, [
+        {"skill": "object_detection", "labels": ["person"]}])
+    _install(s, "abandoned-object", tier0_labels=["backpack"])
+    _pick(s, "abandoned-object", gate)
+    assert _assignments_of(s, gate) == [
+        {"skill": "abandoned_object", "labels": ["backpack"]},
+        {"skill": "object_detection", "labels": ["person"]},
+    ]
+
+
 def test_declare_is_idempotent_and_updates_params(db):
     s, (gate, _) = db
     svc.declare(s, skill=LPR, camera_id=gate, consumer="agent",

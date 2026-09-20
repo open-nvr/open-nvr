@@ -134,21 +134,45 @@ def _skip_unassigned() -> bool:
     )
 
 
-def _assignment_view(c: dict) -> tuple[frozenset[str] | None, bool, frozenset[str] | None]:
-    """(per-camera labels, analyze, skills) from a camera dict's ``assignments``.
+def _clean_labels(raw: object) -> frozenset[str]:
+    if not isinstance(raw, (list, tuple, set, frozenset)):
+        return frozenset()
+    return frozenset(str(s).strip().lower() for s in raw if str(s).strip())
 
-    Labels come from an ``object_detection`` assignment carrying labels —
-    "camera 4 wants person + truck" — and REPLACE the global DETECT_LABELS
-    for that camera only (unset → global applies, as ever). ``analyze``
-    stays True unless the opt-in skip mode is on AND the camera carries
-    assignments, none of them detection-shaped. The back-compat rule
-    everywhere: NO assignments = no restriction declared = analyze with
-    global labels, exactly as before assignments existed.
+
+def _assignment_view(
+    c: dict,
+) -> tuple[frozenset[str] | None, bool, frozenset[str] | None, frozenset[str] | None]:
+    """(per-camera labels, analyze, skills, extra labels) from a camera
+    dict's ``assignments``.
+
+    Two label sources, with opposite meanings:
+
+    * ``labels`` on the ``object_detection`` entry is the operator's
+      NARROWING — "camera 4 wants person + truck" — and REPLACES the
+      global DETECT_LABELS for that camera only (unset → global applies,
+      as ever).
+    * ``labels`` on ANY OTHER entry is an app's WIDENING: core fills an
+      app pick's labels from the app manifest's ``tier0_labels`` (the
+      classes the app needs Tier-0 to track — a bag, a parcel — that the
+      global set does not name). These are ADDED to whatever the camera
+      would otherwise track, never a replacement, so an operator's
+      narrowing still stands for what it names and an app still sees
+      its classes. Returned separately (``extra``) rather than merged
+      here because "narrowed to None" means "the global set" and the
+      global set lives with the worker (``service.allowed_labels_for``),
+      which is where the union is taken.
+
+    ``analyze`` stays True unless the opt-in skip mode is on AND the
+    camera carries assignments, none of them detection-shaped. The
+    back-compat rule everywhere: NO assignments = no restriction declared
+    = analyze with global labels, exactly as before assignments existed.
     """
     assignments = c.get("assignments")
     if not isinstance(assignments, list) or not assignments:
-        return None, True, None
+        return None, True, None, None
     labels: frozenset[str] | None = None
+    extra: set[str] = set()
     skills: set[str] = set()
     for a in assignments:
         if not isinstance(a, dict):
@@ -157,10 +181,11 @@ def _assignment_view(c: dict) -> tuple[frozenset[str] | None, bool, frozenset[st
         if not skill:
             continue
         skills.add(skill)
-        if skill == "object_detection" and a.get("labels"):
-            labels = frozenset(
-                str(s).strip().lower() for s in a["labels"] if str(s).strip()
-            ) or None
+        if skill == "object_detection":
+            if a.get("labels"):
+                labels = _clean_labels(a["labels"]) or None
+        else:
+            extra |= _clean_labels(a.get("labels"))
     analyze = True
     if _skip_unassigned() and skills and not (skills & DETECTION_SHAPED_SKILLS):
         analyze = False
@@ -169,7 +194,7 @@ def _assignment_view(c: dict) -> tuple[frozenset[str] | None, bool, frozenset[st
             "and DETECT_SKIP_UNASSIGNED is on",
             c.get("camera_id"), ", ".join(sorted(skills)),
         )
-    return labels, analyze, (frozenset(skills) or None)
+    return labels, analyze, (frozenset(skills) or None), (frozenset(extra) or None)
 
 
 # Cameras already warned about a missing/garbled open_nvr_camera_id — the
@@ -182,7 +207,7 @@ def _to_spec(c: dict) -> CameraSpec:
     # The endpoint returns active cameras with a resolved ``frame_url``. All
     # active cameras are analyzed by default (on-by-default); an ``analyze`` flag
     # is honoured if the endpoint ever adds per-camera opt-out.
-    labels, assignment_analyze, skills = _assignment_view(c)
+    labels, assignment_analyze, skills, extra_labels = _assignment_view(c)
     # Core's numeric Camera.id, sent alongside the "cam{id}" handle — the
     # events store keys on the number (see CameraSpec.nvr_camera_id). The
     # str() round-trip rejects bools/floats (int(True) == 1 would file
@@ -211,6 +236,7 @@ def _to_spec(c: dict) -> CameraSpec:
         fps=int(c.get("fps", _default_fps())),
         hwaccel=(c.get("hwaccel") or None),   # None = not declared → global applies
         labels=labels,
+        extra_labels=extra_labels,
         skills=skills,
     )
 
