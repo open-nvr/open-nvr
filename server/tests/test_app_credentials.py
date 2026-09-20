@@ -263,6 +263,61 @@ def test_an_app_with_nothing_picked_sees_nothing(env):
     assert sorted(int(c["open_nvr_camera_id"]) for c in cams) == sorted(ids.values())
 
 
+def test_a_disabled_app_reads_nothing_and_is_told_why(env):
+    """The catalog's switch used to change nothing an app could feel: it
+    kept its cameras, kept pulling their streams and kept driving its
+    adapters, so the only real off switch was ``docker stop``. Disabled
+    now means no roster — enforced here, whether or not the app is
+    polite enough to notice the flag on its config poll."""
+    tc, ids, _ = env
+    key = _register(tc, _site()).json()["api_key"]
+    cams = tc.get("/internal/camera-agent/cameras", headers=_app(key)).json()["cameras"]
+    assert [int(c["open_nvr_camera_id"]) for c in cams] == [ids["gate"]]
+
+    assert tc.post("/apps/loitering-detection/disable").status_code == 200
+
+    assert tc.get("/internal/camera-agent/cameras", headers=_app(key)).json()["cameras"] == []
+    assert tc.get("/internal/camera-agent/events", headers=_app(key)).json()["events"] == []
+    # Its own camera, a moment ago — 404 like any camera outside a roster.
+    assert tc.get(f"/internal/app/cameras/{ids['gate']}/snapshot",
+                  headers=_app(key)).status_code == 404
+    assert tc.get(f"/internal/app/cameras/{ids['gate']}/stream",
+                  headers=_app(key)).status_code == 404
+    # The site key is untouched: the detect-pipeline must keep feeding
+    # every camera whatever the catalog says about apps.
+    assert tc.get("/internal/camera-agent/cameras", headers=_site()).json()["cameras"]
+
+    assert tc.post("/apps/loitering-detection/enable").status_code == 200
+    cams = tc.get("/internal/camera-agent/cameras", headers=_app(key)).json()["cameras"]
+    assert [int(c["open_nvr_camera_id"]) for c in cams] == [ids["gate"]]
+
+
+def test_the_switch_rides_the_config_poll_and_the_selection_survives_it(env):
+    tc, ids, _ = env
+    key = _register(tc, _site()).json()["api_key"]
+    body = tc.get("/apps/loitering-detection/config", headers=_app(key)).json()
+    assert body["enabled"] is True and body["cameras"] == [ids["gate"]]
+
+    assert tc.post("/apps/loitering-detection/disable").status_code == 200
+    body = tc.get("/apps/loitering-detection/config", headers=_app(key)).json()
+    # What it may read, on the poll it already makes: the app stops
+    # within one poll instead of running on until someone stops it.
+    assert body["enabled"] is False and body["cameras"] == []
+    # …while the operator's own view keeps the selection, or disabling an
+    # app for an afternoon would lose the cameras it was pointed at.
+    operator = tc.get("/apps/loitering-detection/config", headers=_site()).json()
+    assert operator["enabled"] is False and operator["cameras"] == [ids["gate"]]
+
+
+def test_registering_switches_an_app_on_but_never_switches_it_back_on(env):
+    """Presence is the intent — an app is here because somebody deployed
+    it — but a restart must not undo the operator's Disable."""
+    tc, _, _ = env
+    assert _register(tc, _site()).json()["enabled"] is True
+    assert tc.post("/apps/loitering-detection/disable").status_code == 200
+    assert _register(tc, _site()).json()["enabled"] is False
+
+
 def test_pipeline_write_routes_refuse_app_keys(env):
     tc, ids, _ = env
     key = _register(tc, _site()).json()["api_key"]

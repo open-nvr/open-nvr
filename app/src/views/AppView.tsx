@@ -148,7 +148,11 @@ export function AppView() {
     mutationFn: () => (app?.enabled ? apiService.disableApp(appId) : apiService.enableApp(appId)),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['apps'] })
-      showSuccess(`${app?.name} ${app?.enabled ? 'disabled' : 'enabled'}`)
+      showSuccess(
+        app?.enabled
+          ? `${app?.name} disabled — it stops watching its cameras within a few seconds. Its settings and camera selection are kept.`
+          : `${app?.name} enabled`
+      )
     },
     onError: (e) => showError(extractApiError(e, 'Failed to toggle app.')),
   })

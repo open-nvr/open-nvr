@@ -461,6 +461,10 @@ class ContractMixin:
         #: ``None`` until the first successful fetch — "not known yet",
         #: which is different from "nothing picked" (an empty set).
         self.picked_cameras: frozenset[int] | None = None
+        #: The operator's switch in the App Catalog, as last delivered by
+        #: the poll. ``None`` = not told (a standalone run, or a core too
+        #: old to send it) — which means "carry on", never "off".
+        self.app_enabled: bool | None = None
 
     def _contract_note_event(self) -> None:
         self._events_seen += 1
@@ -531,6 +535,11 @@ class ContractMixin:
             # says what. Consumers that never learned the key still get
             # a correct verdict from `ready`.
             payload["not_ready"] = problem
+        if self.app_enabled is False:
+            # NOT a readiness failure — the app is well, it has been
+            # switched off. Said here so "why is it doing nothing?" has
+            # an answer on the first thing anyone reads.
+            payload["enabled"] = False
         return payload
 
     def manifest_snapshot(self) -> dict[str, Any]:
@@ -803,9 +812,24 @@ class ContractMixin:
         updated before this runs.
         """
 
+    def on_enabled_update(self, enabled: bool) -> None:
+        """Called when the operator switches this app on or off in the
+        App Catalog. The default logs it; override to add teardown of
+        anything the SDK does not know about (an open stream, a device
+        connection). Work that goes through ``camera_picked`` or a
+        FrameApp tick is already stopped."""
+        if enabled:
+            logger.info("switched on in the App Catalog — resuming")
+        else:
+            logger.warning("switched off in the App Catalog — doing no work "
+                           "until it is switched back on")
+
     def camera_picked(self, camera: Any) -> bool:
         """Should this app act on ``camera`` (an id, ``"3"`` or ``"cam3"``)?
 
+        * An app switched OFF in the catalog works on nothing — always
+          False, before every other rule, including the apps that pick
+          no cameras.
         * An app whose manifest declares ``camera_picker=False`` works on
           no cameras of its own — always True.
         * A standalone run (no live config poll: no core to ask) keeps
@@ -817,6 +841,8 @@ class ContractMixin:
         """
         from .cameras import camera_key
 
+        if self.app_enabled is False:
+            return False
         if getattr(self.manifest, "camera_picker", True) is False:
             return True
         if self._config_poll_thread is None:
@@ -918,6 +944,23 @@ class ContractMixin:
                     self.on_cameras_update(picked)
                 except Exception:
                     logger.exception("on_cameras_update raised")
+        # So does the operator's switch. Disabling an app used to change
+        # nothing it could feel: it kept its cameras and kept working,
+        # and the only real off switch was its container. Core now hands
+        # a disabled app an empty roster as well, so an app that ignores
+        # this still stops — but an app told WHY can say so, and the
+        # apps with no camera selection at all (alert relays, gateways)
+        # have nothing else to stop them.
+        try:
+            raw_enabled = response.json().get("enabled")
+        except Exception:  # noqa: BLE001
+            raw_enabled = None
+        if isinstance(raw_enabled, bool) and raw_enabled != self.app_enabled:
+            self.app_enabled = raw_enabled
+            try:
+                self.on_enabled_update(raw_enabled)
+            except Exception:
+                logger.exception("on_enabled_update raised")
         if config == self._applied_config:
             return
         self._applied_config = config

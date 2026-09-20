@@ -246,3 +246,82 @@ def test_a_frame_app_with_nothing_picked_fetches_nothing():
     app.on_cameras_update(frozenset())
     app.handle_tick()
     assert frames.asked == []
+
+
+# ── the operator's switch ──────────────────────────────────────────
+#
+# Disabling an app in the catalog used to change nothing it could feel:
+# it kept its cameras, kept pulling their streams and kept driving its
+# adapters, so the only real off switch was `docker stop`. The switch
+# rides the same poll the picks do.
+
+
+class _Switched(_Det):
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.switches = []
+
+    def on_enabled_update(self, enabled):
+        self.switches.append(enabled)
+
+
+def test_the_switch_arrives_on_the_config_poll(monkeypatch):
+    monkeypatch.setattr(contract_mod.httpx, "get", _FakeGet([
+        {"config": {"x": 1}, "enabled": True, "cameras": [2]},
+        {"config": {"x": 1}, "enabled": False, "cameras": []},
+        {"config": {"x": 1}, "enabled": False, "cameras": []},
+    ]))
+    app = _Switched(_cfg(opennvr_url="http://reg:8000"), AlertDispatcher([_Recorder()]))
+    url, headers = app._config_poll_target()
+    for _ in range(3):
+        app._config_poll_once(url, headers)
+    assert app.switches == [True, False]   # told once per change, not per poll
+    assert app.app_enabled is False
+
+
+def test_an_old_core_without_the_switch_leaves_the_app_working(monkeypatch):
+    """``None`` is "not told", never "off" — an app must not stop
+    because it is talking to a core that predates the flag."""
+    monkeypatch.setattr(contract_mod.httpx, "get",
+                        _FakeGet([{"config": {"x": 1}, "cameras": [2]}]))
+    app = _Switched(_cfg(opennvr_url="http://reg:8000"), AlertDispatcher([_Recorder()]))
+    app._config_poll_once(*app._config_poll_target())
+    assert app.app_enabled is None and app.switches == []
+    assert app.handle_event(_event("cam2"))
+
+
+def test_a_disabled_app_acts_on_no_camera_it_still_holds():
+    det = _connected(_Det(_cfg(), AlertDispatcher([_Recorder()])))
+    det.picked_cameras = frozenset({2})
+    assert det.handle_event(_event("cam2"))
+    det.app_enabled = False
+    assert det.handle_event(_event("cam2")) == []
+    det.app_enabled = True
+    assert det.handle_event(_event("cam2"))
+
+
+def test_a_disabled_app_without_a_picker_stops_too():
+    """The apps exempt from camera selection (relays, gateways) have no
+    empty roster to stop them — the switch is all there is."""
+    det = _connected(_ExemptDet(_cfg(), AlertDispatcher([_Recorder()])))
+    det.app_enabled = False
+    assert det.handle_event(_event("cam1")) == []
+
+
+def test_a_disabled_frame_app_fetches_nothing():
+    frames = _Frames()
+    app = _Poller(_cfg(), AlertDispatcher([_Recorder()]),
+                  frame_source=frames, cameras=["front-door"])
+    app.app_enabled = False
+    app.handle_tick()
+    assert frames.asked == []
+
+
+def test_a_disabled_app_says_so_on_health():
+    det = _Det(_cfg(), AlertDispatcher([_Recorder()]))
+    assert "enabled" not in det.health_snapshot()
+    det.app_enabled = False
+    health = det.health_snapshot()
+    # Switched off is not a fault: /health stays ready and says why it
+    # is quiet.
+    assert health["enabled"] is False and health["ready"] is True

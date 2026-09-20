@@ -8,6 +8,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Disabling an app in the catalog now stops it.** `enabled` gated one
+  route (invoking an app's actions) and nothing the app itself could
+  feel: a disabled app kept its cameras, kept pulling their streams and
+  kept driving its adapters, so the only real off switch was
+  `docker stop`. A disabled app now has no camera roster — it reads no
+  frames, gets no stream grants and uses no compute — and the flag rides
+  its live config poll, so an SDK app stops within ~10s and says why on
+  `/health` instead of going quiet. Because of that enforcement, an app
+  is switched ON when it first registers (its container was deployed:
+  that is the intent) rather than being born off; a licensed app still
+  has to clear its entitlement, the operator's Disable survives every
+  later registration, and a migration switches on the apps that
+  registered under the old meaning so an upgrade does not stop them.
+
 - **App SDK 0.6.0.** Not a patch: `rtsp.py` is a new module, `PLATFORM`
   gained five names, `OpenNVR` gained `save_evidence` / `stream` /
   `stream_grant` (and their async twins), `Alert` gained `alert_type`
