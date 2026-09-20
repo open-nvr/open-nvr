@@ -830,13 +830,18 @@ app.add_middleware(RequestLoggingMiddleware)
 # HTTPException handler (preserve proper status codes like 401/403/404)
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
+    from utils.url_redaction import redact_signed_media_path, redact_url_query
+
     main_logger.log_action(
         "http.exception",
         message=f"HTTP Exception: {exc.status_code} - {exc.detail}",
         extra_data={
             "status_code": exc.status_code,
             "detail": exc.detail,
-            "url": str(request.url),
+            # Same redaction as the request log: a signed media URL (HA-112)
+            # is a bearer credential in the path, and a 403/404 for one
+            # (expired, or a resource that vanished) lands here.
+            "url": redact_signed_media_path(redact_url_query(str(request.url))),
             "method": request.method,
         },
         ip_address=request.client.host if request.client else None,

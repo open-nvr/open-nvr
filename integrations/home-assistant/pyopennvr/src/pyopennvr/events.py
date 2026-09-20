@@ -34,6 +34,7 @@ import inspect
 import json
 import logging
 import random
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -84,7 +85,17 @@ class EventStream:
         self._max_backoff = max_backoff
         self._silence = silence_timeout
         self._stopping = False
+        #: Set by ``stop()``: wakes the reconnect sleep, which can otherwise be
+        #: a minute long, so stopping never waits for the next attempt.
+        self._stop_event = asyncio.Event()
         self._ws: aiohttp.ClientWebSocketResponse | None = None
+        #: Whether the CURRENT connection got as far as ``subscribed``. An
+        #: instance attribute, not a local of ``_connect_once``: a connection
+        #: that lived for an hour and then died by exception (a half-open TCP
+        #: connection surfaces as ``asyncio.TimeoutError`` from the receive
+        #: timeout) must still reset the backoff, and a local would be lost
+        #: with the exception.
+        self._established = False
         #: The server epoch and last seq seen: what a reconnect resumes from.
         self.epoch: str | None = None
         self.last_seq: int | None = None
@@ -98,6 +109,7 @@ class EventStream:
 
     async def stop(self) -> None:
         self._stopping = True
+        self._stop_event.set()
         if self._ws is not None and not self._ws.closed:
             await self._ws.close()
 
@@ -105,36 +117,51 @@ class EventStream:
         backoff = self._min_backoff
         while not self._stopping:
             await self._set_state("connecting")
+            self._established = False
             try:
-                established = await self._connect_once()
+                await self._connect_once()
             except OpenNVRAuthError as exc:
                 if exc.code != "token_address":
                     await self._set_state("auth_failed")
                     return
                 _LOGGER.debug("OpenNVR refuses this address: %s", exc)
-                established = False
             except (OpenNVRError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                _LOGGER.debug("OpenNVR events connection failed: %s", exc)
-                established = False
+                _LOGGER.debug("OpenNVR events connection failed: %s", _redact(exc))
             if self.state == "auth_failed" or self._stopping:
                 break
             await self._set_state("disconnected")
-            backoff = self._min_backoff if established else min(backoff * 2, self._max_backoff)
-            await asyncio.sleep(backoff * random.uniform(0.8, 1.2))
+            backoff = (self._min_backoff if self._established
+                       else min(backoff * 2, self._max_backoff))
+            # Waiting on the stop event rather than sleeping: ``stop()`` must
+            # interrupt a backoff that can be a minute long.
+            try:
+                await asyncio.wait_for(self._stop_event.wait(),
+                                       backoff * random.uniform(0.8, 1.2))
+            except asyncio.TimeoutError:
+                pass
         if self.state != "auth_failed":
             await self._set_state("stopped")
 
-    async def _connect_once(self) -> bool:
-        """One connection, until it closes. True if it got as far as the
-        server's ``subscribed`` frame (so the backoff resets)."""
+    async def _connect_once(self) -> None:
+        """One connection, until it closes. Sets ``_established`` once the
+        server's ``subscribed`` frame arrives (so the backoff resets)."""
         ticket = await self._client.ws_ticket()
+        # Minting the ticket is a round trip during which ``stop()`` finds no
+        # socket to close: without this check a socket would be opened after
+        # the stop and live until the server closed it.
+        if self._stopping:
+            return
         url = self._client.ws_url(ticket, since=self.last_seq, epoch=self.epoch,
                                   types=self._types)
-        established = False
         async with self._session.ws_connect(url, ssl=self._client.ssl,
                                             receive_timeout=self._silence,
                                             heartbeat=None) as ws:
             self._ws = ws
+            if self._stopping:
+                # Stopped while the handshake was in flight, so the socket
+                # was not there for ``stop()`` to close.
+                await ws.close()
+                return
             async for msg in ws:
                 if msg.type != aiohttp.WSMsgType.TEXT:
                     break
@@ -145,7 +172,7 @@ class EventStream:
                 if not isinstance(frame, dict):
                     continue
                 if frame.get("event_type") == "subscribed":
-                    established = True
+                    self._established = True
                     await self._set_state("connected")
                     if frame.get("epoch") != self.epoch:
                         self.last_seq = None      # a new server process
@@ -165,4 +192,13 @@ class EventStream:
             if ws.close_code == CLOSE_TOKEN_REVOKED:
                 _LOGGER.debug("OpenNVR closed the events socket (4401): reconnecting")
         self._ws = None
-        return established
+
+
+_QUERY = re.compile(r"\?[^\s'\"]*")
+
+
+def _redact(exc: BaseException) -> str:
+    """``str(exc)`` with any URL query removed. aiohttp's handshake errors
+    (``WSServerHandshakeError``) print the URL they failed on, and ours
+    carries the single-use ticket: it must not end up in a log."""
+    return _QUERY.sub("?<redacted>", str(exc))

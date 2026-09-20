@@ -143,6 +143,14 @@ def zone_filter(zone_id: int):
     four LIKE shapes cover first/only/last/middle without JSON operators
     that SQLite and Postgres spell differently, and never a prefix match
     (zone 1 is not zone 11).
+
+    Serializer assumption: the patterns spell the list exactly as
+    SQLAlchemy's ``JSON`` type serialises it, ``json.dumps`` with the
+    default separators (``", "`` between items, no space inside the
+    brackets). ``record_track_visit`` writes through that type; an engine
+    with a custom ``json_serializer`` (compact separators) would silently
+    make every filter miss its middle and last items, so
+    tests/test_zones.py pins the stored text form.
     """
     from sqlalchemy import String, cast, or_
 

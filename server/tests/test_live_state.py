@@ -11,7 +11,9 @@
 * the consumer updates live state even with the overlay off, and
   publishes a ``live_state`` event on change;
 * ``GET /live-state`` is scoped to the caller's cameras and a token's
-  allow-list.
+  allow-list, and asks the event store a fixed number of questions however
+  many cameras it lists;
+* deleted cameras are evicted from the live state by the sweeper's prune.
 """
 
 from __future__ import annotations
@@ -88,7 +90,63 @@ def test_frames_after_a_gap_do_not_resurrect_old_tracks():
     ls = LiveState(stale_s=5)
     ls.update(1, _frame(_t(1)), now=100)
     d = ls.update(1, _frame(_t(2)), now=120)
-    assert d["ended"] == [] and [s["track_id"] for s in d["started"]] == ["2"]
+    assert [s["track_id"] for s in d["started"]] == ["2"]
+    assert ls.camera(1, now=120)["objects"] == {"person": {"total": 1, "active": 1}}
+
+
+def test_frames_after_a_gap_report_the_vanished_tracks_as_ended():
+    """Review: the gap branch cleared the tracks and then computed ``ended``
+    against the empty dict, so a track that vanished during a gap was never
+    reported as ended (the sweeper only runs while the camera stays quiet,
+    and here it had not run before the frames resumed)."""
+    ls = LiveState(stale_s=5)
+    ls.update(1, _frame(_t(1)), now=100)
+    d = ls.update(1, _frame(_t(2)), now=103)
+    assert [e["track_id"] for e in d["ended"]] == ["1"]
+    assert d["ended"][0]["duration_s"] == 0.0
+    # And the same across a gap; track 2 is gone, track 3 is new.
+    d = ls.update(1, _frame(_t(3)), now=120)
+    assert [e["track_id"] for e in d["ended"]] == ["2"]
+    assert [s["track_id"] for s in d["started"]] == ["3"]
+    # A track id that persists across the gap is a fresh start (nothing
+    # carries over), so it is reported ended and started, once each.
+    d = ls.update(1, _frame(_t(3)), now=140)
+    assert [e["track_id"] for e in d["ended"]] == ["3"]
+    assert [s["track_id"] for s in d["started"]] == ["3"]
+
+
+def test_retain_evicts_deleted_cameras():
+    """Review: a ``_Camera`` was never removed, so a deleted camera's tracks,
+    zones and timestamps lived for the life of the process."""
+    import services.live_state as ls_mod
+
+    ls = LiveState(stale_s=5)
+    ls.update(1, _frame(_t(1)), now=100)
+    ls.update(2, _frame(_t(2)), now=100)
+    ls.set_zones(3, [SimpleNamespace(id=7, name="z", polygon=[[0, 0], [1, 0], [1, 1]],
+                                     labels=None)])
+    ls_mod._zones_loaded[2] = 100.0
+    assert ls.camera_ids() == [1, 2, 3]
+    assert ls.retain({1}) == [2, 3]
+    assert ls.camera_ids() == [1]
+    assert 2 not in ls_mod._zones_loaded
+    # A forgotten camera reads as an unknown one, and can come back.
+    assert ls.camera(3, now=100)["zones"] == []
+    ls.update(2, _frame(_t(9)), now=101)
+    assert ls.camera_ids() == [1, 2]
+
+
+def test_the_sweeper_prunes_against_the_cameras_that_still_exist(monkeypatch):
+    import services.live_state as ls_mod
+    import services.tier0_track_consumer as tc
+
+    fresh = LiveState()
+    monkeypatch.setattr(ls_mod, "_instance", fresh)
+    fresh.update(1, _frame(_t(1)), now=100)
+    fresh.update(4, _frame(_t(1)), now=100)
+    monkeypatch.setattr(tc, "_existing_camera_ids", lambda: {1, 2, 3})
+    assert asyncio.run(tc.prune_live_state()) == [4]
+    assert fresh.camera_ids() == [1]
 
 
 def test_motion_is_debounced():
@@ -112,7 +170,7 @@ def consumer(monkeypatch):
 
     fresh = LiveState()
     monkeypatch.setattr(ls_mod, "_instance", fresh)
-    monkeypatch.setattr(ls_mod, "refresh_zones_if_due", lambda cid, now=None: None)
+    monkeypatch.setattr(ls_mod, "load_zones", lambda cid: None)
     sent = []
 
     async def fake_publish(event):
@@ -199,6 +257,64 @@ def test_last_plate_and_last_object_come_from_the_event_store(env, monkeypatch):
     assert cam["last_object"] == {**cam["last_object"], "label": "car", "event_id": rid,
                                   "zone_ids": [4],
                                   "evidence_url": f"/api/v1/events/{rid}/evidence"}
+
+
+def _count_statements(env):  # noqa: F811
+    """Attach a statement counter to the test engine; returns the list."""
+    from sqlalchemy import event
+
+    engine = env.Session.kw["bind"]
+    seen: list[str] = []
+
+    def _on(conn, cursor, statement, parameters, context, executemany):
+        seen.append(statement)
+
+    event.listen(engine, "before_cursor_execute", _on)
+    return seen, lambda: event.remove(engine, "before_cursor_execute", _on)
+
+
+def test_live_state_asks_the_event_store_once_however_many_cameras(env, monkeypatch):  # noqa: F811
+    """Review: last_plate / last_object ran two ``LIMIT 1`` queries PER
+    camera on every GET /live-state. Now one batched query per predicate,
+    whatever the camera count, and the same answers."""
+    from datetime import UTC, datetime, timedelta
+
+    import services.live_state as ls_mod
+    from services.timeline_service import record_track_visit
+
+    monkeypatch.setattr(ls_mod, "_instance", LiveState())
+    s = env.Session()
+    t0 = datetime.now(UTC) - timedelta(minutes=10)
+    expect = {}
+    for cid in (1, 2, 3):
+        # Oldest carries the plate, newest does not: "last plate" and
+        # "last object" are different rows, and each is the per-camera
+        # newest of its kind.
+        old = record_track_visit(s, camera_id=cid, label="car", started_at=t0,
+                                 evidence_path="a/b.jpg")
+        old.plate_text = f"PLATE{cid}"
+        s.commit()
+        new = record_track_visit(s, camera_id=cid, label="person",
+                                 started_at=t0 + timedelta(minutes=cid))
+        expect[cid] = (old.id, new.id)
+    s.close()
+    H = env.jwt("admin")
+
+    seen, stop = _count_statements(env)
+    one = env.client.get("/api/v1/live-state?camera_id=1", headers=H).json()["cameras"]
+    n_one = len(seen)
+    seen.clear()
+    allc = env.client.get("/api/v1/live-state", headers=H).json()["cameras"]
+    n_all = len(seen)
+    stop()
+    assert len(one) == 1 and len(allc) == 3
+    assert n_all == n_one, (n_one, n_all)
+    for cam in allc:
+        plate_id, obj_id = expect[cam["camera_id"]]
+        assert cam["last_plate"]["text"] == f"PLATE{cam['camera_id']}"
+        assert cam["last_plate"]["event_id"] == plate_id
+        assert cam["last_object"]["event_id"] == obj_id
+        assert cam["last_object"]["label"] == "person"
 
 
 def test_plates_need_recordings_view(env, monkeypatch):  # noqa: F811

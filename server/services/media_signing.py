@@ -121,8 +121,21 @@ def verify(db: Session, token: str) -> dict[str, Any]:
         raise BadToken("malformed") from exc
     if not isinstance(claims, dict):
         raise BadToken("malformed")
-    secret_hex = (_keys(db).get("keys") or {}).get(claims.get("v"))
-    if secret_hex is None or not hmac.compare_digest(_mac(secret_hex, body), sig):
+    # The payload is attacker-controlled JSON on an unauthenticated route:
+    # a list or dict for "v" is unhashable (TypeError on the key lookup)
+    # and a non-ASCII "sig" makes compare_digest(str, str) raise. Both are
+    # just bad tokens (403), not server errors (500).
+    kid = claims.get("v")
+    if not isinstance(kid, str):
+        raise BadToken("malformed")
+    secret_hex = (_keys(db).get("keys") or {}).get(kid)
+    if secret_hex is None:
+        raise BadToken("bad signature")
+    try:
+        good = hmac.compare_digest(_mac(secret_hex, body), sig)
+    except (TypeError, ValueError) as exc:
+        raise BadToken("malformed") from exc
+    if not good:
         raise BadToken("bad signature")
     if not isinstance(claims.get("x"), int) or claims["x"] < time.time():
         raise BadToken("expired")

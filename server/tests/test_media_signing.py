@@ -225,3 +225,72 @@ def _vera_event(env):  # noqa: F811
     eid = ev.id
     s.close()
     return eid
+
+
+# ── review fixes ──────────────────────────────────────────────────────────
+
+
+def test_a_malformed_token_is_a_403_never_a_500(env, media):  # noqa: F811
+    """The payload is attacker JSON on a route with no login. A list (or
+    dict) for the key id is unhashable, and a non-ASCII signature makes
+    compare_digest raise; both used to escape verify as TypeError and
+    turn into a 500 instead of the 'bad link' 403."""
+    s = env.Session()
+    try:
+        good, _ = ms.sign(s, {"k": "event", "i": media["event"], "u": 1}, ttl_s=120)
+        prefix, body, sig = good.split(".")
+        keys = ms._keys(s)
+        secret = keys["keys"][keys["current"]]
+    finally:
+        s.close()
+    claims = json.loads(ms._unb64(body))
+    for bad_kid in (["a"], {"a": 1}, 7, None):
+        forged = ms._b64(json.dumps({**claims, "v": bad_kid}).encode())
+        # Signed with the real key so only the key-id shape is at fault.
+        tok = f"{prefix}.{forged}.{ms._mac(secret, forged)}"
+        s = env.Session()
+        try:
+            with pytest.raises(ms.BadToken):
+                ms.verify(s, tok)
+        finally:
+            s.close()
+        assert env.client.get(f"/api/v1/media/s/{tok}").status_code == 403
+    for bad_sig in ("é" * 8, sig[:-1] + "ÿ"):
+        s = env.Session()
+        try:
+            with pytest.raises(ms.BadToken):
+                ms.verify(s, f"{prefix}.{body}.{bad_sig}")
+        finally:
+            s.close()
+        assert env.client.get(f"/api/v1/media/s/{prefix}.{body}.{bad_sig}").status_code == 403
+    assert env.client.get(f"/api/v1/media/s/{good}").status_code == 200
+
+
+def test_the_request_log_never_holds_a_signed_media_token(env, media, monkeypatch):  # noqa: F811
+    """The signed URL is the credential and the request log used to print
+    it in full (path, url and message) on every fetch; a 403 from the
+    route goes through the same middleware."""
+    import middleware.request_logging as rl
+
+    records: list = []
+
+    class _Capture:
+        def log_action(self, action, **kw):
+            records.append((action, kw))
+
+        def error(self, msg, **kw):
+            records.append(("error", {"message": msg, **kw}))
+
+    monkeypatch.setattr(rl, "api_logger", _Capture())
+    url = _sign(env, env.jwt("admin"), kind="event", id=media["event"]).json()["url"]
+    token = url.rsplit("/", 1)[1]
+    assert env.client.get(url).status_code == 200
+    assert env.client.get(url[:-3] + "xyz").status_code == 403
+    fetches = [r for r in records if "/media/s/" in r[1].get("message", "")
+               or "/media/s/" in str(r[1].get("extra_data", {}).get("path"))]
+    assert len(fetches) == 4, records                     # start + complete, twice
+    blob = repr(fetches)
+    assert token not in blob and token[:20] not in blob and "xyz" not in blob
+    assert "/api/v1/media/s/<redacted>" in blob
+    # Other paths are untouched.
+    assert any("/api/v1/media/sign" in repr(r) for r in records)

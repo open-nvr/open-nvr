@@ -4,7 +4,8 @@ For each OpenNVR alert, and each time an alert's or event's media is ready,
 the integration fires a Home Assistant event carrying **relay URLs**: paths
 under Home Assistant's own URL (``/api/opennvr/<site>/m/<token>``) that a
 phone can fetch from anywhere it can reach HA, relative so the Companion app
-resolves them against HA's URL.
+resolves them against HA's URL, and signed by HA (``?authSig=``) since the
+relay requires auth and a notification fetcher has no login.
 
 * ``opennvr_alert``: when an alert lands (with its first image, if any).
 * ``opennvr_media_ready``: when its clip can be played (source ``alert`` or
@@ -27,7 +28,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
 from .const import CONF_MEDIA_TTL, DEFAULT_MEDIA_TTL, DOMAIN, signal_frame
-from .views import relay_path
+from .views import signed_relay_path
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -82,7 +83,8 @@ class _Notifier:
         except OpenNVRError as err:
             _LOGGER.debug("Could not sign %s media: %s", kind, err)
             return None
-        return relay_path(self._coordinator.data.info.site_id, media.url)
+        return signed_relay_path(self.hass, self._coordinator.data.info.site_id, media.url,
+                                 ttl)
 
     async def _alert(self, frame: dict[str, Any]) -> None:
         p = frame.get("payload") or {}

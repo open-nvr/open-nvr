@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import MagicMock
 
 from freezegun.api import FrozenDateTimeFactory
@@ -118,7 +119,7 @@ async def test_snapshot_and_site_mode_update_everyone(
     [stream] = mock_stream.instances
     calls = []
     coordinator.async_add_listener(lambda: calls.append(1))
-    stream.on_frame({"v": 2, "seq": 1, "event_type": "state_snapshot", "resync": True,
+    stream.on_frame({"v": 2, "seq": 1, "event_type": "state_snapshot", "resync": False,
                      "cameras": [], "site_mode": {"mode": "disarmed"},
                      "entity_states": {"camera.1.detection": {"state": False,
                                                               "attributes": {}}}})
@@ -129,6 +130,47 @@ async def test_snapshot_and_site_mode_update_everyone(
     stream.on_frame({"v": 2, "seq": 2, "event_type": "site_mode",
                      "payload": {"mode": "armed_home", "changed_by": "token:x"}})
     assert coordinator.data.site_mode.mode == "armed_home" and len(calls) == 2
+
+
+async def test_a_resync_snapshot_replaces_the_states(
+        hass: HomeAssistant, mock_client: MagicMock, mock_stream: type[FakeStream]) -> None:
+    """``resync: true``: the server could not replay what was missed while
+    the socket was down, so the snapshot is everything it knows. A key it
+    no longer carries (an entity's state withdrawn meanwhile) must not keep
+    the value from before the outage, as merging would leave it."""
+    entry = create_mock_config_entry()
+    await setup_mock_config_entry(hass, entry)
+    coordinator = entry.runtime_data.coordinator
+    [stream] = mock_stream.instances
+    assert coordinator.state_of("camera.1.count.person")["state"] == 1
+    stream.on_frame({"v": 2, "seq": 1, "event_type": "state_snapshot", "resync": True,
+                     "cameras": [], "site_mode": None,
+                     "entity_states": {"camera.1.detection": {"state": False,
+                                                              "attributes": {}}}})
+    assert coordinator.data.states == {"camera.1.detection": {"state": False,
+                                                              "attributes": {}}}
+    assert coordinator.state_of("camera.1.count.person") is None
+    # A resync during a REST refresh is newer than what the refresh read:
+    # the refresh's states (both keys again) must not resurrect the gone one.
+    gate = asyncio.Event()
+    read = dict(mock_client.get_entity_states.return_value)
+
+    async def slow_read():
+        await gate.wait()
+        return read
+
+    mock_client.get_entity_states.side_effect = slow_read
+    refresh = hass.async_create_task(coordinator.async_refresh())
+    while not mock_client.get_entity_states.call_count > 1:
+        await asyncio.sleep(0)
+    stream.on_frame({"v": 2, "seq": 2, "event_type": "state_snapshot", "resync": True,
+                     "cameras": [], "site_mode": None,
+                     "entity_states": {"camera.1.detection": {"state": True,
+                                                              "attributes": {}}}})
+    gate.set()
+    await refresh
+    assert coordinator.data.states == {"camera.1.detection": {"state": True,
+                                                              "attributes": {}}}
 
 
 async def test_descriptors_changed_rereads_the_catalogue(

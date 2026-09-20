@@ -18,7 +18,7 @@ The integration fires two Home Assistant events for automations:
 - `opennvr_alert` when an OpenNVR alert lands: severity, title, app, camera entity, and `image_url`.
 - `opennvr_media_ready` when an alert's or event's clip can be played: the same, plus `clip_url`.
 
-The URLs are relative paths under Home Assistant's own address (`/api/opennvr/<site>/m/<token>`), so a phone can fetch them from anywhere it can reach Home Assistant. Each link is an OpenNVR-signed token for exactly one picture or clip, valid for the "notification link lifetime" option. The relay needs no login, and OpenNVR checks the signature on every fetch.
+The URLs are relative paths under Home Assistant's own address (`/api/opennvr/<site>/m/<token>`), so a phone can fetch them from anywhere it can reach Home Assistant. Each link is an OpenNVR-signed token for exactly one picture or clip, valid for the "notification link lifetime" option. The link is also signed by Home Assistant itself (`?authSig=`) for the same lifetime, so the relay is never open to anyone who can merely reach Home Assistant; the Companion apps fetch it as they do any HA attachment, and OpenNVR checks its own signature on every fetch.
 
 The blueprint `blueprints/automation/opennvr/alert_notification.yaml` sends a phone notification with the picture and the clip. It filters by severity, camera and site mode, and supports quiet hours and a cooldown. The notification offers "Acknowledge" (which acknowledges the alert in OpenNVR) and "Live view".
 

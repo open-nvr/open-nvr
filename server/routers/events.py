@@ -80,11 +80,16 @@ router = APIRouter()
 # multiple workers, move this to a shared store (e.g. Redis).
 # ---------------------------------------------------------------------------
 _WS_TICKET_TTL_SECONDS = 30
-# ticket -> (username | None, expires_at). None = a platform SERVICE
-# identity (the deployment's INTERNAL_API_KEY): no user row, no camera
-# scope. Minted for trusted in-stack consumers — the camera agent relays
-# core's overlay tracks to its own viewers and scopes them itself.
-_ws_tickets: dict[str, tuple[str | None, float]] = {}
+# ticket -> (username | None, expires_at, api_token_id | None). A None
+# username = a platform SERVICE identity (the deployment's INTERNAL_API_KEY):
+# no user row, no camera scope. Minted for trusted in-stack consumers — the
+# camera agent relays core's overlay tracks to its own viewers and scopes
+# them itself. The token id (HA-103) lives IN the ticket, not only in the
+# binding beside it: the ticket is the credential, so what it may resolve
+# to must be decided by the ticket alone. When it used to live only in
+# ``_ws_ticket_bindings``, a token ticket whose binding was missing fell
+# through to its owner's user row with none of the token's scoping.
+_ws_tickets: dict[str, tuple[str | None, float, int | None]] = {}
 
 
 @dataclass(frozen=True)
@@ -107,8 +112,9 @@ class WsTicketBinding:
     api_token_id: int | None = None
 
 
-# ticket -> binding. Kept beside _ws_tickets (same keys, same lifetime) so
-# the ticket store's (username, expires_at) shape is unchanged.
+# ticket -> binding. Kept beside _ws_tickets (same keys, same lifetime).
+# It carries firewall facts for the handshake; WHO the ticket resolves to
+# (user, token or service) is decided by the _ws_tickets entry alone.
 _ws_ticket_bindings: dict[str, WsTicketBinding] = {}
 
 
@@ -133,8 +139,24 @@ SERVICE = ServiceIdentity()
 _SERVICE_TICKET = object()
 
 
+@dataclass(frozen=True)
+class _TokenTicket:
+    """What a consumed API-token ticket resolves to: the token that must be
+    re-checked at the handshake, and the owner it was minted for. Never a
+    bare username, so it cannot be mistaken for a user ticket."""
+
+    username: str
+    api_token_id: int
+
+
+def _ticket_fields(entry) -> tuple[str | None, float, int | None]:
+    # Older callers (and tests) still store the two-field shape.
+    username, expires_at, *rest = entry
+    return username, expires_at, (rest[0] if rest else None)
+
+
 def _prune_ws_tickets(now: float) -> None:
-    for tok in [t for t, (_, exp) in _ws_tickets.items() if exp <= now]:
+    for tok in [t for t, e in _ws_tickets.items() if _ticket_fields(e)[1] <= now]:
         _ws_tickets.pop(tok, None)
         _ws_ticket_bindings.pop(tok, None)
     # A binding whose ticket is gone (consumed or pruned) is dead weight.
@@ -149,7 +171,8 @@ def _mint_ws_ticket(
     now = time.time()
     _prune_ws_tickets(now)
     ticket = secrets.token_urlsafe(32)
-    _ws_tickets[ticket] = (username, now + _WS_TICKET_TTL_SECONDS)
+    api_token_id = binding.api_token_id if binding is not None else None
+    _ws_tickets[ticket] = (username, now + _WS_TICKET_TTL_SECONDS, api_token_id)
     if binding is not None:
         _ws_ticket_bindings[ticket] = binding
     return ticket, _WS_TICKET_TTL_SECONDS
@@ -158,19 +181,24 @@ def _mint_ws_ticket(
 def _consume_ws_ticket(ticket: str):
     """Validate and *consume* a ticket (single use).
 
-    Returns the username for a user ticket, ``_SERVICE_TICKET`` for a
-    service ticket, or ``None`` when the ticket is unknown or expired —
-    three outcomes, because a service ticket has no username and must
-    not be mistaken for a missing one.
+    Returns the username for a user ticket, a ``_TokenTicket`` for an
+    API-token ticket, ``_SERVICE_TICKET`` for a service ticket, or ``None``
+    when the ticket is unknown or expired — four outcomes, because a
+    service ticket has no username and must not be mistaken for a missing
+    one, and a token ticket must never be mistaken for its owner's.
     """
     entry = _ws_tickets.pop(ticket, None)  # pop() => cannot be replayed
     _ws_ticket_bindings.pop(ticket, None)
     if entry is None:
         return None
-    username, expires_at = entry
+    username, expires_at, api_token_id = _ticket_fields(entry)
     if expires_at <= time.time():
         return None
-    return _SERVICE_TICKET if username is None else username
+    if username is None:
+        return _SERVICE_TICKET
+    if api_token_id is not None:
+        return _TokenTicket(username, api_token_id)
+    return username
 
 
 @router.post("/events/ws-ticket")
@@ -273,11 +301,18 @@ def _authenticate_ws(
         return None
     if subject is _SERVICE_TICKET:
         return SERVICE
-    if binding is not None and binding.api_token_id is not None:
-        principal = api_tokens.principal_for_ws(db, binding.api_token_id, ip)
-        if principal is None or principal.username != subject:
+    if isinstance(subject, _TokenTicket):
+        # The ticket itself says it is a token's: resolve the token (revoked,
+        # expired, owner disabled, network) or refuse. There is no fallback
+        # to the owner's user row, whatever the binding beside it says.
+        principal = api_tokens.principal_for_ws(db, subject.api_token_id, ip)
+        if principal is None or principal.username != subject.username:
             return None
         return principal
+    if binding is not None and binding.api_token_id is not None:
+        # A binding that claims a token for a plain user ticket cannot occur
+        # from _mint_ws_ticket; refuse rather than guess which record lies.
+        return None
     user = db.query(User).filter(User.username == subject).first()
     if user is None or not user.is_active:
         return None
@@ -664,6 +699,13 @@ async def _stream_v2(websocket, user, allowed, event_types, *, camera_id, task,
             main_logger.info("events_stream v2 opened: user=%s since=%s resumed=%s",
                              user.username, since, complete)
             reported_drops = 0
+            # The seq this socket is caught up to: everything numbered at or
+            # below it has been delivered (or replayed, or is covered by the
+            # snapshot). A heartbeat reports THIS, never ``bus.current_seq``:
+            # the bus may already be ahead by events still queued for this
+            # socket, and a client that resumed with ``since`` = that number
+            # would never get them.
+            last_seq = replayed[-1][0] if complete and replayed else sub.start_seq
             while True:
                 try:
                     seq, event = await asyncio.wait_for(sub.queue.get(), V2_HEARTBEAT_S)
@@ -672,11 +714,14 @@ async def _stream_v2(websocket, user, allowed, event_types, *, camera_id, task,
                         await recheck.close(websocket)
                         break
                     await websocket.send_text(json.dumps(
-                        {"v": 2, "event_type": "heartbeat", "seq": bus.current_seq}))
+                        {"v": 2, "event_type": "heartbeat", "seq": last_seq}))
                     continue
                 if recheck is not None and not await recheck.still_ok():
                     await recheck.close(websocket)
                     break
+                # Dequeued is delivered as far as resume is concerned: an event
+                # this socket may not see is not one it should be sent again.
+                last_seq = seq
                 if not _v2_may_send(event, held):
                     continue
                 await websocket.send_text(_v2_frame(seq, event))

@@ -209,10 +209,14 @@ def _overlay_enabled() -> bool:
 
 
 async def _update_live_state(camera_id: int, raw: dict[str, Any]) -> None:
-    from services.live_state import get_live_state, refresh_zones_if_due
+    from services.live_state import claim_zones_refresh, get_live_state, load_zones
 
-    # A DB read every 10 s per camera: off the event loop.
-    await asyncio.to_thread(refresh_zones_if_due, camera_id)
+    # Due-ness is a dict lookup, decided here on the loop; only the DB read
+    # itself (once per camera per TTL) is worth a worker-thread hop. Hopping
+    # for every frame cost a thread hand-off per detection at 5 fps per
+    # camera for a call that returned at once.
+    if claim_zones_refresh(camera_id):
+        await asyncio.to_thread(load_zones, camera_id)
     live = get_live_state()
     delta = live.update(camera_id, raw)
     if delta["changed"] or delta["started"] or delta["ended"]:
@@ -230,19 +234,51 @@ async def _update_live_state(camera_id: int, raw: dict[str, Any]) -> None:
                     payload={"key": key, "event": {"type": s["label"], "attributes": attrs}})
 
 
-async def run_live_state_sweeper(interval_s: float = 1.0) -> None:
+#: How often the sweeper drops live-state entries of cameras no longer in
+#: the database. A deleted camera simply stops sending frames, so nothing
+#: else would ever notice; one cheap id query a minute is the price of not
+#: growing a dict for the life of the process.
+PRUNE_EVERY_S = 60.0
+
+
+def _existing_camera_ids() -> set[int]:
+    """Ids of the cameras that still exist (soft-deleted ones excluded)."""
+    from core.database import SessionLocal
+    from models import Camera
+
+    with SessionLocal() as db:
+        return {cid for (cid,) in db.query(Camera.id).filter(Camera.deleted_at.is_(None)).all()}
+
+
+async def prune_live_state() -> list[int]:
+    """Forget cameras that were deleted since the last pass. Returns them."""
+    from services.live_state import get_live_state
+
+    ids = await asyncio.to_thread(_existing_camera_ids)
+    return get_live_state().retain(ids)
+
+
+async def run_live_state_sweeper(interval_s: float = 1.0,
+                                 prune_every_s: float = PRUNE_EVERY_S) -> None:
     """Tier-0 sends no frame when nothing is detected, so a camera that goes
-    quiet is noticed here: its tracks end and its counts drop to zero."""
+    quiet is noticed here: its tracks end and its counts drop to zero. Every
+    ``prune_every_s`` it also evicts cameras that no longer exist."""
+    import time
+
     from services.event_bus_service import publish_live_state
     from services.live_state import get_live_state
 
     live = get_live_state()
+    next_prune = time.monotonic() + prune_every_s
     while True:
         await asyncio.sleep(interval_s)
         try:
             for camera_id, ended in live.sweep():
                 await publish_live_state(camera_id=camera_id, state=live.camera(camera_id),
                                          ended=ended)
+            if time.monotonic() >= next_prune:
+                next_prune = time.monotonic() + prune_every_s
+                await prune_live_state()
         except Exception:  # noqa: BLE001 - the sweeper must outlive one bad pass
             logger.warning("live-state sweep failed", exc_info=True)
 

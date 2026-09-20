@@ -334,6 +334,35 @@ async def test_a_briefly_missing_descriptor_keeps_its_entity(
     assert entry_now is not None and entry_now.name == "Gate camera preset"
 
 
+async def test_a_pruned_descriptor_that_returns_gets_its_entity_back(
+        hass: HomeAssistant, catalog_client: MagicMock, mock_stream: type[FakeStream],
+        freezer: FrozenDateTimeFactory) -> None:
+    """Gone for longer than the grace period, the entity is pruned; when the
+    descriptor then reappears (a camera back online after a long outage)
+    the entity must be created again, not wait for a restart of HA."""
+    entry = await _setup(hass)
+    entry.runtime_data.coordinator.async_add_listener(lambda: None)
+    ent_reg = er.async_get(hass)
+    uid = f"{SITE_ID}:camera.1.ptz_preset"
+    assert ent_reg.async_get_entity_id("select", DOMAIN, uid)
+    without = [d for d in CATALOG if d["key"] != "camera.1.ptz_preset"]
+    catalog_client.get_entities.return_value = EntityCatalog.from_dict(
+        {"etag": "e2", "entities": without})
+    for _ in range(3):
+        freezer.tick(31)
+        async_fire_time_changed(hass)
+        await hass.async_block_till_done()
+    assert ent_reg.async_get_entity_id("select", DOMAIN, uid) is None      # pruned
+    catalog_client.get_entities.return_value = EntityCatalog.from_dict(
+        {"etag": "e3", "entities": CATALOG})
+    freezer.tick(31)
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    entity_id = ent_reg.async_get_entity_id("select", DOMAIN, uid)
+    assert entity_id is not None
+    assert hass.states.get(entity_id).state == "Home"
+
+
 async def test_catalogue_changes_reach_live_entities(
         hass: HomeAssistant, catalog_client: MagicMock, mock_stream: type[FakeStream],
         freezer: FrozenDateTimeFactory) -> None:

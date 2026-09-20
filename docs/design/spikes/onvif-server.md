@@ -5,8 +5,8 @@
 | **Status** | Spike complete. Recommendation: **go**, as an opt-in sidecar, after integration 1.0 |
 | **Date** | 2026-09-19 |
 | **Design** | [home-assistant-integration.md](../home-assistant-integration.md) §10, scenario S9 |
-| **Prototype** | [`scripts/spikes/onvif_server.py`](../../../scripts/spikes/onvif_server.py) (not product code) |
-| **Check** | [`scripts/spikes/onvif-ha-check.ps1`](../../../scripts/spikes/onvif-ha-check.ps1) |
+| **Prototype** | `scripts/spikes/onvif_server.py` at commit `ceb65f3` (not product code; removed from the tree, `git show ceb65f3:scripts/spikes/onvif_server.py`) |
+| **Check** | `scripts/spikes/onvif-ha-check.ps1` and `onvif_ha_check.py` at the same commit |
 
 ## Question
 Can OpenNVR present itself as an ONVIF device, so that VMSs, NVRs and Home

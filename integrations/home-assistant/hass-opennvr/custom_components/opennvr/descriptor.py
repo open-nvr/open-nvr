@@ -135,7 +135,7 @@ def async_setup_platform_entities(
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> Callable[[], None]:
     """Add an entity for each descriptor of ``platform``, now and whenever
-    new ones appear. Returns the listener's remover."""
+    new ones appear. Returns the listeners' remover."""
     added: set[str] = set()
 
     @callback
@@ -148,8 +148,24 @@ def async_setup_platform_entities(
         if new:
             async_add_entities(new)
 
+    @callback
+    def forget(key: str) -> None:
+        # Pruned: the descriptor may well come back (PTZ presets, after an
+        # OpenNVR restart), and it then needs a new entity. Told by the
+        # prune rather than by the entity's own removal so that a disabled
+        # entity, which was never added to hass, is forgotten too.
+        added.discard(key)
+
     add_new()
-    return coordinator.async_add_listener(add_new)
+    removers = (coordinator.async_add_listener(add_new),
+                coordinator.async_add_removal_listener(forget))
+
+    @callback
+    def remove() -> None:
+        for remover in removers:
+            remover()
+
+    return remove
 
 
 #: A key missing from this many consecutive refreshes is gone for good. A
@@ -218,6 +234,7 @@ def async_prune(hass: HomeAssistant, coordinator: OpenNVRCoordinator,
         if deselected or coordinator.refreshes - first >= PRUNE_AFTER_REFRESHES - 1:
             missing.pop(ent.unique_id, None)
             ent_reg.async_remove(ent.entity_id)
+            coordinator.async_entity_removed(ent.unique_id.split(":", 1)[-1])
     dev_reg = dr.async_get(hass)
     wanted = wanted_device_identifiers(coordinator)
     for device in dr.async_entries_for_config_entry(dev_reg, entry.entry_id):

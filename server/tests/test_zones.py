@@ -105,6 +105,35 @@ def test_no_path_or_a_bad_path_still_stores_the_visit(env):  # noqa: F811
     assert _ingest(env, track="b", path=[[0.3, 7.0]]) is None
 
 
+def test_zone_filter_matches_the_stored_json_text_form(env):  # noqa: F811
+    """``zone_filter`` is four LIKE patterns written against ``json.dumps``
+    with its default separators. Pin the text the JSON column actually
+    stores (through ``record_track_visit``, the real writer) so a changed
+    serializer fails here rather than silently emptying zone filters."""
+    from sqlalchemy import String, cast
+
+    from services.timeline_service import record_track_visit, zone_filter
+
+    s = env.Session()
+    now = datetime.now(UTC)
+    row = record_track_visit(s, camera_id=1, label="person", started_at=now, zone_ids=[1, 4])
+    record_track_visit(s, camera_id=1, label="person", started_at=now, zone_ids=[14])
+    record_track_visit(s, camera_id=1, label="person", started_at=now, zone_ids=[41, 1])
+    TE = env.models.TimelineEvent
+    stored = s.query(cast(TE.zone_ids, String)).filter(TE.id == row.id).scalar()
+    assert stored == "[1, 4]" == json.dumps([1, 4])
+
+    def ids(zone_id):
+        return sorted(r.zone_ids for r in s.query(TE).filter(zone_filter(zone_id)).all())
+
+    assert ids(4) == [[1, 4]]              # last item
+    assert ids(1) == [[1, 4], [41, 1]]     # first and last, never inside 14 or 41
+    assert ids(14) == [[14]]               # only item; not a prefix of "1, 4"
+    assert ids(41) == [[41, 1]]
+    assert ids(2) == []
+    s.close()
+
+
 def test_events_api_returns_zone_ids(env):  # noqa: F811
     zid = _zone(env)
     _ingest(env, path=[[0.3, 0.3]])

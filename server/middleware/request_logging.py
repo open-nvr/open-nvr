@@ -27,7 +27,11 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from core.logging_config import api_logger
 from core.request_context import begin_request, end_request, valid_correlation_id
-from utils.url_redaction import redact_query_params, redact_url_query
+from utils.url_redaction import (
+    redact_query_params,
+    redact_signed_media_path,
+    redact_url_query,
+)
 
 
 # High-frequency media paths: an HLS playback session issues hundreds of
@@ -97,6 +101,11 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         if request.url.path.startswith(_QUIET_PREFIXES):
             return await call_next(request)
         slim = _is_slim_path(request.url.path)
+        # A signed media URL (HA-112) carries its credential in the PATH, so
+        # every record below logs these two instead of the raw path / URL.
+        # The other query-string redaction still applies to the full URL.
+        log_path = redact_signed_media_path(request.url.path)
+        log_url = redact_signed_media_path(redact_url_query(str(request.url)))
 
         # Get client info
         client_host = request.client.host if request.client else "unknown"
@@ -122,13 +131,13 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         if not slim:
             api_logger.log_action(
                 "api.request_start",
-                message=f"{request.method} {request.url.path}",
+                message=f"{request.method} {log_path}",
                 extra_data={
                     "method": request.method,
                     # Redact secrets carried in the URL / query string (camera
                     # creds, stream tokens, MFA codes) before they hit the log.
-                    "url": redact_url_query(str(request.url)),
-                    "path": request.url.path,
+                    "url": log_url,
+                    "path": log_path,
                     "query_params": redact_query_params(request.query_params),
                     "headers": sanitized_headers,
                     "client_host": client_host,
@@ -152,11 +161,11 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             # Log response
             api_logger.log_action(
                 "api.request_complete",
-                message=f"{request.method} {request.url.path} - {response.status_code}",
+                message=f"{request.method} {log_path} - {response.status_code}",
                 extra_data={
                     "method": request.method,
-                    "url": redact_url_query(str(request.url)),
-                    "path": request.url.path,
+                    "url": log_url,
+                    "path": log_path,
                     "status_code": response.status_code,
                     "process_time_seconds": round(process_time, 3),
                     "correlation_id": correlation_id,
@@ -181,11 +190,11 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
 
             # Log error
             api_logger.error(
-                f"Request failed: {request.method} {request.url.path}",
+                f"Request failed: {request.method} {log_path}",
                 extra={
                     "method": request.method,
-                    "url": redact_url_query(str(request.url)),
-                    "path": request.url.path,
+                    "url": log_url,
+                    "path": log_path,
                     "process_time_seconds": round(process_time, 3),
                     "exception_type": type(exc).__name__,
                     "ip_address": client_host,

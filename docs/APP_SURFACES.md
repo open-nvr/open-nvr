@@ -35,6 +35,7 @@ reaches you). Get those right and every surface below lights up.
 | **Feature forms (actions)** | Catalog card buttons | `AppManifest.actions` + `on_action()` |
 | **Agent skill** | OpenNVR Agent skills panel + conversation | the contract keys (§2) — automatic |
 | **Announcements** | notification feed, webhooks, voice | just emit alerts (you already do) |
+| **Home Assistant entities** | HA devices and entities, MQTT discovery, Assist | `AppManifest.entities` — sensors/buttons read from your `/state`, commands mapped onto your `actions` |
 
 ---
 
@@ -43,7 +44,8 @@ reaches you). Get those right and every surface below lights up.
 You already have this: every alert your app dispatches through the
 SDK's `AlertDispatcher` rides `opennvr.alerts.>` on the bus. The
 platform fans it out — the operator UI's alerts inbox, the webhook
-fan-out, the Home Assistant relay if installed, **and the agent's
+fan-out, Home Assistant (the native integration and the built-in MQTT
+discovery both carry app alerts as events), **and the agent's
 proactive channel**: "the license-plate app flagged a watchlist plate"
 reaches the user as a notification (and spoken, on voice deployments)
 with the tab closed. Conversationally, `recent_app_alerts` answers

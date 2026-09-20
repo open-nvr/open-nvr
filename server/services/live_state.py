@@ -103,10 +103,20 @@ class LiveState:
             cam = self._cams.setdefault(camera_id, _Camera())
             before = self._counts(cam, now)
             was_motion = self._motion(cam, now)
-            if now - cam.last_frame > self.stale_s:
+            # The tracks on the books before this frame. Kept aside so that
+            # ``ended`` below is computed against them even when the gap
+            # check empties the camera: the sweeper ends tracks only while
+            # a camera stays quiet, so a frame that resumes right after a
+            # gap is the only chance to report the tracks that vanished.
+            previous = cam.tracks
+            gap = now - cam.last_frame > self.stale_s
+            if gap:
                 # Frames resumed after a gap: whatever was there then is
-                # not evidence of anything now.
-                cam.tracks.clear()
+                # not evidence of anything now, so nothing carries over.
+                # Every previous track ends (a re-seen id included, so
+                # starts and ends stay paired for whoever counts them) and
+                # every track in this frame is a fresh start.
+                cam.tracks = {}
             cam.last_frame = now
             seen: dict[str, _Track] = {}
             for t in raw.get("tracks") or []:
@@ -133,7 +143,7 @@ class LiveState:
                        for k, v in seen.items() if k not in cam.tracks]
             ended = [{"track_id": k, "label": v.label, "zones": sorted(v.zones),
                       "duration_s": round(v.last_seen - v.first_seen, 1)}
-                     for k, v in cam.tracks.items() if k not in seen]
+                     for k, v in previous.items() if gap or k not in seen]
             cam.tracks = seen
             if any(not tr.stationary for tr in seen.values()):
                 cam.last_active = now
@@ -194,6 +204,26 @@ class LiveState:
                     out.append((cid, ended))
         return out
 
+    def retain(self, camera_ids: set[int] | list[int]) -> list[int]:
+        """Drop every camera NOT in ``camera_ids`` and forget its zone-cache
+        stamp. Returns the ids dropped.
+
+        Nothing else removes a ``_Camera``: a deleted camera stops sending
+        frames but its entry (tracks, zones, timestamps) would otherwise
+        live as long as the process, and ``camera_ids()`` would keep
+        naming it. The sweeper calls this with the cameras still in the
+        database (see ``run_live_state_sweeper``); the pure method keeps
+        the DB out of this module.
+        """
+        keep = set(camera_ids)
+        with self._lock:
+            gone = sorted(cid for cid in self._cams if cid not in keep)
+            for cid in gone:
+                del self._cams[cid]
+        for cid in gone:
+            _zones_loaded.pop(cid, None)
+        return gone
+
     def camera_ids(self) -> list[int]:
         with self._lock:
             return sorted(self._cams)
@@ -219,15 +249,34 @@ def get_live_state() -> LiveState:
 # ── zones cache (the consumer runs on every frame; zones change rarely) ────
 
 _ZONES_TTL_S = 10.0
+#: camera_id -> monotonic time the zones were last (re)loaded, or claimed for
+#: loading. Touched from the consumer's event loop (``claim_zones_refresh``),
+#: from zone CRUD request handlers (``invalidate_zones``) and from
+#: ``LiveState.retain``; every access is a single dict get/set/pop, which
+#: is atomic under the GIL, and the worst a race can do is one extra load
+#: (an invalidate landing between a claim and its load is re-honoured on
+#: the next frame because the stamp is gone). No lock is therefore needed.
 _zones_loaded: dict[int, float] = {}
 
 
-def refresh_zones_if_due(camera_id: int, now: float | None = None) -> None:
-    """Load this camera's zones into the live state at most every 10 s."""
+def claim_zones_refresh(camera_id: int, now: float | None = None) -> bool:
+    """True, and stamp the camera, when its zones are due for a reload.
+
+    Pure bookkeeping, no I/O: the consumer calls it on the event loop for
+    every Tier-0 frame and hops to a thread (``load_zones``) only when this
+    says so, instead of paying a thread hand-off per frame for a check that
+    returns immediately 49 times out of 50.
+    """
     now = time.monotonic() if now is None else now
     if now - _zones_loaded.get(camera_id, -1e9) < _ZONES_TTL_S:
-        return
+        return False
     _zones_loaded[camera_id] = now
+    return True
+
+
+def load_zones(camera_id: int) -> None:
+    """Read this camera's zones from the DB into the live state. Blocking;
+    the consumer runs it in a worker thread."""
     try:
         from core.database import SessionLocal
         from models import CameraZone
@@ -237,6 +286,13 @@ def refresh_zones_if_due(camera_id: int, now: float | None = None) -> None:
             get_live_state().set_zones(camera_id, zones)
     except Exception:  # noqa: BLE001 - counts without zones beat no counts
         pass
+
+
+def refresh_zones_if_due(camera_id: int, now: float | None = None) -> None:
+    """Load this camera's zones into the live state at most every 10 s
+    (the synchronous form of claim + load, for callers not on a loop)."""
+    if claim_zones_refresh(camera_id, now):
+        load_zones(camera_id)
 
 
 def invalidate_zones(camera_id: int | None = None) -> None:

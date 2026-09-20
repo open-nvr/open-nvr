@@ -421,6 +421,50 @@ _SEV = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 LAST_LOOKBACK = timedelta(days=7)
 
 
+def latest_events(db: Session, camera_ids: list[int] | set[int], *predicates: Any,
+                  now: Any = None, lookback: timedelta = LAST_LOOKBACK) -> dict[int, Any]:
+    """``{camera_id: newest TimelineEvent}`` matching ``predicates`` within
+    ``lookback``, for ALL ``camera_ids`` in one round trip.
+
+    Used for the "last plate" / "last object" answers of both the entity
+    resolver (every publisher tick, 2 s, while any HA bridge is connected)
+    and ``GET /live-state``. Each used to run one ``ORDER BY started_at
+    DESC LIMIT 1`` per camera per predicate, so a 40-camera site paid 80
+    queries a tick for two numbers per camera. Here a grouped subquery
+    finds each camera's newest matching ``started_at`` and a join fetches
+    those rows: two statements per resolve regardless of camera count,
+    plain SQL-92 that SQLite and Postgres both run against the
+    ``(camera_id, started_at)`` index. Two rows with the same started_at
+    (a merged track resplit, a clock tie) are settled by the higher id,
+    which is what the old ``.first()`` on an index scan returned in
+    practice on both backends.
+    """
+    from datetime import UTC, datetime
+
+    from sqlalchemy import and_, func
+
+    from models import TimelineEvent
+
+    ids = sorted(set(camera_ids))
+    if not ids:
+        return {}
+    now = datetime.now(UTC) if now is None else now
+    where = [TimelineEvent.camera_id.in_(ids),
+             TimelineEvent.started_at >= now - lookback, *predicates]
+    newest = (db.query(TimelineEvent.camera_id.label("cid"),
+                       func.max(TimelineEvent.started_at).label("mx"))
+              .filter(*where).group_by(TimelineEvent.camera_id).subquery())
+    rows = (db.query(TimelineEvent)
+            .join(newest, and_(TimelineEvent.camera_id == newest.c.cid,
+                               TimelineEvent.started_at == newest.c.mx))
+            .filter(*where).all())
+    out: dict[int, Any] = {}
+    for row in rows:
+        if row.camera_id not in out or row.id > out[row.camera_id].id:
+            out[row.camera_id] = row
+    return out
+
+
 def _site_states(db: Session) -> dict[str, dict]:
     from models import AppAlert
     from services.system_monitor_service import get_system_monitor
@@ -494,6 +538,16 @@ def resolve_states(db: Session, descriptors: list[Descriptor],
                       .filter(Recording.camera_id.in_(cam_ids))
                       .group_by(Recording.camera_id).all())
         pause = paused(db)
+        # One batched query per predicate for every camera, not two per
+        # camera (see latest_events); skipped entirely when no caller wants
+        # these keys.
+        want_plate = any(f"camera.{cid}.last_plate" in keys for cid in cam_ids)
+        want_object = any(f"camera.{cid}.last_object" in keys for cid in cam_ids)
+        plates = latest_events(db, cam_ids, TimelineEvent.plate_text.isnot(None),
+                               now=now) if want_plate else {}
+        objects = latest_events(db, cam_ids, TimelineEvent.event_type == "track",
+                                TimelineEvent.evidence_path.isnot(None),
+                                now=now) if want_object else {}
         for cid in cam_ids:
             cam = cams.get(cid)
             if cam is None:
@@ -517,18 +571,13 @@ def resolve_states(db: Session, descriptors: list[Descriptor],
                                         "attributes": {}}
             states[f"{k}.recording"] = {"state": str(cid) not in pause,
                                         "attributes": pause.get(str(cid)) or {}}
-            recent = (db.query(TimelineEvent)
-                      .filter(TimelineEvent.camera_id == cid,
-                              TimelineEvent.started_at >= now - LAST_LOOKBACK)
-                      .order_by(TimelineEvent.started_at.desc()))
             if f"{k}.last_plate" in keys:
-                plate = recent.filter(TimelineEvent.plate_text.isnot(None)).first()
+                plate = plates.get(cid)
                 states[f"{k}.last_plate"] = {
                     "state": plate.plate_text if plate else None,
                     "attributes": {"event_id": plate.id} if plate else {}}
             if f"{k}.last_object" in keys:
-                obj = recent.filter(TimelineEvent.event_type == "track",
-                                    TimelineEvent.evidence_path.isnot(None)).first()
+                obj = objects.get(cid)
                 seen = (obj.ended_at or obj.started_at) if obj else None
                 states[f"{k}.last_object"] = {
                     "state": seen.isoformat() if seen else None,

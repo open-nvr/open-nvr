@@ -255,3 +255,60 @@ def test_audit_log_api_returns_and_filters_by_correlation_id(session_factory):
 
     everything = c.get("/api/v1/audit-logs/").json()
     assert everything["total"] == 3
+
+
+# ── signed media URLs never reach the request log (HA-112 review) ─────────
+
+_TOKEN = "m1.eyJrIjoiZXZlbnQiLCJpIjoxfQ.c2lnbmF0dXJl"
+
+
+def test_redact_signed_media_path_masks_the_token_only():
+    from utils.url_redaction import redact_signed_media_path as r
+
+    assert r(f"/api/v1/media/s/{_TOKEN}") == "/api/v1/media/s/<redacted>"
+    assert r(f"http://nvr:8000/api/v1/media/s/{_TOKEN}?x=1") == \
+        "http://nvr:8000/api/v1/media/s/<redacted>"
+    assert r(f"/api/v1/media/s/{_TOKEN}/deeper") == "/api/v1/media/s/<redacted>"
+    for untouched in ("/api/v1/media/sign", "/api/v1/cameras/", "", None):
+        assert r(untouched) == untouched
+
+
+def test_signed_media_urls_are_redacted_in_every_request_log_record(monkeypatch):
+    """The token in the path IS the credential. Three records could carry
+    it: the middleware's request_start / request_complete pair and, for a
+    403 or 404 from the route, main.py's http.exception record. None of
+    them may hold the token, or the log would double as a link store."""
+    import importlib
+
+    from fastapi import HTTPException
+
+    import middleware.request_logging as rl
+
+    main = importlib.import_module("main")
+    records: list = []
+
+    class _Capture:
+        def log_action(self, action, **kw):
+            records.append((action, kw))
+
+        def error(self, msg, **kw):
+            records.append(("error", {"message": msg, **kw}))
+
+    monkeypatch.setattr(rl, "api_logger", _Capture())
+    monkeypatch.setattr(main, "main_logger", _Capture())
+
+    app = FastAPI()
+    app.add_middleware(RequestLoggingMiddleware)
+    app.add_exception_handler(HTTPException, main.http_exception_handler)
+
+    @app.get("/api/v1/media/s/{token}")
+    def fetch(token: str):
+        raise HTTPException(status_code=403, detail="Invalid or expired link")
+
+    r = TestClient(app).get(f"/api/v1/media/s/{_TOKEN}")
+    assert r.status_code == 403
+    assert [a for a, _ in records] == [
+        "api.request_start", "http.exception", "api.request_complete"]
+    blob = repr(records)
+    assert _TOKEN not in blob and _TOKEN[3:20] not in blob
+    assert blob.count("/api/v1/media/s/<redacted>") >= 3

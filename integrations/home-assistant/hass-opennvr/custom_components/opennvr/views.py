@@ -21,17 +21,19 @@ Paths (``<entry>`` is the config entry id):
 * ``/api/opennvr/<entry>/clip/<camera_id>/<start_epoch>/<seconds>``: an MP4
   of that camera's recording.
 
-And one view WITHOUT Home Assistant auth, for notifications (a phone's
-notification fetcher cannot log in): ``/api/opennvr/<site_id>/m/<token>``
-relays one OpenNVR signed-media token to OpenNVR's ``/api/v1/media/s/``. It
-accepts nothing but the token's shape; OpenNVR checks its signature, expiry
-and the one object it names, so the relay unlocks exactly what the token
-does, for as long as it does, and nothing else.
+And one for notifications: ``/api/opennvr/<site_id>/m/<token>`` relays one
+OpenNVR signed-media token to OpenNVR's ``/api/v1/media/s/``. It accepts
+nothing but the token's shape; OpenNVR checks its signature, expiry and the
+one object it names. It requires Home Assistant auth like every other view;
+a fetcher that cannot log in (a phone's notification fetcher) is given the
+path SIGNED by Home Assistant (``signed_relay_path``, ``?authSig=``), which
+the Companion apps resolve against HA's URL like any other relative
+attachment path.
 """
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
 import logging
 import re
@@ -40,8 +42,9 @@ from aiohttp import ClientError, ClientTimeout, web
 from pyopennvr import OpenNVRAuthError, OpenNVRError, OpenNVRNotFoundError
 
 from homeassistant.components.http import HomeAssistantView
+from homeassistant.components.http.auth import async_sign_path
 from homeassistant.config_entries import ConfigEntryState
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import DOMAIN
@@ -66,6 +69,17 @@ def relay_path(site_id: str, signed_url: str) -> str | None:
     """The relay path for an OpenNVR signed-media URL (``.../media/s/<token>``)."""
     token = signed_url.rsplit("/media/s/", 1)[-1]
     return f"{URL_BASE}/{site_id}/m/{token}" if _SIGNED_TOKEN.fullmatch(token) else None
+
+
+@callback
+def signed_relay_path(hass: HomeAssistant, site_id: str, signed_url: str,
+                      ttl_s: int) -> str | None:
+    """The relay path, signed by Home Assistant for ``ttl_s`` seconds (as
+    long as OpenNVR's own token lives), for a fetcher with no HA login."""
+    path = relay_path(site_id, signed_url)
+    if path is None:
+        return None
+    return async_sign_path(hass, path, timedelta(seconds=ttl_s))
 
 
 def event_image_path(entry_id: str, event_id: int, image: str = "evidence") -> str:
@@ -199,9 +213,16 @@ class ClipView(_MediaView):
 
 
 class RelayView(_MediaView):
-    """Signed media for notifications; see the module docstring."""
+    """Signed media for notifications; see the module docstring.
 
-    requires_auth = False
+    Home Assistant auth is required (a signed path counts). The view once
+    ran without it, reasoning that the OpenNVR token in the path is itself a
+    credential; but anyone who can reach HA at all (over Nabu Casa, the
+    internet) could then use HA as an open relay into OpenNVR's media
+    endpoint with any token they got hold of, and HA's own protections
+    (login, IP bans, the signed-path TTL) would not apply to camera footage.
+    """
+
     url = URL_BASE + "/{site_id}/m/{token}"
     name = f"api:{DOMAIN}:relay"
 

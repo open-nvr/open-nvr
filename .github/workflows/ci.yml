@@ -65,8 +65,11 @@ jobs:
       # server/contract/contract.json needs the matching version bump
       # (MAJOR for anything removed or narrowed, MINOR for additions).
       - name: HA contract check
+        # No `|| true` on the fetch: a failed fetch used to be swallowed and
+        # the script then died with "base ref not found", blaming the wrong
+        # step. Let the fetch fail where it fails.
         run: |
-          git fetch --no-tags --depth=1 origin main:refs/remotes/origin/main || true
+          git fetch --no-tags --depth=1 origin main:refs/remotes/origin/main
           server/.venv/bin/python scripts/contract_check.py --base origin/main
 
   # ── App SDK ──────────────────────────────────────────────────────

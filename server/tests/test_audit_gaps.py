@@ -445,3 +445,55 @@ def test_onvif_tools_ptz_is_audited_without_credentials(monkeypatch, audited):
     assert all(r["entity_id"] == 9 for r in audited)       # resolved camera id
     assert "s3cret" not in repr(audited) and "admin" not in repr(
         [r["details"] for r in audited])
+
+
+# ── camera.describe names the real client, like every other audit row ───
+
+
+def test_describe_camera_audits_the_client_behind_a_trusted_proxy(monkeypatch):
+    """describe_camera wrote its own audit row with ``request.client.host``
+    (the reverse proxy) where every other site resolves the real client
+    through core.client_ip; the one row about a frame sent to a model
+    named nginx as the actor's address."""
+    import contextlib
+    import ipaddress
+
+    import core.client_ip as cip
+    import core.database as cdb
+    from routers import cameras as cameras_router
+    from services import camera_scope, scene_description
+
+    monkeypatch.setattr(cip, "_trusted_proxy_nets",
+                        lambda: (ipaddress.ip_network("172.28.0.0/16"),))
+    monkeypatch.setattr(camera_scope, "can_view_camera", lambda db, u, cid: True)
+    monkeypatch.setattr(cdb, "release", lambda db: None)
+
+    async def _describe(camera, caller, question=None):
+        return {"available": True, "description": "a gate", "model": "m", "task": "caption"}
+
+    monkeypatch.setattr(scene_description, "describe", _describe)
+    rows: list[dict] = []
+    monkeypatch.setattr(cameras_router, "write_audit_log",
+                        lambda db, **kw: rows.append(kw))
+    monkeypatch.setattr(cdb, "SessionLocal",
+                        lambda: contextlib.nullcontext(object()))
+
+    class _Q:
+        def filter(self, *a, **k):
+            return self
+
+        def first(self):
+            return types.SimpleNamespace(id=3, rtsp_url="rtsp://x/s")
+
+    db = types.SimpleNamespace(query=lambda *a, **k: _Q())
+    proxied = types.SimpleNamespace(
+        client=types.SimpleNamespace(host="172.28.0.5"),
+        headers={"x-forwarded-for": "192.168.1.50, 172.28.0.5",
+                 "user-agent": "HomeAssistant"},
+    )
+    out = asyncio.run(cameras_router.describe_camera(
+        camera_id=3, request=proxied, body=None, db=db, current_user=ADMIN))
+    assert out["camera_id"] == 3
+    (row,) = rows
+    assert row["action"] == "camera.describe" and row["entity_id"] == 3
+    assert row["ip"] == "192.168.1.50" and row["user_agent"] == "HomeAssistant"

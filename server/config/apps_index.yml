@@ -496,7 +496,7 @@
 
 - id: home-assistant-relay
   name: Home Assistant Relay
-  summary: Bridges the opennvr.alerts.* fan-out into Home Assistant entities via MQTT discovery or the HA REST API, with auto-off windows so sensors read like an event log.
+  summary: "Deprecated: use the native Home Assistant integration or the built-in MQTT discovery (docs/HOME_ASSISTANT.md), which cover cameras, controls, media and every app's entities. This bridges only alerts into binary sensors; kept for existing installs."
   category: integration
   version: "1.0.0"
   image: ghcr.io/open-nvr/home-assistant-relay:latest

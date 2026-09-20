@@ -7,6 +7,7 @@ from datetime import timedelta
 from unittest.mock import MagicMock
 
 from freezegun.api import FrozenDateTimeFactory
+from pyopennvr import OpenNVRRequestError
 import pytest
 from pytest_homeassistant_custom_component.common import async_mock_service
 from pytest_homeassistant_custom_component.typing import (
@@ -46,6 +47,49 @@ async def test_viewer_client_is_a_session_for_the_shown_cameras(
     freezer.tick(500)                                               # < 2 min left: renew
     await coordinator.async_viewer_client()
     assert mock_client.open_session.call_count == 2
+
+
+async def test_a_refused_mint_keeps_the_viewer_session_while_it_lasts(
+        hass: HomeAssistant, mock_client: MagicMock, mock_stream: type[FakeStream],
+        freezer: FrozenDateTimeFactory) -> None:
+    """A page of thumbnails renewing at once can trip the server's rate
+    limit (429). The session in hand is still valid: use it, rather than
+    fail every thumbnail with 502 for the sake of an early renewal."""
+    entry = await _setup(hass)
+    coordinator = entry.runtime_data.coordinator
+    mock_client.open_session.return_value = {
+        "token": "onvr_viewer01_x",
+        "expires_at": (dt_util.utcnow() + timedelta(seconds=600)).isoformat()}
+    first = await coordinator.async_viewer_client()
+    mock_client.open_session.side_effect = OpenNVRRequestError("rate limited", 429)
+    freezer.tick(500)                                               # renewal is due
+    assert await coordinator.async_viewer_client() is first
+    assert mock_client.open_session.call_count == 2
+    freezer.tick(200)                                               # now expired: no
+    with pytest.raises(OpenNVRRequestError):
+        await coordinator.async_viewer_client()
+
+
+async def test_a_session_cut_short_by_the_parent_token_is_not_minted_every_call(
+        hass: HomeAssistant, mock_client: MagicMock, mock_stream: type[FakeStream],
+        freezer: FrozenDateTimeFactory) -> None:
+    """The server caps a session at the parent token's expiry. A session
+    with under two minutes to live from the start would otherwise be
+    renewed on every call (and hit the rate limit at once)."""
+    entry = await _setup(hass)
+    coordinator = entry.runtime_data.coordinator
+    mock_client.open_session.return_value = {
+        "token": "onvr_viewer01_x",
+        "expires_at": (dt_util.utcnow() + timedelta(seconds=60)).isoformat()}
+    await coordinator.async_viewer_client()
+    await coordinator.async_viewer_client()
+    assert mock_client.open_session.call_count == 1                 # reused
+    freezer.tick(20)
+    await coordinator.async_viewer_client()
+    assert mock_client.open_session.call_count == 1                 # under half its life
+    freezer.tick(20)
+    await coordinator.async_viewer_client()
+    assert mock_client.open_session.call_count == 2                 # past half: renewed
 
 
 async def test_clip_of_a_hidden_camera_is_not_served(

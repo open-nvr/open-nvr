@@ -24,20 +24,15 @@
 
 name: e2e
 
+# Not a PR gate yet. tests/e2e/run.py materialises the fake-camera rig
+# (docker-compose.fakecams.yml and friends) from the out-of-tree branch
+# origin/fake-camera, so a run depends on a branch no PR can review or pin
+# and can go red for reasons unrelated to the change under test. Until the
+# rig lives in main this runs on demand only; restore the pull_request
+# trigger (server/**, kai-c/**, detect-pipeline/**, app/**, nginx/**,
+# nats/**, docker-compose*.yml, Dockerfile, supervisord.conf, tests/e2e/**,
+# this file) when it does.
 on:
-  pull_request:
-    paths:
-      - "server/**"
-      - "kai-c/**"
-      - "detect-pipeline/**"
-      - "app/**"
-      - "nginx/**"
-      - "nats/**"
-      - "docker-compose*.yml"
-      - "Dockerfile"
-      - "supervisord.conf"
-      - "tests/e2e/**"
-      - ".github/workflows/e2e.yml"
   workflow_dispatch:
     inputs:
       marker:

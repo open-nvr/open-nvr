@@ -357,3 +357,83 @@ def test_a_turned_off_camera_keeps_its_entities(env):  # noqa: F811
     s.close()
     keys = _keys(env, env.jwt("admin"))
     assert "camera.2.online" in keys and "camera.2.detection" in keys
+
+
+def test_last_plate_and_object_are_batched_across_cameras(env):  # noqa: F811
+    """Review: resolve_states ran two ``LIMIT 1`` queries PER camera on every
+    publisher tick (2 s while any HA bridge is connected). The statement
+    count must not grow with the camera count, and each camera's answer
+    must still be its own newest plate and newest evidenced visit."""
+    from datetime import timedelta
+
+    from sqlalchemy import event
+
+    from models import TimelineEvent
+    from services.timeline_service import record_track_visit
+
+    s = env.Session()
+    t0 = datetime.now(UTC) - timedelta(minutes=10)
+    expect = {}
+    for cid in (1, 2, 3):
+        # Newest row per camera has no plate and no evidence, so the two
+        # answers are distinct rows and neither is "just the newest".
+        first = record_track_visit(s, camera_id=cid, label="car", started_at=t0,
+                                   evidence_path="a/b.jpg")
+        if cid != 3:
+            first.plate_text = f"P{cid}"
+            s.commit()
+        second = record_track_visit(s, camera_id=cid, label="truck",
+                                    started_at=t0 + timedelta(minutes=1),
+                                    evidence_path="c/d.jpg")
+        record_track_visit(s, camera_id=cid, label="person",
+                           started_at=t0 + timedelta(minutes=2))
+        expect[cid] = (first.id, second.id)
+    # Two visits with the SAME started_at: the tie goes to the higher id.
+    tie_a = record_track_visit(s, camera_id=1, label="bus", started_at=t0 + timedelta(minutes=5),
+                               evidence_path="e/f.jpg")
+    tie_b = record_track_visit(s, camera_id=1, label="van", started_at=t0 + timedelta(minutes=5),
+                               evidence_path="g/h.jpg")
+    assert tie_b.id > tie_a.id
+    expect[1] = (expect[1][0], tie_b.id)
+    # Outside the lookback: a plate older than 7 days must not answer for
+    # a camera whose only recent visits carry none.
+    record_track_visit(s, camera_id=3, label="ghost",
+                       started_at=datetime.now(UTC) - timedelta(days=30),
+                       evidence_path="x/y.jpg").plate_text = "OLD"
+    s.commit()
+
+    statements: list[str] = []
+    engine = env.Session.kw["bind"]
+
+    def _on(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", _on)
+    try:
+        descs = ed.all_descriptors(s)
+        one = [d for d in descs if d.camera_id in (None, 1)]
+        statements.clear()
+        got_one = ed.resolve_states(s, one)
+        n_one = len(statements)
+        statements.clear()
+        got_all = ed.resolve_states(s, descs)
+        n_all = len(statements)
+        # The helper on its own: one statement per call, for 1 or 3 cameras.
+        statements.clear()
+        ed.latest_events(s, [1], TimelineEvent.plate_text.isnot(None))
+        assert len(statements) == 1
+        statements.clear()
+        ed.latest_events(s, [1, 2, 3], TimelineEvent.plate_text.isnot(None))
+        assert len(statements) == 1
+    finally:
+        event.remove(engine, "before_cursor_execute", _on)
+        s.close()
+    assert n_all == n_one, (n_one, n_all)
+    assert got_one["camera.1.last_plate"] == got_all["camera.1.last_plate"]
+    for cid, (plate_id, obj_id) in expect.items():
+        if cid != 3:
+            assert got_all[f"camera.{cid}.last_plate"] == {
+                "state": f"P{cid}", "attributes": {"event_id": plate_id}}
+        assert got_all[f"camera.{cid}.last_object"]["attributes"]["event_id"] == obj_id
+    assert got_all["camera.3.last_plate"] == {"state": None, "attributes": {}}
+    assert got_all["camera.1.last_object"]["attributes"]["label"] == "van"

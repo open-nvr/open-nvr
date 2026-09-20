@@ -33,6 +33,7 @@ from core.config import _host_is_internal
 from core.database import get_db
 from core.logging_config import main_logger
 from core.client_ip import get_client_ip
+from core.permissions import RequirePermission
 from routers.network import (
     detect_local_subnets,
     get_camera_lan_subnets,
@@ -125,6 +126,13 @@ def _assert_ip_in_camera_lan(ip: str, db: Session) -> None:
 # * "manage" — PTZ move / stop / presets. Never part of onboarding: a
 #   registered IP requires ownership, a can_manage grant, or superuser;
 #   an unregistered IP is refused outright.
+#
+# On top of the "manage" tier, the three PTZ routes also require the
+# ``ptz.control`` permission (HA-107), exactly as /cameras/{id}/ptz/* does:
+# services/permission_catalog.py promises it is layered on BOTH families,
+# so an operator who takes it away from a role must close the IP-keyed
+# path too, or the ONVIF tools page would keep steering the camera.
+require_ptz_control = RequirePermission("ptz.control")
 
 
 def _authorize_camera_ip(db: Session, user, ip: str, *, action: str) -> None:
@@ -480,7 +488,7 @@ async def camera_ptz_move(
     password: str = Query(...),
     request: Request = None,
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_active_user),
+    current_user=Depends(require_ptz_control),
 ):
     _assert_ip_in_camera_lan(ip, db)
     _authorize_camera_ip(db, current_user, ip, action="manage")
@@ -506,7 +514,7 @@ async def camera_ptz_stop(
     password: str = Query(...),
     request: Request = None,
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_active_user),
+    current_user=Depends(require_ptz_control),
 ):
     _assert_ip_in_camera_lan(ip, db)
     _authorize_camera_ip(db, current_user, ip, action="manage")
@@ -571,7 +579,7 @@ async def camera_ptz_preset(
     password: str = Query(...),
     request: Request = None,
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_active_user),
+    current_user=Depends(require_ptz_control),
 ):
     _assert_ip_in_camera_lan(ip, db)
     _authorize_camera_ip(db, current_user, ip, action="manage")

@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import time
 
 import aiohttp
 import pytest
@@ -17,19 +19,29 @@ from pyopennvr import EventStream, OpenNVRClient
 
 class FakeServer:
     """Scripted v2 server. ``scripts`` is one list of frames per connection;
-    a frame may be ("close", code) to close the socket."""
+    a frame may be ("close", code) to close the socket, or ("hang", seconds)
+    to go silent without closing (a half-open connection, as the client
+    sees it)."""
 
     def __init__(self, scripts):
         self.scripts = list(scripts)
         self.connections: list[dict] = []
+        #: ``time.monotonic()`` when each connection was accepted.
+        self.connected_at: list[float] = []
         self.ticket_status = 200
         self.ticket_headers: dict[str, str] = {}
         self.tickets = 0
         #: After this many tickets, refuse the rest with ``ticket_status``.
         self.refuse_after: int | None = None
+        #: Seconds the ticket endpoint takes to answer.
+        self.ticket_delay = 0.0
+        #: Refuse the websocket upgrade itself with this status.
+        self.ws_status: int | None = None
 
     async def ticket(self, request):
         self.tickets += 1
+        if self.ticket_delay:
+            await asyncio.sleep(self.ticket_delay)
         refuse = (self.refuse_after is not None and self.tickets > self.refuse_after) or (
             self.refuse_after is None and self.ticket_status != 200)
         if refuse:
@@ -39,6 +51,9 @@ class FakeServer:
 
     async def ws(self, request):
         self.connections.append(dict(request.query))
+        self.connected_at.append(time.monotonic())
+        if self.ws_status is not None:
+            return web.Response(status=self.ws_status)
         ws = web.WebSocketResponse()
         await ws.prepare(request)
         script = self.scripts.pop(0) if self.scripts else []
@@ -46,17 +61,24 @@ class FakeServer:
             if isinstance(frame, tuple) and frame[0] == "close":
                 await ws.close(code=frame[1])
                 return ws
+            if isinstance(frame, tuple) and frame[0] == "hang":
+                await asyncio.sleep(frame[1])
+                continue
             await ws.send_str(json.dumps(frame))
         await ws.close()
         return ws
 
 
-async def _run(server: FakeServer, *, until=lambda frames: False, max_s=5.0):
+def _app(server: FakeServer) -> web.Application:
     app = web.Application()
     app.router.add_post("/api/v1/events/ws-ticket", server.ticket)
     app.router.add_get("/api/v1/events/ws", server.ws)
+    return app
+
+
+async def _run(server: FakeServer, *, until=lambda frames: False, max_s=5.0, **kwargs):
     frames, states = [], []
-    async with TestServer(app) as ts, aiohttp.ClientSession() as session:
+    async with TestServer(_app(server)) as ts, aiohttp.ClientSession() as session:
         client = OpenNVRClient(str(ts.make_url("")), "onvr_x", session)
         stream = None
 
@@ -66,7 +88,7 @@ async def _run(server: FakeServer, *, until=lambda frames: False, max_s=5.0):
                 await stream.stop()
 
         stream = EventStream(client, session, on_frame, on_state=states.append,
-                             min_backoff=0.01, max_backoff=0.05)
+                             **{"min_backoff": 0.01, "max_backoff": 0.05, **kwargs})
         await asyncio.wait_for(stream.run(), max_s)
     return stream, frames, states
 
@@ -132,10 +154,7 @@ async def test_an_address_refusal_is_retried_not_auth_failed():
     server.ticket_status, server.refuse_after = 403, 0
     server.ticket_headers = {"X-OpenNVR-Error": "token_address"}
     states = []
-    app = web.Application()
-    app.router.add_post("/api/v1/events/ws-ticket", server.ticket)
-    app.router.add_get("/api/v1/events/ws", server.ws)
-    async with TestServer(app) as ts, aiohttp.ClientSession() as session:
+    async with TestServer(_app(server)) as ts, aiohttp.ClientSession() as session:
         client = OpenNVRClient(str(ts.make_url("")), "onvr_x", session)
         stream = EventStream(client, session, lambda f: None, on_state=states.append,
                              min_backoff=0.01, max_backoff=0.02)
@@ -151,10 +170,7 @@ async def test_a_consumer_error_does_not_end_the_stream():
     server = FakeServer([[hello(), snap(), {"v": 2, "seq": 11, "event_type": "boom"},
                           {"v": 2, "seq": 12, "event_type": "app_alert"}]])
     seen = []
-    app = web.Application()
-    app.router.add_post("/api/v1/events/ws-ticket", server.ticket)
-    app.router.add_get("/api/v1/events/ws", server.ws)
-    async with TestServer(app) as ts, aiohttp.ClientSession() as session:
+    async with TestServer(_app(server)) as ts, aiohttp.ClientSession() as session:
         client = OpenNVRClient(str(ts.make_url("")), "onvr_x", session)
         stream = None
 
@@ -191,3 +207,69 @@ async def test_it_keeps_reconnecting_with_backoff(n):
     _stream, frames, _ = await _run(server, until=lambda fs: any(
         f.get("event_type") == "state_snapshot" for f in fs))
     assert len(server.connections) == n + 1
+
+
+async def test_a_connection_that_dies_by_timeout_resets_the_backoff():
+    """A half-open TCP connection surfaces as a receive timeout, i.e. an
+    exception out of the connection, not a normal close. The connection had
+    been established, so the next attempt must come after the MINIMUM
+    backoff, not one doubled from before it (which would then never shrink
+    again, since every later drop looks the same)."""
+    server = FakeServer([[], [], [],                              # ratchets up
+                         [hello(), snap(), ("hang", 1.0)],        # then goes silent
+                         [hello(), snap()]])
+    _stream, frames, states = await _run(
+        server, min_backoff=0.05, max_backoff=1.0, silence_timeout=0.1,
+        until=lambda fs: sum(f.get("event_type") == "state_snapshot" for f in fs) == 2)
+    assert len(server.connections) == 5
+    # Silence timeout + minimum backoff (with jitter): well under the 0.8 s a
+    # doubled backoff would have waited.
+    assert server.connected_at[4] - server.connected_at[3] < 0.5
+    assert states.count("connected") == 2
+
+
+async def test_stop_interrupts_the_backoff_sleep():
+    server = FakeServer([[]])                       # closes at once: a long backoff follows
+    async with TestServer(_app(server)) as ts, aiohttp.ClientSession() as session:
+        client = OpenNVRClient(str(ts.make_url("")), "onvr_x", session)
+        stream = EventStream(client, session, lambda f: None, min_backoff=30, max_backoff=60)
+        task = asyncio.create_task(stream.run())
+        while not (server.connections and stream.state == "disconnected"):
+            await asyncio.sleep(0.01)               # "disconnected" is also the initial state
+        await stream.stop()
+        await asyncio.wait_for(task, 1)             # not 30 s
+    assert stream.state == "stopped" and len(server.connections) == 1
+
+
+async def test_stop_during_the_ticket_round_trip_opens_no_socket():
+    server = FakeServer([[hello(), snap()]])
+    server.ticket_delay = 0.2
+    async with TestServer(_app(server)) as ts, aiohttp.ClientSession() as session:
+        client = OpenNVRClient(str(ts.make_url("")), "onvr_x", session)
+        stream = EventStream(client, session, lambda f: None, min_backoff=0.01)
+        task = asyncio.create_task(stream.run())
+        while server.tickets < 1:
+            await asyncio.sleep(0.01)
+        await stream.stop()                         # the ticket is still being minted
+        await asyncio.wait_for(task, 2)
+    assert server.connections == [] and stream.state == "stopped"
+
+
+async def test_a_refused_handshake_is_logged_without_the_ticket(caplog):
+    """aiohttp's handshake error prints the URL, and ours carries the
+    single-use ticket."""
+    server = FakeServer([[hello(), snap()]])
+    server.ws_status = 403
+    with caplog.at_level(logging.DEBUG, logger="pyopennvr.events"):
+        async with TestServer(_app(server)) as ts, aiohttp.ClientSession() as session:
+            client = OpenNVRClient(str(ts.make_url("")), "onvr_x", session)
+            stream = EventStream(client, session, lambda f: None, min_backoff=0.01,
+                                 max_backoff=0.02)
+            task = asyncio.create_task(stream.run())
+            while len(server.connections) < 2:
+                await asyncio.sleep(0.01)
+            await stream.stop()
+            await asyncio.wait_for(task, 2)
+    failed = [r.getMessage() for r in caplog.records if "connection failed" in r.getMessage()]
+    assert failed and all("403" in m for m in failed)
+    assert not any("ticket=" in r.getMessage() for r in caplog.records)

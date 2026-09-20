@@ -33,7 +33,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util import dt as dt_util
 
 from .const import CONF_MEDIA_TTL, DEFAULT_MEDIA_TTL, DOMAIN
-from .views import relay_path
+from .views import signed_relay_path
 
 ATTR_CAMERA = "camera"
 #: Longest clip a signed export URL may cover (the server's own limit).
@@ -216,7 +216,8 @@ async def _export_recording(hass: HomeAssistant, call: ServiceCall) -> ServiceRe
                                          duration_s=duration, ttl_s=_ttl_s(entry)))
     # ``url`` is under Home Assistant's own address (reachable wherever HA
     # is, e.g. for a phone notification); ``direct_url`` is OpenNVR's.
-    result: dict[str, Any] = {"url": relay_path(entry.unique_id, media.url) or media.url,
+    result: dict[str, Any] = {"url": signed_relay_path(hass, entry.unique_id, media.url,
+                                                        _ttl_s(entry)) or media.url,
                               "direct_url": media.url, "expires_at": media.expires_at}
     if call.data["with_hash"]:
         result.update(await _hash(hass, client, media.url))
@@ -292,7 +293,8 @@ async def _search_events(hass: HomeAssistant, call: ServiceCall) -> ServiceRespo
                                                 ttl_s=_ttl_s(entry))
             except OpenNVRError:
                 return
-        row["thumbnail_url"] = relay_path(entry.unique_id, media.url) or media.url
+        row["thumbnail_url"] = signed_relay_path(hass, entry.unique_id, media.url,
+                                                 _ttl_s(entry)) or media.url
 
     await asyncio.gather(*(thumbnail(r) for r in results))
     for row in results:

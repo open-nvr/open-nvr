@@ -29,6 +29,7 @@ from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
 from core.auth import get_current_active_user, get_current_superuser
+from core.client_ip import get_client_ip
 from urllib.parse import urlparse
 
 from core.config import _host_is_internal, settings
@@ -2823,7 +2824,9 @@ async def describe_camera(
     camera = SimpleNamespace(id=row.id, rtsp_url=row.rtsp_url)
     question = ((body.question or "").strip() or None) if body is not None else None
     user_id = current_user.id   # a token's owner: the limit is per person
-    ip = request.client.host if request.client else None
+    # The real client, not the reverse proxy: this row is read after the
+    # fact by a person, and every other audit site resolves it the same way.
+    ip = get_client_ip(request) or None
     agent = request.headers.get("user-agent")
     # Nothing below needs this session: the frame grab and the model take up
     # to a minute, and a connection must not sit idle in a transaction.

@@ -812,3 +812,127 @@ def test_system_info_publishes_the_passthrough_allowlist(env):
     info = env.client.get("/api/v1/system/info", headers=env.jwt("admin")).json()
     assert "/api/v1/cameras/" in info["passthrough_allowlist"]
     assert not any("api-tokens" in p for p in info["passthrough_allowlist"])
+
+
+# ── review fixes: a token ticket is a token ticket, heartbeat seq ─────────
+
+
+def _mint_ws_ticket_for(env, tok):
+    r = _ws_ticket(env, tok)
+    assert r.status_code == 200 and r.json()["kind"] == "token", r.text
+    return r.json()["ticket"]
+
+
+def test_a_token_ticket_never_resolves_as_its_owner(env):
+    """Whether a ticket is a token's used to live only in the binding map
+    beside the ticket store; with that entry gone, the ticket resolved to
+    the owner's user row (admin here) with no token scoping at all."""
+    ev = importlib.import_module("routers.events")  # `routers.events` is a router
+    from starlette.websockets import WebSocketDisconnect
+
+    out = _mint(env, camera_ids=[1])
+    t = _mint_ws_ticket_for(env, out["token"])
+    del ev._ws_ticket_bindings[t]
+    with _open(env.client, t) as ws:
+        hello = ws.receive_json()
+    # Still the token's socket: its event types, not the owner's unscoped view.
+    assert "event_types" in hello["filters"]
+    assert "app_alert" not in hello["filters"]["event_types"]
+
+    # And once the token is gone, nothing is left to resolve to.
+    t = _mint_ws_ticket_for(env, out["token"])
+    del ev._ws_ticket_bindings[t]
+    env.client.delete(f"/api/v1/api-tokens/{out['id']}", headers=env.jwt("admin"))
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with _open(env.client, t) as ws:
+            ws.receive_json()
+    assert exc.value.reason == "unauthorized"
+    # The same, one layer down: the store entry alone decides.
+    t = _mint_ws_ticket_for(env, _mint(env, name="other")["token"])
+    ev._ws_tickets[t] = (ev._ws_tickets[t][0], ev._ws_tickets[t][1], 999_999)
+    del ev._ws_ticket_bindings[t]
+    s = env.Session()
+    try:
+        assert ev._authenticate_ws(t, s, None, "192.168.1.20") is None
+    finally:
+        s.close()
+
+
+def test_a_heartbeat_never_reports_a_seq_still_queued_for_the_socket(env, monkeypatch):
+    """The idle branch used to read ``bus.current_seq`` AFTER awaiting the
+    token re-check; an event published during that await sat in this
+    socket's queue while the heartbeat already advertised its seq, so a
+    client resuming with that ``since`` would never receive it. The
+    re-check is the await in question, so it publishes the event itself."""
+    ev = importlib.import_module("routers.events")  # `routers.events` is a router
+    from services import entity_state_publisher, event_bus_service as ebs
+    import services.live_state as ls_mod
+
+    bus = ebs.EventBus()
+    monkeypatch.setattr(ebs, "_event_bus_instance", bus)
+    monkeypatch.setattr(ls_mod, "_instance", ls_mod.LiveState())
+    entity_state_publisher._forget()
+    monkeypatch.setattr(ev, "V2_HEARTBEAT_S", 0.05)
+    published = []
+
+    async def still_ok_and_publish(self):
+        if not published:
+            published.append(True)
+            await bus.publish({"event_type": "camera_status", "camera_id": 1,
+                              "task": "status", "payload": {"online": True}})
+        return True
+
+    monkeypatch.setattr(ev.TokenRecheck, "still_ok", still_ok_and_publish)
+    tok = _mint(env, camera_ids=[1])["token"]
+    with _open(env.client, _mint_ws_ticket_for(env, tok), v=2) as ws:
+        hello = ws.receive_json()
+        assert ws.receive_json()["event_type"] == "state_snapshot"
+        beat = ws.receive_json()
+        frame = ws.receive_json()
+    assert beat["event_type"] == "heartbeat" and frame["event_type"] == "camera_status"
+    assert beat["seq"] == hello["seq"]          # what this socket had actually got
+    assert frame["seq"] == hello["seq"] + 1     # the queued event, sent after it
+    assert beat["seq"] < frame["seq"]
+
+
+def test_onvif_ptz_needs_the_ptz_control_permission(env, monkeypatch):
+    """services/permission_catalog.py promises ptz.control is layered on
+    /cameras/{id}/ptz/* AND the IP-keyed ONVIF tools; only the former
+    enforced it. vera's role has live.view but not ptz.control."""
+    from core.database import get_db
+    from routers import onvif as onvif_router
+
+    monkeypatch.setattr(onvif_router, "_assert_ip_in_camera_lan", lambda ip, db: None)
+
+    async def _ok(*a, **k):
+        return {"ok": True}
+
+    for fn in ("ptz_continuous_move", "ptz_stop", "ptz_presets"):
+        monkeypatch.setattr(onvif_router, fn, _ok)
+    app = env.client.app
+    app.include_router(onvif_router.router, prefix="/api/v1/onvif")
+    app.dependency_overrides[onvif_router.get_db] = app.dependency_overrides[get_db]
+    # vera may MANAGE camera 3 (the ONVIF "manage" tier) but lacks ptz.control.
+    s = env.Session()
+    s.query(env.models.CameraPermission).filter_by(user_id=env.ids["viewer"], camera_id=3) \
+        .update({"can_manage": True})
+    s.commit()
+    s.close()
+    creds = {"username": "u", "password": "p", "profileToken": "p0"}
+    calls = [("/api/v1/onvif/camera/192.0.2.3/ptz/move", {**creds, "x": 0.5}),
+             ("/api/v1/onvif/camera/192.0.2.3/ptz/stop", creds),
+             ("/api/v1/onvif/camera/192.0.2.3/ptz/preset", {**creds, "action": "getPresets"})]
+    for path, params in calls:
+        r = env.client.post(path, params=params, headers=env.jwt("vera"))
+        assert r.status_code == 403 and "ptz.control" in r.text, (path, r.text)
+    s = env.Session()
+    perm = s.query(env.models.Permission).filter_by(name="ptz.control").one()
+    s.add(env.models.RolePermission(role_id=env.ids["viewer_role"], permission_id=perm.id))
+    s.commit()
+    s.close()
+    for path, params in calls:
+        assert env.client.post(path, params=params, headers=env.jwt("vera")).status_code == 200
+    # The camera tier still applies underneath: camera 1 is not hers.
+    r = env.client.post("/api/v1/onvif/camera/192.0.2.1/ptz/stop", params=creds,
+                        headers=env.jwt("vera"))
+    assert r.status_code == 403 and "ptz.control" not in r.text

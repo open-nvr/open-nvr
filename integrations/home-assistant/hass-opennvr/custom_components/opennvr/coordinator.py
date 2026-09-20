@@ -33,6 +33,7 @@ from pyopennvr import (
     OpenNVRContractError,
     OpenNVRError,
     OpenNVRNotFoundError,
+    OpenNVRRequestError,
     SiteMode,
     SUPPORTED_CONTRACT_MAJOR,
     SystemInfo,
@@ -110,7 +111,12 @@ class OpenNVRCoordinator(DataUpdateCoordinator[OpenNVRSiteData]):
         self.prune_missing: dict[str, int] = {}
         self._viewer: OpenNVRClient | None = None
         self._viewer_until: datetime | None = None
+        #: When the viewer session is next renewed (before ``_viewer_until``).
+        self._viewer_renew_at: datetime | None = None
         self._viewer_lock = asyncio.Lock()
+        #: Told the key of every entity the prune removed, so the platform
+        #: that added it will add it again should its descriptor return.
+        self._removal_listeners: list[Callable[[str], None]] = []
         #: Recent frames, for diagnostics.
         self.recent_frames: deque[dict[str, Any]] = deque(maxlen=RECENT_FRAMES)
 
@@ -201,7 +207,12 @@ class OpenNVRCoordinator(DataUpdateCoordinator[OpenNVRSiteData]):
         by_key = {d.key: d for d in catalog.descriptors
                   if d.camera_id is None or d.camera_id in cameras}
         pushed = self._inflight or {}
-        states.update(pushed.get("states", {}))
+        if pushed.get("replace"):
+            # A resync snapshot arrived meanwhile: it is the whole picture,
+            # and newer than what this refresh read.
+            states = dict(pushed.get("states", {}))
+        else:
+            states.update(pushed.get("states", {}))
         if "site_mode" in pushed:
             site_mode = pushed["site_mode"]
         self.refreshes += 1
@@ -243,6 +254,17 @@ class OpenNVRCoordinator(DataUpdateCoordinator[OpenNVRSiteData]):
             self._inflight.setdefault("states", {})[key] = value
 
     @callback
+    def async_replace_states(self, states: dict[str, dict[str, Any]]) -> None:
+        """The whole picture, from a resync snapshot: a key that vanished
+        while the socket was down (an entity's state withdrawn) must not
+        keep its last value, which merging would give it."""
+        if self.data is not None:
+            self.data.states = dict(states)
+        if self._inflight is not None:
+            self._inflight["states"] = dict(states)
+            self._inflight["replace"] = True
+
+    @callback
     def async_set_site_mode(self, mode: SiteMode | None) -> None:
         if self.data is not None:
             self.data.site_mode = mode
@@ -259,17 +281,34 @@ class OpenNVRCoordinator(DataUpdateCoordinator[OpenNVRSiteData]):
             return self.client
         async with self._viewer_lock:
             now = dt_util.utcnow()
-            if (self._viewer is not None and self._viewer_until is not None
-                    and self._viewer_until - now > VIEWER_RENEW_BEFORE):
+            if (self._viewer is not None and self._viewer_renew_at is not None
+                    and now < self._viewer_renew_at):
                 return self._viewer
-            session = await self.client.open_session(
-                camera_ids=sorted(self.data.cameras), ttl_s=VIEWER_TTL_S)
+            try:
+                session = await self.client.open_session(
+                    camera_ids=sorted(self.data.cameras), ttl_s=VIEWER_TTL_S)
+            except OpenNVRRequestError as err:
+                # Minting refused (429: a page of thumbnails renews early
+                # all at once). The session we hold is still good: it
+                # serves as well as a new one would, where failing every
+                # thumbnail with 502 for the rate limit's sake would not.
+                if (self._viewer is not None and self._viewer_until is not None
+                        and self._viewer_until > now):
+                    _LOGGER.debug("Keeping the viewer session (mint refused: %s)", err)
+                    return self._viewer
+                raise
             verify = self.client.ssl is not False
             self._viewer = OpenNVRClient(self.client.base_url, session["token"],
                                          async_get_clientsession(self.hass, verify),
                                          verify_ssl=verify)
             self._viewer_until = (dt_util.parse_datetime(session.get("expires_at") or "")
                                   or now + timedelta(seconds=VIEWER_TTL_S))
+            # Renewed 2 minutes before it expires, but never before half its
+            # life has passed: the server caps a session at the PARENT
+            # token's expiry, and one short-lived for that reason would
+            # otherwise be minted again on every call.
+            self._viewer_renew_at = self._viewer_until - min(
+                VIEWER_RENEW_BEFORE, (self._viewer_until - now) / 2)
             return self._viewer
 
     @callback
@@ -287,6 +326,23 @@ class OpenNVRCoordinator(DataUpdateCoordinator[OpenNVRSiteData]):
                 self._key_listeners.pop(key, None)
 
         return remove
+
+    @callback
+    def async_add_removal_listener(self, listener: Callable[[str], None]) -> CALLBACK_TYPE:
+        """Call ``listener`` with the key of each entity the prune removes."""
+        self._removal_listeners.append(listener)
+
+        @callback
+        def remove() -> None:
+            if listener in self._removal_listeners:
+                self._removal_listeners.remove(listener)
+
+        return remove
+
+    @callback
+    def async_entity_removed(self, key: str) -> None:
+        for listener in list(self._removal_listeners):
+            listener(key)
 
     # ── the events socket ────────────────────────────────────────────────
 
@@ -339,8 +395,14 @@ class OpenNVRCoordinator(DataUpdateCoordinator[OpenNVRSiteData]):
         elif kind == "state_snapshot":
             snap = frame.get("entity_states")
             if isinstance(snap, dict):
-                for key, value in snap.items():
-                    if isinstance(key, str) and isinstance(value, dict):
+                states = {key: value for key, value in snap.items()
+                          if isinstance(key, str) and isinstance(value, dict)}
+                if frame.get("resync") is True:
+                    # The server could not replay what was missed, so this
+                    # is everything it knows: rebuild rather than merge.
+                    self.async_replace_states(states)
+                else:
+                    for key, value in states.items():
                         self.async_set_state(key, value)
             if isinstance(frame.get("site_mode"), dict):
                 self.async_set_site_mode(_site_mode_from(frame["site_mode"], data.site_mode))
