@@ -84,6 +84,10 @@ def test_fake_core_serves_the_platform_client(fake_core):
     assert nvr.state.get("seen") == {"n": 3} and nvr.state.get("nope", 0) == 0
     assert nvr.state.items() == {"seen": {"n": 3}}
     assert nvr.state.delete("seen") is True and nvr.state.delete("seen") is False
+    # Site mode defaults to core's default (armed_away) and a test can flip it.
+    assert nvr.site_mode()["mode"] == "armed_away"
+    fake_core.site_mode = "disarmed"
+    assert nvr.site_mode()["mode"] == "disarmed"
     assert fake_core.requests[0]["path"] == "/api/v1/internal/camera-agent/cameras"
     assert fake_core.requests[0]["key"].startswith("oak_")
 

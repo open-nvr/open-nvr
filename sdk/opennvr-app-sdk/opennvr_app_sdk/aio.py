@@ -393,6 +393,12 @@ class AsyncOpenNVR:
     def recordings(self, camera) -> AsyncRecordingsAPI:
         return AsyncRecordingsAPI(self._http, _camera_id(camera))
 
+    async def site_mode(self) -> dict | None:
+        """The site's arming state, or ``None`` when core cannot be asked.
+        Read-only; see :meth:`opennvr_app_sdk.client.OpenNVR.site_mode`."""
+        body = await self._http.get_json("/api/v1/internal/app/site-mode")
+        return body if isinstance(body, dict) else None
+
     async def aclose(self) -> None:
         await self._http.aclose()
         await self.ai.aclose()

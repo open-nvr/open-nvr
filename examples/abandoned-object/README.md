@@ -76,7 +76,10 @@ Identity is what makes "this bag has been alone for ninety seconds"
 well-defined, so the stock config consumes Tier-0 (`consume_tier0:
 true`, subject `opennvr.inference.tier0.>`), which tracks. Without a
 `track_id` an item cannot be followed, so nothing is reported and the
-app warns once.
+app warns once. Tier-0 tracks only people, vehicles and pets out of the
+box, so the manifest declares `tier0_labels` (backpack, handbag,
+suitcase) and the platform widens Tier-0 to those classes on the
+cameras picked for the app — nothing to configure on the camera page.
 
 Upgrading from 1.0: `dwell_seconds`, `move_tolerance_px` and
 `person_radius_px` still load — the two pixel knobs are read as

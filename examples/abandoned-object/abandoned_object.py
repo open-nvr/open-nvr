@@ -111,6 +111,9 @@ MANIFEST = AppManifest(
     # Lights the first-class Left Items page (app/src/lib/appVerticals.ts).
     provides=["left_items"],
     subscribes="opennvr.inference.>",
+    # Tier-0 tracks only person/vehicles/pets by default; the platform widens
+    # it to these on the cameras picked for the app, or a stock install sees no bag.
+    tier0_labels=["backpack", "handbag", "suitcase"],
     params=[
         Param("object_labels", list, default=["backpack", "handbag", "suitcase"],
               suggestions=OBJECT_SUGGESTIONS,

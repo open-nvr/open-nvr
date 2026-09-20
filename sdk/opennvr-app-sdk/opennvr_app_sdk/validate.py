@@ -191,6 +191,21 @@ def check_manifest(m: AppManifest, report: Report, cls: type | None = None) -> N
             report.error(f"requires_scopes {scope!r} must look like 'events:<domain>.<event>'")
     if m.subscribes is not None and not re.match(r"^[A-Za-z0-9_.*>-]+$", m.subscribes):
         report.error(f"subscribes {m.subscribes!r} is not a NATS subject pattern")
+    # Tier-0 compares labels lowercased, so a "Backpack" here would widen
+    # nothing and the app would silently see nothing — the failure this
+    # field exists to prevent. Not checked against DETECTION_LABELS: a
+    # custom Tier-0 model may emit classes COCO does not have.
+    seen_labels: set[str] = set()
+    for label in m.tier0_labels:
+        if not isinstance(label, str) or not label.strip():
+            report.error(f"tier0_labels: {label!r} is not a non-empty string")
+            continue
+        if label != label.strip().lower():
+            report.error(f"tier0_labels: {label!r} must be lowercase with no surrounding "
+                         "whitespace (Tier-0 matches labels lowercased)")
+        if label in seen_labels:
+            report.warn(f"tier0_labels: {label!r} listed twice")
+        seen_labels.add(label)
 
     seen: set[str] = set()
     for p in m.params:

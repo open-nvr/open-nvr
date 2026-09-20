@@ -62,6 +62,17 @@ def test_manifest_defaults():
     assert d["subscribes"] is None
     assert d["params"] == []
     assert d["emits"] == []
+    # Empty = "the default Tier-0 set is enough"; the platform widens nothing.
+    assert d["tier0_labels"] == []
+
+
+def test_tier0_labels_serialize_as_a_list():
+    """The classes an app needs Tier-0 to track ride the manifest to core,
+    which widens the per-camera label set with them when the app is picked
+    for a camera. A tuple in, a JSON list out."""
+    m = AppManifest(id="x", name="X", version="0.1", category="test",
+                    tier0_labels=("backpack", "suitcase"))
+    assert m.to_dict()["tier0_labels"] == ["backpack", "suitcase"]
 
 
 def test_to_dict_is_json_serializable():

@@ -23,6 +23,12 @@ three rules, all here so no caller can get them wrong:
   every claim's set; any claim WITHOUT labels means "no restriction"
   and wins (a restriction other consumers didn't ask for must never
   hide their detections).
+* **App widening**: an app pick (consumer ``app:<id>``) carries the
+  app's manifest ``tier0_labels`` as its ``labels``, filled in here at
+  declare time and refreshed on re-registration. Tier-0 reads labels
+  on a NON-``object_detection`` entry as classes to ADD to the camera's
+  set, never as a replacement — see detect-pipeline's
+  ``_assignment_view`` and docs/tier0-consumption.md.
 
 Vocabulary stays open (annotate, never gate): ``skill`` and
 ``consumer`` are free strings; validation is shape and bounds only.
@@ -119,6 +125,8 @@ def declare(
                 SkillAssignment.consumer == consumer)
         .first()
     )
+    if consumer.startswith(APP_CONSUMER_PREFIX) and _labels_of(params) is None:
+        params = _with_app_tier0_labels(db, consumer[len(APP_CONSUMER_PREFIX):], params)
     if row is None:
         row = SkillAssignment(
             skill=skill, camera_id=camera_id, consumer=consumer,
@@ -130,6 +138,92 @@ def declare(
     db.flush()
     project_camera(db, camera)
     return row
+
+
+def _manifest_tier0_labels(manifest: Any) -> list[str]:
+    """The ``tier0_labels`` an app's manifest declares, cleaned the way
+    the projection cleans labels (lowercased, deduplicated, sorted) so a
+    pick row carries exactly what Tier-0 will compare against."""
+    if not isinstance(manifest, dict):
+        return []
+    labels = manifest.get("tier0_labels")
+    if not isinstance(labels, list):
+        return []
+    return sorted({str(s).strip().lower() for s in labels if str(s).strip()})
+
+
+def _with_app_tier0_labels(
+    db: Session, app_id: str, params: Optional[dict],
+) -> Optional[dict]:
+    """A pick's params with the app's ``tier0_labels`` filled in as
+    ``labels`` — only when the caller passed none, so a caller that named
+    labels itself keeps them.
+
+    Tier-0 tracks only the deployment's global label set, so an app that
+    rides it for other classes (a bag, a parcel) sees nothing on a stock
+    install. Its manifest says which classes it needs; the pick is where
+    the platform learns WHICH cameras, so this is where the two meet.
+    Tier-0 reads the labels off the pick's projection entry (skill = the
+    app id) and widens that camera's set with them. An unknown app id or
+    a manifest without the field leaves the params untouched.
+    """
+    from models import InstalledApp
+
+    app = db.query(InstalledApp).filter(InstalledApp.id == app_id).first()
+    labels = _manifest_tier0_labels(app.manifest_json) if app is not None else []
+    if not labels:
+        return params
+    out = dict(params) if isinstance(params, dict) else {}
+    out["labels"] = labels
+    return out
+
+
+def sync_app_pick_labels(db: Session, app_id: str) -> int:
+    """Refresh ``labels`` on every pick the app holds from its CURRENT
+    manifest and re-project those cameras (no commit). Returns how many
+    pick rows changed.
+
+    Registration calls this so a manifest that GAINS ``tier0_labels``
+    widens the cameras picked before the upgrade — otherwise an operator
+    would have to unpick and re-pick every camera to see the new classes,
+    with nothing telling them so. The manifest is the source of truth for
+    a pick's labels both ways: a manifest that drops the field takes the
+    labels off the picks again.
+    """
+    from models import InstalledApp
+
+    app = db.query(InstalledApp).filter(InstalledApp.id == app_id).first()
+    labels = _manifest_tier0_labels(app.manifest_json) if app is not None else []
+    rows = (
+        db.query(SkillAssignment)
+        .filter(SkillAssignment.consumer == app_consumer(app_id))
+        .all()
+    )
+    changed = 0
+    cameras: set[int] = set()
+    for row in rows:
+        params = dict(row.params) if isinstance(row.params, dict) else {}
+        if labels:
+            if _labels_of(params) == labels:
+                continue
+            params["labels"] = labels
+        else:
+            if "labels" not in params:
+                continue
+            params.pop("labels")
+        row.params = params or None
+        changed += 1
+        cameras.add(row.camera_id)
+    if not changed:
+        return 0
+    db.flush()
+    for camera in db.query(Camera).filter(Camera.id.in_(cameras)).all():
+        project_camera(db, camera)
+    logger.info(
+        "refreshed tier0 labels on %d camera pick(s) for app %s: %s",
+        changed, app_id, ", ".join(labels) or "-",
+    )
+    return changed
 
 
 def release(

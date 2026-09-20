@@ -155,7 +155,7 @@ def test_fast_plate_ocr_task_is_license_plate_recognition():
 
 
 def test_assignment_view_returns_skills():
-    labels, analyze, skills = _assignment_view({
+    labels, analyze, skills, extra = _assignment_view({
         "camera_id": "cam1",
         "assignments": [
             {"skill": "license_plate_recognition"},
@@ -166,9 +166,10 @@ def test_assignment_view_returns_skills():
                                 "object_detection"})
     assert labels == frozenset({"person"})
     assert analyze is True
+    assert extra is None
 
 
 def test_assignment_view_no_assignments_means_no_skills():
-    assert _assignment_view({"camera_id": "c"}) == (None, True, None)
+    assert _assignment_view({"camera_id": "c"}) == (None, True, None, None)
     assert _assignment_view({"camera_id": "c", "assignments": []}) == (
-        None, True, None)
+        None, True, None, None)

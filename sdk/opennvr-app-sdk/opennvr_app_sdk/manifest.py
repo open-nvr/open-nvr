@@ -347,6 +347,16 @@ class AppManifest:
     # data at all — they act on OTHER apps' alerts (a notifier, a gate
     # relay), which are already limited to the cameras those apps picked.
     camera_picker: bool = True
+    # Object classes this app needs Tier-0 to TRACK on the cameras picked
+    # for it (COCO names: "backpack", "suitcase", …). Tier-0 tracks only
+    # the deployment's DETECT_LABELS by default (person, vehicles, pets),
+    # so an app riding it for anything else sees nothing on a stock
+    # install and no operator knows why. When the app is picked for a
+    # camera, the platform WIDENS Tier-0's per-camera label set with
+    # these — added on top of whatever the global set or an operator's
+    # narrowing names, never replacing either. Empty ⇒ the app is happy
+    # with the default set (or drives its own inference).
+    tier0_labels: list[str] = field(default_factory=list)
     # Declarative operator actions (optional) — verbs the catalog can
     # invoke on the app's contract surface via the server's JWT-only
     # proxy. Empty ⇒ no Actions section renders.
@@ -444,6 +454,7 @@ class AppManifest:
             "entities": [e.to_dict() for e in self.entities],
             "overlay": bool(self.overlay),
             "camera_picker": bool(self.camera_picker),
+            "tier0_labels": list(self.tier0_labels),
             "has_ui": bool(self.has_ui),
             "ui_mode": self.ui_mode,
             "ui_url": self.ui_url,
