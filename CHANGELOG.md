@@ -25,6 +25,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **An app that built its platform client before registering ran on
+  every camera.** An app holds more than one credential — the contract's
+  and one per client it builds — and only the contract's was handed the
+  key core issues at registration; the others resolved the key file once,
+  at construction, so a client built in an app's `__init__` presented the
+  deployment's site key for the life of the process. To core a site-key
+  caller is a platform component, so the app was handed the whole fleet
+  and could mint a stream grant for any camera: with nothing selected and
+  the app disabled, guard-scan was still decoding two streams and running
+  pose on every frame. The app key is now resolved per call (and shared
+  in-process when it cannot be persisted), so construction order no
+  longer decides whether an app is scoped to its cameras.
+
 - **Tapo ONVIF authentication fallback.** Cameras such as the TP-Link Tapo
   C520WS that return an ONVIF `NotAuthorized` SOAP fault instead of an HTTP
   Digest challenge are retried once with WS-Security UsernameToken

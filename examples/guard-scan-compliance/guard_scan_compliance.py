@@ -648,7 +648,9 @@ class GuardScanApp(FrameApp):
 
     def __init__(self, config) -> None:
         self.config = config
-        self.nvr = OpenNVR()
+        #: The platform client is built on FIRST USE, never here — see
+        #: the ``nvr`` property below.
+        self._nvr: OpenNVR | None = None
         self.kaic_url = getattr(config, "kaic_url", "") or ""
         self.kaic_key = getattr(config, "kaic_api_key", "") or ""
         self.events = DomainEventPublisher(
@@ -682,6 +684,31 @@ class GuardScanApp(FrameApp):
         self.dispatcher = dispatcher
         super().__init__(config, dispatcher, frame_source=_NoPollSource(),
                          cameras=[], poll_interval_seconds=30.0)
+
+    # ── the platform client ──
+
+    @property
+    def nvr(self) -> OpenNVR:
+        """The client this app talks to core with, built on first use.
+
+        Not in ``__init__``: core mints this app's own key during
+        registration, which the base class does in ``start()`` — after
+        the constructor has run. A client built before that resolves its
+        credential when no app key exists yet and falls back to the
+        deployment's site key, and to core a site-key caller is a
+        platform component rather than an app: unscoped, every camera in
+        the building, the operator's camera selection bypassed. The SDK
+        now re-reads the key per call as well (belt and braces), but the
+        cheapest way not to hold a credential from before registration
+        is not to build the client until it is wanted.
+        """
+        if self._nvr is None:
+            self._nvr = OpenNVR()
+        return self._nvr
+
+    @nvr.setter
+    def nvr(self, client) -> None:
+        self._nvr = client
 
     # ── config ──
 

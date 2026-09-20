@@ -691,3 +691,37 @@ def _camera_key():
     from opennvr_app_sdk.cameras import camera_key
 
     return camera_key
+
+
+# ── the platform client is built after registration, not before ─────
+#
+# The app is scoped to the cameras the operator selected for it by the
+# key core mints during registration — which the base class does in
+# start(), AFTER this class is constructed. A client built in __init__
+# resolved its credential while no app key existed yet and fell back to
+# the deployment's site key; to core a site-key caller is a platform
+# component, not an app, so the roster came back as every camera in the
+# building and the app screened all of them. Nothing in the app said so:
+# it looked like a working install with a lot of cameras.
+
+
+def test_the_constructor_does_not_build_the_platform_client():
+    ctor = _slice("def __init__(self, config) -> None:",
+                  "# ── the platform client ──")
+    assert "OpenNVR(" not in ctor
+
+
+def test_the_platform_client_is_built_on_first_use_and_stays_replaceable():
+    ns: dict = {}
+    exec(compile(_slice("# ── the platform client ──", "# ── config ──"),
+                 "<nvr>", "exec"), ns)  # noqa: S102
+    built: list[int] = []
+    ns["OpenNVR"] = lambda: built.append(1) or "client"
+    app = type("_App", (), {"nvr": ns["nvr"], "_nvr": None})()
+
+    assert built == []          # constructed, registered nothing yet
+    assert app.nvr == "client"  # first use, after registration
+    assert app.nvr == "client" and built == [1]  # and only once
+
+    app.nvr = "stub"            # the tests' own substitution still works
+    assert app.nvr == "stub"
