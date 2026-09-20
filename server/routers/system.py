@@ -23,8 +23,11 @@ Guarded by superuser. In debug mode, actions are NO-OP for safety and only log/a
 import json
 import platform
 import subprocess
+import time
+from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from core.auth import get_current_active_user, get_current_superuser
@@ -35,6 +38,82 @@ from models import Camera, CameraEvent, SecuritySetting, SystemEvent
 from schemas import SystemMonitoringSettings
 
 router = APIRouter(prefix="/system", tags=["system"])  # mounted at /api/v1
+
+# Process start, for /system/info uptime.
+_STARTED_MONOTONIC = time.monotonic()
+
+
+@router.get("/info")
+async def get_system_info(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Identity and capabilities of this OpenNVR site, for API clients.
+
+    The Home Assistant integration keys its config entry on ``site_id``
+    (stable across URL changes), checks ``contract_version`` before it
+    starts, and feature-detects on ``features``. ``latest_version`` is null
+    unless the operator opted in with UPDATE_CHECK.
+    """
+    from core.contract import CONTRACT_VERSION, FEATURES
+    from services import site_settings
+    from services.api_tokens import PASSTHROUGH_ALLOWLIST, describe_caller
+    from services.update_check import latest_version
+
+    try:
+        from main import __version__ as server_version  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 — tests import the router alone
+        server_version = "unknown"
+
+    return {
+        "site_id": site_settings.get_site_id(db),
+        "name": site_settings.get_site_name(db),
+        "version": server_version,
+        "contract_version": CONTRACT_VERSION,
+        "features": list(FEATURES),
+        "recording_pause_enabled": site_settings.recording_pause_enabled(db),
+        "uptime_s": int(time.monotonic() - _STARTED_MONOTONIC),
+        "latest_version": await latest_version(),
+        "caller": describe_caller(db, current_user),
+        # Clients compare it with their own clock: signed media and token
+        # expiry are judged by the server's.
+        "server_time": datetime.now(UTC).isoformat(),
+        "network": _network_facts(db),
+        # Read-only paths an integration may relay for a dashboard card.
+        "passthrough_allowlist": list(PASSTHROUGH_ALLOWLIST),
+        # Home Assistant MQTT discovery is publishing (HA-402): the native
+        # integration warns, since running both duplicates every entity.
+        "mqtt_discovery": _mqtt_discovery_active(),
+    }
+
+
+def _mqtt_discovery_active() -> bool:
+    try:
+        from services.ha_mqtt_discovery import manager
+    except Exception:  # noqa: BLE001 - aiomqtt missing: not active
+        return False
+    return manager.active()
+
+
+def _network_facts(db: Session) -> dict:
+    """What a client on another machine can reach (docs/HOME_ASSISTANT.md):
+    whether MediaMTX advertises any WebRTC ICE host (configured or learned),
+    and whether RTSPS is published beyond loopback. Booleans only."""
+    import ipaddress
+    from urllib.parse import urlsplit
+
+    from services.webrtc_ice_host_service import WebRTCIceHostService
+
+    try:
+        ice = bool(WebRTCIceHostService.resolve(db))
+    except Exception:  # noqa: BLE001 - a fact we can't read is not a fact
+        ice = None
+    host = urlsplit(settings.mediamtx_external_rtsps_url or "").hostname or ""
+    try:
+        loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = host in ("", "localhost")
+    return {"webrtc_ice_hosts": ice, "rtsps_exposed": not loopback}
 
 
 @router.get("/posture")
@@ -161,6 +240,48 @@ def _get_or_init_monitoring(db: Session) -> SecuritySetting:
         db.commit()
         db.refresh(row)
     return row
+
+
+class RecordingPauseSetting(BaseModel):
+    enabled: bool
+
+
+@router.get("/settings/recording-pause")
+async def get_recording_pause_setting(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_superuser),
+):
+    """Whether recording may be paused on this site, and what is paused."""
+    from services import recording_pause, site_settings
+
+    return {"enabled": site_settings.recording_pause_enabled(db),
+            "paused": recording_pause.paused(db)}
+
+
+@router.put("/settings/recording-pause")
+async def set_recording_pause_setting(
+    payload: RecordingPauseSetting,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_superuser),
+):
+    """Allow or forbid pausing recording (off by default: this is a
+    recorder). Forbidding it resumes every camera paused through it."""
+    from services import recording_pause, site_settings
+    from services.audit_service import audit_request
+
+    site_settings.set_json(db, site_settings.RECORDING_PAUSE_KEY, bool(payload.enabled))
+    resumed: list[int] = []
+    if not payload.enabled:
+        resumed = await recording_pause.resume_all(
+            db, actor=f"user:{current_user.username}", reason="recording pause turned off")
+    audit_request(
+        db, request, action="settings.recording_pause", user_id=current_user.id,
+        entity_type="setting", entity_id=None,
+        details={"enabled": bool(payload.enabled), "resumed_cameras": resumed},
+    )
+    return {"enabled": bool(payload.enabled), "resumed_cameras": resumed,
+            "paused": recording_pause.paused(db)}
 
 
 @router.get("/monitoring-settings")

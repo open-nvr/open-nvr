@@ -69,6 +69,7 @@ def record_track_visit(
     stationary: bool | None = None,
     evidence_path: str | None = None,
     scene_evidence_path: str | None = None,
+    zone_ids: list[int] | None = None,
 ) -> TimelineEvent:
     """Persist one finished visit (source=tier0, event_type=track)."""
     row = TimelineEvent(
@@ -83,11 +84,80 @@ def record_track_visit(
         evidence_path=evidence_path,
         scene_evidence_path=scene_evidence_path,
         payload={"stationary": stationary} if stationary is not None else None,
+        zone_ids=zone_ids,
     )
     db.add(row)
     db.commit()
     db.refresh(row)
     return row
+
+
+#: TimelineEvent.source / event_type of an event someone created by hand
+#: (Home Assistant automation, operator, API client), HA-107.
+MANUAL = "manual"
+
+
+def record_manual_event(
+    db: Session,
+    *,
+    camera_id: int,
+    label: str,
+    started_at: datetime,
+    ended_at: datetime | None = None,
+    note: str | None = None,
+    actor: str | None = None,
+) -> TimelineEvent:
+    """Persist a manual event. ``ended_at=None`` leaves it open until
+    :func:`end_manual_event`."""
+    payload: dict = {}
+    if note:
+        payload["note"] = note
+    if actor:
+        payload["created_by"] = actor
+    row = TimelineEvent(
+        camera_id=camera_id,
+        source=MANUAL,
+        event_type=MANUAL,
+        label=(label or MANUAL)[:60].lower(),
+        started_at=started_at,
+        ended_at=ended_at,
+        payload=payload or None,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def end_manual_event(db: Session, row: TimelineEvent, ended_at: datetime) -> TimelineEvent:
+    row.ended_at = ended_at
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def zone_filter(zone_id: int):
+    """``zone_id`` in the JSON list ``events.zone_ids`` (HA-109), dialect-neutral.
+
+    The column holds ``json.dumps`` text (``[1, 4]``) on every backend, so
+    four LIKE shapes cover first/only/last/middle without JSON operators
+    that SQLite and Postgres spell differently, and never a prefix match
+    (zone 1 is not zone 11).
+
+    Serializer assumption: the patterns spell the list exactly as
+    SQLAlchemy's ``JSON`` type serialises it, ``json.dumps`` with the
+    default separators (``", "`` between items, no space inside the
+    brackets). ``record_track_visit`` writes through that type; an engine
+    with a custom ``json_serializer`` (compact separators) would silently
+    make every filter miss its middle and last items, so
+    tests/test_zones.py pins the stored text form.
+    """
+    from sqlalchemy import String, cast, or_
+
+    text = cast(TimelineEvent.zone_ids, String)
+    z = str(int(zone_id))
+    return or_(text.like(f"[{z}]"), text.like(f"[{z},%"),
+               text.like(f"%, {z}]"), text.like(f"%, {z},%"))
 
 
 def _events_query(
@@ -101,6 +171,7 @@ def _events_query(
     scope: set[int] | None = None,
     plate: str | None = None,
     has_plate: bool = False,
+    zone_id: int | None = None,
 ):
     """Scope + filters, with NO ordering, offset or limit.
 
@@ -119,6 +190,8 @@ def _events_query(
     q = scope_query(q, TimelineEvent.camera_id, scope)
     if camera_id is not None:
         q = q.filter(TimelineEvent.camera_id == camera_id)
+    if zone_id is not None:
+        q = q.filter(zone_filter(zone_id))
     if label:
         q = q.filter(TimelineEvent.label == label.strip().lower())
     if source:

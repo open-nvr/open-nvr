@@ -37,17 +37,19 @@ from __future__ import annotations
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from core.auth import get_current_active_user
 from core.database import get_db
-from models import Camera, User
+from models import AppAlert, Camera, CameraZone, TimelineEvent, User
 
 # The internal door is defined once, next to the pipeline's write routes;
 # the metrics scrape is the same door and should not grow a second lock.
 from routers.internal_camera_agent import _platform_only, _require_internal_key
 from services import search_metrics as metrics
-from services.camera_scope import visible_camera_ids
+from core.permissions import user_has_permission
+from services.camera_scope import scope_query, visible_camera_ids
 from services.search_query import ParsedQuery, parse_query
 from services.search_service import anchor_for, count_search_events, search_events
 
@@ -260,6 +262,8 @@ async def search(
     camera_id: list[int] | None = Query(None, description="Camera; repeatable (OR)."),
     text: str | None = Query(None, description="Words to match in captions/attributes."),
     plate: str | None = Query(None),
+    zone: str | None = Query(None, max_length=60,
+                             description="Zone id or name (among the caller's cameras)."),
     from_: datetime | None = Query(default=None, alias="from"),
     to: datetime | None = Query(default=None),
     source: str | None = Query(None, description="tier0 | camera | app | adapter"),
@@ -311,8 +315,10 @@ async def search(
         if sep and kind.strip() and value.strip():
             attrs.append((kind.strip().lower(), value.strip().lower()))
 
+    zone_id = _resolve_zone(db, zone, cams[0] if len(cams) == 1 else None, scope)
     filters = dict(
         from_=start, to=end, plate=plate_q or None, source=source, scope=scope,
+        zone_id=zone_id,
     )
     shape = metrics.query_shape(
         labels=labels, camera_ids=cams, text=words or "", attrs=attrs,
@@ -340,6 +346,7 @@ async def search(
         "text": words or "",
         "plate": plate_q or "",
         "attrs": [f"{k}:{v}" for k, v in attrs],
+        "zone_id": zone_id,
         "from": start.isoformat() if start else None,
         "to": end.isoformat() if end else None,
         # Which parts the CALLER pinned, so the UI can render those chips
@@ -348,7 +355,7 @@ async def search(
             k for k, v in (
                 ("labels", label), ("camera_ids", camera_id), ("text", text),
                 ("plate", plate), ("from", from_), ("to", to), ("source", source),
-                ("attrs", attr),
+                ("attrs", attr), ("zone_id", zone),
             ) if v
         ),
     })
@@ -387,3 +394,127 @@ async def search(
         "count": len(hits),
         "total": total,
     }
+
+
+# ── Home Assistant (HA-116/HA-502): zones by name, and period summaries ──
+
+
+def _resolve_zone(db: Session, zone: str | None, camera_id: int | None,
+                  scope: set[int] | None) -> int | None:
+    """A zone id from an id or a name. Names match exactly (case-insensitive,
+    no wildcards) and only among cameras the caller can see: another user's
+    zone names are not an oracle."""
+    if zone is None or zone == "":
+        return None
+    if zone.isdigit():
+        return int(zone)
+    q = db.query(CameraZone).filter(func.lower(CameraZone.name) == zone.strip().lower())
+    if scope is not None:
+        q = q.filter(CameraZone.camera_id.in_(scope or {-1}))
+    if camera_id is not None:
+        q = q.filter(CameraZone.camera_id == camera_id)
+    rows = q.all()
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"No zone named {zone!r}")
+    if len(rows) > 1:
+        raise HTTPException(status_code=409,
+                            detail=f"Zone name {zone!r} is on several cameras; add camera_id")
+    return rows[0].id
+
+
+def _alert_camera_num(handle: str | None) -> int | None:
+    from services.alerts_inbox import _camera_num
+
+    return _camera_num(handle)
+
+
+#: Longest period one summary covers.
+MAX_SUMMARY_DAYS = 31
+
+
+@router.get("/search/summary")
+async def search_summary(
+    from_: datetime = Query(..., alias="from"),
+    to: datetime | None = None,
+    camera_id: int | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """What happened between ``from`` and ``to`` (default now), per camera:
+    events counted by label (and the first and last), alerts by severity.
+    Scoped like ``/search``: events need ``recordings.view``, alerts
+    ``alerts.view``, on visible cameras only. Cameras with nothing are
+    left out."""
+    from datetime import UTC, timedelta
+
+    from routers.alerts_inbox import _scope_alerts
+
+    def aware(value: datetime) -> datetime:  # a naive time is UTC
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+
+    start, end = aware(from_), aware(to or datetime.now(UTC))
+    if end <= start:
+        raise HTTPException(status_code=422, detail="'to' must be after 'from'")
+    if end - start > timedelta(days=MAX_SUMMARY_DAYS):
+        raise HTTPException(status_code=422,
+                            detail=f"A summary covers at most {MAX_SUMMARY_DAYS} days")
+    scope = visible_camera_ids(db, current_user)
+    if camera_id is not None and scope is not None and camera_id not in scope:
+        raise HTTPException(status_code=404, detail="Camera not found")
+
+    cams: dict[int, dict] = {}
+
+    def cam(cid: int) -> dict:
+        return cams.setdefault(cid, {"camera_id": cid, "events": {}, "event_count": 0,
+                                     "first_event": None, "last_event": None,
+                                     "alerts": {}, "alert_count": 0})
+
+    if user_has_permission(current_user, "recordings.view"):
+        eq = scope_query(db.query(TimelineEvent.camera_id, TimelineEvent.label,
+                                  func.count(TimelineEvent.id),
+                                  func.min(TimelineEvent.started_at),
+                                  func.max(TimelineEvent.started_at)),
+                         TimelineEvent.camera_id, scope)
+        eq = eq.filter(TimelineEvent.started_at >= start, TimelineEvent.started_at < end)
+        if camera_id is not None:
+            eq = eq.filter(TimelineEvent.camera_id == camera_id)
+        for cid, label, count, first, last in eq.group_by(
+                TimelineEvent.camera_id, TimelineEvent.label).all():
+            if cid is None:
+                continue
+            c = cam(cid)
+            c["events"][label or "unknown"] = count
+            c["event_count"] += count
+            for key, value, pick in (("first_event", first, min), ("last_event", last, max)):
+                if value is not None:
+                    iso = value.isoformat()
+                    c[key] = iso if c[key] is None else pick(c[key], iso)
+
+    site_alerts: dict[str, int] = {}   # alerts about no camera in particular
+    if user_has_permission(current_user, "alerts.view"):
+        aq = _scope_alerts(db.query(AppAlert.camera_id, AppAlert.severity,
+                                    func.count(AppAlert.id)), scope)
+        aq = aq.filter(AppAlert.fired_at >= start, AppAlert.fired_at < end)
+        for handle, severity, count in aq.group_by(AppAlert.camera_id, AppAlert.severity).all():
+            sev = severity or "unknown"
+            cid = _alert_camera_num(handle)
+            if cid is None:
+                if camera_id is None and not handle:
+                    site_alerts[sev] = site_alerts.get(sev, 0) + count
+                continue
+            if camera_id is not None and cid != camera_id:
+                continue
+            c = cam(cid)
+            c["alerts"][sev] = c["alerts"].get(sev, 0) + count
+            c["alert_count"] += count
+
+    names = dict(db.query(Camera.id, Camera.name).filter(Camera.id.in_(list(cams) or [-1])).all())
+    rows = sorted(cams.values(), key=lambda c: (-(c["event_count"] + c["alert_count"]),
+                                                 c["camera_id"]))
+    for c in rows:
+        c["name"] = names.get(c["camera_id"])
+    return {"from": start.isoformat(), "to": end.isoformat(), "cameras": rows,
+            "site_alerts": site_alerts,
+            "totals": {"events": sum(c["event_count"] for c in rows),
+                       "alerts": sum(c["alert_count"] for c in rows)
+                       + sum(site_alerts.values())}}

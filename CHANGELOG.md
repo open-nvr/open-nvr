@@ -63,7 +63,36 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   6–11 s between re-checks. Oldest-first bounds the wait at roughly
   tracks ÷ reserve frames for every track.
 
+### Deprecated
+
+- **`examples/home-assistant-relay`.** It turns alerts into binary sensors
+  and nothing more. Both Home Assistant paths below cover it and much more.
+  It keeps working, and now logs a deprecation warning at start.
+
 ### Added
+
+- **Home Assistant.** OpenNVR now works with Home Assistant in two ways
+  ([docs/HOME_ASSISTANT.md](docs/HOME_ASSISTANT.md)):
+  - a **native integration** plus its `pyopennvr` client library, under
+    `integrations/home-assistant/` and not yet on HACS or PyPI. It offers
+    cameras with WebRTC live view, controls, health sensors, alerts, the
+    media browser, actions, notifications (media relayed through Home
+    Assistant) and a dashboard card session;
+  - **built-in MQTT discovery**: the MQTT integration type now works. With
+    discovery on, it publishes the same devices and entities to Home
+    Assistant's MQTT integration and runs commands as the API token it is
+    bound to.
+
+  The core changes behind them:
+  - **API tokens** (`onvr_…`), limited by scopes, cameras and source
+    addresses. A token never passes as a superuser;
+  - correlation ids on requests and audit rows;
+  - `/system/info` and a versioned contract (`server/contract/`);
+  - camera stats, zones, live state, events WebSocket v2 with resume;
+  - signed media links, and entity descriptors with typed commands;
+  - site mode, search, PTZ presets and manual events;
+  - recording pause, behind a site flag that is off by default.
+  Design: `docs/design/home-assistant-integration.md`.
 
 - **Bounding boxes on the live view.** Tracked objects are outlined over
   the video with their label, confidence and track id, one colour per

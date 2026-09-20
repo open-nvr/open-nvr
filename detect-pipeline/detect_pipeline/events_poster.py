@@ -86,6 +86,30 @@ class Visit:
     # only time that read can honestly carry. Appended LAST, same rule as
     # above, so positional constructions keep meaning.
     evidence_ts: float | None = None
+    # Where the object stood over the visit: the bottom-centre of its box,
+    # normalised 0..1 of the frame, at most PATH_MAX_POINTS evenly thinned.
+    # Core files the visit under the camera's zones from it (HA-109). Empty
+    # when frame size was unknown. Appended LAST, same rule as above.
+    path: tuple = ()
+
+
+#: Most points kept per visit path. When a long visit fills it, every other
+#: point is dropped, so the path stays spread over the whole visit.
+PATH_MAX_POINTS = 32
+
+
+def foot_point(box, width, height) -> tuple[float, float] | None:
+    """Bottom-centre of a pixel box ``(x1, y1, x2, y2)``, normalised, or None."""
+    try:
+        w, h = float(width), float(height)
+        x1, y1, x2, y2 = (float(c) for c in box)
+    except (TypeError, ValueError):
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    x = min(1.0, max(0.0, (x1 + x2) / 2.0 / w))
+    y = min(1.0, max(0.0, y2 / h))
+    return (round(x, 4), round(y, 4))
 
 
 def _core_camera_id(v: Visit) -> int:
@@ -241,6 +265,8 @@ class VisitPoster:
         # predates the field never sees a key it has no opinion about.
         if v.scene_jpeg:
             body["scene_jpeg_b64"] = base64.b64encode(v.scene_jpeg).decode("ascii")
+        if v.path:
+            body["path"] = [[x, y] for x, y in v.path]
         if v.candidate_jpegs:
             body["candidate_jpegs_b64"] = [
                 base64.b64encode(j).decode("ascii") for j in v.candidate_jpegs
@@ -284,7 +310,9 @@ class VisitLifecycle:
         self.min_duration_s = min_duration_s
         self._live: dict = {}
 
-    def observe(self, tracks, now_wall: float) -> list[Visit]:
+    def observe(self, tracks, now_wall: float, frame_size=None) -> list[Visit]:
+        """``frame_size`` is ``(width, height)`` of the frame the boxes are
+        in; without it visits carry no path (and get no zone tags)."""
         current = set()
         for tr in tracks:
             current.add(tr.id)
@@ -293,7 +321,8 @@ class VisitLifecycle:
                 v = self._live[tr.id] = {
                     "start": now_wall, "label": tr.label, "score": float(tr.score),
                     "stationary": False, "confirmed": False, "crop": None,
-                    "crop_ts": None, "ring": None, "scene": None,
+                    "crop_ts": None, "ring": None, "scene": None, "path": [],
+                    "path_step": 1, "path_seen": 0,
                 }
             v["end"] = now_wall
             v["label"] = tr.label
@@ -316,12 +345,32 @@ class VisitLifecycle:
             scene = getattr(tr, "best_scene_jpeg", None)
             if scene is not None:
                 v["scene"] = scene
+            if frame_size is not None:
+                self._add_path_point(v, getattr(tr, "box", None), frame_size)
         finished = []
         for tid in [t for t in self._live if t not in current]:
             visit = self._finish(tid, self._live.pop(tid))
             if visit is not None:
                 finished.append(visit)
         return finished
+
+    @staticmethod
+    def _add_path_point(v: dict, box, frame_size) -> None:
+        """Keep every ``path_step``-th point; when the path is full, drop
+        every other point and double the step, so a visit of any length
+        ends up as at most PATH_MAX_POINTS points spread over all of it."""
+        if box is None:
+            return
+        pt = foot_point(box, *frame_size)
+        if pt is None:
+            return
+        v["path_seen"] += 1
+        if (v["path_seen"] - 1) % v["path_step"]:
+            return
+        v["path"].append(pt)
+        if len(v["path"]) > PATH_MAX_POINTS:
+            v["path"] = v["path"][::2]
+            v["path_step"] *= 2
 
     def flush(self) -> list[Visit]:
         """Finish everything still live (worker stopping)."""
@@ -402,4 +451,5 @@ class VisitLifecycle:
             # Already bytes — deliberately NOT re-encoded here (unlike crop
             # and the candidates, which arrive as pixels).
             scene_jpeg=v.get("scene"),
+            path=tuple(v.get("path") or ()),
         )

@@ -139,6 +139,25 @@ class TrackEventIn(BaseModel):
     # answer "where was it and what else was in shot". Optional, and DROPPED
     # rather than 422'd when oversized or malformed — see the ingest below.
     scene_jpeg_b64: str | None = None
+    # Where the object stood over the visit: bottom-centre of its box,
+    # normalised 0..1, downsampled by the pipeline (HA-109). Used to file the
+    # visit under the camera's zones. Optional; a malformed path is ignored,
+    # never a 422 (history beats zone tags).
+    path: list[list[float]] | None = None
+
+
+def _zone_ids_for(db: Session, payload: TrackEventIn) -> list[int] | None:
+    from services.zones import clean_path, zones_for_path
+
+    path = clean_path(payload.path)
+    if path is None:
+        return None
+    try:
+        return zones_for_path(db, payload.camera_id, payload.label, path)
+    except Exception:  # noqa: BLE001 - zone tags never cost a visit
+        main_logger.warning("zone tagging failed for camera %s", payload.camera_id,
+                            exc_info=True)
+        return None
 
 
 @router.post("/events", status_code=201)
@@ -222,6 +241,7 @@ async def ingest_track_event(
             stationary=payload.stationary,
             evidence_path=evidence_rel,
             scene_evidence_path=scene_rel,
+            zone_ids=_zone_ids_for(db, payload),
         )
     except IntegrityError:
         # Retry raced an earlier success — the visit already exists
@@ -243,6 +263,13 @@ async def ingest_track_event(
         # background task ahead of it in the exit stack.
         release(db)
         return {"id": duplicate_id, "duplicate": True}
+    # HA-113: say when this visit's clip is playable (a new visit only).
+    try:
+        from services.media_ready import schedule_for_visit
+
+        schedule_for_visit(row)
+    except Exception:  # noqa: BLE001 - a nudge never costs the visit
+        logger.debug("media_ready scheduling failed", exc_info=True)
     # PR-C: vehicle visit with evidence -> queue ONE OCR pass over the best
     # frame (background — never on the ingest path). Best-effort: no adapter,
     # no plate, no problem.
@@ -1011,6 +1038,9 @@ def list_camera_agent_sources(
                 # assigned: the camera is eligible for any skill's picker
                 # but adopted by none, so no app inference runs on it.
                 "assignments": list(cam.assignments or []),
+                # Tier-0 detection on/off (NULL = on). detect-pipeline
+                # skips a camera with analyze=false; it keeps recording.
+                "analyze": cam.detection_enabled is not False,
             }
         )
 

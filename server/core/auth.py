@@ -23,7 +23,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pyotp
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -171,10 +171,17 @@ def verify_token(token: str) -> TokenData | None:
 
 
 def get_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db),
 ) -> User:
-    """Get current authenticated user from JWT token."""
+    """Get the current principal: a user from a JWT, or, for an ``onvr_`` API
+    token, a read-only TokenPrincipal acting for the token's owner (HA-101).
+
+    A token principal is never a superuser, may only reach the routes in
+    services.api_tokens.TOKEN_ROUTES, and is checked against its scopes, its
+    owner's permissions and its camera allow-list before the route runs.
+    """
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -182,6 +189,10 @@ def get_current_user(
     )
 
     token = credentials.credentials
+    from services import api_tokens
+
+    if api_tokens.looks_like_token(token):
+        return api_tokens.authorize_request(request, db, token)
     token_data = verify_token(token)
     if token_data is None:
         auth_logger.log_action(

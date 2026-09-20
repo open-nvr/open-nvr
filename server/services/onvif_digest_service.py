@@ -743,6 +743,114 @@ async def ptz_stop_digest(
     return {"status": "stopped"}
 
 
+# Preset tokens are camera-issued identifiers ("1", "Preset_3", "p-0001"...).
+# They are interpolated into SOAP, so anything outside this shape is refused
+# before it reaches the camera; names are XML-escaped instead (free text).
+PRESET_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+
+
+def _checked_preset_token(token: str) -> str:
+    if not PRESET_TOKEN_RE.fullmatch(token or ""):
+        raise HTTPException(status_code=422, detail="Invalid preset token")
+    return token
+
+
+def _parse_presets(text: str) -> list[dict[str, str]]:
+    """``[{"token", "name"}]`` from a GetPresetsResponse.
+
+    Tolerant of the namespace prefix and of attribute order, the two things
+    vendors vary (see fetch_profiles_digest). A preset with no name gets its
+    token as the name.
+    """
+    presets = []
+    for m in re.finditer(
+        r"<(?:\w+:)?Preset\b([^>]*?)(?:/>|>(.*?)</(?:\w+:)?Preset>)", text, re.DOTALL
+    ):
+        tok = re.search(r'token="([^"]+)"', m.group(1))
+        if not tok:
+            continue
+        name_m = re.search(r"<(?:\w+:)?Name>([^<]*)</(?:\w+:)?Name>", m.group(2) or "")
+        token = _xml_text(tok.group(1))
+        name = _xml_text(name_m.group(1)).strip() if name_m else ""
+        presets.append({"token": token, "name": name or token})
+    return presets
+
+
+async def ptz_get_presets_digest(
+    ip: str,
+    username: str,
+    password: str,
+    profile_token: str,
+    port: int = 80,
+    scheme: str = "http",
+) -> list[dict[str, str]]:
+    """The camera's stored PTZ presets for a media profile."""
+    ptz_url = await get_ptz_service_url(ip, username, password, port, scheme)
+    if not ptz_url:
+        raise HTTPException(status_code=404, detail="PTZ service not available")
+    body = f"""<tptz:GetPresets>
+      <tptz:ProfileToken>{html.escape(profile_token)}</tptz:ProfileToken>
+    </tptz:GetPresets>"""
+    status, text = await _onvif_request(ptz_url, body, username, password)
+    if status != 200:
+        raise HTTPException(status_code=status, detail=f"PTZ presets failed: {text[:500]}")
+    return _parse_presets(text)
+
+
+async def ptz_goto_preset_digest(
+    ip: str,
+    username: str,
+    password: str,
+    profile_token: str,
+    preset_token: str,
+    port: int = 80,
+    scheme: str = "http",
+) -> dict[str, Any]:
+    """Move the camera to a stored preset."""
+    preset_token = _checked_preset_token(preset_token)
+    ptz_url = await get_ptz_service_url(ip, username, password, port, scheme)
+    if not ptz_url:
+        raise HTTPException(status_code=404, detail="PTZ service not available")
+    body = f"""<tptz:GotoPreset>
+      <tptz:ProfileToken>{html.escape(profile_token)}</tptz:ProfileToken>
+      <tptz:PresetToken>{preset_token}</tptz:PresetToken>
+    </tptz:GotoPreset>"""
+    status, text = await _onvif_request(ptz_url, body, username, password)
+    if status != 200:
+        raise HTTPException(status_code=status, detail=f"PTZ goto preset failed: {text[:500]}")
+    return {"status": "moving", "preset": preset_token}
+
+
+async def ptz_set_preset_digest(
+    ip: str,
+    username: str,
+    password: str,
+    profile_token: str,
+    name: str,
+    preset_token: str | None = None,
+    port: int = 80,
+    scheme: str = "http",
+) -> dict[str, Any]:
+    """Store the current position as a preset. With ``preset_token`` it
+    overwrites that preset; without, the camera allocates a new one."""
+    token_xml = ""
+    if preset_token is not None:
+        token_xml = f"<tptz:PresetToken>{_checked_preset_token(preset_token)}</tptz:PresetToken>"
+    ptz_url = await get_ptz_service_url(ip, username, password, port, scheme)
+    if not ptz_url:
+        raise HTTPException(status_code=404, detail="PTZ service not available")
+    body = f"""<tptz:SetPreset>
+      <tptz:ProfileToken>{html.escape(profile_token)}</tptz:ProfileToken>
+      <tptz:PresetName>{html.escape(name)}</tptz:PresetName>
+      {token_xml}
+    </tptz:SetPreset>"""
+    status, text = await _onvif_request(ptz_url, body, username, password)
+    if status != 200:
+        raise HTTPException(status_code=status, detail=f"PTZ set preset failed: {text[:500]}")
+    m = re.search(r"<(?:\w+:)?PresetToken>([^<]+)</(?:\w+:)?PresetToken>", text)
+    return {"token": _xml_text(m.group(1)) if m else preset_token, "name": name}
+
+
 async def get_system_datetime(
     ip: str,
     port: int = 80,

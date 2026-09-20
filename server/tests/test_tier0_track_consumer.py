@@ -229,11 +229,57 @@ class _Bus:
 
 
 def _run(msg, monkeypatch):
+    """The OVERLAY events one message produces. Live-state events (HA-110)
+    and detection entity events (HA-114) ride the same bus and have their
+    own tests (test_live_state.py, test_entities.py); each
+    run gets a fresh live state so no test sees another's tracks."""
+    import services.live_state as ls_mod
+
     bus = _Bus()
     from services import event_bus_service
     monkeypatch.setattr(event_bus_service, "get_event_bus", lambda: bus)
+    monkeypatch.setattr(ls_mod, "_instance", ls_mod.LiveState())
+    monkeypatch.setattr(ls_mod, "load_zones", lambda cid: None)
     asyncio.run(tc._handle_message(msg))
-    return bus.published
+    return [e for e in bus.published
+            if e.get("event_type") not in ("live_state", "entity_state")]
+
+
+def test_zone_refresh_hops_to_a_thread_only_when_a_reload_is_due(monkeypatch):
+    """Review: ``asyncio.to_thread(refresh_zones_if_due, ...)`` ran on EVERY
+    Tier-0 frame although the function returned at once 49 times in 50.
+    Due-ness is now decided on the loop; the thread hop is paid once per
+    TTL per camera, and the worker only ever runs the DB read."""
+    import services.live_state as ls_mod
+
+    bus = _Bus()
+    from services import event_bus_service
+    monkeypatch.setattr(event_bus_service, "get_event_bus", lambda: bus)
+    monkeypatch.setattr(ls_mod, "_instance", ls_mod.LiveState())
+    monkeypatch.setattr(ls_mod, "_zones_loaded", {})
+    monkeypatch.setattr(ls_mod, "load_zones", lambda cid: None)
+    hops = []
+
+    async def fake_to_thread(fn, *args, **kwargs):
+        hops.append((fn, args))
+        return fn(*args, **kwargs)
+
+    monkeypatch.setattr(tc.asyncio, "to_thread", fake_to_thread)
+    raw = _raw([{"id": 1, "label": "person", "score": 0.9, "box": [0, 0, 100, 100],
+                 "matched": True}])
+    asyncio.run(tc._update_live_state(3, raw))
+    assert [(fn.__name__ if hasattr(fn, "__name__") else fn, a) for fn, a in hops] \
+        == [("<lambda>", (3,))]  # the patched load_zones, for camera 3, once
+    hops.clear()
+    for _ in range(5):
+        asyncio.run(tc._update_live_state(3, raw))
+    assert hops == []                       # fresh: no hop at all
+    asyncio.run(tc._update_live_state(4, raw))
+    assert len(hops) == 1                   # another camera: its own first load
+    hops.clear()
+    ls_mod.invalidate_zones(3)              # zone CRUD: the next frame reloads
+    asyncio.run(tc._update_live_state(3, raw))
+    assert len(hops) == 1
 
 
 def test_camera_handle_is_mapped_to_the_integer_id(monkeypatch):

@@ -21,7 +21,7 @@ from __future__ import annotations
 import time
 from typing import Any, Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from core.auth import get_current_active_user
@@ -30,6 +30,7 @@ from core.logging_config import main_logger
 from models import InstalledApp, User
 from routers.ai_models import _load_tasks_registry
 from services import skill_assignments
+from services.audit_service import audit_request
 from services.camera_scope import can_manage_camera, in_scope, visible_camera_ids
 from services.kai_c_service import get_kai_c_service
 from services.skills_registry import derive_skills
@@ -134,6 +135,7 @@ def _require_camera_manage(db: Session, user: User, camera_id: int) -> None:
 async def declare_skill_camera(
     skill_id: str,
     camera_id: int,
+    request: Request,
     consumer: str = Body(..., embed=True),
     params: dict[str, Any] | None = Body(None, embed=True),
     db: Session = Depends(get_db),
@@ -157,6 +159,12 @@ async def declare_skill_camera(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     db.commit()
+    # Turning an AI app on for a camera changes what that camera watches for.
+    audit_request(
+        db, request, action="skill.claim", user_id=current_user.id,
+        entity_type="camera", entity_id=camera_id,
+        details={"skill": skill_id, "consumer": consumer},
+    )
     return skill_assignments.skill_view(db, skill_id)
 
 
@@ -165,6 +173,7 @@ async def release_skill_camera(
     skill_id: str,
     camera_id: int,
     consumer: str,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ) -> dict[str, Any]:
@@ -178,4 +187,9 @@ async def release_skill_camera(
             detail=f"no claim by {consumer!r} on camera {camera_id} "
                    f"for skill {skill_id!r}")
     db.commit()
+    audit_request(
+        db, request, action="skill.release", user_id=current_user.id,
+        entity_type="camera", entity_id=camera_id,
+        details={"skill": skill_id, "consumer": consumer},
+    )
     return skill_assignments.skill_view(db, skill_id)

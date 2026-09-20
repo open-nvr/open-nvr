@@ -24,10 +24,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
+from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
 from core.auth import get_current_active_user, get_current_superuser
+from core.client_ip import get_client_ip
 from urllib.parse import urlparse
 
 from core.config import _host_is_internal, settings
@@ -56,7 +58,7 @@ from schemas import (
     DeletedCameraList,
     TransportSecurityUpdate,
 )
-from services.audit_service import write_audit_log
+from services.audit_service import audit_request, write_audit_log
 from services.camera_identity import path_name_for_camera, read_marker
 from services.camera_service import CameraService
 from services.camera_status_service import get_camera_status_service
@@ -285,6 +287,10 @@ def _check_duplicate_ips(db: Session, user_id: int, cam: Camera):
 #: and the viewer role does not (scripts/init_db.py), and the one the
 #: UI already keys its Add Camera button on.
 require_cameras_manage = RequirePermission("cameras.manage")
+# PTZ needs the permission AND the camera (ownership, via get_camera_by_id).
+# HA-004 granted ptz.control to every role that had live.view, so nobody who
+# could steer a camera before lost that.
+require_ptz_control = RequirePermission("ptz.control")
 
 
 def _reject_external_camera_hosts(camera_create) -> None:
@@ -599,7 +605,25 @@ def get_cameras(
         user_agent=request.headers.get("user-agent") if request else None,
     )
 
-    if current_user.is_superuser:
+    from services.api_tokens import is_token_principal
+
+    if is_token_principal(current_user):
+        # An API token lists exactly the cameras it may see: its owner's
+        # visible cameras narrowed to its allow-list (camera_scope does
+        # both). The branches below key off is_superuser, which a token
+        # never is, so an admin-owned token would otherwise see only the
+        # cameras that admin happens to own.
+        from services.camera_scope import visible_camera_ids
+
+        scope = visible_camera_ids(db, current_user)
+        q = db.query(Camera).filter(Camera.deleted_at.is_(None))
+        if active_only:
+            q = q.filter(Camera.is_active == True)  # noqa: E712
+        if scope is not None:
+            q = q.filter(Camera.id.in_(scope or {-1}))
+        total = q.count()
+        cameras = q.order_by(Camera.id).offset(skip).limit(limit).all()
+    elif current_user.is_superuser:
         cameras = CameraService.get_all_cameras(
             db=db, skip=skip, limit=limit, active_only=active_only
         )
@@ -1103,6 +1127,31 @@ async def update_camera(
         )
 
         update_fields = camera_update.model_dump(exclude_unset=True)
+        # Audit-only, never a camera column: take it out before setattr.
+        reason = update_fields.pop("reason", None)
+        from services import api_tokens
+
+        if api_tokens.is_token_principal(current_user):
+            allowed = set(api_tokens.TOKEN_CAMERA_FIELDS)
+            if "is_active" in update_fields:
+                # Turning a camera off also stops its recording, so a token
+                # may only do it where recording may be paused at all.
+                from services.site_settings import recording_pause_enabled
+
+                if not recording_pause_enabled(db):
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Turning a camera off stops recording, which this "
+                               "site does not allow API tokens to do",
+                    )
+                allowed.add("is_active")
+            refused = sorted(set(update_fields) - allowed)
+            if refused:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"An API token cannot change these camera fields: {refused}",
+                )
+        was_detecting = camera.detection_enabled is not False
         # RFC-0002 Phase 2: the editor's assignments write routes through
         # the assignment TABLE as the 'operator' consumer — full-replace
         # of the operator's claims only, so app/agent claims survive an
@@ -1466,7 +1515,12 @@ async def update_camera(
                 details={
                     "updated_fields": [
                         k for k in camera_update.model_dump(exclude_unset=True).keys()
+                        if k != "reason"
                     ],
+                    **({"reason": reason} if reason else {}),
+                    **({"detection_enabled": {"from": was_detecting,
+                                              "to": camera.detection_enabled is not False}}
+                       if "detection_enabled" in update_fields else {}),
                     **({"stream_action": stream_action} if stream_action else {}),
                     **({"stream_warning": stream_warning} if stream_warning else {}),
                 },
@@ -2105,38 +2159,84 @@ def test_camera_connection(
 
 
 def _update_camera_recording_config(db: Session, camera_id: int, enable: bool):
-    from sqlalchemy.sql import func
+    from services.recording_pause import set_recording_config
 
-    from models import Camera, CameraConfig
+    set_recording_config(db, camera_id, enable)
 
-    config = db.query(CameraConfig).filter(CameraConfig.camera_id == camera_id).first()
-    if config:
-        config.recording_enabled = enable
-    else:
-        # Create config if it doesn't exist
-        cam = db.query(Camera).filter(Camera.id == camera_id).first()
-        if cam and cam.rtsp_url:
-            config = CameraConfig(
-                camera_id=camera_id,
-                stream_protocol="rtsp",
-                source_url=cam.rtsp_url,
-                recording_enabled=enable,
-                rtsp_transport="tcp",
-                recording_segment_seconds=settings.recording_segment_seconds,
-                last_provisioned_at=func.now(),
+
+class RecordingSwitch(BaseModel):
+    enabled: bool
+    #: Pause only: resume automatically after this many seconds.
+    resume_after_s: int | None = Field(None, ge=60, le=7 * 24 * 3600)
+    #: Why, for the audit log (e.g. the Home Assistant automation).
+    reason: str | None = Field(None, max_length=200)
+
+
+@router.post("/{camera_id}/recording")
+async def set_camera_recording(
+    camera_id: int,
+    payload: RecordingSwitch,
+    request: Request,
+    camera: Camera = Depends(get_camera_or_403),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Pause or resume recording on one camera (HA-108).
+
+    Recording is always on unless a site admin has allowed pausing
+    (``PUT /system/settings/recording-pause``); with that off, pausing is
+    refused (403) and the rule below stands. Resuming is always allowed.
+    Pausing needs ``recordings.pause``. A pause survives a restart, and an
+    automatic resume (``resume_after_s``) is rescheduled at boot.
+    """
+    from core.permissions import user_has_permission
+    from core.request_context import current as current_ctx
+    from services import recording_pause, site_settings
+
+    if not payload.enabled:
+        # The site flag first: its message is the one that tells an admin
+        # what to change.
+        if not site_settings.recording_pause_enabled(db):
+            raise HTTPException(
+                status_code=403,
+                detail="Pausing recording is not allowed on this site "
+                       "(Settings > Recording > Allow pausing recording)",
             )
-            db.add(config)
+        if not user_has_permission(current_user, "recordings.pause"):
+            raise HTTPException(status_code=403, detail="Needs the recordings.pause permission")
+        if not camera.is_active:
+            raise HTTPException(status_code=409, detail="Camera is turned off")
+    elif not user_has_permission(current_user, "recordings.pause") and \
+            not user_has_permission(current_user, "cameras.manage"):
+        raise HTTPException(status_code=403, detail="Needs recordings.pause or cameras.manage")
 
-    db.commit()
+    ctx = current_ctx()
+    actor = (ctx.actor if ctx is not None and ctx.actor else None) or f"user:{current_user.username}"
+    try:
+        if payload.enabled:
+            await recording_pause.resume(db, camera.id, actor=actor, reason=payload.reason)
+            state = None
+        else:
+            state = await recording_pause.pause(
+                db, camera.id, actor=actor, reason=payload.reason,
+                resume_after_s=payload.resume_after_s)
+    except recording_pause.PauseError as exc:
+        raise HTTPException(status_code=502, detail=f"Media server refused: {exc}") from exc
+    audit_request(
+        db, request, action="recording.resume" if payload.enabled else "recording.pause",
+        user_id=current_user.id, entity_type="camera", entity_id=camera.id,
+        details={"reason": payload.reason,
+                 "resume_at": (state or {}).get("resume_at")},
+    )
+    return {"camera_id": camera.id, "recording": payload.enabled, "paused": state}
 
 
-# DISABLED — this is a Network Video RECORDER: recording is automatic and must
-# not be switchable off by anyone, including via the API. The route is
-# intentionally commented out so a direct `curl` cannot enable/disable
-# recording. Recording is turned on once at camera-configure time (see
-# CameraService, enable_recording=True). The handler is kept (not deleted) so
-# the behaviour can be restored by re-enabling the decorator if the product
-# decision ever changes.
+# DISABLED — this is a Network Video RECORDER: recording is automatic. This
+# old toggle stays unrouted so a direct `curl` cannot switch recording off.
+# The one supported way to pause is POST /{camera_id}/recording above, which
+# only works when a site admin has allowed it (recording_pause_enabled, off
+# by default), is audited, and can resume on its own. The handler is kept for
+# reference.
 # @router.post("/{camera_id}/toggle-recording")
 async def toggle_camera_recording(
     camera_id: int,
@@ -2227,6 +2327,34 @@ def stream_urls(
     return {"whep": whep, "hls": hls}
 
 
+@router.get("/{camera_id}/stats")
+async def get_camera_stats(
+    camera_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Health numbers for one camera: stream up, bitrate, detection fps,
+    inference time, skipped frames, recording state, days of footage kept.
+
+    Any user who can view the camera may read them. Sources that are absent
+    (detect-pipeline not deployed, camera paused) read as null, not errors.
+    Bitrate is measured between two reads, so the first call returns null.
+    """
+    from services.camera_scope import can_view_camera
+    from services.camera_stats import get_camera_stats as _stats
+
+    cam = (
+        db.query(Camera)
+        .filter(Camera.id == camera_id, Camera.deleted_at.is_(None))
+        .first()
+    )
+    if cam is None:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    if not can_view_camera(db, current_user, camera_id):
+        raise HTTPException(status_code=403, detail="Not allowed to view this camera")
+    return await _stats(db, cam)
+
+
 # ============================================================================
 # PTZ Control Endpoints - Uses camera credentials from database
 # ============================================================================
@@ -2238,8 +2366,9 @@ async def ptz_move(
     x: float = Query(0.0, ge=-1.0, le=1.0),
     y: float = Query(0.0, ge=-1.0, le=1.0),
     z: float = Query(0.0, ge=-1.0, le=1.0),
+    request: Request = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_ptz_control),
 ):
     """
     PTZ continuous move for a camera.
@@ -2269,7 +2398,7 @@ async def ptz_move(
 
     from services.ptz_service import PTZService
 
-    return await PTZService.move(
+    result = await PTZService.move(
         camera_id=cam.id,
         ip=cam.ip_address,
         username=cam.username,
@@ -2279,13 +2408,21 @@ async def ptz_move(
         y=y,
         z=z,
     )
+    audit_request(
+        db, request, action="ptz.move", user_id=current_user.id,
+        entity_type="camera", entity_id=cam.id,
+        details={"x": x, "y": y, "z": z,
+                 "success": bool(isinstance(result, dict) and result.get("success"))},
+    )
+    return result
 
 
 @router.post("/{camera_id}/ptz/stop")
 async def ptz_stop(
     camera_id: int,
+    request: Request = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_ptz_control),
 ):
     """
     Stop PTZ movement for a camera.
@@ -2303,13 +2440,103 @@ async def ptz_stop(
 
     from services.ptz_service import PTZService
 
-    return await PTZService.stop(
+    result = await PTZService.stop(
         camera_id=cam.id,
         ip=cam.ip_address,
         username=cam.username,
         password=cam.password,
         camera_port=cam.port,
     )
+    audit_request(
+        db, request, action="ptz.stop", user_id=current_user.id,
+        entity_type="camera", entity_id=cam.id,
+        details={"success": bool(isinstance(result, dict) and result.get("success"))},
+    )
+    return result
+
+
+def _ptz_camera(db: Session, camera_id: int, current_user) -> Camera:
+    cam = CameraService.get_camera_by_id(db, camera_id, current_user.id)
+    if not cam:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    if not cam.username or not cam.password:
+        raise HTTPException(
+            status_code=400, detail="Camera ONVIF credentials not configured"
+        )
+    return cam
+
+
+class PTZPresetSave(BaseModel):
+    name: str = Field(..., min_length=1, max_length=64)
+    #: Overwrite this preset; omit to let the camera allocate a new one.
+    token: str | None = Field(None, max_length=64)
+
+
+@router.get("/{camera_id}/ptz/presets")
+async def ptz_list_presets(
+    camera_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_ptz_control),
+):
+    """The camera's stored PTZ presets: ``{"presets": [{"token", "name"}]}``."""
+    from services.ptz_service import PTZService
+
+    cam = _ptz_camera(db, camera_id, current_user)
+    presets = await PTZService.presets(
+        camera_id=cam.id, ip=cam.ip_address, username=cam.username,
+        password=cam.password, camera_port=cam.port,
+    )
+    return {"camera_id": cam.id, "presets": presets}
+
+
+@router.post("/{camera_id}/ptz/presets")
+async def ptz_save_preset(
+    camera_id: int,
+    payload: PTZPresetSave,
+    request: Request = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_ptz_control),
+):
+    """Store the camera's current position as a preset (new, or overwrite
+    ``token``). The camera keeps the preset; OpenNVR stores nothing."""
+    from services.ptz_service import PTZService
+
+    cam = _ptz_camera(db, camera_id, current_user)
+    result = await PTZService.set_preset(
+        camera_id=cam.id, ip=cam.ip_address, username=cam.username,
+        password=cam.password, camera_port=cam.port,
+        name=payload.name.strip(), preset_token=payload.token,
+    )
+    audit_request(
+        db, request, action="ptz.preset_save", user_id=current_user.id,
+        entity_type="camera", entity_id=cam.id,
+        details={"name": payload.name.strip(), "token": result.get("token"),
+                 "overwrite": payload.token is not None},
+    )
+    return {"camera_id": cam.id, **result}
+
+
+@router.post("/{camera_id}/ptz/presets/{preset_token}/goto")
+async def ptz_goto_preset(
+    camera_id: int,
+    preset_token: str,
+    request: Request = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_ptz_control),
+):
+    """Move the camera to a stored preset."""
+    from services.ptz_service import PTZService
+
+    cam = _ptz_camera(db, camera_id, current_user)
+    result = await PTZService.goto_preset(
+        camera_id=cam.id, ip=cam.ip_address, username=cam.username,
+        password=cam.password, camera_port=cam.port, preset_token=preset_token,
+    )
+    audit_request(
+        db, request, action="ptz.preset_goto", user_id=current_user.id,
+        entity_type="camera", entity_id=cam.id, details={"token": preset_token},
+    )
+    return {"camera_id": cam.id, **result}
 
 
 # Proxy restart/status and publish URL endpoints removed (FFmpeg proxy eliminated)
@@ -2566,3 +2793,63 @@ async def get_camera_snapshot(
         # aggressively cache image GETs otherwise.
         headers={"Cache-Control": "no-store"},
     )
+
+
+class DescribeIn(BaseModel):
+    question: str | None = Field(None, max_length=300)
+
+
+@router.post("/{camera_id}/describe")
+async def describe_camera(
+    camera_id: int,
+    request: Request,
+    body: DescribeIn | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """The camera's current view in words, from a caption or visual-QA
+    adapter through KAI-C (services/scene_description.py); with
+    ``question``, its answer. ``available: false`` when no such adapter is
+    installed or it declined. Audited: a frame went to a model. 429 past a
+    few a minute; 503 when no frame can be captured."""
+    from types import SimpleNamespace
+
+    from core.database import SessionLocal, release
+    from services import scene_description
+    from services.camera_scope import can_view_camera
+
+    row = db.query(Camera).filter(Camera.id == camera_id, Camera.deleted_at.is_(None)).first()
+    if row is None or not can_view_camera(db, current_user, camera_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Camera not found")
+    camera = SimpleNamespace(id=row.id, rtsp_url=row.rtsp_url)
+    question = ((body.question or "").strip() or None) if body is not None else None
+    user_id = current_user.id   # a token's owner: the limit is per person
+    # The real client, not the reverse proxy: this row is read after the
+    # fact by a person, and every other audit site resolves it the same way.
+    ip = get_client_ip(request) or None
+    agent = request.headers.get("user-agent")
+    # Nothing below needs this session: the frame grab and the model take up
+    # to a minute, and a connection must not sit idle in a transaction.
+    release(db)
+    try:
+        result = await scene_description.describe(camera, f"user:{user_id}", question)
+    except scene_description.RateLimited:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                            detail="Too many descriptions; try again in a minute",
+                            headers={"Retry-After": "60"})
+    except scene_description.Busy:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="The image model is busy; try again shortly",
+                            headers={"Retry-After": "30"})
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+    with SessionLocal() as audit_db:
+        write_audit_log(
+            audit_db, action="camera.describe", user_id=user_id, entity_type="camera",
+            entity_id=camera.id,
+            # Not the question or the answer: they may describe people.
+            details={"model": result["model"], "task": result["task"],
+                     "answered": result["available"], "question": question is not None},
+            ip=ip, user_agent=agent,
+        )
+    return {"camera_id": camera.id, "at": datetime.now(UTC).isoformat(), **result}

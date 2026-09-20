@@ -7,6 +7,19 @@ already holds the app's credential ([APP_CREDENTIALS.md](APP_CREDENTIALS.md))
 and therefore the app's camera roster. Nothing an app does with core,
 KAI-C or the event bus needs a hand-written HTTP or NATS client any more.
 
+**Three credentials, three kinds of caller — and the platform does not
+blur them.** A *person* holds a JWT and uses the operator API, scoped by
+their role and camera grants. An *app* — something installed from the
+catalog and running on the platform — holds an app key and uses this
+door, scoped to the roster it was granted. A *third-party consumer acting
+on a person's behalf* — Home Assistant, a script, a dashboard — holds an
+[API token](HOME_ASSISTANT.md) on the operator API: it acts as its owner,
+can never exceed them (scopes ∩ owner permissions, cameras ∩ owner
+visibility, an explicit route allow-list), and is audited as itself. An
+integration is therefore never written as an app in disguise, and an app
+never borrows a person's token; which door a piece of code uses tells you
+what it is.
+
 ```python
 from opennvr_app_sdk import OpenNVR
 

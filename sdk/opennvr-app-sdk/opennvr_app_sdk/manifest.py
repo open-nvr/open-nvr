@@ -232,6 +232,65 @@ class Action:
         }
 
 
+#: Platforms an app may declare an entity on (HA-114). Unknown platforms
+#: are skipped by core, never an error, so newer ones can be added later.
+ENTITY_PLATFORMS = ("sensor", "binary_sensor", "button", "switch", "select",
+                    "number", "event")
+#: Platforms that DO something, and therefore need ``action``.
+ENTITY_CONTROL_PLATFORMS = ("button", "switch", "select", "number")
+
+
+@dataclass
+class Entity:
+    """One entity the app wants in Home Assistant (and MQTT discovery).
+
+    Core turns it into an entity descriptor, resolves its value from the
+    app's ``/state`` and pushes changes; the Home Assistant integration
+    renders it with no app-specific code.
+
+    ``state_path`` is a dot path into ``/state`` (like ``StateView.path``),
+    with list indexes and ``[field=value]`` row selectors. With
+    ``per_camera=True`` there is one entity per camera the app was given,
+    on that camera's device, and ``{camera}`` in the path becomes the
+    camera's handle (``cam3``): ``per_camera[camera={camera}].unattended``.
+
+    Controls (button, switch, select, number) name one of the app's own
+    declared ``actions``; core calls it with ``camera`` (per-camera) and
+    ``value`` (switch/select/number) when the action declares those params.
+    """
+
+    key: str
+    platform: str
+    name: str
+    state_path: str = ""
+    per_camera: bool = False
+    action: str = ""
+    device_class: str = ""
+    unit: str = ""
+    state_class: str = ""
+    icon: str = ""
+    entity_category: str = ""
+    enabled_default: bool = True
+    #: select: the choices; number: {"min", "max", "step"}.
+    options: Any = None
+    #: event platform: the event types it can fire.
+    event_types: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {"key": self.key, "platform": self.platform, "name": self.name,
+                             "per_camera": bool(self.per_camera),
+                             "enabled_default": bool(self.enabled_default)}
+        for k in ("state_path", "action", "device_class", "unit", "state_class",
+                  "icon", "entity_category"):
+            if getattr(self, k):
+                d[k] = getattr(self, k)
+        if self.options is not None:
+            d["options"] = self.options
+        if self.event_types:
+            d["event_types"] = list(self.event_types)
+        return d
+
+
 @dataclass
 class AppManifest:
     """The static identity + schema of one app.
@@ -292,6 +351,9 @@ class AppManifest:
     # invoke on the app's contract surface via the server's JWT-only
     # proxy. Empty ⇒ no Actions section renders.
     actions: list[Action] = field(default_factory=list)
+    # Entities for Home Assistant (HA-114): values from /state, controls
+    # through the actions above. Empty ⇒ the app shows no entities.
+    entities: list[Entity] = field(default_factory=list)
     # RFC-0002 Phase 4 app-surface convention: True ⇒ the app serves an
     # HTML dashboard at GET /ui on its contract port, and core proxies
     # it at /api/v1/apps/{id}/ui (the catalog renders it sandboxed).
@@ -379,6 +441,7 @@ class AppManifest:
             "emits": [a.to_dict() for a in self.emits],
             "state_schema": [v.to_dict() for v in self.state_schema],
             "actions": [a.to_dict() for a in self.actions],
+            "entities": [e.to_dict() for e in self.entities],
             "overlay": bool(self.overlay),
             "camera_picker": bool(self.camera_picker),
             "has_ui": bool(self.has_ui),

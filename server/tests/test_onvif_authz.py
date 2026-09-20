@@ -51,12 +51,19 @@ sys.modules.setdefault("core.logging_config", _lm)
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import create_engine  # noqa: E402
-from sqlalchemy.orm import sessionmaker  # noqa: E402
+from sqlalchemy.orm import joinedload, sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from core.auth import get_current_active_user, get_current_superuser  # noqa: E402
 from core.database import Base, get_db  # noqa: E402
-from models import Camera, CameraPermission, Role, User  # noqa: E402
+from models import (  # noqa: E402
+    Camera,
+    CameraPermission,
+    Permission,
+    Role,
+    RolePermission,
+    User,
+)
 from routers import onvif as onvif_router  # noqa: E402
 
 OWNER, VIEWER, MANAGER, STRANGER, ROOT = 1, 2, 3, 4, 5
@@ -73,7 +80,13 @@ def harness(monkeypatch):
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine)
     s = factory()
+    # Every user holds ptz.control: the PTZ routes gate on that RBAC
+    # permission (as /cameras/{id}/ptz/* does) BEFORE the per-camera grant
+    # under test, so without it every PTZ call would be a 403 for the
+    # permission and the ownership/grant assertions would prove nothing.
     s.add(Role(id=1, name="admin"))
+    s.add(Permission(id=1, name="ptz.control", description="ptz"))
+    s.add(RolePermission(role_id=1, permission_id=1))
     for uid, name in ((OWNER, "owner"), (VIEWER, "viewer"), (MANAGER, "manager"),
                       (STRANGER, "stranger")):
         s.add(User(id=uid, username=name, email=f"{name}@x",
@@ -115,9 +128,14 @@ def harness(monkeypatch):
             session.close()
 
     def _user():
+        # The User outlives this session, and RequirePermission reads
+        # user.role.permissions: load them eagerly, or the lazy load on a
+        # closed session raises DetachedInstanceError.
         session = factory()
         try:
-            return session.get(User, state["uid"])
+            return (session.query(User)
+                    .options(joinedload(User.role).joinedload(Role.permissions))
+                    .filter(User.id == state["uid"]).one())
         finally:
             session.close()
 

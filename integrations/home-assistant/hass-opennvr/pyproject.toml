@@ -1,0 +1,9 @@
+# Test and tooling configuration for the OpenNVR Home Assistant integration.
+# The integration itself ships as custom_components/opennvr (HACS layout);
+# this file is not a package definition.
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+addopts = "--timeout=30"

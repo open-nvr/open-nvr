@@ -48,7 +48,14 @@ from services.search_service import (  # noqa: E402
 )
 
 UTC = timezone.utc
+#: The parser's clock. FROZEN so "yesterday" and "last Tuesday" resolve to
+#: dates the assertions can name.
 NOW = datetime(2026, 9, 18, 15, 0, tzinfo=UTC)
+#: The store's clock. REAL, because the API route parses against the wall
+#: clock and cannot be told otherwise — a row written relative to a frozen
+#: date stops being "today" the day after the test was written, which is
+#: exactly what happened. Rows go here; only the parser sees NOW.
+WALL = datetime.now(UTC).replace(microsecond=0)
 
 
 # ── Parser ───────────────────────────────────────────────────────────
@@ -184,7 +191,7 @@ def _camera(db, cam_id: int, name: str) -> Camera:
 
 def _visit(db, *, camera_id=1, label="person", minutes_ago=5, caption=None,
            attributes=None, plate=None, evidence="e.jpg") -> TimelineEvent:
-    started = NOW - timedelta(minutes=minutes_ago)
+    started = WALL - timedelta(minutes=minutes_ago)
     row = TimelineEvent(
         camera_id=camera_id, source="tier0", event_type="track", label=label,
         started_at=started, ended_at=started + timedelta(seconds=20),
@@ -245,11 +252,11 @@ def test_scope_is_the_stores_own(db):
 def test_time_window_uses_the_overlap_rule(db):
     _camera(db, 1, "Dock")
     row = _visit(db, minutes_ago=10)
-    row.ended_at = NOW - timedelta(minutes=2)
+    row.ended_at = WALL - timedelta(minutes=2)
     db.commit()
     # A visit that started before the window but was still running inside
     # it counts — "who was here in the last 5 minutes" means them too.
-    hits = search_events(db, from_=NOW - timedelta(minutes=5), to=NOW, scope=None)
+    hits = search_events(db, from_=WALL - timedelta(minutes=5), to=WALL, scope=None)
     assert len(hits) == 1
 
 
@@ -313,7 +320,7 @@ def client(db):
 
 def test_the_api_answers_with_what_it_understood(client, db):
     _camera(db, 1, "Loading dock")
-    _visit(db, camera_id=1, label="truck", minutes_ago=5,
+    _visit(db, camera_id=1, label="truck", minutes_ago=0,
            caption="a red truck at the dock")
     body = client.get("/api/v1/search", params={"q": "red truck at the dock today"}).json()
 
@@ -336,8 +343,8 @@ def test_an_explicit_parameter_overrides_the_parse(client, db):
     """Correcting a chip is passing the parameter — and the response says
     which parts the caller pinned, so the UI can show them as edited."""
     _camera(db, 1, "Loading dock")
-    _visit(db, camera_id=1, label="person", minutes_ago=5)
-    _visit(db, camera_id=1, label="truck", minutes_ago=5)
+    _visit(db, camera_id=1, label="person", minutes_ago=0)
+    _visit(db, camera_id=1, label="truck", minutes_ago=0)
 
     guessed = client.get("/api/v1/search", params={"q": "trucks today"}).json()
     assert guessed["interpretation"]["labels"] == ["truck"]
@@ -376,8 +383,8 @@ def test_parse_false_lets_a_ui_clear_a_filter_the_sentence_implied(client, db):
     driving from edited chips turns the parser off and owns every
     filter. Without this there is no way to REMOVE a chip."""
     _camera(db, 1, "Dock")
-    _visit(db, camera_id=1, label="person", minutes_ago=5)
-    _visit(db, camera_id=1, label="truck", minutes_ago=5)
+    _visit(db, camera_id=1, label="person", minutes_ago=0)
+    _visit(db, camera_id=1, label="truck", minutes_ago=0)
 
     narrowed = client.get("/api/v1/search", params={"q": "trucks today"}).json()
     assert narrowed["total"] == 1
@@ -609,8 +616,8 @@ def test_an_unreachable_or_odd_registry_degrades_to_nothing_runnable():
 
 
 def _at(db, *, camera_id: int, label="person", at_s: float, evidence="e.jpg"):
-    """A visit at a given offset from NOW, in seconds."""
-    started = NOW + timedelta(seconds=at_s)
+    """A visit at a given offset from the wall clock, in seconds."""
+    started = WALL + timedelta(seconds=at_s)
     row = TimelineEvent(camera_id=camera_id, source="tier0", event_type="track",
                         label=label, started_at=started,
                         ended_at=started + timedelta(seconds=5), evidence_path=evidence)

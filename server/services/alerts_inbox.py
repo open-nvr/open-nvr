@@ -83,7 +83,7 @@ def normalize_ring_config(raw: object) -> dict[str, str]:
     return merged
 
 
-def apply_alert(envelope: object, db=None) -> str:
+def apply_alert(envelope: object, db=None, out: dict | None = None) -> str:
     """Store one §11.5 alert envelope into the inbox.
 
     ``db``: an open session to write through (core raising its own
@@ -188,6 +188,14 @@ def apply_alert(envelope: object, db=None) -> str:
         }
         db.add(row)
         db.commit()
+        if out is not None:
+            # For the live push (HA-111): what was STORED, normalised,
+            # rather than the raw envelope.
+            out.update(stored, id=row.id, source_kind=source_kind,
+                       source_name=source_name, alert_type=alert_type,
+                       correlation_id=row.correlation_id,
+                       image_names=sorted(images) if images else [],
+                       at=observed_at or row.fired_at)
         logger.info(
             "alert inbox: [%s] %s (camera=%s source=%s alert_id=%s)",
             severity.upper(), stored["title"], stored["camera_id"],
@@ -337,8 +345,9 @@ async def _handle_message(msg) -> None:
     except (ValueError, UnicodeDecodeError):
         logger.debug("alert inbox: undecodable message on %s", msg.subject)
         return
+    stored: dict = {}
     try:
-        status = await asyncio.to_thread(apply_alert, envelope)
+        status = await asyncio.to_thread(apply_alert, envelope, None, stored)
         if status != "stored":
             logger.debug("alert inbox: %s for %s", status, msg.subject)
             return
@@ -351,13 +360,39 @@ async def _handle_message(msg) -> None:
     try:
         from services.event_bus_service import publish_app_alert
 
+        # The stored (normalised) values: an "info" alert is stored as
+        # "low", and a push saying "info" would disagree with the inbox.
         await publish_app_alert(
             camera_id=_camera_num(envelope.get("camera_id")),
-            severity=str(envelope.get("severity") or "high"),
-            alert_type=envelope.get("alert_type"),
-            payload={"title": envelope.get("title"),
-                     "alert_id": envelope.get("alert_id")},
+            severity=stored.get("severity") or "high",
+            alert_type=stored.get("alert_type") or envelope.get("alert_type"),
+            payload={"title": stored.get("title") or envelope.get("title"),
+                     "alert_id": stored.get("alert_id") or envelope.get("alert_id"),
+                     "id": stored.get("id"),
+                     "source": {"kind": stored.get("source_kind"),
+                                "name": stored.get("source_name")},
+                     "correlation_id": stored.get("correlation_id"),
+                     # Stored with the alert, so ready now: sign them with
+                     # POST /media/sign {kind: alert_image} (HA-113).
+                     "images": stored.get("image_names") or []},
         )
+        cam_num = _camera_num(envelope.get("camera_id"))
+        if cam_num is not None:
+            # The camera's "alert" event entity (HA-114).
+            from services.event_bus_service import publish_entity_state
+
+            key = f"camera.{cam_num}.alerts"
+            await publish_entity_state(
+                key=key, camera_id=cam_num, required_scope="alerts.view",
+                payload={"key": key, "event": {"type": "alert", "attributes": {
+                    "id": stored.get("id"), "alert_id": stored.get("alert_id"),
+                    "severity": stored.get("severity"), "title": stored.get("title"),
+                    "source": stored.get("source_name"),
+                    "correlation_id": stored.get("correlation_id"),
+                    "images": stored.get("image_names") or []}}})
+        from services.media_ready import schedule_for_alert
+
+        schedule_for_alert(stored, _camera_num(envelope.get("camera_id")), stored.get("at"))
     except Exception:  # noqa: BLE001
         logger.debug("alert inbox: live push failed", exc_info=True)
 

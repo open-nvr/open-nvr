@@ -202,6 +202,87 @@ def to_overlay_payload(
     }
 
 
+def _overlay_enabled() -> bool:
+    from core.config import settings
+
+    return bool(getattr(settings, "detection_overlay_enabled", True))
+
+
+async def _update_live_state(camera_id: int, raw: dict[str, Any]) -> None:
+    from services.live_state import claim_zones_refresh, get_live_state, load_zones
+
+    # Due-ness is a dict lookup, decided here on the loop; only the DB read
+    # itself (once per camera per TTL) is worth a worker-thread hop. Hopping
+    # for every frame cost a thread hand-off per detection at 5 fps per
+    # camera for a call that returned at once.
+    if claim_zones_refresh(camera_id):
+        await asyncio.to_thread(load_zones, camera_id)
+    live = get_live_state()
+    delta = live.update(camera_id, raw)
+    if delta["changed"] or delta["started"] or delta["ended"]:
+        from services.event_bus_service import publish_entity_state, publish_live_state
+
+        await publish_live_state(camera_id=camera_id, state=live.camera(camera_id),
+                                 started=delta["started"], ended=delta["ended"])
+        # The detection event entities (HA-114): camera-wide and per zone.
+        for s in delta["started"]:
+            attrs = {"track_id": s["track_id"], "zones": s["zones"]}
+            for key in [f"camera.{camera_id}.detections"] + [
+                    f"zone.{z}.detections" for z in s["zones"]]:
+                await publish_entity_state(
+                    key=key, camera_id=camera_id, required_scope="cameras.view",
+                    payload={"key": key, "event": {"type": s["label"], "attributes": attrs}})
+
+
+#: How often the sweeper drops live-state entries of cameras no longer in
+#: the database. A deleted camera simply stops sending frames, so nothing
+#: else would ever notice; one cheap id query a minute is the price of not
+#: growing a dict for the life of the process.
+PRUNE_EVERY_S = 60.0
+
+
+def _existing_camera_ids() -> set[int]:
+    """Ids of the cameras that still exist (soft-deleted ones excluded)."""
+    from core.database import SessionLocal
+    from models import Camera
+
+    with SessionLocal() as db:
+        return {cid for (cid,) in db.query(Camera.id).filter(Camera.deleted_at.is_(None)).all()}
+
+
+async def prune_live_state() -> list[int]:
+    """Forget cameras that were deleted since the last pass. Returns them."""
+    from services.live_state import get_live_state
+
+    ids = await asyncio.to_thread(_existing_camera_ids)
+    return get_live_state().retain(ids)
+
+
+async def run_live_state_sweeper(interval_s: float = 1.0,
+                                 prune_every_s: float = PRUNE_EVERY_S) -> None:
+    """Tier-0 sends no frame when nothing is detected, so a camera that goes
+    quiet is noticed here: its tracks end and its counts drop to zero. Every
+    ``prune_every_s`` it also evicts cameras that no longer exist."""
+    import time
+
+    from services.event_bus_service import publish_live_state
+    from services.live_state import get_live_state
+
+    live = get_live_state()
+    next_prune = time.monotonic() + prune_every_s
+    while True:
+        await asyncio.sleep(interval_s)
+        try:
+            for camera_id, ended in live.sweep():
+                await publish_live_state(camera_id=camera_id, state=live.camera(camera_id),
+                                         ended=ended)
+            if time.monotonic() >= next_prune:
+                next_prune = time.monotonic() + prune_every_s
+                await prune_live_state()
+        except Exception:  # noqa: BLE001 - the sweeper must outlive one bad pass
+            logger.warning("live-state sweep failed", exc_info=True)
+
+
 async def _handle_message(msg) -> None:
     global _dropped
     try:
@@ -217,6 +298,11 @@ async def _handle_message(msg) -> None:
             camera_id = camera_id_from_handle(parts[3]) if len(parts) >= 5 else None
         if camera_id is None:
             raise ValueError(f"unmappable camera_id {raw.get('camera_id')!r}")
+        # Live state first, from the raw frame and whether or not the
+        # overlay is on: counts must not depend on what is being drawn.
+        await _update_live_state(camera_id, raw)
+        if not _overlay_enabled():
+            return
         payload = to_overlay_payload(raw)
         if payload is None:
             return   # nothing drawable this frame; not an error
@@ -367,9 +453,13 @@ async def run_consumer_loop() -> None:
     immediately when no NATS URL is configured; retries slowly otherwise."""
     from core.config import settings
 
-    if not bool(getattr(settings, "detection_overlay_enabled", True)):
+    if not _overlay_enabled():
+        # Unchanged from before HA-110: off means no track data reaches ANY
+        # consumer, which now includes live counts (HA-110) and the entity
+        # states built on them. An operator who switched this off for
+        # privacy or load gets exactly that.
         logger.info("detection overlay disabled by DETECTION_OVERLAY_ENABLED "
-                    "— no track data will reach any consumer")
+                    "— no track data will reach any consumer (no live counts)")
         return
     url = (getattr(settings, "nats_url", "") or "").strip()
     if not url:

@@ -120,4 +120,16 @@ export const systemService = {
     api.post(`/api/v1/device-firewall/devices/${id}/block`),
   deleteDevice: (id: number) =>
     api.delete(`/api/v1/device-firewall/devices/${id}`),
+
+  // API tokens for Home Assistant and other clients. The secret comes back
+  // only from create.
+  listApiTokens: () => api.get('/api/v1/api-tokens'),
+  createApiToken: (payload: {
+    name: string
+    scopes: string[]
+    camera_ids: number[] | null
+    allowed_cidrs: string[] | null
+    expires_in_days: number | null
+  }) => api.post('/api/v1/api-tokens', payload),
+  revokeApiToken: (id: number) => api.delete(`/api/v1/api-tokens/${id}`),
 }

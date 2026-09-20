@@ -110,6 +110,21 @@ def _by_camera(samples: list[Sample], name: str) -> dict[str, float]:
     return out
 
 
+def _sum_by_camera(samples: list[Sample], name: str) -> dict[str, float]:
+    """Per-camera SUM of a family split by another label too (reason, model).
+
+    ``_by_camera`` keeps the last series it sees per camera, which is right
+    for one-series-per-camera gauges but silently drops all but one series
+    of, say, ``tier0_detector_skipped_total{camera,reason}``.
+    """
+    out: dict[str, float] = {}
+    for s in samples:
+        if s.name == name and "camera" in s.labels:
+            cam = s.labels["camera"]
+            out[cam] = out.get(cam, 0.0) + s.value
+    return out
+
+
 def _labels_by_camera(samples: list[Sample], name: str) -> dict[str, dict]:
     """Label sets of an info-metric family, keyed by camera.
 
@@ -252,6 +267,12 @@ def reduce_metrics(samples: list[Sample]) -> dict[str, Any]:
     # struggling-camera signals on purpose: "cam3 is shedding" and "cam3 is
     # decoding on the CPU with skip=none" is one answer, not two lookups.
     decode_cfg = _labels_by_camera(samples, "tier0_decode_config")
+    # Per-camera detector cost and skips, for the Home Assistant sensors
+    # (HA-105). Latency is the mean since the pipeline started; skipped is a
+    # monotonic count across reasons (no motion, calibrating).
+    lat_sum = _sum_by_camera(samples, "tier0_detector_latency_seconds_sum")
+    lat_cnt = _sum_by_camera(samples, "tier0_detector_latency_seconds_count")
+    skipped_by_cam = _sum_by_camera(samples, "tier0_detector_skipped_total")
     all_cams = sorted(set(proc) | set(tgt) | set(up_by_cam) | set(frame_age))
     cameras = []
     for cam in all_cams:
@@ -270,6 +291,9 @@ def reduce_metrics(samples: list[Sample]) -> dict[str, Any]:
             "shedding": (b is not None and c is not None and b < c),
             "regions_capped_total": int(capped.get(cam, 0)),
             "tracks_active": int(tracks_act.get(cam, 0)),
+            "inference_ms": (round(lat_sum[cam] / lat_cnt[cam] * 1000.0, 2)
+                             if lat_cnt.get(cam) else None),
+            "skipped_total": int(skipped_by_cam.get(cam, 0)),
             "visits_posted": int(visits_ok.get(cam, 0)),
             "visits_dropped": int(visits_drop.get(cam, 0)),
             "mainstream_fallback": bool(mainstream.get(cam, 0) >= 1.0),

@@ -47,6 +47,8 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
+from collections import deque
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
@@ -67,16 +69,41 @@ EVENT_APP_ALERT = "app_alert"
 # AI Detection Results table, and 5 fps of tracker output per camera
 # would flood it. Consumers that want boxes opt in by name.
 EVENT_TRACKS = "tracks"
+# What a camera sees now (services/live_state.py): counts per label and
+# zone, motion, and the tracks that just started or ended. Sent on change.
+EVENT_LIVE_STATE = "live_state"
+# An event's media can be fetched now (services/media_ready.py): which
+# images it has and the clip range, once that clip is playable.
+EVENT_MEDIA_READY = "media_ready"
+# The site's arming mode changed (services/site_mode.py). Site-wide: it
+# names no camera and reaches every subscriber entitled to its type.
+EVENT_SITE_MODE = "site_mode"
+# Server-described entities (services/entity_descriptors.py, HA-114): a
+# resolved state or a fired event entity, and "re-fetch GET /entities".
+# Both v2-only: v1 sockets never see them.
+EVENT_ENTITY_STATE = "entity_state"
+EVENT_DESCRIPTORS_CHANGED = "descriptors_changed"
 
 # Reasonable default for a single slow WebSocket client. Bumping this trades
 # memory for tolerance of bursty traffic.
 _DEFAULT_SUBSCRIBER_QUEUE_SIZE = 100
+
+#: How long published events stay replayable for a v2 client that
+#: reconnects with ``since`` (HA-111), and a hard cap on how many.
+RING_SECONDS = 300.0
+RING_MAX_EVENTS = 20_000
+#: Not kept for replay: live overlay boxes (up to several frames a second
+#: per camera). Stale boxes are worthless to a client catching up, and
+#: keeping them would crowd everything else out of the ring and hold tens
+#: of MB on a large site. Live subscribers still get them.
+RING_SKIP_TYPES = frozenset({EVENT_TRACKS})
 
 
 class _Subscriber:
     """One subscription slot. Owns the queue and the optional filters."""
 
     __slots__ = ("queue", "camera_id", "tasks", "allowed_camera_ids",
+                 "allowed_event_types", "event_types", "with_seq", "start_seq",
                  "dropped", "created_at")
 
     def __init__(
@@ -85,6 +112,9 @@ class _Subscriber:
         camera_id: int | None,
         tasks: frozenset[str] | None,
         allowed_camera_ids: frozenset[int] | None = None,
+        allowed_event_types: frozenset[str] | None = None,
+        event_types: frozenset[str] | None = None,
+        with_seq: bool = False,
     ):
         self.queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=queue_size)
         self.camera_id = camera_id
@@ -100,19 +130,42 @@ class _Subscriber:
         #: event is matched means no present or future caller can widen
         #: its own scope by leaving a query parameter off.
         self.allowed_camera_ids = allowed_camera_ids
+        #: Event types this subscriber is ENTITLED to, or ``None`` for all.
+        #: Also a boundary, not a filter: an API token only receives the
+        #: types its scopes cover (services.api_tokens.TOKEN_EVENT_SCOPES).
+        self.allowed_event_types = allowed_event_types
+        #: The client's own event-type preference (v2 ``types=``). A
+        #: filter, unlike allowed_event_types, which is a boundary.
+        self.event_types = event_types
+        #: v2 subscribers get ``(seq, event)`` pairs; v1 the bare event, so
+        #: v1 frames stay exactly what they were.
+        self.with_seq = with_seq
+        #: The bus sequence number when this subscriber was added: every
+        #: event after it reaches the queue, everything up to it is history
+        #: (replay or snapshot).
+        self.start_seq = 0
         self.dropped: int = 0
         self.created_at = time.time()
 
     def matches(self, event: dict[str, Any]) -> bool:
+        if event.get("v2_only") is True and not self.with_seq:
+            return False
         # Entitlement first: a subscriber never sees a camera it was not
         # granted, whatever it asked to filter on.
-        if self.allowed_camera_ids is not None:
+        site_wide = event.get("site_wide") is True
+        if self.allowed_camera_ids is not None and not site_wide:
             cam = event.get("camera_id")
             if cam is None or cam not in self.allowed_camera_ids:
                 return False
-        if self.camera_id is not None and event.get("camera_id") != self.camera_id:
+        if (self.allowed_event_types is not None
+                and event.get("event_type") not in self.allowed_event_types):
+            return False
+        if (self.camera_id is not None and not site_wide
+                and event.get("camera_id") != self.camera_id):
             return False
         if self.tasks is not None and event.get("task") not in self.tasks:
+            return False
+        if self.event_types is not None and event.get("event_type") not in self.event_types:
             return False
         return True
 
@@ -124,6 +177,42 @@ class EventBus:
         self._subscribers: set[_Subscriber] = set()
         self._lock = asyncio.Lock()
         self._subscriber_queue_size = subscriber_queue_size
+        #: Per-process id. Sequence numbers restart with the process, so a
+        #: client resuming with ``since`` must also send the epoch it got
+        #: them in; a different epoch means "resync from a snapshot".
+        self.epoch = uuid.uuid4().hex[:12]
+        self._seq = 0
+        #: (seq, monotonic time, event), oldest first.
+        self._ring: deque[tuple[int, float, dict[str, Any]]] = deque()
+
+    @property
+    def current_seq(self) -> int:
+        return self._seq
+
+    def _prune(self, now: float) -> None:
+        while self._ring and (len(self._ring) > RING_MAX_EVENTS
+                              or now - self._ring[0][1] > RING_SECONDS):
+            self._ring.popleft()
+
+    async def replay(
+        self, sub: _Subscriber, since: int
+    ) -> tuple[list[tuple[int, dict[str, Any]]], bool]:
+        """Events after ``since`` up to the subscriber's start, filtered by
+        its entitlements and filters. ``complete`` is False when events in
+        that range have already left the ring (or ``since`` is from the
+        future): the client must resync from a snapshot."""
+        async with self._lock:
+            self._prune(time.monotonic())
+            upto = sub.start_seq
+            if since > upto:
+                return [], False
+            if since == upto:
+                return [], True
+            oldest = self._ring[0][0] if self._ring else upto + 1
+            if since + 1 < oldest:
+                return [], False
+            return [(s, e) for s, _t, e in self._ring
+                    if since < s <= upto and sub.matches(e)], True
 
     async def publish(self, event: dict[str, Any]) -> None:
         """
@@ -133,21 +222,27 @@ class EventBus:
         If a subscriber's queue is full we drop the oldest event for THAT
         subscriber only — other subscribers still receive the new event.
         """
-        if not self._subscribers:
-            return
-
         # Timestamp here (not at each publisher site) so every consumer sees a
         # consistent monotonic-ish ordering even if producers forget.
         event.setdefault("timestamp", int(time.time() * 1000))
 
-        # Snapshot under lock; deliver outside the lock so one slow subscriber
-        # can't block the snapshot path.
+        # Numbered and kept for replay even with no subscriber attached:
+        # the moment a client is disconnected is exactly when it will need
+        # to catch up. Snapshot the targets under the lock; deliver outside
+        # it so one slow subscriber can't block the snapshot path.
         async with self._lock:
+            self._seq += 1
+            seq = self._seq
+            now = time.monotonic()
+            if event.get("event_type") not in RING_SKIP_TYPES:
+                self._ring.append((seq, now, event))
+            self._prune(now)
             targets = [s for s in self._subscribers if s.matches(event)]
 
         for sub in targets:
+            item = (seq, event) if sub.with_seq else event
             try:
-                sub.queue.put_nowait(event)
+                sub.queue.put_nowait(item)
             except asyncio.QueueFull:
                 # Drop-oldest: pop one, enqueue new. Counter tracks how many
                 # events a given subscriber has missed so the WS layer can
@@ -157,7 +252,7 @@ class EventBus:
                 except asyncio.QueueEmpty:
                     pass
                 try:
-                    sub.queue.put_nowait(event)
+                    sub.queue.put_nowait(item)
                     sub.dropped += 1
                 except asyncio.QueueFull:
                     # Should not happen — we just drained a slot — but be
@@ -170,6 +265,9 @@ class EventBus:
         camera_id: int | None = None,
         tasks: list[str] | None = None,
         allowed_camera_ids: set[int] | frozenset[int] | None = None,
+        allowed_event_types: set[str] | frozenset[str] | None = None,
+        event_types: set[str] | frozenset[str] | list[str] | None = None,
+        with_seq: bool = False,
     ) -> AsyncIterator[_Subscriber]:
         """
         Context-managed subscription. Use as::
@@ -190,8 +288,14 @@ class EventBus:
             allowed_camera_ids=(
                 None if allowed_camera_ids is None
                 else frozenset(allowed_camera_ids)),
+            allowed_event_types=(
+                None if allowed_event_types is None
+                else frozenset(allowed_event_types)),
+            event_types=frozenset(event_types) if event_types else None,
+            with_seq=with_seq,
         )
         async with self._lock:
+            sub.start_seq = self._seq
             self._subscribers.add(sub)
 
         try:
@@ -209,6 +313,11 @@ class EventBus:
     @property
     def subscriber_count(self) -> int:
         return len(self._subscribers)
+
+    @property
+    def v2_subscriber_count(self) -> int:
+        """Sockets on protocol v2 (the only ones that receive entity_state)."""
+        return sum(1 for s in self._subscribers if s.with_seq)
 
 
 # Singleton accessor — matches the pattern used by other services
@@ -243,6 +352,71 @@ async def publish_inference_result(
         "model_id": model_id,
         "task": task,
         "payload": payload,
+    })
+
+
+async def publish_live_state(
+    *,
+    camera_id: int,
+    state: dict[str, Any],
+    started: list[dict[str, Any]] | None = None,
+    ended: list[dict[str, Any]] | None = None,
+) -> None:
+    """Publish a camera's live state after it changed (HA-110). Per-camera
+    entitlement applies like every camera event."""
+    await get_event_bus().publish({
+        "event_type": EVENT_LIVE_STATE,
+        "camera_id": camera_id,
+        "task": "live_state",
+        "payload": {"state": state, "started": started or [], "ended": ended or []},
+    })
+
+
+async def publish_media_ready(*, camera_id: int, payload: dict[str, Any]) -> None:
+    """Publish that an event's or alert's media is ready (HA-113)."""
+    await get_event_bus().publish({
+        "event_type": EVENT_MEDIA_READY,
+        "camera_id": camera_id,
+        "task": payload.get("source") or "event",
+        "payload": payload,
+    })
+
+
+async def publish_site_mode(value: dict[str, Any]) -> None:
+    """Publish a site-mode change (HA-118). ``site_wide`` lets it through
+    camera entitlement: it carries no camera data, only the mode. Only
+    ever set here, on events that are about the site, not a camera."""
+    await get_event_bus().publish({
+        "event_type": EVENT_SITE_MODE,
+        "site_wide": True,
+        "task": "site_mode",
+        "payload": value,
+    })
+
+
+async def publish_entity_state(
+    *, key: str, camera_id: int | None, required_scope: str, payload: dict[str, Any],
+) -> None:
+    """A descriptor's new state, or an event entity firing (HA-114). The v2
+    socket delivers it only to connections holding ``required_scope``."""
+    event: dict[str, Any] = {
+        "event_type": EVENT_ENTITY_STATE,
+        "task": "entity",
+        "v2_only": True,
+        "required_scope": required_scope,
+        "payload": payload,
+    }
+    if camera_id is None:
+        event["site_wide"] = True
+    else:
+        event["camera_id"] = camera_id
+    await get_event_bus().publish(event)
+
+
+async def publish_descriptors_changed(etag: str) -> None:
+    await get_event_bus().publish({
+        "event_type": EVENT_DESCRIPTORS_CHANGED, "task": "entity", "v2_only": True,
+        "site_wide": True, "payload": {"etag": etag},
     })
 
 

@@ -247,8 +247,10 @@ def _backfill_additive_columns() -> None:
     reconciles that for additive columns that are nullable or have a server
     default — the only kind that can be added safely to a populated table, and
     the kind OpenNVR's migrations add. It only ever ADDs columns; it never drops
-    or alters. Anything that needs more (NOT NULL without default, renames, data
-    backfills, indexes) is left for a real migration once the DB is baselined.
+    or alters. A column declared ``index=True`` also gets its single-column
+    index. Anything that needs more (NOT NULL without default, renames, data
+    backfills, composite indexes) is left for a real migration once the DB is
+    baselined.
     """
     from sqlalchemy import inspect, text
 
@@ -280,6 +282,19 @@ def _backfill_additive_columns() -> None:
                 main_logger.info(
                     "Backfilled missing column %s.%s (%s)", table.name, col.name, coltype
                 )
+                if col.index:
+                    # A column declared index=True gets the index create_all
+                    # would have built, under SQLAlchemy's own name, so this
+                    # path and a real migration converge. Without it, a filter
+                    # on the column (e.g. audit_logs.correlation_id) is a
+                    # sequential scan on every create_all-bootstrapped install.
+                    index_name = f"ix_{table.name}_{col.name}"
+                    with engine.begin() as conn:
+                        conn.execute(text(
+                            f'CREATE INDEX IF NOT EXISTS "{index_name}" '
+                            f'ON "{table.name}" ("{col.name}")'
+                        ))
+                    main_logger.info("Backfilled index %s", index_name)
             except Exception as e:
                 main_logger.error(
                     "Could not backfill column %s.%s: %s", table.name, col.name, e

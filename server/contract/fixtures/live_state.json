@@ -1,0 +1,39 @@
+{
+  "stale_after_s": 5.0,
+  "motion_off_after_s": 10.0,
+  "cameras": [
+    {
+      "camera_id": 1,
+      "stale": false,
+      "last_frame_at": 1789749043.8,
+      "motion": true,
+      "objects": {
+        "person": {
+          "total": 1,
+          "active": 1
+        }
+      },
+      "zones": [
+        {
+          "zone_id": 3,
+          "name": "Driveway",
+          "objects": {}
+        }
+      ],
+      "last_plate": {
+        "text": "KA01AB1234",
+        "event_id": 991,
+        "at": "2026-09-18T09:58:01+00:00"
+      },
+      "last_object": {
+        "label": "person",
+        "event_id": 1002,
+        "at": "2026-09-18T10:01:12+00:00",
+        "zone_ids": [
+          3
+        ],
+        "evidence_url": "/api/v1/events/1002/evidence"
+      }
+    }
+  ]
+}

@@ -33,6 +33,7 @@ from core.config import _host_is_internal
 from core.database import get_db
 from core.logging_config import main_logger
 from core.client_ip import get_client_ip
+from core.permissions import RequirePermission
 from routers.network import (
     detect_local_subnets,
     get_camera_lan_subnets,
@@ -125,6 +126,13 @@ def _assert_ip_in_camera_lan(ip: str, db: Session) -> None:
 # * "manage" — PTZ move / stop / presets. Never part of onboarding: a
 #   registered IP requires ownership, a can_manage grant, or superuser;
 #   an unregistered IP is refused outright.
+#
+# On top of the "manage" tier, the three PTZ routes also require the
+# ``ptz.control`` permission (HA-107), exactly as /cameras/{id}/ptz/* does:
+# services/permission_catalog.py promises it is layered on BOTH families,
+# so an operator who takes it away from a role must close the IP-keyed
+# path too, or the ONVIF tools page would keep steering the camera.
+require_ptz_control = RequirePermission("ptz.control")
 
 
 def _authorize_camera_ip(db: Session, user, ip: str, *, action: str) -> None:
@@ -450,6 +458,24 @@ async def camera_stream_uri(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _audit_ptz(db, request, user, ip: str, action: str, details: dict) -> None:
+    """Audit a PTZ action taken through the IP-keyed ONVIF tools.
+
+    Resolves the camera id when the IP belongs to a configured camera, so
+    these rows line up with the /cameras/{id}/ptz/* ones; otherwise the IP is
+    the entity. Credentials are never recorded.
+    """
+    from models import Camera
+    from services.audit_service import audit_request
+
+    cam = db.query(Camera).filter(Camera.ip_address == ip).first()
+    audit_request(
+        db, request, action=action, user_id=getattr(user, "id", None),
+        entity_type="camera", entity_id=cam.id if cam else ip,
+        details={**details, "via": "onvif_tools", "ip": ip},
+    )
+
+
 @router.post("/camera/{ip}/ptz/move")
 async def camera_ptz_move(
     ip: str,
@@ -460,8 +486,9 @@ async def camera_ptz_move(
     port: int = Query(80, ge=1, le=65535),
     username: str = Query(...),
     password: str = Query(...),
+    request: Request = None,
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_active_user),
+    current_user=Depends(require_ptz_control),
 ):
     _assert_ip_in_camera_lan(ip, db)
     _authorize_camera_ip(db, current_user, ip, action="manage")
@@ -469,6 +496,8 @@ async def camera_ptz_move(
         result = await ptz_continuous_move(
             ip, username, password, profile_token, x, y, z, port
         )
+        _audit_ptz(db, request, current_user, ip, "ptz.move",
+                   {"x": x, "y": y, "z": z})
         return {"ip": ip, "profileToken": profile_token, "result": result}
     except HTTPException:
         raise
@@ -483,13 +512,15 @@ async def camera_ptz_stop(
     port: int = Query(80, ge=1, le=65535),
     username: str = Query(...),
     password: str = Query(...),
+    request: Request = None,
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_active_user),
+    current_user=Depends(require_ptz_control),
 ):
     _assert_ip_in_camera_lan(ip, db)
     _authorize_camera_ip(db, current_user, ip, action="manage")
     try:
         result = await ptz_stop(ip, username, password, profile_token, port)
+        _audit_ptz(db, request, current_user, ip, "ptz.stop", {})
         return {"ip": ip, "profileToken": profile_token, "result": result}
     except HTTPException:
         raise
@@ -546,8 +577,9 @@ async def camera_ptz_preset(
     port: int = Query(80, ge=1, le=65535),
     username: str = Query(...),
     password: str = Query(...),
+    request: Request = None,
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_active_user),
+    current_user=Depends(require_ptz_control),
 ):
     _assert_ip_in_camera_lan(ip, db)
     _authorize_camera_ip(db, current_user, ip, action="manage")
@@ -562,6 +594,13 @@ async def camera_ptz_preset(
             preset_token=preset_token,
             port=port,
         )
+        # Listing presets is a read; setting or recalling one moves or
+        # changes the camera and is audited like any other PTZ action.
+        preset_audit = {"gotopreset": "ptz.preset.goto",
+                        "setpreset": "ptz.preset.set"}.get(action.lower())
+        if preset_audit:
+            _audit_ptz(db, request, current_user, ip, preset_audit,
+                       {"preset_token": preset_token, "name": name})
         return {
             "ip": ip,
             "profileToken": profile_token,

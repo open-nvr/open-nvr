@@ -36,7 +36,7 @@ import json
 import logging
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import func, or_
@@ -305,6 +305,7 @@ class AckIn(BaseModel):
 @router.post("/ack")
 async def acknowledge(
     payload: AckIn,
+    request: Request,
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db),
 ):
@@ -337,15 +338,26 @@ async def acknowledge(
         if filters.get("severity"):
             q = q.filter(AppAlert.severity == filters["severity"])
     now = datetime.now(UTC)
-    count = 0
+    acked_ids: list[int] = []
     for row in q.all():
         row.acknowledged_at = now
         row.acknowledged_by = current_user.id
-        count += 1
+        acked_ids.append(row.id)
     db.commit()
+    count = len(acked_ids)
     if count:
         logger.info("alert inbox: %d alert(s) acknowledged by %s",
                     count, current_user.username)
+        # Silencing an alarm is exactly the kind of action an investigator
+        # needs to attribute later (who, when, from where, which automation).
+        from services.audit_service import audit_request
+
+        audit_request(
+            db, request, action="alerts.ack", user_id=current_user.id,
+            entity_type="app_alert",
+            details={"count": count, "ids": acked_ids[:200],
+                     **({"filter": filters} if filters else {})},
+        )
     return {"acknowledged": count}
 
 

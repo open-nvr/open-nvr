@@ -1,0 +1,134 @@
+# End-to-end suite — the slice ci.yml's header says it does not cover.
+#
+# ci.yml runs ~2,700 unit tests across seven packages. They cover components.
+# This covers the seams between them, which is where the failures that reach
+# users actually live — and in this system those failures are overwhelmingly
+# silent (an empty page and nothing in any log), so they survive a green unit
+# matrix indefinitely.
+#
+# Only the `smoke` tier runs automatically. It needs no video footage and
+# finishes in about a minute against a warm stack. The heavier tiers are
+# opt-in:
+#
+#   media      needs a camera publishing a generated clip; a few minutes
+#   detection  needs REAL footage — YOLOv8 will not classify a drawn
+#              rectangle, so a generated clip yields no detection and no
+#              visit. There is nothing to point it at on a hosted runner.
+#   lpr        the above plus the apps overlay's fast_plate_ocr registrar
+#   ui         Playwright; runtime on a 2-core runner is not yet measured
+#
+# Run those locally (`python tests/e2e/run.py -m detection`) or add a
+# self-hosted runner with footage mounted and set E2E_CLIP_SOURCE.
+#
+# See docs/TESTING.md and tests/e2e/README.md.
+
+name: e2e
+
+# Not a PR gate yet. tests/e2e/run.py materialises the fake-camera rig
+# (docker-compose.fakecams.yml and friends) from the out-of-tree branch
+# origin/fake-camera, so a run depends on a branch no PR can review or pin
+# and can go red for reasons unrelated to the change under test. Until the
+# rig lives in main this runs on demand only; restore the pull_request
+# trigger (server/**, kai-c/**, detect-pipeline/**, app/**, nginx/**,
+# nats/**, docker-compose*.yml, Dockerfile, supervisord.conf, tests/e2e/**,
+# this file) when it does.
+on:
+  workflow_dispatch:
+    inputs:
+      marker:
+        description: "pytest marker expression (smoke, media, ui, or empty for all)"
+        required: false
+        default: "smoke"
+
+concurrency:
+  # One stack per ref: these bind host ports and a fixed subnet, so two
+  # concurrent runs on the same runner would collide.
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: smoke
+    runs-on: ubuntu-latest
+    # Generous: a cold run pulls the whole stack and migrates an empty
+    # database before a single test executes.
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # run.py materialises the fake-camera rig from origin/fake-camera
+          # when it is absent, which needs more than a shallow clone.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Show runner capacity
+        # Tier-0 and ffprobe are the first things to suffer when a host is
+        # small, and they fail in ways that look like product bugs. Recording
+        # the machine's size makes a slow run explicable after the fact.
+        run: |
+          nproc
+          free -h || true
+          df -h / || true
+
+      - name: Run the smoke tier
+        env:
+          # A hosted runner is smaller than a workstation; give the waits room
+          # rather than letting a slow machine read as a product failure.
+          E2E_BUDGET_STACK_READY: "900"
+          E2E_BUDGET_STREAM_RECEIVING: "300"
+          E2E_BUDGET_SEGMENT_RECORDED: "300"
+        run: |
+          python tests/e2e/run.py --fresh -m "${{ github.event.inputs.marker || 'smoke' }}"
+
+      - name: Upload the run report and evidence
+        # always(), not failure(): the HTML report carries a screenshot of every
+        # GUI test, and seeing what a GREEN run actually rendered is how you
+        # notice a page that loaded but loaded wrongly. Uploading only on red
+        # throws that away.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-report
+          # index.html is self-contained -- inline CSS, screenshots embedded as
+          # data URIs -- so it opens straight from the downloaded artifact with
+          # no server and no network. Alongside it, each failing test has a
+          # paste-ready ISSUE.md, correlated logs, metrics and a Playwright
+          # trace.
+          path: |
+            tests/e2e/.artifacts/runs/
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Publish the summary
+        if: always()
+        # The markdown report was written to be readable here; surfacing it
+        # means a reviewer sees the tally without downloading anything.
+        run: |
+          if [ -f tests/e2e/.artifacts/runs/report.md ]; then
+            cat tests/e2e/.artifacts/runs/report.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Stack logs on failure
+        if: failure()
+        run: |
+          docker compose -p opennvr-e2e \
+            --env-file tests/e2e/.artifacts/e2e.env \
+            -f docker-compose.yml \
+            -f docker-compose.fakecams.yml \
+            -f docker-compose.e2e.yml \
+            logs --tail 200 || true
+
+      - name: Tear down
+        if: always()
+        run: |
+          docker compose -p opennvr-e2e \
+            --env-file tests/e2e/.artifacts/e2e.env \
+            -f docker-compose.yml \
+            -f docker-compose.fakecams.yml \
+            -f docker-compose.e2e.yml \
+            down -v --remove-orphans || true

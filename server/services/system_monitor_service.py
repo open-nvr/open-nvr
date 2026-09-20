@@ -113,6 +113,9 @@ class SystemMonitorService:
             "memory": None,
             "disk": None,
             "disk_error": None,
+            # No GPU probe yet; the key is part of the API contract (HA-105)
+            # so clients can rely on it and read null as "unknown".
+            "gpu": None,
         }
         if psutil is not None:
             try:

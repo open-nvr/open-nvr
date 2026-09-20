@@ -326,6 +326,12 @@ class Settings(BaseSettings):
     #   cloud             - unrestricted
     # See V-009 / V-022.
     deployment_mode: Literal["offline", "hybrid", "cloud"] = "offline"
+    # Opt-in check for a newer OpenNVR release (GET api.github.com once per
+    # UPDATE_CHECK_TTL_HOURS), surfaced by /system/info for Home Assistant's
+    # update entity. OFF by default: an offline-first NVR makes no outbound
+    # call unless the operator asks for it.
+    update_check: bool = False
+    update_check_ttl_hours: float = 6.0
 
     # AI egress posture (env-only):
     #   local_only (default) - KAI-C refuses non-local adapters; cloud infer 403

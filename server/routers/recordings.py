@@ -333,7 +333,16 @@ def _can_view_camera(user: User, camera: Camera, db: Session) -> bool:
     rows. Cameras with no owner (legacy rows) are superuser-only until an
     owner or a grant is assigned — an unassigned camera must never be the
     one everybody can see.
+
+    An API token is limited to its camera allow-list and otherwise sees
+    exactly what its owner sees.
     """
+    from services.api_tokens import is_token_principal
+
+    if is_token_principal(user):
+        if user.camera_ids is not None and camera.id not in user.camera_ids:
+            return False
+        user = user.user
     if getattr(user, "is_superuser", False):
         return True
     owner_id = getattr(camera, "owner_id", None)
@@ -410,6 +419,12 @@ async def _authenticate_request(request: Request, db: Session) -> User | None:
         auth_header = request.headers.get("authorization")
         if auth_header and auth_header.lower().startswith("bearer "):
             tok = auth_header.split(" ", 1)[1]
+            from services import api_tokens
+
+            if api_tokens.looks_like_token(tok):
+                # Same route table, permission and camera checks as
+                # core.auth; raises 401/403 itself.
+                return api_tokens.authorize_request(request, db, tok)
             td = verify_token(tok)
             if td:
                 user_obj = db.query(User).filter(User.username == td.username).first()
@@ -827,7 +842,7 @@ async def set_recording_flag(
     request: Request = None,
     db: Session = Depends(get_db),
 ):
-    """Flag (or unflag) every recording clip in a time range.
+    """Flag (or unflag) every recording clip that overlaps a time range.
 
     Flagged clips are skipped by retention's age and disk-pressure sweeps
     while ``protect_flagged`` is enabled — this is what makes "keep this
@@ -835,7 +850,7 @@ async def set_recording_flag(
     """
     from datetime import datetime
 
-    from models import Recording
+    from services.recording_protection import set_range_protection
 
     user_obj = await _authenticate_request(request, db)
     if not user_obj:
@@ -854,16 +869,18 @@ async def set_recording_flag(
     if end_dt <= start_dt:
         raise HTTPException(status_code=400, detail="End must be after start")
 
-    updated = (
-        db.query(Recording)
-        .filter(
-            Recording.camera_id == camera_id,
-            Recording.start_time >= start_dt,
-            Recording.start_time < end_dt,
-        )
-        .update({Recording.is_flagged: flagged}, synchronize_session=False)
+    updated = set_range_protection(db, camera_id, start_dt, end_dt, flagged)
+    # Protecting (or releasing) footage from retention is evidence handling:
+    # it must be attributable.
+    from services.audit_service import audit_request
+
+    audit_request(
+        db, request,
+        action="recording.protect" if flagged else "recording.unprotect",
+        user_id=getattr(user_obj, "id", None),
+        entity_type="camera", entity_id=camera_id,
+        details={"start": start, "end": end, "updated_clips": updated},
     )
-    db.commit()
     return {"camera_id": camera_id, "flagged": flagged, "updated_clips": updated}
 
 
@@ -927,6 +944,16 @@ async def create_export_ticket(
         "duration": duration,
         "filename": safe_name,
     }
+    # Every footage export is audited at mint time (the download itself is a
+    # ticketed GET with no session). Who took which minutes of which camera.
+    from services.audit_service import audit_request
+
+    audit_request(
+        db, request, action="recording.export",
+        user_id=getattr(user_obj, "id", None),
+        entity_type="camera", entity_id=camera.id,
+        details={"start": start, "duration": duration, "filename": safe_name},
+    )
     return {
         "ticket": ticket,
         "download_url": f"{settings.api_prefix}/recordings/export?ticket={ticket}",
@@ -947,17 +974,30 @@ async def export_clip(
     """
     import time as _time
 
-    from fastapi.responses import StreamingResponse
-
     entry = _export_tickets.pop(ticket, None)  # single-use
     if not entry or entry["expires"] < _time.time():
         raise HTTPException(status_code=403, detail="Invalid or expired ticket")
+    return await stream_playback_clip(
+        entry["path"], entry["start"], entry["duration"], entry["filename"])
+
+
+async def stream_playback_clip(
+    path: str, start: str, duration: float, filename: str, *, inline: bool = False
+):
+    """Stream ``duration`` seconds of a MediaMTX path from ``start`` as MP4.
+
+    Shared by the ticketed export and signed media URLs (HA-112). The
+    upstream status is probed BEFORE a response is committed: checking it
+    inside the generator would already have sent a 200 + attachment header,
+    turning an upstream failure into a silent zero-byte "clip.mp4".
+    """
+    from fastapi.responses import StreamingResponse
 
     url = f"{settings.mediamtx_playback_url}/get"  # url-internal-ok: server-side clip fetch from mediamtx playback server
     params = {
-        "path": entry["path"],
-        "start": entry["start"],
-        "duration": str(entry["duration"]),
+        "path": path,
+        "start": start,
+        "duration": str(duration),
         # The playback server authenticates now; core says who it is.
         **mediamtx_client.playback_auth(),
     }
@@ -967,11 +1007,6 @@ async def export_clip(
     client = mediamtx_client.get_client()
     httpx_timeout = _httpx.Timeout(30.0, read=600.0)
 
-    # Probe the upstream status BEFORE committing a response: open the stream,
-    # read the status code, and only then hand the (still-open) body to
-    # StreamingResponse. Checking status inside the generator would already
-    # have sent a 200 + attachment header, turning an upstream failure into a
-    # silent, zero-byte "clip.mp4" download instead of a real error.
     req = client.build_request("GET", url, params=params, timeout=httpx_timeout)
     try:
         resp = await client.send(req, stream=True)
@@ -997,11 +1032,12 @@ async def export_clip(
         finally:
             await resp.aclose()
 
+    disposition = "inline" if inline else "attachment"
     return StreamingResponse(
         _stream(),
         media_type="video/mp4",
         headers={
-            "Content-Disposition": f'attachment; filename="{entry["filename"]}"',
+            "Content-Disposition": f'{disposition}; filename="{filename}"',
             "Cache-Control": "no-store",
         },
     )
