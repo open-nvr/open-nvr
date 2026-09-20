@@ -1588,7 +1588,7 @@ The catalogue covers the most-asked NVR + AI use cases. Each entry is a runnable
 | `camera-agent` | Voice-interactive agent ("what's at the gate?") | ASR + TTS + LLM | **Shipped** |
 | `license-plate-recognition` | License-plate recognition (whitelist / denylist) | object_detection + LPR | **Shipped** |
 | `smart-doorbell` | Family vs stranger recognition + alert routing | face recognition | **Shipped** |
-| `package-delivery` | Porch package arrival + theft detection | object_detection + tracking | **Shipped** |
+| `package-delivery` | Porch package arrival, pick-up and theft, rated by evidence | object_detection + tracking (Tier-0) for who/when; package_detection, or VQA, on demand for what | **Shipped** |
 | `home-assistant-relay` | Bridge OpenNVR alerts to Home Assistant | n/a (subscriber) | **Shipped** |
 | `camera-health` | Detect blurry/obstructed/offline cameras | classification | Roadmap |
 | `crowd-count` | Headcount in zone (retail, public safety) | counting | Roadmap |

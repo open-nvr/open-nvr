@@ -17,11 +17,11 @@
   suggested_adapters: [insightface]
 
 - use_case: "Package watch"
-  intent: "Know when a package arrives, lingers, or disappears from the porch."
+  intent: "Know when a package arrives, lingers, or disappears from the porch — and who took it."
   needs_capability: object_detection
-  also_needs: [multi_object_tracking]
+  also_needs: [multi_object_tracking, package_detection]
   suggested_apps: [package-delivery]
-  suggested_adapters: [yolov8, bytetrack]
+  suggested_adapters: [yolov8, bytetrack, package-detection]
 
 - use_case: "How many people are in this space?"
   intent: "Track zone occupancy and alert when a threshold is crossed."

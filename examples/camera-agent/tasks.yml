@@ -143,6 +143,20 @@
   agent_skill: null
   aliases: [keypoints, body_keypoints, pose]
 
+- task: package_detection
+  label: Package Detection
+  summary: Finds parcels — boxes, padded mailers, envelopes — left at a door or on a step. COCO has no package class; this task is what fills the gap.
+  categories: [vision, security, analytics]
+  tags: [package, parcel, delivery, porch, doorstep, bbox]
+  agent_skill: null
+  aliases: [parcel_detection, package-detection]
+  suggested_adapters: [package-detection]
+  suggested_apps: [package-delivery]
+  hardware:
+    min: 2-core CPU, ~1 GB RAM
+    recommended: any 4-core CPU — the task is asked on demand, a few frames a day per door
+    note: A general detector cannot provide this task; a fine-tune on the site's own frames is what makes it good.
+
 - task: license_plate_recognition
   label: License Plate Recognition
   summary: Reads vehicle license plates (ANPR/LPR) from a frame.
