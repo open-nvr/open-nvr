@@ -13,60 +13,49 @@
 # update .env and re-run ``docker compose up`` so the init container
 # re-templates the file.
 
-# ── KAI-C (proxies + audits the YOLOv8 detection call) ─────────────
-# Unlike the NATS-riding detectors, package-delivery is a FrameApp:
-# it fetches camera frames itself and drives inference through KAI-C
-# (compose service ``opennvr-core``, KAI-C on :8100).
-kaic_url: "http://opennvr-core:8100"
-kaic_api_key: "${INTERNAL_API_KEY}"
-
-# The standard stack registers the YOLOv8 object detector with KAI-C
-# under the name ``default`` (not ``yolov8``).
-detector_adapter: "default"
+# ── The bus: Tier-0's tracked detections ──────────────────────────
+nats_url: "nats://nats:4222"
+nats_token: "${INTERNAL_API_KEY}"
+subject_pattern: "opennvr.inference.tier0.>"
+consume_tier0: true
 
 # ── Cameras ──────────────────────────────────────────────────────
-# None listed here, on purpose. Select the cameras this app works on in
-# the App Catalog → Configure → Cameras; Porch rois are drawn there too. Frames come
-# from OpenNVR itself, so there is no camera URL to copy, and nothing
-# selected means the app does nothing and uses no compute.
-#
-# (A `cameras:` list still works when running this app standalone,
-# without opennvr_url — see config.example.yml.)
+# None listed here, on purpose. Select the doors this app watches in
+# the App Catalog → Configure → Cameras, and draw the porch zone there.
+# Nothing selected means the app does nothing and uses no compute.
 
-# ── Detection / state-machine knobs — EDIT for your scene ──────────
-poll_interval_seconds: 3.0
-request_timeout_seconds: 30.0
-package_labels:
-  - suitcase
-  - backpack
-  - handbag
-person_labels:
-  - person
-detection_confidence: 0.35
-iou_threshold: 0.30
-arrive_consecutive_hits: 2
-gone_consecutive_misses: 3
-# 0 disables the "package still sitting there" reminder.
-linger_alert_after_seconds: 0
-# Person-seen window for owner-vs-stranger; 0 disables the heuristic.
-pickup_person_lookback_seconds: 8.0
-dedup_window_seconds: 30.0
+# ── The rule — EDIT from the catalog ──────────────────────────────
+delivery_hours: {start: "08:00", end: "20:00"}
+recheck_minutes: 15
+idle_recheck_minutes: 60
+reminder_minutes: 60
+settle_seconds: 4
+courier_grace_seconds: 120
+quick_grab_minutes: 10
+known_face_window_seconds: 180
+vehicle_window_seconds: 120
+person_label: "person"
+vehicle_labels: ["truck", "car", "bus"]
+proxy_labels: ["suitcase", "backpack", "handbag"]
+attach_snapshot: true
+alert_cooldown_seconds: 20
+track_ttl_seconds: 10
 
 # ── Alert delivery ─────────────────────────────────────────────────
 # Alerts always go to stdout (``docker compose logs package-delivery``).
 webhook_url: null
-# Fan alerts back onto the bus so the operator-UI alerts inbox and any
-# other subscriber (e.g. home-assistant-relay) pick them up.
+# Fan alerts back onto the bus so the operator-UI alerts inbox and the
+# Home Assistant integration pick them up.
 nats_alerts_url: "nats://nats:4222"
 nats_alerts_token: "${INTERNAL_API_KEY}"
-attach_snapshot_on_alerts: true
-snapshot_max_bytes: 716800
 
 # ── App contract (spec §03) — powers the App Catalog ───────────────
 # The SDK serves /health /manifest /state on contract_port and
 # self-registers with the OpenNVR app registry on boot. The
 # registration token comes from the OPENNVR_INTERNAL_API_KEY
 # environment variable set by the overlay, so it is not templated here.
+# Snapshots, evidence and the KAI-C skill that counts parcels go through
+# opennvr_url (KAIC_URL is set by the overlay).
 contract_port: 9207
 contract_bind_host: "0.0.0.0"
 contract_host: "package-delivery"   # the compose service name

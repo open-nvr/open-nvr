@@ -1161,6 +1161,9 @@ services:
       - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - NATS_URL=nats://nats:4222
       - OPENNVR_URL=http://opennvr-core:8000
+      # Parcels are counted by a KAI-C skill (a package detector, a box-capable
+      # detector or a VQA model — whichever is registered), on demand.
+      - KAIC_URL=http://opennvr-core:8100
       # Egress: apps sit on the internal opennvr_apps network; the only
       # way out is the egress proxy, which asks core whether THIS app may
       # reach the host (declared in its listing, or allowed by the

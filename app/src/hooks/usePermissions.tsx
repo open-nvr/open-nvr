@@ -140,6 +140,9 @@ export const NAV_PERMISSIONS = {
   // The unattended-item queue: live items plus alarms with their
   // snapshots — the alerts tier, like the other incident pages.
   '/left-items': 'alerts.view',
+  // Doorstep photographs of couriers, residents and strangers — the
+  // same tier as the alert inbox that carries them.
+  '/deliveries': 'alerts.view',
   '/playback': 'recordings.view',
   // Search answers with evidence photos and opens recordings — it is
   // the recordings workflow, and carries its tier.

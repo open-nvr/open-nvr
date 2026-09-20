@@ -425,13 +425,13 @@
 
 - id: package-delivery
   name: Package Delivery
-  summary: Watches a porch ROI for package arrivals, lingering boxes, and pick-ups with an owner-vs-stranger severity heuristic.
+  summary: What is waiting at each door, who brought it and who took it. Triggered by the people and vehicles Tier-0 already sees, with the parcels counted on demand by the best skill the box has; every pick-up is rated by evidence (a known face, the courier, a vehicle, the hours, the site mode) and reminders run until it is collected.
   category: doorstep
-  version: "1.0.0"
+  version: "1.1.0"
   image: ghcr.io/open-nvr/package-delivery:latest
   build_context: examples/package-delivery
-  requires_tasks: [object_detection]
-  emits: [package_arrived, package_lingering, package_picked_up, package_taken]
+  requires_tasks: [object_detection, multi_object_tracking]
+  emits: [package_delivered, package_picked_up, package_taken, package_reminder]
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/package-delivery/README.md
   author: OpenNVR
   contact: https://github.com/open-nvr/open-nvr/issues
@@ -452,6 +452,7 @@
             - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
             - NATS_URL=nats://nats:4222
             - OPENNVR_URL=http://opennvr-core:8000
+            - KAIC_URL=http://opennvr-core:8100
           expose:
             - "9207"
           networks:

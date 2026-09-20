@@ -87,6 +87,7 @@ const Tripwires = lazy(reloadOnStale(() => import('./views/Tripwires').then((m) 
 const Loitering = lazy(reloadOnStale(() => import('./views/Loitering').then((m) => ({ default: m.Loitering }))))
 const Perimeter = lazy(reloadOnStale(() => import('./views/Perimeter').then((m) => ({ default: m.Perimeter }))))
 const LeftItems = lazy(reloadOnStale(() => import('./views/LeftItems').then((m) => ({ default: m.LeftItems }))))
+const Deliveries = lazy(reloadOnStale(() => import('./views/Deliveries').then((m) => ({ default: m.Deliveries }))))
 const Search = lazy(reloadOnStale(() => import('./views/Search').then((m) => ({ default: m.Search }))))
 const GuardCompliance = lazy(reloadOnStale(() => import('./views/GuardCompliance')))
 const Settings = lazy(reloadOnStale(() => import('./views/Settings').then((m) => ({ default: m.Settings }))))
@@ -180,6 +181,7 @@ const router = createBrowserRouter([
           { path: 'loitering', element: <Loitering /> },
           { path: 'perimeter', element: <Perimeter /> },
           { path: 'left-items', element: <LeftItems /> },
+          { path: 'deliveries', element: <Deliveries /> },
           { path: 'guard-compliance', element: <GuardCompliance /> },
           { path: 'rbac/*', element: <AccessControl /> },
           { path: 'byok', element: <BYOK /> },
