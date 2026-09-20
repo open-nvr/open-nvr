@@ -86,11 +86,13 @@ around the step where parcels are actually left. Nothing drawn means the
 whole frame, which counts the plant pot and the doormat too; the page
 says which doors still need one. Set the delivery hours for your area.
 
-For the best counts, register a package-capable skill with KAI-C: a
-dedicated package detector, an object detector with a box class, or a
-VQA model. The page shows what is in use. The shipped Moondream adapter
-(`moondream-vlm` in AI Adapters) is enough to move the counter from
-*proxy* to *fair* on a stock install.
+For the best counts, install the **Package Detection** adapter from
+*AI Adapters* (`package-detection`, a YOLOv8n fine-tuned on open
+doorstep datasets, CPU) — the app moves to *good* within five minutes
+of it registering. Any other package-capable skill works the same way:
+a detector with a box class, or a VQA model; the shipped Moondream
+adapter (`moondream-vlm`) is enough to move the counter from *proxy*
+to *fair* on a stock install. The page shows what is in use.
 
 ### Accuracy, and fine-tuning for your porch
 
@@ -103,10 +105,12 @@ designed so that this is a skill you add, not a change to the app: a
 registers with KAI-C and is picked over everything else the next time
 the app looks (within five minutes), with no restart.
 
-Where to start is the openly licensed *package at front door* set
-(1,293 doorstep images, MIT) and Roboflow's public *packages* set
-(CC0), fine-tuned on a small YOLO and packaged with the adapter contract
-(`docs/AI_ADAPTER_CONTRACT.md`, `docs/CONTRIBUTING_ADAPTERS.md`). For a
+The shipped `package-detection` adapter is exactly that recipe — the
+openly licensed *package at front door* set (1,293 doorstep images,
+MIT) and Roboflow's public *packages* set (CC0), fine-tuned on
+YOLOv8n — and its `train_package_model.py` in the ai-adapter
+repository merges frames from your own cameras into the next
+training run (`package_data/site/`). For a
 deployment where the counts matter — a building lobby, a business
 receiving stock — plan on fine-tuning with a few hundred frames from
 the actual cameras; the *Not a package* and *Collected* buttons on the

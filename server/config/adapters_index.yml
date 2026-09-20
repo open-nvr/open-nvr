@@ -244,6 +244,31 @@
   source: https://github.com/open-nvr/ai-adapter/tree/main/adapters/bytetrack
   contact: https://github.com/open-nvr/ai-adapter/issues
 
+- id: package-detection
+  name: Package Detection
+  summary: Parcels on a doorstep — the one class COCO does not have. YOLOv8n fine-tuned on two openly licensed doorstep sets (test mAP50 0.91, ~30 ms per frame on CPU), called on demand by the Package Delivery app; register it and the app's counts go from proxy to good.
+  version: "1.0.0"
+  tier: first_party
+  image: ghcr.io/open-nvr/package-detection-adapter:latest
+  tasks_advertised: [package_detection]
+  model:
+    framework: onnxruntime
+    modalities_in: [image]
+    modalities_out: [bbox_classes]
+    fingerprinted: true
+  permissions:
+    gpu: false
+    network_egress: []
+    host_filesystem: []
+  scheduling: { max_inflight: 1, fair_queuing: per_camera }
+  supports_stream: false
+  license: AGPL-3.0
+  vendor: open-nvr
+  model_card_url: https://github.com/open-nvr/ai-adapter/blob/main/adapters/package_detection/README.md
+  docs_url: https://github.com/open-nvr/ai-adapter/blob/main/adapters/package_detection/README.md
+  source: https://github.com/open-nvr/ai-adapter/tree/main/adapters/package_detection
+  contact: https://github.com/open-nvr/ai-adapter/issues
+
 - id: moondream-vlm
   name: Moondream VLM
   summary: Answers questions about a frame, not just captions it — a drop-in for the caption slot that also does visual Q&A.
