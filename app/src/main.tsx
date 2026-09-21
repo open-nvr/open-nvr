@@ -88,6 +88,7 @@ const Loitering = lazy(reloadOnStale(() => import('./views/Loitering').then((m) 
 const Perimeter = lazy(reloadOnStale(() => import('./views/Perimeter').then((m) => ({ default: m.Perimeter }))))
 const LeftItems = lazy(reloadOnStale(() => import('./views/LeftItems').then((m) => ({ default: m.LeftItems }))))
 const Deliveries = lazy(reloadOnStale(() => import('./views/Deliveries').then((m) => ({ default: m.Deliveries }))))
+const Gates = lazy(reloadOnStale(() => import('./views/Gates').then((m) => ({ default: m.Gates }))))
 const Search = lazy(reloadOnStale(() => import('./views/Search').then((m) => ({ default: m.Search }))))
 const GuardCompliance = lazy(reloadOnStale(() => import('./views/GuardCompliance')))
 const Settings = lazy(reloadOnStale(() => import('./views/Settings').then((m) => ({ default: m.Settings }))))
@@ -182,6 +183,7 @@ const router = createBrowserRouter([
           { path: 'perimeter', element: <Perimeter /> },
           { path: 'left-items', element: <LeftItems /> },
           { path: 'deliveries', element: <Deliveries /> },
+          { path: 'gates', element: <Gates /> },
           { path: 'guard-compliance', element: <GuardCompliance /> },
           { path: 'rbac/*', element: <AccessControl /> },
           { path: 'byok', element: <BYOK /> },

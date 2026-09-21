@@ -18,7 +18,7 @@
 
 import { Outlet, NavLink, Link, useLocation } from 'react-router-dom'
 import { DeviceBlockedOverlay } from '../components/DeviceBlockedOverlay'
-import { AlertTriangle, Bell, Boxes, Brain, Briefcase, Camera, Car, ChevronDown, Cloud, Cpu, Database, FileCheck, FileSearch, GitCommitHorizontal, Hourglass, KeyRound, Layers, LifeBuoy, LogOut, Maximize, Menu, Minimize, Monitor, MonitorPlay, Moon, Network, PackageCheck, Plug, RefreshCcw, Search as SearchIcon, Settings as SettingsIcon, Shield, ShieldAlert, ShieldCheck, Sun, User as UserIcon, UserRound, Users } from 'lucide-react'
+import { AlertTriangle, Bell, Boxes, Brain, Briefcase, Camera, Car, ChevronDown, Cloud, Cpu, Database, DoorOpen, FileCheck, FileSearch, GitCommitHorizontal, Hourglass, KeyRound, Layers, LifeBuoy, LogOut, Maximize, Menu, Minimize, Monitor, MonitorPlay, Moon, Network, PackageCheck, Plug, RefreshCcw, Search as SearchIcon, Settings as SettingsIcon, Shield, ShieldAlert, ShieldCheck, Sun, User as UserIcon, UserRound, Users } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import { apiService } from '../lib/apiService'
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
@@ -199,6 +199,9 @@ export function AppShell() {
     '/perimeter': <ShieldAlert size={16} />,
     '/left-items': <Briefcase size={16} />,
     '/deliveries': <PackageCheck size={16} />,
+    // lucide has no barrier/boom-gate glyph; DoorOpen is the nearest
+    // thing that reads as "a way through that opens".
+    '/gates': <DoorOpen size={16} />,
   }
   const enabledRoutes = enabledVerticals.map((v) => v.to).join(',')
 

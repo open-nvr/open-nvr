@@ -1,7 +1,7 @@
 [project]
 name = "opennvr-example-gate-controller"
-version = "1.0.0"
-description = "OpenNVR gate-controller example app — pulses HTTP relays on access.decided.v1 allow decisions"
+version = "1.1.0"
+description = "OpenNVR gate-controller example app — drives dry contact, HTTP relays, Modbus and ONVIF Profile C barriers from access.decided.v1"
 requires-python = ">=3.11"
 license = { text = "AGPL-3.0" }
 

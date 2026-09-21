@@ -938,6 +938,17 @@ services:
     command:
       - --config
       - /app/config/config.yml
+    # Transports and this network, in one place (examples/gate-controller/
+    # HARDWARE.md → Running in the shipped compose):
+    #   http / onvif — allow the relay's host for this app in the App
+    #     Catalog; the egress proxy carries them.
+    #   modbus / mqtt — raw TCP, which an HTTP CONNECT proxy cannot
+    #     carry. They need APPS_EGRESS_ENFORCED=false (deployment-wide).
+    #   dry_contact — no network at all, but the GPIO device has to come
+    #     in. Add it in a docker-compose.override.yml rather than here,
+    #     so installs without that device still start:
+    #       services: { gate-controller: { devices:
+    #         ["/dev/gpiochip0:/dev/gpiochip0"], group_add: ["997"] } }
     networks:
       - opennvr_apps
 
