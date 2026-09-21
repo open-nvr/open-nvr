@@ -42,6 +42,7 @@ import {
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { api } from '../lib/api'
+import { AuthedImage } from '../components/AuthedImage'
 import { useTranslation } from '../i18n'
 import {
   Badge, Button, Card, CardContent, EmptyState, PageHeader, Skeleton,
@@ -84,12 +85,23 @@ type Hit = {
   claims: Claim[]
   anchor: { camera_id: number; at: string | null; ended_at: string | null }
 }
+type RelaxHint = {
+  /** The server's field name — mapped to a Filters key by RELAXABLE. */
+  drop: 'text' | 'when' | 'camera_ids' | 'labels' | 'plate'
+  value: string
+  would_match: number
+}
+
 type SearchResponse = {
   query: string
   interpretation: Interpretation
   results: Hit[]
   count: number
   total: number
+  /** Empty result: which ONE chip is responsible, and what dropping it
+   *  would find. Empty when there were results, or when no single chip
+   *  explains it. */
+  relax?: RelaxHint[]
 }
 
 /** The filters the page owns, which are exactly the API's parameters. */
@@ -102,6 +114,17 @@ type Filters = {
   plate: string
   /** kind:value claims a skill made, ANDed. */
   attrs: string[]
+}
+
+/** The server names the field; the UI already has a dropper keyed by
+ *  Filters. "when" maps to `from` because drop() clears both ends of a
+ *  window together — a half-open range is not a thing anyone meant. */
+const RELAXABLE: Record<RelaxHint['drop'], { key: keyof Filters; label: string }> = {
+  text: { key: 'text', label: 'the words' },
+  when: { key: 'from', label: 'the time window' },
+  camera_ids: { key: 'cameraIds', label: 'the camera' },
+  labels: { key: 'labels', label: 'the object' },
+  plate: { key: 'plate', label: 'the plate' },
 }
 
 const PAGE = 24
@@ -260,6 +283,7 @@ export function Search() {
   }
 
   const results = data?.results ?? []
+  const relax = data?.relax ?? []
   const total = data?.total ?? 0
   const pages = Math.ceil(total / PAGE)
   const nothingAsked = !sentence && !editing
@@ -413,17 +437,43 @@ export function Search() {
           {Array.from({ length: 8 }).map((_, i) => <Skeleton key={i} className="h-44" />)}
         </div>
       ) : results.length === 0 ? (
-        <EmptyState
-          icon={<SearchIcon size={24} />}
-          title={nothingAsked ? t('search.startTitle') : t('search.noneTitle')}
-          description={
-            nothingAsked
-              ? 'Ask for what you are looking for in your own words. Everything Tier-0 sees is already indexed — no app to install, and nothing is re-scanned when you search.'
-              : chips.length > 1
-                ? 'Nothing matched all of those at once. Remove a chip above — the time window and the words are the two that usually narrow it too far.'
-                : 'Nothing matched. Words only match what a captioner wrote about a frame, so a deployment with no captioner can search classes, cameras, times and plates, but not colours.'
-          }
-        />
+        <div className="space-y-3">
+          <EmptyState
+            icon={<SearchIcon size={24} />}
+            title={nothingAsked ? t('search.startTitle') : t('search.noneTitle')}
+            description={
+              nothingAsked
+                ? 'Ask for what you are looking for in your own words. Everything Tier-0 sees is already indexed — no app to install, and nothing is re-scanned when you search.'
+                : relax.length > 0
+                  ? 'One of the chips above is doing all the narrowing.'
+                  : chips.length > 1
+                    ? 'Nothing matched all of those at once. Remove a chip above — the time window and the words are the two that usually narrow it too far.'
+                    : 'Nothing matched. Words only match what a captioner wrote about a frame, so a deployment with no captioner can search classes, cameras, times and plates, but not colours.'
+            }
+          />
+          {/* The server already counted what dropping each chip would
+              find, so the operator does not have to guess which one to
+              remove — or remove the right one and not know it. */}
+          {relax.length > 0 && (
+            <div className="flex flex-wrap items-center justify-center gap-2">
+              {relax.map((hint) => {
+                const spec = RELAXABLE[hint.drop]
+                if (!spec) return null
+                return (
+                  <Button
+                    key={hint.drop}
+                    variant="outline"
+                    onClick={() => drop(spec.key)}
+                  >
+                    Without {spec.label}
+                    {hint.value ? ` (${hint.value})` : ''}: {hint.would_match}{' '}
+                    {hint.would_match === 1 ? 'result' : 'results'}
+                  </Button>
+                )
+              })}
+            </div>
+          )}
+        </div>
       ) : (
         <>
           <div className="flex items-center gap-2 text-xs text-[var(--text-dim)] px-0.5">
@@ -491,10 +541,19 @@ function ResultCard(
     >
       <div className="relative aspect-video bg-[var(--bg-2)] flex items-center justify-center">
         {hit.evidence_url ? (
-          <img
-            src={hit.evidence_url}
+          // Through the api client, not a bare <img src>. The evidence
+          // endpoint is camera-scoped and needs the JWT header, which
+          // an <img> cannot send — so a plain src 401s and every result
+          // renders as a broken-image icon.
+          <AuthedImage
+            queryKey={['search-evidence', hit.id]}
+            fetchBlob={(signal) =>
+              api.get(`/api/v1/events/${hit.id}/evidence`, {
+                responseType: 'blob',
+                signal,
+              })
+            }
             alt={`${hit.label ?? 'object'} on ${hit.camera_name ?? hit.camera_id}`}
-            loading="lazy"
             className="h-full w-full object-cover"
           />
         ) : (

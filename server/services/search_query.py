@@ -82,14 +82,47 @@ LABEL_SYNONYMS: dict[str, tuple[str, ...]] = {
     "dog": ("dog",), "cat": ("cat",), "animal": ("dog", "cat"),
 }
 
-#: Words that carry no meaning here. Kept short on purpose: anything not
-#: listed survives as free text, where a caption may well match it.
+#: Words that carry no meaning here. Anything not listed survives as
+#: free text, where a caption may well match it — which is why the list
+#: has to cover the way people actually type into this box.
+#:
+#: The box says "describe it", so people address the system: "did you
+#: see any car in the last 5 minutes". Every one of those words that
+#: survives becomes a REQUIRED substring of a caption, and no caption
+#: ever written contains "you see" — so a perfectly well-understood
+#: query ("car", "last 5 minutes", both correct) returns nothing, which
+#: is exactly the confident-wrong-parse failure this parser exists to
+#: avoid. Three groups, for that reason:
+#:
+#: * articles, prepositions and conjunctions — structure, never content;
+#: * asking words — the operator addressing the system rather than
+#:   describing the footage ("did you see", "can you show me", "was
+#:   there anything");
+#: * words for the medium itself — "camera", "footage", "clip" — which
+#:   name where they are looking, not what they are looking for.
 _STOP = {
+    # structure
     "a", "an", "the", "at", "in", "on", "of", "for", "to", "from", "by",
-    "me", "my", "we", "us", "i", "show", "find", "get", "search", "look",
-    "any", "all", "was", "were", "is", "are", "there", "that", "who",
-    "what", "when", "where", "did", "do", "does", "with", "and", "please",
-    "camera", "cameras", "footage", "video", "clip", "clips", "near",
+    "with", "and", "or", "about", "it", "its", "this", "these", "those",
+    "up", "out", "over", "into", "around", "some",
+    "if", "whether", "just", "only", "also", "then", "than", "as",
+    "but", "so", "still", "yet", "ever", "again", "else",
+    # the operator addressing the system
+    "me", "my", "we", "us", "i", "you", "your", "show", "find", "get",
+    "search", "look", "looking", "see", "seen", "saw", "seeing", "spot",
+    "spotted", "notice", "noticed", "detect", "detected", "catch",
+    "caught", "capture", "captured", "record", "recorded", "tell",
+    "give", "please", "thanks", "thank", "check", "want", "need",
+    "anything", "something", "any", "all", "anyone", "anybody",
+    # question and auxiliary verbs
+    "was", "were", "is", "are", "be", "been", "am", "has", "have", "had",
+    "there", "that", "who", "whom", "what", "when", "where", "which",
+    "why", "how", "did", "do", "does", "done", "can", "could", "will",
+    "would", "should", "may", "might", "must", "shall",
+    # the medium, not the subject
+    "camera", "cameras", "cam", "footage", "video", "videos", "clip",
+    "clips", "feed", "recording", "recordings", "frame", "frames",
+    "near", "captured",
 }
 
 _TIME_RE = re.compile(r"\b([01]?\d|2[0-3]):([0-5]\d)\b")
