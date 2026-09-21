@@ -228,6 +228,12 @@ class FrameApp(ContractMixin):
         """One poll cycle: fetch a frame per camera, run the rule,
         dispatch whatever it produced. Fetch / rule failures are
         logged per camera and never propagate."""
+        if self.app_enabled is False:
+            # Switched off in the catalog. Core also empties the roster,
+            # which stops a FrameApp that takes its cameras from the
+            # picker; this covers the ones that take them from their own
+            # YAML (camera_picker=False, a standalone run).
+            return []
         fired: list[Alert] = []
         for camera_id in self._cameras:
             try:

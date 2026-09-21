@@ -38,6 +38,22 @@ def key_file() -> Path:
     return Path(os.environ.get("OPENNVR_APP_KEY_FILE") or DEFAULT_KEY_FILE)
 
 
+#: Keys core issued during THIS run, by the file they belong to, so
+#: every :class:`AppCredentials` in the process can see them. The file
+#: is the usual channel between them, but it is not always writable (a
+#: read-only rootfs, no volume for ``.opennvr``), and an app whose
+#: clients fall back to the site key stops being scoped to its own
+#: cameras — too much to lose to a failed write. Keyed by path rather
+#: than held as one global so a test (or a process running two apps)
+#: that redirects ``OPENNVR_APP_KEY_FILE`` is isolated by construction.
+_ISSUED_KEYS: dict[str, str] = {}
+
+
+def issued_app_key() -> str | None:
+    """The key core issued for this key file during this run, if any."""
+    return _ISSUED_KEYS.get(str(key_file()))
+
+
 def stored_app_key() -> str | None:
     """The persisted app key, if any (env ``OPENNVR_APP_KEY`` wins)."""
     env = (os.environ.get("OPENNVR_APP_KEY") or "").strip()
@@ -165,19 +181,35 @@ class AppCredentials:
 
     def __init__(self, explicit: str | None = None) -> None:
         self._explicit = str(explicit) if explicit else None
-        self._app_key: str | None = None
-        if is_app_key(self._explicit):
-            self._app_key = self._explicit
-        else:
-            self._app_key = stored_app_key()
+        #: Set only when the operator supplied an app key outright, or
+        #: when core issued one to THIS instance (``adopt``). Otherwise
+        #: left empty and resolved per call from the key file — see
+        #: :attr:`app_key`.
+        self._app_key: str | None = (
+            self._explicit if is_app_key(self._explicit) else None)
 
     @property
     def app_key(self) -> str | None:
-        return self._app_key
+        """The app's own key, re-read from the key file when this
+        instance was not handed one.
+
+        An app holds MORE THAN ONE of these objects — the contract has
+        its own, and so does every client the app builds — but only the
+        contract's is given the key core issues at registration. Resolving
+        the file once in ``__init__`` therefore left any client built
+        BEFORE that registration (an app that keeps an ``OpenNVR()`` in
+        its constructor) presenting the site key for the life of the
+        process. To core a site-key caller is a platform component, not
+        an app: unscoped, every camera in the building, the operator's
+        camera selection silently bypassed. The file is the shared truth
+        between the two objects, so read it per call and construction
+        order stops mattering.
+        """
+        return self._app_key or issued_app_key() or stored_app_key()
 
     @property
     def has_app_key(self) -> bool:
-        return bool(self._app_key)
+        return bool(self.app_key)
 
     @property
     def bus_url(self) -> str | None:
@@ -186,7 +218,7 @@ class AppCredentials:
 
     @property
     def app_id(self) -> str | None:
-        return app_id_from_key(self._app_key)
+        return app_id_from_key(self.app_key)
 
     def adopt_bus(self, url: str) -> None:
         if url and url != stored_bus_url():
@@ -195,7 +227,7 @@ class AppCredentials:
 
     def token(self) -> str | None:
         """What to send: the app key when we have one, else the site key."""
-        return self._app_key or site_key(
+        return self.app_key or site_key(
             None if is_app_key(self._explicit) else self._explicit)
 
     def headers(self) -> dict[str, str]:
@@ -209,16 +241,20 @@ class AppCredentials:
     def adopt(self, key: str) -> None:
         """A key just issued by core: use it from now on and persist it."""
         self._app_key = key.strip()
+        # Before the file, so the app's other credentials still
+        # authenticate as the app when the file cannot be written.
+        _ISSUED_KEYS[str(key_file())] = self._app_key
         store_app_key(self._app_key)
         logger.info("app key issued by OpenNVR — using it for every core call")
 
     def invalidate(self) -> None:
         """Core refused our app key (rotated/revoked): fall back to the
         site key so the next registration can ask for a new one."""
-        if self._app_key:
+        if self.app_key:
             logger.warning("OpenNVR rejected the app key — discarding it; "
                            "will request a new one at next registration")
         self._app_key = None
+        _ISSUED_KEYS.pop(str(key_file()), None)
         forget_app_key()
         forget_bus_url()
 

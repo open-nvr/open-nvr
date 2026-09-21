@@ -114,6 +114,41 @@ def test_registration_adopts_the_issued_key_then_uses_it(monkeypatch):
     assert headers["X-Internal-Api-Key"] == "oak_my-app_" + "e" * 32
 
 
+def test_a_credential_built_before_registration_still_sends_the_app_key(monkeypatch):
+    """An app holds more than one credential — the contract's, and one
+    per client it builds — and only the contract's is handed the key
+    core issues. A client built in the app's ``__init__`` therefore
+    resolved its credential before any key existed and went on sending
+    the SITE key, which core reads as a platform component: unscoped,
+    every camera in the building, the operator's selection bypassed.
+    """
+    monkeypatch.setenv("OPENNVR_INTERNAL_API_KEY", "site-secret")
+    early = AppCredentials()  # e.g. OpenNVR() in the app's constructor
+    assert early.token() == "site-secret" and not early.has_app_key
+
+    key = "oak_my-app_" + "9" * 32
+    fake = _FakePost([(200, {"id": "my-app", "api_key": key})])
+    monkeypatch.setattr(contract_mod.httpx, "post", fake)
+    assert _app().register_with_opennvr() is True
+
+    assert early.token() == key
+    assert early.has_app_key and early.app_id == "my-app"
+
+
+def test_the_issued_key_is_shared_even_when_it_cannot_be_persisted(monkeypatch):
+    """The key file is how credentials in one app find each other, and
+    it is not always writable (read-only rootfs, no volume). Losing the
+    app key to a failed write means losing the camera scoping with it,
+    so the issued key is remembered in the process too."""
+    monkeypatch.setenv("OPENNVR_INTERNAL_API_KEY", "site-secret")
+    monkeypatch.setattr(creds_mod, "store_app_key", lambda key: False)
+    early = AppCredentials()
+    key = "oak_my-app_" + "8" * 32
+    AppCredentials().adopt(key)
+    assert not creds_mod.key_file().exists()
+    assert early.token() == key
+
+
 def test_rejected_app_key_is_discarded_for_the_next_attempt(monkeypatch):
     creds_mod.store_app_key("oak_my-app_" + "f" * 32)
     fake = _FakePost([(401, {"detail": "Invalid or revoked app key"}),

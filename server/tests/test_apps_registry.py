@@ -295,7 +295,13 @@ def test_register_creates_record(client):
     assert body["category"] == "perimeter"
     assert body["version"] == "1.0.0"
     assert body["url"] == "http://loitering:9200"
-    assert body["enabled"] is False           # operator opt-in, not auto-on
+    # On from the moment it registers: an app only gets this far because
+    # somebody deployed its container, and `enabled` is now enforced —
+    # a disabled app is handed no cameras and does no work, so being
+    # born off would mean a stock install that silently does nothing.
+    # The operator's later Disable is what the flag is for, and it
+    # survives every later registration.
+    assert body["enabled"] is True
     assert body["status"] == "registered"
     assert body["last_seen"] is not None
     assert body["manifest"]["params"][0]["name"] == "watch_labels"
@@ -1305,9 +1311,10 @@ def _register_action_app(auth_client, enabled=True):
         headers={"X-Internal-Api-Key": _effective_internal_key()},
     )
     assert reg.status_code == 200
-    if enabled:
-        en = auth_client.post("/apps/loitering-detection/enable")
-        assert en.status_code == 200
+    # Registering enables it; the disabled case has to ask for that.
+    if not enabled:
+        off = auth_client.post("/apps/loitering-detection/disable")
+        assert off.status_code == 200
     return reg
 
 

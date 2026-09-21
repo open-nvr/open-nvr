@@ -937,6 +937,17 @@ async def register_app(
     row.manifest_json = manifest
     row.status = "registered"
     row.last_seen = datetime.now(UTC)
+    # An app the operator deployed is ON. ``enabled`` is now enforced —
+    # a disabled app gets no roster, so it reads no camera and does no
+    # work — which makes the flag the app is BORN with the difference
+    # between a stock install that works and one that silently does
+    # nothing until every app is toggled by hand. Presence is the
+    # intent; the operator's later Disable is theirs to keep, so this
+    # happens on FIRST registration only. A licensed app still has to
+    # clear its entitlement, exactly as the enable route requires.
+    if created:
+        allowed, _reason = may_enable(row)
+        row.enabled = bool(allowed)
     # A manifest that gains (or changes) ``tier0_labels`` must reach the
     # cameras picked BEFORE this version, or the upgrade silently changes
     # nothing until every camera is unpicked and re-picked.
@@ -1194,9 +1205,19 @@ async def get_app_config(
         scope = _visible(db, principal)
         if scope is not None:
             picked &= scope
+    if isinstance(principal, AppPrincipal) and not row.enabled:
+        # What the app is allowed to read (``app_camera_ids``), said on
+        # the poll it already makes: a disabled app stops within one
+        # poll instead of running on until someone stops its container.
+        # The operator's own view keeps the selection — disabling an app
+        # must not lose the cameras it was pointed at.
+        picked = set()
     return {
         "id": row.id,
         "config": config,
+        # The operator's switch, so the app can stop (and say why) rather
+        # than discover it through empty rosters and 404s.
+        "enabled": bool(row.enabled),
         "cameras": sorted(picked),
         "updated_at": row.updated_at,
         # The licence verdict rides the live config poll so the app can

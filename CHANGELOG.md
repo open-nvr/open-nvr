@@ -8,6 +8,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Disabling an app in the catalog now stops it.** `enabled` gated one
+  route (invoking an app's actions) and nothing the app itself could
+  feel: a disabled app kept its cameras, kept pulling their streams and
+  kept driving its adapters, so the only real off switch was
+  `docker stop`. A disabled app now has no camera roster — it reads no
+  frames, gets no stream grants and uses no compute — and the flag rides
+  its live config poll, so an SDK app stops within ~10s and says why on
+  `/health` instead of going quiet. Because of that enforcement, an app
+  is switched ON when it first registers (its container was deployed:
+  that is the intent) rather than being born off; a licensed app still
+  has to clear its entitlement, the operator's Disable survives every
+  later registration, and a migration switches on the apps that
+  registered under the old meaning so an upgrade does not stop them.
+
 - **App SDK 0.6.0.** Not a patch: `rtsp.py` is a new module, `PLATFORM`
   gained five names, `OpenNVR` gained `save_evidence` / `stream` /
   `stream_grant` (and their async twins), `Alert` gained `alert_type`
@@ -24,6 +38,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   images have no reason to have it.
 
 ### Fixed
+
+- **An app that built its platform client before registering ran on
+  every camera.** An app holds more than one credential — the contract's
+  and one per client it builds — and only the contract's was handed the
+  key core issues at registration; the others resolved the key file once,
+  at construction, so a client built in an app's `__init__` presented the
+  deployment's site key for the life of the process. To core a site-key
+  caller is a platform component, so the app was handed the whole fleet
+  and could mint a stream grant for any camera: with nothing selected and
+  the app disabled, guard-scan was still decoding two streams and running
+  pose on every frame. The app key is now resolved per call (and shared
+  in-process when it cannot be persisted), so construction order no
+  longer decides whether an app is scoped to its cameras.
 
 - **Tapo ONVIF authentication fallback.** Cameras such as the TP-Link Tapo
   C520WS that return an ONVIF `NotAuthorized` SOAP fault instead of an HTTP

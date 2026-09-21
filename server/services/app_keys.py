@@ -128,6 +128,13 @@ def app_camera_ids(db: Session, row) -> set[int] | None:
     nothing. Callers test ``roster is not None``, which still holds: an
     empty set is not None and correctly filters to zero cameras.
 
+    A DISABLED app has no roster at all. The catalog's switch used to
+    change nothing an app could feel: it kept its cameras, kept pulling
+    their streams and kept driving its adapters, so the only way to stop
+    one was ``docker stop``. Enforced here, the app reads no camera it
+    was not switched on for — whether or not the app itself is polite
+    enough to notice the flag on its config poll.
+
     It used to be "cameras whose assignment on the camera page names this
     app". That made the camera page the only way to point an app at a
     camera and made every such row both a restriction and a pick — so a
@@ -135,4 +142,6 @@ def app_camera_ids(db: Session, row) -> set[int] | None:
     """
     from services.skill_assignments import picked_camera_ids
 
+    if not row.enabled:
+        return set()
     return picked_camera_ids(db, row.id)

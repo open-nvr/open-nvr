@@ -1714,7 +1714,9 @@ function AppCard({ app, caps, tier0, skill, onConfigure }: { app: RegisteredApp;
       queryClient.invalidateQueries({ queryKey: ['apps'] })
       if (!wasEnabling) {
         setEnableNote(false)
-        showSuccess(`${app.name} disabled`)
+        // Say what it does, now that it does something: disabling used
+        // to leave the app running and only stop operator actions.
+        showSuccess(`${app.name} disabled — it stops watching its cameras within a few seconds. Its settings and camera selection are kept.`)
         return
       }
       // Enabling used to redirect straight to the app's page, which

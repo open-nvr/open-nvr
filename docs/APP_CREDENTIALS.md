@@ -21,7 +21,14 @@ An app's **roster** is the cameras picked for it in its own
 configuration (App Catalog → Configure → Cameras; stored as claims with
 consumer `app:<id>`). An app sees the cameras picked for it and no
 others, and an app with nothing picked sees nothing
-([CAMERA_ASSIGNMENTS.md](CAMERA_ASSIGNMENTS.md)). It is enforced here,
+([CAMERA_ASSIGNMENTS.md](CAMERA_ASSIGNMENTS.md)). **A disabled app has
+no roster at all**: the catalog's switch is what stops an app, so it
+reads no camera, drives no adapter and uses no compute until it is
+switched back on. An app is switched ON when it first registers —
+somebody deployed its container — and the operator's Disable survives
+every later registration. The switch also rides the app's own config
+poll (`enabled`), so an SDK app stops within one poll and can say why
+rather than discovering it through empty rosters. It is enforced here,
 where the frames are actually handed out: the camera list gives an app a
 stream token scoped to each picked camera's own path (never the wildcard
 the platform's components carry) and never the camera's raw RTSP URL;
