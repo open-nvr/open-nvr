@@ -147,6 +147,10 @@ export const NAV_PERMISSIONS = {
   // plate reads and refusals behind each decision — the alerts tier,
   // like the other pages that let an operator act on what they see.
   '/gates': 'alerts.view',
+  // Pausing alert delivery is an alarm-desk action, and the page shows
+  // the alerts that were delivered or held back — the alerts tier, like
+  // the inbox they came from.
+  '/notifications': 'alerts.view',
   '/playback': 'recordings.view',
   // Search answers with evidence photos and opens recordings — it is
   // the recordings workflow, and carries its tier.
