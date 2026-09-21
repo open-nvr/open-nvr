@@ -8,6 +8,26 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **A switched-off app's camera selection no longer buys compute.** An
+  app's selection is stored as a claim under the platform skill it turns
+  on — ANPR's is `license_plate_recognition`, which is what starts plate
+  OCR — and the compute gates read the camera's projected skills, where
+  the claimant's identity is gone. So the catalog's switch stopped at the
+  app's own door: ANPR went quiet while core kept reading plates for it,
+  about a core an hour, for nobody. A switched-off app's claims are now
+  left out of the projection (the claim row stays, so enabling restores
+  it without re-picking), enable/disable and first registration
+  re-project the app's cameras, and a boot backstop heals deployments
+  whose projection predates the rule. Rows typed in a camera's own
+  Assignments section are unaffected — plate OCR asked for there keeps
+  running whatever the app does. The camera roster now also carries
+  `skills_claimed` (everything claimed, live or not) so Tier-0's opt-in
+  `DETECT_SKIP_UNASSIGNED` still skips a camera nobody wants instead of
+  reading an emptied projection as "no restriction declared" and
+  analysing it. The camera settings form prefills from the operator's own
+  rows, so saving it can no longer copy an app's skill into a claim that
+  outlives the app's switch.
+
 - **Disabling an app in the catalog now stops it.** `enabled` gated one
   route (invoking an app's actions) and nothing the app itself could
   feel: a disabled app kept its cameras, kept pulling their streams and

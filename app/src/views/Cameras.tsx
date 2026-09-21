@@ -223,6 +223,25 @@ export function Cameras() {
     }
   }
 
+  // The rows this form owns. Only the operator's claims: an app's pick
+  // shows on the camera's "Used by" line instead, and saving this form
+  // must never turn one into an operator claim that outlives the app's
+  // switch.
+  const loadOperatorAssignments = async (cameraId: number) => {
+    try {
+      const { data } = await apiService.getCameraAssignments(cameraId)
+      setForm(f => ({
+        ...f,
+        assignments: (data?.assignments || []).map((a: CameraAssignment) => ({
+          skill: a.skill,
+          labels: (a.labels || []).join(', '),
+        })),
+      }))
+    } catch {
+      setForm(f => ({ ...f, assignments: [] }))
+    }
+  }
+
   const skillInfo = (raw: string): AssignableSkill | undefined => {
     const s = raw.trim().toLowerCase()
     return s ? assignableSkills.find(k => k.skill === s) : undefined
@@ -518,13 +537,13 @@ export function Cameras() {
       status: c.status || 'unknown',
       is_active: c.is_active,
       detection_enabled: c.detection_enabled !== false,
-      assignments: (c.assignments || []).map(a => ({
-        skill: a.skill,
-        labels: (a.labels || []).join(', '),
-      })),
+      // Filled in below from the operator's own claims — c.assignments
+      // is the projection and also carries apps' picks.
+      assignments: [],
     })
     setShowEditDialog(true)
     loadAssignableSkills()
+    loadOperatorAssignments(c.id)
   }
 
   const closeEditDialog = () => {

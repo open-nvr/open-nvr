@@ -940,6 +940,15 @@ def list_camera_agent_sources(
     # here, where the frames are actually handed out.
     if is_app:
         cameras = [c for c in cameras if int(c.id) in roster]
+    # Every skill CLAIMED on these cameras, live or not — one query for
+    # the whole roster, not one per camera. Tier-0's opt-in skip mode
+    # needs "did anything ask for this camera?", which an empty
+    # projection cannot answer: empty means "no restriction declared"
+    # there, so a camera whose only claim came from an app that was then
+    # switched off would start being analyzed instead of skipped.
+    from services.skill_assignments import claimed_skills_by_camera
+
+    claimed = claimed_skills_by_camera(db, {int(c.id) for c in cameras})
     out: list[dict[str, object]] = []
     for cam in cameras:
         stream_name = _build_stream_name(
@@ -1038,6 +1047,15 @@ def list_camera_agent_sources(
                 # assigned: the camera is eligible for any skill's picker
                 # but adopted by none, so no app inference runs on it.
                 "assignments": list(cam.assignments or []),
+                # Skills claimed on this camera INCLUDING those whose
+                # claimant is switched off — ``assignments`` carries only
+                # what is live. The difference matters to one reader:
+                # DETECT_SKIP_UNASSIGNED skips a camera that carries
+                # claims, none of them detection-shaped, and an empty
+                # ``assignments`` reads as "nothing declared, analyze with
+                # the global labels". Additive: a reader that does not
+                # know this key behaves exactly as before.
+                "skills_claimed": claimed.get(int(cam.id), []),
                 # Tier-0 detection on/off (NULL = on). detect-pipeline
                 # skips a camera with analyze=false; it keeps recording.
                 "analyze": cam.detection_enabled is not False,

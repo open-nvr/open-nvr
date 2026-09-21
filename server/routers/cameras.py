@@ -957,6 +957,31 @@ async def assignable_skills(
     return {"skills": sorted(merged.values(), key=lambda e: e["skill"])}
 
 
+@router.get("/{camera_id}/assignments")
+def camera_operator_assignments(
+    camera_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """The OPERATOR's own claims on this camera — what the settings form
+    edits, and what it must prefill from.
+
+    Not ``camera.assignments``: that projection also carries app picks,
+    and the form's PUT is a full replace of the operator's claims. So
+    prefilling from the projection and pressing Save copied an app's
+    skill into an operator claim — ``license_plate_recognition`` is a
+    platform task, so it is accepted there by design — and from then on
+    switching that app off left its inference running on this camera,
+    with nothing on screen to say why.
+    """
+    from services.camera_scope import in_scope, visible_camera_ids
+    from services.skill_assignments import operator_assignments
+
+    if not in_scope(visible_camera_ids(db, current_user), camera_id):
+        raise HTTPException(status_code=404, detail="Camera not found")
+    return {"assignments": operator_assignments(db, camera_id)}
+
+
 @router.get("/{camera_id}/used-by")
 def camera_used_by(
     camera_id: int,

@@ -205,6 +205,133 @@ def test_a_platform_plate_row_keeps_ocr_on_after_anpr_goes(world):
     assert sa.camera_adopted(s.get(Camera, ids["yard"]), PLATE_SKILL) is True
 
 
+# ── a switched-off app's pick buys no compute ──────────────────────
+#
+# A pick is stored under the platform skill it turns on, which is what
+# makes ANPR's pick start plate OCR. It also meant the catalog's switch
+# stopped at the app's own door: the app went quiet, and core carried on
+# reading plates for it — about a core an hour, for nobody.
+
+
+def _set_enabled(Session, app_id, value):
+    s = Session()
+    s.get(InstalledApp, app_id).enabled = value
+    s.commit()
+    sa.reproject_app_cameras(s, app_id)
+    s.commit()
+    s.close()
+
+
+def test_a_disabled_apps_pick_stops_the_compute_it_turned_on(world):
+    ids, Session = world["ids"], world["Session"]
+    _pick(Session, "license-plate-recognition", ids["yard"])
+    s = Session()
+    assert sa.camera_adopted(s.get(Camera, ids["yard"]), PLATE_SKILL) is True
+    s.close()
+
+    _set_enabled(Session, "license-plate-recognition", False)
+    s = Session()
+    assert sa.camera_adopted(s.get(Camera, ids["yard"]), PLATE_SKILL) is False
+    # The pick itself survives: switching an app off must not lose the
+    # cameras an operator pointed it at.
+    assert sa.picked_camera_ids(s, "license-plate-recognition") == {ids["yard"]}
+    s.close()
+
+    _set_enabled(Session, "license-plate-recognition", True)
+    s = Session()
+    assert sa.camera_adopted(s.get(Camera, ids["yard"]), PLATE_SKILL) is True
+    s.close()
+
+
+def test_one_app_off_does_not_stop_another_on_the_same_camera(world):
+    ids, Session = world["ids"], world["Session"]
+    _pick(Session, "license-plate-recognition", ids["yard"])
+    _pick(Session, "occupancy-counting", ids["yard"])
+    _set_enabled(Session, "license-plate-recognition", False)
+    s = Session()
+    yard = s.get(Camera, ids["yard"])
+    assert sa.camera_adopted(yard, PLATE_SKILL) is False
+    assert sa.camera_adopted(yard, "occupancy_counting") is True
+    s.close()
+
+
+def test_an_operator_row_keeps_the_compute_on_while_the_app_is_off(world):
+    """Plate OCR is platform compute: an operator who asked for it on the
+    camera page keeps it, whatever the app does."""
+    ids, Session = world["ids"], world["Session"]
+    _pick(Session, "license-plate-recognition", ids["yard"])
+    s = Session()
+    sa.set_operator_assignments(s, s.get(Camera, ids["yard"]), [{"skill": PLATE_SKILL}])
+    s.commit()
+    s.close()
+    _set_enabled(Session, "license-plate-recognition", False)
+    s = Session()
+    assert sa.camera_adopted(s.get(Camera, ids["yard"]), PLATE_SKILL) is True
+    s.close()
+
+
+def test_a_claim_naming_an_app_we_do_not_have_is_left_alone(world):
+    """Only an INSTALLED app's switch gates its claims. A consumer this
+    deployment knows nothing about is annotated, never gated — the
+    vocabulary is open by design, and an uninstall releases that app's
+    claims itself."""
+    ids, Session = world["ids"], world["Session"]
+    s = Session()
+    sa.declare(s, skill=PLATE_SKILL, camera_id=ids["yard"],
+               consumer=sa.app_consumer("not-installed"))
+    s.commit()
+    assert sa.camera_adopted(s.get(Camera, ids["yard"]), PLATE_SKILL) is True
+    assert sa.reconcile_projections(s) == 0
+    assert sa.camera_adopted(s.get(Camera, ids["yard"]), PLATE_SKILL) is True
+    s.close()
+
+
+def test_the_boot_backstop_heals_a_projection_written_under_the_old_rule(world):
+    ids, Session = world["ids"], world["Session"]
+    _pick(Session, "license-plate-recognition", ids["yard"])
+    s = Session()
+    s.get(InstalledApp, "license-plate-recognition").enabled = False
+    s.commit()   # …and nothing re-projected, as an upgrade would leave it
+    assert sa.camera_adopted(s.get(Camera, ids["yard"]), PLATE_SKILL) is True
+    assert sa.reconcile_projections(s) == 1
+    assert sa.camera_adopted(s.get(Camera, ids["yard"]), PLATE_SKILL) is False
+    # Idempotent: the next boot finds nothing to do.
+    assert sa.reconcile_projections(s) == 0
+    s.close()
+
+
+def test_claimed_skills_report_what_is_asked_for_not_what_is_live(world):
+    """Tier-0's opt-in skip mode needs "did anything ask for this
+    camera?" — which an empty projection cannot answer."""
+    ids, Session = world["ids"], world["Session"]
+    _pick(Session, "license-plate-recognition", ids["yard"])
+    _set_enabled(Session, "license-plate-recognition", False)
+    s = Session()
+    assert s.get(Camera, ids["yard"]).assignments is None
+    assert sa.claimed_skills_by_camera(s, {ids["yard"], ids["gate"]}) == {
+        ids["yard"]: [PLATE_SKILL]}
+    s.close()
+
+
+def test_the_camera_form_prefills_the_operators_own_rows_only(world):
+    """The form's PUT is a full replace of the operator's claims. It used
+    to prefill from the projection, which also carries app picks — so
+    opening a camera an app had picked and pressing Save copied that
+    app's skill into an operator claim, and the app's switch stopped
+    working on that camera for ever."""
+    ids, Session = world["ids"], world["Session"]
+    _pick(Session, "license-plate-recognition", ids["yard"])
+    s = Session()
+    sa.set_operator_assignments(s, s.get(Camera, ids["yard"]),
+                                [{"skill": "object_detection", "labels": ["person"]}])
+    s.commit()
+    assert sa.operator_assignments(s, ids["yard"]) == [
+        {"skill": "object_detection", "labels": ["person"]}]
+    # …while the camera itself carries both.
+    assert sa.camera_adopted(s.get(Camera, ids["yard"]), PLATE_SKILL) is True
+    s.close()
+
+
 # ── the camera page tunes compute, and no longer points apps ───────
 
 

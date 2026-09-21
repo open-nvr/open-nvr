@@ -147,10 +147,14 @@ def test_provider_returns_none_on_failure():
 # ── Assignments → per-camera labels + opt-in skip (slice 3) ─────────
 
 
-def _cam(cid="cam4", assignments=None):
+def _cam(cid="cam4", assignments=None, skills_claimed=None):
     c = {"camera_id": cid, "name": cid, "frame_url": f"rtsp://m/{cid}"}
     if assignments is not None:
         c["assignments"] = assignments
+    # Every skill claimed on the camera, live or not — core sends this
+    # alongside the (live-only) assignments; omitted = an older core.
+    if skills_claimed is not None:
+        c["skills_claimed"] = skills_claimed
     return c
 
 
@@ -250,6 +254,54 @@ def test_skip_unassigned_is_opt_in(monkeypatch):
     # ...and NO assignments at all is never skipped (no restriction declared).
     assert _to_spec(_cam()).analyze is True
     assert _to_spec(_cam(assignments=[])).analyze is True
+
+
+def test_a_switched_off_apps_camera_is_still_skipped(monkeypatch):
+    """Core stops projecting a switched-off app's pick, so `assignments`
+    empties — and an empty list means "nothing declared, analyze" here.
+    Without `skills_claimed`, switching an app OFF would put a camera
+    that was being skipped back into Tier-0: MORE compute for turning
+    something off. The claim is still on the camera and still asks for
+    nothing detection-shaped."""
+    from detect_pipeline.providers import _to_spec
+
+    monkeypatch.setenv("DETECT_SKIP_UNASSIGNED", "true")
+    off = _cam(assignments=[], skills_claimed=["license_plate_recognition"])
+    assert _to_spec(off).analyze is False
+    # It is the CLAIM that decides, so the app's skill is not offered to
+    # Tier-0 as a live one.
+    assert _to_spec(off).skills is None
+
+    # A claim that does ride the Tier-0 stream keeps the camera analyzed
+    # even while its app is off — the stream has other subscribers.
+    assert _to_spec(_cam(assignments=[],
+                         skills_claimed=["occupancy_counting"])).analyze is True
+    # Nothing claimed at all is never skipped.
+    assert _to_spec(_cam(assignments=[], skills_claimed=[])).analyze is True
+
+
+def test_claims_decide_the_skip_even_when_some_are_live(monkeypatch):
+    from detect_pipeline.providers import _to_spec
+
+    monkeypatch.setenv("DETECT_SKIP_UNASSIGNED", "true")
+    # One app off, one on: LPR is live, the parked claim is not — neither
+    # rides Tier-0, so the camera is still skipped.
+    cam = _cam(assignments=[{"skill": "license_plate_recognition"}],
+               skills_claimed=["license_plate_recognition", "guard_scan_compliance"])
+    assert _to_spec(cam).analyze is False
+    assert _to_spec(cam).skills == frozenset({"license_plate_recognition"})
+
+
+def test_an_older_core_without_claimed_skills_is_unchanged(monkeypatch):
+    """No `skills_claimed` key: decide on the live assignments, exactly
+    as before it existed."""
+    from detect_pipeline.providers import _to_spec
+
+    monkeypatch.setenv("DETECT_SKIP_UNASSIGNED", "true")
+    lpr_only = _cam(assignments=[{"skill": "license_plate_recognition"}])
+    assert _to_spec(lpr_only).analyze is False
+    assert _to_spec(_cam(assignments=[])).analyze is True
+    assert _to_spec(_cam()).analyze is True
 
 
 def test_provider_leaves_hwaccel_undeclared_when_core_omits_it():

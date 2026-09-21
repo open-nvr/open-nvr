@@ -69,7 +69,7 @@ from sqlalchemy.orm import sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from core.database import Base, get_db  # noqa: E402
-from models import Camera, Role, User  # noqa: E402
+from models import Camera, Role, SkillAssignment, User  # noqa: E402
 from routers import internal_camera_agent as internal_router  # noqa: E402
 from schemas import CameraAssignment, CameraUpdate  # noqa: E402
 
@@ -135,7 +135,14 @@ def _make_app():
         poolclass=StaticPool,
     )
     Base.metadata.create_all(
-        engine, tables=[Camera.__table__, User.__table__, Role.__table__]
+        engine,
+        # The roster reads the claims table as well as the projection:
+        # it reports every skill CLAIMED on a camera, live or not, so
+        # Tier-0's skip mode can tell "nobody wants this camera" from
+        # "nothing declared" once a switched-off app's claim stops being
+        # projected.
+        tables=[Camera.__table__, User.__table__, Role.__table__,
+                SkillAssignment.__table__],
     )
     session_factory = sessionmaker(bind=engine)
 

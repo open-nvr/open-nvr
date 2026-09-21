@@ -134,6 +134,25 @@ def _skip_unassigned() -> bool:
     )
 
 
+def _analyze_with(skills: frozenset[str], camera_id: object = None) -> bool:
+    """The DETECT_SKIP_UNASSIGNED decision for one camera's skills.
+
+    True (analyze) unless the opt-in mode is on AND the camera carries
+    skills, none of which ride the Tier-0 stream. No skills at all means
+    nothing was declared, which has always meant "analyze".
+    """
+    if not (_skip_unassigned() and skills):
+        return True
+    if skills & DETECTION_SHAPED_SKILLS:
+        return True
+    log.info(
+        "tier0: skipping %s — claims (%s) need no Tier-0 detection and "
+        "DETECT_SKIP_UNASSIGNED is on",
+        camera_id, ", ".join(sorted(skills)),
+    )
+    return False
+
+
 def _clean_labels(raw: object) -> frozenset[str]:
     if not isinstance(raw, (list, tuple, set, frozenset)):
         return frozenset()
@@ -167,10 +186,26 @@ def _assignment_view(
     camera carries assignments, none of them detection-shaped. The
     back-compat rule everywhere: NO assignments = no restriction declared
     = analyze with global labels, exactly as before assignments existed.
+
+    That decision reads ``skills_claimed`` when core sends it (every
+    skill claimed on the camera, live or not) rather than the live
+    ``assignments``. The two differ for a camera whose only claim came
+    from an app that has since been switched off: core stops projecting
+    a switched-off app's pick, so ``assignments`` empties — and an empty
+    list means "nothing declared, analyze with the global labels" here.
+    Without the extra key, switching an app OFF would put a camera that
+    was being skipped back into Tier-0, costing more compute than
+    leaving the app on. An older core sends no such key and keeps the
+    behaviour it always had.
     """
     assignments = c.get("assignments")
+    raw_claimed = c.get("skills_claimed")
+    claimed: frozenset[str] | None = (
+        _clean_labels(raw_claimed) if isinstance(raw_claimed, list) else None
+    )
     if not isinstance(assignments, list) or not assignments:
-        return None, True, None, None
+        analyze = _analyze_with(claimed or frozenset(), c.get("camera_id"))
+        return None, analyze, None, None
     labels: frozenset[str] | None = None
     extra: set[str] = set()
     skills: set[str] = set()
@@ -186,14 +221,10 @@ def _assignment_view(
                 labels = _clean_labels(a["labels"]) or None
         else:
             extra |= _clean_labels(a.get("labels"))
-    analyze = True
-    if _skip_unassigned() and skills and not (skills & DETECTION_SHAPED_SKILLS):
-        analyze = False
-        log.info(
-            "tier0: skipping %s — assignments (%s) need no Tier-0 detection "
-            "and DETECT_SKIP_UNASSIGNED is on",
-            c.get("camera_id"), ", ".join(sorted(skills)),
-        )
+    # Claimed, not live: a pick whose app is switched off still says
+    # "somebody asked for this camera, and not for detection".
+    analyze = _analyze_with(claimed if claimed is not None else frozenset(skills),
+                            c.get("camera_id"))
     return labels, analyze, (frozenset(skills) or None), (frozenset(extra) or None)
 
 

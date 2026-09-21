@@ -18,6 +18,14 @@ three rules, all here so no caller can get them wrong:
   reconcile, the SDK's ``cameras_for_skill`` and the internal
   camera-agent endpoint already read — is recomputed from the table on
   every write. Existing consumers keep working without a line changed.
+* **Live claims only**: the projection is the COMPUTE gate, and it
+  carries skills, not claimants. A claim whose consumer buys nothing —
+  an app switched off in the catalog, or one that is gone — is left out
+  of it, so the inference behind it stops; the row itself stays, so
+  switching the app back on restores the camera without re-picking.
+  Nothing else rewrites the column, so the catalog routes and a boot
+  backstop re-project (``reproject_app_cameras``,
+  ``reconcile_projections``).
 * **Additive narrowing**: a claim's ``params`` may carry
   ``{"labels": [...]}``. The projection merges labels as the union of
   every claim's set; any claim WITHOUT labels means "no restriction"
@@ -71,20 +79,65 @@ def _labels_of(params: Optional[dict]) -> Optional[list[str]]:
     return cleaned or None
 
 
-def project_camera(db: Session, camera: Camera) -> None:
+def inactive_consumers(db: Session) -> set[str]:
+    """Consumers whose claims buy no compute: installed apps that are
+    switched OFF in the catalog.
+
+    A pick is stored under the PLATFORM skill it turns on
+    (``app_pick_skill``: ANPR picks are ``license_plate_recognition``),
+    which is the whole point — it is what makes plate OCR run. But that
+    also means the projection cannot tell "the operator tuned this
+    camera" from "an app asked for this", and the compute gates read the
+    projection, not the table. So the catalog's switch stopped at the
+    app's own door: the app went quiet while core kept reading plates
+    for it, at about a core an hour, for nobody.
+
+    Resolved here, where the consumer is still known — the entry never
+    reaches the projection, so every reader (core's gates, Tier-0, the
+    SDK, an app of someone else's making) sees the claim gone rather
+    than having to learn a new "but is it live?" flag it might not
+    know about. A reader that has not been upgraded fails CLOSED.
+
+    An INSTALLED app only. A consumer this deployment knows nothing
+    about — ``app:something-not-installed`` — is left alone, because the
+    vocabulary is open by design (see this module's header): a consumer
+    is a free string, annotated and never gated on. An uninstall
+    releases that app's claims itself (:func:`release_app_picks`).
+    """
+    from models import InstalledApp
+
+    return {
+        app_consumer(row[0]) for row in
+        db.query(InstalledApp.id).filter(InstalledApp.enabled.is_(False)).all()
+    }
+
+
+def project_camera(db: Session, camera: Camera,
+                   inactive: set[str] | None = None) -> None:
     """Recompute ``camera.assignments`` from the table (no commit).
 
     Projection shape is exactly what the editor wrote historically:
     ``[{"skill": s} | {"skill": s, "labels": [...]}]`` — so every
-    reader (Tier-0, SDK, internal endpoint, the editor's own prefill)
-    is untouched.
+    reader (Tier-0, the SDK, the internal endpoint) is untouched.
+
+    ACTIVE claims only: a switched-off app's pick is left out, because
+    this column is the compute gate (see :func:`inactive_consumers`).
+    The row stays in the table, so enabling the app brings the camera
+    back without the operator picking it again.
     """
-    rows = (
-        db.query(SkillAssignment)
-        .filter(SkillAssignment.camera_id == camera.id)
-        .order_by(SkillAssignment.skill)
-        .all()
-    )
+    # Two small queries; a caller projecting many cameras resolves the
+    # set once and passes it in rather than paying them per camera.
+    if inactive is None:
+        inactive = inactive_consumers(db)
+    rows = [
+        row for row in (
+            db.query(SkillAssignment)
+            .filter(SkillAssignment.camera_id == camera.id)
+            .order_by(SkillAssignment.skill)
+            .all()
+        )
+        if row.consumer not in inactive
+    ]
     merged: dict[str, Optional[set[str]]] = {}
     for row in rows:
         labels = _labels_of(row.params)
@@ -217,8 +270,9 @@ def sync_app_pick_labels(db: Session, app_id: str) -> int:
     if not changed:
         return 0
     db.flush()
+    inactive = inactive_consumers(db)
     for camera in db.query(Camera).filter(Camera.id.in_(cameras)).all():
-        project_camera(db, camera)
+        project_camera(db, camera, inactive)
     logger.info(
         "refreshed tier0 labels on %d camera pick(s) for app %s: %s",
         changed, app_id, ", ".join(labels) or "-",
@@ -494,6 +548,114 @@ def apps_using_camera(db: Session, camera_id: int) -> list[str]:
     return sorted({r[0][len(APP_CONSUMER_PREFIX):] for r in rows})
 
 
+def reconcile_projections(db: Session, *, commit: bool = True) -> int:
+    """Boot backstop: recompute the projection of every camera holding a
+    claim that buys no compute. Returns how many cameras were rewritten.
+
+    Nothing rewrites the column on its own. A deployment upgrading into
+    the rule that a switched-off app's pick is not projected would keep
+    the old projection — and go on paying for plate OCR nobody reads —
+    until somebody happened to edit a claim on that camera. Databases
+    bootstrapped by ``create_all`` skip migrations entirely, which is why
+    this is a boot backstop rather than one.
+
+    Idempotent and cheap: two small queries, and ``project_camera``
+    writes only when the value actually changes.
+    """
+    inactive = inactive_consumers(db)
+    if not inactive:
+        return 0
+    camera_ids = {
+        int(row[0]) for row in
+        db.query(SkillAssignment.camera_id)
+        .filter(SkillAssignment.consumer.in_(inactive))
+        .distinct().all()
+    }
+    if not camera_ids:
+        return 0
+    changed = 0
+    for camera in db.query(Camera).filter(Camera.id.in_(camera_ids)).all():
+        before = camera.assignments
+        project_camera(db, camera, inactive)
+        if camera.assignments != before:
+            changed += 1
+    if changed and commit:
+        db.commit()
+    if changed:
+        logger.info("reconciled %d camera projection(s) holding claims of "
+                    "switched-off apps", changed)
+    return changed
+
+
+def reproject_app_cameras(db: Session, app_id: str) -> int:
+    """Recompute the projection of every camera this app picked (no commit).
+
+    Switching an app on or off edits no claim row, so nothing would
+    otherwise recompute the column the compute gates read — the app
+    would go quiet while core carried on reading plates for it. Called
+    from both catalog routes; returns how many cameras were touched.
+    """
+    camera_ids = picked_camera_ids(db, app_id)
+    if not camera_ids:
+        return 0
+    inactive = inactive_consumers(db)
+    for camera in db.query(Camera).filter(Camera.id.in_(camera_ids)).all():
+        project_camera(db, camera, inactive)
+    return len(camera_ids)
+
+
+def claimed_skills_by_camera(db: Session, camera_ids: set[int]) -> dict[int, list[str]]:
+    """Every skill CLAIMED on each camera, live or not — one query.
+
+    The projection carries what is live; this says whether anything
+    asked at all. Tier-0's opt-in ``DETECT_SKIP_UNASSIGNED`` needs the
+    difference: an empty projection means "no restriction declared" to
+    it (so: analyze with the global labels), and without this a camera
+    whose only claim came from an app that was then switched off would
+    go from "skipped, nobody wants it" to "analyzed by default" — the
+    switch would cost MORE compute than leaving the app on.
+    """
+    if not camera_ids:
+        return {}
+    out: dict[int, set[str]] = {}
+    rows = (
+        db.query(SkillAssignment.camera_id, SkillAssignment.skill)
+        .filter(SkillAssignment.camera_id.in_(camera_ids))
+        .all()
+    )
+    for camera_id, skill in rows:
+        out.setdefault(int(camera_id), set()).add(str(skill))
+    return {cid: sorted(skills) for cid, skills in out.items()}
+
+
+def operator_assignments(db: Session, camera_id: int) -> list[dict[str, Any]]:
+    """The OPERATOR's own claims on this camera, in editor shape.
+
+    What the camera-settings form must prefill from. It used to prefill
+    from the projection, which also carries app picks — so opening a
+    camera an app had picked and pressing Save copied that app's skill
+    into an operator claim (``license_plate_recognition`` is a platform
+    task, so it is accepted there by design). The app's switch then
+    stopped working on that camera for ever, with nothing on screen to
+    say why.
+    """
+    rows = (
+        db.query(SkillAssignment)
+        .filter(SkillAssignment.camera_id == camera_id,
+                SkillAssignment.consumer == OPERATOR_CONSUMER)
+        .order_by(SkillAssignment.skill)
+        .all()
+    )
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        entry: dict[str, Any] = {"skill": row.skill}
+        labels = _labels_of(row.params)
+        if labels:
+            entry["labels"] = labels
+        out.append(entry)
+    return out
+
+
 def release_app_picks(db: Session, app_id: str) -> int:
     """Drop every pick an app holds and re-project those cameras (no
     commit). Uninstall calls this: nothing should keep running for an
@@ -508,8 +670,9 @@ def release_app_picks(db: Session, app_id: str) -> int:
         db.delete(row)
     db.flush()
     if camera_ids:
+        inactive = inactive_consumers(db)
         for camera in db.query(Camera).filter(Camera.id.in_(camera_ids)).all():
-            project_camera(db, camera)
+            project_camera(db, camera, inactive)
     if rows:
         logger.info("released %d camera pick(s) for app %s", len(rows), app_id)
     return len(rows)

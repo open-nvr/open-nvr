@@ -57,6 +57,14 @@ export const cameraService = {
   updateCamera: (cameraId: number, payload: any) => api.put(`/api/v1/cameras/${cameraId}`, payload),
   // Suggestions + live availability for the camera Assignments editor.
   getAssignableSkills: () => api.get('/api/v1/cameras/assignable-skills'),
+  // The OPERATOR's own claims on one camera — what the Assignments
+  // editor prefills from. NOT camera.assignments, which also carries
+  // the picks apps made in their own configuration: saving the form is
+  // a full replace of the operator's claims, so prefilling from the
+  // projection copied an app's skill into an operator claim and left
+  // that app's inference running after it was switched off.
+  getCameraAssignments: (cameraId: number) =>
+    api.get(`/api/v1/cameras/${cameraId}/assignments`),
   // Claims: which cameras a skill is pointed at. An app's camera pick is
   // one of these (consumer `app:<id>`), and a pick is what turns the app
   // ON for a camera — so these need the same permission as editing the

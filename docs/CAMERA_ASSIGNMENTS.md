@@ -112,6 +112,20 @@ The dialog's **Used by** line lists the apps this camera is selected for.
   from this section, or from being selected for ANPR, which stores that
   same name.
 
+**A switched-off app's cameras buy no compute.** Disabling an app in the
+catalog stops the platform work its selection turned on — plate OCR for
+ANPR, the extra Tier-0 classes another app asked for — within a few
+seconds, and enabling it puts them back. The selection itself is kept, so
+nothing has to be re-picked. A row you typed in this section is yours and
+survives: plate OCR asked for here keeps running whatever the ANPR app
+does, which is the point of being able to type it.
+
+This section edits **your** rows only. It used to be prefilled with the
+camera's full list, apps' selections included, so opening a camera and
+pressing Save quietly copied an app's skill into a row of your own — and
+that app's switch then stopped working on that camera, with nothing on
+screen to explain it.
+
 ## For app developers
 
 In code a selection is called a *pick* (`picked_cameras`,

@@ -169,6 +169,23 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         main_logger.error(f"Camera uuid backfill failed: {e}", exc_info=True)
 
+    # Camera skill projections: the column the compute gates read is
+    # recomputed only when a claim is written, so a deployment coming
+    # into the rule that a switched-off app's pick buys no compute would
+    # keep the old projection — and keep paying for the inference behind
+    # it — until someone edited a claim. Idempotent, and a no-op once
+    # everything agrees.
+    try:
+        db = SessionLocal()
+        try:
+            from services.skill_assignments import reconcile_projections
+
+            reconcile_projections(db)
+        finally:
+            db.close()
+    except Exception as e:
+        main_logger.error(f"Camera projection reconcile failed: {e}", exc_info=True)
+
     # Seed defaults (roles, permissions, admin user) and ensure admin user exists
     try:
         db = SessionLocal()

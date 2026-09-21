@@ -60,7 +60,7 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from core.config import settings  # noqa: E402
 from core.database import Base, get_db  # noqa: E402
-from models import Camera, Role, User  # noqa: E402
+from models import Camera, Role, SkillAssignment, User  # noqa: E402
 from routers import internal_camera_agent as internal_router  # noqa: E402
 
 
@@ -79,7 +79,12 @@ def client(monkeypatch):
         poolclass=StaticPool,
     )
     Base.metadata.create_all(
-        engine, tables=[Camera.__table__, User.__table__, Role.__table__]
+        # The roster reads the claims table too: it reports every skill
+        # CLAIMED on a camera, live or not, alongside the projection of
+        # the live ones.
+        engine,
+        tables=[Camera.__table__, User.__table__, Role.__table__,
+                SkillAssignment.__table__],
     )
     session_factory = sessionmaker(bind=engine)
     session = session_factory()

@@ -318,6 +318,47 @@ def test_registering_switches_an_app_on_but_never_switches_it_back_on(env):
     assert _register(tc, _site()).json()["enabled"] is False
 
 
+def test_disabling_an_app_stops_the_platform_compute_its_pick_turned_on(env):
+    """The app going quiet is half of it. An ANPR pick is stored under
+    ``license_plate_recognition`` — the platform skill — which is what
+    makes core read plates for that camera, and that gate reads the
+    camera's projection, not the app's state. So the catalog's switch
+    stopped at the app's door while core kept OCR-ing for nobody."""
+    tc, ids, SessionLocal = env
+    _register(tc, _site())
+    s = SessionLocal()
+    gate = s.get(Camera, ids["gate"])
+    assert "loitering_detection" in (
+        {e["skill"] for e in (gate.assignments or [])})
+    s.close()
+
+    assert tc.post("/apps/loitering-detection/disable").status_code == 200
+    s = SessionLocal()
+    gate = s.get(Camera, ids["gate"])
+    assert (gate.assignments or []) == []
+    # The pick survives, so enabling puts it back with no re-picking.
+    s.close()
+    assert tc.post("/apps/loitering-detection/enable").status_code == 200
+    s = SessionLocal()
+    gate = s.get(Camera, ids["gate"])
+    assert "loitering_detection" in {e["skill"] for e in (gate.assignments or [])}
+    s.close()
+
+
+def test_the_roster_says_what_is_claimed_as_well_as_what_is_live(env):
+    """Tier-0's opt-in skip mode has to tell "nobody wants this camera"
+    from "nothing declared" — an empty projection reads as the latter,
+    so switching an app off would put a skipped camera back into
+    detection and cost MORE compute than leaving it on."""
+    tc, ids, _ = env
+    _register(tc, _site())
+    assert tc.post("/apps/loitering-detection/disable").status_code == 200
+    cams = tc.get("/internal/camera-agent/cameras", headers=_site()).json()["cameras"]
+    gate = next(c for c in cams if int(c["open_nvr_camera_id"]) == ids["gate"])
+    assert gate["assignments"] == []
+    assert gate["skills_claimed"] == ["loitering_detection"]
+
+
 def test_pipeline_write_routes_refuse_app_keys(env):
     tc, ids, _ = env
     key = _register(tc, _site()).json()["api_key"]

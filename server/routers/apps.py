@@ -948,6 +948,16 @@ async def register_app(
     if created:
         allowed, _reason = may_enable(row)
         row.enabled = bool(allowed)
+        if row.enabled:
+            # Picks may already exist — a camera picked for this app
+            # before it first reached us (a restored database, a
+            # container rebuilt after its registry row was lost). They
+            # were not projected while no live app stood behind them, so
+            # project them now or the compute they turn on would wait for
+            # someone to touch a claim.
+            from services.skill_assignments import reproject_app_cameras
+
+            reproject_app_cameras(db, app_id)
     # A manifest that gains (or changes) ``tier0_labels`` must reach the
     # cameras picked BEFORE this version, or the upgrade silently changes
     # nothing until every camera is unpicked and re-picked.
@@ -1091,6 +1101,13 @@ async def enable_app(
         raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED,
                             detail=f"Cannot enable '{app_id}': {reason}")
     row.enabled = True
+    # The app's picks buy compute again: re-project the cameras it holds,
+    # or the platform inference its picks turn on (plate OCR, the Tier-0
+    # classes its manifest asks for) would stay off until something else
+    # happened to touch a claim row. See skill_assignments.project_camera.
+    from services.skill_assignments import reproject_app_cameras
+
+    reproject_app_cameras(db, app_id)
     db.commit()
     db.refresh(row)
 
@@ -1118,6 +1135,13 @@ async def disable_app(
     """
     row = _get_app_or_404(db, app_id)
     row.enabled = False
+    # A disabled app's picks buy nothing. Re-projecting here is what
+    # actually stops the work: the compute gates read the camera's
+    # projection, so until it is recomputed core would go on reading
+    # plates for an app that has been switched off.
+    from services.skill_assignments import reproject_app_cameras
+
+    reproject_app_cameras(db, app_id)
     db.commit()
     db.refresh(row)
 
