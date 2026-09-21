@@ -143,6 +143,10 @@ export const NAV_PERMISSIONS = {
   // Doorstep photographs of couriers, residents and strangers — the
   // same tier as the alert inbox that carries them.
   '/deliveries': 'alerts.view',
+  // Opening a barrier is an alarm-desk action, and the page shows the
+  // plate reads and refusals behind each decision — the alerts tier,
+  // like the other pages that let an operator act on what they see.
+  '/gates': 'alerts.view',
   '/playback': 'recordings.view',
   // Search answers with evidence photos and opens recordings — it is
   // the recordings workflow, and carries its tier.

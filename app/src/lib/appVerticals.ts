@@ -106,6 +106,16 @@ export const APP_VERTICALS: AppVertical[] = [
     legacy: (m) => (m.requires_tasks ?? []).includes('package_delivery'),
   },
   {
+    capability: 'gates',
+    to: '/gates',
+    // What every barrier is doing right now and the controls to open or
+    // hold one. Named for the thing an operator manages — "barrier
+    // control" is the mechanism, "gates" is what a guard at the kerb
+    // actually talks about. A control surface, not a report.
+    label: 'Gates',
+    legacy: (m) => (m.requires_tasks ?? []).includes('gate_control'),
+  },
+  {
     capability: 'people',
     to: '/people',
     // The face directory: who is enrolled, who the door just saw, and
