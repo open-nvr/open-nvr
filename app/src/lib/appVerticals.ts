@@ -116,6 +116,16 @@ export const APP_VERTICALS: AppVertical[] = [
     legacy: (m) => (m.requires_tasks ?? []).includes('gate_control'),
   },
   {
+    capability: 'notifications',
+    to: '/notifications',
+    // Whether alerts are actually reaching anyone: the channels and
+    // their health, the ordered routing rules, quiet hours and pauses,
+    // and the reason any alert was held back. Named for the thing an
+    // operator manages — "alert delivery" is the mechanism,
+    // "notifications" is what they call the message on their phone.
+    label: 'Notifications',
+  },
+  {
     capability: 'people',
     to: '/people',
     // The face directory: who is enrolled, who the door just saw, and

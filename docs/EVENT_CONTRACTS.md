@@ -233,13 +233,32 @@ The existing wire shape (`opennvr_app_sdk/alerts.py::Alert.to_wire`:
 payload — it already satisfies the envelope's spirit and every
 first-party app publishes it.
 
-Transition note: apps publish today on
-`opennvr.alerts.{source.kind}.{source.name}.{camera_id}`. That tree
-remains supported as the *plumbing* address (subscribers filtering by
-which app fired, e.g. the alerts-subscriber example). The SDK
-dispatcher dual-publishes to the domain subject so consumers that
-only care "an alert fired on this camera" stop encoding app names in
-subscriptions. New consumers use the domain subject.
+**Not yet published. Consumers must subscribe to the plumbing tree.**
+Apps publish on `opennvr.alerts.{source.kind}.{source.name}.{camera_id}`
+and nowhere else: `AlertDispatcher.fire` fans out over its channels, and
+`NatsAlertChannel.send` publishes `alert_subject()`, which builds that
+subject alone. Nothing in the platform has ever published on
+`opennvr.events.alert.fired.v1.*`.
+
+An earlier revision of this note claimed the SDK dispatcher
+dual-publishes to the domain subject. It does not, and the claim cost
+real behaviour: `alert-notifier` 1.0 was written against it, subscribed
+to the domain tree, installed cleanly, reported healthy, and delivered
+zero notifications for its entire life. A subscriber on
+`opennvr.events.alert.fired.v1.>` receives nothing today.
+
+So: **subscribe to `opennvr.alerts.>`** (or a narrower slice of it) and
+tolerate both envelope shapes, as `examples/alert-notifier` does — the
+plumbing tree carries the bare `Alert.to_wire` dict, and a future domain
+publisher would wrap that same dict as `payload`. The wire shape above
+is settled; only the address is pending.
+
+Making the domain subject real needs two changes together, which is why
+it has not happened by accident: the dispatcher must dual-publish, AND
+per-app NATS permissions must grant it. `nats_users.app_permissions`
+allows `opennvr.events.>` only to apps whose manifest declares
+`provides`, so an app that fires alerts without providing a vertical
+would be denied on every publish.
 
 ### `access.decided.v1`
 

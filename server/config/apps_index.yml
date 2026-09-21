@@ -351,19 +351,29 @@
 
 - id: alert-notifier
   name: Alert Notifier
-  summary: "The guard's phone: pushes alerts at/above a severity bar to Telegram and/or any webhook (SMS gateways, Slack, sirens) — one alarm, one push, flood-safe."
+  summary: "The guard's phone: alerts on ntfy, Telegram, Pushover, Discord, Slack, Teams, Gotify, Matrix, email or any webhook — routed by ordered rules, collapsed per burst, quiet-hours aware, and checked so a revoked token is found in daylight."
   category: notifications
-  version: "1.0.0"
+  version: "2.0.0"
   image: ghcr.io/open-nvr/alert-notifier:latest
   build_context: examples/alert-notifier
   # No inference and no adapters — bus in, push out.
   requires_tasks: []
-  emits: []
+  emits: [notification_channel_failing, notification_channel_recovered]
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/alert-notifier/README.md
   author: OpenNVR
   contact: https://github.com/open-nvr/open-nvr/issues
   source: https://github.com/open-nvr/open-nvr/tree/main/examples/alert-notifier
-  network_egress: ["api.telegram.org", "the webhook URL the operator configures"]
+  # The public services' own hosts. A self-hosted ntfy or Gotify, a
+  # Matrix homeserver, an SMTP server or a webhook target is a host only
+  # the operator knows, so those are added per-install from the catalog.
+  # SMTP cannot go through the egress proxy at all (it speaks HTTP
+  # CONNECT) — see examples/alert-notifier/CHANNELS.md → "Getting out".
+  network_egress:
+    - ntfy.sh
+    - api.telegram.org
+    - api.pushover.net
+    - discord.com
+    - hooks.slack.com
   install:
     compose: |
       # INFORMATIONAL — this service already ships in

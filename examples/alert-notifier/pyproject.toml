@@ -1,7 +1,7 @@
 [project]
 name = "opennvr-example-alert-notifier"
-version = "1.0.0"
-description = "OpenNVR alert-notifier example app — pushes contracted alerts to Telegram and webhooks"
+version = "2.0.0"
+description = "OpenNVR alert-notifier example app — routes, groups and delivers alerts to ten channels"
 requires-python = ">=3.11"
 license = { text = "AGPL-3.0" }
 

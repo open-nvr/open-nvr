@@ -18,7 +18,7 @@
 
 import { Outlet, NavLink, Link, useLocation } from 'react-router-dom'
 import { DeviceBlockedOverlay } from '../components/DeviceBlockedOverlay'
-import { AlertTriangle, Bell, Boxes, Brain, Briefcase, Camera, Car, ChevronDown, Cloud, Cpu, Database, DoorOpen, FileCheck, FileSearch, GitCommitHorizontal, Hourglass, KeyRound, Layers, LifeBuoy, LogOut, Maximize, Menu, Minimize, Monitor, MonitorPlay, Moon, Network, PackageCheck, Plug, RefreshCcw, Search as SearchIcon, Settings as SettingsIcon, Shield, ShieldAlert, ShieldCheck, Sun, User as UserIcon, UserRound, Users } from 'lucide-react'
+import { AlertTriangle, Bell, BellRing, Boxes, Brain, Briefcase, Camera, Car, ChevronDown, Cloud, Cpu, Database, DoorOpen, FileCheck, FileSearch, GitCommitHorizontal, Hourglass, KeyRound, Layers, LifeBuoy, LogOut, Maximize, Menu, Minimize, Monitor, MonitorPlay, Moon, Network, PackageCheck, Plug, RefreshCcw, Search as SearchIcon, Settings as SettingsIcon, Shield, ShieldAlert, ShieldCheck, Sun, User as UserIcon, UserRound, Users } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import { apiService } from '../lib/apiService'
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
@@ -202,6 +202,9 @@ export function AppShell() {
     // lucide has no barrier/boom-gate glyph; DoorOpen is the nearest
     // thing that reads as "a way through that opens".
     '/gates': <DoorOpen size={16} />,
+    // Bell is already the alert inbox in the nav above; BellRing is the
+    // one that reads as "it actually went off on someone's phone".
+    '/notifications': <BellRing size={16} />,
   }
   const enabledRoutes = enabledVerticals.map((v) => v.to).join(',')
 
