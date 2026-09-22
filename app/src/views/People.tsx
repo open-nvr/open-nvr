@@ -30,10 +30,11 @@
 // A stranger on the wall becomes "Priya, contractor, until Friday" in
 // one dialog, no photo to go and find.
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  Camera, Clock, ImagePlus, Pencil, RefreshCw, Search, ShieldAlert, Trash2, Upload, UserPlus, UserRound, Users,
+  Camera, Check, Clock, ImagePlus, Pencil, RefreshCw, RotateCcw, ScanFace, Search,
+  ShieldAlert, SkipForward, Trash2, Upload, UserPlus, UserRound, Users, VideoOff,
 } from 'lucide-react'
 import { apiService } from '../lib/apiService'
 import { extractApiError } from '../lib/apiError'
@@ -126,6 +127,147 @@ function blobToBase64(blob: Blob): Promise<string> {
     reader.onerror = () => reject(new Error('Could not read the image.'))
     reader.readAsDataURL(blob)
   })
+}
+
+/* ------------------- Guided capture, this device ------------------- */
+
+// Why a pose sequence rather than one photo.
+//
+// The adapter matches a face against the best of a person's samples, so
+// what limits recognition at a real door is not the quality of one
+// portrait but how little of the person it covers. A single front-on
+// shot is the pose a door camera almost never gets: people arrive at an
+// angle, look at the lock, glance down at a parcel. Enrol four views in
+// one sitting and the same person walking up to the porch matches on
+// whichever one their head happens to resemble.
+//
+// Four is a deliberate stopping point. Each pose is another action call
+// and another wait, and past roughly four the returns come from
+// DIFFERENT LIGHT rather than different angles — which this dialog
+// cannot give, because the light here is the light at the operator's
+// desk. That is what the strangers wall and "Add a photo" are for: the
+// samples that matter most are the ones the door camera takes itself.
+const CAPTURE_POSES = [
+  { key: 'front', label: 'Look straight at the camera', hint: 'Whole face in frame, eyes level.' },
+  { key: 'left', label: 'Turn your head slightly left', hint: 'About a quarter turn — both eyes still visible.' },
+  { key: 'right', label: 'Turn your head slightly right', hint: 'The same again, the other way.' },
+  { key: 'up', label: 'Lift your chin a little', hint: 'The angle a camera above the door sees.' },
+] as const
+
+type Shot = { key: string; label: string; b64: string | null; skipped: boolean }
+
+const freshShots = (): Shot[] =>
+  CAPTURE_POSES.map((p) => ({ key: p.key, label: p.label, b64: null, skipped: false }))
+
+/** The current video frame as base64 JPEG, downscaled. */
+function grabFrame(video: HTMLVideoElement, maxEdge = 1280): string | null {
+  const w = video.videoWidth
+  const h = video.videoHeight
+  // A stream that has not produced a frame yet reports 0x0, and drawing
+  // it yields a blank canvas that passes every check we could make here
+  // and fails at the adapter as "no face found".
+  if (!w || !h) return null
+  const scale = Math.min(1, maxEdge / Math.max(w, h))
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.round(w * scale)
+  canvas.height = Math.round(h * scale)
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return null
+  // Deliberately NOT mirrored. The preview below is flipped in CSS,
+  // because looking at an unmirrored image of yourself makes it oddly
+  // hard to follow "turn left" — but the frame captured here is the
+  // true one. Face embeddings are not mirror-invariant, so enrolling
+  // flipped samples and then matching the door camera's unflipped
+  // footage against them would cost accuracy for the sake of a preview.
+  // CSS transforms do not affect drawImage, so this needs no undoing;
+  // it needs only to not be "helpfully" flipped to match the preview.
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+  const url = canvas.toDataURL('image/jpeg', 0.92)
+  return url.includes(',') ? url.split(',', 2)[1] : null
+}
+
+/** getUserMedia, with its failures told apart. */
+function useDeviceCamera() {
+  const videoRef = useRef<HTMLVideoElement | null>(null)
+  const streamRef = useRef<MediaStream | null>(null)
+  const [live, setLive] = useState(false)
+  const [starting, setStarting] = useState(false)
+  const [problem, setProblem] = useState<string | null>(null)
+  const [devices, setDevices] = useState<{ id: string; label: string }[]>([])
+  const [deviceId, setDeviceId] = useState<string>('')
+
+  const stop = useCallback(() => {
+    // Every track, explicitly. Dropping the reference is not enough:
+    // the camera stays on and the indicator light stays lit, which
+    // reads as the NVR quietly watching the operator.
+    streamRef.current?.getTracks().forEach((t) => t.stop())
+    streamRef.current = null
+    if (videoRef.current) videoRef.current.srcObject = null
+    setLive(false)
+  }, [])
+
+  const start = useCallback(async (id?: string) => {
+    setProblem(null)
+    // No mediaDevices at all means an insecure context in every current
+    // browser — http:// on a LAN IP. OpenNVR's own nginx terminates TLS,
+    // so the supported setup has this; a reverse proxy in front of it on
+    // plain http does not, and the operator needs telling which it is
+    // rather than a button that does nothing.
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setProblem(
+        window.isSecureContext === false
+          ? 'Your browser only allows camera access on a secure page. This tab is on plain http — reach OpenNVR over https (its own nginx serves TLS) and this will work.'
+          : 'This browser does not expose a camera to web pages.')
+      return
+    }
+    setStarting(true)
+    try {
+      stop()
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: id
+          ? { deviceId: { exact: id }, width: { ideal: 1280 }, height: { ideal: 720 } }
+          : { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false,
+      })
+      streamRef.current = stream
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream
+        await videoRef.current.play().catch(() => undefined)
+      }
+      setLive(true)
+      // Labels are blank until permission has been granted once, so
+      // enumerate AFTER getUserMedia or the picker reads "camera 1".
+      try {
+        const all = await navigator.mediaDevices.enumerateDevices()
+        const cams = all
+          .filter((d) => d.kind === 'videoinput')
+          .map((d, i) => ({ id: d.deviceId, label: d.label || `Camera ${i + 1}` }))
+        setDevices(cams)
+        const active = stream.getVideoTracks()[0]?.getSettings().deviceId
+        if (active) setDeviceId(active)
+      } catch {
+        // A picker we cannot build is not a reason to lose the stream.
+      }
+    } catch (e) {
+      const name = (e as { name?: string } | null)?.name ?? ''
+      setProblem(
+        name === 'NotAllowedError' || name === 'SecurityError'
+          ? 'Camera access was blocked. Allow it for this site in your browser, then try again.'
+          : name === 'NotFoundError' || name === 'OverconstrainedError'
+            ? 'No camera on this device. Upload a photo, or take one from a door camera instead.'
+            : name === 'NotReadableError'
+              ? 'The camera is busy — another app (a video call?) has it open.'
+              : 'Could not start the camera on this device.')
+      stop()
+    } finally {
+      setStarting(false)
+    }
+  }, [stop])
+
+  // Releasing the camera when the dialog closes is not optional.
+  useEffect(() => stop, [stop])
+
+  return { videoRef, live, starting, problem, devices, deviceId, start, stop }
 }
 
 /* ----------------------------- Page ----------------------------- */
@@ -532,6 +674,108 @@ function Stat({ icon, value, label, tone }: { icon: React.ReactNode; value: Reac
   )
 }
 
+/** The pose prompt, the strip of what has been taken, and the controls.
+ *  The live video itself lives in the dialog's main preview square. */
+function DeviceCapture({
+  cam, shots, poseIdx, onCapture, onRetake, onSkip, onPick,
+}: {
+  cam: ReturnType<typeof useDeviceCamera>
+  shots: Shot[]
+  poseIdx: number
+  onCapture: () => void
+  onRetake: (idx: number) => void
+  onSkip: () => void
+  onPick: (idx: number) => void
+}) {
+  const pose = CAPTURE_POSES[poseIdx]
+  const done = shots.filter((s) => s.b64).length
+  const current = shots[poseIdx]
+
+  if (cam.problem) {
+    return (
+      <div className="space-y-2">
+        <p className="text-[11px] text-[var(--danger)]">{cam.problem}</p>
+        <Button size="sm" variant="outline" className="w-full" onClick={() => void cam.start()}>
+          <RotateCcw size={14} /> Try again
+        </Button>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-2">
+      {/* What to do now. The count is the honest one — poses with a
+          photo on file, not poses stepped past. */}
+      <div className="rounded border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1.5">
+        <div className="flex items-baseline justify-between gap-2">
+          <span className="text-xs font-medium flex items-center gap-1">
+            <ScanFace size={13} /> {pose.label}
+          </span>
+          <span className="text-[10px] text-[var(--text-dim)]">{done}/{CAPTURE_POSES.length}</span>
+        </div>
+        <p className="text-[11px] text-[var(--text-dim)]">{pose.hint}</p>
+      </div>
+
+      {/* Every pose, so a bad one can be redone without starting over. */}
+      <div className="flex gap-1">
+        {shots.map((s, i) => (
+          <button
+            key={s.key}
+            type="button"
+            title={s.b64 ? `${s.label} — click to retake` : s.skipped ? `${s.label} — skipped` : s.label}
+            onClick={() => (s.b64 ? onRetake(i) : onPick(i))}
+            className={`relative flex-1 aspect-square rounded border overflow-hidden ${
+              i === poseIdx ? 'border-[var(--accent)]' : 'border-[var(--border)]'
+            } ${s.b64 ? '' : 'bg-[var(--bg-2)]'}`}
+          >
+            {s.b64 ? (
+              <>
+                <img src={`data:image/jpeg;base64,${s.b64}`} alt={s.label} className="w-full h-full object-cover" />
+                <Check size={10} className="absolute bottom-0.5 right-0.5 text-[var(--success,#3fb950)]" />
+              </>
+            ) : (
+              <span className="text-[10px] text-[var(--text-dim)] grid place-items-center w-full h-full">
+                {s.skipped ? '—' : i + 1}
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {cam.devices.length > 1 && (
+        <select
+          className="w-full px-2 py-1 text-xs rounded border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
+          value={cam.deviceId}
+          onChange={(e) => void cam.start(e.target.value)}
+        >
+          {cam.devices.map((d) => <option key={d.id} value={d.id}>{d.label}</option>)}
+        </select>
+      )}
+
+      <div className="flex gap-1">
+        <Button size="sm" variant="primary" className="flex-1" disabled={!cam.live} onClick={onCapture}>
+          <Camera size={14} /> {current?.b64 ? 'Retake' : 'Capture'}
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          title="Skip this pose — the rest are still worth having"
+          disabled={poseIdx >= CAPTURE_POSES.length - 1}
+          onClick={onSkip}
+        >
+          <SkipForward size={14} />
+        </Button>
+      </div>
+
+      <p className="text-[11px] text-[var(--text-dim)]">
+        Four angles, because a door camera rarely gets a front-on face. Any
+        one of them is enough to enrol with — the rest make a match at the
+        door more likely. Nothing is sent anywhere until you press Enrol.
+      </p>
+    </div>
+  )
+}
+
 function Chip({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
   return (
     <button
@@ -674,9 +918,15 @@ function PersonEditor({ appId, categories, cameras, initial, onClose, onSaved }:
   // metadata-only edit, and the stranger flow brings its own crop.
   const [photoB64, setPhotoB64] = useState<string | null>(null)
   const [preview, setPreview] = useState<string | null>(initial.mode === 'stranger' ? initial.stranger.image : editing?.thumbnail ?? null)
-  const [photoSource, setPhotoSource] = useState<'upload' | 'camera'>('upload')
+  const [photoSource, setPhotoSource] = useState<'upload' | 'camera' | 'device'>('upload')
   const [cameraId, setCameraId] = useState<number | ''>(cameras[0]?.id ?? '')
   const [snapping, setSnapping] = useState(false)
+  // Guided capture off the operator's own webcam. `shots` is the whole
+  // sequence; `poseIdx` is where they are in it.
+  const cam = useDeviceCamera()
+  const [shots, setShots] = useState<Shot[]>(freshShots)
+  const [poseIdx, setPoseIdx] = useState(0)
+  const captured = shots.filter((s) => s.b64)
   const [err, setErr] = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement | null>(null)
 
@@ -699,6 +949,40 @@ function PersonEditor({ appId, categories, cameras, initial, onClose, onSaved }:
     }
   }
 
+  // Switching away from the device releases the camera; the shots taken
+  // so far are kept, so flipping to Upload to check something and back
+  // does not throw the sequence away.
+  const pickSource = (next: 'upload' | 'camera' | 'device') => {
+    setErr(null)
+    setPhotoSource(next)
+    if (next === 'device') void cam.start(cam.deviceId || undefined)
+    else cam.stop()
+  }
+
+  const capturePose = () => {
+    const video = cam.videoRef.current
+    if (!video) return
+    const b64 = grabFrame(video)
+    if (!b64) return setErr('The camera has not sent a frame yet — give it a second.')
+    setErr(null)
+    setShots((prev) => prev.map((s, i) => (i === poseIdx ? { ...s, b64, skipped: false } : s)))
+    // The preview follows the last capture, so the operator sees what
+    // they just took rather than a live feed they cannot judge.
+    setPreview(`data:image/jpeg;base64,${b64}`)
+    setPhotoB64(b64)
+    setPoseIdx((i) => Math.min(i + 1, CAPTURE_POSES.length - 1))
+  }
+
+  const retakePose = (idx: number) => {
+    setPoseIdx(idx)
+    setShots((prev) => prev.map((s, i) => (i === idx ? { ...s, b64: null, skipped: false } : s)))
+  }
+
+  const skipPose = () => {
+    setShots((prev) => prev.map((s, i) => (i === poseIdx ? { ...s, skipped: true } : s)))
+    setPoseIdx((i) => Math.min(i + 1, CAPTURE_POSES.length - 1))
+  }
+
   const snap = async () => {
     if (cameraId === '') return
     setSnapping(true); setErr(null)
@@ -714,6 +998,73 @@ function PersonEditor({ appId, categories, cameras, initial, onClose, onSaved }:
     }
   }
 
+  /** Enrol a captured sequence as one person.
+   *
+   *  Sequential, and it has to be: a new person's id is derived from
+   *  their name by the app (not by us — the slug rules live in Python),
+   *  so it is only knowable from the first call's response, and every
+   *  later pose appends against it. Firing these in parallel would
+   *  either race to create four people or append to an id we guessed.
+   *
+   *  Partial failure is reported, not hidden and not rolled back. Three
+   *  of four poses on file is a usable person and deleting them to
+   *  "undo" would be worse than saying so; the count tells the operator
+   *  whether to top them up from "Add a photo". */
+  const enrolSet = async (images: string[], trimmed: string): Promise<string> => {
+    const existing = initial.mode === 'add-photo' || initial.mode === 'edit'
+      ? initial.person : null
+
+    if (initial.mode === 'edit') {
+      await apiService.invokeAppAction(appId, 'update_face', {
+        person_id: initial.person.person_id, name: trimmed, category, notes, valid_until: validUntil,
+      })
+    }
+
+    // The first pose: creates a new person, or replaces / appends to an
+    // existing one exactly as the single-photo path would.
+    const firstAppends = existing ? !replace : false
+    const { data } = await apiService.invokeAppAction(appId, 'enroll_face', {
+      person_id: existing?.person_id ?? '',
+      image: images[0],
+      append: firstAppends,
+      name: existing ? (replace ? trimmed : '') : trimmed,
+      category: existing ? (replace ? category : '') : category,
+      notes: existing && !replace ? '' : notes,
+      valid_until: existing && !replace ? '' : validUntil,
+    })
+
+    const personId = String(
+      (data as { enrolled?: { person_id?: string } } | undefined)?.enrolled?.person_id
+      ?? existing?.person_id ?? '')
+    let landed = 1
+
+    // Without an id there is nothing to append to. One pose is enrolled
+    // and saying "4 poses" would be a lie.
+    if (personId) {
+      for (const image of images.slice(1)) {
+        try {
+          await apiService.invokeAppAction(appId, 'enroll_face', {
+            person_id: personId, image, append: true, name: '', category: '',
+            notes: '', valid_until: '',
+          })
+          landed += 1
+        } catch {
+          // Keep going: a rejected pose is usually "no face found" in
+          // that one frame, and the remaining angles are still worth
+          // having.
+        }
+      }
+    }
+
+    const who = trimmed || existing?.name || 'them'
+    if (landed === images.length) {
+      return existing && !replace
+        ? `Added ${landed} photos to ${who}`
+        : `Enrolled ${who} from ${landed} angles`
+    }
+    return `${existing && !replace ? 'Added' : 'Enrolled'} ${who} — ${landed} of ${images.length} poses were accepted. Top them up from “Add a photo”.`
+  }
+
   const save = useMutation({
     mutationFn: async () => {
       const trimmed = name.trim()
@@ -725,8 +1076,14 @@ function PersonEditor({ appId, categories, cameras, initial, onClose, onSaved }:
         })
         return `Enrolled ${trimmed} from the door snapshot`
       }
+      // A guided sequence goes in as a set. One lone capture falls
+      // through to the single-photo paths below, which already do the
+      // right thing with it.
+      if (photoSource === 'device' && captured.length > 1) {
+        return await enrolSet(captured.map((s) => s.b64 as string), trimmed)
+      }
       if (initial.mode === 'add-photo') {
-        if (!photoB64) throw new Error('Add a photo — upload one or take it from a camera.')
+        if (!photoB64) throw new Error('Add a photo — upload one, take one on this device, or snap it from a door camera.')
         await apiService.invokeAppAction(appId, 'enroll_face', {
           person_id: initial.person.person_id, image: photoB64, append: !replace,
           name: replace ? trimmed : '', category: replace ? category : '',
@@ -739,7 +1096,7 @@ function PersonEditor({ appId, categories, cameras, initial, onClose, onSaved }:
         })
         return `Updated ${trimmed}`
       }
-      if (!photoB64) throw new Error('Add a photo — upload one or take it from a camera.')
+      if (!photoB64) throw new Error('Add a photo — upload one, take one on this device, or snap it from a door camera.')
       if (initial.mode === 'edit') {
         await apiService.invokeAppAction(appId, 'update_face', {
           person_id: initial.person.person_id, name: trimmed, category, notes, valid_until: validUntil,
@@ -785,8 +1142,34 @@ function PersonEditor({ appId, categories, cameras, initial, onClose, onSaved }:
       <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
         {/* ── Photo ── */}
         <div className="md:col-span-2 space-y-2">
-          <div className="aspect-square w-full rounded border border-[var(--border)] bg-black overflow-hidden grid place-items-center">
-            {preview ? (
+          <div className="relative aspect-square w-full rounded border border-[var(--border)] bg-black overflow-hidden grid place-items-center">
+            {/* The video element is mounted for the whole life of the
+                dialog in device mode rather than swapped in and out:
+                remounting it drops srcObject and the stream has to be
+                re-acquired, which re-prompts on some browsers. It is
+                hidden behind the still while a pose is being reviewed. */}
+            {photoSource === 'device' && (
+              <video
+                ref={cam.videoRef}
+                playsInline
+                muted
+                autoPlay
+                aria-label="Live view from this device's camera"
+                /* Mirrored for the operator only — grabFrame captures the
+                   true, unflipped frame. See its comment. */
+                className={`absolute inset-0 w-full h-full object-cover -scale-x-100 ${
+                  cam.live ? '' : 'opacity-0'}`}
+              />
+            )}
+            {photoSource === 'device' ? (
+              !cam.live && (
+                <span className="relative text-xs text-[var(--text-dim)] px-4 text-center">
+                  {cam.starting ? 'Starting the camera…'
+                    : cam.problem ? <VideoOff size={18} className="mx-auto mb-1" />
+                      : 'Camera off'}
+                </span>
+              )
+            ) : preview ? (
               <img src={preview} alt="face" className="w-full h-full object-cover" />
             ) : (
               <span className="text-xs text-[var(--text-dim)] px-4 text-center">No photo yet</span>
@@ -794,11 +1177,22 @@ function PersonEditor({ appId, categories, cameras, initial, onClose, onSaved }:
           </div>
           {initial.mode !== 'stranger' && (
             <>
-              <div className="flex gap-1">
-                <Chip active={photoSource === 'upload'} onClick={() => setPhotoSource('upload')}>Upload</Chip>
-                <Chip active={photoSource === 'camera'} onClick={() => setPhotoSource('camera')}>From a camera</Chip>
+              <div className="flex flex-wrap gap-1">
+                <Chip active={photoSource === 'upload'} onClick={() => pickSource('upload')}>Upload</Chip>
+                <Chip active={photoSource === 'camera'} onClick={() => pickSource('camera')}>A door camera</Chip>
+                <Chip active={photoSource === 'device'} onClick={() => pickSource('device')}>This device</Chip>
               </div>
-              {photoSource === 'upload' ? (
+              {photoSource === 'device' ? (
+                <DeviceCapture
+                  cam={cam}
+                  shots={shots}
+                  poseIdx={poseIdx}
+                  onCapture={capturePose}
+                  onRetake={retakePose}
+                  onSkip={skipPose}
+                  onPick={(idx) => setPoseIdx(idx)}
+                />
+              ) : photoSource === 'upload' ? (
                 <>
                   <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={(e) => onFile(e.target.files?.[0])} />
                   <Button size="sm" variant="outline" className="w-full" onClick={() => fileRef.current?.click()}>
