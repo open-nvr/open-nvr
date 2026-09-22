@@ -415,6 +415,19 @@ async def ingest_track_event(
                      settings.events_caption_enrichment,
                      camera_skills(camera)):
         background.add_task(enrich_event_caption, row.id)
+
+    # And what the box's OWN skills can claim about it — colour, vehicle
+    # type. Plan-driven rather than hardcoded: it runs what KAI-C reports
+    # registered and healthy, so a site with no VLM pays nothing and
+    # loses nothing it had. Same three gates, same background shape.
+    from services.descriptor_enrichment import (
+        enrich_event_descriptors, wants_descriptors,
+    )
+
+    if wants_descriptors(row.label, evidence_rel,
+                         settings.events_descriptor_enrichment,
+                         camera_skills(camera)):
+        background.add_task(enrich_event_descriptors, row.id)
     # Read the id BEFORE releasing: record_track_visit committed, which
     # expires every attribute, so a post-close row.id would try to refresh a
     # detached instance.
@@ -633,61 +646,12 @@ async def ingest_event_descriptors(
     if row is None:
         raise HTTPException(status_code=404, detail="unknown event")
 
-    written = 0
-    for d in payload.descriptors:
-        kind = (d.kind or "").strip().lower()[:40]
-        value = (d.value or "").strip().lower()[:120]
-        if not kind or not value:
-            continue
-        task = (d.source_task or "")[:40] or None
-        existing = (
-            db.query(VisitDescriptor)
-            .filter(
-                VisitDescriptor.event_id == row.id,
-                VisitDescriptor.kind == kind,
-                VisitDescriptor.source_task.is_(task) if task is None
-                else VisitDescriptor.source_task == task,
-            )
-            .one_or_none()
-        )
-        if existing is None:
-            # Another TASK may already have claimed this kind. That is a
-            # disagreement between skills, not a duplicate to overwrite,
-            # and counting it is the only way a skill quietly going wrong
-            # shows up before somebody acts on its answer.
-            other = (
-                db.query(VisitDescriptor)
-                .filter(
-                    VisitDescriptor.event_id == row.id,
-                    VisitDescriptor.kind == kind,
-                    VisitDescriptor.value != value,
-                )
-                .first()
-            )
-            if other is not None:
-                metrics.DESCRIPTOR_CONFLICTS.inc({"kind": kind})
-            existing = VisitDescriptor(event_id=row.id, kind=kind, source_task=task)
-            db.add(existing)
-        existing.value = value
-        existing.confidence = (
-            None if d.confidence is None else max(0.0, min(1.0, float(d.confidence)))
-        )
-        existing.source_adapter = (d.source_adapter or "")[:60] or None
-        existing.model_fingerprint = (d.model_fingerprint or "")[:120] or None
-        written += 1
-        # Attribution: which KAI-C skill is actually contributing claims.
-        metrics.DESCRIPTORS_WRITTEN.inc({
-            "kind": kind, "task": task or "unknown",
-            "adapter": existing.source_adapter or "unknown",
-        })
+    # One implementation, shared with core's own plan-driven enricher —
+    # see services/descriptor_store for why the upsert key, the conflict
+    # count and the ran_tasks rule must not exist twice.
+    from services.descriptor_store import apply_descriptors
 
-    if payload.ran_tasks:
-        # "Looked and found nothing" belongs on the row, not in a log:
-        # the next reader has no other way to tell it from "never looked".
-        seen = dict(row.payload or {})
-        ran = sorted({*(seen.get("enriched_by") or []), *[str(t)[:40] for t in payload.ran_tasks]})
-        seen["enriched_by"] = ran
-        row.payload = seen
+    written = apply_descriptors(db, row, payload.descriptors, payload.ran_tasks)
     db.commit()
     return {"ok": True, "written": written,
             "enriched_by": (row.payload or {}).get("enriched_by", [])}
