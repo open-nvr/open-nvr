@@ -45,8 +45,8 @@ type Camera = { id: number; name: string }
 // final say: it refuses any scope not in its list or not held by the creator.
 const SCOPES = [
   'cameras.view', 'live.view', 'recordings.view', 'alerts.view', 'settings.view',
-  'alerts.manage', 'ptz.control', 'cameras.manage', 'events.create', 'apps.actions',
-  'recordings.pause', 'settings.manage',
+  'alerts.manage', 'ptz.control', 'cameras.manage', 'events.create', 'apps.view',
+  'apps.actions', 'recordings.pause', 'settings.manage',
 ] as const
 
 // What a Home Assistant install needs for cameras, sensors and notifications.
