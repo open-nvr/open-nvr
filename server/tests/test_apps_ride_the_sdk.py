@@ -234,3 +234,69 @@ def test_every_dockerfile_copies_the_modules_its_app_imports():
         "from the source tree. Copy the modules by glob "
         "(COPY examples/<app>/*.py ./) rather than by name."
     )
+
+
+# ── every app image is actually built by CI ──────────────────────────
+#
+# The companion to the rule above. A Dockerfile that has fallen behind
+# its app only fails when something BUILDS it, and the workflow that
+# does lists its apps in a matrix — another enumerated list that can
+# drift. guard-scan-compliance was missing from it, so that image was
+# never built on any PR; its Dockerfile happened to be fine, which is
+# luck rather than coverage.
+
+SMOKE_WORKFLOW = REPO_ROOT / ".github/workflows/app-images-smoke.yml"
+
+
+def _smoke_matrix_apps() -> set[str]:
+    """App names the image-smoke workflow builds.
+
+    Parsed with a regex rather than a YAML load: the file is a GitHub
+    Actions workflow full of ``${{ }}`` expressions, and this should not
+    need a yaml dependency to read two lists out of it. camera-agent has
+    a job of its own rather than a matrix row.
+    """
+    import re
+
+    text = SMOKE_WORKFLOW.read_text(encoding="utf-8")
+    apps = set(re.findall(r"\{\s*app:\s*([A-Za-z0-9._-]+)", text))
+    if re.search(r"^\s{2}camera-agent:\s*$", text, re.MULTILINE):
+        apps.add("camera-agent")
+    return apps
+
+
+def test_the_image_smoke_builds_every_app_that_has_a_dockerfile():
+    built = _smoke_matrix_apps()
+    missing = sorted(
+        app.name for app in _app_dirs()
+        if (app / "Dockerfile").is_file() and app.name not in built
+    )
+    assert not missing, (
+        f"{missing} ship a Dockerfile that no CI job ever builds, so a "
+        "Dockerfile that falls behind its app is found by whoever runs "
+        "the image next. Add a matrix row to "
+        ".github/workflows/app-images-smoke.yml."
+    )
+
+
+def test_the_smoke_matrix_has_no_stale_rows():
+    # A renamed or deleted app must not leave a row that builds nothing
+    # and passes, which reads on the PR exactly like coverage.
+    existing = {p.name for p in EXAMPLES.iterdir() if p.is_dir()}
+    stale = sorted(app for app in _smoke_matrix_apps() if app not in existing)
+    assert not stale, (
+        f"{stale} appear in the image-smoke matrix but examples/<name> "
+        "does not exist")
+
+
+def test_the_weights_images_are_not_expected_in_the_app_matrix():
+    # They have Dockerfiles but are not apps — EXCLUDED above says so,
+    # and each has its own build workflow. This pins the reason, so
+    # nobody "fixes" the matrix by adding them.
+    built = _smoke_matrix_apps()
+    for name in sorted(EXCLUDED):
+        assert (EXAMPLES / name / "Dockerfile").is_file(), (
+            f"{name} is EXCLUDED as a weights image but has no Dockerfile")
+        assert name not in built, (
+            f"{name} is a weights image, not an app — it is built by its "
+            "own workflow, not the app-image smoke")
