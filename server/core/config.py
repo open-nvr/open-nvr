@@ -401,6 +401,13 @@ class Settings(BaseSettings):
     # PR-C: OCR the best frame of vehicle visits (fast_plate_ocr via KAI-C)
     # and store plate_text on the event row. Best-effort; off = rows only.
     events_plate_enrichment: bool = True
+    # Caption the best frame of a visit (a scene_caption adapter via
+    # KAI-C) and store the words in event_text — what core's search
+    # matches "red" or "delivery van" against. Best-effort, and gated
+    # per camera by the image_captioning skill assignment exactly as the
+    # plate sweep is, so a site that has not asked for it pays no
+    # inference; off = no captions at all and search stays label-and-time.
+    events_caption_enrichment: bool = True
     # RFC-0002 Phase 0: NATS URL for core's domain-event consumers
     # (plate.recognized.v1 today). Compose sets NATS_URL=nats://nats:4222;
     # empty disables consumption (enrichment's synchronous fallback still

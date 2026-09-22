@@ -402,6 +402,19 @@ async def ingest_track_event(
         mark_sweep_pending(row.id)
         background.add_task(enrich_event_plate, row.id, candidates or None,
                             candidate_stamps or None, payload.evidence_ts)
+
+    # Describe the visit's best frame, so the canonical store holds the
+    # WORDS search matches on and not only a class label and a time.
+    # Same three gates as the plate sweep above — feature flag, a label
+    # worth describing, and the per-camera skill assignment — and the
+    # same background-task shape, so an unassigned camera costs nothing
+    # and a missing captioner leaves the row exactly as it is today.
+    from services.caption_enrichment import enrich_event_caption, wants_caption
+
+    if wants_caption(row.label, evidence_rel,
+                     settings.events_caption_enrichment,
+                     camera_skills(camera)):
+        background.add_task(enrich_event_caption, row.id)
     # Read the id BEFORE releasing: record_track_visit committed, which
     # expires every attribute, so a post-close row.id would try to refresh a
     # detached instance.
