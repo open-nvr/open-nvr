@@ -1,0 +1,149 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: Apache-2.0
+#
+# Build + publish workflow for the
+# ghcr.io/open-nvr/package-detection-weights image.
+#
+# Why this exists: Package Delivery grades its own counts, and a
+# detector it cannot load makes that grade read "fair" — a correct
+# answer that looks like a broken one. Before this image, the weights
+# had to be fetched at first boot or placed by hand, so the ordinary
+# outcome of installing the app was an adapter that started, answered
+# /health, and could not count a parcel. Same reason build-yolov8-
+# weights and build-yolo-pose-weights exist, plus the filtered-network
+# case those two document (reported from IN/CN/IR).
+#
+# Unlike those two there is nothing upstream to export from: this model
+# is ours, YOLOv8n fine-tuned on two openly licensed doorstep sets. The
+# graph comes from a release asset on the adapter repo, pinned in
+# build-args below. Re-training publishes a new asset and bumps
+# weights_tag; nothing here re-trains, because a build that trains is a
+# build whose output nobody can reproduce.
+#
+# Triggered on:
+#   - Pull request touching examples/package-detection-weights/* or
+#     this file → build only (no push). Catches a broken download or a
+#     moved release asset before merge.
+#   - Push to main → build + push :sha-<short> and the pinned version.
+#   - Tag matching v* → also :latest.
+#
+# Architecture: linux/amd64 + linux/arm64. The ONNX is the same on
+# both (a model graph, not native code), so the multi-arch manifest is
+# free — and the alpine base is small enough that there is no
+# disk-space dance here, unlike the two ultralytics-based builds.
+
+name: build-package-detection-weights
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - "v*"
+    paths:
+      - "examples/package-detection-weights/**"
+      - ".github/workflows/build-package-detection-weights.yml"
+  pull_request:
+    paths:
+      - "examples/package-detection-weights/**"
+      - ".github/workflows/build-package-detection-weights.yml"
+  # Manual trigger so a re-trained model can be published without
+  # bumping OpenNVR's own version.
+  workflow_dispatch:
+    inputs:
+      weights_tag:
+        # The ai-adapter RELEASE tag the .onnx asset comes from. Keep
+        # it aligned with PACKAGE_DETECTION_WEIGHTS_IMAGE's default in
+        # docker-compose.apps.yml, so the published image and the
+        # operator-facing compose reference stay in lockstep.
+        description: "package-detection weights release tag (e.g. 1.0.0)"
+        required: false
+        default: "1.0.0"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # required to push to ghcr.io
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/amd64,linux/arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        # Not on pull_request: nothing is pushed there, and GHCR
+        # rejects logins from forked-PR contexts anyway.
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: tags
+        run: |
+          # The weights release drives the image tag, because that is
+          # the operator-meaningful version: which trained model the
+          # graph came from, not which OpenNVR release shipped it.
+          WEIGHTS_TAG="${{ github.event.inputs.weights_tag || '1.0.0' }}"
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            EXTRA="ghcr.io/${{ github.repository_owner }}/package-detection-weights:latest"
+          else
+            EXTRA=""
+          fi
+          OWNER="${{ github.repository_owner }}"
+          PRIMARY="ghcr.io/${OWNER}/package-detection-weights:v${WEIGHTS_TAG}"
+          SHA="ghcr.io/${OWNER}/package-detection-weights:sha-${GITHUB_SHA::8}"
+          {
+            echo "primary=${PRIMARY}"
+            echo "extra=${EXTRA}"
+            echo "sha=${SHA}"
+            echo "weights_tag=${WEIGHTS_TAG}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build (and push if not PR)
+        uses: docker/build-push-action@v5
+        with:
+          context: examples/package-detection-weights
+          file: examples/package-detection-weights/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ steps.tags.outputs.primary }}
+            ${{ steps.tags.outputs.sha }}
+            ${{ steps.tags.outputs.extra }}
+          # Pinned to the release asset, so the same tag always carries
+          # the same graph — a weights image whose contents move under
+          # a fixed tag makes a detection regression impossible to
+          # bisect.
+          build-args: |
+            PACKAGE_ONNX_URL=https://github.com/${{ github.repository_owner }}/ai-adapter/releases/download/package-detection-v${{ steps.tags.outputs.weights_tag }}/yolov8n-package.onnx
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Sanity-check the published image
+        # Pull back what we just pushed and prove the graph is in it.
+        # Cheap insurance against "the build succeeded but the download
+        # returned a 404 page" — the failure this image exists to stop,
+        # and one that is invisible until an operator's counts sit at
+        # "fair" weeks later.
+        if: github.event_name != 'pull_request'
+        run: |
+          docker pull "${{ steps.tags.outputs.primary }}"
+          docker run --rm --entrypoint sh "${{ steps.tags.outputs.primary }}" -c '
+            set -e
+            SIZE=$(wc -c < /yolov8n-package.onnx)
+            echo "yolov8n-package.onnx: ${SIZE} bytes"
+            # A 404 page or an LFS pointer is a few hundred bytes; the
+            # real graph is ~11.7 MB. Anything under 8 MB is not it.
+            [ "$SIZE" -gt 8000000 ] || { echo "too small to be the model"; exit 1; }
+          '

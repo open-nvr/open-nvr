@@ -103,7 +103,10 @@ type DeliveriesState = {
     adapter: string | null
     task: string | null
     quality: 'good' | 'fair' | 'proxy' | 'none'
+    /** The whole sentence — for the catalog view and the API. */
     note: string
+    /** Just the timer clause, which is all this page is missing. */
+    cadence?: string
   }
   hours?: { start: string; end: string } | null
   per_camera?: CameraRow[]
@@ -469,9 +472,10 @@ function CountedBy({ counted, hours, checks }: {
         Counted by <b className="text-[var(--text)]">{engine ?? method}</b>
         {engine ? ` (${method})` : ''} when someone leaves the doorstep
         {hours ? `, ${hours.start}–${hours.end}` : ''}.
-        {/* The app's own sentence about its timer, so the page never
-            claims an interval the operator has since changed. */}
-        {counted.note ? ` ${counted.note}` : ''}
+        {/* The app's own CADENCE, so the page never claims an interval
+            the operator has since changed — and not `note`, which is
+            the whole sentence and printed this panel twice. */}
+        {counted.cadence ? ` Checked ${counted.cadence}.` : ''}
         {checks > 0 ? ` ${checks} ${checks === 1 ? 'check' : 'checks'} today.` : ''}
         {quality === 'proxy' && (
           <span className="text-xs">
