@@ -832,12 +832,39 @@ class IntrusionDetector(Detector):
 
     # ── the sweep ──
 
+    def _tick_and_fire(self, now: float | None = None) -> list[Alert]:
+        """Advance the state machine and DISPATCH whatever it raised.
+
+        ``tick`` returns the alerts its transitions produced, and every
+        caller that dropped that list dropped real alarms. The losing
+        case is not exotic: the dashboard polls ``/state`` about once a
+        second, ``state_snapshot`` ticks, and an entry delay expiring in
+        that instant goes BREACH -> ALARM inside the poll. The alerts
+        were discarded, the camera was left in ALARM, and the sweep a
+        second later saw a state that had already moved and raised
+        nothing. The page said "in alarm"; nobody was told.
+
+        So every call site that does not itself consume the list comes
+        through here, and a test below fails if a new one does not.
+
+        Dispatch failures are swallowed rather than raised, because two
+        of the callers are an HTTP GET and an operator action: a webhook
+        timing out must not turn the status page into a 500, and it must
+        not lose the rest of the batch either.
+        """
+        fired = self.tick(now)
+        for alert in fired:
+            try:
+                self._dispatcher.fire(alert)
+            except Exception:  # noqa: BLE001
+                logger.warning("alarm dispatch failed", exc_info=True)
+        return fired
+
     async def _tick_loop(self) -> None:
         while True:
             await asyncio.sleep(1.0)
             try:
-                for alert in self.tick():
-                    self._dispatcher.fire(alert)
+                self._tick_and_fire()
             except Exception:
                 logger.warning("arming tick failed", exc_info=True)
 
@@ -946,7 +973,7 @@ class IntrusionDetector(Detector):
                     self._to(st, DISARMED, now)
                 self._note(cam_id, "armed by operator" if want else "disarmed by operator",
                            "info", now)
-            self.tick(now)
+            self._tick_and_fire(now)
             return {"ok": True, "cameras": targets, "armed": want,
                     "until": (now + hold) if hold > 0 else None}
         if name == "bypass":
@@ -966,7 +993,7 @@ class IntrusionDetector(Detector):
                 st.bypass_until = now + minutes * 60.0
                 self._to(st, BYPASSED, now)
                 self._note(cam_id, f"bypassed for {int(minutes)} min", "info", now)
-            self.tick(now)
+            self._tick_and_fire(now)
             return {"ok": True, "camera": cam_id, "until": st.bypass_until or None}
         if name == "acknowledge":
             targets = self._targets(params.get("camera"))
@@ -984,14 +1011,17 @@ class IntrusionDetector(Detector):
             for st in self._cams.values():
                 st.override = None
                 st.override_until = 0.0
-            self.tick(now)
+            self._tick_and_fire(now)
             return {"ok": True}
         raise KeyError(name)
 
     # ── surfaces ──
 
     def state_snapshot(self) -> dict[str, Any]:
-        self.tick()
+        # Ticking here is how a quiet camera still advances; firing what
+        # that tick raises is how the alarm it just produced reaches
+        # somebody. A status page must not be able to swallow an alarm.
+        self._tick_and_fire()
         now = time.time()
         intruders: list[dict[str, Any]] = []
         per_cam_intruders: dict[str, int] = {}
