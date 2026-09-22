@@ -1127,6 +1127,111 @@ services:
   # camera snapshots itself and drives YOLOv8 through KAI-C.
   # Contract surface on :9207.
   # ──────────────────────────────────────────────────────────────
+  # ──────────────────────────────────────────────────────────────
+  # Package-detection adapter — the parcel class COCO does not have.
+  #
+  # Without this, Package Delivery falls back to whatever else KAI-C
+  # has registered: a VQA model (counts "fair") or, with nothing at
+  # all, the COCO bag classes as a stand-in ("proxy"). The Deliveries
+  # page names the skill it used and grades it, so a deployment that
+  # meant to run the real detector and silently did not is visible —
+  # but it has to be RUN for the grade to change, and a catalog entry
+  # is not a running container.
+  #
+  # Weights are not baked into the image (it stays small and boots with
+  # no network). Point PACKAGE_DETECTION_MODEL_URL at the .onnx and the
+  # adapter fetches it once into the volume below; or put the file in
+  # that volume yourself as yolov8n-package.onnx, which is what a site
+  # fine-tune on its OWN doorstep footage does — see the adapter README.
+  #
+  #   docker compose cp ./yolov8n-package.onnx \
+  #     package-detection-adapter:/app/model_weights/yolov8n-package.onnx
+  # ──────────────────────────────────────────────────────────────
+  package-detection-adapter:
+    profiles: [apps, package-delivery]
+    image: ghcr.io/open-nvr/package-detection-adapter:${ADAPTER_TAG:-latest}
+    container_name: opennvr_package_detection_adapter
+    logging: *svc-logs
+    restart: unless-stopped
+    environment:
+      - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
+      # The adapter reads PACKAGE_DETECTION_WEIGHTS_DIR — a DIRECTORY,
+      # not a file path — and looks for yolov8n-package.onnx inside it
+      # (service.py: WEIGHTS_FILENAME). Naming the variable after the
+      # image rather than after what the code reads is how the yolov8
+      # block earned its warning comment and a run of 503s.
+      - PACKAGE_DETECTION_WEIGHTS_DIR=/app/model_weights
+      # Fetched once into that volume when the file is not there. Empty
+      # URL + empty volume = the adapter reports itself unhealthy
+      # rather than answering /infer with a model it does not have, and
+      # the app's picker skips it and says so on the page.
+      - PACKAGE_DETECTION_MODEL_URL=${PACKAGE_DETECTION_MODEL_URL:-}
+      # Optional: the class names the model emits, if you fine-tuned it
+      # with a different label order.
+      - PACKAGE_DETECTION_LABELS=${PACKAGE_DETECTION_LABELS:-}
+    volumes:
+      - opennvr_package_detection_weights:/app/model_weights
+    networks:
+      - opennvr_internal
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx, sys; sys.exit(0 if httpx.get('http://127.0.0.1:9010/health', timeout=2).status_code == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 120s
+      retries: 10
+
+  # One-shot KAI-C registration — same pattern as fast-plate-ocr and
+  # yolo-pose. The name MUST be ``package_detection``: it becomes
+  # KAI-C's route and it is the task string the app's picker matches on
+  # to grade its counts "good". Always exits 0: a failed registration
+  # degrades to the VQA fallback and a WARN, never a wedged compose up.
+  package-detection-register:
+    profiles: [apps, package-delivery]
+    image: alpine:3.20
+    container_name: opennvr_package_detection_register
+    logging: *svc-logs
+    restart: "no"
+    depends_on:
+      opennvr-core:
+        condition: service_healthy
+      package-detection-adapter:
+        condition: service_healthy
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        name="package_detection"
+        url="http://package-detection-adapter:9010"
+        echo "Auto-registering '$$name' -> $$url with KAI-C…"
+        i=0
+        while [ $$i -lt 30 ]; do
+          if wget -q -O- \
+               --header="Content-Type: application/json" \
+               --header="X-Internal-Api-Key: $${INTERNAL_API_KEY}" \
+               --post-data="{\"name\":\"$$name\",\"url\":\"$$url\"}" \
+               http://opennvr-core:8100/api/v1/adapters/register >/dev/null 2>&1; then
+            echo "Registered '$$name'."
+            if wget -q -O- \
+                 --header="X-Internal-Api-Key: $${INTERNAL_API_KEY}" \
+                 --header="X-Actor: install" \
+                 --post-data="" \
+                 "http://opennvr-core:8100/api/v1/adapters/$$name/permissions/approve-all" >/dev/null 2>&1; then
+              echo "Approved '$$name' declared permissions (install-time grant, audited)."
+            else
+              echo "WARN: could not approve '$$name' permissions — grant them via the AI models page." >&2
+            fi
+            exit 0
+          fi
+          i=$$((i+1)); echo "register attempt $$i/30 failed (adapter warming up?); retry in 5s"; sleep 5
+        done
+        echo "WARN: could not register '$$name' after retries — Package Delivery will fall back to a VQA model or the COCO stand-in, and the Deliveries page will say which." >&2
+        exit 0
+    networks:
+      - opennvr_internal
+
   package-delivery-config-init:
     profiles: [apps, package-delivery]
     image: alpine:3.20
@@ -1458,6 +1563,10 @@ volumes:
   opennvr_insightface_cache:
   opennvr_smart_doorbell_config:
   opennvr_package_delivery_config:
+  # Package-detection weights: fetched once from
+  # PACKAGE_DETECTION_MODEL_URL, or filled by hand for a site
+  # fine-tune. Kept out of the image so it stays small.
+  opennvr_package_detection_weights:
   opennvr_footage_search_config:
   # footage-search's persistent SQLite index (see its store.py).
   opennvr_footage_search_data:

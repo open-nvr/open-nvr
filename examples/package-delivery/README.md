@@ -86,13 +86,51 @@ around the step where parcels are actually left. Nothing drawn means the
 whole frame, which counts the plant pot and the doormat too; the page
 says which doors still need one. Set the delivery hours for your area.
 
-For the best counts, install the **Package Detection** adapter from
-*AI Adapters* (`package-detection`, a YOLOv8n fine-tuned on open
-doorstep datasets, CPU) — the app moves to *good* within five minutes
-of it registering. Any other package-capable skill works the same way:
-a detector with a box class, or a VQA model; the shipped Moondream
-adapter (`moondream-vlm`) is enough to move the counter from *proxy*
-to *fair* on a stock install. The page shows what is in use.
+### Getting the counter to *good*
+
+The page grades its own counts, and *fair* is a correct answer that
+looks like a broken one: it means no package detector is **registered
+with KAI-C**, so a VQA model is answering instead. A catalog entry in
+*AI Adapters* is a thing you can read about — it is not a running
+container, and the app can only pick from what is actually registered.
+
+The detector ships with the app's compose profile:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.apps.yml \
+  --profile package-delivery up -d
+```
+
+That brings up `package-detection-adapter` and registers it under the
+task name `package_detection`, which is what moves the grade to *good*
+within five minutes.
+
+**It needs weights**, which are not baked into the image. Either point
+it at the `.onnx`:
+
+```bash
+PACKAGE_DETECTION_MODEL_URL=https://example.com/yolov8n-package.onnx
+```
+
+or put the file in the volume yourself — which is also how you install
+a fine-tune of your own:
+
+```bash
+docker compose cp ./yolov8n-package.onnx \
+  package-detection-adapter:/app/model_weights/yolov8n-package.onnx
+docker compose restart package-detection-adapter
+```
+
+The filename matters: the adapter looks for `yolov8n-package.onnx` in
+`PACKAGE_DETECTION_WEIGHTS_DIR`. With no weights it reports itself
+unhealthy rather than answering with a model it does not have, the
+picker skips it, and the page says *fair* again — so if the grade has
+not moved, check that container's logs first.
+
+Any other package-capable skill works the same way: a detector with a
+box class, or a VQA model; the shipped Moondream adapter
+(`moondream-vlm`) is enough to move the counter from *proxy* to *fair*
+on a stock install. The page shows what is in use.
 
 ### Accuracy, and fine-tuning for your porch
 
