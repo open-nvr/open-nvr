@@ -749,3 +749,46 @@ def test_a_day_rolls_the_counters(clock):
     assert d.state_snapshot()["today"]["delivered"] == 1
     d._today_key = "1999-01-01"
     assert d.state_snapshot()["today"]["delivered"] == 0
+
+
+class TestTheProvenanceSentence:
+    """The Deliveries page composes its own sentence — it bolds the
+    adapter and knows the delivery hours — and then appended the whole
+    of ``describe`` after it, so the panel said the same thing twice
+    with two different tails."""
+
+    def _cfg(self):
+        return _config()
+
+    def test_cadence_is_the_timer_clause_and_nothing_else(self):
+        counter = Counter(method=METHOD_VQA, adapter="ollamavlm",
+                          task="visual_question_answering")
+        cadence = counter.cadence(self._cfg())
+        assert cadence.startswith("every ")
+        # The part the page already renders itself.
+        assert "Counted by" not in cadence
+        assert "doorstep" not in cadence
+
+    def test_describe_is_still_the_whole_sentence(self):
+        """The catalog view and the API consumers want the full thing."""
+        counter = Counter(method=METHOD_VQA, adapter="ollamavlm",
+                          task="visual_question_answering")
+        cfg = self._cfg()
+        note = counter.describe(cfg)
+        assert note.startswith("Counted by ollamavlm")
+        assert counter.cadence(cfg) in note
+
+    def test_no_timers_means_no_dangling_comma(self):
+        cfg = self._cfg()
+        cfg.recheck_minutes = 0
+        cfg.idle_recheck_minutes = 0
+        counter = Counter(method=METHOD_VQA, adapter="x", task="vqa")
+        assert counter.cadence(cfg) == ""
+        assert counter.describe(cfg).endswith("doorstep.")
+
+    def test_the_state_carries_both(self):
+        note = _app().state_snapshot()["counted_by"]
+        assert "note" in note and "cadence" in note
+        # And the page's own sentence plus the cadence must not repeat
+        # the lead-in that caused the duplicate.
+        assert "Counted by" not in (note["cadence"] or "")

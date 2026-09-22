@@ -86,13 +86,42 @@ around the step where parcels are actually left. Nothing drawn means the
 whole frame, which counts the plant pot and the doormat too; the page
 says which doors still need one. Set the delivery hours for your area.
 
-For the best counts, install the **Package Detection** adapter from
-*AI Adapters* (`package-detection`, a YOLOv8n fine-tuned on open
-doorstep datasets, CPU) — the app moves to *good* within five minutes
-of it registering. Any other package-capable skill works the same way:
-a detector with a box class, or a VQA model; the shipped Moondream
-adapter (`moondream-vlm`) is enough to move the counter from *proxy*
-to *fair* on a stock install. The page shows what is in use.
+### The counter's grade, and what changes it
+
+The page grades its own counts, so the grade is worth reading:
+
+| what is registered with KAI-C | grade |
+|---|---|
+| the package detector that ships with this app | **good** |
+| a VQA model (moondream, qwen-vl, …) | fair |
+| nothing package-capable | proxy — COCO bags stand in |
+
+**It should say *good* on a stock install.** The detector, its weights
+and its KAI-C registration all come up with the app's compose profile:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.apps.yml \
+  --profile package-delivery up -d
+```
+
+That starts `package-detection-weights-init` (which copies a pre-baked
+`yolov8n-package.onnx` into a volume), then the adapter, then a one-shot
+registration under the task name `package_detection` — which is what the
+app's picker matches on. Nothing to download by hand, and nothing
+fetched at first boot, so it works on a filtered network.
+
+If the page still says *fair* after five minutes, the detector is not
+registered. In order of likelihood:
+
+```bash
+docker compose logs package-detection-register   # did registration succeed?
+docker compose logs package-detection-adapter    # did the model load?
+docker compose logs package-detection-weights-init
+```
+
+A "fair" grade is not the app rating the model poorly. It is the app
+telling you a package detector is not answering, and counting with the
+next best thing it could find.
 
 ### Accuracy, and fine-tuning for your porch
 
@@ -114,9 +143,30 @@ training run (`package_data/site/`). For a
 deployment where the counts matter — a building lobby, a business
 receiving stock — plan on fine-tuning with a few hundred frames from
 the actual cameras; the *Not a package* and *Collected* buttons on the
-Deliveries page are the corrections such a set is built from. If you
-would like help training a model for your site, or want your adapter
-listed in the catalog, open an issue on the OpenNVR repository.
+Deliveries page are the corrections such a set is built from.
+
+Installing your own export takes one of two forms. Either bake it into
+a weights image of your own and point the stack at it:
+
+```bash
+PACKAGE_DETECTION_WEIGHTS_IMAGE=registry.example.com/our-doorsteps:v3
+```
+
+or drop the file straight into the volume, which is quicker while you
+are still iterating:
+
+```bash
+docker compose cp ./yolov8n-package.onnx \
+  package-detection-adapter:/app/model_weights/yolov8n-package.onnx
+docker compose restart package-detection-adapter
+```
+
+The filename matters — the adapter looks for `yolov8n-package.onnx`
+inside `PACKAGE_DETECTION_WEIGHTS_DIR`, and a file under another name
+is a model it cannot find and a grade that quietly stays *fair*.
+
+If you would like help training a model for your site, or want your
+adapter listed in the catalog, open an issue on the OpenNVR repository.
 
 ## Standalone
 

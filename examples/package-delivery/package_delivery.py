@@ -531,13 +531,26 @@ class Counter:
             METHOD_NONE: "nothing — no skill on this box can count parcels and Tier-0 is "
                          "not being consumed for the stand-in classes",
         }[self.method]
-        cadence = []
-        if cfg.recheck_minutes > 0:
-            cadence.append(f"every {int(cfg.recheck_minutes)} min while parcels wait")
-        if cfg.idle_recheck_minutes > 0:
-            cadence.append(f"every {int(cfg.idle_recheck_minutes)} min otherwise")
         return (f"Counted by {what} when someone leaves the doorstep"
-                + (", " + " and ".join(cadence) if cadence else "") + ".")
+                + (", " + self.cadence(cfg) if self.cadence(cfg) else "") + ".")
+
+    def cadence(self, cfg: AppConfig) -> str:
+        """How often it looks — and ONLY that.
+
+        Split out of :meth:`describe` because the page composes its own
+        sentence (it bolds the adapter and knows the delivery hours) and
+        then appended the whole of ``describe`` after it, so the panel
+        read "Counted by ollamavlm … 08:00-20:00. Counted by ollamavlm …
+        every 15 min." twice over. The cadence is the one part the page
+        does not already know, so that is what it gets; ``describe``
+        stays whole for the catalog view and the API.
+        """
+        parts = []
+        if cfg.recheck_minutes > 0:
+            parts.append(f"every {int(cfg.recheck_minutes)} min while parcels wait")
+        if cfg.idle_recheck_minutes > 0:
+            parts.append(f"every {int(cfg.idle_recheck_minutes)} min otherwise")
+        return " and ".join(parts)
 
     def choose(self, capabilities: dict[str, Any] | None, now: float) -> None:
         """Pick the best method from a ``/capabilities`` body (either the
@@ -1428,7 +1441,10 @@ class PackageDeliveryDetector(Detector):
             "waiting_now": waiting,
             "today": dict(self._today),
             "counted_by": {"method": c.method, "adapter": c.adapter, "task": c.task,
-                           "quality": c.quality, "note": c.describe(self.cfg)},
+                           "quality": c.quality, "note": c.describe(self.cfg),
+                           # Just the timer clause — the page builds the
+                           # rest of the sentence itself.
+                           "cadence": c.cadence(self.cfg)},
             "hours": self.cfg.delivery_hours.as_dict() if self.cfg.delivery_hours else None,
             "per_camera": rows,
             "events": list(self._events),
