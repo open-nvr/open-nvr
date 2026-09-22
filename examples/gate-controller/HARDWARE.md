@@ -35,20 +35,35 @@ the first two work with a plain relay:
 
 | Type | What it is | Plain dry contact? |
 |---|---|---|
-| **Volt-free / dry N.O.** — FAAC, CAME, Nice, HySecurity, LiftMaster, DoorKing | Two terminals; closing them is the command. The barrier supplies its own logic voltage. | **Yes, directly.** |
+| **Volt-free / dry N.O.** — FAAC, BFT, CAME, Nice, HySecurity, LiftMaster, Linear, DoorKing, Viking | Two terminals; closing them is the command. The barrier supplies its own logic voltage. | **Yes, directly.** |
 | **24 V sourcing input** — Magnetic AutoControl MGC / MGC-Pro | The input activates when **+24 V DC is applied**. | **Yes, but** the relay must switch the barrier's own +24 V rail into the input. A bare closed contact does nothing. |
 | **Serial / protocol only** — some Dahua / Hikvision modes, RS-485 boards | A command over RS-485 or an IP API. | **No.** Use `modbus`/`http`, or the board's parallel dry-contact terminals if it has them. |
 
 ### Verified operators
 
+Every row below was read out of that manufacturer's own manual. The
+list runs across the markets we expect to meet — the European names
+(FAAC, BFT, Nice, CAME, Magnetic), the North American ones
+(LiftMaster, Linear, HySecurity, DoorKing, Viking) and the Chinese OEM
+boards that turn up worldwide under local badges. The **Position
+output** column is the one to read first: it is what decides whether a
+gate can be monitored at all, and the answer is "no" more often than
+the brochures suggest.
+
 | Operator | Open input | Hold-open input | Position output |
 |---|---|---|---|
 | **FAAC 620/640 (624BLD)** | `OPEN` — N.O. | — | 624 Relay Card: RL2 *Opened*, RL3 *Closed*, N.O. 1 A @ 24 V; 624BLD `OUT1`–`OUT3` programmable |
+| **FAAC B680H (E680 board)** | `J1` t3 `OPEN`, t4 `CLOSE` (N.O.); t6 `STP`, t7 `EMR` (N.C.); `GND` t8–9 | — | `OUT 1` (t13) / `OUT 2` (t15) — **open-collector to GND, max 24 VDC 100 mA. Not a contact.** Functions "03 Beam CLOSED", "04 Beam OPEN or in PAUSE" |
 | **Nice WIL** | N.O. step/open | **`Open-Timer` (t14)** — maintained holds the bar in an infinite pause | t9 *C.A. Indicator* — **24 V lamp output, not a contact** |
+| **Nice M-Bar / L-Bar (M3BAR–L9BAR)** | `OPEN`, `CLOSE`, `SbS` — "it is possible to connect 'Normally Open' contacts" | — | `OGI` 24 V max 10 W, `FLASH` 12 V max 21 W, settable to *Boom open* / *Boom closed*. **Lamp supplies — the manual describes no volt-free contact anywhere** |
+| **BFT Giotto BT A Ultra** | `IC 1` (t61) default `OPEN`, `IC 2` (t62) default `CLOSE`, both N.O., common **t60**; `STOP` t71 N.C. | `IC` set to `TIMER` — a listed `IC` option; the manual does not describe its behaviour, so test it | **`AUX 3` (t26–27) — "FREE CONTACT (N.O.) (Max. 24V 1A)"**, aux logic 12: *"the contact stays closed when the barrier is totally closed"*. `AUX 0` (t20–21) is a **24 V powered** contact, not free |
+| **BFT Moovi 30 / 60** | `7-8` START, or `OPEN` with trimmer TW at min; `19-20` PED, or `CLOSE` with TW at min; `7-9` STOP (N.C.) | — | `15-16` — a **relay** output, SCA barrier-open light or 2nd radio channel by `DIP 7`. Real contact, but the manual prints **no rating** |
 | **CAME ZL37 / ZL38** | **`2-3`** Open button (N.O.); `2-7` command button | **No latch.** `2-7` maintained is **hold-to-run** — see the warning below | `10-5` "barrier open" pilot lamp, 24 V 3 W — **lamp, not a contact** |
 | **HySecurity / Nice HySecurity (Smart DC)** | **`RADIO OPEN`** (N.O.) — HySecurity's documented input for access control, not `OPEN` | Physical Hold Open toggle; free-exit latch via `EB`/`CB`/`DT` menu | **User Relay 1/2/3** — fn #1 Close-limit, #3 Open-limit, #8 gate-open-too-long |
 | **DoorKing 1601 / 1602** | **Terminal 6 `UP`** (dry contact to t14 common) | **Yes — t6 maintained with SW1-6 OFF:** the arm stays up regardless of any down input or timer | **No.** t12/t13 are dry contacts but driven by **loop logic, not arm position** — leave this gate unmonitored |
 | **LiftMaster / Chamberlain (CSL24U family)** | **`EXIT` — always. Never `OPEN`.** See the warning below | `EXIT` maintained holds an open gate and pauses the timer-to-close | Expansion board **`AUX RELAY 1/2`**, N.O.+N.C., 42 VDC / 5 A, with Open-Limit and Close-Limit functions |
+| **Linear BGU / BGUS** | `OPEN INPUT` — "CONNECT TO NORMALLY OPEN DEVICES (KEYPAD, CARD READER, KEYSWITCH, TELEPHONE ENTRY SYSTEM)"; `3-BUTTON STATION` for open/close/stop | **Yes** — "A CONSTANT OPEN INPUT WILL OVERRIDE THE MID-TRAVEL STOP AND HALT THE AUTO CLOSE TIMER UNTIL RELEASED" | **No.** `AUX RELAY` is a real N.O./COM/N.C. contact, but its four modes are Maglock, M4, Ticket Dispenser and Strobe — none reports position. `ALARM` is "NOT USED IN BARRIER GATES" |
+| **Viking B-12** | Guard-station `Open`, `Close`, `Stop` against `Gnd` | — | **No.** Only the mag-lock relay (N.O./COM/N.C.) is documented; no position terminal — leave this gate unmonitored |
 | **Magnetic AutoControl MGC / MGC-Pro** | `IN1`–`IN5`, **+24 V applied, not volt-free**. Default IN1/IN2 = *Open low priority* | **`Open Service`** (MGC-Pro): boom stays up while 24 V is present | Assignable outputs: `Open`, `Closed`, `Opening`, `Closing`, `Boom angle`. Default NO1 = `Open` |
 | **Dahua economic boom barrier** | **t10 `Open Barrier`**, t11 `Close`, t9 `COM` | not documented | **t7 `Opened`, t8 `Closed`, t9 `COM`** — a real two-state output |
 
@@ -73,11 +88,63 @@ barrier mid-travel with nobody there.
 ### Vendors we could not verify
 
 We did not find manufacturer wiring manuals with terminal tables for
-**Nice (non-WIL barriers), BFT, Beninca, All-O-Matic, Viking, Elite,
-Automatic Systems, Hikvision barrier gates**, or the Indian market
-(**Godrej, Aditya, Spectra, Matrix, eSSL, Realtime**). They are not
-unsupported — the great majority take a dry contact like everything
-else — we simply will not print terminal numbers we have not read.
+**Beninca, All-O-Matic, Elite, Hikvision barrier gates**, or, in the
+Indian market, **Godrej, Aditya, Spectra, Matrix, Realtime or CP
+Plus**. They are not unsupported — the great majority take a dry
+contact like everything else — we simply will not print terminal
+numbers we have not read.
+
+**Automatic Systems** (BL4x, BL229 and relatives) is a different case
+and worth calling out, because it is common on European and North
+American car parks and toll lanes. Its manuals are thorough about
+everything except the customer terminal block: the BL229 technical
+manual says *"Please refer to the electrical diagram inside the
+barrier, which takes precedence over any other information"*, and the
+BL4x manual says *"Connections must be executed in accordance with the
+wiring diagrams provided inside the equipment, which remain the
+reference."* The legend exists — the BL229 manual describes the
+diagrams as supplied in a plastic pouch glued inside the door. So there
+is nothing for us to print here, and nothing much to worry about: open
+the door, read the sheet that came with *that* unit, then apply the
+four steps below.
+
+### Rebadged boards: read the board, not the badge
+
+This is not an Indian-market problem, it is a rebadge problem, and it
+shows up wherever a barrier is sold under a local brand: **the badge on
+the housing tells you little, the control board tells you everything.**
+Open the cabinet and read the board's silkscreen before you look up the
+brand. Below the Indian market is worked through as the example,
+because it is where we had the largest gap — but the same move works on
+any unbranded board in Europe or North America.
+
+Two confirmations of the rebadge, from the vendors' own manuals:
+
+- **Vantage "Ultrafast"** (Indian brand) ships **Defuwei** hardware — the
+  manual is Defuwei's, covering the TAB, DAB, MINI-H and Guard-H
+  families. Its board uses `J9` for control inputs and `J10` for
+  outputs, with `K1`/`K2` driving the signal lights. No terminal legend
+  is printed, so no row here.
+- **eSSL BG100-BDC** (eSSL Security, Bengaluru) is the one Indian-badged
+  barrier whose own manual names its inputs and outputs.
+
+| Board / model | Command inputs | Position output | What the manual actually says |
+|---|---|---|---|
+| **DZ SERVO Ver2.0** — the servo board under a great many BG-series barriers | `OPEN`, `CLOSE`, `COM`, plus separate remote-control open/close ports | **Yes, both poles**: "Opening in place signal NO/NC", "Closing in place signal NO/NC". Separate R&G traffic-light relay, 10 A | "All command generators (push buttons, limit switches, etc.) must be connected by the volt-free contact way" |
+| **DZX2.1** — the older traditional-barrier board | `UP`, `DOWN`, `STOP`, `COM` | **Yes**: "Up limit (or down limit) relay output (no power, switch signal)" — i.e. volt-free | "dry contact input signal, UP (or DOWN, or STOP) connect with 'COM', the control board will response accordingly" |
+| **eSSL BG100-BDC** | `External Open`, `External Close`, `External Stop`, `COM` | **Yes**: `Open Limit Output`, `Close Limit Output`, `Limit Output COM` | Labels are from the control-board diagram (Fig. 12). The manual states **neither** the contact type nor any rating |
+
+No terminal *numbers* appear above because none of these manuals print
+them — the boards are labelled by function on the silkscreen instead,
+which is why reading the board beats looking up the brand.
+
+⚠️ **On the DZ SERVO, do the continuity test even though the manual
+says volt-free.** The same manual that insists on "the volt-free
+contact way" also describes `OPEN` and `CLOSE` as pairing against a
+`+24V` port. Those two statements cannot both be taken at face value,
+and which one is true decides whether a bare relay does anything at
+all. Measure across the pair with the barrier powered (rule 2 below)
+before you wire anything.
 
 **If your barrier is not in the table**, the procedure is the same
 everywhere:
@@ -98,7 +165,9 @@ everywhere:
 Much of the Indian-market equipment is a rebadged Chinese controller
 with the Dahua-style `Open` / `Close` / `COM` inputs and
 `Opened` / `Closed` / `COM` outputs, or a licensed European board — so
-one of the patterns above almost certainly applies.
+one of the patterns above almost certainly applies. The boards in
+*Rebadged boards* above are the ones you are most likely to find under
+the lid.
 
 ### Reading the barrier's position
 
@@ -109,11 +178,29 @@ that failed to close is exactly when a made-up state does harm.
 
 - **Real contacts** (wire to a GPIO input, a Modbus discrete input, or a
   door monitor): FAAC 624 relay card, HySecurity user relays,
-  LiftMaster AUX RELAY, Magnetic assignable outputs, Dahua t7/t8.
-- **Lamp outputs are not contacts.** Nice's C.A. indicator and CAME's
-  `10-5` drive a 24 V bulb. Reading them needs an opto-isolator or a
-  small 24 V relay — without one you will read nothing, or backfeed the
-  board.
+  LiftMaster AUX RELAY, BFT's `AUX 3` free contact, Magnetic assignable
+  outputs, Dahua t7/t8, and on the Chinese-OEM boards common in India
+  the DZ SERVO "in place" relays, DZX2.1's limit outputs and eSSL's
+  `Open`/`Close Limit Output`. Those last three are the reason a
+  rebadged barrier is usually **monitorable** — the position output is
+  on the board whether or not the brochure mentions it.
+- **Lamp outputs are not contacts.** Nice's C.A. indicator, the M-Bar's
+  `OGI`, and CAME's `10-5` drive a 24 V bulb. Reading them needs an
+  opto-isolator or a small 24 V relay — without one you will read
+  nothing, or backfeed the board.
+- **Open-collector outputs are not contacts either**, and they are the
+  easiest of the three to misread, because the datasheet line looks
+  like a contact spec. FAAC's E680 `OUT 1`/`OUT 2` are "open-collector
+  GND ... maximum load 24 VDC with 100 mA": a transistor that *sinks*
+  to the board's own ground when active. It has a polarity, it shares a
+  ground reference with the barrier, and it will not close a circuit
+  between two arbitrary terminals the way a relay will. Wire it to an
+  opto-isolated or sinking input, or through a small relay, and tie the
+  grounds — do not hang a dry-contact input across it and assume.
+- **A powered contact is a third thing again.** BFT's `AUX 0` is a "24V
+  POWERED CONTACT (N.O.)" while `AUX 3` on the same board is a "FREE
+  CONTACT". Same word, two terminals apart, completely different
+  wiring. Read the whole line, not the `(N.O.)`.
 - **HySecurity limits are encoder-learned**, not mechanical switches.
   The contact is real, but a lost calibration mis-reports silently,
   where a broken physical switch simply reads "not open".
