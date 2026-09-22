@@ -1354,6 +1354,12 @@ async def enrich_event_plate(
                         dedup_window_s(),
                     )
                     clear_plate(row)
+                    # The claim goes with the read. A journey anchored on
+                    # a plate the later looks overturned would put a
+                    # vehicle at a camera it was never at.
+                    from services.descriptor_store import sync_plate_claim
+
+                    sync_plate_claim(db, row)
                     db.commit()
                     return
                 logger.info(
@@ -1378,6 +1384,11 @@ async def enrich_event_plate(
                                  merged=was_merged, reads=agreeing,
                                  source="sweep")
             note_sighting(camera_id, plate)
+            # After stamp_plate_evidence, so the claim carries the
+            # measured confidence that call just put in the payload.
+            from services.descriptor_store import sync_plate_claim
+
+            sync_plate_claim(db, row)
             db.commit()
         finally:
             db.close()

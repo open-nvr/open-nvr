@@ -13,6 +13,14 @@ history.
 This sweep walks that history and hands each qualifying visit to the
 SAME enricher the ingest path calls.
 
+It also repairs, for free, what the live path now does on every write:
+projecting a visit's claims into ``event_text.attributes`` so they are
+findable as words and not only filterable as rows, and turning a
+``plate_text`` column into the ``plate`` claim the attr filter and
+``journey.py``'s identity anchor both read. Neither needs an adapter, so
+neither is gated by a skill assignment — the gate exists to stop
+unasked-for inference, and there is none in a projection.
+
 Not a fourth enricher
 ---------------------
 There is no second copy of any rule here. The labels, the per-camera
@@ -146,9 +154,12 @@ def plan_batch(db, before_id: int | None, limit: int) -> list[dict[str, Any]]:
     rows = q.order_by(TimelineEvent.id.desc()).limit(int(limit)).all()
 
     out: list[dict[str, Any]] = []
+    plated: set[int] = set()
     for row, camera in rows:
         label = (row.label or "").lower()
         skills = camera_skills(camera)
+        if (row.plate_text or "").strip():
+            plated.add(int(row.id))
         item = {
             "event_id": int(row.id),
             "caption": (label in CAPTIONABLE_LABELS
@@ -157,8 +168,41 @@ def plan_batch(db, before_id: int | None, limit: int) -> list[dict[str, Any]]:
             "descriptors": (label in DESCRIBABLE_LABELS
                             and wants_descriptors(row.label, row.evidence_path,
                                                   True, skills)),
+            "repair": False,
         }
         out.append(item)
+
+    # ── the free repair ────────────────────────────────────────────
+    # Claims written before the projection existed are filterable but not
+    # findable: search matches free text against caption || attributes,
+    # and attributes was empty. Plates have the same shape — they lived
+    # on the row as a column and never as the claim journey.py anchors
+    # on. Both are fixed from data already in the store, so this costs no
+    # inference, and it is deliberately NOT gated by a skill assignment:
+    # the gate exists to stop unasked-for inference, and there is none
+    # here. It is the same work the live path now does on every write.
+    #
+    # Two set queries per batch rather than a check per visit: at a batch
+    # of fifty that is two indexed IN lookups instead of a hundred.
+    ids = [int(i["event_id"]) for i in out]
+    if ids:
+        from models import EventText, VisitDescriptor
+
+        claimed = {
+            r[0] for r in db.query(VisitDescriptor.event_id)
+            .filter(VisitDescriptor.event_id.in_(ids)).distinct().all()
+        }
+        worded = {
+            r[0] for r in db.query(EventText.event_id)
+            .filter(EventText.event_id.in_(ids),
+                    EventText.attributes.isnot(None),
+                    EventText.attributes != "").all()
+        }
+        for item in out:
+            event_id = int(item["event_id"])
+            item["repair"] = bool(
+                event_id in plated
+                or (event_id in claimed and event_id not in worded))
     return out
 
 
@@ -233,6 +277,36 @@ async def backfill_once(batch: int = DEFAULT_BATCH,
             # from delaying the caption of somebody at the door now.
             await asyncio.sleep(pause)
 
+    # ── Phase 2b: the free repair ───────────────────────────────────
+    # No adapter is called here, so this holds a session without the
+    # objection that shaped the phases above. Committed per visit: one
+    # unrepairable row must not roll back the batch's other repairs.
+    repaired = 0
+    to_repair = [int(i["event_id"]) for i in items if i.get("repair")]
+    if to_repair:
+        from models import TimelineEvent
+        from services.descriptor_store import (
+            project_attributes, sync_plate_claim,
+        )
+
+        db = SessionLocal()
+        try:
+            for event_id in to_repair:
+                try:
+                    row = db.get(TimelineEvent, event_id)
+                    if row is None:
+                        continue      # aged out by retention meanwhile
+                    sync_plate_claim(db, row)
+                    project_attributes(db, row)
+                    db.commit()
+                    repaired += 1
+                except Exception:  # noqa: BLE001
+                    logger.warning("enrichment backfill: repair failed for %s",
+                                   event_id, exc_info=True)
+                    db.rollback()
+        finally:
+            db.close()
+
     # ── Phase 3: reopen and advance ─────────────────────────────────
     lowest = min(int(i["event_id"]) for i in items)
     db = SessionLocal()
@@ -242,6 +316,7 @@ async def backfill_once(batch: int = DEFAULT_BATCH,
         state["examined"] = int(state.get("examined", 0)) + len(items)
         state["captioned"] = int(state.get("captioned", 0)) + captioned
         state["described"] = int(state.get("described", 0)) + described
+        state["repaired"] = int(state.get("repaired", 0)) + repaired
         _write_state(db, state)
     except Exception:  # noqa: BLE001
         logger.exception("enrichment backfill: could not record progress")
@@ -251,7 +326,8 @@ async def backfill_once(batch: int = DEFAULT_BATCH,
 
     logger.info(
         "enrichment backfill: %s examined, %s captioned, %s described, "
-        "cursor now %s", len(items), captioned, described, lowest,
+        "%s repaired, cursor now %s",
+        len(items), captioned, described, repaired, lowest,
     )
     return state
 
@@ -269,13 +345,11 @@ async def run_backfill_loop(batch: int = DEFAULT_BATCH,
 
     if not getattr(settings, "events_enrichment_backfill", False):
         return
-    if not (getattr(settings, "events_caption_enrichment", True)
-            or getattr(settings, "events_descriptor_enrichment", True)):
-        # Nothing to write. Saying so beats a loop that walks the whole
-        # table calling two enrichers that both return immediately.
-        logger.info("enrichment backfill: both enrichers are off; nothing to do")
-        return
-
+    # No early return when both enrichers are off. The sweep also
+    # repairs projections and plate claims from data already stored,
+    # which spends no inference and does not depend on either setting —
+    # plate reads are a third one (events_plate_enrichment), so a box
+    # with captions and descriptors off can still have real work here.
     logger.info("enrichment backfill: starting (batch=%s, pause=%ss)",
                 batch, pause)
     previous: Any = object()

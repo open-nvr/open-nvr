@@ -115,16 +115,37 @@ def _camera(db, cam_id: int, skills: list[str] | None = None) -> Camera:
 
 def _visit(db, *, event_id: int, camera_id: int, label: str,
            evidence: str | None = "cam1/2026/09/22/frame.jpg",
-           minutes_ago: int = 0) -> TimelineEvent:
+           minutes_ago: int = 0, plate: str | None = None) -> TimelineEvent:
     started = WALL - timedelta(minutes=minutes_ago)
     row = TimelineEvent(
         id=event_id, camera_id=camera_id, source="tier0", event_type="track",
         label=label, started_at=started,
         ended_at=started + timedelta(seconds=20), evidence_path=evidence,
+        plate_text=plate,
     )
     db.add(row)
     db.commit()
     return row
+
+
+class _Claim:
+    model_fingerprint = None
+    confidence = None
+    source_adapter = "moondream"
+    source_task = "vqa"
+
+    def __init__(self, kind, value):
+        self.kind, self.value = kind, value
+
+
+def _raw_claim(db, row, kind: str, value: str) -> None:
+    """A claim written the way the store held them BEFORE the projection
+    existed — straight into the table, no words."""
+    from models import VisitDescriptor
+
+    db.add(VisitDescriptor(event_id=row.id, kind=kind, value=value,
+                           source_task="vqa"))
+    db.commit()
 
 
 # ── which visits get offered ─────────────────────────────────────────
@@ -394,6 +415,101 @@ def test_a_cursor_that_stops_moving_stops_the_loop(session_local, calls,
 
     assert calls["caption"] == [2, 2], (
         "it should notice on the second identical pass, not keep going")
+
+
+# ── the free repair ──────────────────────────────────────────────────
+
+
+def test_claims_written_before_the_projection_existed_are_repaired(session_local,
+                                                                   calls):
+    """PR #508's claims are filterable and not findable: nothing wrote
+    event_text.attributes then, and the enrichers short-circuit on a
+    visit they have already handled, so only a repair reaches them."""
+    db = session_local
+    _camera(db, 1, [])                   # no assignment — and it must not matter
+    row = _visit(db, event_id=1, camera_id=1, label="car")
+    _raw_claim(db, row, "colour", "red")
+    _raw_claim(db, row, "vehicle_type", "van")
+
+    assert bf.plan_batch(db, None, 10)[0]["repair"] is True
+    _run(bf.backfill_once(batch=10, pause=0))
+
+    from models import EventText
+
+    db.expire_all()
+    assert db.get(EventText, row.id).attributes == "red van"
+    assert calls["caption"] == [] and calls["descriptors"] == [], (
+        "the repair spends no inference, so it is not gated by the "
+        "assignment and must not call an enricher either")
+
+
+def test_a_historical_plate_becomes_the_anchor_it_never_was(session_local):
+    """The plate lived on the row as a column. journey.py's certain
+    anchor reads descriptors, so every plate ever read was invisible to
+    it."""
+    db = session_local
+    _camera(db, 1, [])
+    row = _visit(db, event_id=1, camera_id=1, label="car", plate="AB12CDE")
+
+    assert bf.plan_batch(db, None, 10)[0]["repair"] is True
+    _run(bf.backfill_once(batch=10, pause=0))
+
+    from models import EventText, VisitDescriptor
+
+    db.expire_all()
+    claim = (db.query(VisitDescriptor)
+             .filter(VisitDescriptor.kind == "plate").one())
+    assert claim.value == "ab12cde"
+    assert db.get(EventText, row.id).attributes == "ab12cde"
+
+
+def test_a_visit_already_projected_is_not_repaired_again(session_local):
+    db = session_local
+    _camera(db, 1, [])
+    row = _visit(db, event_id=1, camera_id=1, label="car")
+
+    from services.descriptor_store import apply_descriptors
+
+    apply_descriptors(db, row, [_Claim("colour", "red")])
+    db.commit()
+
+    assert bf.plan_batch(db, None, 10)[0]["repair"] is False
+
+
+def test_a_visit_with_neither_claims_nor_a_plate_is_not_repaired(session_local):
+    db = session_local
+    _camera(db, 1, ["image_captioning"])
+    _visit(db, event_id=1, camera_id=1, label="car")
+
+    assert bf.plan_batch(db, None, 10)[0]["repair"] is False
+
+
+def test_the_sweep_runs_for_repairs_even_with_both_enrichers_off(session_local,
+                                                                calls,
+                                                                monkeypatch):
+    """Plate reads are a third setting. A box with captions and
+    descriptors off can still have a whole history of plates that never
+    became claims."""
+    db = session_local
+    _camera(db, 1, [])
+    _visit(db, event_id=1, camera_id=1, label="car", plate="AB12CDE")
+
+    from core.config import settings
+
+    monkeypatch.setattr(settings, "events_enrichment_backfill", True,
+                        raising=False)
+    monkeypatch.setattr(settings, "events_caption_enrichment", False,
+                        raising=False)
+    monkeypatch.setattr(settings, "events_descriptor_enrichment", False,
+                        raising=False)
+    _run(asyncio.wait_for(bf.run_backfill_loop(batch=10, pause=0, interval=0), 10))
+
+    from models import VisitDescriptor
+
+    db.expire_all()
+    assert db.query(VisitDescriptor).filter(
+        VisitDescriptor.kind == "plate").count() == 1
+    assert calls["caption"] == [] and calls["descriptors"] == []
 
 
 # ── wiring ───────────────────────────────────────────────────────────
