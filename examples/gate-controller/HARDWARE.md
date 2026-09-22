@@ -74,10 +74,47 @@ barrier mid-travel with nobody there.
 
 We did not find manufacturer wiring manuals with terminal tables for
 **Nice (non-WIL barriers), BFT, Beninca, All-O-Matic, Viking, Elite,
-Automatic Systems, Hikvision barrier gates**, or the Indian market
-(**Godrej, Aditya, Spectra, Matrix, eSSL, Realtime**). They are not
+Automatic Systems, Hikvision barrier gates**, or, in the Indian market,
+**Godrej, Aditya, Spectra, Matrix, Realtime or CP Plus**. They are not
 unsupported — the great majority take a dry contact like everything
 else — we simply will not print terminal numbers we have not read.
+
+### Indian-market barriers: identify the board, not the badge
+
+The section above used to list the whole Indian market as unverified on
+the guess that most of it is rebadged Chinese controllers. That guess
+holds up, and it turns out to be the useful way in: **the badge on the
+housing tells you little, the control board tells you everything.**
+Open the cabinet and read the board's silkscreen before you look up
+the brand.
+
+Two confirmations of the rebadge, from the vendors' own manuals:
+
+- **Vantage "Ultrafast"** (Indian brand) ships **Defuwei** hardware — the
+  manual is Defuwei's, covering the TAB, DAB, MINI-H and Guard-H
+  families. Its board uses `J9` for control inputs and `J10` for
+  outputs, with `K1`/`K2` driving the signal lights. No terminal legend
+  is printed, so no row here.
+- **eSSL BG100-BDC** (eSSL Security, Bengaluru) is the one Indian-badged
+  barrier whose own manual names its inputs and outputs.
+
+| Board / model | Command inputs | Position output | What the manual actually says |
+|---|---|---|---|
+| **DZ SERVO Ver2.0** — the servo board under a great many BG-series barriers | `OPEN`, `CLOSE`, `COM`, plus separate remote-control open/close ports | **Yes, both poles**: "Opening in place signal NO/NC", "Closing in place signal NO/NC". Separate R&G traffic-light relay, 10 A | "All command generators (push buttons, limit switches, etc.) must be connected by the volt-free contact way" |
+| **DZX2.1** — the older traditional-barrier board | `UP`, `DOWN`, `STOP`, `COM` | **Yes**: "Up limit (or down limit) relay output (no power, switch signal)" — i.e. volt-free | "dry contact input signal, UP (or DOWN, or STOP) connect with 'COM', the control board will response accordingly" |
+| **eSSL BG100-BDC** | `External Open`, `External Close`, `External Stop`, `COM` | **Yes**: `Open Limit Output`, `Close Limit Output`, `Limit Output COM` | Labels are from the control-board diagram (Fig. 12). The manual states **neither** the contact type nor any rating |
+
+No terminal *numbers* appear above because none of these manuals print
+them — the boards are labelled by function on the silkscreen instead,
+which is why reading the board beats looking up the brand.
+
+⚠️ **On the DZ SERVO, do the continuity test even though the manual
+says volt-free.** The same manual that insists on "the volt-free
+contact way" also describes `OPEN` and `CLOSE` as pairing against a
+`+24V` port. Those two statements cannot both be taken at face value,
+and which one is true decides whether a bare relay does anything at
+all. Measure across the pair with the barrier powered (rule 2 below)
+before you wire anything.
 
 **If your barrier is not in the table**, the procedure is the same
 everywhere:
@@ -98,7 +135,9 @@ everywhere:
 Much of the Indian-market equipment is a rebadged Chinese controller
 with the Dahua-style `Open` / `Close` / `COM` inputs and
 `Opened` / `Closed` / `COM` outputs, or a licensed European board — so
-one of the patterns above almost certainly applies.
+one of the patterns above almost certainly applies. The verified boards
+in *Indian-market barriers* above are the two you are most likely to
+find under the lid.
 
 ### Reading the barrier's position
 
@@ -109,7 +148,12 @@ that failed to close is exactly when a made-up state does harm.
 
 - **Real contacts** (wire to a GPIO input, a Modbus discrete input, or a
   door monitor): FAAC 624 relay card, HySecurity user relays,
-  LiftMaster AUX RELAY, Magnetic assignable outputs, Dahua t7/t8.
+  LiftMaster AUX RELAY, Magnetic assignable outputs, Dahua t7/t8, and
+  on the Chinese-OEM boards common in India the DZ SERVO "in place"
+  relays, DZX2.1's limit outputs and eSSL's `Open`/`Close Limit
+  Output`. Those three are the reason a rebadged barrier is usually
+  **monitorable** — the position output is on the board whether or not
+  the brochure mentions it.
 - **Lamp outputs are not contacts.** Nice's C.A. indicator and CAME's
   `10-5` drive a 24 V bulb. Reading them needs an opto-isolator or a
   small 24 V relay — without one you will read nothing, or backfeed the
