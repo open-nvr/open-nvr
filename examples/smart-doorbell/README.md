@@ -80,17 +80,27 @@ App Catalog:
 
 Each visit costs a line of text — when, which camera, recognised or not,
 and who. Only the most recent unrecognised visits also keep a thumbnail,
-because those are the tiles anyone actually looks at; an older stranger
-keeps the line and the wall shows **snapshot aged out** in place of the
-picture. The visit still happened, and the caption is the answer to the
-question — the photo was only ever the nicer half of it.
+because those are the tiles anyone actually looks at.
 
 The full-size crop goes to the platform's evidence store, where alerts
 already cite their pictures and where OpenNVR's own retention governs
-it. A tile restored from history therefore cannot be enrolled from: the
-full crop is not in this process, and enrolling from a 190 px wall
-thumbnail would teach the adapter a worse face than the operator thinks
-they are giving it. Enrol a stranger while the tile is fresh.
+it — and it can be fetched back, so **a stranger from last Tuesday can
+still be enrolled**. "The doorbell was restarted" is not something an
+operator should have to care about when they click Enrol on a face.
+
+The wall says which of two things it means when a tile has no picture
+inline, because they are not the same:
+
+| Tile says | What it means |
+| --- | --- |
+| **photo kept — open to enrol** | The log does not carry a thumbnail this far back, but the platform still holds the crop. Open it and enrol. |
+| **snapshot aged out** | Retention has taken the crop. The visit is still in the history; the photo is gone. |
+
+What never happens is enrolling from the wall thumbnail. That is a
+~190 px image kept for drawing the tile, and feeding it to the adapter
+would teach it a worse face than the operator believes they handed over
+— so a capture with no fetchable crop refuses rather than quietly
+enrolling something inferior.
 
 Why the identity is the app's own record rather than a claim on the
 platform's visit rows: this app polls snapshots, so it has a frame and a

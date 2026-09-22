@@ -181,6 +181,29 @@ class VisitLog:
     def entry(self, visit_id: str) -> dict[str, Any] | None:
         return next((e for e in self.entries if e.get("id") == visit_id), None)
 
+    def crop(self, visit_id: str) -> bytes | None:
+        """The FULL-SIZE face crop for a visit, fetched back from the
+        platform's evidence store.
+
+        Not the wall thumbnail. The thumbnail is ~190px and lives in the
+        log so the wall can draw without a round trip; this is the 320px
+        crop the enroller needs, and teaching the adapter the thumbnail
+        instead would quietly give it a worse face than the operator
+        believes they handed over.
+
+        ``None`` when the picture is gone — retention sweeps evidence,
+        and the caller says "no longer available" rather than enrolling
+        from something else.
+        """
+        path = (self.entry(visit_id) or {}).get("evidence_path")
+        if not path:
+            return None
+        try:
+            return self._nvr.read_evidence(str(path))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("evidence %s unreadable (%s)", path, exc)
+            return None
+
     # ── internals ──────────────────────────────────────────────────
 
     def _save(self, crop: bytes) -> str | None:
