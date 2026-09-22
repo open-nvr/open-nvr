@@ -260,3 +260,99 @@ def anchor_for(event: TimelineEvent) -> dict[str, Any]:
         "at": at.isoformat() if at else None,
         "ended_at": event.ended_at.isoformat() if event.ended_at else None,
     }
+
+
+# ── Answering, not just listing ──────────────────────────────────────
+#
+# A result list makes the operator do the counting. "Was a red van here
+# this morning?" is answered by ten rows they have to read and tally,
+# and the thing they most need to know — that four of those ten were
+# never described by any skill, so the absence of "red" on them means
+# nothing — is the one thing a list cannot say.
+#
+# So search also answers. Two rules make that safe:
+#
+#   1. Every number below is COUNTED from rows already returned. Nothing
+#      is inferred, generalised or predicted. If the store does not say
+#      it, it does not appear.
+#   2. The answer is DATA, not a sentence. The server has no business
+#      emitting English prose that the French UI then cannot translate,
+#      and a sentence assembled on the server is a sentence nobody can
+#      re-word without a release. The UI composes it.
+#
+# Everything here describes THIS PAGE of results, not the whole match
+# set, because that is what was actually loaded — counting claims across
+# a ten-thousand-row match would be a second full query, and quoting
+# page numbers as though they were totals is the exact dishonesty this
+# is meant to remove. ``shown`` and ``total`` are both reported so the
+# UI can say which it is talking about.
+
+#: How many distinct cameras / claims / plates the answer names before
+#: it stops. Past a handful the summary stops being a summary.
+_ANSWER_TOP_N = 4
+
+
+def summarise_hits(
+    hits: list[SearchHit],
+    *,
+    total: int,
+    camera_names: dict[int, str] | None = None,
+) -> dict[str, Any]:
+    """Counted facts about ``hits`` — what matched, where, when, what was
+    claimed about them, and what is NOT known.
+
+    Returns ``{}`` for an empty page: there is nothing to summarise, and
+    an answer block full of zeroes reads as a finding.
+    """
+    if not hits:
+        return {}
+
+    names = camera_names or {}
+    events = [h.event for h in hits]
+
+    per_camera: dict[int, int] = {}
+    for e in events:
+        per_camera[e.camera_id] = per_camera.get(e.camera_id, 0) + 1
+    cameras = sorted(
+        ({"id": cid, "name": names.get(cid), "count": n}
+         for cid, n in per_camera.items()),
+        key=lambda c: (-c["count"], c["id"]),
+    )
+
+    starts = sorted(e.started_at for e in events if e.started_at)
+
+    per_claim: dict[tuple[str, str], int] = {}
+    for h in hits:
+        # Distinct within a visit: two skills agreeing that a van is red
+        # is one red van, not two. Counting agreements as sightings would
+        # make the best-enriched visits look like a crowd.
+        for kind, value in {(c["kind"], c["value"]) for c in h.claims
+                            if c.get("kind") and c.get("value")}:
+            per_claim[(kind, value)] = per_claim.get((kind, value), 0) + 1
+    claims = sorted(
+        ({"kind": k, "value": v, "count": n} for (k, v), n in per_claim.items()),
+        key=lambda c: (-c["count"], c["kind"], c["value"]),
+    )
+
+    plates = sorted({e.plate_text for e in events if e.plate_text})
+
+    return {
+        # What this block is counted over, stated rather than implied.
+        "scope": "page",
+        "shown": len(hits),
+        "total": total,
+        "cameras": cameras[:_ANSWER_TOP_N],
+        "camera_count": len(cameras),
+        "first_at": starts[0].isoformat() if starts else None,
+        "last_at": starts[-1].isoformat() if starts else None,
+        "claims": claims[:_ANSWER_TOP_N],
+        "claim_count": len(claims),
+        "plates": plates[:_ANSWER_TOP_N],
+        "plate_count": len(plates),
+        "with_evidence": sum(1 for e in events if e.evidence_path),
+        # The honest part, and the reason this is worth shipping. A visit
+        # with no claims was never ASKED about — no skill ran on it — so
+        # its silence on "red" is not evidence that it was not red. An
+        # operator reading a list has no way to see that.
+        "undescribed": sum(1 for h in hits if not h.claims),
+    }

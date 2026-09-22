@@ -42,6 +42,7 @@ import {
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { api } from '../lib/api'
+import SearchAnswer, { type SearchAnswerData } from '../components/SearchAnswer'
 import { AuthedImage } from '../components/AuthedImage'
 import { JourneyPanel } from '../components/JourneyPanel'
 import { useTranslation } from '../i18n'
@@ -98,6 +99,8 @@ type SearchResponse = {
   interpretation: Interpretation
   results: Hit[]
   count: number
+  /** Counted facts about `results` — see components/SearchAnswer. */
+  answer?: SearchAnswerData
   total: number
   /** Empty result: which ONE chip is responsible, and what dropping it
    *  would find. Empty when there were results, or when no single chip
@@ -486,6 +489,8 @@ export function Search() {
             </span>
             {searchQuery.isFetching && <span>updating…</span>}
           </div>
+
+          <SearchAnswer answer={data?.answer} />
 
           <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
             {results.map((h, i) => (
