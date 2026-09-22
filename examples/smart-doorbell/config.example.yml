@@ -66,6 +66,14 @@ attach_snapshot_for_unknowns: true
 # dropped from the envelope; the alert still fires.
 snapshot_max_bytes: 716800
 
+# How long the door remembers who called. The history lives in this
+# app's durable store in core, so it survives restarts and redeploys —
+# which is what makes "who came three days ago" answerable at all.
+# Bounded by a count as well as an age: the log is one value rewritten
+# on every visit, and a busy porch must not turn that into a megabyte.
+history_days: 30
+history_max: 200
+
 # Alert delivery channels — webhook + NATS. Both independent of
 # the always-on stdout channel.
 #

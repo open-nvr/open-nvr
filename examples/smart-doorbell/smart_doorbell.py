@@ -81,6 +81,7 @@ from face_recognition_pipeline import (
     RecognitionClient,
 )
 from frame_sources import FrameSource, FrameSourceError, build_frame_source
+from visit_log import VisitLog
 from opennvr_app_sdk import (
     Action, AlertType, AppManifest, FrameApp, KaiCClient, Param, StateView,
 )
@@ -145,6 +146,10 @@ MANIFEST = AppManifest(
               description="Embed a base64 JPEG in unknown-face alerts only."),
         Param("snapshot_max_bytes", int, default=_DEFAULT_SNAPSHOT_MAX_BYTES,
               description="Pre-base64 snapshot cap; 0 disables the limit."),
+        Param("history_days", int, default=30,
+              description="How long a visit stays in the door's history."),
+        Param("history_max", int, default=200,
+              description="Hard cap on remembered visits, whatever the age."),
     ],
     emits=[
         AlertType("known_visitor", severity="low"),
@@ -303,6 +308,14 @@ class AppConfig:
     # (the alert still fires) with a WARN log line.
     snapshot_max_bytes: int = _DEFAULT_SNAPSHOT_MAX_BYTES
 
+    # How long the door remembers. The whole point of keeping a history
+    # is "who came three days ago", so the default is a month rather
+    # than the handful of entries a deque held — and it is bounded by a
+    # count as well, because the log is one JSON value rewritten per
+    # visit and a busy porch must not turn that into a megabyte.
+    history_days: int = 30
+    history_max: int = 200
+
     # Alert delivery channels.
     webhook_url: str | None = None
     nats_alerts_url: str | None = None
@@ -370,6 +383,8 @@ def load_config(path: str | Path) -> AppConfig:
         snapshot_max_bytes=int(
             raw.get("snapshot_max_bytes", _DEFAULT_SNAPSHOT_MAX_BYTES)
         ),
+        history_days=int(raw.get("history_days", 30)),
+        history_max=int(raw.get("history_max", 200)),
         webhook_url=raw.get("webhook_url"),
         nats_alerts_url=raw.get("nats_alerts_url"),
         nats_alerts_token=raw.get("nats_alerts_token"),
@@ -544,6 +559,47 @@ def _slug(name: str) -> str:
     return s or "face"
 
 
+class _LazyNvr:
+    """What :class:`VisitLog` needs, resolved at CALL time.
+
+    The log is built in the constructor and the platform client is not
+    available until after registration, so handing it ``app.nvr`` there
+    would capture ``None`` — or worse, force the client to be built
+    early, before core has minted this app's key (see the ``nvr``
+    property). This forwards each attribute when it is actually used.
+    """
+
+    __slots__ = ("_app",)
+
+    def __init__(self, app: Any) -> None:
+        self._app = app
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._app.nvr, name)
+
+
+def _feed_line(item: dict[str, Any]) -> dict[str, Any]:
+    """One stored visit as the dashboard's "Recent visitors" row.
+
+    Built from the record rather than stored twice: the feed's wording
+    is presentation, and a restored visit must read exactly like a live
+    one or the log looks like two different logs.
+    """
+    display = item.get("name") or item.get("person_id") or "?"
+    recognized = bool(item.get("recognized"))
+    camera = item.get("camera") or "?"
+    return {
+        "message": (f"{display} recognised" if recognized
+                    else "Unknown visitor") + f" at {camera}",
+        "time": item.get("at"),
+        "level": "low" if recognized else "high",
+        "camera": camera,
+        "name": display if recognized else None,
+        "category": item.get("category") if recognized else None,
+        "similarity": item.get("similarity"),
+    }
+
+
 class SmartDoorbell(FrameApp):
     """Polls all configured cameras (via the SDK FrameApp loop), runs
     recognition, dispatches.
@@ -628,6 +684,68 @@ class SmartDoorbell(FrameApp):
         # person_id -> metadata from the same refresh, so an expiry date
         # is known at recognition time without a second adapter call.
         self._people_meta: dict[str, dict[str, Any]] = {}
+        #: The platform client, built on FIRST USE — core mints this
+        #: app's key during registration, which the base class does in
+        #: start(), after this constructor has run. A client built here
+        #: would resolve its credential before the app key exists and
+        #: fall back to the deployment's site key, which core reads as a
+        #: platform component: unscoped, every camera in the building.
+        self._nvr: Any = None
+        #: Who came to the door, kept across restarts. Every collection
+        #: above this line is a deque that a redeploy empties.
+        self._history = VisitLog(
+            _LazyNvr(self),
+            max_entries=self.config.history_max,
+            max_days=self.config.history_days,
+        )
+        self._history_restored = False
+        self._visit_seq = 0
+
+    @property
+    def nvr(self):
+        """The client this app talks to core with, built on first use."""
+        if self._nvr is None:
+            from opennvr_app_sdk import OpenNVR
+
+            self._nvr = OpenNVR()
+        return self._nvr
+
+    @nvr.setter
+    def nvr(self, client) -> None:
+        self._nvr = client
+
+    def _restore_history(self) -> None:
+        """Put the stored visits back on the feed and the wall, once.
+
+        Lazily rather than in the constructor: reading it needs the
+        platform client, which needs the app key core mints during
+        registration — and a doorbell must come up and start watching the
+        door whether or not its history can be read.
+        """
+        if self._history_restored:
+            return
+        self._history_restored = True
+        try:
+            entries = self._history.entries
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("visit history could not be restored (%s)", exc)
+            return
+        if not entries:
+            return
+        for item in reversed(self._history.recent(self._recent.maxlen or 25)):
+            self._recent.appendleft(_feed_line(item))
+        for item in reversed(self._history.strangers(
+                self._stranger_gallery.maxlen or 8)):
+            self._stranger_gallery.appendleft({
+                "id": item.get("id"),
+                "image": item.get("thumb"),
+                # No picture and a record that says why, so the wall can
+                # show "snapshot aged out" instead of a broken tile.
+                "aged_out": not item.get("thumb"),
+                "label": item.get("camera"),
+                "time": item.get("at"),
+            })
+        logger.info("restored %d visits from history", len(entries))
 
     def request_stop(self) -> None:
         """Historical name — the SDK base spells it ``stop()``."""
@@ -647,6 +765,9 @@ class SmartDoorbell(FrameApp):
         cam = self._cameras_by_id.get(camera_id) or CameraConfig(
             camera_id=camera_id, frame_url="opennvr:core")
         correlation_id = uuid.uuid4().hex
+        # First frame after a start: put yesterday's visitors back on the
+        # feed and the wall before this one joins them.
+        self._restore_history()
 
         read = self.pipeline.process_frame(frame_bytes, correlation_id=correlation_id)
         if read is None or not read.face_detected:
@@ -696,6 +817,9 @@ class SmartDoorbell(FrameApp):
         self._visits["known" if read.recognized else "unknown"] += 1
         if read.recognized and read.person_id:
             self._last_seen[read.person_id] = now_wall
+        crop: bytes | None = None
+        thumb: str | None = None
+        sid: str | None = None
         if not read.recognized:
             # One full-frame decode: the 320 px crop, then the ~190 px wall
             # thumbnail from the crop — a face, not a whole porch, in a
@@ -715,11 +839,45 @@ class SmartDoorbell(FrameApp):
                 live = {g["id"] for g in self._stranger_gallery}
                 for old in [k for k in self._stranger_crops if k not in live]:
                     self._stranger_crops.pop(old, None)
+
+        # Durable, and LAST: the alert has already gone out and the
+        # dashboard is already right. A doorbell that failed to ring
+        # because a key/value write timed out would be a worse doorbell
+        # than one with a gap in its history.
+        self._remember(cam, read, now_wall, visit_id=sid, thumb=thumb, crop=crop)
         # Wire the app-dispatched alert into the SDK contract counters
         # (/health's alerts_fired) — the base loop can't see it because
         # on_frame returns None.
         self._contract_note_alerts(1)
         return None
+
+    def _remember(self, cam: Any, read: Any, at: float, *,
+                  visit_id: str | None, thumb: str | None,
+                  crop: bytes | None) -> None:
+        """Write this visit to the durable history. Never raises.
+
+        A recognised visitor gets no thumbnail: their face is already in
+        the gallery an operator enrolled, and storing another copy per
+        visit would fill the log with pictures of people it already
+        knows. A stranger's is the one worth keeping.
+        """
+        if visit_id is None:
+            self._visit_seq += 1
+            visit_id = f"v{int(at)}-{self._visit_seq}"
+        try:
+            self._history.record({
+                "id": visit_id,
+                "at": at,
+                "camera": cam.camera_id,
+                "recognized": bool(read.recognized),
+                "person_id": read.person_id if read.recognized else None,
+                "name": read.name if read.recognized else None,
+                "category": read.category if read.recognized else None,
+                "similarity": read.similarity,
+                **({"thumb": thumb} if thumb and not read.recognized else {}),
+            }, crop=crop if not read.recognized else None)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("visit not recorded in history (%s)", exc)
 
     def _enrolled_count(self) -> int | None:
         """How many faces the adapter holds, cached for a minute. None when
@@ -827,11 +985,18 @@ class SmartDoorbell(FrameApp):
             for r in snap["camera_health"]
         ) or "<tr><td colspan='4' class='dim'>No cameras configured.</td></tr>"
 
-        wall = "".join(
-            f"<figure><img src='{item['image']}' alt='stranger'>"
-            f"<figcaption>{esc(str(item['label']))} · {ago(item.get('time'))}</figcaption></figure>"
-            for item in reversed(snap["stranger_gallery"])
-        )
+        def _tile(item: dict[str, Any]) -> str:
+            # A visit whose picture the history no longer keeps still
+            # happened, and saying so beats a broken image: the caption
+            # is the answer to "who came on Tuesday", the photo was only
+            # ever the nicer half of it.
+            face = (f"<img src='{item['image']}' alt='stranger'>"
+                    if item.get("image")
+                    else "<div class='gone'>snapshot aged out</div>")
+            return (f"<figure>{face}<figcaption>{esc(str(item.get('label') or '?'))}"
+                    f" · {ago(item.get('time'))}</figcaption></figure>")
+
+        wall = "".join(_tile(item) for item in reversed(snap["stranger_gallery"]))
         wall_block = (f"<div class='wall'>{wall}</div>" if wall
                       else "<p class='dim'>No strangers seen yet.</p>")
 
@@ -872,6 +1037,8 @@ class SmartDoorbell(FrameApp):
  .wall {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: .6rem }}
  figure {{ margin: 0; border: 1px solid #e0e0e0; border-radius: 6px; overflow: hidden; background: #fff }}
  figure img {{ width: 100%; height: 96px; object-fit: cover; display: block }}
+ .gone {{ height: 96px; display: flex; align-items: center; justify-content: center;
+          background: #f2f3f5; color: #6b6f76; font-size: .72rem; text-align: center }}
  figcaption {{ font-size: .78rem; padding: .25rem .4rem; color: #3a3d44 }}
  .note {{ margin-top: 1rem; font-size: .85rem; color: #6b6f76 }}
 </style>
@@ -949,6 +1116,11 @@ page. Threshold and re-fire window are edited in the config form and apply live.
             sid = str(params.get("stranger_id") or "").strip()
             crop = self._stranger_crops.get(sid)
             if crop is None:
+                # A tile restored from history has no full crop in this
+                # process. Enrolling from the wall thumbnail would teach
+                # the adapter a 190 px face, so the honest answer is that
+                # this capture is no longer available to enrol from —
+                # not a silently worse enrolment.
                 raise KeyError(sid or "stranger_id")
             # A capture assigned to someone already enrolled is an added
             # sample; the wall tile then disappears (it is no longer a stranger).
@@ -957,6 +1129,13 @@ page. Threshold and re-fire window are edited in the config form and apply live.
             self._stranger_crops.pop(sid, None)
             self._stranger_gallery = deque((g for g in self._stranger_gallery if g.get("id") != sid),
                                            maxlen=self._stranger_gallery.maxlen)
+            # And out of the durable history, or the tile reappears on
+            # the next restart for somebody who is now enrolled.
+            try:
+                self._history.forget(sid)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("enrolled stranger %s not removed from "
+                               "history (%s)", sid, exc)
             return out
 
         if name == "update_face":
