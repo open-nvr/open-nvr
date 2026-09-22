@@ -76,6 +76,15 @@ __all__ = [
 
 #: Descriptor kinds that ARE an identity rather than evidence of one.
 #: Both come from KAI-C adapters; both are exact-match.
+#:
+#: Only ``plate`` has a producer today. Nothing in this repository writes
+#: a ``face_id`` claim — core refuses to, leaving a name on a person to
+#: an app the operator installed on purpose, and no app writes one
+#: either. The face branches below are therefore correct, priced, and
+#: never taken, and a journey whose only link is a recognised face
+#: cannot form. That is a decision rather than an oversight;
+#: ``tests/test_descriptor_producers.py`` carries the reasoning and
+#: fails if it stops being true.
 ANCHOR_KINDS = ("plate", "face_id")
 
 #: How much each kind of agreement is worth before its surprise is taken

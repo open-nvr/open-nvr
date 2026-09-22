@@ -84,6 +84,12 @@ TASK_DESCRIPTORS: dict[str, dict[str, Any]] = {
         # The strongest claim in the set, and the most sensitive: a name
         # attached to a person on a camera. Enabled per deployment, and
         # every report that uses it says so.
+        #
+        # Declared, and currently unproduced. No enricher in core writes
+        # face_id and no app does either, so this row describes what the
+        # kind would mean rather than something the store holds. See
+        # tests/test_descriptor_producers.py — it fails if the set of
+        # unproduced kinds changes without the reason changing with it.
         "kinds": ["face_id"],
         "labels": ["person"],
     },
