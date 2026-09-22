@@ -169,3 +169,103 @@ def test_file_present_but_schema_not_yet_is_not_yet(tmp_path):
     ])
     assert idx.available is True
     assert len(idx.search(keywords=["person"])) == 1
+
+
+# ── the canonical store is now the source; the index is the fallback ──
+#
+# search_footage used to read ONLY the footage-search app's private
+# SQLite index. It now asks the platform's canonical store first
+# (timeline.find — the operator Search page's own query), because that
+# store is one row per VISIT rather than per analyzed frame, is scoped by
+# the same predicate everything else uses, and carries the evidence
+# photo, the plate and what each skill claimed. The index remains as a
+# fallback for a box that cannot reach core.
+
+
+class _FakeTimeline:
+    """Stands in for the SDK's TimelineAPI. ``answer`` of None is the
+    SDK's "could not reach the store" — deliberately NOT the same as an
+    empty result list."""
+
+    def __init__(self, answer):
+        self.answer = answer
+        self.calls = []
+
+    def find(self, q="", **kw):
+        self.calls.append({"q": q, **kw})
+        return self.answer
+
+
+def _tools_with(timeline=None, footage_index=None):
+    return CameraTools(
+        context=_FakeContext(["cam-dock", "cam-gate"]),
+        caption_client=None, detection_client=None, recognition_client=None,
+        footage_index=footage_index, timeline=timeline,
+    )
+
+
+@pytest.mark.asyncio
+async def test_search_uses_the_canonical_store_when_it_is_available():
+    tl = _FakeTimeline({
+        "total": 1,
+        "results": [{
+            "id": 41, "camera_id": 2, "started_at": "2026-09-22T14:03:00+00:00",
+            "caption": "a red truck at a loading dock", "label": "truck",
+            "plate_text": "KA01AB1234", "has_evidence": True,
+        }],
+    })
+    out = await _tools_with(timeline=tl).search_footage(
+        {"keywords": ["red", "truck"]})
+    assert "red truck at a loading dock" in out
+    # The things the private index could never carry.
+    assert "KA01AB1234" in out
+    assert "photo kept" in out
+    assert "#41" in out
+    # And the query went out as text with parsing off: the model already
+    # decomposed the question, so a second parser would be two opinions
+    # about one query.
+    assert tl.calls[0]["text"] == "red truck"
+    assert tl.calls[0]["parse"] is False
+
+
+@pytest.mark.asyncio
+async def test_an_empty_result_is_reported_as_nothing_matched():
+    tl = _FakeTimeline({"total": 0, "results": []})
+    out = await _tools_with(timeline=tl).search_footage({"keywords": ["zebra"]})
+    assert "No recorded footage matched" in out
+
+
+@pytest.mark.asyncio
+async def test_unreachable_store_is_not_reported_as_nothing_matched(tmp_path):
+    """The distinction the events client goes out of its way to preserve:
+    "nothing came" and "I couldn't check" are different answers, and in a
+    security product conflating them is the dangerous direction."""
+    tools = _tools_with(timeline=_FakeTimeline(None))
+    out = await tools.search_footage({"keywords": ["red", "truck"]})
+    assert "No recorded footage matched" not in out
+    assert "cannot say" in out.lower()
+
+
+@pytest.mark.asyncio
+async def test_it_falls_back_to_the_local_index_when_core_is_unreachable(tmp_path):
+    db = tmp_path / "index.sqlite3"
+    _build_index(db, [("cam-dock", time.time() - 120, "corr-1", "blip",
+                       "truck", "a red truck at the dock")])
+    tools = _tools_with(timeline=_FakeTimeline(None),
+                        footage_index=FootageIndex(str(db)))
+    out = await tools.search_footage({"keywords": ["red", "truck"]})
+    assert "red truck at the dock" in out
+
+
+@pytest.mark.asyncio
+async def test_the_index_is_not_consulted_when_the_store_answered(tmp_path):
+    """Belt and braces: an answer from the canonical store must not be
+    silently topped up from, or replaced by, the legacy index."""
+    db = tmp_path / "index.sqlite3"
+    _build_index(db, [("cam-dock", time.time() - 120, "corr-1", "blip",
+                       "truck", "INDEX ROW THAT MUST NOT APPEAR")])
+    tl = _FakeTimeline({"total": 0, "results": []})
+    tools = _tools_with(timeline=tl, footage_index=FootageIndex(str(db)))
+    out = await tools.search_footage({"keywords": ["truck"]})
+    assert "INDEX ROW" not in out
+    assert "No recorded footage matched" in out
