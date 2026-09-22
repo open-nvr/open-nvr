@@ -18,6 +18,7 @@
 
 import { api } from '../lib/api'
 import { formatSeenAt, seenAtTitle } from '../lib/time'
+import type { DateFormatters } from '../i18n'
 
 // The operator alert inbox: app-emitted §11.5 alerts landed by the
 // core's opennvr.alerts.> consumer. The bell polls unacked rows, rings
@@ -66,19 +67,19 @@ export function alarmSeenIso(a: InboxAlert): string | null {
   return a.observed_at ?? a.fired_at
 }
 
-export function alarmSeenAt(a: InboxAlert): string {
-  return formatSeenAt(alarmSeenIso(a)) || '—'
+export function alarmSeenAt(a: InboxAlert, fmt: DateFormatters): string {
+  return formatSeenAt(alarmSeenIso(a), fmt) || '—'
 }
 
 // Tooltip for the cell above. When the two differ by a noticeable margin
 // the lag rides along: it is a useful health signal, and hiding it would
 // be the same dishonesty in the other direction.
-export function alarmSeenTitle(a: InboxAlert): string | undefined {
-  const full = seenAtTitle(alarmSeenIso(a))
+export function alarmSeenTitle(a: InboxAlert, fmt: DateFormatters): string | undefined {
+  const full = seenAtTitle(alarmSeenIso(a), fmt)
   if (!a.observed_at || !a.fired_at) return full
   const lagMs = new Date(a.fired_at).getTime() - new Date(a.observed_at).getTime()
   if (!Number.isFinite(lagMs) || lagMs < 1000) return full
-  const at = new Date(a.fired_at).toLocaleTimeString()
+  const at = fmt.time(a.fired_at, {})
   return `${full} · alerted ${Math.round(lagMs / 1000)}s later, at ${at}`
 }
 

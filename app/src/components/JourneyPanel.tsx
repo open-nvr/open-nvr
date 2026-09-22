@@ -49,7 +49,7 @@ import { ImageOff, MapPin, Route, TriangleAlert } from 'lucide-react'
 import { api } from '../lib/api'
 import { AuthedImage } from './AuthedImage'
 import { Modal } from './Modal'
-import { useTranslation } from '../i18n'
+import { useTranslation, useDateFormat, type DateFormatters } from '../i18n'
 import { Badge, Button, EmptyState, Skeleton } from './ui'
 
 export type JourneyHop = {
@@ -105,10 +105,10 @@ const METHOD_BAR: Record<string, string> = {
   'time-only': 'var(--badge-warning-text)',
 }
 
-function clockTime(iso: string | null): string {
+function clockTime(iso: string | null, fmt: DateFormatters): string {
   if (!iso) return '—'
   const d = new Date(iso)
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  return fmt.time(d, { hour: '2-digit', minute: '2-digit', second: '2-digit' })
 }
 
 function transit(seconds: number): string {
@@ -273,6 +273,7 @@ function StopCard({
   lead: string
   hop?: JourneyHop
 }) {
+  const fmt = useDateFormat()
   const { t } = useTranslation()
   return (
     <div className="rounded border border-[var(--border)] bg-[var(--panel)]">
@@ -280,7 +281,7 @@ function StopCard({
         <Link
           to={playbackHref(cameraId, at)}
           className="relative block h-16 w-24 shrink-0 overflow-hidden rounded bg-[var(--bg-2)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
-          title={at ? t('journey.openAt').replace('{when}', new Date(at).toLocaleString()) : undefined}
+          title={at ? t('journey.openAt').replace('{when}', fmt.dateTime(at)) : undefined}
         >
           {evidenceUrl ? (
             <AuthedImage
@@ -305,7 +306,7 @@ function StopCard({
           <div className="flex items-center gap-2 text-xs">
             <span className="text-[var(--text-dim)] tabular-nums">{lead}</span>
             <span className="truncate font-medium">{cameraName ?? `cam${cameraId}`}</span>
-            <span className="ml-auto tabular-nums text-[var(--text-dim)]">{clockTime(at)}</span>
+            <span className="ml-auto tabular-nums text-[var(--text-dim)]">{clockTime(at, fmt)}</span>
           </div>
           {hop ? (
             <>

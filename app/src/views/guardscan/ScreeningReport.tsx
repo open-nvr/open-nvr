@@ -23,6 +23,7 @@ import {
   guardScanService, VERDICT_LABEL,
   type ComplianceReport, type Tally,
 } from '../../services/guardScanService'
+import { useDateFormat, type DateFormatters } from '../../i18n'
 
 // Rows the report groups by. Deliberately fewer choices than the page:
 // a printed document wants a period someone will recognise, not a knob.
@@ -43,6 +44,7 @@ export function ScreeningReport({ days: initialDays, onClose }: {
   days: number
   onClose: () => void
 }) {
+  const fmt = useDateFormat()
   const [days, setDays] = useState(initialDays)
   const tz = useMemo(() => -new Date().getTimezoneOffset(), [])
 
@@ -80,7 +82,7 @@ export function ScreeningReport({ days: initialDays, onClose }: {
     >
       <h1 className="text-xl font-semibold">Entry Screening Report</h1>
       <p className="mt-1 text-sm text-neutral-500">
-        Last {days} days · generated {new Date().toLocaleString()} · OpenNVR
+        Last {days} days · generated {fmt.dateTime(new Date())} · OpenNVR
       </p>
 
       {query.isPending ? (

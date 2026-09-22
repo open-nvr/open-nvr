@@ -32,7 +32,7 @@ import { ErrorBoundary } from '../components/ErrorBoundary'
 import { CameraStatusProvider } from '../hooks/useCameraStatus'
 import { SystemAlertBanner } from '../components/SystemAlertBanner'
 import { AlertBell } from '../components/AlertBell'
-import { useTranslation } from '../i18n'
+import { useTranslation, useDateFormat, type DateFormatters } from '../i18n'
 
 type NavItem = {
   to: string
@@ -464,12 +464,13 @@ export function AppShell() {
 }
 
 function LiveClock() {
+  const fmt = useDateFormat()
   const [now, setNow] = useState(() => new Date())
   useEffect(() => {
     const id = window.setInterval(() => setNow(new Date()), 1000)
     return () => window.clearInterval(id)
   }, [])
-  return <span className="opacity-90 tabular-nums">{now.toLocaleString()}</span>
+  return <span className="opacity-90 tabular-nums">{fmt.dateTime(now)}</span>
 }
 
 function SideLink({ to, label, icon, collapsed, end }: { to: string; label: string; icon: React.ReactNode; collapsed?: boolean; end?: boolean }) {

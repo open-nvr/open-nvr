@@ -18,12 +18,13 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate } from 'react-router-dom'
-import { useTranslation } from '../i18n'
+import { useTranslation, useDateFormat, type DateFormatters } from '../i18n'
 import { Card, CardHeader, CardTitle, CardContent, Skeleton, ErrorCard } from "../components/ui";
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip as RTooltip, CartesianGrid, BarChart, Bar, Cell } from 'recharts'
 import { apiService } from "../lib/apiService";
 
 export default function SystemNetworkMonitoring() {
+  const fmt = useDateFormat()
   const { t } = useTranslation()
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -115,9 +116,9 @@ export default function SystemNetworkMonitoring() {
                           </linearGradient>
                         </defs>
                         <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.15)" />
-                        <XAxis dataKey="ts" stroke="var(--text-dim)" fontSize={12} tickFormatter={(v) => new Date(v).toLocaleString()} />
+                        <XAxis dataKey="ts" stroke="var(--text-dim)" fontSize={12} tickFormatter={(v) => fmt.dateTime(v)} />
                         <YAxis stroke="var(--text-dim)" fontSize={12} allowDecimals={false} />
-                        <RTooltip contentStyle={{ background: 'var(--panel-2)', border: '1px solid rgb(64,64,64)', color: 'var(--text)' }} labelFormatter={(v) => new Date(v as string).toLocaleString()} />
+                        <RTooltip contentStyle={{ background: 'var(--panel-2)', border: '1px solid rgb(64,64,64)', color: 'var(--text)' }} labelFormatter={(v) => fmt.dateTime(v as string)} />
                         <Area type="monotone" dataKey="count" stroke="#ef4444" fill="url(#suricataAlertGrad)" strokeWidth={2} />
                       </AreaChart>
                     </ResponsiveContainer>

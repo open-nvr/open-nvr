@@ -42,7 +42,7 @@ import {
 import { useSnackbar } from '../components/Snackbar'
 import { VideoPlayer } from '../components/VideoPlayer/VideoPlayer'
 import { PlaybackConsole } from '../components/PlaybackConsole'
-import { useTranslation } from '../i18n'
+import { useTranslation, useDateFormat, type DateFormatters } from '../i18n'
 
 // Daily recording - one entry per camera per day
 interface DailyRecording {
@@ -93,6 +93,7 @@ interface CloudUploadStatus {
 }
 
 export function PlaybackView() {
+  const fmt = useDateFormat()
   const { t } = useTranslation()
   const { token, loading: authLoading, user } = useAuth()
   const { showError, showSuccess } = useSnackbar()
@@ -349,7 +350,7 @@ export function PlaybackView() {
   const formatDate = (dateStr: string) => {
     const [year, month, day] = dateStr.split('-')
     const date = new Date(parseInt(year), parseInt(month) - 1, parseInt(day))
-    return date.toLocaleDateString(undefined, {
+    return fmt.date(date, {
       weekday: 'short',
       year: 'numeric',
       month: 'short',
@@ -358,7 +359,7 @@ export function PlaybackView() {
   }
 
   const formatTime = (isoStr: string) => {
-    return new Date(isoStr).toLocaleTimeString(undefined, {
+    return fmt.time(isoStr, {
       hour: '2-digit',
       minute: '2-digit'
     })

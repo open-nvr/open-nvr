@@ -32,7 +32,7 @@ import {
 import { Link } from 'react-router-dom'
 import { api } from '../lib/api'
 import { apiService } from '../lib/apiService'
-import { useTranslation } from '../i18n'
+import { useTranslation, useDateFormat, type DateFormatters } from '../i18n'
 import {
   Badge, Button, Card, CardContent, CardHeader, CardTitle,
   EmptyState, PageHeader, Skeleton,
@@ -500,6 +500,7 @@ function Mini({ value, label, tone, dim }: { value: React.ReactNode; label: stri
 
 /** Stays per hour (or per day), alerts overlaid in the danger colour. */
 function StayBars({ series, daily }: { series: Bucket[]; daily: boolean }) {
+  const dfmt = useDateFormat()
   if (series.length === 0) {
     return <div className="text-xs text-[var(--text-dim)] py-3 text-center">No history yet for this window.</div>
   }
@@ -509,7 +510,7 @@ function StayBars({ series, daily }: { series: Bucket[]; daily: boolean }) {
   const scale = (v: number) => (v / top) * PLOT
   const fmt = (t: number) => {
     const d = new Date(t * 1000)
-    return daily ? d.toLocaleDateString([], { weekday: 'short' }) : d.toLocaleTimeString([], { hour: '2-digit' })
+    return daily ? dfmt.date(d, { weekday: 'short' }) : dfmt.time(d, { hour: '2-digit' })
   }
   const every = Math.max(1, Math.ceil(series.length / 8))
   return (

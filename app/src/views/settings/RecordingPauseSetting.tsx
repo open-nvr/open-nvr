@@ -23,7 +23,7 @@ import { Button } from '../../components/ui'
 import { apiService } from '../../lib/apiService'
 import { extractApiError } from '../../lib/apiError'
 import { usePermissions } from '../../hooks/usePermissions'
-import { useTranslation } from '../../i18n'
+import { useTranslation, useDateFormat, type DateFormatters } from '../../i18n'
 
 type PauseInfo = { since: string; resume_at: string | null; by: string; reason: string | null }
 
@@ -33,6 +33,7 @@ type PauseInfo = { since: string; resume_at: string | null; by: string; reason: 
  * Superuser only; the server enforces the same.
  */
 export function RecordingPauseSetting() {
+  const fmt = useDateFormat()
   const { t } = useTranslation()
   const { isSuperuser } = usePermissions()
   const { showSuccess, showError } = useSnackbar()
@@ -126,8 +127,8 @@ export function RecordingPauseSetting() {
               <div>
                 <div>{names[camId] ?? `#${camId}`}</div>
                 <div className="text-xs text-[var(--text-dim)]">
-                  {t('recordingPause.pausedBy', { by: info.by, since: new Date(info.since).toLocaleString() })}
-                  {info.resume_at && <> · {t('recordingPause.resumesAt', { at: new Date(info.resume_at).toLocaleString() })}</>}
+                  {t('recordingPause.pausedBy', { by: info.by, since: fmt.dateTime(info.since) })}
+                  {info.resume_at && <> · {t('recordingPause.resumesAt', { at: fmt.dateTime(info.resume_at) })}</>}
                   {info.reason && <> · {info.reason}</>}
                 </div>
               </div>

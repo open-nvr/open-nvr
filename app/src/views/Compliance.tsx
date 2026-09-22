@@ -23,7 +23,7 @@ import { toDataURL } from 'qrcode'
 // Where a phone that scans the panel's QR lands. `ref` tags the lead source.
 const ASSESSMENT_URL = 'https://opennvr.org/contact?ref=nvr-889'
 import { apiService } from '../lib/apiService'
-import { useTranslation } from '../i18n'
+import { useTranslation, useDateFormat, type DateFormatters } from '../i18n'
 import { extractApiError } from '../lib/apiError'
 import { Card, CardHeader, CardTitle, CardContent, Skeleton } from '../components/ui'
 
@@ -298,6 +298,7 @@ function SecuritySection({ data }: { data: SecurityCheck | null }) {
 }
 
 export function Compliance() {
+  const fmt = useDateFormat()
   const { t } = useTranslation()
   const [summary, setSummary] = useState<ComplianceSummary | null>(null)
   const [coverage, setCoverage] = useState<RecordingCoverage | null>(null)
@@ -566,7 +567,7 @@ export function Compliance() {
                   {accessAudit.logs.map((log) => (
                     <tr key={log.id} className="hover:bg-[var(--bg-2)]">
                       <td className="py-2 text-xs">
-                        {new Date(log.timestamp).toLocaleString()}
+                        {fmt.dateTime(log.timestamp)}
                       </td>
                       <td className="py-2">
                         <Badge variant="info">

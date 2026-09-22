@@ -22,6 +22,7 @@ import { Save, FolderOpen, Clock, Shield, HardDrive, Archive, Link2, Trash2, Ref
 import { useSnackbar } from '../../components/Snackbar'
 import { UsageBar } from '../../components/ui/stats'
 import { RecordingPauseSetting } from './RecordingPauseSetting'
+import { useDateFormat, type DateFormatters } from '../../i18n'
 
 interface OrphanIdentity {
     camera_uuid?: string | null
@@ -56,16 +57,17 @@ function formatBytes(bytes: number): string {
     return `${(bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${units[i]}`
 }
 
-function formatDay(iso?: string | null): string {
+function formatDay(iso: string | null | undefined, fmt: DateFormatters): string {
     if (!iso) return '?'
     try {
-        return new Date(iso).toLocaleDateString()
+        return fmt.date(iso)
     } catch {
         return iso
     }
 }
 
 export function RecordingSettings() {
+    const fmt = useDateFormat()
     const { showError, showSuccess } = useSnackbar()
     const [loading, setLoading] = useState(false)
     const [path, setPath] = useState('')
@@ -150,7 +152,7 @@ export function RecordingSettings() {
         }
         const cam = cameras.find((c) => c.id === camId)
         const ok = window.confirm(
-            `Attach ${orphan.file_count} recording file(s) (${formatDay(orphan.earliest)} – ${formatDay(orphan.latest)}, ${formatBytes(orphan.total_bytes)}) to camera "${cam?.name || camId}"?\n\nThe footage will appear in that camera's playback timeline.`
+            `Attach ${orphan.file_count} recording file(s) (${formatDay(orphan.earliest, fmt)} – ${formatDay(orphan.latest, fmt)}, ${formatBytes(orphan.total_bytes)}) to camera "${cam?.name || camId}"?\n\nThe footage will appear in that camera's playback timeline.`
         )
         if (!ok) return
         try {
@@ -458,7 +460,7 @@ export function RecordingSettings() {
                                         <td className="py-3 pr-4 whitespace-nowrap">
                                             <div>{o.file_count} files · {formatBytes(o.total_bytes)}</div>
                                             <div className="text-xs text-[var(--text-dim)]">
-                                                {formatDay(o.earliest)} – {formatDay(o.latest)}
+                                                {formatDay(o.earliest, fmt)} – {formatDay(o.latest, fmt)}
                                             </div>
                                         </td>
                                         <td className="py-3 pr-4 text-xs text-[var(--text-dim)] whitespace-nowrap">

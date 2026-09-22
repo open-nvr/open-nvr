@@ -20,6 +20,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useSnackbar } from '../../components/Snackbar'
 import { Badge, Button, ErrorCard, Skeleton } from '../../components/ui'
 import { apiService } from '../../lib/apiService'
+import { useDateFormat, type DateFormatters } from '../../i18n'
 
 type Device = {
   id: number
@@ -71,6 +72,7 @@ const STATUS_BADGE: Record<string, 'success' | 'warning' | 'destructive'> = {
  * only serves an OpenNVR-signed token, which a blocked device cannot obtain.
  */
 export function DeviceFirewall() {
+  const fmt = useDateFormat()
   const { showSuccess, showError } = useSnackbar()
   const [devices, setDevices] = useState<Device[]>([])
   const [active, setActive] = useState(false)
@@ -215,7 +217,7 @@ export function DeviceFirewall() {
                 </td>
                 <td className="px-3 py-2 text-[var(--text-dim)]">{d.attempt_count}×</td>
                 <td className="px-3 py-2 text-xs text-[var(--text-dim)]">
-                  {d.last_seen ? new Date(d.last_seen).toLocaleString() : '—'}
+                  {d.last_seen ? fmt.dateTime(d.last_seen) : '—'}
                 </td>
                 <td className="px-3 py-2">
                   <div className="flex justify-end gap-2">

@@ -1245,7 +1245,7 @@ export function Vehicles() {
       cellClassName: 'text-[var(--text-dim)] tabular-nums',
       cell: (e) => {
         const iso = plateSeenIso(e)
-        return <span title={seenAtTitle(iso)}>{formatSeenAt(iso) || '—'}</span>
+        return <span title={seenAtTitle(iso, fmt)}>{formatSeenAt(iso, fmt) || '—'}</span>
       },
     },
     {
