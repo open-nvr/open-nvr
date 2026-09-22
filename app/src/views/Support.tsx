@@ -19,7 +19,7 @@
 import React, { useCallback, useMemo, useState } from 'react'
 import { useAuth } from '../auth/AuthContext'
 import { apiService } from '../lib/apiService'
-import { useTranslation } from '../i18n'
+import { useTranslation, useDateFormat, type DateFormatters } from '../i18n'
 
 type DiagItem = {
   key: string
@@ -30,6 +30,7 @@ type DiagItem = {
 }
 
 export function Support() {
+  const fmt = useDateFormat()
   const { t } = useTranslation()
   const { user } = useAuth()
   const canAdmin = !!user?.is_superuser
@@ -237,7 +238,7 @@ export function Support() {
           </div>
           <div className="flex items-center justify-between p-2 bg-[var(--bg)] rounded border border-[var(--border)]">
             <span className="text-[var(--text-dim)]">{t('support.time')}</span>
-            <span className="font-mono text-xs">{new Date().toLocaleString()}</span>
+            <span className="font-mono text-xs">{fmt.dateTime(new Date())}</span>
           </div>
         </div>
       </div>

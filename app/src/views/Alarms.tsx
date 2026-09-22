@@ -22,7 +22,7 @@ import { BellRing, PhoneCall, Shield, Volume2 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { playTestSound } from '../components/AlertBell'
 import { useAuth } from '../auth/AuthContext'
-import { useTranslation } from '../i18n'
+import { useTranslation, useDateFormat, type DateFormatters } from '../i18n'
 import { api } from '../lib/api'
 import { apiService } from '../lib/apiService'
 import {
@@ -376,6 +376,7 @@ const SITE_MODES = ['disarmed', 'armed_home', 'armed_away'] as const
 // Arming, usually driven by Home Assistant's alarm panel. Shown to everyone
 // on this page because "why did nobody get called?" is answered here.
 function SiteModeCard({ canChange }: { canChange: boolean }) {
+  const fmt = useDateFormat()
   const { t } = useTranslation()
   const qc = useQueryClient()
   const mode = useQuery({
@@ -416,7 +417,7 @@ function SiteModeCard({ canChange }: { canChange: boolean }) {
         {mode.data.changed_by && (
           <> · {t('siteMode.changedBy', {
             by: mode.data.changed_by,
-            at: mode.data.changed_at ? new Date(mode.data.changed_at).toLocaleString() : '',
+            at: mode.data.changed_at ? fmt.dateTime(mode.data.changed_at) : '',
           })}</>
         )}
       </div>

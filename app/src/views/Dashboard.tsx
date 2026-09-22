@@ -27,14 +27,14 @@ import { useCameraStatusConnected } from '../hooks/useCameraStatus'
 import { useCameras, useRecordingsByDate, useSuricataStats, useSystemResources, type CameraItem } from '../lib/queries'
 import { StatTile, UsageBar } from '../components/ui/stats'
 import { formatDuration, localDayStart, todayLocalKey } from '../lib/time'
-import { useTranslation } from '../i18n'
+import { useTranslation, useDateFormat, type DateFormatters } from '../i18n'
 
 type RecordingItem = { start_time?: string | null; id: number; camera?: string; relpath?: string; url?: string; size?: number }
 
 /** "Today" / "Sat, Aug 15" for a local YYYY-MM-DD date key. */
-function fmtDay(date: string): string {
+function fmtDay(date: string, fmt: DateFormatters): string {
   if (date === todayLocalKey()) return 'Today'
-  return new Date(localDayStart(date)).toLocaleDateString(undefined, {
+  return fmt.date(localDayStart(date), {
     weekday: 'short',
     month: 'short',
     day: 'numeric',
@@ -98,6 +98,7 @@ function CameraTile({ cam, status, recording }: { cam: CameraItem; status: 'onli
 }
 
 export function Dashboard() {
+  const fmt = useDateFormat()
   const { t } = useTranslation()
   const navigate = useNavigate()
 
@@ -376,7 +377,7 @@ export function Dashboard() {
                         )}
                       </td>
                       <td className="py-2 pr-4 text-[var(--text-dim)]">{c.days > 0 ? c.days : '—'}</td>
-                      <td className="py-2 pr-4 text-[var(--text-dim)]">{c.latest ? fmtDay(c.latest) : '—'}</td>
+                      <td className="py-2 pr-4 text-[var(--text-dim)]">{c.latest ? fmtDay(c.latest, fmt) : '—'}</td>
                       <td className="py-2 pr-4 text-right">
                         {c.days > 0 && (
                           <Link
@@ -457,7 +458,7 @@ export function Dashboard() {
                 <tbody>
                   {(recs || []).slice(0, 10).map((r) => (
                     <tr key={r.id} className="border-b border-neutral-800">
-                      <td className="py-2 pr-4 text-[var(--text)]">{r.start_time ? new Date(r.start_time).toLocaleString() : '—'}</td>
+                      <td className="py-2 pr-4 text-[var(--text)]">{r.start_time ? fmt.dateTime(r.start_time) : '—'}</td>
                       <td className="py-2 pr-4 text-[var(--text-dim)]">{r.camera || '—'}</td>
                       <td className="py-2 pr-4 text-[var(--text-dim)]">{r.size ? `${(r.size / (1024 * 1024)).toFixed(1)} MB` : '—'}</td>
                       <td className="py-2 pr-4">

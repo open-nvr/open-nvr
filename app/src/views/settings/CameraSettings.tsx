@@ -29,7 +29,7 @@ import {
 import { ReadOnlyField } from '../../components/ui/ReadOnlyField'
 import { Tabs } from '../../components/ui/Tabs'
 import { useCameraCapabilities } from '../../hooks/useCameraCapabilities'
-import { useTranslation } from '../../i18n'
+import { useTranslation, useDateFormat, type DateFormatters } from '../../i18n'
 import { apiService } from '../../lib/apiService'
 import { extractApiError } from '../../lib/apiError'
 
@@ -478,6 +478,7 @@ function PtzTab({ cameraId }: { cameraId: number }) {
 }
 
 function EventsTab({ cameraId }: { cameraId: number }) {
+  const fmt = useDateFormat()
   const { t } = useTranslation()
   const { showError, showSuccess } = useSnackbar()
   const [subscribed, setSubscribed] = useState(false)
@@ -564,7 +565,7 @@ function EventsTab({ cameraId }: { cameraId: number }) {
               </Badge>
               <span className="text-[var(--text-dim)] flex-1">{e.description}</span>
               <span className="text-xs font-mono text-[var(--text-dim)]">
-                {e.occurred_at ? new Date(e.occurred_at).toLocaleTimeString() : ''}
+                {e.occurred_at ? fmt.time(e.occurred_at, {}) : ''}
               </span>
             </div>
           ))}
@@ -1799,6 +1800,7 @@ export function CameraSettingsPanel({
   camera: CameraLite | null
   active?: boolean
 }) {
+  const fmt = useDateFormat()
   const enabled = activeProp ?? true
   const { t } = useTranslation()
   const { caps, loading, error, reload } = useCameraCapabilities(
@@ -1853,7 +1855,7 @@ export function CameraSettingsPanel({
             )}
             {caps?.probed_at && (
               <span className="text-xs text-[var(--text-dim)]">
-                Probed {new Date(caps.probed_at).toLocaleString()}
+                Probed {fmt.dateTime(caps.probed_at)}
               </span>
             )}
             <div className="ml-auto">

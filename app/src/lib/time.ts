@@ -27,6 +27,8 @@
  */
 
 /** Epoch ms of local midnight beginning `date` (YYYY-MM-DD). */
+import type { DateFormatters } from '../i18n'
+
 export function localDayStart(date: string): number {
   const [y, m, d] = date.split('-').map(Number)
   return new Date(y, m - 1, d).getTime()
@@ -86,14 +88,19 @@ export function browserTz(): string {
  * placeholder. `seenAtTitle` gives the full localised value for the
  * cell's tooltip.
  */
-export function formatSeenAt(iso: string | null | undefined, now = new Date()): string {
+export function formatSeenAt(
+  iso: string | null | undefined, fmt: DateFormatters, now = new Date(),
+): string {
   if (!iso) return ''
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return ''
-  const time = d.toLocaleTimeString(undefined, {
+  // hour12 stays false on purpose: this is a dense, scannable table
+  // column, where 24-hour is unambiguous and the same width on every
+  // row. The LANGUAGE still decides the date part and the separators.
+  const time = fmt.time(d, {
     hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
   })
-  const date = d.toLocaleDateString(undefined, {
+  const date = fmt.date(d, {
     day: '2-digit',
     month: 'short',
     ...(d.getFullYear() === now.getFullYear() ? {} : { year: 'numeric' }),
@@ -102,8 +109,10 @@ export function formatSeenAt(iso: string | null | undefined, now = new Date()): 
 }
 
 /** The unabbreviated timestamp, for the tooltip on a compact cell. */
-export function seenAtTitle(iso: string | null | undefined): string | undefined {
+export function seenAtTitle(
+  iso: string | null | undefined, fmt: DateFormatters,
+): string | undefined {
   if (!iso) return undefined
   const d = new Date(iso)
-  return Number.isNaN(d.getTime()) ? undefined : d.toLocaleString()
+  return Number.isNaN(d.getTime()) ? undefined : fmt.dateTime(d)
 }

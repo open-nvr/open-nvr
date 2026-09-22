@@ -29,6 +29,7 @@ import { useAuth } from '../../auth/AuthContext'
 import { useSnackbar } from '../../components/Snackbar'
 import { Modal } from '../../components/Modal'
 import { PlaybackConsole } from '../../components/PlaybackConsole'
+import { useDateFormat, type DateFormatters } from '../../i18n'
 
 type DeletedCamera = {
   id: number
@@ -43,6 +44,7 @@ type DeletedCamera = {
 type DayEntry = { date: string; total_duration?: number; segment_count?: number }
 
 export function DeletedCameras() {
+  const fmt = useDateFormat()
   const { user } = useAuth()
   const { showError, showSuccess } = useSnackbar()
   const isSuperuser = !!user?.is_superuser
@@ -127,7 +129,7 @@ export function DeletedCameras() {
   }
 
   const fmtWhen = (iso: string) => {
-    try { return new Date(iso).toLocaleString() } catch { return iso }
+    return fmt.dateTime(iso)
   }
   const fmtHours = (secs?: number) =>
     secs ? `${(secs / 3600).toFixed(1)} h` : ''

@@ -35,7 +35,7 @@ import {
 import { Link } from 'react-router-dom'
 import { api } from '../lib/api'
 import { apiService } from '../lib/apiService'
-import { useTranslation } from '../i18n'
+import { useTranslation, useDateFormat, type DateFormatters } from '../i18n'
 import {
   Badge, Button, Card, CardContent, CardHeader, CardTitle,
   EmptyState, PageHeader, Skeleton,
@@ -433,6 +433,7 @@ function FlowBars({ series, daily, labels }: {
   daily: boolean
   labels: { a_to_b: string; b_to_a: string }
 }) {
+  const dfmt = useDateFormat()
   if (series.length === 0) {
     return <div className="text-xs text-[var(--text-dim)] py-3 text-center">No history yet for this window.</div>
   }
@@ -442,7 +443,7 @@ function FlowBars({ series, daily, labels }: {
   const scale = (v: number) => (v / top) * (MID - PAD)
   const fmt = (t: number) => {
     const d = new Date(t * 1000)
-    return daily ? d.toLocaleDateString([], { weekday: 'short' }) : d.toLocaleTimeString([], { hour: '2-digit' })
+    return daily ? dfmt.date(d, { weekday: 'short' }) : dfmt.time(d, { hour: '2-digit' })
   }
   const every = Math.max(1, Math.ceil(series.length / 8))
   return (

@@ -19,7 +19,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { TimelineSegment } from './PlaybackTimeline'
 import { useEdgeAutoPan } from '../hooks/useEdgeAutoPan'
-import { useTranslation } from '../i18n'
+import { useTranslation, useDateFormat, type DateFormatters } from '../i18n'
 
 export interface TimelineRow {
   id: number
@@ -59,8 +59,8 @@ function pickTickInterval(spanMs: number): number {
   return candidates[candidates.length - 1] * 1000
 }
 
-function fmtTick(ms: number, intervalMs: number): string {
-  return new Date(ms).toLocaleTimeString(undefined, {
+function fmtTick(ms: number, intervalMs: number, fmt: DateFormatters): string {
+  return fmt.time(ms, {
     hour: '2-digit',
     minute: '2-digit',
     ...(intervalMs < 60000 ? { second: '2-digit' } : {}),
@@ -68,8 +68,8 @@ function fmtTick(ms: number, intervalMs: number): string {
   })
 }
 
-function fmtFull(ms: number): string {
-  return new Date(ms).toLocaleString(undefined, {
+function fmtFull(ms: number, fmt: DateFormatters): string {
+  return fmt.dateTime(ms, {
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
@@ -179,6 +179,7 @@ export function MultiCamTimeline({
   onRowClick,
   className = '',
 }: MultiCamTimelineProps) {
+  const fmt = useDateFormat()
   const { t } = useTranslation()
   const overlayRef = useRef<HTMLDivElement>(null)
   const lastXRef = useRef(0)
@@ -232,7 +233,7 @@ export function MultiCamTimeline({
     const first = Math.ceil(viewStart / interval) * interval
     const out: { pct: number; label: string }[] = []
     for (let t = first; t <= viewEnd; t += interval) {
-      out.push({ pct: toPct(t), label: fmtTick(t, interval) })
+      out.push({ pct: toPct(t), label: fmtTick(t, interval, fmt) })
     }
     return out
   }, [span, viewStart, viewEnd, toPct])
@@ -324,7 +325,7 @@ export function MultiCamTimeline({
               className="absolute -translate-x-1/2 px-1 bg-[var(--accent)] text-white whitespace-nowrap z-10"
               style={{ left: `clamp(3.5rem, ${currentPct}%, calc(100% - 3.5rem))` }}
             >
-              {fmtFull(currentTime)}
+              {fmtFull(currentTime, fmt)}
             </span>
           )}
           {hoverMs != null && (
@@ -332,7 +333,7 @@ export function MultiCamTimeline({
               className="pointer-events-none absolute -translate-x-1/2 z-20 px-1.5 bg-black/90 border border-white/15 text-white whitespace-nowrap"
               style={{ left: `clamp(3.5rem, ${toPct(hoverMs)}%, calc(100% - 3.5rem))` }}
             >
-              {fmtFull(hoverMs)}
+              {fmtFull(hoverMs, fmt)}
               {hoverInGap && <span className="text-amber-400 ml-1">· {t('shared.noRecordingLower')}</span>}
             </span>
           )}

@@ -42,7 +42,7 @@ import { warmHls } from '../lib/loadHls'
 import { useCameraAspects, useRecordingsByDate, useSegmentsForCameras } from '../lib/queries'
 import { localDateKey, localDayEnd, localDayStart, todayLocalKey } from '../lib/time'
 import { useSnackbar } from '../components/Snackbar'
-import { useTranslation } from '../i18n'
+import { useTranslation, useDateFormat, type DateFormatters } from '../i18n'
 import { RecordingCalendar } from '../components/RecordingCalendar'
 import { MultiCamTimeline, type TimelineRow } from '../components/MultiCamTimeline'
 import { SyncPlaybackTile } from '../components/SyncPlaybackTile'
@@ -104,9 +104,9 @@ function formatDuration(seconds: number) {
   return hours > 0 ? `${hours}h ${mins}m` : `${mins}m`
 }
 
-function formatDateLong(date: string) {
+function formatDateLong(date: string, fmt: DateFormatters) {
   const [y, m, d] = date.split('-').map(Number)
-  return new Date(y, m - 1, d).toLocaleDateString(undefined, {
+  return fmt.date(new Date(y, m - 1, d), {
     weekday: 'short',
     year: 'numeric',
     month: 'short',
@@ -120,6 +120,7 @@ function formatDateLong(date: string) {
  * checklist, and one multi-track timeline driving every tile.
  */
 export function SyncPlayback() {
+  const fmt = useDateFormat()
   const { t } = useTranslation()
   const { showError } = useSnackbar()
   const stageRef = useRef<HTMLDivElement>(null)
@@ -546,7 +547,7 @@ export function SyncPlayback() {
           {selectedDate && (
             <span className="inline-flex items-center gap-1.5 text-sm text-[var(--text-dim)]">
               <CalendarDays size={14} className="text-[var(--accent)]" />
-              {formatDateLong(selectedDate)}
+              {formatDateLong(selectedDate, fmt)}
             </span>
           )}
           <span className="text-sm text-[var(--text-dim)]">
@@ -700,7 +701,7 @@ export function SyncPlayback() {
             aria-expanded={calOpen}
           >
             <CalendarDays size={15} className="text-[var(--accent)]" />
-            <span className="font-medium">{selectedDate ? formatDateLong(selectedDate) : t('playback.selectDate')}</span>
+            <span className="font-medium">{selectedDate ? formatDateLong(selectedDate, fmt) : t('playback.selectDate')}</span>
             <ChevronDown size={15} className={`ml-auto transition-transform ${calOpen ? '' : '-rotate-90'}`} />
           </button>
           {calOpen && (

@@ -18,7 +18,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useEdgeAutoPan } from '../hooks/useEdgeAutoPan'
-import { useTranslation } from '../i18n'
+import { useTranslation, useDateFormat, type DateFormatters } from '../i18n'
 
 export interface TimelineSegment {
   /** epoch ms */
@@ -71,8 +71,8 @@ function pickTickInterval(spanMs: number): number {
   return candidates[candidates.length - 1] * 1000
 }
 
-function fmtTick(ms: number, intervalMs: number): string {
-  return new Date(ms).toLocaleTimeString(undefined, {
+function fmtTick(ms: number, intervalMs: number, fmt: DateFormatters): string {
+  return fmt.time(ms, {
     hour: '2-digit',
     minute: '2-digit',
     ...(intervalMs < 60000 ? { second: '2-digit' } : {}),
@@ -80,8 +80,8 @@ function fmtTick(ms: number, intervalMs: number): string {
   })
 }
 
-function fmtFull(ms: number): string {
-  return new Date(ms).toLocaleString(undefined, {
+function fmtFull(ms: number, fmt: DateFormatters): string {
+  return fmt.dateTime(ms, {
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
@@ -106,6 +106,7 @@ export function PlaybackTimeline({
   onSelectionChange,
   className = '',
 }: PlaybackTimelineProps) {
+  const fmt = useDateFormat()
   const { t } = useTranslation()
   const trackRef = useRef<HTMLDivElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
@@ -188,7 +189,7 @@ export function PlaybackTimeline({
     const first = Math.ceil(viewStart / interval) * interval
     const out: { ms: number; pct: number; label: string }[] = []
     for (let t = first; t <= viewEnd; t += interval) {
-      out.push({ ms: t, pct: toPct(t), label: fmtTick(t, interval) })
+      out.push({ ms: t, pct: toPct(t), label: fmtTick(t, interval, fmt) })
     }
     return out
   }, [span, viewStart, viewEnd, toPct])
@@ -316,7 +317,7 @@ export function PlaybackTimeline({
             className="absolute -translate-x-1/2 px-1 rounded bg-[var(--accent)] text-white whitespace-nowrap"
             style={{ left: `clamp(3.5rem, ${currentPct}%, calc(100% - 3.5rem))` }}
           >
-            {fmtFull(currentTime)}
+            {fmtFull(currentTime, fmt)}
           </span>
         )}
       </div>
@@ -416,7 +417,7 @@ export function PlaybackTimeline({
           className="pointer-events-none absolute top-0 z-20 px-1.5 py-0.5 bg-black/90 border border-white/15 text-white text-[10px] font-mono whitespace-nowrap"
           style={{ left: `clamp(3.5rem, ${hoverX}px, calc(100% - 3.5rem))`, transform: 'translate(-50%, -0.15rem)' }}
         >
-          {fmtFull(hoverMs)}
+          {fmtFull(hoverMs, fmt)}
           {hoverInGap && <span className="text-amber-400 ml-1">· {t('shared.noRecordingLower')}</span>}
         </div>
       )}

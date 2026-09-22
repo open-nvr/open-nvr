@@ -22,7 +22,7 @@ import { Badge, Button, ErrorCard, Skeleton } from '../../components/ui'
 import { apiService } from '../../lib/apiService'
 import { extractApiError } from '../../lib/apiError'
 import { usePermissions } from '../../hooks/usePermissions'
-import { useTranslation } from '../../i18n'
+import { useTranslation, useDateFormat, type DateFormatters } from '../../i18n'
 
 type ApiToken = {
   id: number
@@ -72,6 +72,7 @@ const STATUS_BADGE = { active: 'success', revoked: 'neutral', expired: 'warning'
  * The secret is shown once, right after creation; only its hash is stored.
  */
 export function ApiTokens() {
+  const fmt = useDateFormat()
   const { t } = useTranslation()
   const { showSuccess, showError } = useSnackbar()
   const { hasPermission, loading: permsLoading } = usePermissions()
@@ -373,11 +374,11 @@ export function ApiTokens() {
                     )}
                   </td>
                   <td className="px-3 py-2 text-xs text-[var(--text-dim)]">
-                    {tok.last_used_at ? new Date(tok.last_used_at).toLocaleString() : t('apiTokens.neverUsed')}
+                    {tok.last_used_at ? fmt.dateTime(tok.last_used_at) : t('apiTokens.neverUsed')}
                     {tok.last_used_ip && <div className="font-mono">{tok.last_used_ip}</div>}
                   </td>
                   <td className="px-3 py-2 text-xs text-[var(--text-dim)]">
-                    {tok.expires_at ? new Date(tok.expires_at).toLocaleDateString() : t('apiTokens.never')}
+                    {tok.expires_at ? fmt.date(tok.expires_at) : t('apiTokens.never')}
                   </td>
                   <td className="px-3 py-2">
                     <Badge variant={STATUS_BADGE[st]}>{t(`apiTokens.status.${st}`)}</Badge>

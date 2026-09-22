@@ -21,7 +21,7 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { apiService } from '../lib/apiService'
 import { useSystemAlerts, type SystemAlertEvent } from '../hooks/useCameraStatus'
-import { useTranslation } from '../i18n'
+import { useTranslation, useDateFormat, type DateFormatters } from '../i18n'
 import { Alarms } from './Alarms'
 import { extractApiError } from '../lib/apiError'
 
@@ -232,6 +232,7 @@ function humanAlertType(t: string): string {
  * shared events socket. Low-volume — a plain table, no virtualization.
  */
 function SystemAlertsView() {
+  const fmt = useDateFormat()
   const { t } = useTranslation()
   const [rows, setRows] = useState<SystemEventRow[]>([])
   const [loading, setLoading] = useState(false)
@@ -296,7 +297,7 @@ function SystemAlertsView() {
               const sev = SEVERITY_LABEL[r.severity] || SEVERITY_LABEL.info
               return (
                 <tr key={r.id} className={i % 2 === 0 ? 'bg-[var(--bg-2)]' : 'bg-[var(--panel)]'}>
-                  <td className="p-2 whitespace-nowrap">{r.occurred_at ? new Date(r.occurred_at).toLocaleString() : '—'}</td>
+                  <td className="p-2 whitespace-nowrap">{r.occurred_at ? fmt.dateTime(r.occurred_at) : '—'}</td>
                   <td className={`p-2 ${sev.className}`}>{sev.text}</td>
                   <td className="p-2 whitespace-nowrap capitalize">
                     {humanAlertType(r.event_type)}
@@ -319,6 +320,7 @@ const GRID_COLS = 'grid grid-cols-[170px_90px_200px_minmax(240px,1fr)_160px_160p
 const ROW_HEIGHT = 33
 
 function VirtualAlertTable({ items, loading, onCategoryClick }: { items: EveAlert[]; loading: boolean; onCategoryClick: (category: string) => void }) {
+  const fmt = useDateFormat()
   const { t } = useTranslation()
   const scrollRef = useRef<HTMLDivElement>(null)
   const rowVirtualizer = useVirtualizer({
@@ -351,7 +353,7 @@ function VirtualAlertTable({ items, loading, onCategoryClick }: { items: EveAler
                   className={`${GRID_COLS} ${vRow.index % 2 === 0 ? 'bg-[var(--bg-2)]' : 'bg-[var(--panel)]'}`}
                   style={{ position: 'absolute', top: 0, left: 0, right: 0, height: vRow.size, transform: `translateY(${vRow.start}px)` }}
                 >
-                  <div className="p-2 whitespace-nowrap truncate">{e?.timestamp ? new Date(String(e.timestamp).replace('+0000', '+00:00')).toLocaleString() : '-'}</div>
+                  <div className="p-2 whitespace-nowrap truncate">{e?.timestamp ? fmt.dateTime(String(e.timestamp).replace('+0000', '+00:00')) : '-'}</div>
                   <div className="p-2">
                     {typeof e?.alert?.severity !== 'undefined' ? (
                       e.alert.severity === 1 ? 'High' : e.alert.severity === 2 ? 'Medium' : e.alert.severity === 3 ? 'Low' : String(e.alert.severity)

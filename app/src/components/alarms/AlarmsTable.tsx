@@ -2,7 +2,7 @@ import { useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
 import { Check } from 'lucide-react'
 import { Button, EmptyState, SeverityBadge } from '../ui'
-import { useTranslation } from '../../i18n'
+import { useTranslation, useDateFormat, type DateFormatters } from '../../i18n'
 import { DataTable, type Column } from '../ui/DataTable'
 import { SegmentedControl, type SegmentOption } from '../ui/SegmentedControl'
 import { AuthedImage } from '../AuthedImage'
@@ -88,6 +88,7 @@ export function AlarmsTable({
   isPending, isFetching, isError, error, onRetry, footer, toolbar,
   fillHeight = true,
 }: AlarmsTableProps) {
+  const fmt = useDateFormat()
   const { t } = useTranslation()
   // The alert whose photos are open full size, if any.
   const [viewing, setViewing] = useState<InboxAlert | null>(null)
@@ -225,7 +226,7 @@ export function AlarmsTable({
       key: 'seen', header: t('alerts.dateTime'), width: 'w-[164px]',
       className: 'whitespace-nowrap',
       cellClassName: 'text-[var(--text-dim)] tabular-nums',
-      cell: (a) => <span title={alarmSeenTitle(a)}>{alarmSeenAt(a)}</span>,
+      cell: (a) => <span title={alarmSeenTitle(a, fmt)}>{alarmSeenAt(a, fmt)}</span>,
     },
   ]
 
@@ -366,10 +367,11 @@ export function AlarmsSelectionBar({
 export function AlarmEvidenceViewer({
   alert, onClose,
 }: { alert: InboxAlert; onClose: () => void }) {
+  const fmt = useDateFormat()
   return (
     <EvidenceViewer
       title={alert.title}
-      subtitle={`${alarmSeenAt(alert)}${
+      subtitle={`${alarmSeenAt(alert, fmt)}${
         alert.alert_type ? ` · ${alert.alert_type.replace(/_/g, ' ')}` : ''}`}
       images={alert.images}
       queryKeyPrefix={['alert-image', alert.id]}

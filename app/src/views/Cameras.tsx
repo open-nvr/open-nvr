@@ -18,7 +18,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useTranslation } from '../i18n'
+import { useTranslation, useDateFormat, type DateFormatters } from '../i18n'
 import { apiService } from '../lib/apiService'
 import { queryClient, useCameras, useMediaMtxHealth } from '../lib/queries'
 import { useCameraStatusConnected } from '../hooks/useCameraStatus'
@@ -137,6 +137,7 @@ type CameraForm = {
 }
 
 export function Cameras() {
+  const fmt = useDateFormat()
   const navigate = useNavigate()
   const { t } = useTranslation()
   const { hasPermission } = usePermissions()
@@ -300,7 +301,7 @@ export function Cameras() {
   const recordingState = (c: Camera): { variant: BadgeVariant; label: string; title?: string } => {
     const at = c.last_recording_at ? new Date(c.last_recording_at) : null
     const agoSeconds = at ? Math.max(0, (Date.now() - at.getTime()) / 1000) : null
-    const seenAt = at ? `Last segment ${at.toLocaleString()}` : undefined
+    const seenAt = at ? `Last segment ${fmt.dateTime(at)}` : undefined
 
     switch (c.recording_state) {
       case 'recording':
