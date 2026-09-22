@@ -10,7 +10,7 @@ The index is one file — [`server/config/apps_index.yml`](../server/config/apps
 Landing your app there is five steps:
 
 1. [Build your app on the App SDK](#1-build-your-app-on-the-app-sdk)
-2. [Publish your image and get its digest](#2-publish-your-image-and-get-its-digest)
+2. [Get a repository under the org — CI builds, signs and publishes](#2-get-a-repository-under-the-org--ci-builds-signs-and-publishes)
 3. [Add one entry to `apps_index.yml`](#3-add-one-entry-to-apps_indexyml)
 4. [Validate it — `make validate-apps-index`](#4-validate-it)
 5. [Open the PR](#5-open-the-pr)

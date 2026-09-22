@@ -231,7 +231,9 @@ startup rather than a failure at the first car.
 
 `sense_line` is what makes the gate monitored. `hold_line` is what
 makes *Hold open* possible — without it the app refuses to hold rather
-than faking it (see [Holding](#3-holding-a-gate-open)).
+than faking it (see the **Hold-open input** column in
+[Verified operators](#verified-operators), and the hold-to-run warning
+under it).
 
 ---
 

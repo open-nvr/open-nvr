@@ -1,6 +1,6 @@
 # detect-pipeline (OpenNVR Tier-0)
 
-Always-on, low-risk detection for [compute-gated inference](../docs/design/compute-gated-inference.md).
+Always-on, low-risk detection for [compute-gated inference](../docs/ARCHITECTURE.md#compute-gated-inference-tier-0--agentsapps).
 Pulls a camera **substream from MediaMTX**, hardware-decodes it, and runs
 `motion → region select → cheap detector → tracker → best-frame`. **Nothing is
 gated here** (the gate + shadow mode are PR B); recording stays MediaMTX's job
@@ -469,7 +469,8 @@ to enable; it still only fires in `enforce` (`shadow`/`off` dispatch nothing).
 - **Default routing:** `caption` on person/vehicle (light, non-biometric). `face`/`plate`
   are opt-in rows. A custom model adds a row keyed on its own class/trigger, and
   `TriggerPolicy.none`/`always` let a model opt out/in — see
-  [`docs/design/trigger-policies.md`](../docs/design/trigger-policies.md).
+  `TriggerPolicy` in [`detect_pipeline/gate.py`](detect_pipeline/gate.py),
+  which is where the policy is defined rather than described.
 - **Discipline:** validate the shadow-mode miss rate on real hardware before flipping
   `enforce` + dispatch.
 
