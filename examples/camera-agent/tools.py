@@ -413,6 +413,23 @@ class CameraTools:
         # Search page's own query). This is what search_footage now uses;
         # the private SQLite index above is only its fallback.
         self._timeline = timeline
+        # How search_footage has actually been answered since start-up.
+        # The private SQLite index is now only an outage fallback, and the
+        # open question is whether it still earns a second store with its
+        # own retention policy. That is a question about deployments, not
+        # about opinions, so the agent counts rather than guesses:
+        #
+        #   canonical       the platform store answered (the normal path)
+        #   index_fallback  core was unreachable and the index answered
+        #   unanswerable    core was unreachable and nothing could answer
+        #
+        # A month of index_fallback == 0 is the evidence for deleting the
+        # index. A month of it > 0 is the evidence for keeping it, and
+        # says how often an operator would otherwise have been told
+        # nothing during an outage.
+        self.footage_search_sources: dict[str, int] = {
+            "canonical": 0, "index_fallback": 0, "unanswerable": 0,
+        }
         # Cameras touched by the most recent tool call — read by /converse
         # so the UI can show which camera(s) the agent is working on.
         self.last_cameras_used: list[str] = []
@@ -991,6 +1008,7 @@ class CameraTools:
             self._footage_index is None
             or not getattr(self._footage_index, "available", False)
         ):
+            self.footage_search_sources["unanswerable"] += 1
             return (
                 "Footage search isn't available — this agent has no "
                 "connection to the OpenNVR event store."
@@ -1053,6 +1071,7 @@ class CameraTools:
             # result. The first falls through to the index if there is
             # one, and is stated plainly if there is not.
             if answer is not None:
+                self.footage_search_sources["canonical"] += 1
                 results = answer.get("results") or []
                 if not results:
                     return f"No recorded footage matched {phrase!r}."
@@ -1077,6 +1096,7 @@ class CameraTools:
         if self._footage_index is None or not getattr(
             self._footage_index, "available", False
         ):
+            self.footage_search_sources["unanswerable"] += 1
             return ("Could not reach the event store, and no local footage "
                     "index is configured — so I cannot say whether anything "
                     "matched.")
@@ -1086,8 +1106,17 @@ class CameraTools:
                 camera_id=camera_id,
             )
         except Exception:
+            self.footage_search_sources["unanswerable"] += 1
             logger.exception("search_footage: index query failed")
             return "Footage search failed."
+
+        self.footage_search_sources["index_fallback"] += 1
+        logger.warning(
+            "search_footage: answered from the private SQLite index because "
+            "the canonical store could not be reached (index_fallback=%d "
+            "since start-up)",
+            self.footage_search_sources["index_fallback"],
+        )
 
         if not hits:
             return f"No recorded footage matched {phrase!r}."
