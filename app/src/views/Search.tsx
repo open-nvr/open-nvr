@@ -45,7 +45,7 @@ import { api } from '../lib/api'
 import SearchAnswer, { type SearchAnswerData } from '../components/SearchAnswer'
 import { AuthedImage } from '../components/AuthedImage'
 import { JourneyPanel } from '../components/JourneyPanel'
-import { useTranslation } from '../i18n'
+import { useTranslation, useDateFormat, type DateFormatters } from '../i18n'
 import {
   Badge, Button, Card, CardContent, EmptyState, PageHeader, Skeleton,
 } from '../components/ui'
@@ -140,20 +140,20 @@ const EXAMPLES = [
   'bicycle last night',
 ]
 
-function when(iso: string | null): string {
+function when(iso: string | null, fmt: DateFormatters): string {
   if (!iso) return '—'
   const d = new Date(iso)
   const today = new Date()
   const sameDay = d.toDateString() === today.toDateString()
-  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-  return sameDay ? time : `${d.toLocaleDateString([], { day: 'numeric', month: 'short' })} ${time}`
+  const time = fmt.time(d, { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  return sameDay ? time : `${fmt.date(d, { day: 'numeric', month: 'short' })} ${time}`
 }
 
-function rangeLabel(from: string | null, to: string | null): string {
+function rangeLabel(from: string | null, to: string | null, fmt: DateFormatters): string {
   if (!from && !to) return ''
   const f = from ? new Date(from) : null
   const t = to ? new Date(to) : null
-  const d = (x: Date) => x.toLocaleString([], {
+  const d = (x: Date) => fmt.dateTime(x, {
     day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
   })
   if (f && t) return `${d(f)} → ${d(t)}`
@@ -164,6 +164,7 @@ function rangeLabel(from: string | null, to: string | null): string {
 
 export function Search() {
   const { t } = useTranslation()
+  const fmt = useDateFormat()
   const [params, setParams] = useSearchParams()
   const [draft, setDraft] = useState(params.get('q') ?? '')
   // The query that has actually been run, and the filters it produced.
@@ -316,9 +317,9 @@ export function Search() {
           // Your word, not the machine's expansion of it: "yesterday" is
           // what you typed and what you would edit, and the range it
           // became is one hover away.
-          label: interp.matched?.when || rangeLabel(interp.from, interp.to),
+          label: interp.matched?.when || rangeLabel(interp.from, interp.to, fmt),
           title: interp.matched?.when
-            ? `"${interp.matched.when}" = ${rangeLabel(interp.from, interp.to)}`
+            ? `"${interp.matched.when}" = ${rangeLabel(interp.from, interp.to, fmt)}`
             : 'The time window searched.',
         },
         interp.text && {
@@ -538,6 +539,7 @@ function ResultCard(
   },
 ) {
   const { t } = useTranslation()
+  const fmt = useDateFormat()
   const at = hit.anchor?.at ?? hit.started_at
   // Recordings opens on this camera, this day, this instant.
   const href = at
@@ -557,7 +559,7 @@ function ResultCard(
       onClick={opened}
       to={href}
       className="group block hover:opacity-95 focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
-      title={at ? `Open the recording at ${new Date(at).toLocaleString()}` : 'Open recordings'}
+      title={at ? `Open the recording at ${fmt.dateTime(at)}` : 'Open recordings'}
     >
       <div className="relative aspect-video bg-[var(--bg-2)] flex items-center justify-center">
         {hit.evidence_url ? (
@@ -597,7 +599,7 @@ function ResultCard(
       <div className="p-2 space-y-0.5">
         <div className="flex items-center gap-2 text-xs">
           <span className="font-medium truncate">{hit.camera_name ?? `cam${hit.camera_id}`}</span>
-          <span className="ml-auto tabular-nums text-[var(--text-dim)]">{when(at)}</span>
+          <span className="ml-auto tabular-nums text-[var(--text-dim)]">{when(at, fmt)}</span>
         </div>
         {hit.caption && (
           <div className="text-[11px] text-[var(--text-dim)] line-clamp-2">{hit.caption}</div>
