@@ -151,6 +151,14 @@ class Journey:
                 "started_at": (
                     self.anchor.started_at.isoformat() if self.anchor.started_at else None
                 ),
+                # Same shape as a hop's. Without it a client cannot tell
+                # "no frame was kept" from "the frame failed to load",
+                # and renders a broken image for the first stop of every
+                # route whose evidence has aged out.
+                "evidence_url": (
+                    f"/api/v1/events/{self.anchor.id}/evidence"
+                    if self.anchor.evidence_path else None
+                ),
             },
             "method": self.method,
             "caveat": self.caveat,

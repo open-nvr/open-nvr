@@ -718,6 +718,23 @@ def test_a_general_object_is_followed_on_what_the_skills_saw(db):
     assert any("clothing_top matches" in w for w in j.hops[0].why)
 
 
+def test_the_anchor_says_whether_it_kept_a_frame(db):
+    """Same shape as a hop's. Without it a client cannot tell "no frame
+    was kept" from "the frame failed to load", and draws a broken image
+    for the first stop of every route whose evidence has aged out."""
+    from services.journey import find_journey
+
+    _three_cameras(db)
+    kept = _at(db, camera_id=1, label="car", at_s=0)
+    aged = _at(db, camera_id=1, label="car", at_s=10, evidence=None)
+
+    body = find_journey(db, event_id=kept.id, scope=None).as_dict()
+    assert body["anchor"]["evidence_url"] == f"/api/v1/events/{kept.id}/evidence"
+
+    body = find_journey(db, event_id=aged.id, scope=None).as_dict()
+    assert body["anchor"]["evidence_url"] is None
+
+
 def test_missing_descriptors_are_not_a_mismatch(db):
     """The rule that decides whether adding a skill helps or hurts: a
     visit nobody enriched must score neutrally, never badly."""
