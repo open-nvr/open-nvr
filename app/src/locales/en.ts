@@ -661,7 +661,7 @@ export const translations: TranslationCatalog = {
   'notifications.meta.pending': '{{count}} being collapsed right now',
   'notifications.meta.timezone': 'times in {{zone}}',
   'notifications.meta.alertsSeen': '{{count}} alerts seen since start',
-  'people.title': 'People',
+  'people.title': 'Smart Doorbell',
   'people.description': "Who your door cameras recognise: the face directory, strangers at the door, and enrolling a person from a snapshot the camera already took.",
   'people.noApp': "No face-recognition app is enabled",
   'occupancy.title': 'Occupancy',

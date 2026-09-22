@@ -178,15 +178,46 @@ dispatcher drains.
 
 ### The People page
 
-Enabling the app lights **Applications → People (Faces)** in the main
+Enabling the app lights **Applications → Smart Doorbell** in the main
 navigation (the manifest `provides: ["people"]`). That page is the face
 directory for a home, a gated premises or an office:
 
 * **Directory** — everyone enrolled, with photo, category, notes, an
   optional *valid until* date, and when the door last saw them. Search
   by name, id or notes; filter by category.
-* **Add person** — name, category, notes, expiry, and a photo either
-  uploaded or snapped from any camera in the system.
+* **Add person** — name, category, notes, expiry, and a photo from one
+  of three places: **Upload** a file, snap one from **a door camera**,
+  or take one on **this device** (below).
+* **Guided capture from this device.** The browser's own camera — a
+  laptop or phone webcam — walked through four poses: straight on, a
+  quarter turn left, a quarter turn right, and chin lifted for the angle
+  a camera above a door sees. Each pose is captured, retakeable by
+  clicking its thumbnail, and skippable; the set enrols together, the
+  first pose creating the person and the rest appended as samples.
+
+  This exists because a single front-on portrait is the one pose a door
+  camera almost never gets: people arrive at an angle, look at the lock,
+  glance down at a parcel. It also means a household can be enrolled at
+  a desk in a couple of minutes, before anyone has walked past the door.
+
+  Four is where it stops on purpose. Past four the gains come from
+  different *light* rather than different angles, and the light at the
+  operator's desk is not the light at the door — which is what the
+  strangers wall and *Add a photo* are for.
+
+  Requirements, and the failure modes named rather than swallowed:
+  browsers hand a page the camera only on a secure origin, which
+  OpenNVR's own nginx provides (https, self-signed by default); reached
+  over plain http through some other proxy, the dialog says so instead
+  of offering a button that does nothing. A blocked permission, a
+  machine with no camera, and a camera already held by a video call are
+  each reported as themselves. The preview is mirrored so that "turn
+  left" is followable, but the frame stored is the true, unmirrored one
+  — face embeddings are not mirror-invariant, so enrolling flipped
+  samples would cost accuracy against unflipped door footage. The
+  camera is released the moment the dialog closes. If some poses are
+  rejected (no face found in that frame), the ones that landed are kept
+  and the dialog says how many — three of four is a usable person.
 * **Strangers at the door** — every unrecognised face the camera took,
   newest first. Click one, and *Enrol this person* turns that snapshot
   into a known face: no photo to go and find.

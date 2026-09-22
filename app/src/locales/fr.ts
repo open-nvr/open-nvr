@@ -640,7 +640,7 @@ export const translations: TranslationCatalog = {
   'notifications.meta.pending': '{{count}} en cours de regroupement',
   'notifications.meta.timezone': 'heures en {{zone}}',
   'notifications.meta.alertsSeen': '{{count}} alertes vues depuis le démarrage',
-  'people.title': 'Personnes',
+  'people.title': 'Smart Doorbell',
   'people.description': "Qui vos caméras de porte reconnaissent : l’annuaire des visages, les inconnus à la porte, et l’enrôlement d’une personne à partir d’une image déjà prise par la caméra.",
   'people.noApp': "Aucune application de reconnaissance faciale n’est activée",
   'occupancy.title': 'Occupation',

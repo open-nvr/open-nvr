@@ -128,10 +128,18 @@ export const APP_VERTICALS: AppVertical[] = [
   {
     capability: 'people',
     to: '/people',
-    // The face directory: who is enrolled, who the door just saw, and
-    // enrolling a person from a snapshot the camera already took. Named
-    // for what the operator manages, not for the model.
-    label: 'People (Faces)',
+    // The one row named for its app rather than for what the operator
+    // manages, and deliberately so. "People (Faces)" told an operator
+    // who had just installed Smart Doorbell nothing about where it went:
+    // they went looking for the name on the tile they clicked and found
+    // a word the catalog never used. The other rows do not have that
+    // problem, because nobody installs an app called "Tripwires" — the
+    // app is "Line Crossing" and the page is wider than it. Here the app
+    // IS the page.
+    //
+    // If a second app ever provides `people`, this label stops being
+    // true and should go back to the generic noun.
+    label: 'Smart Doorbell',
     legacy: (m) => (m.requires_tasks ?? []).includes('face_recognition'),
   },
   {
