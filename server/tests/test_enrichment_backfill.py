@@ -404,7 +404,7 @@ def test_a_cursor_that_stops_moving_stops_the_loop(session_local, calls,
     # A walk that never gets past the newest visit — what an off-by-one
     # in the cursor filter would produce.
     monkeypatch.setattr(bf, "plan_batch",
-                        lambda db, before, limit: [
+                        lambda db, before, limit, people=False: [
                             {"event_id": 2, "caption": True, "descriptors": False}])
 
     from core.config import settings
@@ -415,6 +415,40 @@ def test_a_cursor_that_stops_moving_stops_the_loop(session_local, calls,
 
     assert calls["caption"] == [2, 2], (
         "it should notice on the second identical pass, not keep going")
+
+
+def test_the_sweep_carries_the_people_gate_into_history(session_local):
+    """Whatever the live path does to a person visit, the sweep must do
+    to the back catalogue — and not a question more."""
+    db = session_local
+    _camera(db, 1, ["vqa"])
+    _visit(db, event_id=1, camera_id=1, label="person")
+    _visit(db, event_id=2, camera_id=1, label="car")
+
+    off = {i["event_id"]: i for i in bf.plan_batch(db, None, 10)}
+    assert off[1]["descriptors"] is False, "people are opt-in in history too"
+    assert off[2]["descriptors"] is True
+
+    on = {i["event_id"]: i for i in bf.plan_batch(db, None, 10, True)}
+    assert on[1]["descriptors"] is True
+    assert on[2]["descriptors"] is True
+
+
+def test_a_pass_reads_the_people_setting(session_local, calls, monkeypatch):
+    db = session_local
+    _camera(db, 1, ["vqa"])
+    _visit(db, event_id=1, camera_id=1, label="person")
+
+    from core.config import settings
+
+    _run(bf.backfill_once(batch=10, pause=0))
+    assert calls["descriptors"] == [], "off by default, in history as well"
+
+    bf._write_state(db, {})
+    monkeypatch.setattr(settings, "events_descriptor_people", True,
+                        raising=False)
+    _run(bf.backfill_once(batch=10, pause=0))
+    assert calls["descriptors"] == [1]
 
 
 # ── the free repair ──────────────────────────────────────────────────
