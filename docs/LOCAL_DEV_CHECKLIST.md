@@ -248,5 +248,5 @@ mediamtx.exe ..\mediamtx.local.yml  # Windows
 
 See full setup guide: [LOCAL_SETUP.md](LOCAL_SETUP.md)
 
-For Docker deployment: [DOCKER_SETUP.md](DOCKER_SETUP.md)
+For Docker deployment: the [Quickstart](../README.md#quickstart) — `./start.sh up` is the supported path, and `DOCKER_SETUP.md` was folded into it.
 
