@@ -1011,3 +1011,158 @@ def test_skills_disagreeing_is_counted_not_hidden(internal_client, db, metrics):
     assert _value(s, "opennvr_search_descriptor_conflicts_total", kind="colour") == 1
     assert _value(s, "opennvr_search_descriptors_written_total",
                   kind="colour", task="vqa", adapter="qwen-vl") == 1
+
+
+# ── Asking the way people actually ask ───────────────────────────────
+
+
+class TestConversationalQueries:
+    """The box says "describe it", so people address the system. Every
+    filler word that survives the parse becomes a REQUIRED substring of
+    a caption — and no caption ever written contains "you see", so a
+    query whose meaning was understood perfectly returns nothing. That
+    is the confident-wrong-parse failure this parser exists to avoid.
+    """
+
+    def test_did_you_see_any_car_in_last_5_mins(self, client, db):
+        """The exact query that returned nothing while the camera had
+        been full of cars for the previous five minutes."""
+        _camera(db, 1, "cam1")
+        for _ in range(3):
+            _visit(db, camera_id=1, label="car", minutes_ago=1)
+
+        body = client.get("/api/v1/search",
+                          params={"q": "did you see any car in last 5 mins"}).json()
+        interp = body["interpretation"]
+        assert interp["labels"] == ["car"]
+        assert interp["matched"]["when"] == "last 5 mins"
+        # The whole bug: "you see" used to land here and AND itself
+        # against every caption.
+        assert interp["text"] == ""
+        assert body["total"] == 3
+
+    @pytest.mark.parametrize("q", [
+        "did you see any car in last 5 mins",
+        "can you show me cars today",
+        "have you caught any cars today",
+        "tell me if there were cars today",
+        "check the cameras for a car today",
+    ])
+    def test_the_same_question_however_it_is_phrased(self, client, db, q):
+        _camera(db, 1, "cam1")
+        _visit(db, camera_id=1, label="car", minutes_ago=1)
+        body = client.get("/api/v1/search", params={"q": q}).json()
+        assert body["interpretation"]["labels"] == ["car"]
+        assert body["interpretation"]["text"] == "", (
+            f"{body['interpretation']['text']!r} became a required "
+            f"caption substring")
+        assert body["total"] == 1
+
+    def test_this_morning_is_a_window_not_a_phrase_to_match(self, db):
+        """Its own test rather than one of the parametrized cases: the
+        window is real, so a fixture written "1 minute ago" only falls
+        inside it before noon and the case would pass or fail by the
+        clock."""
+        from services.search_query import parse_query
+
+        parsed = parse_query("was there a car this morning",
+                             cameras={1: "cam1"})
+        assert parsed.labels == ["car"]
+        assert parsed.text == ""
+        assert parsed.matched["when"] == "this morning"
+
+    def test_a_real_describing_word_is_still_kept(self, db):
+        """The stop list must not eat the words that carry the
+        description — "red" is the whole point of "red truck"."""
+        from services.search_query import parse_query
+
+        parsed = parse_query("did you see a red truck today",
+                             cameras={1: "cam1"})
+        assert parsed.labels == ["truck"]
+        assert parsed.text == "red"
+
+    def test_a_place_word_is_still_kept(self, db):
+        from services.search_query import parse_query
+
+        parsed = parse_query("was anyone near the loading bay last night",
+                             cameras={1: "cam1"})
+        assert parsed.labels == ["person"]
+        assert "bay" in parsed.text
+
+
+# ── Why an empty search is empty ─────────────────────────────────────
+
+
+class TestWhyEmpty:
+    """"Nothing matched — remove a chip" asks the operator to guess
+    which one. Dropping each filter in turn and counting is cheap, runs
+    only on an empty result, and turns the guess into one click."""
+
+    def test_it_names_the_chip_that_emptied_the_search(self, client, db):
+        _camera(db, 1, "cam1")
+        _visit(db, camera_id=1, label="car", minutes_ago=1, caption="a car")
+
+        body = client.get("/api/v1/search",
+                          params={"q": "car today", "text": "chartreuse"}).json()
+        assert body["total"] == 0
+        assert body["relax"], "an empty search should say why"
+        first = body["relax"][0]
+        assert first["drop"] == "text"
+        assert first["value"] == "chartreuse"
+        assert first["would_match"] == 1
+
+    def test_it_names_a_time_window_that_is_too_narrow(self, client, db):
+        _camera(db, 1, "cam1")
+        _visit(db, camera_id=1, label="car", minutes_ago=600)
+
+        body = client.get("/api/v1/search",
+                          params={"q": "car in the last 5 minutes"}).json()
+        assert body["total"] == 0
+        assert [r["drop"] for r in body["relax"]] == ["when"]
+        assert body["relax"][0]["would_match"] == 1
+
+    def test_it_stays_quiet_when_there_are_results(self, client, db):
+        _camera(db, 1, "cam1")
+        _visit(db, camera_id=1, label="car", minutes_ago=1)
+        body = client.get("/api/v1/search", params={"q": "car today"}).json()
+        assert body["total"] == 1
+        assert body["relax"] == []
+
+    def test_it_stays_quiet_when_no_single_chip_explains_it(self, client, db):
+        """A genuinely empty store has no chip to blame, and inventing
+        one would be worse than silence."""
+        _camera(db, 1, "cam1")
+        body = client.get("/api/v1/search", params={"q": "car today"}).json()
+        assert body["total"] == 0
+        assert body["relax"] == []
+
+    def test_a_hint_failure_never_breaks_the_search(self, client, db,
+                                                    monkeypatch):
+        """Best-effort means best-effort: a working, empty search must
+        not become a 500 because the diagnosis blew up."""
+        from routers import search as search_router
+
+        def boom(*a, **k):
+            raise RuntimeError("count exploded")
+
+        _camera(db, 1, "cam1")
+        _visit(db, camera_id=1, label="car", minutes_ago=1)
+        monkeypatch.setattr(search_router, "count_search_events",
+                            _counting_then(boom, first=0))
+        resp = client.get("/api/v1/search",
+                          params={"q": "car today", "text": "nope"})
+        assert resp.status_code == 200
+        assert resp.json()["relax"] == []
+
+
+def _counting_then(after, *, first=0):
+    """count_search_events that answers `first` once, then raises."""
+    calls = {"n": 0}
+
+    def wrapped(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return first
+        return after(*a, **k)
+
+    return wrapped

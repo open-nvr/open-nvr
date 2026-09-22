@@ -34,6 +34,7 @@ camera scoping, no evidence, and no way to open the clip.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
@@ -52,6 +53,8 @@ from core.permissions import user_has_permission
 from services.camera_scope import scope_query, visible_camera_ids
 from services.search_query import ParsedQuery, parse_query
 from services.search_service import anchor_for, count_search_events, search_events
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["search"])
 
@@ -393,10 +396,69 @@ async def search(
         ],
         "count": len(hits),
         "total": total,
+        # Empty result: which ONE chip is responsible, and what dropping
+        # it would find. Absent when there were results, and absent when
+        # no single chip explains it.
+        "relax": (
+            _why_empty(db, labels=labels, cams=cams, words=words,
+                       attrs=attrs, filters=filters)
+            if total == 0 else []
+        ),
     }
 
 
 # ── Home Assistant (HA-116/HA-502): zones by name, and period summaries ──
+
+
+def _why_empty(db, *, labels, cams, words, attrs, filters, limit: int = 5) -> list[dict]:
+    """Which single chip is responsible for a search matching nothing.
+
+    A parse the operator can SEE is the design here; this closes the
+    loop by making it a parse they can act on. "Nothing matched —
+    remove a chip" asks them to guess which one, and the honest answer
+    is cheap: drop each filter in turn and count. If one of those
+    counts is non-zero, that chip is the whole reason, and the UI can
+    offer the search they meant in one click.
+
+    Only runs on an empty result, so it costs nothing on the normal
+    path, and it counts rather than fetching. Everything is
+    best-effort: a failure here must leave a working (if empty) search
+    alone rather than turning it into a 500.
+    """
+    if not any((labels, cams, words, attrs, filters.get("from_"),
+                filters.get("to"), filters.get("plate"))):
+        return []
+
+    def count(**over) -> int:
+        base = dict(labels=labels, camera_ids=cams, text=words or "",
+                    attrs=attrs, **filters)
+        base.update(over)
+        return count_search_events(db, **base)
+
+    # Ordered by how often each one is the culprit, so the first
+    # suggestion is usually the right one.
+    candidates: list[tuple[str, str, dict]] = []
+    if words:
+        candidates.append(("text", words, {"text": ""}))
+    if filters.get("from_") or filters.get("to"):
+        candidates.append(("when", "", {"from_": None, "to": None}))
+    if cams:
+        candidates.append(("camera_ids", "", {"camera_ids": []}))
+    if labels:
+        candidates.append(("labels", "", {"labels": []}))
+    if filters.get("plate"):
+        candidates.append(("plate", str(filters["plate"]), {"plate": None}))
+
+    out: list[dict] = []
+    for field, value, override in candidates[:limit]:
+        try:
+            found = count(**override)
+        except Exception:  # noqa: BLE001 — a hint must never break a search
+            logger.debug("empty-search hint failed for %s", field, exc_info=True)
+            continue
+        if found > 0:
+            out.append({"drop": field, "value": value, "would_match": found})
+    return out
 
 
 def _resolve_zone(db: Session, zone: str | None, camera_id: int | None,
