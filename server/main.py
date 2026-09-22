@@ -675,6 +675,58 @@ async def lifespan(app: FastAPI):
 
     spawn_background(background_entity_states(), name="entity-state-publisher")
 
+    # The camera graph (journey_transition_learning, on by default).
+    # learn_transitions had no caller outside its tests, so
+    # camera_transitions was empty on every deployment and every
+    # cross-camera route fell back to "no learned route between these
+    # cameras yet" — scored on time alone, which is the weakest answer
+    # the feature can give. Nothing about it was broken; nobody had ever
+    # run it.
+    #
+    # Nightly and FULL (never `since`): a windowed scan writes that
+    # window's counts over the totals, and only a full scan may prune an
+    # edge the site no longer supports. In a worker thread, because it is
+    # a synchronous scan of every plate and face claim and must not block
+    # the event loop — the same rule the retention sweep above follows.
+    async def background_transition_learning():
+        try:
+            from core.config import settings
+
+            if not getattr(settings, "journey_transition_learning", True):
+                return
+
+            def _learn() -> int:
+                from core.database import SessionLocal
+                from services.journey import learn_transitions
+
+                db = SessionLocal()
+                try:
+                    return learn_transitions(db)
+                finally:
+                    db.close()
+
+            # After the first enrichment has had a chance to write some
+            # claims; an empty first pass would prune a graph learned
+            # before the restart.
+            await asyncio.sleep(900)
+            while True:
+                try:
+                    edges = await asyncio.to_thread(_learn)
+                    main_logger.info(
+                        "Camera graph relearned: %s edges", edges)
+                except Exception as e:  # noqa: BLE001
+                    main_logger.error(f"Camera graph learning failed: {e}",
+                                      exc_info=True)
+                await asyncio.sleep(24 * 60 * 60)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            main_logger.error(f"Camera graph scheduler failed: {e}",
+                              exc_info=True)
+
+    spawn_background(background_transition_learning(),
+                     name="camera-graph-learning")
+
     # Back catalogue (events_enrichment_backfill, off by default): the two
     # enrichers run off the INGEST path, so every visit recorded before
     # they shipped has a row in events and nothing in event_text or

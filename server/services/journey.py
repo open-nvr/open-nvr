@@ -62,7 +62,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func
@@ -218,6 +218,27 @@ def learn_transitions(db, *, since: datetime | None = None, max_gap_seconds: flo
 
     Returns the number of edges written. Cheap enough to run nightly; the
     graph only changes when the site does.
+
+    A FULL relearn (``since=None``) is authoritative: it also removes
+    edges nothing supports any more. The site's topology is not
+    append-only — this table exists because a route "changes when a gate
+    is closed or a camera is re-aimed" — and an edge that only ever
+    accumulates would keep asserting a route that no longer exists,
+    which ``_transit_fit`` would then score as plausible. An edge
+    therefore survives exactly as long as evidence for it survives,
+    which is the rule the rest of this store follows.
+
+    With one exception, and it is the usual one: a scan that finds NO
+    trips at all prunes nothing. Zero anchors means LPR is off, an
+    adapter is down, or the database is new — "could not check", not
+    "no route exists" — and those are different answers.
+
+    ``since`` narrows the scan to a WINDOW, and the counts it writes are
+    the window's, not a running total. It is for asking "what did the
+    graph look like last week", never for incremental accumulation: a
+    nightly ``since=yesterday`` would overwrite every edge's samples
+    with one day's worth. It does not prune, for the same reason — a
+    window cannot speak for what it did not look at.
     """
     q = (
         db.query(VisitDescriptor.kind, VisitDescriptor.value,
@@ -261,7 +282,22 @@ def learn_transitions(db, *, since: datetime | None = None, max_gap_seconds: flo
         edge.samples = len(gaps)
         edge.median_seconds = median
         edge.p90_seconds = p90
+        # Set explicitly: the column has a server default but no
+        # onupdate, so without this a relearned edge keeps reading as
+        # first-seen and nothing can tell a live route from a fossil.
+        edge.updated_at = datetime.now(UTC)
         written += 1
+
+    if since is None and trips:
+        # Only a full scan may prune — see the docstring. And only a scan
+        # that SAW something: finding no trips at all means the anchors
+        # are missing (LPR switched off, an adapter down, a fresh
+        # database), which is "could not check", not "no route exists".
+        # Wiping the graph on that reading is the same mistake as
+        # treating an unenriched visit as a mismatch.
+        for edge in db.query(CameraTransition).all():
+            if (edge.from_camera_id, edge.to_camera_id) not in trips:
+                db.delete(edge)
     db.commit()
     return written
 

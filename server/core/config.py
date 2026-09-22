@@ -435,6 +435,15 @@ class Settings(BaseSettings):
     # gated per camera by the same skill assignments, so turning it on
     # without them costs nothing.
     events_enrichment_backfill: bool = False
+    # Relearn the camera graph nightly from the journeys the site is
+    # already certain about (same plate or same recognised face on two
+    # cameras). ON by default, unlike the backfill above, because it
+    # spends no inference at all — it is one indexed scan of claims
+    # already stored — and without it camera_transitions stays empty,
+    # which makes every cross-camera route answer "no learned route
+    # between these cameras yet" and score on time alone. Off means the
+    # graph freezes as it is; it does not disable route-following.
+    journey_transition_learning: bool = True
     # RFC-0002 Phase 0: NATS URL for core's domain-event consumers
     # (plate.recognized.v1 today). Compose sets NATS_URL=nats://nats:4222;
     # empty disables consumption (enrichment's synchronous fallback still
