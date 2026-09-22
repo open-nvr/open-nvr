@@ -63,6 +63,42 @@ small Python script. Side effects:
   adapter; it survives restarts but never holds raw images,
   only the 512-d embedding vectors.
 
+## Who came to the door, and when
+
+The feed and the stranger wall used to be in-memory only, so a restart
+or a redeploy wiped every stranger the doorbell had ever seen. They are
+now written to the app's durable store in core, which means "who came to
+my door three days ago" has an answer that survives `docker compose up`.
+
+Two settings govern how long the door remembers, both editable from the
+App Catalog:
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `history_days` | 30 | How long a visit stays in the history. |
+| `history_max` | 200 | Hard cap on remembered visits, whatever the age. |
+
+Each visit costs a line of text — when, which camera, recognised or not,
+and who. Only the most recent unrecognised visits also keep a thumbnail,
+because those are the tiles anyone actually looks at; an older stranger
+keeps the line and the wall shows **snapshot aged out** in place of the
+picture. The visit still happened, and the caption is the answer to the
+question — the photo was only ever the nicer half of it.
+
+The full-size crop goes to the platform's evidence store, where alerts
+already cite their pictures and where OpenNVR's own retention governs
+it. A tile restored from history therefore cannot be enrolled from: the
+full crop is not in this process, and enrolling from a 190 px wall
+thumbnail would teach the adapter a worse face than the operator thinks
+they are giving it. Enrol a stranger while the tile is fresh.
+
+Why the identity is the app's own record rather than a claim on the
+platform's visit rows: this app polls snapshots, so it has a frame and a
+face but no `event_id`. Attaching a name to a platform visit would mean
+guessing which visit the frame belonged to by matching timestamps, and a
+guessed identity in the shared store is indistinguishable afterwards
+from a measured one.
+
 ## Honesty up front
 
 Real-world failure modes the example does NOT yet handle:
@@ -263,6 +299,7 @@ examples/smart-doorbell/
 ├── smart_doorbell.py              CLI + SmartDoorbell driver
 ├── face_recognition_pipeline.py   Testable pipeline (no daemon loop)
 ├── alerts.py                      Alert envelope + stdout/webhook/NATS dispatchers
+├── visit_log.py                   Who came to the door, kept across restarts
 ├── frame_sources.py               file:// + http(s):// frame fetchers
 ├── config.example.yml             Operator config with every option
 ├── pyproject.toml                 Minimal deps (httpx, PyYAML, nats-py)
