@@ -294,6 +294,7 @@ async def ingest_track_event(
     if (row.label or "") in _VEHICLES \
             and payload.track_id and not row.plate_text:
         from services.plate_attempt_cache import cache as _attempt_cache
+        from services.descriptor_store import sync_plate_claim
         from services.plate_enrichment import (
             dedup_window_s,
             is_duplicate_sighting,
@@ -332,6 +333,10 @@ async def ingest_track_event(
                                      reads=1, source="early",
                                      confidence=pending.confidence)
                 note_sighting(payload.camera_id, plate)
+                # A plate is a claim as well as a column: the attr
+                # filter and journey.py's plate anchor read descriptors.
+                # After the stamp, so the claim carries its confidence.
+                sync_plate_claim(db, row)
                 db.commit()
                 early_read = True
                 logger.info(
@@ -492,6 +497,7 @@ async def run_early_plate_attempt(
     # read): still PARK the read — the ingest claim is what lets the
     # visit skip its whole OCR sweep — but skip the race-cover row
     # write; the claim path makes the fold decision with fresher state.
+    from services.descriptor_store import sync_plate_claim
     from services.plate_enrichment import (
         is_duplicate_sighting,
         note_sighting,
@@ -537,6 +543,7 @@ async def run_early_plate_attempt(
                                      reads=1, source="early",
                                      confidence=read["confidence"])
                 note_sighting(camera_id, row.plate_text)
+                sync_plate_claim(db, row)
                 db.commit()
                 logger.info(
                     "plate attempt: event %s -> %s (raced ingest, conf=%.2f)",

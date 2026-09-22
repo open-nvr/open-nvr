@@ -204,6 +204,13 @@ def apply_plate_event(envelope: object) -> str:
                              if isinstance(payload.get("confidence"), (int, float))
                              else None)
         note_sighting(row.camera_id, normalized)
+        # The plate is a claim as well as a column — the attr filter and
+        # journey.py's plate anchor both read descriptors, not the
+        # column. After the stamp above, so the claim carries the
+        # forwarded confidence.
+        from services.descriptor_store import sync_plate_claim
+
+        sync_plate_claim(db, row)
         db.commit()
         logger.info(
             "plate event applied: event %s -> %s [correlation_id=%s]",
