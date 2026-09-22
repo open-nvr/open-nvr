@@ -80,6 +80,7 @@ from face_recognition_pipeline import (
     FaceRecognitionPipelineConfig,
     RecognitionClient,
 )
+from chime import ChimePolicy
 from frame_sources import FrameSource, FrameSourceError, build_frame_source
 from visit_log import VisitLog
 from opennvr_app_sdk import (
@@ -150,6 +151,12 @@ MANIFEST = AppManifest(
               description="How long a visit stays in the door's history."),
         Param("history_max", int, default=200,
               description="Hard cap on remembered visits, whatever the age."),
+        Param("chime_enabled", bool, default=True,
+              description="Ring for callers. Off still alerts and records."),
+        Param("quiet_hours", str, default="",
+              description="HH:MM-HH:MM in which only an alarm tone rings."),
+        Param("rechime_seconds", int, default=300,
+              description="Least gap between rings for the same caller."),
     ],
     emits=[
         AlertType("known_visitor", severity="low"),
@@ -316,6 +323,20 @@ class AppConfig:
     history_days: int = 30
     history_max: int = 200
 
+    # The bell. An alert fires for every visit whatever these say —
+    # these decide only whether something RINGS, which is a different
+    # question and the one every annoying doorbell gets wrong.
+    chime_enabled: bool = True
+    # HH:MM-HH:MM. Inside it only the alarm tone rings: a delivery at
+    # 03:00 goes in the log, a stranger at 03:00 still wakes the house.
+    quiet_hours: str = ""
+    # Longer than the alert dedup on purpose. Being told again in a feed
+    # costs nothing; being rung at again costs attention.
+    rechime_seconds: int = 300
+    # category -> tone, overriding chime.DEFAULT_TONES. YAML rather than
+    # a catalog Param because it is a mapping, not a value.
+    chime_tones: dict[str, str] = field(default_factory=dict)
+
     # Alert delivery channels.
     webhook_url: str | None = None
     nats_alerts_url: str | None = None
@@ -385,6 +406,11 @@ def load_config(path: str | Path) -> AppConfig:
         ),
         history_days=int(raw.get("history_days", 30)),
         history_max=int(raw.get("history_max", 200)),
+        chime_enabled=bool(raw.get("chime_enabled", True)),
+        quiet_hours=str(raw.get("quiet_hours") or ""),
+        rechime_seconds=int(raw.get("rechime_seconds", 300)),
+        chime_tones={str(k): str(v) for k, v
+                     in (raw.get("chime_tones") or {}).items()},
         webhook_url=raw.get("webhook_url"),
         nats_alerts_url=raw.get("nats_alerts_url"),
         nats_alerts_token=raw.get("nats_alerts_token"),
@@ -700,6 +726,19 @@ class SmartDoorbell(FrameApp):
         )
         self._history_restored = False
         self._visit_seq = 0
+        #: Does anything ring, and with what. Separate from the alert
+        #: path on purpose: every visit alerts, only some interrupt
+        #: somebody.
+        self._chime = ChimePolicy(
+            tones=self.config.chime_tones,
+            quiet_hours=self.config.quiet_hours,
+            rechime_seconds=self.config.rechime_seconds,
+            enabled=self.config.chime_enabled,
+        )
+        #: Rings since start, and the last decision — both on /state so
+        #: "why didn't it ring?" is answerable without reading a log.
+        self._rings = 0
+        self._last_chime: dict[str, Any] | None = None
 
     @property
     def nvr(self):
@@ -785,6 +824,19 @@ class SmartDoorbell(FrameApp):
                 return None
             self._last_fired[plate_key] = now
 
+        # Decided BEFORE the alert is built, because the decision rides
+        # in the envelope: whatever actually rings — a relay into ntfy,
+        # a Home Assistant automation, a smart speaker — reads it from
+        # there, and reads the reason when nothing rang.
+        chime = self._chime.decide(
+            key=f"{cam.camera_id}|{read.person_id or '?'}",
+            category=read.category, recognized=read.recognized, now=now,
+        )
+        self._last_chime = {**chime.as_dict(), "at": time.time(),
+                            "camera": cam.camera_id}
+        if chime.ring:
+            self._rings += 1
+
         attach_snapshot = (
             self.config.attach_snapshot_for_unknowns and not read.recognized
         )
@@ -799,7 +851,7 @@ class SmartDoorbell(FrameApp):
                     "dropping from alert envelope correlation_id=%s",
                     cam.camera_id, len(frame_bytes), cap, read.correlation_id,
                 )
-        alert = self._build_alert(cam, read, snapshot_bytes)
+        alert = self._build_alert(cam, read, snapshot_bytes, chime)
         self.dispatcher.dispatch(alert)
         now_wall = time.time()
         display = read.name or read.person_id or "?"
@@ -943,6 +995,17 @@ class SmartDoorbell(FrameApp):
             "since": self._started_at,
             "stranger_gallery": list(self._stranger_gallery),
             "recent": list(self._recent),
+            "rings": self._rings,
+            # The last decision, including a suppressed one. "Why didn't
+            # it ring?" is the first question anyone asks a doorbell, and
+            # it should not need a log file to answer.
+            "last_chime": self._last_chime,
+            "chime": {
+                "enabled": self.config.chime_enabled,
+                "quiet_hours": self.config.quiet_hours,
+                "rechime_seconds": self.config.rechime_seconds,
+                "tones": dict(self._chime.tones),
+            },
         }
 
     def on_config_update(self, config: dict[str, Any]) -> None:
@@ -961,6 +1024,30 @@ class SmartDoorbell(FrameApp):
             self.config.attach_snapshot_for_unknowns = bool(config["attach_snapshot_for_unknowns"])
         if "snapshot_max_bytes" in config:
             self.config.snapshot_max_bytes = int(config["snapshot_max_bytes"])
+        if any(k in config for k in
+               ("chime_enabled", "quiet_hours", "rechime_seconds", "chime_tones")):
+            self.config.chime_enabled = bool(
+                config.get("chime_enabled", self.config.chime_enabled))
+            self.config.quiet_hours = str(
+                config.get("quiet_hours", self.config.quiet_hours) or "")
+            self.config.rechime_seconds = int(
+                config.get("rechime_seconds", self.config.rechime_seconds))
+            if "chime_tones" in config:
+                self.config.chime_tones = {
+                    str(k): str(v) for k, v in (config["chime_tones"] or {}).items()}
+            # Rebuilt whole rather than mutated field by field, so the
+            # run loop never sees a policy with a new quiet window and
+            # an old tone table. The last-rang clock is deliberately
+            # NOT carried over: an operator who just changed the bell
+            # is entitled to hear the next caller.
+            self._chime = ChimePolicy(
+                tones=self.config.chime_tones,
+                quiet_hours=self.config.quiet_hours,
+                rechime_seconds=self.config.rechime_seconds,
+                enabled=self.config.chime_enabled,
+            )
+            logger.info("chime policy updated live (enabled=%s quiet=%r)",
+                        self.config.chime_enabled, self.config.quiet_hours)
 
     def ui_html(self) -> str:
         """The app dashboard (RFC-0002 Phase 4): ONE static, self-contained
@@ -1020,6 +1107,19 @@ class SmartDoorbell(FrameApp):
         enrolled_txt = "?" if enrolled is None else str(enrolled)
         enrolled_note = (" <span class='warn'>(face adapter unreachable)</span>"
                          if enrolled is None else "")
+        # Why the last caller did or did not ring, in the operator's own
+        # words rather than in a log they would have to go and find.
+        last_chime = snap.get("last_chime") or {}
+        if not snap["chime"]["enabled"]:
+            chime_note = " <span class='warn'>(chime off)</span>"
+        elif last_chime.get("ring"):
+            chime_note = (f" <span class='dim'>(last: {esc(str(last_chime.get('tone')))}"
+                          f")</span>")
+        elif last_chime.get("reason"):
+            chime_note = (f" <span class='dim'>(silent: "
+                          f"{esc(str(last_chime['reason']))})</span>")
+        else:
+            chime_note = ""
         return f"""<title>Smart Doorbell</title>
 <style>
  body {{ font: 14px system-ui, sans-serif; margin: 1.2rem; color: #1a1a1a;
@@ -1050,6 +1150,7 @@ class SmartDoorbell(FrameApp):
  <div><b>{snap["visits"]["known"]}</b><span class="dim">known visitors</span></div>
  <div><b>{snap["visits"]["unknown"]}</b><span class="dim">strangers</span></div>
  <div><b>{snap["deduped_visitors_tracked"]}</b><span class="dim">visitors tracked</span></div>
+ <div><b>{snap["rings"]}</b><span class="dim">rings</span>{chime_note}</div>
 </div>
 <h2>Cameras</h2>
 <table><tr><th>Camera</th><th>Status</th><th>Last frame</th><th>Error</th></tr>{cam_rows}</table>
@@ -1260,6 +1361,7 @@ page. Threshold and re-fire window are edited in the config form and apply live.
         cam: CameraConfig,
         read: FaceRead,
         snapshot: bytes | None,
+        chime: Any = None,
     ) -> Alert:
         kind = "unknown_visitor"
         if read.recognized:
@@ -1316,6 +1418,15 @@ page. Threshold and re-fire window are edited in the config form and apply live.
             evidence["snapshot_b64"] = base64.b64encode(snapshot).decode("ascii")
             evidence["snapshot_mime"] = "image/jpeg"
 
+        # What to ring, or why nothing did. In the envelope rather than
+        # acted on here: an app that owned the speaker would work on
+        # exactly one deployment, and a suppressed ring with no stated
+        # reason is indistinguishable from a broken doorbell.
+        tags: list[str] = []
+        if chime is not None:
+            evidence["chime"] = chime.as_dict()
+            tags.append(f"chime:{chime.tone}" if chime.ring else "chime:silent")
+
         return Alert(
             severity=severity,
             title=title,
@@ -1324,6 +1435,7 @@ page. Threshold and re-fire window are edited in the config form and apply live.
             source=AlertSource(),
             correlation_id=read.correlation_id,
             evidence=evidence,
+            tags=tags,
         )
 
 

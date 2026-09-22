@@ -99,6 +99,64 @@ guessing which visit the frame belonged to by matching timestamps, and a
 guessed identity in the shared store is indistinguishable afterwards
 from a measured one.
 
+## The bell
+
+An alert and a chime are different events, and treating them as one is
+what makes doorbells annoying. Every face at the door is worth
+**recording**; only some are worth **interrupting** somebody for. The
+alert, the feed, the history and the operator inbox are unaffected by
+anything in this section — it decides one narrower question: does
+something ring, and what does it play.
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `chime_enabled` | `true` | Off still alerts and records; nothing rings. |
+| `quiet_hours` | *(none)* | `HH:MM-HH:MM` in which only an `alarm` tone rings. |
+| `rechime_seconds` | 300 | Least gap between rings for the same caller. |
+| `chime_tones` | see below | Tone per person category. |
+
+The shipped table, which is opinionated on purpose:
+
+| Category | Tone | Why |
+| --- | --- | --- |
+| `family`, `resident` | `none` | A bell that rings when the family comes home is the bell people stop hearing — and then it does not work for the stranger either. |
+| `friend`, `staff` | `chime` | Announce, softly. |
+| `contractor`, `visitor` | `ding_dong` | Somebody with business at the door. |
+| `watchlist` | `alarm` | The one recognised face that must be louder than a stranger. |
+| *(unknown)* | `ding_dong` | A caller nobody has enrolled. |
+
+Three rules, each a thing real doorbells get wrong:
+
+1. **Who it is decides the sound**, per the table above.
+2. **Quiet hours silence the bell, not the alarm.** A delivery at 03:00
+   goes in the log and does not wake the house; a stranger at 03:00
+   does. Suppressing that would be a burglar alarm that observes
+   bedtime, so only the `alarm` tone overrides the window — which is
+   exactly the line between "someone is here" and "something is wrong".
+3. **A bell that rings twelve times is noise.** `rechime_seconds` is
+   separate from, and longer than, `dedup_window_seconds`: being told
+   again in a feed costs nothing, being rung at again costs attention.
+   A suppressed ring does not restart the clock, so somebody walking
+   past during quiet hours cannot delay the ring that should follow it.
+
+**Ringing is somebody else's job, deliberately.** This app decides; it
+does not make a noise. The decision rides in the alert envelope, as
+`evidence.chime` and a `chime:<tone>` tag, so whatever the household
+actually rings — the alerts-subscriber relay into ntfy or Telegram, a
+Home Assistant automation over OpenNVR's MQTT bridge, a webhook to a
+smart speaker — plays the right tone at the right time. An app that
+tried to own the speaker would work on exactly one deployment.
+
+```json
+"chime": { "tone": "ding_dong", "ring": false,
+           "reason": "quiet hours (22:00-07:00)" }
+```
+
+When it decides **not** to ring it says why, in words, in the same
+envelope and on the dashboard. A doorbell that silently chose to stay
+quiet is indistinguishable from a broken one, and whoever is debugging
+it in the morning has nothing else to go on.
+
 ## Honesty up front
 
 Real-world failure modes the example does NOT yet handle:
@@ -299,6 +357,7 @@ examples/smart-doorbell/
 ├── smart_doorbell.py              CLI + SmartDoorbell driver
 ├── face_recognition_pipeline.py   Testable pipeline (no daemon loop)
 ├── alerts.py                      Alert envelope + stdout/webhook/NATS dispatchers
+├── chime.py                       When the door rings, and with what
 ├── visit_log.py                   Who came to the door, kept across restarts
 ├── frame_sources.py               file:// + http(s):// frame fetchers
 ├── config.example.yml             Operator config with every option

@@ -74,6 +74,37 @@ snapshot_max_bytes: 716800
 history_days: 30
 history_max: 200
 
+# The bell. An alert fires for every visit whatever these say — these
+# decide only whether something RINGS. This app does not make the
+# noise: the decision rides in the alert envelope, so a relay into
+# ntfy/Telegram, a Home Assistant automation or a smart speaker plays
+# the tone. When nothing rings, the envelope says why.
+chime_enabled: true
+
+# HH:MM-HH:MM. Inside it only the `alarm` tone rings: a delivery at
+# 03:00 goes in the log, a stranger at 03:00 still wakes the house.
+# Empty disables quiet hours entirely.
+quiet_hours: ""
+
+# Least gap between rings for the same caller at the same door.
+# Deliberately longer than dedup_window_seconds: being told again in a
+# feed costs nothing, being rung at again costs attention.
+rechime_seconds: 300
+
+# Tone per person category, overriding the shipped defaults.
+# One of: none | chime | ding_dong | alarm.
+# The people who live here are announced WITHOUT ringing — a bell that
+# rings when the family comes home is the bell people stop hearing.
+# chime_tones:
+#   family: none
+#   resident: none
+#   friend: chime
+#   staff: chime
+#   contractor: ding_dong
+#   visitor: ding_dong
+#   watchlist: alarm
+#   unknown: ding_dong
+
 # Alert delivery channels — webhook + NATS. Both independent of
 # the always-on stdout channel.
 #
