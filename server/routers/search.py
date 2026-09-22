@@ -52,7 +52,8 @@ from services import search_metrics as metrics
 from core.permissions import user_has_permission
 from services.camera_scope import scope_query, visible_camera_ids
 from services.search_query import ParsedQuery, parse_query
-from services.search_service import anchor_for, count_search_events, search_events
+from services.search_service import (anchor_for, count_search_events, search_events,
+                                     summarise_hits)
 
 logger = logging.getLogger(__name__)
 
@@ -396,6 +397,12 @@ async def search(
         ],
         "count": len(hits),
         "total": total,
+        # Counted facts about the results above — what matched, where,
+        # when, what the skills claimed, and how many were never
+        # described at all. Data, not a sentence: the UI composes the
+        # wording so it can be translated and re-worded without a
+        # release. Absent when nothing matched.
+        "answer": summarise_hits(hits, total=total, camera_names=cameras),
         # Empty result: which ONE chip is responsible, and what dropping
         # it would find. Absent when there were results, and absent when
         # no single chip explains it.
