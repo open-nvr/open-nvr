@@ -1127,6 +1127,50 @@ services:
   # camera snapshots itself and drives YOLOv8 through KAI-C.
   # Contract surface on :9207.
   # ──────────────────────────────────────────────────────────────
+  # Weights for the detector below. Pre-baked into a ~19 MB image the
+  # same way yolov8-weights and yolo-pose-weights are, because the
+  # reason those exist applies here exactly: an operator on a filtered
+  # network cannot fetch a model at first boot, and an adapter that
+  # starts, answers /health and fails every /infer on a missing file is
+  # the silent kind of broken. Here it is worse than silent — the app
+  # grades itself "fair" and looks like it is rating its own model
+  # poorly.
+  #
+  # Override PACKAGE_DETECTION_WEIGHTS_IMAGE to ship a fine-tune of
+  # your own doorsteps, or skip the image and put the .onnx straight
+  # into the volume (examples/package-delivery/README.md).
+  package-detection-weights-init:
+    profiles: [apps, package-delivery]
+    image: ${PACKAGE_DETECTION_WEIGHTS_IMAGE:-ghcr.io/open-nvr/package-detection-weights:v1.0.0}
+    # Build it here if it cannot be pulled — same last-resort fallback
+    # as yolo-pose-weights-init, and for the same reason: an
+    # unpublished image, a private package or a blocked ghcr.io
+    # otherwise ends with "denied", no weights, and an app that
+    # silently counts "fair" for ever.
+    build:
+      context: examples/package-detection-weights
+      dockerfile: Dockerfile
+    pull_policy: missing
+    container_name: opennvr_package_detection_weights_init
+    logging: *svc-logs
+    restart: "no"
+    # List-form command, as yolov8-weights-init explains at length:
+    # compose word-splits a STRING command, so `sh -c set -e ...` would
+    # run only `set`, exit 0, and copy nothing.
+    entrypoint: ["sh", "-ec"]
+    command:
+      - |
+        WEIGHTS=/weights/yolov8n-package.onnx
+        if [ -s "$$WEIGHTS" ]; then
+          echo "yolov8n-package.onnx already present at $$WEIGHTS (size: $$(wc -c < $$WEIGHTS) bytes); skipping."
+          exit 0
+        fi
+        echo "Copying pre-baked yolov8n-package.onnx into volume..."
+        cp /yolov8n-package.onnx "$$WEIGHTS"
+        echo "Wrote $$(wc -c < $$WEIGHTS) bytes to $$WEIGHTS."
+    volumes:
+      - opennvr_package_detection_weights:/weights
+
   # ──────────────────────────────────────────────────────────────
   # Package-detection adapter — the parcel class COCO does not have.
   #
@@ -1138,11 +1182,10 @@ services:
   # but it has to be RUN for the grade to change, and a catalog entry
   # is not a running container.
   #
-  # Weights are not baked into the image (it stays small and boots with
-  # no network). Point PACKAGE_DETECTION_MODEL_URL at the .onnx and the
-  # adapter fetches it once into the volume below; or put the file in
-  # that volume yourself as yolov8n-package.onnx, which is what a site
-  # fine-tune on its OWN doorstep footage does — see the adapter README.
+  # The weights come from package-detection-weights-init above, so this
+  # boots with a model and no network. A site fine-tune on its OWN
+  # doorstep footage replaces them, either by overriding
+  # PACKAGE_DETECTION_WEIGHTS_IMAGE or by hand:
   #
   #   docker compose cp ./yolov8n-package.onnx \
   #     package-detection-adapter:/app/model_weights/yolov8n-package.onnx
@@ -1161,14 +1204,17 @@ services:
       # image rather than after what the code reads is how the yolov8
       # block earned its warning comment and a run of 503s.
       - PACKAGE_DETECTION_WEIGHTS_DIR=/app/model_weights
-      # Fetched once into that volume when the file is not there. Empty
-      # URL + empty volume = the adapter reports itself unhealthy
-      # rather than answering /infer with a model it does not have, and
-      # the app's picker skips it and says so on the page.
+      # Empty by default and it should stay that way: the weights-init
+      # above has already put the model in the volume, so there is
+      # nothing to fetch. This is the escape hatch for a site that
+      # would rather pull its own fine-tune at boot than bake an image.
       - PACKAGE_DETECTION_MODEL_URL=${PACKAGE_DETECTION_MODEL_URL:-}
       # Optional: the class names the model emits, if you fine-tuned it
       # with a different label order.
       - PACKAGE_DETECTION_LABELS=${PACKAGE_DETECTION_LABELS:-}
+    depends_on:
+      package-detection-weights-init:
+        condition: service_completed_successfully
     volumes:
       - opennvr_package_detection_weights:/app/model_weights
     networks:

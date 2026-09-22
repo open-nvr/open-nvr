@@ -85,9 +85,8 @@ def test_the_weights_variable_is_the_one_the_adapter_actually_reads():
         "PACKAGE_DETECTION_WEIGHTS_DIR and looks for "
         "yolov8n-package.onnx inside it")
     assert "opennvr_package_detection_weights:/app/model_weights" in _APPS, (
-        "the weights are not baked into the image, so without a volume "
-        "every restart re-downloads them — or, with no URL set, finds "
-        "nothing at all")
+        "the adapter reads its model from the volume the weights-init "
+        "fills; without the mount it starts with nothing")
 
 
 def test_the_weights_volume_is_declared():
@@ -132,3 +131,50 @@ def test_the_operator_is_told_how_to_get_good_rather_than_left_guessing():
         "the filename the adapter looks for must be written down — an "
         "operator putting their fine-tune in under another name gets a "
         "silent fallback to 'fair'")
+
+
+def test_the_weights_ship_with_the_app_rather_than_being_fetched():
+    """An app whose detector needs a hand-supplied model counts "fair"
+    on every stock install, which reads as the app rating its own model
+    poorly. yolov8-weights and yolo-pose-weights already solved this —
+    and their headers record WHY a boot-time fetch is not good enough:
+    operators on filtered networks (IN/CN/IR) cannot reach the URL."""
+    assert "\n  package-detection-weights-init:\n" in _APPS, (
+        "no weights-init — a stock install has no model and silently "
+        "counts at the VQA grade")
+    assert ("${PACKAGE_DETECTION_WEIGHTS_IMAGE:-"
+            "ghcr.io/open-nvr/package-detection-weights:") in _APPS, (
+        "the weights image must be pinned and overridable, so a site "
+        "fine-tune is one variable rather than a compose edit")
+    init = _service_block("package-detection-weights-init")
+    assert "build:" in init, (
+        "keep the local build fallback: an unpublished image, a private "
+        "package or a blocked ghcr.io otherwise leaves no weights at all")
+    assert 'entrypoint: ["sh", "-ec"]' in init, (
+        "list-form entrypoint — compose word-splits a string command, "
+        "which copies nothing and leaves an empty volume")
+
+
+def test_the_adapter_waits_for_its_weights():
+    """Unlike the app→adapter edge, THIS one is a hard dependency: an
+    adapter that starts before the copy finishes loads nothing, and
+    then reports itself unhealthy for ever."""
+    block = _service_block("package-detection-adapter")
+    assert "package-detection-weights-init:" in block
+    assert "service_completed_successfully" in block
+
+
+def test_the_weights_image_is_built_and_published():
+    workflow = REPO_ROOT / ".github/workflows/build-package-detection-weights.yml"
+    assert workflow.exists(), (
+        "a compose file referencing an image nobody builds is a compose "
+        "file that pulls a 404")
+    text = workflow.read_text()
+    assert "package-detection-weights" in text
+    assert "linux/amd64,linux/arm64" in text, (
+        "the ONNX is architecture-independent, so there is no reason to "
+        "leave arm64 operators building it themselves")
+    assert "Sanity-check the published image" in text, (
+        "pull back what was pushed: a download that 404s bakes an HTML "
+        "error page into the image and fails silently on the operator's "
+        "machine weeks later")
