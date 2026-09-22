@@ -1,24 +1,36 @@
 # Copyright (c) 2026 OpenNVR
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Timestamps in the language the operator picked.
+"""Dates, times AND numbers in the language the operator picked.
 
-``getDateLocale`` was exported when the catalogues landed and never
-called once. Every ``toLocaleTimeString([], …)`` in the app passes an
-empty locale list, which means "whatever the browser is set to" — so an
-operator who selects Français reads ``02:02 PM``, a format France does
-not use, because their Chrome is American. The language switcher
+Every ``toLocale…String`` call without a locale asks the BROWSER, not
+the operator. Select Français on an American Chrome and you read
+``02:02 PM``, a format France does not use; the language switcher
 translates the words around the timestamp and not the timestamp.
 
-That is 84 call sites across 32 files, and converting them blind in one
-change would be a large edit nobody could review against a rendered
-page. So this is a ratchet rather than a gate: the count may go DOWN
-freely and may not go up, and the per-file baseline below says exactly
-where the remaining work is.
+A correction to how this file first described itself: it counted 84
+"timestamps", and about fifteen of those were never timestamps.
+``n.toLocaleString()`` on a NUMBER is the thousands separator — 12,000
+in English, 12 000 in French — which has exactly the same defect and a
+different fix. ``AIAdapters.tsx`` was the worst offender in the list at
+16 sites, and fifteen of them were counts, not dates. Left as it was,
+this file would have sent somebody to format a frame count with a date
+formatter.
 
-A file that reaches zero should be deleted from the baseline in the same
-commit, which is what makes the number fall. The test fails either way —
-too many is unfinished work, too few is a stale baseline — so the list
-cannot quietly stop describing the code.
+So the rule the baseline encodes is the simple one: do not call
+``toLocale…String`` directly. Use ``useDateFormat()`` in a component or
+``dateFormatters(language)`` in a module-level helper, and take
+``.time`` / ``.date`` / ``.dateTime`` / ``.number`` from it. That needs
+no guess about what the receiver is.
+
+43 sites remain across 25 files. Converting them blind in one change
+would be a large edit nobody could review against a rendered page, so
+this is a ratchet rather than a gate: the count may go DOWN freely and
+may not go up, and the per-file baseline says where the work is.
+
+A file that reaches zero leaves the baseline in the same commit, which
+is what makes the number fall. The test fails either way — too many is
+unfinished work, too few is a stale baseline — so the list cannot
+quietly stop describing the code.
 """
 
 from __future__ import annotations
@@ -37,7 +49,7 @@ _CALL = re.compile(r"\.toLocale(?:Time|Date)?String\s*\(")
 _BASELINE: dict[str, int] = {
     # The formatters themselves. These are the ONE correct place for a
     # raw call, and they are why the number can never reach zero.
-    "i18n.tsx": 3,
+    "i18n.tsx": 5,
     # Local-day maths, not display: these build day keys and boundaries
     # in the viewer's own timezone, which is deliberate and documented
     # at the top of the file. Localising them would change what a "day"
@@ -49,23 +61,17 @@ _BASELINE: dict[str, int] = {
     "components/PlaybackTimeline.tsx": 2,
     "services/alertsInboxService.ts": 1,
     "shell/AppShell.tsx": 1,
-    "views/AIAdapters.tsx": 16,
-    "views/AIDetectionResults.tsx": 3,
-    "views/AIModelsBYOM.tsx": 3,
     "views/Alarms.tsx": 1,
     "views/AlertsIncidents.tsx": 2,
     "views/Cameras.tsx": 1,
     "views/Compliance.tsx": 1,
     "views/Dashboard.tsx": 2,
-    "views/GuardCompliance.tsx": 4,
     "views/Loitering.tsx": 2,
-    "views/Occupancy.tsx": 7,
     "views/PlaybackView.tsx": 2,
     "views/Support.tsx": 1,
     "views/SyncPlayback.tsx": 1,
     "views/SystemNetworkMonitoring.tsx": 2,
     "views/Tripwires.tsx": 2,
-    "views/Vehicles.tsx": 9,
     "views/guardscan/ScreeningReport.tsx": 1,
     "views/settings/ApiTokens.tsx": 2,
     "views/settings/CameraSettings.tsx": 2,
@@ -127,6 +133,10 @@ def test_the_formatters_exist_and_are_actually_used():
     i18n = (_APP / "i18n.tsx").read_text()
     assert "export function useDateFormat" in i18n
     assert "export function dateFormatters" in i18n
+    assert "number:" in i18n, (
+        "numbers need the operator's locale too — 12,000 is 12 000 in "
+        "French, and without a formatter for it the migration sends "
+        "people to format counts with a date helper")
 
     importers = [
         p.relative_to(_APP).as_posix()
@@ -135,7 +145,7 @@ def test_the_formatters_exist_and_are_actually_used():
         and p.name != "i18n.tsx"
         and "useDateFormat" in p.read_text(errors="ignore")
     ]
-    assert len(importers) >= 4, (
+    assert len(importers) >= 10, (
         f"only {importers} use the formatters; the migration has stalled")
 
 

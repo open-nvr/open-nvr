@@ -27,7 +27,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Activity, Cpu, Database, Globe, HardDrive, Info, Layers, Lock, RefreshCw, ShieldAlert, ShieldCheck, Share2, Server } from 'lucide-react'
 import { apiService } from '../lib/apiService'
 import { extractApiError } from '../lib/apiError'
-import { useTranslation } from '../i18n'
+import { useTranslation, useDateFormat } from '../i18n'
 import { useSnackbar } from '../components/Snackbar'
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, EmptyState, ErrorCard, PageHeader, Skeleton, type BadgeVariant } from '../components/ui'
 import { MetricPanel, Sparkline, SparkRow, StatTile } from '../components/ui/stats'
@@ -302,6 +302,7 @@ function SaturationGauge({ inflight, maxInflight }: { inflight: number; maxInfli
 }
 
 function FingerprintChanges({ changes }: { changes: string[] }) {
+  const fmt = useDateFormat()
   const count = changes?.length ?? 0
   if (count === 0) return <div className="text-xs text-[var(--text-dim)]">No weight changes observed — fingerprint stable.</div>
   const latest = changes.reduce((a, b) => (a > b ? a : b))
@@ -310,7 +311,7 @@ function FingerprintChanges({ changes }: { changes: string[] }) {
     <div className="flex items-baseline gap-2">
       <span className="font-mono text-lg font-bold tabular-nums text-[var(--text)]">{count}</span>
       <span className="font-mono text-xs text-[var(--text-dim)]">
-        change{count === 1 ? '' : 's'} · latest {Number.isNaN(latestDate.getTime()) ? latest : latestDate.toLocaleString()}
+        change{count === 1 ? '' : 's'} · latest {Number.isNaN(latestDate.getTime()) ? latest : fmt.dateTime(latestDate)}
       </span>
     </div>
   )
@@ -853,6 +854,7 @@ function formatPct(v: number | null | undefined): string {
  * users see the evidence without the button doing anything for them.
  */
 function PromotionCard({ d }: { d: Tier0MetricsResp }) {
+  const fmt = useDateFormat()
   const { showSuccess, showError } = useSnackbar()
   const queryClient = useQueryClient()
   const promo = d.promotion
@@ -882,7 +884,7 @@ function PromotionCard({ d }: { d: Tier0MetricsResp }) {
         <div className="flex items-center justify-between gap-3">
           <span>
             <ShieldCheck size={14} className="inline mr-1.5 text-emerald-400" />
-            Enforcement is on — {(g?.suppressions ?? 0).toLocaleString()} expensive
+            Enforcement is on — {fmt.number(g?.suppressions ?? 0)} expensive
             looks skipped so far.
           </span>
           <Button variant="ghost" className="text-xs shrink-0"
@@ -933,6 +935,7 @@ function PromotionCard({ d }: { d: Tier0MetricsResp }) {
 
 function ComputeGatedPanel() {
   const { t: translate } = useTranslation()
+  const fmt = useDateFormat()
   const query = useTier0Metrics()
   const d = query.data
 
@@ -991,7 +994,7 @@ function ComputeGatedPanel() {
               value={d.health.min_fps_ratio != null ? formatPct(d.health.min_fps_ratio) : '—'}
               sub={d.health.worst_camera ? `worst: ${d.health.worst_camera}` : 'processed ÷ target fps'}
               warn={d.health.min_fps_ratio != null && d.health.min_fps_ratio < 0.9} />
-            <StatTile label="Restarts" value={(d.health.restarts_total ?? 0).toLocaleString()}
+            <StatTile label="Restarts" value={fmt.number(d.health.restarts_total ?? 0)}
               sub="camera feed restarts" warn={(d.health.restarts_total ?? 0) > 0} />
           </div>
         )}
@@ -1001,9 +1004,9 @@ function ComputeGatedPanel() {
           <StatTile label="CPU" value={p?.cpu_percent != null ? `${Math.round(p.cpu_percent)}%` : '—'} sub="detect-pipeline process" />
           <StatTile label="Memory" value={formatBytes(p?.memory_bytes)} sub="resident" />
           <StatTile label="Motion-gate" value={formatPct(f?.motion_gate_ratio)}
-            sub={`${(f?.skipped_no_motion ?? 0).toLocaleString()} idle frames skipped`} />
-          <StatTile label="Frames" value={(f?.total ?? 0).toLocaleString()}
-            sub={`${(f?.detector_runs ?? 0).toLocaleString()} ran the detector`} />
+            sub={`${fmt.number(f?.skipped_no_motion ?? 0)} idle frames skipped`} />
+          <StatTile label="Frames" value={fmt.number(f?.total ?? 0)}
+            sub={`${fmt.number(f?.detector_runs ?? 0)} ran the detector`} />
         </div>
 
         {/* Per-camera detail — the fleet aggregate hides exactly the camera
@@ -1047,7 +1050,7 @@ function ComputeGatedPanel() {
                       </td>
                       <td className="pr-4 py-1 tabular-nums">{c.tracks_active}</td>
                       <td className={`pr-4 py-1 tabular-nums ${c.visits_dropped > 0 ? 'text-amber-400' : ''}`}>
-                        {c.visits_posted.toLocaleString()}
+                        {fmt.number(c.visits_posted)}
                         {c.visits_dropped > 0 ? ` (+${c.visits_dropped} dropped)` : ''}
                       </td>
                       <td className="py-1">
@@ -1066,13 +1069,13 @@ function ComputeGatedPanel() {
             Zero here while detections climb is "detected but nobody was told". */}
         {d.events_flow && (
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-            <StatTile label="Bus events" value={d.events_flow.bus_events_published.toLocaleString()}
+            <StatTile label="Bus events" value={fmt.number(d.events_flow.bus_events_published)}
               sub="published to NATS (alarms, apps)" />
-            <StatTile label="Visits posted" value={d.events_flow.visits_posted.toLocaleString()}
+            <StatTile label="Visits posted" value={fmt.number(d.events_flow.visits_posted)}
               sub="written to history" />
-            <StatTile label="Visits dropped" value={d.events_flow.visits_dropped.toLocaleString()}
+            <StatTile label="Visits dropped" value={fmt.number(d.events_flow.visits_dropped)}
               sub="lost before history" warn={d.events_flow.visits_dropped > 0} />
-            <StatTile label="Sink errors" value={d.events_flow.sink_errors.toLocaleString()}
+            <StatTile label="Sink errors" value={fmt.number(d.events_flow.sink_errors)}
               sub="event-store write failures" warn={d.events_flow.sink_errors > 0} />
           </div>
         )}
@@ -1092,7 +1095,7 @@ function ComputeGatedPanel() {
                 )}
               </span>
               <span>
-                <span className="font-bold tabular-nums">{(d.detector.detections_total ?? 0).toLocaleString()}</span>
+                <span className="font-bold tabular-nums">{fmt.number(d.detector.detections_total ?? 0)}</span>
                 <span className="text-[var(--text-dim)]"> detections</span>
               </span>
               {Object.entries(d.detector.detections_by_class ?? {})
@@ -1100,7 +1103,7 @@ function ComputeGatedPanel() {
                 .map(([label, n]) => (
                   <span key={label} className="inline-flex items-center gap-1.5 text-[var(--text-dim)]">
                     <i className="w-1.5 h-1.5 rounded-sm bg-[var(--accent,#5eb3f6)]" />
-                    {label} <span className="tabular-nums text-[var(--text)]">{n.toLocaleString()}</span>
+                    {label} <span className="tabular-nums text-[var(--text)]">{fmt.number(n)}</span>
                   </span>
                 ))}
             </div>
@@ -1135,11 +1138,11 @@ function ComputeGatedPanel() {
               <div className="flex flex-wrap gap-x-4 gap-y-1 font-mono text-xs text-[var(--text-dim)]">
                 <span className="inline-flex items-center gap-1.5">
                   <i className="w-2 h-2 rounded-sm bg-emerald-500" />
-                  {shadow ? 'would suppress' : 'suppressed'} {suppressN.toLocaleString()} ({formatPct(suppressN / decisionTotal)})
+                  {shadow ? 'would suppress' : 'suppressed'} {fmt.number(suppressN)} ({formatPct(suppressN / decisionTotal)})
                 </span>
                 <span className="inline-flex items-center gap-1.5">
                   <i className="w-2 h-2 rounded-sm bg-amber-500" />
-                  escalated {escN.toLocaleString()} ({formatPct(escN / decisionTotal)})
+                  escalated {fmt.number(escN)} ({formatPct(escN / decisionTotal)})
                 </span>
               </div>
             </>
@@ -1152,7 +1155,7 @@ function ComputeGatedPanel() {
             Expensive-model calls (Tier-1)
           </div>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-            <StatTile label="Dispatched" value={(t?.dispatched ?? 0).toLocaleString()} sub="governed via KAI-C" />
+            <StatTile label="Dispatched" value={fmt.number(t?.dispatched ?? 0)} sub="governed via KAI-C" />
             <StatTile label="Latency" value={formatMs(t?.latency_avg_ms)}
               sub={t?.latency_p95_ms != null ? `p95 ${formatMs(t.latency_p95_ms)}` : 'avg per call'} />
             <StatTile label="In flight" value={`${t?.inflight ?? 0}`} sub="concurrent now" />

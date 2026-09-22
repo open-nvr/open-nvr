@@ -19,7 +19,7 @@
 import { useEffect, useState } from 'react'
 import { apiService } from '../lib/apiService'
 import { useAuth } from '../auth/AuthContext'
-import { useTranslation } from '../i18n'
+import { useTranslation, useDateFormat } from '../i18n'
 import { extractApiError } from '../lib/apiError'
 import { RecordingBrowser } from '../components/RecordingBrowser'
 import { Cloud } from 'lucide-react'
@@ -87,6 +87,7 @@ const AVAILABLE_TASKS = [
 ]
 
 export function AIModelsBYOM() {
+  const fmt = useDateFormat()
   const { user } = useAuth()
   const { t } = useTranslation()
   const canAdmin = !!user?.is_superuser
@@ -325,8 +326,8 @@ export function AIModelsBYOM() {
       }
       
       if (data.time_range?.start && data.time_range?.end) {
-        const start = new Date(data.time_range.start).toLocaleTimeString();
-        const end = new Date(data.time_range.end).toLocaleTimeString();
+        const start = fmt.time(data.time_range.start, {});
+        const end = fmt.time(data.time_range.end, {});
         message += ` (${start} - ${end})`;
       }
       
@@ -1152,7 +1153,7 @@ export function AIModelsBYOM() {
                         <div>
                           <div className="font-medium text-sm capitalize">{cred.provider}</div>
                           <div className="text-xs text-[var(--text-dim)]">
-                            ID: {cred.id.slice(0, 8)}... • Created: {new Date(cred.created_at).toLocaleDateString()}
+                            ID: {cred.id.slice(0, 8)}... • Created: {fmt.date(cred.created_at)}
                           </div>
                           {cred.account_info && (
                             <div className="text-xs text-[var(--text-dim)] mt-1">

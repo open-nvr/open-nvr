@@ -38,6 +38,7 @@ import { SegmentedControl } from '../components/ui/SegmentedControl'
 import { usePagination } from '../hooks/usePagination'
 import { APP_VERTICALS, manifestProvides } from '../lib/appVerticals'
 import { AppConfigModal, type RegisteredApp } from './AppCatalog'
+import { useDateFormat } from '../i18n'
 import { useAppCameras } from './apps/CameraPicker'
 import { LiveCameraPanel } from './guardscan/LiveCameraPanel'
 import { ScreeningClip } from './guardscan/ScreeningClip'
@@ -145,6 +146,7 @@ function since(days: number): string {
 }
 
 export default function GuardCompliance() {
+  const fmt = useDateFormat()
   const { showError, showSuccess } = useSnackbar()
   const { user: me } = useAuth()
   const [period, setPeriod] = useState<'day' | 'week' | 'month'>('day')
@@ -723,7 +725,7 @@ export default function GuardCompliance() {
         <EvidenceViewer
           title={`${VERDICT_LABEL[viewing.verdict] ?? viewing.verdict} · ${Math.round(viewing.score)}%`}
           subtitle={[
-            viewing.ended_at ? new Date(viewing.ended_at).toLocaleString() : null,
+            viewing.ended_at ? fmt.dateTime(viewing.ended_at) : null,
             cameraName(viewing.camera_id),
             viewing.flagged ? 'scanner flagged' : null,
             viewing.steps_missing.length
@@ -983,6 +985,7 @@ function ScreeningTable({ rows, query, show, cameraName, onOpen, toolbar }: {
   onOpen: (row: Screening) => void
   toolbar: ReactNode
 }) {
+  const fmt = useDateFormat()
   const emptyTitle = show === 'problems' ? 'Every scan was complete'
     : show === 'flagged' ? 'The scanner flagged nobody'
     : 'Nothing screened yet'
@@ -1092,10 +1095,10 @@ function ScreeningTable({ rows, query, show, cameraName, onOpen, toolbar }: {
     { key: 'when', header: 'Date & time', width: 'w-[164px]',
       cellClassName: 'whitespace-nowrap text-[var(--text-dim)] tabular-nums',
       cell: (s) => s.ended_at
-        ? <span title={`Ended ${new Date(s.ended_at).toLocaleString()}`
+        ? <span title={`Ended ${fmt.dateTime(s.ended_at)}`
             + (s.started_at
-              ? ` · started ${new Date(s.started_at).toLocaleTimeString()}` : '')}>
-            {new Date(s.ended_at).toLocaleString()}
+              ? ` · started ${fmt.time(s.started_at, {})}` : '')}>
+            {fmt.dateTime(s.ended_at)}
           </span>
         : '—' },
   ]

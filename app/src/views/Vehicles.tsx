@@ -39,7 +39,7 @@ import {
 } from 'lucide-react'
 import { apiService } from '../lib/apiService'
 import { useAuth } from '../auth/AuthContext'
-import { useTranslation } from '../i18n'
+import { useTranslation, useDateFormat, type DateFormatters } from '../i18n'
 import { Link, useNavigate } from 'react-router-dom'
 import {
   alarmSeenAt,
@@ -641,9 +641,9 @@ function plateSeenIso(e: PlateEvent): string | null {
   return e.observed_at ?? e.started_at ?? null
 }
 
-function plateSeenAt(e: PlateEvent): string | null {
+function plateSeenAt(e: PlateEvent, fmt: DateFormatters): string | null {
   const iso = plateSeenIso(e)
-  return iso ? new Date(iso).toLocaleString() : null
+  return iso ? fmt.dateTime(iso) : null
 }
 
 // One stat, as a chip. Bordered box at the app's own `rounded` (4px,
@@ -705,6 +705,7 @@ function toCsv(rows: PlateEvent[], cameraName: (id: number) => string): string {
 
 export function Vehicles() {
   const { t } = useTranslation()
+  const fmt = useDateFormat()
   const queryClient = useQueryClient()
   const { showSuccess, showError } = useSnackbar()
   const navigate = useNavigate()
@@ -1588,7 +1589,7 @@ export function Vehicles() {
                         </Badge>
                       </td>
                       <td className="py-1 pr-3 text-[var(--text-dim)]">
-                        {new Date(r.time * 1000).toLocaleTimeString()}
+                        {fmt.time(r.time * 1000, {})}
                       </td>
                       <td className="py-1 text-right">
                         {canConfigure && (
@@ -1764,14 +1765,14 @@ export function Vehicles() {
                 <div>
                   <div className="font-medium">
                     {historyQuery.data?.first_seen
-                      ? new Date(historyQuery.data.first_seen).toLocaleString() : '—'}
+                      ? fmt.dateTime(historyQuery.data.first_seen) : '—'}
                   </div>
                   <div className="text-xs text-[var(--text-dim)]">{t('vehicles.firstSeen')}</div>
                 </div>
                 <div>
                   <div className="font-medium">
                     {historyQuery.data?.last_seen
-                      ? new Date(historyQuery.data.last_seen).toLocaleString() : '—'}
+                      ? fmt.dateTime(historyQuery.data.last_seen) : '—'}
                   </div>
                   <div className="text-xs text-[var(--text-dim)]">{t('vehicles.lastSeen')}</div>
                 </div>
@@ -1801,12 +1802,12 @@ export function Vehicles() {
                             <tr key={i} className="border-t border-[var(--border)]">
                               <td className="py-1 pr-2">
                                 {s.entered_at
-                                  ? `${new Date(s.entered_at).toLocaleString()} · ${cameraName(s.entry_camera_id as number)}`
+                                  ? `${fmt.dateTime(s.entered_at)} · ${cameraName(s.entry_camera_id as number)}`
                                   : <span className="text-[var(--text-dim)]">missed</span>}
                               </td>
                               <td className="py-1 pr-2">
                                 {s.exited_at
-                                  ? `${new Date(s.exited_at).toLocaleString()} · ${cameraName(s.exit_camera_id as number)}`
+                                  ? `${fmt.dateTime(s.exited_at)} · ${cameraName(s.exit_camera_id as number)}`
                                   : <span className="text-[var(--text-dim)]">{i === 0 && sessionsQuery.data!.inside_now ? 'still inside' : 'missed'}</span>}
                               </td>
                               <td className="py-1 text-right font-mono">
@@ -1945,6 +1946,7 @@ function EvidenceDialog({
   onClose: () => void
 }) {
   const { t } = useTranslation()
+  const fmt = useDateFormat()
   const plate = (e.plate_text ?? '').toUpperCase()
   const hasRead = !!e.has_plate_frame
   const hasFrame = hasRead || !!e.has_evidence
@@ -1960,7 +1962,7 @@ function EvidenceDialog({
   const [showVehicleAnyway, setShowVehicleAnyway] = useState(false)
   const reads = e.payload?.plate_reads
   const singleRead = !!plate && (reads === 1 || reads === undefined)
-  const seen = plateSeenAt(e)
+  const seen = plateSeenAt(e, fmt)
   // One stage, no chooser: the frame the plate was READ from. The scene
   // is the visit's best-thumbnail moment, which a merged track can take
   // off a DIFFERENT car, so offering it just gave the operator a
@@ -3397,8 +3399,8 @@ function MonitorDialog({
 // browser's print dialog — zero dependencies, works everywhere. The
 // print CSS isolates .print-report so only the document prints.
 
-function monthLabel(year: number, month: number): string {
-  return new Date(year, month - 1, 1).toLocaleString(undefined, {
+function monthLabel(year: number, month: number, fmt: DateFormatters): string {
+  return fmt.dateTime(new Date(year, month - 1, 1), {
     month: 'long', year: 'numeric',
   })
 }
@@ -3427,6 +3429,7 @@ function ReportOverlay({
   onClose: () => void
 }) {
   const { t } = useTranslation()
+  const fmt = useDateFormat()
   const months = useMemo(() => lastMonths(12), [])
   const [sel, setSel] = useState(months[0])
 
@@ -3476,7 +3479,7 @@ function ReportOverlay({
   }, [report])
 
   const dt = (v: string | null | undefined) =>
-    v ? new Date(v).toLocaleString(undefined, {
+    v ? fmt.dateTime(v, {
       day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
     }) : '—'
 
@@ -3505,7 +3508,7 @@ function ReportOverlay({
           >
             {months.map((m) => (
               <option key={`${m.year}-${m.month}`} value={`${m.year}-${m.month}`}>
-                {monthLabel(m.year, m.month)}
+                {monthLabel(m.year, m.month, fmt)}
               </option>
             ))}
           </select>
@@ -3532,7 +3535,7 @@ function ReportOverlay({
             <div className="mb-6">
               <div className="text-2xl font-semibold">{t('vehicles.reportTitle')}</div>
               <div className="text-neutral-500">
-                {monthLabel(report.year, report.month)} · generated {new Date().toLocaleDateString()} · OpenNVR
+                {monthLabel(report.year, report.month, fmt)} · generated {fmt.date(new Date())} · OpenNVR
               </div>
             </div>
 
