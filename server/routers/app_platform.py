@@ -30,6 +30,7 @@ routes; per-app roster scoping lives here.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote as urlquote
@@ -37,7 +38,7 @@ from urllib.parse import urlencode
 
 from fastapi import (APIRouter, Body, Depends, HTTPException, Query, Request,
                      status)
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 from sqlalchemy.orm import Session
 
 from core.config import settings
@@ -416,6 +417,58 @@ async def app_evidence_upload(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
                             detail=str(exc)) from exc
     return {"path": rel, "bytes": len(body)}
+
+
+#: The shape ``save_evidence_jpeg`` produces: ``<first two hex>/<sha256>.jpg``.
+#: This pattern is the whole security boundary of the read below — see it.
+_CONTENT_ADDRESSED = re.compile(r"^[0-9a-f]{2}/[0-9a-f]{64}\.jpg$")
+
+
+@router.get("/evidence/{rel_path:path}")
+async def app_evidence_read(
+    rel_path: str,
+    principal=Depends(_require_internal_key),
+):
+    """Read back a JPEG an app stored here. 404 for anything else.
+
+    Apps could write a photo and never read one, so a picture an app
+    saved was write-only to it: the doorbell that uploads a face crop
+    cannot show that crop again after a restart, and an alert relay
+    cannot attach the photo its alert cites.
+
+    Why this is not a read primitive over the whole evidence store
+    ---------------------------------------------------------------
+    The store is CONTENT-ADDRESSED: ``save_evidence_jpeg`` names a file
+    ``<sha256(bytes)>.jpg``. The path is therefore a capability — you
+    can only name a file whose exact bytes you already had, or whose
+    hash somebody handed you. Guessing one is guessing a SHA-256.
+
+    That property holds ONLY for the content-addressed names, and the
+    same root also holds Tier-0's visit evidence under structured,
+    guessable paths (``cam1/2026/09/22/…``). So this route serves the
+    content-addressed shape and nothing else. Without that check an app
+    could walk the site's camera evidence by construction, which is a
+    different feature entirely and not one anybody asked for.
+
+    Traversal is refused twice over: the pattern admits no ``.`` or
+    ``/`` beyond the one separator, and ``resolve_evidence`` re-checks
+    containment under the root anyway. A path that is well-formed but
+    absent is a 404 like any other, because retention sweeps these and
+    an app must be able to tell "aged out" from "never existed" only in
+    the sense that neither is available — no other information is owed.
+    """
+    from services.evidence_store import resolve_evidence
+
+    if not _CONTENT_ADDRESSED.match(rel_path or ""):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="unknown evidence path",
+        )
+    path = resolve_evidence(rel_path)
+    if path is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="unknown evidence path")
+    return FileResponse(path, media_type="image/jpeg")
 
 
 @router.get("/state")

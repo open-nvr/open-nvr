@@ -111,3 +111,98 @@ def test_no_key_no_upload(client):
     r = tc.post("/internal/app/evidence", content=JPEG,
                 headers={"Content-Type": "image/jpeg"})
     assert r.status_code in (401, 403)
+
+
+# ── reading one back ─────────────────────────────────────────────────
+#
+# A photo an app stored used to be write-only to it: the doorbell that
+# uploads a face crop could not show that crop again after a restart,
+# and a relay could not attach the picture its own alert cited.
+
+
+def _get(tc, rel: str):
+    return tc.get(f"/internal/app/evidence/{rel}",
+                  headers={"X-Internal-Api-Key": SITE_KEY})
+
+
+def test_a_photo_an_app_stored_can_be_read_back(client):
+    tc, _ = client
+    rel = _post(tc, JPEG).json()["path"]
+
+    r = _get(tc, rel)
+    assert r.status_code == 200
+    assert r.content == JPEG
+    assert r.headers["content-type"].startswith("image/jpeg")
+
+
+def test_a_camera_structured_path_is_not_readable(client):
+    """THE boundary. The same root also holds Tier-0's visit evidence
+    under guessable paths, and serving those would turn this into a way
+    to walk the site's cameras by construction — a different feature,
+    and not one anybody asked for.
+    """
+    tc, root = client
+    victim = root / ".evidence" / "cam1" / "2026" / "09" / "22"
+    victim.mkdir(parents=True, exist_ok=True)
+    (victim / "frame.jpg").write_bytes(JPEG)
+
+    assert _get(tc, "cam1/2026/09/22/frame.jpg").status_code == 404
+
+
+@pytest.mark.parametrize("rel", [
+    "ab/" + "f" * 64 + ".jpg.jpg",      # a suffix past the one we write
+    "AB/" + "F" * 64 + ".jpg",          # the store writes lowercase hex
+    "ab/" + "f" * 63 + ".jpg",          # one short of a sha256
+    "ab/notahash.jpg",
+    "notahash/" + "f" * 64 + ".jpg",
+])
+def test_anything_that_is_not_a_content_addressed_name_is_refused(client, rel):
+    """The file is PUT THERE first, so a missing shape check would serve
+    it. Asserting 404 on a path that does not exist would pass against
+    no check at all — which is what the first version of this test did.
+    """
+    tc, root = client
+    victim = root / ".evidence" / rel
+    victim.parent.mkdir(parents=True, exist_ok=True)
+    victim.write_bytes(JPEG)
+    assert victim.is_file()
+
+    assert _get(tc, rel).status_code == 404
+
+
+@pytest.mark.parametrize("rel", ["../../../etc/passwd", "ab/../../secret.jpg", ""])
+def test_traversal_is_refused_twice_over(client, rel):
+    """The pattern admits no ``..`` and ``resolve_evidence`` re-checks
+    containment under the root anyway. Neither alone is trusted."""
+    tc, _ = client
+    assert _get(tc, rel).status_code == 404
+
+
+def test_a_well_formed_path_that_is_gone_is_a_404(client):
+    """Retention sweeps evidence, so an app that stored a crop last
+    month must be told the picture has aged out rather than get a
+    surprise."""
+    tc, _ = client
+    assert _get(tc, "ab/" + "c" * 64 + ".jpg").status_code == 404
+
+
+def test_no_key_no_read(client):
+    tc, _ = client
+    rel = _post(tc, JPEG).json()["path"]
+    assert tc.get(f"/internal/app/evidence/{rel}").status_code in (401, 403)
+
+
+def test_the_sdk_offers_it_in_both_flavours():
+    """The SDK ships sync and async clients that must stay in step; a
+    method on one and not the other is the drift the parity check
+    exists to catch."""
+    import inspect
+    import pathlib
+
+    sdk = (pathlib.Path(__file__).resolve().parents[2]
+           / "sdk/opennvr-app-sdk/opennvr_app_sdk")
+    for name in ("client.py", "aio.py"):
+        src = (sdk / name).read_text()
+        assert "def read_evidence(" in src, f"{name} has no read_evidence"
+        assert "/api/v1/internal/app/evidence/" in src
+    del inspect

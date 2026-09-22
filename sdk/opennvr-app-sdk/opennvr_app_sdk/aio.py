@@ -346,6 +346,21 @@ class AsyncOpenNVR:
         path = (body or {}).get("path")
         return str(path) if path else None
 
+    async def read_evidence(self, path: str) -> bytes | None:
+        """The JPEG behind a path ``save_evidence`` returned.
+
+        ``None`` when it is gone: retention sweeps evidence, and an app
+        that stored a crop last month should be told the picture has
+        aged out rather than crash. Only the content-addressed paths
+        ``save_evidence`` produces are readable — the path is a hash of
+        the bytes, which is what makes it a capability rather than a way
+        to browse the site's cameras.
+        """
+        if not path:
+            return None
+        return await self._http.get_bytes(
+            f"/api/v1/internal/app/evidence/{str(path).lstrip('/')}")
+
     async def stream_grant(self, camera) -> dict | None:
         """Core's permission to read this camera's video, plus the URL.
 
