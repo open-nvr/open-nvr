@@ -104,6 +104,48 @@ TASK_DESCRIPTORS: dict[str, dict[str, Any]] = {
 }
 
 
+#: alias (lowercased) -> canonical task name, from server/config/tasks.yml.
+#: Cached: build_plan runs behind a TTL cache but the file never changes
+#: while the process lives.
+_CANON_CACHE: dict[str, str] | None = None
+
+
+def _canonical_tasks() -> dict[str, str]:
+    """Alias map from the shipped taxonomy. Best-effort and cached.
+
+    An unreadable or malformed tasks.yml degrades to "no aliases known",
+    which is exactly the behaviour that shipped before this map existed —
+    never an exception, because this runs on the enrichment path.
+    """
+    global _CANON_CACHE
+    if _CANON_CACHE is not None:
+        return _CANON_CACHE
+    mapping: dict[str, str] = {}
+    try:
+        from pathlib import Path
+
+        import yaml
+
+        raw = yaml.safe_load(
+            (Path(__file__).resolve().parents[1] / "config/tasks.yml").read_text())
+        entries = raw.get("tasks") if isinstance(raw, dict) else raw
+        for entry in entries or []:
+            if not isinstance(entry, dict):
+                continue
+            canonical = str(entry.get("task") or "").strip()
+            if not canonical:
+                continue
+            mapping[canonical.lower()] = canonical
+            for alias in entry.get("aliases") or []:
+                # A canonical name always wins over an alias that collides
+                # with it, matching canonicalize_task's documented rule.
+                mapping.setdefault(str(alias).strip().lower(), canonical)
+    except Exception:  # noqa: BLE001
+        mapping = {}
+    _CANON_CACHE = mapping
+    return mapping
+
+
 def build_plan(
     capabilities: dict[str, Any] | None,
     health: dict[str, Any] | None,
@@ -137,6 +179,24 @@ def build_plan(
             ok = entry.get("healthy", entry.get("status") in (None, "healthy", "ok"))
             (healthy_names if ok else unhealthy_names).add(name)
 
+    # Adapters advertise whichever spelling they like; tasks.yml is the
+    # taxonomy that says which spellings are the same skill. Without
+    # canonicalising here, the TASK_DESCRIPTORS lookup below silently
+    # missed on two of its four entries — Moondream advertises
+    # "visual_qa" against a table keyed "vqa", BLIP advertises
+    # "scene_caption" against "image_captioning". Neither crashed: the
+    # plan reported a healthy skill promising NO descriptor kinds, so the
+    # colour filter was never worth offering and an enricher reading the
+    # plan had nothing to run.
+    #
+    # Read straight from the YAML rather than through
+    # routers.ai_models.canonicalize_task: importing a ROUTER from a
+    # service pulls core.config.settings into a background task, which
+    # raises wherever the environment is not fully configured. The first
+    # version of this fix did exactly that, and its except-clause turned
+    # the whole thing into a silent no-op.
+    canon = _canonical_tasks()
+
     by_task: dict[str, list[str]] = {}
     for entry in adapters:
         if not isinstance(entry, dict):
@@ -146,7 +206,11 @@ def build_plan(
         if isinstance(tasks, str):
             tasks = [tasks]
         for task in tasks:
-            by_task.setdefault(str(task), []).append(name)
+            # Grouped by the CANONICAL name, so one skill advertised under
+            # two spellings is one plan entry with both adapters rather
+            # than two half-described ones.
+            key = canon.get(str(task).strip().lower(), str(task))
+            by_task.setdefault(key, []).append(name)
 
     plan: list[SkillPlan] = []
     for task, names in sorted(by_task.items()):
