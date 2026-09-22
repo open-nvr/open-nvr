@@ -408,6 +408,13 @@ class Settings(BaseSettings):
     # plate sweep is, so a site that has not asked for it pays no
     # inference; off = no captions at all and search stays label-and-time.
     events_caption_enrichment: bool = True
+    # Ask the box's own skills what they can say about a visit (colour,
+    # vehicle type) and store each answer as a claim in visit_descriptors
+    # — what search's attr filter matches. Plan-driven: it runs only what
+    # KAI-C reports registered and healthy. Gated per camera by the vqa
+    # skill assignment, so a site that has not asked for it pays nothing;
+    # off = no claims and the attr filter stays empty.
+    events_descriptor_enrichment: bool = True
     # RFC-0002 Phase 0: NATS URL for core's domain-event consumers
     # (plate.recognized.v1 today). Compose sets NATS_URL=nats://nats:4222;
     # empty disables consumption (enrichment's synchronous fallback still
