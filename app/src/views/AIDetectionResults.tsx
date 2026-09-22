@@ -19,7 +19,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { apiService } from '../lib/apiService'
 import { useAuth } from '../auth/AuthContext'
-import { useTranslation } from '../i18n'
+import { useTranslation, useDateFormat } from '../i18n'
 import { extractApiError } from '../lib/apiError'
 
 type DetectionResult = {
@@ -96,6 +96,7 @@ type WSInferenceEvent = {
 
 export function AIDetectionResults() {
   const { t } = useTranslation()
+  const fmt = useDateFormat()
   const { user, token } = useAuth()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -620,7 +621,7 @@ export function AIDetectionResults() {
                       )}
                     </td>
                     <td className="p-3 text-xs text-[var(--text-dim)]">
-                      {new Date(result.created_at).toLocaleString()}
+                      {fmt.dateTime(result.created_at)}
                     </td>
                     <td className="p-3 text-center">
                       {user?.is_superuser && (
@@ -694,7 +695,7 @@ export function AIDetectionResults() {
                 </div>
                 {stats?.latest_detection && (
                   <div className="text-[10px] text-[var(--text-dim)] mt-1">
-                    Latest: {new Date(stats.latest_detection).toLocaleTimeString()}
+                    Latest: {fmt.time(stats.latest_detection, {})}
                   </div>
                 )}
               </button>
@@ -857,7 +858,7 @@ export function AIDetectionResults() {
                     <div key={result.id} className="bg-[var(--panel)] p-2 rounded border border-neutral-700 text-xs">
                       <div className="flex items-center justify-between mb-1">
                         <span className="font-medium">{result.model_name || `Model ${result.model_id}`}</span>
-                        <span className="text-[var(--text-dim)]">{new Date(result.created_at).toLocaleString()}</span>
+                        <span className="text-[var(--text-dim)]">{fmt.dateTime(result.created_at)}</span>
                       </div>
                       <div className="flex gap-2">
                         <span className="bg-blue-500/20 text-blue-300 px-2 py-0.5 rounded">{result.task}</span>

@@ -94,6 +94,13 @@ export type DateFormatters = {
   time: (v: string | number | Date | null | undefined, o?: Intl.DateTimeFormatOptions) => string
   date: (v: string | number | Date | null | undefined, o?: Intl.DateTimeFormatOptions) => string
   dateTime: (v: string | number | Date | null | undefined, o?: Intl.DateTimeFormatOptions) => string
+  /**
+   * Thousands separators, which are a language too: 12,000 in English is
+   * 12 000 in French. `n.toLocaleString()` has the same defect as the
+   * date calls — it asks the browser, not the operator — and it is easy
+   * to miss because the number is still readable when it is wrong.
+   */
+  number: (v: number | null | undefined, o?: Intl.NumberFormatOptions) => string
 }
 
 /** Build formatters for a language. Use `useDateFormat()` inside a
@@ -107,6 +114,8 @@ export function dateFormatters(language: Language): DateFormatters {
       locale, o ?? { hour: '2-digit', minute: '2-digit' }) ?? '—',
     date: (v, o) => _d(v)?.toLocaleDateString(locale, o) ?? '—',
     dateTime: (v, o) => _d(v)?.toLocaleString(locale, o) ?? '—',
+    number: (v, o) =>
+      typeof v === 'number' && Number.isFinite(v) ? v.toLocaleString(locale, o) : '—',
   }
 }
 

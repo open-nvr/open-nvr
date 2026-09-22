@@ -32,7 +32,7 @@ import { apiService } from '../lib/apiService'
 import { useAuth } from '../auth/AuthContext'
 import { extractApiError } from '../lib/apiError'
 import { useSnackbar } from '../components/Snackbar'
-import { useTranslation } from '../i18n'
+import { useTranslation, useDateFormat } from '../i18n'
 import {
   Badge, Button, Card, CardContent,
   EmptyState, ErrorCard, PageHeader, Skeleton,
@@ -688,6 +688,7 @@ function fmtDuration(seconds: number | null | undefined): string {
  * across cameras — a mirrored bar pair per hour, one axis, the two
  * series told apart by side AND legend, never colour alone. */
 function FlowChart({ cameras }: { cameras: FootfallResp['cameras'] }) {
+  const dfmt = useDateFormat()
   const byHour = new Map<string, { entries: number; exits: number }>()
   for (const c of cameras) {
     for (const h of c.hours) {
@@ -705,7 +706,7 @@ function FlowChart({ cameras }: { cameras: FootfallResp['cameras'] }) {
   const W = 720, H = 120, PAD = 4, LABEL_H = 14, MID = (H - LABEL_H) / 2
   const bw = (W - 2 * PAD) / slots.length
   const scale = (v: number) => (v / top) * (MID - PAD)
-  const fmt = (d: Date) => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  const label = (d: Date) => dfmt.time(d)
   return (
     <div className="overflow-x-auto">
       <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ minWidth: 480, height: H }}
@@ -727,11 +728,11 @@ function FlowChart({ cameras }: { cameras: FootfallResp['cameras'] }) {
                       fill="var(--text-dim,#6b7280)" fillOpacity="0.55" />
               )}
               <rect x={x} y={0} width={bw} height={H - LABEL_H} fill="transparent">
-                <title>{`${fmt(sl.t)} · in ${sl.entries} · out ${sl.exits}`}</title>
+                <title>{`${label(sl.t)} · in ${sl.entries} · out ${sl.exits}`}</title>
               </rect>
               {(i % Math.max(1, Math.round(slots.length / 6)) === 0) && (
                 <text x={x + bw / 2} y={H - 3} textAnchor="middle" fontSize="9"
-                      fill="var(--text-dim,#6b7280)">{fmt(sl.t)}</text>
+                      fill="var(--text-dim,#6b7280)">{label(sl.t)}</text>
               )}
             </g>
           )
@@ -768,6 +769,7 @@ function OccupancyReportOverlay({
   maxOccupancy: number
   onClose: () => void
 }) {
+  const dfmt = useDateFormat()
   const [days, setDays] = useState(7)
   const reportQuery = useQuery({
     queryKey: ['occupancy-report', days],
@@ -782,10 +784,10 @@ function OccupancyReportOverlay({
   })
   const report = reportQuery.data
   const dt = (v: string | null | undefined) =>
-    v ? new Date(v).toLocaleString(undefined, {
+    v ? dfmt.dateTime(v, {
       day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
     }) : '—'
-  const dateOnly = (v: string) => new Date(v).toLocaleDateString(undefined, {
+  const dateOnly = (v: string) => dfmt.date(v, {
     day: '2-digit', month: 'short',
   })
   const hourLabel = (h: number) => `${String(h).padStart(2, '0')}:00–${String((h + 1) % 24).padStart(2, '0')}:00`
@@ -837,7 +839,7 @@ function OccupancyReportOverlay({
             <div className="mb-6">
               <div className="text-2xl font-semibold">Occupancy Report</div>
               <div className="text-neutral-500">
-                {dateOnly(report.start)} – {dateOnly(report.end)} ({report.days} days) · generated {new Date(report.generated_at).toLocaleDateString()} · OpenNVR
+                {dateOnly(report.start)} – {dateOnly(report.end)} ({report.days} days) · generated {dfmt.date(report.generated_at)} · OpenNVR
               </div>
             </div>
 
@@ -883,7 +885,7 @@ function OccupancyReportOverlay({
                       <tbody>
                         {report.daily.map((d) => (
                           <tr key={d.day} className="border-b border-neutral-100">
-                            <td className="py-1 pr-2">{new Date(d.day + 'T12:00:00').toLocaleDateString(undefined, { weekday: 'short', day: '2-digit', month: 'short' })}</td>
+                            <td className="py-1 pr-2">{dfmt.date(d.day + 'T12:00:00', { weekday: 'short', day: '2-digit', month: 'short' })}</td>
                             <td className="py-1 pr-2 text-right" style={num}>{d.entries}</td>
                             <td className="py-1 pr-2 text-right" style={num}>{d.exits}</td>
                             <td className="py-1">
@@ -1102,6 +1104,7 @@ function HeatmapDialog({
   initialHours?: number
   onClose: () => void
 }) {
+  const dfmt = useDateFormat()
   const [hours, setHours] = useState(initialHours)
   const heatQuery = useQuery({
     queryKey: ['occupancy-heatmap', cameraId, hours],
@@ -1181,7 +1184,7 @@ function HeatmapDialog({
             <span>· peak cell {heat.max} hits{perFrame > 0 ? ` (${perFrame.toFixed(2)}/frame)` : ''}</span>
             <span>· {heat.frames} frames over {heat.hours_covered} h</span>
             {heat.updated_at && (
-              <span>· updated {new Date(heat.updated_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+              <span>· updated {dfmt.time(heat.updated_at)}</span>
             )}
           </>
         )}
@@ -1208,6 +1211,7 @@ function OccupancySparkline({
   samples: { t: string; avg: number; max: number }[]
   ceiling: number
 }) {
+  const dfmt = useDateFormat()
   if (samples.length < 2) {
     return (
       <div className="mt-2 text-[11px] text-[var(--text-dim)]">
@@ -1240,7 +1244,7 @@ function OccupancySparkline({
         {samples.map((sm) => (
           <circle key={sm.t} cx={x(sm.t)} cy={y(sm.avg)} r="5"
                   fill="transparent">
-            <title>{`${new Date(sm.t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · avg ${sm.avg} · peak ${sm.max}`}</title>
+            <title>{`${dfmt.time(sm.t)} · avg ${sm.avg} · peak ${sm.max}`}</title>
           </circle>
         ))}
         <circle cx={x(last.t)} cy={y(last.avg)} r="3.5"
