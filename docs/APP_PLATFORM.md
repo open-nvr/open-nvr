@@ -53,15 +53,31 @@ caps   = nvr.ai.capabilities()                    # adapters, tasks, health
 |---|---|---|
 | `cameras()`, `camera(x)` | `GET /internal/camera-agent/cameras` | the app's roster |
 | `snapshot(cam)` | `GET /internal/app/cameras/{id}/snapshot` | roster |
+| `camera.stream(cam)`, `stream_grant(cam)` | `GET /internal/app/cameras/{id}/stream` | roster |
 | `recordings(cam).list/url/frame_at` | `GET /internal/app/recordings/{id}[/url]`, `/internal/camera-agent/recordings/frame` | roster |
 | `timeline.search/evidence` | `GET /internal/camera-agent/events[/{id}/evidence]` | roster |
 | `timeline.plate_stats/summary/sessions` | `GET /internal/app/plates/*` | roster |
 | `alerts.inbox()` | `GET /internal/app/alerts` | the app's own alerts |
 | `site_mode()` | `GET /internal/app/site-mode` | the whole site (read-only: `disarmed` / `armed_home` / `armed_away`) |
 | `state.get/set/delete/items` | `GET/PUT/DELETE /internal/app/state[/{key}]` | the app's own namespace |
+| `save_evidence(jpeg)` | `POST /internal/app/evidence` | the app's own evidence store |
+| `read_evidence(path)` | `GET /internal/app/evidence/{path}` | the app's own evidence store |
 | `ai.capabilities()` | KAI-C `GET /api/v1/ai/capabilities` | — |
 | `ai.infer()` | KAI-C `POST /api/v1/infer/{adapter}` | — |
 | `ai.stream()` → `InferStream` | KAI-C `WS /api/v1/infer/{adapter}/stream` (contract §6) | — |
+
+Two `stream`s, and they are unrelated. `camera.stream(cam)` above is
+the platform's LIVE view of a camera the app is assigned. `ai.stream()`
+at the bottom of the table is a KAI-C inference session. Having both
+named `stream` in one table is a trap the table used to set by listing
+only the second one.
+
+The evidence store is how an app keeps a photo and gets it back later.
+`save_evidence` returns a content-addressed path; `read_evidence` takes
+one back. The path is the capability — it is derived from the bytes, so
+it cannot be guessed, and an app can hold it in its own state and fetch
+the picture again after a restart. The Smart Doorbell uses exactly this
+to enrol a face from a visit it saw before it was restarted.
 
 Cameras are accepted as a `Camera`, an int id, or a `camN` / `cam-N`
 handle everywhere. Reads return `None` / `[]` and log when the platform
