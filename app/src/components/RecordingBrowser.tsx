@@ -19,7 +19,7 @@
 import React, { useState, useEffect } from 'react';
 import { apiService } from '../lib/apiService';
 import { RecordingTimeline } from './RecordingTimeline';
-import { useTranslation } from '../i18n';
+import { useTranslation, useDateFormat } from '../i18n';
 
 interface RecordingSegment {
   path: string;
@@ -79,6 +79,7 @@ export const RecordingBrowser: React.FC<RecordingBrowserProps> = ({
   onClose
 }) => {
   const { t } = useTranslation();
+  const fmt = useDateFormat();
   const [loading, setLoading] = useState(false);
   const [cameraRecordings, setCameraRecordings] = useState<CameraRecordings[]>([]);
   const [selectedCameraId, setSelectedCameraId] = useState<number | null>(null);
@@ -183,7 +184,7 @@ export const RecordingBrowser: React.FC<RecordingBrowserProps> = ({
               <div>
                 <h3 className="text-lg font-semibold text-white">{t('shared.recordingTimeline')}</h3>
                 <p className="text-sm text-slate-400">
-                  {cameraData?.camera_name} • {new Date(selectedSession.start_time).toLocaleDateString()}
+                  {cameraData?.camera_name} • {fmt.date(selectedSession.start_time)}
                 </p>
               </div>
             </div>
@@ -220,7 +221,7 @@ export const RecordingBrowser: React.FC<RecordingBrowserProps> = ({
               <div>
                 <div className="text-slate-400">{t('shared.timeRange')}</div>
                 <div className="text-white font-medium text-xs">
-                  {new Date(selectedSession.start_time).toLocaleTimeString()} - {new Date(selectedSession.end_time).toLocaleTimeString()}
+                  {fmt.time(selectedSession.start_time)} - {fmt.time(selectedSession.end_time)}
                 </div>
               </div>
             </div>
@@ -342,7 +343,7 @@ export const RecordingBrowser: React.FC<RecordingBrowserProps> = ({
                               <span className="text-slate-400">{isExpanded ? '▼' : '▶'}</span>
                               <div>
                                 <div className="text-white font-medium">
-                                  📅 {new Date(dateData.date).toLocaleDateString('en-US', {
+                                  📅 {fmt.date(dateData.date, {
                                     weekday: 'long',
                                     year: 'numeric',
                                     month: 'long',
@@ -382,7 +383,7 @@ export const RecordingBrowser: React.FC<RecordingBrowserProps> = ({
                                         <div className="flex items-center gap-3 text-white font-medium mb-1">
                                           <span>{!hasCompleteSegments ? '⚠️' : isPartiallyComplete ? '🔄' : '🎬'}</span>
                                           <span>
-                                            {new Date(session.start_time).toLocaleTimeString()} - {new Date(session.end_time).toLocaleTimeString()}
+                                            {fmt.time(session.start_time)} - {fmt.time(session.end_time)}
                                           </span>
                                           {!hasCompleteSegments && (
                                             <span className="text-xs px-2 py-1 bg-orange-600/30 text-orange-300 rounded">

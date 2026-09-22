@@ -17,7 +17,7 @@
  */
 
 import React, { useState, useRef, useEffect } from 'react';
-import { useTranslation } from '../i18n';
+import { useTranslation, useDateFormat } from '../i18n';
 
 interface TimelineSegment {
   path: string;
@@ -38,6 +38,7 @@ export const RecordingTimeline: React.FC<RecordingTimelineProps> = ({
   onAnalyze
 }) => {
   const { t } = useTranslation();
+  const fmt = useDateFormat();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [selectionStart, setSelectionStart] = useState<number | null>(null);
@@ -115,8 +116,8 @@ export const RecordingTimeline: React.FC<RecordingTimelineProps> = ({
   };
 
   const formatTime = (date: Date) => {
-    return date.toLocaleTimeString('en-US', { 
-      hour: '2-digit', 
+    return fmt.time(date, {
+      hour: '2-digit',
       minute: '2-digit',
       second: '2-digit'
     });

@@ -19,7 +19,7 @@
 // is not evidence that nothing red came past — nothing looked. That
 // distinction is invisible in a result grid and it is the difference
 // between an answer and a guess.
-import { useTranslation } from '../i18n'
+import { useTranslation, useDateFormat } from '../i18n'
 
 export type SearchAnswerData = {
   scope: 'page'
@@ -37,9 +37,6 @@ export type SearchAnswerData = {
   undescribed: number
 }
 
-const time = (iso: string | null) =>
-  iso ? new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''
-
 const Chip = ({ children }: { children: React.ReactNode }) => (
   <span className="inline-flex items-center rounded bg-[var(--panel)] border border-[var(--border)] px-1.5 py-0.5 text-xs">
     {children}
@@ -48,6 +45,7 @@ const Chip = ({ children }: { children: React.ReactNode }) => (
 
 export default function SearchAnswer({ answer }: { answer?: SearchAnswerData }) {
   const { t } = useTranslation()
+  const fmt = useDateFormat()
   if (!answer || !answer.shown) return null
 
   const {
@@ -55,8 +53,8 @@ export default function SearchAnswer({ answer }: { answer?: SearchAnswerData }) 
     claims, claim_count, plates, plate_count, with_evidence, undescribed,
   } = answer
 
-  const from = time(first_at)
-  const to = time(last_at)
+  const from = first_at ? fmt.time(first_at) : ''
+  const to = last_at ? fmt.time(last_at) : ''
   const when = !from ? '' : from === to
     ? t('search.answer.at', { time: from })
     : t('search.answer.between', { from, to })

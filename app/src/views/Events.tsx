@@ -22,7 +22,7 @@ import { apiService } from '../lib/apiService'
 import { Modal } from '../components/Modal'
 import { Button, EmptyState, PageHeader, Table, THead, TBody, TR, TH, TD, Skeleton } from '../components/ui'
 import { extractApiError } from '../lib/apiError'
-import { useTranslation } from '../i18n'
+import { useTranslation, useDateFormat } from '../i18n'
 
 type LogItem = {
   id: number
@@ -39,6 +39,7 @@ type LogItem = {
 
 export function Events() {
   const { t } = useTranslation()
+  const fmt = useDateFormat()
   const [logs, setLogs] = useState<LogItem[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
@@ -167,7 +168,7 @@ export function Events() {
           <TBody striped>
             {logs.map((log) => (
               <TR key={log.id} className="align-top">
-                <TD className="whitespace-nowrap">{new Date(log.timestamp).toLocaleString()}</TD>
+                <TD className="whitespace-nowrap">{fmt.dateTime(log.timestamp)}</TD>
                 <TD className="whitespace-nowrap" title={String(log.username || log.user_id || '-')}>{log.username || log.user_id || '-'}</TD>
                 <TD className="truncate" title={log.action}>{friendlyAction(log.action)}</TD>
                 <TD className="truncate" title={`${log.entity_type || '-'}${log.entity_id ? `:${log.entity_id}` : ''}`}>{log.entity_type || '-'}{log.entity_id ? `:${log.entity_id}` : ''}</TD>
@@ -195,7 +196,7 @@ export function Events() {
         {selected && (
           <div className="space-y-2 text-sm">
             <div className="grid grid-cols-2 gap-2">
-              <div><span className="text-[var(--text-dim)]">Time: </span>{new Date(selected.timestamp).toLocaleString()}</div>
+              <div><span className="text-[var(--text-dim)]">Time: </span>{fmt.dateTime(selected.timestamp)}</div>
               <div><span className="text-[var(--text-dim)]">User: </span>{selected.username || selected.user_id || '-'}</div>
               <div><span className="text-[var(--text-dim)]">Action: </span>{friendlyAction(selected.action)}</div>
               <div><span className="text-[var(--text-dim)]">IP: </span>{selected.ip || '-'}</div>
