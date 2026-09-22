@@ -844,10 +844,27 @@ _PLATE_MARKS = ("plate_merged", "plate_reads", "plate_source",
                 "plate_confidence")
 
 
-def clear_plate(row) -> None:
+def clear_plate(row, db=None) -> None:
     """Take a plate OFF a row — text, images and the marks above — so
     it is once more an ordinary vehicle visit. Used when a single read
-    is retracted (the looks agreed on a different, already-seen car)."""
+    is retracted (the looks agreed on a different, already-seen car).
+
+    Pass ``db`` and the CLAIM goes with the read. That used to be the
+    caller's job, two lines further down, and a mutation check showed
+    nothing would have noticed if those two lines drifted apart: both
+    the write and the sync live inside one 340-line function, so every
+    guard that could see them saw the other call and passed. An
+    invariant that has to be remembered is not an invariant, so it is
+    enforced here instead. ``db=None`` is for callers with no session —
+    they still have to sync themselves, and the guard in
+    test_attribute_projection still says so.
+
+    Why it matters: journey treats a plate as an exact identity worth
+    4.0, the joint-highest weight in the system. A retracted read whose
+    claim outlived it would anchor a journey on a plate the platform has
+    already decided was wrong, and put a vehicle at a camera it was
+    never at.
+    """
     row.plate_text = None
     row.plate_evidence_path = None
     row.plate_frame_path = None
@@ -860,6 +877,10 @@ def clear_plate(row) -> None:
     for key in _PLATE_MARKS:
         payload.pop(key, None)
     row.payload = payload
+    if db is not None:
+        from services.descriptor_store import sync_plate_claim
+
+        sync_plate_claim(db, row)
 
 
 def plate_reads_of(row) -> int:
@@ -1353,13 +1374,8 @@ async def enrich_event_plate(
                         event_id, row.plate_text, plate, camera_id,
                         dedup_window_s(),
                     )
-                    clear_plate(row)
-                    # The claim goes with the read. A journey anchored on
-                    # a plate the later looks overturned would put a
-                    # vehicle at a camera it was never at.
-                    from services.descriptor_store import sync_plate_claim
-
-                    sync_plate_claim(db, row)
+                    # clear_plate takes the claim with the read.
+                    clear_plate(row, db)
                     db.commit()
                     return
                 logger.info(

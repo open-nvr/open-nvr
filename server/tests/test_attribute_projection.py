@@ -325,26 +325,119 @@ def test_the_plate_is_an_identity_anchor_journey_looks_for(db):
     assert "plate" in ANCHOR_KINDS
 
 
-def test_every_writer_of_plate_text_syncs_the_claim():
-    """A sixth writer that sets the column and forgets the claim would
-    reintroduce exactly the gap this closes, silently — the row would
-    look right and the journey anchor would be missing."""
-    root = Path(__file__).resolve().parents[1]
-    offenders = []
+def _plate_writers(root: Path):
+    """Every function that assigns ``plate_text``, and whether it also
+    calls ``sync_plate_claim`` itself.
+
+    By FUNCTION, not by file. The first version of this asked whether
+    the file mentioned sync_plate_claim anywhere, which passes happily
+    when one of two writers in the same module loses its call — the
+    exact drift it was written to catch, one level down. A mutation
+    check found that; it had been green the whole time.
+    """
+    import ast
+
     for path in sorted(root.rglob("*.py")):
         rel = path.relative_to(root).as_posix()
         if rel.startswith("tests/") or rel.startswith(".venv/"):
             continue
-        src = path.read_text(errors="ignore")
-        # The assignment, not the comparisons or the keyword arguments in
-        # queries: a writer is a line that puts a value on the row.
-        writes = any(
-            f"{obj}.plate_text = " in src for obj in ("row", "event", "visit")
-        )
-        if writes and "sync_plate_claim" not in src:
-            offenders.append(rel)
+        try:
+            tree = ast.parse(path.read_text(errors="ignore"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            writes = any(
+                isinstance(t, ast.Attribute) and t.attr == "plate_text"
+                for sub in ast.walk(node)
+                if isinstance(sub, ast.Assign)
+                for t in sub.targets
+            )
+            if not writes:
+                continue
+            calls = {
+                c.func.id if isinstance(c.func, ast.Name) else
+                (c.func.attr if isinstance(c.func, ast.Attribute) else "")
+                for c in ast.walk(node) if isinstance(c, ast.Call)
+            }
+            yield rel, node.name, calls
+
+
+#: Writers that do NOT sync themselves because their caller does.
+#:
+#: Empty on purpose, and the emptiness is the fix. ``clear_plate`` used
+#: to be the entry here: it retracted a read and left the caller to drop
+#: the claim two lines later. A mutation check showed that nothing would
+#: have noticed if those two lines drifted apart — both the write and
+#: the sync sit inside one 340-line function, so every guard that could
+#: see them saw the OTHER call and passed. Rather than teach a static
+#: guard to do flow analysis, clear_plate now drops the claim itself.
+#:
+#: Anything added back here is a pairing somebody has to remember, and
+#: the test below only checks that SOME caller syncs — not that the one
+#: on the failing branch does.
+_SYNCS_VIA_CALLER: set[str] = set()
+
+
+def test_every_writer_of_plate_text_syncs_the_claim():
+    """A writer that sets the column and forgets the claim reintroduces
+    exactly the gap this closes, silently — the row looks right and the
+    journey anchor is missing."""
+    root = Path(__file__).resolve().parents[1]
+    offenders = [
+        f"{rel}:{fn}"
+        for rel, fn, calls in _plate_writers(root)
+        if "sync_plate_claim" not in calls and fn not in _SYNCS_VIA_CALLER
+    ]
     assert offenders == [], (
         f"{offenders} set plate_text without syncing the plate claim")
+
+
+def test_a_writer_excused_from_syncing_is_synced_by_every_caller():
+    """``clear_plate`` retracts a read, and a claim that outlives the
+    read it came from is worse than no claim: journey treats a plate as
+    an exact identity worth 4.0, so a retracted plate still carrying its
+    claim would put a vehicle at a camera it was never at. It does not
+    sync itself — its one caller does, on the next line — so that is
+    what gets asserted."""
+    import ast
+
+    root = Path(__file__).resolve().parents[1]
+    unsynced = []
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root).as_posix()
+        if rel.startswith("tests/") or rel.startswith(".venv/"):
+            continue
+        try:
+            tree = ast.parse(path.read_text(errors="ignore"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            calls = [
+                c.func.id if isinstance(c.func, ast.Name) else
+                (c.func.attr if isinstance(c.func, ast.Attribute) else "")
+                for c in ast.walk(node) if isinstance(c, ast.Call)
+            ]
+            for excused in _SYNCS_VIA_CALLER:
+                if excused in calls and "sync_plate_claim" not in calls:
+                    unsynced.append(f"{rel}:{node.name} calls {excused}")
+    assert unsynced == [], (
+        f"{unsynced} — a retraction whose claim is never cleared leaves "
+        "journey anchored on a plate the system has already overturned")
+
+
+def test_the_excused_list_names_something_real():
+    """An excuse for a function that no longer exists is an excuse that
+    silently covers nothing."""
+    root = Path(__file__).resolve().parents[1]
+    writers = {fn for _, fn, _ in _plate_writers(root)}
+    missing = sorted(_SYNCS_VIA_CALLER - writers)
+    assert missing == [], (
+        f"{missing} are excused from syncing but no longer write "
+        "plate_text; drop them from _SYNCS_VIA_CALLER")
 
 
 # ── the payoff ───────────────────────────────────────────────────────
