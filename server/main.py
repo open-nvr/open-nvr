@@ -675,6 +675,31 @@ async def lifespan(app: FastAPI):
 
     spawn_background(background_entity_states(), name="entity-state-publisher")
 
+    # Back catalogue (events_enrichment_backfill, off by default): the two
+    # enrichers run off the INGEST path, so every visit recorded before
+    # they shipped has a row in events and nothing in event_text or
+    # visit_descriptors — and the first search an operator runs after
+    # upgrading is against yesterday, which returns nothing. This walks
+    # history newest-first and hands each visit to the SAME enricher,
+    # then RETURNS: it is finite work, not a consumer, which is why it is
+    # spawned directly rather than supervised by run_consumer_forever.
+    async def background_enrichment_backfill():
+        try:
+            from services.enrichment_backfill import run_backfill_loop
+
+            # After the first cameras and skill assignments have settled:
+            # reading the gate against a half-provisioned assignment table
+            # would answer "not assigned" and skip visits that qualify.
+            await asyncio.sleep(180)
+            await run_backfill_loop()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            main_logger.error(f"Enrichment backfill failed: {e}", exc_info=True)
+
+    spawn_background(background_enrichment_backfill(),
+                     name="enrichment-backfill")
+
     # Home Assistant MQTT discovery (HA-402): one bridge per enabled MQTT
     # integration with discovery on. No integration, nothing runs.
     async def background_mqtt_bridges():

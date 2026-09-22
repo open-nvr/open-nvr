@@ -415,6 +415,15 @@ class Settings(BaseSettings):
     # skill assignment, so a site that has not asked for it pays nothing;
     # off = no claims and the attr filter stays empty.
     events_descriptor_enrichment: bool = True
+    # Sweep visits recorded BEFORE the two enrichers above were deployed,
+    # handing each to the same enricher the ingest path calls. Off by
+    # default and the only enrichment path that is: upgrading a running
+    # site must never quietly start working through its back catalogue on
+    # the GPU the live cameras are using. Switch it on once, let it finish
+    # (it stops by itself at the oldest visit), switch it back off. Still
+    # gated per camera by the same skill assignments, so turning it on
+    # without them costs nothing.
+    events_enrichment_backfill: bool = False
     # RFC-0002 Phase 0: NATS URL for core's domain-event consumers
     # (plate.recognized.v1 today). Compose sets NATS_URL=nats://nats:4222;
     # empty disables consumption (enrichment's synchronous fallback still
