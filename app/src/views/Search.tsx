@@ -37,12 +37,13 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import {
-  Camera as CameraIcon, CarFront, Clock, ImageOff, Info, Search as SearchIcon,
-  Sparkles, Tag, Type, X,
+  Camera as CameraIcon, CarFront, Clock, ImageOff, Info, Route,
+  Search as SearchIcon, Sparkles, Tag, Type, X,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { api } from '../lib/api'
 import { AuthedImage } from '../components/AuthedImage'
+import { JourneyPanel } from '../components/JourneyPanel'
 import { useTranslation } from '../i18n'
 import {
   Badge, Button, Card, CardContent, EmptyState, PageHeader, Skeleton,
@@ -166,6 +167,8 @@ export function Search() {
   const [sentence, setSentence] = useState(params.get('q') ?? '')
   const [filters, setFilters] = useState<Filters | null>(null)
   const [page, setPage] = useState(0)
+  /** The visit whose route is open, if any. */
+  const [following, setFollowing] = useState<number | null>(null)
   const boxRef = useRef<HTMLInputElement>(null)
 
   // A search page that needs a click before you can type is a search page
@@ -491,6 +494,7 @@ export function Search() {
                 hit={h}
                 rank={page * PAGE + i + 1}
                 onRefine={addAttr}
+                onFollow={() => setFollowing(h.id)}
               />
             ))}
           </div>
@@ -509,6 +513,11 @@ export function Search() {
           )}
         </>
       )}
+
+      {/* A route is read against the results it came from — which other
+          visit was the better candidate, what else was on that camera —
+          so it opens beside the page rather than replacing it. */}
+      <JourneyPanel eventId={following} onClose={() => setFollowing(null)} />
     </section>
   )
 }
@@ -516,8 +525,14 @@ export function Search() {
 /* --------------------------- Pieces ----------------------------- */
 
 function ResultCard(
-  { hit, rank, onRefine }: { hit: Hit; rank: number; onRefine: (c: Claim) => void },
+  { hit, rank, onRefine, onFollow }: {
+    hit: Hit
+    rank: number
+    onRefine: (c: Claim) => void
+    onFollow: () => void
+  },
 ) {
+  const { t } = useTranslation()
   const at = hit.anchor?.at ?? hit.started_at
   // Recordings opens on this camera, this day, this instant.
   const href = at
@@ -588,9 +603,19 @@ function ResultCard(
         itself a way to search: one click finds every other red van. The
         skill and its confidence ride the tooltip, so a result can always
         be asked who said this. */}
-    {hit.claims.length > 0 && (
-      <div className="flex flex-wrap gap-1 px-2 pb-2">
-        {hit.claims.map((c) => (
+    <div className="flex flex-wrap items-center gap-1 px-2 pb-2">
+      {/* Outside the Link as well, and first, because following an
+          object is a different question from watching this moment: the
+          card's own click opens the recording here. */}
+      <button
+        type="button"
+        onClick={onFollow}
+        className="inline-flex items-center gap-1 rounded border border-[var(--border)] bg-[var(--bg-2)] px-1.5 py-0.5 text-[10px] text-[var(--text-dim)] hover:text-[var(--text)] hover:border-[var(--accent)]"
+      >
+        <Route size={11} />
+        {t('search.follow')}
+      </button>
+      {hit.claims.map((c) => (
           <button
             key={`${c.kind}:${c.value}`}
             type="button"
@@ -602,9 +627,8 @@ function ResultCard(
           >
             {c.value}
           </button>
-        ))}
-      </div>
-    )}
+      ))}
+    </div>
     </div>
   )
 }
