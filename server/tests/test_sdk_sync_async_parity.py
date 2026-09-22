@@ -206,3 +206,82 @@ def test_the_named_wrappers_are_real_methods():
     assert missing == [], (
         f"{missing} are named as SDK wrappers but no such method exists; "
         "the table is describing an SDK that is not there")
+
+
+# ── and the doc an app author actually reads ─────────────────────────
+
+_PLATFORM_DOC = (Path(__file__).resolve().parents[2]
+                 / "docs" / "APP_PLATFORM.md")
+
+#: Routes the Surface table is not expected to name individually,
+#: because it names them as a group and the group is unambiguous.
+_DOCUMENTED_AS_A_GROUP = {
+    "GET /plates/stats": "/internal/app/plates/*",
+    "GET /plates/summary": "/internal/app/plates/*",
+    "GET /plates/sessions": "/internal/app/plates/*",
+    "GET /state": "/internal/app/state[/{}]",
+    "GET /state/{key}": "/internal/app/state[/{}]",
+    "PUT /state/{key}": "/internal/app/state[/{}]",
+    "DELETE /state/{key}": "/internal/app/state[/{}]",
+    "GET /recordings/{camera_id}/url": "/internal/app/recordings/{}[/url]",
+}
+
+
+def _shape(text: str) -> str:
+    """``{camera_id}`` and ``{id}`` and ``{rel_path:path}`` are the same
+    hole. Comparing the shapes rather than the names is what lets the
+    doc call it ``{id}`` and the router call it ``{camera_id}``."""
+    return re.sub(r"\{[^}]*\}", "{}", text)
+
+
+def test_the_platform_doc_names_every_capability():
+    """APP_PLATFORM.md's Surface table is where an app author finds out
+    what the platform can do. A capability missing from it is one nobody
+    discovers — and three were: the camera stream grant, and both halves
+    of the evidence store. save_evidence and read_evidence are how an app
+    keeps a photo and gets it back after a restart, which is the whole
+    reason the doorbell can enrol a face it saw last week.
+
+    The stream one was worse than absent. `ai.stream()` WAS in the table
+    — a KAI-C inference session, nothing to do with a camera's live view
+    — so a reader scanning for "stream" found the wrong thing and
+    stopped looking.
+    """
+    doc = _shape(_PLATFORM_DOC.read_text())
+    missing = []
+    for route in sorted(_platform_routes()):
+        group = _DOCUMENTED_AS_A_GROUP.get(route)
+        if group:
+            if _shape(group) not in doc:
+                missing.append(f"{route} (expected under {group})")
+            continue
+        method, path = route.split(" ", 1)
+        # Method AND full shape. Matching the path prefix alone let
+        # `GET /evidence/{path}` be satisfied by the POST /evidence row
+        # sitting above it — the same loose-substring mistake this file
+        # exists to prevent, made inside the file itself.
+        if _shape(f"{method} /internal/app{path}") not in doc:
+            missing.append(route)
+    assert missing == [], (
+        f"these routes are not in APP_PLATFORM.md's Surface table: "
+        f"{missing}. An app author reading the doc will never find them, "
+        "and the SDK method for them might as well not exist.")
+
+
+def test_the_group_entries_describe_routes_that_exist():
+    """A group heading for routes that were renamed away covers nothing
+    while still making the table look complete."""
+    stale = sorted(set(_DOCUMENTED_AS_A_GROUP) - _platform_routes())
+    assert stale == [], (
+        f"{stale} are excused as group-documented but are no longer routes")
+
+
+def test_both_streams_are_told_apart():
+    """The table names two unrelated things `stream`. If the note that
+    says so is ever dropped, the trap comes back."""
+    doc = _PLATFORM_DOC.read_text()
+    assert "/internal/app/cameras/{id}/stream" in doc
+    assert "infer/{adapter}/stream" in doc
+    assert "unrelated" in doc, (
+        "the doc names two different things `stream` and no longer says "
+        "they are different")
