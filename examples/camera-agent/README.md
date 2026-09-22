@@ -118,9 +118,12 @@ not "AGI for cameras":
 
 * The model has a small fixed toolset, no web access. It can
   describe what it sees, count objects, recognise faces, look back at
-  recent inference events, and — when a footage-search index is
-  configured (`footage_index_path`) — search keyframes via
-  `search_footage`.
+  recent inference events, and search recorded footage by words via
+  `search_footage` — answered from the platform's canonical event store
+  (the operator Search page's own query), so it works wherever the
+  server API origin is configured. The footage-search app's private
+  SQLite index (`footage_index_path`) is kept only as a fallback for a
+  box that cannot reach core, and is no longer required.
 * **It has a memory.** When the server API origin is configured
   (`opennvr_base_url`), the `search_history` tool reads the platform's
   canonical event store: every past visit of every detected object,

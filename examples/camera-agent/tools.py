@@ -23,6 +23,7 @@ metadata + the event ring.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import math
@@ -384,6 +385,7 @@ class CameraTools:
         best_frame_fetch: Any = None,
         resolve_camera: Any = None,
         events_client: Any = None,
+        timeline: Any = None,
     ) -> None:
         self._ctx = context
         self._caption = caption_client
@@ -406,6 +408,11 @@ class CameraTools:
         # store). Powers search_history: past visits with best-frame evidence,
         # optionally face-matched. None = tool reports history isn't enabled.
         self._events = events_client
+        # Optional SDK TimelineAPI — the platform's SEARCH over that same
+        # canonical store (``/api/v1/internal/app/search``, the operator
+        # Search page's own query). This is what search_footage now uses;
+        # the private SQLite index above is only its fallback.
+        self._timeline = timeline
         # Cameras touched by the most recent tool call — read by /converse
         # so the UI can show which camera(s) the agent is working on.
         self.last_cameras_used: list[str] = []
@@ -961,12 +968,32 @@ class CameraTools:
     # ── search_footage ─────────────────────────────────────────────
 
     async def search_footage(self, args: dict[str, Any]) -> str:
-        if self._footage_index is None or not getattr(
-            self._footage_index, "available", False
+        """Search recorded footage by words.
+
+        Answered from the PLATFORM's canonical store (``timeline.find``,
+        the same query the operator's Search page runs), with the
+        footage-search app's private SQLite index kept only as a fallback
+        for when core cannot be reached.
+
+        It used to be the other way round, with the index as the only
+        source, and that cost more than duplication. The index is one row
+        per analyzed FRAME — hence its 60-second coalescing hack, because
+        "a person sitting in frame is thousands of identical rows" — it
+        has no camera scoping of its own, it carries a second 30-day
+        retention policy on a second store, it holds no evidence photo,
+        plate or skill claims, and it exists at all only if an operator
+        installed an optional app AND set footage_index_path. The
+        canonical store is one row per VISIT, scoped by the predicate
+        everything else uses, and each hit carries its evidence frame and
+        what each skill claimed about it.
+        """
+        if self._timeline is None and (
+            self._footage_index is None
+            or not getattr(self._footage_index, "available", False)
         ):
             return (
-                "Footage search isn't available — the footage-search index "
-                "is not configured or hasn't been built yet."
+                "Footage search isn't available — this agent has no "
+                "connection to the OpenNVR event store."
             )
         keywords = args.get("keywords")
         if isinstance(keywords, str):
@@ -999,6 +1026,60 @@ class CameraTools:
                 f"{sorted(c.camera_id for c in self._ctx.cameras)} or '__any__'."
             )
 
+        phrase = " ".join(keywords)
+
+        # ── The canonical store first ────────────────────────────────
+        if self._timeline is not None:
+            start = None
+            if within_minutes is not None:
+                from datetime import UTC, datetime, timedelta
+                start = datetime.now(UTC) - timedelta(minutes=within_minutes)
+            try:
+                # parse=False: the model has already decomposed the
+                # question into keywords and a window, so letting the
+                # server re-read them as a sentence would be two parsers
+                # disagreeing about one query.
+                answer = await asyncio.to_thread(
+                    self._timeline.find, "", text=phrase,
+                    camera=camera_id, start=start, parse=False, limit=10,
+                )
+            except Exception:
+                logger.exception("search_footage: timeline query failed")
+                answer = None
+
+            # None means "could not reach the store", which is NOT the
+            # same as "nothing matched" — in a security product those are
+            # different answers, so only the second one is reported as a
+            # result. The first falls through to the index if there is
+            # one, and is stated plainly if there is not.
+            if answer is not None:
+                results = answer.get("results") or []
+                if not results:
+                    return f"No recorded footage matched {phrase!r}."
+                lines = []
+                for r in results:
+                    when = r.get("started_at") or ""
+                    cam = r.get("camera_id")
+                    descr = (r.get("caption") or r.get("label") or "match")
+                    extra = ""
+                    if r.get("plate_text"):
+                        extra += f", plate {r['plate_text']}"
+                    if r.get("has_evidence"):
+                        extra += " (photo kept)"
+                    lines.append(f"[#{r.get('id')}] {when} on camera {cam}: {descr}{extra}")
+                total = answer.get("total")
+                head = "Found in recorded footage"
+                if isinstance(total, int) and total > len(results):
+                    head += f" ({len(results)} of {total})"
+                return head + ":\n" + "\n".join(lines)
+
+        # ── Fallback: the app's private index, if one is configured ──
+        if self._footage_index is None or not getattr(
+            self._footage_index, "available", False
+        ):
+            return ("Could not reach the event store, and no local footage "
+                    "index is configured — so I cannot say whether anything "
+                    "matched.")
         try:
             hits = self._footage_index.search(
                 keywords=keywords, within_minutes=within_minutes,
@@ -1009,7 +1090,6 @@ class CameraTools:
             return "Footage search failed."
 
         if not hits:
-            phrase = " ".join(keywords)
             return f"No recorded footage matched {phrase!r}."
 
         import time as _time

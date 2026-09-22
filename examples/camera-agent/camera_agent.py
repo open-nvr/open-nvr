@@ -3268,6 +3268,7 @@ class CameraAgentRuntime:
         # server API origin is configured — same origin + INTERNAL_API_KEY chain
         # the app door uses. Shared primitive from the SDK (Challenge-3 rule).
         events_client = None
+        timeline = None
         if cfg.opennvr_api_url:
             import os as _os
 
@@ -3279,11 +3280,35 @@ class CameraAgentRuntime:
                 or _os.environ.get("INTERNAL_API_KEY", ""),
             )
             logger.info("history enabled: events store at %s", cfg.opennvr_api_url)
+            # The platform's SEARCH over that same store. Constructed
+            # beside EventsClient and from the same credential, because
+            # search_footage now answers from the canonical store rather
+            # than the footage-search app's private SQLite index — the
+            # route (/api/v1/internal/app/search) and the SDK wrapper
+            # both already existed; the agent was simply pointed at the
+            # wrong store.
+            try:
+                from opennvr_app_sdk import OpenNVR
+
+                timeline = OpenNVR(
+                    cfg.opennvr_api_url,
+                    token=cfg.opennvr_api_key
+                    or cfg.kaic_api_key
+                    or _os.environ.get("INTERNAL_API_KEY", ""),
+                ).timeline
+            except Exception:
+                # Never fatal: an agent that cannot build a search client
+                # still has every live tool and the events store.
+                logger.warning("footage search unavailable", exc_info=True)
         # Kept on the runtime too: the events SKILL is served by two
         # independent backends (NATS ring → recent_events; events store →
         # search_history/describe_event/describe_window), and the skills
         # panel must gate + caption on what is ACTUALLY wired.
         self.events_client = events_client
+        # Same reasoning as events_client: the skills panel gates on what
+        # is ACTUALLY wired, and footage search is now served by the
+        # platform store with the local index only as a fallback.
+        self.timeline = timeline
 
         self.tools = CameraTools(
             context=self.context,
@@ -3294,6 +3319,7 @@ class CameraAgentRuntime:
             best_frame_fetch=best_frame_fetch,
             resolve_camera=_resolve_camera,
             events_client=events_client,
+            timeline=timeline,
         )
         # Advertised tools are (re)built by _configure_tools from enabled_tools
         # minus any skills switched off at runtime. disabled_skills starts empty.
@@ -3699,7 +3725,16 @@ class CameraAgentRuntime:
             # the footage-search container creates AFTER the agent booted
             # lights the tool up without an agent restart. When the index
             # isn't readable yet the tool itself says so, cleanly.
-            return getattr(self, "footage_index", None) is not None
+            #
+            # EITHER backend now makes the skill usable, and the platform
+            # one is the default: footage search is answered from the
+            # canonical event store, so this is available wherever core
+            # is configured rather than only where somebody additionally
+            # installed the footage-search app and pointed the agent at
+            # its SQLite file. The index stays a fallback, so a box that
+            # has one and no core connection keeps working.
+            return (getattr(self, "timeline", None) is not None
+                    or getattr(self, "footage_index", None) is not None)
         if req == "apps":
             # The app door is wired iff the OpenNVR server base URL is set —
             # then the AppRegistryClient exists. Configuration presence is the
@@ -3752,7 +3787,7 @@ class CameraAgentRuntime:
             "faces": "Set faces_url to the recognition adapter to enable.",
             "events": ("Set nats_inference_url (live events) or "
                        "opennvr_api_url (visit history) to enable."),
-            "footage": "Set footage_index_path (built by the footage-search example).",
+            "footage": "Set opennvr_api_url so the agent can search the event store (or footage_index_path for the legacy local index).",
             "apps": "Set opennvr_api_url to read installed catalog apps.",
         }
         out: list[dict[str, Any]] = []
