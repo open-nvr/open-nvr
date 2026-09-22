@@ -44,10 +44,18 @@ class _Nvr:
     def __init__(self, store: _Store | None = None) -> None:
         self.state = store or _Store()
         self.saved: list[bytes] = []
+        self.evidence: dict[str, bytes] = {}
 
     def save_evidence(self, jpeg: bytes) -> str:
         self.saved.append(jpeg)
-        return f"evidence/{len(self.saved)}.jpg"
+        path = f"evidence/{len(self.saved)}.jpg"
+        #: What the platform still holds, by path. Dropping an entry
+        #: stands in for the retention sweep.
+        self.evidence[path] = jpeg
+        return path
+
+    def read_evidence(self, path: str) -> bytes | None:
+        return self.evidence.get(path)
 
 
 class _BrokenNvr:
@@ -64,6 +72,9 @@ class _BrokenNvr:
         self.state = self._S()
 
     def save_evidence(self, jpeg: bytes):
+        raise RuntimeError("core unreachable")
+
+    def read_evidence(self, path: str):
         raise RuntimeError("core unreachable")
 
 
@@ -348,6 +359,111 @@ def test_enrolling_a_stranger_takes_them_out_of_history_too(monkeypatch):
 
     app.on_action("enroll_stranger", {"stranger_id": sid, "name": "Bob"})
     assert store.values[STATE_KEY] == []
+
+
+# ── enrolling a face from last Tuesday ───────────────────────────────
+
+
+def test_the_full_crop_comes_back_from_the_platform():
+    """Not the wall thumbnail — the crop the enroller needs. The
+    thumbnail is ~190px and exists so the tile can be drawn."""
+    nvr = _Nvr()
+    log = VisitLog(nvr)
+    log.record(_visit(1), crop=b"\xff\xd8the-full-320px-crop")
+
+    assert log.crop("s1") == b"\xff\xd8the-full-320px-crop"
+
+
+def test_a_crop_the_platform_no_longer_holds_is_none():
+    nvr = _Nvr()
+    log = VisitLog(nvr)
+    log.record(_visit(1), crop=b"\xff\xd8x")
+    nvr.evidence.clear()              # the retention sweep got there
+
+    assert log.crop("s1") is None
+
+
+def test_a_visit_that_never_had_a_crop_asks_the_platform_nothing():
+    """A visit with no evidence_path has no picture anywhere, so the
+    round trip is one we already know the answer to."""
+    nvr = _Nvr()
+    asked: list[str] = []
+    nvr.read_evidence = lambda p: asked.append(p)  # type: ignore[assignment]
+    log = VisitLog(nvr)
+    log.record(_visit(1))
+
+    assert log.crop("s1") is None
+    assert log.crop("nosuchvisit") is None
+    assert asked == [], "it asked for a picture it knew was not there"
+
+
+def test_an_unreachable_platform_is_none_not_an_exception():
+    log = VisitLog(_BrokenNvr())
+    assert log.crop("s1") is None
+
+
+def test_a_stranger_from_before_the_restart_can_still_be_enrolled(monkeypatch):
+    """The point. "The doorbell was restarted" is not something an
+    operator should have to care about when they click Enrol on a face
+    from Tuesday."""
+    store = _Store()
+    first, _ = _doorbell([_unknown()], store)
+    first.on_frame("front-door", b"\xff\xd8jpeg")
+    sid = store.values[STATE_KEY][0]["id"]
+    saved = first.nvr.evidence          # the platform's copy survives
+
+    second, _ = _doorbell([_unknown()], store)
+    second.nvr.evidence.update(saved)
+    second._restore_history()
+    assert sid not in second._stranger_crops, "nothing in memory yet"
+
+    enrolled: dict = {}
+    monkeypatch.setattr(second, "_enroll",
+                        lambda **kw: enrolled.update(kw) or {"ok": True})
+    second.on_action("enroll_stranger", {"stranger_id": sid, "name": "Bob"})
+
+    assert enrolled["image_bytes"], "enrolled from the full crop"
+    assert store.values[STATE_KEY] == [], "and left the history"
+
+
+def test_the_wall_never_enrols_from_the_thumbnail(monkeypatch):
+    """A ~190px face would teach the adapter something worse than the
+    operator believes they handed over. With no fetchable crop the
+    action refuses instead."""
+    store = _Store()
+    app, _ = _doorbell([_unknown()], store)
+    app.on_frame("front-door", b"\xff\xd8jpeg")
+    sid = store.values[STATE_KEY][0]["id"]
+
+    second, _ = _doorbell([_unknown()], store)   # no evidence carried over
+    second._restore_history()
+    monkeypatch.setattr(second, "_enroll", lambda **kw: {"ok": True})
+
+    with pytest.raises(KeyError):
+        second.on_action("enroll_stranger", {"stranger_id": sid, "name": "Bob"})
+
+
+def test_the_wall_distinguishes_kept_from_aged_out():
+    """Two different absences. Saying "aged out" for a face that is
+    still there tells an operator it is gone when they could enrol
+    from it."""
+    kept = _visit(1, at=time.time() - 60)
+    kept.pop("thumb", None)
+    kept["evidence_path"] = "evidence/1.jpg"
+    gone = _visit(2, at=time.time() - 30)
+    gone.pop("thumb", None)
+    store = _Store({STATE_KEY: [kept, gone]})
+
+    app, _ = _doorbell([_unknown()], store)
+    app._restore_history()
+
+    tiles = {t["id"]: t for t in app._stranger_gallery}
+    assert tiles["s1"]["photo_kept"] is True and tiles["s1"]["aged_out"] is False
+    assert tiles["s2"]["aged_out"] is True
+
+    html = app.ui_html()
+    assert "photo kept" in html
+    assert "snapshot aged out" in html
 
 
 @pytest.mark.parametrize("field", ["history_days", "history_max"])

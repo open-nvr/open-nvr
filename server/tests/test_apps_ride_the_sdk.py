@@ -148,3 +148,89 @@ def test_camera_agent_debt_is_still_open():
         "camera-agent no longer references opennvr_app_sdk at all — the "
         "gap-8 story in RFC-0002 (utilities without contracts) is out of "
         "date; re-audit before touching the allowlist")
+
+
+# ── the image must contain the modules the app imports ───────────────
+#
+# A separate failure from the SDK rule above, and a nastier one, because
+# the test suites cannot see it. `uv sync` installs each example as an
+# EDITABLE package, so every top-level module resolves from the source
+# tree whatever the Dockerfile copies — the app imports fine locally and
+# the IMAGE crashes on startup with ModuleNotFoundError. It happened
+# twice on smart-doorbell (visit_log.py, then chime.py) before the
+# app-images-smoke job caught it, which is a slow way to find out.
+
+
+def _copied_module_names(dockerfile: Path, app: str) -> tuple[set[str], bool]:
+    """Module basenames a Dockerfile copies, and whether it uses a glob.
+
+    A glob or a whole-directory COPY cannot fall behind the app, so it
+    satisfies this rule by construction and the name set is not used.
+    """
+    names: set[str] = set()
+    globbed = False
+    for raw in dockerfile.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line.upper().startswith("COPY "):
+            continue
+        for token in line.split()[1:]:
+            if token.startswith("--"):
+                continue
+            if f"examples/{app}" not in token:
+                continue
+            if "*" in token or token.rstrip("/").endswith(app):
+                globbed = True
+            if token.endswith(".py"):
+                names.add(token.rsplit("/", 1)[-1])
+    return names, globbed
+
+
+def _top_level_imports(app_dir: Path) -> set[str]:
+    """Sibling modules the app's own sources import from each other.
+
+    Only bare ``import x`` / ``from x import`` where ``x.py`` sits beside
+    them — those are the ones that must be in the image. Third-party and
+    SDK imports come from pip.
+    """
+    siblings = {p.stem for p in app_dir.glob("*.py")}
+    needed: set[str] = set()
+    for src in _python_sources(app_dir):
+        if src.parent != app_dir:
+            continue
+        tree = ast.parse(src.read_text(encoding="utf-8"), filename=str(src))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.level == 0:
+                root = (node.module or "").split(".")[0]
+                if root in siblings:
+                    needed.add(root)
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    root = alias.name.split(".")[0]
+                    if root in siblings:
+                        needed.add(root)
+    return needed
+
+
+def test_every_dockerfile_copies_the_modules_its_app_imports():
+    offenders: dict[str, list[str]] = {}
+    for app_dir in _app_dirs():
+        dockerfile = app_dir / "Dockerfile"
+        if not dockerfile.is_file():
+            continue
+        copied, globbed = _copied_module_names(dockerfile, app_dir.name)
+        if globbed:
+            continue
+        missing = sorted(
+            f"{m}.py" for m in _top_level_imports(app_dir)
+            if f"{m}.py" not in copied
+        )
+        if missing:
+            offenders[app_dir.name] = missing
+    assert not offenders, (
+        "these Dockerfiles enumerate their app's modules and have fallen "
+        f"behind it: {offenders}. The image would crash on startup with "
+        "ModuleNotFoundError while every test still passed, because uv "
+        "installs the app as an editable package and the import resolves "
+        "from the source tree. Copy the modules by glob "
+        "(COPY examples/<app>/*.py ./) rather than by name."
+    )

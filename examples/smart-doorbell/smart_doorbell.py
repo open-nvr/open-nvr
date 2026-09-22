@@ -778,9 +778,14 @@ class SmartDoorbell(FrameApp):
             self._stranger_gallery.appendleft({
                 "id": item.get("id"),
                 "image": item.get("thumb"),
-                # No picture and a record that says why, so the wall can
-                # show "snapshot aged out" instead of a broken tile.
-                "aged_out": not item.get("thumb"),
+                # Two different absences, and the wall must not call them
+                # the same thing. No inline thumbnail but the platform
+                # still holds the crop means the face is there to enrol
+                # from, just not drawn — the log keeps a thumbnail only
+                # for the newest few. No crop either means the picture
+                # really is gone.
+                "photo_kept": bool(item.get("evidence_path")),
+                "aged_out": not (item.get("thumb") or item.get("evidence_path")),
                 "label": item.get("camera"),
                 "time": item.get("at"),
             })
@@ -1077,9 +1082,16 @@ class SmartDoorbell(FrameApp):
             # happened, and saying so beats a broken image: the caption
             # is the answer to "who came on Tuesday", the photo was only
             # ever the nicer half of it.
-            face = (f"<img src='{item['image']}' alt='stranger'>"
-                    if item.get("image")
-                    else "<div class='gone'>snapshot aged out</div>")
+            if item.get("image"):
+                face = f"<img src='{item['image']}' alt='stranger'>"
+            elif item.get("photo_kept"):
+                # The crop is in the platform's evidence store; the log
+                # just does not carry a thumbnail this far back. Saying
+                # "aged out" here would tell an operator the face is
+                # gone when they can still enrol from it.
+                face = "<div class='gone'>photo kept — open to enrol</div>"
+            else:
+                face = "<div class='gone'>snapshot aged out</div>"
             return (f"<figure>{face}<figcaption>{esc(str(item.get('label') or '?'))}"
                     f" · {ago(item.get('time'))}</figcaption></figure>")
 
@@ -1178,6 +1190,40 @@ page. Threshold and re-fire window are edited in the config form and apply live.
     # camera loop once a minute.
     _DIRECTORY_TIMEOUT_S = 3.0
 
+    def _crop_for(self, stranger_id: str) -> bytes | None:
+        """This stranger's full-size face crop, from memory or history.
+
+        A tile the wall restored after a restart has no crop in this
+        process — it was uploaded by the process that saw the face. The
+        platform kept it, so fetch it back rather than refusing: "the
+        doorbell was restarted" is not a reason an operator should have
+        to care about when they click Enrol on a face from Tuesday.
+
+        What is deliberately NOT done is enrolling from the wall
+        thumbnail. That is a ~190px image kept for drawing the tile, and
+        feeding it to the adapter would teach it a worse face than the
+        operator believes they handed over — a silently poor enrolment
+        is worse than an honest "no longer available", which is what a
+        None here still produces.
+        """
+        sid = (stranger_id or "").strip()
+        if not sid:
+            return None
+        crop = self._stranger_crops.get(sid)
+        if crop is not None:
+            return crop
+        try:
+            crop = self._history.crop(sid)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("crop for %s unreadable (%s)", sid, exc)
+            return None
+        if crop:
+            # Hold it for the rest of this process: enrolling usually
+            # means looking at the face first, so the operator has
+            # already fetched it once through stranger_image.
+            self._stranger_crops[sid] = crop
+        return crop
+
     def on_action(self, name: str, params: dict[str, Any]) -> dict[str, Any]:
         """enroll_face / list_faces / delete_face — the catalog's
         face-DB management, previously CLI-only. Runs on the contract
@@ -1207,7 +1253,7 @@ page. Threshold and re-fire window are edited in the config form and apply live.
 
         if name == "stranger_image":
             sid = str(params.get("stranger_id") or "").strip()
-            crop = self._stranger_crops.get(sid)
+            crop = self._crop_for(sid)
             if crop is None:
                 raise KeyError(sid or "stranger_id")
             return {"stranger_id": sid, "image": base64.b64encode(crop).decode("ascii"),
@@ -1215,13 +1261,8 @@ page. Threshold and re-fire window are edited in the config form and apply live.
 
         if name == "enroll_stranger":
             sid = str(params.get("stranger_id") or "").strip()
-            crop = self._stranger_crops.get(sid)
+            crop = self._crop_for(sid)
             if crop is None:
-                # A tile restored from history has no full crop in this
-                # process. Enrolling from the wall thumbnail would teach
-                # the adapter a 190 px face, so the honest answer is that
-                # this capture is no longer available to enrol from —
-                # not a silently worse enrolment.
                 raise KeyError(sid or "stranger_id")
             # A capture assigned to someone already enrolled is an added
             # sample; the wall tile then disappears (it is no longer a stranger).
