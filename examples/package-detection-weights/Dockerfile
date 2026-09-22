@@ -53,7 +53,29 @@ ARG PACKAGE_ONNX_URL=https://github.com/open-nvr/ai-adapter/releases/download/pa
 ARG EXPECTED_MIN_BYTES=8000000
 
 RUN apk add --no-cache wget \
- && wget -q -O /yolov8n-package.onnx "${PACKAGE_ONNX_URL}" \
+ # Say why the download failed, in words. Every check below is chained
+ # off this one with &&, so a wget that dies outright short-circuits the
+ # lot and the build's whole output is "exit code: 8" — wget for "the
+ # server answered with an error status", which on a release asset means
+ # a 404. An asset that was never published, or that moved, is the
+ # single likeliest reason this image fails to build, so it is the one
+ # failure that must not be a bare exit code.
+ && if ! wget -q -O /yolov8n-package.onnx "${PACKAGE_ONNX_URL}"; then \
+      echo "" >&2; \
+      echo "Could not download the weights:" >&2; \
+      echo "  ${PACKAGE_ONNX_URL}" >&2; \
+      echo "" >&2; \
+      echo "wget failed, so nothing was fetched and none of the checks" >&2; \
+      echo "below ever ran. Exit 8 is an error status from the server;" >&2; \
+      echo "on a release asset that is a 404 — no release or no asset" >&2; \
+      echo "under that exact tag and filename." >&2; \
+      echo "" >&2; \
+      echo "Publish the asset, or point PACKAGE_ONNX_URL at one that" >&2; \
+      echo "exists. Tag and filename must both match exactly. A" >&2; \
+      echo "re-trained model ships as a NEW tag rather than replacing" >&2; \
+      echo "an existing one, so a given tag always carries one graph." >&2; \
+      exit 1; \
+    fi \
  # Prove it is a model and not a 404 page. A GitHub "Not Found" body
  # is ~9 bytes of HTML that copies into the volume perfectly happily
  # and then fails at the adapter, on the operator's machine, as a
@@ -70,10 +92,22 @@ RUN apk add --no-cache wget \
  # it. Grepping for "onnx" in the header looks equivalent and is not:
  # this model's producer string is "pytorch", so that check rejects
  # the genuine weights and passes anything with the word in it.
- && head -c 1 /yolov8n-package.onnx | od -An -tx1 | grep -q '08' \
+ && if ! head -c 1 /yolov8n-package.onnx | od -An -tx1 | grep -q '08'; then \
+      echo "${PACKAGE_ONNX_URL} is ${SIZE} bytes but does not start with" >&2; \
+      echo "the protobuf tag 0x08, so it is not a serialized ONNX" >&2; \
+      echo "ModelProto — a big file of the wrong kind (a .pt checkpoint," >&2; \
+      echo "an archive) rather than a truncated or missing one." >&2; \
+      exit 1; \
+    fi \
  # And the graph really is the detector we think: YOLO exports name
  # their input tensor "images".
- && head -c 256 /yolov8n-package.onnx | grep -qa "images" \
+ && if ! head -c 256 /yolov8n-package.onnx | grep -qa "images"; then \
+      echo "${PACKAGE_ONNX_URL} parses as ONNX but its input tensor is" >&2; \
+      echo "not named \"images\", which every YOLO export uses. This is" >&2; \
+      echo "some other model — check the tag points at the package" >&2; \
+      echo "detector's graph and not another adapter's." >&2; \
+      exit 1; \
+    fi \
  && echo "Baked yolov8n-package.onnx (${SIZE} bytes)." \
  && apk del wget
 
