@@ -197,6 +197,7 @@ jobs:
           - { app: alert-notifier,             module: alert_notifier }
           - { app: footage-search,             module: footage_search }
           - { app: gate-controller,            module: gate_controller }
+          - { app: guard-scan-compliance,      module: guard_scan_compliance }
           - { app: home-assistant-relay,       module: home_assistant_relay }
           - { app: intrusion-detection,        module: intrusion_detection }
           - { app: license-plate-recognition,  module: license_plate_recognition }
