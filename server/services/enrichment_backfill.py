@@ -117,8 +117,13 @@ def _write_state(db, state: dict[str, Any]) -> None:
     site_settings.set_json(db, STATE_KEY, state)
 
 
-def plan_batch(db, before_id: int | None, limit: int) -> list[dict[str, Any]]:
+def plan_batch(db, before_id: int | None, limit: int,
+               people: bool = False) -> list[dict[str, Any]]:
     """The next batch of candidate visits, newest first.
+
+    ``people`` is passed straight through to ``wants_descriptors`` — a
+    scope question rather than a kill switch, so it belongs with the
+    other gates here rather than being applied a phase later.
 
     Returns plain dicts, never ORM rows: the caller closes this session
     before calling any adapter (the rule ``plate_enrichment`` documents —
@@ -167,7 +172,7 @@ def plan_batch(db, before_id: int | None, limit: int) -> list[dict[str, Any]]:
                                           True, skills)),
             "descriptors": (label in DESCRIBABLE_LABELS
                             and wants_descriptors(row.label, row.evidence_path,
-                                                  True, skills)),
+                                                  True, skills, people)),
             "repair": False,
         }
         out.append(item)
@@ -227,7 +232,9 @@ async def backfill_once(batch: int = DEFAULT_BATCH,
         state = dict(read_state(db))
         if state.get("done"):
             return state
-        items = plan_batch(db, state.get("cursor"), batch)
+        items = plan_batch(db, state.get("cursor"), batch,
+                           bool(getattr(settings, "events_descriptor_people",
+                                        False)))
     finally:
         db.close()
 

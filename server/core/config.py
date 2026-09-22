@@ -415,6 +415,17 @@ class Settings(BaseSettings):
     # skill assignment, so a site that has not asked for it pays nothing;
     # off = no claims and the attr filter stays empty.
     events_descriptor_enrichment: bool = True
+    # Ask the same two questions about PEOPLE (what colour is their top,
+    # what are they carrying) — the kinds the plan advertises and, until
+    # this flag, nobody produced, which left person visits with no
+    # evidence at all for search or for cross-camera journey matching.
+    # Off by default, and separate from the flag above on purpose:
+    # person is the most common class on a camera by a wide margin, so
+    # widening the label set silently would multiply the inference bill
+    # of every site that had already assigned vqa for its vehicles. The
+    # per-camera assignment cannot say "for vehicles, not for everyone
+    # who walks past"; this can. Still gated by that assignment on top.
+    events_descriptor_people: bool = False
     # Sweep visits recorded BEFORE the two enrichers above were deployed,
     # handing each to the same enricher the ingest path calls. Off by
     # default and the only enrichment path that is: upgrading a running

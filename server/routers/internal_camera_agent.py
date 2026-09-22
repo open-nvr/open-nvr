@@ -431,7 +431,11 @@ async def ingest_track_event(
 
     if wants_descriptors(row.label, evidence_rel,
                          settings.events_descriptor_enrichment,
-                         camera_skills(camera)):
+                         camera_skills(camera),
+                         # People are a separate, deliberate opt-in: two
+                         # questions per person visit is a different
+                         # order of cost from two per vehicle.
+                         getattr(settings, "events_descriptor_people", False)):
         background.add_task(enrich_event_descriptors, row.id)
     # Read the id BEFORE releasing: record_track_visit committed, which
     # expires every attribute, so a post-close row.id would try to refresh a

@@ -20,14 +20,24 @@ service's ``attrs`` filter all existed, and the only writers in the repo
 were tests. "Every red van" could never match, because no claim had ever
 been written.
 
-Scope of this first cut, deliberately narrow
---------------------------------------------
+Scope, deliberately narrow
+--------------------------
 * **VQA only.** It is the one shipped task whose kinds are the attributes
   search filters on. ``plate`` stays with ``plate_enrichment``, which
   already does multi-frame OCR far better than one question would.
-* **``colour`` and ``vehicle_type``, on vehicles.** A hard ceiling of two
-  inferences per visit. VQA answers one question at a time, so an
-  unbounded kind list is an unbounded per-visit cost.
+* **Two questions per visit, whatever it is.** ``colour`` and
+  ``vehicle_type`` on a vehicle; ``clothing_top`` and ``carrying`` on a
+  person. VQA answers one question at a time, so ``LABEL_KINDS`` is not
+  a preference — it IS the per-visit inference bill, and it is capped at
+  two by construction. The plan offers all four kinds on any label, so
+  without the per-class split a lorry would be asked what colour its top
+  is: an inference spent to store nonsense.
+* **People are gated separately** (``PEOPLE_SETTING``, off by default).
+  Person is the most common class on a camera by a wide margin, so
+  quietly widening the label set would multiply the inference bill of
+  every site that had already assigned vqa for its vehicles, without
+  that site changing anything. The per-camera assignment cannot express
+  "for vehicles, not for everyone who walks past"; this flag can.
 * **``face_id`` is NOT produced here**, though the plan lists it. A name
   attached to a person, written into the platform store for every person
   on an assigned camera, is a materially larger privacy surface than an
@@ -66,11 +76,35 @@ VQA_TASK = "vqa"
 #: vehicle has exactly that shape.
 DESCRIPTOR_SKILL = VQA_TASK
 
-#: Classes worth asking about, and the ceiling on cost. Vehicles only in
-#: this cut: colour and type are the attributes an operator searches a
-#: vehicle by, and a person's clothing changes between visits in a way a
-#: registration plate does not.
-DESCRIBABLE_LABELS = {"car", "truck", "bus", "motorcycle"}
+#: Vehicle classes, and what is worth asking about one.
+VEHICLE_LABELS = {"car", "truck", "bus", "motorcycle"}
+
+#: The person class. Split out because it is gated separately and its
+#: cost is of a different order — see ``PEOPLE_SETTING`` below.
+PERSON_LABELS = {"person"}
+
+#: Every class this enricher will ask about.
+DESCRIBABLE_LABELS = VEHICLE_LABELS | PERSON_LABELS
+
+#: The settings flag that admits people. Vehicles ride on
+#: ``events_descriptor_enrichment``; people need this one as well.
+#:
+#: Why a second flag rather than just widening the label set: person is
+#: by a long way the most common class on a camera, so asking two
+#: questions per person visit multiplies the inference bill of a site
+#: that already assigned vqa — without that site changing anything. The
+#: per-camera assignment is the gate that stops unasked-for inference,
+#: and it cannot express "I wanted this for vehicles, not for everyone
+#: who walks past". This flag can.
+PEOPLE_SETTING = "events_descriptor_people"
+
+#: Which kinds are asked on which class, and the ceiling on cost. VQA
+#: answers ONE question at a time, so this map IS the per-visit
+#: inference bill: two, whatever walks or drives past.
+LABEL_KINDS: dict[str, tuple[str, ...]] = {
+    **{label: ("colour", "vehicle_type") for label in VEHICLE_LABELS},
+    **{label: ("clothing_top", "carrying") for label in PERSON_LABELS},
+}
 
 #: Burst guard, same reasoning as the OCR and caption ones.
 _VQA_CONCURRENCY = _asyncio.Semaphore(2)
@@ -120,22 +154,75 @@ KIND_QUESTIONS: dict[str, dict[str, Any]] = {
         "synonyms": {"lorry": "truck", "minivan": "van", "sedan": "car",
                      "hatchback": "car", "estate": "car"},
     },
+    "clothing_top": {
+        # Defined narrowly, as the COLOUR of the upper garment, because
+        # an undefined kind is worse than a narrow one: two enrichers
+        # with different ideas of what "clothing_top" means write values
+        # that can never agree, and journey.py compares them as strings.
+        # Colour is also the part that survives a change of camera —
+        # "jacket" and "coat" are the same garment described twice.
+        "question": (
+            "What colour is the top the person is wearing? Answer with "
+            "one word."
+        ),
+        "vocabulary": [
+            "white", "black", "silver", "grey", "gray", "red", "blue",
+            "green", "yellow", "orange", "brown", "beige", "gold",
+            "maroon", "purple", "pink",
+        ],
+        "synonyms": {"gray": "grey", "dark grey": "grey", "light grey": "grey"},
+    },
+    "carrying": {
+        "question": (
+            "What is the person carrying? Answer with one word, such as "
+            "backpack, bag, suitcase, box, umbrella, or nothing."
+        ),
+        # "nothing" is a real answer here, unlike an unreadable colour,
+        # and it is stored. A person carrying nothing DISAGREES with a
+        # person carrying a backpack, and journey.py can only count that
+        # disagreement if both visits carry the claim — rule 1 there is
+        # "missing is not mismatch", so an unstored "nothing" scores
+        # neutrally when it should count against. How little a common
+        # answer is worth is already handled: the surprise weighting
+        # measures that from the store rather than assuming it.
+        "vocabulary": [
+            "nothing", "backpack", "bag", "suitcase", "box", "umbrella",
+            "trolley", "bicycle", "phone", "parcel", "basket",
+        ],
+        "synonyms": {
+            "rucksack": "backpack", "handbag": "bag", "holdall": "bag",
+            "shopping bag": "bag", "carrier bag": "bag", "package": "parcel",
+            "luggage": "suitcase", "case": "suitcase", "cart": "trolley",
+            "pram": "trolley", "buggy": "trolley", "none": "nothing",
+            "empty handed": "nothing", "empty-handed": "nothing",
+            "nothing at all": "nothing",
+        },
+    },
 }
 
 
 def wants_descriptors(label: str | None, evidence_path: str | None,
                       enabled: bool = True,
-                      camera_skills: set[str] | None = None) -> bool:
-    """Should this visit be asked about? Pure, tested, four gates.
+                      camera_skills: set[str] | None = None,
+                      people: bool = False) -> bool:
+    """Should this visit be asked about? Pure, tested, five gates.
 
     ``None`` camera_skills means the caller could not resolve the camera
     and is treated as NOT assigned — failing closed, as with the other
     two enrichers. A wrong False costs a visit with fewer attributes; a
     wrong True spends inference on every vehicle of every camera on the
     site.
+
+    ``people`` is the fifth gate and defaults OFF. A person visit is
+    asked about only when a site has said so explicitly, because person
+    is the most common class by a wide margin and widening the label set
+    silently would multiply the bill of every site that had already
+    assigned vqa for its vehicles.
     """
-    if not (enabled and evidence_path
-            and (label or "").lower() in DESCRIBABLE_LABELS):
+    lab = (label or "").lower()
+    if not (enabled and evidence_path and lab in DESCRIBABLE_LABELS):
+        return False
+    if lab in PERSON_LABELS and not people:
         return False
     return DESCRIPTOR_SKILL in (camera_skills or set())
 
@@ -263,6 +350,12 @@ async def enrich_event_descriptors(event_id: int) -> None:
         label = (row.label or "").lower()
         if label not in DESCRIBABLE_LABELS:
             return
+        if label in PERSON_LABELS and not getattr(
+                settings, PEOPLE_SETTING, False):
+            # Re-checked here and not only at the gate: this is a
+            # background task, so a visit queued before the flag was
+            # turned off would otherwise still be paid for.
+            return
         evidence_path = row.evidence_path
         already = set((row.payload or {}).get("enriched_by") or [])
         camera_handle = f"cam{row.camera_id}"
@@ -289,12 +382,16 @@ async def enrich_event_descriptors(event_id: int) -> None:
     # a changed vocabulary is traceable to config rather than chance.
     adapter = sorted(adapters)[0]
 
-    # Only kinds the PLAN promises AND this enricher can normalise. The
-    # plan may offer clothing_top and carrying; those are person
-    # attributes and out of scope for this cut, and a kind we cannot
-    # reduce to a token is a row nobody can filter on.
+    # Three filters, and each drops a different kind of mistake. The PLAN
+    # decides what this box can claim at all; KIND_QUESTIONS decides what
+    # we can reduce to a countable token, because a kind we cannot
+    # normalise is a row nobody can filter on; and LABEL_KINDS decides
+    # what is worth asking about THIS class — the plan offers all four
+    # kinds on any label, and asking a lorry what colour its top is
+    # spends an inference to store nonsense.
+    for_label = LABEL_KINDS.get(label, ())
     kinds = [k for k in (vqa.get("descriptor_kinds") or [])
-             if k in KIND_QUESTIONS]
+             if k in KIND_QUESTIONS and k in for_label]
     if not kinds:
         return
 
