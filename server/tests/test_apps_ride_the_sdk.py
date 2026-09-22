@@ -35,9 +35,21 @@ EXAMPLES = REPO_ROOT / "examples"
 BASES = frozenset({"Detector", "FrameApp", "AlertSubscriber"})
 
 # Not apps at all: build-support directories with no Python entrypoint.
-# Both are one Dockerfile that exports an ONNX graph and ships it, so
-# there is no base class for them to ride.
-EXCLUDED = frozenset({"yolov8-weights", "yolo-pose-weights"})
+# Each is one Dockerfile that puts an ONNX graph into an image and ships
+# it, so there is no base class for them to ride — and no /manifest or
+# /state for one to provide, because nothing in them ever runs as a
+# service. yolov8 and yolo-pose export their graph from ultralytics at
+# build time; package-detection bakes in a pinned release asset instead,
+# because that model is ours and there is no upstream to export from.
+#
+# Unlike ALLOWLISTED this set is not debt and carries no shrink-only
+# rule: a directory belongs here when it is not an app, so it grows
+# whenever another weights image lands.
+EXCLUDED = frozenset({
+    "yolov8-weights",
+    "yolo-pose-weights",
+    "package-detection-weights",
+})
 
 # Gap 8's VISIBILITY debt is retired: the agent now serves /manifest and
 # /state and self-registers with the App Catalog (Phase 1 contract
