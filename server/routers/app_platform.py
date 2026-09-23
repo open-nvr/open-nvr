@@ -321,6 +321,41 @@ async def app_plate_sessions(
         scope=_app_roster(db, principal), limit=limit)
 
 
+@router.get("/plates/inside")
+async def app_plates_inside(
+    in_cameras: str = Query("", description="Entry gates: comma-separated ids/handles"),
+    out_cameras: str = Query("", description="Exit gates: comma-separated ids/handles"),
+    hours: int = Query(24, ge=1, le=24 * 7),
+    principal=Depends(_require_internal_key),
+    db: Session = Depends(get_db),
+):
+    """Which vehicles are inside right now, and since when.
+
+    The operator's Vehicles page has had this since gate pairing
+    landed; an app could not reach it. So license-plate-recognition
+    kept its own ledger of who had driven in and not out — in memory,
+    losing every open visit on restart, which meant a vehicle that
+    entered before a redeploy could never trigger an overstay alert
+    however long it stayed. The same question, asked twice, answered
+    from two places, one of which forgets.
+
+    Stateless, like ``plates/sessions``: which cameras are entry gates
+    and which are exits lives in the calling app's config, because the
+    platform has no opinion about a site's traffic direction. The
+    window is what makes a missed exit age out instead of leaving a
+    vehicle inside forever.
+    """
+    from services.timeline_service import gate_occupancy
+
+    return gate_occupancy(
+        db,
+        in_cameras=_roster_ids(db, principal, _parse_ids(in_cameras)),
+        out_cameras=_roster_ids(db, principal, _parse_ids(out_cameras)),
+        hours=hours,
+        scope=_app_roster(db, principal),
+    )
+
+
 # ── Alerts: what this app raised ────────────────────────────────────
 
 

@@ -201,6 +201,28 @@ class AsyncTimelineAPI:
             in_cameras=",".join(str(_camera_id(c)) for c in in_cameras),
             out_cameras=",".join(str(_camera_id(c)) for c in out_cameras))
 
+    async def plates_inside(self, *, in_cameras: Iterable = (),
+                            out_cameras: Iterable = (), hours: int = 24) -> dict | None:
+        """Which vehicles are inside right now, and since when.
+
+        ``{"inside": n, "plates": [...], "entries": [{plate, entered_at,
+        camera_id}]}``. ``entries`` is what makes an overstay check
+        possible without keeping a ledger: it carries the entry time,
+        so "inside longer than N hours" is a subtraction rather than a
+        record an app has to maintain across its own restarts.
+
+        ``hours`` windows the answer so a missed exit read ages out
+        instead of leaving a vehicle inside forever.
+
+        ``None`` means core could not be reached — NOT "nobody is
+        inside". An app that conflates them stops alerting on overstays
+        during exactly the outage it should be noisiest about.
+        """
+        return await self._http.get_json(
+            "/api/v1/internal/app/plates/inside", hours=hours,
+            in_cameras=",".join(str(_camera_id(c)) for c in in_cameras),
+            out_cameras=",".join(str(_camera_id(c)) for c in out_cameras))
+
 
 class AsyncAlertsAPI:
     def __init__(self, http: _AsyncHttp) -> None:

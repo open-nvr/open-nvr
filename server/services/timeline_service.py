@@ -475,7 +475,26 @@ def gate_occupancy(
     inside = sorted(
         p for p, r in last_by_plate.items() if r.camera_id in in_set
     )
-    return {"inside": len(inside), "plates": inside[:200]}
+    # `entries` carries WHEN each vehicle came in, which `plates` cannot.
+    # A count answers "how busy is the site"; "has this visitor been here
+    # too long?" needs the entry time, and without it every caller has to
+    # keep its own ledger of arrivals to subtract from — which is exactly
+    # what license-plate-recognition was doing, in memory, losing every
+    # open visit on restart.
+    #
+    # `plates` is left exactly as it was. The Vehicles page reads it as a
+    # list of strings, and widening a field in place is how a dashboard
+    # starts rendering "[object Object]".
+    entries = [
+        {
+            "plate": p,
+            "entered_at": (seen_at_of(last_by_plate[p]).isoformat()
+                           if seen_at_of(last_by_plate[p]) else None),
+            "camera_id": last_by_plate[p].camera_id,
+        }
+        for p in inside[:200]
+    ]
+    return {"inside": len(inside), "plates": inside[:200], "entries": entries}
 
 
 def vehicle_report(

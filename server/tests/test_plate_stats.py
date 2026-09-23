@@ -203,15 +203,35 @@ def test_gate_occupancy_counts_last_direction(db):
     got = gate_occupancy(
         s, in_cameras=[cams["gate"].id], out_cameras=[cams["yard"].id],
         hours=24, scope=visible_camera_ids(s, users["alice"]), now=NOW)
-    assert got == {"inside": 1, "plates": ["AAA111"]}
+    assert got["inside"] == 1
+    assert got["plates"] == ["AAA111"]
+    # `entries` carries WHEN, which the count and the plate list cannot.
+    # Without it an overstay check has to keep its own ledger of
+    # arrivals to subtract from — which is what license-plate-recognition
+    # did, in memory, losing every open visit on restart.
+    entry = got["entries"][0]
+    assert len(got["entries"]) == 1
+    assert entry["plate"] == "AAA111"
+    assert entry["camera_id"] == cams["gate"].id
+    # Emitted exactly as stored, like every other timestamp on these
+    # routes — which on SQLite means NAIVE. Normalising here would make
+    # this one field disagree with `plate_sessions` next to it; the
+    # caller does it, and license-plate-recognition's parser assumes UTC
+    # for a naive value rather than raising halfway through a sweep.
+    assert entry["entered_at"].startswith(
+        (NOW - timedelta(hours=1)).replace(tzinfo=None).isoformat())
 
 
 def test_gate_occupancy_needs_both_directions(db):
     from services.timeline_service import gate_occupancy
 
     s, users, cams = db
-    assert gate_occupancy(s, in_cameras=[cams["gate"].id], out_cameras=[],
-                          scope=visible_camera_ids(s, users["alice"])) == {"inside": 0, "plates": []}
+    got = gate_occupancy(s, in_cameras=[cams["gate"].id], out_cameras=[],
+                         scope=visible_camera_ids(s, users["alice"]))
+    assert got == {"inside": 0, "plates": []}, (
+        "the no-gates early return must keep its shape; a caller reading "
+        "entries on it should get a KeyError it can see, not an empty "
+        "list that reads as 'nobody is inside'")
 
 
 # ── vehicle_report (the printable monthly report) ───────────────────

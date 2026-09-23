@@ -190,6 +190,28 @@ def test_the_answer_block_arrives_intact(timeline):
     assert answer["answer"]["plate_count"] == 1
 
 
+def test_plates_inside_reaches_the_route_over_the_wire(timeline):
+    """`plates/inside` exists because an app could not reach what the
+    operator's Vehicles page has had all along, so it kept its own
+    ledger of who had driven in and not out. Both gate lists are
+    repeated parameters, which is the shape that silently 422'd."""
+    answer = timeline.plates_inside(in_cameras=[7], out_cameras=[8])
+    assert answer is not None, (
+        "the store looked unreachable; check the gate lists survived "
+        "the wire")
+    assert "entries" in answer, (
+        "entries is what makes an overstay check possible without a "
+        "ledger — plates alone says who, not since when")
+
+
+def test_plates_inside_needs_both_directions(timeline):
+    """With no exit gate, nothing can be known to be inside — and
+    answering "everyone who ever drove in" would be worse than
+    answering nothing."""
+    answer = timeline.plates_inside(in_cameras=[7], out_cameras=[])
+    assert answer == {"inside": 0, "plates": []}
+
+
 # ── the encoder itself, so the reason is pinned next to the seam ─────
 
 
