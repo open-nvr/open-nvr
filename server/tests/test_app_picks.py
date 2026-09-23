@@ -131,6 +131,7 @@ def world(monkeypatch):
     who = {"user": admin}
     app.dependency_overrides[auth_mod.get_current_active_user] = lambda: who["user"]
     app.dependency_overrides[apps_router.get_read_principal] = lambda: who["user"]
+    app.dependency_overrides[auth_mod.get_current_superuser] = lambda: admin
     with TestClient(app) as tc:
         yield {"tc": tc, "ids": ids, "Session": Session, "who": who,
                "admin": admin, "viewer": viewer}
@@ -350,3 +351,198 @@ def test_a_deleted_camera_drops_out_of_the_picks(world):
     s.commit()
     assert sa.picked_camera_ids(s, "guard-scan-compliance") == set()
     assert s.query(SkillAssignment).count() == 1  # the row itself is the delete path's job
+
+
+# ── enable/disable and the union (#539) ─────────────────────────────
+#
+# A disabled app is not a consumer. Its picks STAY — the operator's
+# camera selection has to survive a Disable and come back exactly on
+# Enable — but they contribute nothing to the union while the app is
+# off, so nothing downstream keeps computing for an app that is off.
+
+
+def test_disabling_an_app_drops_its_picks_from_the_union(world):
+    """The bug: Disable flipped the flag and left the projection alone,
+    so a disabled ANPR app went on buying plate OCR on every vehicle."""
+    tc, ids, Session = world["tc"], world["ids"], world["Session"]
+    _pick(Session, "license-plate-recognition", ids["yard"])
+    s = Session()
+    assert sa.camera_adopted(s.get(Camera, ids["yard"]), PLATE_SKILL) is True
+    s.close()
+
+    assert tc.post("/apps/license-plate-recognition/disable").status_code == 200
+
+    s = Session()
+    yard = s.get(Camera, ids["yard"])
+    assert sa.camera_adopted(yard, PLATE_SKILL) is False
+    assert yard.assignments is None
+    # The pick itself survives — Disable is not Uninstall.
+    assert sa.picked_camera_ids(s, "license-plate-recognition") == {ids["yard"]}
+    s.close()
+
+
+def test_enabling_restores_the_selection_exactly(world):
+    tc, ids, Session = world["tc"], world["ids"], world["Session"]
+    _pick(Session, "license-plate-recognition", ids["yard"])
+    _pick(Session, "license-plate-recognition", ids["gate"])
+    tc.post("/apps/license-plate-recognition/disable")
+    assert tc.post("/apps/license-plate-recognition/enable").status_code == 200
+
+    s = Session()
+    for cam_id in (ids["yard"], ids["gate"]):
+        assert sa.camera_adopted(s.get(Camera, cam_id), PLATE_SKILL) is True
+    assert sa.camera_adopted(s.get(Camera, ids["lobby"]), PLATE_SKILL) is False
+    s.close()
+
+
+def test_a_disabled_app_does_not_shrink_another_consumers_claim(world):
+    """Union semantics: one consumer going quiet must not take a skill
+    away from the others who asked for it."""
+    ids, Session = world["ids"], world["Session"]
+    tc = world["tc"]
+    _pick(Session, "license-plate-recognition", ids["yard"])
+    s = Session()
+    # The camera page's own platform row, on the same skill.
+    sa.declare(s, skill=PLATE_SKILL, camera_id=ids["yard"],
+               consumer=sa.OPERATOR_CONSUMER)
+    s.commit()
+    s.close()
+
+    tc.post("/apps/license-plate-recognition/disable")
+
+    s = Session()
+    # The operator asked for plate OCR here; the app's state is not theirs.
+    assert sa.camera_adopted(s.get(Camera, ids["yard"]), PLATE_SKILL) is True
+    s.close()
+
+
+def test_a_disabled_apps_tier0_labels_stop_widening_the_camera(world):
+    """A pick's labels widen Tier-0's tracked set. A disabled app must
+    not keep that widening — it is compute the app asked for."""
+    tc, ids, Session = world["tc"], world["ids"], world["Session"]
+    s = Session()
+    app = s.get(InstalledApp, "occupancy-counting")
+    app.manifest_json = {**_manifest("occupancy-counting", ["occupancy"]),
+                         "tier0_labels": ["backpack"]}
+    s.commit()
+    s.close()
+    _pick(Session, "occupancy-counting", ids["gate"])
+
+    s = Session()
+    assert s.get(Camera, ids["gate"]).assignments == [
+        {"skill": "occupancy_counting", "labels": ["backpack"]}]
+    s.close()
+
+    tc.post("/apps/occupancy-counting/disable")
+
+    s = Session()
+    assert s.get(Camera, ids["gate"]).assignments is None
+    s.close()
+
+
+def test_disable_reprojects_every_camera_the_app_picked(world):
+    tc, ids, Session = world["tc"], world["ids"], world["Session"]
+    for cam in ("gate", "yard", "lobby"):
+        _pick(Session, "occupancy-counting", ids[cam])
+    tc.post("/apps/occupancy-counting/disable")
+    s = Session()
+    for cam in ("gate", "yard", "lobby"):
+        assert s.get(Camera, ids[cam]).assignments is None
+    s.close()
+
+
+def test_declaring_a_pick_for_a_disabled_app_stays_dormant(world):
+    """Picking a camera while the app is off records the choice without
+    switching compute on — it lights up when the app is enabled."""
+    tc, ids, Session = world["tc"], world["ids"], world["Session"]
+    tc.post("/apps/license-plate-recognition/disable")
+    _pick(Session, "license-plate-recognition", ids["yard"])
+
+    s = Session()
+    assert sa.camera_adopted(s.get(Camera, ids["yard"]), PLATE_SKILL) is False
+    s.close()
+
+    tc.post("/apps/license-plate-recognition/enable")
+    s = Session()
+    assert sa.camera_adopted(s.get(Camera, ids["yard"]), PLATE_SKILL) is True
+    s.close()
+
+
+def test_the_registry_agrees_with_compute_about_a_disabled_app(world):
+    """`assignments_by_skill` feeds GET /skills. Compute follows the
+    projection, so this map has to as well — otherwise the registry
+    calls a skill active on a camera where nothing is computing."""
+    tc, ids, Session = world["tc"], world["ids"], world["Session"]
+    _pick(Session, "license-plate-recognition", ids["yard"])
+    s = Session()
+    assert sa.assignments_by_skill(s) == {PLATE_SKILL: [ids["yard"]]}
+    s.close()
+
+    tc.post("/apps/license-plate-recognition/disable")
+
+    s = Session()
+    assert sa.assignments_by_skill(s) == {}
+    s.close()
+
+    tc.post("/apps/license-plate-recognition/enable")
+    s = Session()
+    assert sa.assignments_by_skill(s) == {PLATE_SKILL: [ids["yard"]]}
+    s.close()
+
+
+def test_the_claims_view_shows_a_dormant_pick_without_counting_it(world):
+    """Hiding the claim would make the pick vanish from the one view
+    that exists so a release is never a surprise. It is shown, marked,
+    and left out of the union."""
+    tc, ids, Session = world["tc"], world["ids"], world["Session"]
+    _pick(Session, "license-plate-recognition", ids["yard"])
+    s = Session()
+    # Enabled: the key is sparse, so nothing changes shape.
+    claims = sa.skill_view(s, PLATE_SKILL)["cameras"][0]["consumers"]
+    assert claims == [{"consumer": "app:license-plate-recognition",
+                       "params": None}]
+    s.close()
+
+    tc.post("/apps/license-plate-recognition/disable")
+
+    s = Session()
+    view = sa.skill_view(s, PLATE_SKILL)
+    assert view["union"] == []
+    assert view["cameras"][0]["consumers"] == [
+        {"consumer": "app:license-plate-recognition", "params": None,
+         "dormant": True}]
+    s.close()
+
+
+def test_an_operators_claim_is_never_dormant(world):
+    tc, ids, Session = world["tc"], world["ids"], world["Session"]
+    _pick(Session, "license-plate-recognition", ids["yard"])
+    s = Session()
+    sa.declare(s, skill=PLATE_SKILL, camera_id=ids["yard"],
+               consumer=sa.OPERATOR_CONSUMER)
+    s.commit()
+    s.close()
+
+    tc.post("/apps/license-plate-recognition/disable")
+
+    s = Session()
+    view = sa.skill_view(s, PLATE_SKILL)
+    assert view["union"] == [ids["yard"]]     # the operator still wants it
+    by_consumer = {c["consumer"]: c for c in view["cameras"][0]["consumers"]}
+    assert by_consumer["operator"].get("dormant") is None
+    assert by_consumer["app:license-plate-recognition"]["dormant"] is True
+    assert sa.assignments_by_skill(s) == {PLATE_SKILL: [ids["yard"]]}
+    s.close()
+
+
+def test_label_sync_projects_off_one_disabled_app_lookup(world):
+    """Source lockstep: every project_camera loop passes the shared
+    lookup, or an app re-registration re-queries installed_apps once per
+    camera it picked."""
+    src = (REPO_ROOT / "server" / "services" / "skill_assignments.py").read_text(
+        encoding="utf-8")
+    for fn in ("def sync_app_pick_labels(", "def release_app_picks(",
+               "def reproject_app_cameras("):
+        body = src[src.index(fn):]
+        body = body[:body.index("\ndef ", 1)]
+        assert "project_camera(db, camera)" not in body, fn

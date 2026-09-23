@@ -39,6 +39,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A disabled app kept its camera picks switched on, so plate OCR went
+  on burning compute after ANPR was disabled** (#539). Disable flipped
+  `installed_apps.enabled` and nothing else: the app's picks stayed in
+  the assignment table and stayed in the `cameras.assignments`
+  projection, and everything that reads that projection kept working. A
+  disabled ANPR app still bought an inference on every vehicle, both in
+  Tier-1 dispatch and in core's visit enrichment — invisibly, since the
+  app itself had gone quiet. A disabled app is no longer a consumer: its
+  claims drop out of each camera's union, and enable/disable re-project
+  the cameras it picked. The picks themselves are untouched, so enabling
+  restores the operator's selection exactly, and a migration heals the
+  installs that disabled an app before this release.
+
 - **An app that built its platform client before registering ran on
   every camera.** An app holds more than one credential — the contract's
   and one per client it builds — and only the contract's was handed the
