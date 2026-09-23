@@ -71,14 +71,42 @@ def _labels_of(params: Optional[dict]) -> Optional[list[str]]:
     return cleaned or None
 
 
-def project_camera(db: Session, camera: Camera) -> None:
+def disabled_app_consumers(db: Session) -> frozenset[str]:
+    """The consumer strings of every installed app that is switched OFF.
+
+    A disabled app is not a consumer. Its picks stay in the table — the
+    operator's camera selection must survive a Disable, and an Enable
+    has to restore it exactly — but they contribute nothing to the
+    union while the app is off, which is what :func:`project_camera`
+    uses this for.
+    """
+    from models import InstalledApp
+
+    rows = (
+        db.query(InstalledApp.id)
+        .filter(InstalledApp.enabled.is_(False))
+        .all()
+    )
+    return frozenset(app_consumer(str(r[0])) for r in rows)
+
+
+def project_camera(db: Session, camera: Camera, *,
+                   disabled_consumers: Optional[frozenset[str]] = None) -> None:
     """Recompute ``camera.assignments`` from the table (no commit).
 
     Projection shape is exactly what the editor wrote historically:
     ``[{"skill": s} | {"skill": s, "labels": [...]}]`` — so every
     reader (Tier-0, SDK, internal endpoint, the editor's own prefill)
     is untouched.
+
+    Claims held by a DISABLED app are skipped (#539). Turning an app off
+    used to leave its picks in the projection, so every consumer that
+    reads the projection kept working: a disabled ANPR app went on
+    buying plate OCR on every vehicle, indefinitely and invisibly. Pass
+    ``disabled_consumers`` to project several cameras off one lookup.
     """
+    if disabled_consumers is None:
+        disabled_consumers = disabled_app_consumers(db)
     rows = (
         db.query(SkillAssignment)
         .filter(SkillAssignment.camera_id == camera.id)
@@ -87,6 +115,8 @@ def project_camera(db: Session, camera: Camera) -> None:
     )
     merged: dict[str, Optional[set[str]]] = {}
     for row in rows:
+        if row.consumer in disabled_consumers:
+            continue
         labels = _labels_of(row.params)
         if row.skill not in merged:
             merged[row.skill] = set(labels) if labels is not None else None
@@ -217,8 +247,9 @@ def sync_app_pick_labels(db: Session, app_id: str) -> int:
     if not changed:
         return 0
     db.flush()
+    disabled = disabled_app_consumers(db)
     for camera in db.query(Camera).filter(Camera.id.in_(cameras)).all():
-        project_camera(db, camera)
+        project_camera(db, camera, disabled_consumers=disabled)
     logger.info(
         "refreshed tier0 labels on %d camera pick(s) for app %s: %s",
         changed, app_id, ", ".join(labels) or "-",
@@ -299,7 +330,13 @@ def skill_view(db: Session, skill: str) -> dict[str, Any]:
 
     Live cameras only (#372) — the operator view must show the same
     union the consumers act on, or a binned camera's stale claim looks
-    like a working assignment."""
+    like a working assignment.
+
+    A DISABLED app's claim is shown (hiding it would make the pick
+    vanish from the view that exists so a release is never a surprise)
+    but carries ``"dormant": true`` and is left OUT of ``union``, which
+    has to mean the same thing here as it does in the projection: the
+    cameras this skill actually runs on (#539)."""
     rows = (
         db.query(SkillAssignment)
         .join(Camera, Camera.id == SkillAssignment.camera_id)
@@ -308,19 +345,29 @@ def skill_view(db: Session, skill: str) -> dict[str, Any]:
         .order_by(SkillAssignment.camera_id, SkillAssignment.consumer)
         .all()
     )
+    disabled = disabled_app_consumers(db)
     cameras: dict[int, list[dict[str, Any]]] = {}
+    union: set[int] = set()
     for row in rows:
-        cameras.setdefault(row.camera_id, []).append({
+        claim: dict[str, Any] = {
             "consumer": row.consumer,
             "params": row.params,
-        })
+        }
+        if row.consumer in disabled:
+            # Sparse on purpose: the key appears only where it says
+            # something, so every existing reader of this shape is
+            # untouched.
+            claim["dormant"] = True
+        else:
+            union.add(row.camera_id)
+        cameras.setdefault(row.camera_id, []).append(claim)
     return {
         "skill": (skill or "").strip(),
         "cameras": [
             {"camera_id": cid, "consumers": claims}
             for cid, claims in sorted(cameras.items())
         ],
-        "union": sorted(cameras),
+        "union": sorted(union),
     }
 
 
@@ -362,7 +409,13 @@ def assignments_by_skill(db: Session) -> dict[str, list[int]]:
     drops orphan rows whose camera was hard-deleted. When the last live
     assignment goes, the key disappears and the restriction correctly
     lifts (CAMERA_ASSIGNMENTS.md: 'the assignment list for that skill
-    is the whole truth' — the truth must not include tombstones)."""
+    is the whole truth' — the truth must not include tombstones).
+
+    A DISABLED app's claims are skipped for the same reason (#539).
+    This map is what the registry reports a skill as running on, and
+    compute follows the projection — which no longer counts a disabled
+    app. Reading the raw table here would have the registry call a skill
+    active on cameras where nothing is computing."""
     out: dict[str, set[int]] = {}
     rows = (
         db.query(SkillAssignment)
@@ -370,7 +423,10 @@ def assignments_by_skill(db: Session) -> dict[str, list[int]]:
         .filter(Camera.deleted_at.is_(None))
         .all()
     )
+    disabled = disabled_app_consumers(db)
     for row in rows:
+        if row.consumer in disabled:
+            continue
         out.setdefault(row.skill, set()).add(row.camera_id)
     return {k: sorted(v) for k, v in out.items()}
 
@@ -494,6 +550,30 @@ def apps_using_camera(db: Session, camera_id: int) -> list[str]:
     return sorted({r[0][len(APP_CONSUMER_PREFIX):] for r in rows})
 
 
+def reproject_app_cameras(db: Session, app_id: str) -> int:
+    """Recompute the projection of every camera this app picked, and
+    return how many were touched (no commit).
+
+    Enable/Disable call this: the flag decides whether the app's picks
+    count towards each camera's union, so flipping it has to reach the
+    projection or nothing downstream notices. Tier-0 picks the change up
+    on its next reconcile tick, like any assignment change.
+    """
+    rows = (
+        db.query(SkillAssignment.camera_id)
+        .filter(SkillAssignment.consumer == app_consumer(app_id))
+        .all()
+    )
+    camera_ids = {int(r[0]) for r in rows}
+    if not camera_ids:
+        return 0
+    disabled = disabled_app_consumers(db)
+    cameras = db.query(Camera).filter(Camera.id.in_(camera_ids)).all()
+    for camera in cameras:
+        project_camera(db, camera, disabled_consumers=disabled)
+    return len(cameras)
+
+
 def release_app_picks(db: Session, app_id: str) -> int:
     """Drop every pick an app holds and re-project those cameras (no
     commit). Uninstall calls this: nothing should keep running for an
@@ -508,8 +588,9 @@ def release_app_picks(db: Session, app_id: str) -> int:
         db.delete(row)
     db.flush()
     if camera_ids:
+        disabled = disabled_app_consumers(db)
         for camera in db.query(Camera).filter(Camera.id.in_(camera_ids)).all():
-            project_camera(db, camera)
+            project_camera(db, camera, disabled_consumers=disabled)
     if rows:
         logger.info("released %d camera pick(s) for app %s", len(rows), app_id)
     return len(rows)

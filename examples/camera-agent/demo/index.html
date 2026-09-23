@@ -524,6 +524,18 @@
     .ev-scope{font-size:0.66rem; color:var(--faint);}
     .ev-scope a{color:var(--accent); text-decoration:none;}
 
+    /* ── "OpenNVR is not answering" pill ─────────────────────────────── */
+    /* A transient state, deliberately NOT the login card: a slow core is
+       not an expired session. Sits above the page, below the overlay. */
+    #coreOffline{position:fixed; top:0.75rem; left:50%; transform:translateX(-50%); z-index:90;
+      display:flex; align-items:center; gap:0.45rem; padding:0.38rem 0.85rem; border-radius:999px;
+      background:rgba(20,29,48,0.94); border:1px solid var(--stroke2); color:var(--faint);
+      font-size:0.74rem; box-shadow:var(--shadow);}
+    #coreOffline[hidden]{display:none;}
+    #coreOffline .dot{width:7px; height:7px; border-radius:50%; background:#e0a33e;
+      animation:core-pulse 1.2s ease-in-out infinite;}
+    @keyframes core-pulse{0%,100%{opacity:1;} 50%{opacity:0.25;}}
+
     /* ── login overlay (auth_mode="opennvr") ─────────────────────────── */
     #loginOverlay{position:fixed; inset:0; z-index:100; display:flex; align-items:center; justify-content:center;
       padding:1rem; background:radial-gradient(60% 50% at 50% 32%, rgba(94,179,246,0.10), transparent 70%), rgba(4,7,13,0.82);
@@ -926,6 +938,12 @@
     </div>
   </div>
 
+  <!-- "OpenNVR is not answering": the agent could not reach core to
+       validate this session (HTTP 503). Transient by construction — the
+       page keeps its token and retries, rather than raising the login
+       card on a core that is merely busy. -->
+  <div id="coreOffline" hidden><span class="dot"></span><span>OpenNVR is not answering — reconnecting…</span></div>
+
   <!-- Login overlay (auth_mode="opennvr"): the agent proxies OpenNVR's
        login, so tokens are the server's own — one origin, mobile-same
        bearer contract, revocation/MFA stay the server's job. -->
@@ -971,20 +989,47 @@
     let _device=localStorage.getItem("agent_device_token")||"";
     const _rawFetch=window.fetch.bind(window);
     let _refreshing=null;
+    // "OpenNVR is not answering" — transient, and deliberately not the
+    // login card. The agent answers 503 when it could not ask core
+    // whether our token is good; that is a reason to wait, not to sign
+    // out. Self-clears so a page left idle doesn't keep a stale pill.
+    let _offlineT=null;
+    function showCoreOffline(){ const el=$("coreOffline"); if(!el) return;
+      el.hidden=false; clearTimeout(_offlineT);
+      _offlineT=setTimeout(()=>{ el.hidden=true; },15000); }
+    function hideCoreOffline(){ const el=$("coreOffline"); if(!el) return;
+      clearTimeout(_offlineT); el.hidden=true; }
+    // Is THIS 503 the agent saying it could not reach core? Other
+    // endpoints answer 503 for their own reasons — /frame does it for a
+    // camera that is simply off, and the page polls that constantly — so
+    // the status alone must not be read as "OpenNVR is down".
+    async function _coreUnreachable(r){
+      if(r.status!==503) return false;
+      try{ const d=await r.clone().json(); return !!(d&&d.error==="core_unreachable"); }
+      catch{ return false; }
+    }
+    // "ok" | "dead" | "unavailable". A refresh the SERVER refused ends the
+    // session; one it could not answer at all does not — treating those
+    // the same is what signed operators out whenever core got busy.
     async function _tryRefresh(){
-      if(!_refreshTok) return false;
+      if(!_refreshTok) return "dead";
       if(_refreshing) return _refreshing;   // collapse concurrent 401s
       _refreshing=(async()=>{
         try{ const r=await _rawFetch("/auth/refresh",{method:"POST",
             headers:{"Content-Type":"application/json"},
             body:JSON.stringify({refresh_token:_refreshTok})});
-          if(!r.ok) return false;
+          // Any 5xx on this route means the exchange did not complete
+          // (core down, gateway timeout, proxy error). Only a 4xx is the
+          // server actually refusing the refresh token.
+          if(r.status>=500) return "unavailable";
+          if(!r.ok) return "dead";
           const d=await r.json();
-          if(!d.access_token) return false;
+          if(!d.access_token) return "dead";
           _token=d.access_token; sessionStorage.setItem("agent_token",_token);
           if(d.refresh_token){ _refreshTok=d.refresh_token; sessionStorage.setItem("agent_refresh",_refreshTok); }
-          return true;
-        }catch{ return false; } finally{ setTimeout(()=>{_refreshing=null;},0); }
+          return "ok";
+        }catch{ return "unavailable"; }      // network error: can't tell
+        finally{ setTimeout(()=>{_refreshing=null;},0); }
       })();
       return _refreshing;
     }
@@ -996,14 +1041,23 @@
           if(_device) o.headers["X-Device-Token"]=_device; }
         return _rawFetch(url,o); };
       let r=await send();
-      if(r.status===401&&local&&_authMode==="opennvr"){
-        if(await _tryRefresh()) r=await send();
-        if(r.status===401) showLogin();
+      if(local&&_authMode==="opennvr"){
+        if(await _coreUnreachable(r)){ showCoreOffline(); return r; }
+        if(r.status===401){
+          const outcome=await _tryRefresh();
+          if(outcome==="unavailable"){ showCoreOffline(); return r; }
+          if(outcome==="ok"){
+            r=await send();
+            if(await _coreUnreachable(r)){ showCoreOffline(); return r; }
+          }
+          if(r.status===401) showLogin();
+        }
       }
       if(r.status===403&&local&&_authMode==="opennvr"){
         try{ const d=await r.clone().json();
           if(d&&d.error==="device_not_approved") showDeviceBlocked(); }catch{}
       }
+      if(local&&r.ok) hideCoreOffline();
       return r;
     };
     // Device-firewall denial: this browser is enrolled but not yet approved.

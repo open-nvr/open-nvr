@@ -1091,6 +1091,14 @@ async def enable_app(
         raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED,
                             detail=f"Cannot enable '{app_id}': {reason}")
     row.enabled = True
+    # The picks this app holds count again: re-project the cameras it
+    # picked so the union — and every consumer reading it — sees the
+    # skill come back (#539). Picks were never dropped on Disable, so
+    # this restores the operator's selection exactly.
+    from services.skill_assignments import reproject_app_cameras
+
+    db.flush()
+    reproject_app_cameras(db, app_id)
     db.commit()
     db.refresh(row)
 
@@ -1118,6 +1126,15 @@ async def disable_app(
     """
     row = _get_app_or_404(db, app_id)
     row.enabled = False
+    # A disabled app stops being a consumer: re-project its cameras so
+    # its picks drop out of the union (#539). Without this the app went
+    # quiet but the compute it switched on did not — a disabled ANPR
+    # kept buying plate OCR on every vehicle. The picks themselves stay,
+    # so Enable restores the selection.
+    from services.skill_assignments import reproject_app_cameras
+
+    db.flush()
+    reproject_app_cameras(db, app_id)
     db.commit()
     db.refresh(row)
 
