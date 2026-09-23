@@ -39,6 +39,21 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A slow core signed the camera agent's operators out mid-session**
+  (#540). The agent validates every request by asking core `GET
+  /api/v1/auth/me`, and a timeout on that call was swallowed into the
+  same answer core gives for a rejected token — then cached as a verdict
+  for a full minute, so one five-second hiccup 401'd every gated
+  endpoint behind it. The page tried its one silent refresh, the refresh
+  proxy answered `502` for the same reason, and the login card came up
+  while the operator's token was still perfectly good. "Could not ask"
+  is now distinct from "was refused": the gate answers `503` with
+  `Retry-After` (a WebSocket closes 1013), a token core validated
+  recently rides out a blip, a transport failure is never cached as a
+  verdict, and the page shows a reconnecting pill instead of logging
+  anyone out. A token core actually rejected is still rejected — an
+  outage never upgrades it.
+
 - **A disabled app kept its camera picks switched on, so plate OCR went
   on burning compute after ANPR was disabled** (#539). Disable flipped
   `installed_apps.enabled` and nothing else: the app's picks stayed in

@@ -67,6 +67,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from adapter_clients import (
     AppRegistryClient,
+    AuthUnavailable,
     KaicAdapterClient,
     KaicCapabilitiesClient,
     OllamaClient,
@@ -5813,7 +5814,17 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                                 status_code=403)
         authz = request.headers.get("authorization", "")
         token = authz[7:].strip() if authz.lower().startswith("bearer ") else ""
-        user = await runtime.auth.me(token) if (token and runtime.auth) else None
+        try:
+            user = await runtime.auth.me(token) if (token and runtime.auth) else None
+        except AuthUnavailable:
+            # We could not ASK whether this token is good. 503 says "try
+            # again"; a 401 here told the page the session was over and
+            # sent the operator back to the login card while their token
+            # was still valid (#540).
+            return JSONResponse(
+                {"error": "core_unreachable",
+                 "detail": "OpenNVR is not answering; retrying"},
+                status_code=503, headers={"Retry-After": "2"})
         if user is None:
             return JSONResponse({"error": "authentication required"},
                                 status_code=401)
@@ -7018,7 +7029,13 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                 await websocket.close(code=4403)   # 4403 = device blocked
                 return
             _tok = websocket.query_params.get("token", "")
-            _user = await runtime.auth.me(_tok) if (_tok and runtime.auth) else None
+            try:
+                _user = await runtime.auth.me(_tok) if (_tok and runtime.auth) else None
+            except AuthUnavailable:
+                # 1013 "try again later" — the socket is refused, not the
+                # session (#540): the page reconnects instead of logging out.
+                await websocket.close(code=1013)
+                return
             if _user is None:
                 await websocket.close(code=4401)   # 4401 = auth required
                 return
@@ -7091,7 +7108,13 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                 await websocket.close(code=4403)   # 4403 = device blocked
                 return
             _tok = websocket.query_params.get("token", "")
-            _user = await runtime.auth.me(_tok) if (_tok and runtime.auth) else None
+            try:
+                _user = await runtime.auth.me(_tok) if (_tok and runtime.auth) else None
+            except AuthUnavailable:
+                # 1013 "try again later" — the socket is refused, not the
+                # session (#540): the page reconnects instead of logging out.
+                await websocket.close(code=1013)
+                return
             if _user is None:
                 await websocket.close(code=4401)   # 4401 = auth required
                 return
