@@ -45,7 +45,7 @@ def _tools(events, caption):
     ctx = CameraContext(cameras=[CameraSpec(camera_id="cam1", frame_url="x", role="r")])
     return CameraTools(
         context=ctx, detection_client=None, caption_client=caption,
-        recognition_client=None, footage_index=None, events_client=events,
+        recognition_client=None, events_client=events,
         resolve_camera=lambda c: "3",   # agent cam -> server-side id
     )
 

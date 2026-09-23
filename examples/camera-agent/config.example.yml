@@ -151,14 +151,12 @@ event_ring_size: 256
 # nats_inference_url: nats://127.0.0.1:4222
 # nats_inference_token: # leave unset for anonymous
 
-# Optional: path to the footage-search SQLite index. When set (and the
-# index has been built by the footage-search example's `index`
-# subcommand), the agent gains a `search_footage` tool so the user can
-# ask about the recorded past in natural language — "did a red truck
-# come by the dock earlier?". Without it, that tool reports it's
-# unavailable. Point this at the same db_path the footage-search
-# indexer writes to.
-# footage_index_path: /data/footage_index.sqlite3
+# `search_footage` — "did a red truck come by the dock earlier?" — is
+# answered from the OpenNVR event store, so it needs opennvr_api_url
+# and nothing else. It used to need footage_index_path as well, a
+# read-only view of footage-search's SQLite index; that index was
+# deleted in footage-search 2.0.0 and the key is now ignored (the
+# agent warns at startup if it is still set). Remove it.
 
 # Labels your detection adapter can see BEYOND the standard YOLOv8/COCO-80
 # set. Alarm presets (the demo's one-click Fire / Smoke / Gas leak buttons)

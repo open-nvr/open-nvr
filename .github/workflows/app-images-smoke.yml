@@ -113,7 +113,7 @@ jobs:
 
           modules = [
               "camera_agent", "monitor_host", "adapter_clients", "context",
-              "tools", "services", "frame_sources", "serializer", "footage_index",
+              "tools", "services", "frame_sources", "serializer",
           ]
           for name in modules:
               importlib.import_module(name)

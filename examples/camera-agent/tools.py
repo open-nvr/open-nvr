@@ -381,7 +381,6 @@ class CameraTools:
         caption_client: KaicAdapterClient,
         detection_client: KaicAdapterClient,
         recognition_client: KaicAdapterClient,
-        footage_index: Any = None,
         best_frame_fetch: Any = None,
         resolve_camera: Any = None,
         events_client: Any = None,
@@ -401,34 +400,32 @@ class CameraTools:
         # instead of an arbitrary live grab — more accurate and cheaper. None (or a
         # miss) falls back to the live frame, so behaviour is unchanged without it.
         self._best_frame_fetch = best_frame_fetch
-        # Optional read-only FootageIndex (footage_index.FootageIndex).
-        # When None or unavailable, search_footage reports that cleanly.
-        self._footage_index = footage_index
         # Optional SDK EventsClient — the platform's memory (canonical event
         # store). Powers search_history: past visits with best-frame evidence,
         # optionally face-matched. None = tool reports history isn't enabled.
         self._events = events_client
-        # Optional SDK TimelineAPI — the platform's SEARCH over that same
-        # canonical store (``/api/v1/internal/app/search``, the operator
-        # Search page's own query). This is what search_footage now uses;
-        # the private SQLite index above is only its fallback.
+        # SDK TimelineAPI — the platform's search over the canonical event
+        # store (``/api/v1/internal/app/search``, the operator Search
+        # page's own query). The ONLY source search_footage has.
         self._timeline = timeline
-        # How search_footage has actually been answered since start-up.
-        # The private SQLite index is now only an outage fallback, and the
-        # open question is whether it still earns a second store with its
-        # own retention policy. That is a question about deployments, not
-        # about opinions, so the agent counts rather than guesses:
+        # How search_footage has been answered since start-up.
         #
-        #   canonical       the platform store answered (the normal path)
-        #   index_fallback  core was unreachable and the index answered
-        #   unanswerable    core was unreachable and nothing could answer
+        #   canonical     the store answered (the normal path)
+        #   unanswerable  the store could not be reached, and rather than
+        #                 guess, the agent said so
         #
-        # A month of index_fallback == 0 is the evidence for deleting the
-        # index. A month of it > 0 is the evidence for keeping it, and
-        # says how often an operator would otherwise have been told
-        # nothing during an outage.
+        # There used to be a third, `index_fallback`, counting queries the
+        # private SQLite index served during an outage. It was here to
+        # answer whether that index still earned a second store with its
+        # own retention policy, by evidence rather than opinion. The
+        # question closed itself: footage-search 2.0.0 deleted the index,
+        # so nothing writes the file any more and a fallback to it would
+        # be a fallback to whatever was true on the day of the upgrade.
+        # Stale footage descriptions served as current ones is a worse
+        # outage than no answer, so the honest answer is the only one
+        # left.
         self.footage_search_sources: dict[str, int] = {
-            "canonical": 0, "index_fallback": 0, "unanswerable": 0,
+            "canonical": 0, "unanswerable": 0,
         }
         # Cameras touched by the most recent tool call — read by /converse
         # so the UI can show which camera(s) the agent is working on.
@@ -988,26 +985,29 @@ class CameraTools:
         """Search recorded footage by words.
 
         Answered from the PLATFORM's canonical store (``timeline.find``,
-        the same query the operator's Search page runs), with the
-        footage-search app's private SQLite index kept only as a fallback
-        for when core cannot be reached.
+        the same query the operator's Search page runs). There is no
+        second source and, deliberately, no fallback.
 
-        It used to be the other way round, with the index as the only
-        source, and that cost more than duplication. The index is one row
-        per analyzed FRAME — hence its 60-second coalescing hack, because
-        "a person sitting in frame is thousands of identical rows" — it
-        has no camera scoping of its own, it carries a second 30-day
-        retention policy on a second store, it holds no evidence photo,
-        plate or skill claims, and it exists at all only if an operator
-        installed an optional app AND set footage_index_path. The
-        canonical store is one row per VISIT, scoped by the predicate
-        everything else uses, and each hit carries its evidence frame and
-        what each skill claimed about it.
+        It used to read footage-search's private SQLite index, first as
+        the only source and then as an outage fallback. That index is
+        gone: footage-search 2.0.0 deleted it, so the file is either
+        absent or frozen at whatever was true on the day of the upgrade.
+        Falling back to it would mean answering "was anyone at the gate
+        last night?" from a database that stopped being written in
+        August — and doing so during an outage, when nobody is in a
+        position to notice. In a security product a stale answer
+        presented as a current one is worse than no answer, so when the
+        store cannot be reached this says so.
+
+        The index was the wrong shape besides. One row per analyzed
+        FRAME, hence its 60-second coalescing hack; no camera scoping of
+        its own; a second 30-day retention policy on a second store; no
+        evidence photo, plate or skill claims. The canonical store is
+        one row per VISIT, scoped by the predicate everything else uses,
+        and each hit carries its evidence frame and what each skill
+        claimed about it.
         """
-        if self._timeline is None and (
-            self._footage_index is None
-            or not getattr(self._footage_index, "available", False)
-        ):
+        if self._timeline is None:
             self.footage_search_sources["unanswerable"] += 1
             return (
                 "Footage search isn't available — this agent has no "
@@ -1087,67 +1087,33 @@ class CameraTools:
             # None means "could not reach the store", which is NOT the
             # same as "nothing matched" — in a security product those are
             # different answers, so only the second one is reported as a
-            # result. The first falls through to the index if there is
-            # one, and is stated plainly if there is not.
-            if answer is not None:
-                self.footage_search_sources["canonical"] += 1
-                results = answer.get("results") or []
-                if not results:
-                    return f"No recorded footage matched {phrase!r}."
-                lines = []
-                for r in results:
-                    when = r.get("started_at") or ""
-                    cam = r.get("camera_id")
-                    descr = (r.get("caption") or r.get("label") or "match")
-                    extra = ""
-                    if r.get("plate_text"):
-                        extra += f", plate {r['plate_text']}"
-                    if r.get("has_evidence"):
-                        extra += " (photo kept)"
-                    lines.append(f"[#{r.get('id')}] {when} on camera {cam}: {descr}{extra}")
-                total = answer.get("total")
-                head = "Found in recorded footage"
-                if isinstance(total, int) and total > len(results):
-                    head += f" ({len(results)} of {total})"
-                return head + ":\n" + "\n".join(lines)
+            # result. The first is stated plainly, because there is
+            # nowhere honest left to fall through to.
+            if answer is None:
+                self.footage_search_sources["unanswerable"] += 1
+                return ("Could not reach the event store, so I cannot say "
+                        "whether anything matched.")
 
-        # ── Fallback: the app's private index, if one is configured ──
-        if self._footage_index is None or not getattr(
-            self._footage_index, "available", False
-        ):
-            self.footage_search_sources["unanswerable"] += 1
-            return ("Could not reach the event store, and no local footage "
-                    "index is configured — so I cannot say whether anything "
-                    "matched.")
-        try:
-            hits = self._footage_index.search(
-                keywords=keywords, within_minutes=within_minutes,
-                camera_id=camera_id,
-            )
-        except Exception:
-            self.footage_search_sources["unanswerable"] += 1
-            logger.exception("search_footage: index query failed")
-            return "Footage search failed."
-
-        self.footage_search_sources["index_fallback"] += 1
-        logger.warning(
-            "search_footage: answered from the private SQLite index because "
-            "the canonical store could not be reached (index_fallback=%d "
-            "since start-up)",
-            self.footage_search_sources["index_fallback"],
-        )
-
-        if not hits:
-            return f"No recorded footage matched {phrase!r}."
-
-        import time as _time
-        now = _time.time()
-        lines = []
-        for h in hits:
-            mins = max(0, int((now - h.ts) / 60))
-            descr = h.caption or (" ".join(h.labels) or "match")
-            lines.append(f"{mins} min ago on {h.camera_id}: {descr}")
-        return "Found in recorded footage:\n" + "\n".join(lines)
+            self.footage_search_sources["canonical"] += 1
+            results = answer.get("results") or []
+            if not results:
+                return f"No recorded footage matched {phrase!r}."
+            lines = []
+            for r in results:
+                when = r.get("started_at") or ""
+                cam = r.get("camera_id")
+                descr = (r.get("caption") or r.get("label") or "match")
+                extra = ""
+                if r.get("plate_text"):
+                    extra += f", plate {r['plate_text']}"
+                if r.get("has_evidence"):
+                    extra += " (photo kept)"
+                lines.append(f"[#{r.get('id')}] {when} on camera {cam}: {descr}{extra}")
+            total = answer.get("total")
+            head = "Found in recorded footage"
+            if isinstance(total, int) and total > len(results):
+                head += f" ({len(results)} of {total})"
+            return head + ":\n" + "\n".join(lines)
 
     # ── Helpers ────────────────────────────────────────────────────
 

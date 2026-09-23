@@ -121,30 +121,32 @@ def test_contract_routes_exist_and_are_open():
         assert "llm_error" in body and "vision_error" in body
 
 
-def test_state_reports_which_store_answered_footage_search():
-    """The counter exists to decide whether the private SQLite index is
-    still earning its place. That decision needs a number somebody can
-    read, and for a month it was written to memory and exposed nowhere:
-    the fallback logs a warning, but `index_fallback == 0` is the
-    reading the decision turns on and zero events log nothing at all.
+def test_state_reports_whether_footage_search_could_be_answered():
+    """These counters were added to decide, by evidence rather than
+    opinion, whether the private SQLite index still earned a second
+    store. `index_fallback` was the reading the decision turned on.
 
-    `canonical` beside it is what makes the zero mean anything. Without
-    it, "the index never served a query" is indistinguishable from
-    "nobody searched" and from "this build was never deployed", and
-    those are three different answers to the same question.
+    The decision resolved without the month of data: footage-search
+    2.0.0 deleted the index, so nothing writes that file and a fallback
+    to it would serve whatever was true on the day of the upgrade. The
+    counter went with it.
+
+    What remains is still worth exposing. `unanswerable` climbing means
+    operators are asking about the past during outages and being told
+    nothing — which is the honest answer, but a number worth watching,
+    because it is the cost this change accepted.
     """
     runtime = CameraAgentRuntime(_cfg())
     body = runtime.contract_state()
 
     assert "footage_search" in body
-    assert set(body["footage_search"]) == {
-        "canonical", "index_fallback", "unanswerable"}
+    assert set(body["footage_search"]) == {"canonical", "unanswerable"}
 
     runtime.tools.footage_search_sources["canonical"] += 3
-    runtime.tools.footage_search_sources["index_fallback"] += 1
+    runtime.tools.footage_search_sources["unanswerable"] += 1
     after = runtime.contract_state()
     assert after["footage_search"]["canonical"] == 3
-    assert after["footage_search"]["index_fallback"] == 1
+    assert after["footage_search"]["unanswerable"] == 1
     # A copy, not the live dict: /state is a public door and a reader
     # must not be able to reach in and reset the evidence.
     after["footage_search"]["canonical"] = 999
