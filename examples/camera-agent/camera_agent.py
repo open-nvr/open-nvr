@@ -4954,6 +4954,16 @@ class CameraAgentRuntime:
             "llm_model": self.cfg.llm_model,
             "llm_error": getattr(self, "last_llm_error", None),
             "vision_error": getattr(self.tools, "last_vision_error", None),
+            # Which store has answered footage search since start-up.
+            # This is here because a counter nobody can read is not
+            # evidence: the fallback logs a warning, but the reading the
+            # deletion question actually needs is index_fallback == 0,
+            # and zero events produce zero log lines. Without `canonical`
+            # beside it there is no way to tell "the index never served a
+            # query" from "nobody ever searched" or "this build was never
+            # deployed", and those are three different answers.
+            "footage_search": dict(
+                getattr(self.tools, "footage_search_sources", {}) or {}),
         }
 
     async def register_with_app_catalog(self) -> bool:
