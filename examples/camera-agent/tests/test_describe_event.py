@@ -40,7 +40,7 @@ def _tools(events, caption):
     ctx = CameraContext(cameras=[CameraSpec(camera_id="cam1", frame_url="x", role="r")])
     return CameraTools(
         context=ctx, detection_client=None, caption_client=caption,
-        recognition_client=None, footage_index=None, events_client=events,
+        recognition_client=None, events_client=events,
     )
 
 
@@ -71,7 +71,7 @@ def test_describe_event_no_photo_is_reported():
 def test_describe_event_needs_history_enabled():
     ctx = CameraContext(cameras=[CameraSpec(camera_id="cam1", frame_url="x", role="r")])
     tools = CameraTools(context=ctx, detection_client=None, caption_client=_VQAClient(),
-                        recognition_client=None, footage_index=None)  # no events_client
+                        recognition_client=None)  # no events_client
     out = asyncio.run(tools.describe_event({"event_id": 1}))
     assert "History isn't enabled" in out
 

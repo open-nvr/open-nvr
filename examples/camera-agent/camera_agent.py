@@ -252,13 +252,6 @@ class AppConfig:
     nats_inference_url: str | None = None
     nats_inference_token: str | None = None
 
-    # Optional path to the footage-search SQLite index. When set and the
-    # file exists, the agent gains a ``search_footage`` tool that answers
-    # natural-language questions about the recorded past ("did a red
-    # truck come by earlier?"). Build the index with the footage-search
-    # example's ``index`` subcommand.
-    footage_index_path: str | None = None
-
     # Labels the deployment's detection adapter can see BEYOND the standard
     # YOLOv8/COCO-80 set. Alarm presets (GET /alarm-presets) are greyed out
     # when their target isn't detectable — a "Fire" preset that could never
@@ -2833,6 +2826,22 @@ def load_config(path: str | Path) -> AppConfig:
         raise SystemExit("config: auth_mode 'opennvr' requires opennvr_api_url "
                          "(the server that validates tokens)")
 
+    if raw.get("footage_index_path"):
+        # Retired with footage-search 2.0.0, which deleted the SQLite
+        # index this pointed at. Nothing writes that file any more, so
+        # the agent would be reading whatever happened to be true on the
+        # day of the upgrade — and reading it during an outage, when
+        # nobody is positioned to notice the dates are months old. A
+        # stale answer presented as a current one is worse than no
+        # answer, so the key is ignored rather than honoured, and said
+        # out loud rather than ignored silently.
+        logger.warning(
+            "config: footage_index_path (%s) is no longer used. "
+            "footage-search 2.0.0 deleted the index it read; footage "
+            "search is answered from the OpenNVR event store "
+            "(opennvr_api_url). Remove the key.",
+            raw["footage_index_path"])
+
     _tls_cert = str(raw.get("tls_certfile") or "").strip() or None
     _tls_key = str(raw.get("tls_keyfile") or "").strip() or None
     if bool(_tls_cert) != bool(_tls_key):
@@ -2990,7 +2999,6 @@ def load_config(path: str | Path) -> AppConfig:
         event_ring_size=_int("event_ring_size", 256),
         nats_inference_url=raw.get("nats_inference_url"),
         nats_inference_token=raw.get("nats_inference_token"),
-        footage_index_path=raw.get("footage_index_path"),
         detector_extra_labels=[
             str(s).strip().lower()
             for s in (raw.get("detector_extra_labels") or [])
@@ -3211,27 +3219,6 @@ class CameraAgentRuntime:
                 cfg.opennvr_api_url,
             )
 
-        # Optional read-only footage-search index → enables search_footage.
-        self.footage_index = None
-        if cfg.footage_index_path:
-            from footage_index import FootageIndex
-
-            self.footage_index = FootageIndex(cfg.footage_index_path)
-            if self.footage_index.available:
-                logger.info(
-                    "camera-agent: footage index loaded from %s; "
-                    "search_footage tool enabled",
-                    cfg.footage_index_path,
-                )
-            else:
-                logger.info(
-                    "camera-agent: footage_index_path set (%s) but the index "
-                    "isn't readable yet — search_footage lights up "
-                    "automatically once the footage-search indexer has "
-                    "created it (the reader re-tries on every call)",
-                    cfg.footage_index_path,
-                )
-
         # Agent camera id → OpenNVR camera id (used on the Tier-0 bus subject,
         # the best-frame endpoint, and the events store). Resolved AT CALL TIME
         # against the live roster.
@@ -3315,7 +3302,6 @@ class CameraAgentRuntime:
             caption_client=self.caption_client,
             detection_client=self.detection_client,
             recognition_client=self.recognition_client,
-            footage_index=self.footage_index,
             best_frame_fetch=best_frame_fetch,
             resolve_camera=_resolve_camera,
             events_client=events_client,
@@ -3434,10 +3420,10 @@ class CameraAgentRuntime:
         # handlers degrade gracefully if the registry is momentarily down.
         if not self.skill_requirement_met("apps"):
             excluded.update(SKILL_TOOLS["apps"])
-        # Same principle for footage: with no footage_index_path configured
-        # there is nothing the tool could ever read, so the LLM shouldn't
-        # see it. When the path IS set, the tool stays advertised and
-        # degrades cleanly until the indexer has built the file.
+        # Same principle for footage: with no connection to the event
+        # store there is nothing the tool could ever read, so the LLM
+        # shouldn't see it. When core IS configured the tool stays
+        # advertised and degrades cleanly while core is unreachable.
         if not self.skill_requirement_met("footage"):
             excluded.update(SKILL_TOOLS["footage"])
         allow = None if self.cfg.enabled_tools is None else set(self.cfg.enabled_tools)
@@ -3731,10 +3717,10 @@ class CameraAgentRuntime:
             # canonical event store, so this is available wherever core
             # is configured rather than only where somebody additionally
             # installed the footage-search app and pointed the agent at
-            # its SQLite file. The index stays a fallback, so a box that
-            # has one and no core connection keeps working.
-            return (getattr(self, "timeline", None) is not None
-                    or getattr(self, "footage_index", None) is not None)
+            # its SQLite file. That file is the only other thing this
+            # ever read, and it no longer exists — so core is now the
+            # whole requirement.
+            return getattr(self, "timeline", None) is not None
         if req == "apps":
             # The app door is wired iff the OpenNVR server base URL is set —
             # then the AppRegistryClient exists. Configuration presence is the
@@ -3787,7 +3773,7 @@ class CameraAgentRuntime:
             "faces": "Set faces_url to the recognition adapter to enable.",
             "events": ("Set nats_inference_url (live events) or "
                        "opennvr_api_url (visit history) to enable."),
-            "footage": "Set opennvr_api_url so the agent can search the event store (or footage_index_path for the legacy local index).",
+            "footage": "Set opennvr_api_url so the agent can search the event store.",
             "apps": "Set opennvr_api_url to read installed catalog apps.",
         }
         out: list[dict[str, Any]] = []

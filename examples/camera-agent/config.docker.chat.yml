@@ -57,9 +57,6 @@ enabled_tools:
   - app_status
   - recent_app_alerts
 
-# See config.docker.yml — same read-only mount, same self-healing reader.
-footage_index_path: /footage/footage_index.sqlite3
-
 # 1.0 so the camera screen's 1 fps still refresh gets a new frame each
 # second (see config.docker.yml).
 frame_cache_ttl_seconds: 1.0

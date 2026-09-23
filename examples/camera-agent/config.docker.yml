@@ -184,13 +184,6 @@ event_ring_size: 256
 # standard stack compose (which uses INTERNAL_API_KEY).
 nats_inference_url: nats://nats:4222
 
-# The footage-search app's SQLite index, mounted read-only by the compose
-# overlay (volume opennvr_footage_search_data → /footage). Enables the
-# search_footage tool — "did a red truck come by earlier today?". The
-# reader re-tries on every call, so the tool lights up automatically once
-# the apps overlay's indexer has created the file; until then it reports
-# the index hasn't been built yet.
-footage_index_path: /footage/footage_index.sqlite3
 nats_inference_token: ${INTERNAL_API_KEY}
 
 # Load cameras from OpenNVR. OpenNVR returns internal MediaMTX frame-source
