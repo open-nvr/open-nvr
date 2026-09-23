@@ -106,8 +106,11 @@ The dialog's **Used by** line lists the apps this camera is selected for.
   With `DETECT_SKIP_UNASSIGNED=true` in `.env` (off by default), a camera
   whose claims are all detection-free skips Tier-0 entirely. Cameras
   selected for a detection app (occupancy, loitering, line-crossing,
-  intrusion, abandoned-object, package-delivery, smart-doorbell,
-  footage-search) are never skipped.
+  intrusion, abandoned-object, package-delivery, smart-doorbell) are
+  never skipped. footage-search is NOT one of them: it drives no
+  inference and searches whatever the store already holds, so selecting
+  it for a camera does not by itself keep Tier-0 running there — which
+  also means a camera skipped this way has nothing to find.
 * **Plate OCR** runs on cameras carrying `license_plate_recognition` —
   from this section, or from being selected for ANPR, which stores that
   same name.

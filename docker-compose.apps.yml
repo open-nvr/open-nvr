@@ -1346,10 +1346,15 @@ services:
       - opennvr_apps
 
   # ──────────────────────────────────────────────────────────────
-  # Footage search — indexes inference events (labels + captions)
-  # into SQLite; natural-language search from the App Catalog (the
-  # manifest-declared "search" action) or ``docker compose exec``.
-  # Contract surface on :9208 (health/state/actions + registration).
+  # Footage search — natural-language search over recorded footage,
+  # answered from the platform's event store. Queried from the App
+  # Catalog (the manifest-declared "search" action) or ``docker
+  # compose exec``. Contract surface on :9208 (health/state/actions
+  # + registration).
+  #
+  # As of 2.0.0 it keeps no index of its own: no NATS subscription
+  # and no data volume, because a second copy of the same footage
+  # with its own retention policy was the problem, not the feature.
   # ──────────────────────────────────────────────────────────────
   footage-search-config-init:
     # In BOTH profiles: ``apps`` (the everything-on profile / the
@@ -1381,8 +1386,9 @@ services:
   footage-search:
     # In BOTH profiles: ``apps`` (the everything-on profile / the
     # reconciler's) and ``default-apps`` — the profile start.sh/start.ps1
-    # enable on every stock install, because these apps ride the Tier-0
-    # stream that is always on and need no extra adapter, model, or GPU.
+    # enable on every stock install. It qualifies for a different reason
+    # than the others now: not that it rides the always-on Tier-0 stream,
+    # but that it rides nothing at all and costs a container.
     # Opt out with OPENNVR_DEFAULT_APPS=off in .env.
     profiles: [apps, default-apps, footage-search]
     build:
@@ -1396,8 +1402,8 @@ services:
     depends_on:
       footage-search-config-init:
         condition: service_completed_successfully
-      nats:
-        condition: service_healthy
+      # No `nats` here any more: nothing is subscribed to. core is the
+      # only dependency that matters, and it is the one it searches.
       opennvr-core:
         condition: service_healthy
       egress-proxy:
@@ -1406,7 +1412,6 @@ services:
       # Informational — this app reads everything from the generated
       # config.yml (no contract/registration keys in its config surface).
       - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
-      - NATS_URL=nats://nats:4222
       - OPENNVR_URL=http://opennvr-core:8000
       # Egress: apps sit on the internal opennvr_apps network; the only
       # way out is the egress proxy, which asks core whether THIS app may
@@ -1417,18 +1422,16 @@ services:
       - HTTP_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
       - HTTPS_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
       - NO_PROXY=opennvr-core,nats,nats-apps,egress-proxy,mediamtx,detect-pipeline,ollama,localhost,127.0.0.1
-    # Reserved catalog port — the app serves nothing today.
     expose:
       - "9208"
     volumes:
       - opennvr_footage_search_config:/app/config:ro
-      # The SQLite index (db_path: /app/data/footage_index.sqlite3) —
-      # persists across restarts and image rebuilds.
-      - opennvr_footage_search_data:/app/data
+      # No data volume: the app is stateless between restarts. Anything
+      # it can tell you, it reads from core when asked.
     command:
       - --config
       - /app/config/config.yml
-      - index
+      - serve
     networks:
       - opennvr_apps
 
@@ -1614,8 +1617,12 @@ volumes:
   # fine-tune. Kept out of the image so it stays small.
   opennvr_package_detection_weights:
   opennvr_footage_search_config:
-  # footage-search's persistent SQLite index (see its store.py).
-  opennvr_footage_search_data:
+  # opennvr_footage_search_data is gone — footage-search 2.0.0 keeps no
+  # index. An upgraded install still has the old volume on disk with
+  # nothing attached to it; `docker volume rm opennvr_footage_search_data`
+  # reclaims the space (the app's README says so too). Left for the
+  # operator to remove rather than pruned here: deleting somebody's data
+  # during an upgrade is not this file's business.
   opennvr_home_assistant_relay_config:
   opennvr_guard_scan_config:
   opennvr_guard_scan_sessions:

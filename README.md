@@ -235,7 +235,7 @@ Full details — model picks, hardware notes, how it works — in [`examples/cam
 | *"Is anyone in the kitchen?"* | LLM calls YOLOv8 on the current frame |
 | *"Did anyone walk past in the last ten minutes?"* | LLM queries the inference event ring on NATS |
 | *"Who was at the door this morning?"* | LLM calls InsightFace against your enrolled face DB |
-| *"Did a red truck come by the dock earlier?"* | LLM searches the recorded-footage index (when a [`footage-search`](examples/footage-search) index is configured) |
+| *"Did a red truck come by the dock earlier?"* | LLM searches the remembered visits in the event store |
 
 Under the hood: a local LLM (Ollama) doing OpenAI-style tool-calling over your live frames — or a cloud brain you bring. The LLM runtime is a dial, not a dependency: the bundled Ollama container (Linux default), an Ollama on the machine hosting Docker (`OLLAMA_EXTERNAL_URL` — the macOS/Windows default, where the host's GPU does the work), or any OpenAI-compatible endpoint. The default is the full hands-free voice loop (Pipecat · Silero VAD · Whisper STT · Piper TTS); `--chat` is the same agent, lighter, typed instead of spoken. No cloud and no API keys unless *you* choose a cloud model.
 
@@ -289,7 +289,7 @@ app = AdapterApp(
 
 What the contract makes straightforward to build (some already ship as examples):
 
-- **Natural-language footage search** — "find clips with a red truck at the dock yesterday" — ships today as the [`footage-search`](examples/footage-search) example, using scene captions plus the open-vocabulary [`vlm`](https://github.com/open-nvr/ai-adapter/tree/main/adapters/vlm) adapter.
+- **Natural-language footage search** — "find clips with a red truck at the dock yesterday" — ships today as the [`footage-search`](examples/footage-search) example, searching the captions and skill claims already attached to each remembered visit — sharpened by the open-vocabulary [`vlm`](https://github.com/open-nvr/ai-adapter/tree/main/adapters/vlm) adapter.
 - **Tracker-stable alert deduplication** for warehouses ("don't fire 'person detected' sixty times for the same forklift driver walking past").
 - **Pose-based fall detection** for memory-care facilities (needs a pose adapter; on the roadmap).
 - **Site-specific PPE compliance** for construction with the false-positive threshold tuned to what the insurer will accept.
@@ -308,7 +308,7 @@ Adapters are *capabilities*; applications are *solutions*. And every camera can 
 | [`occupancy-counting`](examples/occupancy-counting) | Zone occupancy with edge-triggered over/under alerts | intermediate |
 | [`line-crossing`](examples/line-crossing) | Directional tripwire / entry-exit counting (tracked) | intermediate |
 | [`abandoned-object`](examples/abandoned-object) | Unattended-item detection with owner-proximity suppression | advanced |
-| [`footage-search`](examples/footage-search) | Natural-language search over recorded inference ("red truck yesterday") | advanced |
+| [`footage-search`](examples/footage-search) | Natural-language search over recorded footage ("red truck yesterday") | intermediate |
 | [`license-plate-recognition`](examples/license-plate-recognition) | YOLOv8 + fast-plate-ocr chain with allowlists | intermediate |
 | [`smart-doorbell`](examples/smart-doorbell) | InsightFace recognition with REST enrollment | intermediate |
 | [`package-delivery`](examples/package-delivery) | Per-track state machine for arrival, linger, pickup | intermediate |

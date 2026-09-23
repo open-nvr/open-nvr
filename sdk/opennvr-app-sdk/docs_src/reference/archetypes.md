@@ -12,6 +12,8 @@ batch at once. Same process, same manifest, same alerts.
 
 ::: opennvr_app_sdk.AlertSubscriber
 
+::: opennvr_app_sdk.ContractApp
+
 ::: opennvr_app_sdk.DomainEventSubscriber
 
 ::: opennvr_app_sdk.app
