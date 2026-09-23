@@ -37,6 +37,7 @@ Run:
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import html
 import logging
 import queue
@@ -89,6 +90,10 @@ QUEUE_DEPTH = 500
 
 #: Alerts kept for the backtest ("this rule would have caught N").
 HISTORY_DEPTH = 2000
+#: How far back a backtest reaches into core's inbox. Enough to cover a
+#: month on a busy site; a rule change is judged on a season, not on an
+#: afternoon.
+BACKTEST_LIMIT = 2000
 
 #: Delivery log depth — what the operator pastes into a bug report.
 LOG_DEPTH = 200
@@ -1395,8 +1400,21 @@ class AlertNotifier(AlertSubscriber):
         return {"ok": True, "scope": scope, "was_paused": cleared}
 
     def action_backtest(self) -> dict[str, Any]:
+        """"If I changed this rule, what would have fired?"
+
+        Answered from the platform's alert inbox — the alerts THIS app
+        raised, which core has kept whether or not this process was
+        running when they happened.
+
+        It used to be answered from an in-memory deque, and said so in
+        its own output: "it does not read history it was not running
+        for." Which made the answer worth very little on the occasion
+        it mattered most, because the reason somebody backtests a rule
+        is usually that something went wrong recently — and a redeploy
+        or a crash between then and now emptied the evidence.
+        """
+        history, source = self._backtest_history()
         with self._lock:
-            history = list(self._history)
             counts = self._rules.backtest(history, tz_name=self._tz)
             shadowed = [
                 {"rule": self._rules.rules[i].name,
@@ -1408,10 +1426,68 @@ class AlertNotifier(AlertSubscriber):
             "since": self._clock(history[0].at) if history else "",
             "matches": counts,
             "never_fires": shadowed,
-            "note": ("Counted from the alerts this app has seen since it "
-                     "started — it does not read history it was not "
-                     "running for."),
+            "source": source,
         }
+
+    def _backtest_history(self) -> tuple[list[routing.Incident], str]:
+        """Past alerts to replay, newest-first from core, oldest-first out.
+
+        Falls back to the in-memory deque when core cannot be reached,
+        and SAYS which one it used. An operator reading "12 would have
+        fired" needs to know whether that was measured against a month
+        or against the twenty minutes since the last restart; the old
+        version left them to guess, and the number looks identical
+        either way.
+        """
+        try:
+            rows = self.nvr.alerts.inbox(limit=BACKTEST_LIMIT)
+        except Exception:  # noqa: BLE001 — a backtest is not worth a crash
+            logger.warning("backtest: inbox unavailable", exc_info=True)
+            rows = None
+        if not rows:
+            with self._lock:
+                local = list(self._history)
+            return local, ("the alerts this app has seen since it started "
+                           "— core's inbox could not be read")
+        history = [self._incident_from_row(r) for r in rows]
+        history = [i for i in history if i is not None]
+        history.sort(key=lambda i: i.at)
+        return history, f"core's alert inbox ({len(history)} alerts)"
+
+    @staticmethod
+    def _incident_from_row(row: dict[str, Any]) -> "routing.Incident | None":
+        """One inbox row as the shape the rules match against.
+
+        Deliberately not a second parser: every field here is one the
+        rules already read, and anything they do not read is left off
+        rather than guessed at. ``image`` is absent by design — a
+        backtest counts matches, it does not re-deliver.
+        """
+        when = row.get("observed_at") or row.get("fired_at") or ""
+        at = 0.0
+        if when:
+            try:
+                parsed = dt.datetime.fromisoformat(str(when).replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=dt.timezone.utc)
+                at = parsed.timestamp()
+            except (TypeError, ValueError):
+                return None
+        return routing.Incident(
+            title=str(row.get("title") or "Alert"),
+            description=str(row.get("description") or ""),
+            severity=str(row.get("severity") or "high"),
+            camera_id=str(row.get("camera_id") or ""),
+            camera_name=str(row.get("camera_name") or ""),
+            alert_type=str(row.get("alert_type") or ""),
+            source=str(row.get("source_name") or ""),
+            zones=list(row.get("zones") or []),
+            tags=list(row.get("tags") or []),
+            fired_at=str(row.get("fired_at") or ""),
+            alert_id=str(row.get("alert_id") or ""),
+            correlation_id=str(row.get("correlation_id") or ""),
+            at=at,
+        )
 
     def _who(self) -> str:
         try:

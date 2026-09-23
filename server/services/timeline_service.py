@@ -25,7 +25,7 @@ Routes stay thin; the semantics live here where tests can reach them:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func as _func
 from sqlalchemy.orm import Session
@@ -589,3 +589,112 @@ def vehicle_report(
             for d in sorted(per_day_counts)
         ],
     }
+
+
+# ── Subject binding: which visit is this frame looking at? ──────────
+#
+# RFC-0003. A frame-polling app has a camera, some bytes and an
+# instant; it has no event_id, so whatever it works out from the frame
+# has nowhere to go. That single gap is why smart-doorbell kept a
+# parallel visit log, why `face_id` had no producer, and why person
+# journeys were unreachable code.
+#
+# The objection to closing it was never that matching is impossible.
+# It was that a guessed subject becomes indistinguishable from a
+# measured one once written down. So the answer is not to match more
+# cleverly; it is to say which kind of match happened, every time, in
+# the row itself.
+
+#: How far outside every visit's span an instant may fall and still
+#: bind. Deliberately small: a doorbell frame is taken within a second
+#: or two of the person being there, and a window wide enough to be
+#: "safe" is wide enough to attach a name to the wrong visitor.
+DEFAULT_BIND_TOLERANCE_S = 5.0
+
+
+def resolve_visit(
+    db: Session,
+    *,
+    camera_id: int,
+    at: datetime,
+    scope: set[int] | None = None,
+    tolerance_s: float = DEFAULT_BIND_TOLERANCE_S,
+    label: str | None = None,
+) -> dict:
+    """Which visit was happening on this camera at this instant.
+
+    Returns ``{"event_id": int|None, "binding": str|None, "reason":
+    str}``. The three outcomes are deliberately distinct:
+
+    * exactly one visit's span CONTAINS the instant → ``window``. Not a
+      guess: the span is core's own record of when that object was
+      present, and the lookup is made by the component that owns it.
+    * nothing contains it, but one visit starts or ends within
+      ``tolerance_s`` → ``nearest``. This IS a guess, it is named one,
+      and a caller that must not act on a guess can refuse it.
+    * two or more visits contain it → NOTHING binds.
+
+    That last case is the one worth being stubborn about. A doorbell
+    frame taken while two people are at the door genuinely does not
+    identify which visit the face belongs to, and picking the closer
+    one would be inventing a fact. Ambiguity is an answer here, not an
+    error — the caller is told ``ambiguous`` and writes no claim.
+
+    ``label`` narrows to visits of one kind, which is how a face app
+    avoids binding to the delivery van parked behind the visitor.
+    """
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+
+    # A visit with no end is still open; treat "now" as its end so a
+    # frame taken during it can bind. An open visit that started after
+    # the instant cannot contain it either way.
+    q = (
+        db.query(TimelineEvent)
+        .filter(TimelineEvent.camera_id == int(camera_id))
+        .filter(TimelineEvent.event_type == "visit")
+    )
+    q = scope_query(q, TimelineEvent.camera_id, scope)
+    if label:
+        q = q.filter(TimelineEvent.label == label.strip().lower())
+
+    window = timedelta(seconds=max(0.0, float(tolerance_s)))
+    q = q.filter(SEEN_AT <= at + window)
+    rows = q.order_by(SEEN_AT.desc()).limit(64).all()
+
+    containing: list[TimelineEvent] = []
+    near: list[tuple[float, TimelineEvent]] = []
+    for row in rows:
+        start = seen_at_of(row)
+        if start is None:
+            continue
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        end = row.ended_at or at
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=timezone.utc)
+        if start <= at <= end:
+            containing.append(row)
+            continue
+        gap = min(abs((at - start).total_seconds()),
+                  abs((at - end).total_seconds()))
+        if gap <= window.total_seconds():
+            near.append((gap, row))
+
+    if len(containing) == 1:
+        return {"event_id": containing[0].id, "binding": "window",
+                "reason": "one visit was in progress"}
+    if len(containing) > 1:
+        return {"event_id": None, "binding": None, "reason": "ambiguous",
+                "candidates": sorted(r.id for r in containing)}
+    if near:
+        near.sort(key=lambda pair: pair[0])
+        # Two candidates equally close is the same ambiguity as two
+        # containing visits, and gets the same refusal.
+        if len(near) > 1 and abs(near[0][0] - near[1][0]) < 1e-6:
+            return {"event_id": None, "binding": None, "reason": "ambiguous",
+                    "candidates": sorted(r.id for _, r in near)}
+        return {"event_id": near[0][1].id, "binding": "nearest",
+                "reason": f"no visit covered the instant; nearest within "
+                          f"{near[0][0]:.1f}s"}
+    return {"event_id": None, "binding": None, "reason": "no visit"}

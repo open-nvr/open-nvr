@@ -59,6 +59,8 @@ caps   = nvr.ai.capabilities()                    # adapters, tasks, health
 | `timeline.find(text)` | `GET /internal/app/search` | roster |
 | `timeline.plate_stats/summary/sessions` | `GET /internal/app/plates/*` | roster |
 | `timeline.plates_inside()` | `GET /internal/app/plates/inside` | roster |
+| `timeline.visit_at(cam, at)` | `GET /internal/app/visits/at` | roster |
+| `timeline.add_claims(event_id, …)` | `POST /internal/app/visits/claims` | roster |
 | `alerts.inbox()` | `GET /internal/app/alerts` | the app's own alerts |
 | `site_mode()` | `GET /internal/app/site-mode` | the whole site (read-only: `disarmed` / `armed_home` / `armed_away`) |
 | `state.get/set/delete/items` | `GET/PUT/DELETE /internal/app/state[/{key}]` | the app's own namespace |

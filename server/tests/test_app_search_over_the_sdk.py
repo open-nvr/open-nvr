@@ -212,6 +212,52 @@ def test_plates_inside_needs_both_directions(timeline):
     assert answer == {"inside": 0, "plates": []}
 
 
+# ── subject binding over the wire (RFC-0003) ─────────────────────────
+
+
+def test_visit_at_resolves_over_the_wire(timeline):
+    """The call a frame-polling app makes. `at` is a datetime crossing
+    an HTTP boundary as a query parameter, which is the shape that
+    silently 422'd for camera lists."""
+    answer = timeline.visit_at(7, _T0 + timedelta(seconds=10))
+    assert answer is not None, "the store looked unreachable"
+    assert "binding" in answer, (
+        "binding is the whole point — without it a guessed subject is "
+        "indistinguishable from a measured one")
+
+
+def test_a_camera_the_app_does_not_hold_binds_nothing(timeline):
+    """Not a 403. Whether a visit exists on a camera this app was not
+    given is not this app's business either."""
+    answer = timeline.visit_at(999, _T0)
+    assert answer["event_id"] is None
+
+
+def test_claims_are_written_with_their_binding(timeline):
+    got = timeline.visit_at(7, _T0 + timedelta(seconds=10))
+    assert got["event_id"], "nothing to attach a claim to"
+
+    out = timeline.add_claims(
+        got["event_id"],
+        [{"kind": "face_id", "value": "Priya", "confidence": 0.9,
+          "source_task": "face_recognition"}],
+        binding=got["binding"])
+    assert out["written"] == 1
+    assert out["binding"] == got["binding"]
+
+
+def test_an_unknown_binding_is_refused_at_the_door(timeline):
+    """422 from the route, not a quiet coercion to 'direct' — which
+    would record the MOST trusted value for a claim nobody can vouch
+    for. A write that did not happen raises rather than returning
+    None, because "the claim was not recorded" has no quieter reading."""
+    got = timeline.visit_at(7, _T0 + timedelta(seconds=10))
+    with pytest.raises(Exception):
+        timeline.add_claims(got["event_id"],
+                            [{"kind": "face_id", "value": "x"}],
+                            binding="probably")
+
+
 # ── the encoder itself, so the reason is pinned next to the seam ─────
 
 

@@ -11,6 +11,7 @@ and that losing the store never stops the door ringing.
 """
 from __future__ import annotations
 
+import inspect
 import time
 from typing import Any
 from unittest.mock import MagicMock
@@ -18,6 +19,12 @@ from unittest.mock import MagicMock
 import pytest
 
 from face_recognition_pipeline import FaceRead
+from opennvr_app_sdk.client import TimelineAPI
+
+_REAL_VISIT_AT = inspect.signature(TimelineAPI.visit_at)
+_REAL_ADD_CLAIMS = inspect.signature(TimelineAPI.add_claims)
+_REAL_FIND = inspect.signature(TimelineAPI.find)
+
 from smart_doorbell import AppConfig, CameraConfig, SmartDoorbell
 from visit_log import MAX_ENTRIES, MAX_THUMBNAILS, STATE_KEY, VisitLog
 
@@ -40,11 +47,42 @@ class _Store:
         self.values[key] = value
 
 
+class _Timeline:
+    """core's RFC-0003 surface, reduced to what the doorbell asks of it.
+
+    Bound against the real client's signatures, so a rename in the SDK
+    breaks these tests rather than quietly letting them accept a call
+    no client can make — the fake that accepted anything is how the
+    camera-agent shipped a call to a method that did not exist.
+    """
+
+    def __init__(self, bound=None, visits=()):
+        #: What `visit_at` answers. None = core unreachable.
+        self.bound = bound
+        self.written: list[dict] = []
+        #: What `find` answers for the restored feed.
+        self.visits = list(visits)
+
+    def visit_at(self, camera, at, **kw):
+        _REAL_VISIT_AT.bind(self, camera, at, **kw)
+        return self.bound
+
+    def add_claims(self, event_id, claims, **kw):
+        _REAL_ADD_CLAIMS.bind(self, event_id, claims, **kw)
+        self.written.append({"event_id": event_id, "claims": list(claims), **kw})
+        return {"ok": True, "written": len(claims)}
+
+    def find(self, text="", **kw):
+        _REAL_FIND.bind(self, text, **kw)
+        return {"results": self.visits, "total": len(self.visits)}
+
+
 class _Nvr:
-    def __init__(self, store: _Store | None = None) -> None:
+    def __init__(self, store: _Store | None = None, timeline=None) -> None:
         self.state = store or _Store()
         self.saved: list[bytes] = []
         self.evidence: dict[str, bytes] = {}
+        self.timeline = timeline if timeline is not None else _Timeline()
 
     def save_evidence(self, jpeg: bytes) -> str:
         self.saved.append(jpeg)
@@ -243,12 +281,12 @@ def _config(**overrides) -> AppConfig:
     return base
 
 
-def _doorbell(reads, store: _Store | None = None, **cfg):
+def _doorbell(reads, store: _Store | None = None, timeline=None, **cfg):
     pipeline = MagicMock()
     pipeline.process_frame.side_effect = list(reads)
     dispatcher = MagicMock()
     app = SmartDoorbell(_config(**cfg), pipeline, dispatcher)
-    app.nvr = _Nvr(store or _Store())
+    app.nvr = _Nvr(store or _Store(), timeline=timeline)
 
     class _Stub:
         def fetch(self) -> bytes:
@@ -282,33 +320,117 @@ def test_a_visit_lands_in_the_durable_history(monkeypatch):
     assert kept[0]["recognized"] is False
 
 
-def test_a_recognised_visitor_is_recorded_without_another_photo():
-    """Their face is already in the gallery an operator enrolled; a copy
-    per visit would fill the log with pictures it already has."""
+def test_a_recognised_face_is_written_to_the_platform_not_a_local_log():
+    """The point of RFC-0003, and of this app's port.
+
+    The name used to live in this app's own key/value store, where the
+    operator's timeline could not see it and no other app could either.
+    It goes to the visit now, bound through core, with the binding
+    recorded — and the local store keeps no name at all.
+    """
+    tl = _Timeline(bound={"event_id": 8140, "binding": "window",
+                          "reason": "one visit was in progress"})
     store = _Store()
-    app, _ = _doorbell([_known()], store)
+    app, _ = _doorbell([_known()], store, timeline=tl)
     app.on_frame("front-door", b"\xff\xd8jpeg")
 
-    entry = store.values[STATE_KEY][0]
-    assert entry["recognized"] is True
-    assert entry["name"] == "Alice Smith"
-    assert "thumb" not in entry
+    assert len(tl.written) == 1
+    claim = tl.written[0]["claims"][0]
+    assert claim["kind"] == "face_id"
+    assert claim["value"] == "Alice Smith"
+    assert tl.written[0]["event_id"] == 8140
+    assert tl.written[0]["binding"] == "window"
+
+    # And nothing identifying stayed behind.
+    assert "Alice Smith" not in str(store.values), (
+        "the name is still in the app's own store")
+
+
+def test_an_unrecognised_visitor_claims_no_identity():
+    """"Somebody unknown was here" is already a visit in the store.
+    Writing `face_id: unknown` would turn the ABSENCE of an identity
+    into an assertion about one, and every reader counting faces would
+    count it."""
+    tl = _Timeline(bound={"event_id": 8140, "binding": "window"})
+    app, _ = _doorbell([_unknown()], _Store(), timeline=tl)
+    app.on_frame("front-door", b"\xff\xd8jpeg")
+
+    assert tl.written == []
+
+
+def test_an_ambiguous_instant_writes_no_name():
+    """Two people at the door. The frame does not say whose face it is,
+    core refuses to choose, and the doorbell must not choose either."""
+    tl = _Timeline(bound={"event_id": None, "binding": None,
+                          "reason": "ambiguous", "candidates": [1, 2]})
+    app, _ = _doorbell([_known()], _Store(), timeline=tl)
+    app.on_frame("front-door", b"\xff\xd8jpeg")
+
+    assert tl.written == []
+    assert app.state_snapshot()["identity_binding"]["ambiguous"] == 1
+
+
+def test_an_unreachable_core_loses_the_name_loudly_not_the_ring():
+    """The doorbell still rang — the alert goes out before any of this.
+    What must not happen is the name being silently dropped, because
+    "not recorded" is not a quieter version of "there was no name"."""
+    tl = _Timeline(bound=None)      # None = core unreachable
+    app, dispatcher = _doorbell([_known()], _Store(), timeline=tl)
+    app.on_frame("front-door", b"\xff\xd8jpeg")
+
+    assert dispatcher.dispatch.called, "the doorbell stopped ringing"
+    assert tl.written == []
+    assert app.state_snapshot()["identity_binding"]["unreachable"] == 1
+
+
+def test_a_guessed_binding_is_recorded_as_a_guess():
+    """`nearest` is allowed and labelled. A reader that must not act on
+    a guess filters on it; one that never sees the field cannot."""
+    tl = _Timeline(bound={"event_id": 8140, "binding": "nearest",
+                          "reason": "nearest within 2.0s"})
+    app, _ = _doorbell([_known()], _Store(), timeline=tl)
+    app.on_frame("front-door", b"\xff\xd8jpeg")
+
+    assert tl.written[0]["binding"] == "nearest"
+    assert app.state_snapshot()["identity_binding"]["nearest"] == 1
 
 
 def test_the_dashboard_comes_back_with_yesterdays_visitors():
+    """The feed is read from the PLATFORM now, so a redeploy shows what
+    the operator's timeline shows — not a second history that only this
+    app could see."""
+    tl = _Timeline(
+        bound={"event_id": 8140, "binding": "window"},
+        visits=[{
+            "id": 8140, "camera_id": 3, "camera_name": "front-door",
+            "started_at": "2026-09-22T19:04:00+00:00", "label": "person",
+            "claims": [{"kind": "face_id", "value": "Alice Smith"}],
+        }])
     store = _Store()
-    first, _ = _doorbell([_unknown()], store)
-    first.on_frame("front-door", b"\xff\xd8jpeg")
+    app, _ = _doorbell([_unknown()], store, timeline=tl)
 
-    # A redeploy: new process, same store.
-    second, _ = _doorbell([_unknown()], store)
-    snap = second.state_snapshot()
+    snap = app.state_snapshot()
     assert snap["recent"] == [], "history is read lazily, not in the ctor"
 
-    second.on_frame("front-door", b"\xff\xd8jpeg")
-    snap = second.state_snapshot()
+    app.on_frame("front-door", b"\xff\xd8jpeg")
+    snap = app.state_snapshot()
     assert len(snap["recent"]) == 2, "the restored visit and the new one"
+    assert any("Alice Smith recognised" in r["message"] for r in snap["recent"])
     assert any("Unknown visitor" in r["message"] for r in snap["recent"])
+
+
+def test_a_visit_with_no_face_claim_reads_as_unknown():
+    """Absent, not blank. A visit nobody recognised has no claim at
+    all, and the feed must say so rather than rendering an empty name."""
+    tl = _Timeline(visits=[{
+        "id": 1, "camera_id": 3, "camera_name": "front-door",
+        "started_at": "2026-09-22T19:04:00+00:00", "claims": [],
+    }])
+    app, _ = _doorbell([], _Store(), timeline=tl)
+    app._restore_history()
+
+    assert app.state_snapshot()["recent"][0]["name"] is None
+    assert "Unknown visitor" in app.state_snapshot()["recent"][0]["message"]
 
 
 def test_a_restored_tile_with_no_picture_says_so():

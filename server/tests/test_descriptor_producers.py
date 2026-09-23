@@ -56,15 +56,18 @@ sys.modules.setdefault("core.logging_config", _lm)
 KINDS_WITHOUT_A_PRODUCER: dict[str, str] = {
     "face_id": (
         "A name attached to a person is the most sensitive claim in the "
-        "set, and core deliberately does not produce it: "
+        "set, and CORE deliberately does not produce it: "
         "descriptor_enrichment refuses the kind outright, and "
         "descriptor_store keeps it out of the projected words so it "
         "cannot be reached by free-text search. It is left to an app the "
-        "operator installed on purpose. No such app writes one today, so "
-        "the face_id branches in journey are unreachable — correct, "
-        "priced, and never taken. That is a product decision to make "
-        "deliberately, not a bug to patch by having core start naming "
-        "people."
+        "operator installed on purpose, and as of RFC-0003 one exists — "
+        "smart-doorbell writes face_id through /internal/app/visits/"
+        "claims, roster-scoped, with the binding recorded so a guessed "
+        "subject stays distinguishable from a measured one. So this "
+        "entry no longer means the kind is never written; it means core "
+        "will not be the one writing it, which is the decision worth "
+        "keeping. The journey branches that price face_id ARE now "
+        "reachable on a deployment running that app."
     ),
 }
 

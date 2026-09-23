@@ -631,6 +631,9 @@ class VisitDescriptor(Base):
         # in this deployment is what decides whether it is weak evidence
         # or nearly an identifier.
         Index("ix_descriptor_kind_value", "kind", "value"),
+        # "everything not bound by a timestamp" is a filter a cautious
+        # reader applies to the largest table in the store.
+        Index("ix_descriptor_binding", "binding"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -649,6 +652,20 @@ class VisitDescriptor(Base):
     source_task = Column(String(40), nullable=True)
     source_adapter = Column(String(60), nullable=True)
     model_fingerprint = Column(String(120), nullable=True)
+    #: How the SUBJECT was determined — which visit this claim is about.
+    #: Everything else here qualifies the claim; this qualifies the
+    #: binding, and without it a guessed subject is indistinguishable
+    #: from a measured one once written down.
+    #:
+    #:   direct   the producer held the event_id
+    #:   window   core matched camera + instant inside the visit's span
+    #:   nearest  nothing covered the instant; the closest within a
+    #:            bounded tolerance was used — a guess, and named one
+    #:
+    #: A reader that must not act on a guess filters on this. An
+    #: ambiguous instant binds NOTHING rather than picking, so there is
+    #: no fourth value for "we chose between two".
+    binding = Column(String(16), nullable=False, server_default="direct")
     #: The KAI-C correlation id of the inference behind this claim — the
     #: join back to KAI-C's audit line, and so to the adapter and model
     #: version that made it. It is the difference between a descriptor
