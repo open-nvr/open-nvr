@@ -657,6 +657,20 @@ async def ingest_event_descriptors(
     if row is None:
         raise HTTPException(status_code=404, detail="unknown event")
 
+    # An APP key may only write to a camera it was given. This endpoint
+    # took the site key when it was written — the enricher and the agent
+    # are unscoped platform components — and then app keys became valid
+    # here too, which left any app able to attach a claim to any visit
+    # on the site. A claim can be a NAME; that is a worse hole than any
+    # read, and it was open because the scoping lives one layer up in
+    # the app routes and nobody carried it down here.
+    #
+    # 404 rather than 403: whether a visit exists on a camera this app
+    # does not hold is not this app's business either.
+    roster = _app_roster(db, principal)
+    if roster is not None and row.camera_id not in roster:
+        raise HTTPException(status_code=404, detail="unknown event")
+
     # One implementation, shared with core's own plan-driven enricher —
     # see services/descriptor_store for why the upsert key, the conflict
     # count and the ran_tasks rule must not exist twice.

@@ -646,9 +646,58 @@ class TestActions:
         assert result["matches"]["gate"] == 2
         assert result["matches"]["rest"] == 1
 
-    def test_the_backtest_is_honest_about_where_its_numbers_came_from(
-            self, app):
-        assert "since it" in app.action_backtest()["note"]
+    def test_the_backtest_reads_the_platforms_inbox(self, app):
+        """"If I changed this rule, what would have fired?" is answered
+        from the alerts core kept, not from what this process happened
+        to witness since it started."""
+        class _Alerts:
+            def inbox(self, **kw):
+                return [{
+                    "title": "Person at gate", "description": "",
+                    "severity": "high", "camera_id": "cam-gate",
+                    "camera_name": "Gate", "alert_type": "intrusion",
+                    "source_name": "intrusion-detection",
+                    "observed_at": "2026-09-01T02:00:00+00:00",
+                    "fired_at": "2026-09-01T02:00:01+00:00",
+                    "alert_id": "a1", "correlation_id": "c1",
+                    "tags": [], "zones": [],
+                }]
+
+        # `nvr` is a lazily-built property; set the backing attribute
+        # and mark the build as done so it is not overwritten.
+        app._nvr = type("N", (), {"alerts": _Alerts()})()
+        app._nvr_tried = True
+        out = app.action_backtest()
+
+        assert out["alerts_considered"] == 1
+        assert "inbox" in out["source"]
+
+    def test_the_backtest_says_which_history_it_used(self, app):
+        """An operator reading "12 would have fired" needs to know
+        whether that was measured against a month or against the
+        twenty minutes since the last restart. The number looks
+        identical either way, so the source has to be stated."""
+        # No client → core unreachable → the in-memory fallback.
+        out = app.action_backtest()
+        assert "could not be read" in out["source"]
+
+    def test_an_unparseable_timestamp_is_dropped_not_fatal(self, app):
+        """One bad row must not take the whole backtest down — every
+        other alert behind it would stop being counted too."""
+        class _Alerts:
+            def inbox(self, **kw):
+                return [
+                    {"title": "bad", "observed_at": "not-a-date"},
+                    {"title": "good", "severity": "high",
+                     "camera_id": "cam-gate", "camera_name": "Gate",
+                     "observed_at": "2026-09-01T02:00:00+00:00"},
+                ]
+
+        # `nvr` is a lazily-built property; set the backing attribute
+        # and mark the build as done so it is not overwritten.
+        app._nvr = type("N", (), {"alerts": _Alerts()})()
+        app._nvr_tried = True
+        assert app.action_backtest()["alerts_considered"] == 1
 
     def test_check_runs_every_probe_now(self, app):
         assert app.on_action("check", {})["results"] == {"phone": "ok"}

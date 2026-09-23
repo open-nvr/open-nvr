@@ -98,6 +98,22 @@ class _AsyncHttp:
             raise PlatformError(f"PUT {path} → HTTP {r.status_code}: {r.text[:200]}")
         return r.json()
 
+    # Unlike ``get_json``, a failed write RAISES. A read that cannot be
+    # served returns None and the caller decides; a write that did not
+    # happen has no such reading — "the claim was not recorded" is not
+    # a quieter version of "there was nothing to record", and an app
+    # that swallowed it would believe it had written a name it had not.
+    async def post_json(self, path: str, body: Any, **params) -> Any:
+        url = f"{self.base}{path}{query_string(params)}"
+        try:
+            r = await self._client.post(url, json=body, headers=self.headers())
+        except Exception as exc:  # noqa: BLE001
+            raise PlatformError(f"POST {path} failed: {exc}") from exc
+        if r.status_code >= 400:
+            raise PlatformError(f"POST {path} → HTTP {r.status_code}: {r.text[:200]}")
+        return r.json()
+
+
     async def post_bytes(self, path: str, body: bytes, content_type: str,
                          **params) -> Any:
         url = f"{self.base}{path}{query_string(params)}"
@@ -223,6 +239,51 @@ class AsyncTimelineAPI:
             in_cameras=",".join(str(_camera_id(c)) for c in in_cameras),
             out_cameras=",".join(str(_camera_id(c)) for c in out_cameras))
 
+
+    async def visit_at(self, camera, at, *, label: str | None = None,
+                       tolerance_s: float = 5.0) -> dict | None:
+        """Which visit was happening on this camera at this instant.
+
+        ``{"event_id": int|None, "binding": "window"|"nearest"|None,
+        "reason": str}``.
+
+        This is how a frame-polling app attaches what it learns to a
+        visit. It has a camera, some bytes and a moment; it has no
+        ``event_id``, and before this there was nowhere for its
+        conclusion to go — which is why smart-doorbell kept a parallel
+        visit log and why ``face_id`` had no producer.
+
+        ``binding`` is the honest part. ``window`` means a visit's own
+        span contained the instant: a lookup made by the component that
+        owns the span, not a guess. ``nearest`` means nothing contained
+        it and the closest within tolerance was used, which IS a guess —
+        an app that must not act on one checks this field. ``event_id``
+        of ``None`` with reason ``ambiguous`` means two visits covered
+        the instant and neither was chosen; write nothing.
+
+        ``None`` for the whole call means core could not be reached,
+        which is not the same as "no visit".
+        """
+        return await self._http.get_json(
+            "/api/v1/internal/app/visits/at", camera=_camera_id(camera),
+            at=_iso(at), label=label, tolerance_s=tolerance_s)
+
+    async def add_claims(self, event_id: int, claims, *, binding: str = "direct",
+                         ran_tasks=()) -> dict:
+        """Attach what this app worked out to a visit.
+
+        ``binding`` says how the subject was determined — pass back
+        what :meth:`visit_at` returned, or ``"direct"`` if the
+        ``event_id`` came with the event. It is recorded per claim, so
+        a reader can exclude anything bound by a timestamp.
+
+        Scoped: an app may only write to a camera it was given.
+        """
+        return await self._http.post_json(
+            "/api/v1/internal/app/visits/claims",
+            {"event_id": int(event_id), "binding": binding,
+             "claims": [dict(c) for c in claims],
+             "ran_tasks": list(ran_tasks)})
 
 class AsyncAlertsAPI:
     def __init__(self, http: _AsyncHttp) -> None:

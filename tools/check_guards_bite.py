@@ -69,6 +69,28 @@ MUTATIONS: list[tuple[str, str, str, str, str, str]] = [
      'return {"inside": len(inside), "plates": inside[:200]}',
      "server", "tests/test_plate_stats.py"),
 
+    # ── subject binding (RFC-0003) ───────────────────────────────────
+    ('an ambiguous instant picks a visit instead of refusing',
+     'server/services/timeline_service.py',
+     '    if len(containing) > 1:\n        return {"event_id": None, "binding": None, "reason": "ambiguous",\n                "candidates": sorted(r.id for r in containing)}',
+     '    if len(containing) > 1:\n        return {"event_id": containing[0].id, "binding": "window",\n                "reason": "picked one"}',
+     'server', 'tests/test_visit_binding.py'),
+    ('a guessed subject is recorded as a measured one',
+     'server/services/timeline_service.py',
+     '        return {"event_id": near[0][1].id, "binding": "nearest",',
+     '        return {"event_id": near[0][1].id, "binding": "window",',
+     'server', 'tests/test_visit_binding.py'),
+    ('an unknown binding is silently accepted',
+     'server/services/descriptor_store.py',
+     '    if binding not in BINDINGS:\n        raise ValueError(',
+     '    if False:\n        raise ValueError(',
+     'server', 'tests/test_visit_binding.py'),
+    ('an app writes a claim to a camera it was not given',
+     'server/routers/internal_camera_agent.py',
+     '    roster = _app_roster(db, principal)\n    if roster is not None and row.camera_id not in roster:\n        raise HTTPException(status_code=404, detail="unknown event")',
+     '    pass',
+     'server', 'tests/test_visit_binding.py'),
+
     # ── the canonical event store ────────────────────────────────────
     ("a plate retraction stops dropping the claim",
      "server/services/plate_enrichment.py",

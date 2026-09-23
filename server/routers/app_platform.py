@@ -39,6 +39,7 @@ from urllib.parse import urlencode
 from fastapi import (APIRouter, Body, Depends, HTTPException, Query, Request,
                      status)
 from fastapi.responses import FileResponse, Response
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from core.config import settings
@@ -354,6 +355,113 @@ async def app_plates_inside(
         hours=hours,
         scope=_app_roster(db, principal),
     )
+
+
+# ── Subject binding (RFC-0003) ──────────────────────────────────────
+
+
+@router.get("/visits/at")
+async def app_visit_at(
+    camera: str = Query(..., description="Camera id or handle."),
+    at: datetime = Query(..., description="The instant the frame was taken."),
+    label: str | None = Query(None, description="Narrow to one object class."),
+    tolerance_s: float = Query(5.0, ge=0.0, le=60.0),
+    principal=Depends(_require_internal_key),
+    db: Session = Depends(get_db),
+):
+    """Which visit was happening on this camera at this instant.
+
+    The whole reason frame-polling apps could not write to the store.
+    A ``FrameApp`` has a camera, some bytes and a moment; it has no
+    ``event_id``, so whatever it learns from the frame has nowhere to
+    go. smart-doorbell kept a parallel visit log for exactly this
+    reason, and the reason was good: attaching a name by matching
+    timestamps would make a guessed identity indistinguishable,
+    afterwards, from a measured one.
+
+    Indistinguishable is a property of the record, so the answer is to
+    say which kind of match happened. ``binding`` is ``window`` when a
+    visit's own span contained the instant — a lookup made by the
+    component that owns the span, not a guess — and ``nearest`` when
+    nothing contained it and the closest within ``tolerance_s`` was
+    used, which IS a guess and is named one.
+
+    Two visits covering the instant returns neither. A doorbell frame
+    taken while two people are at the door does not identify whose face
+    it is, and choosing would be inventing a fact.
+    """
+    from services.timeline_service import resolve_visit
+
+    cam_ids = _roster_ids(db, principal, _parse_ids(camera))
+    if not cam_ids:
+        # Not an error: an app asking about a camera it does not hold
+        # gets the same "nothing to bind to" it would get for a quiet
+        # camera, rather than a 403 that tells it the camera exists.
+        return {"event_id": None, "binding": None, "reason": "no visit"}
+    return resolve_visit(
+        db, camera_id=cam_ids[0], at=at, label=label,
+        tolerance_s=tolerance_s, scope=_app_roster(db, principal))
+
+
+class AppClaimIn(BaseModel):
+    kind: str = Field(..., max_length=40)
+    value: str = Field(..., max_length=120)
+    confidence: float | None = None
+    source_task: str | None = Field(None, max_length=40)
+    source_adapter: str | None = Field(None, max_length=60)
+    model_fingerprint: str | None = Field(None, max_length=120)
+    correlation_id: str | None = Field(None, max_length=64)
+
+
+class AppClaimsIn(BaseModel):
+    event_id: int
+    binding: str = Field("direct", max_length=16)
+    claims: list[AppClaimIn] = []
+    ran_tasks: list[str] = []
+
+
+@router.post("/visits/claims")
+async def app_write_claims(
+    payload: AppClaimsIn,
+    principal=Depends(_require_internal_key),
+    db: Session = Depends(get_db),
+):
+    """Attach what this app worked out to a visit.
+
+    Roster-scoped, unlike the camera-agent's descriptor endpoint this
+    is modelled on: an app may only write to a camera it was given.
+    Without that an app key could attach a claim — a NAME — to any
+    visit on the site, which is a worse hole than any read.
+
+    ``binding`` must be one the caller can justify. An app that
+    resolved the subject through ``/visits/at`` passes back what that
+    call returned; an app that already held the ``event_id`` says
+    ``direct``. It is recorded per claim, so a reader can exclude
+    anything bound by a timestamp in one filter.
+    """
+    from models import TimelineEvent
+    from services.descriptor_store import BINDINGS, apply_descriptors
+
+    binding = (payload.binding or "direct").strip().lower()
+    if binding not in BINDINGS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"binding must be one of {sorted(BINDINGS)}")
+
+    row = db.get(TimelineEvent, int(payload.event_id))
+    if row is None:
+        raise HTTPException(status_code=404, detail="unknown event")
+
+    roster = _app_roster(db, principal)
+    if roster is not None and row.camera_id not in roster:
+        # 404, not 403: whether a visit exists on a camera this app was
+        # not given is not this app's business either.
+        raise HTTPException(status_code=404, detail="unknown event")
+
+    written = apply_descriptors(db, row, payload.claims, payload.ran_tasks,
+                                binding=binding)
+    db.commit()
+    return {"ok": True, "written": written, "binding": binding}
 
 
 # ── Alerts: what this app raised ────────────────────────────────────

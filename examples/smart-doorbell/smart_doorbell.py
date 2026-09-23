@@ -285,6 +285,13 @@ class AppConfig:
     kaic_url: str
     kaic_api_key: str
     recognition_adapter: str = "insightface"
+    #: How far outside a visit's span the frame's instant may fall and
+    #: still attach the name (RFC-0003). Small on purpose: a doorbell
+    #: frame is taken within a second or two of the person being there,
+    #: and a window wide enough to feel safe is wide enough to attach a
+    #: name to the wrong visitor. 0 refuses to guess at all — only a
+    #: frame taken DURING a visit produces a claim.
+    bind_tolerance_seconds: float = 5.0
 
     # The InsightFace adapter's direct URL for face-DB CRUD. KAI-C
     # does not proxy the /faces/* routes, so the enroll subcommand
@@ -389,6 +396,8 @@ def load_config(path: str | Path) -> AppConfig:
         kaic_url=str(kaic_url),
         kaic_api_key=str(kaic_api_key),
         recognition_adapter=str(raw.get("recognition_adapter", "insightface")),
+        bind_tolerance_seconds=max(
+            0.0, float(raw.get("bind_tolerance_seconds", 5.0))),
         adapter_url=str(raw.get("adapter_url", "http://127.0.0.1:9005")),
         adapter_token=str(raw.get("adapter_token", "") or ""),
         cameras=cameras,
@@ -604,28 +613,6 @@ class _LazyNvr:
         return getattr(self._app.nvr, name)
 
 
-def _feed_line(item: dict[str, Any]) -> dict[str, Any]:
-    """One stored visit as the dashboard's "Recent visitors" row.
-
-    Built from the record rather than stored twice: the feed's wording
-    is presentation, and a restored visit must read exactly like a live
-    one or the log looks like two different logs.
-    """
-    display = item.get("name") or item.get("person_id") or "?"
-    recognized = bool(item.get("recognized"))
-    camera = item.get("camera") or "?"
-    return {
-        "message": (f"{display} recognised" if recognized
-                    else "Unknown visitor") + f" at {camera}",
-        "time": item.get("at"),
-        "level": "low" if recognized else "high",
-        "camera": camera,
-        "name": display if recognized else None,
-        "category": item.get("category") if recognized else None,
-        "similarity": item.get("similarity"),
-    }
-
-
 class SmartDoorbell(FrameApp):
     """Polls all configured cameras (via the SDK FrameApp loop), runs
     recognition, dispatches.
@@ -717,15 +704,26 @@ class SmartDoorbell(FrameApp):
         #: fall back to the deployment's site key, which core reads as a
         #: platform component: unscoped, every camera in the building.
         self._nvr: Any = None
-        #: Who came to the door, kept across restarts. Every collection
-        #: above this line is a deque that a redeploy empties.
-        self._history = VisitLog(
+        #: Stranger TILES, kept across restarts — a thumbnail, a camera
+        #: and a time. Presentation state for the wall, carrying no name:
+        #: identities live in the platform's store now (RFC-0003), where
+        #: they are scoped, auditable, and visible to the operator's own
+        #: pages rather than only to this app.
+        self._tiles = VisitLog(
             _LazyNvr(self),
             max_entries=self.config.history_max,
             max_days=self.config.history_days,
         )
         self._history_restored = False
         self._visit_seq = 0
+        #: How the identities this app wrote were bound — on /state, so
+        #: "is it guessing?" is answerable without reading a log. A
+        #: deployment where `nearest` climbs is one where the doorbell
+        #: sees faces between visits rather than during them.
+        self._claims: dict[str, int] = {
+            "window": 0, "nearest": 0, "ambiguous": 0,
+            "no visit": 0, "unreachable": 0, "failed": 0,
+        }
         #: Does anything ring, and with what. Separate from the alert
         #: path on purpose: every visit alerts, only some interrupt
         #: somebody.
@@ -753,27 +751,76 @@ class SmartDoorbell(FrameApp):
     def nvr(self, client) -> None:
         self._nvr = client
 
-    def _restore_history(self) -> None:
-        """Put the stored visits back on the feed and the wall, once.
+    def _recent_visits_from_core(self) -> list[dict[str, Any]]:
+        """The feed, read back from the platform's store.
 
-        Lazily rather than in the constructor: reading it needs the
+        One query, not one per visit. Names come from the ``face_id``
+        claims this app wrote, so a visit nobody recognised shows as
+        "Unknown visitor" because there IS no claim — not because a
+        field was blank.
+
+        Returns ``[]`` on any failure. That is a display list; an empty
+        feed on a doorbell that cannot reach core is a cosmetic gap,
+        and the alerting path above does not depend on it.
+        """
+        try:
+            answer = self.nvr.timeline.find(
+                "", label=["person"],
+                camera=[c.camera_id for c in self.config.cameras] or None,
+                limit=self._recent.maxlen or 25)
+        except Exception:  # noqa: BLE001
+            logger.debug("feed could not be restored", exc_info=True)
+            return []
+        if answer is None:
+            logger.info("feed not restored: core unreachable")
+            return []
+        out: list[dict[str, Any]] = []
+        for row in answer.get("results") or []:
+            name = next((str(c.get("value")) for c in (row.get("claims") or [])
+                         if c.get("kind") == "face_id" and c.get("value")), None)
+            out.append({
+                "message": (f"{name} recognised" if name
+                            else "Unknown visitor")
+                           + f" at {row.get('camera_name') or row.get('camera_id')}",
+                "time": row.get("started_at"),
+                "level": "low" if name else "high",
+                "camera": row.get("camera_name") or row.get("camera_id"),
+                "name": name,
+            })
+        return out
+
+    def _restore_history(self) -> None:
+        """Put yesterday's visitors back on the feed and the wall, once.
+
+        The FEED now comes from the platform: recent person visits on
+        this app's cameras, with the name read from the ``face_id``
+        claim this app wrote. That is the whole point of RFC-0003 —
+        the answer to "who came to my door on Tuesday" is the same
+        whether the doorbell, the operator's timeline or another app
+        asks it.
+
+        The WALL comes from the local tiles, because a thumbnail is
+        presentation state and the store holds evidence paths rather
+        than 190-pixel images.
+
+        Lazily rather than in the constructor: reading either needs the
         platform client, which needs the app key core mints during
-        registration — and a doorbell must come up and start watching the
-        door whether or not its history can be read.
+        registration — and a doorbell must come up and start watching
+        the door whether or not its history can be read.
         """
         if self._history_restored:
             return
         self._history_restored = True
+        for item in reversed(self._recent_visits_from_core()):
+            self._recent.appendleft(item)
         try:
-            entries = self._history.entries
+            entries = self._tiles.entries
         except Exception as exc:  # noqa: BLE001
-            logger.warning("visit history could not be restored (%s)", exc)
+            logger.warning("stranger tiles could not be restored (%s)", exc)
             return
         if not entries:
             return
-        for item in reversed(self._history.recent(self._recent.maxlen or 25)):
-            self._recent.appendleft(_feed_line(item))
-        for item in reversed(self._history.strangers(
+        for item in reversed(self._tiles.strangers(
                 self._stranger_gallery.maxlen or 8)):
             self._stranger_gallery.appendleft({
                 "id": item.get("id"),
@@ -911,30 +958,90 @@ class SmartDoorbell(FrameApp):
     def _remember(self, cam: Any, read: Any, at: float, *,
                   visit_id: str | None, thumb: str | None,
                   crop: bytes | None) -> None:
-        """Write this visit to the durable history. Never raises.
+        """Record this visit. Never raises.
 
-        A recognised visitor gets no thumbnail: their face is already in
-        the gallery an operator enrolled, and storing another copy per
-        visit would fill the log with pictures of people it already
-        knows. A stranger's is the one worth keeping.
+        The identity goes to the PLATFORM now, not to a log of our own.
+
+        This app used to keep its whole visit history in the SDK's
+        key/value store, and argued for it: a ``FrameApp`` has a frame
+        and a face but no ``event_id``, so attaching a name to a
+        platform visit meant guessing which visit by timestamp, and a
+        guessed identity is indistinguishable afterwards from a
+        measured one. The argument was right and the conclusion was
+        wrong — indistinguishable is a property of the record, so
+        RFC-0003 put the binding IN the record. ``visit_at`` says
+        whether the instant fell inside a visit's own span (``window``)
+        or merely near one (``nearest``), and refuses to choose when
+        two visits could be meant.
+
+        What stays local is the wall tile: a thumbnail, a camera and a
+        time. That is presentation state, the same category as the
+        ``_recent`` deque above it, and it carries no name.
         """
         if visit_id is None:
             self._visit_seq += 1
             visit_id = f"v{int(at)}-{self._visit_seq}"
+        self._claim_identity(cam, read, at)
         try:
-            self._history.record({
+            self._tiles.record({
                 "id": visit_id,
                 "at": at,
                 "camera": cam.camera_id,
                 "recognized": bool(read.recognized),
-                "person_id": read.person_id if read.recognized else None,
-                "name": read.name if read.recognized else None,
-                "category": read.category if read.recognized else None,
-                "similarity": read.similarity,
                 **({"thumb": thumb} if thumb and not read.recognized else {}),
             }, crop=crop if not read.recognized else None)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("visit not recorded in history (%s)", exc)
+        except Exception:  # noqa: BLE001 — a tile is not worth a miss
+            logger.debug("stranger tile not stored", exc_info=True)
+
+    def _claim_identity(self, cam: Any, read: Any, at: float) -> None:
+        """Attach the name to the platform's visit, saying how it bound.
+
+        Only a RECOGNISED face produces a claim. "Somebody unknown was
+        here" is already a visit in the store; writing ``face_id:
+        unknown`` would turn the absence of an identity into an
+        assertion about one, and every reader counting faces would
+        count it.
+
+        Best-effort, and last: an alert that already went out must not
+        be undone by a write that timed out. But the failure is LOGGED
+        at warning rather than swallowed, because "the name was not
+        recorded" is not a quieter version of "there was no name".
+        """
+        if not (read.recognized and read.person_id):
+            return
+        name = (read.name or read.person_id or "").strip()
+        if not name:
+            return
+        try:
+            client = self.nvr
+            bound = client.timeline.visit_at(
+                cam.camera_id, dt.datetime.fromtimestamp(at, dt.timezone.utc),
+                label="person", tolerance_s=self.config.bind_tolerance_seconds)
+            if bound is None:
+                logger.warning("face %s not recorded: core unreachable", name)
+                self._claims["unreachable"] += 1
+                return
+            event_id = bound.get("event_id")
+            if not event_id:
+                # Ambiguous, or no visit at all. Both mean this frame
+                # does not identify a visit, and a doorbell frame taken
+                # while two people are at the door genuinely does not
+                # say whose face it is.
+                self._claims[bound.get("reason") or "unbound"] += 1
+                return
+            binding = bound.get("binding") or "nearest"
+            client.timeline.add_claims(
+                event_id,
+                [{"kind": "face_id", "value": name,
+                  "confidence": read.similarity,
+                  "source_task": "face_recognition",
+                  "source_adapter": self.config.recognition_adapter,
+                  "correlation_id": read.correlation_id}],
+                binding=binding)
+            self._claims[binding] += 1
+        except Exception:  # noqa: BLE001
+            logger.warning("face %s not recorded", name, exc_info=True)
+            self._claims["failed"] += 1
 
     def _enrolled_count(self) -> int | None:
         """How many faces the adapter holds, cached for a minute. None when
@@ -997,6 +1104,11 @@ class SmartDoorbell(FrameApp):
             "deduped_visitors_tracked": len(self._last_fired),
             "enrolled_faces": self._enrolled_count(),
             "visits": dict(self._visits),
+            # How the names this app wrote were attached (RFC-0003).
+            # `nearest` climbing means it is seeing faces between
+            # visits rather than during them, which is a tuning signal
+            # long before it is a wrong name.
+            "identity_binding": dict(self._claims),
             "since": self._started_at,
             "stranger_gallery": list(self._stranger_gallery),
             "recent": list(self._recent),
@@ -1213,7 +1325,7 @@ page. Threshold and re-fire window are edited in the config form and apply live.
         if crop is not None:
             return crop
         try:
-            crop = self._history.crop(sid)
+            crop = self._tiles.crop(sid)
         except Exception as exc:  # noqa: BLE001
             logger.warning("crop for %s unreadable (%s)", sid, exc)
             return None
@@ -1274,7 +1386,7 @@ page. Threshold and re-fire window are edited in the config form and apply live.
             # And out of the durable history, or the tile reappears on
             # the next restart for somebody who is now enrolled.
             try:
-                self._history.forget(sid)
+                self._tiles.forget(sid)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("enrolled stranger %s not removed from "
                                "history (%s)", sid, exc)

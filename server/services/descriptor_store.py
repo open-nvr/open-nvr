@@ -128,11 +128,26 @@ def project_attributes(db, row: TimelineEvent) -> str | None:
     return attributes
 
 
+#: The ways a claim's SUBJECT can have been determined — which visit it
+#: is about. See RFC-0003 and the migration that added the column.
+#:
+#:   direct   the producer held the event_id
+#:   window   core matched camera + instant inside the visit's own span
+#:   nearest  nothing covered the instant; the closest within a bounded
+#:            tolerance was used — a guess, and named one
+#:
+#: There is deliberately no value for "we chose between two candidates":
+#: an ambiguous instant binds nothing at all.
+BINDINGS = frozenset({"direct", "window", "nearest"})
+
+
 def apply_descriptors(
     db,
     row: TimelineEvent,
     descriptors: Iterable[Any],
     ran_tasks: Iterable[str] = (),
+    *,
+    binding: str = "direct",
 ) -> int:
     """Write claims onto ``row``; returns how many were written.
 
@@ -141,7 +156,18 @@ def apply_descriptors(
     ``source_adapter`` / ``model_fingerprint`` — the endpoint passes its
     pydantic models, the enricher passes its own small dataclass. The
     caller commits.
+
+    ``binding`` says how the SUBJECT was determined and defaults to
+    ``direct``, which is what every caller before RFC-0003 was: they
+    held the ``event_id`` already. It is stored per claim rather than
+    per event because one visit can carry a plate the LPR pipeline
+    bound directly and a face an app bound by timestamp, and a reader
+    that trusts one must be able to refuse the other.
     """
+    binding = (binding or "direct").strip().lower()
+    if binding not in BINDINGS:
+        raise ValueError(
+            f"binding must be one of {sorted(BINDINGS)}, not {binding!r}")
     written = 0
     for d in descriptors:
         kind = (d.kind or "").strip().lower()[:40]
@@ -178,6 +204,11 @@ def apply_descriptors(
             existing = VisitDescriptor(event_id=row.id, kind=kind, source_task=task)
             db.add(existing)
         existing.value = value
+        # Re-running a skill replaces how ITS claim was bound too: a
+        # doorbell that first guessed by timestamp and later matched a
+        # real visit must not leave the old "nearest" behind, or the
+        # row would understate what is now known.
+        existing.binding = binding
         existing.confidence = (
             None if d.confidence is None else max(0.0, min(1.0, float(d.confidence)))
         )
@@ -188,6 +219,9 @@ def apply_descriptors(
         metrics.DESCRIPTORS_WRITTEN.inc({
             "kind": kind, "task": task or "unknown",
             "adapter": existing.source_adapter or "unknown",
+            # Watchable: a deployment where "nearest" is climbing is one
+            # where apps are guessing more than they are measuring.
+            "binding": binding,
         })
 
     if ran_tasks:

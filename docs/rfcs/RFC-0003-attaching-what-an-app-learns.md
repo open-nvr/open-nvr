@@ -1,6 +1,9 @@
 # RFC-0003 — Attaching what an app learns to a visit
 
-**Status:** draft, needs a decision
+**Status:** ACCEPTED and implemented (option A). The decision below —
+whether an app may write an identity claim at all — was taken: yes,
+with the binding recorded. smart-doorbell is the first producer, and
+its parallel visit log is gone.
 **Blocks:** smart-doorbell's parallel visit log, `face_id` having any
 producer at all, person journeys
 **Author:** OpenNVR
@@ -136,7 +139,30 @@ dead code that is priced, tested and unreachable; and an operator
 asking "who came to the door last Tuesday" gets a different answer from
 the app than from the platform, with no way to tell which is right.
 
-## Recommendation
+## What was built
+
+**A, with the `binding` column.** B remains available later as an
+optimisation; nothing here forecloses it.
+
+Shipped:
+
+- `visit_descriptors.binding` (`direct` / `window` / `nearest`), with
+  every existing row backfilled to `direct` — true rather than assumed,
+  since the only writers before this release held an `event_id` they
+  were handed.
+- `GET /internal/app/visits/at` — camera + instant → visit, roster
+  scoped, with the binding named. Two visits covering the instant bind
+  nothing.
+- `POST /internal/app/visits/claims` — roster-scoped writes, binding
+  recorded per claim.
+- `timeline.visit_at()` / `timeline.add_claims()` in both SDK clients.
+- smart-doorbell writes `face_id` through it and keeps only stranger
+  TILES locally — a thumbnail, a camera and a time, carrying no name.
+- A scoping hole closed on the way: the camera-agent's descriptor
+  endpoint accepted app keys and checked no roster, so any installed
+  app could attach a name to any visit on the site.
+
+## Original recommendation
 
 **A, with the `binding` column, and B later as an optimisation.**
 
@@ -184,7 +210,7 @@ A few things that stay open whichever way this goes:
 - **Backfill.** Existing rows become `direct`, which is true for all of
   them today. Worth asserting in the migration rather than assuming.
 
-## Acceptance, if A is chosen
+## Acceptance
 
 - A `FrameApp` can attach a claim to a visit without keeping its own
   record of visits.
@@ -194,3 +220,9 @@ A few things that stay open whichever way this goes:
 - smart-doorbell's `visit_log.py` is deleted, and the doorbell's feed
   and stranger wall read from the platform.
 - `face_id` has a producer, or the kind is removed — not neither.
+
+All met, except that the doorbell's stranger wall still reads tiles
+from local storage: the store holds evidence paths, not 190-pixel
+thumbnails, and fetching one per tile at boot would trade a cosmetic
+gap for N round trips. That storage carries no identity, which was the
+thing that mattered.
