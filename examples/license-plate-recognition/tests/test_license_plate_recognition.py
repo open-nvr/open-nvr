@@ -11,13 +11,21 @@ without NATS, KAI-C, or core — envelopes go straight through
 """
 from __future__ import annotations
 
+import datetime as _dt
+import inspect
 import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
+from opennvr_app_sdk.client import TimelineAPI
+
 import license_plate_recognition as lpr
+
+#: Bound against the real client so a rename in the SDK breaks these
+#: tests instead of quietly widening the fake.
+_REAL_PLATES_INSIDE = inspect.signature(TimelineAPI.plates_inside)
 from license_plate_recognition import (
     AppConfig,
     PLATE_SUBJECT_PATTERN,
@@ -736,53 +744,249 @@ def test_invalid_format_regex_skipped():
     assert len(pats) == 1
 
 
-def test_overstay_fires_once_for_visitor(monkeypatch):
-    t = {"wall": 1_000_000.0}
-    monkeypatch.setattr(time, "time", lambda: t["wall"])
+class _FakeTimeline:
+    """core's `plates/inside`, reduced to what the sweep asks of it.
+
+    Bound against the real client's signature, so a rename in the SDK
+    breaks these tests rather than quietly letting them accept a call
+    no client can make.
+    """
+
+    def __init__(self, entries=(), answer_is_none=False):
+        self.entries = list(entries)
+        self.answer_is_none = answer_is_none
+        self.calls = 0
+
+    def plates_inside(self, **kw):
+        _REAL_PLATES_INSIDE.bind(self, **kw)
+        self.calls += 1
+        if self.answer_is_none:
+            return None
+        return {"inside": len(self.entries),
+                "plates": [e["plate"] for e in self.entries],
+                "entries": self.entries}
+
+
+class _FakeState:
+    def __init__(self):
+        self.saved = {}
+
+    def get(self, key, default=None):
+        return self.saved.get(key, default)
+
+    def set(self, key, value):
+        self.saved[key] = value
+
+
+class _FakeNVR:
+    def __init__(self, timeline):
+        self.timeline = timeline
+        self.state = _FakeState()
+
+
+def _inside(plate, hours_ago, camera_id="cam1"):
+    when = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=hours_ago)
+    return {"plate": plate, "entered_at": when.isoformat(),
+            "camera_id": camera_id}
+
+
+def _with_core(alerter, timeline):
+    """Point the app at a fake core, with nothing fetched yet."""
+    alerter._nvr = _FakeNVR(timeline)
+    alerter._inside_fetched_at = None
+    return alerter
+
+
+def _let_it_refetch(alerter):
+    """Backdate the last fetch past the throttle, without pretending it
+    never happened — those are different states and the staleness rule
+    depends on telling them apart."""
+    alerter._inside_fetched_at = (
+        time.monotonic() - lpr.OVERSTAY_POLL_SECONDS - 1)
+
+
+def test_overstay_fires_once_for_visitor():
+    """The ledger is gone; who is inside and since when comes from the
+    platform, so the test supplies core's answer rather than replaying
+    gate reads through a fake clock."""
     alerter, _ = _alerter(
         overstay_hours=2.0, dedup_window_seconds=0,
         camera_roles={"1": {"role": "gate_in"}, "2": {"role": "gate_out"}},
         registry=["MH12DE1433"])
-    # Visitor enters at gate-in.
-    alerter.handle_event(_envelope(plate="XX99ZZ0001", camera="cam1"))
-    assert alerter.state_snapshot()["inside_visitors"] == 1
-    # 3 hours later another read arrives → sweep fires the overstay.
-    t["wall"] += 3 * 3600
+    tl = _FakeTimeline([_inside("XX99ZZ0001", hours_ago=3)])
+    _with_core(alerter, tl)
+
     fired = alerter.handle_event(_envelope(plate="MH12DE1433", camera="cam1"))
     over = [a for a in fired if a.evidence.get("overstay")]
     assert len(over) == 1
     assert over[0].severity == "medium"
     assert "XX99ZZ0001" in over[0].title
-    # …and only once.
-    t["wall"] += 3600
+
+    # …and only once, even as core keeps reporting the same open visit.
+    _let_it_refetch(alerter)
     fired = alerter.handle_event(_envelope(plate="MH12DE1433", camera="cam2"))
     assert [a for a in fired if a.evidence.get("overstay")] == []
 
 
-def test_gate_out_clears_the_visitor(monkeypatch):
-    t = {"wall": 1_000_000.0}
-    monkeypatch.setattr(time, "time", lambda: t["wall"])
+def test_the_announcement_survives_a_restart():
+    """THE bug this port fixes, in reverse.
+
+    The old ledger lived in memory, so a redeploy forgot every open
+    visit and a vehicle that drove in beforehand could never trigger an
+    overstay however long it stayed. Now the platform remembers the
+    visit and core's durable store remembers that we already said so —
+    which means a restart neither loses the alert nor repeats it.
+    """
+    entry = _inside("XX99ZZ0001", hours_ago=5)
+    tl = _FakeTimeline([entry])
+
+    first, _ = _alerter(overstay_hours=2.0, dedup_window_seconds=0,
+                        camera_roles={"1": {"role": "gate_in"}})
+    _with_core(first, tl)
+    assert [a for a in first.handle_event(_envelope(plate="AAA111", camera="cam1"))
+            if a.evidence.get("overstay")]
+    saved = first.nvr.state.saved
+
+    # A new process. Same core, same open visit, same saved record.
+    second, _ = _alerter(overstay_hours=2.0, dedup_window_seconds=0,
+                         camera_roles={"1": {"role": "gate_in"}})
+    _with_core(second, tl)
+    second.nvr.state.saved = saved
+    assert [a for a in second.handle_event(_envelope(plate="AAA111", camera="cam1"))
+            if a.evidence.get("overstay")] == []
+
+
+def test_a_returning_vehicle_is_a_new_visit():
+    """Keyed on plate AND entry time. The same van leaving and coming
+    back is a second visit and alerts again — otherwise one announcement
+    would silence that plate forever."""
+    alerter, _ = _alerter(overstay_hours=2.0, dedup_window_seconds=0,
+                          camera_roles={"1": {"role": "gate_in"}})
+    tl = _FakeTimeline([_inside("XX99ZZ0001", hours_ago=3)])
+    _with_core(alerter, tl)
+    assert [a for a in alerter.handle_event(_envelope(plate="AAA111", camera="cam1"))
+            if a.evidence.get("overstay")]
+
+    # Left, returned, and has now been inside too long again.
+    tl.entries = [_inside("XX99ZZ0001", hours_ago=3.5)]
+    _let_it_refetch(alerter)
+    assert [a for a in alerter.handle_event(_envelope(plate="AAA111", camera="cam1"))
+            if a.evidence.get("overstay")]
+
+
+def test_gate_out_clears_the_visitor():
+    """A vehicle that has left is simply not in core's answer. The app
+    no longer has to notice the exit read itself — which is why it can
+    no longer MISS one."""
     alerter, _ = _alerter(
         overstay_hours=1.0, dedup_window_seconds=0,
         camera_roles={"1": {"role": "gate_in"}, "2": {"role": "gate_out"}})
-    alerter.handle_event(_envelope(plate="XX99ZZ0001", camera="cam1"))
-    alerter.handle_event(_envelope(plate="XX99ZZ0001", camera="cam2"))  # left
+    _with_core(alerter, _FakeTimeline([]))
+
     assert alerter.state_snapshot()["inside_visitors"] == 0
-    t["wall"] += 2 * 3600
     fired = alerter.handle_event(_envelope(plate="AAA111", camera="cam1"))
     assert [a for a in fired if a.evidence.get("overstay")] == []
 
 
-def test_registered_vehicles_never_overstay(monkeypatch):
-    t = {"wall": 1_000_000.0}
-    monkeypatch.setattr(time, "time", lambda: t["wall"])
+def test_registered_vehicles_never_overstay():
+    """Only visitors overstay. The register is this app's config and the
+    platform has no opinion about it, so the filter stays app-side even
+    though the occupancy does not."""
     alerter, _ = _alerter(
         overstay_hours=1.0, dedup_window_seconds=0,
         camera_roles={"1": {"role": "gate_in"}},
         registry=["MH12DE1433"], allowlist=["KA05MJ6021"])
-    alerter.handle_event(_envelope(plate="MH12DE1433", camera="cam1"))
-    alerter.handle_event(_envelope(plate="KA05MJ6021", camera="cam1"))
+    _with_core(alerter, _FakeTimeline([
+        _inside("MH12DE1433", hours_ago=9),
+        _inside("KA05MJ6021", hours_ago=9),
+    ]))
+
+    fired = alerter.handle_event(_envelope(plate="AAA111", camera="cam1"))
+    assert [a for a in fired if a.evidence.get("overstay")] == []
     assert alerter.state_snapshot()["inside_visitors"] == 0
+
+
+def test_an_unreachable_core_does_not_read_as_an_empty_car_park():
+    """`None` is "could not ask", not "nobody is inside". Treating them
+    the same silences overstay alerts during exactly the outage they
+    should survive.
+
+    Asserted on what an operator would be TOLD, not on the cache: an
+    earlier version of this test checked `_inside_cache` was still
+    populated, which stayed true even when the code returned `[]` and
+    announced nothing. It passed with the bug in place.
+    """
+    alerter, _ = _alerter(overstay_hours=1.0, dedup_window_seconds=0,
+                          camera_roles={"1": {"role": "gate_in"}})
+    # Two visitors inside, both over the threshold. One is announced
+    # while core is up; the other is what the outage must not swallow.
+    _with_core(alerter, _FakeTimeline([
+        _inside("XX99ZZ0001", hours_ago=9),
+        _inside("YY88WW0002", hours_ago=9),
+    ]))
+    first = [a for a in alerter.handle_event(_envelope(plate="AAA111", camera="cam1"))
+             if a.evidence.get("overstay")]
+    assert len(first) == 2
+
+    # A third visitor crossed the line just before core went down, so
+    # the last good answer still carries them.
+    alerter._inside_cache.append(_inside("ZZ77VV0003", hours_ago=9))
+    alerter._nvr.timeline.answer_is_none = True
+    alerter._nvr.timeline.entries = []
+    _let_it_refetch(alerter)
+
+    fired = [a for a in alerter.handle_event(_envelope(plate="AAA111", camera="cam1"))
+             if a.evidence.get("overstay")]
+    assert len(fired) == 1, (
+        "an unreachable core was treated as an empty car park; the "
+        "visitor who was already inside stopped being announced")
+    assert "ZZ77VV0003" in fired[0].title
+
+
+def test_the_sweep_is_throttled():
+    """It runs on every plate read and a busy gate reads constantly. The
+    question moves at the speed of a car park."""
+    alerter, _ = _alerter(overstay_hours=9.0, dedup_window_seconds=0,
+                          camera_roles={"1": {"role": "gate_in"}})
+    tl = _FakeTimeline([_inside("XX99ZZ0001", hours_ago=1)])
+    _with_core(alerter, tl)
+
+    for _ in range(5):
+        alerter.handle_event(_envelope(plate="AAA111", camera="cam1"))
+    assert tl.calls == 1, f"asked core {tl.calls} times for one car park"
+
+
+def test_a_naive_entry_time_is_read_as_utc():
+    """core emits timestamps exactly as stored, which on SQLite means
+    no offset. Subtracting a naive value from an aware `now` raises,
+    and a sweep that raises stops announcing every vehicle behind the
+    odd one — so a naive value is read as UTC rather than rejected."""
+    naive = (_dt.datetime.now(_dt.timezone.utc)
+             - _dt.timedelta(hours=9)).replace(tzinfo=None)
+    alerter, _ = _alerter(overstay_hours=1.0, dedup_window_seconds=0,
+                          camera_roles={"1": {"role": "gate_in"}})
+    _with_core(alerter, _FakeTimeline([
+        {"plate": "XX99ZZ0001", "entered_at": naive.isoformat(),
+         "camera_id": "cam1"},
+    ]))
+    over = [a for a in alerter.handle_event(_envelope(plate="AAA111", camera="cam1"))
+            if a.evidence.get("overstay")]
+    assert len(over) == 1
+
+
+def test_an_unparseable_entry_time_is_skipped_not_fatal():
+    """One odd row must not stop the sweep: everything behind it in the
+    list would stop being announced too."""
+    alerter, _ = _alerter(overstay_hours=1.0, dedup_window_seconds=0,
+                          camera_roles={"1": {"role": "gate_in"}})
+    _with_core(alerter, _FakeTimeline([
+        {"plate": "BAD", "entered_at": "not-a-date", "camera_id": "cam1"},
+        _inside("XX99ZZ0001", hours_ago=9),
+    ]))
+    over = [a for a in alerter.handle_event(_envelope(plate="AAA111", camera="cam1"))
+            if a.evidence.get("overstay")]
+    assert len(over) == 1
+    assert "XX99ZZ0001" in over[0].title
 
 
 def test_trust_settings_update_live():

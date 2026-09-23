@@ -54,6 +54,21 @@ MUTATIONS: list[tuple[str, str, str, str, str, str]] = [
      "    if not scope:\n        return q",
      "server", "tests/test_scope_query_empty.py"),
 
+    ("an unreachable core reads as an empty car park",
+     "examples/license-plate-recognition/license_plate_recognition.py",
+     "            return self._inside_cache or None",
+     "            return []",
+     "examples/license-plate-recognition", "tests"),
+    ("overstay stops telling one visit from the next",
+     "examples/license-plate-recognition/license_plate_recognition.py",
+     '            key = (plate, entered_at)', '            key = (plate, "")',
+     "examples/license-plate-recognition", "tests"),
+    ("gate occupancy stops saying WHEN each vehicle came in",
+     "server/services/timeline_service.py",
+     'return {"inside": len(inside), "plates": inside[:200], "entries": entries}',
+     'return {"inside": len(inside), "plates": inside[:200]}',
+     "server", "tests/test_plate_stats.py"),
+
     # ── the canonical event store ────────────────────────────────────
     ("a plate retraction stops dropping the claim",
      "server/services/plate_enrichment.py",
