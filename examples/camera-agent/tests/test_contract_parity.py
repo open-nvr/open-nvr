@@ -121,6 +121,45 @@ def test_contract_routes_exist_and_are_open():
         assert "llm_error" in body and "vision_error" in body
 
 
+def test_state_reports_which_store_answered_footage_search():
+    """The counter exists to decide whether the private SQLite index is
+    still earning its place. That decision needs a number somebody can
+    read, and for a month it was written to memory and exposed nowhere:
+    the fallback logs a warning, but `index_fallback == 0` is the
+    reading the decision turns on and zero events log nothing at all.
+
+    `canonical` beside it is what makes the zero mean anything. Without
+    it, "the index never served a query" is indistinguishable from
+    "nobody searched" and from "this build was never deployed", and
+    those are three different answers to the same question.
+    """
+    runtime = CameraAgentRuntime(_cfg())
+    body = runtime.contract_state()
+
+    assert "footage_search" in body
+    assert set(body["footage_search"]) == {
+        "canonical", "index_fallback", "unanswerable"}
+
+    runtime.tools.footage_search_sources["canonical"] += 3
+    runtime.tools.footage_search_sources["index_fallback"] += 1
+    after = runtime.contract_state()
+    assert after["footage_search"]["canonical"] == 3
+    assert after["footage_search"]["index_fallback"] == 1
+    # A copy, not the live dict: /state is a public door and a reader
+    # must not be able to reach in and reset the evidence.
+    after["footage_search"]["canonical"] = 999
+    assert runtime.tools.footage_search_sources["canonical"] == 3
+
+
+def test_state_survives_an_agent_with_no_tools_yet():
+    """/state must never 500 the probe — including before the toolbox
+    exists, which is the shape the skills-derivation test above guards
+    for a different field."""
+    runtime = CameraAgentRuntime(_cfg())
+    runtime.tools = None  # type: ignore[assignment]
+    assert runtime.contract_state()["footage_search"] == {}
+
+
 def test_state_never_500s_when_skills_derivation_breaks():
     runtime = CameraAgentRuntime(_cfg())
 
