@@ -12,56 +12,34 @@
 # DO NOT edit the substituted values directly. To change the secret,
 # update .env and re-run ``docker compose up`` so the init container
 # re-templates the file.
-
-# ── Index location ──────────────────────────────────────────────────
-# /app/data is a named Docker volume (opennvr_footage_search_data), so
-# the index survives container restarts and image rebuilds. Both the
-# ``index`` daemon and ``search`` invocations read the same path.
-db_path: "/app/data/footage_index.sqlite3"
-
-# ── NATS endpoint (KAI-C's event bus, compose service ``nats``) ────
-nats_url: "nats://nats:4222"
-# The standard stack runs NATS with ``--auth INTERNAL_API_KEY``.
-nats_token: "${INTERNAL_API_KEY}"
-
-# Subscribe to detector events (labels) AND captioner events (scene
-# text). The wildcard catches both; the indexer merges a detection
-# event and a caption event that share a correlation_id into one
-# searchable keyframe.
-subject_pattern: "opennvr.inference.>"
+#
+# Upgrading from 1.x? db_path, nats_url, nats_token, subject_pattern,
+# retention_days and coalesce_seconds are all gone: this app no longer
+# keeps an index of its own. Leaving them in a hand-edited config is
+# harmless — unknown keys are ignored — but they do nothing.
 
 # ── Search vocabulary — EDIT for your scene ────────────────────────
 # extra_labels: object classes beyond the built-in COCO-ish vocabulary
-# that your detector emits (parsed as labels, not free-text keywords).
+# that your detectors emit (parsed as labels, not free-text keywords).
 extra_labels: []
 
-# camera_aliases: words a user might say mapped to the camera_id
-# KAI-C uses, e.g. ``dock: "cam-dock"``.
+# camera_aliases: words a user might say, mapped to a camera this app
+# has been given — by NAME as it appears in OpenNVR, e.g.
+# ``dock: "Loading Dock"``. An id ("3") or a handle ("cam3") works
+# too. An alias naming a camera this app does NOT hold is refused
+# rather than quietly widened to every camera.
 camera_aliases: {}
 
 # Max results returned by a search.
 result_limit: 25
 
-# ── Retention ─────────────────────────────────────────────────────
-# Days of searchable history to keep. The index grows with every
-# detection and Tier-0 publishes continuously, so an unbounded index
-# is a slow disk leak on an active camera. Pruned on start and every
-# 6h. Set 0 to keep everything forever (you own the disk).
-retention_days: 30
-
-# One row per EPISODE, not per frame: Tier-0 publishes an event per
-# analyzed frame, so without this a person sitting in view at 2 fps is
-# 7,200 identical "person" rows an hour — and a search returns 25
-# consecutive frames instead of 25 distinct sightings. Caption-less
-# repeats of the same label set on a camera within this many seconds
-# merge into one row (its timestamp advances). Set 0 to index every
-# frame separately.
-coalesce_seconds: 60
-
 # ── Optional LLM query parsing (Ollama) ────────────────────────────
 # When enabled, queries are parsed by a local Ollama model (e.g. the
 # camera-agent overlay's ``ollama`` service) instead of the built-in
 # heuristic parser. Falls back to the heuristic parser on any error.
+#
+# This parses the OPERATOR'S SENTENCE and nothing else. It never
+# decides what the results mean — the store answers that.
 ollama:
   enabled: false
   url: "http://ollama:11434"
@@ -74,4 +52,9 @@ ollama:
 # rides the OPENNVR_INTERNAL_API_KEY env var the overlay sets.
 contract_port: 9208
 contract_host: "footage-search"
+
+# Required, and doing double duty: the registry this app registers
+# with AND the event store it searches. Every other example app can
+# run standalone without it; this one has nothing to search without
+# it, and refuses to start rather than come up answering nothing.
 opennvr_url: "http://opennvr-core:8000"

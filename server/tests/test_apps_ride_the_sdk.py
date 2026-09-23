@@ -31,8 +31,21 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = REPO_ROOT / "examples"
 
-# The three SDK base classes an app may ride (sdk/opennvr-app-sdk).
-BASES = frozenset({"Detector", "FrameApp", "AlertSubscriber"})
+# The SDK base classes an app may ride (sdk/opennvr-app-sdk).
+#
+# ``ContractApp`` is the newest and the odd one out: the other three
+# are each driven by something arriving — NATS for Detector and
+# AlertSubscriber, a timer for FrameApp — and own a loop the contract
+# server rides on. ``ContractApp`` has no loop, because some apps have
+# nothing to consume: they exist so an operator has somewhere to ask a
+# question, and read what they need from core when asked.
+#
+# It was added for footage-search, which used to index every inference
+# event into its own SQLite database. Having deleted that index it had
+# nothing left to subscribe to, and keeping a NATS connection whose
+# only purpose was to satisfy a base class would have been the wrong
+# way to pass this test.
+BASES = frozenset({"Detector", "FrameApp", "AlertSubscriber", "ContractApp"})
 
 # Not apps at all: build-support directories with no Python entrypoint.
 # Each is one Dockerfile that puts an ONNX graph into an image and ships

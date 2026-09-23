@@ -3,86 +3,77 @@
 
 """
 Footage-search example app — natural-language search over recorded
-inference history, now on the ``opennvr-app-sdk``.
+footage, answered from the platform's canonical event store.
 
-    $ python footage_search.py search "red truck at the dock yesterday"
+    $ python footage_search.py --config config.yml search \
+          "red truck at the dock yesterday"
 
-    2 matches:
-      [cam-dock] 2026-06-13 14:22:08  truck
+    2 match(es):
+      [Dock] 2026-06-13 14:22:08  truck
         "a red truck parked near a loading dock"
-        correlation_id=corr_8f1c… (use it to pull the recorded segment)
-      [cam-dock] 2026-06-13 09:05:41  truck person
+        event #8140 · plate KA01AB1234 · photo kept
+      [Dock] 2026-06-13 09:05:41  truck
         "a red delivery truck with a person beside it"
-        correlation_id=corr_2a90…
+        event #8017
 
-Two subcommands:
+What changed, and why it is most of this file
+---------------------------------------------
 
-* ``index`` runs a daemon that subscribes to KAI-C's NATS inference
-  broadcast surface and writes every searchable keyframe (object labels
-  from a detector, scene captions from a BLIP-style captioner) into a
-  local SQLite index. Run it alongside your detectors; it pays zero
-  adapter cost (it rides the stream that's already flowing).
+This app used to keep its own database. It subscribed to KAI-C's NATS
+inference broadcast and wrote every searchable keyframe into a local
+SQLite index, then searched that. It worked, and it was the wrong
+shape, for reasons that only became clear once the platform had a
+canonical store of its own:
 
-* ``search`` parses a natural-language query into a structured filter
-  (object labels + descriptor keywords + time window + camera) and runs
-  it against the index, printing matching keyframes newest-first. Each
-  match carries the ``correlation_id`` that ties it to the exact
-  recorded segment in OpenNVR.
+* The index was one row per analyzed FRAME. Tier-0 publishes
+  continuously, so a person sitting still was thousands of identical
+  rows — which is why the old store carried a 60-second coalescing hack
+  and why a search could return 25 consecutive frames instead of 25
+  distinct episodes. The canonical store is one row per VISIT.
+* It had no camera scoping. It indexed whatever came past on the bus,
+  and an operator's view of it was whatever the app chose to show.
+  ``timeline.find`` is scoped server-side, by the same predicate as
+  everything else in the platform.
+* It was a SECOND retention policy on a SECOND store. Footage deleted
+  from OpenNVR stayed described here for up to 30 more days, in a file
+  nobody was auditing.
+* It carried no evidence photo, no plate, and none of the claims that
+  enrichment skills make about a visit — because none of that exists on
+  the bus at the moment a frame is analyzed. It is all on the visit.
 
-What lives where after the migration
-------------------------------------
+So the index is gone, and ``store.py`` with it, along with the indexer
+daemon, the NATS subscription, the retention loop and the coalescing
+window. What remains is the part that was always this app's own: the
+natural-language parser, pointed at core.
 
-The :class:`Indexer` is a :class:`~opennvr_app_sdk.Detector` (App SDK
-spec §02): the SDK base owns the NATS connect / subscribe / drain
-loop, per-message JSON decoding + exception isolation, and the §03
-contract endpoints. Because the indexer also stores caption-only
-events (no ``result.detections``), it hooks ``handle_event`` — the
-whole-event stage above the base's detections walk — rather than
-``on_detections``.
-
-Deliberately app-side (the "don't force it" clause):
-
-* ``store.py`` — the SQLite keyframe schema + FTS-ish search query,
-  and ``keyframe_from_event`` (which result shapes are indexable is
-  this app's business);
-* ``query.py`` — the natural-language → structured-filter parsers
-  (heuristic + optional Ollama);
-* the two-subcommand CLI (``index`` / ``search``): the SDK's
-  ``app(...)`` runner models single-loop daemons, so ``main`` keeps
-  its own argparse and drives ``Indexer.run()`` itself for the
-  ``index`` path.
-
-Why this works without a special model: object *classes* come from the
-detector's labels; *attributes* like "red" come from the captioner's
-scene text. Searching across both is what lets "red truck" resolve. For
-precise attribute detection, point the indexer at an open-vocabulary /
-VLM adapter instead of (or alongside) BLIP — the index and search code
-don't change.
+``query.py`` stays app-side deliberately. The app-facing search route
+does no sentence parsing — an app has usually already decided what it
+is looking for, and two parsers disagreeing about one query is a bug
+that is very hard to see. Here a HUMAN typed the sentence, so the
+parsing belongs to whoever took the human's input, which is this app.
 
 Run::
 
-    python footage_search.py index  --config config.yml
-    python footage_search.py search --config config.yml "red truck yesterday"
+    python footage_search.py --config config.yml search "red truck yesterday"
+    python footage_search.py --config config.yml serve
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
-import dataclasses
 import datetime as _dt
 import logging
 import signal
 import sys
-import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
-from opennvr_app_sdk import Action, Alert, AppManifest, Detector, Param, StateView
+from opennvr_app_sdk import Action, AppManifest, ContractApp, Param, StateView
+from opennvr_app_sdk.client import OpenNVR
 from opennvr_app_sdk.config import load_yaml
 
 from query import DEFAULT_LABELS, parse_heuristic, parse_with_ollama
-from store import FootageStore, SearchResult, keyframe_from_event
 
 logger = logging.getLogger("footage-search")
 
@@ -90,43 +81,32 @@ logger = logging.getLogger("footage-search")
 MANIFEST = AppManifest(
     id="footage-search",
     name="Footage Search",
-    version="1.0.0",
+    version="2.0.0",
     category="forensics",
     summary=(
-        "Indexes inference events (labels + captions) into SQLite and "
-        "answers natural-language footage queries like 'red truck at "
-        "the dock yesterday'."
+        "Answers natural-language footage queries like 'red truck at "
+        "the dock yesterday' against the platform's event store."
     ),
-    requires_tasks=[],  # indexes whatever detector/captioner streams exist
-    subscribes="opennvr.inference.>",
+    requires_tasks=[],   # reads remembered visits; drives no inference
+    subscribes=None,     # no stream at all — see ContractApp
     params=[
-        Param("db_path", str, default="footage_index.sqlite3"),
-        Param("subject_pattern", str, default="opennvr.inference.>"),
         Param("extra_labels", list, default=[],
               description="Extra label vocabulary for the query parser."),
         Param("camera_aliases", dict, default={},
-              description="word -> camera_id aliases ('dock' -> 'cam-dock')."),
+              description="word -> camera name or id ('dock' -> 'Dock')."),
         Param("result_limit", int, default=25),
-        Param("retention_days", int, default=30,
-              description="Delete indexed keyframes older than this. 0 keeps everything."),
-        Param("coalesce_seconds", int, default=60,
-              description="Merge caption-less repeats of the same label set on "
-                          "a camera within this window into one row (Tier-0 "
-                          "publishes per frame). 0 disables."),
     ],
-    emits=[],  # writes an index; fires no alerts
-    # Declarative live-state views — rendered generically by the catalog.
+    emits=[],            # answers questions; fires no alerts
     state_schema=[
-        StateView(name="rows_total", label="Indexed keyframes",
-                  kind="metric", path="rows_total"),
-        StateView(name="session", label="This session",
-                  kind="metric", path="indexed_this_session"),
+        StateView(name="searches", label="Searches this session",
+                  kind="metric", path="searches"),
+        StateView(name="store", label="Event store",
+                  kind="text", path="store_status",
+                  description="Whether core answered the last query."),
         StateView(name="recent", label="Recent searches",
                   kind="log", path="recent", limit=10,
                   description="Operator queries run from the search action."),
     ],
-    # Operator actions (user-JWT-only through the server proxy): the UI
-    # query path that replaces `docker compose exec … search "…"`.
     actions=[
         Action(
             "search", "Search footage",
@@ -136,7 +116,7 @@ MANIFEST = AppManifest(
                 Param("limit", int, default=10,
                       description="Max results (1-200)."),
             ],
-            description="Parse the query and search the footage index.",
+            description="Parse the query and search recorded footage.",
         ),
     ],
 )
@@ -154,30 +134,16 @@ class OllamaConfig:
 
 @dataclass
 class AppConfig:
-    db_path: str
-    nats_url: str
-    nats_token: str | None
-    subject_pattern: str
-    extra_labels: list[str]
-    camera_aliases: dict[str, str]
-    ollama: OllamaConfig
-    result_limit: int
-    # Days of index history to keep. The index grows with every
-    # detection forever, and Tier-0 publishes continuously — so an
-    # unbounded index is a slow disk leak on an active camera. 0
-    # disables pruning (an operator who wants a permanent archive).
-    retention_days: int = 30
-    # Tier-0 publishes an event per analyzed frame with no correlation_id;
-    # without coalescing a person sitting in frame is thousands of identical
-    # rows and a search returns 25 consecutive frames instead of 25 distinct
-    # episodes. Repeats of the same label set within this window advance the
-    # existing row's timestamp instead of inserting. 0 disables.
-    coalesce_seconds: int = 60
+    extra_labels: list[str] = field(default_factory=list)
+    camera_aliases: dict[str, str] = field(default_factory=dict)
+    ollama: OllamaConfig = field(default_factory=OllamaConfig)
+    result_limit: int = 25
 
-    # App contract (spec §03) — all optional; see the SDK's contract
-    # module. ``contract_port`` serves /health /manifest /state AND the
-    # POST /actions surface (the catalog's search form); ``opennvr_url``
-    # triggers registry self-registration + live config delivery.
+    # App contract (spec §03). ``contract_port`` serves /health
+    # /manifest /state AND POST /actions (the catalog's search form).
+    # ``opennvr_url`` is BOTH the registry this app self-registers with
+    # and the store it searches — so unlike every other example app it
+    # is not optional here: there is nothing to search without it.
     contract_port: int | None = None
     contract_bind_host: str | None = None
     contract_host: str | None = None
@@ -188,20 +154,12 @@ class AppConfig:
 def load_config(path: str) -> AppConfig:
     raw = load_yaml(path)
 
-    db_path = str(raw.get("db_path") or "footage_index.sqlite3").strip()
-    if not db_path:
-        raise ValueError("config: 'db_path' must not be empty")
-
-    nats_url = str(raw.get("nats_url") or "").strip()
-    if not nats_url:
-        raise ValueError("config: 'nats_url' is required (for `index`)")
-    subject = str(raw.get("subject_pattern") or "opennvr.inference.>").strip()
-
     extra_labels = [str(s).lower() for s in (raw.get("extra_labels") or [])]
 
     aliases_raw = raw.get("camera_aliases") or {}
     if not isinstance(aliases_raw, dict):
-        raise ValueError("config: 'camera_aliases' must be a mapping of word -> camera_id")
+        raise ValueError(
+            "config: 'camera_aliases' must be a mapping of word -> camera")
     camera_aliases = {str(k).lower(): str(v) for k, v in aliases_raw.items()}
 
     ollama_raw = raw.get("ollama") or {}
@@ -218,18 +176,18 @@ def load_config(path: str) -> AppConfig:
     if result_limit <= 0:
         raise ValueError("config: 'result_limit' must be > 0")
 
+    opennvr_url = str(raw["opennvr_url"]).strip() if raw.get("opennvr_url") else ""
+    if not opennvr_url:
+        raise ValueError(
+            "config: 'opennvr_url' is required — this app searches the "
+            "OpenNVR event store and has no index of its own")
+
     contract_port_raw = raw.get("contract_port")
     return AppConfig(
-        db_path=db_path,
-        nats_url=nats_url,
-        nats_token=str(raw["nats_token"]) if raw.get("nats_token") else None,
-        subject_pattern=subject,
         extra_labels=extra_labels,
         camera_aliases=camera_aliases,
         ollama=ollama,
         result_limit=result_limit,
-        retention_days=max(0, int(raw.get("retention_days", 30) or 0)),
-        coalesce_seconds=max(0, int(raw.get("coalesce_seconds", 60) or 0)),
         contract_port=(
             int(contract_port_raw) if contract_port_raw is not None else None
         ),
@@ -239,82 +197,215 @@ def load_config(path: str) -> AppConfig:
         contract_host=(
             str(raw["contract_host"]) if raw.get("contract_host") else None
         ),
-        opennvr_url=str(raw["opennvr_url"]) if raw.get("opennvr_url") else None,
+        opennvr_url=opennvr_url,
         opennvr_token=(
             str(raw["opennvr_token"]) if raw.get("opennvr_token") else None
         ),
     )
 
 
-# ── Indexer ────────────────────────────────────────────────────────
+# ── Results ────────────────────────────────────────────────────────
 
 
-class Indexer(Detector):
-    """Subscribes to NATS inference events (via the SDK's Detector
-    loop) and writes searchable keyframes into the store.
+@dataclass
+class Hit:
+    """One matching visit, flattened for display.
 
-    Hooks :meth:`handle_event` instead of ``on_detections`` because
-    caption-only events (a BLIP result has ``result.caption`` and no
-    detections list) are exactly as indexable as detection events —
-    the base's detections walk would drop them.
+    Deliberately not the route's dict. What this app shows is a stable
+    surface for its CLI and its action, and a new key appearing on the
+    route should not silently change what an operator reads.
+    """
+
+    event_id: int
+    camera_id: int | None
+    camera_name: str | None
+    when: str
+    labels: list[str]
+    caption: str
+    plate: str | None
+    has_evidence: bool
+
+    @classmethod
+    def from_result(cls, row: dict[str, Any]) -> "Hit":
+        claims = row.get("claims") or []
+        labels = [str(row["label"])] if row.get("label") else []
+        labels += [str(c.get("value")) for c in claims
+                   if c.get("kind") == "colour" and c.get("value")]
+        return cls(
+            event_id=int(row.get("id") or 0),
+            camera_id=row.get("camera_id"),
+            camera_name=row.get("camera_name"),
+            when=str(row.get("started_at") or ""),
+            labels=labels,
+            caption=str(row.get("caption") or ""),
+            plate=row.get("plate_text") or None,
+            has_evidence=bool(row.get("has_evidence")),
+        )
+
+
+class StoreUnreachable(RuntimeError):
+    """Core did not answer.
+
+    Its own exception type so that it cannot be collapsed into "nothing
+    matched" by accident. Telling an operator that no red truck came
+    past, when the truth is that nobody was able to look, is the worst
+    answer this app can give.
+    """
+
+
+class CameraNotHeld(RuntimeError):
+    """The query named a camera this app has not been given.
+
+    Also not "nothing matched": the operator asked about the loading
+    dock and the honest reply is that this app cannot see the loading
+    dock, not that the dock was quiet.
+    """
+
+
+# ── Search ─────────────────────────────────────────────────────────
+
+
+def run_search(config: AppConfig, client: OpenNVR, query: str,
+               *, limit: int | None = None) -> list[Hit]:
+    """Parse the query and run it against the canonical store."""
+    now = _dt.datetime.now(_dt.timezone.utc)
+    vocab = set(DEFAULT_LABELS) | set(config.extra_labels)
+    if config.ollama.enabled:
+        qf = parse_with_ollama(
+            query, now=now, ollama_url=config.ollama.url,
+            model=config.ollama.model, label_vocab=vocab,
+            camera_aliases=config.camera_aliases,
+        )
+    else:
+        qf = parse_heuristic(
+            query, now=now, label_vocab=vocab,
+            camera_aliases=config.camera_aliases,
+        )
+    logger.debug(
+        "parsed query → labels=%s keywords=%s camera=%s since=%s until=%s",
+        qf.labels, qf.keywords, qf.camera_id, qf.since, qf.until,
+    )
+
+    cameras: list[int] | None = None
+    if qf.camera_id:
+        cameras = resolve_camera(client, qf.camera_id)
+        if not cameras:
+            raise CameraNotHeld(
+                f"'{qf.camera_id}' is not a camera this app has been given "
+                "access to")
+
+    answer = client.timeline.find(
+        " ".join(qf.keywords),
+        label=qf.labels or None,
+        camera=cameras,
+        start=_ts(qf.since),
+        end=_ts(qf.until),
+        limit=limit or config.result_limit,
+    )
+    if answer is None:
+        raise StoreUnreachable(
+            "the OpenNVR event store did not answer, so it is not known "
+            "whether anything matched")
+    return [Hit.from_result(r) for r in (answer.get("results") or [])]
+
+
+def _ts(value: float | None) -> _dt.datetime | None:
+    return (_dt.datetime.fromtimestamp(value, _dt.timezone.utc)
+            if value is not None else None)
+
+
+def resolve_camera(client: OpenNVR, alias: str) -> list[int]:
+    """An alias from the query parser → camera ids this app holds.
+
+    The parser yields whatever the operator configured (``"dock"`` ->
+    ``"Dock"``), which may be a name, an id, or a ``cam3`` handle. The
+    handle is compared as the roster reports it rather than rebuilt from
+    the id, so a change to how handles are formed cannot leave this
+    matching a shape core no longer uses.
+
+    Matching happens against the app's OWN roster, so an alias can never
+    reach a camera the app was not given. The server would refuse it in
+    any case; failing here just says so in words an operator can act on.
+    """
+    wanted = alias.strip().lower()
+    return [c.id for c in client.cameras()
+            if (c.name or "").strip().lower() == wanted
+            or str(c.id) == wanted
+            or (c.handle or "").strip().lower() == wanted
+            or (c.handle or "").strip().lower().replace("cam", "cam-", 1) == wanted]
+
+
+def format_results(results: list[Hit]) -> str:
+    if not results:
+        return "No matching footage found."
+    lines = [f"{len(results)} match(es):"]
+    for r in results:
+        where = r.camera_name or (f"camera {r.camera_id}" if r.camera_id
+                                  else "unknown camera")
+        when = r.when.replace("T", " ")[:19] or "—"
+        labels = " ".join(r.labels) or "—"
+        lines.append(f"  [{where}] {when}  {labels}")
+        if r.caption:
+            lines.append(f'      "{r.caption}"')
+        detail = [f"event #{r.event_id}"]
+        if r.plate:
+            detail.append(f"plate {r.plate}")
+        if r.has_evidence:
+            detail.append("photo kept")
+        lines.append("      " + " · ".join(detail))
+    return "\n".join(lines)
+
+
+# ── App ────────────────────────────────────────────────────────────
+
+
+class FootageSearch(ContractApp):
+    """The operator surface: a manifest, live state, and one action.
+
+    A :class:`~opennvr_app_sdk.ContractApp` rather than a ``Detector``
+    because there is no longer anything to subscribe to. Everything it
+    answers with, it reads from core at the moment it is asked.
     """
 
     manifest = MANIFEST
 
-    def __init__(
-        self,
-        config: AppConfig,
-        store: FootageStore,
-        dispatcher: Any = None,
-    ) -> None:
-        # ``dispatcher`` is unused (this app fires no alerts); the
-        # historical constructor is ``Indexer(config, store)``.
-        self._store = store
-        super().__init__(config, dispatcher)
-        self._indexed = 0
-        # Rolling feed of the most recent operator searches — powers the
-        # "Recent searches" log on the app's dashboard.
+    def __init__(self, config: AppConfig, client: OpenNVR | None = None) -> None:
+        self._client = client
+        self._searches = 0
+        self._store_ok: bool | None = None
         self._recent: deque[dict[str, Any]] = deque(maxlen=25)
+        super().__init__(config)
 
-    def ingest(self, event: dict[str, Any]) -> bool:
-        """Index one event. Returns True if a keyframe was stored."""
-        kf = keyframe_from_event(event)
-        if kf is None:
-            return False
-        self._store.add(kf)
-        self._indexed += 1
-        return True
+    @property
+    def client(self) -> OpenNVR:
+        """Built on first use, not at construction: an app that cannot
+        reach core should still serve ``/health`` and say why."""
+        if self._client is None:
+            self._client = OpenNVR(self.cfg.opennvr_url,
+                                   token=self.cfg.opennvr_token)
+        return self._client
 
-    def handle_event(self, event: Any) -> list[Alert]:
-        """Whole-event hook (decode + isolation live in the SDK's
-        ``_handle_raw`` above this)."""
-        self._contract_note_event()
-        if isinstance(event, dict):
-            # Index only the cameras picked for this app. The bus carries
-            # every camera; nothing picked = nothing indexed.
-            camera_id = event.get("camera_id")
-            if camera_id and not self.camera_picked(camera_id):
-                return []
-            self.ingest(event)
-            if self._indexed and self._indexed % 100 == 0:
-                logger.info("indexed %d keyframes", self._indexed)
-        return []
+    def not_ready_reason(self) -> str | None:
+        """Up, but unable to do the job. Shown as-is in the App Catalog.
+
+        ``None`` while nothing has been asked yet: an app that has not
+        been queried is not broken, and saying so would put a red mark
+        on every freshly started deployment.
+        """
+        if self._store_ok is False:
+            return ("The OpenNVR event store did not answer the last "
+                    "search, so footage cannot be searched right now.")
+        return None
 
     def state_snapshot(self) -> dict[str, Any]:
-        """``GET /state`` — session + total index counters."""
         return {
-            "indexed_this_session": self._indexed,
-            "rows_total": self._store.count(),
+            "searches": self._searches,
+            "store_status": {None: "not queried yet", True: "answering",
+                             False: "not answering"}[self._store_ok],
             "recent": list(self._recent),
         }
 
     def on_action(self, name: str, params: dict[str, Any]) -> dict[str, Any]:
-        """``search`` — the manifest-declared operator action, giving the
-        catalog a UI query path (previously CLI-only via ``docker compose
-        exec … search``). Runs on the contract server's thread, so it
-        opens a FRESH read connection: the indexer's own sqlite
-        connection belongs to the NATS loop thread and sqlite connections
-        must not be used concurrently across threads."""
         if name != "search":
             raise KeyError(name)
         query = str(params.get("query") or "").strip()
@@ -330,134 +421,51 @@ class Indexer(Detector):
         if not 1 <= limit <= 200:
             raise ValueError("'limit' must be between 1 and 200")
 
-        read_store = FootageStore(self.cfg.db_path)
         try:
-            cfg = dataclasses.replace(self.cfg, result_limit=limit)
-            results = run_search(cfg, read_store, query)
-        finally:
-            # One fresh connection PER ACTION — it must close with the
-            # request or N searches leak N file descriptors (review H1).
-            read_store.close()
-        # Hit count only, never the words: the state is shown to every
-        # operator, and a query may come from someone's voice assistant.
-        self._recent.append({
-            "message": f"search: {len(results)} hit"
-                       f"{'' if len(results) == 1 else 's'}",
-            "time": _dt.datetime.now(tz=_dt.timezone.utc).isoformat(
-                timespec="seconds"),
-        })
-        # Rows indexed before a camera was unpicked stay on disk until
-        # retention clears them, but are not offered: search covers the
-        # cameras this app works on now.
-        results = [r for r in results if self.camera_picked(r.camera_id)]
+            results = run_search(self.cfg, self.client, query, limit=limit)
+        except StoreUnreachable:
+            self._store_ok = False
+            self._note("search: store did not answer")
+            raise
+        self._store_ok = True
+        self._searches += 1
+
+        # Hit count only, never the words: state is shown to every
+        # operator, and a query may have come from someone's voice
+        # assistant.
+        self._note(f"search: {len(results)} hit"
+                   f"{'' if len(results) == 1 else 's'}")
         return {
             "query": query,
             "results": [
                 {
-                    "camera": r.camera_id,
-                    "when": _dt.datetime.fromtimestamp(
-                        r.ts, tz=_dt.timezone.utc
-                    ).isoformat(timespec="seconds"),
+                    "event_id": r.event_id,
+                    "camera": r.camera_name or r.camera_id,
+                    "when": r.when,
                     "labels": " ".join(r.labels),
                     "caption": r.caption,
+                    "plate": r.plate,
+                    "has_evidence": r.has_evidence,
                 }
                 for r in results
             ],
         }
 
-    def prune_now(self) -> int:
-        """Apply the retention window once. Returns rows deleted (0 when
-        retention is disabled). Separated from the timer so it is testable
-        without a running loop."""
-        days = int(getattr(self.cfg, "retention_days", 0) or 0)
-        if days <= 0:
-            return 0
-        cutoff = time.time() - days * 86_400
-        removed = self._store.prune(cutoff)
-        if removed:
-            logger.info("retention: pruned %d keyframes older than %d days",
-                        removed, days)
-        return removed
-
-    async def _retention_loop(self, interval_s: float = 6 * 3600) -> None:
-        """Prune on start and every 6h after. Best-effort: a failing prune
-        (locked db, disk hiccup) must never take the indexer down."""
-        while True:
-            try:
-                await asyncio.to_thread(self.prune_now)
-            except Exception:
-                logger.warning("retention pass failed", exc_info=True)
-            await asyncio.sleep(interval_s)
-
-    async def run(self, *, once: bool = False) -> None:
-        logger.info(
-            "footage-search indexer started: db=%s, subject=%r (%d rows already indexed)",
-            self.cfg.db_path, self.cfg.subject_pattern, self._store.count(),
-        )
-        retention: asyncio.Task | None = None
-        if not once and int(getattr(self.cfg, "retention_days", 0) or 0) > 0:
-            retention = asyncio.create_task(self._retention_loop())
-        try:
-            await super().run(once=once)
-        finally:
-            if retention is not None:
-                retention.cancel()
-            logger.info("indexer stopped; %d keyframes this session", self._indexed)
-
-
-# ── Search ─────────────────────────────────────────────────────────
-
-
-def run_search(config: AppConfig, store: FootageStore, query: str) -> list[SearchResult]:
-    """Parse the query and run it against the store."""
-    now = _dt.datetime.now(_dt.timezone.utc)
-    vocab = set(DEFAULT_LABELS) | set(config.extra_labels)
-    if config.ollama.enabled:
-        qf = parse_with_ollama(
-            query, now=now, ollama_url=config.ollama.url, model=config.ollama.model,
-            label_vocab=vocab, camera_aliases=config.camera_aliases,
-        )
-    else:
-        qf = parse_heuristic(
-            query, now=now, label_vocab=vocab, camera_aliases=config.camera_aliases,
-        )
-    logger.debug(
-        "parsed query → labels=%s keywords=%s camera=%s since=%s until=%s",
-        qf.labels, qf.keywords, qf.camera_id, qf.since, qf.until,
-    )
-    return store.search(
-        labels=qf.labels, keywords=qf.keywords,
-        since=qf.since, until=qf.until, camera_id=qf.camera_id,
-        limit=config.result_limit,
-    )
-
-
-def format_results(results: list[SearchResult]) -> str:
-    if not results:
-        return "No matching footage found."
-    lines = [f"{len(results)} match(es):"]
-    for r in results:
-        when = _dt.datetime.fromtimestamp(r.ts, _dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        labels = " ".join(r.labels) or "—"
-        lines.append(f"  [{r.camera_id}] {when}  {labels}")
-        if r.caption:
-            lines.append(f"      \"{r.caption}\"")
-        cid = r.correlation_id or "—"
-        lines.append(
-            f"      correlation_id={cid} (use it to pull the recorded segment)"
-        )
-    return "\n".join(lines)
+    def _note(self, message: str) -> None:
+        self._recent.append({
+            "message": message,
+            "time": _dt.datetime.now(tz=_dt.timezone.utc).isoformat(
+                timespec="seconds"),
+        })
 
 
 # ── CLI ────────────────────────────────────────────────────────────
 
 
 def main(argv: list[str] | None = None) -> int:
-    # Two-subcommand CLI — kept app-side (the SDK's ``app(...)``
-    # runner models single-loop daemons; ``search`` is a one-shot).
     parser = argparse.ArgumentParser(
         prog="footage-search",
-        description="Index inference events and search recorded footage in natural language.",
+        description="Search recorded footage in natural language.",
     )
     parser.add_argument("--config", required=True, help="Path to config.yml")
     parser.add_argument(
@@ -465,9 +473,11 @@ def main(argv: list[str] | None = None) -> int:
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("index", help="Run the indexer daemon (subscribes to NATS).")
-    p_search = sub.add_parser("search", help="Search the index.")
-    p_search.add_argument("query", help="Natural-language query, e.g. 'red truck yesterday'.")
+    sub.add_parser("serve",
+                   help="Serve the app contract (manifest, state, actions).")
+    p_search = sub.add_parser("search", help="Run one search and print it.")
+    p_search.add_argument(
+        "query", help="Natural-language query, e.g. 'red truck yesterday'.")
 
     args = parser.parse_args(argv)
     logging.basicConfig(
@@ -480,32 +490,33 @@ def main(argv: list[str] | None = None) -> int:
         print(f"config error: {exc}", file=sys.stderr)
         return 2
 
-    store = FootageStore(
-        config.db_path, coalesce_seconds=float(config.coalesce_seconds)
-    )
-    try:
-        if args.command == "search":
-            results = run_search(config, store, args.query)
-            print(format_results(results))
-            return 0
-
-        # index
-        indexer = Indexer(config, store)
-        loop = asyncio.new_event_loop()
-
-        def _handle_signal(_signum, _frame):
-            logger.info("signal received, stopping…")
-            loop.call_soon_threadsafe(indexer.stop)
-
-        signal.signal(signal.SIGINT, _handle_signal)
-        signal.signal(signal.SIGTERM, _handle_signal)
+    if args.command == "search":
+        client = OpenNVR(config.opennvr_url, token=config.opennvr_token)
         try:
-            loop.run_until_complete(indexer.run())
-        finally:
-            loop.close()
+            results = run_search(config, client, args.query)
+        except (StoreUnreachable, CameraNotHeld) as exc:
+            # Exit 3, not 0 with "no matches". A script reading this
+            # output has to be able to tell an empty result from an
+            # unanswered question.
+            print(f"search unavailable: {exc}", file=sys.stderr)
+            return 3
+        print(format_results(results))
         return 0
+
+    app = FootageSearch(config)
+    loop = asyncio.new_event_loop()
+
+    def _handle_signal(_signum, _frame):
+        logger.info("signal received, stopping…")
+        loop.call_soon_threadsafe(app.stop)
+
+    signal.signal(signal.SIGINT, _handle_signal)
+    signal.signal(signal.SIGTERM, _handle_signal)
+    try:
+        loop.run_until_complete(app.run())
     finally:
-        store.close()
+        loop.close()
+    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover

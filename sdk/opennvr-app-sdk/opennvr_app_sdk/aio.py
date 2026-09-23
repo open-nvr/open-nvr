@@ -170,6 +170,24 @@ class AsyncTimelineAPI:
         return await self._http.get_bytes(
             f"/api/v1/internal/camera-agent/events/{int(event_id)}/{suffix}")
 
+    async def find(self, text: str = "", *, label=None, camera=None,
+                   plate: str | None = None, attrs=None, start=None, end=None,
+                   limit: int = 25, skip: int = 0) -> dict | None:
+        """Search the canonical store by WORDS, scoped to this app.
+
+        ``None`` means the store could not be reached, which is NOT the
+        same as an empty result — see the sync twin for why that
+        distinction is load-bearing.
+        """
+        return await self._http.get_json(
+            "/api/v1/internal/app/search",
+            text=text or "",
+            label=[s for s in (label or []) if s] or None,
+            camera_id=[_camera_id(c) for c in (camera or []) if c is not None] or None,
+            plate=plate, attr=list(attrs or []) or None,
+            limit=limit, skip=skip,
+            **{"from": _iso(start), "to": _iso(end)})
+
     async def plate_stats(self, days: int = 7) -> dict | None:
         return await self._http.get_json("/api/v1/internal/app/plates/stats", days=days)
 

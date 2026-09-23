@@ -39,6 +39,9 @@ Archetypes (spec §02):
   KAI-C (intrusion, LPR, package delivery).
 * :class:`AlertSubscriber` — consumes ``opennvr.alerts.*`` (the
   alerts-subscriber template, HA relay, SIEM bridges).
+* :class:`ContractApp` — no stream and no timer: an app that exists so
+  an operator has somewhere to ask a question, and reads what it needs
+  from core when asked (footage-search).
 
 Apache-2.0, unlike the AGPL example apps — the SDK is meant to be
 embedded in third-party apps the same way ``opennvr-adapter-sdk`` is.
@@ -59,6 +62,7 @@ from .alerts import (
 from .alert_subscriber import AlertSubscriber, AlertSubscriberRunner, alert_app
 from .config import BaseAppConfig, load_app_config, load_yaml, require
 from .contract import ContractServer, Entitlement
+from .contract_app import ContractApp
 from .detector import AppRunner, Detector, app
 from .facade import (
     DEFAULT_ABSENCE_S, DEFAULT_MIN_CONFIDENCE, App, DetectionEvent, Setting,
@@ -143,6 +147,7 @@ ARCHETYPES: tuple[str, ...] = (
     "Detector",
     "FrameApp",
     "AlertSubscriber",
+    "ContractApp",
     "DomainEventSubscriber",
     "app",
     "alert_app",

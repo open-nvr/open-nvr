@@ -474,9 +474,9 @@
 
 - id: footage-search
   name: Footage Search
-  summary: Indexes inference events (labels + captions) into SQLite and answers natural-language footage queries like 'red truck at the dock yesterday'.
+  summary: Answers natural-language footage queries like 'red truck at the dock yesterday' against the platform's event store.
   category: forensics
-  version: "1.0.0"
+  version: "2.0.0"
   image: ghcr.io/open-nvr/footage-search:latest
   build_context: examples/footage-search
   requires_tasks: []
@@ -489,10 +489,15 @@
   install:
     compose: |
       # INFORMATIONAL — this service already ships in
-      # docker-compose.apps.yml (with its config-init companion, named
-      # config volume, and a persistent data volume for the SQLite
-      # index); you do NOT paste this anywhere. Run the command below
-      # and compose brings it up from the shipped overlay.
+      # docker-compose.apps.yml (with its config-init companion and
+      # named config volume); you do NOT paste this anywhere. Run the
+      # command below and compose brings it up from the shipped
+      # overlay.
+      #
+      # No data volume and no NATS: as of 2.0.0 this app keeps no index
+      # of its own and searches the platform's event store, so
+      # OPENNVR_URL is what it needs and the rest was upkeep on a second
+      # copy of the same footage.
       services:
         footage-search:
           profiles: [apps]
@@ -500,7 +505,6 @@
           restart: unless-stopped
           environment:
             - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
-            - NATS_URL=nats://nats:4222
             - OPENNVR_URL=http://opennvr-core:8000
           expose:
             - "9208"

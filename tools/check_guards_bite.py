@@ -47,6 +47,13 @@ AGENT_PY = sys.executable
 #: reverse the protected behaviour — a mutation that leaves the
 #: behaviour intact proves nothing when the guard passes.
 MUTATIONS: list[tuple[str, str, str, str, str, str]] = [
+    # ── camera scoping ───────────────────────────────────────────────
+    ("an empty camera scope stops meaning nothing",
+     "server/services/camera_scope.py",
+     "    if not scope:\n        return q.filter(camera_column.in_([-1]))",
+     "    if not scope:\n        return q",
+     "server", "tests/test_scope_query_empty.py"),
+
     # ── the canonical event store ────────────────────────────────────
     ("a plate retraction stops dropping the claim",
      "server/services/plate_enrichment.py",
@@ -142,6 +149,35 @@ KNOWN_UNCOVERED: list[tuple[str, str, str, str, str, str, str]] = [
      "which a static guard should not pretend to do. What protects this "
      "instead is that clear_plate now drops the claim itself — the "
      "mutation has to delete a call to it to get here."),
+
+    ("the app-search short-circuit for an empty roster",
+     "server/routers/app_platform.py",
+     '    if roster is not None and not roster:\n        return {"results": [], "count": 0, "total": 0, "answer": {}}\n',
+     "",
+     "server", "tests/test_app_search_route.py",
+     "It is a shortcut, not a guard, and the tests are right not to "
+     "notice it going. Removing it leaves the empty roster to "
+     "scope_query, which already matches nothing, so the route still "
+     "answers correctly — two database round trips slower. A test that "
+     "failed here would be pinning an optimisation as if it were the "
+     "scoping. The comment in the route used to claim it WAS the "
+     "scoping; that claim is what this entry replaces."),
+
+    ("scope_query's explicit empty-set branch, with the route's "
+     "short-circuit already gone",
+     "server/services/camera_scope.py",
+     "    if not scope:\n        return q.filter(camera_column.in_([-1]))\n",
+     "",
+     "server", "tests/test_scope_query_empty.py",
+     "Falls through to in_(sorted(set())), and SQLAlchemy 2.x compiles "
+     "an empty IN to a false predicate: no rows, no warning. So the "
+     "mutated code is still CORRECT, and a test that failed here would "
+     "be asserting on how a library renders a degenerate expression. "
+     "The branch is kept because a site-wide scoping invariant should "
+     "not rest silently on that rendering across a major version — but "
+     "what is pinned is the behaviour, which the sentinels-disagree "
+     "test covers. Deleting the branch in a way that actually widens "
+     "the query (returning q unfiltered) IS caught; see MUTATIONS."),
 ]
 
 

@@ -569,9 +569,11 @@ class KaiCService:
             #    internal key. KAI-C applies sovereignty/fingerprint
             #    governance AND publishes the result on NATS, so the
             #    subscriber example apps (occupancy / loitering /
-            #    line-crossing / abandoned-object / footage-search) see
-            #    the server's own camera inference without a separate
-            #    producer app running. Returns the adapter body directly.
+            #    line-crossing / abandoned-object) see the server's own
+            #    camera inference without a separate producer app
+            #    running. Returns the adapter body directly.
+            #    (footage-search used to be in that list; since 2.0.0 it
+            #    subscribes to nothing and reads the event store.)
             #
             #  v1 (default): same contract body → POST /infer/local
             #    (legacy passthrough; no NATS/governance). Safe when the

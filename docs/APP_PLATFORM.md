@@ -56,6 +56,7 @@ caps   = nvr.ai.capabilities()                    # adapters, tasks, health
 | `camera.stream(cam)`, `stream_grant(cam)` | `GET /internal/app/cameras/{id}/stream` | roster |
 | `recordings(cam).list/url/frame_at` | `GET /internal/app/recordings/{id}[/url]`, `/internal/camera-agent/recordings/frame` | roster |
 | `timeline.search/evidence` | `GET /internal/camera-agent/events[/{id}/evidence]` | roster |
+| `timeline.find(text)` | `GET /internal/app/search` | roster |
 | `timeline.plate_stats/summary/sessions` | `GET /internal/app/plates/*` | roster |
 | `alerts.inbox()` | `GET /internal/app/alerts` | the app's own alerts |
 | `site_mode()` | `GET /internal/app/site-mode` | the whole site (read-only: `disarmed` / `armed_home` / `armed_away`) |
@@ -71,6 +72,18 @@ the platform's LIVE view of a camera the app is assigned. `ai.stream()`
 at the bottom of the table is a KAI-C inference session. Having both
 named `stream` in one table is a trap the table used to set by listing
 only the second one.
+
+`timeline.search()` and `timeline.find()` are different questions.
+`search` filters by label and time — "cars on cam3 yesterday". `find`
+matches the WORDS an enricher wrote into the caption and attributes, so
+"red van" reaches a visit nobody labelled a van, and returns what each
+skill claimed about each hit. `find` is the one an app should reach for
+when the operator typed something; it is also the reason an app no
+longer needs an index of its own.
+
+Both return `None` when the store cannot be reached, which is NOT an
+empty result. An app that reports those the same way tells an operator
+that no red van came past when the truth is that nobody looked.
 
 The evidence store is how an app keeps a photo and gets it back later.
 `save_evidence` returns a content-addressed path; `read_evidence` takes

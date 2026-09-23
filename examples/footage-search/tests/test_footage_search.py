@@ -1,35 +1,105 @@
 # Copyright (c) 2026 OpenNVR
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Tests for the footage-search store, query parser, and the headline
-'red truck' end-to-end path — all without NATS or an LLM."""
+"""Tests for the query parser and the search path onto the event store.
+
+The index is gone, and with it most of what this file used to hold:
+keyframe extraction, coalescing windows, retention pruning, Tier-0
+frame walking. All of that was the cost of keeping a second copy of the
+platform's data, and none of it is this app's job any more.
+
+What is left is the part that was always its own — turning a sentence a
+human typed into a structured query — plus the seams where that meets
+core. Those seams get the attention, because the app's whole surface is
+now one call to somebody else's store, and the two ways that call can
+fail to mean what it says.
+"""
 from __future__ import annotations
 
 import datetime as _dt
-import time
+import inspect
 
+import pytest
+from opennvr_app_sdk.client import Camera, TimelineAPI
+
+from footage_search import (AppConfig, CameraNotHeld, FootageSearch, Hit,
+                            OllamaConfig, StoreUnreachable, format_results,
+                            resolve_camera, run_search)
 from query import parse_heuristic
-from store import FootageStore, Keyframe, keyframe_from_event
 
 NOW = _dt.datetime(2026, 6, 14, 12, 0, 0, tzinfo=_dt.timezone.utc)
 
+#: Bound against the real client, so a rename in the SDK breaks these
+#: tests instead of quietly making the fake accept a call no client can
+#: take. That exact fake — ``def find(self, *a, **kw)`` — is how the
+#: camera-agent shipped a call to a method that did not exist and had it
+#: read as working for a month.
+_REAL_FIND = inspect.signature(TimelineAPI.find)
 
-def _ts(dt: _dt.datetime) -> float:
-    return dt.timestamp()
+
+class _Timeline:
+    def __init__(self, answer):
+        self.answer = answer
+        self.calls = []
+
+    def find(self, *a, **kw):
+        bound = _REAL_FIND.bind(self, *a, **kw)
+        bound.apply_defaults()
+        self.calls.append({k: v for k, v in list(bound.arguments.items())[1:]})
+        return self.answer
 
 
-# ── Query parser ───────────────────────────────────────────────────
+def _camera(cid, name):
+    """A roster entry as core reports one."""
+    return Camera(id=cid, handle=f"cam{cid}", name=name, role=name,
+                  frame_url=f"http://core/frames/{cid}")
+
+
+class _Client:
+    """Stands in for ``OpenNVR``, reduced to what this app asks of it."""
+
+    def __init__(self, answer=None, cameras=()):
+        self.timeline = _Timeline(answer)
+        self._cameras = list(cameras)
+
+    def cameras(self):
+        return self._cameras
+
+
+def _cfg(**over):
+    base = dict(extra_labels=[], camera_aliases={}, ollama=OllamaConfig(),
+                result_limit=25, opennvr_url="http://core")
+    base.update(over)
+    return AppConfig(**base)
+
+
+def _row(**over):
+    row = {
+        "id": 8140, "camera_id": 3, "camera_name": "Dock", "label": "truck",
+        "started_at": "2026-06-13T14:22:08+00:00",
+        "caption": "a red truck parked near a loading dock",
+        "plate_text": None, "has_evidence": False, "claims": [],
+    }
+    row.update(over)
+    return row
+
+
+def _answer(*rows):
+    return {"results": list(rows), "count": len(rows), "total": len(rows),
+            "answer": {}}
+
+
+# ── Query parser (unchanged by the port) ───────────────────────────
 
 
 def test_parses_label_keyword_and_time():
     qf = parse_heuristic(
         "show me every red truck at the dock yesterday",
-        now=NOW, camera_aliases={"dock": "cam-dock"},
+        now=NOW, camera_aliases={"dock": "Dock"},
     )
     assert "truck" in qf.labels
     assert "red" in qf.keywords
-    assert qf.camera_id == "cam-dock"
-    # yesterday window
+    assert qf.camera_id == "Dock"
     assert qf.since is not None and qf.until is not None
     y = (NOW - _dt.timedelta(days=1)).date()
     assert _dt.datetime.fromtimestamp(qf.since, _dt.timezone.utc).date() == y
@@ -49,327 +119,249 @@ def test_descriptor_only_query_has_no_labels():
     assert qf.since is not None           # today window
 
 
-# ── Store + keyframe extraction ────────────────────────────────────
+# ── The parsed query reaches the store intact ──────────────────────
 
 
-def test_keyframe_from_detection_and_caption_events():
-    det_kf = keyframe_from_event({
-        "camera_id": "cam-1", "correlation_id": "c1", "adapter": "yolov8",
-        "completed_at": "2026-06-14T10:00:00Z",
-        "result": {"detections": [{"label": "truck"}, {"label": "person"}]},
-    })
-    assert det_kf is not None and "truck" in det_kf.labels
+def test_the_headline_query_end_to_end():
+    """"red truck at the dock yesterday" — the query on the tin.
 
-    cap_kf = keyframe_from_event({
-        "camera_id": "cam-1", "correlation_id": "c1", "adapter": "blip",
-        "completed_at": "2026-06-14T10:00:00Z",
-        "result": {"caption": "a red truck near a loading dock"},
-    })
-    assert cap_kf is not None and "red truck" in cap_kf.caption
+    The label goes out as a label, the descriptor as search text, the
+    camera as an id resolved from the roster, and the day as a window.
+    Each of those used to be a column in this app's own database.
+    """
+    client = _Client(answer=_answer(_row()),
+                     cameras=[_camera(3, "Dock")])
+    hits = run_search(_cfg(camera_aliases={"dock": "Dock"}), client,
+                      "red truck at the dock yesterday")
 
-    # Empty event → nothing to index
-    assert keyframe_from_event({"camera_id": "cam-1", "result": {}}) is None
-
-
-def test_red_truck_end_to_end():
-    store = FootageStore(":memory:")
-    # The detector indexed a truck; the captioner indexed the color.
-    store.add(Keyframe(
-        camera_id="cam-dock", ts=_ts(NOW - _dt.timedelta(days=1, hours=2)),
-        correlation_id="corr-A", adapter="yolov8",
-        labels=["truck", "person"], caption="",
-    ))
-    store.add(Keyframe(
-        camera_id="cam-dock", ts=_ts(NOW - _dt.timedelta(days=1, hours=2)),
-        correlation_id="corr-A", adapter="blip",
-        labels=[], caption="a red truck parked near a loading dock",
-    ))
-    # A blue car yesterday — should NOT match "red truck".
-    store.add(Keyframe(
-        camera_id="cam-dock", ts=_ts(NOW - _dt.timedelta(days=1, hours=1)),
-        correlation_id="corr-B", adapter="blip",
-        labels=["car"], caption="a blue car",
-    ))
-
-    qf = parse_heuristic("red truck at the dock yesterday", now=NOW,
-                         camera_aliases={"dock": "cam-dock"})
-    results = store.search(
-        labels=qf.labels, keywords=qf.keywords,
-        since=qf.since, until=qf.until, camera_id=qf.camera_id,
-    )
-    captions = [r.caption for r in results]
-    # The red-truck caption row matches (truck via... actually caption);
-    # at least one result, and none of them the blue car.
-    assert any("red truck" in c for c in captions)
-    assert all("blue car" not in c for c in captions)
-    store.close()
+    call = client.timeline.calls[0]
+    assert call["label"] == ["truck"]
+    assert "red" in call["text"]
+    assert call["camera"] == [3]
+    assert call["start"] is not None and call["end"] is not None
+    assert len(hits) == 1
+    assert hits[0].caption.startswith("a red truck")
 
 
-def test_time_window_excludes_old_rows():
-    store = FootageStore(":memory:")
-    store.add(Keyframe("cam-1", _ts(NOW - _dt.timedelta(days=5)), "old", "yolov8",
-                       ["truck"], "a truck"))
-    store.add(Keyframe("cam-1", _ts(NOW - _dt.timedelta(minutes=10)), "new", "yolov8",
-                       ["truck"], "a truck"))
-    qf = parse_heuristic("truck in the last 30 minutes", now=NOW)
-    results = store.search(labels=qf.labels, since=qf.since, until=qf.until)
-    ids = {r.correlation_id for r in results}
-    assert ids == {"new"}
-    store.close()
+def test_a_descriptor_only_query_sends_no_label_filter():
+    """``label=[]`` would be a filter matching nothing. It has to be
+    ``None`` — no filter at all — or "anyone in a yellow jacket" comes
+    back empty against a store that holds exactly that."""
+    client = _Client(answer=_answer())
+    run_search(_cfg(), client, "anyone in a yellow jacket today")
+    assert client.timeline.calls[0]["label"] is None
 
 
-# ── The "search" action (manifest-declared, catalog-invoked) ────────────
+def test_a_query_with_no_time_words_sends_no_window():
+    client = _Client(answer=_answer())
+    run_search(_cfg(), client, "red truck")
+    call = client.timeline.calls[0]
+    assert call["start"] is None and call["end"] is None
 
 
-def test_search_action_end_to_end(tmp_path):
-    """on_action("search") — the UI query path — opens a FRESH read
-    connection on the db_path (the indexer's own connection belongs to
-    the NATS loop thread) and returns catalog-renderable rows."""
-    from footage_search import AppConfig, Indexer, OllamaConfig
+def test_the_result_limit_is_honoured():
+    client = _Client(answer=_answer())
+    run_search(_cfg(result_limit=7), client, "red truck")
+    assert client.timeline.calls[0]["limit"] == 7
+    run_search(_cfg(result_limit=7), client, "red truck", limit=3)
+    assert client.timeline.calls[1]["limit"] == 3
 
-    db = str(tmp_path / "idx.sqlite3")
-    seed = FootageStore(db)
-    seed.add(Keyframe(
-        camera_id="cam-dock", ts=_ts(NOW - _dt.timedelta(hours=2)),
-        correlation_id="c1", adapter="blip",
-        labels=["truck"], caption="a red truck at the dock",
-    ))
-    seed.close()
 
-    cfg = AppConfig(
-        db_path=db, nats_url="nats://x", nats_token=None,
-        subject_pattern="opennvr.inference.>", extra_labels=[],
-        camera_aliases={"dock": "cam-dock"}, ollama=OllamaConfig(),
-        result_limit=25,
-    )
-    indexer = Indexer(cfg, FootageStore(db))
+# ── What a visit carries that a keyframe never could ───────────────
 
-    out = indexer.on_action("search", {"query": "red truck", "limit": 5})
+
+def test_a_hit_carries_the_plate_and_the_photo():
+    """The plate and the evidence frame are on the VISIT. Neither
+    existed on the inference bus, so neither could ever have been in the
+    old index — this is the part of the port that adds rather than
+    removes."""
+    client = _Client(answer=_answer(
+        _row(plate_text="KA01AB1234", has_evidence=True)))
+    hit = run_search(_cfg(), client, "red truck")[0]
+
+    assert hit.plate == "KA01AB1234"
+    assert hit.has_evidence is True
+    rendered = format_results([hit])
+    assert "plate KA01AB1234" in rendered
+    assert "photo kept" in rendered
+
+
+def test_a_skill_claim_becomes_a_label():
+    """A colour claim from an enrichment skill shows beside the object
+    class, so "red truck" reads back as "truck red" rather than as a
+    caption the operator has to squint at."""
+    client = _Client(answer=_answer(_row(claims=[
+        {"kind": "colour", "value": "red", "confidence": 0.8},
+        {"kind": "face_id", "value": "someone", "confidence": 0.9},
+    ])))
+    hit = run_search(_cfg(), client, "red truck")[0]
+    assert hit.labels == ["truck", "red"]
+    assert "someone" not in hit.labels, (
+        "only colour claims become labels; anything else riding along "
+        "would put an identity claim in a list rendered to every viewer")
+
+
+# ── The two failures that are not 'nothing matched' ────────────────
+
+
+def test_an_unreachable_store_is_not_reported_as_no_matches():
+    """The worst answer this app can give is that no red truck came
+    past, when the truth is that nobody was able to look. ``find``
+    returns ``None`` for that, and ``None`` must not become ``[]``."""
+    client = _Client(answer=None)
+    with pytest.raises(StoreUnreachable):
+        run_search(_cfg(), client, "red truck")
+
+
+def test_an_empty_result_is_a_real_answer():
+    """The other half of the same distinction: core answered, and the
+    answer was nothing. That is not an error."""
+    client = _Client(answer=_answer())
+    assert run_search(_cfg(), client, "red truck") == []
+
+
+def test_a_camera_the_app_does_not_hold_is_refused_not_widened():
+    """An alias naming a camera outside the roster must not fall back to
+    searching every camera. The operator asked about the gate; answering
+    with the loading dock is worse than refusing."""
+    client = _Client(answer=_answer(_row()),
+                     cameras=[_camera(3, "Dock")])
+    with pytest.raises(CameraNotHeld):
+        run_search(_cfg(camera_aliases={"gate": "Gate"}), client,
+                   "red truck at the gate")
+    assert client.timeline.calls == [], (
+        "the query went to the store anyway, unscoped")
+
+
+# ── Camera resolution ──────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("alias", ["Dock", "dock", "DOCK", "3", "cam3", "cam-3"])
+def test_an_alias_resolves_by_name_id_or_handle(alias):
+    client = _Client(cameras=[_camera(3, "Dock")])
+    assert resolve_camera(client, alias) == [3]
+
+
+def test_an_alias_matches_nothing_outside_the_roster():
+    client = _Client(cameras=[_camera(3, "Dock")])
+    assert resolve_camera(client, "Gate") == []
+    assert resolve_camera(client, "9") == []
+
+
+# ── The operator action ────────────────────────────────────────────
+
+
+def _app(client):
+    return FootageSearch(_cfg(camera_aliases={"dock": "Dock"}), client=client)
+
+
+def test_the_search_action_returns_catalog_renderable_rows():
+    app = _app(_Client(answer=_answer(_row(plate_text="KA01AB1234")),
+                       cameras=[_camera(3, "Dock")]))
+    out = app.on_action("search", {"query": "red truck", "limit": 5})
+
     assert out["query"] == "red truck"
     assert len(out["results"]) == 1
     row = out["results"][0]
-    assert row["camera"] == "cam-dock"
+    assert row["camera"] == "Dock"
+    assert row["event_id"] == 8140
+    assert row["plate"] == "KA01AB1234"
     assert "red truck" in row["caption"]
-    assert row["when"].endswith("+00:00")  # ISO, UTC
 
 
-def test_search_action_validates_params():
-    from footage_search import AppConfig, Indexer, OllamaConfig
-
-    cfg = AppConfig(
-        db_path=":memory:", nats_url="nats://x", nats_token=None,
-        subject_pattern="s", extra_labels=[], camera_aliases={},
-        ollama=OllamaConfig(), result_limit=25,
-    )
-    indexer = Indexer(cfg, FootageStore(":memory:"))
-
-    import pytest as _pytest
-    with _pytest.raises(ValueError, match="non-empty"):
-        indexer.on_action("search", {"query": "   "})
-    with _pytest.raises(ValueError, match="between 1 and 200"):
-        indexer.on_action("search", {"query": "x", "limit": 0})
-    with _pytest.raises(KeyError):
-        indexer.on_action("enroll-face", {})
+def test_the_search_action_validates_params():
+    app = _app(_Client(answer=_answer()))
+    with pytest.raises(ValueError, match="non-empty"):
+        app.on_action("search", {"query": "   "})
+    with pytest.raises(ValueError, match="between 1 and 200"):
+        app.on_action("search", {"query": "x", "limit": 0})
+    with pytest.raises(ValueError, match="whole number"):
+        app.on_action("search", {"query": "x", "limit": "soon"})
+    with pytest.raises(KeyError):
+        app.on_action("enroll-face", {})
 
 
-# ── Tier-0 events (the always-on detector) ─────────────────────────
-#
-# A stock OpenNVR install runs detect-pipeline and no per-frame adapter
-# loop, so Tier-0 events are the ONLY thing on the bus. They carry
-# top-level ``tracks`` and NO ``result`` block — the shape the indexer
-# used to walk straight past, leaving the index permanently empty.
+def test_the_state_records_hit_counts_and_never_the_words():
+    """``/state`` is shown to every operator, and a query may have come
+    from someone's voice assistant. The count is safe; the sentence is
+    not."""
+    app = _app(_Client(answer=_answer(_row())))
+    app.on_action("search", {"query": "anyone in a yellow jacket"})
 
-def _tier0_event(labels, *, camera_id="cam-1", wall_ts=1_755_700_000.0):
-    return {
-        "schema": "opennvr.tier0.v1",
-        "adapter": "tier0",
-        "camera_id": camera_id,
-        "seq": 7,
-        "ts": 1234.5,            # time.monotonic() — NOT a date
-        "wall_ts": wall_ts,
-        "frame": {"w": 1920, "h": 1080},
-        "tracks": [
-            {"id": i + 1, "label": lab, "score": 0.9,
-             "box": [10, 10, 50, 50], "stationary": False, "best": True}
-            for i, lab in enumerate(labels)
-        ],
-    }
+    state = app.state_snapshot()
+    assert state["searches"] == 1
+    assert state["recent"][0]["message"] == "search: 1 hit"
+    assert "jacket" not in str(state), "the query text reached /state"
 
 
-def test_tier0_tracks_are_indexed_with_deduped_labels():
-    kf = keyframe_from_event(_tier0_event(["person", "person", "car"]))
-    assert kf is not None, "Tier-0 events must produce a keyframe"
-    assert kf.labels == ["person", "car"]      # one frame, four people → "person" once
-    assert kf.adapter == "tier0"
-    assert kf.camera_id == "cam-1"
+def test_an_outage_shows_in_the_catalog_and_does_not_count_as_a_search():
+    app = _app(_Client(answer=None))
+    assert app.not_ready_reason() is None, "not asked yet is not broken"
+
+    with pytest.raises(StoreUnreachable):
+        app.on_action("search", {"query": "red truck"})
+
+    assert "did not answer" in (app.not_ready_reason() or "")
+    assert app.state_snapshot()["searches"] == 0
+    assert app.state_snapshot()["store_status"] == "not answering"
 
 
-def test_tier0_keyframe_uses_wall_clock_not_monotonic():
-    """``ts`` is a monotonic reading; storing it would date every keyframe
-    from the machine's boot origin and break every time-window search."""
-    kf = keyframe_from_event(_tier0_event(["person"]))
-    assert kf.ts == 1_755_700_000.0
+def test_a_successful_search_clears_the_outage():
+    client = _Client(answer=None)
+    app = _app(client)
+    with pytest.raises(StoreUnreachable):
+        app.on_action("search", {"query": "red truck"})
+
+    client.timeline.answer = _answer(_row())
+    app.on_action("search", {"query": "red truck"})
+    assert app.not_ready_reason() is None
+    assert app.state_snapshot()["store_status"] == "answering"
 
 
-def test_monotonic_leak_is_rejected_in_favour_of_now():
-    import time as _t
-    ev = _tier0_event(["person"], wall_ts=1234.5)   # a monotonic value leaked in
-    kf = keyframe_from_event(ev)
-    assert kf.ts > 1_700_000_000, "a pre-2001 stamp must fall back to now"
-    assert abs(kf.ts - _t.time()) < 5
+# ── Config ─────────────────────────────────────────────────────────
 
 
-def test_tier0_event_with_no_tracks_is_not_indexed():
-    assert keyframe_from_event(_tier0_event([])) is None
-# ── Retention ──────────────────────────────────────────────────────
-#
-# The index grows with every detection, and Tier-0 publishes
-# continuously — unbounded growth is a slow disk leak on an active
-# camera, which is why footage-search can be left running.
+def test_the_store_url_is_required(tmp_path):
+    """Every other example app treats ``opennvr_url`` as optional
+    because it can still do its job standalone. This one cannot: the
+    store IS the app, and starting without it would produce something
+    that serves /health and answers nothing."""
+    from footage_search import load_config
 
-def _kf(store, *, ts, cam="cam-1", corr="", labels=("person",)):
-    store.add(Keyframe(camera_id=cam, ts=ts, correlation_id=corr,
-                       adapter="tier0", labels=list(labels), caption=""))
-
-
-def test_prune_removes_only_rows_older_than_the_cutoff(tmp_path):
-    store = FootageStore(str(tmp_path / "idx.sqlite3"))
-    now = 1_755_700_000.0
-    _kf(store, ts=now - 10 * 86_400, corr="old")
-    _kf(store, ts=now - 40 * 86_400, corr="older")
-    _kf(store, ts=now, corr="fresh")
-    assert store.count() == 3
-    removed = store.prune(now - 30 * 86_400)
-    assert removed == 1 and store.count() == 2
-    store.close()
+    cfg_file = tmp_path / "config.yml"
+    cfg_file.write_text("result_limit: 25\n")
+    with pytest.raises(ValueError, match="opennvr_url"):
+        load_config(str(cfg_file))
 
 
-def test_prune_on_empty_store_is_a_noop(tmp_path):
-    store = FootageStore(str(tmp_path / "idx.sqlite3"))
-    assert store.prune(1_755_700_000.0) == 0
-    store.close()
+def test_a_config_with_a_store_loads(tmp_path):
+    from footage_search import load_config
+
+    cfg_file = tmp_path / "config.yml"
+    cfg_file.write_text(
+        "opennvr_url: http://core:8000\n"
+        "camera_aliases:\n  dock: Dock\n"
+        "extra_labels: [forklift]\n")
+    cfg = load_config(str(cfg_file))
+    assert cfg.opennvr_url == "http://core:8000"
+    assert cfg.camera_aliases == {"dock": "Dock"}
+    assert cfg.extra_labels == ["forklift"]
 
 
-def test_retention_disabled_keeps_everything(tmp_path):
-    import footage_search as fs
-    store = FootageStore(str(tmp_path / "idx.sqlite3"))
-    _kf(store, ts=1.0, corr="ancient")          # 1970
-    cfg = fs.AppConfig(
-        db_path=str(tmp_path / "idx.sqlite3"), nats_url="nats://x:4222",
-        nats_token=None, subject_pattern="opennvr.inference.>",
-        extra_labels=[], camera_aliases={},
-        ollama=fs.OllamaConfig(), result_limit=25, retention_days=0,
-    )
-    indexer = fs.Indexer(cfg, store)
-    assert indexer.prune_now() == 0
-    assert store.count() == 1
-    store.close()
+# ── Rendering ──────────────────────────────────────────────────────
 
 
-def test_retention_window_prunes_ancient_rows(tmp_path):
-    import footage_search as fs
-    store = FootageStore(str(tmp_path / "idx.sqlite3"))
-    _kf(store, ts=1.0, corr="ancient")           # 1970 — far outside any window
-    _kf(store, ts=time.time(), corr="now")
-    cfg = fs.AppConfig(
-        db_path=str(tmp_path / "idx.sqlite3"), nats_url="nats://x:4222",
-        nats_token=None, subject_pattern="opennvr.inference.>",
-        extra_labels=[], camera_aliases={},
-        ollama=fs.OllamaConfig(), result_limit=25, retention_days=30,
-    )
-    indexer = fs.Indexer(cfg, store)
-    assert indexer.prune_now() == 1
-    assert store.count() == 1
-    store.close()
+def test_nothing_found_says_so():
+    assert format_results([]) == "No matching footage found."
 
 
-# ── Episode coalescing ─────────────────────────────────────────────
-#
-# Tier-0 publishes an event per analyzed frame and its events carry no
-# correlation_id, so nothing merges by correlation: without coalescing a
-# person sitting in frame at 2 fps is 7,200 identical rows an hour, and a
-# search returns 25 consecutive frames instead of 25 distinct sightings.
-
-
-def test_repeated_tier0_frames_coalesce_into_one_episode(tmp_path):
-    store = FootageStore(str(tmp_path / "idx.sqlite3"), coalesce_seconds=60)
-    base = 1_755_700_000.0
-    for i in range(10):                      # 10 frames over 45 seconds
-        _kf(store, ts=base + i * 5)
-    assert store.count() == 1, "one episode, not one row per frame"
-    hit = store.search(labels=["person"])[0]
-    assert hit.ts == base + 45, "the episode's timestamp advances to the latest frame"
-    store.close()
-
-
-def test_a_gap_beyond_the_window_starts_a_new_episode(tmp_path):
-    store = FootageStore(str(tmp_path / "idx.sqlite3"), coalesce_seconds=60)
-    base = 1_755_700_000.0
-    _kf(store, ts=base)
-    _kf(store, ts=base + 61)                 # outside the window
-    assert store.count() == 2
-    store.close()
-
-
-def test_different_label_sets_do_not_coalesce_and_alternation_survives(tmp_path):
-    """person / person+car alternating each frame must not defeat the
-    window: each set coalesces against ITS OWN newest row."""
-    store = FootageStore(str(tmp_path / "idx.sqlite3"), coalesce_seconds=60)
-    base = 1_755_700_000.0
-    for i in range(6):
-        labels = ("person",) if i % 2 == 0 else ("car", "person")
-        _kf(store, ts=base + i * 5, labels=labels)
-    assert store.count() == 2, "one episode per distinct label set"
-    store.close()
-
-
-def test_caption_and_correlation_rows_are_exempt_from_coalescing(tmp_path):
-    store = FootageStore(str(tmp_path / "idx.sqlite3"), coalesce_seconds=60)
-    base = 1_755_700_000.0
-    # Caption-carrying keyframes (no correlation_id) each keep their row —
-    # captions differ frame to frame and are the searchable payload.
-    store.add(Keyframe(camera_id="cam-1", ts=base, correlation_id="",
-                       adapter="blip", labels=["person"], caption="a red coat"))
-    store.add(Keyframe(camera_id="cam-1", ts=base + 5, correlation_id="",
-                       adapter="blip", labels=["person"], caption="a blue coat"))
-    # Correlation-id keyframes keep the merge-by-correlation behavior.
-    _kf(store, ts=base + 10, corr="A")
-    _kf(store, ts=base + 15, corr="B")
-    assert store.count() == 4
-    store.close()
-
-
-def test_coalescing_can_be_disabled(tmp_path):
-    store = FootageStore(str(tmp_path / "idx.sqlite3"), coalesce_seconds=0)
-    base = 1_755_700_000.0
-    _kf(store, ts=base)
-    _kf(store, ts=base + 1)
-    assert store.count() == 2
-    store.close()
-
-
-# ── Picked cameras ─────────────────────────────────────────────────
-
-
-def test_only_picked_cameras_are_indexed():
-    """Connected to core, the indexer works on the cameras picked for it
-    in its configuration. Nothing picked = nothing indexed."""
-    from footage_search import AppConfig, Indexer, OllamaConfig
-
-    cfg = AppConfig(
-        db_path=":memory:", nats_url="nats://x", nats_token=None,
-        subject_pattern="s", extra_labels=[], camera_aliases={},
-        ollama=OllamaConfig(), result_limit=25,
-    )
-    store = FootageStore(":memory:")
-    indexer = Indexer(cfg, store)
-    indexer._config_poll_thread = object()   # connected
-    indexer.picked_cameras = frozenset({2})
-
-    indexer.handle_event(_tier0_event(["person"], camera_id="cam1"))
-    indexer.handle_event(_tier0_event(["person"], camera_id="cam2"))
-    assert store.count() == 1
-
-    indexer.picked_cameras = frozenset()
-    indexer.handle_event(_tier0_event(["car"], camera_id="cam2"))
-    assert store.count() == 1
+def test_a_hit_with_no_camera_name_still_renders():
+    """``camera_name`` comes from a lookup that can miss — a camera
+    deleted since the visit. The row is still a real visit and must not
+    render as a crash or a blank."""
+    hit = Hit(event_id=1, camera_id=4, camera_name=None,
+              when="2026-06-13T14:22:08+00:00", labels=["truck"],
+              caption="", plate=None, has_evidence=False)
+    rendered = format_results([hit])
+    assert "camera 4" in rendered
+    assert "event #1" in rendered
