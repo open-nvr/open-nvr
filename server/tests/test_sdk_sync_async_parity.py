@@ -156,6 +156,7 @@ _ROUTE_WRAPPERS: dict[str, str] = {
     "GET /cameras/{camera_id}/stream": "stream",
     "GET /recordings/{camera_id}": "recordings",
     "GET /recordings/{camera_id}/url": "url",
+    "GET /search": "find",
     "GET /plates/stats": "plate_stats",
     "GET /plates/summary": "plate_summary",
     "GET /plates/sessions": "plate_sessions",

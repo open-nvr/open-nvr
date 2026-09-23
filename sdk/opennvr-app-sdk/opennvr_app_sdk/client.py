@@ -126,8 +126,22 @@ def parse_state_items(body: Any) -> dict[str, Any]:
 
 
 def query_string(params: dict[str, Any]) -> str:
+    """Query string, with a list value emitted as a REPEATED parameter.
+
+    ``doseq=True`` is the whole point. Without it ``urlencode`` falls
+    back to ``str()`` on a list and sends ``camera_id=%5B7%2C+8%5D`` —
+    the Python repr, URL-encoded — which FastAPI rejects with a 422 that
+    ``get_json`` then turns into ``None``, indistinguishable from the
+    store being unreachable. Every repeatable parameter on the search
+    route (``label``, ``camera_id``, ``attr``) goes through here, so
+    getting this wrong silently disables filtering rather than failing.
+
+    Strings are left alone: ``doseq`` special-cases ``str`` and
+    ``bytes``, so the comma-joined parameters elsewhere in this client
+    are unaffected.
+    """
     clean = {k: v for k, v in params.items() if v is not None}
-    return f"?{urlencode(clean)}" if clean else ""
+    return f"?{urlencode(clean, doseq=True)}" if clean else ""
 
 
 class _Http:
@@ -255,6 +269,31 @@ class TimelineAPI:
         suffix = "scene-evidence" if scene else "evidence"
         return self._http.get_bytes(
             f"/api/v1/internal/camera-agent/events/{int(event_id)}/{suffix}")
+
+    def find(self, text: str = "", *, label=None, camera=None,
+             plate: str | None = None, attrs=None, start=None, end=None,
+             limit: int = 25, skip: int = 0) -> dict | None:
+        """Search the canonical store by WORDS, scoped to this app.
+
+        ``search()`` above filters by label and time. This matches the
+        caption and attribute text an enricher wrote — "red van" finds a
+        visit nobody labelled "van" if a captioner said so — and returns
+        what each skill claimed alongside each hit, plus a counted
+        ``answer`` summarising the page.
+
+        ``None`` means the store could not be reached, which is NOT the
+        same as an empty result and must not be reported as "nothing
+        matched". An app that conflates them tells an operator no red van
+        came past when the truth is that nobody looked.
+        """
+        return self._http.get_json(
+            "/api/v1/internal/app/search",
+            text=text or "",
+            label=[s for s in (label or []) if s] or None,
+            camera_id=[_camera_id(c) for c in (camera or []) if c is not None] or None,
+            plate=plate, attr=list(attrs or []) or None,
+            limit=limit, skip=skip,
+            **{"from": _iso(start), "to": _iso(end)})
 
     def plate_stats(self, days: int = 7) -> dict | None:
         return self._http.get_json("/api/v1/internal/app/plates/stats", days=days)

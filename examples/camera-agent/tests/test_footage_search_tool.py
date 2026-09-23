@@ -5,14 +5,20 @@
 ``search_footage`` tool — no NATS, no LLM, no live adapters."""
 from __future__ import annotations
 
+import inspect
 import sqlite3
 import time
 from dataclasses import dataclass
 
 import pytest
+from opennvr_app_sdk.client import TimelineAPI
 
 from footage_index import FootageIndex
 from tools import CameraTools
+
+#: Imported from the SDK rather than restated, so a parameter renamed
+#: or dropped there breaks these tests instead of quietly widening them.
+_REAL_FIND = inspect.signature(TimelineAPI.find)
 
 
 # ── Minimal fakes ──────────────────────────────────────────────────
@@ -191,8 +197,15 @@ class _FakeTimeline:
         self.answer = answer
         self.calls = []
 
-    def find(self, q="", **kw):
-        self.calls.append({"q": q, **kw})
+    def find(self, *a, **kw):
+        # Bound against the REAL signature. Without this line the fake
+        # accepts calls no client can take, which is how
+        # ``find("", text=..., parse=False)`` — a duplicate argument and
+        # a parameter that has never existed — passed here for a month
+        # while every live query fell through to the SQLite index.
+        bound = _REAL_FIND.bind(self, *a, **kw)
+        bound.apply_defaults()
+        self.calls.append({k: v for k, v in list(bound.arguments.items())[1:]})
         return self.answer
 
 
@@ -221,11 +234,13 @@ async def test_search_uses_the_canonical_store_when_it_is_available():
     assert "KA01AB1234" in out
     assert "photo kept" in out
     assert "#41" in out
-    # And the query went out as text with parsing off: the model already
-    # decomposed the question, so a second parser would be two opinions
-    # about one query.
+    # And the keywords went out as the search text, joined. There is no
+    # "parse" flag to turn off: the app-facing route does no sentence
+    # parsing at all, which is the version of "one parser per query"
+    # that actually exists. This assertion used to name a parameter the
+    # client has never had, and passed because the fake accepted it.
     assert tl.calls[0]["text"] == "red truck"
-    assert tl.calls[0]["parse"] is False
+    assert "parse" not in tl.calls[0]
 
 
 @pytest.mark.asyncio

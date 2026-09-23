@@ -551,3 +551,118 @@ async def app_state_delete(
                .delete())
     db.commit()
     return {"deleted": bool(deleted)}
+
+
+# ── Search ───────────────────────────────────────────────────────────
+#
+# The canonical store's search, for apps. Until this existed there was
+# no way for an app to ask the platform "which visits match these
+# words?" — the operator route (GET /api/v1/search) authenticates a
+# USER and scopes by what that user can see, which an app holding an
+# internal key can neither satisfy nor should.
+#
+# That absence is why footage-search shipped its own SQLite index, and
+# why the camera-agent's attempt to stop using that index quietly did
+# nothing: it called a method the SDK never had, against a route that
+# never existed, and fell back to the private index on every query
+# because AttributeError and "core unreachable" reach the same
+# except-branch.
+#
+# It deliberately reuses search_events / count_search_events /
+# summarise_hits rather than growing a second query path. One store,
+# one predicate, one ranking: an app and the operator asking the same
+# question have to get the same answer, or the app is a second source of
+# truth again by a different route.
+
+
+@router.get("/search")
+async def app_search(
+    text: str = Query("", description="Words to match in captions and attributes."),
+    label: list[str] | None = Query(None, description="Object class; repeatable (OR)."),
+    camera_id: list[int] | None = Query(None, description="Camera; repeatable (OR)."),
+    plate: str | None = Query(None),
+    attr: list[str] | None = Query(
+        None, description="kind:value claim filter; repeatable (AND)."),
+    from_: datetime | None = Query(default=None, alias="from"),
+    to: datetime | None = Query(default=None),
+    limit: int = Query(25, ge=1, le=200),
+    skip: int = Query(0, ge=0),
+    principal=Depends(_require_internal_key),
+    db: Session = Depends(get_db),
+):
+    """Visits matching these words, scoped to the app's own cameras.
+
+    No sentence parsing here on purpose. The operator route parses
+    English because a person typed it; an app has already decided what
+    it is looking for, and two parsers disagreeing about one query is
+    the failure mode that made the agent pass ``parse=False`` to a
+    method that did not exist.
+    """
+    from services.camera_scope import scope_query
+    from services.search_service import (count_search_events, search_events,
+                                         summarise_hits)
+
+    roster = _app_roster(db, principal)
+    # A shortcut, not a guard: it saves an app with no cameras two round
+    # trips to be told there is nothing. The scoping itself belongs to
+    # `scope_query`, which turns an empty scope into a predicate that
+    # matches nothing. The comment that used to sit here said this line
+    # was what stopped a site-wide leak; deleting it failed no test, and
+    # deleting `scope_query`'s branch too failed no test either, because
+    # an empty `IN` is already false. Behaviour pinned in
+    # test_scope_query_empty.py, with the reasoning.
+    if roster is not None and not roster:
+        return {"results": [], "count": 0, "total": 0, "answer": {}}
+
+    cams = [c for c in (camera_id or []) if c]
+    labels = [s for s in (label or []) if s]
+
+    attrs: list[tuple[str, str]] = []
+    for raw in attr or []:
+        kind, sep, value = str(raw).partition(":")
+        if sep and kind.strip() and value.strip():
+            attrs.append((kind.strip().lower(), value.strip().lower()))
+
+    filters = dict(from_=from_, to=to, plate=plate or None, scope=roster)
+    hits = search_events(
+        db, labels=labels, camera_ids=cams, text=text or "", attrs=attrs,
+        limit=limit, skip=skip, **filters)
+    total = count_search_events(
+        db, labels=labels, camera_ids=cams, text=text or "", attrs=attrs,
+        **filters)
+
+    # Names for the rows being returned, not for the site: a scoped
+    # route has no business reading the whole camera table, and a
+    # dictionary built from it is one careless `.values()` away from
+    # being the leak the scoping exists to prevent.
+    names = {
+        c.id: c.name
+        for c in scope_query(db.query(Camera), Camera.id, roster).all()
+    }
+    return {
+        "results": [
+            {
+                "id": h.event.id,
+                "camera_id": h.event.camera_id,
+                "camera_name": names.get(h.event.camera_id),
+                "label": h.event.label,
+                "score": round(h.score, 4),
+                "started_at": (h.event.started_at.isoformat()
+                               if h.event.started_at else None),
+                "ended_at": (h.event.ended_at.isoformat()
+                             if h.event.ended_at else None),
+                "plate_text": h.event.plate_text,
+                "caption": h.caption,
+                "attributes": h.attributes,
+                "claims": h.claims,
+                # The app reads its own evidence through /evidence/{path};
+                # this says whether there IS a photo, so a caller can tell
+                # "none kept" from "not fetched yet".
+                "has_evidence": bool(h.event.evidence_path),
+            }
+            for h in hits
+        ],
+        "count": len(hits),
+        "total": total,
+        "answer": summarise_hits(hits, total=total, camera_names=names),
+    }

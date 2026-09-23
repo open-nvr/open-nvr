@@ -1052,18 +1052,37 @@ class CameraTools:
             if within_minutes is not None:
                 from datetime import UTC, datetime, timedelta
                 start = datetime.now(UTC) - timedelta(minutes=within_minutes)
-            try:
-                # parse=False: the model has already decomposed the
-                # question into keywords and a window, so letting the
-                # server re-read them as a sentence would be two parsers
-                # disagreeing about one query.
-                answer = await asyncio.to_thread(
-                    self._timeline.find, "", text=phrase,
-                    camera=camera_id, start=start, parse=False, limit=10,
-                )
-            except Exception:
-                logger.exception("search_footage: timeline query failed")
-                answer = None
+            # No try/except here, deliberately, and it is the whole
+            # reason this repoint took a month to discover it had never
+            # run. The call used to be wrapped in `except Exception:
+            # answer = None`, which is the same branch an unreachable
+            # store takes — so when the call raised AttributeError
+            # because `find` did not exist on the client at all, every
+            # query fell quietly through to the SQLite index and the
+            # repoint read as done. `get_json` already returns None for
+            # anything that goes wrong on the wire, which is the only
+            # failure this code knows how to answer for. A failure it
+            # cannot answer for should be loud.
+            # The agent's handles are operator-chosen names
+            # ("front_door"); the platform scopes by server-side id.
+            # `_resolve_camera` returns the handle unchanged when a
+            # camera has no server-side id yet, which the SDK would
+            # reject — so an unmapped camera narrows to nothing here
+            # rather than being sent as a filter the store cannot read.
+            server_cam: int | None = None
+            if camera_id is not None:
+                resolved = self._resolve_camera(camera_id)
+                try:
+                    server_cam = int(resolved)
+                except (TypeError, ValueError):
+                    return (f"ERROR: camera '{camera_id}' has no server-side "
+                            "id, so recorded footage cannot be searched for "
+                            "it.")
+            answer = await asyncio.to_thread(
+                self._timeline.find, phrase,
+                camera=[server_cam] if server_cam is not None else None,
+                start=start, limit=10,
+            )
 
             # None means "could not reach the store", which is NOT the
             # same as "nothing matched" — in a security product those are
