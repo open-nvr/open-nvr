@@ -31,6 +31,7 @@ Exits non-zero on any survivor or any drift.
 
 from __future__ import annotations
 
+import importlib
 import subprocess
 import sys
 from pathlib import Path
@@ -72,14 +73,91 @@ MUTATIONS: list[tuple[str, str, str, str, str, str]] = [
     # ── subject binding (RFC-0003) ───────────────────────────────────
     ('an ambiguous instant picks a visit instead of refusing',
      'server/services/timeline_service.py',
-     '    if len(containing) > 1:\n        return {"event_id": None, "binding": None, "reason": "ambiguous",\n                "candidates": sorted(r.id for r in containing)}',
-     '    if len(containing) > 1:\n        return {"event_id": containing[0].id, "binding": "window",\n                "reason": "picked one"}',
+     '    if len(containing) > 1:\n        _count_binding("ambiguous")\n        return {"event_id": None, "binding": None, "reason": "ambiguous",\n                "candidates": sorted(r.id for r in containing)}',
+     '    if len(containing) > 1:\n        _count_binding("window")\n        return {"event_id": containing[0].id, "binding": "window",\n                "reason": "picked one"}',
      'server', 'tests/test_visit_binding.py'),
     ('a guessed subject is recorded as a measured one',
      'server/services/timeline_service.py',
      '        return {"event_id": near[0][1].id, "binding": "nearest",',
      '        return {"event_id": near[0][1].id, "binding": "window",',
      'server', 'tests/test_visit_binding.py'),
+    ('a covering visit is looked for over a PAGE of rows again',
+     'server/services/timeline_service.py',
+     '''    containing = (contains.order_by(TimelineEvent.started_at.desc())
+                  .limit(_AMBIGUITY_REPORT_N).all())''',
+     '    containing = [r for r in candidates()\n'
+     '                  .order_by(TimelineEvent.started_at.desc()).limit(64).all()\n'
+     '                  if (r.started_at or at) <= at <= (r.ended_at or at)]',
+     'server', 'tests/test_visit_binding.py'),
+    ('the vector arm is restricted to rows the WORDS already matched',
+     'server/services/search_service.py',
+     '''    candidate_ids = _arm_ids(
+        db, filters=filters, labels=labels, camera_ids=camera_ids,
+        text="", attrs=attrs, limit=cap.ceiling + 1, ranked=False)''',
+     '''    candidate_ids = _arm_ids(
+        db, filters=filters, labels=labels, camera_ids=camera_ids,
+        text=text, attrs=attrs, limit=cap.ceiling + 1, ranked=False)''',
+     'server', 'tests/test_hybrid_search.py'),
+    ('a truncated similarity scan reports as an untruncated one',
+     'server/services/embedding_store.py',
+     '    truncated = len(ids) > ceiling',
+     '    truncated = False',
+     'server', 'tests/test_hybrid_search.py'),
+    ('a text search goes back on an outer join and loses the GIN index',
+     'server/services/search_service.py',
+     '''    if text:
+        q = q.join(EventText, EventText.event_id == TimelineEvent.id)
+    else:
+        q = q.outerjoin(EventText, EventText.event_id == TimelineEvent.id)''',
+     '    q = q.outerjoin(EventText, EventText.event_id == TimelineEvent.id)',
+     'server', 'tests/test_hybrid_search.py'),
+    ('an empty recent search is reported instead of widening',
+     'examples/camera-agent/tools.py',
+     '''            if (defaulted and answer is not None
+                    and not (answer.get("results") or [])):''',
+     '            if False:',
+     'examples/camera-agent', 'tests/test_footage_search_tool.py'),
+    ('a Boolean migration default goes back to an integer',
+     'server/migrations/versions/e8a1b2c3d4f5_add_installed_apps_overlay_enabled.py',
+     '                server_default=sa.false(),',
+     '                server_default=sa.text("0"),',
+     'server', 'tests/test_migration_column_defaults.py'),
+    ('a metric label is passed but not declared',
+     'server/services/search_metrics.py',
+     '    ("kind", "task", "adapter", "binding"),',
+     '    ("kind", "task", "adapter"),',
+     'server', 'tests/test_metric_labels_are_declared.py'),
+
+    ('the resolver stops agreeing with the producer about event_type',
+     'server/services/timeline_service.py',
+     '            .filter(TimelineEvent.event_type == TRACK)',
+     '            .filter(TimelineEvent.event_type == "visit")',
+     'server', 'tests/test_visit_binding.py'),
+    ('a visit span is measured from the plate read instead of the start',
+     'server/services/timeline_service.py',
+     '''        TimelineEvent.started_at <= at,
+        or_(TimelineEvent.ended_at.is_(None), TimelineEvent.ended_at >= at),''',
+     '''        SEEN_AT <= at,
+        or_(TimelineEvent.ended_at.is_(None), TimelineEvent.ended_at >= at),''',
+     'server', 'tests/test_visit_binding.py'),
+    ('an open visit scores a zero gap however far away it starts',
+     'server/services/timeline_service.py',
+     '''    if start > at:
+        return (start - at).total_seconds()''',
+     '''    if start > at:
+        return 0.0''',
+     'server', 'tests/test_visit_binding.py'),
+    ('the fused pool stops covering the page being asked for',
+     'server/services/search_service.py',
+     '    depth = max(ARM_DEPTH, min(500, skip + limit))',
+     '    depth = ARM_DEPTH',
+     'server', 'tests/test_hybrid_search.py'),
+    ('total goes back to describing a different set than the hits',
+     'server/services/search_service.py',
+     '    return SearchPage(hits=hits, total=len(ordered), semantic={',
+     '    return SearchPage(hits=hits, total=total, semantic={',
+     'server', 'tests/test_hybrid_search.py'),
+
     ('an unknown binding is silently accepted',
      'server/services/descriptor_store.py',
      '    if binding not in BINDINGS:\n        raise ValueError(',
@@ -218,6 +296,28 @@ KNOWN_UNCOVERED: list[tuple[str, str, str, str, str, str, str]] = [
 ]
 
 
+def _restore(path, original, rel):
+    """Put the file back — and throw away the bytecode written FROM the
+    mutated source.
+
+    Restoring the .py is not enough. CPython caches by (mtime, size),
+    and a mutation that happens to preserve the source's size leaves a
+    .pyc that a later interpreter accepts as current — so the NEXT test
+    run, minutes later and in a different process, imports the mutated
+    module and fails a test that has nothing to do with the mutation.
+
+    That is what the two "flaky" server tests were. They were not
+    flaky; they were this, deterministically, whenever a full suite
+    followed a harness run.
+    """
+    path.write_text(original)
+    assert path.read_text() == original, f"failed to restore {rel}"
+    for cache in path.parent.rglob("__pycache__"):
+        for stale in cache.glob(f"{path.stem}.*.pyc"):
+            stale.unlink(missing_ok=True)
+    importlib.invalidate_caches()
+
+
 def _run(run_dir: str, test: str) -> bool:
     py = AGENT_PY if "camera-agent" in run_dir else SERVER_PY
     proc = subprocess.run(
@@ -244,8 +344,7 @@ def main() -> int:
         try:
             passed = _run(run_dir, test)
         finally:
-            path.write_text(original)
-            assert path.read_text() == original, f"failed to restore {rel}"
+            _restore(path, original, rel)
         if passed:
             print(f"{'SURVIVED':<10} {label}")
             survived.append(label)
@@ -267,8 +366,7 @@ def main() -> int:
         try:
             passed = _run(run_dir, test)
         finally:
-            path.write_text(original)
-            assert path.read_text() == original, f"failed to restore {rel}"
+            _restore(path, original, rel)
         if passed:
             print(f"{'as noted':<10} {label}")
             print(f"{'':<10}   {why}")

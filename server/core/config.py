@@ -426,6 +426,25 @@ class Settings(BaseSettings):
     # per-camera assignment cannot say "for vehicles, not for everyone
     # who walks past"; this can. Still gated by that assignment on top.
     events_descriptor_people: bool = False
+    # Ask an adapter advertising `embed` for a vector of the visit's best
+    # frame and store it in event_embeddings, so search can rank by
+    # meaning as well as by words (services/search_service.py fuses the
+    # two with RRF). Gated per camera by the `embed` skill assignment,
+    # exactly like the two above.
+    #
+    # OFF BY DEFAULT, and unlike the captioner this one stays off on
+    # upgrade for a reason of its own: an embedding model is the
+    # heaviest per-visit inference in the stack and the one most likely
+    # to want a GPU. A site that upgrades and finds its mini-PC running a
+    # vision transformer on every car has been handed a regression,
+    # however much better the search got. Turning it on is a decision
+    # with a hardware question attached, so it is left as a decision —
+    # the agent's hardware panel is where that question gets answered.
+    #
+    # Off is a complete state, not a pending one: no vectors means
+    # capability() reports none and search matches words, exactly as it
+    # did before any of this existed.
+    events_embed_enrichment: bool = False
     # Sweep visits recorded BEFORE the two enrichers above were deployed,
     # handing each to the same enricher the ingest path calls. Off by
     # default and the only enrichment path that is: upgrading a running

@@ -28,7 +28,20 @@ def upgrade() -> None:
                 "overlay_enabled",
                 sa.Boolean(),
                 nullable=False,
-                server_default=sa.text("0"),
+                # sa.false(), NOT sa.text("0"). SQLite has no boolean
+                # type and takes the integer happily; Postgres — the
+                # production dialect — refuses it outright:
+                #
+                #   column "overlay_enabled" is of type boolean but
+                #   default expression is of type integer
+                #
+                # which aborts this migration and therefore every
+                # migration after it. The chain was unrunnable on
+                # Postgres end to end, and passed on SQLite, so nothing
+                # in the test suite ever saw it. sa.false() renders
+                # correctly on both dialects.
+                # Guarded by tests/test_migration_column_defaults.py.
+                server_default=sa.false(),
             )
         )
 

@@ -711,11 +711,14 @@ async def app_state_delete(
 # because AttributeError and "core unreachable" reach the same
 # except-branch.
 #
-# It deliberately reuses search_events / count_search_events /
-# summarise_hits rather than growing a second query path. One store,
-# one predicate, one ranking: an app and the operator asking the same
-# question have to get the same answer, or the app is a second source of
-# truth again by a different route.
+# It deliberately reuses search_page / summarise_hits rather than
+# growing a second query path. One store, one predicate, one ranking: an
+# app and the operator asking the same question have to get the same
+# answer, or the app is a second source of truth again by a different
+# route. That now includes the SECOND ranking arm — if this route did
+# its own thing, a site with embeddings would answer an app and a person
+# differently, which is the same divergence a private index caused,
+# reached by a subtler path.
 
 
 @router.get("/search")
@@ -742,8 +745,7 @@ async def app_search(
     method that did not exist.
     """
     from services.camera_scope import scope_query
-    from services.search_service import (count_search_events, search_events,
-                                         summarise_hits)
+    from services.search_service import search_page, summarise_hits
 
     roster = _app_roster(db, principal)
     # A shortcut, not a guard: it saves an app with no cameras two round
@@ -767,12 +769,17 @@ async def app_search(
             attrs.append((kind.strip().lower(), value.strip().lower()))
 
     filters = dict(from_=from_, to=to, plate=plate or None, scope=roster)
-    hits = search_events(
+    # Same two arms the operator route gets, and the same absence-means-
+    # words-only rule. An app and a person asking the same question have
+    # to be answered by the same ranking, or the app is a second source
+    # of truth again by a subtler route than a private index.
+    from routers.search import _query_vector
+
+    page = search_page(
         db, labels=labels, camera_ids=cams, text=text or "", attrs=attrs,
+        query_vector=(await _query_vector(db, text or ""))[0],
         limit=limit, skip=skip, **filters)
-    total = count_search_events(
-        db, labels=labels, camera_ids=cams, text=text or "", attrs=attrs,
-        **filters)
+    hits, total = page.hits, page.total
 
     # Names for the rows being returned, not for the site: a scoped
     # route has no business reading the whole camera table, and a
@@ -808,4 +815,9 @@ async def app_search(
         "count": len(hits),
         "total": total,
         "answer": summarise_hits(hits, total=total, camera_names=names),
+        # Present only where a vector arm took part. An app that wants to
+        # know whether it is getting semantic ranking — or whether the
+        # scan truncated — can read it; one that does not care sees the
+        # response it always saw.
+        **({"semantic": page.semantic} if page.semantic else {}),
     }

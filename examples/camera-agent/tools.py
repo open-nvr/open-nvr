@@ -40,6 +40,23 @@ from opennvr_app_sdk import make_best_frame_fetch, snapshot_from_event  # noqa: 
 
 logger = logging.getLogger(__name__)
 
+#: How far back ``search_footage`` looks when the caller names no window.
+#:
+#: Seven days. Not a retention policy and not a limit — a search that
+#: comes back empty inside this window is re-run over all history before
+#: anything is reported, so nothing is hidden by it. What it buys is the
+#: common case: an unbounded free-text search is a full scan of the
+#: event store, and this is the one query a person sits through with the
+#: conversation paused.
+#:
+#: The number comes from what people actually ask a camera about — "did
+#: anyone come by", "was there a van this week" — and from the shape of
+#: the measurement in bench/app_search_latency.py, where a window moves
+#: free text off the linear curve. If ``footage_search_sources["widened"]``
+#: climbs on a real site, this is too short for how that site is asked
+#: about and should go up.
+DEFAULT_SEARCH_MINUTES = 7 * 24 * 60
+
 
 # ── Tool definitions in OpenAI / Pipecat function-calling shape ────
 
@@ -185,7 +202,9 @@ def build_tool_definitions(
                         "within_minutes": {
                             "type": "number",
                             "description": (
-                                "Minutes back to search. Omit for no limit."
+                                "Minutes back to search. Omit to search the "
+                                "last week first, widening to all history "
+                                "automatically if nothing matched."
                             ),
                         },
                         "camera_id": {
@@ -424,8 +443,15 @@ class CameraTools:
         # Stale footage descriptions served as current ones is a worse
         # outage than no answer, so the honest answer is the only one
         # left.
+        #
+        # `widened` counts queries where the default recent window came
+        # back empty and the search was re-run over all history. It is a
+        # TUNING SIGNAL, not an error count: if it climbs, the default
+        # window is too short for how this site is actually asked about,
+        # and every one of those conversations paid two queries instead
+        # of one. If it stays near zero, the window is doing its job.
         self.footage_search_sources: dict[str, int] = {
-            "canonical": 0, "unanswerable": 0,
+            "canonical": 0, "unanswerable": 0, "widened": 0,
         }
         # Cameras touched by the most recent tool call — read by /converse
         # so the UI can show which camera(s) the agent is working on.
@@ -1078,11 +1104,55 @@ class CameraTools:
                     return (f"ERROR: camera '{camera_id}' has no server-side "
                             "id, so recorded footage cannot be searched for "
                             "it.")
+            # A SEARCH WITH NO WINDOW IS A FULL SCAN, and this is the
+            # one search a person waits through with the conversation
+            # paused. Measured on a synthetic store (bench/
+            # app_search_latency.py): free text with no window grows
+            # linearly — 14ms at 5k visits, 222ms at 200k — while the
+            # same text inside a window stays in the tens of
+            # milliseconds. On a site with a year of history that is the
+            # difference between an answer and a silence.
+            #
+            # So an omitted window becomes a recent one. What makes that
+            # safe rather than merely fast is the SECOND pass below: a
+            # narrowed search that finds nothing is widened to all
+            # history before anything is reported. Otherwise this would
+            # be trading latency for wrong answers — "no red truck came
+            # by" when one did, six weeks ago — which is the worse
+            # failure by a distance in a security product.
+            #
+            # The cost is paid only when the fast path came back empty,
+            # which is exactly the case where the slower query is the
+            # one actually being asked for.
+            # Two flags, not one. `defaulted` says the caller gave no
+            # window so a recent one was assumed; `widened` says that
+            # window came back empty and the whole history was searched
+            # after all. Only the second changes what the ANSWER means —
+            # conflating them labels a hit from this morning as older
+            # than a week.
+            defaulted = start is None
+            widened = False
+            if defaulted:
+                from datetime import UTC, datetime, timedelta
+                start = datetime.now(UTC) - timedelta(minutes=DEFAULT_SEARCH_MINUTES)
+
             answer = await asyncio.to_thread(
                 self._timeline.find, phrase,
                 camera=[server_cam] if server_cam is not None else None,
                 start=start, limit=10,
             )
+
+            if (defaulted and answer is not None
+                    and not (answer.get("results") or [])):
+                # Nothing recent. Ask the expensive question now, because
+                # now it is the question.
+                answer = await asyncio.to_thread(
+                    self._timeline.find, phrase,
+                    camera=[server_cam] if server_cam is not None else None,
+                    start=None, limit=10,
+                )
+                widened = True
+                self.footage_search_sources["widened"] += 1
 
             # None means "could not reach the store", which is NOT the
             # same as "nothing matched" — in a security product those are
@@ -1097,6 +1167,13 @@ class CameraTools:
             self.footage_search_sources["canonical"] += 1
             results = answer.get("results") or []
             if not results:
+                # Say WHAT was searched. "No recorded footage matched"
+                # after a week-long look and after an all-history look
+                # are different facts, and an operator acting on the
+                # first one needs to know it was the first one.
+                if widened:
+                    return (f"No recorded footage matched {phrase!r}, "
+                            f"searching all stored history.")
                 return f"No recorded footage matched {phrase!r}."
             lines = []
             for r in results:
@@ -1111,6 +1188,14 @@ class CameraTools:
                 lines.append(f"[#{r.get('id')}] {when} on camera {cam}: {descr}{extra}")
             total = answer.get("total")
             head = "Found in recorded footage"
+            if widened:
+                # The fast window found nothing and the wide one did, so
+                # the match is older than a week. That is part of the
+                # answer, not an implementation detail: "yes, a red
+                # truck" means something different when it was in March.
+                head = "Found in recorded footage (nothing in the last "
+                head += f"{DEFAULT_SEARCH_MINUTES // 1440} days, so I "
+                head += "searched further back)"
             if isinstance(total, int) and total > len(results):
                 head += f" ({len(results)} of {total})"
             return head + ":\n" + "\n".join(lines)

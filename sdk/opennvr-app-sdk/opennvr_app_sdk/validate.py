@@ -49,10 +49,21 @@ KNOWN_CATEGORIES = frozenset({
 })
 #: The canonical task registry (server/config/tasks.yml) — an unknown
 #: task greys the app out in every catalog, so it is worth a warning.
+#:
+#: A COPY of a list that lives somewhere else, which is the defect class
+#: this codebase keeps rediscovering. It had fallen two tasks behind
+#: (``pose_estimation``, ``package_detection``) before anyone noticed,
+#: and the symptom of that is quiet: a correct manifest gets warned
+#: about, and nothing breaks loudly enough to investigate. The SDK ships
+#: independently of the server and cannot read the server's config at
+#: runtime, so the copy is unavoidable — but an UNCHECKED copy is not.
+#: ``server/tests/test_known_tasks_match_registry.py`` fails when this
+#: set and ``tasks.yml`` disagree, in either direction.
 KNOWN_TASKS = frozenset({
     "object_detection", "face_recognition", "image_captioning", "vqa", "face_detection",
     "person_detection", "license_plate_recognition", "multi_object_tracking",
-    "speech_to_text", "text_to_speech",
+    "speech_to_text", "text_to_speech", "pose_estimation", "package_detection",
+    "embed",
 })
 KNOWN_PARAM_TYPES = frozenset({"str", "int", "float", "bool", "list", "dict", "json",
                                "geometry.polygon", "geometry.tripwire", "image", "time_range"})

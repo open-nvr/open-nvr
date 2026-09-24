@@ -437,6 +437,21 @@ async def ingest_track_event(
                          # order of cost from two per vehicle.
                          getattr(settings, "events_descriptor_people", False)):
         background.add_task(enrich_event_descriptors, row.id)
+
+    # Third enricher, same three gates and the same background shape: a
+    # vector of the best frame, so search can rank by meaning as well as
+    # by whichever words a captioner happened to choose. Off by default
+    # — an embedding model is the heaviest per-visit inference in the
+    # stack — and a silent no-op when no adapter advertises `embed`,
+    # which is what most sites will be.
+    from services.embed_enrichment import (
+        enrich_event_embedding, wants_embedding,
+    )
+
+    if wants_embedding(row.label, evidence_rel,
+                       getattr(settings, "events_embed_enrichment", False),
+                       camera_skills(camera)):
+        background.add_task(enrich_event_embedding, row.id)
     # Read the id BEFORE releasing: record_track_visit committed, which
     # expires every attribute, so a post-close row.id would try to refresh a
     # detached instance.

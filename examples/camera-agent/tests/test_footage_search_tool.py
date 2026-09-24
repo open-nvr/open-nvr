@@ -100,7 +100,7 @@ async def test_the_store_answers_and_the_hit_carries_what_a_frame_could_not():
     assert "KA01AB1234" in out
     assert "photo kept" in out
     assert "#41" in out
-    assert t.footage_search_sources == {"canonical": 1, "unanswerable": 0}
+    assert t.footage_search_sources == {"canonical": 1, "unanswerable": 0, "widened": 0}
 
 
 @pytest.mark.asyncio
@@ -139,7 +139,7 @@ async def test_an_unreachable_store_is_not_reported_as_nothing_matched():
 
     assert "cannot say whether anything matched" in out
     assert "No recorded footage matched" not in out
-    assert t.footage_search_sources == {"canonical": 0, "unanswerable": 1}
+    assert t.footage_search_sources == {"canonical": 0, "unanswerable": 1, "widened": 0}
 
 
 @pytest.mark.asyncio
@@ -151,7 +151,7 @@ async def test_no_store_configured_at_all_is_unanswerable():
     out = await t.search_footage(ARGS)
 
     assert "isn't available" in out
-    assert t.footage_search_sources == {"canonical": 0, "unanswerable": 1}
+    assert t.footage_search_sources == {"canonical": 0, "unanswerable": 1, "widened": 0}
 
 
 @pytest.mark.asyncio
@@ -173,7 +173,7 @@ async def test_a_programming_error_is_not_reported_as_an_outage():
     with pytest.raises(AttributeError):
         await t.search_footage(ARGS)
 
-    assert t.footage_search_sources == {"canonical": 0, "unanswerable": 0}
+    assert t.footage_search_sources == {"canonical": 0, "unanswerable": 0, "widened": 0}
 
 
 def test_an_unreachable_store_arrives_as_none_not_as_an_exception():
@@ -220,7 +220,7 @@ async def test_a_rejected_query_counts_as_nothing():
                                               "camera_id": "cam-nope"})
     assert "ERROR" in await t.search_footage({"keywords": ["x"],
                                               "within_minutes": "soon"})
-    assert t.footage_search_sources == {"canonical": 0, "unanswerable": 0}
+    assert t.footage_search_sources == {"canonical": 0, "unanswerable": 0, "widened": 0}
 
 
 @pytest.mark.asyncio
@@ -251,4 +251,128 @@ async def test_the_counts_accumulate_across_calls():
     tl.answer = None
     await t.search_footage(ARGS)
 
-    assert t.footage_search_sources == {"canonical": 2, "unanswerable": 1}
+    assert t.footage_search_sources == {"canonical": 2, "unanswerable": 1, "widened": 0}
+
+
+# ── the default window, and why it cannot cost an answer ─────────────
+#
+# An unbounded free-text search is a full scan of the event store, and
+# this is the one query a person sits through with the conversation
+# paused: 14ms at 5k visits, 222ms at 200k (bench/app_search_latency.py).
+# So an omitted window becomes a recent one.
+#
+# That trade is only acceptable because of the second pass. A narrowed
+# search that finds nothing is re-run over ALL history before anything
+# is reported — otherwise this would be buying latency with wrong
+# answers ("no red truck came by" when one did, six weeks ago), which in
+# a security product is the worse failure by a distance.
+#
+# Two flags carry that distinction, and keeping them apart is the bug
+# these tests exist to prevent: "a window was assumed" and "the window
+# came back empty so we looked further" are different facts, and using
+# one for both labels this morning's hit as older than a week.
+
+
+class _TwoAnswers:
+    """Empty for the first call, a match for the second."""
+
+    def __init__(self, second=None):
+        self.second = second if second is not None else _A_MATCH
+        self.calls = []
+
+    def find(self, *a, **kw):
+        bound = _REAL_FIND.bind(self, *a, **kw)
+        bound.apply_defaults()
+        self.calls.append({k: v for k, v in list(bound.arguments.items())[1:]})
+        return {"total": 0, "results": []} if len(self.calls) == 1 else self.second
+
+
+@pytest.mark.asyncio
+async def test_an_omitted_window_is_searched_recently_first():
+    tl = _Timeline(_A_MATCH)
+    await _tools(tl).search_footage(ARGS)
+
+    assert len(tl.calls) == 1, "a hit inside the window still paid a full scan"
+    assert tl.calls[0]["start"] is not None, (
+        "an unbounded free-text search reached the store — that is the "
+        "full scan this default exists to avoid")
+
+
+@pytest.mark.asyncio
+async def test_nothing_recent_widens_to_all_history_rather_than_reporting_none():
+    """THE case. The fast window must never be able to hide a match."""
+    tl = _TwoAnswers()
+    out = await _tools(tl).search_footage(ARGS)
+
+    assert len(tl.calls) == 2, "an empty recent search was reported as no match"
+    assert tl.calls[0]["start"] is not None
+    assert tl.calls[1]["start"] is None, "the second pass was still bounded"
+    assert "red truck at a loading dock" in out, "the older match was lost"
+
+
+@pytest.mark.asyncio
+async def test_a_widened_hit_says_it_is_older_than_the_window():
+    """Part of the answer, not an implementation detail: "yes, a red
+    truck" means something different when it was in March."""
+    out = await _tools(_TwoAnswers()).search_footage(ARGS)
+
+    assert "further back" in out
+
+
+@pytest.mark.asyncio
+async def test_a_hit_inside_the_window_is_not_labelled_as_older():
+    """The bug the two flags prevent. `widened` must mean "the second
+    query ran", not "a default was applied" — otherwise every hit gets
+    told it is more than a week old."""
+    out = await _tools(_Timeline(_A_MATCH)).search_footage(ARGS)
+
+    assert "further back" not in out, (
+        "a match from inside the default window was reported as older "
+        "than the window")
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_window_is_never_widened():
+    """A caller that named a window meant it. Widening past it would
+    answer a question nobody asked, and would make `within_minutes`
+    advisory rather than a filter."""
+    tl = _TwoAnswers()
+    out = await _tools(tl).search_footage({**ARGS, "within_minutes": 30})
+
+    assert len(tl.calls) == 1, "an explicit window was overridden"
+    assert "No recorded footage matched" in out
+
+
+@pytest.mark.asyncio
+async def test_a_genuinely_empty_search_says_it_looked_everywhere():
+    """"Nothing in the last week" and "nothing ever" are different
+    answers, and an operator acting on the first needs to know which
+    one they were given."""
+    tl = _Timeline({"total": 0, "results": []})
+    out = await _tools(tl).search_footage(ARGS)
+
+    assert len(tl.calls) == 2
+    assert "all stored history" in out
+
+
+@pytest.mark.asyncio
+async def test_widening_is_counted_as_a_tuning_signal():
+    """If this climbs on a real site, the default window is too short
+    for how that site is asked about — and every one of those
+    conversations paid two queries instead of one."""
+    t = _tools(_TwoAnswers())
+    await t.search_footage(ARGS)
+
+    assert t.footage_search_sources["widened"] == 1
+    assert t.footage_search_sources["canonical"] == 1
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_store_is_not_widened_into_a_second_failure():
+    """None is "could not reach the store". Retrying it unbounded would
+    double the wait before saying so, and say nothing more."""
+    tl = _Timeline(None)
+    out = await _tools(tl).search_footage(ARGS)
+
+    assert len(tl.calls) == 1
+    assert "Could not reach the event store" in out

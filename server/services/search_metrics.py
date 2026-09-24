@@ -282,9 +282,13 @@ REGISTRY_UNREACHABLE = Counter(
 )
 DESCRIPTORS_WRITTEN = Counter(
     "opennvr_search_descriptors_written_total",
-    "Claims written, by kind and the KAI-C task/adapter that produced "
-    "them. Attribution: which skill is actually contributing.",
-    ("kind", "task", "adapter"),
+    "Claims written, by kind, the KAI-C task/adapter that produced them, "
+    "and how the claim's SUBJECT was bound (RFC-0003). Attribution in "
+    "two directions: which skill is contributing, and whether what it "
+    "contributed was attached to a known visit or a guessed one. A "
+    "`face_id` written against a `nearest` binding is a name on a "
+    "guessed subject, and this is where that becomes countable.",
+    ("kind", "task", "adapter", "binding"),
 )
 DESCRIPTOR_CONFLICTS = Counter(
     "opennvr_search_descriptor_conflicts_total",
@@ -292,6 +296,39 @@ DESCRIPTOR_CONFLICTS = Counter(
     "one visit. Kept rather than resolved — a rising conflict rate is a "
     "skill going wrong, and is invisible if disagreement is overwritten.",
     ("kind",),
+)
+
+# ── how a claim's subject was decided (RFC-0003) ─────────────────────
+#
+# `binding` records whether a claim's subject was known, looked up, or
+# guessed. Recording it on the row was half the job; the other half is
+# being able to see the MIX change without reading rows.
+#
+# The tolerance that admits a `nearest` binding is a tuning constant
+# (timeline_service.DEFAULT_BIND_TOLERANCE_S, 5s). Set too wide it
+# attaches names to the wrong visitor, and the way anyone finds out
+# today is that somebody notices a wrong name — which is late, rare, and
+# depends on an operator knowing the visitor. These counters make it a
+# number instead: a rising `nearest` share means frames are arriving
+# further from the visits they belong to, and it says so long before a
+# name lands on the wrong person.
+BINDINGS = Counter(
+    "opennvr_visit_bindings_total",
+    "Attempts to bind a frame to a visit, by outcome. `window` is a "
+    "lookup (a visit's own span contained the instant), `nearest` is an "
+    "admitted guess, `ambiguous` is a deliberate refusal, `none` found "
+    "nothing. A rising `nearest` share is the bind tolerance being asked "
+    "to do too much; a rising `ambiguous` share is cameras seeing more "
+    "than one thing at once, which is information, not a fault.",
+    ("outcome",),
+)
+BIND_GAP = Histogram(
+    "opennvr_visit_bind_gap_seconds",
+    "For `nearest` bindings only: how far the instant fell outside the "
+    "visit it was attached to. Clustering near the tolerance means the "
+    "next frame along will fall outside it and bind nothing — or, worse, "
+    "reach the visit after.",
+    (0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0), (),
 )
 
 # ── journeys ─────────────────────────────────────────────────────────
@@ -326,6 +363,7 @@ _ALL: tuple[_Metric, ...] = (
     VISITS, ENRICHED, DESCRIBED, COVERAGE_AGE,
     SKILLS, REGISTRY_UNREACHABLE, DESCRIPTORS_WRITTEN, DESCRIPTOR_CONFLICTS,
     JOURNEYS, JOURNEY_HOPS, TRANSITION_EDGES, TRANSITION_SAMPLES,
+    BINDINGS, BIND_GAP,
 )
 
 
