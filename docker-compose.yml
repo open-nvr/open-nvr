@@ -644,6 +644,16 @@ services:
       # nothing. Guarded now by test_server_env_wiring.py, the server's
       # equivalent of the detect-pipeline check that caught the same
       # defect in DETECT_MOTION_MAX_FORCED_EXITS.
+      #
+      # NOTE ON THE `:-` BELOW. It does not make these optional in the
+      # way it looks. Compose substitutes an unset variable with the
+      # EMPTY STRING and still passes the variable, so `.env` staying
+      # silent about one of these sends `''` to a `bool` field — which
+      # crashed the backend at import on every install that did not set
+      # all six (#547). Settings now reads an empty value as "unset" and
+      # falls back to the documented default;
+      # test_empty_env_means_unset.py holds that, for every variable
+      # written in this form rather than only these six.
       - EVENTS_PLATE_ENRICHMENT=${EVENTS_PLATE_ENRICHMENT:-}
       - EVENTS_CAPTION_ENRICHMENT=${EVENTS_CAPTION_ENRICHMENT:-}
       - EVENTS_DESCRIPTOR_ENRICHMENT=${EVENTS_DESCRIPTOR_ENRICHMENT:-}
