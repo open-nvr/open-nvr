@@ -144,6 +144,40 @@
   source: https://github.com/open-nvr/ai-adapter/tree/main/adapters/insightface
   contact: https://github.com/open-nvr/ai-adapter/issues
 
+- id: clip-embeddings
+  name: CLIP Embeddings
+  summary: >-
+    Semantic search. Turns a frame into a vector AND a query in words into a
+    vector in the same space, so a search for "truck" finds the visit a
+    captioner called "a lorry". Search fuses this with the keyword ranking;
+    without it, search matches words exactly as it does today.
+  version: "1.0.0"
+  tier: first_party
+  image: ghcr.io/open-nvr/clip-adapter:latest
+  tasks_advertised: [embed]
+  model:
+    framework: open_clip
+    # BOTH directions, which is this adapter's one unusual property: it
+    # answers a request that carries no image at all.
+    modalities_in: [image, text]
+    modalities_out: [embedding]
+    fingerprinted: true
+  permissions:
+    gpu: false
+    # Genuinely empty: the weights are baked into the image and the
+    # runtime is pinned offline, so this adapter never dials anything.
+    # Same posture as the BLIP captioner.
+    network_egress: []
+    host_filesystem: []
+  scheduling: { max_inflight: 1, fair_queuing: per_camera }
+  supports_stream: false
+  license: AGPL-3.0
+  vendor: open-nvr
+  model_card_url: https://github.com/mlfoundations/open_clip
+  docs_url: https://github.com/open-nvr/ai-adapter/blob/main/adapters/clip/README.md
+  source: https://github.com/open-nvr/ai-adapter/tree/main/adapters/clip
+  contact: https://github.com/open-nvr/ai-adapter/issues
+
 - id: whisper-asr
   name: Whisper ASR
   summary: Speech to text, with translation. Weights download on first boot into the adapter's volume; pre-populate it for an air-gapped site.
