@@ -426,6 +426,56 @@ class Settings(BaseSettings):
     # per-camera assignment cannot say "for vehicles, not for everyone
     # who walks past"; this can. Still gated by that assignment on top.
     events_descriptor_people: bool = False
+    # Ask an adapter advertising `embed` for a vector of the visit's best
+    # frame and store it in event_embeddings, so search can rank by
+    # meaning as well as by words (services/search_service.py fuses the
+    # two with RRF). Gated per camera by the `embed` skill assignment,
+    # exactly like the two above.
+    #
+    # OFF BY DEFAULT — and the honest version of why, because the
+    # obvious argument for it is weaker than it looks.
+    #
+    # THE ARGUMENT THAT HOLDS: an embedding model is the heaviest
+    # per-visit inference in the stack and the one most likely to want a
+    # GPU. Getting this wrong does not produce a worse search result, it
+    # produces dropped frames — the detector falls behind, the box gets
+    # worse at the thing it exists for, and nobody asked for that trade.
+    # A site that upgrades on a Tuesday and finds its mini-PC running a
+    # vision transformer on every passing car has been handed a
+    # regression however much better the search got.
+    #
+    # THE ARGUMENT THAT DOES NOT: "off by default keeps the box safe".
+    # It does not, and it is not what keeps the box safe. The per-camera
+    # skill assignment is the real gate — `wants_embedding` fails closed
+    # when it cannot resolve the camera, and the `embed` skill did not
+    # exist before this release, so no camera anywhere has it assigned.
+    # This flag could default true and still cause exactly nothing to
+    # happen until somebody deliberately assigned the skill. That is
+    # precisely the reasoning under which `events_caption_enrichment`
+    # defaults TRUE and leans entirely on its assignment gate.
+    #
+    # So what this default actually buys is narrower than "safety": a
+    # site-wide off switch that does not require unassigning the skill
+    # on thirty cameras, starting in the position where turning it on is
+    # a decision somebody made rather than one they inherited. That is
+    # defence in depth. The assignment is the defence.
+    #
+    # If a later release decides the captioner's precedent should win
+    # here too, flipping this is a one-line change and is not dangerous
+    # for the reason above — but it should be flipped deliberately, with
+    # that reasoning in hand, not because the default looked timid.
+    #
+    # Off is a COMPLETE state, not a pending one: no vectors means
+    # capability() reports none and search matches words, exactly as it
+    # did before any of this existed. Nothing degrades, nothing warns,
+    # and no response shape changes.
+    #
+    # Note that search does not read this flag at all. capability() asks
+    # the STORE whether any vectors exist, so a flag set true over an
+    # empty table cannot produce an adapter round trip per query — which
+    # is why flipping it has no effect on query behaviour until
+    # something has actually been embedded.
+    events_embed_enrichment: bool = False
     # Sweep visits recorded BEFORE the two enrichers above were deployed,
     # handing each to the same enricher the ingest path calls. Off by
     # default and the only enrichment path that is: upgrading a running

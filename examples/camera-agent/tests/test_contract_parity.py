@@ -135,12 +135,24 @@ def test_state_reports_whether_footage_search_could_be_answered():
     operators are asking about the past during outages and being told
     nothing — which is the honest answer, but a number worth watching,
     because it is the cost this change accepted.
+
+    `widened` is the newer one and reads the other way round: it counts
+    searches where the default recent window came back empty and the
+    whole history was searched instead. Not an error — the answer is
+    correct either way — but each one cost two queries, so a climbing
+    number means the default window is too short for how this site is
+    actually asked about.
+
+    The set is asserted EXACTLY rather than by subset, which is the
+    point of it: /state is a public door, and a counter appearing or
+    disappearing should have to be acknowledged here rather than
+    arriving unannounced in somebody's dashboard.
     """
     runtime = CameraAgentRuntime(_cfg())
     body = runtime.contract_state()
 
     assert "footage_search" in body
-    assert set(body["footage_search"]) == {"canonical", "unanswerable"}
+    assert set(body["footage_search"]) == {"canonical", "unanswerable", "widened"}
 
     runtime.tools.footage_search_sources["canonical"] += 3
     runtime.tools.footage_search_sources["unanswerable"] += 1

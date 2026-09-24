@@ -32,6 +32,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -511,6 +512,15 @@ class TimelineEvent(Base):
         # idempotent. NULLs (alarm/alert rows) never collide by SQL semantics.
         Index("uq_events_visit", "camera_id", "track_id", "started_at",
               unique=True),
+        # NOT DECLARED HERE, deliberately: ix_events_started_brin, a BRIN
+        # index on started_at alone, created by migration d3a8b1c5e9f2.
+        # It serves the query naming neither a camera nor a class —
+        # "everything between 2am and 4am" — which every index above
+        # leaves to a scan. BRIN has no SQLite equivalent, and declaring
+        # it here would quietly create a BTREE on the test dialect: the
+        # most expensive index on the fastest-growing table, measuring
+        # something production does not do. If a btree on started_at is
+        # ever wanted, it should be added on purpose.
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -605,6 +615,55 @@ class EventText(Base):
     attributes = Column(Text, nullable=True)
     #: Which enricher wrote this, so a bad one can be found and re-run.
     source = Column(String(60), nullable=True)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class EventEmbedding(Base):
+    """One visit's vector — the sibling of :class:`EventText`.
+
+    Words and vectors are two views of the same enrichment, so they sit
+    side by side, keyed the same way, cascading the same way. Search
+    fuses them; neither is required for the other to work.
+
+    In the MAIN database, deliberately, not a vector service. Every
+    query here is already filtered — this camera, this window, this
+    class — and a vector store on the other side of a network call
+    cannot see that filter, so it either returns candidates the filter
+    then throws away or asks for an id list it has no index on. Frigate
+    reached the same conclusion with ``sqlite-vec``. Keeping the vectors
+    next to the rows also means one backup, one retention policy, and
+    one place a deleted camera's data actually disappears from.
+
+    ``vector`` is float32 little-endian bytes, NORMALISED ON WRITE so
+    similarity is a dot product (services/embedding_store.py). A plain
+    BLOB rather than a native vector type because OpenNVR has to run
+    where pgvector is not installed and where the database is SQLite,
+    and a schema that only loads on the better machine is the thing this
+    project does not do. An ANN index is an addition on top of this
+    column, not a replacement for it.
+
+    ``dim`` and ``model`` are stored rather than assumed: vectors from
+    two different adapters are not comparable, and a half-migrated store
+    should be diagnosable from the table rather than from the ranking
+    looking odd."""
+
+    __tablename__ = "event_embeddings"
+    __table_args__ = (
+        # "which visits still need embedding" and "re-run everything that
+        # came from the old adapter" are both this index.
+        Index("ix_event_embeddings_model", "model"),
+    )
+
+    event_id = Column(
+        Integer, ForeignKey("events.id", ondelete="CASCADE"), primary_key=True
+    )
+    #: float32 little-endian, unit length. See embedding_store.pack().
+    vector = Column(LargeBinary, nullable=False)
+    #: Length of the vector. Stored because a mismatch is a
+    #: misconfiguration worth naming, not a comparison worth attempting.
+    dim = Column(Integer, nullable=False)
+    #: Which adapter produced it, for targeted re-runs.
+    model = Column(String(120), nullable=True)
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
 

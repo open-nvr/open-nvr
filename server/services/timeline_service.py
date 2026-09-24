@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func as _func
+from sqlalchemy import func as _func, or_
 from sqlalchemy.orm import Session
 
 from models import TimelineEvent
@@ -57,6 +57,24 @@ def seen_at_of(row) -> datetime | None:
     return getattr(row, "observed_at", None) or row.started_at
 
 
+#: ``TimelineEvent.event_type`` of one object's stay on one camera.
+#:
+#: "track", not "visit", and the two must never be guessed at
+#: separately. RFC-0003's resolve_visit was written filtering
+#: ``event_type == "visit"`` — the word the RFC, the route and every
+#: docstring use — while record_track_visit has always written "track".
+#: Nothing in production matched, so every bind returned "no visit": the
+#: doorbell wrote no face_id at all, and its counters described a site
+#: where nobody was ever seen.
+#:
+#: The tests passed because their fixtures BUILT rows with
+#: event_type="visit" by hand — the suite was the only producer of the
+#: value the code looked for. That is the defect this constant exists to
+#: prevent, and tests/test_visit_binding.py goes through
+#: record_track_visit now for exactly that reason.
+TRACK = "track"
+
+
 def record_track_visit(
     db: Session,
     *,
@@ -75,7 +93,7 @@ def record_track_visit(
     row = TimelineEvent(
         camera_id=camera_id,
         source="tier0",
-        event_type="track",
+        event_type=TRACK,
         label=(label or "")[:60].lower() or None,
         score=score,
         track_id=(track_id or "")[:40] or None,
@@ -611,6 +629,47 @@ def vehicle_report(
 #: "safe" is wide enough to attach a name to the wrong visitor.
 DEFAULT_BIND_TOLERANCE_S = 5.0
 
+#: How many overlapping visits an ``ambiguous`` reply will name.
+#:
+#: Ambiguity is decided by the SECOND row — one binds, two refuse — so
+#: this number never changes an outcome. It only bounds how much of the
+#: crowd the caller gets told about, because "ambiguous, and here is
+#: which visits" is debuggable and a bare refusal is not.
+_AMBIGUITY_REPORT_N = 8
+
+
+def _utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _gap_to(row, at: datetime) -> float | None:
+    """Seconds between ``at`` and the nearer edge of ``row``'s span.
+
+    Only ever called on a row the containment query REJECTED, so the row
+    lies strictly on one side of ``at`` and there are exactly two cases.
+    Saying so explicitly matters, because the previous version wrote the
+    general ``min(|at-start|, |at-end|)`` and treated an open visit's end
+    as ``at`` itself — which made the second term exactly zero, so EVERY
+    open visit scored a gap of 0.0 no matter how far away it started. An
+    open visit beginning four seconds after the instant beat a closed one
+    ending half a second before it, and the reply said "nearest within
+    0.0s" about a visit that had not started yet.
+    """
+    start = _utc(getattr(row, "started_at", None))
+    if start is None:
+        return None
+    if start > at:
+        return (start - at).total_seconds()
+    # Started at or before `at` and did not contain it, so it must have
+    # ended first. An open visit that started before `at` IS containing
+    # and cannot reach here; if one somehow does, it is not a near miss.
+    end = _utc(row.ended_at)
+    if end is None:
+        return None
+    return (at - end).total_seconds()
+
 
 def resolve_visit(
     db: Session,
@@ -646,45 +705,114 @@ def resolve_visit(
     if at.tzinfo is None:
         at = at.replace(tzinfo=timezone.utc)
 
-    # A visit with no end is still open; treat "now" as its end so a
-    # frame taken during it can bind. An open visit that started after
-    # the instant cannot contain it either way.
-    q = (
-        db.query(TimelineEvent)
-        .filter(TimelineEvent.camera_id == int(camera_id))
-        .filter(TimelineEvent.event_type == "visit")
-    )
-    q = scope_query(q, TimelineEvent.camera_id, scope)
-    if label:
-        q = q.filter(TimelineEvent.label == label.strip().lower())
+    def candidates():
+        """The scoped, camera-and-label-narrowed visit query."""
+        q = (
+            db.query(TimelineEvent)
+            .filter(TimelineEvent.camera_id == int(camera_id))
+            .filter(TimelineEvent.event_type == TRACK)
+        )
+        q = scope_query(q, TimelineEvent.camera_id, scope)
+        if label:
+            q = q.filter(TimelineEvent.label == label.strip().lower())
+        return q
 
     window = timedelta(seconds=max(0.0, float(tolerance_s)))
-    q = q.filter(SEEN_AT <= at + window)
-    rows = q.order_by(SEEN_AT.desc()).limit(64).all()
 
-    containing: list[TimelineEvent] = []
+    # CONTAINMENT IS A SQL PREDICATE, not a filter over a page of rows.
+    #
+    # This used to take the 64 most recent visits within the tolerance
+    # and test containment in Python. That is wrong in the one place it
+    # matters: on a busy camera the visit actually covering the instant
+    # can sit outside the newest 64 — several objects with overlapping
+    # spans, or one long visit with short ones layered over it — and the
+    # function then reported "no visit covered the instant". The caller
+    # could not tell that from a true miss, so a real `window` binding
+    # silently became a `nearest` guess or no claim at all. It degraded
+    # exactly on the cameras with the most traffic, and it degraded
+    # quietly, which is the worst combination available.
+    #
+    # An open visit (ended_at IS NULL) is still in progress, so it
+    # contains any instant at or after its start.
+    #
+    # THE SPAN IS started_at..ended_at, not SEEN_AT..ended_at. SEEN_AT is
+    # coalesce(observed_at, started_at), and observed_at is the capture
+    # time of the look a PLATE READ won on — normally later than the
+    # visit's start, sometimes much later on a busy gate. Using it as the
+    # start while using the raw ended_at as the end made the effective
+    # span strictly narrower than the real visit: a visit running
+    # 10:00:00-10:00:30 whose plate was read at 10:00:10 would not bind
+    # an instant at 10:00:02, which is plainly inside it. Worse, a row
+    # where observed_at fell after ended_at could never bind at ANY
+    # instant, because the two halves of the predicate were unsatisfiable
+    # together.
+    #
+    # SEEN_AT exists for the plate AGGREGATIONS, where "when was this
+    # read taken" is the question. "Was this object present at this
+    # instant" is a different question and the visit's own span is its
+    # answer.
+    contains = candidates().filter(
+        TimelineEvent.started_at <= at,
+        or_(TimelineEvent.ended_at.is_(None), TimelineEvent.ended_at >= at),
+    )
+    # Two is the whole question — one binds, more than one refuses. A few
+    # more are fetched only so the `ambiguous` reply can NAME the
+    # candidates, which is what makes it debuggable rather than just a
+    # refusal.
+    containing = (contains.order_by(TimelineEvent.started_at.desc())
+                  .limit(_AMBIGUITY_REPORT_N).all())
+
     near: list[tuple[float, TimelineEvent]] = []
-    for row in rows:
-        start = seen_at_of(row)
-        if start is None:
-            continue
-        if start.tzinfo is None:
-            start = start.replace(tzinfo=timezone.utc)
-        end = row.ended_at or at
-        if end.tzinfo is None:
-            end = end.replace(tzinfo=timezone.utc)
-        if start <= at <= end:
-            containing.append(row)
-            continue
-        gap = min(abs((at - start).total_seconds()),
-                  abs((at - end).total_seconds()))
-        if gap <= window.total_seconds():
-            near.append((gap, row))
+    if not containing:
+        # Nothing covered the instant, so every candidate is strictly on
+        # one side of it, and the nearest on each side is reachable with
+        # an ORDER BY the index can serve. No scan, no ceiling.
+        #
+        #   before: ended_at < at, and within tolerance
+        #   after:  it starts after at, and within tolerance
+        #
+        # A visit with no end cannot be "before" — it would have been
+        # containing — so the before-arm needs no NULL branch.
+        #
+        # Both arms key off started_at/ended_at, the same columns
+        # containment uses. When they disagreed — before on ended_at,
+        # after on SEEN_AT — one row could satisfy BOTH (ended before
+        # `at`, plate read after it), appear twice in `near` with
+        # identical gaps, and trip the equally-near tie check into
+        # reporting `ambiguous` with the same event id listed twice, for
+        # a single unambiguous candidate.
+        before = (
+            candidates()
+            .filter(TimelineEvent.ended_at.isnot(None),
+                    TimelineEvent.ended_at < at,
+                    TimelineEvent.ended_at >= at - window)
+            .order_by(TimelineEvent.ended_at.desc())
+            .limit(2)
+            .all()
+        )
+        after = (
+            candidates()
+            .filter(TimelineEvent.started_at > at,
+                    TimelineEvent.started_at <= at + window)
+            .order_by(TimelineEvent.started_at.asc())
+            .limit(2)
+            .all()
+        )
+        seen_ids: set[int] = set()
+        for row in before + after:
+            if row.id in seen_ids:
+                continue
+            seen_ids.add(row.id)
+            gap = _gap_to(row, at)
+            if gap is not None and gap <= window.total_seconds():
+                near.append((gap, row))
 
     if len(containing) == 1:
+        _count_binding("window")
         return {"event_id": containing[0].id, "binding": "window",
                 "reason": "one visit was in progress"}
     if len(containing) > 1:
+        _count_binding("ambiguous")
         return {"event_id": None, "binding": None, "reason": "ambiguous",
                 "candidates": sorted(r.id for r in containing)}
     if near:
@@ -692,9 +820,36 @@ def resolve_visit(
         # Two candidates equally close is the same ambiguity as two
         # containing visits, and gets the same refusal.
         if len(near) > 1 and abs(near[0][0] - near[1][0]) < 1e-6:
+            _count_binding("ambiguous")
             return {"event_id": None, "binding": None, "reason": "ambiguous",
                     "candidates": sorted(r.id for _, r in near)}
+        # The GAP is recorded, not just the outcome. A `nearest` share
+        # that is stable but creeping towards the tolerance is the
+        # warning; by the time it crosses, the binding stops happening
+        # at all and the symptom changes shape from "occasionally wrong"
+        # to "silently nothing".
+        _count_binding("nearest", gap=near[0][0])
         return {"event_id": near[0][1].id, "binding": "nearest",
                 "reason": f"no visit covered the instant; nearest within "
                           f"{near[0][0]:.1f}s"}
+    _count_binding("none")
     return {"event_id": None, "binding": None, "reason": "no visit"}
+
+
+def _count_binding(outcome: str, *, gap: float | None = None) -> None:
+    """Record one bind attempt. Never raises.
+
+    Metrics are an observation of the system, not part of it: a
+    misconfigured or missing collector must not be able to stop a
+    doorbell attaching a name. The import is local for the same reason
+    the rest of this module's are — services importing each other at
+    module scope is how this tree grew its import cycles.
+    """
+    try:
+        from services import search_metrics as _metrics
+
+        _metrics.BINDINGS.inc({"outcome": outcome})
+        if gap is not None:
+            _metrics.BIND_GAP.observe(gap)
+    except Exception:                              # noqa: BLE001
+        pass

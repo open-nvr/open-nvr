@@ -103,6 +103,30 @@
     recommended: NVIDIA GPU (CUDA), 4 GB+ VRAM
     note: Vision-language models are the heaviest task here — GPU strongly advised for frequent captions.
 
+- task: embed
+  label: Visual Embedding
+  summary: Turns a frame — or a query in words — into a vector, so search can rank by meaning rather than by wording.
+  categories: [vision, language, search]
+  tags: [embedding, clip, siglip, semantic, search, vector]
+  # Deliberately null, not `see`. An embedding adapter cannot describe
+  # anything to anyone — it produces a vector for the SEARCH index.
+  # Listing it as backing `see` would report the agent as able to
+  # describe a scene on a site whose only vision adapter is a CLIP,
+  # and the agent would then have nothing to say.
+  agent_skill: null
+  # An adapter that shipped before the canonical name existed may
+  # advertise any of these; they are the same capability.
+  aliases: [embedding, image_embedding, clip]
+  suggested_adapters: [clip, siglip]
+  hardware:
+    min: 4-core CPU, ~4 GB RAM
+    recommended: NVIDIA GPU (CUDA) or Apple Silicon, 2 GB+ VRAM
+    note: >-
+      Optional. Without it, search matches words and keeps working exactly as
+      before — this adds semantic ranking on top, fused with the word ranking.
+      The model runs once per visit, so CPU is fine for a few cameras and a GPU
+      is what makes it comfortable across a site.
+
 - task: vqa
   label: Visual Question Answering
   summary: Answers arbitrary natural-language questions about a frame.

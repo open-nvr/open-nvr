@@ -52,8 +52,8 @@ from services import search_metrics as metrics
 from core.permissions import user_has_permission
 from services.camera_scope import scope_query, visible_camera_ids
 from services.search_query import ParsedQuery, parse_query
-from services.search_service import (anchor_for, count_search_events, search_events,
-                                     summarise_hits)
+from services.search_service import (anchor_for, count_search_events,
+                                     search_page, summarise_hits)
 
 logger = logging.getLogger(__name__)
 
@@ -328,16 +328,37 @@ async def search(
         labels=labels, camera_ids=cams, text=words or "", attrs=attrs,
         plate=plate_q or "", from_=start, to=end,
     )
-    with metrics.Timer() as page_timer:
-        hits = search_events(
-            db, labels=labels, camera_ids=cams, text=words or "", attrs=attrs,
-            limit=limit, skip=skip, **filters,
-        )
+    # The query's own vector, when this deployment has an adapter that
+    # can make one and anything to compare it against. Every way that
+    # can fail is an ABSENCE, not an error — no adapter registered, no
+    # visit embedded yet, an adapter that only does images, KAI-C
+    # unreachable — and every one of them lands here as None, which is
+    # the word search this route has always been.
+    query_vector, no_vector_reason = await _query_vector(db, words or "")
+
+    # Counted FIRST, and timed on its own, because that timer is the
+    # whole point of opennvr_search_count_seconds — the exact total is
+    # the one cost this API added over the old app store. The result is
+    # handed to search_page so the count is not paid for twice.
     with metrics.Timer() as count_timer:
         total = count_search_events(
             db, labels=labels, camera_ids=cams, text=words or "", attrs=attrs, **filters
         )
-    _record_search(shape, parsed, page_timer, count_timer, total, parse=parse,
+    with metrics.Timer() as page_timer:
+        page = search_page(
+            db, labels=labels, camera_ids=cams, text=words or "", attrs=attrs,
+            query_vector=query_vector, total=total, limit=limit, skip=skip,
+            **filters,
+        )
+    hits = page.hits
+    # `text_total` is what the metric has always recorded — how many rows
+    # the words matched — so the history behind that series keeps its
+    # meaning. `total` below is what the CALLER can page through, which
+    # is the fused pool when two arms ran. They differ only with
+    # embeddings on, and `semantic.text_total` carries the other one.
+    text_total = total
+    total = page.total
+    _record_search(shape, parsed, page_timer, count_timer, text_total, parse=parse,
                    overridden=bool(label or camera_id or text or plate or from_
                                    or to or source or attr))
 
@@ -406,15 +427,95 @@ async def search(
         # Empty result: which ONE chip is responsible, and what dropping
         # it would find. Absent when there were results, and absent when
         # no single chip explains it.
+        # Gated on HITS, not on the count. The vector arm returns rows
+        # the text predicate does not match, so `total == 0` alongside a
+        # non-empty page is a real state — and it used to run a batch of
+        # "why did nothing match" queries on a search that had just
+        # returned results, then tell the operator nothing matched while
+        # showing them a row.
         "relax": (
             _why_empty(db, labels=labels, cams=cams, words=words,
                        attrs=attrs, filters=filters)
-            if total == 0 else []
+            if not hits else []
         ),
+        # How the ranking was produced, when a second arm took part —
+        # or why it did not, when this site HAS embeddings and the
+        # embedder could not be reached. Still absent on a deployment
+        # that has simply never embedded anything, which is most of
+        # them: a block saying "semantic: off" on every response would
+        # be noise about a feature nobody switched on.
+        **_semantic_block(page, no_vector_reason),
     }
 
 
 # ── Home Assistant (HA-116/HA-502): zones by name, and period summaries ──
+
+
+def _semantic_block(page, no_vector_reason: str | None) -> dict:
+    """The ``semantic`` key, or nothing.
+
+    Present when an arm ran, and present when one SHOULD have run and
+    could not. Absent on a site with no embeddings at all.
+    """
+    if page.semantic:
+        return {"semantic": page.semantic}
+    if no_vector_reason == "embedder-unreachable":
+        return {"semantic": {
+            "used": False,
+            "reason": "embedder-unreachable",
+            "note": ("This site has embedded visits, but no adapter could "
+                     "turn the query into a vector — results are ranked by "
+                     "words only until the embedding adapter is reachable."),
+        }}
+    return {}
+
+
+async def _query_vector(db, words: str) -> tuple[list[float] | None, str | None]:
+    """A vector for the operator's words, and WHY there isn't one.
+
+    Returns ``(vector, reason)``. A reason is returned even though the
+    search proceeds either way, because the reasons are not equivalent
+    and the response has to be able to tell them apart:
+
+    * ``None`` — there is a vector, or there were no words to embed.
+    * ``"no-embeddings"`` — this deployment has never embedded anything.
+      The ordinary state of most sites, and not worth alarming anyone
+      about.
+    * ``"embedder-unreachable"`` — this site HAS embeddings and the
+      adapter could not produce a query vector. Semantic ranking is off
+      right now and it should not be, which is an operational fact.
+
+    Folding the last two together is the mistake this codebase keeps
+    making in other clothes: a site with 200,000 embedded visits and a
+    dead KAI-C returned a response byte-identical to a site that has
+    never embedded anything, so the one deployment that would want to
+    know had no way to find out.
+
+    Asked cheapest-refusal-first. Checking the STORE before calling the
+    adapter matters: a config flag saying embeddings are on, over an
+    empty table, would buy an inference round trip per search and
+    compare the answer against nothing.
+
+    Nothing here raises. A search must not fail because an optional
+    ranking could not be improved.
+    """
+    words = (words or "").strip()
+    if not words:
+        return None, None
+    try:
+        from services.embedding_store import capability
+
+        if not capability(db).available:
+            return None, "no-embeddings"
+        from services.embed_enrichment import embed_text
+
+        vector, _adapter = await embed_text(words)
+        if vector:
+            return vector, None
+        return None, "embedder-unreachable"
+    except Exception as exc:                       # noqa: BLE001
+        logger.debug("search: query embedding unavailable (%s)", exc)
+        return None, "embedder-unreachable"
 
 
 def _why_empty(db, *, labels, cams, words, attrs, filters, limit: int = 5) -> list[dict]:
