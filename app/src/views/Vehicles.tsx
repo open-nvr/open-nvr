@@ -719,7 +719,7 @@ export function Vehicles() {
   const [range, setRange] = useState<(typeof RANGE_PRESETS)[number]>(RANGE_PRESETS[0])
   const reads = usePagination(25, 'plate-reads')
   const [preview, setPreview] = useState<PlateEvent | null>(null)
-  const [tab, setTab] = useState<'reads' | 'registry' | 'monitoring' | 'alarms'>('reads')
+  const [tab, setTab] = useState<'reads' | 'registry' | 'monitoring' | 'alarms' | 'gate'>('reads')
   // The register, monitors, barrier and alarm mode are the LPR app's
   // SITE-WIDE config — superuser-only on the server. Everyone else
   // gets the reads and alarms for their own cameras.
@@ -1423,6 +1423,13 @@ export function Vehicles() {
               </span>
             ),
           },
+          // Gate Settings last, and a TAB rather than a fold under the
+          // register table. Folded, it read as part of the register and
+          // the camera-role table inside it — the thing that starts plate
+          // reading at all — sat below four other rows inside a collapsed
+          // card. Operators went to the App Catalog to assign a camera
+          // instead, which is a different screen for the same setting.
+          { key: 'gate', label: t('vehicles.gateSettings') },
           ] as const)
             .filter((t) => canConfigure || t.key === 'reads' || t.key === 'alarms')
             .map((t) => ({ key: t.key, label: t.label }))}
@@ -1441,9 +1448,10 @@ export function Vehicles() {
           cameras={camerasQuery.data ?? []}
           onSave={saveMonitors}
         />
-      ) : tab === 'registry' ? (
+      ) : tab === 'registry' || tab === 'gate' ? (
         <>
-        {allow.length > 0 && (
+        {/* The legacy allowlist belongs to the register, not the gate. */}
+        {tab === 'registry' && allow.length > 0 && (
           <Card className="mb-3">
             <CardContent className="p-3 space-y-2">
               <div className="flex items-center gap-2 font-medium text-sm">
@@ -1505,6 +1513,12 @@ export function Vehicles() {
           </Card>
         )}
         <RegistryTab
+          /* Same component, same props, two tabs — the register table
+             and the settings that govern it. Rendering a second copy
+             with its own handlers would be two places to keep in step,
+             which is the defect this file has already been bitten by. */
+          view={tab === 'gate' ? 'gate' : 'registry'}
+          onOpenGate={() => setTab('gate')}
           registry={registry}
           alarmOnUnknown={alarmOnUnknown}
           barrierMode={barrierMode}
@@ -2133,6 +2147,8 @@ function RegistryTab({
   onSetRole,
   onSaveRegistry,
   onToggleAlarm,
+  view = 'registry',
+  onOpenGate,
 }: {
   registry: RegistryEntry[]
   alarmOnUnknown: boolean
@@ -2150,6 +2166,17 @@ function RegistryTab({
   onSetRole: (cameraId: number, role: CameraRole | '', label?: string) => void
   onSaveRegistry: (entries: RegistryEntry[]) => void
   onToggleAlarm: (on: boolean) => void
+  /** Which half of this component the caller wants: the register table,
+      or the settings that govern it. They were one screen, with the
+      settings folded under the table — so the camera-role table that
+      starts plate reading sat inside a collapsed card below four other
+      rows, and operators went to the App Catalog instead. */
+  view?: 'registry' | 'gate'
+  /** Take the operator to the Gate Settings tab. The register keeps the
+      two affordances that used to unfold the panel in place — the setup
+      banner and the toolbar button — because they are how somebody with
+      no camera reading plates finds the one setting that matters. */
+  onOpenGate?: () => void
 }) {
   const { t } = useTranslation()
   // The dialog's subject: a new entry to add, or an existing plate to edit.
@@ -2162,7 +2189,8 @@ function RegistryTab({
   // Settings are set once and then left alone, so they fold away under the
   // list — except while nothing is set up, when they are the only useful
   // thing on the tab.
-  const [settingsOpen, setSettingsOpen] = useState(() => reading.length === 0)
+  // On its own tab there is nothing to fold it under, so it opens.
+  const [settingsOpen, setSettingsOpen] = useState(() => view === 'gate' || reading.length === 0)
   const settingsRef = useRef<HTMLDivElement | null>(null)
   const settingsToggleRef = useRef<HTMLButtonElement | null>(null)
   const settingsPanelId = useId()
@@ -2374,7 +2402,7 @@ function RegistryTab({
             No camera is reading plates yet — give a camera a role and this app starts reading it.
           </span>
           {cameras.length > 0 && (
-            <Button variant="outline" size="sm" onClick={() => openSettings({ highlight: true })}>
+            <Button variant="outline" size="sm" onClick={() => (onOpenGate ? onOpenGate() : openSettings({ highlight: true }))}>
               Assign camera roles
             </Button>
           )}
@@ -2385,279 +2413,286 @@ function RegistryTab({
           same table as the plate reads: header pinned, rows scrolling in
           whatever height the screen has left, pager in the toolbar. Import
           and export act on the whole list, so they sit here too. */}
-      {registry.length === 0 ? (
-        <Card>
-          <EmptyState
-            icon={<Car size={28} />}
-            title={t('vehicles.noRegistered')}
-            description={t('vehicles.registerDescription')}
-            action={<div className="flex flex-wrap justify-center gap-2">{addButton}{importButton}</div>}
-          />
-        </Card>
-      ) : (
-        <DataTable<RegistryEntry>
-          caption={t('vehicles.vehicleRegister')}
-          columns={registerColumns}
-          rows={pageRows}
-          rowKey={(r) => r.plate}
-          fillHeight
-          fixed
-          dense
-          minWidth="min-w-[720px]"
-          // The row IS the record, as on the plate reads: clicking it opens
-          // the entry to edit. The action cell keeps its own buttons.
-          onRowClick={editRow}
-          striped={false}
-          empty={
+      {view === 'registry' && (
+        registry.length === 0 ? (
+          <Card>
             <EmptyState
-              icon={<Search size={28} />}
-              title={`${t('vehicles.noMatchRegister')} “${query.trim()}”`}
-              description={t('vehicles.searchFields')}
+              icon={<Car size={28} />}
+              title={t('vehicles.noRegistered')}
+              description={t('vehicles.registerDescription')}
+              action={<div className="flex flex-wrap justify-center gap-2">{addButton}{importButton}</div>}
             />
-          }
-          toolbar={
-            <div className="flex flex-wrap items-center gap-2 py-1.5 pl-3">
-              <div className="relative">
-                <Search size={14} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--text-dim)]" />
-                <input
-                  value={query}
-                  onChange={(e) => { setQuery(e.target.value); pager.setPage(1) }}
-                  placeholder="Search plate, owner, flat…"
-                  aria-label={t('vehicles.searchRegister')}
-                  className="w-56 rounded border border-[var(--border)] bg-[var(--bg-2)] py-1 pl-7 pr-2 text-xs"
-                />
+          </Card>
+        ) : (
+          <DataTable<RegistryEntry>
+            caption={t('vehicles.vehicleRegister')}
+            columns={registerColumns}
+            rows={pageRows}
+            rowKey={(r) => r.plate}
+            fillHeight
+            fixed
+            dense
+            minWidth="min-w-[720px]"
+            // The row IS the record, as on the plate reads: clicking it opens
+            // the entry to edit. The action cell keeps its own buttons.
+            onRowClick={editRow}
+            striped={false}
+            empty={
+              <EmptyState
+                icon={<Search size={28} />}
+                title={`${t('vehicles.noMatchRegister')} “${query.trim()}”`}
+                description={t('vehicles.searchFields')}
+              />
+            }
+            toolbar={
+              <div className="flex flex-wrap items-center gap-2 py-1.5 pl-3">
+                <div className="relative">
+                  <Search size={14} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--text-dim)]" />
+                  <input
+                    value={query}
+                    onChange={(e) => { setQuery(e.target.value); pager.setPage(1) }}
+                    placeholder="Search plate, owner, flat…"
+                    aria-label={t('vehicles.searchRegister')}
+                    className="w-56 rounded border border-[var(--border)] bg-[var(--bg-2)] py-1 pl-7 pr-2 text-xs"
+                  />
+                </div>
+                {importButton}
+                <Button variant="outline" size="sm" onClick={exportCsv}>
+                  <Download size={14} /> {t('vehicles.export')}
+                </Button>
+                {addButton}
+                {/* Always opens (never closes) the panel under the table and
+                    takes the page to it — the panel's own header toggles. */}
+                <Button
+                  variant="outline" size="sm"
+                  aria-controls={onOpenGate ? undefined : settingsPanelId}
+                  onClick={() => (onOpenGate ? onOpenGate() : openSettings({ highlight: true }))}
+                >
+                  <SlidersHorizontal size={14} /> {t('vehicles.gateSettings')}
+                </Button>
+                <div className="ml-auto">
+                  <Pagination
+                    page={page}
+                    pageSize={pager.pageSize}
+                    total={rows.length}
+                    rowCount={pageRows.length}
+                    label="vehicles"
+                    onPageChange={pager.setPage}
+                    onPageSizeChange={pager.setPageSize}
+                  />
+                </div>
               </div>
-              {importButton}
-              <Button variant="outline" size="sm" onClick={exportCsv}>
-                <Download size={14} /> {t('vehicles.export')}
-              </Button>
-              {addButton}
-              {/* Always opens (never closes) the panel under the table and
-                  takes the page to it — the panel's own header toggles. */}
-              <Button
-                variant="outline" size="sm"
-                aria-controls={settingsPanelId}
-                onClick={() => openSettings({ highlight: true })}
-              >
-                <SlidersHorizontal size={14} /> {t('vehicles.gateSettings')}
-              </Button>
-              <div className="ml-auto">
-                <Pagination
-                  page={page}
-                  pageSize={pager.pageSize}
-                  total={rows.length}
-                  rowCount={pageRows.length}
-                  label="vehicles"
-                  onPageChange={pager.setPage}
-                  onPageSizeChange={pager.setPageSize}
-                />
-              </div>
-            </div>
-          }
-        />
+            }
+          />
+        )
       )}
 
-      {/* Gate settings — set once, so folded under the list, with a
-          summary line that shows their state without opening them. */}
-      <div ref={settingsRef} className="scroll-mt-4">
-        {/* A brief accent ring when opened from elsewhere, so the eye lands
-            on the panel the page just scrolled to. */}
-        <Card className={`transition-shadow duration-300 ${settingsFlash ? 'ring-2 ring-[var(--accent)]' : ''}`}>
-          <button
-            ref={settingsToggleRef}
-            type="button"
-            aria-expanded={settingsOpen}
-            aria-controls={settingsPanelId}
-            onClick={() => (settingsOpen ? setSettingsOpen(false) : openSettings())}
-            className="flex w-full items-center gap-2 px-4 py-3 text-left focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--accent)]"
-          >
-            <ChevronRight
-              size={16}
-              className={`shrink-0 text-[var(--text-dim)] transition-transform ${settingsOpen ? 'rotate-90' : ''}`}
-            />
-            <span className="shrink-0 text-sm font-medium">{t('vehicles.gateSettings')}</span>
-            {!settingsOpen && (
-              <span className="min-w-0 truncate text-xs text-[var(--text-dim)]">{settingsSummary}</span>
-            )}
-          </button>
-          {settingsOpen && (
-            <div id={settingsPanelId} className="divide-y divide-[var(--border)] border-t border-[var(--border)]">
-              <SettingRow
-                icon={<BellRing size={18} className={alarmOnUnknown ? 'text-[var(--warning,#b7791f)]' : 'text-[var(--text-dim)]'} />}
-                title={t('vehicles.alarmUnknown')}
-                summary={t('vehicles.alarmSummary')}
-                info={t('vehicles.alarmInfo')}
-              >
-                <Switch
-                  checked={alarmOnUnknown}
-                  onChange={onToggleAlarm}
-                  label={t('vehicles.alarmUnknown')}
-                />
-              </SettingRow>
-              <SettingRow
-                icon={<Car size={18} className={barrierMode === 'registered' ? 'text-[var(--success,#46a758)]' : 'text-[var(--text-dim)]'} />}
-                title={t('vehicles.automaticBarrier')}
-                summary={hasIn
-                  ? 'Registered vehicles are allowed at Gate IN; everything else is denied.'
-                  : (
-                    <span className="text-[var(--warning,#b7791f)]">
-                      Needs a Gate IN camera — set one under Camera roles below.
-                    </span>
+      {/* Gate settings. Its own TAB now, rather than a fold under the
+          register: collapsed down there, the camera-role table that
+          actually starts plate reading sat below four other rows inside a
+          closed card, and operators went to the App Catalog to assign a
+          camera instead — a different screen for the same setting. */}
+      {view === 'gate' && (
+        <div ref={settingsRef} className="scroll-mt-4">
+          {/* A brief accent ring when opened from elsewhere, so the eye lands
+              on the panel the page just scrolled to. */}
+          <Card className={`transition-shadow duration-300 ${settingsFlash ? 'ring-2 ring-[var(--accent)]' : ''}`}>
+            <button
+              ref={settingsToggleRef}
+              type="button"
+              aria-expanded={settingsOpen}
+              aria-controls={settingsPanelId}
+              onClick={() => (settingsOpen ? setSettingsOpen(false) : openSettings())}
+              className="flex w-full items-center gap-2 px-4 py-3 text-left focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--accent)]"
+            >
+              <ChevronRight
+                size={16}
+                className={`shrink-0 text-[var(--text-dim)] transition-transform ${settingsOpen ? 'rotate-90' : ''}`}
+              />
+              <span className="shrink-0 text-sm font-medium">{t('vehicles.gateSettings')}</span>
+              {!settingsOpen && (
+                <span className="min-w-0 truncate text-xs text-[var(--text-dim)]">{settingsSummary}</span>
+              )}
+            </button>
+            {settingsOpen && (
+              <div id={settingsPanelId} className="divide-y divide-[var(--border)] border-t border-[var(--border)]">
+                <SettingRow
+                  icon={<BellRing size={18} className={alarmOnUnknown ? 'text-[var(--warning,#b7791f)]' : 'text-[var(--text-dim)]'} />}
+                  title={t('vehicles.alarmUnknown')}
+                  summary={t('vehicles.alarmSummary')}
+                  info={t('vehicles.alarmInfo')}
+                >
+                  <Switch
+                    checked={alarmOnUnknown}
+                    onChange={onToggleAlarm}
+                    label={t('vehicles.alarmUnknown')}
+                  />
+                </SettingRow>
+                <SettingRow
+                  icon={<Car size={18} className={barrierMode === 'registered' ? 'text-[var(--success,#46a758)]' : 'text-[var(--text-dim)]'} />}
+                  title={t('vehicles.automaticBarrier')}
+                  summary={hasIn
+                    ? 'Registered vehicles are allowed at Gate IN; everything else is denied.'
+                    : (
+                      <span className="text-[var(--warning,#b7791f)]">
+                        Needs a Gate IN camera — set one under Camera roles below.
+                      </span>
+                    )}
+                  info={
+                    <>
+                      Publishes an allow/deny decision for every read on a Gate IN
+                      camera. Install the <b>Gate Controller</b> app from the App
+                      Catalog to wire those decisions to your relay — it ships in
+                      dry-run, so nothing moves until you say so.
+                    </>
+                  }
+                >
+                  <Switch
+                    checked={barrierMode === 'registered'}
+                    onChange={onToggleBarrier}
+                    label={t('vehicles.automaticBarrier')}
+                  />
+                </SettingRow>
+                <SettingRow
+                  icon={<History size={18} className={overstayHours > 0 ? 'text-[var(--warning,#b7791f)]' : 'text-[var(--text-dim)]'} />}
+                  title={t('vehicles.overstay')}
+                  summary={t('vehicles.overstaySummary')}
+                  info={t('vehicles.overstayInfo')}
+                >
+                  {overstayHours > 0 && (
+                    <label className="flex items-center gap-1.5 text-xs text-[var(--text-dim)]">
+                      after
+                      <input
+                        type="number"
+                        min={0}
+                        step={0.5}
+                        aria-label="Overstay threshold in hours"
+                        value={overstayDraft ?? String(overstayHours)}
+                        onChange={(e) => setOverstayDraft(e.target.value)}
+                        onBlur={commitOverstay}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+                          if (e.key === 'Escape') setOverstayDraft(null)
+                        }}
+                        className="w-16 rounded border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 text-sm text-[var(--text)]"
+                      />
+                      hours
+                    </label>
                   )}
-                info={
-                  <>
-                    Publishes an allow/deny decision for every read on a Gate IN
-                    camera. Install the <b>Gate Controller</b> app from the App
-                    Catalog to wire those decisions to your relay — it ships in
-                    dry-run, so nothing moves until you say so.
-                  </>
-                }
-              >
-                <Switch
-                  checked={barrierMode === 'registered'}
-                  onChange={onToggleBarrier}
-                  label={t('vehicles.automaticBarrier')}
-                />
-              </SettingRow>
-              <SettingRow
-                icon={<History size={18} className={overstayHours > 0 ? 'text-[var(--warning,#b7791f)]' : 'text-[var(--text-dim)]'} />}
-                title={t('vehicles.overstay')}
-                summary={t('vehicles.overstaySummary')}
-                info={t('vehicles.overstayInfo')}
-              >
-                {overstayHours > 0 && (
-                  <label className="flex items-center gap-1.5 text-xs text-[var(--text-dim)]">
-                    after
-                    <input
-                      type="number"
-                      min={0}
-                      step={0.5}
-                      aria-label="Overstay threshold in hours"
-                      value={overstayDraft ?? String(overstayHours)}
-                      onChange={(e) => setOverstayDraft(e.target.value)}
-                      onBlur={commitOverstay}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
-                        if (e.key === 'Escape') setOverstayDraft(null)
-                      }}
-                      className="w-16 rounded border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 text-sm text-[var(--text)]"
-                    />
-                    hours
-                  </label>
-                )}
-                <Switch
-                  checked={overstayHours > 0}
-                  onChange={(on) => {
-                    setOverstayDraft(null)
-                    onSetOverstay(on ? OVERSTAY_DEFAULT_HOURS : 0)
-                  }}
-                  label={t('vehicles.overstay')}
-                />
-              </SettingRow>
+                  <Switch
+                    checked={overstayHours > 0}
+                    onChange={(on) => {
+                      setOverstayDraft(null)
+                      onSetOverstay(on ? OVERSTAY_DEFAULT_HOURS : 0)
+                    }}
+                    label={t('vehicles.overstay')}
+                  />
+                </SettingRow>
 
-              {/* Camera roles — the site's layout in the vehicle story */}
-              <div className="space-y-2 px-4 py-3">
-                <div className="flex items-center gap-1.5 text-sm font-medium">
-                  {t('vehicles.cameraRoles')}
-                  <InfoTip label={t('vehicles.aboutRoles')}>
-                    <b>Gate IN</b> is required for gate features. <b>Gate OUT</b>{' '}
-                    unlocks exit times, stay durations and “inside now”.{' '}
-                    <b>Parking</b>, or a named location of your own, enriches each
-                    vehicle’s history.
-                  </InfoTip>
-                </div>
-                <div className="text-xs text-[var(--text-dim)]">
-                  Where each camera sits. Giving a camera a role starts plate reading on it.
-                </div>
-                {reading.length > 0 && !hasIn && (
-                  <div className="rounded border border-[var(--warning,#b7791f)] px-3 py-2 text-xs text-[var(--warning,#b7791f)]">
-                    No Gate IN camera yet — mark at least one. Until then there is no gate
-                    history and no “inside now”; reads still collect normally.
+                {/* Camera roles — the site's layout in the vehicle story */}
+                <div className="space-y-2 px-4 py-3">
+                  <div className="flex items-center gap-1.5 text-sm font-medium">
+                    {t('vehicles.cameraRoles')}
+                    <InfoTip label={t('vehicles.aboutRoles')}>
+                      <b>Gate IN</b> is required for gate features. <b>Gate OUT</b>{' '}
+                      unlocks exit times, stay durations and “inside now”.{' '}
+                      <b>Parking</b>, or a named location of your own, enriches each
+                      vehicle’s history.
+                    </InfoTip>
                   </div>
-                )}
-                {reading.length > 0 && hasIn && !hasOut && (
-                  <div className="rounded border border-[var(--border)] px-3 py-2 text-xs text-[var(--text-dim)]">
-                    No Gate OUT camera — entries are recorded, but exit times, stay
-                    durations and “inside now” stay off until you mark one.
+                  <div className="text-xs text-[var(--text-dim)]">
+                    Where each camera sits. Giving a camera a role starts plate reading on it.
                   </div>
-                )}
-                {cameras.length === 0 ? (
-                  <div className="text-xs text-[var(--text-dim)]">{t('vehicles.noCameras')}</div>
-                ) : (
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr className="text-left text-xs text-[var(--text-dim)] border-b border-[var(--border)]">
-                          <th className="py-1.5 pr-4 font-normal">Camera</th>
-                          <th className="py-1.5 pr-4 font-normal">Role</th>
-                          <th className="py-1.5 font-normal">Plate reading</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {cameras.map((c) => {
-                          // Every camera is on offer: any number of apps may use
-                          // the same one. A role here is ANPR's pick of the
-                          // camera — the same pick its Cameras section shows.
-                          const entry = cameraRoles[String(c.id)]
-                          return (
-                            <tr
-                              key={c.id}
-                              className="border-b border-[var(--border)] last:border-0"
-                            >
-                              <td className="py-1.5 pr-4">{c.name}</td>
-                              <td className="py-1.5 pr-4">
-                                <div className="flex items-center gap-2">
-                                  <select
-                                    value={entry?.role ?? ''}
-                                    aria-label={`Role of ${c.name}`}
-                                    onChange={(e) => {
-                                      const role = e.target.value as CameraRole | ''
-                                      onSetRole(c.id, role, role === 'other' ? (entry?.label ?? '') : undefined)
-                                    }}
-                                    className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm"
-                                  >
-                                    <option value="">{t('vehicles.noRole')}</option>
-                                    <option value="gate_in">Gate IN</option>
-                                    <option value="gate_out">Gate OUT</option>
-                                    <option value="parking">Parking</option>
-                                    <option value="other">Other…</option>
-                                  </select>
-                                  {entry?.role === 'other' && (
-                                    <input
-                                      defaultValue={entry.label ?? ''}
-                                      placeholder="e.g. Basement"
-                                      aria-label={`Location name for ${c.name}`}
-                                      onBlur={(e) => onSetRole(c.id, 'other', e.target.value.trim())}
-                                      onKeyDown={(e) => {
-                                        if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+                  {reading.length > 0 && !hasIn && (
+                    <div className="rounded border border-[var(--warning,#b7791f)] px-3 py-2 text-xs text-[var(--warning,#b7791f)]">
+                      No Gate IN camera yet — mark at least one. Until then there is no gate
+                      history and no “inside now”; reads still collect normally.
+                    </div>
+                  )}
+                  {reading.length > 0 && hasIn && !hasOut && (
+                    <div className="rounded border border-[var(--border)] px-3 py-2 text-xs text-[var(--text-dim)]">
+                      No Gate OUT camera — entries are recorded, but exit times, stay
+                      durations and “inside now” stay off until you mark one.
+                    </div>
+                  )}
+                  {cameras.length === 0 ? (
+                    <div className="text-xs text-[var(--text-dim)]">{t('vehicles.noCameras')}</div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="text-left text-xs text-[var(--text-dim)] border-b border-[var(--border)]">
+                            <th className="py-1.5 pr-4 font-normal">Camera</th>
+                            <th className="py-1.5 pr-4 font-normal">Role</th>
+                            <th className="py-1.5 font-normal">Plate reading</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {cameras.map((c) => {
+                            // Every camera is on offer: any number of apps may use
+                            // the same one. A role here is ANPR's pick of the
+                            // camera — the same pick its Cameras section shows.
+                            const entry = cameraRoles[String(c.id)]
+                            return (
+                              <tr
+                                key={c.id}
+                                className="border-b border-[var(--border)] last:border-0"
+                              >
+                                <td className="py-1.5 pr-4">{c.name}</td>
+                                <td className="py-1.5 pr-4">
+                                  <div className="flex items-center gap-2">
+                                    <select
+                                      value={entry?.role ?? ''}
+                                      aria-label={`Role of ${c.name}`}
+                                      onChange={(e) => {
+                                        const role = e.target.value as CameraRole | ''
+                                        onSetRole(c.id, role, role === 'other' ? (entry?.label ?? '') : undefined)
                                       }}
-                                      className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm w-36"
-                                    />
+                                      className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm"
+                                    >
+                                      <option value="">{t('vehicles.noRole')}</option>
+                                      <option value="gate_in">Gate IN</option>
+                                      <option value="gate_out">Gate OUT</option>
+                                      <option value="parking">Parking</option>
+                                      <option value="other">Other…</option>
+                                    </select>
+                                    {entry?.role === 'other' && (
+                                      <input
+                                        defaultValue={entry.label ?? ''}
+                                        placeholder="e.g. Basement"
+                                        aria-label={`Location name for ${c.name}`}
+                                        onBlur={(e) => onSetRole(c.id, 'other', e.target.value.trim())}
+                                        onKeyDown={(e) => {
+                                          if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+                                        }}
+                                        className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm w-36"
+                                      />
+                                    )}
+                                  </div>
+                                </td>
+                                <td className="py-1.5 text-xs">
+                                  {cameraAdopted(c, LPR_SKILL) ? (
+                                    <span className="inline-flex items-center gap-1.5 text-[var(--success,#46a758)]">
+                                      <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-current" />
+                                      {t('vehicles.reading')}
+                                    </span>
+                                  ) : (
+                                    <span className="text-[var(--text-dim)]">{t('vehicles.notReading')}</span>
                                   )}
-                                </div>
-                              </td>
-                              <td className="py-1.5 text-xs">
-                                {cameraAdopted(c, LPR_SKILL) ? (
-                                  <span className="inline-flex items-center gap-1.5 text-[var(--success,#46a758)]">
-                                    <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-current" />
-                                    {t('vehicles.reading')}
-                                  </span>
-                                ) : (
-                                  <span className="text-[var(--text-dim)]">{t('vehicles.notReading')}</span>
-                                )}
-                              </td>
-                            </tr>
-                          )
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
+                                </td>
+                              </tr>
+                            )
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
-          )}
-        </Card>
-      </div>
+            )}
+          </Card>
+        </div>
+      )}
 
       {importOpen && (
         <ImportDialog
