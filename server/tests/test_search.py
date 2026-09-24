@@ -1183,3 +1183,137 @@ def _counting_then(after, *, first=0):
         return after(*a, **k)
 
     return wrapped
+
+
+# ── A leftover word must not empty the page ─────────────────────────
+#
+# The parser hands everything it could not interpret to the text filter,
+# and that filter is an AND across words. For a word the operator meant,
+# that is correct. For the residue of a sentence it is a trap, and the
+# trap is not rare: "can you tell me if you seen any car in last 15 mins
+# what is number of it" parses `car` and the window correctly, leaves
+# `number`, and returns nothing out of 421 matching cars. The example
+# question this project ships — "did a red truck come by earlier today"
+# — leaves `red come earlier` and fails identically.
+#
+# A longer stopword list is not the fix. _STOP is already long and
+# careful and was one word short; the next sentence brings a word it has
+# not met either. These pin the behaviour instead: the structural parse
+# stands, the residue is dropped, and the response says it happened.
+
+
+def test_a_leftover_word_does_not_empty_the_page(client, db):
+    """The reported query, end to end."""
+    _camera(db, 1, "Gate")
+    for _ in range(3):
+        _visit(db, camera_id=1, label="car", minutes_ago=2, caption="a car")
+
+    body = client.get("/api/v1/search", params={
+        "q": "can you tell me if you seen any car in last 15 mins "
+             "what is number of it"}).json()
+
+    assert body["total"] == 3, (
+        "the word `number` still empties a page of cars — no caption "
+        "contains it, and it is the operator asking a question rather "
+        "than describing the footage")
+    assert body["interpretation"]["labels"] == ["car"], (
+        "relaxing the words must not disturb the structural parse")
+
+
+def test_the_response_admits_what_it_dropped(client, db):
+    """Results the operator did not ask for need saying so.
+
+    Returning 3 cars for a query that asked about a number, silently, is
+    a different failure from returning none — it just fails later, when
+    they wonder why a filter did nothing.
+    """
+    _camera(db, 1, "Gate")
+    _visit(db, camera_id=1, label="car", minutes_ago=2, caption="a car")
+
+    body = client.get("/api/v1/search", params={
+        "q": "any car in last 15 mins what is number of it"}).json()
+
+    assert body.get("relaxed"), "no `relaxed` block on a relaxed search"
+    assert body["relaxed"]["dropped"] == "number"
+    assert body["relaxed"]["without"] == 1
+    # The interpretation reports what was APPLIED.
+    assert body["interpretation"]["text"] == ""
+    assert "number" in body["interpretation"]["ignored"], (
+        "a dropped word belongs in `ignored`, the field that exists to "
+        "say what the parser set aside instead of pretending")
+
+
+def test_words_the_caller_passed_are_never_dropped(client, db):
+    """An explicit `text=` is not residue.
+
+    A caller who passed words meant them — a UI chip the operator typed,
+    an integration filtering deliberately — and is owed the empty result
+    they asked for rather than a broader one they did not.
+    """
+    _camera(db, 1, "Gate")
+    _visit(db, camera_id=1, label="car", minutes_ago=2, caption="a car")
+
+    body = client.get("/api/v1/search", params={
+        "q": "car today", "text": "number"}).json()
+
+    assert body["total"] == 0
+    assert "relaxed" not in body
+    assert body["interpretation"]["text"] == "number"
+
+
+def test_a_search_that_matched_is_left_alone(client, db):
+    """Never touches a working search."""
+    _camera(db, 1, "Gate")
+    _visit(db, camera_id=1, label="truck", minutes_ago=2,
+           caption="a red truck at the dock")
+
+    body = client.get("/api/v1/search", params={"q": "red truck today"}).json()
+
+    assert body["total"] == 1
+    assert "relaxed" not in body
+    assert body["interpretation"]["text"] == "red", (
+        "a word that MATCHES must keep filtering — relaxing unconditionally "
+        "would make every text search return everything")
+
+
+def test_structural_chips_are_not_relaxed(client, db):
+    """Only the words. Dropping a label or a window answers a different
+    question, which is the failure being fixed, not a fallback."""
+    _camera(db, 1, "Gate")
+    _visit(db, camera_id=1, label="car", minutes_ago=2, caption="a car")
+
+    body = client.get("/api/v1/search", params={"q": "any dog today"}).json()
+
+    assert body["total"] == 0, "a label with no matches must stay empty"
+    assert "relaxed" not in body
+    # The one-click offer still stands — an offer, not a substitution.
+    assert any(r["drop"] == "labels" for r in body.get("relax", []))
+
+
+def test_plate_number_is_one_phrase_not_a_word_to_match():
+    """`numberplate` was already a cue; `plate number` is the same phrase
+    with a space in it, and leaving the tail behind demanded a caption
+    containing the word "number"."""
+    assert parse_query("what is the plate number of the car").text == ""
+    assert parse_query("registration number for that van").text == ""
+    # Only beside a cue. Alone it is an ordinary word, and _STOP is not
+    # where a word with two meanings belongs.
+    assert parse_query("number 5 door").text == "number door"
+
+
+def test_words_are_not_relaxed_when_they_were_the_whole_query(client, db):
+    """Relaxing needs something to stand on.
+
+    "zebra 42" parses to no label, no window and no camera. Dropping
+    `zebra` does not broaden that search, it deletes it — and answers
+    "did you see a zebra" with every visit in the database. An empty
+    result is the honest answer when the words WERE the query.
+    """
+    _camera(db, 1, "Dock")
+    _visit(db, camera_id=1, label="person", minutes_ago=2,
+           caption="a person walking")
+
+    body = client.get("/api/v1/search", params={"q": "zebra"}).json()
+
+    assert body["total"] == 0
+    assert "relaxed" not in body
