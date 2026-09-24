@@ -1317,3 +1317,106 @@ def test_words_are_not_relaxed_when_they_were_the_whole_query(client, db):
 
     assert body["total"] == 0
     assert "relaxed" not in body
+
+
+# ── The internal events read: what a camera agent can ask ────────────
+#
+# The agent's search_history could filter by label, time, camera and
+# plate and nothing else, so "did you see a blue car in the last hour"
+# became "any car in the last hour" — the word `blue` dropped before the
+# query was built, and the answer confidently described a different
+# question. The capability existed in the user-facing search the whole
+# time; the internal endpoint the agent uses simply never exposed it.
+
+
+def test_the_agent_can_filter_by_what_a_skill_said(internal_client, db):
+    _camera(db, 1, "Gate")
+    blue = _visit(db, camera_id=1, label="car", minutes_ago=5)
+    red = _visit(db, camera_id=1, label="car", minutes_ago=5)
+    _claim(db, blue.id, "colour", "blue")
+    _claim(db, red.id, "colour", "red")
+
+    body = internal_client.get(
+        "/api/v1/internal/camera-agent/events",
+        params={"label": "car", "attr": "blue"}).json()
+
+    assert [e["id"] for e in body["events"]] == [blue.id]
+    assert body["attrs_applied"] == ["blue"]
+
+
+def test_a_bare_value_survives_the_colour_spelling(internal_client, db):
+    """The kind is `colour`. Every caller who has not read
+    descriptor_enrichment.LABEL_KINDS will write `color`, and a
+    kind-scoped query with the wrong spelling returns nothing while
+    looking exactly like "no blue cars" — so a bare value matches any
+    kind, and that is the spelling the tool schema advertises."""
+    _camera(db, 1, "Gate")
+    row = _visit(db, camera_id=1, label="car", minutes_ago=5)
+    _claim(db, row.id, "colour", "blue")
+
+    bare = internal_client.get("/api/v1/internal/camera-agent/events",
+                               params={"attr": "blue"}).json()
+    right = internal_client.get("/api/v1/internal/camera-agent/events",
+                                params={"attr": "colour:blue"}).json()
+    wrong = internal_client.get("/api/v1/internal/camera-agent/events",
+                                params={"attr": "color:blue"}).json()
+
+    assert [e["id"] for e in bare["events"]] == [row.id]
+    assert [e["id"] for e in right["events"]] == [row.id]
+    assert wrong["events"] == [], "an explicit kind stays exact"
+
+
+def test_attributes_and_rather_than_widen(internal_client, db):
+    _camera(db, 1, "Gate")
+    both = _visit(db, camera_id=1, label="car", minutes_ago=5)
+    one = _visit(db, camera_id=1, label="car", minutes_ago=5)
+    _claim(db, both.id, "colour", "blue")
+    _claim(db, both.id, "vehicle_type", "van")
+    _claim(db, one.id, "colour", "blue")
+
+    body = internal_client.get(
+        "/api/v1/internal/camera-agent/events",
+        params={"attr": ["blue", "van"]}).json()
+
+    assert [e["id"] for e in body["events"]] == [both.id]
+
+
+def test_an_empty_attribute_search_says_which_kind_of_empty(internal_client, db):
+    """The whole point, and the reason this endpoint reports counts.
+
+    "No blue cars" and "nothing ever looked at what colour anything was"
+    are opposite answers that produce an identical empty list. An agent
+    that cannot tell them apart tells an operator there was no blue car
+    when the truth is that nobody asked — confidently wrong about a
+    security question, which is the failure mode this project keeps
+    finding and keeps having to fix.
+    """
+    _camera(db, 1, "Gate")
+    described = _visit(db, camera_id=1, label="car", minutes_ago=5)
+    _visit(db, camera_id=1, label="car", minutes_ago=5)   # never looked at
+    _visit(db, camera_id=1, label="car", minutes_ago=5)   # never looked at
+    _claim(db, described.id, "colour", "red")
+
+    body = internal_client.get(
+        "/api/v1/internal/camera-agent/events",
+        params={"label": "car", "attr": "blue"}).json()
+
+    assert body["events"] == []
+    assert body["described"]["in_window"] == 3
+    assert body["described"]["with_any_descriptor"] == 1, (
+        "without this an agent cannot say 'one of the three was described "
+        "and it was not blue; the other two nobody looked at'")
+
+
+def test_the_counts_are_absent_when_no_attribute_was_asked(internal_client, db):
+    """Two extra counts on every history read would be a cost paid by
+    every caller for a feature most do not use."""
+    _camera(db, 1, "Gate")
+    _visit(db, camera_id=1, label="car", minutes_ago=5)
+
+    body = internal_client.get("/api/v1/internal/camera-agent/events",
+                               params={"label": "car"}).json()
+
+    assert "described" not in body
+    assert "attrs_applied" not in body
+    assert len(body["events"]) == 1

@@ -84,6 +84,7 @@ class EventsClient:
         start: datetime | str | None = None,
         end: datetime | str | None = None,
         limit: int = 50,
+        attrs: list[str] | None = None,
     ) -> list[StoredEvent] | None:
         """Visits overlapping [start, end), newest first.
 
@@ -98,11 +99,23 @@ class EventsClient:
             params["camera_id"] = camera_id
         if plate:
             params["plate"] = plate
+        # What a skill SAID about the visit — "blue", "van", "hi-vis" —
+        # as opposed to what the detector classified it as. Repeatable
+        # and ANDed server-side.
+        #
+        # Bare values are the documented spelling. "kind:value" scopes to
+        # one kind and is exact, which means `color:blue` finds nothing
+        # because the kind is spelled `colour` — a wrong answer that
+        # looks precisely like "there were no blue cars". Send `blue`.
+        attr_list = [a.strip() for a in (attrs or []) if str(a).strip()]
         if start is not None:
             params["from"] = start.isoformat() if isinstance(start, datetime) else start
         if end is not None:
             params["to"] = end.isoformat() if isinstance(end, datetime) else end
-        url = f"{self._base}/api/v1/internal/camera-agent/events?{urlencode(params)}"
+        # doseq: the endpoint takes `attr` repeated, and urlencode would
+        # otherwise send one param whose value is the string "['blue']".
+        url = (f"{self._base}/api/v1/internal/camera-agent/events?"
+               f"{urlencode({**params, 'attr': attr_list}, doseq=True)}")
         try:
             status, body = await self._get(url, self._headers)
             if status != 200:

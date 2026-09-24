@@ -630,3 +630,117 @@ def test_a_broken_ring_never_breaks_the_history_answer(anyio_backend=None):
     tools._ctx.recent_events = boom
     out = asyncio.run(tools.search_history({"label": "person"}))
     assert "1 person visit(s)" in out
+
+
+# ── "Did you see a BLUE car" ─────────────────────────────────────────
+#
+# search_history could filter by label, time, camera and plate and
+# nothing else. Asked about a blue car it searched for cars, dropped
+# `blue` before the query was built, and narrated whatever came back —
+# so an operator asking the same question three times got three
+# confident answers to a question they had not asked. The capability
+# existed in the platform's own search the whole time.
+
+
+class _OldEventsClient:
+    """An app SDK from before the attribute filter.
+
+    Explicit parameters and no ``**kwargs``, which is the shape the
+    capability probe has to recognise — passing ``attrs`` to this would
+    raise, and silently not passing it would answer the wrong question.
+    """
+
+    def __init__(self, events):
+        self._events = events
+        self.searches = []
+
+    async def search(self, *, label=None, camera_id=None, plate=None,
+                     start=None, end=None, limit=50):
+        self.searches.append(
+            dict(label=label, camera_id=camera_id, plate=plate,
+                 start=start, end=end, limit=limit))
+        return self._events
+
+    async def evidence(self, event_id):
+        return None
+
+
+def test_the_attribute_reaches_the_query(anyio_backend=None):
+    import asyncio
+    ec = _FakeEventsClient([_FakeEvent(1, label="car")])
+    tools = _history_tools(ec)
+
+    out = asyncio.run(tools.search_history(
+        {"label": "car", "attr": ["blue"]}))
+
+    assert ec.searches[0]["attrs"] == ["blue"], (
+        "the attribute was dropped before the query — the bug")
+    assert "blue" in out, (
+        "the answer must say what it filtered on, so an operator can see "
+        "the question was understood")
+
+
+def test_an_sdk_that_cannot_filter_says_so_rather_than_guessing(
+        anyio_backend=None):
+    """The failure this whole change is about, one layer down.
+
+    An older SDK cannot carry `attrs`. Dropping it and answering anyway
+    would return every car to someone who asked about a blue one —
+    the original bug, relocated. A limitation an operator can read beats
+    a confident answer to a question nobody asked.
+    """
+    import asyncio
+    ec = _OldEventsClient([_FakeEvent(1, label="car"), _FakeEvent(2, label="car")])
+    tools = _history_tools(ec)
+
+    out = asyncio.run(tools.search_history(
+        {"label": "car", "attr": ["blue"]}))
+
+    assert ec.searches == [], "it must not run the unfiltered query at all"
+    assert "blue" in out
+    assert "can't filter" in out.lower() or "older" in out.lower()
+    assert "I remember" not in out, "no answer may be narrated"
+
+
+def test_an_old_sdk_still_answers_questions_it_can_answer(anyio_backend=None):
+    """The probe must gate the attribute, not the tool."""
+    import asyncio
+    ec = _OldEventsClient([_FakeEvent(1, label="car")])
+    tools = _history_tools(ec)
+
+    out = asyncio.run(tools.search_history({"label": "car"}))
+
+    assert ec.searches and ec.searches[0]["label"] == "car"
+    assert "I remember" in out
+
+
+def test_no_match_on_an_attribute_says_which_kind_of_empty(anyio_backend=None):
+    """"No blue cars" and "nothing looked at what colour they were" are
+    opposite answers behind an identical empty list, and only one of
+    them is an answer."""
+    import asyncio
+    ec = _FakeEventsClient([])
+    tools = _history_tools(ec)
+
+    out = asyncio.run(tools.search_history(
+        {"label": "car", "attr": ["blue"]}))
+
+    assert "blue" in out
+    assert "described" in out.lower(), (
+        "an empty attribute search must name the condition it depends on "
+        "— that something looked at the visit at all")
+
+
+def test_the_tool_schema_advertises_the_attribute(anyio_backend=None):
+    """A parameter the model cannot see is a parameter that does not
+    exist: the bug was a missing slot, not a bad prompt."""
+    import json
+
+    defs = build_tool_definitions(["cam1"])
+    spec = next(t for t in defs
+                if t["function"]["name"] == "search_history")
+    props = spec["function"]["parameters"]["properties"]
+
+    assert "attr" in props
+    assert props["attr"]["type"] == "array"
+    assert "blue" in json.dumps(props["attr"]).lower()

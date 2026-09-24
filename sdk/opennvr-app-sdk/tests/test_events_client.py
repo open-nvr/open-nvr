@@ -53,3 +53,42 @@ def test_evidence_roundtrip_and_miss():
     c, _ = _client([(200, b"\xff\xd8jpg"), (404, b"")])
     assert asyncio.run(c.evidence(42)) == b"\xff\xd8jpg"
     assert asyncio.run(c.evidence(43)) is None
+
+
+# ── attrs: what a skill SAID, not what the detector classified ───────
+
+
+def test_attrs_are_sent_as_repeated_parameters():
+    """The endpoint takes `attr` repeated. A list urlencoded WITHOUT
+    doseq becomes one parameter whose value is the string "['blue']",
+    which FastAPI rejects with a 422 that `search` turns into None —
+    indistinguishable from the store being unreachable."""
+    body = json.dumps({"events": []}).encode()
+    c, calls = _client([(200, body)])
+
+    asyncio.run(c.search(label="car", attrs=["blue", "van"]))
+
+    url, _ = calls[0]
+    assert "attr=blue" in url and "attr=van" in url
+    assert "%5B" not in url, "a list leaked through as a Python repr"
+
+
+def test_no_attrs_sends_no_attr_parameter():
+    """An empty filter must not become `attr=` — a blank value the
+    server would have to decide the meaning of."""
+    body = json.dumps({"events": []}).encode()
+    c, calls = _client([(200, body)])
+
+    asyncio.run(c.search(label="car"))
+
+    assert "attr" not in calls[0][0]
+
+
+def test_blank_attrs_are_dropped_rather_than_sent():
+    body = json.dumps({"events": []}).encode()
+    c, calls = _client([(200, body)])
+
+    asyncio.run(c.search(label="car", attrs=["  ", "", "blue"]))
+
+    url, _ = calls[0]
+    assert url.count("attr=") == 1 and "attr=blue" in url

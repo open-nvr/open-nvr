@@ -748,6 +748,13 @@ async def internal_list_events(
     from_: datetime | None = Query(default=None, alias="from"),
     to: datetime | None = None,
     limit: int = 100,
+    attr: list[str] | None = Query(
+        default=None,
+        description=(
+            "What a skill said about the visit: 'blue', 'van', 'hi-vis'. "
+            "Repeatable and ANDed. 'kind:value' scopes to one kind; a bare "
+            "value matches any kind, which is the safe spelling."),
+    ),
     principal=Depends(_require_internal_key),
     db: Session = Depends(get_db),
 ):
@@ -757,13 +764,58 @@ async def internal_list_events(
     platform component like tier0, not a per-user browser session — its
     answers are already scoped by which cameras it is configured to see.
     """
-    from services.timeline_service import query_events
+    from services.timeline_service import count_events, query_events
 
+    # "blue" or "colour:blue". A bare value is the DEFAULT spelling on
+    # purpose: the kind is `colour`, every caller who has not read
+    # descriptor_enrichment.LABEL_KINDS will write `color`, and a
+    # kind-scoped query with the wrong spelling returns nothing while
+    # looking exactly like "no blue cars".
+    attrs: list[tuple[str | None, str]] = []
+    for raw in attr or []:
+        if not (raw or "").strip():
+            continue
+        kind, _, value = raw.partition(":")
+        attrs.append((kind, value) if value else (None, kind))
+
+    scope = _app_roster(db, principal)
     # An app key sees its own roster's visits only (site key: the fleet).
     rows = query_events(db, camera_id=camera_id, label=label, plate=plate,
                         from_=from_, to=to, limit=limit,
-                        scope=_app_roster(db, principal))
+                        attrs=attrs or None, scope=scope)
+
+    # WAS THE QUESTION EVEN ASKABLE?
+    #
+    # An empty result for an attribute query has two causes that look
+    # identical and mean opposite things: nothing in the window was
+    # blue, or nothing in the window was ever LOOKED at — no descriptor
+    # adapter registered, enrichment off, the visits predating it. The
+    # caller cannot tell, and a camera agent that says "no, I saw no
+    # blue car" when the honest answer is "nothing described what
+    # colour anything was" is confidently wrong about a security
+    # question.
+    #
+    # So when attributes were asked for, count the same window WITHOUT
+    # them and again for rows that carry any descriptor at all. Costs
+    # two counts on a path that already ran a query, and only when the
+    # caller used the feature.
+    described: dict[str, int] | None = None
+    if attrs:
+        base = dict(camera_id=camera_id, label=label, plate=plate,
+                    from_=from_, to=to, scope=scope)
+        try:
+            described = {
+                "in_window": count_events(db, **base),
+                "with_any_descriptor": count_events(
+                    db, has_descriptor=True, **base),
+            }
+        except Exception:  # noqa: BLE001 — a hint must never break a read
+            described = None
+
     return {
+        **({"attrs_applied": [f"{k}:{v}" if k else v for k, v in attrs]}
+           if attrs else {}),
+        **({"described": described} if described else {}),
         "events": [
             {
                 "id": e.id,
