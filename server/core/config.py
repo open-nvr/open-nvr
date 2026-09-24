@@ -24,7 +24,7 @@ import binascii
 import ipaddress
 import os
 import socket
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 from pydantic import ValidationInfo, field_validator, model_validator
@@ -634,6 +634,53 @@ class Settings(BaseSettings):
                 "Must be a valid Fernet key."
             )
         return v
+
+    @model_validator(mode="before")
+    @classmethod
+    def _empty_env_var_means_unset(cls, data: Any) -> Any:
+        """An empty environment variable means the operator did not set it.
+
+        ``docker-compose.yml`` has no ``env_file:`` — every service
+        enumerates its environment by hand, as
+
+            - EVENTS_CAPTION_ENRICHMENT=${EVENTS_CAPTION_ENRICHMENT:-}
+
+        Compose substitutes an unset variable with the EMPTY STRING and
+        still passes the variable, so a knob the operator never
+        mentioned in ``.env`` does not arrive here absent. It arrives as
+        ``''``. Pydantic will not read ``''`` as a bool, and this class
+        is instantiated at module import, so the failure lands before
+        uvicorn has a logger: supervisord restarts the backend forever,
+        the container never reports healthy, and every dependent service
+        dies with ``dependency failed to start`` while the only readable
+        trace is a file inside the container (#547).
+
+        Dropping the key restores the field's DOCUMENTED default, which
+        is what "I did not set this" means everywhere else an operator
+        looks — a commented-out line in ``.env.example``, an absent
+        ``-e`` on the command line, a variable the shell never exported.
+
+        Only fields that HAVE a default are dropped, and the distinction
+        is the point rather than caution. A REQUIRED field arriving
+        empty is a real misconfiguration with an error message written
+        for it — ``secret_key`` tells the operator to run ``make
+        secrets`` — and swallowing ``''`` there would replace that with
+        pydantic's bare "Field required". Empty means unset only where
+        unset is a thing the field knows how to be.
+        """
+        if not isinstance(data, dict):
+            return data
+
+        optional = {
+            name
+            for name, field in cls.model_fields.items()
+            if not field.is_required()
+        }
+        return {
+            key: value
+            for key, value in data.items()
+            if not (isinstance(value, str) and value == "" and key.lower() in optional)
+        }
 
     @model_validator(mode="after")
     def _enforce_mediamtx_internal(self) -> "Settings":

@@ -36,6 +36,19 @@ The failure mode is what makes it worth a test rather than a review
 habit: the code falls back to its own default, the service starts
 clean, and nothing anywhere reports that the setting was ignored.
 
+WHAT THIS TEST DOES NOT CHECK, learned the hard way (#547).
+
+It checks that each variable is PASSED. It says nothing about whether
+the value that arrives can be parsed. Compose writes a passthrough as
+``${VAR:-}``, which substitutes the empty string for an unset variable
+and passes it anyway, so four of the six knobs plumbed here reached a
+``bool`` field as ``''`` and took the backend down at import on every
+install whose ``.env`` did not set them — which was every install
+following ``.env.example``, because it set only the other two.
+
+Plumbed and parseable are different properties and this file only
+holds the first. ``test_empty_env_means_unset.py`` holds the second.
+
 Deliberately string-level, matching the sibling test's style — no yaml
 dependency in this suite.
 """
