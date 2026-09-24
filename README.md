@@ -15,7 +15,7 @@ OpenNVR™ is the open, sovereign platform for recording your cameras and runnin
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)](https://www.python.org)
 [![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.22804254-blue.svg)](https://doi.org/10.5281/zenodo.22804254)
 
-[Quickstart](#quickstart) · [Talk to your cameras](#talk-to-your-cameras) · [Build on it](#build-on-it) · [Read the paper](https://doi.org/10.5281/zenodo.22804254)
+[Get it running](#get-it-running) · [Add apps in one click](#add-capabilities-in-one-click) · [Talk to your cameras](#talk-to-your-cameras) · [How it works](#how-it-actually-works) · [Build on it](#build-on-it) · [Read the paper](https://doi.org/10.5281/zenodo.22804254)
 
 <a href="https://opennvr.org/camera-agent">
   <img src=".github/demo-agent.gif" alt="Ask your cameras a question — the OpenNVR camera agent runs YOLOv8 on a live frame and answers locally, no cloud" width="760" />
@@ -24,6 +24,102 @@ OpenNVR™ is the open, sovereign platform for recording your cameras and runnin
 </div>
 
 ---
+
+## Get it running
+
+Two commands. You need [Docker](https://docs.docker.com/get-docker/) — Desktop on Windows/macOS, Engine + Compose v2 on Linux — and nothing else. No account, no API key, no cloud anything.
+
+```bash
+git clone https://github.com/open-nvr/open-nvr.git && cd open-nvr
+./start.sh          # Windows: .\start.ps1
+```
+
+That's the install. The launcher opens a short wizard where **every question has a working default in `[brackets]` — press Enter through all of them** and you get a running stack. It generates the secrets, pulls the images, starts everything, and prints your URL and a one-time setup token at the end.
+
+> ⏳ **First run: 8–15 minutes**, almost all of it downloading container images (and a ~1 GB local model if you pick the camera agent). Every start after that is seconds.
+
+Open the printed URL, accept the self-signed certificate once, paste the token, set a password, add a camera. Detection overlays appear within about 30 seconds.
+
+**No camera to hand?** [OpenNVR Cam](https://play.google.com/store/apps/details?id=org.opennvr.cam) turns an Android phone into a real ONVIF camera that OpenNVR discovers like any other. Or let the camera agent use the webcam on the machine itself — no provisioning at all.
+
+<details>
+<summary><b>Running it again, stopping it, and other day-two commands</b></summary>
+
+Run `./start.sh` (or `.\start.ps1`) any time — if it's already set up it asks whether to start as-is or reconfigure. To skip the question, give it a word:
+
+| Situation | Command |
+|---|---|
+| Start now, no prompt | `./start.sh up` |
+| Re-print the setup token | `./start.sh token` |
+| Change settings or swap the example | `./start.sh reconfigure` |
+| Your LAN IP changed (DHCP, moved boxes) | `./start.sh refresh-certs` *(Linux/macOS)* |
+| Stop everything | `./start.sh down` |
+| Tail live logs | `./start.sh logs` |
+| Check container status | `./start.sh status` |
+| Pick up new images after an upgrade | `docker compose pull && ./start.sh up` |
+
+**Unattended or scripted installs** — skip the wizard entirely:
+
+```bash
+cp .env.example .env
+./scripts/generate-secrets.sh --write    # or write your own values
+./start.sh up
+```
+
+Bare `docker compose up -d` works too, but you lose the NIC topology auto-detect, the security posture banner, and the setup token being surfaced — you'd be grepping logs for it.
+
+Retention, production hardening, and a reference for every compose file: [`DOCKER_QUICKSTART.md`](DOCKER_QUICKSTART.md).
+</details>
+
+## Add capabilities in one click
+
+Once it's up, **App Catalog** in the sidebar lists thirteen installable applications — plate recognition, a face-recognising doorbell, intrusion zones, loitering, occupancy counting, line crossing, abandoned objects, package delivery, gate control, guard-scan compliance, natural-language footage search, alert routing, and a Home Assistant bridge. Search it, pick one, click **Install**, then choose which cameras it watches. No compose files, no YAML.
+
+Each app declares what it needs before you install it — which cameras, which network hosts it may reach, whether it wants a licence key — and an administrator approves that, so an app cannot quietly acquire access it never asked for. Apps in the catalog are open source under the `open-nvr` organisation and built from source by CI.
+
+Cameras get **jobs**, too. Assign camera 1 to plate recognition and cameras 2–3 to people counting on each camera's settings page; the capabilities point themselves at the right cameras while recording and streaming continue on all of them ([how assignments work](docs/CAMERA_ASSIGNMENTS.md)).
+
+## Talk to your cameras
+
+The camera-agent lets you *ask* your cameras questions — all on your hardware. **One command, from the repo root:**
+
+```bash
+examples/camera-agent/quickstart.sh          # voice: click Start and speak
+examples/camera-agent/quickstart.sh --chat   # chat: type and read (lighter — no mic/speaker)
+examples/camera-agent/quickstart.sh --down   # stop
+```
+
+Then open <http://localhost:9100/demo>. **No camera?** Click **"Use this machine's camera"** to run against your laptop webcam (or any USB/Pi/onboard device) with zero provisioning.
+
+First boot pulls the small LLM (default `qwen2.5:1.5b`) and warms the adapters — give it a minute. A few knobs:
+
+- **Low-RAM box** — `OLLAMA_MODEL=qwen2.5:0.5b examples/camera-agent/quickstart.sh`
+- **Mac / Windows: run the LLM on the host** — Docker's VM has no GPU access on
+  these platforms, so the bundled LLM container answers on plain CPU (minutes
+  per turn on an M1). Set `OLLAMA_EXTERNAL_URL=http://host.docker.internal:11434`
+  in `.env` (the installer offers this — and can install Ollama and pull the
+  model for you): the agent uses host Ollama on the real GPU (Metal on Apple
+  Silicon, seconds per turn) and the 3.2 GB ollama image is skipped entirely.
+  Pair with `CAPTION_ADAPTER=ollamavlm` to run scene descriptions on the same
+  host runtime.
+- **Cloud / bring-your-own brain** — point it at any OpenAI-compatible endpoint; see [`config.cloud.yml`](examples/camera-agent/config.cloud.yml)
+- **Drive Compose yourself** — `docker compose -f docker-compose.yml -f docker-compose.camera-agent.yml --profile camera-agent up -d` (or `--profile camera-agent-chat`)
+
+Full details — model picks, hardware notes, how it works — in [`examples/camera-agent/README.md`](examples/camera-agent/README.md).
+
+**What you can ask:**
+
+| You say | What happens |
+|---|---|
+| *"What's at the back gate?"* | LLM calls BLIP for a scene caption of the live frame |
+| *"Is anyone in the kitchen?"* | LLM calls YOLOv8 on the current frame |
+| *"Did anyone walk past in the last ten minutes?"* | LLM queries the inference event ring on NATS |
+| *"Who was at the door this morning?"* | LLM calls InsightFace against your enrolled face DB |
+| *"Did a red truck come by the dock earlier?"* | LLM searches the remembered visits in the event store |
+
+Under the hood: a local LLM (Ollama) doing OpenAI-style tool-calling over your live frames — or a cloud brain you bring. The LLM runtime is a dial, not a dependency: the bundled Ollama container (Linux default), an Ollama on the machine hosting Docker (`OLLAMA_EXTERNAL_URL` — the macOS/Windows default, where the host's GPU does the work), or any OpenAI-compatible endpoint. The default is the full hands-free voice loop (Pipecat · Silero VAD · Whisper STT · Piper TTS); `--chat` is the same agent, lighter, typed instead of spoken. No cloud and no API keys unless *you* choose a cloud model.
+
+This is the first OpenNVR example where the cameras have agency, not just data.
 
 ## Why this exists
 
@@ -69,177 +165,49 @@ Frigate is the right call for a lot of homelabbers, and we say so — [the full,
 
 <sub>¹ Frigate ships strong AI (face, LPR, CLIP search, GenAI descriptions) — the architectural difference is *how it's added*: Frigate's capabilities land in-tree under one license; OpenNVR ships a published wire contract + Apache-2.0 SDK so third parties publish adapters out-of-tree under **any** license, including proprietary or classified. Full nuance, and who should pick which: [`docs/COMPARISONS.md`](docs/COMPARISONS.md).</sub>
 
-## Quickstart
+## How it actually works
 
-**Clone it, run one command, answer a few on-screen prompts.** That's the whole install — no editing files, no copying `.env`, no separate secret step. Pre-built images on GHCR, no source build.
+Five moving parts, and the separation between them is the design.
 
-### 1. Clone
-
-```bash
-git clone https://github.com/open-nvr/open-nvr.git
-cd open-nvr
+```mermaid
+flowchart TD
+    Cam[Camera] --> MTX[MediaMTX<br/>ingest + record]
+    MTX -.->|always kept| Rec[(Recordings<br/>1-min chunks)]
+    MTX --> T0[Tier-0 detector<br/>cheap, always-on]
+    T0 -->|compute-gate| ADP[Purpose adapters<br/>face / LPR / VLM · /infer]
+    ADP -->|perception: what is it| BUS[[NATS bus<br/>opennvr.inference.*]]
+    BUS --> APP[Apps<br/>zone / line / dwell rules]
+    APP -->|policy: does it matter| IE{{interest event}}
+    IE -->|live| SUBS[[Subscribers<br/>UI · agent · Home Assistant]]
+    IE -->|memory| STORE[(Event store<br/>evidence + queryable history)]
 ```
 
-### 2. Run the launcher
+**Recording never depends on AI.** MediaMTX ingests and writes one-minute chunks regardless of what any model is doing. If every adapter on the box crashes, you still have your footage. This is the part that has to be boring.
 
-**Windows (PowerShell):**
-```powershell
-.\start.ps1
-```
+**Tier-0 is a cheap always-on detector that decides when anything expensive runs.** A 4K stream is decoded and scanned by a small model at a low frame rate; only when it sees something worth a closer look does it wake a purpose adapter. That gate is why the whole stack fits on a mini-PC — the expensive models run on seconds of footage per hour, not on all of it.
 
-**Linux / macOS:**
-```bash
-./start.sh
-```
+**Adapters answer "what is it", apps decide "does it matter".** An adapter is any model behind a REST or WebSocket endpoint that speaks the [AI Adapter Contract](docs/AI_ADAPTER_CONTRACT.md) — it recognises a face, reads a plate, describes a scene, and says nothing about whether you should care. Apps subscribe to that stream and hold the policy: this zone, these hours, that dwell time, this plate watchlist. Keeping them apart is what lets you swap a detector without rewriting your rules, and write a rule without knowing which model is behind it.
 
-That's the only command you run. It requires just [Docker](https://docs.docker.com/get-docker/) (Desktop on Windows/macOS, Engine + Compose v2 on Linux) to be installed and running.
+**Everything worth remembering lands in one event store.** One row per *visit* — one object's stay on one camera — carrying its best frame, its time span, and whatever the skills claimed about it. Apps do not keep private databases; they query this. That is why "was a red van here on Tuesday?" gives the same answer whether the operator's search page, the camera agent, or an installed app asks it, and why an app you install tomorrow can answer questions about footage from last month.
 
-### 3. Answer the on-screen prompts
+Claims carry their provenance — which task and which model made them, how confident it was, and whether the subject was *known* or *matched by timestamp*. A guessed identity and a measured one stay distinguishable after the fact, which matters when the claim is somebody's name.
 
-On a fresh checkout the launcher opens an interactive installer. Every question shows a sensible default in `[brackets]` — **press Enter to accept it**, or type a value to change it. Nothing needs an account, an API key, or anything cloud; it all runs locally.
+Full three-tier model, the wire contracts, and the offline-first design in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and the [paper](https://doi.org/10.5281/zenodo.22804254).
 
-```
-   ___                   _   ___     ______
-  / _ \ _ __   ___ _ __ | \ | \ \   / /  _ \
- | | | | '_ \ / _ \ '_ \|  \| |\ \ / /| |_) |
- | |_| | |_) |  __/ | | | |\  | \ V / |  _ <
-  \___/| .__/ \___|_| |_|_| \_|  \_/  |_| \_\
+## What runs where
 
-  OpenNVR interactive installer
-  ✓ Detected Windows (Docker bridge mode)
+OpenNVR adapts to the box it finds rather than demanding one. Nothing in the table below is a hard requirement — a smaller machine runs the same software with the heavier capabilities switched off, and turning one on is a decision, never a surprise.
 
-  -- Basic settings -------------------------------------
-  Administrator username [admin]:
-  Administrator email [admin@opennvr.local]:
-  Recordings folder on this machine [C:/opennvr/recordings]:
+| Your hardware | What's comfortable | Notes |
+|---|---|---|
+| **Raspberry Pi 4/5, 4 GB** | Recording, streaming, Tier-0 detection, zone/line/dwell apps | Use the camera's substream. Skip the VLM-based capabilities. |
+| **Mini-PC / NUC, 8–16 GB** | All of the above, plus plate recognition, face recognition, the text-mode camera agent | The mainstream target. A hardware decoder (`DETECT_HWACCEL`) buys the most of any single change. |
+| **Desktop / server + NVIDIA GPU** | Everything, plus scene captioning, VQA, and the hands-free voice agent | Vision-language models are where a GPU stops being optional and starts being pleasant. |
+| **Apple Silicon (macOS)** | As above, with the LLM on the host | Docker's VM has no GPU access on macOS — point `OLLAMA_EXTERNAL_URL` at host Ollama and Metal does the work. |
 
-  -- Example app ----------------------------------------
-  Set up an example app now? [y/N]: y
-   3. camera-agent   [installable: docker-compose.camera-agent.yml]
-   0. Core stack only
-  Select an example [0]: 3
-  Camera Agent mode: 1=voice, 2=chat [1]:
-  Local LLM model (Ollama) [qwen2.5:1.5b]:
-```
+**Detection using too much CPU?** It is almost always video *decode*, not the model. In order: store the camera's **substream URL** on its settings page (roughly 60× fewer pixels to decode, and detection accuracy is unchanged because the model's input is 640×640 either way); check `DETECT_FPS` (the default `2` suits small boxes); attach a hardware decoder via `DETECT_HWACCEL` (`vaapi`, `nvidia`, `qsv`, `rpi`, `rkmpp`, `jetson`). Full strategy in [`docs/DETECT_CPU.md`](docs/DETECT_CPU.md), per-dial reference in [`detect-pipeline/README.md`](detect-pipeline/README.md).
 
-Prefer to just accept everything? Press Enter through every prompt and you get a working local stack. The installer then generates all secrets, downloads the images (and, if you picked the Camera Agent, a ~1 GB local model), builds, and starts everything.
-
-> ⏳ **First run takes 8–15 minutes** depending on your network — it's downloading container images and the AI model. Later starts are much faster because everything is cached.
-
-### 4. Open the URL and paste the token
-
-When it finishes, the launcher prints the access URLs and a one-time setup token **as the very last thing** — copy the token into the browser:
-
-```
-  ✓ OpenNVR is running!
-  Web UI (local) → http://localhost:8000  (login: admin)
-  Web UI (HTTPS) → https://localhost/
-  Web UI (LAN)   → https://<this-host-ip>/
-  Camera Agent   → http://localhost:9100/demo   (only if you chose it)
-
-  🔑 First-time setup token (one-time use — copy into the UI):
-  ================================================================
-   OpenNVR first-time setup token (one-time use)
-  ----------------------------------------------------------------
-    aXyZ_pasteThisIntoTheBrowser_4cFiRsT-tImE-sEtUp
-  ----------------------------------------------------------------
-  ================================================================
-```
-
-Then:
-
-1. **Open the printed URL** on any device on your LAN.
-2. **Accept the self-signed cert warning once** — *Advanced → Accept the risk and continue*. The cert lives in `./nginx-certs/` on the host and never leaves the machine.
-3. **Paste the token, set an admin password, add a camera.** Detection overlays appear within ~30 seconds.
-
-Live streams (WebRTC, HLS) and recording playback work from any LAN device.
-
-### Running it again
-
-Run `.\start.ps1` (or `./start.sh`) any time. If it's already set up, it asks whether to **start with your current config** or **reconfigure** (change settings / swap the example), then starts. To skip the question: `up` starts now, `reconfigure` re-runs the wizard, `token` re-prints the setup token.
-
-> **Just want to try the AI?** Pick **camera-agent** in step 3, or see [Talk to your cameras](#talk-to-your-cameras).
-
-> **Don't need object detection?** Set `DETECT_PIPELINE_ENABLED=false` in `.env` and restart — the always-on detection loop (and its CPU) switches off entirely, while recording, playback, the camera-agent, and any adapters you bring keep working. Made for setups running other kinds of AI (captioning/VQA, LPR, faces, your own [Adapter Contract](docs/AI_ADAPTER_CONTRACT.md) models) that don't want a detector running underneath.
-
-> **Detection CPU high?** Tier-0's cost is video *decode*, not the model — a 4K@25fps main stream is decoded in full before a single frame is analyzed. Three fixes, in order: **(1) store the camera's substream URL** on its settings page — on CPU-only hosts the detector automatically taps the low-res substream (~60× fewer pixels to decode; detection accuracy is unaffected, since the model's input is 640×640 either way — only evidence-crop resolution changes). **(2) Check `DETECT_FPS`** (the main CPU dial; the default `2` is comfortable on small boxes — raise it only on hosts with headroom). **(3) Attach a hardware decoder** — set `DETECT_HWACCEL` to `vaapi` (Intel/AMD iGPU), `nvidia`, `qsv`, `rpi`, `rkmpp`, or `jetson` and uncomment the device mapping in compose; with an accelerator the pipeline switches to the full-res main stream automatically, so you get hardware-cheap decode *and* full-resolution evidence crops. The full strategy — what's on by default and why it's safe, the opt-in dials and what each trades — is in [`docs/DETECT_CPU.md`](docs/DETECT_CPU.md); per-dial reference and accelerated inference backends (OpenVINO, CUDA, and friends) in [`detect-pipeline/README.md`](detect-pipeline/README.md). If none of that fits your box, the off switch above always works — and a lighter CPU-first detector (not YOLOv8-based) for low-power hardware is on the [roadmap](docs/ROADMAP.md).
-
-### Common follow-ups
-
-Commands below use `./start.sh`; on Windows use `.\start.ps1` with the same word.
-
-| Situation | Command |
-|---|---|
-| Re-print the setup token | `./start.sh token` |
-| Change settings or swap the example | `./start.sh reconfigure` |
-| Start without the reconfigure prompt | `./start.sh up` |
-| Your LAN IP changed (DHCP, moved boxes) | `./start.sh refresh-certs` *(Linux/macOS)* |
-| Stop everything | `./start.sh down` |
-| Tail live logs | `./start.sh logs` |
-| Check container status | `./start.sh status` |
-| Pick up new GHCR images after an upgrade | `docker compose pull && ./start.sh up` |
-
-### Advanced setup
-
-Want to skip the interactive wizard — pin specific secret values, run unattended on a CI box, deploy from configuration management?
-
-```bash
-git clone https://github.com/open-nvr/open-nvr.git
-cd open-nvr
-cp .env.example .env
-./scripts/generate-secrets.sh --write    # or write your own values
-./start.sh up                            # still gets pre-flight + posture + token
-```
-
-Skipping `./start.sh up` and using bare `docker compose up -d` works too, but you'll lose: NIC topology auto-detect, the security posture banner, the one-time setup token surfacing. Grep the logs manually if you go that route.
-
-**Need more detail?** [`DOCKER_QUICKSTART.md`](DOCKER_QUICKSTART.md) covers retention, production hardening, profile options, and a [compose-file reference](DOCKER_QUICKSTART.md#compose-file-reference) explaining every compose file and when each applies.
-
-## OpenNVR Cam — your phone as a test camera
-
-**[OpenNVR Cam](https://play.google.com/store/apps/details?id=org.opennvr.cam)** (Android, on Google Play) turns your mobile into an IP camera with **ONVIF support** — the quickest way to test OpenNVR without any camera hardware: install the app, and OpenNVR discovers and streams it like any real ONVIF camera.
-
-## Talk to your cameras
-
-The camera-agent lets you *ask* your cameras questions — all on your hardware. **One command, from the repo root:**
-
-```bash
-examples/camera-agent/quickstart.sh          # voice: click Start and speak
-examples/camera-agent/quickstart.sh --chat   # chat: type and read (lighter — no mic/speaker)
-examples/camera-agent/quickstart.sh --down   # stop
-```
-
-Then open <http://localhost:9100/demo>. **No camera?** Click **"Use this machine's camera"** to run against your laptop webcam (or any USB/Pi/onboard device) with zero provisioning.
-
-First boot pulls the small LLM (default `qwen2.5:1.5b`) and warms the adapters — give it a minute. A few knobs:
-
-- **Low-RAM box** — `OLLAMA_MODEL=qwen2.5:0.5b examples/camera-agent/quickstart.sh`
-- **Mac / Windows: run the LLM on the host** — Docker's VM has no GPU access on
-  these platforms, so the bundled LLM container answers on plain CPU (minutes
-  per turn on an M1). Set `OLLAMA_EXTERNAL_URL=http://host.docker.internal:11434`
-  in `.env` (the installer offers this — and can install Ollama and pull the
-  model for you): the agent uses host Ollama on the real GPU (Metal on Apple
-  Silicon, seconds per turn) and the 3.2 GB ollama image is skipped entirely.
-  Pair with `CAPTION_ADAPTER=ollamavlm` to run scene descriptions on the same
-  host runtime.
-- **Cloud / bring-your-own brain** — point it at any OpenAI-compatible endpoint; see [`config.cloud.yml`](examples/camera-agent/config.cloud.yml)
-- **Drive Compose yourself** — `docker compose -f docker-compose.yml -f docker-compose.camera-agent.yml --profile camera-agent up -d` (or `--profile camera-agent-chat`)
-
-Full details — model picks, hardware notes, how it works — in [`examples/camera-agent/README.md`](examples/camera-agent/README.md).
-
-**What you can ask:**
-
-| You say | What happens |
-|---|---|
-| *"What's at the back gate?"* | LLM calls BLIP for a scene caption of the live frame |
-| *"Is anyone in the kitchen?"* | LLM calls YOLOv8 on the current frame |
-| *"Did anyone walk past in the last ten minutes?"* | LLM queries the inference event ring on NATS |
-| *"Who was at the door this morning?"* | LLM calls InsightFace against your enrolled face DB |
-| *"Did a red truck come by the dock earlier?"* | LLM searches the remembered visits in the event store |
-
-Under the hood: a local LLM (Ollama) doing OpenAI-style tool-calling over your live frames — or a cloud brain you bring. The LLM runtime is a dial, not a dependency: the bundled Ollama container (Linux default), an Ollama on the machine hosting Docker (`OLLAMA_EXTERNAL_URL` — the macOS/Windows default, where the host's GPU does the work), or any OpenAI-compatible endpoint. The default is the full hands-free voice loop (Pipecat · Silero VAD · Whisper STT · Piper TTS); `--chat` is the same agent, lighter, typed instead of spoken. No cloud and no API keys unless *you* choose a cloud model.
-
-This is the first OpenNVR example where the cameras have agency, not just data.
+**Don't want a detector at all?** `DETECT_PIPELINE_ENABLED=false` switches the always-on loop off entirely while recording, playback, the agent, and any adapters you bring keep working.
 
 ## Build on it
 
@@ -312,10 +280,13 @@ Adapters are *capabilities*; applications are *solutions*. And every camera can 
 | [`license-plate-recognition`](examples/license-plate-recognition) | YOLOv8 + fast-plate-ocr chain with allowlists | intermediate |
 | [`smart-doorbell`](examples/smart-doorbell) | InsightFace recognition with REST enrollment | intermediate |
 | [`package-delivery`](examples/package-delivery) | Per-track state machine for arrival, linger, pickup | intermediate |
+| [`gate-controller`](examples/gate-controller) | Open the barrier for allowed vehicles, and only for allowed vehicles | advanced |
+| [`guard-scan-compliance`](examples/guard-scan-compliance) | Check a guard wands every person entering — and flag what the scanner finds | advanced |
+| [`alert-notifier`](examples/alert-notifier) | Routing and judgement: what actually deserves to reach the guard's phone | intermediate |
 | [`camera-agent`](examples/camera-agent) | Ask your cameras questions — ~1–2 GB text mode on a laptop, up to full hands-free voice | beginner→advanced |
 | [`home-assistant-relay`](examples/home-assistant-relay) | Bridge alerts into Home Assistant via MQTT discovery | intermediate |
 
-Eleven of the thirteen shipped examples are listed above; [`inference-listener`](examples/inference-listener) and [`alerts-subscriber`](examples/alerts-subscriber) round out the set as minimal subscriber templates. Each application is a copy-as-template starting point. Gallery walkthrough and the "drives inference vs subscribes to events" axis-grid in [`examples/README.md`](examples/README.md). The roadmap for the application catalog — audio-event detection, tamper-evident incident export, and the vertical safety/security packs — is in [`docs/ROADMAP.md`](docs/ROADMAP.md).
+Fourteen of the sixteen shipped examples are listed above; [`inference-listener`](examples/inference-listener) and [`alerts-subscriber`](examples/alerts-subscriber) round out the set as minimal subscriber templates. Thirteen of them are installable straight from the App Catalog. Each application is a copy-as-template starting point. Gallery walkthrough and the "drives inference vs subscribes to events" axis-grid in [`examples/README.md`](examples/README.md). The roadmap for the application catalog — audio-event detection, tamper-evident incident export, and the vertical safety/security packs — is in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 **Build an app.** Don't want to fork an example? A generator scaffolds a minimal, runnable app and you fill in **one method** — the rule. Start with **[Your first OpenNVR detector in 15 minutes](docs/FIRST_DETECTOR.md)**: `pip install opennvr-app-sdk && opennvr-app new my-app` (or `python3 scripts/create_opennvr_app.py my-app` in this checkout) → edit `on_detections` → `uv run pytest` green → run it against the stack → list it in the App Catalog. Catalog apps are open source under the `open-nvr` organisation, built from source by CI and reviewed; you keep the copyright and your name is on the card, OpenNVR takes no fee, and you can sell what the code needs (a model, a service) through the built-in licence hook — **[the deal for developers](docs/DEVELOPER_PROGRAM.md)**.
 
@@ -364,6 +335,6 @@ contributions need only a DCO sign-off.
 
 **OpenNVR — cameras you connect, hardware you own, AI you choose and author, audit you can show.**
 
-[⭐ Star on GitHub](https://github.com/open-nvr/open-nvr) · [📄 Read the paper](https://doi.org/10.5281/zenodo.22804254) · [⚡ Quickstart](#quickstart)
+[⭐ Star on GitHub](https://github.com/open-nvr/open-nvr) · [📄 Read the paper](https://doi.org/10.5281/zenodo.22804254) · [⚡ Get it running](#get-it-running)
 
 </div>
