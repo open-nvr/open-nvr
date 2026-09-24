@@ -77,6 +77,46 @@ fi
       | grep --line-buffered -A 6 "first-time setup token"
 ) &
 
+# ──────────────────────────────────────────────────────────────────────
+# #547: Surface startup failures to docker logs.
+# ──────────────────────────────────────────────────────────────────────
+# The forwarder above solves ONE line of output. Everything else a
+# process writes to stderr — including the traceback that kills it —
+# lands in a file inside the container and reaches nobody.
+#
+# That is not hypothetical. In #547 the backend died at import on every
+# install: `docker logs opennvr_core` showed only supervisord restarting
+# it in a loop, the container reported "Started", and the published port
+# still accepted TCP because Docker binds it whether or not anything is
+# listening. The actual ValidationError sat in
+# /app/logs/opennvr-backend-error.log, which an operator has to already
+# know about to look in. The reporter found it; most would have filed
+# "doesn't work" or walked away.
+#
+# The project had noticed twice and worked around it twice rather than
+# fixing it — tests/e2e/harness/evidence.py collects these files
+# specially because "grepping core's Docker output returns nothing,
+# every time", and tests/host-hardening/ carries the banner forwarder
+# above. Two workarounds for one missing pipe.
+#
+# Volume is not a concern, which is worth stating because it is the
+# obvious objection. uvicorn's LOGGING_CONFIG sends the ACCESS logger to
+# stdout and only the default logger — startup, warnings, tracebacks —
+# to stderr. So this carries the lines an operator needs and not one
+# line per HTTP request.
+#
+# The files stay exactly as they were: this tees, it does not move.
+# evidence.py still collects them, supervisord still rotates them.
+for _log in /app/logs/opennvr-backend-error.log /app/logs/kai-c-error.log; do
+    _tag="$(basename "$_log" -error.log)"
+    (
+        mkdir -p /app/logs
+        touch "$_log"
+        chown opennvr:opennvr "$_log"
+        tail -n 0 -F "$_log" | sed -u "s|^|[$_tag] |"
+    ) &
+done
+
 # Switch to opennvr user and run supervisord
 exec gosu opennvr /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf
 
