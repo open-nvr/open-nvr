@@ -135,6 +135,16 @@ _WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday",
 #: Words that say the next token IS a registration, so it is taken as one
 #: whatever it looks like.
 _PLATE_CUES = {"plate", "plates", "reg", "registration", "numberplate", "licence", "license"}
+#: The rest of the phrase, once a cue above has been consumed: "plate
+#: NUMBER", "registration NUMBER". _PLATE_CUES already carries the
+#: one-word spelling `numberplate`; these are the two-word ones, and
+#: leaving the tail behind is how "what is the plate number" ends up
+#: demanding a caption that contains the word "number".
+#:
+#: Only applied when a cue is actually present. "number" on its own is
+#: not plate-speak, and a word that means one thing beside "plate" and
+#: another thing alone does not belong in _STOP.
+_PLATE_PHRASE_TAIL = {"number", "numbers", "no"}
 #: Shape of a plate when nobody said the word: long enough, and mostly
 #: digits. Without the density rule "gate14" and "bay3" become plate
 #: searches that return nothing — the confident-wrong-parse failure this
@@ -340,6 +350,8 @@ def parse_query(
     cued = any(w in _PLATE_CUES for w in rest)
     for w in rest:
         if w in _STOP or w in _PLATE_CUES:
+            continue
+        if cued and w in _PLATE_PHRASE_TAIL:
             continue
         if not out.plate and not w.isdigit() and _looks_like_plate(w, cued=cued):
             out.plate = w.upper()

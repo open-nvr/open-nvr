@@ -358,6 +358,68 @@ async def search(
     # embeddings on, and `semantic.text_total` carries the other one.
     text_total = total
     total = page.total
+
+    # ── A LEFTOVER WORD MUST NOT EMPTY THE PAGE ────────────────────
+    #
+    # The parser hands whatever it could not interpret to the text
+    # filter, and the text filter is an AND: every word has to appear in
+    # a caption. That is right for a word the operator meant and wrong
+    # for the sentence they actually type. "can you tell me if you seen
+    # any car in last 15 mins what is number of it" parses `car` and the
+    # window correctly and leaves `number` — a question word no caption
+    # will ever contain — which turned 421 matching cars into nothing.
+    # `did a red truck come by earlier today`, the example question this
+    # project ships, leaves `red come earlier` and fails the same way.
+    #
+    # The answer is not a longer stopword list. That list is already
+    # long and careful and was one word short, and the next sentence
+    # brings a word it has not met either.
+    #
+    # So when the words empty the page, drop them, return what the rest
+    # of the parse found, and SAY SO. The count is the one _why_empty
+    # was already computing to offer "Without the words (number): 421
+    # results" one click away — the system knew the answer and showed a
+    # blank page next to it.
+    #
+    # Three conditions, each load-bearing:
+    #   * `not hits` — never changes a search that found anything.
+    #   * `parse` and not an explicit `text=` — a caller who PASSED words
+    #     meant them, and gets the empty result they asked for. Only the
+    #     parser's own residue is droppable.
+    #   * a non-zero count without them — relaxing into another empty
+    #     page would be noise, and the structural chips stay untouched
+    #     either way: dropping a label or a time window would answer a
+    #     different question, which is the failure this is fixing.
+    #   * something else to stand on. "zebra 42" parses to no label, no
+    #     window and no camera, so dropping `zebra` does not relax the
+    #     search — it removes it, and answers "did you see a zebra" with
+    #     the entire database. An existing test caught this; the empty
+    #     result is the honest one when the words were the whole query.
+    relaxed: dict | None = None
+    _structural = any((labels, cams, attrs, filters.get("from_"),
+                       filters.get("to"), filters.get("plate")))
+    if not hits and words and parse and not text and _structural:
+        try:
+            without = count_search_events(
+                db, labels=labels, camera_ids=cams, text="", attrs=attrs,
+                **filters)
+        except Exception:  # noqa: BLE001 — a fallback must never 500 a search
+            logger.debug("relax-on-empty count failed", exc_info=True)
+            without = 0
+        if without > 0:
+            relaxed = {"dropped": words, "matched": 0, "without": without}
+            page = search_page(
+                db, labels=labels, camera_ids=cams, text="", attrs=attrs,
+                query_vector=query_vector, total=without, limit=limit,
+                skip=skip, **filters)
+            hits = page.hits
+            total = page.total
+            # The interpretation reports what was APPLIED, so the words
+            # move to `ignored` — the field whose whole purpose is
+            # saying what the parser set aside "instead of pretending".
+            parsed.ignored = list(parsed.ignored) + words.split()
+            words = ""
+
     _record_search(shape, parsed, page_timer, count_timer, text_total, parse=parse,
                    overridden=bool(label or camera_id or text or plate or from_
                                    or to or source or attr))
@@ -433,6 +495,11 @@ async def search(
         # "why did nothing match" queries on a search that had just
         # returned results, then tell the operator nothing matched while
         # showing them a row.
+        # Present only when a leftover word was dropped to avoid an
+        # empty page: what was dropped, and how many the rest matched.
+        # The UI owes the operator a visible undo — these results are
+        # NOT the search they typed.
+        **({"relaxed": relaxed} if relaxed else {}),
         "relax": (
             _why_empty(db, labels=labels, cams=cams, words=words,
                        attrs=attrs, filters=filters)
