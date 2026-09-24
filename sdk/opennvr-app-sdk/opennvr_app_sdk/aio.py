@@ -173,11 +173,18 @@ class AsyncTimelineAPI:
 
     async def search(self, *, camera=None, label: str | None = None,
                      plate: str | None = None, start=None, end=None,
-                     limit: int = 50) -> list[dict] | None:
+                     limit: int = 50,
+                     attrs: list[str] | None = None) -> list[dict] | None:
+        # Kept in step with the sync EventsClient.search on purpose — an
+        # app that switches clients must not silently lose a filter.
+        # Bare values ("blue"), not "kind:value": the colour kind is
+        # spelled `colour`, and an exact `color:blue` finds nothing while
+        # looking exactly like "there were no blue cars".
         body = await self._http.get_json(
             "/api/v1/internal/camera-agent/events",
             camera_id=None if camera is None else _camera_id(camera),
             label=label, plate=plate, limit=limit,
+            attr=[a.strip() for a in (attrs or []) if str(a).strip()],
             **{"from": _iso(start), "to": _iso(end)})
         return None if body is None else list(body.get("events") or [])
 

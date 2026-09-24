@@ -154,17 +154,27 @@ def _is_postgres(db) -> bool:
     return db.bind.dialect.name == "postgresql" if db.bind is not None else False
 
 
-def db_exists_claim(kind: str, value: str):
-    """A correlated EXISTS over one descriptor claim."""
-    return (
-        select(VisitDescriptor.id)
-        .where(
-            VisitDescriptor.event_id == TimelineEvent.id,
-            VisitDescriptor.kind == kind.strip().lower(),
-            VisitDescriptor.value == value.strip().lower(),
-        )
-        .exists()
-    )
+def db_exists_claim(kind: str | None, value: str):
+    """A correlated EXISTS over one descriptor claim.
+
+    ``kind`` may be None or empty, which matches the value under ANY
+    kind. That is not laziness, it is the only spelling-proof option for
+    a caller that did not choose the vocabulary: the colour kind is
+    ``colour`` and every caller who has not read
+    ``descriptor_enrichment.LABEL_KINDS`` will send ``color``. A
+    kind-scoped query with the wrong spelling returns nothing and looks
+    exactly like "no blue cars", which is the failure this whole area
+    keeps producing. Values are distinctive enough that an unscoped
+    match is right nearly always, and a caller who knows the kind can
+    still say so.
+    """
+    where = [
+        VisitDescriptor.event_id == TimelineEvent.id,
+        VisitDescriptor.value == value.strip().lower(),
+    ]
+    if kind and kind.strip():
+        where.append(VisitDescriptor.kind == kind.strip().lower())
+    return select(VisitDescriptor.id).where(*where).exists()
 
 
 def _apply_search_filters(

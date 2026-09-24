@@ -253,6 +253,17 @@ def build_tool_definitions(
                             "type": "string",
                             "description": "Vehicle searches: find visits whose read plate contains this text, e.g. 'KA01' or '1234'.",
                         },
+                        "attr": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "What a skill SAID about the visit, as bare "
+                                "words: ['blue'], ['blue','van'], ['hi-vis']. "
+                                "Repeatable and ANDed. Use this for colour and "
+                                "vehicle type — 'did you see a BLUE car' is "
+                                "label=car with attr=['blue'], not label=car "
+                                "alone."),
+                        },
                     },
                     "required": [],
                 },
@@ -1232,10 +1243,28 @@ class CameraTools:
                 camera_id = int(resolved)
             except (TypeError, ValueError):
                 return f"ERROR: camera '{cam}' has no server-side id."
+        attrs = [str(a).strip().lower()
+                 for a in (args.get("attr") or []) if str(a).strip()]
+        # AN ATTRIBUTE THIS TRANSPORT CANNOT CARRY IS NOT AN ATTRIBUTE
+        # OF ZERO VISITS.
+        #
+        # `attr` reaches the events endpoint only through an app-SDK that
+        # accepts it. On an older SDK the filter would be dropped
+        # silently and this tool would answer "did you see a BLUE car"
+        # with every car it found — which is exactly the bug being
+        # fixed, moved one layer down. Refuse instead, and name the
+        # reason: a limitation an operator can read is worth more than a
+        # confident answer to a question nobody asked.
+        if attrs and not self._events_supports("attrs"):
+            return ("I can't filter by what something looked like on this "
+                    "deployment — the app SDK here is older than the "
+                    f"attribute filter ({', '.join(attrs)}). I can still "
+                    "search by object, camera, time and plate.")
         try:
             events = await self._events.search(
                 label=label, camera_id=camera_id, plate=plate,
                 start=start, end=end, limit=25,
+                **({"attrs": attrs} if attrs else {}),
             )
         except Exception:
             events = None
@@ -1247,6 +1276,16 @@ class CameraTools:
                     "or the time range wasn't understood) — please try again.")
         if not events:
             window = self._window_phrase(start, end)
+            if attrs:
+                # "No blue cars" and "nobody ever looked at what colour
+                # they were" are opposite answers behind an identical
+                # empty list, and only one of them is an answer.
+                return (f"No {label} visits described as "
+                        f"{' and '.join(attrs)}{window}. Note that only "
+                        "visits a skill has described can match that — if "
+                        "nothing here runs colour or type descriptions, "
+                        "this is not the same as there having been none."
+                        + self._in_progress_note(label, camera_arg))
             return (f"No {label} visits remembered{window}."
                     + self._in_progress_note(label, camera_arg))
 
@@ -1261,8 +1300,10 @@ class CameraTools:
                 + (" (photo kept)" if e.has_evidence else "")
             )
         live_note = self._in_progress_note(label, camera_arg)
-        summary = (f"I remember {len(events)} {label} visit(s)"
-                   f"{self._window_phrase(start, end)}: " + "; ".join(clauses) + ".")
+        described = f" described as {' and '.join(attrs)}" if attrs else ""
+        summary = (f"I remember {len(events)} {label} visit(s){described}"
+                   f"{self._window_phrase(start, end)}: "
+                   + "; ".join(clauses) + ".")
 
         # Hand the remembered photos to the UI. The answer names times and
         # says "(photo kept)" — the photo is right there in the store and was
@@ -1278,6 +1319,25 @@ class CameraTools:
             if names:
                 summary += " Recognised: " + ", ".join(sorted(names)) + "."
         return summary
+
+    def _events_supports(self, param: str) -> bool:
+        """Does the installed app SDK's events client accept ``param``?
+
+        Asked of the object rather than pinned to a version, because the
+        agent runs against whatever SDK the deployment installed and a
+        version pin would turn "your SDK is older" into an install
+        failure. A client that takes **kwargs is taken at its word.
+        """
+        try:
+            import inspect
+
+            sig = inspect.signature(self._events.search)
+        except (TypeError, ValueError):  # builtins, C, or a mock
+            return True
+        if param in sig.parameters:
+            return True
+        return any(p.kind is inspect.Parameter.VAR_KEYWORD
+                   for p in sig.parameters.values())
 
     def _in_progress_note(self, label: str, camera_arg) -> str:
         """A visit enters the store only when it ENDS, so history alone answers

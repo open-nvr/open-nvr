@@ -271,13 +271,25 @@ class TimelineAPI:
 
     def search(self, *, camera=None, label: str | None = None,
                plate: str | None = None, start=None, end=None,
-               limit: int = 50) -> list[dict] | None:
+               limit: int = 50,
+               attrs: list[str] | None = None) -> list[dict] | None:
         """Visits overlapping [start, end), newest first. ``None`` when the
-        store could not be reached (distinct from an empty window)."""
+        store could not be reached (distinct from an empty window).
+
+        ``attrs`` filters on what a skill SAID about the visit — "blue",
+        "van", "hi-vis" — as opposed to what the detector classified it
+        as. Repeatable and ANDed server-side.
+
+        Bare values, not "kind:value". The colour kind is spelled
+        ``colour``, so an exact ``color:blue`` matches nothing and looks
+        precisely like "there were no blue cars" — which is the answer
+        nobody wants to be wrong about.
+        """
         body = self._http.get_json(
             "/api/v1/internal/camera-agent/events",
             camera_id=None if camera is None else _camera_id(camera),
             label=label, plate=plate, limit=limit,
+            attr=[a.strip() for a in (attrs or []) if str(a).strip()],
             **{"from": _iso(start), "to": _iso(end)})
         return None if body is None else list(body.get("events") or [])
 

@@ -190,6 +190,8 @@ def _events_query(
     plate: str | None = None,
     has_plate: bool = False,
     zone_id: int | None = None,
+    attrs: list[tuple[str | None, str]] | None = None,
+    has_descriptor: bool = False,
 ):
     """Scope + filters, with NO ordering, offset or limit.
 
@@ -212,6 +214,35 @@ def _events_query(
         q = q.filter(zone_filter(zone_id))
     if label:
         q = q.filter(TimelineEvent.label == label.strip().lower())
+    # What a skill SAID about the visit — "blue", "van", "hi-vis" — as
+    # opposed to what the detector classified it as. ANDed, like the
+    # search API's: two attributes narrow, they do not widen.
+    #
+    # This is what a camera agent needs to answer "did you see a blue
+    # car", and without it the word "blue" was dropped before the query
+    # was built and the answer described a different question
+    # confidently. The predicate is the search API's, imported rather
+    # than rewritten, so the two cannot drift into disagreeing about
+    # what an attribute match means.
+    for kind, value in (attrs or []):
+        if not (value or "").strip():
+            continue
+        from services.search_service import db_exists_claim
+
+        q = q.filter(db_exists_claim(kind, value))
+    # "Was anything here described AT ALL?" — the question that tells an
+    # empty attribute search which kind of empty it is. Not a filter
+    # anyone asks for directly; it is how a caller distinguishes "no
+    # blue cars" from "nothing looked at any of them".
+    if has_descriptor:
+        from models import VisitDescriptor
+        from sqlalchemy import select as _select
+
+        q = q.filter(
+            _select(VisitDescriptor.id)
+            .where(VisitDescriptor.event_id == TimelineEvent.id)
+            .exists()
+        )
     if source:
         q = q.filter(TimelineEvent.source == source)
     if plate:
