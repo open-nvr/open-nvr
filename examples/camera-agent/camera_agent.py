@@ -7359,7 +7359,45 @@ _HISTORY_LABELS: dict[str, str] = {
     "car": "car", "cars": "car", "vehicle": "car", "truck": "truck",
     "bike": "bicycle", "bicycle": "bicycle", "motorcycle": "motorcycle",
     "dog": "dog", "cat": "cat",
+    # Speech-to-text hears "car" as "card" often enough that "did you see
+    # any blue card" is a real utterance; nobody asks the history for
+    # playing cards.
+    "card": "car", "cards": "car",
 }
+
+# What a visit was DESCRIBED as — the claim vocabulary the platform's
+# descriptor enricher writes (colour, vehicle type, what someone carries;
+# server/services/descriptor_enrichment.py KIND_QUESTIONS) plus the
+# clothing colour of a person. A word here in a past-tense question is
+# passed to search_history as ``attr``, so "did you see a BLUE car" asks
+# the store for blue cars — it used to ask for every car and the answer
+# listed twenty-five of them, colour unmentioned.
+_ATTR_WORDS: frozenset[str] = frozenset({
+    # colours (vehicle colour / clothing colour — the store resolves which)
+    "white", "black", "silver", "grey", "gray", "red", "blue", "green",
+    "yellow", "orange", "brown", "beige", "gold", "maroon", "purple", "pink",
+    # vehicle types that are not Tier-0 labels
+    "van", "suv", "pickup", "taxi", "lorry", "tractor", "ambulance",
+    "hatchback", "sedan", "minivan", "scooter",
+    # what a person carries
+    "backpack", "rucksack", "bag", "handbag", "suitcase", "luggage",
+    "box", "parcel", "package", "umbrella", "trolley", "basket",
+})
+_ATTR_ALIASES: dict[str, str] = {"gray": "grey", "lorry": "truck", "rucksack": "backpack",
+                                 "handbag": "bag", "luggage": "suitcase", "package": "parcel"}
+
+
+def _attr_words(text: str) -> list[str]:
+    """The description words in an utterance, in order, canonical, unique.
+    A colour or a type is kept even when it is also the object's label
+    word ("truck" is a label; "lorry" is a claim)."""
+    out: list[str] = []
+    for w in re.findall(r"[a-z]+", (text or "").lower()):
+        if w in _ATTR_WORDS:
+            w = _ATTR_ALIASES.get(w, w)
+            if w not in out:
+                out.append(w)
+    return out
 
 
 def _is_past_question(text: str) -> bool:
@@ -7459,7 +7497,16 @@ def _pick_forced_call(
             args: dict[str, Any] = {"camera_id": cam}
             m = _DETECTION_RE.search(text or "")
             noun = (m.group(0).lower() if m else "")
+            if not noun:
+                # No detection noun — maybe a label word the detection
+                # vocabulary does not carry (a speech-to-text "card").
+                noun = next((w for w in re.findall(r"[a-z]+", (text or "").lower())
+                             if w in _HISTORY_LABELS), "")
             args["label"] = _HISTORY_LABELS.get(noun, "person")
+            # The description survives: "blue car" is not "car".
+            attrs = [a for a in _attr_words(text) if a != args["label"]]
+            if attrs:
+                args["attr"] = attrs
             if start_iso:
                 args["start_time"] = start_iso
             if end_iso:

@@ -1591,3 +1591,18 @@ def test_the_response_names_the_skill_a_question_needs(client, db):
     assert needs["clothing_top"]["word"] == "red"
     assert needs["clothing_top"]["skill"] == "vqa"
     assert needs["clothing_top"]["state"] in ("not-on-this-box", "never-produced")
+
+
+def test_a_bare_attr_word_also_matches_the_caption(db):
+    """The agent asks "described as blue" with a bare word. A caption is
+    a description: a visit the captioner called "a blue car" matches even
+    before (or without) a colour claim. A kind-scoped chip does not."""
+    _camera(db, 1, "Gate")
+    captioned = _visit(db, camera_id=1, label="car", minutes_ago=3, caption="a blue car parked")
+    _visit(db, camera_id=1, label="car", minutes_ago=4, caption="a white van")
+    claimed = _visit(db, camera_id=1, label="car", minutes_ago=5)
+    _claim(db, claimed.id, "colour", "blue")
+    bare = {h.event.id for h in search_events(db, attrs=[(None, "blue")], scope=None)}
+    assert bare == {captioned.id, claimed.id}
+    scoped = {h.event.id for h in search_events(db, attrs=[("colour", "blue")], scope=None)}
+    assert scoped == {claimed.id}

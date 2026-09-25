@@ -77,6 +77,7 @@ from datetime import datetime
 from typing import Any, Sequence
 
 from sqlalchemy import func, literal, or_, select, text as sql_text
+from sqlalchemy.orm import aliased
 
 from models import EventText, TimelineEvent, VisitDescriptor
 from services.timeline_service import _events_query
@@ -168,13 +169,32 @@ def db_exists_claim(kind: str | None, value: str):
     match is right nearly always, and a caller who knows the kind can
     still say so.
     """
+    word = value.strip().lower()
     where = [
         VisitDescriptor.event_id == TimelineEvent.id,
-        VisitDescriptor.value == value.strip().lower(),
+        VisitDescriptor.value == word,
     ]
     if kind and kind.strip():
         where.append(VisitDescriptor.kind == kind.strip().lower())
-    return select(VisitDescriptor.id).where(*where).exists()
+        return select(VisitDescriptor.id).where(*where).exists()
+    # A BARE word — the agent's "did you see a blue car" — means "described
+    # as blue", and a caption is a description too: the captioner may have
+    # written "a blue car" on a visit the VQA enricher has not reached (or
+    # never will, on a box without it). A kind-scoped chip (colour:blue)
+    # stays a claim match, which is what the search UI's chips mean.
+    # An alias: the outer query already joins event_text, and a correlated
+    # subquery on the same table would auto-correlate it away (no FROM).
+    words = aliased(EventText)
+    caption_says = (
+        select(words.event_id)
+        .where(words.event_id == TimelineEvent.id)
+        .where(or_(
+            func.lower(func.coalesce(words.caption, "")).like(f"%{word}%"),
+            func.lower(func.coalesce(words.attributes, "")).like(f"%{word}%"),
+        ))
+        .exists()
+    )
+    return or_(select(VisitDescriptor.id).where(*where).exists(), caption_says)
 
 
 def _apply_search_filters(
