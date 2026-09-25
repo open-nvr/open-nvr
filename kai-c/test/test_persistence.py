@@ -28,6 +28,8 @@ import json
 from pathlib import Path
 
 import httpx
+import logging
+
 import pytest
 
 from kai_c.audit import AuditStore
@@ -326,6 +328,37 @@ async def test_deferred_seed_retries_until_up_with_config_consent(tmp_path: Path
     assert adapter is not None
     assert adapter.approval_status == "approved"
     assert reg.pending_registrations() == []
+    await reg.aclose()
+
+
+@pytest.mark.asyncio
+async def test_pending_retry_failures_reach_the_operator_log(tmp_path: Path, audit, caplog):
+    """A persisted adapter whose registration keeps failing (401 after a
+    secret rotation, bad capabilities, ...) used to fail at DEBUG only —
+    the operator saw plates stop and nothing in the log said why. The
+    first failure and every twentieth must be a WARNING naming the
+    adapter, the URL, the attempt count and the error; the ones in
+    between stay quiet so a down adapter can't flood the log."""
+    stub = _DownThenUpStub(url="http://127.0.0.1:9100",
+                           capabilities=_base_caps(gpu=True))
+    reg = _registry_for(stub, audit, _store(tmp_path))
+    reg.defer("fast_plate_ocr", stub.url, source="runtime",
+              grant_all_on_register=False, error="boot race")
+
+    caplog.set_level(logging.DEBUG, logger="kai_c.registry")
+    for _ in range(40):
+        await reg.retry_pending()       # never comes up
+    assert reg.pending_registrations()[0]["attempts"] == 40
+
+    warnings = [r for r in caplog.records
+                if r.levelno == logging.WARNING and "fast_plate_ocr" in r.getMessage()]
+    # attempt 1, 20 and 40 — three warnings, not forty.
+    assert len(warnings) == 3, [w.getMessage() for w in warnings]
+    first = warnings[0].getMessage()
+    assert "after 1 attempt" in first
+    assert stub.url in first
+    assert "deferred" in first          # points at GET /api/v1/adapters
+    assert "after 40 attempt" in warnings[-1].getMessage()
     await reg.aclose()
 
 

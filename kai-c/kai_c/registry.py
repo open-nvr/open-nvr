@@ -922,10 +922,27 @@ class AdapterRegistry:
                     if current is not None:
                         current.attempts += 1
                         current.last_error = str(exc)
-                logger.debug(
-                    "registration retry failed for %s @ %s: %s",
-                    p.name, p.url, exc,
-                )
+                    attempts = current.attempts if current is not None else 0
+                # WARNING on the first failure and every twentieth after,
+                # not DEBUG on all of them. A persisted adapter whose
+                # registration keeps failing is the thing an operator most
+                # needs to hear about — the plate reader that answered 401
+                # for an hour after a secret changed was invisible in the
+                # logs precisely because this line was DEBUG, and it took
+                # a manual poll of KAI-C to find out why plates stopped.
+                if attempts == 1 or attempts % 20 == 0:
+                    logger.warning(
+                        "adapter %s is still not registered after %d "
+                        "attempt(s) — %s (url %s). It stays queued and is "
+                        "retried every poll; see the `deferred` list on "
+                        "GET /api/v1/adapters.",
+                        p.name, attempts, exc, p.url,
+                    )
+                else:
+                    logger.debug(
+                        "registration retry failed for %s @ %s: %s",
+                        p.name, p.url, exc,
+                    )
                 continue
             # Registered. Re-apply the recorded consent through the
             # NORMAL grant paths (audited, drift-safe): seeds get the
