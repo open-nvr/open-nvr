@@ -28,6 +28,29 @@ newly installed app starts. The app card in the catalog says *No cameras*,
 and the app's own health line says *No cameras selected*, until you select
 one.
 
+## Skills follow apps
+
+A camera carries **exactly the model skills the enabled apps using it
+bring** — nothing is assigned on the camera itself, and the camera page
+has no skills editor. Each app's manifest says what it brings:
+`requires_tasks` (what it cannot run without: the doorbell's
+`face_recognition`, ANPR's `license_plate_recognition`) and
+`enrich_tasks` (what it uses when the box has it: Footage Search's
+`image_captioning` and `embed`). Selecting a camera for the app puts
+those skills in the camera's set; several apps sharing a camera give it
+the union; disabling or uninstalling an app takes its skills out again,
+except a skill another enabled app still brings.
+
+The platform's own enrichers (captions, embeddings, colour/type
+descriptors, plate reads) read that set, so they run on a camera because
+an app that needs them was pointed at it — and for no other reason.
+
+One app runs on every camera without a selection: the **OpenNVR Agent**
+declares `all_cameras`, and the platform selects every camera for it
+(new cameras included). Its `image_captioning` and `vqa` are therefore in
+every camera's set while the agent is enabled — the cost of being able to
+ask it about any camera. Disable the agent and they leave every set.
+
 ## How to select cameras for an app
 
 App Catalog → the app → **Configure** → **Cameras** → **Select cameras**.
@@ -64,7 +87,7 @@ than reporting it as incomplete.
 * **Uninstalling an app releases its selected cameras.**
 
 Some apps have no camera selection, because they read no camera data of
-their own: **alert-notifier**, **gate-controller** and
+their own (or, for the Agent, because they run on all of them): **alert-notifier**, **gate-controller** and
 **home-assistant-relay** act on other apps' alerts (already limited to the
 cameras selected for those apps), and the **OpenNVR Agent** shows each user
 their own cameras. These have no Cameras section.

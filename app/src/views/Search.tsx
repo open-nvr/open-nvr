@@ -59,6 +59,8 @@ type Need = {
   skill: string
   state: string
   fallback: string | null
+  /** Installed apps whose manifest brings this skill — pick the camera there. */
+  apps?: string[]
 }
 type Interpretation = {
   wants_plate?: boolean
@@ -653,11 +655,17 @@ export function Search() {
                 >
                   <Sparkles size={12} />
                   <span>
-                    {t(`search.needs.${n.state}`, {
-                      word: n.word,
-                      kind: t(`search.kind.${n.kind}`),
-                      skill: t(`search.skill.${n.skill}`),
-                    })}
+                    {t(
+                      n.state === 'never-produced' && (n.apps?.length ?? 0) > 0
+                        ? 'search.needs.never-produced-app'
+                        : `search.needs.${n.state}`,
+                      {
+                        word: n.word,
+                        kind: t(`search.kind.${n.kind}`),
+                        skill: t(`search.skill.${n.skill}`),
+                        apps: (n.apps ?? []).join(', '),
+                      },
+                    )}
                   </span>
                   {n.fallback === 'captions' && (
                     <span className="text-[var(--text-dim)]">{t('search.needs.captionsFallback')}</span>

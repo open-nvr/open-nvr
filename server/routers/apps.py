@@ -734,7 +734,18 @@ def _serialize_app(row: InstalledApp) -> dict[str, Any]:
         # Whether this app takes a camera pick at all. Apps that read no
         # camera data (they act on other apps' alerts) declare False.
         "camera_picker": (row.manifest_json or {}).get("camera_picker", True) is not False,
+        # Runs on every camera without a pick (the agent). The platform
+        # holds its picks; the catalog says "All cameras" instead of
+        # warning that none were selected.
+        "all_cameras": (row.manifest_json or {}).get("all_cameras") is True,
+        # The model skills a pick of this app brings to a camera.
+        "skills": _app_tasks_of(row),
     }
+
+
+def _app_tasks_of(row) -> list[str]:
+    from services.skill_assignments import app_tasks
+    return app_tasks(row.manifest_json)
 
 
 def _get_app_or_404(db: Session, app_id: str) -> InstalledApp:
@@ -955,6 +966,12 @@ async def register_app(
         from services.skill_assignments import sync_app_pick_labels
 
         sync_app_pick_labels(db, app_id)
+    # An app that runs on all cameras (the agent) holds a platform pick on
+    # every live camera; a manifest that gains the flag reaches cameras
+    # that predate it the same way tier0_labels do.
+    from services.skill_assignments import sync_all_camera_picks
+
+    sync_all_camera_picks(db, app_id)
     # Per-app credential: issued on first registration, and re-issued
     # whenever the app registers with the SITE key (or a user) and says
     # it holds no key of its own (a fresh container with no persisted
@@ -1319,6 +1336,8 @@ async def get_app_cameras(
         "skill": app_pick_skill(row.id),
         "consumer": app_consumer(row.id),
         "camera_picker": (row.manifest_json or {}).get("camera_picker", True) is not False,
+        "all_cameras": (row.manifest_json or {}).get("all_cameras") is True,
+        "skills": _app_tasks_of(row),
         "cameras": cameras,
     }
 

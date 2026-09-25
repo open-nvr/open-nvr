@@ -26,6 +26,8 @@ from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
 from core.config import settings
+import logging
+
 from core.logging_config import camera_logger
 from models import Camera, CameraPermission, User
 from schemas import CameraCreate, CameraUpdate
@@ -106,6 +108,17 @@ class CameraService:
             # Commit the transaction to persist the camera
             db.commit()
             db.refresh(db_camera)
+            # Every app that runs on all cameras picks the new one, so its
+            # skills are on the camera from its first frame.
+            try:
+                from services.skill_assignments import adopt_new_camera
+                if adopt_new_camera(db, db_camera.id):
+                    db.commit()
+                    db.refresh(db_camera)
+            except Exception:  # noqa: BLE001 — never fail onboarding on this
+                db.rollback()
+                logging.getLogger(__name__).warning(
+                    "all-cameras apps could not adopt camera %s", db_camera.id, exc_info=True)
 
             # Identity-protect the recordings directory BEFORE provisioning
             # (i.e. before MediaMTX can write the first segment): if this

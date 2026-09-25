@@ -91,6 +91,14 @@ Three consequences, all real today:
 `assignments` is additive: every existing consumer ignores it until it
 opts in.
 
+> **Superseded again (2026-09-25) — skills follow apps.** The camera
+> page writes nothing any more. A pick projects the app id (roster) AND
+> the tasks the app's manifest declares (`requires_tasks` + `enrich_tasks`,
+> canonical) as skill entries; the camera's set is the union over enabled
+> apps; an `all_cameras` app (the agent) holds a platform pick on every
+> live camera. See `services/skill_assignments.py` and
+> [CAMERA_ASSIGNMENTS.md](../CAMERA_ASSIGNMENTS.md).
+>
 > **Superseded — who writes it.** This originally said the camera's
 > settings page was the one writer. That made the camera page the only
 > way to point an app at a camera, so an app could not say which cameras

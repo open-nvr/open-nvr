@@ -169,6 +169,21 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         main_logger.error(f"Camera uuid backfill failed: {e}", exc_info=True)
 
+    # Skills follow apps: retire the camera page's rows, give all-cameras
+    # apps their picks, re-project every camera (derived skills from
+    # manifests registered before this code exist only after this).
+    try:
+        db = SessionLocal()
+        try:
+            from services.skill_assignments import reconcile_on_startup
+            stats = reconcile_on_startup(db)
+            db.commit()
+            main_logger.info(f"Skill assignments reconciled: {stats}")
+        finally:
+            db.close()
+    except Exception as e:
+        main_logger.error(f"Skill assignment reconcile failed: {e}", exc_info=True)
+
     # Seed defaults (roles, permissions, admin user) and ensure admin user exists
     try:
         db = SessionLocal()

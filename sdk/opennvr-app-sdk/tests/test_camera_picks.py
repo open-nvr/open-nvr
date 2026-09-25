@@ -325,3 +325,18 @@ def test_a_disabled_app_says_so_on_health():
     # Switched off is not a fault: /health stays ready and says why it
     # is quiet.
     assert health["enabled"] is False and health["ready"] is True
+
+
+
+def test_enrich_tasks_and_all_cameras_reach_the_wire():
+    """Skills follow apps: a pick brings requires_tasks + enrich_tasks to
+    the camera, and all_cameras asks the platform to pick every camera."""
+    from opennvr_app_sdk import AppManifest
+    m = AppManifest(id="x", name="X", version="1", description="t", category="t",
+                    camera_picker=False, all_cameras=True,
+                    enrich_tasks=["image_captioning", "vqa"])
+    d = m.to_dict()
+    assert d["enrich_tasks"] == ["image_captioning", "vqa"]
+    assert d["all_cameras"] is True
+    plain = AppManifest(id="y", name="Y", version="1", description="t", category="t").to_dict()
+    assert plain["enrich_tasks"] == [] and plain["all_cameras"] is False

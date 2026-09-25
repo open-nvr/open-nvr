@@ -10,24 +10,26 @@ ingest path, in the background, best-effort.
 | **Captions** | a sentence per visit (`event_text`) | a captioner advertising `scene_caption` (BLIP, Moondream, or `ollamavlm`) | `EVENTS_CAPTION_ENRICHMENT` | `image_captioning` |
 | **Embeddings** | one 512-d vector per visit (`event_embeddings`) | the CLIP adapter (`embed` task) | `EVENTS_EMBED_ENRICHMENT` | `embed` |
 
-## The gate that surprises everyone
+## The gate: skills follow apps
 
-Captions and embeddings are **per-camera opt-in**. The flag being on and the
-adapter being registered is not enough: a camera must carry the skill, or
-nothing is produced — deliberately, so a thirty-camera site does not pay for
-inference on thirty cameras to describe one gate. Since this document, the
-backend logs a warning the first time a qualifying visit is skipped for this
-reason, and once per thousand after.
+Captions, embeddings and descriptors are **per-camera**, and a camera
+carries a skill only because an enabled app that brings it was pointed at
+the camera (`docs/CAMERA_ASSIGNMENTS.md` → *Skills follow apps*). The flag
+being on and the adapter being registered is not enough — deliberately,
+so a thirty-camera site does not pay for inference on thirty cameras to
+describe one gate. The backend logs a warning the first time a qualifying
+visit is skipped for this reason, and once per thousand after.
 
-Assign the skills in **camera settings → Skills** (*Image Captioning*,
-*Visual Embedding*), or by API — the operator's assignments are sent as a
-full list; app-owned assignments are untouched:
+| Skill in the camera's set | Brought by |
+|---|---|
+| `image_captioning`, `embed` | **Footage Search** — select the cameras to make searchable |
+| `image_captioning`, `vqa` | **OpenNVR Agent** — every camera, while the agent is enabled |
+| `license_plate_recognition` | **ANPR** — its selected cameras (a gate role on the Vehicles page selects too) |
+| `face_recognition` | **Smart Doorbell** — its selected cameras |
 
-```bash
-curl -s -X PUT localhost:8000/api/v1/cameras/1 \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"assignments":[{"skill":"image_captioning"},{"skill":"embed"}]}'
-```
+There is no skills editor on the camera page. Select the camera in the app
+(App Catalog → the app → Configure → Cameras → Select cameras); the
+enricher picks the change up on its next visit.
 
 ## Turning it on, in order
 
@@ -45,7 +47,7 @@ curl -s -X PUT localhost:8000/api/v1/cameras/1 \
    `EVENTS_EMBED_ENRICHMENT=true`.
 3. `./start.sh up`, then check the adapters registered:
    `GET /api/v1/skills` lists `image_captioning` and `embed` with a provider.
-4. **Assign the skills** to the cameras that should pay for them (above).
+4. **Select the cameras** in the app that brings the skill (Footage Search for captions + embeddings; the Agent covers every camera) — see *The gate* above.
 5. **Back-fill history.** The enrichers run on *new* visits only. Every visit
    recorded before is a row with no words and no vector, so the first search
    an operator runs — against yesterday — returns nothing. Set
