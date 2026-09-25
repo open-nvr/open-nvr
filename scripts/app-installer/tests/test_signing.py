@@ -166,7 +166,7 @@ def test_pinned_install_proceeds_when_the_signature_verifies():
     assert status == "applied"
     argv, env = runner.calls[0]
     assert argv[-2:] == ["egress-proxy", "loitering-detection"]
-    assert env == {"LOITERING_DETECTION_IMAGE": PIN}
+    assert env == {"LOITERING_DETECTION_IMAGE": PIN, "APPS_PULL_POLICY": "missing"}
 
 
 def test_unpinned_install_is_not_verified_and_stays_dev_only(caplog):

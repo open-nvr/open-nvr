@@ -174,6 +174,14 @@ override env var:
 The transform is unit-tested on both sides and the env-var name must
 match between the reconciler and compose — that is the whole contract.
 
+The app services default to `pull_policy: ${APPS_PULL_POLICY:-build}` —
+a checkout builds its own `:local-build` images and never asks Docker
+Hub for them first (the old `missing` default printed "pull access
+denied for opennvr/<id>, repository does not exist" on every install
+before falling back to the build). A pinned intent therefore also sets
+`APPS_PULL_POLICY=missing` in the same env, so the pinned digest is
+pulled, never built over.
+
 For a `desired="installed"` intent **without** a digest, no override is
 passed (compose falls back to the local build) and the loud UNPINNED
 warning above fires. Teardown (`desired="absent"`) passes no override —

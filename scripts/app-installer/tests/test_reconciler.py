@@ -169,6 +169,7 @@ def test_db_supplied_image_is_ignored_in_favor_of_index(caplog):
     assert status_ == "applied"
     # The pin env is built from the CURATED entry, not the row.
     assert runner.envs[0] == {
+        "APPS_PULL_POLICY": "missing",   # a pin is pulled, never built over
         "LOITERING_DETECTION_IMAGE": (
             "ghcr.io/open-nvr/loitering-detection@sha256:" + "a" * 64
         )
@@ -225,6 +226,7 @@ def test_pending_installed_calls_compose_up_and_applies():
     # A digest-bearing index entry → the runner is handed the pinned
     # image override env so compose actually deploys the pinned ref.
     assert runner.envs[0] == {
+        "APPS_PULL_POLICY": "missing",   # a pin is pulled, never built over
         "LOITERING_DETECTION_IMAGE": pinned_image_ref(intent)
     }
 
@@ -241,6 +243,7 @@ def test_digest_bearing_entry_passes_pinned_ref_env():
     _reconcile(intent, runner)
 
     assert runner.envs[0] == {
+        "APPS_PULL_POLICY": "missing",   # a pin is pulled, never built over
         "LICENSE_PLATE_RECOGNITION_IMAGE": (
             "ghcr.io/open-nvr/license-plate-recognition@sha256:" + "d" * 64
         )

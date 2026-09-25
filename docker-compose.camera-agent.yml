@@ -603,6 +603,7 @@ services:
       context: .
       dockerfile: examples/camera-agent/Dockerfile
     image: opennvr/camera-agent:local-build
+    pull_policy: ${APPS_PULL_POLICY:-build}
     container_name: opennvr_camera_agent_chat
     hostname: camera-agent-chat
     logging: *svc-logs
