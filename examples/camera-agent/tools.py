@@ -262,7 +262,16 @@ def build_tool_definitions(
                                 "Repeatable and ANDed. Use this for colour and "
                                 "vehicle type — 'did you see a BLUE car' is "
                                 "label=car with attr=['blue'], not label=car "
-                                "alone."),
+                                "alone.\n"
+                                "ALSO A PERSON'S NAME. Where face "
+                                "recognition is installed, a recognised "
+                                "visit carries the name as a claim, so "
+                                "'was Varun here yesterday' is "
+                                "label=person with attr=['varun singh'] "
+                                "and a time window — NOT a question this "
+                                "tool cannot answer. Call list_people "
+                                "first if unsure of the spelling; a name "
+                                "nobody enrolled matches nothing."),
                         },
                     },
                     "required": [],
