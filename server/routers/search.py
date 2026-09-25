@@ -344,6 +344,16 @@ async def _needs_for(db: Session, scope: set[int] | None, *, parsed: ParsedQuery
         box.claimed_kinds = {str(r[0]) for r in rows if r[0]}
     except Exception:  # noqa: BLE001
         logger.debug("search: claimed kinds lookup failed", exc_info=True)
+    try:
+        # Which apps bring which skill — so "never produced" can name the
+        # app to pick the camera in, rather than a skill to assign.
+        from models import InstalledApp
+        from services.skill_assignments import app_tasks
+        for row in db.query(InstalledApp).all():
+            for task in app_tasks(row.manifest_json):
+                box.apps_by_skill.setdefault(task, []).append(str(row.name or row.id))
+    except Exception:  # noqa: BLE001
+        logger.debug("search: app skills lookup failed", exc_info=True)
     return resolve_needs(
         words=(words or "").split(), labels=labels, attrs=attrs,
         wants_plate=wants_plate, plate=plate, box=box,

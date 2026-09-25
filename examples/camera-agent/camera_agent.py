@@ -5704,6 +5704,13 @@ def agent_manifest(cfg: Any | None = None) -> dict[str, Any]:
         # No camera picker: the agent is a platform component on the site
         # key, and every user already sees only their own cameras through it.
         camera_picker=False,
+        # …and it runs on all of them: the platform holds a pick for the
+        # agent on every live camera, so the skills below are in every
+        # camera's set while the agent is enabled — captions and VQA on
+        # every visit, which is what "ask the agent about any camera"
+        # costs. Disable the agent and they leave every set.
+        all_cameras=True,
+        enrich_tasks=["image_captioning", "vqa"],
         name="OpenNVR Agent",
         version=AGENT_VERSION,
         category="assistant",

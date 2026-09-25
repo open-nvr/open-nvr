@@ -87,10 +87,14 @@ class Need:
     #: still carry colour words, so "red" can match a caption on a box
     #: with no VQA — the need is then advisory, not fatal.
     fallback: str | None = None
+    #: Installed apps whose manifest brings this skill to the cameras they
+    #: are picked for — the fix for ``never-produced`` is to pick the
+    #: camera in one of these, and the UI can say which.
+    apps: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {"word": self.word, "kind": self.kind, "skill": self.skill,
-                "state": self.state, "fallback": self.fallback}
+                "state": self.state, "fallback": self.fallback, "apps": list(self.apps)}
 
 
 @dataclass
@@ -103,6 +107,8 @@ class BoxAbilities:
     claimed_kinds: set[str] = field(default_factory=set)
     #: a healthy captioner is registered (colour words can match captions)
     captions: bool = False
+    #: skill → names of installed apps whose manifest brings it
+    apps_by_skill: dict[str, list[str]] = field(default_factory=dict)
 
 
 def _state(kind: str, box: BoxAbilities) -> str:
@@ -139,8 +145,10 @@ def resolve_needs(
         if (word, kind) in seen:
             return
         seen.add((word, kind))
-        needs.append(Need(word=word, kind=kind, skill=KIND_SKILL[kind],
-                          state=_state(kind, box), fallback=fallback))
+        skill = KIND_SKILL[kind]
+        needs.append(Need(word=word, kind=kind, skill=skill,
+                          state=_state(kind, box), fallback=fallback,
+                          apps=list(box.apps_by_skill.get(skill, []))))
 
     caption_fallback = "captions" if box.captions else None
     for w in words:

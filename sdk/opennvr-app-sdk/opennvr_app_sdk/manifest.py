@@ -311,6 +311,13 @@ class AppManifest:
     category: str
     summary: str = ""
     requires_tasks: list[str] = field(default_factory=list)
+    # Tasks this app USES when the box has them and runs without when it
+    # does not (a captioner, an embedder, a VQA model). Skills follow
+    # apps: picking a camera for this app puts these — and
+    # requires_tasks — in that camera's skill set, which is what switches
+    # the platform's enrichers on for it. requires_tasks are refused at
+    # install when absent; enrich_tasks never are.
+    enrich_tasks: list[str] = field(default_factory=list)
     requires_adapters: list[str] = field(default_factory=list)
     # RFC-0002 Phase 5: event scopes this app requests, e.g.
     # ["events:plate.recognized"]. Scopes name DOMAIN events (the
@@ -347,6 +354,13 @@ class AppManifest:
     # data at all — they act on OTHER apps' alerts (a notifier, a gate
     # relay), which are already limited to the cameras those apps picked.
     camera_picker: bool = True
+    # True ⇒ the app runs on EVERY live camera and takes no pick: the
+    # platform holds a pick for it on each camera (written on
+    # registration and on camera creation, released with the camera), so
+    # its skills ride the same table and the same enable/disable rules as
+    # everyone else's. Only meaningful with camera_picker=False. The agent
+    # declares it; an app that reads a camera's stream should not.
+    all_cameras: bool = False
     # Object classes this app needs Tier-0 to TRACK on the cameras picked
     # for it (COCO names: "backpack", "suitcase", …). Tier-0 tracks only
     # the deployment's DETECT_LABELS by default (person, vehicles, pets),
@@ -443,6 +457,7 @@ class AppManifest:
             "category": self.category,
             "summary": self.summary,
             "requires_tasks": list(self.requires_tasks),
+            "enrich_tasks": list(self.enrich_tasks),
             "requires_adapters": list(self.requires_adapters),
             "requires_scopes": list(self.requires_scopes),
             "provides": list(self.provides),
@@ -454,6 +469,7 @@ class AppManifest:
             "entities": [e.to_dict() for e in self.entities],
             "overlay": bool(self.overlay),
             "camera_picker": bool(self.camera_picker),
+            "all_cameras": bool(self.all_cameras),
             "tier0_labels": list(self.tier0_labels),
             "has_ui": bool(self.has_ui),
             "ui_mode": self.ui_mode,

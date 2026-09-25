@@ -56,7 +56,6 @@ export const cameraService = {
     api.post('/api/v1/cameras/', payload, opts.force ? { params: { force: true } } : undefined),
   updateCamera: (cameraId: number, payload: any) => api.put(`/api/v1/cameras/${cameraId}`, payload),
   // Suggestions + live availability for the camera Assignments editor.
-  getAssignableSkills: () => api.get('/api/v1/cameras/assignable-skills'),
   // Claims: which cameras a skill is pointed at. An app's camera pick is
   // one of these (consumer `app:<id>`), and a pick is what turns the app
   // ON for a camera — so these need the same permission as editing the

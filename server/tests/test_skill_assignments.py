@@ -156,24 +156,23 @@ def test_dormant_in_the_registry_when_union_empties(db):
     assert view["sources"]["assignments"] == {"implemented": False, "phase": 2}
 
 
-def test_operator_replace_touches_only_operator_claims(db):
+def test_retiring_the_camera_pages_rows_leaves_app_claims_alone(db):
+    """The camera page's editor is gone; its rows (consumer "operator")
+    are retired at startup. An app's claim on the same camera survives."""
     s, (gate, yard) = db
-    cam = s.query(models.Camera).get(gate)
     svc.declare(s, skill=LPR, camera_id=gate, consumer="app:lpr")
-    svc.set_operator_assignments(s, cam, [
-        {"skill": "object_detection", "labels": ["person"]},
-    ])
+    svc.declare(s, skill="object_detection", camera_id=gate, consumer=svc.OPERATOR_CONSUMER,
+                params={"labels": ["person"]})
+    svc.declare(s, skill="embed", camera_id=yard, consumer=svc.OPERATOR_CONSUMER)
     s.commit()
-    assert _assignments_of(s, gate) == [
-        {"skill": LPR},
-        {"skill": "object_detection", "labels": ["person"]},
-    ]
-    # The editor's full-replace clears ONLY operator claims: the app's
-    # LPR claim survives an operator submitting a list without it.
-    svc.set_operator_assignments(s, cam, [])
+    assert svc.retire_operator_claims(s) == 2
+    s.commit()
+    for cam in (gate, yard):
+        svc.project_camera(s, s.query(models.Camera).get(cam))
     s.commit()
     assert _assignments_of(s, gate) == [{"skill": LPR}]
-    assert svc.assignments_by_skill(s) == {LPR: [gate]}
+    assert _assignments_of(s, yard) is None or _assignments_of(s, yard) == []
+    assert svc.retire_operator_claims(s) == 0          # idempotent
 
 
 def test_labels_merge_additively_and_unrestricted_wins(db):
@@ -283,20 +282,51 @@ def test_reregistering_with_new_labels_refreshes_existing_picks(db):
     assert _assignments_of(s, gate) == [{"skill": "package_delivery"}]
 
 
-def test_app_widening_leaves_operator_narrowing_alone(db):
-    """Operator narrowing keeps its own object_detection entry with
-    replace semantics; the app's labels ride the app's own entry. Tier-0
-    unions the two (detect-pipeline _assignment_view)."""
+def test_a_pick_brings_the_apps_tasks_and_a_disable_takes_them_away(db):
+    """Skills follow apps. Picking a camera for an app puts the model
+    skills its manifest declares (requires_tasks + enrich_tasks,
+    canonical) in the camera's set; disabling the app removes them;
+    a task another enabled app also brings stays."""
     s, (gate, _) = db
-    cam = s.query(models.Camera).get(gate)
-    svc.set_operator_assignments(s, cam, [
-        {"skill": "object_detection", "labels": ["person"]}])
-    _install(s, "abandoned-object", tier0_labels=["backpack"])
-    _pick(s, "abandoned-object", gate)
+    _install(s, "smart-doorbell", requires_tasks=["face_recognition"])
+    _install(s, "footage-search", enrich_tasks=["scene_caption", "embed"])   # alias → canonical
+    _pick(s, "smart-doorbell", gate)
+    _pick(s, "footage-search", gate)
     assert _assignments_of(s, gate) == [
-        {"skill": "abandoned_object", "labels": ["backpack"]},
-        {"skill": "object_detection", "labels": ["person"]},
+        {"skill": "embed"},
+        {"skill": "face_recognition"},
+        {"skill": "footage_search"},
+        {"skill": "image_captioning"},
+        {"skill": "smart_doorbell"},
     ]
+    assert svc.camera_adopted(s.query(models.Camera).get(gate), "face_recognition")
+    assert svc.assignments_by_skill(s)["image_captioning"] == [gate]
+    # Disable the doorbell: its pick and its task leave the set.
+    s.query(models.InstalledApp).filter_by(id="smart-doorbell").update({"enabled": False})
+    s.commit()
+    svc.reproject_app_cameras(s, "smart-doorbell")
+    s.commit()
+    assert "face_recognition" not in svc.camera_skills(s.query(models.Camera).get(gate))
+    assert "smart_doorbell" not in svc.camera_skills(s.query(models.Camera).get(gate))
+    assert "image_captioning" in svc.camera_skills(s.query(models.Camera).get(gate))
+    # Release the last app bringing a task: the task goes with it.
+    svc.release_app_picks(s, "footage-search")
+    s.commit()
+    assert svc.camera_skills(s.query(models.Camera).get(gate)) == set()
+
+
+def test_two_apps_sharing_a_task_keep_it_until_the_last_release(db):
+    s, (gate, _) = db
+    _install(s, "intrusion", requires_tasks=["object_detection"])
+    _install(s, "loitering", requires_tasks=["object_detection"])
+    _pick(s, "intrusion", gate)
+    _pick(s, "loitering", gate)
+    svc.release_app_picks(s, "intrusion")
+    s.commit()
+    assert "object_detection" in svc.camera_skills(s.query(models.Camera).get(gate))
+    svc.release_app_picks(s, "loitering")
+    s.commit()
+    assert "object_detection" not in svc.camera_skills(s.query(models.Camera).get(gate))
 
 
 def test_declare_is_idempotent_and_updates_params(db):

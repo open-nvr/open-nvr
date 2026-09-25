@@ -3,10 +3,10 @@ revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'darwin'",
-    "python_full_version == '3.13.*' and sys_platform == 'darwin'",
     "python_full_version >= '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "python_full_version == '3.13.*' and platform_machine == 'aarch64' and sys_platform == 'linux'",
     "(python_full_version >= '3.14' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version >= '3.14' and sys_platform != 'darwin' and sys_platform != 'linux')",
+    "python_full_version == '3.13.*' and sys_platform == 'darwin'",
+    "python_full_version == '3.13.*' and platform_machine == 'aarch64' and sys_platform == 'linux'",
     "(python_full_version == '3.13.*' and platform_machine != 'aarch64' and sys_platform == 'linux') or (python_full_version == '3.13.*' and sys_platform != 'darwin' and sys_platform != 'linux')",
     "python_full_version == '3.12.*' and sys_platform == 'darwin'",
     "python_full_version == '3.12.*' and platform_machine == 'aarch64' and sys_platform == 'linux'",
@@ -1038,7 +1038,7 @@ wheels = [
 
 [[package]]
 name = "opennvr-app-sdk"
-version = "0.6.0"
+version = "0.7.0"
 source = { editable = "../../sdk/opennvr-app-sdk" }
 dependencies = [
     { name = "httpx" },
@@ -1057,6 +1057,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "openapi-spec-validator", specifier = ">=0.7" },
     { name = "pytest", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", specifier = ">=0.23" },
 ]
@@ -1074,6 +1075,7 @@ dependencies = [
     { name = "pipecat-ai", extra = ["websocket"] },
     { name = "pyyaml" },
     { name = "uvicorn" },
+    { name = "websockets" },
 ]
 
 [package.optional-dependencies]
@@ -1104,6 +1106,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0,<7.0" },
     { name = "respx", marker = "extra == 'dev'", specifier = ">=0.20" },
     { name = "uvicorn", specifier = ">=0.27,<1.0" },
+    { name = "websockets", specifier = ">=12,<18" },
 ]
 provides-extras = ["device", "notify", "dev"]
 

@@ -194,51 +194,46 @@ def test_releasing_an_apps_picks_leaves_other_apps_alone(world):
     assert sa.picked_camera_ids(s, "occupancy-counting") == {ids["yard"]}
 
 
-def test_a_platform_plate_row_keeps_ocr_on_after_anpr_goes(world):
-    """Plate OCR is core compute. A platform row on the camera page turns
-    it on independently of the app, and outlives the app's picks."""
+def test_plate_ocr_leaves_with_the_last_app_that_brought_it(world):
+    """Plate OCR is core compute, but nothing switches it on except an
+    app that brings the skill. When ANPR's pick goes, so does OCR."""
     ids, Session = world["ids"], world["Session"]
     _pick(Session, "license-plate-recognition", ids["yard"])
     s = Session()
-    sa.set_operator_assignments(s, s.get(Camera, ids["yard"]), [{"skill": PLATE_SKILL}])
+    assert sa.camera_adopted(s.get(Camera, ids["yard"]), PLATE_SKILL) is True
     sa.release_app_picks(s, "license-plate-recognition")
     s.commit()
-    assert sa.camera_adopted(s.get(Camera, ids["yard"]), PLATE_SKILL) is True
+    assert sa.camera_adopted(s.get(Camera, ids["yard"]), PLATE_SKILL) is False
 
 
-# ── the camera page tunes compute, and no longer points apps ───────
+# ── the camera page no longer writes skills at all ─────────────────
 
 
-@pytest.mark.parametrize("skill", ["guard_scan", "guard_scan_compliance",
-                                   "guard-scan-compliance", "occupancy"])
-def test_the_camera_page_refuses_a_row_naming_an_app(world, skill):
-    ids, Session = world["ids"], world["Session"]
-    s = Session()
-    with pytest.raises(ValueError) as exc:
-        sa.set_operator_assignments(s, s.get(Camera, ids["gate"]), [{"skill": skill}])
-    assert "own configuration" in str(exc.value)
-
-
-def test_the_camera_page_still_accepts_platform_tasks(world):
-    ids, Session = world["ids"], world["Session"]
-    s = Session()
-    gate = s.get(Camera, ids["gate"])
-    sa.set_operator_assignments(s, gate, [
-        {"skill": "object_detection", "labels": ["person", "truck"]},
-        # ANPR's id spelling, but also the platform plate task: allowed.
-        {"skill": PLATE_SKILL},
-    ])
-    s.commit()
-    assert sa.camera_skills(s.get(Camera, ids["gate"])) == {"object_detection", PLATE_SKILL}
-
-
-def test_the_camera_update_route_turns_the_refusal_into_a_422():
-    """Source lockstep: the service raises ValueError; the route must not
-    let that become a 500."""
+def test_the_camera_update_route_refuses_assignments_outright():
+    """Skills follow apps: the route must not carry a write path for
+    them, and the refusal must not be a 500."""
     src = (REPO_ROOT / "server" / "routers" / "cameras.py").read_text(encoding="utf-8")
-    block = src[src.index("set_operator_assignments(db, camera, operator_assignments)") - 200:]
-    assert "except ValueError" in block[:600]
-    assert "status_code=422" in block[:600]
+    assert "set_operator_assignments" not in src
+    assert "assignable-skills" not in src
+    block = src[src.index('update_fields.pop("assignments", None)') - 100:]
+    assert "status_code=422" in block[:700]
+    assert "Skills are brought by apps" in block[:700]
+
+
+def test_a_pick_puts_the_apps_skills_on_the_camera(world):
+    ids, Session = world["ids"], world["Session"]
+    s = Session()
+    app = s.get(InstalledApp, "guard-scan-compliance")
+    app.manifest_json = {**app.manifest_json, "requires_tasks": ["pose_estimation"],
+                         "enrich_tasks": ["scene_caption"]}
+    s.commit()
+    _pick(Session, "guard-scan-compliance", ids["gate"])
+    s = Session()
+    skills = sa.camera_skills(s.get(Camera, ids["gate"]))
+    assert {"guard_scan_compliance", "pose_estimation", "image_captioning"} <= skills
+    # ... and the picker endpoint says what a pick brings
+    body = world["tc"].get("/apps/guard-scan-compliance/cameras").json()
+    assert body["skills"] == ["pose_estimation", "image_captioning"]
 
 
 # ── the picker endpoint ────────────────────────────────────────────

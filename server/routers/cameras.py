@@ -865,98 +865,6 @@ def get_deleted_cameras(
     return DeletedCameraList(cameras=items, total=len(items))
 
 
-# ── Assignable skills (per-camera assignment, consumer 3) ───────────
-#
-# The camera edit dialog's Assignments editor asks this endpoint what
-# skills EXIST and whether each is actually served right now, so it can
-# offer suggestions and flag "LPR needs the plate adapter — not
-# installed" instead of leaving the operator to guess spellings.
-# Composed from three sources, none authoritative over the others:
-#   * the canonical task registry (server/config/tasks.yml) — every
-#     adapter-shaped capability, available when a registered adapter
-#     advertises the task (or an alias). object_detection is special:
-#     the always-on Tier-0 detector provides it on every install.
-#   (Installed apps are not listed: apps pick cameras in their own config.)
-# ``available`` is a TRI-STATE: true / false / null, where null means
-# "couldn't tell" (KAI-C unreachable) — the UI must never grey a skill
-# on null, the same advisory rule the agent's skills panel follows.
-# The vocabulary stays OPEN: this endpoint suggests and annotates; it
-# never becomes a validation gate (an assignment may be declared before
-# its capability is installed).
-
-
-def _assignable_task_entries(tasks_advertised: set[str] | None) -> list[dict]:
-    import yaml as _yaml
-
-    registry_path = Path(__file__).resolve().parents[1] / "config" / "tasks.yml"
-    try:
-        registry = _yaml.safe_load(registry_path.read_text()) or []
-    except Exception:
-        camera_logger.warning("assignable-skills: tasks.yml unreadable", exc_info=True)
-        registry = []
-    out: list[dict] = []
-    for entry in registry:
-        if not isinstance(entry, dict) or not entry.get("task"):
-            continue
-        task = str(entry["task"])
-        names = {task, *(str(a) for a in entry.get("aliases") or [])}
-        if task == "object_detection":
-            available: bool | None = True
-            hint = "Provided by the built-in Tier-0 detector on every install."
-        elif tasks_advertised is None:
-            available = None
-            hint = "Adapter status unknown (KAI-C unreachable) — not greyed out."
-        elif names & tasks_advertised:
-            available = True
-            hint = "An installed adapter advertises this task."
-        else:
-            available = False
-            suggested = ", ".join(entry.get("suggested_adapters") or []) or "an adapter"
-            hint = (
-                f"No registered adapter advertises {task!r} — register one "
-                f"(suggested: {suggested}) on the AI Adapters page."
-            )
-        out.append({
-            "skill": task,
-            "label": str(entry.get("label") or task),
-            "source": "tier0" if task == "object_detection" else "adapter",
-            "available": available,
-            "hint": hint,
-        })
-    return out
-
-
-@router.get("/assignable-skills")
-async def assignable_skills(
-    current_user: User = Depends(get_current_active_user),
-    db: Session = Depends(get_db),
-):
-    """Suggestions + live availability for the Assignments editor."""
-    # Adapter tasks via KAI-C — advisory: unreachable = unknown, not empty.
-    tasks_advertised: set[str] | None = None
-    try:
-        from services.kai_c_service import get_kai_c_service
-
-        capabilities = await get_kai_c_service().get_capabilities()
-        tasks_advertised = set()
-        for entry in (capabilities.get("adapters") or {}).values():
-            caps = (entry or {}).get("capabilities") or {}
-            tasks_advertised.update(str(t) for t in caps.get("tasks_advertised") or [])
-    except Exception:
-        camera_logger.info("assignable-skills: KAI-C unreachable; availability unknown")
-
-    skills = _assignable_task_entries(tasks_advertised)
-
-    # Installed apps are deliberately NOT offered. An app is pointed at a
-    # camera from the app's own configuration (a pick), and naming one
-    # here is refused on save — see
-    # services.skill_assignments.operator_rows_naming_apps.
-    merged: dict[str, dict] = {}
-    for entry in skills:
-        merged[entry["skill"]] = entry
-    return {"skills": sorted(merged.values(), key=lambda e: e["skill"])}
-
-
 @router.get("/{camera_id}/used-by")
 def camera_used_by(
     camera_id: int,
@@ -1152,23 +1060,17 @@ async def update_camera(
                     detail=f"An API token cannot change these camera fields: {refused}",
                 )
         was_detecting = camera.detection_enabled is not False
-        # RFC-0002 Phase 2: the editor's assignments write routes through
-        # the assignment TABLE as the 'operator' consumer — full-replace
-        # of the operator's claims only, so app/agent claims survive an
-        # operator edit (union semantics, decision 8). Camera.assignments
-        # itself becomes the table's projection, recomputed inside.
-        operator_assignments = update_fields.pop("assignments", None)
-        if operator_assignments is not None:
-            from services.skill_assignments import set_operator_assignments
-
-            try:
-                set_operator_assignments(db, camera, operator_assignments)
-            except ValueError as exc:
-                # An app named here: apps pick their cameras in their own
-                # configuration now. Refuse before any other field of
-                # this edit is applied.
-                db.rollback()
-                raise HTTPException(status_code=422, detail=str(exc)) from exc
+        # Skills follow apps. The camera page used to write skill rows of
+        # its own; now a camera carries exactly the skills the enabled
+        # apps using it bring, so there is nothing to set here — refuse
+        # before any other field of this edit is applied.
+        if update_fields.pop("assignments", None) is not None:
+            raise HTTPException(
+                status_code=422,
+                detail="Skills are brought by apps: to run a skill on this "
+                       "camera, select the camera in that app's configuration "
+                       "(App Catalog → Configure → Cameras).",
+            )
         for field, value in update_fields.items():
             setattr(camera, field, value)
 

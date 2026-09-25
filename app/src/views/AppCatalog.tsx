@@ -262,6 +262,10 @@ export type RegisteredApp = {
   /** Does this app work on cameras picked for it? False for apps that act
    *  only on other apps' alerts; they get no Cameras section. */
   camera_picker?: boolean
+  /** Runs on every camera; the platform holds its picks (the agent). */
+  all_cameras?: boolean
+  /** The model skills a pick of this app brings to a camera. */
+  skills?: string[]
   /** How many live cameras are picked for this app (list endpoint only). */
   picked_cameras?: number
 }
@@ -1836,7 +1840,14 @@ function AppCard({ app, caps, tier0, skill, onConfigure }: { app: RegisteredApp;
         {/* Where every freshly installed app starts. Said on the card, not
             only inside Configure, because an enabled app with no cameras
             otherwise looks exactly like one that is working. */}
-        {app.camera_picker !== false && app.picked_cameras === 0 && (
+        {app.all_cameras && (
+          <div>
+            <Badge title="Runs on every camera — the platform selects them for this app, and its skills are in every camera's set while it is enabled">
+              All cameras
+            </Badge>
+          </div>
+        )}
+        {app.camera_picker !== false && !app.all_cameras && app.picked_cameras === 0 && (
           <div>
             <Badge variant="warning" title="Select cameras in Configure — until then this app does nothing">
               No cameras

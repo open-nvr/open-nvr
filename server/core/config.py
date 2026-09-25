@@ -485,6 +485,12 @@ class Settings(BaseSettings):
     # gated per camera by the same skill assignments, so turning it on
     # without them costs nothing.
     events_enrichment_backfill: bool = False
+    # Apps allowed to run on EVERY camera without an operator pick
+    # (manifest all_cameras: true). A pick is also what an app may READ,
+    # so honouring the flag from any manifest would let a third-party
+    # app grant itself every camera on its first registration. Only ids
+    # listed here get it; anyone else asking is logged and ignored.
+    all_cameras_apps: str = "camera-agent"
     # How long visit rows in the events store are kept. 0 (default) means
     # "the same window as the recordings retention" — the evidence JPEG
     # and the row that points at it age out together, so a row never

@@ -87,7 +87,13 @@ MANIFEST = AppManifest(
         "Answers natural-language footage queries like 'red truck at "
         "the dock yesterday' against the platform's event store."
     ),
-    requires_tasks=[],   # reads remembered visits; drives no inference
+    requires_tasks=[],   # reads remembered visits; drives no inference itself
+    # …but the visits it searches are worth more described and embedded.
+    # Picking a camera for Footage Search puts these in the camera's skill
+    # set, which is what turns the platform's caption and embedding
+    # enrichers on for that camera. Soft: a box with neither still
+    # searches by class, camera, time and plate.
+    enrich_tasks=["image_captioning", "embed"],
     subscribes=None,     # no stream at all — see ContractApp
     params=[
         Param("extra_labels", list, default=[],
