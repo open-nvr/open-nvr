@@ -765,3 +765,68 @@ def test_the_schema_tells_the_model_a_name_is_askable(anyio_backend=None):
     assert "list_people" in desc, (
         "the model needs pointing at the roster — a misspelled name matches "
         "nothing, and silently")
+
+
+def test_the_live_note_does_not_answer_an_attribute_question(anyio_backend=None):
+    """A car on camera is not evidence about a RED car question.
+
+    The field failure: "have you seen any red car in the last hour" came
+    back as "I see a car on cam1 right now, and it's still in progress."
+    Tier-0 emits a class and a box — it has never known colour — so the
+    live ring cannot speak to the part of the question that did the
+    narrowing, and saying "a car IS on cam1" in reply to it claims a
+    relevance it does not have. This is the same rule as the cat/person
+    test above, one level down.
+    """
+    import asyncio
+    tools = _history_tools(_FakeEventsClient([]))
+    tools._ctx.recent_events = (
+        lambda *, camera_id, window_seconds: [_RingEv([{"label": "car"}])])
+    out = asyncio.run(
+        tools.search_history({"label": "car", "attr": ["colour:red"]}))
+    assert "cannot tell whether it is" in out, out
+    assert "colour:red" in out
+
+
+def test_the_live_note_is_safe_to_quote_on_its_own(anyio_backend=None):
+    """The note is appended to an answer, and a small model summarising the
+    tool result can keep this sentence and drop the one before it — which
+    is what happened in the field. So the note must not mislead when it is
+    the only thing that survives: it says outright that it is not the
+    answer, and never asserts the attribute."""
+    import asyncio
+    tools = _history_tools(_FakeEventsClient([]))
+    tools._ctx.recent_events = (
+        lambda *, camera_id, window_seconds: [_RingEv([{"label": "car"}])])
+    out = asyncio.run(
+        tools.search_history({"label": "car", "attr": ["colour:red"]}))
+    note = out[out.index(" Separately"):]
+    assert "not an answer to that question" in note
+    # The dangerous reading: the note alone must never look like a yes.
+    assert "red car" not in note.lower()
+
+
+def test_an_unnarrowed_question_still_gets_the_plain_note(anyio_backend=None):
+    """The caveat is for attributes the ring cannot see. "Did any car come"
+    is a question the ring CAN speak to, and burying that in hedging would
+    cost the operator the thing the note exists to tell them."""
+    import asyncio
+    tools = _history_tools(_FakeEventsClient([]))
+    tools._ctx.recent_events = (
+        lambda *, camera_id, window_seconds: [_RingEv([{"label": "car"}])])
+    out = asyncio.run(tools.search_history({"label": "car"}))
+    assert "right now a car IS on" in out
+    assert "cannot tell whether" not in out
+
+
+def test_the_note_caveats_attributes_on_a_found_answer_too(anyio_backend=None):
+    """Not only on the empty branch. Visits WERE remembered, described as
+    red; a live undescribed car still cannot be called one of them."""
+    import asyncio
+    tools = _history_tools(_FakeEventsClient([_FakeEvent(1)], crops={}))
+    tools._ctx.recent_events = (
+        lambda *, camera_id, window_seconds: [_RingEv([{"label": "car"}])])
+    out = asyncio.run(
+        tools.search_history({"label": "car", "attr": ["colour:red"]}))
+    assert "1 car visit(s) described as colour:red" in out
+    assert "cannot tell whether it is colour:red" in out
