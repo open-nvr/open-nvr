@@ -55,6 +55,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
+from typing import Iterable
 
 __all__ = ["ParsedQuery", "parse_query", "LABEL_SYNONYMS"]
 
@@ -164,6 +165,16 @@ class ParsedQuery:
     to: datetime | None = None
     text: str = ""
     plate: str = ""
+    #: The question named a plate without giving one — "what is the
+    #: plate number of the white car" — so only visits that CARRY a read
+    #: can answer it. Without this the page led with the cars nobody
+    #: read, and the operator had to scroll for the one it asked about.
+    wants_plate: bool = False
+    #: Claims the words resolved to, as (kind, value): a name the box
+    #: knows becomes ``("face_id", value)``. A name is never a caption
+    #: word (see ``descriptor_store._UNPROJECTED_KINDS``), so typing one
+    #: used to match nothing — silently, forever.
+    attrs: list[tuple[str, str]] = field(default_factory=list)
     #: The phrase each interpretation came from, so a chip can say
     #: "yesterday → 00:00–23:59" and be removed by the operator.
     matched: dict[str, str] = field(default_factory=dict)
@@ -179,6 +190,8 @@ class ParsedQuery:
             "to": self.to.isoformat() if self.to else None,
             "text": self.text,
             "plate": self.plate,
+            "wants_plate": self.wants_plate,
+            "attrs": [f"{k}:{v}" for k, v in self.attrs],
             "matched": self.matched,
             "ignored": self.ignored,
         }
@@ -305,14 +318,49 @@ def _match_cameras(words: list[str], cameras: dict[int, str]) -> tuple[list[int]
     return hits, used
 
 
+def _match_people(words: list[str], people: Iterable[str]) -> tuple[list[str], list[str]]:
+    """People whose EVERY name part appears in the query, as ``face_id``
+    values. "was varun singh here" and "varun" both land on
+    ``varun-singh``; "singh" alone does not name anyone in particular
+    when two people share it, and one part of a two-part name is not a
+    match. Consumed words are returned so they do not become free text
+    that can never match a caption."""
+    hits: list[str] = []
+    used: list[str] = []
+    wordset = set(words)
+    for value in people:
+        parts = [p for p in re.split(r"[^a-z0-9]+", str(value).lower()) if p]
+        if not parts:
+            continue
+        # A one-part identity must appear whole; a multi-part one lands
+        # on its first part alone as well (first names are how people
+        # ask) — but only when it names exactly one person.
+        if all(p in wordset for p in parts):
+            hits.append(str(value)); used.extend(parts)
+    if not hits:
+        firsts: dict[str, list[str]] = {}
+        for value in people:
+            parts = [p for p in re.split(r"[^a-z0-9]+", str(value).lower()) if p]
+            if len(parts) > 1 and parts[0] in wordset:
+                firsts.setdefault(parts[0], []).append(str(value))
+        for first, values in firsts.items():
+            if len(values) == 1:
+                hits.append(values[0]); used.append(first)
+    return list(dict.fromkeys(hits)), list(dict.fromkeys(used))
+
+
 def parse_query(
     q: str,
     *,
     cameras: dict[int, str] | None = None,
+    people: Iterable[str] | None = None,
     now: datetime | None = None,
 ) -> ParsedQuery:
     """Parse ``q`` into filters. ``cameras`` is {id: name} for the
-    caller's visible cameras — scope decides what "the dock" can mean."""
+    caller's visible cameras — scope decides what "the dock" can mean.
+    ``people`` are the ``face_id`` values visits in scope have been
+    bound to (what ``/search/people`` lists): a name among the words
+    becomes an attr filter instead of a caption word that cannot match."""
     out = ParsedQuery()
     text = (q or "").strip().lower()
     if not text:
@@ -346,6 +394,13 @@ def parse_query(
         out.labels = list(dict.fromkeys(labels))
         out.matched["what"] = " ".join(dict.fromkeys(label_words))
 
+    if people:
+        names, name_words = _match_people(rest, people)
+        if names:
+            out.attrs = [("face_id", n) for n in names]
+            out.matched["person"] = " ".join(name_words)
+            rest = [w for w in rest if w not in set(name_words)]
+
     keep: list[str] = []
     cued = any(w in _PLATE_CUES for w in rest)
     for w in rest:
@@ -362,6 +417,9 @@ def parse_query(
     # a text match on its own, and it drags in every caption with a digit.
     out.ignored = [w for w in keep if w.isdigit()]
     out.text = " ".join(w for w in keep if not w.isdigit())
+    if cued and not out.plate:
+        out.wants_plate = True
+        out.matched["plate"] = "with a plate read"
     if out.text:
         out.matched["text"] = out.text
     return out

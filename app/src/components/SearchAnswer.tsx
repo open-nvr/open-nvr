@@ -35,6 +35,10 @@ export type SearchAnswerData = {
   plate_count: number
   with_evidence: number
   undescribed: number
+  /** Of `shown`: rows the words found, and rows here only because a
+   *  vector resembled the query. Absent on a single-arm search. */
+  matched_words?: number
+  similar_only?: number
 }
 
 const Chip = ({ children }: { children: React.ReactNode }) => (
@@ -51,6 +55,7 @@ export default function SearchAnswer({ answer }: { answer?: SearchAnswerData }) 
   const {
     shown, total, cameras, camera_count, first_at, last_at,
     claims, claim_count, plates, plate_count, with_evidence, undescribed,
+    matched_words, similar_only,
   } = answer
 
   const from = first_at ? fmt.time(first_at) : ''
@@ -112,6 +117,16 @@ export default function SearchAnswer({ answer }: { answer?: SearchAnswerData }) 
         <div>
           {t('search.answer.withEvidence', { count: with_evidence, shown })}
         </div>
+        {/* A yes/no question turns on this line. Five visits that merely
+            LOOK like the query and none described as it is a "no", and a
+            grid of five cannot say so. */}
+        {(similar_only ?? 0) > 0 && (
+          <div className="text-[var(--warn,var(--text-dim))]">
+            {t('search.answer.similarOnly', {
+              count: similar_only ?? 0, matched: matched_words ?? 0,
+            })}
+          </div>
+        )}
         {/* Stated even when it is the only thing this block says, because
             "nothing looked" is an answer the grid cannot give. */}
         {undescribed > 0 && (

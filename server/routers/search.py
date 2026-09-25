@@ -297,6 +297,59 @@ def search_people(
     }
 
 
+def _known_people(db: Session, scope: set[int] | None) -> list[str]:
+    """The ``face_id`` values visits in scope carry — the vocabulary a
+    typed name is matched against (the same list ``/search/people``
+    offers as a picker). Claims, not the recogniser's roster: a name
+    enrolled but never seen would resolve to a filter that can only
+    return nothing."""
+    try:
+        q = (
+            db.query(VisitDescriptor.value)
+            .join(TimelineEvent, TimelineEvent.id == VisitDescriptor.event_id)
+            .filter(VisitDescriptor.kind == PERSON_KIND)
+        )
+        rows = scope_query(q, TimelineEvent.camera_id, scope).distinct().limit(1000).all()
+        return [str(r[0]) for r in rows if r[0]]
+    except Exception:  # noqa: BLE001 — a name lookup must never break a search
+        logger.debug("search: people lookup failed", exc_info=True)
+        return []
+
+
+async def _needs_for(db: Session, scope: set[int] | None, *, parsed: ParsedQuery,
+                     labels, words: str, attrs, wants_plate: bool, plate: str):
+    """Resolve the question's needs against this box — see
+    ``services.search_intent``. Best-effort: an unreachable registry
+    means every need reads as not-on-this-box, which is the honest
+    answer at that moment, and never an error."""
+    from services.enrichment_plan import compute_enrichment_plan
+    from services.search_intent import BoxAbilities, resolve_needs
+    box = BoxAbilities()
+    try:
+        plan = await compute_enrichment_plan(None)
+        for s in plan.get("skills") or []:
+            if not s.get("healthy"):
+                continue
+            box.offered_kinds.update(s.get("descriptor_kinds") or [])
+            if s.get("task") == "image_captioning":
+                box.captions = True
+    except Exception:  # noqa: BLE001
+        logger.debug("search: enrichment plan unavailable", exc_info=True)
+    try:
+        q = (
+            db.query(VisitDescriptor.kind)
+            .join(TimelineEvent, TimelineEvent.id == VisitDescriptor.event_id)
+        )
+        rows = scope_query(q, TimelineEvent.camera_id, scope).distinct().all()
+        box.claimed_kinds = {str(r[0]) for r in rows if r[0]}
+    except Exception:  # noqa: BLE001
+        logger.debug("search: claimed kinds lookup failed", exc_info=True)
+    return resolve_needs(
+        words=(words or "").split(), labels=labels, attrs=attrs,
+        wants_plate=wants_plate, plate=plate, box=box,
+    )
+
+
 @router.get("/search")
 async def search(
     q: str = Query("", description="Natural-language query, e.g. 'red truck at the dock yesterday'."),
@@ -337,7 +390,8 @@ async def search(
     """
     scope = visible_camera_ids(db, current_user)
     cameras = _visible_cameras(db, scope)
-    parsed = parse_query(q, cameras=cameras) if parse else ParsedQuery()
+    parsed = (parse_query(q, cameras=cameras, people=_known_people(db, scope))
+              if parse else ParsedQuery())
 
     # Explicit parameters beat the parse, field by field, so a caller can
     # correct one part without having to restate the rest. A UI driving
@@ -360,10 +414,16 @@ async def search(
             attrs.append((kind.strip().lower(), value.strip().lower()))
 
     zone_id = _resolve_zone(db, zone, cams[0] if len(cams) == 1 else None, scope)
+    if not attr:
+        attrs = list(parsed.attrs)
+    # "What is the plate of…" — only visits that carry a read can answer.
+    wants_plate = bool(parsed.wants_plate) and plate is None
     filters = dict(
         from_=start, to=end, plate=plate_q or None, source=source, scope=scope,
-        zone_id=zone_id,
+        zone_id=zone_id, has_plate=wants_plate,
     )
+    needs = await _needs_for(db, scope, parsed=parsed, labels=labels, words=words,
+                             attrs=attrs, wants_plate=wants_plate, plate=plate_q or "")
     shape = metrics.query_shape(
         labels=labels, camera_ids=cams, text=words or "", attrs=attrs,
         plate=plate_q or "", from_=start, to=end,
@@ -375,6 +435,8 @@ async def search(
     # unreachable — and every one of them lands here as None, which is
     # the word search this route has always been.
     query_vector, no_vector_reason = await _query_vector(db, words or "")
+    from core.config import settings
+    floor = float(getattr(settings, "search_vector_min_similarity", 0) or 0) or None
 
     # Counted FIRST, and timed on its own, because that timer is the
     # whole point of opennvr_search_count_seconds — the exact total is
@@ -388,7 +450,7 @@ async def search(
         page = search_page(
             db, labels=labels, camera_ids=cams, text=words or "", attrs=attrs,
             query_vector=query_vector, total=total, limit=limit, skip=skip,
-            **filters,
+            min_similarity=floor, **filters,
         )
     hits = page.hits
     # `text_total` is what the metric has always recorded — how many rows
@@ -451,7 +513,7 @@ async def search(
             page = search_page(
                 db, labels=labels, camera_ids=cams, text="", attrs=attrs,
                 query_vector=query_vector, total=without, limit=limit,
-                skip=skip, **filters)
+                skip=skip, min_similarity=floor, **filters)
             hits = page.hits
             total = page.total
             # The interpretation reports what was APPLIED, so the words
@@ -473,6 +535,11 @@ async def search(
         "text": words or "",
         "plate": plate_q or "",
         "attrs": [f"{k}:{v}" for k, v in attrs],
+        "wants_plate": wants_plate,
+        # What the question asked of the box's skills, and whether each
+        # is here — the difference between "nothing was red" and "nothing
+        # here has ever looked at a colour".
+        "needs": [n.as_dict() for n in needs],
         "zone_id": zone_id,
         "from": start.isoformat() if start else None,
         "to": end.isoformat() if end else None,

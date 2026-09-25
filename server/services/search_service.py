@@ -403,6 +403,7 @@ def search_page(
     total: int | None = None,
     limit: int = 50,
     skip: int = 0,
+    min_similarity: float | None = None,
     **filters: Any,
 ) -> SearchPage:
     """A page of results, with the vector arm fused in when there is one.
@@ -507,14 +508,29 @@ def search_page(
         db, query_vector=query_vector, candidate_ids=candidate_ids,
         limit=depth, cap=cap)
 
-    arms: dict[str, list[int]] = {"vector": sim.ids}
+    # THE FLOOR. rank_by_similarity returns its top-N whatever the
+    # numbers are, so a query nothing resembles still produced a full
+    # arm of rows — and fusion, counting rows not similarity, made them
+    # the answer. "A person in a red shirt" on a box that never saw one
+    # returned fifty people at cosine 0.19. Below the floor a row is not
+    # a result; how many were cut is reported so a reader can tell "the
+    # floor removed everything" from "nothing had a vector".
+    best = max(sim.scores) if sim.scores else None
+    vector_ids = list(sim.ids)
+    below_floor = 0
+    if min_similarity is not None and min_similarity > 0 and sim.scores:
+        vector_ids = [eid for eid, s in zip(sim.ids, sim.scores) if s >= min_similarity]
+        below_floor = len(sim.ids) - len(vector_ids)
+
+    arms: dict[str, list[int]] = {"vector": vector_ids}
     if text_ids:
         arms["text"] = text_ids
     scores, places = _rrf(arms)
     if not scores:
         return SearchPage(hits=[], total=total, semantic={
-            "used": True, "reason": "no-candidates",
+            "used": True, "reason": "below-floor" if below_floor else "no-candidates",
             "considered": sim.considered, "truncated": sim.truncated,
+            "floor": min_similarity, "below_floor": below_floor, "best": best,
             "arms": {k: 0 for k in arms}, "note": cap.note})
 
     # Ties are a real outcome — two rows placing symmetrically in the two
@@ -565,6 +581,12 @@ def search_page(
         # what the second arm is contributing — if this is always zero,
         # the embeddings are costing a scan and buying a reordering.
         "added_by_vector": len(vector_only),
+        # The floor and what it did, next to the best score the arm saw,
+        # so an operator tuning SEARCH_VECTOR_MIN_SIMILARITY has the two
+        # numbers that matter on the same line.
+        "floor": min_similarity,
+        "below_floor": below_floor,
+        "best": None if best is None else round(float(best), 4),
         "accel": cap.accel,
         "note": cap.note,
     })
@@ -715,6 +737,17 @@ def summarise_hits(
 
     plates = sorted({e.plate_text for e in events if e.plate_text})
 
+    # Which of these the WORDS found, and which are here only because a
+    # vector resembled the query. A row with no ``ranks`` came from the
+    # single-arm path and matched whatever was asked. This is the number
+    # a yes/no question turns on: "did you see a red shirt" answered by
+    # five similar-looking visits and zero that were described as red
+    # is a no, and a list of five cannot say so.
+    similar_only = sum(
+        1 for h in hits
+        if getattr(h, "ranks", None) and h.ranks.get("text") is None
+    )
+
     return {
         # What this block is counted over, stated rather than implied.
         "scope": "page",
@@ -734,4 +767,6 @@ def summarise_hits(
         # its silence on "red" is not evidence that it was not red. An
         # operator reading a list has no way to see that.
         "undescribed": sum(1 for h in hits if not h.claims),
+        "matched_words": len(hits) - similar_only,
+        "similar_only": similar_only,
     }
