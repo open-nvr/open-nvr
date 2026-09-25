@@ -221,12 +221,12 @@ MUTATIONS: list[tuple[str, str, str, str, str, str]] = [
 
     # ── the operator's language ──────────────────────────────────────
     ("the UI asks for a translation key nobody defines",
-     "app/src/views/AIEngine.tsx",
-     "t('ai.save')", "t('ai.saveNowPlease')",
+     "app/src/views/Support.tsx",
+     "t('support.title')", "t('support.titleNowPlease')",
      "server", "tests/test_translation_catalogs.py"),
     ("French loses a key English still has",
      "app/src/locales/fr.ts",
-     "'ai.save': 'Enregistrer', ", "",
+     "'support.title': 'Support',", "",
      "server", "tests/test_translation_catalogs.py"),
     ("a view formats a date without the operator's locale",
      "app/src/views/Support.tsx",

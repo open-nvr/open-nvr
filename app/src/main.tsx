@@ -96,7 +96,6 @@ const Settings = lazy(reloadOnStale(() => import('./views/Settings').then((m) =>
 const Events = lazy(reloadOnStale(() => import('./views/Events').then((m) => ({ default: m.Events }))))
 const Updates = lazy(reloadOnStale(() => import('./views/Updates').then((m) => ({ default: m.Updates }))))
 const Logs = lazy(reloadOnStale(() => import('./views/Logs').then((m) => ({ default: m.Logs }))))
-const AIEngine = lazy(reloadOnStale(() => import('./views/AIEngine').then((m) => ({ default: m.AIEngine }))))
 const Compliance = lazy(reloadOnStale(() => import('./views/Compliance').then((m) => ({ default: m.Compliance }))))
 const AlertsIncidents = lazy(reloadOnStale(() => import('./views/AlertsIncidents').then((m) => ({ default: m.AlertsIncidents }))))
 const Alarms = lazy(reloadOnStale(() => import('./views/Alarms').then((m) => ({ default: m.Alarms }))))
@@ -193,7 +192,7 @@ const router = createBrowserRouter([
           { path: 'firmware', element: <FirmwareView /> },
           { path: 'updates', element: <Updates /> },
           { path: 'logs', element: <Logs /> },
-          { path: 'ai-engine', element: <AIEngine /> },
+          { path: 'ai-engine', element: <Navigate to="/ai-adapters" replace /> },
           { path: 'byom', element: <AIModelsBYOM /> },
           { path: 'ai-detection-results', element: <AIDetectionResults /> },
           { path: 'ai-adapters', element: <AIAdapters /> },
