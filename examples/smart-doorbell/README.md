@@ -75,6 +75,8 @@ App Catalog:
 
 | Setting | Default | What it does |
 | --- | --- | --- |
+| `unknown_severity` | `high` | How loud an unrecognised face is. `critical` is the loudest the platform has. |
+| `known_severity` | *(unset)* | Overrides the level for a recognised person. Unset keeps the per-category default — family, resident and friend `low`; staff, contractor and visitor `info`. A watchlist match and an expired pass are decided before this and stay `high`. |
 | `history_days` | 30 | How long a visit stays in the history. |
 | `history_max` | 200 | Hard cap on remembered visits, whatever the age. |
 

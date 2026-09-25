@@ -116,6 +116,26 @@ _CATEGORY_SEVERITY: dict[str, str] = {
     "watchlist": "high",
 }
 
+#: Severities the platform understands, weakest first.
+_SEVERITIES: tuple[str, ...] = ("info", "low", "medium", "high", "critical")
+
+
+def _severity(value: Any, fallback: str) -> str:
+    """A configured severity, or the default when it is not one.
+
+    Silently ignoring a typo would be the wrong failure here: an
+    operator who sets ``critcal`` and sees nothing change concludes the
+    setting does nothing, which is true and invisible. The WARN says
+    which word was not understood and what is being used instead.
+    """
+    word = str(value or "").strip().lower()
+    if word in _SEVERITIES:
+        return word
+    if word:
+        logger.warning("unknown severity %r — using %r. One of: %s",
+                       value, fallback, ", ".join(_SEVERITIES))
+    return fallback
+
 # The SDK FrameApp rejects a non-positive poll interval (its sleep is
 # the shutdown-interruptible kind). This app historically accepted 0
 # ("poll as fast as the cameras answer"); map that to a near-zero
@@ -151,6 +171,28 @@ MANIFEST = AppManifest(
               description="How long a visit stays in the door's history."),
         Param("history_max", int, default=200,
               description="Hard cap on remembered visits, whatever the age."),
+        # HOW LOUD A FACE IS. Declared rather than hard-coded because
+        # the right answer is the site's, not ours: a stranger at a
+        # family front door and a stranger at a depot gate are the same
+        # event and not the same emergency. Defaults are today's
+        # behaviour, so an existing install hears no change.
+        Param("unknown_severity", str, default="high",
+              label="Stranger alert level", group="Alerting",
+              suggestions=list(_SEVERITIES),
+              description=(
+                  "Level for an unrecognised face. 'critical' is the "
+                  "loudest the platform has.")),
+        Param("known_severity", str, default="",
+              label="Recognised visitor alert level", group="Alerting",
+              advanced=True,
+              suggestions=list(_SEVERITIES),
+              description=(
+                  "Override the level for a RECOGNISED person. Empty "
+                  "keeps the per-category default — family/resident/"
+                  "friend low, staff/contractor/visitor info — which is "
+                  "usually what you want, since the point of enrolling "
+                  "someone is that they are not an alarm. A watchlist "
+                  "match is never lowered by this.")),
         Param("chime_enabled", bool, default=True,
               description="Ring for callers. Off still alerts and records."),
         Param("quiet_hours", str, default="",
@@ -160,6 +202,10 @@ MANIFEST = AppManifest(
     ],
     emits=[
         AlertType("known_visitor", severity="low"),
+        # The severity here is the DEFAULT. `unknown_severity` and
+        # `known_severity` move the actual level at fire time, so the
+        # catalog shows what a fresh install does rather than a promise
+        # this app cannot keep.
         AlertType("unknown_visitor", severity="high",
                   description="Unrecognised face; carries a snapshot when enabled."),
         AlertType("watchlist_visitor", severity="high",
@@ -333,6 +379,8 @@ class AppConfig:
     # The bell. An alert fires for every visit whatever these say —
     # these decide only whether something RINGS, which is a different
     # question and the one every annoying doorbell gets wrong.
+    unknown_severity: str = "high"
+    known_severity: str = ""
     chime_enabled: bool = True
     # HH:MM-HH:MM. Inside it only the alarm tone rings: a delivery at
     # 03:00 goes in the log, a stranger at 03:00 still wakes the house.
@@ -415,6 +463,9 @@ def load_config(path: str | Path) -> AppConfig:
         ),
         history_days=int(raw.get("history_days", 30)),
         history_max=int(raw.get("history_max", 200)),
+        unknown_severity=_severity(raw.get("unknown_severity"), "high"),
+        known_severity=(_severity(raw.get("known_severity"), "")
+                        if str(raw.get("known_severity") or "").strip() else ""),
         chime_enabled=bool(raw.get("chime_enabled", True)),
         quiet_hours=str(raw.get("quiet_hours") or ""),
         rechime_seconds=int(raw.get("rechime_seconds", 300)),
@@ -1543,14 +1594,20 @@ page. Threshold and re-fire window are edited in the config form and apply live.
                 )
             else:
                 kind = "known_visitor"
-                severity = _CATEGORY_SEVERITY.get(category, "info")
+                # The category table is the default; an explicit
+                # known_severity overrides it. Deliberately BELOW the
+                # watchlist and expired-pass branches, so neither can be
+                # quietened by a knob meant for ordinary visitors — the
+                # two recognised faces that must stay loud stay loud.
+                severity = (self.config.known_severity
+                            or _CATEGORY_SEVERITY.get(category, "info"))
                 title = f"Known visitor at {cam.camera_id}: {display}"
                 description = (
                     f"Recognised {display!r} (similarity "
                     f"{read.similarity:.2f}) on {cam.camera_id}."
                 )
         else:
-            severity = "high"
+            severity = self.config.unknown_severity
             title = f"Unknown visitor at {cam.camera_id}"
             description = (
                 f"Unrecognised face on {cam.camera_id}. "
