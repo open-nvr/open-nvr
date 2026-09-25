@@ -39,6 +39,7 @@ import {
 } from '../components/ui'
 import { Modal } from '../components/Modal'
 import { AppConfigModal, type RegisteredApp } from './AppCatalog'
+import { AppPageHeader } from './apps/AppSetup'
 
 export const OCCUPANCY_CAPABILITY = 'occupancy'
 
@@ -340,7 +341,8 @@ export function Occupancy() {
 
   return (
     <section className="space-y-4">
-      <PageHeader
+      <AppPageHeader
+        app={occApp}
         title="Occupancy"
         description="Live head-counts per watched zone — riding the platform's detection stream, zero extra inference. Thresholds apply live."
         actions={

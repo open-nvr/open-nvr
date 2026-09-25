@@ -44,6 +44,7 @@ import {
   type ManifestAction,
   UninstalledAppPage,
 } from './AppCatalog'
+import { AppNoCamerasNotice } from './apps/AppSetup'
 
 function useApp(appId: string) {
   return useQuery({
@@ -271,6 +272,8 @@ export function AppView() {
             </div>
           </div>
         </div>
+        {/* Same notice, same words as every app page's header. */}
+        <AppNoCamerasNotice app={app} />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
