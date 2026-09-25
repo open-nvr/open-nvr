@@ -218,3 +218,21 @@ def test_enrichment_sends_the_camera_handle_not_the_numeric_id():
         "plate_enrichment no longer sends the camera handle — "
         "enrichment-produced plate.recognized.v1 events become "
         "invisible to camera-scoped consumers")
+
+
+def test_the_correlation_id_reaches_the_row_and_the_claim(db):
+    """The envelope's correlation_id is the join to KAI-C's audit line.
+    It used to reach a log statement and nothing else; a reader of the
+    store had no way back to the audit trail (0 of 1 695 claims carried
+    one on a live box)."""
+    from models import TimelineEvent, VisitDescriptor
+    SessionLocal, row_id = db
+    assert apply_plate_event(_envelope(row_id, correlation_id="corr-abc")) == "applied"
+    s = SessionLocal()
+    try:
+        row = s.get(TimelineEvent, row_id)
+        assert (row.payload or {}).get("correlation_id") == "corr-abc"
+        claim = s.query(VisitDescriptor).filter_by(event_id=row_id, kind="plate").one()
+        assert claim.correlation_id == "corr-abc"
+    finally:
+        s.close()
