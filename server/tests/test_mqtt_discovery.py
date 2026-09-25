@@ -9,6 +9,7 @@ messages (Home Assistant's status, commands) are fed in.
 from __future__ import annotations
 
 import asyncio
+import time
 import json
 import types
 
@@ -185,12 +186,49 @@ class FakeBroker:
         return next((p for t, p, _ in reversed(self.published) if t == topic), None)
 
 
-async def _until(predicate, timeout=5.0):
-    for _ in range(int(timeout / 0.02)):
+async def _until(predicate, timeout=5.0, *, what: str = "", show=None):
+    """Poll until ``predicate`` holds, then say something useful if it
+    never does.
+
+    TWO FIXES, FOR TWO SEPARATE PROBLEMS.
+
+    The timeout was 5 seconds, which is generous on an idle laptop and
+    not on a loaded CI runner: this suite publishes through a real
+    asyncio event loop and a background manager, and when the box is
+    busy those tasks get scheduled late. It failed exactly once here,
+    under two test suites running at the same time, and passed sixteen
+    runs in a row otherwise — the signature of a deadline that is fine
+    until the machine is not. A longer one costs NOTHING on a passing
+    run, because the loop returns the moment the predicate holds; it
+    only buys patience for the run that would otherwise fail for being
+    hurried.
+
+    And the message was ``"condition not met in time"``. Which
+    condition, out of nine in this file, and what was the state when it
+    gave up? Neither. Chasing that failure meant re-running the suite to
+    find out which line it was, then adding prints — twenty minutes to
+    learn something the assertion could have said. ``what`` names the
+    wait; ``show`` renders whatever the reader needs to see, and is
+    where "it never arrived" becomes "it arrived on a topic you did not
+    expect".
+    """
+    deadline = time.monotonic() + timeout
+    while True:
         if predicate():
             return
+        if time.monotonic() >= deadline:
+            break
         await asyncio.sleep(0.02)
-    raise AssertionError("condition not met in time")
+
+    detail = ""
+    if show is not None:
+        try:
+            detail = f"\n  observed: {show()!r}"
+        except Exception as exc:  # noqa: BLE001 — diagnosing, not asserting
+            detail = f"\n  observed: <could not render: {exc!r}>"
+    raise AssertionError(
+        f"waited {timeout:g}s for {what or 'a condition'} and it never "
+        f"happened.{detail}")
 
 
 @pytest.fixture
@@ -254,13 +292,17 @@ def test_bridge_publishes_runs_commands_and_stops_on_revoke(bridge_env):
                                    required_scope="cameras.manage",
                                    payload={"key": "camera.1.detection", "state": False,
                                             "attributes": {}})
-        await _until(lambda: broker.last(f"{prefix}/camera.1.detection/state") == "OFF")
+        await _until(lambda: broker.last(f"{prefix}/camera.1.detection/state") == "OFF",
+                     what="the detection switch to publish OFF",
+                     show=lambda: broker.last(f"{prefix}/camera.1.detection/state"))
         # An event reaches the event topic as a CloudEvent.
         await publish_entity_state(key="camera.1.detections", camera_id=1,
                                    required_scope="cameras.view",
                                    payload={"key": "camera.1.detections",
                                             "event": {"type": "person", "attributes": {}}})
-        await _until(lambda: broker.last(f"{prefix}/camera.1.detections/event") is not None)
+        await _until(lambda: broker.last(f"{prefix}/camera.1.detections/event") is not None,
+                     what="a detection event on the camera's event topic",
+                     show=lambda: sorted({t for t, _p, _r in broker.published}))
         ce = json.loads(broker.last(f"{prefix}/camera.1.detections/event"))
         assert ce["specversion"] == "1.0" and ce["data"]["event_type"] == "person"
 
@@ -290,7 +332,9 @@ def test_bridge_publishes_runs_commands_and_stops_on_revoke(bridge_env):
 
         # Revoked: the session ends and the site goes offline.
         env.client.delete(f"/api/v1/api-tokens/{minted['id']}", headers=env.jwt("admin"))
-        await _until(lambda: broker.last(site["avty_t"]) == "offline")
+        await _until(lambda: broker.last(site["avty_t"]) == "offline",
+                     what="the site availability topic to go offline",
+                     show=lambda: broker.last(site["avty_t"]))
         await bridge.stop()
         await asyncio.wait_for(task, 5)
         return prefix
@@ -330,7 +374,8 @@ def test_manager_keeps_unchanged_bridges_and_clears_removed_ones(bridge_env):
         await manager.reload()
         await _until(lambda: any(p == "online" for t, p, _ in broker.published
                                  if t.endswith("/status")))
-        await _until(lambda: configs())
+        await _until(lambda: configs(), what="a discovery config to be published",
+                     show=lambda: sorted(configs()))
         first = manager._bridges[iid][0]
         # Nothing changed: the same bridge keeps running (no offline blip).
         await manager.reload()
