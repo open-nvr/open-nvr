@@ -43,6 +43,7 @@ import {
 import { AlarmsTable } from '../components/alarms/AlarmsTable'
 import { useAckAlarms, useAlarmsList } from '../components/alarms/useAlarmsList'
 import type { RegisteredApp } from './AppCatalog'
+import { AppPageHeader } from './apps/AppSetup'
 
 export const LEFT_ITEMS_CAPABILITY = 'left_items'
 const SOURCE = 'abandoned-object'
@@ -249,7 +250,8 @@ export function LeftItems() {
 
   return (
     <section className="space-y-4">
-      <PageHeader
+      <AppPageHeader
+        app={app}
         title={t('leftItems.title')}
         description={t('leftItems.description')}
         actions={

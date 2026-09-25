@@ -45,6 +45,7 @@ import { AlarmEvidenceViewer } from '../components/alarms/AlarmsTable'
 import { useAlarmsList } from '../components/alarms/useAlarmsList'
 import { alarmSeenIso, alertsInboxService, type InboxAlert } from '../services/alertsInboxService'
 import type { RegisteredApp } from './AppCatalog'
+import { AppPageHeader } from './apps/AppSetup'
 
 export const DELIVERIES_CAPABILITY = 'deliveries'
 const SOURCE = 'package-delivery'
@@ -331,7 +332,8 @@ export function Deliveries() {
 
   return (
     <section className="space-y-4">
-      <PageHeader
+      <AppPageHeader
+        app={app}
         title={t('deliveries.title')}
         description={t('deliveries.description')}
         actions={
@@ -458,9 +460,9 @@ function CountedBy({ counted, hours, checks }: {
         <AlertTriangle size={14} className="text-[var(--danger)]" />
         <span>
           <b>No skill can count packages on this box.</b> Install a VQA or package-detection adapter
-          (AI Engine → Skills) — until then the doors below are watched but never counted.
+          (AI &amp; Detections → AI Adapters) — until then the doors below are watched but never counted.
         </span>
-        <Link to="/ai-engine" className="ml-auto text-[var(--accent)] underline">Skills</Link>
+        <Link to="/ai-adapters" className="ml-auto text-[var(--accent)] underline">AI Adapters</Link>
       </div>
     )
   }

@@ -43,6 +43,7 @@ import {
 import { AlarmsTable } from '../components/alarms/AlarmsTable'
 import { useAckAlarms, useAlarmsList } from '../components/alarms/useAlarmsList'
 import type { RegisteredApp } from './AppCatalog'
+import { AppPageHeader } from './apps/AppSetup'
 
 export const CROSSINGS_CAPABILITY = 'crossings'
 const SOURCE = 'line-crossing'
@@ -243,7 +244,8 @@ export function Tripwires() {
 
   return (
     <section className="space-y-4">
-      <PageHeader
+      <AppPageHeader
+        app={app}
         title={t('tripwires.title')}
         description={t('tripwires.description')}
         actions={

@@ -18,7 +18,7 @@
 
 import { Outlet, NavLink, Link, useLocation } from 'react-router-dom'
 import { DeviceBlockedOverlay } from '../components/DeviceBlockedOverlay'
-import { AlertTriangle, Bell, BellRing, Boxes, Brain, Briefcase, Camera, Car, ChevronDown, Cloud, Cpu, Database, DoorOpen, FileCheck, FileSearch, GitCommitHorizontal, Hourglass, KeyRound, Layers, LifeBuoy, LogOut, Maximize, Menu, Minimize, Monitor, MonitorPlay, Moon, Network, PackageCheck, Plug, RefreshCcw, Search as SearchIcon, Settings as SettingsIcon, Shield, ShieldAlert, ShieldCheck, Sun, User as UserIcon, UserRound, Users } from 'lucide-react'
+import { AlertTriangle, Bell, BellRing, Boxes, Briefcase, Camera, Car, ChevronDown, Cloud, Cpu, Database, DoorOpen, FileCheck, FileSearch, GitCommitHorizontal, Hourglass, KeyRound, Layers, LifeBuoy, LogOut, Maximize, Menu, Minimize, Monitor, MonitorPlay, Moon, Network, PackageCheck, Plug, RefreshCcw, Search as SearchIcon, Settings as SettingsIcon, Shield, ShieldAlert, ShieldCheck, Sun, User as UserIcon, UserRound, Users } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import { apiService } from '../lib/apiService'
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
@@ -76,7 +76,6 @@ const NAV_GROUPS: NavGroup[] = [
     key: 'ai',
     label: 'AI & Detections',
     items: [
-      { to: '/ai-engine', label: 'AI Engine', icon: <Brain size={16} />, perm: '/ai-engine' },
       { to: '/byom', label: 'AI Models (BYOM)', icon: <Boxes size={16} />, perm: '/byom' },
       { to: '/ai-detection-results', label: 'Detection Results', icon: <Database size={16} />, perm: '/byom' },
       { to: '/ai-adapters', label: 'AI Adapters', icon: <Layers size={16} />, perm: '/ai-engine' },
@@ -118,7 +117,7 @@ const NAV_GROUPS: NavGroup[] = [
 const NAV_LABEL_KEYS: Record<string, string> = {
   Dashboard: 'nav.dashboard', 'Live View': 'nav.liveView', Recordings: 'nav.recordings',
   Search: 'nav.search', Cameras: 'nav.cameras',
-  'AI & Detections': 'nav.aiDetections', 'AI Engine': 'nav.aiEngine', 'AI Models (BYOM)': 'nav.aiModels',
+  'AI & Detections': 'nav.aiDetections', 'AI Models (BYOM)': 'nav.aiModels',
   'Detection Results': 'nav.detectionResults', 'AI Adapters': 'nav.aiAdapters', 'Security & Network': 'nav.securityNetwork',
   Network: 'nav.network', 'Logs & Forensics': 'nav.logsForensics', Governance: 'nav.governance', 'Audit Logs': 'nav.auditLogs',
   'Compliance & Reports': 'nav.complianceReports', 'Alerts & Incidents': 'nav.alertsIncidents', 'Access Control (RBAC)': 'nav.accessControl',

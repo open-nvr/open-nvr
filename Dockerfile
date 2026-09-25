@@ -45,29 +45,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy uv binary
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
-# Copy project files for dependency resolution.
-#
-# THE LOCKFILES ARE NOT OPTIONAL. Without them `uv sync --frozen` fails
-# with "Unable to find lockfile", and the `|| uv sync` that used to
-# follow quietly resolved the newest of everything instead — so CI
-# tested one dependency set and the shipped image ran another, with
-# nothing reporting the difference.
-#
-# That is not hypothetical twice over. FastAPI drifted to 0.141.1
-# against a lock pinning 0.135.3 and every API token started getting
-# 403s; the note in docs/design/home-assistant-integration-
-# implementation-plan.md calls it a "Trap found live" and works around
-# the symptom. Then SQLAlchemy 2.1.0 changed the default DBAPI for a
-# bare `postgresql://` URL from psycopg2 to psycopg 3, which is not
-# installed, and the backend could not import at all.
+# Copy project files for dependency resolution. The lockfiles are what make
+# the image reproducible: without them `uv sync --frozen` has nothing to
+# install from, and an unpinned resolve takes whatever is newest that day —
+# which is how SQLAlchemy 2.1 (default postgresql:// driver switched to
+# psycopg 3, not installed) got into core:main and crash-looped it on boot.
 COPY server/pyproject.toml server/uv.lock /build/server/
 COPY kai-c/pyproject.toml kai-c/uv.lock /build/kai-c/
 
 # Create virtual environments and sync dependencies (--no-install-project skips building the project itself)
-#
-# No `|| uv sync` fallback. A lockfile out of step with pyproject.toml
-# is a thing to fix in one command, and failing here says so; silently
-# building something else does not.
+# --frozen and nothing else: a lockfile that disagrees with pyproject.toml
+# fails the build here, rather than shipping an image nobody tested.
 # Server dependencies
 RUN cd /build/server && uv venv /build/server-venv && \
     VIRTUAL_ENV=/build/server-venv uv sync --frozen --no-dev --no-install-project --directory /build/server --active
