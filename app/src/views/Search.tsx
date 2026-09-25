@@ -106,6 +106,14 @@ type SearchResponse = {
    *  would find. Empty when there were results, or when no single chip
    *  explains it. */
   relax?: RelaxHint[]
+  /** Present when a leftover word was DROPPED to avoid an empty page.
+   *  These results are not the search that was typed, so the page owes
+   *  the operator a visible say-so and a way back. */
+  relaxed?: { dropped: string; without: number }
+  /** Why the ranking looks the way it does, when a second arm took part
+   *  — or why it could not. Absent on a deployment that has never
+   *  embedded anything, which is most of them. */
+  semantic?: { used: boolean; reason?: string; note?: string; text_total?: number }
 }
 
 /** The filters the page owns, which are exactly the API's parameters. */
@@ -222,6 +230,27 @@ export function Search() {
   const cameraName = (id: number) =>
     camerasQuery.data?.find((c) => c.id === id)?.name ?? `cam${id}`
 
+  // What this deployment can actually describe a visit with. The
+  // endpoint asks KAI-C which skills are registered AND healthy, and
+  // its docstring has always said the UI should use it "to say what
+  // searching by colour or by face would even mean here, instead of
+  // offering filters that can never match". Until now nothing did, so
+  // the empty state guessed on the operator's behalf.
+  const planQuery = useQuery({
+    queryKey: ['enrichment-plan'],
+    queryFn: async () => {
+      const { data } = await api.get('/api/v1/search/enrichment-plan')
+      return data as { descriptor_kinds?: string[] }
+    },
+    retry: 0,
+    staleTime: 60_000,
+  })
+  // undefined = not asked yet or unreachable, which is NOT the same as
+  // "this box describes nothing" and must not be rendered as if it were.
+  const kinds: string[] | undefined = planQuery.isSuccess
+    ? (planQuery.data?.descriptor_kinds ?? [])
+    : undefined
+
   const searchQuery = useQuery({
     queryKey: ['footage-search', request.toString()],
     queryFn: async () => {
@@ -291,9 +320,31 @@ export function Search() {
 
   const results = data?.results ?? []
   const relax = data?.relax ?? []
+  const relaxed = data?.relaxed
+  const semantic = data?.semantic
   const total = data?.total ?? 0
   const pages = Math.ceil(total / PAGE)
   const nothingAsked = !sentence && !editing
+
+  // WHAT THIS BOX CAN ANSWER, not what deployments in general can.
+  //
+  // The old sentence said "a deployment with no captioner can search
+  // classes, cameras, times and plates, but not colours" — true, and
+  // useless, because it never said which kind of deployment this is.
+  // An operator reading it cannot tell whether their search failed
+  // because nothing was red or because nothing here has ever looked at
+  // a colour. Those are opposite answers.
+  //
+  // kinds === undefined means the registry could not be asked. That is
+  // a third state and gets the old wording: claiming a box describes
+  // nothing because KAI-C was briefly unreachable would be a worse lie
+  // than the vague one.
+  const emptyReason =
+    kinds === undefined
+      ? 'Nothing matched. Words only match what a skill wrote about a frame, so a deployment with nothing describing visits can search classes, cameras, times and plates, but not colours.'
+      : kinds.length === 0
+        ? 'Nothing matched — and nothing on this system describes visits, so words can only match a plate. Install a captioner or a colour/type skill from the App Catalog and searches like “red van” start working; classes, cameras, times and plates work now.'
+        : `Nothing matched. This system can describe a visit by ${kinds.join(', ')} — anything outside that has no words to match against, so try a class, a camera, a time or a plate.`
 
   const chips = interp
     ? [
@@ -455,7 +506,7 @@ export function Search() {
                   ? 'One of the chips above is doing all the narrowing.'
                   : chips.length > 1
                     ? 'Nothing matched all of those at once. Remove a chip above — the time window and the words are the two that usually narrow it too far.'
-                    : 'Nothing matched. Words only match what a captioner wrote about a frame, so a deployment with no captioner can search classes, cameras, times and plates, but not colours.'
+                    : emptyReason
             }
           />
           {/* The server already counted what dropping each chip would
@@ -490,6 +541,51 @@ export function Search() {
             </span>
             {searchQuery.isFetching && <span>updating…</span>}
           </div>
+
+          {/* THESE ARE NOT THE SEARCH THAT WAS TYPED.
+              The server drops a leftover word rather than showing a
+              blank page for a sentence it mostly understood — "what is
+              NUMBER of it" should not cost you 421 cars. But results
+              nobody asked for, handed over silently, are the same
+              confident-wrong-answer failure wearing better clothes: the
+              operator would later wonder why a filter did nothing. So
+              it is said out loud, and it is one click to get the strict
+              search back — an explicit `text` is never dropped, which
+              is exactly what pinning it does. */}
+          {relaxed && (
+            <div className="flex flex-wrap items-center gap-2 rounded border border-[var(--border)] bg-[var(--bg-2)] px-3 py-2 text-xs">
+              <span className="text-[var(--text-dim)]">
+                Nothing was described as <b className="text-[var(--text)]">{relaxed.dropped}</b>,
+                so that word was set aside — showing the {relaxed.without}{' '}
+                {relaxed.without === 1 ? 'result' : 'results'} the rest of your search matched.
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                className="ml-auto"
+                onClick={() => {
+                  const base = editing ? { ...filters! } : asFilters()
+                  base.text = relaxed.dropped
+                  setFilters(base)
+                  setPage(0)
+                }}
+              >
+                Search for “{relaxed.dropped}” anyway
+              </Button>
+            </div>
+          )}
+
+          {/* Vectors exist here and the query could not be turned into
+              one, so this ranking is words-only and the operator is
+              owed that rather than a quietly worse result. Absent on a
+              deployment that never embedded anything — a permanent
+              "semantic: off" banner would be noise about a feature
+              nobody switched on. */}
+          {semantic && semantic.used === false && semantic.reason === 'embedder-unreachable' && (
+            <div className="rounded border border-[var(--warning,#b7791f)] px-3 py-2 text-xs text-[var(--warning,#b7791f)]">
+              {semantic.note ?? 'Ranked by words only — the embedding adapter could not be reached.'}
+            </div>
+          )}
 
           <SearchAnswer answer={data?.answer} />
 
