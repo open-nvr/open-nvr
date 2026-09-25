@@ -744,3 +744,24 @@ def test_the_tool_schema_advertises_the_attribute(anyio_backend=None):
     assert "attr" in props
     assert props["attr"]["type"] == "array"
     assert "blue" in json.dumps(props["attr"]).lower()
+
+
+def test_the_schema_tells_the_model_a_name_is_askable(anyio_backend=None):
+    """"Was Varun here yesterday?" is answerable and the model has to
+    know it.
+
+    face_id IS written — smart-doorbell claims it through
+    /internal/app/visits/claims — and it is deliberately kept OUT of
+    free text, so a name will never be found by searching words. The
+    only route is the attr filter. A model that has not been told that
+    will reach for describe_camera and narrate the live view, which is
+    the behaviour this whole thread started from.
+    """
+    defs = build_tool_definitions(["cam1"])
+    spec = next(t for t in defs if t["function"]["name"] == "search_history")
+    desc = spec["function"]["parameters"]["properties"]["attr"]["description"].lower()
+
+    assert "name" in desc, "the schema never mentions that a person's name is a filter"
+    assert "list_people" in desc, (
+        "the model needs pointing at the roster — a misspelled name matches "
+        "nothing, and silently")

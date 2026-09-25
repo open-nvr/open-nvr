@@ -85,11 +85,21 @@ TASK_DESCRIPTORS: dict[str, dict[str, Any]] = {
         # attached to a person on a camera. Enabled per deployment, and
         # every report that uses it says so.
         #
-        # Declared, and currently unproduced. No enricher in core writes
-        # face_id and no app does either, so this row describes what the
-        # kind would mean rather than something the store holds. See
-        # tests/test_descriptor_producers.py — it fails if the set of
-        # unproduced kinds changes without the reason changing with it.
+        # CORE does not write it — descriptor_enrichment refuses the
+        # kind outright, and descriptor_store keeps it out of the
+        # projected words so a name cannot be reached by free-text
+        # search. It is left to an app the operator installed on
+        # purpose, and since RFC-0003 one exists: smart-doorbell writes
+        # face_id through /internal/app/visits/claims, roster-scoped,
+        # with the binding recorded.
+        #
+        # This comment used to say the kind was unproduced and that no
+        # app wrote it. That went stale when the doorbell shipped, and
+        # it is the kind of staleness that costs real time: a reader
+        # trusting it concludes "was this person here?" cannot be
+        # answered, when on a deployment running that app it already
+        # can. tests/test_descriptor_producers.py is the authority —
+        # it carries the same reasoning and fails if it drifts.
         "kinds": ["face_id"],
         "labels": ["person"],
     },
