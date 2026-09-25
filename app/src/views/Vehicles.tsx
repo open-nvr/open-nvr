@@ -75,6 +75,7 @@ import {
   EmptyState, PageHeader, SeverityBadge, Skeleton,
 } from '../components/ui'
 import type { RegisteredApp } from './AppCatalog'
+import { AppConfigureButton, AppPageHeader } from './apps/AppSetup'
 
 export const LPR_TASK = 'license_plate_recognition'
 
@@ -837,8 +838,12 @@ export function Vehicles() {
       else await cameraService.releaseSkillCamera(LPR_SKILL, cameraId, consumer)
     },
     // The picker reads eligibility off `assignments`, so it has to see
-    // the write it just made.
-    onSettled: () => queryClient.invalidateQueries({ queryKey: ['cameras'] }),
+    // the write it just made — and the app row's picked_cameras is what
+    // the header's "no camera selected" notice reads, so that too.
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ['cameras'] })
+      queryClient.invalidateQueries({ queryKey: ['apps'] })
+    },
     onError: (e) => showError(extractApiError(e, 'Could not assign the camera.')),
   })
   // Cameras actually reading plates. Empty means the skill is dormant:
@@ -1279,7 +1284,8 @@ export function Vehicles() {
             whichever part of the platform ran the OCR" — an implementation
             note, not something an operator needs on every visit, and it
             cost a second line. */}
-        <PageHeader
+        <AppPageHeader
+          app={lprApp}
           title={t('vehicles.title')}
           description={t('vehicles.description')}
           actions={
@@ -1308,6 +1314,7 @@ export function Vehicles() {
                 <Download size={13} className={exporting ? 'animate-pulse' : ''} />
                 {exporting ? 'Exporting…' : t('vehicles.export')}
               </Button>
+              <AppConfigureButton app={lprApp} size="sm" />
               <Button size="sm" onClick={() => eventsQuery.refetch()} disabled={eventsQuery.isFetching}>
                 <RefreshCw size={13} className={eventsQuery.isFetching ? 'animate-spin' : ''} /> {t('vehicles.refresh')}
               </Button>
@@ -1658,7 +1665,7 @@ export function Vehicles() {
               ? t('vehicles.noMatch')
               : t('vehicles.noReads')}
             description={lprCameras.length === 0
-              ? 'No camera is reading plates yet. Give a camera a role under Vehicle register → Camera roles (or select it for License Plate Recognition in App Catalog → Configure → Cameras) and visits will appear here with their evidence photos.'
+              ? 'No camera is reading plates yet. Give a camera a role under Gate settings → Camera roles (or pick it under Configure → Cameras) and visits will appear here with their evidence photos.'
               : 'Vehicle visits appear here with their evidence photos.'}
             action={(debouncedPlate || cameraId !== '') ? (
               <Button variant="outline" onClick={() => {
@@ -2394,20 +2401,6 @@ function RegistryTab({
         }}
       />
 
-      {/* The one setup problem that makes everything else moot, as a single
-          banner that leads to the fix — not a warning buried in a card. */}
-      {reading.length === 0 && (
-        <div className="flex flex-wrap items-center gap-3 rounded border border-[var(--warning,#b7791f)] px-3 py-2 text-sm text-[var(--warning,#b7791f)]">
-          <span className="min-w-0 flex-1">
-            No camera is reading plates yet — give a camera a role and this app starts reading it.
-          </span>
-          {cameras.length > 0 && (
-            <Button variant="outline" size="sm" onClick={() => (onOpenGate ? onOpenGate() : openSettings({ highlight: true }))}>
-              Assign camera roles
-            </Button>
-          )}
-        </div>
-      )}
 
       {/* The register is what this tab is for, so it comes first — on the
           same table as the plate reads: header pinned, rows scrolling in

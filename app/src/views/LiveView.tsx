@@ -1083,7 +1083,7 @@ function MenuItem({ item, onClose }: { item: { icon: React.ReactNode; label: str
         navigate && navigate('/settings/media-source')
         break
       case 'image':
-        navigate && navigate('/ai-engine')
+        navigate && navigate('/search')
         break
       case 'shutdown':
         try {

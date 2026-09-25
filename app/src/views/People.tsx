@@ -47,6 +47,7 @@ import {
 } from '../components/ui'
 import { Modal } from '../components/Modal'
 import type { RegisteredApp } from './AppCatalog'
+import { AppConfigureButton, AppPageHeader } from './apps/AppSetup'
 
 export const PEOPLE_CAPABILITY = 'people'
 
@@ -396,7 +397,8 @@ export function People() {
 
   return (
     <section className="space-y-4">
-      <PageHeader
+      <AppPageHeader
+        app={app}
         title={t('people.title')}
         description={t('people.description')}
         actions={
@@ -404,6 +406,7 @@ export function People() {
             <Button size="sm" variant="outline" onClick={() => { refreshDirectory(); statusQuery.refetch() }}>
               <RefreshCw size={14} /> Refresh
             </Button>
+            <AppConfigureButton app={app} size="sm" />
             <Button size="sm" variant="primary" onClick={() => setEditor({ mode: 'add' })}>
               <UserPlus size={14} /> Add person
             </Button>

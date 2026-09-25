@@ -40,6 +40,7 @@ import {
 import { AlarmsTable } from '../components/alarms/AlarmsTable'
 import { useAckAlarms, useAlarmsList } from '../components/alarms/useAlarmsList'
 import type { RegisteredApp } from './AppCatalog'
+import { AppPageHeader } from './apps/AppSetup'
 
 export const LOITERING_CAPABILITY = 'loitering'
 const SOURCE = 'loitering-detection'
@@ -280,7 +281,8 @@ export function Loitering() {
 
   return (
     <section className="space-y-4">
-      <PageHeader
+      <AppPageHeader
+        app={app}
         title={t('loitering.title')}
         description={t('loitering.description')}
         actions={

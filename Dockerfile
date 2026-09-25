@@ -45,20 +45,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy uv binary
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
-# Copy project files for dependency resolution
-COPY server/pyproject.toml /build/server/pyproject.toml
-COPY kai-c/pyproject.toml /build/kai-c/pyproject.toml
+# Copy project files for dependency resolution. The lockfiles are what make
+# the image reproducible: without them `uv sync --frozen` has nothing to
+# install from, and an unpinned resolve takes whatever is newest that day —
+# which is how SQLAlchemy 2.1 (default postgresql:// driver switched to
+# psycopg 3, not installed) got into core:main and crash-looped it on boot.
+COPY server/pyproject.toml server/uv.lock /build/server/
+COPY kai-c/pyproject.toml kai-c/uv.lock /build/kai-c/
 
 # Create virtual environments and sync dependencies (--no-install-project skips building the project itself)
+# --frozen and nothing else: a lockfile that disagrees with pyproject.toml
+# fails the build here, rather than shipping an image nobody tested.
 # Server dependencies
 RUN cd /build/server && uv venv /build/server-venv && \
-    VIRTUAL_ENV=/build/server-venv uv sync --frozen --no-dev --no-install-project --directory /build/server --active || \
-    VIRTUAL_ENV=/build/server-venv uv sync --no-dev --no-install-project --directory /build/server --active
+    VIRTUAL_ENV=/build/server-venv uv sync --frozen --no-dev --no-install-project --directory /build/server --active
 
-# Kai-C dependencies  
+# Kai-C dependencies
 RUN cd /build/kai-c && uv venv /build/kai-c-venv && \
-    VIRTUAL_ENV=/build/kai-c-venv uv sync --frozen --no-dev --no-install-project --directory /build/kai-c --active || \
-    VIRTUAL_ENV=/build/kai-c-venv uv sync --no-dev --no-install-project --directory /build/kai-c --active
+    VIRTUAL_ENV=/build/kai-c-venv uv sync --frozen --no-dev --no-install-project --directory /build/kai-c --active
 
 # Install opencv-python-headless separately (not in pyproject.toml)
 RUN uv pip install --python /build/server-venv/bin/python --no-cache-dir opencv-python-headless

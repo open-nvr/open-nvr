@@ -310,7 +310,6 @@ export function Support() {
             <div className="font-medium mb-1">Documentation</div>
             <ul className="list-disc list-inside text-[var(--text-dim)]">
               <li>Updates & Patching: see the Updates page for Media Server config</li>
-              <li>AI Engine and Integrations: settings saved locally until backend is wired</li>
               <li>Health endpoint: GET /health</li>
             </ul>
           </div>

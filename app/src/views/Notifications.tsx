@@ -53,6 +53,7 @@ import {
   EmptyState, PageHeader, Skeleton, type BadgeVariant,
 } from '../components/ui'
 import type { RegisteredApp } from './AppCatalog'
+import { AppPageHeader } from './apps/AppSetup'
 
 export const NOTIFICATIONS_CAPABILITY = 'notifications'
 
@@ -301,7 +302,8 @@ export function Notifications() {
 
   return (
     <section className="space-y-4">
-      <PageHeader
+      <AppPageHeader
+        app={app}
         title={t('notifications.title')}
         description={t('notifications.description')}
         actions={

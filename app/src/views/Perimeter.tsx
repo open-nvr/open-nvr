@@ -44,6 +44,7 @@ import {
 import { AlarmsTable } from '../components/alarms/AlarmsTable'
 import { useAckAlarms, useAlarmsList } from '../components/alarms/useAlarmsList'
 import type { RegisteredApp } from './AppCatalog'
+import { AppPageHeader } from './apps/AppSetup'
 
 export const INTRUSION_CAPABILITY = 'intrusion'
 const SOURCE = 'intrusion-detection'
@@ -269,7 +270,8 @@ export function Perimeter() {
 
   return (
     <section className="space-y-4">
-      <PageHeader
+      <AppPageHeader
+        app={app}
         title={t('perimeter.title')}
         description={t('perimeter.description')}
         actions={

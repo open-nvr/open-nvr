@@ -45,6 +45,7 @@ import {
   EmptyState, PageHeader, Skeleton, type BadgeVariant,
 } from '../components/ui'
 import type { RegisteredApp } from './AppCatalog'
+import { AppPageHeader } from './apps/AppSetup'
 
 export const GATES_CAPABILITY = 'gates'
 
@@ -246,7 +247,8 @@ export function Gates() {
 
   return (
     <section className="space-y-4">
-      <PageHeader
+      <AppPageHeader
+        app={app}
         title={t('gates.title')}
         description={t('gates.description')}
         actions={

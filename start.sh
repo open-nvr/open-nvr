@@ -1301,6 +1301,61 @@ print_first_time_setup_token() {
     fi
 }
 
+# ── Front door reachability ────────────────────────────────
+# nginx's own healthcheck runs INSIDE its container, so it stays "healthy"
+# while the host cannot reach it at all. Docker Desktop's port forwarder
+# for a container can go stale (seen after a Docker backend hiccup, across
+# a stop/start): it still accepts on :443, then drops the connection before
+# nginx ever sees it. Every page fails, nothing reaches any log, and it
+# looks like nginx holding a stale address for opennvr-core — it is not;
+# nginx re-resolves upstreams per request. Restarting nginx makes Docker
+# rebuild the forward, so probe from the host the way a browser would and
+# do that restart here instead of leaving the operator to find it.
+edge_https_ok() {
+    [ "$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 "$1" 2>/dev/null)" = "200" ]
+}
+
+check_edge_reachable() {
+    local container="opennvr_nginx"   # container_name from compose
+    command -v curl >/dev/null 2>&1 || return 0
+    # Not running = opennvr-core never got healthy (nginx waits on it), which
+    # print_first_time_setup_token has already reported. Nothing to probe.
+    [ "$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null)" = "running" ] || return 0
+
+    local port host url i
+    port="${NGINX_HOST_HTTPS_PORT:-$(get_env_var NGINX_HOST_HTTPS_PORT 2>/dev/null || echo "")}"
+    port="${port:-443}"
+    host="${NGINX_BIND_HOST:-$(get_env_var NGINX_BIND_HOST 2>/dev/null || echo "")}"
+    if [ -z "$host" ] || [ "$host" = "0.0.0.0" ]; then host="127.0.0.1"; fi
+    url="https://${host}:${port}/healthz"
+
+    # A few tries: nginx may have been started a moment ago.
+    for i in 1 2 3 4 5; do
+        edge_https_ok "$url" && return 0
+        sleep 2
+    done
+
+    # Unreachable from here. Is nginx itself answering, inside Docker?
+    if ! docker exec "$container" wget -q -O - --no-check-certificate https://localhost/healthz >/dev/null 2>&1; then
+        echo -e "  ${YELLOW}nginx is running but not answering its own health check. Inspect:${NC}"
+        echo -e "  ${GRAY}    docker logs --tail 50 ${container}${NC}"
+        return 0
+    fi
+
+    echo -e "  ${YELLOW}nginx is healthy but ${url} is unreachable from this host —${NC}"
+    echo -e "  ${YELLOW}Docker's port forward to it went stale. Restarting nginx ...${NC}"
+    docker restart "$container" >/dev/null 2>&1
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        sleep 2
+        if edge_https_ok "$url"; then
+            echo -e "  ${GREEN}✓ Web UI reachable again at https://${host}:${port}/${NC}"
+            return 0
+        fi
+    done
+    echo -e "  ${RED}The Web UI is still unreachable from this host after restarting nginx.${NC}"
+    echo -e "  ${GRAY}Restart Docker (Docker Desktop on macOS/Windows), then run ./start.sh up again.${NC}"
+}
+
 # ── Raw start / build (no front-door prompt) ───────────────
 # These assume .env already exists — the smart `start` front door and the
 # installer guarantee that before calling them. Kept as their own commands so
@@ -1329,6 +1384,7 @@ run_up() {
     print_access_urls "$ADMIN_USER"
     print_security_posture
     print_first_time_setup_token "$ARGS"
+    check_edge_reachable
 }
 
 run_build() {
@@ -1353,6 +1409,7 @@ run_build() {
     print_access_urls "$ADMIN_USER"
     print_security_posture
     print_first_time_setup_token "$ARGS"
+    check_edge_reachable
 }
 
 # ── Smart front door (bare `./start.sh`) ───────────────────

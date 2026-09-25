@@ -20,7 +20,7 @@
 import { useCallback, useMemo, useRef, useState, type ReactNode } from 'react'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import {
-  CameraOff, ChevronDown, ChevronUp, Download, FileText, Settings2, ShieldCheck,
+  ChevronDown, ChevronUp, Download, FileText, Settings2, ShieldCheck,
 } from 'lucide-react'
 import { useAuth } from '../auth/AuthContext'
 import { apiService } from '../lib/apiService'
@@ -29,7 +29,7 @@ import { useSnackbar } from '../components/Snackbar'
 import { AuthedImage } from '../components/AuthedImage'
 import { EvidenceViewer } from '../components/EvidenceViewer'
 import {
-  Badge, Button, Card, CardContent, EmptyState, ErrorCard, PageHeader, Skeleton,
+  Badge, Button, Card, CardContent, EmptyState, ErrorCard, Skeleton,
   type BadgeVariant,
 } from '../components/ui'
 import { DataTable, type Column } from '../components/ui/DataTable'
@@ -38,6 +38,7 @@ import { SegmentedControl } from '../components/ui/SegmentedControl'
 import { usePagination } from '../hooks/usePagination'
 import { APP_VERTICALS, manifestProvides } from '../lib/appVerticals'
 import { AppConfigModal, type RegisteredApp } from './AppCatalog'
+import { AppPageHeader } from './apps/AppSetup'
 import { useDateFormat } from '../i18n'
 import { useAppCameras } from './apps/CameraPicker'
 import { LiveCameraPanel } from './guardscan/LiveCameraPanel'
@@ -388,44 +389,18 @@ export default function GuardCompliance() {
     // own vertical padding.
     <section className="flex min-h-0 flex-col space-y-4"
              style={{ height: 'calc(100vh - 5rem)' }}>
-      <PageHeader
+      {/* The "no camera selected" notice comes with the header: the app's
+          state, so it sits with the app's name — not in the list, where it
+          read as something about the rows. Past screenings stay listed:
+          they are real history. */}
+      <AppPageHeader
+        app={guardApp}
         title={
           <span className="inline-flex items-center gap-2">
             <ShieldCheck size={18} className="text-[var(--accent)]" /> Entry Screening
           </span>
         }
-        description={
-          <>
-            Did the guard scan every person, properly?
-            {nothingPicked && (
-              // The app's state, so it sits with the app's name — not in
-              // the list, where it read as something about the rows. Past
-              // screenings stay listed: they are real history, and
-              // without this the page looks like a quiet door while
-              // nothing at all is being watched.
-              <span
-                role="status"
-                title={canConfigure
-                  ? 'Guard Scan is not running and uses no compute until a camera is selected.'
-                  : 'Guard Scan is not running and uses no compute. Ask an administrator to select the entrance camera (App Catalog → Guard Scan Compliance → Configure → Cameras).'}
-                className="ml-3 inline-flex items-center gap-1.5 rounded border border-amber-500/40
-                           bg-amber-500/10 px-2 py-0.5 align-middle text-xs text-amber-300"
-              >
-                <CameraOff size={13} />
-                Not running — no camera selected
-                {canConfigure && (
-                  <button
-                    type="button"
-                    onClick={() => setConfigOpen(true)}
-                    className="ml-1 font-medium text-[var(--accent)] hover:underline"
-                  >
-                    Select cameras
-                  </button>
-                )}
-              </span>
-            )}
-          </>
-        }
+        description="Did the guard scan every person, properly?"
         actions={
           <div className="flex flex-wrap items-center gap-2">
             {/* This one really is page-wide: it moves the tiles, the
