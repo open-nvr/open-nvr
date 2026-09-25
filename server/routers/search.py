@@ -43,7 +43,8 @@ from sqlalchemy.orm import Session
 
 from core.auth import get_current_active_user
 from core.database import get_db
-from models import AppAlert, Camera, CameraZone, TimelineEvent, User
+from models import (AppAlert, Camera, CameraZone, TimelineEvent, User,
+                    VisitDescriptor)
 
 # The internal door is defined once, next to the pipeline's write routes;
 # the metrics scrape is the same door and should not grow a second lock.
@@ -254,6 +255,77 @@ async def enrichment_plan(
         # a "colour" or "face" filter is worth offering at all.
         "descriptor_kinds": kinds,
         "label": label,
+    }
+
+
+#: The claim kind whose value is a PERSON. Named here, next to the
+#: endpoint that lists them, because the reason the list has to exist is
+#: the reason the name is not a search word: see
+#: ``descriptor_store._UNPROJECTED_KINDS``.
+PERSON_KIND = "face_id"
+
+
+@router.get("/search/people")
+def search_people(
+    limit: int = Query(200, ge=1, le=1000),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """The people visits on this box have actually been attributed to.
+
+    "Was Varun here yesterday" is ``attr=face_id:varun``, and that filter
+    has worked since the claim store landed. What never existed is any way
+    for an operator to ASK it. A name is deliberately kept out of the
+    projected free text — tokenising it would make every query containing
+    that word match the person, and would widen who can discover the
+    identity from the app that produced it to anyone with search access —
+    so typing a name into the box matches nothing, silently, forever. A
+    filter that can only be reached by knowing the exact value is a filter
+    that does not exist; this is the list that makes it a picker.
+
+    The names come from the CLAIMS, not from the recogniser's enrolment
+    roster, for two independent reasons. The roster lives inside the app
+    that owns the model and core has no route to it. And a name that is
+    enrolled but was never seen would offer a filter that can only ever
+    return nothing — the exact failure this endpoint exists to remove.
+    What is offered here is precisely what is findable.
+
+    Scoped to the caller's cameras, like every other read on this router.
+    It discloses nothing a caller could not already learn by passing the
+    attr filter with a guessed name; it only removes the guessing.
+    """
+    scope = visible_camera_ids(db, current_user)
+    q = (
+        db.query(
+            VisitDescriptor.value.label("value"),
+            # DISTINCT on the event, because one visit can carry the same
+            # name from two tasks and that is one sighting, not two.
+            func.count(func.distinct(VisitDescriptor.event_id)).label("visits"),
+            func.max(TimelineEvent.started_at).label("last_seen"),
+        )
+        .join(TimelineEvent, TimelineEvent.id == VisitDescriptor.event_id)
+        .filter(VisitDescriptor.kind == PERSON_KIND)
+    )
+    rows = (
+        scope_query(q, TimelineEvent.camera_id, scope)
+        .group_by(VisitDescriptor.value)
+        # Most recently seen first: a picker is read top-down and the
+        # person somebody is asking about is usually the recent one.
+        .order_by(func.max(TimelineEvent.started_at).desc())
+        .limit(limit)
+        .all()
+    )
+    return {
+        "kind": PERSON_KIND,
+        "people": [
+            {
+                "value": row.value,
+                "attr": f"{PERSON_KIND}:{row.value}",
+                "visits": int(row.visits or 0),
+                "last_seen": row.last_seen.isoformat() if row.last_seen else None,
+            }
+            for row in rows
+        ],
     }
 
 

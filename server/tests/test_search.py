@@ -1420,3 +1420,130 @@ def test_the_counts_are_absent_when_no_attribute_was_asked(internal_client, db):
     assert "described" not in body
     assert "attrs_applied" not in body
     assert len(body["events"]) == 1
+
+
+# ── The people picker ────────────────────────────────────────────────
+#
+# A name is deliberately not a search word (descriptor_store
+# ._UNPROJECTED_KINDS), so "was Varun here yesterday" typed into the box
+# matches nothing and always will. The filter that answers it —
+# attr=face_id:varun — has worked all along and was unreachable: you had
+# to know the exact value to ask. These cover the list that makes it a
+# picker.
+
+
+def test_the_people_list_is_drawn_from_what_was_actually_seen(client, db):
+    """Not from the recogniser's enrolment roster.
+
+    Core has no route to that roster, and a name enrolled but never seen
+    would offer a filter that can only ever return nothing — the exact
+    "couldn't ask" that this endpoint exists to remove, reintroduced as
+    "asked and got nothing"."""
+    _camera(db, 1, "Door")
+    seen = _visit(db, camera_id=1, label="person", minutes_ago=5)
+    _claim(db, seen.id, "face_id", "varun", task="doorbell")
+    # Somebody else was there too, and one visit nobody recognised.
+    other = _visit(db, camera_id=1, label="person", minutes_ago=3)
+    _claim(db, other.id, "face_id", "priya", task="doorbell")
+    _visit(db, camera_id=1, label="person", minutes_ago=1)
+
+    body = client.get("/api/v1/search/people").json()
+
+    assert body["kind"] == "face_id"
+    assert {p["value"] for p in body["people"]} == {"varun", "priya"}
+    # Every entry carries the exact filter it stands for, so the UI never
+    # has to rebuild the pair and get the separator wrong.
+    assert {p["attr"] for p in body["people"]} == {"face_id:varun", "face_id:priya"}
+
+
+def test_a_person_the_picker_offers_is_a_person_the_filter_finds(client, db):
+    """The one property that matters. An offered name that returns
+    nothing is worse than no picker: it reads as "they were never here"."""
+    _camera(db, 1, "Door")
+    row = _visit(db, camera_id=1, label="person", minutes_ago=5)
+    _claim(db, row.id, "face_id", "varun", task="doorbell")
+
+    offered = client.get("/api/v1/search/people").json()["people"]
+    assert offered, "nothing to pick means nothing to prove"
+    for person in offered:
+        found = client.get("/api/v1/search",
+                           params={"attr": person["attr"], "parse": "false"}).json()
+        assert found["total"] >= 1, f"{person['attr']} was offered and matches nothing"
+
+
+def test_one_visit_claimed_twice_is_one_sighting(client, db):
+    """Two tasks recognising the same face on the same visit is a fact
+    about the skills, not a second visit — and a count that says "2
+    sightings" next to one thumbnail is a number the operator cannot
+    reconcile with the page."""
+    _camera(db, 1, "Door")
+    row = _visit(db, camera_id=1, label="person", minutes_ago=5)
+    _claim(db, row.id, "face_id", "varun", task="doorbell")
+    _claim(db, row.id, "face_id", "varun", task="insightface")
+
+    people = client.get("/api/v1/search/people").json()["people"]
+    assert [p["visits"] for p in people] == [1]
+
+
+def test_the_most_recently_seen_person_is_offered_first(client, db):
+    _camera(db, 1, "Door")
+    old = _visit(db, camera_id=1, label="person", minutes_ago=600)
+    _claim(db, old.id, "face_id", "priya", task="doorbell")
+    recent = _visit(db, camera_id=1, label="person", minutes_ago=2)
+    _claim(db, recent.id, "face_id", "varun", task="doorbell")
+
+    people = client.get("/api/v1/search/people").json()["people"]
+    assert [p["value"] for p in people] == ["varun", "priya"]
+    assert people[0]["last_seen"] is not None
+
+
+def test_the_picker_only_offers_people_seen_on_cameras_you_can_see(client, db):
+    """Same scope rule as the results. Offering a name from a camera
+    whose footage the caller cannot open would disclose the person
+    through the picker and then show them nothing — a leak and a dead
+    end in one control."""
+    _camera(db, 1, "Door")
+    somebody_elses = Camera(id=2, name="Neighbour", ip_address="10.0.0.2",
+                            rtsp_url="rtsp://x/2", owner_id=99)
+    db.add(somebody_elses)
+    db.commit()
+    mine = _visit(db, camera_id=1, label="person", minutes_ago=5)
+    _claim(db, mine.id, "face_id", "varun", task="doorbell")
+    theirs = _visit(db, camera_id=2, label="person", minutes_ago=5)
+    _claim(db, theirs.id, "face_id", "priya", task="doorbell")
+
+    people = client.get("/api/v1/search/people").json()["people"]
+    assert [p["value"] for p in people] == ["varun"]
+
+
+def test_a_box_that_has_recognised_nobody_offers_nothing(client, db):
+    """An empty list, not an error and not a placeholder. The UI renders
+    no control at all, which is the honest thing: there is nothing to
+    pick, and a disabled dropdown would imply there might be."""
+    _camera(db, 1, "Door")
+    row = _visit(db, camera_id=1, label="person", minutes_ago=5)
+    _claim(db, row.id, "colour", "red")
+
+    body = client.get("/api/v1/search/people").json()
+    assert body["people"] == []
+
+
+def test_names_stay_out_of_the_words_even_though_they_are_listed(client, db):
+    """Listing a name for a picker must not have made it searchable as
+    text. If it ever does, this test fails and the privacy rule in
+    descriptor_store has been quietly undone."""
+    from services.descriptor_store import project_attributes
+
+    _camera(db, 1, "Door")
+    row = _visit(db, camera_id=1, label="person", minutes_ago=5)
+    _claim(db, row.id, "face_id", "varun", task="doorbell")
+    _claim(db, row.id, "clothing_top", "blue")
+    project_attributes(db, row)
+    db.commit()
+
+    assert client.get("/api/v1/search/people").json()["people"][0]["value"] == "varun"
+    assert client.get("/api/v1/search",
+                      params={"text": "varun", "parse": "false"}).json()["total"] == 0
+    # …and the claim it rode in with is still a word.
+    assert client.get("/api/v1/search",
+                      params={"text": "blue", "parse": "false"}).json()["total"] == 1
