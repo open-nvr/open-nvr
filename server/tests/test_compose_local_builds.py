@@ -18,20 +18,23 @@ POLICY = "pull_policy: ${APPS_PULL_POLICY:-build}"
 
 
 def _local_build_services(text: str) -> list[tuple[str, str]]:
-    """(service, next line) for every `image: …:local-build` line."""
+    """(service, next line) for every image built from the checkout —
+    a `:local-build` / `:local` tag under the unpublished `opennvr/`
+    namespace. Registry images (ghcr.io/…) are not the concern."""
     lines = text.split("\n")
     out, svc = [], "?"
     for i, line in enumerate(lines):
         m = re.match(r"^  ([a-z0-9-]+):$", line)
         if m:
             svc = m.group(1)
-        if re.match(r"^\s+image: .*local-build\}?\s*$", line):
+        if re.match(r"^\s+image: (\$\{[A-Z_]+_IMAGE:-)?opennvr/[a-z-]+:local(-build)?\}?\s*$", line):
             out.append((svc, lines[i + 1].strip() if i + 1 < len(lines) else ""))
     return out
 
 
 def test_every_local_build_service_builds_without_asking_a_registry():
-    for fname in ("docker-compose.apps.yml", "docker-compose.camera-agent.yml"):
+    for fname in ("docker-compose.yml", "docker-compose.apps.yml",
+                  "docker-compose.camera-agent.yml", "docker-compose.installer.yml"):
         found = _local_build_services((REPO_ROOT / fname).read_text(encoding="utf-8"))
         assert found, f"{fname}: no local-build services found — the pattern drifted"
         missing = [svc for svc, nxt in found if nxt != POLICY]
