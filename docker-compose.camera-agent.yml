@@ -170,7 +170,13 @@ services:
   # Both images are normalized to port 9006 so downstream wiring stays fixed.
   # ──────────────────────────────────────────────────────────────
   caption-adapter:
-    profiles: [camera-agent, camera-agent-chat]
+    # ``enrichment`` / ``descriptions``: core's own caption and descriptor
+    # enrichment needs exactly this adapter, and needs it whether or not
+    # anyone runs the agent. It lives in this file for historical reasons
+    # — the agent needed a captioner first — and duplicating it into
+    # docker-compose.apps.yml (which an earlier version of that file did)
+    # means two adapters answering scene_caption, with KAI-C picking.
+    profiles: [camera-agent, camera-agent-chat, enrichment, descriptions]
     # CAPTION_ADAPTER_TAG lets the caption image ride a different tag than
     # the pinned ADAPTER_TAG. It existed because the default (ollamavlm)
     # shipped only after 0.1.3; adapter releases from 0.1.4 on publish it,
@@ -222,7 +228,10 @@ services:
   # re-pends an adapter that re-declares more scope than was approved.
   # ──────────────────────────────────────────────────────────────
   caption-adapter-register:
-    profiles: [camera-agent, camera-agent-chat]
+    # Same four profiles as the adapter: an unregistered captioner is
+    # invisible to KAI-C, which is the whole failure this one-shot exists
+    # to prevent.
+    profiles: [camera-agent, camera-agent-chat, enrichment, descriptions]
     image: alpine:3.20
     container_name: opennvr_caption_register
     logging: *svc-logs
