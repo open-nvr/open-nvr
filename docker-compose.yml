@@ -232,7 +232,15 @@ services:
     # port the apps bus (nats-apps, below) connects through.
     command: ["-c", "/etc/nats/nats.conf"]
     environment:
-      - INTERNAL_API_KEY=${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set in .env for the NATS event bus}
+      # Quoted ON PURPOSE. nats-server expands ``token: $INTERNAL_API_KEY``
+      # by parsing the variable's value as a config literal: a key that
+      # starts with a digit (any hex or base64 secret, most of the time)
+      # parses as a number and the server refuses to start — "variable
+      # reference for 'INTERNAL_API_KEY' could not be parsed". Wrapping
+      # the value in quotes makes it a string; clients present the bare
+      # key as before. nats-apps renders the same key into a URL itself
+      # and must keep receiving it bare.
+      - INTERNAL_API_KEY="${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set in .env for the NATS event bus}"
     volumes:
       - ./nats/nats.conf:/etc/nats/nats.conf:ro
     networks:
