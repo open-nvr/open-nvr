@@ -141,3 +141,36 @@ def test_manifest_tasks_are_canonical_and_deduplicated():
                          "enrich_tasks": ["visual_qa", "embed", ""]}) == \
         ["image_captioning", "vqa", "embed"]
     assert sa.app_tasks(None) == [] and sa.app_tasks({"requires_tasks": "x"}) == []
+
+
+def test_all_cameras_is_honoured_only_for_allowlisted_apps(db, monkeypatch):
+    """A pick is what an app may READ. A manifest that asks for every
+    camera gets it only when the operator listed the app; anyone else
+    is refused and runs on its picks alone."""
+    from core.config import settings
+    _install(db, "sneaky-app", camera_picker=False, all_cameras=True,
+             enrich_tasks=["image_captioning"])
+    monkeypatch.setattr(settings, "all_cameras_apps", "camera-agent", raising=False)
+    assert sa.sync_all_camera_picks(db, "sneaky-app") == 0
+    assert sa.all_camera_app_ids(db) == []
+    assert _skills(db, 1) == set()
+    monkeypatch.setattr(settings, "all_cameras_apps", "camera-agent, sneaky-app", raising=False)
+    assert sa.sync_all_camera_picks(db, "sneaky-app") == 2
+    assert sa.all_camera_app_ids(db) == ["sneaky-app"]
+
+
+def test_the_skill_view_lists_anpr_once_when_its_pick_is_the_task(db):
+    _install(db, "license-plate-recognition", requires_tasks=["license_plate_recognition"])
+    sa.declare(db, skill=sa.app_pick_skill("license-plate-recognition"), camera_id=1,
+               consumer=sa.app_consumer("license-plate-recognition"))
+    db.commit()
+    view = sa.skill_view(db, "license_plate_recognition")
+    assert [c["consumer"] for c in view["cameras"][0]["consumers"]] == ["app:license-plate-recognition"]
+
+
+def test_reregistering_with_new_tasks_reaches_picked_cameras():
+    """Source lockstep: the register route must re-project an app's
+    cameras on every re-registration, not only when tier0_labels moved."""
+    src = (REPO_ROOT / "server" / "routers" / "apps.py").read_text(encoding="utf-8")
+    i = src.index("sync_all_camera_picks(db, app_id)")
+    assert "reproject_app_cameras(db, app_id)" in src[i:i + 600]

@@ -421,7 +421,11 @@ def skill_view(db: Session, skill: str) -> dict[str, Any]:
             .order_by(SkillAssignment.camera_id, SkillAssignment.consumer)
             .all()
         )
+        already = {(r.camera_id, r.consumer) for r in rows}
         for row in picks:
+            if (row.camera_id, row.consumer) in already:
+                # ANPR: its pick skill IS the task it declares — one claim.
+                continue
             claim = {"consumer": row.consumer, "params": None, "derived": True}
             if row.consumer in disabled:
                 claim["dormant"] = True
@@ -673,12 +677,36 @@ def release_app_picks(db: Session, app_id: str) -> int:
 # projection treat it exactly like a pick the operator made.
 
 
-def _wants_all_cameras(manifest: Any) -> bool:
-    return isinstance(manifest, dict) and manifest.get("all_cameras") is True
+def _all_cameras_allowlist() -> frozenset[str]:
+    """App ids the operator lets run on every camera (ALL_CAMERAS_APPS)."""
+    try:
+        from core.config import settings
+        raw = str(getattr(settings, "all_cameras_apps", "") or "")
+    except Exception:  # noqa: BLE001
+        raw = ""
+    return frozenset(s.strip() for s in raw.split(",") if s.strip())
+
+
+def _wants_all_cameras(app_id: str, manifest: Any) -> bool:
+    """The manifest asks for every camera AND the operator allows this
+    app to have them. A pick is what an app may read, so the manifest
+    alone must never be enough: an app that asks and is not listed is
+    refused, loudly, and gets exactly the cameras it is picked for."""
+    asks = isinstance(manifest, dict) and manifest.get("all_cameras") is True
+    if not asks:
+        return False
+    if str(app_id) in _all_cameras_allowlist():
+        return True
+    logger.warning(
+        "app %s asks to run on all cameras but is not in ALL_CAMERAS_APPS — "
+        "refused; it runs only on cameras picked for it", app_id,
+    )
+    return False
 
 
 def all_camera_app_ids(db: Session) -> list[str]:
-    return sorted(app_id for app_id, m in app_manifests(db).items() if _wants_all_cameras(m))
+    return sorted(app_id for app_id, m in app_manifests(db).items()
+                  if _wants_all_cameras(app_id, m))
 
 
 def sync_all_camera_picks(db: Session, app_id: str) -> int:
@@ -688,7 +716,7 @@ def sync_all_camera_picks(db: Session, app_id: str) -> int:
     from models import InstalledApp
 
     app = db.query(InstalledApp).filter(InstalledApp.id == app_id).first()
-    if app is None or not _wants_all_cameras(app.manifest_json):
+    if app is None or not _wants_all_cameras(app_id, app.manifest_json):
         return 0
     held = picked_camera_ids(db, app_id)
     added = 0

@@ -969,9 +969,16 @@ async def register_app(
     # An app that runs on all cameras (the agent) holds a platform pick on
     # every live camera; a manifest that gains the flag reaches cameras
     # that predate it the same way tier0_labels do.
-    from services.skill_assignments import sync_all_camera_picks
+    from services.skill_assignments import (
+        reproject_app_cameras, sync_all_camera_picks,
+    )
 
     sync_all_camera_picks(db, app_id)
+    # Skills follow the manifest: a version that gains or drops a task
+    # must reach the cameras already picked for it — sync_app_pick_labels
+    # above re-projects only when tier0_labels changed.
+    if not created:
+        reproject_app_cameras(db, app_id)
     # Per-app credential: issued on first registration, and re-issued
     # whenever the app registers with the SITE key (or a user) and says
     # it holds no key of its own (a fresh container with no persisted
