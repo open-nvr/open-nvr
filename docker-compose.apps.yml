@@ -1656,35 +1656,45 @@ services:
   #
   # What that cost, on a real deployment: caption enrichment ON, zero
   # captions, zero non-plate claims, and a search that answered "red
-  # van" with nothing — correctly, because nothing had ever looked. The
-  # store was honest about it the whole time. The catalogue was not.
+  # van" with nothing — correctly, because nothing had ever looked.
   #
-  # PROFILES, and why this is not one switch:
-  #   enrichment    clip + moondream. Embeddings, captions and VQA with
-  #                 nothing answering the same task twice.
-  #   embeddings    clip alone.
-  #   descriptions  moondream alone — it advertises visual_qa AND
-  #                 scene_caption, so it is the one that makes
-  #                 colour/type claims appear.
-  #   captions      blip alone: the light option when a sentence per
-  #                 visit is all you want. Deliberately NOT in
-  #                 ``enrichment`` — blip and moondream both answer
-  #                 scene_caption, and two adapters claiming one task is
-  #                 a choice to make at install time, not something to
-  #                 leave the scheduler to resolve per inference.
+  # ONLY THE EMBEDDER LIVES HERE, and that is the point.
+  #
+  # The first version of this block also shipped moondream and blip. It
+  # should not have: docker-compose.camera-agent.yml has ALWAYS had a
+  # `caption-adapter` service — one container whose image CAPTION_ADAPTER
+  # selects (moondream, blip or ollamavlm) — with its own registration
+  # job. On the box this was written for, that captioner had been up and
+  # healthy for fifteen hours. Adding a second one meant two adapters
+  # answering scene_caption, so which one described a visit came down to
+  # whichever KAI-C picked: a difference the operator cannot see and did
+  # not choose, and double the CPU for it.
+  #
+  # So captions and VQA are served by that one service, which now also
+  # carries the `enrichment` and `descriptions` profiles. Nothing about
+  # it requires the camera agent — the profiles start the adapter and its
+  # register job and nothing else. Its being in that file is history, not
+  # coupling.
+  #
+  # PROFILES
+  #   enrichment    everything core enrichment can use: the embedder here
+  #                 plus the captioner over there.
+  #   embeddings    the embedder alone. ALSO needs
+  #                 EVENTS_EMBED_ENRICHMENT=true — starting the adapter
+  #                 does not flip it.
+  #   descriptions  the captioner alone: scene_caption AND visual_qa,
+  #                 which is what makes colour/type claims appear.
   #
   # Add the profile you want to OPENNVR_EXAMPLE_PROFILE in .env and
   # start.sh replays it on every ``up`` — same mechanism the apps use.
+  # `enrichment` and `descriptions` need docker-compose.camera-agent.yml
+  # in OPENNVR_EXAMPLE_COMPOSE too, because that is where the captioner
+  # is defined.
   #
-  # Embeddings need one thing more than the adapter: EVENTS_EMBED_
-  # ENRICHMENT is false by default and starting clip does not change
-  # that. See docs on the embed default for why it is opt-in.
-  #
-  # All three bake their weights at build time and run under
-  # HF_HUB_OFFLINE — no egress at all, which is what lets
-  # adapters_index.yml declare network_egress: [] for them. All three
-  # are CPU-only and slow next to detection; that cost is the whole
-  # reason they are opt-in rather than on by default.
+  # CLIP bakes its weights at build time and runs under HF_HUB_OFFLINE —
+  # no egress at all, which is what lets adapters_index.yml declare
+  # network_egress: [] for it. It is CPU-only and slow next to detection;
+  # that cost is the whole reason this is opt-in.
   # ──────────────────────────────────────────────────────────────
 
   clip-adapter:
@@ -1723,70 +1733,6 @@ services:
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - ADAPTER_NAME=clip
       - ADAPTER_URL=http://clip-adapter:9011
-
-  moondream-adapter:
-    profiles: [enrichment, descriptions]
-    image: ghcr.io/open-nvr/moondream-adapter:${ADAPTER_TAG:-latest}
-    container_name: opennvr_moondream_adapter
-    logging: *svc-logs
-    restart: unless-stopped
-    environment:
-      - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
-    networks:
-      - opennvr_internal
-    healthcheck:
-      test: ["CMD", "python", "-c", "import httpx, sys; sys.exit(0 if httpx.get('http://127.0.0.1:9008/health', timeout=2).status_code == 200 else 1)"]
-      interval: 15s
-      timeout: 5s
-      # A VLM on CPU is the slowest thing in this file to come up.
-      start_period: 300s
-      retries: 30
-
-  moondream-register:
-    <<: *adapter-register
-    profiles: [enrichment, descriptions]
-    container_name: opennvr_moondream_register
-    depends_on:
-      opennvr-core:
-        condition: service_healthy
-      moondream-adapter:
-        condition: service_healthy
-    environment:
-      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
-      - ADAPTER_NAME=moondream
-      - ADAPTER_URL=http://moondream-adapter:9008
-
-  blip-adapter:
-    profiles: [captions]
-    image: ghcr.io/open-nvr/blip-adapter:${ADAPTER_TAG:-latest}
-    container_name: opennvr_blip_adapter
-    logging: *svc-logs
-    restart: unless-stopped
-    environment:
-      - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
-    networks:
-      - opennvr_internal
-    healthcheck:
-      test: ["CMD", "python", "-c", "import httpx, sys; sys.exit(0 if httpx.get('http://127.0.0.1:9006/health', timeout=2).status_code == 200 else 1)"]
-      interval: 15s
-      timeout: 5s
-      start_period: 240s
-      retries: 20
-
-  blip-register:
-    <<: *adapter-register
-    profiles: [captions]
-    container_name: opennvr_blip_register
-    depends_on:
-      opennvr-core:
-        condition: service_healthy
-      blip-adapter:
-        condition: service_healthy
-    environment:
-      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
-      - ADAPTER_NAME=blip
-      - ADAPTER_URL=http://blip-adapter:9006
-
 
 volumes:
   # Generated config.yml files (mounted read-only by each app).
