@@ -49,6 +49,52 @@ x-default-logging: &svc-logs
     max-size: "10m"
     max-file: "3"
 
+# One-shot KAI-C registration, shared by the core-enrichment adapters at
+# the bottom of this file. The app adapters above each carry their own
+# copy because each has a quirk (fast-plate-ocr's name is named by the
+# LPR app's config; insightface's by the doorbell's) and rewriting them
+# to fit a template would be a risky edit to working services for the
+# sake of tidiness. These three have no quirk, so they share one.
+#
+# ADAPTER_NAME becomes the route /api/v1/infer/<name>; ADAPTER_URL is
+# where KAI-C reaches it. Always exits 0: a registration that could not
+# be completed is a WARN and a missing skill, never a failed ``up`` that
+# takes the rest of the stack down with it.
+x-adapter-register: &adapter-register
+  image: alpine:3.20
+  logging: *svc-logs
+  restart: "no"
+  networks: [opennvr_internal]
+  command:
+    - sh
+    - -c
+    - |
+      set -e
+      echo "Auto-registering '$$ADAPTER_NAME' -> $$ADAPTER_URL with KAI-C…"
+      i=0
+      while [ $$i -lt 30 ]; do
+        if wget -q -O- \
+             --header="Content-Type: application/json" \
+             --header="X-Internal-Api-Key: $${INTERNAL_API_KEY}" \
+             --post-data="{\"name\":\"$$ADAPTER_NAME\",\"url\":\"$$ADAPTER_URL\"}" \
+             http://opennvr-core:8100/api/v1/adapters/register >/dev/null 2>&1; then
+          echo "Registered '$$ADAPTER_NAME'."
+          if wget -q -O- \
+               --header="X-Internal-Api-Key: $${INTERNAL_API_KEY}" \
+               --header="X-Actor: install" \
+               --post-data="" \
+               "http://opennvr-core:8100/api/v1/adapters/$$ADAPTER_NAME/permissions/approve-all" >/dev/null 2>&1; then
+            echo "Approved '$$ADAPTER_NAME' declared permissions (install-time grant, audited)."
+          else
+            echo "WARN: could not approve '$$ADAPTER_NAME' permissions — grant them on the AI models page." >&2
+          fi
+          exit 0
+        fi
+        i=$$((i+1)); echo "register attempt $$i/30 failed (adapter warming up?); retry in 5s"; sleep 5
+      done
+      echo "WARN: could not register '$$ADAPTER_NAME' after retries — core enrichment will not see it until it is registered on the AI models page." >&2
+      exit 0
+
 services:
   # ──────────────────────────────────────────────────────────────
   # Egress proxy — the only door out of the apps network. Apps live on
@@ -1596,6 +1642,151 @@ services:
       - /app/config/config.yml
     networks:
       - opennvr_apps
+
+  # ──────────────────────────────────────────────────────────────
+  # CORE ENRICHMENT ADAPTERS
+  #
+  # Every adapter above belongs to an app. These belong to none: core's
+  # own enrichment asks KAI-C what can describe a visit and runs it
+  # (EVENTS_CAPTION_ENRICHMENT, EVENTS_DESCRIPTOR_ENRICHMENT,
+  # EVENTS_EMBED_ENRICHMENT). Until this block existed there was no way
+  # to start one. adapters_index.yml listed eleven adapters, four of
+  # which had a compose service; the other seven were a catalogue entry
+  # with nothing behind it, and GET /adapters/index is read-only.
+  #
+  # What that cost, on a real deployment: caption enrichment ON, zero
+  # captions, zero non-plate claims, and a search that answered "red
+  # van" with nothing — correctly, because nothing had ever looked. The
+  # store was honest about it the whole time. The catalogue was not.
+  #
+  # PROFILES, and why this is not one switch:
+  #   enrichment    clip + moondream. Embeddings, captions and VQA with
+  #                 nothing answering the same task twice.
+  #   embeddings    clip alone.
+  #   descriptions  moondream alone — it advertises visual_qa AND
+  #                 scene_caption, so it is the one that makes
+  #                 colour/type claims appear.
+  #   captions      blip alone: the light option when a sentence per
+  #                 visit is all you want. Deliberately NOT in
+  #                 ``enrichment`` — blip and moondream both answer
+  #                 scene_caption, and two adapters claiming one task is
+  #                 a choice to make at install time, not something to
+  #                 leave the scheduler to resolve per inference.
+  #
+  # Add the profile you want to OPENNVR_EXAMPLE_PROFILE in .env and
+  # start.sh replays it on every ``up`` — same mechanism the apps use.
+  #
+  # Embeddings need one thing more than the adapter: EVENTS_EMBED_
+  # ENRICHMENT is false by default and starting clip does not change
+  # that. See docs on the embed default for why it is opt-in.
+  #
+  # All three bake their weights at build time and run under
+  # HF_HUB_OFFLINE — no egress at all, which is what lets
+  # adapters_index.yml declare network_egress: [] for them. All three
+  # are CPU-only and slow next to detection; that cost is the whole
+  # reason they are opt-in rather than on by default.
+  # ──────────────────────────────────────────────────────────────
+
+  clip-adapter:
+    profiles: [enrichment, embeddings]
+    image: ghcr.io/open-nvr/clip-adapter:${ADAPTER_TAG:-latest}
+    container_name: opennvr_clip_adapter
+    logging: *svc-logs
+    restart: unless-stopped
+    environment:
+      - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
+    networks:
+      # Internal only. KAI-C calls /infer; nothing else talks to it —
+      # unlike insightface, which the doorbell calls directly.
+      - opennvr_internal
+    healthcheck:
+      # The image declares its own, without a start_period; loading the
+      # weights takes longer than three retries on a small box, and an
+      # adapter marked unhealthy while it is still starting never gets
+      # registered.
+      test: ["CMD", "python", "-c", "import httpx, sys; sys.exit(0 if httpx.get('http://127.0.0.1:9011/health', timeout=2).status_code == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 180s
+      retries: 20
+
+  clip-register:
+    <<: *adapter-register
+    profiles: [enrichment, embeddings]
+    container_name: opennvr_clip_register
+    depends_on:
+      opennvr-core:
+        condition: service_healthy
+      clip-adapter:
+        condition: service_healthy
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      - ADAPTER_NAME=clip
+      - ADAPTER_URL=http://clip-adapter:9011
+
+  moondream-adapter:
+    profiles: [enrichment, descriptions]
+    image: ghcr.io/open-nvr/moondream-adapter:${ADAPTER_TAG:-latest}
+    container_name: opennvr_moondream_adapter
+    logging: *svc-logs
+    restart: unless-stopped
+    environment:
+      - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
+    networks:
+      - opennvr_internal
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx, sys; sys.exit(0 if httpx.get('http://127.0.0.1:9008/health', timeout=2).status_code == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      # A VLM on CPU is the slowest thing in this file to come up.
+      start_period: 300s
+      retries: 30
+
+  moondream-register:
+    <<: *adapter-register
+    profiles: [enrichment, descriptions]
+    container_name: opennvr_moondream_register
+    depends_on:
+      opennvr-core:
+        condition: service_healthy
+      moondream-adapter:
+        condition: service_healthy
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      - ADAPTER_NAME=moondream
+      - ADAPTER_URL=http://moondream-adapter:9008
+
+  blip-adapter:
+    profiles: [captions]
+    image: ghcr.io/open-nvr/blip-adapter:${ADAPTER_TAG:-latest}
+    container_name: opennvr_blip_adapter
+    logging: *svc-logs
+    restart: unless-stopped
+    environment:
+      - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
+    networks:
+      - opennvr_internal
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx, sys; sys.exit(0 if httpx.get('http://127.0.0.1:9006/health', timeout=2).status_code == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 240s
+      retries: 20
+
+  blip-register:
+    <<: *adapter-register
+    profiles: [captions]
+    container_name: opennvr_blip_register
+    depends_on:
+      opennvr-core:
+        condition: service_healthy
+      blip-adapter:
+        condition: service_healthy
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      - ADAPTER_NAME=blip
+      - ADAPTER_URL=http://blip-adapter:9006
+
 
 volumes:
   # Generated config.yml files (mounted read-only by each app).
