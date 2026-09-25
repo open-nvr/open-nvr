@@ -103,6 +103,11 @@ ENFORCE_TEXT = "\n".join([
     # operator health: 2 cams, one behind (cam2 at 2/5 fps)
     "# TYPE tier0_worker_up gauge",
     'tier0_worker_up{camera="cam1"} 1',
+    "# TYPE tier0_motion_latched_open gauge",
+    'tier0_motion_latched_open{camera="cam1"} 0',
+    'tier0_motion_latched_open{camera="cam2"} 1',
+    "# TYPE tier0_motion_forced_exits_total counter",
+    'tier0_motion_forced_exits_total{camera="cam2"} 2',
     'tier0_worker_up{camera="cam2"} 1',
     "# TYPE tier0_target_fps gauge",
     'tier0_target_fps{camera="cam1"} 5',
@@ -162,6 +167,13 @@ def test_reduce_enforce_rollup():
     assert abs(r["health"]["min_fps_ratio"] - 0.4) < 1e-9
     assert r["health"]["worst_camera"] == "cam2"
     assert r["health"]["restarts_total"] == 3
+    # motion gate verdict per camera: cam2's scene never calibrated, so the
+    # gate is latched open there — the 0% it contributes has a reason
+    cams = {c["camera"]: c for c in r["cameras"]}
+    assert cams["cam1"]["motion_latched_open"] is False
+    assert cams["cam2"]["motion_latched_open"] is True
+    assert cams["cam2"]["motion_forced_exits"] == 2
+    assert r["frames"]["motion_latched_cameras"] == ["cam2"]
 
 
 def test_mode_off_when_no_gate_metrics():
