@@ -933,24 +933,56 @@ async def kaic_prometheus_metrics():
 
 @app.get("/adapters/health")
 async def check_adapters_health():
+    """Health of every adapter in the REGISTRY.
+
+    This endpoint and /capabilities below used to iterate
+    ``ADAPTER_REGISTRY`` — the static, env-derived dict that holds
+    exactly one entry, ``default``, and whose own comment invites you to
+    "add more adapters here as needed". Nothing registered at runtime is
+    in it and nothing ever will be.
+
+    The OpenNVR backend calls these two endpoints and no others
+    (``KaiCService.check_kai_c_health`` / ``get_capabilities``), so core
+    saw one adapter no matter how many were registered, healthy and
+    serving. Observed on a live deployment: seven adapters registered and
+    healthy — insightface for thirteen hours, a captioner for fifteen —
+    and ``GET /skills`` reporting "no registered adapter provides this
+    task" for every one of them. Caption and descriptor enrichment are
+    planned off that view, so they never ran: zero captions and zero
+    non-plate claims across 28,000 visits. Plate reads kept working only
+    because the ANPR app calls its adapter directly and never asks KAI-C,
+    which is exactly what made the rest look like a configuration
+    mistake for weeks.
+
+    The note below these handlers said they were "kept for back-compat
+    until OpenNVR backend migrates onto the v1 surface". The backend did
+    not migrate, and the fallback aged into a lie. They now read the real
+    registry — the same one ``/api/v1/adapters`` serves — and keep their
+    old response shape, so every existing caller gets the truth without
+    changing a line.
+
+    Flow: Backend → KAI-C → its registry (no fan-out; see below).
     """
-    Check health of all configured AI Adapters.
-    
-    Flow: Backend → KAI-C → (checks internal adapters)
-    
-    Returns status of all adapters in the registry.
-    """
-    results = {}
-    for name, url in ADAPTER_REGISTRY.items():
-        try:
-            response = requests.get(f"{url}/health", timeout=5)
-            if response.status_code == 200:
-                results[name] = {"status": "ok", "url": url}
-            else:
-                results[name] = {"status": "error", "url": url, "message": f"Returned {response.status_code}"}
-        except Exception as e:
-            results[name] = {"status": "error", "url": url, "message": str(e)}
-    
+    registry = get_registry()
+    results: dict[str, Any] = {}
+    for summary in registry.list_summaries():
+        status = summary.get("health_status") or "unknown"
+        entry: dict[str, Any] = {"status": status, "url": summary.get("url")}
+        if status != "ok":
+            entry["message"] = (
+                "health not polled yet" if status == "unknown"
+                else f"adapter reports {status}"
+            )
+        results[str(summary.get("name"))] = entry
+    # An adapter the registry knows it SHOULD have but could not reach is
+    # a visible row, not silence (#371). Reporting it as absent is how a
+    # restart used to look like "you never installed LPR".
+    for pending in registry.pending_registrations():
+        results.setdefault(str(pending.get("name")), {
+            "status": "error",
+            "url": pending.get("url"),
+            "message": pending.get("last_error") or "registration pending",
+        })
     return {
         "kai_c_status": "ok",
         "adapters": results
@@ -959,12 +991,14 @@ async def check_adapters_health():
 
 @app.get("/capabilities")
 async def get_all_capabilities():
-    """
-    Get capabilities from all configured AI Adapters.
-    
-    Flow: Backend → KAI-C → (queries all internal adapters)
-    
-    Returns combined capabilities from all adapters.
+    """Capabilities of every adapter in the REGISTRY.
+
+    Same defect and same fix as /adapters/health above; read its
+    docstring for what iterating the static ``ADAPTER_REGISTRY`` cost.
+
+    Response shape is unchanged: ``adapters[name]`` carries ``url`` and
+    either ``capabilities`` or ``error``, which is what
+    ``skills_registry._tasks_by_adapter`` reads.
     """
     all_capabilities = {
         "kai_c": {
@@ -974,27 +1008,28 @@ async def get_all_capabilities():
         "adapters": {}
     }
 
-    # Same bearer token as the /infer path; without it these probes 401
-    # once the adapter's 5-minute registration grace window closes.
-    cap_headers = (
-        {"Authorization": f"Bearer {INTERNAL_API_KEY}"} if INTERNAL_API_KEY else {}
-    )
-    for name, url in ADAPTER_REGISTRY.items():
-        try:
-            response = requests.get(
-                f"{url}/capabilities", headers=cap_headers, timeout=10
-            )
-            response.raise_for_status()
-            all_capabilities["adapters"][name] = {
-                "url": url,
-                "capabilities": response.json()
-            }
-        except Exception as e:
-            all_capabilities["adapters"][name] = {
-                "url": url,
-                "error": str(e)
-            }
-    
+    registry = get_registry()
+    urls = {str(s_.get("name")): s_.get("url") for s_ in registry.list_summaries()}
+    aggregated = registry.aggregated_capabilities()
+    all_capabilities["kai_c"]["sovereignty_mode"] = aggregated.get("sovereignty_mode")
+    # The registry already HOLDS each adapter's capabilities document —
+    # it polled /capabilities at registration and re-polls on the health
+    # loop, emitting drift events when it changes. Re-fetching them here
+    # would be a second, slower, blocking copy of that, and it is what
+    # the old loop did: N synchronous requests.get calls inside an async
+    # handler, so one unreachable adapter stalled the whole service for
+    # its timeout.
+    for name, caps in (aggregated.get("adapters") or {}).items():
+        all_capabilities["adapters"][name] = {
+            "url": urls.get(name),
+            "capabilities": caps,
+        }
+    for pending in registry.pending_registrations():
+        all_capabilities["adapters"].setdefault(str(pending.get("name")), {
+            "url": pending.get("url"),
+            "error": pending.get("last_error") or "registration pending",
+        })
+
     return all_capabilities
 
 
@@ -1027,8 +1062,11 @@ async def get_schemas(task: Optional[str] = None):
 # ============================================================
 # These live under /api/v1/* so future versioning (v2, v3) is cheap.
 # The legacy /infer, /infer/local, /infer/cloud, /health, /capabilities,
-# /adapters/health, /schema endpoints above are kept for back-compat
-# until OpenNVR backend migrates onto the v1 surface.
+# /adapters/health and /capabilities above now read the same registry
+# the v1 surface does, so "back-compat" no longer means "a different and
+# wrong answer". /schema still resolves through ADAPTER_REGISTRY and is
+# the last caller of get_adapter_url(); it answers for one adapter, not
+# a fleet, so it is a narrower question than these two were.
 
 
 def require_internal_api_key(x_internal_api_key: Optional[str] = Header(None)) -> None:
