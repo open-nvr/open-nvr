@@ -53,7 +53,7 @@ import {
   EmptyState, PageHeader, Skeleton, type BadgeVariant,
 } from '../components/ui'
 import type { RegisteredApp } from './AppCatalog'
-import { AppNoCamerasBanner } from './apps/AppSetup'
+import { AppPageHeader } from './apps/AppSetup'
 
 export const NOTIFICATIONS_CAPABILITY = 'notifications'
 
@@ -302,7 +302,8 @@ export function Notifications() {
 
   return (
     <section className="space-y-4">
-      <PageHeader
+      <AppPageHeader
+        app={app}
         title={t('notifications.title')}
         description={t('notifications.description')}
         actions={
@@ -318,8 +319,6 @@ export function Notifications() {
           </>
         }
       />
-
-      <AppNoCamerasBanner app={app} />
 
       {/* ── Coverage ── The one thing on this page that must never be
           scrolled past: is anything reaching anyone right now. */}

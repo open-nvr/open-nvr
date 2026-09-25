@@ -16,26 +16,30 @@
  * along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-// The two setup affordances every app page owes its operator, in one
-// place so no page ships without them:
+// The setup affordances every app page owes its operator, in one place so
+// no page ships without them and no two pages say it differently:
 //
-// - Configure, in the page header. The app's form opens over the page,
-//   so a camera picked or a zone drawn shows up in the numbers without a
-//   trip to the App Catalog and back.
-// - A "no cameras" banner above everything else. An app with no cameras
-//   does nothing, and every tab of its page looks like a quiet day — so
-//   the banner is page-level, not inside whichever tab happens to own
-//   camera setup.
+// - AppPageHeader: an app page's header. Title, description, actions —
+//   and, directly under the description, the "no camera selected" notice.
+//   An app with no cameras does nothing, and every tab of its page looks
+//   like a quiet day; the notice sits with the app's name so it is the
+//   first thing read, on every tab, in the same words on every app.
+// - AppConfigureButton: the header's Configure. The app's form opens over
+//   the page, so a camera picked or a zone drawn shows up in the numbers
+//   without a trip to the App Catalog and back.
 
 import { useState, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Settings2 } from 'lucide-react'
+import { Camera, CameraOff, Settings2 } from 'lucide-react'
 import { useAuth } from '../../auth/AuthContext'
-import { Button } from '../../components/ui'
+import { Button, PageHeader } from '../../components/ui'
+import { useTranslation } from '../../i18n'
 import { AppConfigModal, type RegisteredApp } from '../AppCatalog'
 
 /** Does this app work on cameras and have none? Apps that act only on
- *  other apps' alerts (camera_picker false) never do. */
+ *  other apps' alerts (camera_picker false) never do. picked_cameras
+ *  counts every camera claimed in the app's name — the catalog's picker
+ *  and a page's own claim (Vehicles' gate roles) alike. */
 export function appHasNoCameras(app: RegisteredApp | null | undefined): boolean {
   return !!app && app.enabled && app.camera_picker !== false && app.picked_cameras === 0
 }
@@ -76,35 +80,53 @@ export function AppConfigureButton({ app, size }: { app: RegisteredApp | null | 
   )
 }
 
-/** Page-level warning while the app has no cameras. A page that knows
- *  better passes `when` (Vehicles counts cameras holding the plate-reading
- *  role, not just picks), and `action` to send the operator somewhere
- *  better than the config form (Vehicles: its camera-roles tab). */
-export function AppNoCamerasBanner({ app, when, message, action }: {
-  app: RegisteredApp | null | undefined
-  when?: boolean
-  message?: ReactNode
-  action?: ReactNode
-}) {
+/** The "no camera selected" notice, identical on every app page. Renders
+ *  nothing while the app has cameras (or never needs any). Administrators
+ *  get the button that fixes it; anyone else is told who can. */
+export function AppNoCamerasNotice({ app }: { app: RegisteredApp | null | undefined }) {
+  const { t } = useTranslation()
   const { user: me } = useAuth()
   const { openConfig, modal } = useAppConfig(app)
-  if (!app || !(when ?? appHasNoCameras(app))) return null
-  const isAdmin = !!me?.is_superuser
+  if (!app || !appHasNoCameras(app)) return null
+  // Picking cameras is site-wide config, superuser-only like Configure.
+  const selectable = !!me?.is_superuser
   return (
     <div
       role="status"
-      className="flex flex-wrap items-center gap-3 rounded border border-[var(--warning,#b7791f)] px-3 py-2 text-sm text-[var(--warning,#b7791f)]"
+      className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-md border border-[var(--border)]
+                 border-l-4 border-l-[var(--badge-warning-text)] bg-[var(--badge-warning-bg)] px-3 py-2 text-sm"
     >
-      <span className="min-w-0 flex-1">
-        {message ?? <>No camera is selected for {app.name} — it does nothing until one is.</>}
-        {!isAdmin && ' Ask an administrator to select cameras for it.'}
-      </span>
-      {isAdmin && (action ?? (
+      <CameraOff size={16} className="shrink-0 text-[var(--badge-warning-text)]" aria-hidden />
+      <p className="min-w-0 flex-1">
+        <span className="font-medium text-[var(--text)]">{t('appSetup.noCameras.title')}</span>{' '}
+        <span className="text-[var(--text-dim)]">
+          {t(selectable ? 'appSetup.noCameras.body' : 'appSetup.noCameras.askAdmin', { app: app.name })}
+        </span>
+      </p>
+      {selectable && (
         <Button variant="outline" size="sm" onClick={openConfig}>
-          Select cameras
+          <Camera size={14} /> {t('appSetup.noCameras.select')}
         </Button>
-      ))}
+      )}
       {modal}
     </div>
+  )
+}
+
+/** An app page's header: PageHeader with the app's camera notice in its
+ *  notice slot, so the notice cannot end up anywhere else on the page. */
+export function AppPageHeader({ app, title, description, actions }: {
+  app: RegisteredApp | null | undefined
+  title: ReactNode
+  description?: ReactNode
+  actions?: ReactNode
+}) {
+  return (
+    <PageHeader
+      title={title}
+      description={description}
+      actions={actions}
+      notice={<AppNoCamerasNotice app={app} />}
+    />
   )
 }

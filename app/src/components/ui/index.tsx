@@ -174,14 +174,26 @@ export function StatusDot({ status }: { status: Status }) {
 // stops the buttons compressing into two-line labels before the row
 // wraps. `max-w-3xl` keeps a long description readable rather than
 // running the full width of a 2560px monitor.
-export function PageHeader({ title, description, actions }: { title: ReactNode; description?: ReactNode; actions?: ReactNode }) {
+/** `notice` is a full-width line under the title and description, for the
+ *  one state that makes the rest of the page moot (an app with no cameras).
+ *  It carries its own top margin, so a notice that renders nothing leaves
+ *  the header exactly as it was. */
+export function PageHeader({ title, description, actions, notice }: {
+  title: ReactNode
+  description?: ReactNode
+  actions?: ReactNode
+  notice?: ReactNode
+}) {
   return (
-    <div className="flex flex-wrap items-start gap-3 mb-4">
-      <div className="min-w-0 flex-1">
-        <h2 className="text-lg font-semibold text-[var(--text)]">{title}</h2>
-        {description && <p className="text-sm text-[var(--text-dim)] mt-0.5 max-w-3xl">{description}</p>}
+    <div className="mb-4">
+      <div className="flex flex-wrap items-start gap-3">
+        <div className="min-w-0 flex-1">
+          <h2 className="text-lg font-semibold text-[var(--text)]">{title}</h2>
+          {description && <p className="text-sm text-[var(--text-dim)] mt-0.5 max-w-3xl">{description}</p>}
+        </div>
+        {actions && <div className="ml-auto shrink-0 flex flex-wrap items-center gap-2">{actions}</div>}
       </div>
-      {actions && <div className="ml-auto shrink-0 flex flex-wrap items-center gap-2">{actions}</div>}
+      {notice}
     </div>
   )
 }

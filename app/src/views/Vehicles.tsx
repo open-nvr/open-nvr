@@ -75,7 +75,7 @@ import {
   EmptyState, PageHeader, SeverityBadge, Skeleton,
 } from '../components/ui'
 import type { RegisteredApp } from './AppCatalog'
-import { AppConfigureButton, AppNoCamerasBanner } from './apps/AppSetup'
+import { AppConfigureButton, AppPageHeader } from './apps/AppSetup'
 
 export const LPR_TASK = 'license_plate_recognition'
 
@@ -838,8 +838,12 @@ export function Vehicles() {
       else await cameraService.releaseSkillCamera(LPR_SKILL, cameraId, consumer)
     },
     // The picker reads eligibility off `assignments`, so it has to see
-    // the write it just made.
-    onSettled: () => queryClient.invalidateQueries({ queryKey: ['cameras'] }),
+    // the write it just made — and the app row's picked_cameras is what
+    // the header's "no camera selected" notice reads, so that too.
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ['cameras'] })
+      queryClient.invalidateQueries({ queryKey: ['apps'] })
+    },
     onError: (e) => showError(extractApiError(e, 'Could not assign the camera.')),
   })
   // Cameras actually reading plates. Empty means the skill is dormant:
@@ -1280,7 +1284,8 @@ export function Vehicles() {
             whichever part of the platform ran the OCR" — an implementation
             note, not something an operator needs on every visit, and it
             cost a second line. */}
-        <PageHeader
+        <AppPageHeader
+          app={lprApp}
           title={t('vehicles.title')}
           description={t('vehicles.description')}
           actions={
@@ -1439,20 +1444,6 @@ export function Vehicles() {
           onChange={(k: string) => setTab(k as typeof tab)}
         />
       </div>
-
-      {/* The one setup problem that makes everything else moot. Page-level,
-          so it shows on every tab — inside the register it hid from
-          anyone who opened the page on Plate reads and saw a quiet day. */}
-      <AppNoCamerasBanner
-        app={lprApp}
-        when={camerasQuery.isSuccess && lprCameras.length === 0}
-        message="No camera is reading plates yet — give a camera a role and this app starts reading it."
-        action={tab !== 'gate' && (camerasQuery.data ?? []).length > 0 ? (
-          <Button variant="outline" size="sm" onClick={() => setTab('gate')}>
-            {t('vehicles.assignRoles')}
-          </Button>
-        ) : false}
-      />
 
       {tab === 'alarms' ? (
         <VehicleAlarmsTab cameraName={cameraName} />

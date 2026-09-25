@@ -47,7 +47,7 @@ import {
 } from '../components/ui'
 import { Modal } from '../components/Modal'
 import type { RegisteredApp } from './AppCatalog'
-import { AppConfigureButton, AppNoCamerasBanner } from './apps/AppSetup'
+import { AppConfigureButton, AppPageHeader } from './apps/AppSetup'
 
 export const PEOPLE_CAPABILITY = 'people'
 
@@ -397,7 +397,8 @@ export function People() {
 
   return (
     <section className="space-y-4">
-      <PageHeader
+      <AppPageHeader
+        app={app}
         title={t('people.title')}
         description={t('people.description')}
         actions={
@@ -412,8 +413,6 @@ export function People() {
           </>
         }
       />
-
-      <AppNoCamerasBanner app={app} />
 
       {/* ── Headline numbers ── */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
