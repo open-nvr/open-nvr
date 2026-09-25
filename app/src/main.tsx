@@ -198,6 +198,10 @@ const router = createBrowserRouter([
           { path: 'ai-adapters', element: <AIAdapters /> },
           { path: 'app-catalog', element: <AppCatalog /> },
           { path: 'app-catalog/:appId', element: <AppView /> },
+          // The same page under Applications: an app with no first-class
+          // vertical (Footage Search, the Agent) is still an application, not
+          // a catalog entry, and is configured here like every other one.
+          { path: 'apps/:appId', element: <AppView /> },
           { path: 'compliance', element: <Compliance /> },
           { path: 'alerts-incidents', element: <AlertsIncidents /> },
           { path: 'alarms', element: <Alarms /> },

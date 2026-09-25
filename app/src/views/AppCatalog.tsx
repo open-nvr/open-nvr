@@ -641,7 +641,13 @@ function initialFormValue(p: ManifestParam, config: Record<string, any> | null |
 /** Stable empty draft while the picks load. */
 const NO_PICKS: Set<number> = new Set()
 
-export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: () => void }) {
+export function AppConfigModal({ app, onClose, initialCamera }: {
+  app: RegisteredApp
+  onClose: () => void
+  /** Open straight onto this camera's Set up (id or "camN" handle) — how
+   *  an app page's "Draw it" lands on the right camera. */
+  initialCamera?: number | string
+}) {
   const queryClient = useQueryClient()
   const { showSuccess } = useSnackbar()
   const params = app.manifest?.params ?? []
@@ -691,6 +697,17 @@ export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: 
     })), [cameraParams, values])
   const [setupCameraId, setSetupCameraId] = useState<number | null>(null)
   const setupCamera = picksQuery.data?.cameras.find((c) => c.id === setupCameraId)
+  // Land on the requested camera's Set up once the camera list is known —
+  // once, so closing the dialog does not reopen it.
+  const seededSetup = useRef(false)
+  useEffect(() => {
+    if (seededSetup.current || initialCamera == null || !picksQuery.data) return
+    seededSetup.current = true
+    const wanted = picksQuery.data.cameras.find((c) =>
+      typeof initialCamera === 'number' ? c.id === initialCamera
+        : c.handle === initialCamera || String(c.id) === initialCamera)
+    if (wanted && cameraParams.length > 0) setSetupCameraId(wanted.id)
+  }, [initialCamera, picksQuery.data, cameraParams.length])
   // Roles an app keeps per camera elsewhere (ANPR's gate roles, set on the
   // Vehicles page), shown read-only in the picker so unpicking one is a
   // decision rather than an accident.
@@ -1681,7 +1698,7 @@ function NetworkPanel({ app, isAdmin }: { app: RegisteredApp; isAdmin: boolean }
   )
 }
 
-function AppCard({ app, caps, tier0, skill, onConfigure }: { app: RegisteredApp; caps: CapabilitiesLike; tier0: Tier0Like; skill?: SkillEntry; onConfigure: () => void }) {
+function AppCard({ app, caps, tier0, skill }: { app: RegisteredApp; caps: CapabilitiesLike; tier0: Tier0Like; skill?: SkillEntry }) {
   const queryClient = useQueryClient()
   const { showSuccess, showError } = useSnackbar()
   // Enable/disable is a site decision (superuser-only on the server;
@@ -1889,9 +1906,11 @@ function AppCard({ app, caps, tier0, skill, onConfigure }: { app: RegisteredApp;
               <ExternalLink size={14} /> Open app
             </Button>
           )}
-          <Button variant="outline" onClick={onConfigure}>
-            <Settings2 size={14} /> Configure
-          </Button>
+          {/* Configuration lives on the app's own page: the catalog is
+              the store (install, enable, remove), the page is the product. */}
+          <Link to={verticalFor(app.manifest)?.to ?? `/app-catalog/${app.id}`}>
+            <Button variant="outline"><Settings2 size={14} /> Open &amp; configure</Button>
+          </Link>
           {manifestActions.map((a) => (
             <Button
               key={a.name}
@@ -2588,7 +2607,6 @@ export function AppCatalog() {
   const indexQuery = useAppIndex()
   const capsQuery = useKaiCapabilities()
   const skillsQuery = useSkillsRegistry()
-  const [configApp, setConfigApp] = useState<RegisteredApp | null>(null)
   const [installApp, setInstallApp] = useState<IndexApp | null>(null)
   // Install intents the reconciler has not settled yet. Held at page
   // level on purpose — the dialog that started them is usually closed
@@ -2745,7 +2763,7 @@ export function AppCatalog() {
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
             {shownInstalled.map((app) => (
-              <AppCard key={app.id} app={app} caps={capsQuery.data} tier0={tier0Query.data} skill={skillsByApp.get(app.id)} onConfigure={() => setConfigApp(app)} />
+              <AppCard key={app.id} app={app} caps={capsQuery.data} tier0={tier0Query.data} skill={skillsByApp.get(app.id)} />
             ))}
           </div>
         )}
@@ -2807,7 +2825,6 @@ export function AppCatalog() {
         <ContributeNote />
       </div>
 
-      {configApp && <AppConfigModal key={configApp.id} app={configApp} onClose={() => setConfigApp(null)} />}
       {installApp && (
         <InstallModal
           key={installApp.id}

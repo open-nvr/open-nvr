@@ -45,7 +45,8 @@ import { AlarmEvidenceViewer } from '../components/alarms/AlarmsTable'
 import { useAlarmsList } from '../components/alarms/useAlarmsList'
 import { alarmSeenIso, alertsInboxService, type InboxAlert } from '../services/alertsInboxService'
 import type { RegisteredApp } from './AppCatalog'
-import { AppPageHeader } from './apps/AppSetup'
+import { AppCamerasCard } from './apps/AppCamerasCard'
+import { AppPageHeader, AppConfigureButton } from './apps/AppSetup'
 
 export const DELIVERIES_CAPABILITY = 'deliveries'
 const SOURCE = 'package-delivery'
@@ -323,6 +324,7 @@ export function Deliveries() {
           title={t('deliveries.noApp')}
           description="Install and enable Package Delivery from the App Catalog. It watches the porch zone you draw on each door camera, counts the packages whenever someone walks away, tells a courier from a resident from a stranger, reminds you while a parcel sits outside, and records who took it."
         />
+      <AppCamerasCard app={app} />
       </section>
     )
   }
@@ -342,9 +344,7 @@ export function Deliveries() {
               <RefreshCw size={14} /> {t('deliveries.refresh')}
             </Button>
             {app && (
-              <Link to={`/app-catalog/${app.id}`}>
-                <Button size="sm" variant="outline"><PenLine size={14} /> {t('deliveries.drawZones')}</Button>
-              </Link>
+              <AppConfigureButton app={app} size="sm" variant="outline" label="Configure" />
             )}
           </>
         }
@@ -375,7 +375,7 @@ export function Deliveries() {
             <b>{needsZone.map(cameraName).join(', ')}</b>. The whole frame is counted there, so a plant pot or a
             doormat gets counted as a package. Draw the zone around the step where parcels are actually left.
           </span>
-          <Link to={`/app-catalog/${app.id}`} className="shrink-0 text-[var(--accent)] underline">Draw it</Link>
+          <AppConfigureButton app={app} variant="link" className="shrink-0 text-[var(--accent)] underline" label="Draw it" />
         </div>
       )}
 
@@ -388,7 +388,8 @@ export function Deliveries() {
         <EmptyState
           icon={<CameraIcon size={24} />}
           title="No door cameras selected"
-          description="Pick the cameras that see your doorsteps and draw a porch zone on each (App Catalog → Package Delivery → Configure). Each door then appears here with its live picture and count."
+          description="Pick the cameras that see your doorsteps and draw a porch zone on each (Configure, top right). Each door then appears here with its live picture and count."
+          action={app ? <AppConfigureButton app={app} variant="primary" label="Configure" /> : undefined}
         />
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">

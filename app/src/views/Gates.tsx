@@ -37,7 +37,6 @@ import {
   Activity, Ban, Camera as CameraIcon, CameraOff, CalendarClock, Cable, Clock, DoorOpen,
   FlaskConical, Hand, LockOpen, RefreshCw, Settings2, ShieldCheck, Timer, TriangleAlert, User,
 } from 'lucide-react'
-import { Link } from 'react-router-dom'
 import { apiService } from '../lib/apiService'
 import { useTranslation } from '../i18n'
 import {
@@ -45,7 +44,8 @@ import {
   EmptyState, PageHeader, Skeleton, type BadgeVariant,
 } from '../components/ui'
 import type { RegisteredApp } from './AppCatalog'
-import { AppPageHeader } from './apps/AppSetup'
+import { AppCamerasCard } from './apps/AppCamerasCard'
+import { AppPageHeader, AppConfigureButton } from './apps/AppSetup'
 
 export const GATES_CAPABILITY = 'gates'
 
@@ -241,6 +241,7 @@ export function Gates() {
           title={t('gates.noApp')}
           description={t('gates.noAppHelp')}
         />
+      <AppCamerasCard app={app} />
       </section>
     )
   }
@@ -257,9 +258,7 @@ export function Gates() {
               <RefreshCw size={14} /> {t('gates.refresh')}
             </Button>
             {app && (
-              <Link to={`/app-catalog/${app.id}`}>
-                <Button size="sm" variant="outline"><Settings2 size={14} /> {t('gates.configure')}</Button>
-              </Link>
+              <AppConfigureButton app={app} size="sm" variant="outline" label={t('gates.configure')} />
             )}
           </>
         }
@@ -316,9 +315,7 @@ export function Gates() {
           title={t('gates.empty.title')}
           description={t('gates.empty.body')}
           action={app ? (
-            <Link to={`/app-catalog/${app.id}`}>
-              <Button size="sm" variant="primary"><Settings2 size={14} /> {t('gates.configure')}</Button>
-            </Link>
+            <AppConfigureButton app={app} size="sm" variant="primary" label={t('gates.configure')} />
           ) : undefined}
         />
       ) : (

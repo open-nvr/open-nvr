@@ -40,7 +40,8 @@ import {
 import { AlarmsTable } from '../components/alarms/AlarmsTable'
 import { useAckAlarms, useAlarmsList } from '../components/alarms/useAlarmsList'
 import type { RegisteredApp } from './AppCatalog'
-import { AppPageHeader } from './apps/AppSetup'
+import { AppCamerasCard } from './apps/AppCamerasCard'
+import { AppPageHeader, AppConfigureButton } from './apps/AppSetup'
 
 export const LOITERING_CAPABILITY = 'loitering'
 const SOURCE = 'loitering-detection'
@@ -267,6 +268,7 @@ export function Loitering() {
           title={t('loitering.noApp')}
           description="Install and enable Loitering Detection from the App Catalog. It rides the detection stream the platform already produces — no extra model, no GPU — and alerts when a tracked person or vehicle stays in a zone you draw longer than you allow."
         />
+      <AppCamerasCard app={app} />
       </section>
     )
   }
@@ -306,9 +308,7 @@ export function Loitering() {
               <RefreshCw size={14} /> Refresh
             </Button>
             {app && (
-              <Link to={`/app-catalog/${app.id}`}>
-                <Button size="sm" variant="primary"><PenLine size={14} /> Draw zones</Button>
-              </Link>
+              <AppConfigureButton app={app} size="sm" variant="primary" label="Configure" />
             )}
           </>
         }
@@ -335,7 +335,7 @@ export function Loitering() {
             {needsZone.length === 1 ? 'One camera has no zone drawn:' : `${needsZone.length} cameras have no zone drawn:`}{' '}
             <b>{needsZone.map(cameraName).join(', ')}</b>. The whole frame is watched there, which usually means a threshold that never matters or one that fires on everyone.
           </span>
-          <Link to={`/app-catalog/${app.id}`} className="ml-auto text-[var(--accent)] underline">Draw it</Link>
+          <AppConfigureButton app={app} variant="link" className="ml-auto text-[var(--accent)] underline" label="Draw it" />
         </div>
       )}
 
@@ -390,7 +390,8 @@ export function Loitering() {
         <EmptyState
           icon={<Hourglass size={24} />}
           title="No cameras selected"
-          description="Select cameras for Loitering Detection and draw each one's zone (App Catalog → Loitering Detection → Configure). The app starts measuring within a few seconds."
+          description="Select cameras for Loitering Detection and draw each one's zone (Configure, top right). The app starts measuring within a few seconds."
+          action={app ? <AppConfigureButton app={app} variant="primary" label="Configure" /> : undefined}
         />
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">

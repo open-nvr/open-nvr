@@ -39,6 +39,7 @@ import {
 } from '../components/ui'
 import { Modal } from '../components/Modal'
 import { AppConfigModal, type RegisteredApp } from './AppCatalog'
+import { AppCamerasCard } from './apps/AppCamerasCard'
 import { AppPageHeader } from './apps/AppSetup'
 
 export const OCCUPANCY_CAPABILITY = 'occupancy'
@@ -246,7 +247,7 @@ export function Occupancy() {
   // The app's config form (zones, entry lines, limits, watch labels)
   // opens HERE, over the live page, so an operator draws a zone and
   // watches the counts move without leaving for the catalog. The same
-  // form is still reachable from the catalog card and /app-catalog/<id>.
+  // form is still reachable from this page's Configure and the app's own page.
   const [configOpen, setConfigOpen] = useState(false)
   const [reportOpen, setReportOpen] = useState(false)
   const watchLabels: string[] = Array.isArray((occApp?.config as any)?.watch_labels)
@@ -330,6 +331,7 @@ export function Occupancy() {
           title={t('occupancy.title')}
           description={t('occupancy.description')}
         />
+      <AppCamerasCard app={occApp} />
         <EmptyState
           icon={<Users size={28} />}
           title={t('occupancy.noApp')}
