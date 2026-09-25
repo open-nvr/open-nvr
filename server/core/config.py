@@ -514,6 +514,34 @@ class Settings(BaseSettings):
     # the app. Empty directory = default trust store only.
     app_trusted_certs_dir: str = "/etc/opennvr/app-certs"
 
+    @field_validator("database_url")
+    @classmethod
+    def name_the_postgres_driver(cls, v: str) -> str:
+        """``postgresql://`` means psycopg2 HERE, not whatever SQLAlchemy
+        defaults to this year.
+
+        SQLAlchemy 2.1.0 changed the DBAPI a bare ``postgresql://`` URL
+        resolves to, from psycopg2 to psycopg 3. This project installs
+        ``psycopg2-binary`` and not psycopg 3, so on that version the
+        backend cannot import at all — and the failure arrives as
+        ``ModuleNotFoundError: No module named 'psycopg'`` from inside
+        ``create_engine``, which reads like a missing package rather
+        than a default that moved under it.
+
+        The lockfile is the real defence and is now actually used by the
+        image. This is the second one: a dependency bump should not be
+        able to silently change which driver talks to the database.
+
+        Only the bare form is rewritten. ``postgresql+psycopg://`` is
+        somebody asking for psycopg 3 on purpose and is left alone.
+        """
+        url = (v or "").strip()
+        if url.startswith("postgresql://"):
+            return "postgresql+psycopg2://" + url[len("postgresql://"):]
+        if url.startswith("postgres://"):  # the older alias, same meaning
+            return "postgresql+psycopg2://" + url[len("postgres://"):]
+        return v
+
     @field_validator("trusted_proxy_cidrs", "internal_service_cidrs")
     @classmethod
     def validate_trust_cidrs(cls, v: str, info: ValidationInfo) -> str:
