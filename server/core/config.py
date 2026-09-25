@@ -485,6 +485,18 @@ class Settings(BaseSettings):
     # gated per camera by the same skill assignments, so turning it on
     # without them costs nothing.
     events_enrichment_backfill: bool = False
+    # How long visit rows in the events store are kept. 0 (default) means
+    # "the same window as the recordings retention" — the evidence JPEG
+    # and the row that points at it age out together, so a row never
+    # outlives its photo and the store cannot grow without bound. Set it
+    # to keep history longer or shorter than the video; with recordings
+    # kept forever, 0 keeps the rows forever too.
+    events_retention_days: int = 0
+    # The operator inbox (app_alerts). Alerts are small but a busy site
+    # rings thousands a day, and nothing pruned them before this: rows
+    # older than this are dropped, and APP_ALERTS_MAX_ROWS caps the
+    # table inside the window. 0 disables age-based pruning.
+    alerts_inbox_retention_days: int = 90
     # The least cosine similarity a visit needs to be RETURNED by the
     # vector arm of search. Without a floor the arm always hands back
     # its top-N, so "a person in a red shirt" on a box that never saw

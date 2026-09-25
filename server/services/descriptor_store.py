@@ -214,6 +214,12 @@ def apply_descriptors(
         )
         existing.source_adapter = (d.source_adapter or "")[:60] or None
         existing.model_fingerprint = (d.model_fingerprint or "")[:120] or None
+        # The audit join. Kept when a re-run does not carry one: a claim
+        # that was evidence must not become an assertion because the
+        # second writer forgot the id.
+        cid = getattr(d, "correlation_id", None)
+        if isinstance(cid, str) and cid.strip():
+            existing.correlation_id = cid.strip()[:64]
         written += 1
         # Attribution: which KAI-C skill is actually contributing claims.
         metrics.DESCRIPTORS_WRITTEN.inc({
@@ -256,10 +262,11 @@ class _PlateClaim:
     model_fingerprint = None
 
     def __init__(self, value: str, confidence: float | None,
-                 adapter: str | None) -> None:
+                 adapter: str | None, correlation_id: str | None = None) -> None:
         self.value = value
         self.confidence = confidence
         self.source_adapter = adapter
+        self.correlation_id = correlation_id
 
 
 def sync_plate_claim(db, row: TimelineEvent) -> None:
@@ -298,6 +305,7 @@ def sync_plate_claim(db, row: TimelineEvent) -> None:
             float(confidence) if isinstance(confidence, (int, float))
             and not isinstance(confidence, bool) else None,
             str(payload.get("plate_source") or "") or None,
+            str(payload.get("correlation_id") or "") or None,
         )])
         return
 
