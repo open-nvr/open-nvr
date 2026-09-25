@@ -176,7 +176,8 @@ def test_the_gate_is_the_ingest_path_gate_not_a_copy(db):
     _camera(db, 2, ["image_captioning"])     # captions only
     _camera(db, 3, ["vqa"])                  # claims only
     _camera(db, 4, ["image_captioning", "vqa"])
-    for cam in (1, 2, 3, 4):
+    _camera(db, 5, ["embed"])                # vectors only
+    for cam in (1, 2, 3, 4, 5):
         _visit(db, event_id=cam, camera_id=cam, label="car")
 
     by_id = {i["event_id"]: i for i in bf.plan_batch(db, None, 10)}
@@ -184,6 +185,9 @@ def test_the_gate_is_the_ingest_path_gate_not_a_copy(db):
     assert (by_id[2]["caption"], by_id[2]["descriptors"]) == (True, False)
     assert (by_id[3]["caption"], by_id[3]["descriptors"]) == (False, True)
     assert (by_id[4]["caption"], by_id[4]["descriptors"]) == (True, True)
+    # The embedder has the same gate, and the sweep offers it the same
+    # way — it did not, once, and the back catalogue never got vectors.
+    assert [by_id[i]["embed"] for i in (1, 2, 3, 4, 5)] == [False, False, False, False, True]
 
 
 def test_a_person_is_captioned_but_never_questioned(db):
@@ -240,7 +244,7 @@ def _run(coro):
 @pytest.fixture()
 def calls(monkeypatch):
     """Record which enricher was asked about which visit."""
-    seen: dict[str, list[int]] = {"caption": [], "descriptors": []}
+    seen: dict[str, list[int]] = {"caption": [], "descriptors": [], "embed": []}
 
     async def _cap(event_id, *a, **k):
         seen["caption"].append(int(event_id))
@@ -248,28 +252,57 @@ def calls(monkeypatch):
     async def _desc(event_id, *a, **k):
         seen["descriptors"].append(int(event_id))
 
+    async def _emb(event_id, *a, **k):
+        seen["embed"].append(int(event_id))
+
     import services.caption_enrichment as cap_mod
     import services.descriptor_enrichment as desc_mod
+    import services.embed_enrichment as emb_mod
 
     monkeypatch.setattr(cap_mod, "enrich_event_caption", _cap)
     monkeypatch.setattr(desc_mod, "enrich_event_descriptors", _desc)
+    monkeypatch.setattr(emb_mod, "enrich_event_embedding", _emb)
     return seen
 
 
 def test_a_pass_enriches_what_the_gate_allowed_and_advances_the_cursor(
-        session_local, calls):
+        session_local, calls, monkeypatch):
+    from core.config import settings
+    monkeypatch.setattr(settings, "events_embed_enrichment", True, raising=False)
     db = session_local
     _camera(db, 1, ["image_captioning"])
     _camera(db, 2, ["vqa"])
+    _camera(db, 3, ["embed"])
     _visit(db, event_id=1, camera_id=1, label="car")
     _visit(db, event_id=2, camera_id=2, label="truck")
+    _visit(db, event_id=3, camera_id=3, label="car")
 
     state = _run(bf.backfill_once(batch=10, pause=0))
 
     assert calls["caption"] == [1], "only the camera assigned captioning"
     assert calls["descriptors"] == [2], "only the camera assigned vqa"
+    assert calls["embed"] == [3], "only the camera assigned embedding"
     assert state["cursor"] == 1, "the cursor is the LOWEST id examined"
-    assert state["examined"] == 2
+    assert state["examined"] == 3
+    assert state["embedded"] == 1
+
+
+def test_embedding_is_off_unless_the_flag_says_so(session_local, calls, monkeypatch):
+    """The skill alone is not consent to pay for a vector per visit —
+    EVENTS_EMBED_ENRICHMENT is, exactly as on the ingest path. Off by
+    default, unlike the other two, because the embedder is the enricher
+    most sites do not run."""
+    from core.config import settings
+    monkeypatch.setattr(settings, "events_embed_enrichment", False, raising=False)
+    db = session_local
+    _camera(db, 1, ["embed"])
+    _visit(db, event_id=1, camera_id=1, label="car")
+
+    state = _run(bf.backfill_once(batch=10, pause=0))
+
+    assert calls["embed"] == []
+    assert state["embedded"] == 0
+    assert state["examined"] == 1, "still examined and passed — the cursor must advance"
 
 
 def test_a_second_pass_never_re_offers_a_visit(session_local, calls):

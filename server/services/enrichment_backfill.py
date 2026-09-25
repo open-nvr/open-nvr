@@ -99,8 +99,9 @@ def _labels_of_interest() -> set[str]:
     """
     from services.caption_enrichment import CAPTIONABLE_LABELS
     from services.descriptor_enrichment import DESCRIBABLE_LABELS
+    from services.embed_enrichment import EMBEDDABLE_LABELS
 
-    return set(CAPTIONABLE_LABELS) | set(DESCRIBABLE_LABELS)
+    return set(CAPTIONABLE_LABELS) | set(DESCRIBABLE_LABELS) | set(EMBEDDABLE_LABELS)
 
 
 def read_state(db) -> dict[str, Any]:
@@ -141,6 +142,7 @@ def plan_batch(db, before_id: int | None, limit: int,
     from models import Camera, TimelineEvent
     from services.caption_enrichment import CAPTIONABLE_LABELS, wants_caption
     from services.descriptor_enrichment import DESCRIBABLE_LABELS, wants_descriptors
+    from services.embed_enrichment import EMBEDDABLE_LABELS, wants_embedding
     from services.skill_assignments import camera_skills
 
     labels = _labels_of_interest()
@@ -173,6 +175,14 @@ def plan_batch(db, before_id: int | None, limit: int,
             "descriptors": (label in DESCRIBABLE_LABELS
                             and wants_descriptors(row.label, row.evidence_path,
                                                   True, skills, people)),
+            # The embedder shipped after this sweep was written, and the
+            # sweep was never taught about it: a site that turned on
+            # embeddings and assigned the skill got vectors for new visits
+            # only, and the back catalogue — the whole reason this sweep
+            # exists — stayed unrankable forever. Same gate as ingest.
+            "embed": (label in EMBEDDABLE_LABELS
+                      and wants_embedding(row.label, row.evidence_path,
+                                          True, skills)),
             "repair": False,
         }
         out.append(item)
@@ -225,6 +235,9 @@ async def backfill_once(batch: int = DEFAULT_BATCH,
 
     caption_on = bool(getattr(settings, "events_caption_enrichment", True))
     descriptor_on = bool(getattr(settings, "events_descriptor_enrichment", True))
+    # Off by default, like the flag it mirrors: the embedder is the one
+    # enricher most sites do not run.
+    embed_on = bool(getattr(settings, "events_embed_enrichment", False))
 
     # ── Phase 1: read the batch, briefly ────────────────────────────
     db = SessionLocal()
@@ -255,9 +268,11 @@ async def backfill_once(batch: int = DEFAULT_BATCH,
     # ── Phase 2: enrich, one at a time, no session held ─────────────
     from services.caption_enrichment import enrich_event_caption
     from services.descriptor_enrichment import enrich_event_descriptors
+    from services.embed_enrichment import enrich_event_embedding
 
     captioned = 0
     described = 0
+    embedded = 0
     for item in items:
         event_id = item["event_id"]
         if caption_on and item["caption"]:
@@ -277,6 +292,15 @@ async def backfill_once(batch: int = DEFAULT_BATCH,
                 described += 1
             except Exception:  # noqa: BLE001
                 logger.warning("enrichment backfill: descriptors failed for %s",
+                               event_id, exc_info=True)
+        if embed_on and item.get("embed"):
+            try:
+                # Skips itself if the visit already has a vector, so a
+                # second pass costs nothing — same contract as the other two.
+                await enrich_event_embedding(event_id)
+                embedded += 1
+            except Exception:  # noqa: BLE001
+                logger.warning("enrichment backfill: embedding failed for %s",
                                event_id, exc_info=True)
         if pause > 0:
             # Live ingest shares this adapter and its semaphore. Yielding
@@ -323,6 +347,7 @@ async def backfill_once(batch: int = DEFAULT_BATCH,
         state["examined"] = int(state.get("examined", 0)) + len(items)
         state["captioned"] = int(state.get("captioned", 0)) + captioned
         state["described"] = int(state.get("described", 0)) + described
+        state["embedded"] = int(state.get("embedded", 0)) + embedded
         state["repaired"] = int(state.get("repaired", 0)) + repaired
         _write_state(db, state)
     except Exception:  # noqa: BLE001
@@ -333,8 +358,8 @@ async def backfill_once(batch: int = DEFAULT_BATCH,
 
     logger.info(
         "enrichment backfill: %s examined, %s captioned, %s described, "
-        "%s repaired, cursor now %s",
-        len(items), captioned, described, repaired, lowest,
+        "%s embedded, %s repaired, cursor now %s",
+        len(items), captioned, described, embedded, repaired, lowest,
     )
     return state
 
