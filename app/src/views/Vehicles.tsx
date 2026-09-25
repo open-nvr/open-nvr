@@ -76,6 +76,7 @@ import {
 } from '../components/ui'
 import type { RegisteredApp } from './AppCatalog'
 import { AppConfigureButton, AppPageHeader } from './apps/AppSetup'
+import { AppCamerasCard } from './apps/AppCamerasCard'
 
 export const LPR_TASK = 'license_plate_recognition'
 
@@ -1321,6 +1322,7 @@ export function Vehicles() {
             </>
           }
         />
+        <AppCamerasCard app={lprApp} />
 
         {/* Sits directly under the product description, where it reads as
             part of what this page IS rather than an interruption in the

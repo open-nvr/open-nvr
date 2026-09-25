@@ -45,7 +45,6 @@ import {
   ListOrdered, Moon, Pencil, Play, RefreshCw, Send, Settings2, ShieldCheck, Stethoscope,
   TriangleAlert, Volume2, VolumeX,
 } from 'lucide-react'
-import { Link } from 'react-router-dom'
 import { apiService } from '../lib/apiService'
 import { useTranslation } from '../i18n'
 import {
@@ -53,7 +52,8 @@ import {
   EmptyState, PageHeader, Skeleton, type BadgeVariant,
 } from '../components/ui'
 import type { RegisteredApp } from './AppCatalog'
-import { AppPageHeader } from './apps/AppSetup'
+import { AppCamerasCard } from './apps/AppCamerasCard'
+import { AppPageHeader, AppConfigureButton } from './apps/AppSetup'
 
 export const NOTIFICATIONS_CAPABILITY = 'notifications'
 
@@ -296,6 +296,7 @@ export function Notifications() {
           title={t('notifications.noApp')}
           description={t('notifications.noAppHelp')}
         />
+      <AppCamerasCard app={app} />
       </section>
     )
   }
@@ -312,9 +313,7 @@ export function Notifications() {
               <RefreshCw size={14} /> {t('notifications.refresh')}
             </Button>
             {app && (
-              <Link to={`/app-catalog/${app.id}`}>
-                <Button size="sm" variant="outline"><Settings2 size={14} /> {t('notifications.configure')}</Button>
-              </Link>
+              <AppConfigureButton app={app} size="sm" variant="outline" label={t('notifications.configure')} />
             )}
           </>
         }
@@ -363,9 +362,7 @@ export function Notifications() {
               title={t('notifications.channels.empty.title')}
               description={t('notifications.channels.empty.body')}
               action={app ? (
-                <Link to={`/app-catalog/${app.id}`}>
-                  <Button size="sm" variant="primary"><Settings2 size={14} /> {t('notifications.configure')}</Button>
-                </Link>
+                <AppConfigureButton app={app} size="sm" variant="primary" label={t('notifications.configure')} />
               ) : undefined}
             />
           ) : (
@@ -427,9 +424,7 @@ export function Notifications() {
               <Pencil size={13} className="shrink-0 mt-0.5" aria-hidden />
               <span>
                 {t('notifications.rules.editHint')}{' '}
-                <Link className="underline" to={`/app-catalog/${app.id}`}>
-                  {t('notifications.rules.editLink')}
-                </Link>
+                <AppConfigureButton app={app} variant="link" className="underline" label={t('notifications.rules.editLink')} />
               </span>
             </p>
           )}

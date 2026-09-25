@@ -53,7 +53,7 @@ ask it about any camera. Disable the agent and they leave every set.
 
 ## How to select cameras for an app
 
-App Catalog → the app → **Configure** → **Cameras** → **Select cameras**.
+**Applications → the app → Configure** (top right) → **Cameras** → **Select cameras**. The catalog only installs, enables and removes apps; everything about how an app works on your site is on its own page.
 The dialog shows every camera as a thumbnail, grouped by location, with
 search, an *Online only* filter and *Select all* per location; a camera
 another app already uses says so (that is fine — apps share cameras).

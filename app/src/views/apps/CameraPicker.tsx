@@ -67,6 +67,10 @@ export type PickerResponse = {
   skill: string
   consumer: string
   camera_picker: boolean
+  /** Runs on every camera (the platform selects them). */
+  all_cameras?: boolean
+  /** The model skills a pick of this app brings to a camera. */
+  skills?: string[]
   cameras: PickerCamera[]
 }
 

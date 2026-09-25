@@ -30,7 +30,7 @@
 
 import { useState, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Camera, CameraOff, Settings2 } from 'lucide-react'
+import { Camera, CameraOff, PenLine, Settings2 } from 'lucide-react'
 import { useAuth } from '../../auth/AuthContext'
 import { Button, PageHeader } from '../../components/ui'
 import { useTranslation } from '../../i18n'
@@ -45,13 +45,14 @@ export function appHasNoCameras(app: RegisteredApp | null | undefined): boolean 
 }
 
 /** The app's config form, opened over the current page. */
-function useAppConfig(app: RegisteredApp | null | undefined) {
+function useAppConfig(app: RegisteredApp | null | undefined, camera?: number | string | null) {
   const queryClient = useQueryClient()
   const [open, setOpen] = useState(false)
   const modal = open && app ? (
     <AppConfigModal
       key={app.id}
       app={app}
+      initialCamera={camera ?? undefined}
       onClose={() => {
         setOpen(false)
         // Picks and zones change both the app's row (picked_cameras) and
@@ -64,16 +65,47 @@ function useAppConfig(app: RegisteredApp | null | undefined) {
   return { openConfig: () => setOpen(true), modal }
 }
 
-/** Header button. Site-wide config is superuser-only on the server, so
- *  anyone else gets no button rather than a form that refuses to save. */
-export function AppConfigureButton({ app, size }: { app: RegisteredApp | null | undefined; size?: 'sm' }) {
+/** The Configure control, on the app's own page. Site-wide config is
+ *  superuser-only on the server, so anyone else gets no button rather
+ *  than a form that refuses to save.
+ *
+ *  Every page used to link to the App Catalog for this — a store page,
+ *  to change how a running product works. The app's form now opens over
+ *  the page it belongs to, and the same control serves "Draw it" next
+ *  to a camera with no zone: `camera` lands the form on that camera's
+ *  Set up; `variant="link"` renders it inline in a sentence. */
+export function AppConfigureButton({
+  app, size, label = 'Configure', icon = 'settings', variant = 'outline', camera, className, title,
+}: {
+  app: RegisteredApp | null | undefined
+  size?: 'sm' | 'md'
+  label?: ReactNode
+  icon?: 'settings' | 'pen' | 'none'
+  variant?: 'outline' | 'primary' | 'default' | 'link'
+  /** Open straight onto this camera's Set up (id or "camN" handle). */
+  camera?: number | string | null
+  className?: string
+  title?: string
+}) {
   const { user: me } = useAuth()
-  const { openConfig, modal } = useAppConfig(app)
+  const { openConfig, modal } = useAppConfig(app, camera)
   if (!app || !me?.is_superuser) return null
+  if (variant === 'link') {
+    return (
+      <>
+        <button type="button" className={className ?? 'text-[var(--accent)] underline'} title={title}
+                onClick={openConfig}>
+          {label}
+        </button>
+        {modal}
+      </>
+    )
+  }
+  const glyph = icon === 'pen' ? <PenLine size={14} /> : icon === 'settings' ? <Settings2 size={14} /> : null
   return (
     <>
-      <Button size={size} variant="outline" onClick={openConfig}>
-        <Settings2 size={14} /> Configure
+      <Button size={size} variant={variant} className={className} title={title} onClick={openConfig}>
+        {glyph}{glyph ? ' ' : null}{label}
       </Button>
       {modal}
     </>

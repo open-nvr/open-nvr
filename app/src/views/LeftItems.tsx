@@ -43,7 +43,8 @@ import {
 import { AlarmsTable } from '../components/alarms/AlarmsTable'
 import { useAckAlarms, useAlarmsList } from '../components/alarms/useAlarmsList'
 import type { RegisteredApp } from './AppCatalog'
-import { AppPageHeader } from './apps/AppSetup'
+import { AppCamerasCard } from './apps/AppCamerasCard'
+import { AppPageHeader, AppConfigureButton } from './apps/AppSetup'
 
 export const LEFT_ITEMS_CAPABILITY = 'left_items'
 const SOURCE = 'abandoned-object'
@@ -237,6 +238,7 @@ export function LeftItems() {
           title={t('leftItems.noApp')}
           description="Install and enable Abandoned Object from the App Catalog. It rides the detection stream the platform already produces — no extra model, no GPU — and follows every item left in a zone you draw: who was with it, how long it has been alone, and whether anyone came back for it."
         />
+      <AppCamerasCard app={app} />
       </section>
     )
   }
@@ -266,9 +268,7 @@ export function LeftItems() {
               <RefreshCw size={14} /> Refresh
             </Button>
             {app && (
-              <Link to={`/app-catalog/${app.id}`}>
-                <Button size="sm" variant="outline"><PenLine size={14} /> Draw zones</Button>
-              </Link>
+              <AppConfigureButton app={app} size="sm" variant="outline" label="Configure" />
             )}
           </>
         }
@@ -294,7 +294,7 @@ export function LeftItems() {
             {needsZone.length === 1 ? 'One camera has no zone drawn:' : `${needsZone.length} cameras have no zone drawn:`}{' '}
             <b>{needsZone.map(cameraName).join(', ')}</b>. The whole frame is watched there, so every bin and planter in shot becomes a candidate.
           </span>
-          <Link to={`/app-catalog/${app.id}`} className="ml-auto text-[var(--accent)] underline">Draw it</Link>
+          <AppConfigureButton app={app} variant="link" className="ml-auto text-[var(--accent)] underline" label="Draw it" />
         </div>
       )}
 
@@ -422,7 +422,8 @@ export function LeftItems() {
         <EmptyState
           icon={<Briefcase size={24} />}
           title="No cameras selected"
-          description="Select cameras for Abandoned Object and draw each one's zone (App Catalog → Abandoned Object → Configure). Items are followed within a few seconds."
+          description="Select cameras for Abandoned Object and draw each one's zone (Configure, top right). Items are followed within a few seconds."
+          action={app ? <AppConfigureButton app={app} variant="primary" label="Configure" /> : undefined}
         />
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">

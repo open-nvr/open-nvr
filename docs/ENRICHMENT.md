@@ -28,7 +28,7 @@ visit is skipped for this reason, and once per thousand after.
 | `face_recognition` | **Smart Doorbell** — its selected cameras |
 
 There is no skills editor on the camera page. Select the camera in the app
-(App Catalog → the app → Configure → Cameras → Select cameras); the
+(Applications → the app → Configure → Cameras → Select cameras); the
 enricher picks the change up on its next visit.
 
 ## Turning it on, in order

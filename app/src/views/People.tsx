@@ -47,6 +47,7 @@ import {
 } from '../components/ui'
 import { Modal } from '../components/Modal'
 import type { RegisteredApp } from './AppCatalog'
+import { AppCamerasCard } from './apps/AppCamerasCard'
 import { AppConfigureButton, AppPageHeader } from './apps/AppSetup'
 
 export const PEOPLE_CAPABILITY = 'people'
@@ -386,6 +387,7 @@ export function People() {
           title={t('people.noApp')}
           description="Install and enable Smart Doorbell from the App Catalog. It recognises faces at your door cameras and this page is where you tell it who is who."
         />
+      <AppCamerasCard app={app} />
       </section>
     )
   }
