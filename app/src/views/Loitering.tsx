@@ -40,6 +40,7 @@ import {
 import { AlarmsTable } from '../components/alarms/AlarmsTable'
 import { useAckAlarms, useAlarmsList } from '../components/alarms/useAlarmsList'
 import type { RegisteredApp } from './AppCatalog'
+import { AppNoCamerasBanner } from './apps/AppSetup'
 
 export const LOITERING_CAPABILITY = 'loitering'
 const SOURCE = 'loitering-detection'
@@ -311,6 +312,8 @@ export function Loitering() {
           </>
         }
       />
+
+      <AppNoCamerasBanner app={app} />
 
       {/* ── Headline ── */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">

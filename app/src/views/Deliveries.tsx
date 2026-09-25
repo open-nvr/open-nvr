@@ -45,6 +45,7 @@ import { AlarmEvidenceViewer } from '../components/alarms/AlarmsTable'
 import { useAlarmsList } from '../components/alarms/useAlarmsList'
 import { alarmSeenIso, alertsInboxService, type InboxAlert } from '../services/alertsInboxService'
 import type { RegisteredApp } from './AppCatalog'
+import { AppNoCamerasBanner } from './apps/AppSetup'
 
 export const DELIVERIES_CAPABILITY = 'deliveries'
 const SOURCE = 'package-delivery'
@@ -347,6 +348,8 @@ export function Deliveries() {
           </>
         }
       />
+
+      <AppNoCamerasBanner app={app} />
 
       {/* ── Headline ── */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">

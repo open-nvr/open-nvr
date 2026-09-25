@@ -47,6 +47,7 @@ import {
 } from '../components/ui'
 import { Modal } from '../components/Modal'
 import type { RegisteredApp } from './AppCatalog'
+import { AppConfigureButton, AppNoCamerasBanner } from './apps/AppSetup'
 
 export const PEOPLE_CAPABILITY = 'people'
 
@@ -404,12 +405,15 @@ export function People() {
             <Button size="sm" variant="outline" onClick={() => { refreshDirectory(); statusQuery.refetch() }}>
               <RefreshCw size={14} /> Refresh
             </Button>
+            <AppConfigureButton app={app} size="sm" />
             <Button size="sm" variant="primary" onClick={() => setEditor({ mode: 'add' })}>
               <UserPlus size={14} /> Add person
             </Button>
           </>
         }
       />
+
+      <AppNoCamerasBanner app={app} />
 
       {/* ── Headline numbers ── */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">

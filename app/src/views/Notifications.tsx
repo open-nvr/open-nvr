@@ -53,6 +53,7 @@ import {
   EmptyState, PageHeader, Skeleton, type BadgeVariant,
 } from '../components/ui'
 import type { RegisteredApp } from './AppCatalog'
+import { AppNoCamerasBanner } from './apps/AppSetup'
 
 export const NOTIFICATIONS_CAPABILITY = 'notifications'
 
@@ -317,6 +318,8 @@ export function Notifications() {
           </>
         }
       />
+
+      <AppNoCamerasBanner app={app} />
 
       {/* ── Coverage ── The one thing on this page that must never be
           scrolled past: is anything reaching anyone right now. */}

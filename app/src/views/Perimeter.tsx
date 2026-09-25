@@ -44,6 +44,7 @@ import {
 import { AlarmsTable } from '../components/alarms/AlarmsTable'
 import { useAckAlarms, useAlarmsList } from '../components/alarms/useAlarmsList'
 import type { RegisteredApp } from './AppCatalog'
+import { AppNoCamerasBanner } from './apps/AppSetup'
 
 export const INTRUSION_CAPABILITY = 'intrusion'
 const SOURCE = 'intrusion-detection'
@@ -285,6 +286,8 @@ export function Perimeter() {
           </>
         }
       />
+
+      <AppNoCamerasBanner app={app} />
 
       {/* ── The panel: site state, its countdown, and the controls that
              change it. Everything else on the page is detail. ── */}

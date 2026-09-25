@@ -45,6 +45,7 @@ import {
   EmptyState, PageHeader, Skeleton, type BadgeVariant,
 } from '../components/ui'
 import type { RegisteredApp } from './AppCatalog'
+import { AppNoCamerasBanner } from './apps/AppSetup'
 
 export const GATES_CAPABILITY = 'gates'
 
@@ -262,6 +263,8 @@ export function Gates() {
           </>
         }
       />
+
+      <AppNoCamerasBanner app={app} />
 
       {/* ── Commissioning mode ── The page looks alive in dry run; this
           banner is the only thing that says the barriers are not. */}

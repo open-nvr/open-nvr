@@ -39,6 +39,7 @@ import {
 } from '../components/ui'
 import { Modal } from '../components/Modal'
 import { AppConfigModal, type RegisteredApp } from './AppCatalog'
+import { AppNoCamerasBanner } from './apps/AppSetup'
 
 export const OCCUPANCY_CAPABILITY = 'occupancy'
 
@@ -376,6 +377,8 @@ export function Occupancy() {
           </div>
         }
       />
+
+      <AppNoCamerasBanner app={occApp} />
 
       {/* ── Live tiles ────────────────────────────────────────────── */}
       {vehicleHint && canConfigure && (

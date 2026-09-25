@@ -75,6 +75,7 @@ import {
   EmptyState, PageHeader, SeverityBadge, Skeleton,
 } from '../components/ui'
 import type { RegisteredApp } from './AppCatalog'
+import { AppConfigureButton, AppNoCamerasBanner } from './apps/AppSetup'
 
 export const LPR_TASK = 'license_plate_recognition'
 
@@ -1308,6 +1309,7 @@ export function Vehicles() {
                 <Download size={13} className={exporting ? 'animate-pulse' : ''} />
                 {exporting ? 'Exporting…' : t('vehicles.export')}
               </Button>
+              <AppConfigureButton app={lprApp} size="sm" />
               <Button size="sm" onClick={() => eventsQuery.refetch()} disabled={eventsQuery.isFetching}>
                 <RefreshCw size={13} className={eventsQuery.isFetching ? 'animate-spin' : ''} /> {t('vehicles.refresh')}
               </Button>
@@ -1437,6 +1439,20 @@ export function Vehicles() {
           onChange={(k: string) => setTab(k as typeof tab)}
         />
       </div>
+
+      {/* The one setup problem that makes everything else moot. Page-level,
+          so it shows on every tab — inside the register it hid from
+          anyone who opened the page on Plate reads and saw a quiet day. */}
+      <AppNoCamerasBanner
+        app={lprApp}
+        when={camerasQuery.isSuccess && lprCameras.length === 0}
+        message="No camera is reading plates yet — give a camera a role and this app starts reading it."
+        action={tab !== 'gate' && (camerasQuery.data ?? []).length > 0 ? (
+          <Button variant="outline" size="sm" onClick={() => setTab('gate')}>
+            {t('vehicles.assignRoles')}
+          </Button>
+        ) : false}
+      />
 
       {tab === 'alarms' ? (
         <VehicleAlarmsTab cameraName={cameraName} />
@@ -1658,7 +1674,7 @@ export function Vehicles() {
               ? t('vehicles.noMatch')
               : t('vehicles.noReads')}
             description={lprCameras.length === 0
-              ? 'No camera is reading plates yet. Give a camera a role under Vehicle register → Camera roles (or select it for License Plate Recognition in App Catalog → Configure → Cameras) and visits will appear here with their evidence photos.'
+              ? 'No camera is reading plates yet. Give a camera a role under Gate settings → Camera roles (or pick it under Configure → Cameras) and visits will appear here with their evidence photos.'
               : 'Vehicle visits appear here with their evidence photos.'}
             action={(debouncedPlate || cameraId !== '') ? (
               <Button variant="outline" onClick={() => {
@@ -2394,20 +2410,6 @@ function RegistryTab({
         }}
       />
 
-      {/* The one setup problem that makes everything else moot, as a single
-          banner that leads to the fix — not a warning buried in a card. */}
-      {reading.length === 0 && (
-        <div className="flex flex-wrap items-center gap-3 rounded border border-[var(--warning,#b7791f)] px-3 py-2 text-sm text-[var(--warning,#b7791f)]">
-          <span className="min-w-0 flex-1">
-            No camera is reading plates yet — give a camera a role and this app starts reading it.
-          </span>
-          {cameras.length > 0 && (
-            <Button variant="outline" size="sm" onClick={() => (onOpenGate ? onOpenGate() : openSettings({ highlight: true }))}>
-              Assign camera roles
-            </Button>
-          )}
-        </div>
-      )}
 
       {/* The register is what this tab is for, so it comes first — on the
           same table as the plate reads: header pinned, rows scrolling in
