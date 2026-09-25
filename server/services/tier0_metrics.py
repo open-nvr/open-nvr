@@ -262,6 +262,12 @@ def reduce_metrics(samples: list[Sample]) -> dict[str, Any]:
     visits_ok = _by_camera(samples, "tier0_visits_posted_total")
     visits_drop = _by_camera(samples, "tier0_visits_dropped_total")
     capped = _by_camera(samples, "tier0_regions_capped_total")
+    # The motion gate's own verdict on the scene. A camera whose scene never
+    # calibrates (dashcam, a road that never empties) is LATCHED OPEN: the
+    # detector runs on every frame and the gate skips nothing — so the
+    # Motion-gate tile reads 0% and, without this, nothing said why.
+    latched = _by_camera(samples, "tier0_motion_latched_open")
+    forced_exits = _sum_by_camera(samples, "tier0_motion_forced_exits_total")
     up_by_cam = _by_camera(samples, "tier0_worker_up")
     # The decode dials this camera actually opened with. Sits next to the
     # struggling-camera signals on purpose: "cam3 is shedding" and "cam3 is
@@ -297,6 +303,8 @@ def reduce_metrics(samples: list[Sample]) -> dict[str, Any]:
             "visits_posted": int(visits_ok.get(cam, 0)),
             "visits_dropped": int(visits_drop.get(cam, 0)),
             "mainstream_fallback": bool(mainstream.get(cam, 0) >= 1.0),
+            "motion_latched_open": bool(latched.get(cam, 0) >= 1.0),
+            "motion_forced_exits": int(forced_exits.get(cam, 0)),
             # None when the pipeline predates the metric — an older
             # detect-pipeline image against a newer core must render as
             # "unknown", never as a fabricated default config.
@@ -349,6 +357,12 @@ def reduce_metrics(samples: list[Sample]) -> dict[str, Any]:
             "skipped_calibrating": int(skipped_calib),
             "skipped_stationary": int(skipped_stationary),
             "motion_gate_ratio": motion_gate_ratio,
+            # Cameras the gate gave up on (no static background). The ratio
+            # above is honest for them — 0% skipped — but not actionable
+            # without the reason.
+            "motion_latched_cameras": [
+                cam for cam in all_cams if latched.get(cam, 0) >= 1.0
+            ],
         },
         "cameras": cameras,
         # The pipeline's outputs actually LEAVING it: detections become NATS

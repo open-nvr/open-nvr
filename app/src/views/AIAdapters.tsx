@@ -779,6 +779,7 @@ type Tier0MetricsResp = {
     skipped_calibrating: number
     skipped_stationary?: number
     motion_gate_ratio: number | null
+    motion_latched_cameras?: string[]
   }
   cameras?: Array<{
     camera: string
@@ -794,6 +795,8 @@ type Tier0MetricsResp = {
     visits_posted: number
     visits_dropped: number
     mainstream_fallback: boolean
+    motion_latched_open?: boolean
+    motion_forced_exits?: number
   }>
   events_flow?: {
     bus_events_published: number
@@ -1003,8 +1006,14 @@ function ComputeGatedPanel() {
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
           <StatTile label="CPU" value={p?.cpu_percent != null ? `${Math.round(p.cpu_percent)}%` : '—'} sub="detect-pipeline process" />
           <StatTile label="Memory" value={formatBytes(p?.memory_bytes)} sub="resident" />
+          {/* 0% here is honest but useless without the reason: a scene the gate
+              could not model (dashcam, a road that never empties) is latched
+              open and skips nothing by design. Say so instead of showing a
+              zero the operator cannot act on. */}
           <StatTile label="Motion-gate" value={formatPct(f?.motion_gate_ratio)}
-            sub={`${fmt.number(f?.skipped_no_motion ?? 0)} idle frames skipped`} />
+            sub={(f?.motion_latched_cameras?.length ?? 0) > 0
+              ? `gate latched open on ${f!.motion_latched_cameras!.join(', ')} — no static background`
+              : `${fmt.number(f?.skipped_no_motion ?? 0)} idle frames skipped`} />
           <StatTile label="Frames" value={fmt.number(f?.total ?? 0)}
             sub={`${fmt.number(f?.detector_runs ?? 0)} ran the detector`} />
         </div>
@@ -1047,6 +1056,7 @@ function ComputeGatedPanel() {
                       <td className={`pr-4 py-1 tabular-nums ${c.shedding ? 'text-amber-400' : ''}`}>
                         {c.regions_budget ?? '—'}{c.regions_configured != null ? ` / ${c.regions_configured}` : ''}
                         {c.shedding ? ' · shedding' : ''}
+                        {c.motion_latched_open ? ' · gate open (no static background)' : ''}
                       </td>
                       <td className="pr-4 py-1 tabular-nums">{c.tracks_active}</td>
                       <td className={`pr-4 py-1 tabular-nums ${c.visits_dropped > 0 ? 'text-amber-400' : ''}`}>
