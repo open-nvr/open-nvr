@@ -1294,7 +1294,7 @@ class CameraTools:
                         "visits a skill has described can match that — if "
                         "nothing here runs colour or type descriptions, "
                         "this is not the same as there having been none."
-                        + self._in_progress_note(label, camera_arg))
+                        + self._in_progress_note(label, camera_arg, attrs))
             return (f"No {label} visits remembered{window}."
                     + self._in_progress_note(label, camera_arg))
 
@@ -1308,7 +1308,7 @@ class CameraTools:
                 f"[#{e.id}] {span} on camera {e.camera_id}{plate_bit}"
                 + (" (photo kept)" if e.has_evidence else "")
             )
-        live_note = self._in_progress_note(label, camera_arg)
+        live_note = self._in_progress_note(label, camera_arg, attrs)
         described = f" described as {' and '.join(attrs)}" if attrs else ""
         summary = (f"I remember {len(events)} {label} visit(s){described}"
                    f"{self._window_phrase(start, end)}: "
@@ -1348,12 +1348,29 @@ class CameraTools:
         return any(p.kind is inspect.Parameter.VAR_KEYWORD
                    for p in sig.parameters.values())
 
-    def _in_progress_note(self, label: str, camera_arg) -> str:
+    def _in_progress_note(self, label: str, camera_arg,
+                          attrs: list[str] | tuple[str, ...] = ()) -> str:
         """A visit enters the store only when it ENDS, so history alone answers
         'did anyone come today?' with a straight no while the person is
         literally standing on camera. Seen in the field: the operator walked in
         to test, asked, and was denied — the visit was still being written.
         Cross-check the live Tier-0 ring and say so.
+
+        ``attrs`` is what the question narrowed by, and the ring CANNOT
+        evaluate it. Tier-0 emits a class and a box; it does not know
+        colour, type or who somebody is. A test here already says a cat on
+        camera is not evidence about a person question — this is that same
+        rule one level down, which was missed: a car on camera is not
+        evidence about a RED car question. So when the question carried
+        attributes, the note says which part of it the live view cannot
+        answer instead of asserting a relevance it does not have.
+
+        The note is also written to survive being quoted ALONE. It is
+        appended to an answer, and a small model summarising the tool
+        result can keep this sentence and drop the one before it — which
+        is exactly what happened in the field, turning "no red car in the
+        last hour" into "I see a car on cam1 right now". A sentence that
+        misleads when read on its own is a sentence that will mislead.
         """
         try:
             cam_filter = None
@@ -1375,7 +1392,16 @@ class CameraTools:
                     cams.append(cam)
         if not cams:
             return ""
-        return (f" And right now a {label} IS on {', '.join(sorted(cams))} — "
+        where = ', '.join(sorted(cams))
+        if attrs:
+            # Named, not hidden: "a car, I can't tell if it's red" is a
+            # different and honest answer to "was there a red car".
+            return (f" Separately, and not an answer to that question: a "
+                    f"{label} IS on {where} right now, but nothing has "
+                    f"described it, so I cannot tell whether it is "
+                    f"{' and '.join(attrs)}. That visit enters history when "
+                    f"it ends.")
+        return (f" Separately, right now a {label} IS on {where} — "
                 f"that visit is still in progress and enters history when it ends.")
 
     async def _attach_evidence_frames(self, events, cap: int = 3) -> None:
