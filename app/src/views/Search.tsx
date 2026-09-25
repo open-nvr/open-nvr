@@ -38,7 +38,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import {
   Camera as CameraIcon, CarFront, Clock, ImageOff, Info, Route,
-  Search as SearchIcon, Sparkles, Tag, Type, X,
+  Search as SearchIcon, Sparkles, Tag, Type, UserRound, X,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { api } from '../lib/api'
@@ -138,6 +138,15 @@ const RELAXABLE: Record<RelaxHint['drop'], { key: keyof Filters; label: string }
   labels: { key: 'labels', label: 'the object' },
   plate: { key: 'plate', label: 'the plate' },
 }
+
+/** One entry in the people picker — see GET /search/people. */
+type Person = { value: string; attr: string; visits: number; last_seen: string | null }
+
+/** The claim kind whose value is a person, spelled the same as the
+ *  server's PERSON_KIND. It is a constant here for the same reason it is
+ *  one there: this kind is handled differently from every other claim,
+ *  because it is the one that is not a search word. */
+const PERSON_KIND = 'face_id'
 
 const PAGE = 24
 
@@ -251,6 +260,30 @@ export function Search() {
     ? (planQuery.data?.descriptor_kinds ?? [])
     : undefined
 
+  // WHO THIS BOX HAS ACTUALLY RECOGNISED.
+  //
+  // "was Varun here yesterday" cannot be typed. A name is deliberately
+  // kept out of the words a caption search matches (see
+  // descriptor_store._UNPROJECTED_KINDS) — projecting it would make any
+  // query containing that word match the person, and would widen who can
+  // discover the identity from the app that recognised them to anyone
+  // with search access. So the name matches nothing, silently, and no
+  // amount of rephrasing helps: the box cannot express the question.
+  //
+  // The filter that answers it, attr=face_id:varun, has worked all
+  // along. It was simply unreachable unless you already knew the exact
+  // stored value. This list is what turns it into a control.
+  const peopleQuery = useQuery({
+    queryKey: ['search-people'],
+    queryFn: async () => {
+      const { data } = await api.get('/api/v1/search/people')
+      return (data as { people?: Person[] })?.people ?? []
+    },
+    retry: 0,
+    staleTime: 60_000,
+  })
+  const people = peopleQuery.data ?? []
+
   const searchQuery = useQuery({
     queryKey: ['footage-search', request.toString()],
     queryFn: async () => {
@@ -318,6 +351,41 @@ export function Search() {
     setPage(0)
   }
 
+  /** Pick a person, or clear the pick.
+   *
+   *  ONE at a time, deliberately. The attr filter ANDs, and a visit is
+   *  one object: two names required at once describes a visit claimed to
+   *  be two people, which is all but never a row. Adding rather than
+   *  replacing would quietly guarantee an empty page and look like "she
+   *  was never here". */
+  const setPerson = (value: string) => {
+    const base = editing ? { ...filters! } : asFilters()
+    base.attrs = base.attrs.filter((a) => !a.startsWith(`${PERSON_KIND}:`))
+    if (value) {
+      base.attrs = [...base.attrs, `${PERSON_KIND}:${value}`]
+      // And the name stops being a word. It is still sitting in the text
+      // filter if that is how it got typed, where it matches nothing and
+      // ANDs the whole search down to an empty page — so switching to
+      // the filter that works while leaving the one that cannot would
+      // answer "was Varun here" with "no" a second time.
+      const parts = new Set(value.split(/[^a-z0-9]+/).filter(Boolean))
+      base.text = base.text
+        .split(/\s+/)
+        .filter((w) => w && !parts.has(w.toLowerCase()))
+        .join(' ')
+    }
+    setFilters(base)
+    setPage(0)
+  }
+
+  /** Whoever the running search is filtered to, read back off the
+   *  interpretation so the control shows the state of the QUERY rather
+   *  than a copy of it that can drift. */
+  const pickedPerson =
+    (interp?.attrs ?? [])
+      .find((a) => a.startsWith(`${PERSON_KIND}:`))
+      ?.slice(PERSON_KIND.length + 1) ?? ''
+
   const results = data?.results ?? []
   const relax = data?.relax ?? []
   const relaxed = data?.relaxed
@@ -325,6 +393,35 @@ export function Search() {
   const total = data?.total ?? 0
   const pages = Math.ceil(total / PAGE)
   const nothingAsked = !sentence && !editing
+
+  // A NAME TYPED INTO THE BOX IS A QUESTION THAT CANNOT BE ANSWERED.
+  //
+  // It goes to the text filter, the text filter matches words a skill
+  // wrote, and a name is never one of those. The result is an empty page
+  // — or, worse, a page relaxed past the name, which reads as "here is
+  // everything, and she is not in it". Both say "she was never here"
+  // when the truth is "you cannot ask that way".
+  //
+  // So when the words this search used, or the ones it had to drop,
+  // carry a name this box knows, say so and offer the filter that works.
+  // Matching on all of a name's parts rather than the whole string is
+  // what makes "was varun singh here" and "varun" both land.
+  const typedName = useMemo(() => {
+    if (people.length === 0) return null
+    const words = new Set(
+      `${interp?.text ?? ''} ${relaxed?.dropped ?? ''} ${(interp?.ignored ?? []).join(' ')}`
+        .toLowerCase()
+        .split(/[^a-z0-9]+/)
+        .filter(Boolean),
+    )
+    if (words.size === 0) return null
+    return (
+      people.find((p) => {
+        const parts = p.value.split(/[^a-z0-9]+/).filter(Boolean)
+        return parts.length > 0 && parts.every((part) => words.has(part))
+      }) ?? null
+    )
+  }, [people, interp?.text, interp?.ignored, relaxed?.dropped])
 
   // WHAT THIS BOX CAN ANSWER, not what deployments in general can.
   //
@@ -379,13 +476,18 @@ export function Search() {
           label: `"${interp.text}"`,
           title: 'Matched against what a captioner wrote about the frame.',
         },
-        ...(interp.attrs ?? []).map((pair) => ({
-          key: 'attrs' as const,
-          value: pair,
-          icon: <Sparkles size={12} />,
-          label: pair.split(':').slice(1).join(':'),
-          title: `${pair.split(':')[0]} — what a skill claimed about the object.`,
-        })),
+        ...(interp.attrs ?? []).map((pair) => {
+          const person = pair.startsWith(`${PERSON_KIND}:`)
+          return {
+            key: 'attrs' as const,
+            value: pair,
+            icon: person ? <UserRound size={12} /> : <Sparkles size={12} />,
+            label: pair.split(':').slice(1).join(':'),
+            title: person
+              ? 'Recognised as this person. A name is not a searchable word, so this chip is the only way to ask for them.'
+              : `${pair.split(':')[0]} — what a skill claimed about the object.`,
+          }
+        }),
         interp.plate && {
           key: 'plate' as const,
           icon: <CarFront size={12} />,
@@ -455,6 +557,59 @@ export function Search() {
                   Reset to my words
                 </Button>
               )}
+            </div>
+          )}
+
+          {/* THE FILTER WITH NO WAY IN FROM THE KEYBOARD.
+              Rendered only when this box has recognised somebody: an
+              empty dropdown implies there might be a name in it, and a
+              control that can only be set to "Anyone" is worse than no
+              control at all. */}
+          {people.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <label
+                htmlFor="search-person"
+                className="inline-flex items-center gap-1 text-[var(--text-dim)]"
+              >
+                <UserRound size={12} /> Person:
+              </label>
+              <select
+                id="search-person"
+                value={pickedPerson}
+                onChange={(e) => setPerson(e.target.value)}
+                className="rounded border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 outline-none focus:border-[var(--accent)]"
+              >
+                <option value="">Anyone</option>
+                {people.map((p) => (
+                  <option key={p.value} value={p.value}>
+                    {p.value} ({p.visits})
+                  </option>
+                ))}
+              </select>
+              <span className="text-[var(--text-dim)]">
+                Names are kept out of the searchable words on purpose — pick one here instead of typing it.
+              </span>
+            </div>
+          )}
+
+          {/* A name WAS typed, and it can never match. Say it, and
+              offer the one thing that does. */}
+          {typedName && typedName.value !== pickedPerson && (
+            <div className="flex flex-wrap items-center gap-2 rounded border border-[var(--border)] bg-[var(--bg-2)] px-3 py-2 text-xs">
+              <span className="text-[var(--text-dim)]">
+                <b className="text-[var(--text)]">{typedName.value}</b> is a person, not a
+                word — searching for the name matches nothing however it is phrased.{' '}
+                {typedName.visits} {typedName.visits === 1 ? 'visit' : 'visits'} here{' '}
+                {typedName.visits === 1 ? 'has' : 'have'} been recognised as them.
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                className="ml-auto"
+                onClick={() => setPerson(typedName.value)}
+              >
+                Search for {typedName.value}
+              </Button>
             </div>
           )}
 
