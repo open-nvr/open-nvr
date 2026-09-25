@@ -1236,3 +1236,22 @@ class TestConcurrency:
         started = time.time()
         app._shutdown()
         assert time.time() - started < an.SHUTDOWN_DRAIN_SECONDS + 5
+
+
+# ── Manifest ──────────────────────────────────────────────────────────
+
+
+def test_manifest_serialises_with_its_actions():
+    """The register call the SDK makes at boot is MANIFEST.to_dict(). The
+    actions were declared as ``params={"channel": "str"}`` — a shape the
+    SDK never accepted (``Action.params`` is a list of ``Param``) — so
+    to_dict raised, the app died before registering and docker restarted
+    it 476 times in a row without a single alert delivered. This is the
+    boot path, on the CI path."""
+    doc = an.MANIFEST.to_dict()
+    actions = {a["name"]: a for a in doc["actions"]}
+    assert {"test", "confirm", "check", "mute", "unmute"} <= set(actions)
+    assert [p["name"] for p in actions["mute"]["params"]] == ["minutes", "camera"]
+    assert actions["mute"]["params"][0]["type"] == "float"
+    assert actions["confirm"]["params"][0]["required"] is True
+    assert actions["check"]["params"] == []
