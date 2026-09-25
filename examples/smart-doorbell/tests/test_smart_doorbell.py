@@ -762,3 +762,93 @@ def test_nothing_picked_watches_nothing():
     doorbell.step()
     assert pipeline.process_frame.call_count == 0
     assert doorbell.state_snapshot()["cameras"] == []
+
+
+# ── How loud a face is, is the site's decision ───────────────────────
+#
+# A stranger at a family front door and a stranger at a depot gate are
+# the same event and not the same emergency. The severities were hard
+# coded at "high", which is neither the loudest the platform offers nor
+# adjustable — so a site that wanted a stranger to actually alarm had no
+# way to say so, and a site that found it shrill had no way to soften
+# it. Defaults are unchanged, so an existing install hears no difference.
+
+
+def test_a_stranger_can_be_made_critical():
+    """The ask: unknown faces should be able to alarm at the top level."""
+    cfg = _app_config(unknown_severity="critical")
+    doorbell, _p, dispatcher = _build_doorbell([_unknown_read()], config=cfg)
+    doorbell.step()
+    alert = dispatcher.dispatch.call_args.args[0]
+
+    assert alert.severity == "critical"
+    assert alert.evidence["kind"] == "unknown_visitor"
+
+
+def test_the_stranger_default_is_unchanged():
+    """A shipped default getting louder without being asked is its own
+    kind of bug — somebody's night gets interrupted by an upgrade."""
+    doorbell, _p, dispatcher = _build_doorbell([_unknown_read()])
+    doorbell.step()
+    assert dispatcher.dispatch.call_args.args[0].severity == "high"
+
+
+def test_known_severity_overrides_the_category_table():
+    cfg = _app_config(known_severity="medium")
+    doorbell, _p, dispatcher = _build_doorbell(
+        [_known_read(category="family")], config=cfg)
+    doorbell.step()
+    alert = dispatcher.dispatch.call_args.args[0]
+
+    assert alert.severity == "medium"
+    assert alert.evidence["kind"] == "known_visitor"
+
+
+def test_a_watchlist_match_is_never_quietened_by_it():
+    """The knob is for ordinary visitors. A watchlist face and an
+    expired pass are the two recognised people who must stay loud, so
+    they are decided BEFORE it is read — otherwise softening the
+    doorbell would silently soften the alarm it exists for.
+    """
+    cfg = _app_config(known_severity="info")
+    doorbell, _p, dispatcher = _build_doorbell(
+        [_known_read(category="watchlist")], config=cfg)
+    doorbell.step()
+    alert = dispatcher.dispatch.call_args.args[0]
+
+    assert alert.severity == "high"
+    assert alert.evidence["kind"] == "watchlist_visitor"
+
+
+def test_an_expired_pass_is_never_quietened_by_it():
+    cfg = _app_config(known_severity="info")
+    read = dataclasses.replace(_known_read(category="contractor"),
+                               raw={"metadata": {"valid_until": "2020-01-31"}})
+    doorbell, _p, dispatcher = _build_doorbell([read], config=cfg)
+    doorbell.step()
+    alert = dispatcher.dispatch.call_args.args[0]
+
+    assert alert.severity == "high"
+    assert alert.evidence["kind"] == "expired_pass"
+
+
+def test_a_misspelled_severity_falls_back_and_says_so(caplog):
+    """Silently ignoring a typo is the wrong failure: the operator sets
+    `critcal`, hears no change, and concludes the setting does nothing —
+    which is true, and invisible."""
+    from smart_doorbell import _severity
+
+    with caplog.at_level("WARNING"):
+        assert _severity("critcal", "high") == "high"
+    assert "critcal" in caplog.text, caplog.text
+
+    # An empty value is not a typo — it is the documented way to say
+    # "use the default" — so it must not warn.
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        assert _severity("", "high") == "high"
+        assert _severity(None, "high") == "high"
+    assert caplog.text == "", "an unset value is not a mistake"
+
+    # Case and whitespace are an operator typing, not an error.
+    assert _severity("  CRITICAL ", "high") == "critical"
