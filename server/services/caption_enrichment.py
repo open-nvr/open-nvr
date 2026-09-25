@@ -176,7 +176,8 @@ async def _caption_jpeg(jpeg: bytes, adapter: str, camera_handle: str,
 
 def wants_caption(label: str | None, evidence_path: str | None,
                   enabled: bool = True,
-                  camera_skills: set[str] | None = None) -> bool:
+                  camera_skills: set[str] | None = None,
+                  camera_id: int | None = None) -> bool:
     """Should this freshly-ingested visit be queued for a caption? Pure,
     tested, and the exact shape of ``wants_plate`` for the same reasons.
 
@@ -189,7 +190,36 @@ def wants_caption(label: str | None, evidence_path: str | None,
     """
     if not (enabled and evidence_path and (label or "").lower() in CAPTIONABLE_LABELS):
         return False
-    return CAPTION_SKILL in (camera_skills or set())
+    if CAPTION_SKILL in (camera_skills or set()):
+        return True
+    _note_unassigned(camera_id)
+    return False
+
+
+#: Visits that qualified on every count except the assignment. A site with
+#: EVENTS_CAPTION_ENRICHMENT=true, a captioner registered and healthy, and
+#: not one camera carrying the skill produces nothing and — until this —
+#: said nothing: the flag looked on, the adapter looked fine, the store
+#: stayed empty, and the operator concluded the feature was broken. The
+#: gate is deliberate ("no assignment, no caption, no cost"); being
+#: silent about it was not. One line the first time, then one per
+#: thousand, so it is findable without becoming the log.
+_unassigned_skipped: int = 0
+
+
+def _note_unassigned(camera_id: int | None) -> None:
+    global _unassigned_skipped
+    _unassigned_skipped += 1
+    if _unassigned_skipped == 1 or _unassigned_skipped % 1000 == 0:
+        logger.warning(
+            "caption enrichment is ON but camera %s has no %r skill assigned "
+            "— %d qualifying visit(s) skipped with no caption. Assign the skill "
+            "(camera settings → Skills, or PUT /api/v1/cameras/{id} with "
+            "assignments=[{\"skill\": %r}]) to start captioning; nothing "
+            "recorded so far is captioned until EVENTS_ENRICHMENT_BACKFILL=true.",
+            camera_id if camera_id is not None else "?", CAPTION_SKILL,
+            _unassigned_skipped, CAPTION_SKILL,
+        )
 
 
 async def enrich_event_caption(event_id: int, evidence_jpeg: bytes | None = None) -> None:

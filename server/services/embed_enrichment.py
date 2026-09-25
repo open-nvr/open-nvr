@@ -90,7 +90,8 @@ from services.caption_enrichment import CAPTIONABLE_LABELS as EMBEDDABLE_LABELS
 
 def wants_embedding(label: str | None, evidence_path: str | None,
                     enabled: bool = True,
-                    camera_skills: set[str] | None = None) -> bool:
+                    camera_skills: set[str] | None = None,
+                    camera_id: int | None = None) -> bool:
     """Should this freshly-ingested visit be queued for a vector?
 
     Pure and tested, the exact shape of ``wants_caption`` and
@@ -103,7 +104,31 @@ def wants_embedding(label: str | None, evidence_path: str | None,
     if not (enabled and evidence_path
             and (label or "").lower() in EMBEDDABLE_LABELS):
         return False
-    return EMBED_SKILL in (camera_skills or set())
+    if EMBED_SKILL in (camera_skills or set()):
+        return True
+    _note_unassigned(camera_id)
+    return False
+
+
+#: Same shape as the captioner's counter, for the same reason: the gate
+#: is deliberate, silence about it was not. See caption_enrichment.
+_unassigned_skipped: int = 0
+
+
+def _note_unassigned(camera_id: int | None) -> None:
+    global _unassigned_skipped
+    _unassigned_skipped += 1
+    if _unassigned_skipped == 1 or _unassigned_skipped % 1000 == 0:
+        logger.warning(
+            "embed enrichment is ON but camera %s has no %r skill assigned — "
+            "%d qualifying visit(s) skipped with no vector; semantic search "
+            "cannot rank them. Assign the skill (camera settings → Skills, or "
+            "PUT /api/v1/cameras/{id} with assignments=[{\"skill\": %r}]); "
+            "nothing recorded so far is embedded until "
+            "EVENTS_ENRICHMENT_BACKFILL=true.",
+            camera_id if camera_id is not None else "?", EMBED_SKILL,
+            _unassigned_skipped, EMBED_SKILL,
+        )
 
 
 async def _resolve_embed_adapter() -> str | None:

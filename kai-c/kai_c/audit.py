@@ -104,6 +104,11 @@ class AuditStore:
         )
         self._lock = threading.Lock()
         self._opened: bool = False
+        #: Failed local writes since start. The first is logged at ERROR
+        #: with the path and the reason; after that one line per thousand,
+        #: so a wrong mount shows up as one clear message and a running
+        #: count instead of a log full of identical lines that bury it.
+        self.write_failures: int = 0
 
     @property
     def path(self) -> str:
@@ -146,7 +151,16 @@ class AuditStore:
                 # serious; we surface it via stderr/logger but do NOT
                 # raise: the caller's main path should not be broken
                 # by audit-disk issues.
-                logger.error("audit-log write failed: %s line=%r", exc, line.rstrip())
+                self.write_failures += 1
+                if self.write_failures == 1 or self.write_failures % 1000 == 0:
+                    logger.error(
+                        "audit-log write failed (%d so far): %s — path %s. "
+                        "Audit events are being DROPPED until this is fixed; "
+                        "the directory must exist and be writable by this "
+                        "process, or set KAI_C_AUDIT_LOG. First dropped "
+                        "record: %r",
+                        self.write_failures, exc, self._path, line.rstrip(),
+                    )
         return event
 
     def read_all(self) -> list[AuditEvent]:
