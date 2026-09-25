@@ -45,20 +45,36 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy uv binary
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
-# Copy project files for dependency resolution
-COPY server/pyproject.toml /build/server/pyproject.toml
-COPY kai-c/pyproject.toml /build/kai-c/pyproject.toml
+# Copy project files for dependency resolution.
+#
+# THE LOCKFILES ARE NOT OPTIONAL. Without them `uv sync --frozen` fails
+# with "Unable to find lockfile", and the `|| uv sync` that used to
+# follow quietly resolved the newest of everything instead — so CI
+# tested one dependency set and the shipped image ran another, with
+# nothing reporting the difference.
+#
+# That is not hypothetical twice over. FastAPI drifted to 0.141.1
+# against a lock pinning 0.135.3 and every API token started getting
+# 403s; the note in docs/design/home-assistant-integration-
+# implementation-plan.md calls it a "Trap found live" and works around
+# the symptom. Then SQLAlchemy 2.1.0 changed the default DBAPI for a
+# bare `postgresql://` URL from psycopg2 to psycopg 3, which is not
+# installed, and the backend could not import at all.
+COPY server/pyproject.toml server/uv.lock /build/server/
+COPY kai-c/pyproject.toml kai-c/uv.lock /build/kai-c/
 
 # Create virtual environments and sync dependencies (--no-install-project skips building the project itself)
+#
+# No `|| uv sync` fallback. A lockfile out of step with pyproject.toml
+# is a thing to fix in one command, and failing here says so; silently
+# building something else does not.
 # Server dependencies
 RUN cd /build/server && uv venv /build/server-venv && \
-    VIRTUAL_ENV=/build/server-venv uv sync --frozen --no-dev --no-install-project --directory /build/server --active || \
-    VIRTUAL_ENV=/build/server-venv uv sync --no-dev --no-install-project --directory /build/server --active
+    VIRTUAL_ENV=/build/server-venv uv sync --frozen --no-dev --no-install-project --directory /build/server --active
 
-# Kai-C dependencies  
+# Kai-C dependencies
 RUN cd /build/kai-c && uv venv /build/kai-c-venv && \
-    VIRTUAL_ENV=/build/kai-c-venv uv sync --frozen --no-dev --no-install-project --directory /build/kai-c --active || \
-    VIRTUAL_ENV=/build/kai-c-venv uv sync --no-dev --no-install-project --directory /build/kai-c --active
+    VIRTUAL_ENV=/build/kai-c-venv uv sync --frozen --no-dev --no-install-project --directory /build/kai-c --active
 
 # Install opencv-python-headless separately (not in pyproject.toml)
 RUN uv pip install --python /build/server-venv/bin/python --no-cache-dir opencv-python-headless
