@@ -418,7 +418,8 @@ async def ingest_track_event(
 
     if wants_caption(row.label, evidence_rel,
                      settings.events_caption_enrichment,
-                     camera_skills(camera)):
+                     camera_skills(camera),
+                     camera_id=getattr(camera, "id", None)):
         background.add_task(enrich_event_caption, row.id)
 
     # And what the box's OWN skills can claim about it — colour, vehicle
@@ -450,7 +451,8 @@ async def ingest_track_event(
 
     if wants_embedding(row.label, evidence_rel,
                        getattr(settings, "events_embed_enrichment", False),
-                       camera_skills(camera)):
+                       camera_skills(camera),
+                       camera_id=getattr(camera, "id", None)):
         background.add_task(enrich_event_embedding, row.id)
     # Read the id BEFORE releasing: record_track_visit committed, which
     # expires every attribute, so a post-close row.id would try to refresh a

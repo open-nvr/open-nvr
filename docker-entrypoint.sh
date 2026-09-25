@@ -24,6 +24,16 @@ if [ -d "/app/kai-c-state" ]; then
     chown -R opennvr:opennvr /app/kai-c-state 2>/dev/null || true
 fi
 
+# KAI-C's audit log (kai_c/audit.py) defaults to
+# /var/log/opennvr/kai-c-audit.jsonl and creates the directory on first
+# write — which, as the opennvr user under a root-owned /var/log, it
+# cannot. Every registration, inference and refusal was then logged as
+# "audit-log write failed: Permission denied" and dropped: the audit
+# trail the product is sold on was empty on a stock image. Root creates
+# it here, before gosu hands off.
+mkdir -p /var/log/opennvr 2>/dev/null || true
+chown opennvr:opennvr /var/log/opennvr 2>/dev/null || true
+
 # Apps-bus users file (opennvr_nats_auth volume, shared with nats-apps).
 # nats-apps runs as root and creates the directory root:root 755 when it
 # seeds users.conf, so core (uid opennvr) could never replace the seed

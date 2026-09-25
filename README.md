@@ -298,7 +298,7 @@ Commercial deployments — deployment assistance, NDA adapter authoring, complia
 
 ## Documentation
 
-**Getting started** — [Docker quickstart](DOCKER_QUICKSTART.md) · [User manual](USER_MANUAL.md) · [Camera assignments — give each camera a job](docs/CAMERA_ASSIGNMENTS.md) · [Local dev setup](docs/LOCAL_SETUP.md) · [Use cases by industry](docs/USE_CASES.md) · [Comparisons](docs/COMPARISONS.md)
+**Getting started** — [Docker quickstart](DOCKER_QUICKSTART.md) · [User manual](USER_MANUAL.md) · [Camera assignments — give each camera a job](docs/CAMERA_ASSIGNMENTS.md) · [Enrichment — captions, descriptors and embeddings for search](docs/ENRICHMENT.md) · [Local dev setup](docs/LOCAL_SETUP.md) · [Use cases by industry](docs/USE_CASES.md) · [Comparisons](docs/COMPARISONS.md)
 
 **Architecture & security** — [Security policy & acknowledgements](SECURITY.md) · [Security architecture](docs/SECURITY_ARCHITECTURE.md) · [Compliance mapping](docs/COMPLIANCE.md) · [Enterprise](docs/ENTERPRISE.md) · [Reference appliance](docs/REFERENCE_APPLIANCE.md) · [Government deployment brief](docs/GOVERNMENT_DEPLOYMENT.md) · [AI Adapter Contract](docs/AI_ADAPTER_CONTRACT.md) · [Edge autonomy & robotics](docs/EDGE_AUTONOMY.md)
 
