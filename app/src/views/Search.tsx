@@ -436,12 +436,24 @@ export function Search() {
   // a third state and gets the old wording: claiming a box describes
   // nothing because KAI-C was briefly unreachable would be a worse lie
   // than the vague one.
+  // face_id is a kind this box can produce, and it is NOT something to
+  // type — listing it among the words to try sends the operator back to
+  // the query that cannot work. It gets its own sentence pointing at the
+  // control that does, and the rest are said in words rather than in
+  // column names.
+  const sayable = (kinds ?? [])
+    .filter((k) => k !== PERSON_KIND)
+    .map((k) => k.replace(/_/g, ' '))
+  const recognisesPeople = (kinds ?? []).includes(PERSON_KIND)
+  const pickerHint = recognisesPeople && people.length > 0
+    ? ' A name is not one of those words — use the Person picker above to search for someone.'
+    : ''
   const emptyReason =
     kinds === undefined
       ? 'Nothing matched. Words only match what a skill wrote about a frame, so a deployment with nothing describing visits can search classes, cameras, times and plates, but not colours.'
-      : kinds.length === 0
-        ? 'Nothing matched — and nothing on this system describes visits, so words can only match a plate. Install a captioner or a colour/type skill from the App Catalog and searches like “red van” start working; classes, cameras, times and plates work now.'
-        : `Nothing matched. This system can describe a visit by ${kinds.join(', ')} — anything outside that has no words to match against, so try a class, a camera, a time or a plate.`
+      : sayable.length === 0
+        ? `Nothing matched — and nothing on this system describes visits in words, so words can only match a plate. Install a captioner or a colour/type skill from the App Catalog and searches like “red van” start working; classes, cameras, times and plates work now.${pickerHint}`
+        : `Nothing matched. This system can describe a visit by ${sayable.join(', ')} — anything outside that has no words to match against, so try a class, a camera, a time or a plate.${pickerHint}`
 
   const chips = interp
     ? [
@@ -616,7 +628,14 @@ export function Search() {
           {interp && interp.ignored.length > 0 && (
             <div className="flex items-center gap-1.5 text-xs text-[var(--text-dim)]">
               <Info size={12} />
-              Ignored: {interp.ignored.join(', ')} — bare numbers match too much to be useful.
+              Ignored: {interp.ignored.join(', ')}
+              {/* The reason only holds for what the PARSER set aside. Since
+                  the relax path started moving dropped words here too, the
+                  line was explaining "was, varun, here" as bare numbers —
+                  a sentence the operator can see is false, attached to the
+                  one field whose job is honesty about what was dropped. */}
+              {interp.ignored.every((w) => /^\d+$/.test(w))
+                && ' — bare numbers match too much to be useful.'}
             </div>
           )}
 
@@ -711,7 +730,8 @@ export function Search() {
             <div className="flex flex-wrap items-center gap-2 rounded border border-[var(--border)] bg-[var(--bg-2)] px-3 py-2 text-xs">
               <span className="text-[var(--text-dim)]">
                 Nothing was described as <b className="text-[var(--text)]">{relaxed.dropped}</b>,
-                so that word was set aside — showing the {relaxed.without}{' '}
+                so {relaxed.dropped.trim().split(/\s+/).length === 1 ? 'that word was' : 'those words were'}{' '}
+                set aside — showing the {relaxed.without}{' '}
                 {relaxed.without === 1 ? 'result' : 'results'} the rest of your search matched.
               </span>
               <Button
