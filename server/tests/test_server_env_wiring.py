@@ -176,3 +176,20 @@ def test_the_people_opt_in_can_actually_be_opted_into():
     """The one that was already shipped broken: a documented opt-in with
     no way to opt in."""
     assert "EVENTS_DESCRIPTOR_PEOPLE" in _passed_to_container()
+
+
+def test_nats_receives_the_site_key_quoted():
+    """nats-server parses ``token: $INTERNAL_API_KEY`` by parsing the
+    variable's VALUE as config. A key starting with a digit — most hex or
+    base64 secrets — parses as a number and the bus refuses to start,
+    taking core (which depends on it) down with it. The compose file must
+    hand NATS the value wrapped in quotes; the apps bus renders the key
+    into a URL itself and must keep getting it bare."""
+    compose = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    nats_block = compose[compose.index("\n  nats:\n"):compose.index("\n  nats-apps:\n")]
+    apps_block = compose[compose.index("\n  nats-apps:\n"):]
+    apps_block = apps_block[:apps_block.index("\n  ", 20) if "\n  " in apps_block[20:] else len(apps_block)]
+    assert 'INTERNAL_API_KEY="${INTERNAL_API_KEY' in nats_block, (
+        "the platform bus must receive INTERNAL_API_KEY quoted — see the comment in docker-compose.yml")
+    assert '- INTERNAL_API_KEY=${INTERNAL_API_KEY}' in compose, (
+        "the apps bus renders the key into a URL and needs it bare")
