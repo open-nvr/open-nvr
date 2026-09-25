@@ -357,7 +357,11 @@ def _run_env(intent: Intent) -> dict[str, str]:
     pin = pinned_image_ref(intent)
     if pin is None:
         return {}
-    return {image_env_key(intent.id): pin}
+    # The app services default to `pull_policy: build` (a checkout builds
+    # its own apps and must not ask a registry for `:local-build`). A pin
+    # is the one case where the image MUST come from the registry, so the
+    # policy rides along with the pin.
+    return {image_env_key(intent.id): pin, "APPS_PULL_POLICY": "missing"}
 
 
 def reconcile_intent(

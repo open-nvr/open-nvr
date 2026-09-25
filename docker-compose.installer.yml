@@ -46,6 +46,7 @@ services:
       context: .
       dockerfile: scripts/app-installer/Dockerfile
     image: opennvr/app-installer:local
+    pull_policy: ${APPS_PULL_POLICY:-build}
     container_name: opennvr_app_installer
     restart: unless-stopped
     # NOT network-facing: no ports published. It only needs the DB and

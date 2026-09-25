@@ -875,6 +875,7 @@ services:
     build:
       context: ./scripts/mdns-announcer
     image: opennvr/mdns-announcer:local
+    pull_policy: ${APPS_PULL_POLICY:-build}
     container_name: opennvr_mdns
     logging: *svc-logs
     restart: unless-stopped

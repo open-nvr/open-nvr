@@ -111,7 +111,15 @@ services:
     build:
       context: .
       dockerfile: scripts/egress-proxy/Dockerfile
+    # Built from this checkout: never ask Docker Hub for `:local-build`
+    # first. With the default `missing` policy every install printed
+    # "pull access denied for opennvr/<app>, repository does not exist"
+    # before building — noise that reads like a failure. `build` builds
+    # (cached) and skips the registry. The app installer sets
+    # APPS_PULL_POLICY=missing when it pins a published image via the
+    # ${<ID>_IMAGE} slot, so a pinned install still pulls the pin.
     image: ${EGRESS_PROXY_IMAGE:-opennvr/egress-proxy:local-build}
+    pull_policy: ${APPS_PULL_POLICY:-build}
     container_name: opennvr_egress_proxy
     logging: *svc-logs
     restart: unless-stopped
@@ -169,6 +177,7 @@ services:
     # this resolves to the :local-build tag and the build block above is
     # used. See docs/APPS_INSTALL.md → Digest pinning.
     image: ${LOITERING_DETECTION_IMAGE:-opennvr/loitering-detection:local-build}
+    pull_policy: ${APPS_PULL_POLICY:-build}
     container_name: opennvr_loitering_detection
     logging: *svc-logs
     restart: unless-stopped
@@ -259,6 +268,7 @@ services:
     # this resolves to the :local-build tag and the build block above is
     # used. See docs/APPS_INSTALL.md → Digest pinning.
     image: ${OCCUPANCY_COUNTING_IMAGE:-opennvr/occupancy-counting:local-build}
+    pull_policy: ${APPS_PULL_POLICY:-build}
     container_name: opennvr_occupancy_counting
     logging: *svc-logs
     restart: unless-stopped
@@ -331,6 +341,7 @@ services:
     # <image>@sha256:<digest>, and compose then PULLS that exact ref
     # instead of using the build. See docs/APPS_INSTALL.md → Digest pinning.
     image: ${LINE_CROSSING_IMAGE:-opennvr/line-crossing:local-build}
+    pull_policy: ${APPS_PULL_POLICY:-build}
     container_name: opennvr_line_crossing
     logging: *svc-logs
     restart: unless-stopped
@@ -402,6 +413,7 @@ services:
       dockerfile: examples/abandoned-object/Dockerfile
     # Digest pin slot — see docs/APPS_INSTALL.md → Digest pinning.
     image: ${ABANDONED_OBJECT_IMAGE:-opennvr/abandoned-object:local-build}
+    pull_policy: ${APPS_PULL_POLICY:-build}
     container_name: opennvr_abandoned_object
     logging: *svc-logs
     restart: unless-stopped
@@ -473,6 +485,7 @@ services:
       dockerfile: examples/intrusion-detection/Dockerfile
     # Digest pin slot — see docs/APPS_INSTALL.md → Digest pinning.
     image: ${INTRUSION_DETECTION_IMAGE:-opennvr/intrusion-detection:local-build}
+    pull_policy: ${APPS_PULL_POLICY:-build}
     container_name: opennvr_intrusion_detection
     logging: *svc-logs
     restart: unless-stopped
@@ -802,6 +815,7 @@ services:
       dockerfile: examples/license-plate-recognition/Dockerfile
     # Digest pin slot — see docs/APPS_INSTALL.md → Digest pinning.
     image: ${LICENSE_PLATE_RECOGNITION_IMAGE:-opennvr/license-plate-recognition:local-build}
+    pull_policy: ${APPS_PULL_POLICY:-build}
     container_name: opennvr_license_plate_recognition
     logging: *svc-logs
     restart: unless-stopped
@@ -879,6 +893,7 @@ services:
       dockerfile: examples/alert-notifier/Dockerfile
     # Digest pin slot — see docs/APPS_INSTALL.md → Digest pinning.
     image: ${ALERT_NOTIFIER_IMAGE:-opennvr/alert-notifier:local-build}
+    pull_policy: ${APPS_PULL_POLICY:-build}
     container_name: opennvr_alert_notifier
     logging: *svc-logs
     restart: unless-stopped
@@ -951,6 +966,7 @@ services:
       dockerfile: examples/gate-controller/Dockerfile
     # Digest pin slot — see docs/APPS_INSTALL.md → Digest pinning.
     image: ${GATE_CONTROLLER_IMAGE:-opennvr/gate-controller:local-build}
+    pull_policy: ${APPS_PULL_POLICY:-build}
     container_name: opennvr_gate_controller
     logging: *svc-logs
     restart: unless-stopped
@@ -1121,6 +1137,7 @@ services:
       dockerfile: examples/smart-doorbell/Dockerfile
     # Digest pin slot — see docs/APPS_INSTALL.md → Digest pinning.
     image: ${SMART_DOORBELL_IMAGE:-opennvr/smart-doorbell:local-build}
+    pull_policy: ${APPS_PULL_POLICY:-build}
     container_name: opennvr_smart_doorbell
     logging: *svc-logs
     restart: unless-stopped
@@ -1353,6 +1370,7 @@ services:
       dockerfile: examples/package-delivery/Dockerfile
     # Digest pin slot — see docs/APPS_INSTALL.md → Digest pinning.
     image: ${PACKAGE_DELIVERY_IMAGE:-opennvr/package-delivery:local-build}
+    pull_policy: ${APPS_PULL_POLICY:-build}
     container_name: opennvr_package_delivery
     logging: *svc-logs
     restart: unless-stopped
@@ -1442,6 +1460,7 @@ services:
       dockerfile: examples/footage-search/Dockerfile
     # Digest pin slot — see docs/APPS_INSTALL.md → Digest pinning.
     image: ${FOOTAGE_SEARCH_IMAGE:-opennvr/footage-search:local-build}
+    pull_policy: ${APPS_PULL_POLICY:-build}
     container_name: opennvr_footage_search
     logging: *svc-logs
     restart: unless-stopped
@@ -1533,6 +1552,7 @@ services:
       dockerfile: examples/home-assistant-relay/Dockerfile
     # Digest pin slot — see docs/APPS_INSTALL.md → Digest pinning.
     image: ${HOME_ASSISTANT_RELAY_IMAGE:-opennvr/home-assistant-relay:local-build}
+    pull_policy: ${APPS_PULL_POLICY:-build}
     container_name: opennvr_home_assistant_relay
     logging: *svc-logs
     restart: unless-stopped
@@ -1597,6 +1617,7 @@ services:
       dockerfile: examples/guard-scan-compliance/Dockerfile
     # Digest pin slot — see docs/APPS_INSTALL.md → Digest pinning.
     image: ${GUARD_SCAN_COMPLIANCE_IMAGE:-opennvr/guard-scan-compliance:local-build}
+    pull_policy: ${APPS_PULL_POLICY:-build}
     container_name: opennvr_guard_scan_compliance
     logging: *svc-logs
     restart: unless-stopped
