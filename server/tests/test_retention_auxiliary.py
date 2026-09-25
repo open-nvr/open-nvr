@@ -112,3 +112,78 @@ def test_stale_pending_devices_pruned_admin_decisions_kept(db):
     assert stats["deleted_pending_devices"] == 1
     ips = {d.ip_address for d in db.query(TrustedDevice).all()}
     assert ips == {"10.0.0.2", "10.0.0.3", "10.0.0.4"}
+
+
+# ── events store + inbox ─────────────────────────────────────────────
+
+
+def _visit(db, *, age_days: float, with_sidecars: bool = True):
+    from models import EventEmbedding, EventText, TimelineEvent, VisitDescriptor
+    at = datetime.now(UTC) - timedelta(days=age_days)
+    row = TimelineEvent(camera_id=1, label="car", event_type="visit", source="tier0",
+                        started_at=at, ended_at=at + timedelta(seconds=20))
+    db.add(row)
+    db.commit()
+    if with_sidecars:
+        db.add(EventText(event_id=row.id, caption="a car", source="t"))
+        db.add(EventEmbedding(event_id=row.id, vector=b"\x00" * 16, dim=4, model="t"))
+        db.add(VisitDescriptor(event_id=row.id, kind="colour", value="red",
+                               source_task="vqa", binding="direct"))
+        db.commit()
+    return row.id
+
+
+def test_visit_rows_age_out_with_their_evidence(db):
+    """RFC-0001: one retention policy, tied to recordings. The JPEGs
+    were purged on that window; the rows that pointed at them never
+    were, so evidence_url dangled and the table grew without bound."""
+    from models import EventEmbedding, EventText, TimelineEvent, VisitDescriptor
+    old = _visit(db, age_days=40)
+    fresh = _visit(db, age_days=2)
+    stats = RetentionService.cleanup_auxiliary(db, retention_days=30)
+    assert stats["deleted_events"] == 1
+    assert db.get(TimelineEvent, old) is None
+    assert db.get(TimelineEvent, fresh) is not None
+    # sidecars go with the row — explicitly, so SQLite agrees with Postgres
+    for side in (EventText, EventEmbedding, VisitDescriptor):
+        assert db.query(side).filter(side.event_id == old).count() == 0
+        assert db.query(side).filter(side.event_id == fresh).count() == 1
+
+
+def test_events_retention_can_differ_from_recordings(db, monkeypatch):
+    """EVENTS_RETENTION_DAYS overrides; recordings kept forever (0) keeps
+    the rows forever unless the operator says otherwise."""
+    from core.config import settings
+    from models import TimelineEvent
+    old = _visit(db, age_days=40, with_sidecars=False)
+    monkeypatch.setattr(settings, "events_retention_days", 0, raising=False)
+    assert RetentionService.cleanup_auxiliary(db, retention_days=0)["deleted_events"] == 0
+    assert db.get(TimelineEvent, old) is not None
+    monkeypatch.setattr(settings, "events_retention_days", 7, raising=False)
+    assert RetentionService.cleanup_auxiliary(db, retention_days=0)["deleted_events"] == 1
+
+
+def _alert(db, *, age_days: float, n: int = 1):
+    from models import AppAlert
+    for i in range(n):
+        db.add(AppAlert(alert_id=f"al-{age_days}-{i}-{secrets.token_hex(3)}",
+                        fired_at=datetime.now(UTC) - timedelta(days=age_days),
+                        severity="high", title="t"))
+    db.commit()
+
+
+def test_the_inbox_is_pruned_by_age_then_capped(db, monkeypatch):
+    """A busy site rings thousands of alerts a day and nothing ever
+    removed one."""
+    from core.config import settings
+    from models import AppAlert
+    monkeypatch.setattr(settings, "alerts_inbox_retention_days", 30, raising=False)
+    _alert(db, age_days=45, n=3)
+    _alert(db, age_days=1, n=5)
+    stats = RetentionService.cleanup_auxiliary(db, retention_days=0)
+    assert stats["deleted_app_alerts"] == 3
+    assert db.query(AppAlert).count() == 5
+    monkeypatch.setattr(RetentionService, "APP_ALERTS_MAX_ROWS", 2)
+    stats = RetentionService.cleanup_auxiliary(db, retention_days=0)
+    assert stats["deleted_app_alerts"] == 3
+    assert db.query(AppAlert).count() == 2

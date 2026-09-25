@@ -208,6 +208,15 @@ def apply_plate_event(envelope: object) -> str:
         # journey.py's plate anchor both read descriptors, not the
         # column. After the stamp above, so the claim carries the
         # forwarded confidence.
+        # The envelope's correlation_id joins this read to KAI-C's audit
+        # line and to every other event in the chain. It used to stop at
+        # the log statement below; now it rides on the row and on the
+        # claim, so a reader of the store can reach the audit trail.
+        cid = envelope.get("correlation_id")
+        if isinstance(cid, str) and cid.strip():
+            payload_now = dict(row.payload or {})
+            payload_now["correlation_id"] = cid.strip()[:64]
+            row.payload = payload_now
         from services.descriptor_store import sync_plate_claim
 
         sync_plate_claim(db, row)

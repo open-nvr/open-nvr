@@ -247,6 +247,11 @@ class RetentionService:
     CAMERA_EVENTS_FALLBACK_DAYS = 90  # used when recordings are kept forever
     SYSTEM_EVENTS_MAX_ROWS = 50_000
     PENDING_DEVICE_MAX_AGE_DAYS = 30
+    # The events store is deleted in batches so a first sweep over a year
+    # of rows neither holds one giant transaction nor starves the ingest
+    # path; the inbox gets the same age-then-cap treatment as camera_events.
+    EVENTS_DELETE_BATCH = 5_000
+    APP_ALERTS_MAX_ROWS = 100_000
 
     @staticmethod
     def cleanup_auxiliary(db: Session, retention_days: int) -> dict[str, Any]:
@@ -266,6 +271,8 @@ class RetentionService:
             "deleted_system_events": 0,
             "deleted_pending_devices": 0,
             "hevc_cache_removed": 0,
+            "deleted_events": 0,
+            "deleted_app_alerts": 0,
         }
         from models import CameraEvent, DeviceStatus, SystemEvent, TrustedDevice
 
@@ -336,6 +343,77 @@ class RetentionService:
             db.rollback()
             recording_logger.warning(f"system_events prune failed: {e}")
 
+        # events store (visits + their sidecars). RFC-0001 promised "one
+        # retention policy, tied to recordings"; cleanup_evidence delivered
+        # half of it — the JPEGs aged out, the rows that pointed at them
+        # never did, so `evidence_url` dangled and the table grew without
+        # bound (a demo box wrote 31k rows in a day). Rows now age out on
+        # the same window as their evidence, EVENTS_RETENTION_DAYS
+        # overriding when the operator wants history and video to differ.
+        # Sidecars cascade on Postgres; deleted explicitly here so SQLite
+        # (tests, laptops) agrees.
+        try:
+            from core.config import settings
+            from models import (
+                EventEmbedding, EventText, TimelineEvent, VisitDescriptor,
+            )
+            ev_days = int(getattr(settings, "events_retention_days", 0) or 0) or retention_days
+            n = 0
+            if ev_days > 0:
+                cutoff = datetime.now(UTC) - timedelta(days=ev_days)
+                while True:
+                    ids = [
+                        r[0] for r in db.query(TimelineEvent.id)
+                        .filter(TimelineEvent.started_at < cutoff)
+                        .order_by(TimelineEvent.id)
+                        .limit(RetentionService.EVENTS_DELETE_BATCH)
+                        .all()
+                    ]
+                    if not ids:
+                        break
+                    for side in (EventText, EventEmbedding, VisitDescriptor):
+                        db.query(side).filter(side.event_id.in_(ids)).delete(
+                            synchronize_session=False)
+                    n += db.query(TimelineEvent).filter(
+                        TimelineEvent.id.in_(ids)).delete(synchronize_session=False)
+                    db.commit()
+            stats["deleted_events"] = n
+        except Exception as e:
+            db.rollback()
+            recording_logger.warning(f"events prune failed: {e}")
+        # app_alerts (the operator inbox): age, then a hard cap.
+        try:
+            from core.config import settings
+            from models import AppAlert
+            days = int(getattr(settings, "alerts_inbox_retention_days", 90) or 0)
+            n = 0
+            if days > 0:
+                cutoff = datetime.now(UTC) - timedelta(days=days)
+                n = (
+                    db.query(AppAlert)
+                    .filter(AppAlert.fired_at < cutoff)
+                    .delete(synchronize_session=False)
+                )
+            total = db.query(AppAlert).count()
+            if total > RetentionService.APP_ALERTS_MAX_ROWS:
+                cap_id = (
+                    db.query(AppAlert.id)
+                    .order_by(AppAlert.id.desc())
+                    .offset(RetentionService.APP_ALERTS_MAX_ROWS)
+                    .limit(1)
+                    .scalar()
+                )
+                if cap_id is not None:
+                    n += (
+                        db.query(AppAlert)
+                        .filter(AppAlert.id <= cap_id)
+                        .delete(synchronize_session=False)
+                    )
+            db.commit()
+            stats["deleted_app_alerts"] = n
+        except Exception as e:
+            db.rollback()
+            recording_logger.warning(f"app_alerts prune failed: {e}")
         try:
             cutoff = datetime.now(UTC) - timedelta(
                 days=RetentionService.PENDING_DEVICE_MAX_AGE_DAYS
