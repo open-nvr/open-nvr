@@ -1547,3 +1547,47 @@ def test_names_stay_out_of_the_words_even_though_they_are_listed(client, db):
     # …and the claim it rode in with is still a word.
     assert client.get("/api/v1/search",
                       params={"text": "blue", "parse": "false"}).json()["total"] == 1
+
+
+
+# ── the route: names, plate questions, and what the box can answer ───
+
+
+def test_a_known_name_is_searched_as_a_person_not_a_word(client, db):
+    """Typing a name used to match nothing, silently, forever."""
+    _camera(db, 1, "Door")
+    seen = _visit(db, camera_id=1, label="person", minutes_ago=3)
+    _visit(db, camera_id=1, label="person", minutes_ago=4)
+    _claim(db, seen.id, "face_id", "varun-singh", task="face_recognition")
+    body = client.get("/api/v1/search", params={"q": "did you see varun today"}).json()
+    assert body["interpretation"]["attrs"] == ["face_id:varun-singh"]
+    assert body["interpretation"]["text"] == ""
+    assert [r["id"] for r in body["results"]] == [seen.id]
+    need = next(n for n in body["interpretation"]["needs"] if n["kind"] == "face_id")
+    assert need["skill"] == "face_recognition"
+
+
+def test_asking_for_a_plate_number_returns_only_visits_with_a_read(client, db):
+    _camera(db, 1, "Gate")
+    read = _visit(db, camera_id=1, label="car", minutes_ago=2,
+                  caption="a white car", plate="KA01AB1234")
+    _visit(db, camera_id=1, label="car", minutes_ago=1, caption="a white car")
+    body = client.get("/api/v1/search",
+                      params={"q": "what is the plate number of the white car today"}).json()
+    assert body["interpretation"]["wants_plate"] is True
+    assert [r["id"] for r in body["results"]] == [read.id]
+    assert body["answer"]["plates"] == ["KA01AB1234"]
+
+
+def test_the_response_names_the_skill_a_question_needs(client, db):
+    """"Red shirt" on a box with no clothing skill: the need is listed
+    with its state, so an empty page can say why."""
+    _camera(db, 1, "Door")
+    _visit(db, camera_id=1, label="person", minutes_ago=3, caption="a person walking")
+    body = client.get("/api/v1/search",
+                      params={"q": "did you see a person in a red shirt today"}).json()
+    needs = {n["kind"]: n for n in body["interpretation"]["needs"]}
+    assert "clothing_top" in needs
+    assert needs["clothing_top"]["word"] == "red"
+    assert needs["clothing_top"]["skill"] == "vqa"
+    assert needs["clothing_top"]["state"] in ("not-on-this-box", "never-produced")

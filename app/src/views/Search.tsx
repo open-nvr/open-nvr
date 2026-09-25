@@ -50,7 +50,19 @@ import {
   Badge, Button, Card, CardContent, EmptyState, PageHeader, Skeleton,
 } from '../components/ui'
 
+/** One thing the question asked of a skill, and whether this box has it
+ *  (services/search_intent.py). `state` is `available`, `never-produced`
+ *  (skill here, never assigned to a camera) or `not-on-this-box`. */
+type Need = {
+  word: string
+  kind: string
+  skill: string
+  state: string
+  fallback: string | null
+}
 type Interpretation = {
+  wants_plate?: boolean
+  needs?: Need[]
   labels: string[]
   camera_ids: number[]
   from: string | null
@@ -625,6 +637,41 @@ export function Search() {
             </div>
           )}
 
+          {/* WHAT THE QUESTION NEEDS FROM THIS BOX. "Red shirt" needs a
+              skill that describes what people wear; "Varun" needs face
+              recognition and a visit bound to that name. An empty page
+              without this reads as "nothing was red" when the truth is
+              "nothing here has ever looked at a shirt" — opposite
+              answers, and only the server knows which. Only the needs
+              this box cannot meet are shown; a met need is just a match. */}
+          {interp && (interp.needs ?? []).some((n) => n.state !== 'available') && (
+            <div className="space-y-1 text-xs">
+              {(interp.needs ?? []).filter((n) => n.state !== 'available').map((n) => (
+                <div
+                  key={`${n.kind}:${n.word}`}
+                  className="flex flex-wrap items-center gap-1.5 text-[var(--warn,var(--text-dim))]"
+                >
+                  <Sparkles size={12} />
+                  <span>
+                    {t(`search.needs.${n.state}`, {
+                      word: n.word,
+                      kind: t(`search.kind.${n.kind}`),
+                      skill: t(`search.skill.${n.skill}`),
+                    })}
+                  </span>
+                  {n.fallback === 'captions' && (
+                    <span className="text-[var(--text-dim)]">{t('search.needs.captionsFallback')}</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {interp?.wants_plate && (
+            <div className="flex items-center gap-1.5 text-xs text-[var(--text-dim)]">
+              <CarFront size={12} />
+              {t('search.needs.wantsPlate')}
+            </div>
+          )}
           {interp && interp.ignored.length > 0 && (
             <div className="flex items-center gap-1.5 text-xs text-[var(--text-dim)]">
               <Info size={12} />

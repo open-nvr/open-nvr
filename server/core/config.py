@@ -497,6 +497,14 @@ class Settings(BaseSettings):
     # older than this are dropped, and APP_ALERTS_MAX_ROWS caps the
     # table inside the window. 0 disables age-based pruning.
     alerts_inbox_retention_days: int = 90
+    # The least cosine similarity a visit needs to be RETURNED by the
+    # vector arm of search. Without a floor the arm always hands back
+    # its top-N, so "a person in a red shirt" on a box that never saw
+    # one answered with fifty visits that merely contained a person.
+    # Measured on CLIP ViT-B/32 text→frame: on-topic best matches score
+    # 0.25-0.29, off-topic ones 0.19-0.22, so 0.22 keeps the former and
+    # drops the latter. 0 disables the floor (the old behaviour).
+    search_vector_min_similarity: float = 0.22
     # Relearn the camera graph nightly from the journeys the site is
     # already certain about (same plate or same recognised face on two
     # cameras). ON by default, unlike the backfill above, because it

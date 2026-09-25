@@ -48,7 +48,8 @@ from core.database import Base  # noqa: E402
 from models import (Camera, EventEmbedding, EventText, Role,  # noqa: E402
                     TimelineEvent, User)
 from services import embedding_store  # noqa: E402
-from services.search_service import (ARM_DEPTH, RRF_K, _rrf,  # noqa: E402
+from services.search_service import (
+    summarise_hits,ARM_DEPTH, RRF_K, _rrf,  # noqa: E402
                                      search_page)
 
 T0 = datetime(2026, 9, 24, 9, 0, tzinfo=UTC)
@@ -688,3 +689,42 @@ def test_no_total_supplied_still_counts_once(db, monkeypatch):
 
     assert len(calls) == 1, f"counted {len(calls)} times"
     assert page.total == 1
+
+
+
+# ── the floor ────────────────────────────────────────────────────────
+
+
+def test_the_vector_arm_has_a_floor_and_says_what_it_cut(db):
+    """Without one the arm returned its top-N whatever the numbers were,
+    and fusion made fifty unrelated visits the answer to a question
+    nothing resembled."""
+    close = _visit(db, caption="a lorry", vec=[1.0, 0, 0, 0])
+    far = _visit(db, caption="a cyclist", start_s=60, vec=[0, 1.0, 0, 0])
+    unfloored = search_page(db, text="", query_vector=[1.0, 0, 0, 0], scope=None)
+    assert {h.event.id for h in unfloored.hits} == {close.id, far.id}
+    floored = search_page(db, text="", query_vector=[1.0, 0, 0, 0], scope=None,
+                          min_similarity=0.5)
+    assert [h.event.id for h in floored.hits] == [close.id]
+    assert floored.semantic["floor"] == 0.5
+    assert floored.semantic["below_floor"] == 1
+    assert floored.semantic["best"] == 1.0
+
+
+def test_everything_below_the_floor_is_an_empty_page_with_a_reason(db):
+    _visit(db, caption="a cyclist", vec=[0, 1.0, 0, 0])
+    page = search_page(db, text="", query_vector=[1.0, 0, 0, 0], scope=None,
+                       min_similarity=0.5)
+    assert page.hits == []
+    assert page.semantic["reason"] == "below-floor"
+    assert page.semantic["below_floor"] == 1
+
+
+def test_the_answer_separates_word_matches_from_similar_only(db):
+    lorry = _visit(db, caption="a lorry at the loading bay", vec=[1.0, 0, 0, 0])
+    _visit(db, caption="a big truck", start_s=60, vec=[0.9, 0.1, 0, 0])
+    page = search_page(db, text="truck", query_vector=[1.0, 0, 0, 0], scope=None)
+    answer = summarise_hits(page.hits, total=page.total)
+    assert answer["matched_words"] == 1
+    assert answer["similar_only"] == 1
+    assert lorry.id in {h.event.id for h in page.hits}
