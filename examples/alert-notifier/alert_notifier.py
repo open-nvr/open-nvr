@@ -237,7 +237,8 @@ MANIFEST = AppManifest(
     ],
     actions=[
         Action("test", "Send a test",
-               params={"channel": "str"},
+               params=[Param("channel", str, default="", label="Channel",
+                             description="Leave blank to test every channel.")],
                description=(
                    "Send a real notification — the most recent alert, its "
                    "snapshot, the actual template — to one channel, or to "
@@ -245,7 +246,7 @@ MANIFEST = AppManifest(
                    "exercise the photo path does not test the thing that "
                    "breaks.")),
         Action("confirm", "I got it",
-               params={"channel": "str"},
+               params=[Param("channel", str, required=True, label="Channel")],
                description=(
                    "Mark a channel verified because a human saw the "
                    "message arrive. HTTP 200 is not proof a phone buzzed.")),
@@ -254,12 +255,15 @@ MANIFEST = AppManifest(
                    "Verify every channel's credentials without sending "
                    "anything to anyone.")),
         Action("mute", "Pause alerts",
-               params={"minutes": "float", "camera": "str"},
+               params=[Param("minutes", float, default=60.0, label="Minutes"),
+                       Param("camera", str, default="", label="Camera",
+                             description="Leave blank to pause every camera.")],
                confirm=True,
                description=(
                    "Stop delivering for a while — everything, or one "
                    "camera. Always expires; the page shows the countdown.")),
-        Action("unmute", "Resume alerts", params={"camera": "str"},
+        Action("unmute", "Resume alerts",
+               params=[Param("camera", str, default="", label="Camera")],
                description="End a pause early."),
         Action("backtest", "Preview rule matches",
                description=(
