@@ -436,3 +436,35 @@ def test_the_endpoint_and_the_enricher_share_one_writer():
     enricher = (root / "services/descriptor_enrichment.py").read_text()
     assert "from services.descriptor_store import apply_descriptors" in router
     assert "from services.descriptor_store import apply_descriptors" in enricher
+
+
+def test_plan_skills_resolves_without_being_patched(monkeypatch):
+    """Every other test here replaces ``_plan_skills``. This one runs it.
+
+    The enricher imported ``compute_enrichment_plan`` from a module that
+    never defined it; the ImportError was swallowed at DEBUG and the plan
+    came back empty — so with the flag on, the adapter registered and
+    the skill assigned, not one descriptor was ever written. Only KAI-C
+    is stubbed here; the import path is real."""
+    import asyncio
+    from services import descriptor_enrichment as mod
+    from services import enrichment_plan as ep
+    from services import kai_c_service
+
+    async def _caps(self):                    # the shape KAI-C really sends
+        return {"adapters": {"ollamavlm": {"url": "http://ollamavlm-adapter:9009",
+            "capabilities": {"tasks_advertised": ["visual_qa", "scene_caption"]}}}}
+
+    async def _health(self):
+        return {"kai_c_status": "ok", "adapters": {"ollamavlm": {"status": "ok"}}}
+
+    monkeypatch.setattr(kai_c_service.KaiCService, "get_capabilities", _caps)
+    monkeypatch.setattr(kai_c_service.KaiCService, "check_kai_c_health", _health)
+    monkeypatch.setattr(ep, "CACHE", ep.PlanCache())      # not a stale plan from another test
+
+    skills = asyncio.run(mod._plan_skills("car"))
+    tasks = {s["task"] for s in skills}
+    assert VQA_TASK in tasks, skills
+    vqa = next(s for s in skills if s["task"] == VQA_TASK)
+    assert vqa["healthy"] is True
+    assert "colour" in vqa["descriptor_kinds"]
