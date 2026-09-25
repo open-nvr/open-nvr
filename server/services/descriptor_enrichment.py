@@ -266,7 +266,7 @@ async def _plan_skills(label: str | None) -> list[dict[str, Any]]:
     matters when this runs once per vehicle.
     """
     try:
-        from routers.search import compute_enrichment_plan
+        from services.enrichment_plan import compute_enrichment_plan
 
         plan = await compute_enrichment_plan(label)
     except Exception as exc:  # noqa: BLE001

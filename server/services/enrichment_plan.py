@@ -46,7 +46,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-__all__ = ["SkillPlan", "TASK_DESCRIPTORS", "build_plan", "plan_for_label"]
+__all__ = ["SkillPlan", "TASK_DESCRIPTORS", "build_plan", "plan_for_label",
+           "compute_enrichment_plan"]
 
 
 @dataclass
@@ -174,16 +175,42 @@ def build_plan(
     enriches less.
     """
     caps = capabilities or {}
-    adapters = caps.get("adapters")
-    if not isinstance(adapters, list):
-        adapters = []
+    raw_adapters = caps.get("adapters")
+    # KAI-C's /capabilities is a DICT keyed by adapter name, each entry
+    # ``{url, capabilities: {tasks_advertised: [...], ...}}`` (or
+    # ``{url, error}`` for one it could not reach). The list-of-
+    # ``{name, tasks}`` shape is what the first tests were written
+    # against and is kept; the dict shape is what a running box sends,
+    # and until it was read here the plan on every real deployment was
+    # empty — the UI offered no attribute filters and the descriptor
+    # enricher, asking this plan what it could run, ran nothing.
+    adapters: list[dict[str, Any]] = []
+    if isinstance(raw_adapters, dict):
+        for name, entry in raw_adapters.items():
+            if not isinstance(entry, dict):
+                continue
+            inner = entry.get("capabilities")
+            tasks = entry.get("tasks")
+            if tasks is None and isinstance(inner, dict):
+                tasks = inner.get("tasks_advertised")
+            elif tasks is None and isinstance(inner, (list, str)):
+                tasks = inner
+            adapters.append({"name": str(name), "tasks": tasks or []})
+    elif isinstance(raw_adapters, list):
+        adapters = raw_adapters
 
     healthy_names: set[str] = set()
     unhealthy_names: set[str] = set()
     raw_health = (health or {}).get("adapters")
     if isinstance(raw_health, dict):
         for name, entry in raw_health.items():
-            ok = entry.get("healthy") if isinstance(entry, dict) else bool(entry)
+            if isinstance(entry, dict):
+                # /adapters/health says ``{"status": "ok"}`` per adapter;
+                # ``healthy: bool`` is honoured when a producer sends it.
+                ok = (bool(entry["healthy"]) if "healthy" in entry
+                      else entry.get("status") in (None, "ok", "healthy"))
+            else:
+                ok = bool(entry)
             (healthy_names if ok else unhealthy_names).add(str(name))
     elif isinstance(raw_health, list):
         for entry in raw_health:
@@ -282,3 +309,48 @@ class PlanCache:
 
 
 CACHE = PlanCache()
+
+
+async def compute_enrichment_plan(label: str | None = None) -> dict[str, Any]:
+    """The plan as a dict — registered ∩ healthy skills, their descriptor
+    kinds, narrowed to ``label`` when given.
+
+    ONE implementation for the two readers. ``GET /search/enrichment-plan``
+    serves this to the UI, and ``descriptor_enrichment`` asks it what to
+    run on a visit. The enricher used to import a function of this name
+    from the router that had never existed there — the ImportError was
+    caught and logged at DEBUG, the plan came back empty, and not one
+    descriptor was written on any deployment while the flag said the
+    feature was on. The tests patched ``_plan_skills`` and never noticed.
+
+    Asks KAI-C at most every ``PlanCache.ttl`` seconds; an unreachable
+    registry is an empty plan (and a counted one), never an exception —
+    this runs on the enrichment path.
+    """
+    from services import search_metrics as metrics
+    from services.kai_c_service import KaiCService
+
+    plan = CACHE.get()
+    if plan is None:
+        svc = KaiCService()
+        caps: dict = {}
+        health: dict = {}
+        try:
+            caps = await svc.get_capabilities()
+        except Exception:  # noqa: BLE001
+            caps = {}
+            metrics.REGISTRY_UNREACHABLE.inc()
+        try:
+            health = await svc.check_kai_c_health()
+        except Exception:  # noqa: BLE001
+            health = {}
+        plan = CACHE.put(build_plan(caps, health))
+        metrics.SKILLS.set(len(plan), {"state": "registered"})
+        metrics.SKILLS.set(sum(1 for s in plan if s.healthy), {"state": "healthy"})
+    shown = plan_for_label(plan, label) if label else plan
+    kinds = sorted({k for s in shown if s.healthy for k in s.descriptor_kinds})
+    return {
+        "skills": [s.as_dict() for s in shown],
+        "descriptor_kinds": kinds,
+        "label": label,
+    }

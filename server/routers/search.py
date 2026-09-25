@@ -221,41 +221,9 @@ async def enrichment_plan(
     colour or by face would even mean here, instead of offering filters
     that can never match.
     """
-    from services.enrichment_plan import CACHE, build_plan, plan_for_label
-    from services.kai_c_service import KaiCService
+    from services.enrichment_plan import compute_enrichment_plan
 
-    plan = CACHE.get()
-    if plan is None:
-        svc = KaiCService()
-        caps: dict = {}
-        health: dict = {}
-        try:
-            caps = await svc.get_capabilities()
-        except Exception:
-            # A registry that cannot be reached means "nothing extra can be
-            # run right now", not an error page: the visit still has its
-            # class, camera and time, and enrichment is additive by design.
-            caps = {}
-            metrics.REGISTRY_UNREACHABLE.inc()
-        try:
-            health = await svc.check_kai_c_health()
-        except Exception:
-            health = {}
-        plan = CACHE.put(build_plan(caps, health))
-        # What KAI-C makes available right now. Coverage is produced from
-        # this, so a fall here is tomorrow's recall complaint.
-        metrics.SKILLS.set(len(plan), {"state": "registered"})
-        metrics.SKILLS.set(sum(1 for s in plan if s.healthy), {"state": "healthy"})
-
-    shown = plan_for_label(plan, label) if label else plan
-    kinds = sorted({k for s in shown if s.healthy for k in s.descriptor_kinds})
-    return {
-        "skills": [s.as_dict() for s in shown],
-        # The descriptor kinds this deployment can actually produce — what
-        # a "colour" or "face" filter is worth offering at all.
-        "descriptor_kinds": kinds,
-        "label": label,
-    }
+    return await compute_enrichment_plan(label)
 
 
 #: The claim kind whose value is a PERSON. Named here, next to the
