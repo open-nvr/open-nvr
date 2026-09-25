@@ -74,6 +74,19 @@ snapshot_max_bytes: 716800
 history_days: 30
 history_max: 200
 
+# How loud a face is. A stranger at a family front door and a stranger
+# at a depot gate are the same event and not the same emergency, so the
+# level is the site's to set. `critical` is the loudest the platform
+# has; the others are high, medium, low and info.
+unknown_severity: high
+
+# Recognised people keep their per-category level unless this is set —
+# family/resident/friend low, staff/contractor/visitor info. The point
+# of enrolling somebody is that they are not an alarm, so leaving this
+# empty is usually right. A watchlist match and an expired pass are
+# decided before it and are never quietened by it.
+#known_severity: low
+
 # The bell. An alert fires for every visit whatever these say — these
 # decide only whether something RINGS. This app does not make the
 # noise: the decision rides in the alert envelope, so a relay into
