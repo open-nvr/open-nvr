@@ -39,6 +39,7 @@ import { usePagination } from '../hooks/usePagination'
 import { APP_VERTICALS, manifestProvides } from '../lib/appVerticals'
 import { AppConfigModal, type RegisteredApp } from './AppCatalog'
 import { AppPageHeader } from './apps/AppSetup'
+import { AppCamerasCard } from './apps/AppCamerasCard'
 import { useDateFormat } from '../i18n'
 import { useAppCameras } from './apps/CameraPicker'
 import { LiveCameraPanel } from './guardscan/LiveCameraPanel'
@@ -436,6 +437,7 @@ export default function GuardCompliance() {
               options={RANGES}
               onChange={(v) => { setDays(Number(v)); resetPage() }}
             />
+            <AppCamerasCard app={guardApp} />
             {guardApp && canConfigure && (
               <Button variant="outline" size="sm" onClick={() => setConfigOpen(true)}>
                 <Settings2 size={13} /> Configure

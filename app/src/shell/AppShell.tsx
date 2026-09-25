@@ -27,7 +27,7 @@ import { useClickOutside } from '../hooks/useClickOutside'
 import { useAuth } from '../auth/AuthContext'
 import { useTheme } from '../hooks/useTheme'
 import { usePermissions, NAV_PERMISSIONS } from '../hooks/usePermissions'
-import { APP_VERTICALS, manifestProvides } from '../lib/appVerticals'
+import { APP_VERTICALS, manifestProvides, verticalFor } from '../lib/appVerticals'
 import { ErrorBoundary } from '../components/ErrorBoundary'
 import { CameraStatusProvider } from '../hooks/useCameraStatus'
 import { SystemAlertBanner } from '../components/SystemAlertBanner'
@@ -169,6 +169,8 @@ export function AppShell() {
     queryFn: async () => {
       const { data } = await apiService.getApps()
       return (Array.isArray(data) ? data : []) as {
+        id: string
+        name?: string
         enabled?: boolean
         manifest?: { requires_tasks?: string[]; provides?: string[] } | null
       }[]
@@ -223,9 +225,24 @@ export function AppShell() {
         }))
       // Right after the pinned NVR group (i.e. under Cameras): these are
       // operational pages, not settings.
+      // An enabled app with no first-class page is still an application:
+      // it is listed here by name and opens its own page (/apps/<id> —
+      // dashboard, cameras, skills, Configure), so nobody has to find a
+      // running app in the catalog to change how it works.
+      const dashboardItems = canView('/app-catalog')
+        ? apps
+            .filter((a) => a.enabled && !verticalFor(a.manifest))
+            .map((a) => ({
+              to: `/apps/${a.id}`,
+              label: a.name || a.id,
+              icon: <Boxes size={16} />,
+              perm: '/app-catalog' as keyof typeof NAV_PERMISSIONS,
+            }))
+        : []
+      const allAppItems = [...appItems, ...dashboardItems]
       let at = 1
-      if (appItems.length > 0) {
-        groups.splice(at, 0, { key: 'applications', label: 'Applications', items: appItems })
+      if (allAppItems.length > 0) {
+        groups.splice(at, 0, { key: 'applications', label: 'Applications', items: allAppItems })
         at += 1
       }
       // App Catalog sits with the apps, not under "AI & Detections" —
@@ -246,7 +263,7 @@ export function AppShell() {
       return groups
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [hasPermission, enabledRoutes]
+    [hasPermission, enabledRoutes, apps.filter((a) => a.enabled && !verticalFor(a.manifest)).map((a) => a.id).join(',')]
   )
   const pinnedGroups = visibleGroups.filter((g) => g.pinned)
   const menuGroups = visibleGroups.filter((g) => !g.pinned)

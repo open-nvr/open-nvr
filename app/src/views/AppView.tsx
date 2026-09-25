@@ -45,6 +45,7 @@ import {
   UninstalledAppPage,
 } from './AppCatalog'
 import { AppNoCamerasNotice } from './apps/AppSetup'
+import { AppCamerasCard } from './apps/AppCamerasCard'
 
 function useApp(appId: string) {
   return useQuery({
@@ -275,6 +276,9 @@ export function AppView() {
         {/* Same notice, same words as every app page's header. */}
         <AppNoCamerasNotice app={app} />
       </div>
+      {/* The app's cameras and the skills it brings them — on the app's page,
+          like every other application page. */}
+      <AppCamerasCard app={app} />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {/* ── Details + live dashboard ───────────────────────────── */}
