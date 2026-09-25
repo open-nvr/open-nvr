@@ -860,10 +860,10 @@ export function Cameras() {
                     skills the enabled apps using it bring, so there is
                     nothing to edit here — only who uses it, and what that
                     brings. To run a skill on this camera, select the camera
-                    in the app (App Catalog → Configure → Cameras). */}
+                    on the app's own page (Applications → the app → Configure). */}
                 <p className="text-xs text-[var(--muted)]">
                   Skills come from apps. Select this camera in an app's
-                  configuration (App Catalog → Configure → Cameras) to run
+                  page (Applications → the app → Configure → Cameras) to run
                   that app's skills on it; disable the app to stop them.
                 </p>
                 <CameraUsedBy cameraId={editing.id} />

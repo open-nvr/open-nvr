@@ -43,7 +43,8 @@ import {
 import { AlarmsTable } from '../components/alarms/AlarmsTable'
 import { useAckAlarms, useAlarmsList } from '../components/alarms/useAlarmsList'
 import type { RegisteredApp } from './AppCatalog'
-import { AppPageHeader } from './apps/AppSetup'
+import { AppCamerasCard } from './apps/AppCamerasCard'
+import { AppPageHeader, AppConfigureButton } from './apps/AppSetup'
 
 export const CROSSINGS_CAPABILITY = 'crossings'
 const SOURCE = 'line-crossing'
@@ -232,6 +233,7 @@ export function Tripwires() {
           title={t('tripwires.noApp')}
           description="Install and enable Line Crossing from the App Catalog. It rides the detection stream the platform already produces — no extra model, no GPU — and counts every tracked person or vehicle that crosses a line you draw."
         />
+      <AppCamerasCard app={app} />
       </section>
     )
   }
@@ -269,9 +271,7 @@ export function Tripwires() {
               <RefreshCw size={14} /> Refresh
             </Button>
             {app && (
-              <Link to={`/app-catalog/${app.id}`}>
-                <Button size="sm" variant="primary"><PenLine size={14} /> Draw lines</Button>
-              </Link>
+              <AppConfigureButton app={app} size="sm" variant="primary" label="Configure" />
             )}
           </>
         }
@@ -297,7 +297,7 @@ export function Tripwires() {
             {needsLine.length === 1 ? 'One camera is selected but has no line yet:' : `${needsLine.length} cameras are selected but have no line yet:`}{' '}
             <b>{needsLine.map(cameraName).join(', ')}</b>. Nothing is counted there until one is drawn.
           </span>
-          <Link to={`/app-catalog/${app.id}`} className="ml-auto text-[var(--accent)] underline">Draw it</Link>
+          <AppConfigureButton app={app} variant="link" className="ml-auto text-[var(--accent)] underline" label="Draw it" />
         </div>
       )}
 
@@ -308,7 +308,8 @@ export function Tripwires() {
         <EmptyState
           icon={<GitCommitHorizontal size={24} />}
           title="No cameras selected"
-          description="Select cameras for Line Crossing and draw each one's line (App Catalog → Line Crossing → Configure). The app starts counting within a few seconds."
+          description="Select cameras for Line Crossing and draw each one's line (Configure, top right). The app starts counting within a few seconds."
+          action={app ? <AppConfigureButton app={app} variant="primary" label="Configure" /> : undefined}
         />
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">

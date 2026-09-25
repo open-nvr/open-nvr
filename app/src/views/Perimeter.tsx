@@ -44,7 +44,8 @@ import {
 import { AlarmsTable } from '../components/alarms/AlarmsTable'
 import { useAckAlarms, useAlarmsList } from '../components/alarms/useAlarmsList'
 import type { RegisteredApp } from './AppCatalog'
-import { AppPageHeader } from './apps/AppSetup'
+import { AppCamerasCard } from './apps/AppCamerasCard'
+import { AppPageHeader, AppConfigureButton } from './apps/AppSetup'
 
 export const INTRUSION_CAPABILITY = 'intrusion'
 const SOURCE = 'intrusion-detection'
@@ -242,6 +243,7 @@ export function Perimeter() {
           title={t('perimeter.noApp')}
           description="Install and enable Intrusion Detection from the App Catalog. It rides the detection stream the platform already produces — no extra model, no GPU — arms the zones you draw on a schedule or on command, and raises one alarm per intruder with a snapshot."
         />
+      <AppCamerasCard app={app} />
       </section>
     )
   }
@@ -280,9 +282,7 @@ export function Perimeter() {
               <RefreshCw size={14} /> Refresh
             </Button>
             {app && (
-              <Link to={`/app-catalog/${app.id}`}>
-                <Button size="sm" variant="outline"><PenLine size={14} /> Draw zones</Button>
-              </Link>
+              <AppConfigureButton app={app} size="sm" variant="outline" label="Configure" />
             )}
           </>
         }
@@ -368,7 +368,7 @@ export function Perimeter() {
             {needsZone.length === 1 ? 'One camera has no zone drawn:' : `${needsZone.length} cameras have no zone drawn:`}{' '}
             <b>{needsZone.map(cameraName).join(', ')}</b>. The whole frame is armed there — on a perimeter camera that usually alarms on the road behind the fence too.
           </span>
-          <Link to={`/app-catalog/${app.id}`} className="ml-auto text-[var(--accent)] underline">Draw it</Link>
+          <AppConfigureButton app={app} variant="link" className="ml-auto text-[var(--accent)] underline" label="Draw it" />
         </div>
       )}
 
@@ -381,7 +381,8 @@ export function Perimeter() {
         <EmptyState
           icon={<Shield size={24} />}
           title="No cameras selected"
-          description="Select cameras for Intrusion Detection and draw each one's zone (App Catalog → Intrusion Detection → Configure). Arming applies within a few seconds."
+          description="Select cameras for Intrusion Detection and draw each one's zone (Configure, top right). Arming applies within a few seconds."
+          action={app ? <AppConfigureButton app={app} variant="primary" label="Configure" /> : undefined}
         />
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">

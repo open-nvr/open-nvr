@@ -39,6 +39,7 @@ import {
 } from '../components/ui'
 import { Modal } from '../components/Modal'
 import { AppConfigModal, type RegisteredApp } from './AppCatalog'
+import { AppCamerasCard } from './apps/AppCamerasCard'
 import { AppPageHeader } from './apps/AppSetup'
 
 export const OCCUPANCY_CAPABILITY = 'occupancy'
@@ -330,6 +331,7 @@ export function Occupancy() {
           title={t('occupancy.title')}
           description={t('occupancy.description')}
         />
+      <AppCamerasCard app={occApp} />
         <EmptyState
           icon={<Users size={28} />}
           title={t('occupancy.noApp')}

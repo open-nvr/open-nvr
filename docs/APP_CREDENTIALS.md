@@ -18,7 +18,7 @@ a catalog of third-party apps.
 | **User JWT** | people | the operator API, per-camera RBAC applied |
 
 An app's **roster** is the cameras picked for it in its own
-configuration (App Catalog → Configure → Cameras; stored as claims with
+page (Applications → the app → Configure → Cameras; stored as claims with
 consumer `app:<id>`). An app sees the cameras picked for it and no
 others, and an app with nothing picked sees nothing
 ([CAMERA_ASSIGNMENTS.md](CAMERA_ASSIGNMENTS.md)). **A disabled app has
