@@ -21,7 +21,10 @@ import { useNavigate } from 'react-router-dom'
 import { toDataURL } from 'qrcode'
 import { apiService } from '../lib/apiService'
 import { useAuth } from '../auth/AuthContext'
-import { Logo } from '../components/Logo'
+import {
+  AlertCircle, ArrowRight, Check, Copy, Eye, EyeOff, KeyRound, Loader2, Lock, UserRound,
+} from 'lucide-react'
+import { AuthAlert, AuthLayout, authButton, authFieldIcon, authInput, authLabel } from '../components/AuthLayout'
 
 export function FirstTimeSetup() {
   const [username, setUsername] = useState('admin')
@@ -91,145 +94,164 @@ export function FirstTimeSetup() {
     navigate('/login', { replace: true })
   }
 
-  // If MFA setup is shown, display QR code
+  const [showPassword, setShowPassword] = useState(false)
+  const [copied, setCopied] = useState(false)
+
+  const copySecret = async () => {
+    if (!mfaSecret) return
+    try {
+      await navigator.clipboard.writeText(mfaSecret)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1500)
+    } catch { /* clipboard blocked on plain http — the code is visible to copy by hand */ }
+  }
+
+  const step = (n: number, title: string, hint: string) => (
+    <div className="space-y-1">
+      <div className="text-xs font-medium uppercase tracking-wider text-[#5eb3f6]">Step {n} of 2</div>
+      <h1 className="text-lg font-semibold text-gray-100">{title}</h1>
+      <p className="text-sm text-gray-400">{hint}</p>
+    </div>
+  )
+
+  // Step 2: the account exists; bind an authenticator to it.
   if (mfaSecret && qrDataUrl) {
     return (
-      <div
-        className="min-h-screen grid place-items-center bg-[var(--bg)] text-[var(--text)] p-4"
-        style={{
-          backgroundImage: 'linear-gradient(rgba(0,0,0,0.45), rgba(0,0,0,0.45)), url(/opennvr_bg.svg)',
-          backgroundSize: 'cover',
-          backgroundPosition: 'center',
-        }}
-      >
-        <div className="flex flex-col items-center gap-8">
-          {/* Logo outside the form - 35% of viewport */}
-          <Logo className="w-[35vw] h-auto text-[var(--text)]" style={{ minWidth: '280px', maxWidth: '500px' }} />
-          
-          <div className="w-full max-w-md rounded-lg bg-[#1a2332] border border-[#2a3a4f] shadow-2xl p-6 space-y-4">
-          
-          <h2 className="text-xl font-semibold text-gray-100 text-center">MFA Setup Required</h2>
-          
-          <div className="bg-blue-900/30 border border-blue-500/30 rounded p-3 text-sm text-blue-200">
-            <p className="font-semibold mb-2">Setup Complete! Now configure MFA:</p>
-            <ol className="list-decimal list-inside space-y-1">
-              <li>Install an authenticator app (Google Authenticator, Authy, etc.)</li>
-              <li>Scan the QR code below</li>
-              <li>Save your recovery codes (if prompted)</li>
-              <li>Click "Continue" to login</li>
-            </ol>
-          </div>
+      <AuthLayout wide>
+        {step(2, 'Turn on two-step verification', 'Your admin account is created. Link an authenticator app to finish.')}
 
-          <div className="flex justify-center bg-white p-4 rounded border border-gray-300">
-            <img src={qrDataUrl} alt="MFA QR Code" className="w-48 h-48" />
-          </div>
+        <ol className="space-y-2 text-sm text-gray-300">
+          {[
+            'Install an authenticator app (Google Authenticator, Microsoft Authenticator, Authy…).',
+            'Scan the QR code below with it.',
+            'Sign in with your new password and the 6-digit code it shows.',
+          ].map((text, i) => (
+            <li key={i} className="flex gap-3">
+              <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-[#5eb3f6]/15 text-[11px] font-semibold text-[#5eb3f6]">
+                {i + 1}
+              </span>
+              <span>{text}</span>
+            </li>
+          ))}
+        </ol>
 
-          <div className="bg-gray-50 border border-gray-300 rounded p-3">
-            <p className="text-xs text-gray-600 mb-1">Manual Entry Code:</p>
-            <code className="text-sm font-mono text-gray-900 break-all">{mfaSecret}</code>
-          </div>
-
-          <button
-            onClick={onComplete}
-            className="w-full px-4 py-3 rounded-lg bg-[#5eb3f6] text-white font-semibold shadow-lg hover:bg-[#4a9de5] transition-colors"
-          >
-            Continue to Login
-          </button>
+        {/* White behind the code is for the camera, not decoration:
+            scanners need the contrast. */}
+        <div className="mx-auto w-fit rounded-lg bg-white p-3">
+          <img src={qrDataUrl} alt="QR code for your authenticator app" className="h-48 w-48" />
         </div>
+
+        <div className="space-y-1.5">
+          <div className={authLabel}>Can’t scan? Enter this code instead</div>
+          <div className="flex items-center gap-2 rounded-lg border border-[#2a3a4f] bg-[#0f1720] py-1.5 pl-3 pr-1.5">
+            <code className="min-w-0 flex-1 break-all font-mono text-sm text-gray-100">{mfaSecret}</code>
+            <button
+              type="button"
+              onClick={copySecret}
+              className="inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs text-gray-400 hover:bg-white/5 hover:text-gray-100"
+            >
+              {copied ? <Check size={14} className="text-emerald-400" /> : <Copy size={14} />}
+              {copied ? 'Copied' : 'Copy'}
+            </button>
+          </div>
         </div>
-      </div>
+
+        <button type="button" onClick={onComplete} className={authButton}>
+          Continue to sign in <ArrowRight size={16} />
+        </button>
+      </AuthLayout>
     )
   }
 
-  // Show password setup form
+  // Step 1: claim the admin account with the token the server printed.
   return (
-    <div
-      className="min-h-screen grid place-items-center bg-[var(--bg)] text-[var(--text)] p-4"
-      style={{
-        backgroundImage: 'linear-gradient(rgba(0,0,0,0.45), rgba(0,0,0,0.45)), url(/opennvr_bg.svg)',
-        backgroundSize: 'cover',
-        backgroundPosition: 'center',
-      }}
-    >
-      <div className="flex flex-col items-center gap-8">
-        {/* Logo outside the form - 35% of viewport */}
-        <Logo className="w-[35vw] h-auto text-[var(--text)]" style={{ minWidth: '280px', maxWidth: '500px' }} />
-        
-        <form onSubmit={onSubmit} className="w-full max-w-md rounded-lg bg-[#1a2332] border border-[#2a3a4f] shadow-2xl p-6 space-y-4">
-        
-        <div className="bg-orange-900/30 border border-orange-500/30 rounded p-3">
-          <p className="text-sm text-orange-200 font-semibold">First-time setup required</p>
-          <p className="text-xs text-orange-300 mt-1">
-            Paste the setup token from the server stdout and choose a secure admin password.
+    <AuthLayout wide>
+      <form onSubmit={onSubmit} className="space-y-5">
+        {step(1, 'Create the admin account', 'Welcome to OpenNVR. Secure this system before anyone else can claim it.')}
+
+        {error && <AuthAlert tone="error" icon={<AlertCircle size={16} />}>{error}</AuthAlert>}
+
+        <div className="space-y-1.5">
+          <label htmlFor="setup-username" className={authLabel}>Username</label>
+          <div className="relative">
+            <UserRound size={16} className={authFieldIcon} />
+            <input id="setup-username" className={authInput} value={username} disabled readOnly />
+          </div>
+        </div>
+
+        <div className="space-y-1.5">
+          <label htmlFor="setup-token" className={authLabel}>Setup token</label>
+          <div className="relative">
+            <KeyRound size={16} className={authFieldIcon} />
+            <input
+              id="setup-token"
+              type="text"
+              className={`${authInput} font-mono`}
+              value={setupToken}
+              onChange={(e) => setSetupToken(e.target.value)}
+              placeholder="Paste the one-time token"
+              autoComplete="off"
+              autoCorrect="off"
+              spellCheck={false}
+              autoFocus
+              required
+            />
+          </div>
+          <p className="text-xs text-gray-500">
+            Shown once in the terminal where you ran the start script.
           </p>
         </div>
 
-        {error && <div className="text-sm text-red-300 bg-red-900/30 border border-red-500/30 rounded p-3">{error}</div>}
+        <div className="space-y-1.5">
+          <label htmlFor="setup-password" className={authLabel}>Password</label>
+          <div className="relative">
+            <Lock size={16} className={authFieldIcon} />
+            <input
+              id="setup-password"
+              type={showPassword ? 'text' : 'password'}
+              className={`${authInput} pr-11`}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="At least 8 characters"
+              autoComplete="new-password"
+              required
+              minLength={8}
+            />
+            <button
+              type="button"
+              onClick={() => setShowPassword((v) => !v)}
+              className="absolute right-1.5 top-1/2 grid h-8 w-8 -translate-y-1/2 place-items-center rounded-md text-gray-500 hover:bg-white/5 hover:text-gray-200"
+              aria-label={showPassword ? 'Hide password' : 'Show password'}
+              title={showPassword ? 'Hide password' : 'Show password'}
+            >
+              {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+            </button>
+          </div>
+        </div>
 
-        <label className="block text-sm text-gray-200">
-          <span className="block mb-2 text-gray-400 font-medium">Username</span>
-          <input
-            className="w-full bg-[#0f1720]/50 border border-[#2a3a4f] px-4 py-2.5 rounded text-gray-400 cursor-not-allowed"
-            value={username}
-            disabled
-            readOnly
-          />
-        </label>
+        <div className="space-y-1.5">
+          <label htmlFor="setup-confirm" className={authLabel}>Confirm password</label>
+          <div className="relative">
+            <Lock size={16} className={authFieldIcon} />
+            <input
+              id="setup-confirm"
+              type={showPassword ? 'text' : 'password'}
+              className={authInput}
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              placeholder="Re-enter the password"
+              autoComplete="new-password"
+              required
+              minLength={8}
+            />
+          </div>
+        </div>
 
-        <label className="block text-sm text-gray-200">
-          <span className="block mb-2 text-gray-400 font-medium">
-            Setup token
-          </span>
-          <input
-            type="text"
-            className="w-full bg-[#0f1720] border border-[#2a3a4f] focus:border-[#5eb3f6] outline-none px-4 py-2.5 rounded text-gray-100 placeholder-gray-500 font-mono text-sm"
-            value={setupToken}
-            onChange={(e) => setSetupToken(e.target.value)}
-            placeholder="Paste the one-time token from the server stdout"
-            autoComplete="off"
-            autoCorrect="off"
-            spellCheck={false}
-            required
-          />
-          <span className="block text-xs text-gray-500 mt-1">
-            Printed once on server startup in the terminal where you ran the start script.
-          </span>
-        </label>
-
-        <label className="block text-sm text-gray-200">
-          <span className="block mb-2 text-gray-400 font-medium">Password</span>
-          <input
-            type="password"
-            className="w-full bg-[#0f1720] border border-[#2a3a4f] focus:border-[#5eb3f6] outline-none px-4 py-2.5 rounded text-gray-100 placeholder-gray-500"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            placeholder="Minimum 8 characters"
-            required
-            minLength={8}
-          />
-        </label>
-
-        <label className="block text-sm text-gray-200">
-          <span className="block mb-2 text-gray-400 font-medium">Confirm Password</span>
-          <input
-            type="password"
-            className="w-full bg-[#0f1720] border border-[#2a3a4f] focus:border-[#5eb3f6] outline-none px-4 py-2.5 rounded text-gray-100 placeholder-gray-500"
-            value={confirmPassword}
-            onChange={(e) => setConfirmPassword(e.target.value)}
-            placeholder="Re-enter password"
-            required
-            minLength={8}
-          />
-        </label>
-
-        <button
-          disabled={loading}
-          className="w-full px-4 py-3 rounded-lg bg-[#5eb3f6] text-white font-semibold disabled:opacity-60 shadow-lg hover:bg-[#4a9de5] transition-colors"
-        >
-          {loading ? 'Setting up…' : 'Complete Setup'}
+        <button type="submit" disabled={loading} className={authButton}>
+          {loading && <Loader2 size={16} className="animate-spin" />}
+          {loading ? 'Setting up…' : 'Create account'}
         </button>
       </form>
-      </div>
-    </div>
+    </AuthLayout>
   )
 }

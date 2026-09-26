@@ -299,27 +299,24 @@ export function AlertBell() {
     <div className="relative" ref={panelRef}>
       <button
         aria-label={t('alerts.alarms')}
-        className={`relative inline-flex items-center gap-1 px-2 py-1 rounded ${
+        className={`relative grid h-8 w-8 place-items-center rounded-md transition-colors ${
           sirenActive
             ? 'bg-red-600 text-white animate-pulse'
-            : 'bg-[var(--panel)] hover:bg-[var(--panel-2)]'
+            : 'text-[var(--text-dim)] hover:bg-[var(--panel-2)] hover:text-[var(--text)]'
         }`}
         onClick={() => setOpen((s) => !s)}
-        title={t('alerts.alarms')}
+        title={audioBlocked ? `${t('alerts.alarms')} — sound blocked` : t('alerts.alarms')}
       >
-        <Bell size={14} />
-        <span className="hidden md:inline">
-          {t('alerts.alarms')}{audioBlocked ? ' 🔇' : ''}
-        </span>
+        {audioBlocked ? <BellOff size={17} /> : <Bell size={17} />}
         {unackedCount > 0 && (
-          <span className="absolute -top-1.5 -right-1.5 min-w-4 h-4 px-1 rounded-full bg-red-600 text-white text-[10px] leading-4 text-center normal-case">
+          <span className="absolute -top-0.5 -right-0.5 min-w-4 h-4 px-1 rounded-full bg-red-600 text-white text-[10px] font-semibold leading-4 text-center ring-2 ring-[var(--bg-2)]">
             {unackedCount > 99 ? '99+' : unackedCount}
           </span>
         )}
       </button>
 
       {open && (
-        <div className="absolute right-0 mt-1 w-96 max-w-[90vw] bg-[var(--panel)] border border-[var(--border)] text-sm z-50 normal-case tracking-normal shadow-lg">
+        <div className="absolute right-0 mt-2 w-96 max-w-[90vw] overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--panel)] text-sm z-50 shadow-2xl">
           {audioBlocked && (
             <button
               className="w-full text-left px-3 py-2 bg-yellow-600 text-black text-[12px] font-medium"

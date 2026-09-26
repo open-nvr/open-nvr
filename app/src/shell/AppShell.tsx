@@ -18,7 +18,7 @@
 
 import { Outlet, NavLink, Link, useLocation } from 'react-router-dom'
 import { DeviceBlockedOverlay } from '../components/DeviceBlockedOverlay'
-import { AlertTriangle, Bell, BellRing, Boxes, Briefcase, Camera, Car, ChevronDown, Cloud, Cpu, Database, DoorOpen, FileCheck, FileSearch, GitCommitHorizontal, Hourglass, KeyRound, Layers, LifeBuoy, LogOut, Maximize, Menu, Minimize, Monitor, MonitorPlay, Moon, Network, PackageCheck, Plug, RefreshCcw, Search as SearchIcon, Settings as SettingsIcon, Shield, ShieldAlert, ShieldCheck, Sun, User as UserIcon, UserRound, Users } from 'lucide-react'
+import { AlertTriangle, Bell, BellRing, Boxes, Briefcase, Camera, Car, ChevronDown, Cloud, Cpu, Database, DoorOpen, FileCheck, FileSearch, GitCommitHorizontal, Hourglass, KeyRound, Layers, LifeBuoy, LogOut, Maximize, Menu, Minimize, Monitor, MonitorPlay, Moon, Network, PackageCheck, Plug, RefreshCcw, Search as SearchIcon, Settings as SettingsIcon, Shield, ShieldAlert, ShieldCheck, Sun, UserRound, Users, Globe } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import { apiService } from '../lib/apiService'
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
@@ -319,94 +319,112 @@ export function AppShell() {
   return (
     <CameraStatusProvider>
     <div ref={rootRef} className="min-h-screen bg-[var(--bg)] text-[var(--text)]">
-  {/* Top white header (sticky) */}
-  <header className="bg-[var(--bg-2)] border-b border-[var(--border)] text-[var(--text)] h-12 flex items-center px-4 text-sm uppercase tracking-wide sticky top-0 z-40">
-        <Link to="/" className="font-semibold inline-flex items-center gap-2">
+      {/* ── Top bar ──
+          Three zones: brand left, the time centred (an NVR is read
+          against the clock, so it earns the middle), actions right with
+          the account in the corner. Actions are icon-only squares of one
+          size with tooltips — labelled buttons of five different widths
+          read as a toolbar spilled across the bar. No `uppercase` here:
+          it was leaking into every menu opened from the bar. */}
+      <header className="sticky top-0 z-40 grid h-12 grid-cols-[1fr_auto_1fr] items-center gap-4 border-b border-[var(--border)] bg-[var(--bg-2)] px-4 text-sm text-[var(--text)]">
+        <Link to="/" className="inline-flex items-center justify-self-start" aria-label="OpenNVR home">
           <Logo className="h-10 w-auto text-[var(--text)]" />
         </Link>
-        <div className="ml-auto flex items-center gap-3">
+
+        <LiveClock />
+
+        <div className="flex items-center justify-self-end gap-1">
           <AlertBell />
-          <label className="inline-flex items-center gap-1 text-xs normal-case tracking-normal text-[var(--text-dim)]">
-            <span className="sr-only">{t('language.label')}</span>
+          {canView('/live') && (
+            <Link to="/live" className={TOP_ICON} title={t('header.openLiveView')} aria-label={t('header.openLiveView')}>
+              <MonitorPlay size={17} />
+            </Link>
+          )}
+          <button
+            className={TOP_ICON}
+            onClick={toggle}
+            title={isFullscreen ? t('header.exitFullscreen') : t('header.enterFullscreen')}
+            aria-label={isFullscreen ? t('header.exitFullscreen') : t('header.enterFullscreen')}
+          >
+            {isFullscreen ? <Minimize size={16} /> : <Maximize size={16} />}
+          </button>
+          <button
+            className={TOP_ICON}
+            onClick={toggleTheme}
+            title={theme === 'light' ? t('header.switchToDark') : t('header.switchToLight')}
+            aria-label={t('header.toggleTheme')}
+          >
+            {theme === 'light' ? <Moon size={16} /> : <Sun size={16} />}
+          </button>
+          <label
+            className="relative inline-flex h-8 items-center gap-1 rounded-md pl-2 text-xs text-[var(--text-dim)] hover:bg-[var(--panel-2)] hover:text-[var(--text)]"
+            title={t('language.label')}
+          >
+            <Globe size={15} />
             <select
               value={language}
               onChange={(event) => setLanguage(event.target.value as typeof language)}
               aria-label={t('language.label')}
-              className="bg-[var(--panel)] text-[var(--text)] border border-[var(--border)] rounded px-1.5 py-1"
+              className="h-8 cursor-pointer appearance-none bg-transparent pr-2 text-xs font-medium uppercase text-inherit outline-none"
             >
-              <option value="en">{t('language.english')}</option>
-              <option value="fr">{t('language.french')}</option>
+              <option value="en">EN — {t('language.english')}</option>
+              <option value="fr">FR — {t('language.french')}</option>
             </select>
           </label>
-          <button
-            aria-label={t('header.toggleTheme')}
-            className="inline-flex items-center gap-1 px-2 py-1 bg-[var(--panel)] hover:bg-[var(--panel-2)] rounded"
-            onClick={toggleTheme}
-            title={theme === 'light' ? t('header.switchToDark') : t('header.switchToLight')}
-          >
-            {theme === 'light' ? <Moon size={14} /> : <Sun size={14} />}
-            <span className="hidden md:inline">{theme === 'light' ? t('header.switchToDark') : t('header.switchToLight')}</span>
-          </button>
-          {canView('/live') && (
-            <Link
-              to="/live"
-              className="inline-flex items-center gap-1 px-2 py-1 bg-[var(--panel)] hover:bg-[var(--panel-2)] rounded"
-              title={t('header.openLiveView')}
-            >
-              <Camera size={14} />
-              <span className="hidden md:inline">Live</span>
-            </Link>
-          )}
+
+          <span aria-hidden className="mx-2 h-6 w-px bg-[var(--border)]" />
+
           <div className="relative" ref={accountMenuRef}>
             <button
-              className="inline-flex items-center gap-1 px-2 py-1 bg-[var(--panel)] hover:bg-[var(--panel-2)] rounded"
+              className="inline-flex h-8 items-center gap-1.5 rounded-full py-0.5 pl-0.5 pr-2 hover:bg-[var(--panel-2)]"
               onClick={() => setMenuOpen((s) => !s)}
-              title={user ? user.username : t('header.account')}
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
+              title={user?.username ?? t('header.account')}
             >
-              <UserIcon size={14} />
-              <span className="hidden md:inline">{user?.username ?? t('header.account')}</span>
+              <Avatar name={user?.username} size="sm" />
+              <ChevronDown size={14} className={`text-[var(--text-dim)] transition-transform ${menuOpen ? 'rotate-180' : ''}`} />
             </button>
             {menuOpen && (
-              // normal-case/tracking-normal: the top bar is `uppercase`, and
-              // a menu that shouts "SIGNED IN AS ADMIN" reads as an error.
               <div
                 role="menu"
-                className="absolute right-0 z-50 mt-2 w-60 overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--panel)] text-sm normal-case tracking-normal shadow-lg"
+                className="absolute right-0 z-50 mt-2 w-72 overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--panel)] shadow-2xl"
               >
-                <div className="flex items-center gap-3 px-3 py-3">
-                  <span
-                    aria-hidden
-                    className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-[var(--accent)]/15 text-sm font-semibold uppercase text-[var(--accent)]"
-                  >
-                    {(user?.username ?? '?').charAt(0)}
-                  </span>
-                  <div className="min-w-0">
-                    <div className="text-xs text-[var(--text-dim)]">{t('header.signedInAs')}</div>
-                    <div className="truncate font-medium text-[var(--text)]" title={user?.username}>{user?.username}</div>
+                <div className="flex items-center gap-3 bg-[var(--bg-2)] px-4 py-4">
+                  <Avatar name={user?.username} size="lg" />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate font-semibold text-[var(--text)]" title={user?.username}>{user?.username}</div>
+                    {user?.email && (
+                      <div className="truncate text-xs text-[var(--text-dim)]" title={user.email}>{user.email}</div>
+                    )}
+                    <span className="mt-1.5 inline-flex items-center gap-1 rounded-full bg-[var(--accent)]/12 px-2 py-0.5 text-[11px] font-medium text-[var(--accent)]">
+                      <ShieldCheck size={11} />
+                      {user?.is_superuser ? t('header.roleAdmin') : t('header.roleUser')}
+                    </span>
                   </div>
                 </div>
-                <div className="border-t border-[var(--border)] p-1">
+                <div className="border-t border-[var(--border)] p-1.5">
+                  {canView('/settings') && (
+                    <Link
+                      role="menuitem"
+                      to="/settings"
+                      onClick={() => setMenuOpen(false)}
+                      className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-[var(--text)] hover:bg-[var(--panel-2)]"
+                    >
+                      <SettingsIcon size={16} className="text-[var(--text-dim)]" /> {t('header.settings')}
+                    </Link>
+                  )}
                   <button
                     role="menuitem"
-                    className="flex w-full items-center gap-2 rounded px-2.5 py-2 text-left text-[var(--text)] hover:bg-[var(--panel-2)]"
+                    className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-red-500 hover:bg-red-500/10"
                     onClick={logout}
                   >
-                    <LogOut size={15} className="text-[var(--text-dim)]" /> {t('header.logout')}
+                    <LogOut size={16} /> {t('header.logout')}
                   </button>
                 </div>
               </div>
             )}
           </div>
-          <button
-            aria-label={t('header.toggleFullscreen')}
-            className="inline-flex items-center gap-1 px-2 py-1 bg-[var(--panel)] hover:bg-[var(--panel-2)] rounded"
-            onClick={toggle}
-            title={isFullscreen ? t('header.exitFullscreen') : t('header.enterFullscreen')}
-          >
-            {isFullscreen ? <Minimize size={14} /> : <Maximize size={14} />}
-            <span className="hidden md:inline">{isFullscreen ? t('header.exitFullscreen') : t('header.enterFullscreen')}</span>
-          </button>
-          <LiveClock />
         </div>
       </header>
 
@@ -509,7 +527,33 @@ function LiveClock() {
     const id = window.setInterval(() => setNow(new Date()), 1000)
     return () => window.clearInterval(id)
   }, [])
-  return <span className="opacity-90 tabular-nums">{fmt.dateTime(now)}</span>
+  return (
+    <div className="hidden items-baseline gap-2 tabular-nums md:flex" aria-live="off">
+      <span className="text-sm font-semibold text-[var(--text)]">
+        {fmt.time(now, { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+      </span>
+      <span className="text-xs text-[var(--text-dim)]">
+        {fmt.date(now, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })}
+      </span>
+    </div>
+  )
+}
+
+/** One size for every icon action in the top bar. */
+const TOP_ICON =
+  'grid h-8 w-8 place-items-center rounded-md text-[var(--text-dim)] transition-colors hover:bg-[var(--panel-2)] hover:text-[var(--text)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--accent)]'
+
+function Avatar({ name, size }: { name?: string; size: 'sm' | 'lg' }) {
+  return (
+    <span
+      aria-hidden
+      className={`grid shrink-0 place-items-center rounded-full bg-[var(--accent)] font-semibold uppercase text-white ${
+        size === 'lg' ? 'h-11 w-11 text-base' : 'h-7 w-7 text-xs'
+      }`}
+    >
+      {(name ?? '?').charAt(0)}
+    </span>
+  )
 }
 
 function SideLink({ to, label, icon, collapsed, end }: { to: string; label: string; icon: React.ReactNode; collapsed?: boolean; end?: boolean }) {

@@ -20,7 +20,8 @@ import { useEffect, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth/AuthContext'
 import { useTranslation } from '../i18n'
-import { Logo } from '../components/Logo'
+import { AlertCircle, ArrowLeft, Clock, Loader2, ShieldCheck } from 'lucide-react'
+import { AuthAlert, AuthLayout, authButton, authLink } from '../components/AuthLayout'
 
 type LocationState = {
   username?: string
@@ -67,53 +68,76 @@ export function MFAVerify() {
     }
   }
 
+  const locked = retryAfterSeconds > 0
+  const shell = (children: React.ReactNode) => <AuthLayout>{children}</AuthLayout>
+  const backLink = (
+    <Link to="/login" className={`inline-flex items-center gap-1.5 text-sm ${authLink}`}>
+      <ArrowLeft size={14} /> {t('mfa.differentAccount')}
+    </Link>
+  )
+
   if (!username || !password) {
-    return (
-      <div className="min-h-screen grid place-items-center bg-[var(--bg)] text-[var(--text)] p-4">
-        <div className="w-full max-w-sm bg-[var(--panel)] border border-neutral-700 p-4 space-y-3 text-sm">
-          <div className="text-red-400">Missing credentials. Please sign in again.</div>
-          <Link to="/login" className="underline">Back to sign in</Link>
-        </div>
-      </div>
+    return shell(
+      <>
+        <AuthAlert tone="error" icon={<AlertCircle size={16} />}>{t('mfa.missingCredentials')}</AuthAlert>
+        <div className="text-center">{backLink}</div>
+      </>,
     )
   }
 
-  return (
-    <div
-      className="min-h-screen grid place-items-center bg-[var(--bg)] text-[var(--text)] p-4"
-      style={{
-        backgroundImage: 'linear-gradient(rgba(0,0,0,0.45), rgba(0,0,0,0.45)), url(/opennvr_bg.svg)',
-        backgroundSize: 'cover',
-        backgroundPosition: 'center',
-      }}
-    >
-      <div className="flex flex-col items-center gap-8">
-        {/* Logo outside the form - 35% of viewport */}
-        <Logo className="w-[35vw] h-auto text-[var(--text)]" style={{ minWidth: '280px', maxWidth: '500px' }} />
-        
-        <form onSubmit={onSubmit} className="w-full max-w-sm rounded-lg bg-[#1a2332] border border-[#2a3a4f] shadow-2xl p-6 space-y-4">
-        <h1 className="text-lg font-semibold tracking-wide text-gray-100">{t('mfa.setup')}</h1>
-        <div className="text-xs text-gray-400">Enter the 6‑digit code from your authenticator app.</div>
-        {retryAfterSeconds > 0 && (
-          <div className="text-sm text-amber-200 bg-amber-900/30 border border-amber-500/30 rounded p-3">
-            Too many failed attempts. Try again in {formatRetryTime(retryAfterSeconds)}.
-          </div>
-        )}
-        {error && <div className="text-sm text-red-300 bg-red-900/30 border border-red-500/30 rounded p-2">{error}</div>}
-        <label className="block text-sm text-gray-200">
-          <span className="block mb-2 text-gray-400 font-medium">MFA Code</span>
-          <input className="w-full bg-[#0f1720] border border-[#2a3a4f] focus:border-[#5eb3f6] outline-none px-4 py-2.5 rounded text-gray-100 placeholder-gray-500 text-center tracking-widest text-lg" value={code} onChange={(e) => setCode(e.target.value)} minLength={6} maxLength={8} placeholder="000000" required />
-        </label>
-        <button disabled={loading || retryAfterSeconds > 0} className="w-full px-4 py-3 rounded-lg bg-[#5eb3f6] text-white font-semibold disabled:opacity-60 shadow-lg hover:bg-[#4a9de5] transition-colors">
-          {loading ? 'Verifying…' : retryAfterSeconds > 0 ? `Try again in ${formatRetryTime(retryAfterSeconds)}` : 'Verify'}
-        </button>
-        <div className="text-xs text-gray-400 text-center">
-          <Link to="/login" className="text-[#5eb3f6] hover:text-[#4a9de5] underline">Use a different account</Link>
+  return shell(
+    <form onSubmit={onSubmit} className="space-y-5">
+      {/* Centred and stacked: one heading, one line of instruction, then
+          the field. The side-by-side icon made the header ragged, and a
+          field label repeating the hint was noise. */}
+      <div className="flex flex-col items-center gap-3 text-center">
+        <span className="grid h-12 w-12 place-items-center rounded-full bg-[#5eb3f6]/15 text-[#5eb3f6]">
+          <ShieldCheck size={22} />
+        </span>
+        <div className="space-y-1">
+          <h1 className="text-lg font-semibold text-gray-100">{t('mfa.verifyTitle')}</h1>
+          <p className="text-sm text-gray-400">{t('mfa.verifyHint')}</p>
         </div>
-      </form>
       </div>
-    </div>
+
+      {locked && (
+        <AuthAlert tone="warn" icon={<Clock size={16} />}>
+          {t('login.tooManyAttempts')} {formatRetryTime(retryAfterSeconds)}.
+        </AuthAlert>
+      )}
+      {error && <AuthAlert tone="error" icon={<AlertCircle size={16} />}>{error}</AuthAlert>}
+
+      <div>
+        <label htmlFor="mfa-code" className="sr-only">{t('mfa.code')}</label>
+        <input
+          id="mfa-code"
+          className="h-12 w-full rounded-lg border border-[#2a3a4f] bg-[#0f1720] px-3 text-center font-mono text-xl tracking-[0.5em] text-gray-100 outline-none transition-colors placeholder:text-gray-600 focus:border-[#5eb3f6] focus:ring-2 focus:ring-[#5eb3f6]/20"
+          value={code}
+          onChange={(e) => setCode(e.target.value.replace(/\s+/g, ''))}
+          inputMode="numeric"
+          autoComplete="one-time-code"
+          autoFocus
+          minLength={6}
+          maxLength={8}
+          placeholder="000000"
+          required
+        />
+      </div>
+
+      <button
+        type="submit"
+        disabled={loading || locked}
+        className={authButton}
+      >
+        {loading && <Loader2 size={16} className="animate-spin" />}
+        {loading
+          ? t('mfa.verifying')
+          : locked
+            ? `${t('login.tryAgainIn')} ${formatRetryTime(retryAfterSeconds)}`
+            : t('mfa.verify')}
+      </button>
+
+      <div className="text-center">{backLink}</div>
+    </form>,
   )
 }
-
-
