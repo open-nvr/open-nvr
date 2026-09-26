@@ -226,22 +226,26 @@ export function CameraPicker({
   if (selected.length === 0) {
     return (
       <>
-        <div className="flex flex-col items-center gap-2 border border-dashed border-[var(--border)] px-4 py-6 text-center">
-          <CameraOff size={22} className="text-[var(--text-dim)]" />
-          <div className="text-sm font-medium">No cameras selected</div>
-          <div className="max-w-sm text-xs text-[var(--text-dim)]">
-            {appName} isn&apos;t running and uses no compute until you select at least one camera.
+        {/* One row, not a centred empty-state block: it sits at the top of
+            a long form, and a big box here pushed every setting below it
+            off the screen. */}
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded border border-dashed border-[var(--border)] px-3 py-2">
+          <CameraOff size={16} className="shrink-0 text-[var(--text-dim)]" />
+          <div className="min-w-0 flex-1 text-sm">
+            <span className="font-medium">No cameras selected</span>
+            <span className="text-xs text-[var(--text-dim)]">
+              {' — '}
+              {cameras.length === 0
+                ? 'add one on the Cameras page first.'
+                : `${appName} stays off until you pick one.`}
+            </span>
           </div>
-          {cameras.length === 0 ? (
-            <div className="text-xs text-[var(--text-dim)]">
-              There are no cameras you can see. Add one on the Cameras page first.
-            </div>
-          ) : (
+          {cameras.length > 0 && (
             <Button variant="primary" size="sm" onClick={() => setChoosing(true)}>
               Select cameras
             </Button>
           )}
-          {unsaved && <UnsavedNote />}
+          {unsaved && <div className="w-full"><UnsavedNote /></div>}
         </div>
         {dialog}
       </>

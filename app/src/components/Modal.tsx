@@ -80,7 +80,7 @@ export function Modal({
           : `max-h-[85vh] border ${widthClassName || 'w-[720px]'}`}`}>
         <div className="flex items-center justify-between gap-2 border-b border-neutral-700 px-4 py-2">
           <h2 className="text-sm font-semibold flex items-center gap-2">{title}</h2>
-          <button className="text-[var(--text-dim)] hover:text-white" onClick={onClose} aria-label={t('shared.close')}>✕</button>
+          <button className="grid h-8 w-8 place-items-center rounded text-[var(--text-dim)] hover:bg-[var(--bg-2)] hover:text-[var(--text)]" onClick={onClose} aria-label={t('shared.close')} title={t('shared.close')}>✕</button>
         </div>
         <div className={`flex-1 min-h-0 overflow-auto thin-scroll ${bodyClassName || 'p-4'}`}>
           {children}

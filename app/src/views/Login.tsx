@@ -20,6 +20,7 @@ import { useState, useEffect } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth/AuthContext'
 import { useTranslation } from '../i18n'
+import { Logo } from '../components/Logo'
 
 export function Login() {
   const { t } = useTranslation()
@@ -90,7 +91,7 @@ export function Login() {
     >
       <div className="flex flex-col items-center gap-8">
         {/* Logo outside the form - 35% of viewport */}
-        <img src="/opennvr-logo.svg" alt="OpenNVR" className="w-[35vw] h-auto" style={{ minWidth: '280px', maxWidth: '500px' }} />
+        <Logo className="w-[35vw] h-auto text-[var(--text)]" style={{ minWidth: '280px', maxWidth: '500px' }} />
         
         <form onSubmit={onSubmit} className="w-full max-w-sm rounded-lg bg-[#1a2332] border border-[#2a3a4f] shadow-2xl p-6 space-y-4">
         {setupRequired && (

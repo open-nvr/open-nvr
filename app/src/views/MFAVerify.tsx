@@ -20,6 +20,7 @@ import { useEffect, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth/AuthContext'
 import { useTranslation } from '../i18n'
+import { Logo } from '../components/Logo'
 
 type LocationState = {
   username?: string
@@ -88,7 +89,7 @@ export function MFAVerify() {
     >
       <div className="flex flex-col items-center gap-8">
         {/* Logo outside the form - 35% of viewport */}
-        <img src="/opennvr-logo.svg" alt="OpenNVR" className="w-[35vw] h-auto" style={{ minWidth: '280px', maxWidth: '500px' }} />
+        <Logo className="w-[35vw] h-auto text-[var(--text)]" style={{ minWidth: '280px', maxWidth: '500px' }} />
         
         <form onSubmit={onSubmit} className="w-full max-w-sm rounded-lg bg-[#1a2332] border border-[#2a3a4f] shadow-2xl p-6 space-y-4">
         <h1 className="text-lg font-semibold tracking-wide text-gray-100">{t('mfa.setup')}</h1>

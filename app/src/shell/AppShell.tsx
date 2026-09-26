@@ -33,6 +33,7 @@ import { CameraStatusProvider } from '../hooks/useCameraStatus'
 import { SystemAlertBanner } from '../components/SystemAlertBanner'
 import { AlertBell } from '../components/AlertBell'
 import { useTranslation, useDateFormat, type DateFormatters } from '../i18n'
+import { Logo } from '../components/Logo'
 
 type NavItem = {
   to: string
@@ -321,7 +322,7 @@ export function AppShell() {
   {/* Top white header (sticky) */}
   <header className="bg-[var(--bg-2)] border-b border-[var(--border)] text-[var(--text)] h-12 flex items-center px-4 text-sm uppercase tracking-wide sticky top-0 z-40">
         <Link to="/" className="font-semibold inline-flex items-center gap-2">
-          <img src="/opennvr-logo.svg" alt="OpenNVR" className="h-10" />
+          <Logo className="h-10 w-auto text-[var(--text)]" />
         </Link>
         <div className="ml-auto flex items-center gap-3">
           <AlertBell />
