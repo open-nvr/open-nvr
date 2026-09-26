@@ -145,6 +145,8 @@ The architecture is published — a peer-citable paper this year, 34 references,
 
 **It runs on the hardware you already have.** If the machine it's on has a camera — a laptop webcam, a USB or Pi camera, the onboard sensor on a drone or robot — the agent can discover and use it with zero provisioning. Any device that can see a camera or a stream can run its own on-board sovereign agent.
 
+**It works with Home Assistant.** Every camera, zone and app shows up in Home Assistant as a device — motion, detection and recording switches, counts, plates, PTZ, site arming, alerts — through Home Assistant's own MQTT integration with nothing to install, or through the native OpenNVR integration (live video, media browser, notifications with the picture). Commands run as an API token you scope and are audited. See the **[Home Assistant user guide](docs/HOME_ASSISTANT_USER_GUIDE.md)**.
+
 **It's built for sovereignty.** For homelab users that means the doorbell that doesn't phone home. For defence, critical infrastructure, healthcare, and government deployments it means tactical AI that runs on your hardware under your control — models you've fine-tuned, models you can't share with a vendor, analytics whose detection logic itself is operationally sensitive. The procurement brief is in [`docs/GOVERNMENT_DEPLOYMENT.md`](docs/GOVERNMENT_DEPLOYMENT.md); the enterprise offer — reference appliance, compliance evidence pack, supported deployment — in [`docs/ENTERPRISE.md`](docs/ENTERPRISE.md).
 
 ## How it compares
@@ -284,7 +286,7 @@ Adapters are *capabilities*; applications are *solutions*. And every camera can 
 | [`guard-scan-compliance`](examples/guard-scan-compliance) | Check a guard wands every person entering — and flag what the scanner finds | advanced |
 | [`alert-notifier`](examples/alert-notifier) | Routing and judgement: what actually deserves to reach the guard's phone | intermediate |
 | [`camera-agent`](examples/camera-agent) | Ask your cameras questions — ~1–2 GB text mode on a laptop, up to full hands-free voice | beginner→advanced |
-| [`home-assistant-relay`](examples/home-assistant-relay) | Bridge alerts into Home Assistant via MQTT discovery | intermediate |
+| [`home-assistant-relay`](examples/home-assistant-relay) | *Deprecated* — Home Assistant support is built in ([guide](docs/HOME_ASSISTANT_USER_GUIDE.md)); kept as a small NATS→MQTT bridge example | intermediate |
 
 Fourteen of the sixteen shipped examples are listed above; [`inference-listener`](examples/inference-listener) and [`alerts-subscriber`](examples/alerts-subscriber) round out the set as minimal subscriber templates. Thirteen of them are installable straight from the App Catalog. Each application is a copy-as-template starting point. Gallery walkthrough and the "drives inference vs subscribes to events" axis-grid in [`examples/README.md`](examples/README.md). The roadmap for the application catalog — audio-event detection, tamper-evident incident export, and the vertical safety/security packs — is in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
@@ -298,7 +300,7 @@ Commercial deployments — deployment assistance, NDA adapter authoring, complia
 
 ## Documentation
 
-**Getting started** — [Docker quickstart](DOCKER_QUICKSTART.md) · [User manual](USER_MANUAL.md) · [Camera assignments — give each camera a job](docs/CAMERA_ASSIGNMENTS.md) · [Enrichment — captions, descriptors and embeddings for search](docs/ENRICHMENT.md) · [Local dev setup](docs/LOCAL_SETUP.md) · [Use cases by industry](docs/USE_CASES.md) · [Comparisons](docs/COMPARISONS.md)
+**Getting started** — [Docker quickstart](DOCKER_QUICKSTART.md) · [User manual](USER_MANUAL.md) · [Camera assignments — give each camera a job](docs/CAMERA_ASSIGNMENTS.md) · [Enrichment — captions, descriptors and embeddings for search](docs/ENRICHMENT.md) · [Local dev setup](docs/LOCAL_SETUP.md) · [Use cases by industry](docs/USE_CASES.md) · [Comparisons](docs/COMPARISONS.md) · [Home Assistant](docs/HOME_ASSISTANT_USER_GUIDE.md)
 
 **Architecture & security** — [Security policy & acknowledgements](SECURITY.md) · [Security architecture](docs/SECURITY_ARCHITECTURE.md) · [Compliance mapping](docs/COMPLIANCE.md) · [Enterprise](docs/ENTERPRISE.md) · [Reference appliance](docs/REFERENCE_APPLIANCE.md) · [Government deployment brief](docs/GOVERNMENT_DEPLOYMENT.md) · [AI Adapter Contract](docs/AI_ADAPTER_CONTRACT.md) · [Edge autonomy & robotics](docs/EDGE_AUTONOMY.md)
 

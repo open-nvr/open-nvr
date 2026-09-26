@@ -173,6 +173,14 @@ docker compose -f docker-compose.yml up -d
 docker compose -f docker-compose.yml restart opennvr-core
 ```
 
+## Connect Home Assistant
+
+Once the stack is up: create an API token (*Settings → API Tokens*, the
+Home Assistant preset), add an **MQTT** integration in OpenNVR pointing at
+the broker Home Assistant uses, with discovery on — and Home Assistant
+lists every camera, zone and app as a device. Details, automations and
+troubleshooting: [docs/HOME_ASSISTANT_USER_GUIDE.md](docs/HOME_ASSISTANT_USER_GUIDE.md).
+
 ## Customisation
 
 ### Turn off object detection entirely
