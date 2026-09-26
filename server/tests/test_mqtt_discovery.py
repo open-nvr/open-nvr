@@ -384,12 +384,25 @@ def test_manager_keeps_unchanged_bridges_and_clears_removed_ones(bridge_env):
         assert broker.last(next(t for t, _, _ in broker.published
                                 if t.endswith("/status"))) == "online"
         # Deleted: its devices are removed from Home Assistant.
-        s = env.Session()
-        try:
-            s.delete(s.get(env.models.Integration, iid))
-            s.commit()
-        finally:
-            s.close()
+        # The running bridge reads the DB from worker threads, and on this
+        # StaticPool every session shares ONE sqlite connection: a thread's
+        # close() is a ROLLBACK that can undo our DELETE between its flush
+        # and commit (seen on CI: the row survived, reload kept the bridge).
+        # Production sessions have their own connections; retry until the
+        # delete sticks.
+        for _ in range(20):
+            s = env.Session()
+            try:
+                row = s.get(env.models.Integration, iid)
+                if row is None:
+                    break
+                s.delete(row)
+                s.commit()
+            finally:
+                s.close()
+            await asyncio.sleep(0.05)
+        else:
+            raise AssertionError("the integration row could not be deleted")
         await manager.reload()
         assert iid not in manager._bridges
         # Every discovery config, state and the status: cleared on the broker.
