@@ -16,7 +16,7 @@
 [![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.22804254-blue.svg)](https://doi.org/10.5281/zenodo.22804254)
 [![Discord](https://img.shields.io/badge/Discord-join_the_community-5865F2?logo=discord&logoColor=white)](DISCORD_INVITE_URL)
 
-### [▶ 90-second demo](docs/DEMO.md) · [⚡ Quick start](#get-it-running) · [🧩 Build an AI adapter](https://github.com/open-nvr/ai-adapter#write-your-own-adapter) · [📱 Build an app](docs/FIRST_DETECTOR.md) · [🏠 Home Assistant](docs/HOME_ASSISTANT_USER_GUIDE.md)
+### [▶ 90-second demo](docs/DEMO.md) · [⚡ Quick start](#get-it-running) · [🧩 Build an AI adapter](https://github.com/open-nvr/ai-adapter#write-your-own-adapter) · [📱 Build an app](docs/FIRST_DETECTOR.md) · [🏠 Home Assistant](docs/HOME_ASSISTANT_USER_GUIDE.md) · [🔒 Security](docs/SECURITY_ARCHITECTURE.md) · [💬 Discord](DISCORD_INVITE_URL)
 
 <a href="https://opennvr.org/camera-agent">
   <img src=".github/demo-agent.gif" alt="Ask your cameras a question — the OpenNVR camera agent runs YOLOv8 on a live frame and answers locally, no cloud" width="760" />
@@ -38,6 +38,7 @@ IP camera ──▶ OpenNVR (record · stream · detect · remember) ──▶ A
 - **A gate that opens for allowed plates only** — plate reads audited end to end, the barrier driven by an app you can read.
 - **"Did a blue car come by after nine?"** — answered by your own hardware, with the photos, from every visit it remembered.
 - **Your cameras in Home Assistant** with nothing to install — every camera, zone and app as a device; switches, counts, plates, arming.
+- **Cameras that can't be reached from the internet, and AI that can't leak.** The camera network is isolated from the analytics layer by architecture; camera credentials are encrypted at rest; video leaves the host only over RTSPS; apps reach the outside world only through an egress proxy on an allowlist you approve; and two default-deny gates keep every cloud route and non-local model off until you opt in. Every inference is audited with a correlation id from the alert to the model. **This is what most camera software gets wrong, and it is the part of OpenNVR nobody else ships** — [the security architecture](docs/SECURITY_ARCHITECTURE.md), control by control.
 
 Everything an app needs — cameras, streams, recording, detections, an event store with evidence, alerts, auth, audit — is the platform's job. Yours is the rule. See the [app catalog](#applications-ship-on-top-of-it) for what ships, and [build your own in 15 minutes](docs/FIRST_DETECTOR.md).
 
