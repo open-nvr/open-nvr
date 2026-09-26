@@ -33,6 +33,7 @@ export const translations: TranslationCatalog = {
   'appSetup.noCameras.title': 'Aucune caméra sélectionnée.',
   'appSetup.noCameras.body': '{{app}} ne surveille rien tant que vous ne lui attribuez pas au moins une caméra.',
   'appSetup.noCameras.askAdmin': '{{app}} ne surveille rien. Demandez à un administrateur de lui attribuer une caméra.',
+  'appSetup.noCameras.skills': 'En sélectionner une active : {{skills}}.',
   'appSetup.noCameras.select': 'Sélectionner des caméras',
   'catalog.refresh': 'Actualiser',
   'catalog.installed': 'Installées',

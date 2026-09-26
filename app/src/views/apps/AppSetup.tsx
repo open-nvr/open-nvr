@@ -35,6 +35,7 @@ import { useAuth } from '../../auth/AuthContext'
 import { Button, PageHeader } from '../../components/ui'
 import { useTranslation } from '../../i18n'
 import { AppConfigModal, type RegisteredApp } from '../AppCatalog'
+import { listOf, skillLabel } from '../../lib/skillNames'
 
 /** Does this app work on cameras and have none? Apps that act only on
  *  other apps' alerts (camera_picker false) never do. picked_cameras
@@ -122,6 +123,7 @@ export function AppNoCamerasNotice({ app }: { app: RegisteredApp | null | undefi
   if (!app || !appHasNoCameras(app)) return null
   // Picking cameras is site-wide config, superuser-only like Configure.
   const selectable = !!me?.is_superuser
+  const skills = app.skills ?? []
   return (
     <div
       role="status"
@@ -133,6 +135,9 @@ export function AppNoCamerasNotice({ app }: { app: RegisteredApp | null | undefi
         <span className="font-medium text-[var(--text)]">{t('appSetup.noCameras.title')}</span>{' '}
         <span className="text-[var(--text-dim)]">
           {t(selectable ? 'appSetup.noCameras.body' : 'appSetup.noCameras.askAdmin', { app: app.name })}
+          {/* What a pick turns on — so the notice says why it is worth
+              doing, and the Cameras card below has nothing left to add. */}
+          {skills.length > 0 && <> {t('appSetup.noCameras.skills', { skills: listOf(skills.map(skillLabel)) })}</>}
         </span>
       </p>
       {selectable && (

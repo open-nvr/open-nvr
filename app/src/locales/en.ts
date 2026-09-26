@@ -33,6 +33,7 @@ export const translations: TranslationCatalog = {
   'appSetup.noCameras.title': 'No camera selected.',
   'appSetup.noCameras.body': '{{app}} isn’t watching anything until you select at least one camera for it.',
   'appSetup.noCameras.askAdmin': '{{app}} isn’t watching anything. Ask an administrator to select a camera for it.',
+  'appSetup.noCameras.skills': 'Selecting one turns on {{skills}} for it.',
   'appSetup.noCameras.select': 'Select cameras',
   'catalog.refresh': 'Refresh',
   'catalog.installed': 'Installed',
