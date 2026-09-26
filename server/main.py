@@ -169,6 +169,34 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         main_logger.error(f"Camera uuid backfill failed: {e}", exc_info=True)
 
+    # Integration secrets written before they were encrypted at rest are
+    # sealed on the next write; do that write now, once, so no plain
+    # password outlives the upgrade.
+    try:
+        db = SessionLocal()
+        try:
+            import json as _json
+
+            from sqlalchemy import text as _text
+            from sqlalchemy.orm.attributes import flag_modified
+
+            from core.sealed_json import needs_sealing
+            from models import Integration as _Integration
+            plain_ids = []
+            for iid, raw in db.execute(_text("SELECT id, config FROM integrations")).all():
+                cfg = _json.loads(raw) if isinstance(raw, str) else raw
+                if needs_sealing(cfg):
+                    plain_ids.append(iid)
+            for row in db.query(_Integration).filter(_Integration.id.in_(plain_ids)).all():
+                flag_modified(row, "config")
+            if plain_ids:
+                db.commit()
+                main_logger.info(f"Sealed secrets in {len(plain_ids)} integration config(s)")
+        finally:
+            db.close()
+    except Exception as e:
+        main_logger.error(f"Integration secret sealing failed: {e}", exc_info=True)
+
     # Skills follow apps: retire the camera page's rows, give all-cameras
     # apps their picks, re-project every camera (derived skills from
     # manifests registered before this code exist only after this).

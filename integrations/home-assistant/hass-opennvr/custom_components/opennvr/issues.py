@@ -12,6 +12,7 @@
 | ``clock_skew`` | the clocks differ by more than a minute | NTP |
 | ``ssl_unverified`` | certificate verification is off | a trusted certificate, then reconfigure |
 | ``mqtt_duplicate`` | OpenNVR also publishes MQTT discovery | use one of the two |
+| ``relay_duplicate`` | the deprecated home-assistant-relay app is on | disable the relay |
 
 Issue ids carry the entry id, so two OpenNVR sites keep separate issues.
 Each is cleared as soon as the condition is gone.
@@ -55,6 +56,7 @@ _SEVERITY = {
     "clock_skew": ir.IssueSeverity.WARNING,
     "ssl_unverified": ir.IssueSeverity.WARNING,
     "mqtt_duplicate": ir.IssueSeverity.WARNING,
+    "relay_duplicate": ir.IssueSeverity.WARNING,
 }
 _LEARN_MORE = {
     "firewall_blocked": f"{DOCS}#tokens",
@@ -62,6 +64,7 @@ _LEARN_MORE = {
     "rtsp_not_exposed": f"{DOCS}#rtsps_bind_host-rtsps-for-home-assistants-stream-component-optional",
     "server_too_old": DOCS,
     "integration_too_old": DOCS,
+    "relay_duplicate": f"{DOCS}#two-ways-in",
 }
 
 
@@ -126,3 +129,9 @@ def async_check_site(hass: HomeAssistant, entry: ConfigEntry, info: SystemInfo) 
         async_raise(hass, entry, "mqtt_duplicate")
     else:
         async_clear(hass, entry, "mqtt_duplicate")
+    # The deprecated relay app publishes its own alert entities (MQTT
+    # discovery or HA's REST API): every alert shows twice while it runs.
+    if info.raw.get("relay_installed") is True:
+        async_raise(hass, entry, "relay_duplicate")
+    else:
+        async_clear(hass, entry, "relay_duplicate")

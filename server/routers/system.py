@@ -84,7 +84,20 @@ async def get_system_info(
         # Home Assistant MQTT discovery is publishing (HA-402): the native
         # integration warns, since running both duplicates every entity.
         "mqtt_discovery": _mqtt_discovery_active(),
+        # The deprecated home-assistant-relay app is installed and on: it
+        # publishes its own alert entities, so the native integration warns
+        # (running both shows every alert twice).
+        "relay_installed": _relay_installed(db),
     }
+
+
+def _relay_installed(db) -> bool:
+    try:
+        from models import InstalledApp
+        row = db.query(InstalledApp).filter(InstalledApp.id == "home-assistant-relay").first()
+        return bool(row is not None and row.enabled)
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _mqtt_discovery_active() -> bool:

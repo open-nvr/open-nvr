@@ -17,7 +17,8 @@ host, the defaults already work.
 Use **one of the two**, not both: every entity would appear twice. The
 integration raises a repair (*"OpenNVR entities may appear twice"*) if
 it sees both running. The older `examples/home-assistant-relay` app is
-deprecated in favour of either.
+deprecated in favour of either; while it is enabled the integration raises
+*"OpenNVR alerts may appear twice"*.
 
 ### MQTT discovery
 In OpenNVR, go to *Settings > Integrations* and add an **MQTT** integration:
@@ -48,6 +49,13 @@ What goes where (`<site>` is the start of the site id):
 | `opennvr/<site>/<key>/set` | commands from Home Assistant, run as the token and audited as `mqtt:<integration name>` |
 | `opennvr/<site>/<key>/event` | events, as CloudEvents 1.0 JSON |
 | `opennvr/alerts` | every alert, as with the webhook integrations |
+
+The broker password (and every other integration secret — SMTP passwords,
+webhook secrets) is encrypted at rest with `CREDENTIAL_ENCRYPTION_KEY`, the
+key that protects camera passwords, and the API shows it masked; the edit
+form keeps the stored value unless you type a new one. Alerts to an MQTT
+integration ride the discovery bridge's standing connection when it is up,
+and open a one-off connection only when it is not.
 
 **The broker is the trust boundary.** Anyone who can publish to it can send
 every command the token allows, so give the broker usernames and passwords

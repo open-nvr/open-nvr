@@ -9,6 +9,7 @@ messages (Home Assistant's status, commands) are fed in.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 import json
 import types
@@ -648,3 +649,31 @@ def test_integration_api_validates_and_tests_mqtt(env, monkeypatch):  # noqa: F8
     assert ok.status_code == 200 and reloads == [1]
     tested = client.post(f"/api/v1/integrations/{ok.json()['id']}/test")
     assert tested.status_code == 200 and broker.published[0][0] == "opennvr/test"
+
+
+def test_alerts_ride_the_live_bridge_instead_of_a_connection_each(bridge_env, monkeypatch):
+    """Alert delivery to an MQTT integration used to connect, publish and
+    disconnect per alert — thousands a day on a busy site — while the
+    discovery bridge held a session to the same broker. It rides the
+    bridge when one is connected, and falls back to a one-off connection
+    only when none is."""
+    env, broker = bridge_env
+    minted = _mint(env, scopes=["settings.view", "cameras.view"], camera_ids=[1])
+    config = {"broker_url": "mqtt://broker.lan", "api_token_id": minted["id"]}
+
+    async def scenario():
+        manager = hd._Manager()
+        bridge = hd.MqttBridge(7, "ha-mqtt", config)
+        # No bridge connected yet: the caller must fall back to a one-off.
+        assert manager.offer(7, "alerts", "{}") is False
+        task = asyncio.create_task(bridge.run())
+        manager._bridges[7] = (bridge, task)
+        await _until(lambda: bridge.state == "connected", what="the bridge to connect")
+        assert manager.offer(7, "alerts", json.dumps({"subject": "s"})) is True
+        await _until(lambda: any(t == "opennvr/alerts" for t, _, _ in broker.published),
+                     what="the alert to be published on the bridge's session")
+        await bridge.stop()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(task, 5)
+
+    asyncio.run(scenario())
