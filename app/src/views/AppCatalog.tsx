@@ -51,6 +51,9 @@ import {
   CameraSetupDialog, entryFor, isCameraSetupType, isDrawn, shortParamName,
 } from './apps/CameraSetupDialog'
 import { taskProvider, type CapabilitiesLike, type Tier0Like } from '../lib/kaic'
+import { listOf, skillLabel } from '../lib/skillNames'
+import { InfoTip } from '../components/ui/InfoTip'
+import { AppHeader } from './apps/AppHeader'
 import { verticalFor } from '../lib/appVerticals'
 import { matchesCatalogFilter, sortCatalog, type CatalogSort } from '../lib/catalogFilter'
 
@@ -188,7 +191,7 @@ function VerifiedBadge({ verified, author }: { verified?: boolean; author?: stri
 
 /** What an operator should know before installing: where the code is,
  * who to reach, and which hosts the app talks to outside the stack. */
-function ProvenanceLine({ app }: { app: IndexApp }) {
+function ProvenanceLine({ app, hideEgress = false }: { app: IndexApp; hideEgress?: boolean }) {
   const egress = app.network_egress ?? []
   const external = app.kind === 'external'
   return (
@@ -212,7 +215,7 @@ function ProvenanceLine({ app }: { app: IndexApp }) {
           contact
         </a>
       )}
-      {!external && (
+      {!external && !hideEgress && (
         <span
           title={
             egress.length
@@ -532,27 +535,28 @@ function suggestionsFor(p: ManifestParam, seenLabels: string[]): string[] {
   return out
 }
 
-/** The "requires <task>" badge: which tasks are provided, and by what. */
+/** What an app needs from the models on this system, in plain words:
+ *  either "all there" or exactly which piece is missing. */
 function RequiresBadge({ requires, caps, tier0 }: { requires: string[]; caps: CapabilitiesLike; tier0: Tier0Like }) {
   if (requires.length === 0) return null
   const missing = requires.filter((t) => !taskProvider(t, caps, tier0))
+  const say = (ids: string[]) => {
+    const text = listOf(ids.map(skillLabel))
+    return text.charAt(0).toUpperCase() + text.slice(1)
+  }
   if (missing.length === 0) {
-    const viaTier0 = requires.filter((t) => taskProvider(t, caps, tier0) === 'tier0')
     return (
-      <Badge
-        variant="success"
-        title={viaTier0.length ? `${viaTier0.join(', ')}: provided by the platform's Tier-0 detection (no adapter needed)` : undefined}
-      >
-        ● requires {requires.join(' + ')} — {viaTier0.length === requires.length ? 'provided by Tier-0' : 'available'}
+      <Badge variant="success" title="Everything this app needs is already running on this system.">
+        ✓ {say(requires)} — available
       </Badge>
     )
   }
   return (
     <Badge
       variant="warning"
-      title="No registered adapter advertises this task and Tier-0 detection does not provide it — install an adapter from AI & Detections"
+      title="Nothing on this system provides this yet. Add a model for it under AI & Detections, then install the app."
     >
-      requires {missing.join(' + ')} — nothing provides it
+      {say(missing)} — not available yet
     </Badge>
   )
 }
@@ -2316,128 +2320,114 @@ export function UninstalledAppPage({ appId }: { appId: string }) {
   // duplicate an install. Say what is happening instead.
   const registryLagging = Boolean(app.installed)
 
+  const egress = app.network_egress ?? []
+  const emits = app.emits ?? []
+  const humanize = (s: string) => {
+    const t = s.replace(/[-_]+/g, ' ')
+    return t.charAt(0).toUpperCase() + t.slice(1)
+  }
+  const row = 'grid grid-cols-1 gap-1 sm:grid-cols-[11rem_1fr] sm:gap-4'
+  const term = 'text-[var(--text-dim)]'
+
   return (
-    <div className="space-y-5">
-      {back}
-
-      <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-1)] p-5 space-y-4">
-        <div className="flex flex-wrap items-start gap-4">
-          <div className="grid place-items-center h-14 w-14 rounded-xl bg-[var(--bg-2)] border border-[var(--border)] shrink-0">
-            <Boxes size={26} className="text-[var(--accent,var(--text-dim))]" />
-          </div>
-          <div className="min-w-0 flex-1 space-y-2">
-            <div className="flex flex-wrap items-center gap-2">
-              <h2 className="text-lg font-semibold text-[var(--text)]">{app.name}</h2>
-              <Badge variant="info">{app.category}</Badge>
-              <span className="text-xs text-[var(--text-dim)]">v{app.version}</span>
-              <PricingBadge pricing={app.pricing} note={app.price_note} />
-              <LicenceRequiredBadge entitlement={app.entitlement} />
-              <PopularityBadge popularity={app.popularity} />
-              <VerifiedBadge verified={app.verified} author={app.author} />
-              {external && <Badge variant="neutral">third-party</Badge>}
-              <Badge variant="neutral">{registryLagging ? 'registering…' : 'not installed'}</Badge>
-            </div>
-            <p className="text-sm text-[var(--text-dim)]">{app.summary || 'No summary provided.'}</p>
-            <ProvenanceLine app={app} />
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            {external && app.external_url ? (
-              <a href={app.external_url} target="_blank" rel="noreferrer">
-                <Button variant="primary"><ExternalLink size={14} /> Learn more</Button>
-              </a>
-            ) : registryLagging ? (
-              <Button variant="outline" onClick={() => indexQuery.refetch()}>
-                <RefreshCw size={14} /> Finishing install…
-              </Button>
-            ) : (
-              <Button variant="primary" onClick={() => setInstallOpen(true)}>
-                <Download size={14} /> Install
-              </Button>
-            )}
-            {app.docs_url && (
-              <a href={app.docs_url} target="_blank" rel="noreferrer">
-                <Button variant="outline"><ExternalLink size={14} /> Docs</Button>
-              </a>
-            )}
-          </div>
-        </div>
-
+    <div className="space-y-3">
+      <AppHeader
+        name={app.name}
+        category={app.category}
+        version={app.version}
+        summary={app.summary}
+        badges={<>
+          <PricingBadge pricing={app.pricing} note={app.price_note} />
+          <LicenceRequiredBadge entitlement={app.entitlement} />
+          <PopularityBadge popularity={app.popularity} />
+          <VerifiedBadge verified={app.verified} author={app.author} />
+          {external && <Badge variant="neutral">third-party</Badge>}
+          <Badge variant="neutral">{registryLagging ? 'Installing…' : 'Not installed'}</Badge>
+        </>}
+        meta={<ProvenanceLine app={app} hideEgress />}
+        actions={<>
+          {external && app.external_url ? (
+            <a href={app.external_url} target="_blank" rel="noreferrer">
+              <Button size="sm" variant="primary"><ExternalLink size={14} /> Learn more</Button>
+            </a>
+          ) : registryLagging ? (
+            <Button size="sm" variant="outline" onClick={() => indexQuery.refetch()}>
+              <RefreshCw size={14} /> Finishing install…
+            </Button>
+          ) : (
+            <Button size="sm" variant="primary" onClick={() => setInstallOpen(true)}>
+              <Download size={14} /> Install
+            </Button>
+          )}
+          {app.docs_url && (
+            <a href={app.docs_url} target="_blank" rel="noreferrer">
+              <Button size="sm" variant="outline"><ExternalLink size={14} /> Docs</Button>
+            </a>
+          )}
+        </>}
+      >
         {app.screenshots && app.screenshots.length > 0 && (
-          <div className="flex gap-3 overflow-x-auto pb-1">
+          <div className="mt-3 flex gap-3 overflow-x-auto pb-1">
             {app.screenshots.map((src) => (
               <img
                 key={src}
                 src={`/${src}`}
                 alt={`${app.name} screenshot`}
                 loading="lazy"
-                className="h-64 rounded-lg border border-[var(--border)] bg-[var(--bg-2)] shrink-0"
+                className="h-56 rounded-lg border border-[var(--border)] bg-[var(--bg-2)] shrink-0"
                 onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none' }}
               />
             ))}
           </div>
         )}
-      </div>
+      </AppHeader>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {requires.length > 0 && (
-          <Card>
-            <CardHeader><CardTitle>What it needs</CardTitle></CardHeader>
-            <CardContent className="text-sm space-y-2">
-              <p className="text-[var(--text-dim)]">
-                Checked against the adapters registered with KAI-C and the platform&apos;s
-                Tier-0 detection on THIS deployment — so a missing piece is visible
-                before you install, not after.
-              </p>
-              <RequiresBadge requires={requires} caps={capsQuery.data} tier0={tier0Query.data} />
-            </CardContent>
-          </Card>
-        )}
+      {/* Everything worth knowing before installing, as one short list.
+          It used to be three cards, each opening with a paragraph about
+          KAI-C and Tier-0 that told an operator nothing they could act on. */}
+      <Card className="px-4 py-3">
+        <dl className="space-y-2.5 text-sm">
+          {requires.length > 0 && (
+            <div className={row}>
+              <dt className={term}>Needs</dt>
+              <dd><RequiresBadge requires={requires} caps={capsQuery.data} tier0={tier0Query.data} /></dd>
+            </div>
+          )}
+          <div className={row}>
+            <dt className={`${term} inline-flex items-center gap-1.5`}>
+              Internet access <InfoTip>{'Apps run on an isolated network with no route to your cameras or the internet. Anything not listed here is blocked and reported.'}</InfoTip>
+            </dt>
+            <dd>
+              {egress.length === 0 ? (
+                <span className="text-[var(--badge-success-text)]">None — stays inside OpenNVR</span>
+              ) : (
+                <div className="flex flex-wrap gap-1">
+                  {egress.map((h) => <Badge key={h} variant="neutral" className="font-mono">{h}</Badge>)}
+                </div>
+              )}
+            </dd>
+          </div>
+          {emits.length > 0 && (
+            <div className={row}>
+              <dt className={term}>Alerts it can raise</dt>
+              <dd className="flex flex-wrap gap-1">
+                {emits.map((e) => <Badge key={e} variant="neutral" title={e}>{humanize(e)}</Badge>)}
+              </dd>
+            </div>
+          )}
+          {app.entitlement === 'license_key' && (
+            <div className={row}>
+              <dt className={term}>Licence</dt>
+              <dd className="text-[var(--text-dim)]">
+                Needs a licence key from the vendor. An administrator enters it after install;
+                the app can’t be turned on until it’s accepted.
+              </dd>
+            </div>
+          )}
+        </dl>
+      </Card>
 
-        <Card>
-          <CardHeader><CardTitle>Network</CardTitle></CardHeader>
-          <CardContent className="text-sm space-y-2">
-            <p className="text-[var(--text-dim)]">
-              Apps run on an isolated network with no route to your camera network or
-              the internet. These are the only hosts this listing declares; after
-              install, anything else it tries is blocked and reported.
-            </p>
-            {(app.network_egress ?? []).length === 0 ? (
-              <Badge variant="success">nothing outside OpenNVR</Badge>
-            ) : (
-              <div className="flex flex-wrap gap-1">
-                {(app.network_egress ?? []).map((h) => (
-                  <Badge key={h} variant="neutral">{h}</Badge>
-                ))}
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        {(app.emits ?? []).length > 0 && (
-          <Card>
-            <CardHeader><CardTitle>What it publishes</CardTitle></CardHeader>
-            <CardContent className="text-sm">
-              <div className="flex flex-wrap gap-1">
-                {(app.emits ?? []).map((e) => (
-                  <Badge key={e} variant="neutral">{e}</Badge>
-                ))}
-              </div>
-            </CardContent>
-          </Card>
-        )}
-
-        {app.entitlement === 'license_key' && (
-          <Card>
-            <CardHeader><CardTitle>Licensing</CardTitle></CardHeader>
-            <CardContent className="text-sm text-[var(--text-dim)]">
-              Licensed app: after install, an administrator enters the vendor&apos;s key
-              in the catalog; the app cannot be enabled until it accepts one.
-            </CardContent>
-          </Card>
-        )}
-      </div>
-
-      <div className="pt-2 border-t border-[var(--border)]">
+      <div className="pt-1">
         <ContributeNote appName={app.name} />
       </div>
 

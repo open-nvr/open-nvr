@@ -20,6 +20,7 @@
 // distinction is invisible in a result grid and it is the difference
 // between an answer and a guess.
 import { useTranslation, useDateFormat } from '../i18n'
+import { InfoTip } from './ui/InfoTip'
 
 export type SearchAnswerData = {
   scope: 'page'
@@ -41,12 +42,11 @@ export type SearchAnswerData = {
   similar_only?: number
 }
 
-const Chip = ({ children }: { children: React.ReactNode }) => (
-  <span className="inline-flex items-center rounded bg-[var(--panel)] border border-[var(--border)] px-1.5 py-0.5 text-xs">
-    {children}
-  </span>
-)
-
+/**
+ * One line in the results toolbar — where and when — with the rest one
+ * hover away. The full block used to sit above the grid and push the
+ * results off the screen; the counts it carried are all still here.
+ */
 export default function SearchAnswer({ answer }: { answer?: SearchAnswerData }) {
   const { t } = useTranslation()
   const fmt = useDateFormat()
@@ -65,78 +65,63 @@ export default function SearchAnswer({ answer }: { answer?: SearchAnswerData }) 
     : t('search.answer.between', { from, to })
 
   const more = (listed: number, counted: number) =>
-    counted > listed ? t('search.answer.more', { count: counted - listed }) : null
+    counted > listed ? ` ${t('search.answer.more', { count: counted - listed })}` : ''
+
+  const where = cameras.length === 0 ? '' : camera_count === 1
+    ? (cameras[0].name || `#${cameras[0].id}`)
+    : t('search.answer.onCameras', { count: camera_count })
+
+  // "Nothing looked" and "only similar" are answers a grid cannot give,
+  // so the icon that carries them turns amber when either applies.
+  const caveat = undescribed > 0 || (similar_only ?? 0) > 0
 
   return (
-    <div className="rounded border border-[var(--border)] bg-[var(--panel)]/40 px-3 py-2.5 space-y-2">
-      <div className="text-xs text-[var(--text-dim)]">
-        {t(total > shown ? 'search.answer.scopePage' : 'search.answer.scopeAll',
-           { shown, total })}
-        {when && <> · {when}</>}
-      </div>
-
-      {cameras.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-xs text-[var(--text-dim)]">{t('search.answer.cameras')}</span>
-          {cameras.map((c) => (
-            <Chip key={c.id}>
-              {c.name || `#${c.id}`}<span className="text-[var(--text-dim)]"> ×{c.count}</span>
-            </Chip>
-          ))}
-          {more(cameras.length, camera_count) && (
-            <span className="text-xs text-[var(--text-dim)]">{more(cameras.length, camera_count)}</span>
-          )}
-        </div>
-      )}
-
-      {claims.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-xs text-[var(--text-dim)]">{t('search.answer.claims')}</span>
-          {claims.map((c) => (
-            <Chip key={`${c.kind}:${c.value}`}>
-              {c.value}<span className="text-[var(--text-dim)]"> ×{c.count}</span>
-            </Chip>
-          ))}
-          {more(claims.length, claim_count) && (
-            <span className="text-xs text-[var(--text-dim)]">{more(claims.length, claim_count)}</span>
-          )}
-        </div>
-      )}
-
-      {plates.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-xs text-[var(--text-dim)]">{t('search.answer.plates')}</span>
-          {plates.map((p) => <Chip key={p}><span className="font-mono">{p}</span></Chip>)}
-          {more(plates.length, plate_count) && (
-            <span className="text-xs text-[var(--text-dim)]">{more(plates.length, plate_count)}</span>
-          )}
-        </div>
-      )}
-
-      <div className="text-xs text-[var(--text-dim)] space-y-1">
-        <div>
-          {t('search.answer.withEvidence', { count: with_evidence, shown })}
-        </div>
-        {/* A yes/no question turns on this line. Five visits that merely
-            LOOK like the query and none described as it is a "no", and a
-            grid of five cannot say so. */}
-        {(similar_only ?? 0) > 0 && (
-          <div className="text-[var(--warn,var(--text-dim))]">
-            {t('search.answer.similarOnly', {
-              count: similar_only ?? 0, matched: matched_words ?? 0,
-            })}
+    <span className="inline-flex min-w-0 items-center gap-1.5 text-[var(--text-dim)]">
+      <span className="truncate">
+        {[where, when].filter(Boolean).join(' · ')}
+      </span>
+      <span className={caveat ? 'text-[var(--badge-warning-text)] inline-flex' : 'inline-flex'}>
+        <InfoTip label={t('search.answer.details')}>
+          <div className="space-y-1.5">
+            <div className="text-[var(--text-dim)]">
+              {t(total > shown ? 'search.answer.scopePage' : 'search.answer.scopeAll', { shown, total })}
+            </div>
+            {cameras.length > 0 && (
+              <div>
+                <b>{t('search.answer.cameras')}:</b>{' '}
+                {cameras.map((c) => `${c.name || `#${c.id}`} (${c.count})`).join(', ')}
+                {more(cameras.length, camera_count)}
+              </div>
+            )}
+            {claims.length > 0 && (
+              <div>
+                <b>{t('search.answer.claims')}:</b>{' '}
+                {claims.map((c) => `${c.value} (${c.count})`).join(', ')}
+                {more(claims.length, claim_count)}
+              </div>
+            )}
+            {plates.length > 0 && (
+              <div>
+                <b>{t('search.answer.plates')}:</b>{' '}
+                <span className="font-mono">{plates.join(', ')}</span>
+                {more(plates.length, plate_count)}
+              </div>
+            )}
+            <div>{t('search.answer.withEvidence', { count: with_evidence, shown })}</div>
+            {(similar_only ?? 0) > 0 && (
+              <div className="text-[var(--badge-warning-text)]">
+                {t('search.answer.similarOnly', { count: similar_only ?? 0, matched: matched_words ?? 0 })}
+              </div>
+            )}
+            {undescribed > 0 && (
+              <div className="text-[var(--badge-warning-text)]">
+                {t('search.answer.undescribed', { count: undescribed })}{' '}
+                {t('search.answer.undescribedWhy')}
+              </div>
+            )}
           </div>
-        )}
-        {/* Stated even when it is the only thing this block says, because
-            "nothing looked" is an answer the grid cannot give. */}
-        {undescribed > 0 && (
-          <div className="text-[var(--warn,var(--text-dim))]">
-            {t('search.answer.undescribed', { count: undescribed })}
-            {' '}
-            {t('search.answer.undescribedWhy')}
-          </div>
-        )}
-      </div>
-    </div>
+        </InfoTip>
+      </span>
+    </span>
   )
 }

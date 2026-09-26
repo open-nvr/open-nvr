@@ -1,31 +1,36 @@
 /**
  * Copyright (c) 2026 OpenNVR
  * This file is part of OpenNVR.
- * 
+ *
  * OpenNVR is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
- * 
+ *
  * OpenNVR is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU Affero General Public License
  * along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useState, useEffect } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { useEffect, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+import {
+  AlertCircle, AlertTriangle, CheckCircle2, Clock, Eye, EyeOff, KeyRound, Loader2, Lock, UserRound,
+} from 'lucide-react'
 import { useAuth } from '../auth/AuthContext'
 import { useTranslation } from '../i18n'
+import { AuthAlert, AuthLayout, authButton, authFieldIcon, authInput, authLabel, authLink } from '../components/AuthLayout'
 
 export function Login() {
   const { t } = useTranslation()
   const { login, loading, error, setupRequired } = useAuth()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
   const [retryAfterSeconds, setRetryAfterSeconds] = useState(0)
   const navigate = useNavigate()
@@ -79,50 +84,158 @@ export function Login() {
     }
   }
 
+  const locked = retryAfterSeconds > 0
+
   return (
-    <div
-      className="min-h-screen grid place-items-center bg-[var(--bg)] text-[var(--text)] p-4"
-      style={{
-        backgroundImage: 'linear-gradient(rgba(0,0,0,0.45), rgba(0,0,0,0.45)), url(/opennvr_bg.svg)',
-        backgroundSize: 'cover',
-        backgroundPosition: 'center',
-      }}
-    >
-      <div className="flex flex-col items-center gap-8">
-        {/* Logo outside the form - 35% of viewport */}
-        <img src="/opennvr-logo.svg" alt="OpenNVR" className="w-[35vw] h-auto" style={{ minWidth: '280px', maxWidth: '500px' }} />
-        
-        <form onSubmit={onSubmit} className="w-full max-w-sm rounded-lg bg-[#1a2332] border border-[#2a3a4f] shadow-2xl p-6 space-y-4">
-        {setupRequired && (
-          <div className="text-sm text-orange-300 bg-orange-900/30 border border-orange-500/30 rounded p-3">
-            {t('login.setupRequired')}
+    <AuthLayout>
+      <form onSubmit={onSubmit} className="space-y-5">
+          {setupRequired && (
+            <AuthAlert tone="warn" icon={<AlertTriangle size={16} />}>{t('login.setupRequired')}</AuthAlert>
+          )}
+          {locked && (
+            <AuthAlert tone="warn" icon={<Clock size={16} />}>
+              {t('login.tooManyAttempts')} {formatRetryTime(retryAfterSeconds)}.
+            </AuthAlert>
+          )}
+          {error && <AuthAlert tone="error" icon={<AlertCircle size={16} />}>{error}</AuthAlert>}
+          {msg && <AuthAlert tone="ok" icon={<CheckCircle2 size={16} />}>{msg}</AuthAlert>}
+
+          <div className="space-y-1.5">
+            <label htmlFor="login-username" className={authLabel}>
+              {t('login.username')}
+            </label>
+            <div className="relative">
+              <UserRound size={16} className={authFieldIcon} />
+              <input
+                id="login-username"
+                className={authInput}
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                placeholder="admin"
+                autoComplete="username"
+                autoFocus
+                required
+              />
+            </div>
           </div>
-        )}
-        {retryAfterSeconds > 0 && (
-          <div className="text-sm text-amber-200 bg-amber-900/30 border border-amber-500/30 rounded p-3">
-            {t('login.tooManyAttempts')} {formatRetryTime(retryAfterSeconds)}.
+
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
+              <label htmlFor="login-password" className={authLabel}>
+                {t('login.password')}
+              </label>
+              <ForgotPassword />
+            </div>
+            <div className="relative">
+              <Lock size={16} className={authFieldIcon} />
+              <input
+                id="login-password"
+                type={showPassword ? 'text' : 'password'}
+                className={`${authInput} pr-11`}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete="current-password"
+                required
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword((v) => !v)}
+                className="absolute right-1.5 top-1/2 grid h-8 w-8 -translate-y-1/2 place-items-center rounded-md text-gray-500 hover:bg-white/5 hover:text-gray-200"
+                aria-label={showPassword ? t('login.hidePassword') : t('login.showPassword')}
+                title={showPassword ? t('login.hidePassword') : t('login.showPassword')}
+              >
+                {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+              </button>
+            </div>
           </div>
-        )}
-        {error && <div className="text-sm text-red-300 bg-red-900/30 border border-red-500/30 rounded p-2">{error}</div>}
-        {msg && <div className="text-sm text-emerald-300 bg-emerald-900/30 border border-emerald-500/30 rounded p-2">{msg}</div>}
-        <label className="block text-sm text-gray-200">
-          <span className="block mb-2 text-gray-400 font-medium">{t('login.username')}</span>
-          <input className="w-full bg-[#0f1720] border border-[#2a3a4f] focus:border-[#5eb3f6] outline-none px-4 py-2.5 rounded text-gray-100 placeholder-gray-500" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="admin" required />
-        </label>
-        <label className="block text-sm text-gray-200">
-          <span className="block mb-2 text-gray-400 font-medium">{t('login.password')}</span>
-          <input type="password" className="w-full bg-[#0f1720] border border-[#2a3a4f] focus:border-[#5eb3f6] outline-none px-4 py-2.5 rounded text-gray-100 placeholder-gray-500" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="●●●●●●●●" required />
-        </label>
-        {/* MFA input moved to dedicated page */}
-        <button disabled={loading || retryAfterSeconds > 0} className="w-full px-3 py-2 rounded bg-[var(--accent)]/90 text-white disabled:opacity-60 shadow-md hover:bg-[var(--accent)]">
-          {loading ? t('login.signingIn') : retryAfterSeconds > 0 ? `${t('login.tryAgainIn')} ${formatRetryTime(retryAfterSeconds)}` : t('login.signIn')}
-        </button>
-        <div className="flex items-center justify-between text-xs text-gray-500">
-          {/* <span>Tip: default admin is admin / admin123</span> */}
-          {/* <Link to="/register" className="underline">Register</Link> */}
-        </div>
+
+          <button
+            type="submit"
+            disabled={loading || locked}
+            className={authButton}
+          >
+            {loading && <Loader2 size={16} className="animate-spin" />}
+            {loading
+              ? t('login.signingIn')
+              : locked
+                ? `${t('login.tryAgainIn')} ${formatRetryTime(retryAfterSeconds)}`
+                : t('login.signIn')}
+          </button>
       </form>
-      </div>
+    </AuthLayout>
+  )
+}
+
+/** "Forgot password?" as a popover anchored to the link.
+ *
+ *  There is no self-service reset — no mail server to send a link
+ *  through — so the honest answer is who can help. It floats rather than
+ *  pushing the form down, opens on click only (a hover card that appears
+ *  as the pointer crosses the form is a distraction), and closes on
+ *  "Got it", Escape or a click outside. */
+function ForgotPassword() {
+  const { t } = useTranslation()
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-controls="forgot-password-help"
+        className={`text-xs ${authLink}`}
+      >
+        {t('login.forgot')}
+      </button>
+      {open && (
+        <div
+          id="forgot-password-help"
+          role="dialog"
+          aria-label={t('login.forgotTitle')}
+          className="absolute right-0 top-full z-20 mt-2 w-72 rounded-xl border border-[#2a3a4f] bg-[#111a27] p-4 shadow-2xl"
+        >
+          {/* The arrow: a rotated square sharing the card's border. */}
+          <span
+            aria-hidden
+            className="absolute -top-1.5 right-6 h-3 w-3 rotate-45 border-l border-t border-[#2a3a4f] bg-[#111a27]"
+          />
+          <div className="flex gap-3">
+            <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-[#5eb3f6]/15 text-[#5eb3f6]">
+              <KeyRound size={16} />
+            </span>
+            <div className="space-y-1">
+              <div className="text-sm font-semibold text-gray-100">{t('login.forgotTitle')}</div>
+              <p className="text-xs leading-relaxed text-gray-400">{t('login.forgotHelp')}</p>
+            </div>
+          </div>
+          <div className="mt-3 flex justify-end">
+            <button
+              type="button"
+              onClick={() => setOpen(false)}
+              autoFocus
+              className="rounded-md px-2.5 py-1 text-xs font-medium text-[#5eb3f6] hover:bg-white/5"
+            >
+              {t('login.forgotOk')}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
