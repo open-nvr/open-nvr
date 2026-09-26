@@ -226,6 +226,10 @@
     "mqtt_duplicate": {
       "title": "OpenNVR entities may appear twice",
       "description": "{name} also publishes Home Assistant MQTT discovery (an MQTT integration in OpenNVR with Home Assistant discovery on). If Home Assistant's MQTT integration uses the same broker, every OpenNVR entity appears twice. Use one of the two: this integration (live video, media browser, actions) or MQTT discovery (no install), not both."
+    },
+    "relay_duplicate": {
+      "title": "OpenNVR alerts may appear twice",
+      "description": "{name} has the deprecated home-assistant-relay app enabled. It publishes its own alert entities, so every alert shows once from this integration and once from the relay. Disable or uninstall the relay in {name}'s App Catalog."
     }
   },
   "services": {

@@ -26,6 +26,18 @@ from models import Integration
 logger = logging.getLogger(__name__)
 
 
+def _bridge_offer(integration_id: int, suffix: str, body: dict) -> bool:
+    """Hand a message to the live MQTT bridge for this integration, if
+    any. Best-effort: import or queue failures mean "no bridge"."""
+    try:
+        import json as _json
+
+        from services.ha_mqtt_discovery import manager
+        return manager.offer(integration_id, suffix, _json.dumps(body, default=str))
+    except Exception:  # noqa: BLE001 — aiomqtt missing, or no bridge
+        return False
+
+
 def _webhook_target_refusal(url: str) -> str | None:
     """An operator-facing reason to refuse this webhook target, or None.
 
@@ -256,11 +268,16 @@ class IntegrationService:
                     )
                 elif integration.type == "mqtt":
                     from services.mqtt_settings import publish_once
-
-                    result = await publish_once(
-                        integration.config, "alerts",
-                        {"subject": subject, "message": message, **payload},
-                    )
+                    body = {"subject": subject, "message": message, **payload}
+                    # Ride the discovery bridge's standing session when it
+                    # has one: a busy site rings thousands of alerts a day,
+                    # and a connect/publish/disconnect per alert was a
+                    # connection storm on the broker. One-off only when no
+                    # bridge is up (discovery off, or the broker is down).
+                    if _bridge_offer(integration.id, "alerts", body):
+                        result = {"success": True, "message": "published via bridge"}
+                    else:
+                        result = await publish_once(integration.config, "alerts", body)
                 else:
                     return
                 if not result.get("success"):
