@@ -45,9 +45,10 @@ If you read the doc that should answer your question and it doesn't, that's a si
 
 ### Real-time channels
 
-Coming with the v0.1 launch wave: a community chat (Discord or Matrix —
-to be announced when set up). Until then, Discussions is the right
-synchronous-feeling channel; maintainers watch it actively.
+**Discord** — [join the OpenNVR server](DISCORD_INVITE_URL). Questions,
+"is this expected?", showing what you built. Maintainers are there; for
+anything that needs tracking, they will ask you to open an Issue or a
+Discussion so it does not get lost in chat.
 
 ---
 

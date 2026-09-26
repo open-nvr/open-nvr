@@ -2,26 +2,45 @@
 
 <img src=".github/opennvr-logo.svg" alt="OpenNVR — open-source self-hosted AI NVR for IP cameras" width="300" />
 
-# OpenNVR — open-source, self-hosted NVR with AI you control
+# OpenNVR
 
-### Cameras are everywhere. Almost none of them are yours.
+### Build AI applications for your cameras.
 
-**A self-hosted, offline-first network video recorder for ONVIF/RTSP IP cameras, with a pluggable AI platform. Runs on Docker — a laptop, a Raspberry Pi, or an air-gapped server.**
+**OpenNVR is open-source video infrastructure for people who want AI on their cameras without handing the video to anyone.** Connect ONVIF/RTSP cameras, record and stream, plug in *any* AI model, install ready-made apps or write your own — on hardware you own, offline if you like. It is also a complete NVR, so it works on day one and the AI is added on top.
 
-OpenNVR™ is the open, sovereign platform for recording your cameras and running AI on them — entirely on hardware you own, with **AI you choose and control**. No vendor cloud holds your footage or watches it for you. Air-gapped by default, an audit trail you can hand to a regulator. From a homelab doorbell that never phones home, to a laptop you spin it up on in a minute, to the air-gapped government site that legally cannot use anything else.
+*Cameras are everywhere. Almost none of them are yours.* — **Your cameras. Your infrastructure. Your AI.** No mandatory cloud, no vendor lock-in.
 
 [![CI](https://github.com/open-nvr/open-nvr/actions/workflows/ci.yml/badge.svg)](https://github.com/open-nvr/open-nvr/actions/workflows/ci.yml)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)](https://www.python.org)
 [![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.22804254-blue.svg)](https://doi.org/10.5281/zenodo.22804254)
+[![Discord](https://img.shields.io/badge/Discord-join_the_community-5865F2?logo=discord&logoColor=white)](DISCORD_INVITE_URL)
 
-[Get it running](#get-it-running) · [Add apps in one click](#add-capabilities-in-one-click) · [Talk to your cameras](#talk-to-your-cameras) · [How it works](#how-it-actually-works) · [Build on it](#build-on-it) · [Read the paper](https://doi.org/10.5281/zenodo.22804254)
+### [▶ 90-second demo](docs/DEMO.md) · [⚡ Quick start](#get-it-running) · [🧩 Build an AI adapter](https://github.com/open-nvr/ai-adapter#write-your-own-adapter) · [📱 Build an app](docs/FIRST_DETECTOR.md) · [🏠 Home Assistant](docs/HOME_ASSISTANT_USER_GUIDE.md) · [🔒 Security](docs/SECURITY_ARCHITECTURE.md) · [💬 Discord](DISCORD_INVITE_URL)
 
 <a href="https://opennvr.org/camera-agent">
   <img src=".github/demo-agent.gif" alt="Ask your cameras a question — the OpenNVR camera agent runs YOLOv8 on a live frame and answers locally, no cloud" width="760" />
 </a>
 
 </div>
+
+---
+
+## What you can build with it
+
+```
+IP camera ──▶ OpenNVR (record · stream · detect · remember) ──▶ AI adapter (YOLO · your model · a cloud model)
+                                                                          │
+                                                          event ──▶ app · webhook · Home Assistant · the agent
+```
+
+- **A doorbell that knows your family** and never phones home — face recognition on your box, names bound to visits, strangers alerted with a photo.
+- **A gate that opens for allowed plates only** — plate reads audited end to end, the barrier driven by an app you can read.
+- **"Did a blue car come by after nine?"** — answered by your own hardware, with the photos, from every visit it remembered.
+- **Your cameras in Home Assistant** with nothing to install — every camera, zone and app as a device; switches, counts, plates, arming.
+- **Cameras that can't be reached from the internet, and AI that can't leak.** The camera network is isolated from the analytics layer by architecture; camera credentials are encrypted at rest; video leaves the host only over RTSPS; apps reach the outside world only through an egress proxy on an allowlist you approve; and two default-deny gates keep every cloud route and non-local model off until you opt in. Every inference is audited with a correlation id from the alert to the model. **This is what most camera software gets wrong, and it is the part of OpenNVR nobody else ships** — [the security architecture](docs/SECURITY_ARCHITECTURE.md), control by control.
+
+Everything an app needs — cameras, streams, recording, detections, an event store with evidence, alerts, auth, audit — is the platform's job. Yours is the rule. See the [app catalog](#applications-ship-on-top-of-it) for what ships, and [build your own in 15 minutes](docs/FIRST_DETECTOR.md).
 
 ---
 
@@ -294,7 +313,11 @@ Fourteen of the sixteen shipped examples are listed above; [`inference-listener`
 
 ## Community
 
-Bugs go in [Issues](https://github.com/open-nvr/open-nvr/issues), design questions in [Discussions](https://github.com/open-nvr/open-nvr/discussions), security reports via [private GHSA advisory](https://github.com/open-nvr/open-nvr/security/advisories/new) — researchers who have reported issues are credited in [`SECURITY.md`](SECURITY.md#acknowledgements), which also names where a finding is most likely to be real. PR flow is in [`CONTRIBUTING.md`](CONTRIBUTING.md); the [roadmap](docs/ROADMAP.md) names where help is wanted next.
+**Chat with us on Discord** — [join the OpenNVR server](DISCORD_INVITE_URL): questions, show what you built, help others get their cameras in. Bugs go in [Issues](https://github.com/open-nvr/open-nvr/issues), design questions in [Discussions](https://github.com/open-nvr/open-nvr/discussions), security reports via [private GHSA advisory](https://github.com/open-nvr/open-nvr/security/advisories/new) — see [SECURITY.md](SECURITY.md).
+
+**Three ways to help the project grow, in order of value:** build an [app](docs/FIRST_DETECTOR.md) or an [adapter](https://github.com/open-nvr/ai-adapter#write-your-own-adapter) and tell us about it · [follow the open-nvr organisation](https://github.com/open-nvr) so new apps and adapters reach you · ⭐ star this repository. Issues labelled [good first issue](https://github.com/open-nvr/open-nvr/labels/good%20first%20issue) are picked to be finishable in an evening.
+
+**Built something on OpenNVR?** An app, an adapter, an integration, a write-up — open a PR adding it here, or post it on Discord; we list community projects in this section.
 
 Commercial deployments — deployment assistance, NDA adapter authoring, compliance evidence packs, SLA-backed support — [contact@opennvr.org](mailto:contact@opennvr.org).
 
