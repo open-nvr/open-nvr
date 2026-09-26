@@ -35,20 +35,20 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import {
-  Camera as CameraIcon, CarFront, Clock, ImageOff, Info, Route,
+  Camera as CameraIcon, CarFront, Clock, ImageOff, Info, LayoutGrid, List, Play, Route,
   Search as SearchIcon, Sparkles, Tag, Type, UserRound, X,
 } from 'lucide-react'
-import { Link } from 'react-router-dom'
 import { api } from '../lib/api'
 import SearchAnswer, { type SearchAnswerData } from '../components/SearchAnswer'
 import { AuthedImage } from '../components/AuthedImage'
 import { JourneyPanel } from '../components/JourneyPanel'
 import { useTranslation, useDateFormat, type DateFormatters } from '../i18n'
-import {
-  Badge, Button, Card, CardContent, EmptyState, PageHeader, Skeleton,
-} from '../components/ui'
+import { Badge, Button, EmptyState, Skeleton } from '../components/ui'
+import { DataTable, type Column } from '../components/ui/DataTable'
+import { Pagination } from '../components/ui/Pagination'
+import { SegmentedControl } from '../components/ui/SegmentedControl'
 
 /** One thing the question asked of a skill, and whether this box has it
  *  (services/search_intent.py). `state` is `available`, `never-produced`
@@ -147,7 +147,7 @@ type Filters = {
  *  window together — a half-open range is not a thing anyone meant. */
 const RELAXABLE: Record<RelaxHint['drop'], { key: keyof Filters; label: string }> = {
   text: { key: 'text', label: 'the words' },
-  when: { key: 'from', label: 'the time window' },
+  when: { key: 'from', label: 'the time' },
   camera_ids: { key: 'cameraIds', label: 'the camera' },
   labels: { key: 'labels', label: 'the object' },
   plate: { key: 'plate', label: 'the plate' },
@@ -162,7 +162,14 @@ type Person = { value: string; attr: string; visits: number; last_seen: string |
  *  because it is the one that is not a search word. */
 const PERSON_KIND = 'face_id'
 
-const PAGE = 24
+const PAGE_SIZES = [24, 48, 96]
+
+/** Thumbnails or a table — a preference, so it is remembered per browser. */
+type View = 'grid' | 'table'
+const VIEW_KEY = 'opennvr.search.view'
+function storedView(): View {
+  try { return localStorage.getItem(VIEW_KEY) === 'table' ? 'table' : 'grid' } catch { return 'grid' }
+}
 
 const EXAMPLES = [
   'red truck at the dock yesterday',
@@ -202,6 +209,9 @@ export function Search() {
   const [sentence, setSentence] = useState(params.get('q') ?? '')
   const [filters, setFilters] = useState<Filters | null>(null)
   const [page, setPage] = useState(0)
+  const [pageSize, setPageSize] = useState(PAGE_SIZES[0])
+  const [view, setViewState] = useState<View>(storedView)
+  const navigate = useNavigate()
   /** The visit whose route is open, if any. */
   const [following, setFollowing] = useState<number | null>(null)
   const boxRef = useRef<HTMLInputElement>(null)
@@ -221,8 +231,8 @@ export function Search() {
 
   const request = useMemo(() => {
     const qs = new URLSearchParams()
-    qs.set('limit', String(PAGE))
-    qs.set('skip', String(page * PAGE))
+    qs.set('limit', String(pageSize))
+    qs.set('skip', String(page * pageSize))
     if (editing) {
       qs.set('parse', 'false')
       for (const l of filters!.labels) qs.append('label', l)
@@ -236,7 +246,7 @@ export function Search() {
       qs.set('q', sentence)
     }
     return qs
-  }, [editing, filters, sentence, page])
+  }, [editing, filters, sentence, page, pageSize])
 
   // Names for the camera chip: "Loading dock" says what "1 camera"
   // cannot, and the id alone tells an operator nothing.
@@ -405,7 +415,7 @@ export function Search() {
   const relaxed = data?.relaxed
   const semantic = data?.semantic
   const total = data?.total ?? 0
-  const pages = Math.ceil(total / PAGE)
+  const pages = Math.ceil(total / pageSize)
   const nothingAsked = !sentence && !editing
 
   // A NAME TYPED INTO THE BOX IS A QUESTION THAT CANNOT BE ANSWERED.
@@ -460,14 +470,14 @@ export function Search() {
     .map((k) => k.replace(/_/g, ' '))
   const recognisesPeople = (kinds ?? []).includes(PERSON_KIND)
   const pickerHint = recognisesPeople && people.length > 0
-    ? ' A name is not one of those words — use the Person picker above to search for someone.'
+    ? ' To find someone, choose them from the Person list.'
     : ''
   const emptyReason =
     kinds === undefined
-      ? 'Nothing matched. Words only match what a skill wrote about a frame, so a deployment with nothing describing visits can search classes, cameras, times and plates, but not colours.'
+      ? 'Nothing matched. Try an object (car, person), a camera, a time, or a number plate.'
       : sayable.length === 0
-        ? `Nothing matched — and nothing on this system describes visits in words, so words can only match a plate. Install a captioner or a colour/type skill from the App Catalog and searches like “red van” start working; classes, cameras, times and plates work now.${pickerHint}`
-        : `Nothing matched. This system can describe a visit by ${sayable.join(', ')} — anything outside that has no words to match against, so try a class, a camera, a time or a plate.${pickerHint}`
+        ? `Nothing matched. You can search by object, camera, time and number plate. To search by colour or description (like “red van”), add a description app from the App Catalog.${pickerHint}`
+        : `Nothing matched. You can search by object, camera, time, number plate and ${sayable.join(', ')}.${pickerHint}`
 
   const chips = interp
     ? [
@@ -475,7 +485,7 @@ export function Search() {
           key: 'labels' as const,
           icon: <Tag size={12} />,
           label: interp.labels.join(' or '),
-          title: 'Object class. Several classes mean "any of these" — one visit is one object.',
+          title: 'Type of object. Several mean “any of these”.',
         },
         interp.camera_ids.length > 0 && {
           key: 'cameraIds' as const,
@@ -494,13 +504,13 @@ export function Search() {
           label: interp.matched?.when || rangeLabel(interp.from, interp.to, fmt),
           title: interp.matched?.when
             ? `"${interp.matched.when}" = ${rangeLabel(interp.from, interp.to, fmt)}`
-            : 'The time window searched.',
+            : 'The time range searched.',
         },
         interp.text && {
           key: 'text' as const,
           icon: <Type size={12} />,
           label: `"${interp.text}"`,
-          title: 'Matched against what a captioner wrote about the frame.',
+          title: 'Words to look for in the scene description.',
         },
         ...(interp.attrs ?? []).map((pair) => {
           const person = pair.startsWith(`${PERSON_KIND}:`)
@@ -510,351 +520,467 @@ export function Search() {
             icon: person ? <UserRound size={12} /> : <Sparkles size={12} />,
             label: pair.split(':').slice(1).join(':'),
             title: person
-              ? 'Recognised as this person. A name is not a searchable word, so this chip is the only way to ask for them.'
-              : `${pair.split(':')[0]} — what a skill claimed about the object.`,
+              ? 'Only visits recognised as this person.'
+              : `${pair.split(':')[0].replace(/_/g, ' ')}: ${pair.split(':').slice(1).join(':')}`,
           }
         }),
         interp.plate && {
           key: 'plate' as const,
           icon: <CarFront size={12} />,
           label: interp.plate,
-          title: 'Plate reads containing this.',
+          title: 'Number plates containing this.',
         },
       ].filter(Boolean) as {
         key: keyof Filters; value?: string; icon: React.ReactNode; label: string; title: string
       }[]
     : []
 
+  // Notices sit between the box and the results, one line each. They used
+  // to be stacked paragraphs that pushed the results off the screen; the
+  // honesty they carry is kept, the length is not.
+  const notices: { key: string; tone: 'info' | 'warn'; icon: React.ReactNode; text: React.ReactNode; action?: React.ReactNode }[] = []
+  if (typedName && typedName.value !== pickedPerson) {
+    notices.push({
+      key: 'typed-name',
+      tone: 'info',
+      icon: <UserRound size={13} />,
+      text: <>Looking for <b>{typedName.value}</b>? Names can’t be typed into search — pick the person instead.</>,
+      action: (
+        <Button variant="outline" size="sm" onClick={() => setPerson(typedName.value)}>
+          Show {typedName.value} ({typedName.visits})
+        </Button>
+      ),
+    })
+  }
+  for (const n of (interp?.needs ?? []).filter((x) => x.state !== 'available')) {
+    notices.push({
+      key: `need:${n.kind}:${n.word}`,
+      tone: 'warn',
+      icon: <Sparkles size={13} />,
+      text: (
+        <>
+          {t(
+            n.state === 'never-produced' && (n.apps?.length ?? 0) > 0
+              ? 'search.needs.never-produced-app'
+              : `search.needs.${n.state}`,
+            {
+              word: n.word,
+              kind: t(`search.kind.${n.kind}`),
+              skill: t(`search.skill.${n.skill}`),
+              apps: (n.apps ?? []).join(', '),
+            },
+          )}
+          {n.fallback === 'captions' && <> {t('search.needs.captionsFallback')}</>}
+        </>
+      ),
+    })
+  }
+  if (interp?.wants_plate) {
+    notices.push({ key: 'plate', tone: 'info', icon: <CarFront size={13} />, text: t('search.needs.wantsPlate') })
+  }
+  if (interp && interp.ignored.length > 0) {
+    notices.push({
+      key: 'ignored',
+      tone: 'info',
+      icon: <Info size={13} />,
+      text: <>Skipped: {interp.ignored.join(', ')}</>,
+    })
+  }
+  // THESE ARE NOT THE SEARCH THAT WAS TYPED. The server drops a leftover
+  // word rather than showing a blank page for a sentence it mostly
+  // understood; the operator is told, and gets the strict search back in
+  // one click — an explicit `text` is never dropped.
+  if (relaxed && results.length > 0) {
+    notices.push({
+      key: 'relaxed',
+      tone: 'info',
+      icon: <Info size={13} />,
+      text: <>No results for “<b>{relaxed.dropped}</b>”, so showing results for the rest of your search.</>,
+      action: (
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            const base = editing ? { ...filters! } : asFilters()
+            base.text = relaxed.dropped
+            setFilters(base)
+            setPage(0)
+          }}
+        >
+          Search “{relaxed.dropped}” only
+        </Button>
+      ),
+    })
+  }
+  // Only when vectors exist here and the query could not use them — a
+  // permanent banner about a feature nobody switched on would be noise.
+  if (semantic && semantic.used === false && semantic.reason === 'embedder-unreachable') {
+    notices.push({
+      key: 'semantic',
+      tone: 'warn',
+      icon: <Info size={13} />,
+      text: 'Smart matching is offline, so results match your exact words only.',
+    })
+  }
+
+  const setView = (v: View) => {
+    setViewState(v)
+    try { localStorage.setItem(VIEW_KEY, v) } catch { /* private window */ }
+  }
+
+  const openRecording = (h: Hit) => {
+    navigate(recordingHref(h))
+  }
+
+  const toolbar = (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-3 py-2 text-xs">
+      <span className="font-medium text-[var(--text)]">
+        {searchQuery.isPending ? 'Searching…' : `${total} ${total === 1 ? 'result' : 'results'}`}
+      </span>
+      {results.length > 0 && <SearchAnswer answer={data?.answer} />}
+      <span className="ml-auto flex items-center gap-2">
+        {searchQuery.isFetching && !searchQuery.isPending && (
+          <span className="text-[var(--text-dim)]">Updating…</span>
+        )}
+        <SegmentedControl<View>
+          label="View"
+          value={view}
+          onChange={setView}
+          options={[
+            { value: 'grid', label: <LayoutGrid size={14} />, title: 'Thumbnails' },
+            { value: 'table', label: <List size={14} />, title: 'Table' },
+          ]}
+        />
+      </span>
+    </div>
+  )
+
+  const footer = pages > 0 ? (
+    <Pagination
+      page={page + 1}
+      pageSize={pageSize}
+      total={total}
+      rowCount={results.length}
+      pageSizeOptions={PAGE_SIZES}
+      onPageChange={(p) => setPage(p - 1)}
+      onPageSizeChange={(n) => { setPageSize(n); setPage(0) }}
+      isFetching={searchQuery.isFetching}
+      label="results"
+    />
+  ) : null
+
+  const emptyBody = searchQuery.isError ? (
+    <EmptyState
+      icon={<SearchIcon size={24} />}
+      title={t('search.failed')}
+      description="Search isn’t responding right now. Check that the OpenNVR server is running, then try again."
+      action={<Button variant="outline" onClick={() => searchQuery.refetch()}>Try again</Button>}
+    />
+  ) : (
+    <div className="space-y-3">
+      <EmptyState
+        icon={<SearchIcon size={24} />}
+        title={nothingAsked ? t('search.startTitle') : t('search.noneTitle')}
+        description={
+          nothingAsked
+            ? 'Describe what you want to find in everyday words — an object, a camera, a time, or a number plate.'
+            : relax.length > 0
+              ? 'One of your filters is ruling everything out. Try removing it:'
+              : chips.length > 1
+                ? 'Nothing matched all of those together. Try removing a filter above — the time and the words usually narrow it most.'
+                : emptyReason
+        }
+      />
+      {/* The server already counted what dropping each chip would find,
+          so the operator does not have to guess which one to remove. */}
+      {relax.length > 0 && (
+        <div className="flex flex-wrap items-center justify-center gap-2">
+          {relax.map((hint) => {
+            const spec = RELAXABLE[hint.drop]
+            if (!spec) return null
+            return (
+              <Button key={hint.drop} variant="outline" onClick={() => drop(spec.key)}>
+                Without {hint.value ? `“${hint.value}”` : spec.label} — {hint.would_match}{' '}
+                {hint.would_match === 1 ? 'result' : 'results'}
+              </Button>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+
+  const shell = 'flex min-h-0 flex-1 flex-col rounded border border-[var(--border)] bg-[var(--panel)]'
+
   return (
-    <section className="space-y-4">
-      <PageHeader title={t('search.title')} description={t('search.description')} />
+    // Bounded to the viewport, like Live View: the page itself never
+    // scrolls; the results do, under a toolbar and pager that stay put.
+    // 5rem = the 3rem top bar + the shell's p-4.
+    <section className="flex h-[calc(100vh-5rem)] min-h-[480px] flex-col gap-3">
+      <div className="flex shrink-0 flex-wrap items-baseline gap-x-3">
+        <h2 className="text-lg font-semibold text-[var(--text)]">{t('search.title')}</h2>
+        <p className="text-sm text-[var(--text-dim)]">{t('search.description')}</p>
+      </div>
 
       {/* ── The box ── */}
-      <Card>
-        <CardContent className="py-3 space-y-3">
-          <form
-            className="flex items-center gap-2"
-            onSubmit={(e) => { e.preventDefault(); run(draft.trim()) }}
-          >
-            <SearchIcon size={18} className="text-[var(--text-dim)] shrink-0" />
-            <input
-              ref={boxRef}
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              placeholder={t('search.placeholder')}
-              aria-label={t('search.title')}
-              className="flex-1 bg-transparent outline-none text-sm py-1.5 placeholder:text-[var(--text-dim)]"
-            />
-            {draft && (
-              <Button size="sm" variant="ghost" onClick={() => { setDraft(''); run('') }}
-                      title="Clear">
-                <X size={14} />
+      <div className="shrink-0 space-y-2 rounded border border-[var(--border)] bg-[var(--panel-2)] px-3 py-2.5">
+        <form
+          className="flex items-center gap-2"
+          onSubmit={(e) => { e.preventDefault(); run(draft.trim()) }}
+        >
+          <SearchIcon size={18} className="text-[var(--text-dim)] shrink-0" />
+          <input
+            ref={boxRef}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder={t('search.placeholder')}
+            aria-label={t('search.title')}
+            className="flex-1 bg-transparent outline-none text-sm py-1.5 placeholder:text-[var(--text-dim)]"
+          />
+          {draft && (
+            <Button size="sm" variant="ghost" onClick={() => { setDraft(''); run('') }} title="Clear" aria-label="Clear">
+              <X size={14} />
+            </Button>
+          )}
+          <Button size="sm" variant="primary" type="submit">Search</Button>
+        </form>
+
+        {/* What it understood — each chip removable, which is the way out
+            of a wrong guess — and the person picker on the same line. */}
+        {(chips.length > 0 || people.length > 0 || nothingAsked) && (
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            {chips.length > 0 && (
+              <span className="text-[var(--text-dim)]">
+                {editing ? 'Filters:' : 'Searching for:'}
+              </span>
+            )}
+            {chips.map((c) => (
+              <span
+                key={`${c.key}:${c.value ?? ''}`}
+                title={c.title}
+                className="inline-flex items-center gap-1 rounded-full border border-[var(--border)] bg-[var(--bg-2)] pl-2 pr-1 py-0.5"
+              >
+                {c.icon}
+                <span>{c.label}</span>
+                <button
+                  type="button"
+                  aria-label={`Remove ${c.label}`}
+                  className="ml-0.5 rounded-full p-0.5 text-[var(--text-dim)] hover:text-[var(--danger)]"
+                  onClick={() => drop(c.key, c.value)}
+                >
+                  <X size={11} />
+                </button>
+              </span>
+            ))}
+            {editing && (
+              <Button size="sm" variant="ghost" onClick={() => { setFilters(null); setPage(0) }}>
+                Undo changes
               </Button>
             )}
-            <Button size="sm" variant="primary" type="submit">Search</Button>
-          </form>
 
-          {/* What it understood — and the way out of a wrong guess. */}
-          {chips.length > 0 && (
-            <div className="flex flex-wrap items-center gap-2 text-xs">
-              <span className="text-[var(--text-dim)]">
-                {editing ? 'Filters:' : 'Understood as:'}
-              </span>
-              {chips.map((c) => (
-                <span
-                  key={`${c.key}:${c.value ?? ''}`}
-                  title={c.title}
-                  className="inline-flex items-center gap-1 rounded border border-[var(--border)] bg-[var(--bg-2)] pl-2 pr-1 py-0.5"
-                >
-                  {c.icon}
-                  <span>{c.label}</span>
+            {nothingAsked && chips.length === 0 && (
+              <>
+                <span className="text-[var(--text-dim)]">Try:</span>
+                {EXAMPLES.map((e) => (
                   <button
+                    key={e}
                     type="button"
-                    aria-label={`Remove ${c.label}`}
-                    className="ml-0.5 rounded p-0.5 text-[var(--text-dim)] hover:text-[var(--danger)]"
-                    onClick={() => drop(c.key, c.value)}
+                    className="rounded-full border border-[var(--border)] px-2 py-0.5 text-[var(--text-dim)] hover:border-[var(--accent)] hover:text-[var(--text)]"
+                    onClick={() => run(e)}
                   >
-                    <X size={11} />
+                    {e}
                   </button>
-                </span>
-              ))}
-              {editing && (
-                <Button size="sm" variant="ghost" onClick={() => { setFilters(null); setPage(0) }}>
-                  Reset to my words
-                </Button>
-              )}
-            </div>
-          )}
-
-          {/* THE FILTER WITH NO WAY IN FROM THE KEYBOARD.
-              Rendered only when this box has recognised somebody: an
-              empty dropdown implies there might be a name in it, and a
-              control that can only be set to "Anyone" is worse than no
-              control at all. */}
-          {people.length > 0 && (
-            <div className="flex flex-wrap items-center gap-2 text-xs">
-              <label
-                htmlFor="search-person"
-                className="inline-flex items-center gap-1 text-[var(--text-dim)]"
-              >
-                <UserRound size={12} /> Person:
-              </label>
-              <select
-                id="search-person"
-                value={pickedPerson}
-                onChange={(e) => setPerson(e.target.value)}
-                className="rounded border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 outline-none focus:border-[var(--accent)]"
-              >
-                <option value="">Anyone</option>
-                {people.map((p) => (
-                  <option key={p.value} value={p.value}>
-                    {p.value} ({p.visits})
-                  </option>
                 ))}
-              </select>
-              <span className="text-[var(--text-dim)]">
-                Names are kept out of the searchable words on purpose — pick one here instead of typing it.
-              </span>
-            </div>
-          )}
+              </>
+            )}
 
-          {/* A name WAS typed, and it can never match. Say it, and
-              offer the one thing that does. */}
-          {typedName && typedName.value !== pickedPerson && (
-            <div className="flex flex-wrap items-center gap-2 rounded border border-[var(--border)] bg-[var(--bg-2)] px-3 py-2 text-xs">
-              <span className="text-[var(--text-dim)]">
-                <b className="text-[var(--text)]">{typedName.value}</b> is a person, not a
-                word — searching for the name matches nothing however it is phrased.{' '}
-                {typedName.visits} {typedName.visits === 1 ? 'visit' : 'visits'} here{' '}
-                {typedName.visits === 1 ? 'has' : 'have'} been recognised as them.
-              </span>
-              <Button
-                variant="outline"
-                size="sm"
-                className="ml-auto"
-                onClick={() => setPerson(typedName.value)}
-              >
-                Search for {typedName.value}
-              </Button>
-            </div>
-          )}
-
-          {/* WHAT THE QUESTION NEEDS FROM THIS BOX. "Red shirt" needs a
-              skill that describes what people wear; "Varun" needs face
-              recognition and a visit bound to that name. An empty page
-              without this reads as "nothing was red" when the truth is
-              "nothing here has ever looked at a shirt" — opposite
-              answers, and only the server knows which. Only the needs
-              this box cannot meet are shown; a met need is just a match. */}
-          {interp && (interp.needs ?? []).some((n) => n.state !== 'available') && (
-            <div className="space-y-1 text-xs">
-              {(interp.needs ?? []).filter((n) => n.state !== 'available').map((n) => (
-                <div
-                  key={`${n.kind}:${n.word}`}
-                  className="flex flex-wrap items-center gap-1.5 text-[var(--warn,var(--text-dim))]"
+            {/* Only when this box has recognised somebody: a picker that
+                can only be set to "Anyone" is worse than none. Names are
+                deliberately not searchable words, so this is the way in. */}
+            {people.length > 0 && (
+              <label className="ml-auto inline-flex items-center gap-1.5 text-[var(--text-dim)]">
+                <UserRound size={12} /> Person
+                <select
+                  value={pickedPerson}
+                  onChange={(e) => setPerson(e.target.value)}
+                  className="rounded border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 text-[var(--text)] outline-none focus:border-[var(--accent)]"
                 >
-                  <Sparkles size={12} />
-                  <span>
-                    {t(
-                      n.state === 'never-produced' && (n.apps?.length ?? 0) > 0
-                        ? 'search.needs.never-produced-app'
-                        : `search.needs.${n.state}`,
-                      {
-                        word: n.word,
-                        kind: t(`search.kind.${n.kind}`),
-                        skill: t(`search.skill.${n.skill}`),
-                        apps: (n.apps ?? []).join(', '),
-                      },
-                    )}
-                  </span>
-                  {n.fallback === 'captions' && (
-                    <span className="text-[var(--text-dim)]">{t('search.needs.captionsFallback')}</span>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-          {interp?.wants_plate && (
-            <div className="flex items-center gap-1.5 text-xs text-[var(--text-dim)]">
-              <CarFront size={12} />
-              {t('search.needs.wantsPlate')}
-            </div>
-          )}
-          {interp && interp.ignored.length > 0 && (
-            <div className="flex items-center gap-1.5 text-xs text-[var(--text-dim)]">
-              <Info size={12} />
-              Ignored: {interp.ignored.join(', ')}
-              {/* The reason only holds for what the PARSER set aside. Since
-                  the relax path started moving dropped words here too, the
-                  line was explaining "was, varun, here" as bare numbers —
-                  a sentence the operator can see is false, attached to the
-                  one field whose job is honesty about what was dropped. */}
-              {interp.ignored.every((w) => /^\d+$/.test(w))
-                && ' — bare numbers match too much to be useful.'}
-            </div>
-          )}
-
-          {nothingAsked && (
-            <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--text-dim)]">
-              Try:
-              {EXAMPLES.map((e) => (
-                <button
-                  key={e}
-                  type="button"
-                  className="rounded border border-[var(--border)] px-2 py-0.5 hover:border-[var(--accent)] hover:text-[var(--text)]"
-                  onClick={() => run(e)}
-                >
-                  {e}
-                </button>
-              ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* ── Results ── */}
-      {searchQuery.isError ? (
-        <EmptyState
-          icon={<SearchIcon size={24} />}
-          title={t('search.failed')}
-          description="The search service did not answer. The event store is part of core, so this usually means core itself is unreachable rather than anything to do with a missing app."
-        />
-      ) : searchQuery.isPending ? (
-        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
-          {Array.from({ length: 8 }).map((_, i) => <Skeleton key={i} className="h-44" />)}
-        </div>
-      ) : results.length === 0 ? (
-        <div className="space-y-3">
-          <EmptyState
-            icon={<SearchIcon size={24} />}
-            title={nothingAsked ? t('search.startTitle') : t('search.noneTitle')}
-            description={
-              nothingAsked
-                ? 'Ask for what you are looking for in your own words. Everything Tier-0 sees is already indexed — no app to install, and nothing is re-scanned when you search.'
-                : relax.length > 0
-                  ? 'One of the chips above is doing all the narrowing.'
-                  : chips.length > 1
-                    ? 'Nothing matched all of those at once. Remove a chip above — the time window and the words are the two that usually narrow it too far.'
-                    : emptyReason
-            }
-          />
-          {/* The server already counted what dropping each chip would
-              find, so the operator does not have to guess which one to
-              remove — or remove the right one and not know it. */}
-          {relax.length > 0 && (
-            <div className="flex flex-wrap items-center justify-center gap-2">
-              {relax.map((hint) => {
-                const spec = RELAXABLE[hint.drop]
-                if (!spec) return null
-                return (
-                  <Button
-                    key={hint.drop}
-                    variant="outline"
-                    onClick={() => drop(spec.key)}
-                  >
-                    Without {spec.label}
-                    {hint.value ? ` (${hint.value})` : ''}: {hint.would_match}{' '}
-                    {hint.would_match === 1 ? 'result' : 'results'}
-                  </Button>
-                )
-              })}
-            </div>
-          )}
-        </div>
-      ) : (
-        <>
-          <div className="flex items-center gap-2 text-xs text-[var(--text-dim)] px-0.5">
-            <span>
-              {total} {total === 1 ? 'result' : 'results'}
-              {pages > 1 && ` · page ${page + 1} of ${pages}`}
-            </span>
-            {searchQuery.isFetching && <span>updating…</span>}
+                  <option value="">Anyone</option>
+                  {people.map((p) => (
+                    <option key={p.value} value={p.value}>
+                      {p.value} ({p.visits})
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
           </div>
+        )}
+      </div>
 
-          {/* THESE ARE NOT THE SEARCH THAT WAS TYPED.
-              The server drops a leftover word rather than showing a
-              blank page for a sentence it mostly understood — "what is
-              NUMBER of it" should not cost you 421 cars. But results
-              nobody asked for, handed over silently, are the same
-              confident-wrong-answer failure wearing better clothes: the
-              operator would later wonder why a filter did nothing. So
-              it is said out loud, and it is one click to get the strict
-              search back — an explicit `text` is never dropped, which
-              is exactly what pinning it does. */}
-          {relaxed && (
-            <div className="flex flex-wrap items-center gap-2 rounded border border-[var(--border)] bg-[var(--bg-2)] px-3 py-2 text-xs">
-              <span className="text-[var(--text-dim)]">
-                Nothing was described as <b className="text-[var(--text)]">{relaxed.dropped}</b>,
-                so {relaxed.dropped.trim().split(/\s+/).length === 1 ? 'that word was' : 'those words were'}{' '}
-                set aside — showing the {relaxed.without}{' '}
-                {relaxed.without === 1 ? 'result' : 'results'} the rest of your search matched.
-              </span>
-              <Button
-                variant="outline"
-                size="sm"
-                className="ml-auto"
-                onClick={() => {
-                  const base = editing ? { ...filters! } : asFilters()
-                  base.text = relaxed.dropped
-                  setFilters(base)
-                  setPage(0)
-                }}
-              >
-                Search for “{relaxed.dropped}” anyway
-              </Button>
+      {notices.length > 0 && (
+        <div className="shrink-0 max-h-28 space-y-1 overflow-y-auto thin-scroll">
+          {notices.map((n) => (
+            <div
+              key={n.key}
+              className={`flex flex-wrap items-center gap-2 rounded border px-3 py-1.5 text-xs ${
+                n.tone === 'warn'
+                  ? 'border-[var(--badge-warning-bg)] bg-[var(--badge-warning-bg)]/40 text-[var(--badge-warning-text)]'
+                  : 'border-[var(--border)] bg-[var(--bg-2)] text-[var(--text-dim)]'
+              }`}
+            >
+              <span className="shrink-0">{n.icon}</span>
+              <span className="min-w-0 flex-1">{n.text}</span>
+              {n.action}
             </div>
-          )}
-
-          {/* Vectors exist here and the query could not be turned into
-              one, so this ranking is words-only and the operator is
-              owed that rather than a quietly worse result. Absent on a
-              deployment that never embedded anything — a permanent
-              "semantic: off" banner would be noise about a feature
-              nobody switched on. */}
-          {semantic && semantic.used === false && semantic.reason === 'embedder-unreachable' && (
-            <div className="rounded border border-[var(--warning,#b7791f)] px-3 py-2 text-xs text-[var(--warning,#b7791f)]">
-              {semantic.note ?? 'Ranked by words only — the embedding adapter could not be reached.'}
-            </div>
-          )}
-
-          <SearchAnswer answer={data?.answer} />
-
-          <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
-            {results.map((h, i) => (
-              <ResultCard
-                key={h.id}
-                hit={h}
-                rank={page * PAGE + i + 1}
-                onRefine={addAttr}
-                onFollow={() => setFollowing(h.id)}
-              />
-            ))}
-          </div>
-
-          {pages > 1 && (
-            <div className="flex items-center justify-center gap-2 pt-1">
-              <Button size="sm" variant="outline" disabled={page === 0}
-                      onClick={() => setPage((p) => Math.max(0, p - 1))}>
-                Newer
-              </Button>
-              <Button size="sm" variant="outline" disabled={page + 1 >= pages}
-                      onClick={() => setPage((p) => p + 1)}>
-                Older
-              </Button>
-            </div>
-          )}
-        </>
+          ))}
+        </div>
       )}
 
-      {/* A route is read against the results it came from — which other
-          visit was the better candidate, what else was on that camera —
-          so it opens beside the page rather than replacing it. */}
+      {/* ── Results ── */}
+      {view === 'table' && !searchQuery.isError && (searchQuery.isPending || results.length > 0) ? (
+        <DataTable<Hit>
+          fillParent
+          dense
+          fixed
+          minWidth="min-w-[760px]"
+          caption="Search results"
+          columns={tableColumns(fmt, addAttr, setFollowing, page * pageSize)}
+          rows={results}
+          rowKey={(h) => h.id}
+          isPending={searchQuery.isPending}
+          isFetching={searchQuery.isFetching}
+          skeletonRows={10}
+          onRowClick={(h) => {
+            reportOpened(results.indexOf(h) + 1 + page * pageSize)
+            openRecording(h)
+          }}
+          toolbar={toolbar}
+          footer={footer}
+        />
+      ) : (
+        <div className={shell}>
+          <div className="shrink-0 border-b border-[var(--border)]">{toolbar}</div>
+          <div className="min-h-0 flex-1 overflow-y-auto thin-scroll p-3">
+            {searchQuery.isPending ? (
+              <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-3">
+                {Array.from({ length: 8 }).map((_, i) => <Skeleton key={i} className="h-48" />)}
+              </div>
+            ) : searchQuery.isError || results.length === 0 ? (
+              emptyBody
+            ) : (
+              <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-3">
+                {results.map((h, i) => (
+                  <ResultCard
+                    key={h.id}
+                    hit={h}
+                    rank={page * pageSize + i + 1}
+                    onRefine={addAttr}
+                    onFollow={() => setFollowing(h.id)}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+          {footer && results.length > 0 && (
+            <div className="shrink-0 border-t border-[var(--border)]">{footer}</div>
+          )}
+        </div>
+      )}
+
+      {/* A route is read against the results it came from, so it opens
+          beside the page rather than replacing it. */}
       <JourneyPanel eventId={following} onClose={() => setFollowing(null)} />
     </section>
   )
 }
 
 /* --------------------------- Pieces ----------------------------- */
+
+/** Recordings opens on this camera, this day, this instant. */
+function recordingHref(hit: Hit): string {
+  const at = hit.anchor?.at ?? hit.started_at
+  return at
+    ? `/playback/sync?camera=${hit.camera_id}&at=${encodeURIComponent(at)}`
+    : '/playback/sync'
+}
+
+/** Which position in the list was worth opening — the only relevance
+ *  judgement available without somebody labelling footage. The POSITION
+ *  and nothing else. Fire-and-forget: a metric must never get between an
+ *  operator and the video. */
+function reportOpened(rank: number) {
+  api.post(`/api/v1/search/opened?rank=${rank}`).catch(() => {})
+}
+
+/** A claim, said the way a person would read it. */
+function claimTitle(c: Claim): string {
+  const sure = c.confidence != null ? ` (${Math.round(c.confidence * 100)}% sure)` : ''
+  return `${c.kind.replace(/_/g, ' ')}: ${c.value}${sure} — click to find more like this`
+}
+
+function Thumb({ hit, className }: { hit: Hit; className: string }) {
+  return hit.evidence_url ? (
+    // Through the api client, not a bare <img src>: the evidence endpoint
+    // is camera-scoped and needs the JWT header, which an <img> cannot send.
+    <AuthedImage
+      queryKey={['search-evidence', hit.id]}
+      fetchBlob={(signal) =>
+        api.get(`/api/v1/events/${hit.id}/evidence`, { responseType: 'blob', signal })
+      }
+      alt={`${hit.label ?? 'object'} on ${hit.camera_name ?? hit.camera_id}`}
+      className={className}
+    />
+  ) : (
+    <span className="flex h-full w-full flex-col items-center justify-center gap-1 text-[11px] text-[var(--text-dim)]">
+      <ImageOff size={16} />
+      No image
+    </span>
+  )
+}
+
+function ClaimChips({ claims, onRefine, max }: { claims: Claim[]; onRefine: (c: Claim) => void; max: number }) {
+  const shown = claims.slice(0, max)
+  const rest = claims.length - shown.length
+  return (
+    <>
+      {shown.map((c) => (
+        <button
+          key={`${c.kind}:${c.value}`}
+          type="button"
+          onClick={() => onRefine(c)}
+          title={claimTitle(c)}
+          className="rounded-full border border-[var(--border)] bg-[var(--bg-2)] px-2 py-0.5 text-[10px] text-[var(--text-dim)] hover:text-[var(--text)] hover:border-[var(--accent)]"
+        >
+          {c.value}
+        </button>
+      ))}
+      {rest > 0 && (
+        <span className="text-[10px] text-[var(--text-dim)]" title={claims.slice(max).map((c) => c.value).join(', ')}>
+          +{rest}
+        </span>
+      )}
+    </>
+  )
+}
+
+function FollowButton({ onFollow, compact }: { onFollow: () => void; compact?: boolean }) {
+  const { t } = useTranslation()
+  return (
+    // Following an object is a different question from watching this
+    // moment, so it is its own control, outside the link to the video.
+    <button
+      type="button"
+      onClick={(e) => { e.stopPropagation(); onFollow() }}
+      title={t('search.follow')}
+      aria-label={t('search.follow')}
+      className="inline-flex items-center gap-1 rounded border border-[var(--border)] px-1.5 py-0.5 text-[11px] text-[var(--text-dim)] hover:text-[var(--text)] hover:border-[var(--accent)]"
+    >
+      <Route size={12} />
+      {!compact && t('search.follow')}
+    </button>
+  )
+}
 
 function ResultCard(
   { hit, rank, onRefine, onFollow }: {
@@ -864,104 +990,129 @@ function ResultCard(
     onFollow: () => void
   },
 ) {
-  const { t } = useTranslation()
   const fmt = useDateFormat()
   const at = hit.anchor?.at ?? hit.started_at
-  // Recordings opens on this camera, this day, this instant.
-  const href = at
-    ? `/playback/sync?camera=${hit.camera_id}&at=${encodeURIComponent(at)}`
-    : '/playback/sync'
-  // Which position in the list was worth opening — the only relevance
-  // judgement available without somebody labelling footage. The POSITION
-  // and nothing else: not the query, not the result, not who searched.
-  // Fire-and-forget, and a failure is ignored, because a metric must
-  // never get between an operator and the video.
-  const opened = () => {
-    api.post(`/api/v1/search/opened?rank=${rank}`).catch(() => {})
-  }
   return (
-    <div className="rounded border border-[var(--border)] bg-[var(--panel)] overflow-hidden">
-    <Link
-      onClick={opened}
-      to={href}
-      className="group block hover:opacity-95 focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
-      title={at ? `Open the recording at ${fmt.dateTime(at)}` : 'Open recordings'}
-    >
-      <div className="relative aspect-video bg-[var(--bg-2)] flex items-center justify-center">
-        {hit.evidence_url ? (
-          // Through the api client, not a bare <img src>. The evidence
-          // endpoint is camera-scoped and needs the JWT header, which
-          // an <img> cannot send — so a plain src 401s and every result
-          // renders as a broken-image icon.
-          <AuthedImage
-            queryKey={['search-evidence', hit.id]}
-            fetchBlob={(signal) =>
-              api.get(`/api/v1/events/${hit.id}/evidence`, {
-                responseType: 'blob',
-                signal,
-              })
-            }
-            alt={`${hit.label ?? 'object'} on ${hit.camera_name ?? hit.camera_id}`}
-            className="h-full w-full object-cover"
-          />
-        ) : (
-          <span className="text-[var(--text-dim)] flex flex-col items-center gap-1 text-[11px]">
-            <ImageOff size={18} />
-            no frame kept
+    <div className="flex flex-col overflow-hidden rounded border border-[var(--border)] bg-[var(--panel-2)] transition-colors hover:border-[var(--accent)]">
+      <Link
+        onClick={() => reportOpened(rank)}
+        to={recordingHref(hit)}
+        className="group block focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+        title={at ? `Play the recording from ${fmt.dateTime(at)}` : 'Open recordings'}
+      >
+        <div className="relative aspect-video bg-[var(--bg-2)]">
+          <Thumb hit={hit} className="h-full w-full object-cover" />
+          <span className="absolute left-1.5 top-1.5">
+            <Badge variant="neutral" className="capitalize">{hit.label ?? hit.event_type}</Badge>
           </span>
-        )}
-        <span className="absolute left-1.5 top-1.5">
-          <Badge variant="neutral">{hit.label ?? hit.event_type}</Badge>
-        </span>
-        {hit.plate_text && (
-          <span className="absolute right-1.5 top-1.5">
-            <Badge variant="info">{hit.plate_text}</Badge>
+          {hit.plate_text && (
+            <span className="absolute right-1.5 top-1.5">
+              <Badge variant="info" className="font-mono">{hit.plate_text}</Badge>
+            </span>
+          )}
+          <span className="absolute inset-0 flex items-center justify-center bg-black/30 opacity-0 transition-opacity group-hover:opacity-100">
+            <span className="rounded-full bg-black/60 p-2 text-white"><Play size={18} /></span>
           </span>
-        )}
-        <span className="absolute inset-x-0 bottom-0 bg-black/55 text-white text-[11px] px-2 py-1 opacity-0 group-hover:opacity-100 transition-opacity">
-          Open the recording here
-        </span>
-      </div>
-      <div className="p-2 space-y-0.5">
-        <div className="flex items-center gap-2 text-xs">
-          <span className="font-medium truncate">{hit.camera_name ?? `cam${hit.camera_id}`}</span>
-          <span className="ml-auto tabular-nums text-[var(--text-dim)]">{when(at, fmt)}</span>
+        </div>
+        <div className="flex items-center gap-2 px-2.5 pt-2 text-xs">
+          <span className="truncate font-medium">{hit.camera_name ?? `Camera ${hit.camera_id}`}</span>
+          <span className="ml-auto shrink-0 tabular-nums text-[var(--text-dim)]">{when(at, fmt)}</span>
         </div>
         {hit.caption && (
-          <div className="text-[11px] text-[var(--text-dim)] line-clamp-2">{hit.caption}</div>
+          <div className="px-2.5 pt-0.5 text-[11px] text-[var(--text-dim)] line-clamp-1" title={hit.caption}>
+            {hit.caption}
+          </div>
         )}
+      </Link>
+      {/* Each claim is itself a search: one click finds every other red van. */}
+      <div className="mt-auto flex flex-wrap items-center gap-1 px-2.5 pb-2 pt-1.5">
+        <ClaimChips claims={hit.claims} onRefine={onRefine} max={3} />
+        <span className="ml-auto"><FollowButton onFollow={onFollow} compact /></span>
       </div>
-    </Link>
-    {/* What the skills said — outside the link, because each claim is
-        itself a way to search: one click finds every other red van. The
-        skill and its confidence ride the tooltip, so a result can always
-        be asked who said this. */}
-    <div className="flex flex-wrap items-center gap-1 px-2 pb-2">
-      {/* Outside the Link as well, and first, because following an
-          object is a different question from watching this moment: the
-          card's own click opens the recording here. */}
-      <button
-        type="button"
-        onClick={onFollow}
-        className="inline-flex items-center gap-1 rounded border border-[var(--border)] bg-[var(--bg-2)] px-1.5 py-0.5 text-[10px] text-[var(--text-dim)] hover:text-[var(--text)] hover:border-[var(--accent)]"
-      >
-        <Route size={11} />
-        {t('search.follow')}
-      </button>
-      {hit.claims.map((c) => (
-          <button
-            key={`${c.kind}:${c.value}`}
-            type="button"
-            onClick={() => onRefine(c)}
-            title={`${c.kind} = ${c.value}${c.confidence != null ? ` (${Math.round(c.confidence * 100)}%)` : ''}`
-              + `${c.task ? ` · ${c.task}` : ''}${c.adapter ? ` · ${c.adapter}` : ''}`
-              + ' — click to find others'}
-            className="rounded border border-[var(--border)] bg-[var(--bg-2)] px-1.5 py-0.5 text-[10px] text-[var(--text-dim)] hover:text-[var(--text)] hover:border-[var(--accent)]"
-          >
-            {c.value}
-          </button>
-      ))}
-    </div>
     </div>
   )
+}
+
+function tableColumns(
+  fmt: DateFormatters,
+  onRefine: (c: Claim) => void,
+  onFollow: (id: number) => void,
+  offset: number,
+): Column<Hit>[] {
+  return [
+    {
+      key: 'thumb',
+      header: 'Snapshot',
+      width: 'w-28',
+      cell: (h) => (
+        <div className="h-12 w-20 overflow-hidden rounded bg-[var(--bg-2)]">
+          <Thumb hit={h} className="h-full w-full object-cover" />
+        </div>
+      ),
+    },
+    {
+      key: 'what',
+      header: 'Object',
+      width: 'w-28',
+      cell: (h) => <Badge variant="neutral" className="capitalize">{h.label ?? h.event_type}</Badge>,
+    },
+    {
+      key: 'camera',
+      header: 'Camera',
+      width: 'w-40',
+      cellClassName: 'truncate',
+      cell: (h) => h.camera_name ?? `Camera ${h.camera_id}`,
+    },
+    {
+      key: 'time',
+      header: 'Time',
+      width: 'w-36',
+      cellClassName: 'tabular-nums text-[var(--text-dim)]',
+      cell: (h) => when(h.anchor?.at ?? h.started_at, fmt),
+    },
+    {
+      key: 'plate',
+      header: 'Plate',
+      width: 'w-32',
+      hideBelow: 'md',
+      cellClassName: 'font-mono',
+      cell: (h) => h.plate_text ?? <span className="text-[var(--text-dim)]">—</span>,
+    },
+    {
+      key: 'details',
+      header: 'Details',
+      hideBelow: 'lg',
+      isAction: true,
+      cell: (h) => (
+        <div className="flex min-w-0 flex-wrap items-center gap-1">
+          <ClaimChips claims={h.claims} onRefine={onRefine} max={4} />
+          {h.caption && (
+            <span className="min-w-0 truncate text-xs text-[var(--text-dim)]" title={h.caption}>{h.caption}</span>
+          )}
+          {h.claims.length === 0 && !h.caption && <span className="text-[var(--text-dim)]">—</span>}
+        </div>
+      ),
+    },
+    {
+      key: 'actions',
+      header: '',
+      srHeader: 'Actions',
+      width: 'w-40',
+      align: 'right',
+      isAction: true,
+      cell: (h, i) => (
+        <div className="flex items-center justify-end gap-1">
+          <Link
+            to={recordingHref(h)}
+            onClick={() => reportOpened(offset + i + 1)}
+            className="inline-flex items-center gap-1 rounded border border-[var(--border)] px-1.5 py-0.5 text-[11px] text-[var(--text-dim)] hover:text-[var(--text)] hover:border-[var(--accent)]"
+            title="Play the recording from this moment"
+          >
+            <Play size={12} /> Play
+          </Link>
+          <FollowButton onFollow={() => onFollow(h.id)} compact />
+        </div>
+      ),
+    },
+  ]
 }

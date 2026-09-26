@@ -378,6 +378,8 @@ export const translations: TranslationCatalog = {
   'search.answer.scopeAll': 'Calculé sur l’ensemble des {{total}} correspondances',
   'search.answer.at': 'toutes à {{time}}',
   'search.answer.between': 'entre {{from}} et {{to}}',
+  'search.answer.onCameras': 'sur {{count}} caméras',
+  'search.answer.details': 'Détails des résultats',
   'search.answer.cameras': 'Vues sur',
   'search.answer.claims': 'Les compétences ont indiqué',
   'search.answer.plates': 'Plaques lues',
