@@ -1,5 +1,9 @@
 # Home Assistant: setup
 
+> New here? Start with the [user guide](HOME_ASSISTANT_USER_GUIDE.md): what
+> you get, the two ways to connect, automations and troubleshooting. This
+> page is the network side.
+
 Home Assistant talks to OpenNVR over the same HTTPS address your browser uses
 (nginx on port 443). This page lists what to open, and why, when Home
 Assistant runs on **another machine** on your LAN. When it runs on the same
