@@ -43,6 +43,7 @@ from sqlalchemy.sql import func
 
 from core.config import settings
 from core.database import Base
+from core.sealed_json import SealedJSON
 
 
 class Role(Base):
@@ -155,9 +156,10 @@ class Integration(Base):
     name = Column(String(100), nullable=False)
     type = Column(SAEnum(IntegrationType), nullable=False)
     enabled = Column(Boolean, default=True)
-    config = Column(
-        JSON, nullable=False
-    )  # Stores type-specific settings and event subscriptions
+    # Type-specific settings and event subscriptions. Secret values
+    # (broker/SMTP passwords, webhook secrets) are encrypted at rest and
+    # masked on the API — core/sealed_json.py.
+    config = Column(SealedJSON, nullable=False)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

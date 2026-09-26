@@ -143,6 +143,16 @@ boot.
 with the credentials you set, then changes their password on first
 login.
 
+### Connect Home Assistant
+
+**Settings → API Tokens → New token** (the *Home Assistant* preset), then
+**Settings → Integrations → Add → MQTT** with *Home Assistant discovery*
+on and that token as *Act as API token*. Home Assistant's own MQTT
+integration then lists OpenNVR, every camera, zone and app as devices —
+nothing to install on the Home Assistant side. Step by step, automation
+examples and troubleshooting:
+[docs/HOME_ASSISTANT_USER_GUIDE.md](docs/HOME_ASSISTANT_USER_GUIDE.md).
+
 ### View logs
 
 ```bash

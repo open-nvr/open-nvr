@@ -23,6 +23,7 @@ from core.auth import get_current_superuser
 from core.database import get_db
 from models import Integration
 from schemas import IntegrationCreate, IntegrationRead, IntegrationUpdate
+from core.sealed_json import merge_masked, redact
 from services.integration_service import IntegrationService
 
 router = APIRouter(
@@ -36,6 +37,14 @@ logger = logging.getLogger(__name__)
 
 def _is_mqtt(value) -> bool:
     return str(getattr(value, "value", value)) == "mqtt"
+
+
+def _public(row: Integration) -> IntegrationRead:
+    """The row as the API shows it: secrets masked. The stored value
+    never leaves the server; the edit form echoes the mask back and the
+    update keeps what is stored (merge_masked)."""
+    return IntegrationRead.model_validate(row).model_copy(
+        update={"config": redact(row.config)})
 
 
 def _check_mqtt(db: Session, config: dict | None) -> None:
@@ -75,7 +84,7 @@ async def get_integrations(
     skip: int = 0, limit: int = 100, db: Session = Depends(get_db)
 ):
     """List all configured integrations."""
-    return db.query(Integration).offset(skip).limit(limit).all()
+    return [_public(r) for r in db.query(Integration).offset(skip).limit(limit).all()]
 
 
 @router.post("", response_model=IntegrationRead)
@@ -96,7 +105,7 @@ async def create_integration(
     db.refresh(db_integration)
     if _is_mqtt(db_integration.type):
         _reload_mqtt()
-    return db_integration
+    return _public(db_integration)
 
 
 @router.get("/{integration_id}", response_model=IntegrationRead)
@@ -107,7 +116,7 @@ async def get_integration(integration_id: int, db: Session = Depends(get_db)):
     )
     if not db_integration:
         raise HTTPException(status_code=404, detail="Integration not found")
-    return db_integration
+    return _public(db_integration)
 
 
 @router.put("/{integration_id}", response_model=IntegrationRead)
@@ -125,20 +134,18 @@ async def update_integration(
         db_integration.name = integration.name
     if integration.enabled is not None:
         db_integration.enabled = integration.enabled
-    if integration.config is not None and _is_mqtt(db_integration.type):
-        _check_mqtt(db, integration.config)
     if integration.config is not None:
-        # Deep merge or replace? For simplicity, we assume full config replacement or careful partial update by client.
-        # But we'll just replace the whole dict usually.
-        # If we really want to merge, we need to implement it.
-        # Here we substitute.
-        db_integration.config = integration.config
-
+        # Full replacement of the config — except a secret sent back as the
+        # mask the API showed, which keeps the stored value.
+        new_config = merge_masked(db_integration.config, integration.config)
+        if _is_mqtt(db_integration.type):
+            _check_mqtt(db, new_config)
+        db_integration.config = new_config
     db.commit()
     db.refresh(db_integration)
     if _is_mqtt(db_integration.type):
         _reload_mqtt()
-    return db_integration
+    return _public(db_integration)
 
 
 @router.delete("/{integration_id}")

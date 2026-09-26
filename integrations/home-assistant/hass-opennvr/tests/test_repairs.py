@@ -210,3 +210,17 @@ async def test_mqtt_discovery_alongside_warns(hass: HomeAssistant, mock_client: 
     MockConfigEntry(domain="mqtt", data={"broker": "b"}).add_to_hass(hass)
     await entry.runtime_data.coordinator.async_refresh()
     assert "mqtt_duplicate" in _issues(hass, entry)
+
+
+async def test_the_deprecated_relay_alongside_warns(hass: HomeAssistant, mock_client: MagicMock,
+                                                    mock_stream: type[FakeStream]) -> None:
+    """The old home-assistant-relay app publishes its own alert entities;
+    with it enabled every alert shows twice. Raised from the server's
+    word, cleared when it is gone."""
+    mock_client.get_system_info.return_value = _now_info(relay_installed=True)
+    entry = create_mock_config_entry()
+    await setup_mock_config_entry(hass, entry)
+    assert "relay_duplicate" in _issues(hass, entry)
+    mock_client.get_system_info.return_value = _now_info(relay_installed=False)
+    await entry.runtime_data.coordinator.async_refresh()
+    assert "relay_duplicate" not in _issues(hass, entry)

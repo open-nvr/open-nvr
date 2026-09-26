@@ -67,6 +67,9 @@ RECHECK_S = 60.0
 COMMAND_LIMIT = 20
 COMMAND_WINDOW_S = 10.0
 COMMAND_QUEUE = 32
+#: Alerts waiting for the standing session; a burst beyond this falls
+#: back to one-off connections rather than queueing forever.
+OUTBOX_QUEUE = 256
 #: How long ``clear_published`` listens for retained topics.
 CLEAR_COLLECT_S = 2.0
 
@@ -286,8 +289,30 @@ class MqttBridge:
         self._stop = asyncio.Event()
         self._commands: asyncio.Queue[tuple[str, str]] = asyncio.Queue(COMMAND_QUEUE)
         self._command_times: deque[float] = deque()
+        #: Messages other parts of core want on this broker (alerts):
+        #: published over the standing session instead of a fresh
+        #: connection per message.
+        self._outbox: asyncio.Queue[tuple[str, str]] = asyncio.Queue(OUTBOX_QUEUE)
         self.config = dict(config)
         self.state = "starting"
+
+    def offer(self, suffix: str, payload: str) -> bool:
+        """Queue ``payload`` for ``<topic_prefix>/<suffix>`` on the live
+        session. False when there is no session to ride (the caller
+        falls back to a one-off connection) or the queue is full."""
+        if self.state != "connected":
+            return False
+        try:
+            self._outbox.put_nowait((suffix, payload))
+        except asyncio.QueueFull:
+            logger.warning("MQTT bridge %r: outbox full, %s dropped", self.name, suffix)
+            return False
+        return True
+
+    async def _drain(self, mq) -> None:
+        while True:
+            suffix, payload = await self._outbox.get()
+            await mq.publish(f"{self.settings.topic_prefix}/{suffix}", payload, qos=1)
 
     # -- principal and catalogue (sync, run in a thread) --
 
@@ -390,6 +415,7 @@ class MqttBridge:
             await self._publish_all(mq, topics, snap, server_version())
             tasks = [asyncio.create_task(self._messages(mq, topics)),
                      asyncio.create_task(self._command_worker()),
+                     asyncio.create_task(self._drain(mq)),
                      asyncio.create_task(self._pump(mq, topics, sub)),
                      asyncio.create_task(self._recheck(mq, topics)),
                      asyncio.create_task(self._stop.wait())]
@@ -663,6 +689,12 @@ class _Manager:
 
     def states(self) -> dict[int, str]:
         return {i: b.state for i, (b, _) in self._bridges.items()}
+
+    def offer(self, integration_id: int, suffix: str, payload: str) -> bool:
+        """Publish through the integration's live bridge if it has one
+        connected; False otherwise (the caller connects once itself)."""
+        entry = self._bridges.get(integration_id)
+        return bool(entry) and entry[0].offer(suffix, payload)
 
     async def reload(self) -> None:
         """Start, restart or stop bridges to match the MQTT integrations.
