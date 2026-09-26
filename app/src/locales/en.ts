@@ -64,7 +64,7 @@ export const translations: TranslationCatalog = {
   'header.openLiveView': 'Open Live View',
   'header.account': 'Account',
   'header.signedInAs': 'Signed in as',
-  'header.logout': 'Logout',
+  'header.logout': 'Sign out',
   'header.enterFullscreen': 'Enter Fullscreen',
   'header.exitFullscreen': 'Exit Fullscreen',
   'header.toggleTheme': 'Toggle Theme',

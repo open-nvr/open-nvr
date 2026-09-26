@@ -723,32 +723,46 @@ export function Search() {
       </div>
 
       {/* ── The box ── */}
-      <div className="shrink-0 space-y-2 rounded border border-[var(--border)] bg-[var(--panel-2)] px-3 py-2.5">
+      {/* No panel around it: the field is the thing, and a box inside a
+          box read as clutter. Icon and clear button sit inside the input,
+          the Search button beside it at the same height. */}
+      <div className="shrink-0 space-y-2">
         <form
           className="flex items-center gap-2"
           onSubmit={(e) => { e.preventDefault(); run(draft.trim()) }}
         >
-          <SearchIcon size={18} className="text-[var(--text-dim)] shrink-0" />
-          <input
-            ref={boxRef}
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder={t('search.placeholder')}
-            aria-label={t('search.title')}
-            className="flex-1 bg-transparent outline-none text-sm py-1.5 placeholder:text-[var(--text-dim)]"
-          />
-          {draft && (
-            <Button size="sm" variant="ghost" onClick={() => { setDraft(''); run('') }} title="Clear" aria-label="Clear">
-              <X size={14} />
-            </Button>
-          )}
-          <Button size="sm" variant="primary" type="submit">Search</Button>
+          <div className="relative min-w-0 flex-1">
+            <SearchIcon
+              size={17}
+              className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--text-dim)]"
+            />
+            <input
+              ref={boxRef}
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              placeholder={t('search.placeholder')}
+              aria-label={t('search.title')}
+              className="h-10 w-full rounded-lg border border-[var(--border)] bg-[var(--panel-2)] pl-10 pr-9 text-sm outline-none transition-colors placeholder:text-[var(--text-dim)] focus:border-[var(--accent)] focus:ring-2 focus:ring-[var(--accent)]/20"
+            />
+            {draft && (
+              <button
+                type="button"
+                onClick={() => { setDraft(''); run('') }}
+                title="Clear"
+                aria-label="Clear"
+                className="absolute right-2 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-full text-[var(--text-dim)] hover:bg-[var(--bg-2)] hover:text-[var(--text)]"
+              >
+                <X size={14} />
+              </button>
+            )}
+          </div>
+          <Button variant="primary" type="submit" className="h-10 px-5">Search</Button>
         </form>
 
         {/* What it understood — each chip removable, which is the way out
             of a wrong guess — and the person picker on the same line. */}
         {(chips.length > 0 || people.length > 0 || nothingAsked) && (
-          <div className="flex flex-wrap items-center gap-2 text-xs">
+          <div className="flex flex-wrap items-center gap-2 px-1 text-xs">
             {chips.length > 0 && (
               <span className="text-[var(--text-dim)]">
                 {editing ? 'Filters:' : 'Searching for:'}
@@ -780,16 +794,18 @@ export function Search() {
 
             {nothingAsked && chips.length === 0 && (
               <>
-                <span className="text-[var(--text-dim)]">Try:</span>
-                {EXAMPLES.map((e) => (
-                  <button
-                    key={e}
-                    type="button"
-                    className="rounded-full border border-[var(--border)] px-2 py-0.5 text-[var(--text-dim)] hover:border-[var(--accent)] hover:text-[var(--text)]"
-                    onClick={() => run(e)}
-                  >
-                    {e}
-                  </button>
+                <span className="text-[var(--text-dim)]">Try</span>
+                {EXAMPLES.map((e, i) => (
+                  <span key={e} className="inline-flex items-center gap-2">
+                    {i > 0 && <span aria-hidden className="text-[var(--border)]">·</span>}
+                    <button
+                      type="button"
+                      className="text-[var(--accent)] hover:underline"
+                      onClick={() => run(e)}
+                    >
+                      {e}
+                    </button>
+                  </span>
                 ))}
               </>
             )}

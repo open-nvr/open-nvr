@@ -367,11 +367,33 @@ export function AppShell() {
               <span className="hidden md:inline">{user?.username ?? t('header.account')}</span>
             </button>
             {menuOpen && (
-              <div className="absolute right-0 mt-1 bg-[var(--panel)] border border-[var(--border)] text-sm min-w-40 z-50">
-                <div className="px-3 py-2 text-[var(--text-dim)]">{t('header.signedInAs')} <span className="text-[var(--text)]">{user?.username}</span></div>
-                <button className="w-full text-left px-3 py-2 hover:bg-[var(--panel-2)] inline-flex items-center gap-2" onClick={logout}>
-                  <LogOut size={14} /> {t('header.logout')}
-                </button>
+              // normal-case/tracking-normal: the top bar is `uppercase`, and
+              // a menu that shouts "SIGNED IN AS ADMIN" reads as an error.
+              <div
+                role="menu"
+                className="absolute right-0 z-50 mt-2 w-60 overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--panel)] text-sm normal-case tracking-normal shadow-lg"
+              >
+                <div className="flex items-center gap-3 px-3 py-3">
+                  <span
+                    aria-hidden
+                    className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-[var(--accent)]/15 text-sm font-semibold uppercase text-[var(--accent)]"
+                  >
+                    {(user?.username ?? '?').charAt(0)}
+                  </span>
+                  <div className="min-w-0">
+                    <div className="text-xs text-[var(--text-dim)]">{t('header.signedInAs')}</div>
+                    <div className="truncate font-medium text-[var(--text)]" title={user?.username}>{user?.username}</div>
+                  </div>
+                </div>
+                <div className="border-t border-[var(--border)] p-1">
+                  <button
+                    role="menuitem"
+                    className="flex w-full items-center gap-2 rounded px-2.5 py-2 text-left text-[var(--text)] hover:bg-[var(--panel-2)]"
+                    onClick={logout}
+                  >
+                    <LogOut size={15} className="text-[var(--text-dim)]" /> {t('header.logout')}
+                  </button>
+                </div>
               </div>
             )}
           </div>
