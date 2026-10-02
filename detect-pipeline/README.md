@@ -113,10 +113,22 @@ with an env dial and a metric (never a silent cap):
   `DETECT_MIN_SPAWN_SCORE` (default `0.5`): it takes solid evidence to
   *create* a track, weaker evidence still *matches* one (Frigate-style
   hysteresis).
-* `DETECT_MAX_REGIONS` (default `8`) — hard per-frame budget of detector
-  crops. Motion regions win slots first; track re-verifies round-robin
-  the remainder across frames (skipped tracks coast, they don't age).
-  Capped frames count on `tier0_regions_capped_total`.
+* `DETECT_MAX_REGIONS` (built-in default `8`; `.env.example` ships `4`) —
+  hard per-frame budget of detector crops. Motion regions win slots first;
+  track re-verifies round-robin the remainder across frames (skipped
+  tracks coast, they don't age). Capped frames count on
+  `tier0_regions_capped_total`.
+
+  Size it to the host: each region is a full detector pass, and the frame
+  budget is `1/DETECT_FPS` seconds. Configure more than the host sustains
+  and the budget controller sheds regions at runtime ("detector regions
+  cut to N" warnings) — coverage then rotates across frames, and a fast
+  object can cross the frame while its patch isn't scanned. A pinned
+  count the hardware actually delivers gives every frame the same
+  complete coverage; `4` is the CPU-only sweet spot (laptops,
+  macOS/Windows Docker VMs). With `DETECT_HWACCEL` and/or
+  `DETECT_ONNX_BACKEND=ort` on a GPU/NPU provider, raise it to `8`+ for
+  deeper coverage of small and distant objects.
 * `DETECT_MAX_TRACKS` (default `50`) + `DETECT_TRACK_TTL` (default
   `300` s) — a hard ceiling on live tracks, and a wall-clock TTL so a
   track that is never positively re-detected always drains (frame-based
