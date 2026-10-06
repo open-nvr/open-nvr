@@ -114,19 +114,18 @@ Detection using too much CPU is almost always video decode, not the model. Store
 
 ## How it fits together
 
-```mermaid
-flowchart LR
-    CAM[Cameras<br/>ONVIF · RTSP] --> CORE[OpenNVR core<br/>record · stream · detect · remember]
-    CORE --> ADP[Adapters<br/>any model · what is it]
-    ADP --> APP[Apps<br/>your rule · does it matter]
-    APP --> YOU[You<br/>UI · agent · Home Assistant · webhooks]
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="data/images/svg/opennvr-concept-dark.svg">
+  <img src="data/images/svg/opennvr-concept-light.svg" alt="Your cameras feed Records (always on, never gated), then Watches (a cheap always-on detector), then Events (one bus everything listens to), then Apps and the assistant. Watches asks KAI-C, the socket, for a task. A model adapter plugs into KAI-C and is checked (weights fingerprint, declared permissions, local-only policy) before it is trusted. The animation unplugs YOLOv8 and plugs in your own model: the AI wire pauses while recording continues, the new adapter is verified, then serving resumes." width="100%">
+</picture>
 
-**Recording never depends on AI.** Footage is written in one-minute chunks whatever the models are doing. If every adapter on the box crashes, you still have the video.
+**Records never depends on AI.** Footage is written in one-minute chunks whatever the models are doing. In the animation the AI wire goes quiet while a model is swapped and recording carries on. If every adapter on the box crashes, you still have the video.
+
+**Watches asks for a task, never for a model.** The always-on detector asks KAI-C, the socket, for `object_detection`. Whatever adapter is plugged in answers, and it is checked before it is trusted: weights fingerprint, declared permissions, the local-only policy. Swap YOLOv8 for your own fine-tuned model and nothing else on the wire changes.
 
 **Adapters answer "what is it", apps decide "does it matter".** An adapter reads a plate or recognises a face and says nothing about whether you should care. Apps hold the policy: this zone, these hours, that watchlist. Keeping them apart is what lets you swap a model without rewriting a rule, and write a rule without knowing which model is behind it.
 
-**Everything worth remembering lands in one event store.** One row per visit, with its best frame and every claim the models made, carrying which model made it and how confident it was. The search page, the agent and any app you install next month all ask the same store, so they give the same answer.
+**Everything worth remembering lands on one bus and in one store.** Events is the bus everything listens to. One row per visit, with its best frame and every claim the models made, carrying which model made it and how confident it was. The search page, the agent and any app you install next month all ask the same store, so they give the same answer.
 
 The three-tier model, the wire contracts and the offline-first design are in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
