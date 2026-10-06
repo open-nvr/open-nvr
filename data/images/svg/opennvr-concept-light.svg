@@ -93,6 +93,13 @@ text{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',sa
 <text x="1090" y="182" class="ink" font-size="19" font-weight="700" text-anchor="middle">Apps &amp; assistant</text>
 <text x="1090" y="206" class="mut" font-size="13.5" text-anchor="middle">the use case you defined</text>
 
+<!-- ===== legend: the names on the wire, as components ===== -->
+<g class="m fnt" font-size="11">
+  <text x="36" y="300"><tspan class="ink" font-weight="600">Records</tspan>  MediaMTX writes one-minute chunks, whatever the models do</text>
+  <text x="36" y="322"><tspan class="ink" font-weight="600">Watches</tspan>  the Tier-0 detector on the substream, a few frames a second</text>
+  <text x="36" y="344"><tspan class="ink" font-weight="600">Events</tspan>   NATS bus; one row per visit in the store, with its evidence</text>
+</g>
+
 <!-- ===== KAI-C: the socket ===== -->
 <rect class="kaic" x="600" y="282" width="200" height="100" rx="12"/>
 <text x="622" y="320" class="m blu" font-size="15" font-weight="600" letter-spacing="0.5">KAI-C</text>
@@ -168,7 +175,8 @@ text{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',sa
   <g class="tl c3"><rect class="okc" x="1154.5" y="373.5" width="86" height="19" rx="9.5"/><text x="1164" y="386.5" class="okt">✓ local_only</text></g>
 </g>
 
-<text x="915" y="450" class="mut" font-size="14" text-anchor="middle">every model plugs in here — and is checked before it is trusted</text>
+<text x="925" y="440" class="mut" font-size="14" text-anchor="middle">every model plugs in here, and is checked before it is trusted:</text>
+<text x="925" y="460" class="mut" font-size="13" text-anchor="middle">the fingerprint of its weights · the permissions it declared · no way out of the box unless you open one</text>
 
 <!-- ===== headline ===== -->
 <text x="640" y="514" class="ink" font-size="26" font-weight="700" text-anchor="middle" letter-spacing="-0.3">Swap the model. Nothing else on the wire changes.</text>
