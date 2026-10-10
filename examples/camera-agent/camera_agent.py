@@ -127,6 +127,7 @@ from router import (  # noqa: F401 — re-exported
     _pick_camera,
     _is_small_talk,
     _should_force_grounding,
+    _count_thresholds_from_text,
 )
 
 logger = logging.getLogger("camera-agent")
@@ -1202,6 +1203,11 @@ class Monitor:
     active: bool = True
     created_at: float = 0.0
     line: list[float] | None = None   # crossing: [x1,y1,x2,y2] normalized
+    # count: alert when MORE than max_count / FEWER than min_count are seen
+    # at once ("more than 3 people gather" → max_count=3). None = a silent
+    # tally, as before.
+    max_count: int | None = None
+    min_count: int | None = None
     current: dict[str, int] = field(default_factory=dict)
     peak: dict[str, int] = field(default_factory=dict)
     # Per-camera LineCounter — LEGACY-loop crossing monitors only. Converged
@@ -1219,6 +1225,10 @@ class Monitor:
         }
         if self.line:
             d["line"] = self.line
+        if self.max_count is not None:
+            d["max_count"] = self.max_count
+        if self.min_count is not None:
+            d["min_count"] = self.min_count
         return d
 
 
@@ -1313,6 +1323,7 @@ class MonitorManager:
 
     def find_duplicate(self, *, kind: str, camera_ids: list[str],
                        target: str, line: list[float] | None = None,
+                       max_count: int | None = None, min_count: int | None = None,
                        ) -> "Monitor | None":
         """An ACTIVE watch with the same kind, target, camera set (and
         line, for crossings). Same rationale as AlarmManager: slow
@@ -1320,10 +1331,11 @@ class MonitorManager:
         just a list entry — for converged kinds it is a SECOND hosted
         rule instance doing double inference and double notifications."""
         want = (kind, target.strip().lower(), frozenset(camera_ids),
-                tuple(line) if line else None)
+                tuple(line) if line else None, max_count, min_count)
         for m in self._monitors.values():
             if m.active and (m.kind, m.target, frozenset(m.camera_ids),
-                             tuple(m.line) if m.line else None) == want:
+                             tuple(m.line) if m.line else None,
+                             m.max_count, m.min_count) == want:
                 return m
         return None
 
@@ -1338,7 +1350,8 @@ class MonitorManager:
 
     def create(self, *, kind: str, camera_ids: list[str], target: str,
                description: str = "", interval_s: float | None = None,
-               line: list[float] | None = None) -> Monitor:
+               line: list[float] | None = None, max_count: int | None = None,
+               min_count: int | None = None) -> Monitor:
         import time
 
         mon = Monitor(
@@ -1346,6 +1359,7 @@ class MonitorManager:
             target=target.strip().lower(), description=description.strip(),
             interval_s=float(interval_s or self._default_interval),
             created_at=time.time(), line=line,
+            max_count=max_count, min_count=min_count,
         )
         if kind in self._CONVERGED:
             # SDK front door (§07): instantiate the example app's rule
@@ -1357,6 +1371,12 @@ class MonitorManager:
             }
             if kind == "crossing":
                 params["line"] = list(line or [])
+            # A threshold turns the occupancy rule's over/under alerts on
+            # (MonitorHost._wants_alerts); without one it stays a tally.
+            if max_count is not None:
+                params["max_count"] = max_count
+            if min_count is not None:
+                params["min_count"] = min_count
 
             def _sink(cam: str, current: int, peak_candidate: int,
                       _mon: Monitor = mon) -> None:
@@ -1420,7 +1440,8 @@ class MonitorManager:
 
     def export(self) -> list[dict[str, Any]]:
         return [{"kind": m.kind, "camera_ids": m.camera_ids, "target": m.target,
-                 "interval_s": m.interval_s, "line": m.line}
+                 "interval_s": m.interval_s, "line": m.line,
+                 "max_count": m.max_count, "min_count": m.min_count}
                 for m in self._monitors.values() if m.active]
 
     def restore(self, specs: list[dict[str, Any]]) -> None:
@@ -1432,7 +1453,8 @@ class MonitorManager:
         for s in specs or []:
             key = (str(s.get("kind")), str(s.get("target")),
                    frozenset(s.get("camera_ids") or []),
-                   tuple(s.get("line") or ()))
+                   tuple(s.get("line") or ()),
+                   s.get("max_count"), s.get("min_count"))
             if key in seen:
                 skipped += 1
                 continue
@@ -1440,7 +1462,8 @@ class MonitorManager:
             try:
                 self.create(kind=s["kind"], camera_ids=s["camera_ids"],
                             target=s["target"], interval_s=s.get("interval_s"),
-                            line=s.get("line"))
+                            line=s.get("line"), max_count=s.get("max_count"),
+                            min_count=s.get("min_count"))
             except Exception:  # pragma: no cover
                 logger.exception("monitor restore failed for %r", s)
         if skipped:
@@ -1580,20 +1603,32 @@ def _create_monitor_tool(camera_enum_all: list[str]) -> dict[str, Any]:
             "description": (
                 "Set up a STANDING watch on one or more cameras (or 'all'). "
                 "kind='notify' alerts when the target appears; kind='count' "
-                "keeps a live snapshot count; kind='crossing' counts people/"
-                "objects crossing a line (needs a 'line'). Use for ongoing "
-                "requests like 'notify me when you see a person on cam1', "
-                "'count people on gate 2', 'count people entering at the door'. "
-                "NOT for one-off 'what do you see right now' questions."
+                "keeps a live snapshot count, and with max_count/min_count "
+                "alerts when there are more/fewer than that many at once; "
+                "kind='crossing' counts people/objects crossing a line (needs "
+                "a 'line'). Use for ongoing requests like 'notify me when you "
+                "see a person on cam1', 'count people on gate 2', 'tell me "
+                "when more than 3 people gather on cam1' (kind='count', "
+                "target='person', max_count=3), 'count people entering at the "
+                "door'. NOT for one-off 'what do you see right now' questions."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "kind": {"type": "string", "enum": ["notify", "count", "crossing"]},
                     "target": {"type": "string",
-                               "description": "What to watch for, e.g. 'person', 'car', 'dog'."},
+                               "description": "The KIND of object to watch for, as one "
+                                              "word: 'person', 'car', 'dog'. Never a "
+                                              "camera or a place — that goes in camera_id."},
                     "camera_id": {"type": "string", "enum": camera_enum_all,
                                   "description": "A camera id, or 'all'."},
+                    "max_count": {"type": "integer",
+                                  "description": "kind='count' only: alert when MORE than "
+                                                 "this many are seen at once ('more than 3 "
+                                                 "people' → 3)."},
+                    "min_count": {"type": "integer",
+                                  "description": "kind='count' only: alert when FEWER than "
+                                                 "this many are seen at once."},
                     "camera_ids": {"type": "array", "items": {"type": "string", "enum": camera_enum_all},
                                    "description": "Optional: several cameras at once."},
                     "line": {"type": "array", "items": {"type": "number"},
@@ -4373,6 +4408,35 @@ class CameraAgentRuntime:
         kind = str(args.get("kind") or "").strip().lower()
         if kind not in ("notify", "count", "crossing"):
             return "I can 'notify' you, keep a 'count', or count line 'crossing's — which would you like?"
+        thresholds: dict[str, int] = {}
+        for key in ("max_count", "min_count"):
+            raw = args.get(key)
+            if raw is None or raw == "":
+                continue
+            try:
+                value = int(float(raw))
+            except (TypeError, ValueError):
+                return f"How many should '{key}' be? I need a whole number."
+            if value < 0:
+                return f"'{key}' can't be negative — how many did you mean?"
+            thresholds[key] = value
+        if not thresholds and kind in ("count", "notify"):
+            # The model dropped the number the operator said ("more than 3
+            # people"): take it from the question, so the watch alerts as
+            # promised instead of tallying in silence.
+            thresholds = _count_thresholds_from_text(self.tools.current_question or "")
+        line_given = isinstance(args.get("line"), (list, tuple)) and len(args["line"]) == 4
+        if thresholds and kind == "crossing" and not line_given:
+            # "More than 3 people" with no line to cross is a count request
+            # that picked the wrong kind.
+            kind = "count"
+        if thresholds and kind == "notify":
+            # "Notify me when more than 3 people…": only a count watch can
+            # alert on a number, so a threshold makes it one.
+            kind = "count"
+        if thresholds and kind == "crossing":
+            return ("A line-crossing count doesn't take a threshold — did you "
+                    "mean to alert when too many are on camera at once?")
         raw_target = str(args.get("target") or "").strip()
         _extra = set(getattr(self.cfg, "detector_extra_labels", []) or [])
         _extra |= set(self.ring_defaults().keys())
@@ -4395,6 +4459,8 @@ class CameraAgentRuntime:
         dup = self.monitors.find_duplicate(
             kind=kind, camera_ids=cams, target=target,
             line=line if kind == "crossing" else None,
+            max_count=thresholds.get("max_count"),
+            min_count=thresholds.get("min_count"),
         )
         if dup is not None:
             return (f"Watch #{dup.id} already covers that — same kind, "
@@ -4405,6 +4471,8 @@ class CameraAgentRuntime:
                 kind=kind, camera_ids=cams, target=target,
                 description=str(args.get("description") or "").strip(),
                 line=line if kind == "crossing" else None,
+                max_count=thresholds.get("max_count"),
+                min_count=thresholds.get("min_count"),
             )
         except ValueError as exc:
             # The SDK rule rejected the params (e.g. a degenerate line
@@ -4434,6 +4502,14 @@ class CameraAgentRuntime:
         if kind == "crossing":
             return (f"Done — watch #{mon.id} is counting {target}s crossing the line "
                     f"on {where} (needs the tracking adapter for accurate counts).")
+        limits = []
+        if "max_count" in thresholds:
+            limits.append(f"more than {thresholds['max_count']}")
+        if "min_count" in thresholds:
+            limits.append(f"fewer than {thresholds['min_count']}")
+        if limits:
+            return (f"Done — watch #{mon.id} is counting {target}s on {where}; "
+                    f"I'll let you know when there are {' or '.join(limits)} at once.")
         return (f"Done — I'm now counting {target}s on {where} (watch #{mon.id}); "
                 f"you'll see a live tally in the panel.")
 

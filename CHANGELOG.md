@@ -111,6 +111,17 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **"Tell me when more than 3 people gather" works.** The camera agent's
+  `create_monitor` tool had no way to say "more than 3": the occupancy rule
+  behind `kind='count'` always had edge-triggered over/under thresholds,
+  but the tool never exposed them, so the request could not be expressed and
+  small models put the camera in `target` instead (5/50 runs passed across
+  ten models). The tool now takes `max_count` / `min_count`, says `target` is
+  an object label and never a camera, and gives this request as its
+  example; a `notify` call that carries a threshold becomes a count watch.
+  Thresholds are kept on the watch, so they show in `/monitors`, survive a
+  restart and count in duplicate detection.
+
 - **"Thanks" no longer makes the camera agent look at a camera.** When the
   model answered without calling a tool, the anti-fabrication guard forced a
   look if the model's reply mentioned the camera or the scene — so small

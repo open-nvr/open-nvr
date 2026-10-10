@@ -38,12 +38,13 @@
       alarms: {target: person, window: "after 18:00"}
 
 - id: monitor-crowd
+  note: "A notify call with the threshold is fine: the agent makes it a count."
   ask: "notify me when more than 3 people gather on {camera}"
   expect:
     tool: create_monitor
-    args: {kind: count, target: person}
+    args: {target: person, max_count: 3}
     state:
-      monitors: {kind: count, target: person}
+      monitors: {kind: count, target: person, max_count: 3}
 
 - id: overnight-summary
   note: "Must look it up, not make it up."
