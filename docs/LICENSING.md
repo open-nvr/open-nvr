@@ -39,8 +39,8 @@ commonly:
 | Self-hosting for your home, business, farm, or bank — on ANY hardware (Jetson, Pi, your own servers) | ✅ | — |
 | Modifying OpenNVR for internal use and complying with AGPL §13 for network users | ✅ | — |
 | Community App Store apps / AI adapters (Apache SDKs) | ✅ any license | — |
-| **Selling hardware with OpenNVR pre-installed** under your brand, with proprietary modifications or without source-disclosure duties | ❌ | ✅ per-unit OEM license |
-| **Embedding OpenNVR in a proprietary product** (combining/linking beyond the Apache SDK boundaries) | ❌ | ✅ annual ISV license |
+| **Selling hardware with OpenNVR pre-installed** under your brand, with proprietary modifications or without source-disclosure duties | ❌ | ✅ commercial licence, per camera |
+| **Embedding OpenNVR in a proprietary product** (combining/linking beyond the Apache SDK boundaries) | ❌ | ✅ commercial licence, per camera |
 | Offering OpenNVR **as a hosted service** without publishing your modifications | ❌ (AGPL §13) | ✅ |
 | **White-label** (removing OpenNVR branding) | trademark policy applies | ✅ white-label tier |
 
@@ -58,13 +58,17 @@ white-label tier is purchased.
 ## What the Commercial License includes
 
 - Rights to embed, modify, and redistribute without AGPL obligations
-- Per-unit (OEM/appliance) or annual (ISV/hosted) terms
+- Priced per camera, paid once (volume tiers from 250 cameras), with the
+  first year of maintenance included and a yearly subscription as the
+  alternative; white-label onboarding is a one-time fee per partner. The
+  current list prices, a worked example and a buyers' FAQ are at
+  [opennvr.org/pricing](https://opennvr.org/pricing/)
 - "Powered by OpenNVR" / "OpenNVR Certified" trademark grant
 - Warranty, indemnification, and a support SLA
 - Access to certified, signed builds and the priority security channel
 
-**Contact:** open a "Commercial license" issue on GitHub or email the
-maintainers (see repository profile).
+**Contact:** [contact@opennvr.org](mailto:contact@opennvr.org). A pilot of
+up to 32 cameras is free for 90 days under the commercial terms.
 
 ## Contributor License Agreement (CLA)
 
