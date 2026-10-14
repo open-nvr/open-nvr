@@ -32,7 +32,7 @@ token you chose** and are written to OpenNVR's audit log.
 | Needs | an MQTT broker both sides can reach, an OpenNVR API token | an OpenNVR API token |
 | Entities above | yes | yes |
 | Live video, snapshots, media browser, services, notifications with pictures, Assist | no | yes |
-| Status | shipped | built and tested; installable once `pyopennvr` is published on PyPI (see `integrations/home-assistant/RELEASING.md`) |
+| Status | shipped | shipped: [hass-opennvr](https://github.com/open-nvr/hass-opennvr) on HACS, [pyopennvr](https://pypi.org/project/pyopennvr/) on PyPI |
 
 Use **one** of the two. Running both shows every entity twice; the native
 integration raises a repair if it finds OpenNVR publishing MQTT discovery,
@@ -128,10 +128,12 @@ every alert as the webhook integrations receive it; publish to
 `opennvr/<site>/<key>/set` to command. `<site>` is the first 12 characters
 of the site id.
 
-## Setting up the native integration (when released)
+## Setting up the native integration
 
-1. Home Assistant → HACS → *Custom repositories* → add the `hass-opennvr`
-   repository → install **OpenNVR** → restart Home Assistant.
+1. Home Assistant → HACS → *Custom repositories* → add
+   `https://github.com/open-nvr/hass-opennvr` (category *Integration*) →
+   install **OpenNVR** → restart Home Assistant. Needs Home Assistant
+   2026.9 or later.
 2. *Settings → Devices & services → Add integration → OpenNVR.* Enter
    `https://<opennvr-host>` and the API token from step 2 above. Turn off
    certificate verification unless you installed a trusted certificate

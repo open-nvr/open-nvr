@@ -1,5 +1,11 @@
 # Splitting and releasing the Home Assistant integration
 
+> **Status (14 October 2026):** split and released. `open-nvr/pyopennvr`
+> and `open-nvr/hass-opennvr` exist with history; `pyopennvr` 0.1.0 is on
+> PyPI via trusted publishing and `hass-opennvr` 0.1.0 is a release HACS
+> offers. Development stays here; a later release repeats steps 2 and 6:
+> `git subtree split` from `main`, push, bump versions, publish releases.
+
 `pyopennvr/` and `hass-opennvr/` are each laid out as the root of the repository they become, so splitting them off needs no restructuring. Their `.github/workflows` do nothing inside this monorepo; they start running in the new repositories. Until the split, the monorepo's own CI job `home-assistant` runs the same tests.
 
 End users can't install the integration until `pyopennvr` is on PyPI, because Home Assistant installs an integration's requirements from PyPI.

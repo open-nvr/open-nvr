@@ -180,7 +180,7 @@ Thirteen of the sixteen shipped examples are listed above; [`inference-listener`
 
 Turn on MQTT discovery and OpenNVR appears in Home Assistant's own MQTT integration, with nothing to install there: one device for the server, one per camera, one per zone, and one per app that declares entities. You get motion, detection and recording switches, last object and last plate, object counts, PTZ buttons, the site mode as an alarm panel, and an event entity that fires on every detection and alert, ready for automations.
 
-Everything runs as an OpenNVR API token you choose. Home Assistant sees the cameras that token may see and can do only what it may do, and every command lands in the audit log. Setup is four steps: [the Home Assistant guide](docs/HOME_ASSISTANT_USER_GUIDE.md). A native integration that adds live video, the media browser and phone notifications with the picture is built and tested; it becomes installable once its `pyopennvr` client is published on PyPI.
+Everything runs as an OpenNVR API token you choose. Home Assistant sees the cameras that token may see and can do only what it may do, and every command lands in the audit log. Setup is four steps: [the Home Assistant guide](docs/HOME_ASSISTANT_USER_GUIDE.md). The native integration, which adds live video, the media browser and phone notifications with the picture, installs from HACS: [hass-opennvr](https://github.com/open-nvr/hass-opennvr).
 
 ## Talk to your cameras
 
