@@ -66,6 +66,11 @@ recordings/
 # …except the bundled talking-avatar clips (placeholders; swap your own in)
 !examples/camera-agent/demo/avatar/*.mp4
 !examples/camera-agent/demo/avatar/*.webm
+# Fake-camera footage is local test material, often someone else's: a
+# folder of stills (now a slideshow camera) is just as private as a clip.
+# The README and the one bundled demo clip are tracked already.
+data/fake-cameras/*
+!data/fake-cameras/README.md
 
 # Python compiled
 __pycache__/

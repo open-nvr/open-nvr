@@ -8,6 +8,9 @@
 #     /videos/parking/*.mp4    ->  rtsp://<rig>:8554/parking     (one folder,
 #                                                                 every clip in
 #                                                                 it back to back)
+#     /videos/xray/*.jpg       ->  rtsp://<rig>:8554/xray        (a folder of
+#                                                                 stills only: a
+#                                                                 slideshow)
 #
 # The folder is rescanned every FAKECAM_SCAN_INTERVAL seconds: drop in a new
 # file or a new folder and its stream appears without restarting the container.
@@ -41,6 +44,13 @@ GROUP="${FAKECAM_GROUP:-folder}"
 # consecutive scans to agree on its contents before it starts, so a file still
 # being copied in is never published half-written.
 SCAN_INTERVAL="${FAKECAM_SCAN_INTERVAL:-5}"
+# A folder holding only still images (no video) is a slideshow camera: every
+# image in name order, IMAGE_SECONDS each, fitted onto one IMAGE_CANVAS-sized
+# white frame. That is what an X-ray scanner's screen looks like through a
+# capture card, one bag after another.
+IMAGE_SECONDS="${FAKECAM_IMAGE_SECONDS:-4}"
+IMAGE_CANVAS="${FAKECAM_IMAGE_CANVAS:-1280x720}"
+IMAGE_FPS=10
 
 ENCODE="-c:v libx264 -preset veryfast -tune zerolatency -pix_fmt yuv420p -g 50 -bf 0"
 
@@ -106,11 +116,25 @@ is_video() {
   esac
 }
 
+is_image() {
+  case "$1" in
+    *.jpg|*.JPG|*.jpeg|*.JPEG|*.png|*.PNG|*.bmp|*.BMP) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Every video file under $1, one per line, sorted — so a folder's playback order
 # (and therefore its stream's content) is identical on every scan.
 videos_under() {
   find "$1" -type f 2>/dev/null | sort | while IFS= read -r f; do
     if is_video "$f"; then printf '%s\n' "$f"; fi
+  done
+}
+
+# Same, for still images.
+images_under() {
+  find "$1" -type f 2>/dev/null | sort | while IFS= read -r f; do
+    if is_image "$f"; then printf '%s\n' "$f"; fi
   done
 }
 
@@ -124,8 +148,9 @@ signature_of() {
 }
 
 # Record one candidate stream for this scan: $1 = name to slugify, file list on
-# stdin. Names that collide get -2, -3, … in scan order, which stays stable
-# because both loops below walk their inputs sorted.
+# stdin, $2 = "images" for a slideshow. Names that collide get -2, -3, … in
+# scan order, which stays stable because both loops below walk their inputs
+# sorted.
 emit_group() {
   want=$(slugify "$1")
   [ -n "$want" ] || want=cam
@@ -138,7 +163,34 @@ emit_group() {
     rm -f "$SCAN/$slug.files"
     return 0
   fi
+  if [ "${2:-}" = images ]; then : > "$SCAN/$slug.images"; fi
   signature_of "$SCAN/$slug.files" > "$SCAN/$slug.sig"
+}
+
+# A folder with videos is a video stream exactly as before (any stills in it
+# are ignored, and said so once); a folder of nothing but stills is a
+# slideshow, whatever FAKECAM_GROUP says — one camera per still is useless.
+emit_folder() {
+  d="$1"
+  if [ -n "$(videos_under "$d" | head -1)" ]; then
+    mixed="$STATE/.mixed-$(slugify "${d%/}")"
+    if [ -n "$(images_under "$d" | head -1)" ] && [ ! -e "$mixed" ]; then
+      : > "$mixed"
+      log "'$(slugify "${d%/}")' holds videos and stills — streaming the videos, ignoring the stills"
+    fi
+    case "$GROUP" in
+      file)
+        videos_under "$d" | while IFS= read -r f; do
+          printf '%s\n' "$f" | emit_group "$f"
+        done
+        ;;
+      *)
+        videos_under "$d" | emit_group "${d%/}"
+        ;;
+    esac
+  elif [ -n "$(images_under "$d" | head -1)" ]; then
+    images_under "$d" | emit_group "${d%/}" images
+  fi
 }
 
 scan_groups() {
@@ -154,16 +206,7 @@ scan_groups() {
 
   for d in "$VIDEO_DIR"/*/; do
     [ -d "$d" ] || continue
-    case "$GROUP" in
-      file)
-        videos_under "$d" | while IFS= read -r f; do
-          printf '%s\n' "$f" | emit_group "$f"
-        done
-        ;;
-      *)
-        videos_under "$d" | emit_group "${d%/}"
-        ;;
-    esac
+    emit_folder "$d"
   done
 }
 
@@ -245,6 +288,10 @@ render_group() {
   out="$STATE/$slug.mp4"
   [ ! -s "$out" ] || return 0
   [ ! -e "$STATE/$slug.norender" ] || return 1
+  if [ -e "$STATE/$slug.images" ]; then
+    render_slideshow "$slug"
+    return $?
+  fi
 
   first=$(head -1 "$STATE/$slug.files")
   size=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height \
@@ -289,6 +336,46 @@ render_group() {
   return 1
 }
 
+# A folder of stills, rendered once into a looping H.264 file: each image held
+# IMAGE_SECONDS, fitted (never cropped: scans differ in width) onto a white
+# IMAGE_CANVAS frame. Unlike a video folder there is nothing to fall back to
+# if this fails — stills cannot be stream-copied — so a failure is retried on
+# the publisher's next round rather than remembered.
+render_slideshow() {
+  slug="$1"
+  out="$STATE/$slug.mp4"
+  w=${IMAGE_CANVAS%%x*}; h=${IMAGE_CANVAS#*x}
+  case "$w$h" in ''|*[!0-9]*) w=1280; h=720 ;; esac
+  w=$((w / 2 * 2)); h=$((h / 2 * 2))
+
+  set --
+  i=0; graph=""; legs=""
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    set -- "$@" -loop 1 -framerate "$IMAGE_FPS" -t "$IMAGE_SECONDS" -i "$f"
+    graph="${graph}[$i:v:0]scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:color=white,setsar=1,fps=${IMAGE_FPS},format=yuv420p[v$i];"
+    legs="${legs}[v$i]"
+    i=$((i + 1))
+  done < "$STATE/$slug.files"
+
+  log "rendering slideshow '$slug' ($i stills, ${IMAGE_SECONDS}s each, ${w}x${h}); the stream starts when this finishes"
+  started=$(date +%s)
+  ffmpeg -hide_banner -loglevel error -nostdin -y "$@" \
+    -filter_complex "${graph}${legs}concat=n=${i}:v=1:a=0[out]" -map "[out]" \
+    -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -g 20 -bf 0 \
+    -f mp4 "$out.part" &
+  echo $! > "$STATE/$slug.ffpid"
+  if wait "$!"; then
+    rm -f "$STATE/$slug.ffpid"
+    mv "$out.part" "$out"
+    log "rendered slideshow '$slug' in $(( $(date +%s) - started ))s"
+    return 0
+  fi
+  rm -f "$STATE/$slug.ffpid" "$out.part"
+  log "rendering slideshow '$slug' failed; retrying shortly"
+  return 1
+}
+
 publish_forever() {
   slug="$1"
   files="$STATE/$slug.files"
@@ -297,6 +384,30 @@ publish_forever() {
   [ -n "$n" ] || n=1
 
   while [ ! -e "$STATE/$slug.stop" ]; do
+    if [ -e "$STATE/$slug.images" ]; then
+      if ! render_group "$slug"; then
+        [ ! -e "$STATE/$slug.stop" ] || break
+        sleep 30
+        continue
+      fi
+      set -- -i "$STATE/$slug.mp4"
+      vargs="-c:v copy"
+      [ ! -e "$STATE/$slug.stop" ] || break
+      log "publishing slideshow '$slug' ($n still(s))"
+      ffmpeg -hide_banner -loglevel warning -nostdin \
+        -re -stream_loop -1 -fflags +genpts "$@" \
+        -an $vargs -f rtsp -rtsp_transport tcp \
+        "rtsp://127.0.0.1:${RTSP_PORT}/${slug}" &
+      ffpid=$!
+      echo "$ffpid" > "$STATE/$slug.ffpid"
+      wait "$ffpid" 2>/dev/null || true
+      rm -f "$STATE/$slug.ffpid"
+      [ ! -e "$STATE/$slug.stop" ] || break
+      log "publisher '$slug' exited; restarting in 3s"
+      sleep 3
+      continue
+    fi
+
     vargs=$(video_args_for "$files")
     if [ "$vargs" != "-c:v copy" ]; then
       vargs="$vargs -r $(rate_for "$(head -1 "$files")")"
@@ -340,6 +451,8 @@ start_group() {
   rm -f "$STATE/$slug.stop"
   cp "$SCAN/$slug.files" "$STATE/$slug.files"
   cp "$SCAN/$slug.sig" "$STATE/$slug.sig"
+  rm -f "$STATE/$slug.images"
+  if [ -e "$SCAN/$slug.images" ]; then : > "$STATE/$slug.images"; fi
   publish_forever "$slug" &
   echo $! > "$STATE/$slug.pid"
 }
@@ -359,7 +472,8 @@ stop_group() {
   fi
   rm -f "$STATE/$slug.pid" "$STATE/$slug.ffpid" "$STATE/$slug.files" \
         "$STATE/$slug.sig" "$STATE/$slug.concat" "$STATE/$slug.stop" \
-        "$STATE/$slug.mp4" "$STATE/$slug.mp4.part" "$STATE/$slug.norender"
+        "$STATE/$slug.mp4" "$STATE/$slug.mp4.part" "$STATE/$slug.norender" \
+        "$STATE/$slug.images"
 }
 
 # --------------------------------------------------------------- reconcile --

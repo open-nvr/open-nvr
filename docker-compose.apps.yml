@@ -1664,6 +1664,161 @@ services:
     networks:
       - opennvr_apps
 
+  # X-ray screening: reads a baggage scanner's screen, captured as a
+  # camera (or a fake camera made from a folder of exported scans). No
+  # model and no adapter: the scanner has already done the physics.
+  xray-screening-config-init:
+    profiles: [apps, xray-screening]
+    image: alpine:3.20
+    container_name: opennvr_xray_screening_config_init
+    logging: *svc-logs
+    restart: "no"
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        sed_esc() { printf '%s' "$$1" | sed -e 's/\\/\\\\/g; s/&/\\&/g; s/\//\\\//g'; }
+        ikey=$$(sed_esc "$${INTERNAL_API_KEY}")
+        sed -e "s/[$$][{]INTERNAL_API_KEY[}]/$$ikey/g" \
+            < /template/config.docker.yml > /generated/config.yml
+        echo "Wrote /generated/config.yml (xray-screening) from template."
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+    volumes:
+      - ./examples/xray-screening:/template:ro
+      - opennvr_xray_screening_config:/generated
+
+  xray-screening:
+    profiles: [apps, xray-screening]
+    build:
+      context: .
+      dockerfile: examples/xray-screening/Dockerfile
+    # Digest pin slot — see docs/APPS_INSTALL.md → Digest pinning.
+    image: ${XRAY_SCREENING_IMAGE:-opennvr/xray-screening:local-build}
+    pull_policy: ${APPS_PULL_POLICY:-build}
+    container_name: opennvr_xray_screening
+    logging: *svc-logs
+    restart: unless-stopped
+    depends_on:
+      xray-screening-config-init:
+        condition: service_completed_successfully
+      nats-apps:
+        condition: service_healthy
+      opennvr-core:
+        condition: service_healthy
+      egress-proxy:
+        condition: service_started
+    environment:
+      - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      - OPENNVR_URL=http://opennvr-core:8000
+      - HTTP_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - HTTPS_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - NO_PROXY=opennvr-core,nats,nats-apps,egress-proxy,mediamtx,detect-pipeline,ollama,localhost,127.0.0.1
+    expose:
+      - "9213"
+    volumes:
+      - opennvr_xray_screening_config:/app/config:ro
+    command:
+      - --config
+      - /app/config/config.yml
+    networks:
+      - opennvr_apps
+
+  # Gold bar desk: counts the bars on a weighing desk. It segments the
+  # bars itself (FastSAM-s on onnxruntime, cropped to the trays), so its
+  # only dependency beyond the platform is the weights volume below.
+  fastsam-weights-init:
+    profiles: [apps, gold-bar-desk]
+    image: ${FASTSAM_WEIGHTS_IMAGE:-ghcr.io/open-nvr/fastsam-weights:v8.3.0}
+    # Built here if it cannot be pulled — the same last-resort fallback,
+    # and the same reasons, as yolo-pose-weights-init above.
+    build:
+      context: examples/fastsam-weights
+      dockerfile: Dockerfile
+    pull_policy: missing
+    container_name: opennvr_fastsam_weights_init
+    logging: *svc-logs
+    restart: "no"
+    # List form, for the reason yolo-pose-weights-init gives.
+    entrypoint: ["sh", "-ec"]
+    command:
+      - |
+        WEIGHTS=/weights/FastSAM-s.onnx
+        if [ -s "$$WEIGHTS" ]; then
+          echo "FastSAM-s.onnx already present at $$WEIGHTS (size: $$(wc -c < $$WEIGHTS) bytes); skipping."
+          exit 0
+        fi
+        echo "Copying pre-baked FastSAM-s.onnx into volume..."
+        cp /FastSAM-s.onnx "$$WEIGHTS"
+        echo "Wrote $$(wc -c < $$WEIGHTS) bytes to $$WEIGHTS."
+    volumes:
+      - opennvr_fastsam_weights:/weights
+
+  gold-bar-desk-config-init:
+    profiles: [apps, gold-bar-desk]
+    image: alpine:3.20
+    container_name: opennvr_gold_bar_desk_config_init
+    logging: *svc-logs
+    restart: "no"
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        sed_esc() { printf '%s' "$$1" | sed -e 's/\\/\\\\/g; s/&/\\&/g; s/\//\\\//g'; }
+        ikey=$$(sed_esc "$${INTERNAL_API_KEY}")
+        sed -e "s/[$$][{]INTERNAL_API_KEY[}]/$$ikey/g" \
+            < /template/config.docker.yml > /generated/config.yml
+        echo "Wrote /generated/config.yml (gold-bar-desk) from template."
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+    volumes:
+      - ./examples/gold-bar-desk:/template:ro
+      - opennvr_gold_bar_desk_config:/generated
+
+  gold-bar-desk:
+    profiles: [apps, gold-bar-desk]
+    build:
+      context: .
+      dockerfile: examples/gold-bar-desk/Dockerfile
+    # Digest pin slot — see docs/APPS_INSTALL.md → Digest pinning.
+    image: ${GOLD_BAR_DESK_IMAGE:-opennvr/gold-bar-desk:local-build}
+    pull_policy: ${APPS_PULL_POLICY:-build}
+    container_name: opennvr_gold_bar_desk
+    logging: *svc-logs
+    restart: unless-stopped
+    depends_on:
+      gold-bar-desk-config-init:
+        condition: service_completed_successfully
+      # The model has to be in the volume before the app looks for it;
+      # without this the app starts, finds no model, and says so on its
+      # status line until a restart.
+      fastsam-weights-init:
+        condition: service_completed_successfully
+      nats-apps:
+        condition: service_healthy
+      opennvr-core:
+        condition: service_healthy
+      egress-proxy:
+        condition: service_started
+    environment:
+      - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      - OPENNVR_URL=http://opennvr-core:8000
+      - HTTP_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - HTTPS_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - NO_PROXY=opennvr-core,nats,nats-apps,egress-proxy,mediamtx,detect-pipeline,ollama,localhost,127.0.0.1
+    expose:
+      - "9212"
+    volumes:
+      - opennvr_gold_bar_desk_config:/app/config:ro
+      - opennvr_fastsam_weights:/weights:ro
+    command:
+      - --config
+      - /app/config/config.yml
+    networks:
+      - opennvr_apps
+
   # ──────────────────────────────────────────────────────────────
   # CORE ENRICHMENT ADAPTERS
   #
@@ -1786,3 +1941,6 @@ volumes:
   opennvr_guard_scan_sessions:
   opennvr_yolo_pose_cache:
   opennvr_yolo_pose_weights:
+  opennvr_xray_screening_config:
+  opennvr_gold_bar_desk_config:
+  opennvr_fastsam_weights:

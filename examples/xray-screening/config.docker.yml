@@ -1,0 +1,37 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# xray-screening config, consumed by docker-compose.apps.yml.
+#
+# ${VAR} is substituted by the config-init container at compose-up time.
+# Do not edit substituted values here — change .env and re-run
+# ``docker compose up`` so the init container re-templates the file.
+
+# ── Video ──────────────────────────────────────────────────────────
+# The scanner's screen arrives as a camera, through a grant core mints
+# for THIS app and THIS camera. Pick that camera in the App Catalog;
+# there is no camera list here.
+fps: 2.0
+frame_width: 1280
+
+# ── Counting ───────────────────────────────────────────────────────
+repeat_window_min: 60.0
+move_threshold: 0.3
+settle_s: 0.6
+
+# ── What is flagged (fractions of the scan height squared) ─────────
+large_dense: 0.0012
+small_dense: 0.00036
+clutter_metal: 0.45
+dense_value: 70
+
+# ── Where results go ───────────────────────────────────────────────
+webhook_url: null
+nats_alerts_url: "nats://nats-apps:4222"
+nats_alerts_token: "${INTERNAL_API_KEY}"
+
+# ── App contract (spec §03) ────────────────────────────────────────
+contract_port: 9213
+contract_bind_host: "0.0.0.0"
+contract_host: "xray-screening"
+opennvr_url: "http://opennvr-core:8000"

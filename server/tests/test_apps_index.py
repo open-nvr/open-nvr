@@ -198,6 +198,8 @@ _EXPECTED_IDS = {
     "footage-search",
     "home-assistant-relay",
     "guard-scan-compliance",
+    "gold-bar-desk",
+    "xray-screening",
 }
 
 

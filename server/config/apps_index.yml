@@ -264,6 +264,77 @@
             - opennvr_apps
     command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d guard-scan-compliance
 
+- id: gold-bar-desk
+  name: Gold Bar Desk
+  summary: Counts the bars on a weighing desk — trays, balance and hands — alarms when one goes unaccounted for, and photographs every weighing's reading.
+  category: safety
+  version: "0.1.0"
+  image: ghcr.io/open-nvr/gold-bar-desk:latest
+  build_context: examples/gold-bar-desk
+  # It segments bars itself (FastSAM-s on onnxruntime, from the
+  # fastsam-weights volume): no KAI-C task, no adapter.
+  requires_tasks: []
+  emits: [bar_missing, bar_extra, bar_near_body, camera_tamper]
+  docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/gold-bar-desk/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/gold-bar-desk
+  network_egress: []
+  install:
+    compose: |
+      # INFORMATIONAL — this service already ships in
+      # docker-compose.apps.yml (with its config-init companion, the
+      # fastsam-weights-init job and the named volumes); you do NOT paste
+      # this anywhere. Run the command below and compose brings it up.
+      services:
+        gold-bar-desk:
+          profiles: [apps]
+          image: ${GOLD_BAR_DESK_IMAGE:-opennvr/gold-bar-desk:local-build}
+          restart: unless-stopped
+          environment:
+            - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
+            - OPENNVR_URL=http://opennvr-core:8000
+          expose:
+            - "9212"
+          networks:
+            - opennvr_apps
+    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d gold-bar-desk
+
+- id: xray-screening
+  name: X-ray Screening
+  summary: Reads a baggage X-ray scanner's screen — counts trays, and flags dense objects and cluttered trays for a person to check.
+  category: safety
+  version: "0.1.0"
+  image: ghcr.io/open-nvr/xray-screening:latest
+  build_context: examples/xray-screening
+  # Colour analysis of the scanner's own picture: no model, no adapter.
+  requires_tasks: []
+  emits: [dense_object, small_dense_item, cluttered_tray]
+  docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/xray-screening/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/xray-screening
+  network_egress: []
+  install:
+    compose: |
+      # INFORMATIONAL — this service already ships in
+      # docker-compose.apps.yml (with its config-init companion and
+      # named config volume); you do NOT paste this anywhere. Run the
+      # command below and compose brings it up from the shipped overlay.
+      services:
+        xray-screening:
+          profiles: [apps]
+          image: ${XRAY_SCREENING_IMAGE:-opennvr/xray-screening:local-build}
+          restart: unless-stopped
+          environment:
+            - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
+            - OPENNVR_URL=http://opennvr-core:8000
+          expose:
+            - "9213"
+          networks:
+            - opennvr_apps
+    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d xray-screening
+
 - id: license-plate-recognition
   # ANPR leads: it is the name most of the world uses for this (UK, EU,
   # India, AU), with the spelled-out term kept for newcomers and for US

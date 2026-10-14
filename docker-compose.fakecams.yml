@@ -49,6 +49,8 @@ services:
       # Seconds between rescans. A new stream needs two scans to agree on its
       # contents before it goes live, so expect up to 2× this much delay.
       - FAKECAM_SCAN_INTERVAL=${FAKECAM_SCAN_INTERVAL:-5}
+      - FAKECAM_IMAGE_SECONDS=${FAKECAM_IMAGE_SECONDS:-4}
+      - FAKECAM_IMAGE_CANVAS=${FAKECAM_IMAGE_CANVAS:-1280x720}
     volumes:
       # NOTE: if this file is missing, Docker silently creates a DIRECTORY in
       # its place and the container dies with exit 127. Keep it in the repo.

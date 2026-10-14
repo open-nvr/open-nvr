@@ -81,7 +81,7 @@ Dashboard · Live view · Search · App Catalog · Vehicles (ANPR). The dark and
 Three things in one install, each usable on its own.
 
 1. **A complete NVR.** ONVIF and RTSP cameras in, recording and live view out, a detector always on. Works on day one with no AI configured at all.
-2. **An AI platform for cameras.** Any model behind a REST or WebSocket endpoint becomes a capability through a published contract. Object detection, plates, faces, pose, scene description, open-vocabulary search, tracking, speech in and out all ship. Twelve installable applications sit on top: intrusion, loitering, occupancy, line crossing, plates, a doorbell that knows your family, a guard-scan check, a gate controller, and an agent you can talk to.
+2. **An AI platform for cameras.** Any model behind a REST or WebSocket endpoint becomes a capability through a published contract. Object detection, plates, faces, pose, scene description, open-vocabulary search, tracking, speech in and out all ship. Fourteen installable applications sit on top: intrusion, loitering, occupancy, line crossing, plates, a doorbell that knows your family, a guard-scan check, a bullion-desk count, an X-ray screen reader, a gate controller, and an agent you can talk to.
 3. **A product you build on.** Two Apache-2.0 SDKs on PyPI. Write a server-side application or an adapter for your own model in an afternoon, run it on your own site, keep it private or publish it. The platform supplies cameras, streams, recording, detections, an event store with evidence, alerts, auth and audit. You supply the rule.
 
 ```bash
@@ -170,11 +170,13 @@ The three-tier model, the wire contracts and the offline-first design are in [`d
 | [`smart-doorbell`](examples/smart-doorbell) | Face recognition with enrolment, strangers alerted with a photo |
 | [`package-delivery`](examples/package-delivery) | Arrival, linger and pickup per parcel |
 | [`guard-scan-compliance`](examples/guard-scan-compliance) | Was every person wanded, and what did the scanner find |
+| [`gold-bar-desk`](examples/gold-bar-desk) | Every bar on a weighing desk accounted for, and a photo of every weighing |
+| [`xray-screening`](examples/xray-screening) | Trays through a baggage X-ray counted, dense objects flagged for a look |
 | [`footage-search`](examples/footage-search) | "Red truck at the dock yesterday" over recorded footage |
 | [`alert-notifier`](examples/alert-notifier) | What actually deserves to reach the guard's phone |
 | [`camera-agent`](examples/camera-agent) | Ask your cameras questions, by voice or text, all local |
 
-Thirteen of the sixteen shipped examples are listed above; [`inference-listener`](examples/inference-listener) and [`alerts-subscriber`](examples/alerts-subscriber) are minimal subscriber templates, and [`home-assistant-relay`](examples/home-assistant-relay) is kept only as a NATS-to-MQTT bridge example now that Home Assistant support is [built in](docs/HOME_ASSISTANT_USER_GUIDE.md). Every app is a copy-as-template starting point. Replace the predicate and you have a purpose-built NVR for your domain. Gallery and roadmap: [`examples/README.md`](examples/README.md), [`docs/ROADMAP.md`](docs/ROADMAP.md).
+Fifteen of the eighteen shipped examples are listed above; [`inference-listener`](examples/inference-listener) and [`alerts-subscriber`](examples/alerts-subscriber) are minimal subscriber templates, and [`home-assistant-relay`](examples/home-assistant-relay) is kept only as a NATS-to-MQTT bridge example now that Home Assistant support is [built in](docs/HOME_ASSISTANT_USER_GUIDE.md). Every app is a copy-as-template starting point. Replace the predicate and you have a purpose-built NVR for your domain. Gallery and roadmap: [`examples/README.md`](examples/README.md), [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Works with Home Assistant
 

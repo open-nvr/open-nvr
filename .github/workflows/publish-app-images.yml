@@ -77,6 +77,7 @@ jobs:
           - { app: alert-notifier,             title: Alert Notifier }
           - { app: footage-search,             title: Footage Search }
           - { app: gate-controller,            title: Gate Controller }
+          - { app: gold-bar-desk,              title: Gold Bar Desk }
           - { app: guard-scan-compliance,      title: Guard Scan Compliance }
           - { app: home-assistant-relay,       title: Home Assistant Relay }
           - { app: intrusion-detection,        title: Intrusion Detection }
@@ -86,6 +87,7 @@ jobs:
           - { app: occupancy-counting,         title: Occupancy Counting }
           - { app: package-delivery,           title: Package Delivery }
           - { app: smart-doorbell,             title: Smart Doorbell }
+          - { app: xray-screening,             title: X-ray Screening }
     steps:
       - name: Checkout
         uses: actions/checkout@v4

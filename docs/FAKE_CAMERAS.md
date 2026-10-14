@@ -121,6 +121,27 @@ anything exotic becomes `_`, so `Back Yard/` serves as `back_yard`.
 Set `FAKECAM_GROUP=file` in `.env` if you want the older behaviour instead,
 where every file is its own camera no matter which folder it sits in.
 
+### A folder of still images is a slideshow camera
+
+A folder that holds only stills (`.jpg .jpeg .png .bmp`, no video) becomes one
+camera showing each image in name order, `FAKECAM_IMAGE_SECONDS` (default 4)
+apiece, then starting over. That is what a baggage X-ray scanner's screen looks
+like through a capture card, so it is how to test an app that reads one:
+
+```
+data/fake-cameras/
+└── xray-lane-1/          -> camera "xray-lane-1", one scan every 4 s
+    ├── 0001.jpg
+    ├── 0002.jpg
+    └── ...
+```
+
+Every image is fitted, never cropped, onto one white `FAKECAM_IMAGE_CANVAS`
+frame (default `1280x720`), since exported scans differ in width. The
+slideshow is rendered once when the folder appears (about half a second per
+image), then looped at no cost. A folder holding both videos and stills streams
+the videos and ignores the stills, and the log says so.
+
 Pick clips that suit what you're testing. Detection and app testing want a
 scene where something actually happens; a static clip is fine for checking
 streaming, recording or playback.

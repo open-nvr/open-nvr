@@ -62,6 +62,7 @@ EXCLUDED = frozenset({
     "yolov8-weights",
     "yolo-pose-weights",
     "package-detection-weights",
+    "fastsam-weights",
 })
 
 # Gap 8's VISIBILITY debt is retired: the agent now serves /manifest and

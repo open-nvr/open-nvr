@@ -38,6 +38,7 @@ _APPS_INDEX = REPO_ROOT / "server" / "config" / "apps_index.yml"
 NOT_APPLICATIONS = {
     # Weights bundles: build artefacts an adapter consumes, with no app
     # to install and no rule to adapt.
+    "fastsam-weights",
     "package-detection-weights",
     "yolo-pose-weights",
     "yolov8-weights",
