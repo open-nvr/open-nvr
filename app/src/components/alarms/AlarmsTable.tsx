@@ -213,7 +213,7 @@ export function AlarmsTable({
     ...(showSource ? [{
       key: 'source', header: 'Source', hideBelow: 'lg' as const,
       width: 'w-[168px]', cellClassName: 'text-[var(--text-dim)] truncate',
-      cell: (a: InboxAlert) => a.source_name || '—',
+      cell: (a: InboxAlert) => (a.source_kind === 'camera' ? `camera · ${a.source_name || ''}` : a.source_name || '—'),
     }] : []),
     {
       key: 'camera', header: 'Camera', hideBelow: 'sm', width: 'w-[140px]',

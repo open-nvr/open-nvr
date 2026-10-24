@@ -593,6 +593,21 @@ async def set_camera_cloud(
         raise HTTPException(status_code=502, detail=f"Cloud update failed: {e}")
 
 
+@router.get("/{camera_id}/analytics-source")
+async def get_analytics_source(
+    camera: Camera = Depends(get_camera_or_403),
+    db: Session = Depends(get_db),
+):
+    """Where this camera's detections come from (OpenNVR, the camera's own
+    analytics, or both), what the camera advertises (events service,
+    analytics rules), and the alert types native events can become.
+    Change it with ``PUT /cameras/{id}`` (``analytics_source``,
+    ``native_event_types``)."""
+    from services.native_analytics import describe
+
+    return await describe(db, camera)
+
+
 @router.post("/{camera_id}/events/subscribe")
 async def subscribe_events(
     camera: Camera = Depends(get_camera_or_403),

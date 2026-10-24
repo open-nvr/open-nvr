@@ -464,6 +464,14 @@ async def lifespan(app: FastAPI):
             except Exception as e:  # noqa: BLE001
                 main_logger.error(f"[MTX] recording-pause restore failed: {e}",
                                   exc_info=True)
+            # Cameras whose detection source is their own analytics: the
+            # event subscriptions are asyncio tasks and need re-arming.
+            try:
+                from services import native_analytics
+
+                await native_analytics.restore_on_startup()
+            except Exception as e:
+                main_logger.error(f"native analytics restore failed: {e}", exc_info=True)
 
     # Start background provisioning task
     import asyncio

@@ -176,6 +176,7 @@ export const cameraService = {
     api.put(`/api/v1/cameras/${cameraId}/smart/${key}`, payload),
 
   // Camera events (native alarm stream)
+  getAnalyticsSource: (cameraId: number) => api.get(`/api/v1/cameras/${cameraId}/analytics-source`),
   getCameraEvents: (cameraId: number, limit = 50) =>
     api.get(`/api/v1/cameras/${cameraId}/events`, { params: { limit } }),
   getCameraEventsStatus: (cameraId: number) =>

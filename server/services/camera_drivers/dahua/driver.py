@@ -55,7 +55,9 @@ _STORAGE_PATH = "/cgi-bin/storageDevice.cgi"
 _USER_PATH = "/cgi-bin/userManager.cgi"
 _EVENT_PATH = (
     "/cgi-bin/eventManager.cgi?action=attach"
-    "&codes=[VideoMotion,VideoBlind,VideoLoss,AlarmLocal]&heartbeat=5"
+    "&codes=[VideoMotion,VideoBlind,VideoLoss,AlarmLocal,CrossLineDetection,"
+    "CrossRegionDetection,LeftDetection,TakenAwayDetection,WanderDetection,"
+    "ParkingDetection,SceneChange,AudioAnomaly,FaceDetection]&heartbeat=5"
 )
 # Dahua user groups map onto OpenNVR's level vocabulary.
 _GROUP_BY_LEVEL = {"Administrator": "admin", "Operator": "user", "Viewer": "user"}

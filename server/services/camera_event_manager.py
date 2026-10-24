@@ -125,6 +125,15 @@ class CameraEventManager:
         except Exception:
             pass
 
+        # The camera's own analytics as alerts, when this camera's
+        # detection source asks for them (services/native_analytics.py).
+        try:
+            from services.native_analytics import route
+
+            await route(camera_id, ev)
+        except Exception:
+            main_logger.debug("native analytics route failed for camera %s", camera_id, exc_info=True)
+
 
 _manager: CameraEventManager | None = None
 

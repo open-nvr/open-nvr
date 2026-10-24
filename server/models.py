@@ -271,6 +271,12 @@ class Camera(Base):
     # roster's ``analyze``). NULL = on: nullable so the additive column
     # self-heal can add it, and so every existing camera keeps detecting.
     detection_enabled = Column(Boolean, nullable=True, default=True)
+    # Where detections come from: NULL/'opennvr' (ours; native events are
+    # history only), 'camera' (the camera's own analytics become alerts,
+    # Tier-0 paused here) or 'both'. See services/native_analytics.py.
+    analytics_source = Column(String(8), nullable=True)
+    # Optional allowlist of the alert types native events may become.
+    native_event_types = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 

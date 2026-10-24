@@ -484,6 +484,11 @@ class CameraUpdate(BaseModel):
     is_active: bool | None = None
     # Tier-0 object detection on/off; the camera keeps recording either way.
     detection_enabled: bool | None = None
+    # Where detections come from: "opennvr", "camera" (its own analytics
+    # become alerts, Tier-0 paused on it) or "both".
+    analytics_source: Literal["opennvr", "camera", "both"] | None = None
+    # Alert types native events may become; [] or null = all.
+    native_event_types: list[str] | None = None
     # Why, for the audit log only (e.g. the Home Assistant automation that
     # asked). Never stored on the camera.
     reason: str | None = Field(None, max_length=200)
@@ -713,6 +718,15 @@ class CameraResponse(CameraBase):
     @classmethod
     def _null_detection_means_on(cls, v: bool | None) -> bool:
         return True if v is None else v
+
+    # NULL means OpenNVR's own detection (cameras from before the column).
+    analytics_source: str = "opennvr"
+    native_event_types: list[str] | None = None
+
+    @field_validator("analytics_source", mode="before")
+    @classmethod
+    def _null_source_means_opennvr(cls, v: str | None) -> str:
+        return v or "opennvr"
 
     deleted_at: datetime | None = None
     created_at: datetime

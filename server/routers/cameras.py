@@ -1033,6 +1033,13 @@ async def update_camera(
                        "camera, select the camera in that app's configuration "
                        "(App Catalog → Configure → Cameras).",
             )
+        source_change = None
+        if "analytics_source" in update_fields:
+            # The source decides detection_enabled for camera-only mode; set
+            # it through the service so the two never contradict each other.
+            from services.native_analytics import apply_source
+            source_change = apply_source(camera, update_fields.pop("analytics_source"))
+            update_fields.pop("detection_enabled", None)
         for field, value in update_fields.items():
             setattr(camera, field, value)
 
@@ -1368,6 +1375,15 @@ async def update_camera(
             ip_address=request.client.host if request and request.client else None,
         )
 
+        if source_change:
+            # Listen to the camera when its events are wanted, stop when not —
+            # after the commit, so a failure here cannot undo the edit.
+            from services.native_analytics import sync_subscription
+            try:
+                await sync_subscription(camera.id, camera.analytics_source)
+            except Exception as exc:
+                camera_logger.warning("camera %s: event subscription sync failed: %s", camera.id, exc)
+
         # Legacy audit log
         try:
             write_audit_log(
@@ -1385,6 +1401,7 @@ async def update_camera(
                     **({"detection_enabled": {"from": was_detecting,
                                               "to": camera.detection_enabled is not False}}
                        if "detection_enabled" in update_fields else {}),
+                    **({"analytics_source": source_change} if source_change else {}),
                     **({"stream_action": stream_action} if stream_action else {}),
                     **({"stream_warning": stream_warning} if stream_warning else {}),
                 },

@@ -27,6 +27,7 @@ import {
   Skeleton,
 } from '../../components/ui'
 import { ReadOnlyField } from '../../components/ui/ReadOnlyField'
+import { SegmentedControl } from '../../components/ui/SegmentedControl'
 import { Tabs } from '../../components/ui/Tabs'
 import { useCameraCapabilities } from '../../hooks/useCameraCapabilities'
 import { useTranslation, useDateFormat, type DateFormatters } from '../../i18n'
@@ -480,22 +481,39 @@ function PtzTab({ cameraId }: { cameraId: number }) {
   )
 }
 
+type DetectionSource = 'opennvr' | 'camera' | 'both'
+
+type AnalyticsSourceInfo = {
+  camera_id: number
+  analytics_source: DetectionSource
+  native_event_types: string[] | null
+  detection_enabled: boolean
+  listening: boolean
+  native: {
+    events: boolean
+    driver: string | null
+    rules: { key: string; label: string; enabled?: boolean | null; configured?: boolean | null }[]
+    error: string | null
+  }
+  alert_types: { type: string; label: string; severity: string }[]
+}
+
 function EventsTab({ cameraId }: { cameraId: number }) {
   const fmt = useDateFormat()
   const { t } = useTranslation()
   const { showError, showSuccess } = useSnackbar()
-  const [subscribed, setSubscribed] = useState(false)
+  const [info, setInfo] = useState<AnalyticsSourceInfo | null>(null)
   const [events, setEvents] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
 
   const refresh = useCallback(async () => {
     try {
-      const [st, ev] = await Promise.all([
-        apiService.getCameraEventsStatus(cameraId),
+      const [src, ev] = await Promise.all([
+        apiService.getAnalyticsSource(cameraId),
         apiService.getCameraEvents(cameraId, 50),
       ])
-      setSubscribed(!!st.data.subscribed)
+      setInfo(src.data)
       setEvents(ev.data || [])
     } catch {
       /* transient — keep last state */
@@ -505,75 +523,137 @@ function EventsTab({ cameraId }: { cameraId: number }) {
   }, [cameraId])
   useEffect(() => {
     refresh()
-    const t = setInterval(refresh, 3000)
-    return () => clearInterval(t)
+    const timer = setInterval(refresh, 5000)
+    return () => clearInterval(timer)
   }, [refresh])
 
-  const toggle = async () => {
+  const save = async (payload: { analytics_source?: DetectionSource; native_event_types?: string[] | null }) => {
     setBusy(true)
     try {
-      if (subscribed) {
-        await apiService.unsubscribeCameraEvents(cameraId)
-        showSuccess('Stopped listening for camera alarms')
-      } else {
-        await apiService.subscribeCameraEvents(cameraId)
-        showSuccess('Now listening for camera alarms')
-      }
+      await apiService.updateCamera(cameraId, payload)
+      showSuccess(t('device.detectionSourceSaved'))
       await refresh()
     } catch (e: any) {
-      showError(extractApiError(e, t('device.subscriptionError')))
+      showError(extractApiError(e, t('device.detectionSourceError')))
     } finally {
       setBusy(false)
     }
   }
 
-  if (loading) return <Skeleton className="h-32 w-full" />
+  if (loading || !info) return <Skeleton className="h-32 w-full" />
+
+  const source = info.analytics_source
+  const canUseCamera = info.native.events
+  const allowlist = info.native_event_types && info.native_event_types.length ? info.native_event_types : null
+  const typeOn = (type: string) => !allowlist || allowlist.includes(type)
+  const toggleType = (type: string, on: boolean) => {
+    const all = info.alert_types.map((a) => a.type)
+    const current = allowlist ?? all
+    const next = on ? Array.from(new Set([...current, type])) : current.filter((x) => x !== type)
+    // Everything ticked is the default: store null rather than the full list.
+    save({ native_event_types: next.length === all.length ? null : next })
+  }
+  const explain: Record<DetectionSource, string> = {
+    opennvr: t('device.detectionSourceOpennvrHelp'),
+    camera: t('device.detectionSourceCameraHelp'),
+    both: t('device.detectionSourceBothHelp'),
+  }
+
   return (
-    <div className="space-y-4">
-      <div className="flex items-center gap-3">
-        <Button
-          variant={subscribed ? 'danger' : 'primary'}
-          onClick={toggle}
-          disabled={busy}
-        >
-          {busy ? '…' : subscribed ? 'Stop listening' : 'Start listening for alarms'}
-        </Button>
-        <Badge variant={subscribed ? 'success' : 'neutral'}>
-          {subscribed ? 'Live' : 'Off'}
-        </Badge>
-      </div>
-      <p className="text-xs text-[var(--text-dim)]">
-        Streams motion / tamper alarms from the camera into OpenNVR. Enable
-        motion detection (Motion tab) for the camera to report them.
-        Subscriptions reset when the server restarts.
-      </p>
-      {events.length === 0 ? (
-        <EmptyState
-          title={t('device.noAlarms')}
-          description={
-            subscribed
-              ? 'Waiting for the camera to report an alarm…'
-              : 'Start listening to capture alarms.'
-          }
+    <div className="space-y-5">
+      <div className="space-y-2">
+        <SegmentedControl<DetectionSource>
+          label={t('device.detectionSource')}
+          showLabel
+          options={[
+            { value: 'opennvr', label: t('device.detectionSourceOpennvr') },
+            { value: 'camera', label: t('device.detectionSourceCamera'), title: canUseCamera ? undefined : t('device.detectionSourceNoEvents') },
+            { value: 'both', label: t('device.detectionSourceBoth'), title: canUseCamera ? undefined : t('device.detectionSourceNoEvents') },
+          ]}
+          value={source}
+          onChange={(v) => {
+            if (busy || v === source) return
+            if (v !== 'opennvr' && !canUseCamera) {
+              showError(t('device.detectionSourceNoEvents'))
+              return
+            }
+            save({ analytics_source: v })
+          }}
         />
-      ) : (
-        <div className="max-h-72 overflow-auto">
-          {events.map((e) => (
-            <div
-              key={e.id}
-              className="flex items-center gap-3 text-sm border-b border-[var(--border)] py-1.5"
-            >
-              <Badge variant={e.event_state === 'active' ? 'warning' : 'neutral'}>
-                {e.event_type}
+        <p className="text-xs text-[var(--text-dim)]">{explain[source]}</p>
+        <div className="flex items-center gap-2 text-xs">
+          <Badge variant={info.listening ? 'success' : 'neutral'}>
+            {info.listening ? t('device.listeningToCamera') : t('device.notListening')}
+          </Badge>
+          <Badge variant={info.detection_enabled ? 'success' : 'warning'}>
+            {info.detection_enabled ? t('device.opennvrDetectionOn') : t('device.opennvrDetectionPaused')}
+          </Badge>
+          {info.native.driver && <span className="text-[var(--text-dim)]">{info.native.driver}</span>}
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        <div className="text-sm font-medium">{t('device.cameraAdvertises')}</div>
+        {!canUseCamera ? (
+          <p className="text-xs text-[var(--text-dim)]">{t('device.detectionSourceNoEvents')}</p>
+        ) : info.native.rules.length === 0 ? (
+          <p className="text-xs text-[var(--text-dim)]">{t('device.noRulesListed')}</p>
+        ) : (
+          <div className="flex flex-wrap gap-1.5">
+            {info.native.rules.map((r) => (
+              <Badge key={r.key} variant={r.enabled === false ? 'neutral' : 'success'} title={r.key}>
+                {r.label}
+                {r.configured === false ? ` · ${t('device.ruleNotDrawn')}` : ''}
               </Badge>
-              <span className="text-[var(--text-dim)] flex-1">{e.description}</span>
-              <span className="text-xs font-mono text-[var(--text-dim)]">
-                {e.occurred_at ? fmt.time(e.occurred_at, {}) : ''}
-              </span>
-            </div>
-          ))}
+            ))}
+          </div>
+        )}
+        {info.native.error && <p className="text-xs text-[var(--text-dim)]">{info.native.error}</p>}
+      </div>
+
+      {source !== 'opennvr' && (
+        <div className="space-y-2">
+          <div className="text-sm font-medium">{t('device.alertsFromCamera')}</div>
+          <p className="text-xs text-[var(--text-dim)]">{t('device.alertsFromCameraHelp')}</p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6">
+            {info.alert_types.map((a) => (
+              <Toggle
+                key={a.type}
+                label={`${a.label} · ${a.severity}`}
+                checked={typeOn(a.type)}
+                onChange={(v) => toggleType(a.type, v)}
+              />
+            ))}
+          </div>
         </div>
       )}
+
+      <div className="space-y-2">
+        <div className="text-sm font-medium">{t('device.recentCameraEvents')}</div>
+        {events.length === 0 ? (
+          <EmptyState
+            title={t('device.noAlarms')}
+            description={info.listening ? t('device.waitingForCamera') : t('device.pickSourceToListen')}
+          />
+        ) : (
+          <div className="max-h-72 overflow-auto">
+            {events.map((e) => (
+              <div
+                key={e.id}
+                className="flex items-center gap-3 text-sm border-b border-[var(--border)] py-1.5"
+              >
+                <Badge variant={e.event_state === 'active' ? 'warning' : 'neutral'}>
+                  {e.event_type}
+                </Badge>
+                <span className="text-[var(--text-dim)] flex-1 truncate">{e.description}</span>
+                <span className="text-xs font-mono text-[var(--text-dim)]">
+                  {e.occurred_at ? fmt.time(e.occurred_at, {}) : ''}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   )
 }
