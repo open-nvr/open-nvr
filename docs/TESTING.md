@@ -21,6 +21,10 @@ python tests/e2e/run.py -- -k lifecycle -x    # args after -- go to pytest
 Full details — how to add a test, how to read a failure — are in
 [`tests/e2e/README.md`](../tests/e2e/README.md).
 
+**Upgrade testing** — OpenNVR runs in production, so every change must also be
+tested as an in-place upgrade of an existing install with real data. Neither
+layer above does that. See [TESTING_UPGRADES.md](TESTING_UPGRADES.md).
+
 ## What each layer is for
 
 A unit test tells you a function is correct. It cannot tell you that MediaMTX's
