@@ -91,7 +91,9 @@ models ran fine on the same device). So on an OpenVINO device other than
 opts out), and an adapter that knows its size pins it with `reshape_input`
 before the session is built — `yolo_pose` pins `[1, 3, 448, 448]` and
 reports `input_shape_pinned` in `/hardware/evaluation`. Prefer fixed-size
-exports for anything meant to run on an accelerator.
+exports for anything meant to run on an accelerator. (Pinning is what made
+the pose model run on the NPU; it did not stop the iGPU reset described
+under the benchmark findings — that one is driver-level.)
 
 ## What each flavour carries
 
@@ -181,14 +183,21 @@ What the numbers say:
   package power on top of CPU load; a desktop-class CPU in a closed cabinet
   needs real airflow. Watch `x86_pkg_temp` (`/sys/class/thermal`) during a
   benchmark; the Settings → AI → Hardware panel (Phase 3) will show it.
-- **The iGPU driver matters as much as the package.** The same box also
-  reset twice at 48 °C, idle, with the test container capped at 8 cores —
-  each time within 30 s of the pose adapter starting on `GPU`, i.e. during
-  the dynamic-shape compile (see "Model shapes on accelerators"). It runs
-  Ubuntu 24.04's 6.8 GA kernel, where Arrow Lake's iGPU is driven by i915
-  with Meteor Lake firmware; the HWE kernel (`linux-generic-hwe-24.04`) is
-  the one Intel validates the Arrow Lake graphics stack on. Move an Intel
-  Core Ultra host to the HWE kernel before running inference on its iGPU.
+- **One model can take a host down on the iGPU; the NPU is the pose
+  device.** The same box reset four times at 48 °C, idle, with the test
+  container capped at 8 cores — each time within 30 s of the pose adapter
+  starting on `GPU`: with the dynamic export, with the input pinned to
+  448, on the 6.8 GA kernel and on the 7.0 HWE kernel, never a line in the
+  journal. The fixed-size yolov8n and yolo26n compile and run fine on that
+  GPU (19–23 ms/frame), and the pinned pose model runs on the NPU at
+  19 ms/frame. So `OPENNVR_ACCEL=intel` puts the pose adapter on the NPU
+  when the host has one (`YOLO_POSE_ONNX_PROVIDERS` overrides; on a host
+  without an NPU it follows `ADAPTER_ONNX_PROVIDERS`, so set it to
+  `OpenVINOExecutionProvider:CPU` if that host resets). Open question for
+  the iGPU: the 7.0 kernel asks for GuC firmware 70.53 and Ubuntu's
+  `linux-firmware` ships 70.36. Move an Intel Core Ultra host to the HWE
+  kernel (`linux-generic-hwe-24.04`) regardless — it is the stack Intel
+  validates Arrow Lake graphics on — and keep the GA kernel as fallback.
 
 ## Roadmap
 

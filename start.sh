@@ -152,9 +152,16 @@ apply_accel_env() {
                 if [[ -e /dev/accel/accel0 ]]; then export DETECT_ONNX_PROVIDERS="OpenVINOExecutionProvider:NPU"
                 else export DETECT_ONNX_PROVIDERS="OpenVINOExecutionProvider:GPU"; fi
             fi
-            # The ONNX adapters (-intel flavours) run on the iGPU: it takes
-            # dynamic shapes and leaves the NPU to the Tier-0 detector.
+            # The ONNX adapters (-intel flavours) run on the iGPU and leave
+            # the NPU to the Tier-0 detector — except the pose adapter, whose
+            # model reset an Arrow Lake host every time it was compiled for
+            # the iGPU and runs cleanly on the NPU (docs/HARDWARE.md). Both
+            # are plain env overrides in .env.
             [[ -n "$(get_env_var ADAPTER_ONNX_PROVIDERS)" ]] || export ADAPTER_ONNX_PROVIDERS="OpenVINOExecutionProvider:GPU"
+            if [[ -z "$(get_env_var YOLO_POSE_ONNX_PROVIDERS)" ]]; then
+                if [[ -e /dev/accel/accel0 ]]; then export YOLO_POSE_ONNX_PROVIDERS="OpenVINOExecutionProvider:NPU"
+                else export YOLO_POSE_ONNX_PROVIDERS="$ADAPTER_ONNX_PROVIDERS"; fi
+            fi
             ;;
     esac
 }
