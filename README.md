@@ -55,6 +55,8 @@ Open the URL, accept the self-signed certificate, paste the token, add a camera.
 | Your LAN IP changed | `./start.sh refresh-certs` *(Linux/macOS)* |
 | Stop everything | `./start.sh down` |
 | Tail live logs | `./start.sh logs` |
+| Add an overlay or profile (fake cameras, an app) | set `OPENNVR_EXAMPLE_COMPOSE` / `OPENNVR_EXAMPLE_PROFILE` in `.env`, then `./start.sh up` — not `docker compose -f …` by hand, which drops the hardware flavour |
+| Reclaim disk after upgrades | `./start.sh prune` |
 | Upgrade to a new release | back up, check out the tag, set `CORE_TAG`/`ADAPTER_TAG`, `./start.sh up`: [step by step](DOCKER_QUICKSTART.md#upgrading-to-a-new-release) |
 
 Unattended installs: `cp .env.example .env && ./scripts/generate-secrets.sh --write && ./start.sh up`. Retention, hardening and every compose file: [`DOCKER_QUICKSTART.md`](DOCKER_QUICKSTART.md).
