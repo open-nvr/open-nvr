@@ -8,6 +8,16 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`./start.sh prune`** removes image tags from earlier releases (every tag
+  of the release in `.env` is kept, in every flavour, plus the weights images
+  and anything a container still references) and dangling layers. An upgrade
+  pulled the new tags next to the old and nothing removed the old; a 55 GB
+  eMMC held 23 GB of images, nine of them unreachable.
+- **Disk-space preflight in `start.sh`.** Below 8 GB free where the images
+  land is a warning, below 2 GB an error, both naming `prune`. A full disk
+  was the failure that left half a stack behind: a model pull died with "no
+  space left on device", four containers stayed in Created, and every health
+  check read green around the hole.
 - **Detect on the substream, keep the evidence from the main stream.**
   Tier-0 already detects on a camera's low-res substream when one is
   stored (the ~5-10x decode saving), at the price of every crop, scene,
@@ -75,6 +85,17 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the missing file and the overlay. The startup line now carries
   `flavour=` and `providers=`, and the capacity warning says what the
   detector runs on.
+- **A plain `docker compose up -d <service>` no longer drops the hardware
+  flavour.** `start.sh` resolved `OPENNVR_ACCEL=auto` into overlays and
+  `DETECT_*` values that lived only in its own environment, so any compose
+  command run by hand in the checkout — adding the fake-camera rig,
+  restarting one app — rebuilt every service whose config differed as the
+  plain cpu image with no NPU device. `start.sh` now writes `COMPOSE_FILE`,
+  `COMPOSE_PROFILES`, the values the flavour filled and the device group ids
+  into `.env`, which Compose reads on every invocation; a value a previous
+  flavour filled is reset when the flavour changes, and an operator's own
+  value is never overwritten. Passing `-f` by hand still replaces the set
+  (README and `docs/HARDWARE.md` say so).
 - **Smart Doorbell no longer announces a known person as a stranger first.**
   Every polled frame used to be judged alone, so the side-on, blurred first
   frame of an approach fired `unknown_visitor` and the clean frame a second
