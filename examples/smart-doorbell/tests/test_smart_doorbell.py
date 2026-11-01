@@ -37,6 +37,9 @@ def _app_config(**overrides) -> AppConfig:
         cameras=[CameraConfig(camera_id="front-door", frame_url="http://example.invalid/snap.jpg")],
         poll_interval_seconds=0.0,
         request_timeout_seconds=1.0,
+        # These tests are about what a verdict DOES, not when it is
+        # reached: decide on the first frame. The hold has its own tests.
+        decision_hold_seconds=0.0,
     )
     for k, v in overrides.items():
         setattr(base, k, v)
@@ -478,7 +481,10 @@ def test_state_carries_the_views_the_manifest_declares(monkeypatch):
     doorbell, _, _ = _build_doorbell([_known_read(), _unknown_read()])
     monkeypatch.setattr(doorbell, "_face_admin",
                         lambda **kw: MagicMock(list_faces=lambda: {"faces": [{}, {}, {}]}))
-    doorbell.step(); doorbell.step()
+    advance = _ticking(doorbell)
+    # Two VISITS: a miss a second after Alice would be Alice turning her
+    # head, so the stranger comes after the visit gap.
+    doorbell.step(); advance(30); doorbell.step()
     state = doorbell.state_snapshot()
     from smart_doorbell import MANIFEST
     for view in MANIFEST.state_schema:
@@ -487,7 +493,7 @@ def test_state_carries_the_views_the_manifest_declares(monkeypatch):
             assert part in node, f"view {view.name!r}: path {view.path!r} missing from /state"
             node = node[part]
     assert state["enrolled_faces"] == 3
-    assert state["visits"] == {"known": 1, "unknown": 1}
+    assert state["visits"] == {"known": 1, "unknown": 1, "uncertain": 0}
     assert [r["camera_id"] for r in state["camera_health"]] == ["front-door"]
     assert state["camera_health"][0]["status"] == "ok"
     assert state["recent"][-1]["camera"] == "front-door"
@@ -894,3 +900,223 @@ def test_a_misspelled_severity_falls_back_and_says_so(caplog):
 
     # Case and whitespace are an operator typing, not an error.
     assert _severity("  CRITICAL ", "high") == "critical"
+
+
+# ── Deciding per visit, not per frame ─────────────────────────────
+#
+# The first frame of an approach is the worst one. These pin the rule
+# that stops it becoming a stranger alert: hold, match-ends-the-hold,
+# the near-miss band, the quality gate, and the upgrade in place.
+
+
+def _miss(similarity=None, bbox=(80, 60, 220, 220), confidence=0.9) -> FaceRead:
+    return FaceRead(face_detected=True, recognized=False, similarity=similarity,
+                    face_bbox=bbox, confidence=confidence, threshold=0.5,
+                    correlation_id="cid-1")
+
+
+def _ticking(doorbell):
+    """A clock the test moves. Each call to ``advance`` is a second."""
+    t = [1000.0]
+    doorbell._clock = lambda: t[0]
+
+    def advance(seconds: float = 1.0) -> None:
+        t[0] += seconds
+    return advance
+
+
+def test_a_miss_is_held_not_announced():
+    """One bad frame is not a stranger. With the default hold nothing
+    fires on it; the visit is open and waiting."""
+    cfg = _app_config(decision_hold_seconds=4.0)
+    doorbell, _, dispatcher = _build_doorbell([_miss()], config=cfg)
+    _ticking(doorbell)
+    doorbell.step()
+    dispatcher.dispatch.assert_not_called()
+    assert doorbell.state_snapshot()["open_visits"] == 1
+
+
+def test_a_match_during_the_hold_is_the_only_announcement():
+    """Side-on at 0.45, then a clean match: the name, once. No stranger
+    first — the thing this whole change exists to stop."""
+    cfg = _app_config(decision_hold_seconds=4.0)
+    doorbell, _, dispatcher = _build_doorbell(
+        [_miss(similarity=0.45), _known_read(person_id="alice")], config=cfg)
+    advance = _ticking(doorbell)
+    doorbell.step(); advance(); doorbell.step()
+    assert dispatcher.dispatch.call_count == 1
+    alert = dispatcher.dispatch.call_args.args[0]
+    assert alert.alert_type == "known_visitor"
+    assert "supersedes" not in alert.evidence
+    state = doorbell.state_snapshot()
+    assert state["visits"] == {"known": 1, "unknown": 0, "uncertain": 0}
+    assert state["stranger_gallery"] == []
+    assert [v["name"] for v in state["recent"]] == ["Alice Smith"]
+
+
+def test_a_stranger_is_announced_when_the_hold_runs_out():
+    """Nobody enrolled came close for four seconds: a stranger, from the
+    best frame, even though no frame arrived on the tick that decided."""
+    cfg = _app_config(decision_hold_seconds=4.0)
+    reads = [_miss(similarity=0.10, bbox=(0, 0, 50, 50)),
+             _miss(similarity=0.12, bbox=(0, 0, 160, 160)), None, None, None]
+    doorbell, _, dispatcher = _build_doorbell(reads, config=cfg)
+    advance = _ticking(doorbell)
+    for _ in range(4):
+        doorbell.step(); advance()
+        dispatcher.dispatch.assert_not_called()
+    doorbell.step()
+    assert dispatcher.dispatch.call_count == 1
+    alert = dispatcher.dispatch.call_args.args[0]
+    assert alert.alert_type == "unknown_visitor"
+    # Decided from the LARGER face, not the first one.
+    assert alert.evidence["face_bbox"] == [0, 0, 160, 160]
+    assert doorbell.state_snapshot()["visits"]["unknown"] == 1
+
+
+def test_the_hold_runs_out_without_a_frame():
+    """The camera stopped answering mid-visit. The verdict is still
+    reached: a hold is time, not frames."""
+    cfg = _app_config(decision_hold_seconds=4.0)
+    doorbell, _, dispatcher = _build_doorbell([_miss(similarity=0.1)], config=cfg)
+    advance = _ticking(doorbell)
+    doorbell.step()
+
+    class _Dead:
+        def fetch(self) -> bytes:
+            raise RuntimeError("camera gone")
+    doorbell._frame_sources["front-door"] = _Dead()
+    advance(4.0)
+    doorbell.step()
+    assert dispatcher.dispatch.call_count == 1
+
+
+def test_a_near_miss_is_recorded_not_alerted():
+    """Nearest enrolled face at 0.45 against a 0.5 threshold, for the
+    whole hold: that is Alice seen badly, not a stranger. On the wall so
+    the missing angle can be enrolled; no alert; counted as uncertain."""
+    cfg = _app_config(decision_hold_seconds=4.0, unknown_score=0.35)
+    doorbell, _, dispatcher = _build_doorbell(
+        [_miss(similarity=0.45), _miss(similarity=0.30), None], config=cfg)
+    advance = _ticking(doorbell)
+    doorbell.step(); advance(); doorbell.step(); advance(4.0); doorbell.step()
+    dispatcher.dispatch.assert_not_called()
+    state = doorbell.state_snapshot()
+    assert state["visits"] == {"known": 0, "unknown": 0, "uncertain": 1}
+    assert state["stranger_gallery"] == [] or state["stranger_gallery"][0].get("uncertain") is True
+    line = state["recent"][-1]
+    assert line["uncertain"] is True and line["level"] == "medium" and line["name"] is None
+
+
+def test_the_band_can_be_switched_off():
+    cfg = _app_config(decision_hold_seconds=0.0, unknown_score=0.0)
+    doorbell, _, dispatcher = _build_doorbell([_miss(similarity=0.49)], config=cfg)
+    doorbell.step()
+    assert dispatcher.dispatch.call_args.args[0].alert_type == "unknown_visitor"
+
+
+def test_small_or_unsure_faces_do_not_open_a_visit():
+    """A 30-pixel face at the edge of the frame, or one the detector
+    only half believed, is not evidence of anybody."""
+    cfg = _app_config(decision_hold_seconds=0.0)
+    doorbell, _, dispatcher = _build_doorbell(
+        [_miss(bbox=(0, 0, 30, 30)), _miss(confidence=0.4)], config=cfg)
+    doorbell.step(); doorbell.step()
+    dispatcher.dispatch.assert_not_called()
+    assert doorbell.state_snapshot()["open_visits"] == 0
+
+
+def test_a_match_is_never_gated():
+    """The adapter matched above the threshold; a small face that IS
+    Alice is still Alice."""
+    cfg = _app_config(decision_hold_seconds=0.0)
+    read = dataclasses.replace(_known_read(), face_bbox=(0, 0, 20, 20), confidence=0.3)
+    doorbell, _, dispatcher = _build_doorbell([read], config=cfg)
+    doorbell.step()
+    assert dispatcher.dispatch.call_count == 1
+
+
+def test_an_older_adapter_without_the_numbers_still_works():
+    """No similarity, no confidence on the wire: the gate passes what it
+    was not told, and a miss is a plain stranger."""
+    cfg = _app_config(decision_hold_seconds=0.0)
+    doorbell, _, dispatcher = _build_doorbell([_unknown_read()], config=cfg)
+    doorbell.step()
+    assert dispatcher.dispatch.call_args.args[0].alert_type == "unknown_visitor"
+
+
+def test_a_late_match_upgrades_the_stranger_in_place():
+    """Hold set to 0 (or a slow walker): the stranger went out, then the
+    face matched. The name goes out saying which alert it supersedes,
+    the tile comes off the wall, the feed line is corrected, and the
+    counters move from stranger to known. No second ring."""
+    cfg = _app_config(decision_hold_seconds=0.0, dedup_window_seconds=60.0)
+    doorbell, _, dispatcher = _build_doorbell(
+        [_miss(similarity=0.2), _known_read(person_id="alice")], config=cfg)
+    advance = _ticking(doorbell)
+    frame = _real_jpeg()
+
+    class _Src:
+        def fetch(self) -> bytes:
+            return frame
+    doorbell._frame_sources["front-door"] = _Src()
+
+    doorbell.step()
+    first = dispatcher.dispatch.call_args.args[0]
+    assert first.alert_type == "unknown_visitor"
+    assert first.evidence["chime"]["ring"] is True
+    assert len(doorbell.state_snapshot()["stranger_gallery"]) == 1
+
+    advance(); doorbell.step()
+    assert dispatcher.dispatch.call_count == 2
+    second = dispatcher.dispatch.call_args.args[0]
+    assert second.alert_type == "known_visitor"
+    assert second.evidence["supersedes"] == first.alert_id
+    assert f"supersedes:{first.alert_id}" in second.tags
+    assert second.evidence["chime"]["ring"] is False
+    assert "already rang" in second.evidence["chime"]["reason"]
+
+    state = doorbell.state_snapshot()
+    assert state["stranger_gallery"] == []
+    assert state["visits"] == {"known": 1, "unknown": 0, "uncertain": 0}
+    assert len(state["recent"]) == 1
+    line = state["recent"][0]
+    assert line["name"] == "Alice Smith" and line["corrected"] is True
+
+
+def test_an_upgrade_is_not_deduped_but_a_repeat_is():
+    """Alice was announced 10 s ago on this door. A stranger visit that
+    turns out to be Alice is still corrected — new information is never
+    deduped — while Alice again, plainly, is."""
+    cfg = _app_config(decision_hold_seconds=0.0, dedup_window_seconds=60.0,
+                      visit_gap_seconds=2.0)
+    reads = [_known_read(person_id="alice"), None, None,
+             _miss(similarity=0.2), _known_read(person_id="alice"),
+             _known_read(person_id="alice")]
+    doorbell, _, dispatcher = _build_doorbell(reads, config=cfg)
+    advance = _ticking(doorbell)
+    for _ in range(6):
+        doorbell.step(); advance()
+    kinds = [c.args[0].alert_type for c in dispatcher.dispatch.call_args_list]
+    assert kinds == ["known_visitor", "unknown_visitor", "known_visitor"]
+    assert "supersedes" in dispatcher.dispatch.call_args_list[-1].args[0].evidence
+
+
+def test_a_second_person_at_the_door_is_a_second_visit():
+    cfg = _app_config(decision_hold_seconds=4.0)
+    doorbell, _, dispatcher = _build_doorbell(
+        [_known_read(person_id="alice"), _known_read(person_id="bob", name="Bob")],
+        config=cfg)
+    advance = _ticking(doorbell)
+    doorbell.step(); advance(); doorbell.step()
+    names = [c.args[0].evidence["name"] for c in dispatcher.dispatch.call_args_list]
+    assert names == ["Alice Smith", "Bob"]
+
+
+def test_the_deciding_knobs_apply_live():
+    doorbell, _, _ = _build_doorbell([])
+    doorbell.on_config_update({"decision_hold_seconds": 2.5, "unknown_score": 0.4,
+                               "min_face_px": 64, "visit_gap_seconds": 20})
+    d = doorbell.state_snapshot()["decision"]
+    assert d["hold_seconds"] == 2.5 and d["unknown_score"] == 0.4
+    assert d["min_face_px"] == 64 and d["gap_seconds"] == 20.0
