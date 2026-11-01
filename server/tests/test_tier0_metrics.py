@@ -94,6 +94,8 @@ ENFORCE_TEXT = "\n".join([
     'gate_suppressions_total{camera="cam1",reason="stationary"} 20',
     "# TYPE tier0_process_cpu_percent gauge",
     "tier0_process_cpu_percent 42.5",
+    "# TYPE tier0_detector_backend gauge",
+    'tier0_detector_backend{backend="ort",requested="QNNExecutionProvider(htp), CPUExecutionProvider",effective="CPUExecutionProvider"} 1',
     "# TYPE tier0_process_resident_memory_bytes gauge",
     "tier0_process_resident_memory_bytes 123456789",
     "# TYPE tier1_dispatch_total counter",
@@ -436,3 +438,30 @@ def test_decode_config_survives_a_malformed_thread_count():
     (cam,) = snap["cameras"]
     assert cam["decode"]["threads"] == 0        # degraded, not a 500
     assert cam["decode"]["fast"] is True
+
+
+def test_backend_row_shows_an_accelerator_fallback():
+    """The dashboard's one question about the detector: is the accelerator
+    it asked for the one doing the work? The fixture requests QNN on the HTP
+    and runs on CPU — the pipeline-recreated-without-its-NPU case."""
+    r = reduce_metrics(parse_prometheus_text(ENFORCE_TEXT))
+    b = r["backend"]
+    assert b["backend"] == "ort"
+    assert b["requested"].startswith("QNNExecutionProvider(htp)")
+    assert b["effective"] == "CPUExecutionProvider"
+    assert b["accelerated"] is False and b["fallback"] is True
+
+
+def test_backend_row_accelerated_and_plain_cpu():
+    text = ENFORCE_TEXT.replace(
+        'effective="CPUExecutionProvider"} 1', 'effective="QNNExecutionProvider, CPUExecutionProvider"} 1')
+    b = reduce_metrics(parse_prometheus_text(text))["backend"]
+    assert b["accelerated"] is True and b["fallback"] is False
+    # nothing requested: CPU is not a fallback, it is the plan
+    text = ENFORCE_TEXT.replace(
+        'requested="QNNExecutionProvider(htp), CPUExecutionProvider"', 'requested=""')
+    b = reduce_metrics(parse_prometheus_text(text))["backend"]
+    assert b["accelerated"] is False and b["fallback"] is False
+    # no info-metric at all (an older pipeline): absent, not an error
+    text = "\n".join(l for l in ENFORCE_TEXT.splitlines() if "tier0_detector_backend" not in l)
+    assert reduce_metrics(parse_prometheus_text(text))["backend"] is None

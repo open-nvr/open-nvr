@@ -18,6 +18,15 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   was the failure that left half a stack behind: a model pull died with "no
   space left on device", four containers stayed in Created, and every health
   check read green around the hole.
+- **A Detection chip on the dashboard's health bar.** The detect-pipeline
+  sat in Created for an hour on a test box while every chip read green,
+  and later ran on CPU after being rebuilt without its NPU while the bar
+  said the same. The bar now asks core's Tier-0 scrape: unreachable is an
+  outage (alarms, apps and search ride on it), no frames is a warning,
+  and an accelerator requested but not in use shows **CPU fallback**; a
+  healthy pipeline reads `16/16 · NPU`. The scrape (`/ai-models/tier0-metrics`)
+  gains a `backend` block with the request, the effective providers and
+  `fallback`.
 - **Detect on the substream, keep the evidence from the main stream.**
   Tier-0 already detects on a camera's low-res substream when one is
   stored (the ~5-10x decode saving), at the price of every crop, scene,
@@ -96,6 +105,17 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   flavour filled is reset when the flavour changes, and an operator's own
   value is never overwritten. Passing `-f` by hand still replaces the set
   (README and `docs/HARDWARE.md` say so).
+- **Camera agent: a selected camera no longer breaks the LLM's cached
+  prompt prefix.** The UI's selected camera went in as a second system
+  message; Ollama collates system messages ahead of the tool schemas, so
+  every turn with a camera selected re-prefilled ~4k tokens (measured:
+  1,267 of 4,958 reused, 288 s of eight ARM cores). The hint now rides in
+  the user turn with the clock and the router's hint. The pre-warm records
+  a fingerprint of what it cached; a turn whose prefix differs logs which
+  part (system prompt or tool schemas) and marks the trace; a tool rebuild
+  that changes the prefix re-warms it; the voice pipeline keeps the clock
+  out of the system prompt too. A caller whose camera scope differs from
+  the full roster still misses, and the warning now says so.
 - **Smart Doorbell no longer announces a known person as a stranger first.**
   Every polled frame used to be judged alone, so the side-on, blurred first
   frame of an approach fired `unknown_visitor` and the clean frame a second
