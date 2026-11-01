@@ -248,7 +248,7 @@ async def test_real_pipeline_ignores_backchannel_and_yields_to_an_addressed_phra
     cfg.turn_stop_timeout_secs = 2.0
     rt = types.SimpleNamespace(cfg=cfg, whisper=Whisper(), ollama=Ollama(), piper=Piper(),
                                tool_definitions=[], tool_handlers={},
-                               build_system_prompt=lambda: "You are the camera agent.",
+                               build_system_prompt=lambda clock=True: "You are the camera agent.",
                                interruption_log=__import__("collections").deque(maxlen=50))
     core, _context = ca.build_core_processors(rt)
 

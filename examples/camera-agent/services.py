@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, AsyncGenerator
+from typing import Callable, Any, AsyncGenerator
 
 # Pipecat frame + service imports.
 #
@@ -203,6 +203,20 @@ class OpenNvrWhisperSTT(SegmentedSTTService):
 # ── LLM: Ollama via OpenNVR adapter, with tool calling ─────────────
 
 
+def with_clock_in_user_turn(messages: list[dict[str, Any]],
+                            clock_line: Callable[[], str] | None) -> list[dict[str, Any]]:
+    """The per-turn clock, in front of the LAST user message — the one
+    message rendered after the system+tools prefix Ollama caches. A clock
+    in the system prompt changed every minute and re-prefilled ~4k tokens
+    on every voice turn. The context's own list is left alone; history
+    keeps the bare words."""
+    if not clock_line or not messages or messages[-1].get("role") != "user":
+        return messages
+    last = dict(messages[-1])
+    last["content"] = f"[{clock_line()}]\n\n{last.get('content') or ''}"
+    return messages[:-1] + [last]
+
+
 class OpenNvrOllamaLLM(LLMService):
     """Bridges Pipecat's LLM contract to the Ollama adapter's
     OpenAI-style chat_completion task.
@@ -232,9 +246,11 @@ class OpenNvrOllamaLLM(LLMService):
         temperature: float = 0.4,
         max_tokens: int = 256,
         max_tool_iterations: int = 4,
+        clock_line: Callable[[], str] | None = None,
     ) -> None:
         super().__init__()
         self._client = client
+        self._clock_line = clock_line
         self._tools = list(tools)
         self._tool_handlers = dict(tool_handlers)
         self._temperature = temperature
@@ -261,7 +277,7 @@ class OpenNvrOllamaLLM(LLMService):
     async def _handle_context(self, context: LLMContext) -> None:
         # Snapshot the conversation messages; Pipecat's context
         # aggregator owns the canonical list.
-        messages = list(context.get_messages())
+        messages = with_clock_in_user_turn(list(context.get_messages()), self._clock_line)
         logger.info("LLM _handle_context fired with %d messages", len(messages))
 
         # Emit the "LLM is thinking" bracket so downstream TTS knows

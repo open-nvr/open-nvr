@@ -3549,6 +3549,30 @@ class CameraAgentRuntime:
         _viewer_safe = {"list_apps", "app_status", "recent_app_alerts", "list_people"}
         self.viewer_tool_definitions = base + [
             t for t in control if t["function"]["name"] in _viewer_safe]
+        self._rewarm_if_prefix_changed()
+
+    def _rewarm_if_prefix_changed(self) -> None:
+        """The cached prompt prefix embeds the tool schemas. When they are
+        rebuilt into something different after the LLM was warmed — a
+        skill toggled, a camera added — warm the new prefix now, in the
+        background, rather than on the next caller's turn."""
+        warm = getattr(self, "_warm_prefix", None)
+        if not warm:
+            return
+        try:
+            now = _prefix_fingerprint(self.build_system_prompt(clock=False), self.tool_definitions)
+        except Exception:  # noqa: BLE001 — a fingerprint is not worth a crash
+            return
+        if now == warm:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        logger.info("camera-agent: the tool schemas or the system prompt changed since the "
+                    "LLM pre-warm (%s/%s → %s/%s); re-warming the prefix.", *warm, *now)
+        self._warmup_task = loop.create_task(
+            self._prewarm_llm(), name="camera-agent-llm-rewarm")
 
     _RING_BUILTIN_DEFAULTS = {"fire": "siren", "smoke": "siren",
                               "flame": "siren", "gas": "siren"}
@@ -5255,15 +5279,23 @@ class CameraAgentRuntime:
             # turns share the identical system+tools prefix, so even the FIRST
             # question skips the expensive cold prefill — not just the model
             # weight load. (KEEP_ALIVE=-1 keeps the cache resident.)
+            system = self.build_system_prompt(clock=False)
+            tools = self.tool_definitions
             await self.ollama.chat(
                 messages=[
-                    {"role": "system", "content": self.build_system_prompt(clock=False)},
+                    {"role": "system", "content": system},
                     {"role": "user", "content": "hello"},
                 ],
-                tools=self.tool_definitions,
+                tools=tools,
                 max_tokens=1,
             )
-            logger.info("camera-agent: LLM warm — first question will be fast.")
+            # What was cached, so a turn that arrives with a DIFFERENT prefix
+            # says so instead of silently paying the prefill again. Measured
+            # on a CPU host: 4,958 tokens cached, a turn reusing 1,267 of
+            # them, 288 s of all eight cores — and nothing in the log.
+            self._warm_prefix = _prefix_fingerprint(system, tools)
+            logger.info("camera-agent: LLM warm — first question will be fast "
+                        "(prefix %s/%s).", *self._warm_prefix)
         except Exception as exc:
             logger.warning(
                 "camera-agent: LLM pre-warm failed (%s); the first question "
@@ -5751,11 +5783,14 @@ def build_core_processors(runtime: CameraAgentRuntime, *, user_params: Any = Non
         tool_handlers=runtime.tool_handlers,
         temperature=runtime.cfg.llm_temperature,
         max_tokens=runtime.cfg.llm_max_tokens,
+        clock_line=getattr(runtime, "_clock_line", None),
     )
     tts = OpenNvrPiperTTS(client=runtime.piper)
 
+    # No clock in the system prompt (see _user_turn): the voice service
+    # puts it in the user turn, after the cached system+tools prefix.
     context = LLMContext(messages=[
-        {"role": "system", "content": runtime.build_system_prompt()},
+        {"role": "system", "content": runtime.build_system_prompt(clock=False)},
     ])
     aggregators = LLMContextAggregatorPair(
         context, user_params=user_params or build_user_turn_params(runtime.cfg, runtime),
@@ -7578,6 +7613,42 @@ def _user_turn(runtime: "CameraAgentRuntime", user_text: str, *,
     return f"{head}\n\n{user_text}"
 
 
+def _prefix_fingerprint(system_prompt: str, tools: Any) -> tuple[str, str]:
+    """Short hashes of the two parts of the prompt Ollama caches as one
+    prefix: the system text and the tool schemas rendered after it. Equal
+    tuples mean a cached prefill is reused; a differing part names what
+    changed."""
+    import hashlib
+    sys_h = hashlib.sha1((system_prompt or "").encode("utf-8")).hexdigest()[:10]
+    tools_h = hashlib.sha1(json.dumps(tools or [], sort_keys=True).encode("utf-8")).hexdigest()[:10]
+    return sys_h, tools_h
+
+
+def _note_prefix_cache(runtime: Any, system_prompt: str, tools: Any,
+                       trace: list[dict[str, Any]] | None) -> None:
+    """Say so when this turn's prefix is not the one the LLM was warmed
+    with. The prefill is the whole cost of a turn on a CPU host (16 tokens
+    a second idle, under 5 beside twenty cameras), and a miss used to look
+    exactly like a slow model."""
+    warm = getattr(runtime, "_warm_prefix", None)
+    if not warm:
+        return
+    now = _prefix_fingerprint(system_prompt, tools)
+    if now == warm:
+        return
+    changed = [name for name, a, b in (("system prompt", now[0], warm[0]),
+                                       ("tool schemas", now[1], warm[1])) if a != b]
+    what = " and ".join(changed)
+    logger.warning(
+        "converse: the %s differ from the pre-warmed prefix — Ollama re-prefills the "
+        "whole system+tools prefix for this turn (minutes on a CPU host). A "
+        "per-caller camera scope or a tier-specific toolset does this; the "
+        "selected camera, the router hint and the clock already ride in the "
+        "user turn.", what)
+    if trace is not None:
+        trace.append({"step": "prefix", "detail": f"changed: {what}", "ms": 0})
+
+
 class LLMTurnError(RuntimeError):
     """The LLM leg of a turn failed, with a message worth SHOWING.
 
@@ -7703,18 +7774,22 @@ async def _conversation_turn_body(
     tools = tool_definitions if tool_definitions is not None else runtime.tool_definitions
     cameras = [cam.camera_id for cam in runtime.visible_cameras()]
     # UI-selected camera: when the user doesn't name one, bias the model
-    # toward the camera the operator picked in the dropdown.
+    # toward the camera the operator picked in the dropdown. In the USER
+    # turn with the clock, never a second system message: Ollama collates
+    # every system message into the one leading block, BEFORE the tool
+    # schemas, so this one line in front of ~3.5k cached tokens re-prefilled
+    # the whole prefix on every turn that had a camera selected — measured:
+    # 1,267 of 4,958 tokens reused, 288 s on a CPU host.
+    turn_hints: list[str] = []
     if preferred_camera and preferred_camera in cameras:
-        messages.append({
-            "role": "system",
-            "content": (
-                f"The user is currently viewing camera '{preferred_camera}'. "
-                f"If they ask about a camera without naming one, assume they "
-                f"mean '{preferred_camera}'."
-            ),
-        })
+        turn_hints.append(
+            f"The user is currently viewing camera '{preferred_camera}'. If they "
+            f"ask about a camera without naming one, assume they mean "
+            f"'{preferred_camera}'.")
     messages.extend(history)
-    messages.append({"role": "user", "content": _user_turn(runtime, user_text)})
+    messages.append({"role": "user", "content": _user_turn(
+        runtime, user_text, hint=" ".join(turn_hints) or None)})
+    _note_prefix_cache(runtime, messages[0]["content"], tools, trace)
     # The question itself, for tools that decide by it (face matching only
     # when somebody asked WHO — tools.search_history). Task-local: a
     # background task's or a scheduled report's turn does not overwrite
@@ -7820,7 +7895,8 @@ async def _conversation_turn_body(
         assert messages[-1]["role"] == "user"
         messages[-1] = {"role": "user", "content": _user_turn(
             runtime, user_text,
-            hint=f"This question most likely needs the {decision.hint} tool.")}
+            hint=" ".join(turn_hints + [
+                f"This question most likely needs the {decision.hint} tool."]))}
 
     if not routed:
         for iteration in range(max_iterations):
