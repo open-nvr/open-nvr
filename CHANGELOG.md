@@ -26,6 +26,18 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The fake-camera rig can publish a `<name>-sub` substream per clip
   (`FAKECAM_SUBSTREAM=360`), which `register_fake_cameras.py` stores as the
   camera's `substream_url`, so the whole path is testable without a camera.
+- **A camera's substream is found and verified when the camera is added.**
+  Tier-0 only detects on a STORED substream, and a camera added with its
+  main URL had none unless somebody typed it. On creation core now tries
+  the device's own ONVIF sub profile, then the vendor-convention URL
+  (Hikvision/Uniview `/102`, Dahua/CP Plus `subtype=1`), probes each with
+  ffprobe and stores the first that answers (`services/substream_discovery.py`).
+  A guess the camera refuses is never stored; a device-reported sub that
+  could not be checked is, because the pipeline falls back to the main
+  stream if it turns out dead. Same on every hardware flavour: a CPU,
+  Qualcomm or Pi box detects on the cheap stream from the first minute; an
+  Intel or NVIDIA box with hardware decode keeps the main stream by the
+  existing `auto` tap policy.
 
 - **`opennvr-app ai try`: a workflow's Look step on your own pictures.**
   Write the step as it goes in a workflow file, point it at snapshots and

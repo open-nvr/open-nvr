@@ -333,6 +333,34 @@ def _reject_external_camera_hosts(camera_create) -> None:
             )
 
 
+async def _discover_substream_for_create(camera_create):
+    """Store the camera's substream on creation when one can be found AND
+    answers (services.substream_discovery): the device's ONVIF profiles
+    first, then the vendor-convention URL derived from the main one. This
+    is what lets Tier-0 detect on the cheap stream from the first minute
+    on every hardware flavour, with evidence still cut from the main
+    stream. Best-effort: nothing found or no network means the camera is
+    added exactly as before, on its main stream."""
+    from services.substream_discovery import discover_substream
+
+    try:
+        found = await discover_substream(
+            camera_create.rtsp_url, camera_create.ip_address,
+            camera_create.username, camera_create.password,
+        )
+    except Exception:
+        camera_logger.debug("substream discovery failed for camera %s",
+                            camera_create.name, exc_info=True)
+        return camera_create
+    if found is None:
+        return camera_create
+    camera_logger.info(
+        "camera %s: substream discovered via %s (%s) — Tier-0 will detect on it",
+        camera_create.name, found.source, found.resolution,
+    )
+    return camera_create.model_copy(update={"substream_url": found.url})
+
+
 @router.post("/", response_model=CameraResponse)
 async def create_camera(
     camera_create: CameraCreate,
@@ -506,6 +534,14 @@ async def create_camera_checked(
                 onvif_port,
                 control_scheme,
             )
+
+    # The camera's substream, found and verified rather than typed. Only
+    # when the caller gave none (the ONVIF-resolved branch above already
+    # stores the device's own), and only when this call may touch the
+    # network (``probe``). The main stream's host is the only host dialled,
+    # and it passed the internal-host guard above like every other probe.
+    if probe and camera_create.rtsp_url and not camera_create.substream_url:
+        camera_create = await _discover_substream_for_create(camera_create)
 
     # Keep the stored RTSP port in step with the URL that will actually be
     # pulled. `port` defaults to 554, so a camera added with an explicit URL on
