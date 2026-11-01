@@ -129,6 +129,20 @@ def test_stored_substream_serves_the_sub_tap(client):
     assert cam["source"] == "mediamtx-sub"
 
 
+def test_the_sub_tap_comes_with_the_main_tap_for_evidence(client):
+    """Detecting on the sub is the CPU saving; the evidence — the crop the
+    operator is shown, the plate the OCR reads — should still come from the
+    main stream. So beside a sub frame_url core offers the main tap as
+    evidence_url, and only there: a camera already on the main tap has
+    nothing better to offer."""
+    cams = _cams(client)
+    sub = cams["cam1"]
+    assert sub["source"] == "mediamtx-sub"
+    assert sub["evidence_url"], sub
+    assert sub["evidence_url"].split("?")[0] == sub["frame_url"].split("?")[0][: -len("-sub")]
+    assert cams["cam2"]["source"] == "mediamtx" and cams["cam2"]["evidence_url"] is None
+
+
 def test_derivable_but_unstored_url_keeps_the_main_tap(client):
     """A Hikvision-SHAPED main URL is only a guess about the substream —
     the camera may have its sub stream disabled, and an always-on

@@ -323,7 +323,10 @@ class DetectPipeline:
         # bgr is passed so the tracker can retain each track's best-frame crop
         # for Tier-1 dispatch (#10); None on frames with no detections.
         _t = time.monotonic()
-        tracks = self.tracker.update(dets, bgr, scanned_regions=regions)
+        tracks = self.tracker.update(
+            dets, bgr, scanned_regions=regions,
+            frame_ts=getattr(frame, "ts", None),   # the evidence lookup's key
+        )
         stages["track"] = time.monotonic() - _t
         return FrameResult(
             tracks, motion_boxes, regions, False,

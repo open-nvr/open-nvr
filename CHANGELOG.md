@@ -27,6 +27,41 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   healthy pipeline reads `16/16 · NPU`. The scrape (`/ai-models/tier0-metrics`)
   gains a `backend` block with the request, the effective providers and
   `fallback`.
+- **Detect on the substream, keep the evidence from the main stream.**
+  Tier-0 already detects on a camera's low-res substream when one is
+  stored (the ~5-10x decode saving), at the price of every crop, scene,
+  plate candidate and Tier-1 escalation being cut from the same 640x360
+  frame. The detect-pipeline now runs a second ffmpeg on the camera's MAIN
+  stream only while something is in front of the camera and cuts its
+  evidence from the main frame captured at the same moment as the detect
+  frame (`evidence.py`; a main frame further than
+  `DETECT_EVIDENCE_MAX_SKEW_S` away is refused and the detect crop kept).
+  Core offers the main tap as `evidence_url` beside a sub `frame_url`;
+  `DETECT_EVIDENCE_STREAM=detect` restores the old behaviour.
+  `tier0_evidence_crops_total{source}` and `tier0_evidence_active` show
+  what each camera's evidence came from. A camera moving between the main
+  and sub taps (an operator storing a substream URL) now restarts its
+  worker on the next reconcile tick instead of on its next ffmpeg respawn.
+  The fake-camera rig can publish a `<name>-sub` substream per clip
+  (`FAKECAM_SUBSTREAM=360`), which `register_fake_cameras.py` stores as the
+  camera's `substream_url`, so the whole path is testable without a camera.
+- **A camera's substream is found and verified when the camera is added.**
+  Tier-0 only detects on a STORED substream, and a camera added with its
+  main URL had none unless somebody typed it. On creation core now tries
+  the device's own ONVIF sub profile, then the vendor-convention URL
+  (Hikvision/Uniview `/102`, Dahua/CP Plus `subtype=1`), probes each with
+  ffprobe and stores the first that answers (`services/substream_discovery.py`).
+  A guess the camera refuses is never stored; a device-reported sub that
+  could not be checked is, because the pipeline falls back to the main
+  stream if it turns out dead. The same runs when a camera's main URL or
+  credentials are edited and no substream is stored, and once per startup
+  for every active camera still without one (`services/substream_sweep.py`,
+  background, three at a time, trust-zone hosts only), with the `-sub`
+  path provisioned on each hit — so an existing install converges on
+  substream detection without anyone revisiting its cameras. Same on every
+  hardware flavour: a CPU, Qualcomm or Pi box detects on the cheap stream
+  from the first minute; an Intel or NVIDIA box with hardware decode keeps
+  the main stream by the existing `auto` tap policy.
 
 - **`opennvr-app ai try`: a workflow's Look step on your own pictures.**
   Write the step as it goes in a workflow file, point it at snapshots and
@@ -37,6 +72,17 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Storing a substream URL on an existing camera now creates its `-sub`
+  MediaMTX path at once.** The update took the "main path unchanged" branch
+  of the provisioner, which skipped the substream entirely, while the
+  Tier-0 tap listing already handed `cam-N-sub` to the detect-pipeline:
+  that camera's detection died with "path not configured" every tick
+  until the next core restart. The unchanged branch now refreshes the sub
+  path like the replace branch does.
+- **A detect-pipeline worker whose substream tap cannot be opened detects
+  on the main stream instead of going dark.** With the main URL in hand
+  (core's `evidence_url`) it probes that, warns that it is decoding full
+  resolution, and runs no evidence source; without one it fails as before.
 - **The detect-pipeline refuses QNN on the HTP, out loud, when the DSP node
   is not in its container.** ORT's QNN plugin lists an HTP device on any
   Qualcomm host and compiles the graph without opening it, so a pipeline

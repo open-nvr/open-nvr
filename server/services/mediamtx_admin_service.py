@@ -1327,6 +1327,25 @@ class MediaMtxAdminService:
                                 message=f"MediaMTX path config unchanged; replace skipped: {name}",
                                 extra_data={"path": name},
                             )
+                            # The MAIN path is unchanged; the SUB may not be.
+                            # An operator storing a substream URL on a camera
+                            # whose main URL stayed the same landed here, and
+                            # the sub path was never created — while the
+                            # Tier-0 tap listing already handed `{name}-sub`
+                            # to the detect-pipeline, which then found "path
+                            # not configured" every tick until the next core
+                            # restart. Same best-effort refresh as the
+                            # replace branch below (add, or replace in place).
+                            try:
+                                await MediaMtxAdminService._provision_substream(
+                                    camera_id, camera_ip, config
+                                )
+                            except Exception:  # pragma: no cover - defensive
+                                mediamtx_logger.warning(
+                                    f"substream refresh raised for {name}; main path unaffected",
+                                    extra={"camera_id": camera_id, "path": name,
+                                           "action": "mediamtx.substream_provision_error"},
+                                )
                             return {
                                 "status": "ok",
                                 "path": name,

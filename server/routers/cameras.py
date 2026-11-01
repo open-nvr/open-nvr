@@ -333,6 +333,65 @@ def _reject_external_camera_hosts(camera_create) -> None:
             )
 
 
+async def _discover_substream_for_create(camera_create):
+    """Store the camera's substream on creation when one can be found AND
+    answers (services.substream_discovery): the device's ONVIF profiles
+    first, then the vendor-convention URL derived from the main one. This
+    is what lets Tier-0 detect on the cheap stream from the first minute
+    on every hardware flavour, with evidence still cut from the main
+    stream. Best-effort: nothing found or no network means the camera is
+    added exactly as before, on its main stream."""
+    from services.substream_discovery import discover_substream
+
+    try:
+        found = await discover_substream(
+            camera_create.rtsp_url, camera_create.ip_address,
+            camera_create.username, camera_create.password,
+        )
+    except Exception:
+        camera_logger.debug("substream discovery failed for camera %s",
+                            camera_create.name, exc_info=True)
+        return camera_create
+    if found is None:
+        return camera_create
+    camera_logger.info(
+        "camera %s: substream discovered via %s (%s) — Tier-0 will detect on it",
+        camera_create.name, found.source, found.resolution,
+    )
+    return camera_create.model_copy(update={"substream_url": found.url})
+
+
+async def _discover_substream_for_update(camera) -> str | None:
+    """The update-path twin of the above: the camera row's main URL and
+    credentials, guarded on the URL's host being internal. Returns the URL
+    to store, or None."""
+    from urllib.parse import urlsplit
+
+    from services.substream_discovery import discover_substream
+
+    try:
+        host = urlsplit(camera.rtsp_url or "").hostname
+    except ValueError:
+        return None
+    if not _host_is_internal(host):
+        return None
+    try:
+        found = await discover_substream(
+            camera.rtsp_url, camera.ip_address, camera.username, camera.password,
+        )
+    except Exception:
+        camera_logger.debug("substream discovery failed for camera %s",
+                            getattr(camera, "id", "?"), exc_info=True)
+        return None
+    if found is None:
+        return None
+    camera_logger.info(
+        "camera %s: substream discovered via %s (%s) — Tier-0 will detect on it",
+        getattr(camera, "id", "?"), found.source, found.resolution,
+    )
+    return found.url
+
+
 @router.post("/", response_model=CameraResponse)
 async def create_camera(
     camera_create: CameraCreate,
@@ -506,6 +565,14 @@ async def create_camera_checked(
                 onvif_port,
                 control_scheme,
             )
+
+    # The camera's substream, found and verified rather than typed. Only
+    # when the caller gave none (the ONVIF-resolved branch above already
+    # stores the device's own), and only when this call may touch the
+    # network (``probe``). The main stream's host is the only host dialled,
+    # and it passed the internal-host guard above like every other probe.
+    if probe and camera_create.rtsp_url and not camera_create.substream_url:
+        camera_create = await _discover_substream_for_create(camera_create)
 
     # Keep the stored RTSP port in step with the URL that will actually be
     # pulled. `port` defaults to 554, so a camera added with an explicit URL on
@@ -1321,6 +1388,20 @@ async def update_camera(
             camera.substream_url = replace_credentials(
                 camera.substream_url, camera.username, camera.password
             )
+
+        # A main URL or credentials that changed, and no substream stored:
+        # find one, as creation does. Only when the caller did not set
+        # substream_url themselves (an explicit null is their decision), and
+        # only for a host inside the trust zone — the update route never
+        # dialled the camera before, and must not start dialling anything.
+        creds_changed = (camera.username != before_username
+                         or camera.password != before_password)
+        if (camera.rtsp_url and not camera.substream_url
+                and "substream_url" not in update_fields
+                and (camera.rtsp_url != before_rtsp_url or creds_changed)):
+            found_sub = await _discover_substream_for_update(camera)
+            if found_sub:
+                camera.substream_url = found_sub
 
         # Re-point `port` whenever the stream URL moves, for the same reason the
         # create path derives it: MediaMTX pulls `rtsp_url`, so that URL's port

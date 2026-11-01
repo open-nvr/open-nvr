@@ -245,14 +245,28 @@ async def test_replace_skips_when_config_unchanged(monkeypatch):
         staticmethod(lambda: "http://stub.mediamtx.invalid"),
     )
 
+    # The main path being unchanged says nothing about the SUB: an operator
+    # storing a substream URL on a camera whose main URL stayed the same
+    # lands exactly here, and the -sub path must still be (re)provisioned —
+    # core's Tier-0 tap listing hands it out the moment the URL is stored.
+    subs = []
+
+    async def _record_sub(camera_id, camera_ip, config):
+        subs.append((camera_id, config.get("substream_url")))
+    monkeypatch.setattr(MediaMtxAdminService, "_provision_substream",
+                        staticmethod(_record_sub))
+
     result = await MediaMtxAdminService.replace_path(
         camera_id=3,
         camera_ip="192.168.0.103",
-        config={"source_url": "rtsp://192.168.0.103:554/stream"},
+        config={"source_url": "rtsp://192.168.0.103:554/stream",
+                "substream_url": "rtsp://192.168.0.103:554/stream2"},
     )
     assert posts["n"] == 0
     assert result.get("status") == "ok"
     assert result.get("unchanged") is True
+    assert subs == [(3, "rtsp://192.168.0.103:554/stream2")], \
+        "an unchanged main path must still refresh the substream path"
 
 
 @pytest.mark.asyncio

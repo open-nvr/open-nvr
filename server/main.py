@@ -442,6 +442,15 @@ async def lifespan(app: FastAPI):
                     main_logger.info(
                         f"[MTX] Background provisioning completed: {provisioned_count} success, {failed_count} failed"
                     )
+                    # Cameras with no substream stored: find one (ONVIF, then
+                    # the vendor rule, each probed) and provision its -sub
+                    # path, so Tier-0 detects on the cheap stream without
+                    # anyone revisiting cameras added before this existed or
+                    # while they were offline. Background, a few at a time.
+                    from core.background_tasks import spawn_background as _spawn
+                    from services.substream_sweep import run_startup_sweep
+
+                    _spawn(run_startup_sweep(), name="substream-discovery")
 
                 finally:
                     db.close()
