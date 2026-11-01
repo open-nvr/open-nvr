@@ -34,10 +34,15 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ffprobe and stores the first that answers (`services/substream_discovery.py`).
   A guess the camera refuses is never stored; a device-reported sub that
   could not be checked is, because the pipeline falls back to the main
-  stream if it turns out dead. Same on every hardware flavour: a CPU,
-  Qualcomm or Pi box detects on the cheap stream from the first minute; an
-  Intel or NVIDIA box with hardware decode keeps the main stream by the
-  existing `auto` tap policy.
+  stream if it turns out dead. The same runs when a camera's main URL or
+  credentials are edited and no substream is stored, and once per startup
+  for every active camera still without one (`services/substream_sweep.py`,
+  background, three at a time, trust-zone hosts only), with the `-sub`
+  path provisioned on each hit — so an existing install converges on
+  substream detection without anyone revisiting its cameras. Same on every
+  hardware flavour: a CPU, Qualcomm or Pi box detects on the cheap stream
+  from the first minute; an Intel or NVIDIA box with hardware decode keeps
+  the main stream by the existing `auto` tap policy.
 
 - **`opennvr-app ai try`: a workflow's Look step on your own pictures.**
   Write the step as it goes in a workflow file, point it at snapshots and

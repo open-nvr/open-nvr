@@ -171,3 +171,73 @@ async def test_camera_create_stores_the_discovered_sub_and_leaves_the_rest_alone
         raise RuntimeError("network")
     monkeypatch.setattr(sd, "discover_substream", boom)
     assert (await cams._discover_substream_for_create(create)).substream_url is None
+
+
+# ── the update path and the startup sweep ───────────────────────────
+
+class _Cam:
+    def __init__(self, id, rtsp_url, substream_url=None, ip="192.168.1.64",
+                 username="admin", password="pw"):
+        self.id, self.rtsp_url, self.substream_url = id, rtsp_url, substream_url
+        self.ip_address, self.username, self.password = ip, username, password
+
+
+@pytest.mark.asyncio
+async def test_update_discovery_is_guarded_on_the_url_host(monkeypatch):
+    import routers.cameras as cams
+    import services.substream_discovery as sd
+    calls = []
+
+    async def found(main, ip, u, p, **kw):
+        calls.append(main)
+        return DiscoveredSubstream(HIK_SUB, "vendor", True, 640, 360)
+    monkeypatch.setattr(sd, "discover_substream", found)
+    monkeypatch.setattr(cams, "_host_is_internal", lambda h: h == "192.168.1.64")
+    assert await cams._discover_substream_for_update(_Cam(1, HIK_MAIN)) == HIK_SUB
+    # an external host is never dialled, whatever the URL says
+    external = _Cam(2, "rtsp://u:p@8.8.8.8:554/Streaming/Channels/101", ip="8.8.8.8")
+    assert await cams._discover_substream_for_update(external) is None
+    assert calls == [HIK_MAIN]
+
+
+@pytest.mark.asyncio
+async def test_startup_sweep_tries_only_cameras_without_a_sub_and_stores_hits():
+    from services.substream_sweep import sweep_cameras
+    cams = [
+        _Cam(1, HIK_MAIN),                                  # found
+        _Cam(2, DAHUA_MAIN, ip="192.168.1.2"),              # nothing found
+        _Cam(3, HIK_MAIN, substream_url=HIK_SUB),           # already has one
+        _Cam(4, None),                                      # no main URL
+        _Cam(5, "rtsp://u:p@8.8.8.8/Streaming/Channels/101", ip="8.8.8.8"),  # outside
+    ]
+    tried, stored = [], []
+
+    async def discover(main, ip, u, p):
+        tried.append(ip)
+        if main == HIK_MAIN:
+            return DiscoveredSubstream(HIK_SUB, "vendor", True, 640, 360)
+        return None
+
+    async def store(cam, found):
+        stored.append((cam.id, found.url))
+    counts = await sweep_cameras(cams, discover=discover, store=store,
+                                 host_ok=lambda h: h in ("192.168.1.64", "192.168.1.2"))
+    assert sorted(tried) == ["192.168.1.2", "192.168.1.64"]
+    assert stored == [(1, HIK_SUB)]
+    assert counts == {"tried": 2, "found": 1, "skipped": 3}
+
+
+@pytest.mark.asyncio
+async def test_startup_sweep_survives_a_failing_discovery_and_store():
+    from services.substream_sweep import sweep_cameras
+
+    async def discover(main, ip, u, p):
+        if ip == "192.168.1.2":
+            raise RuntimeError("camera hung up")
+        return DiscoveredSubstream(HIK_SUB, "vendor", True, 640, 360)
+
+    async def store(cam, found):
+        raise RuntimeError("db down")
+    counts = await sweep_cameras([_Cam(1, HIK_MAIN), _Cam(2, DAHUA_MAIN, ip="192.168.1.2")],
+                                 discover=discover, store=store, host_ok=lambda h: True)
+    assert counts == {"tried": 2, "found": 0, "skipped": 0}

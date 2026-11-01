@@ -361,6 +361,37 @@ async def _discover_substream_for_create(camera_create):
     return camera_create.model_copy(update={"substream_url": found.url})
 
 
+async def _discover_substream_for_update(camera) -> str | None:
+    """The update-path twin of the above: the camera row's main URL and
+    credentials, guarded on the URL's host being internal. Returns the URL
+    to store, or None."""
+    from urllib.parse import urlsplit
+
+    from services.substream_discovery import discover_substream
+
+    try:
+        host = urlsplit(camera.rtsp_url or "").hostname
+    except ValueError:
+        return None
+    if not _host_is_internal(host):
+        return None
+    try:
+        found = await discover_substream(
+            camera.rtsp_url, camera.ip_address, camera.username, camera.password,
+        )
+    except Exception:
+        camera_logger.debug("substream discovery failed for camera %s",
+                            getattr(camera, "id", "?"), exc_info=True)
+        return None
+    if found is None:
+        return None
+    camera_logger.info(
+        "camera %s: substream discovered via %s (%s) — Tier-0 will detect on it",
+        getattr(camera, "id", "?"), found.source, found.resolution,
+    )
+    return found.url
+
+
 @router.post("/", response_model=CameraResponse)
 async def create_camera(
     camera_create: CameraCreate,
@@ -1357,6 +1388,20 @@ async def update_camera(
             camera.substream_url = replace_credentials(
                 camera.substream_url, camera.username, camera.password
             )
+
+        # A main URL or credentials that changed, and no substream stored:
+        # find one, as creation does. Only when the caller did not set
+        # substream_url themselves (an explicit null is their decision), and
+        # only for a host inside the trust zone — the update route never
+        # dialled the camera before, and must not start dialling anything.
+        creds_changed = (camera.username != before_username
+                         or camera.password != before_password)
+        if (camera.rtsp_url and not camera.substream_url
+                and "substream_url" not in update_fields
+                and (camera.rtsp_url != before_rtsp_url or creds_changed)):
+            found_sub = await _discover_substream_for_update(camera)
+            if found_sub:
+                camera.substream_url = found_sub
 
         # Re-point `port` whenever the stream URL moves, for the same reason the
         # create path derives it: MediaMTX pulls `rtsp_url`, so that URL's port
