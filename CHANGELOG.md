@@ -17,6 +17,17 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The detect-pipeline refuses QNN on the HTP, out loud, when the DSP node
+  is not in its container.** ORT's QNN plugin lists an HTP device on any
+  Qualcomm host and compiles the graph without opening it, so a pipeline
+  recreated without the Qualcomm overlay built a session that named QNN and
+  ran every node on CPU: 18 cameras "over capacity" with nothing saying why
+  (Ventuno Q, 2026-11-01). The node is checked before the plugin is
+  attached; without it the detector runs on the classic CPU list,
+  `tier0_detector_backend` shows `requested != effective`, and the log names
+  the missing file and the overlay. The startup line now carries
+  `flavour=` and `providers=`, and the capacity warning says what the
+  detector runs on.
 - **Camera agent: a selected camera no longer breaks the LLM's cached
   prompt prefix.** The UI's selected camera went in as a second system
   message; Ollama collates system messages ahead of the tool schemas, so
