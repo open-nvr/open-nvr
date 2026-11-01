@@ -38,13 +38,22 @@ class FaceRead:
     # the threshold. Implies ``face_detected``.
     recognized: bool
     # Filled in when ``recognized`` — the person_id / name /
-    # category / similarity from the face DB.
+    # category from the face DB.
     person_id: str | None = None
     name: str | None = None
     category: str | None = None
+    # Cosine similarity to the matched face when ``recognized``; to the
+    # NEAREST enrolled face when not (below the threshold by
+    # definition, and unnamed). ``None`` when nobody is enrolled or the
+    # adapter predates the field. The doorbell reads a near miss as
+    # "wait for a better frame", not "stranger".
     similarity: float | None = None
     # Pixel bbox of the face on the source frame, if reported.
     face_bbox: tuple[int, int, int, int] | None = None
+    # The detector's confidence in the face itself (not the match).
+    # Low on a blurred half-face at the edge of the frame — the frames
+    # a doorbell should not decide from. ``None`` from older adapters.
+    confidence: float | None = None
     # Threshold that was applied. Useful in audit / debug.
     threshold: float | None = None
     # Adapter-side correlation ID; threaded through to the alert
@@ -139,16 +148,20 @@ def _parse_recognition_response(
 
     bbox = _parse_bbox(result.get("face_bbox"))
     threshold = _coerce_float(result.get("threshold"))
+    confidence = _coerce_float(result.get("confidence"))
 
     if not result.get("recognized"):
         # Adapter reports either "no face detected" or "face below
         # threshold." Both surface as face_detected based on whether
         # there's a bbox — bbox present means "face seen, just not
-        # matched."
+        # matched." A miss may carry the nearest similarity and the
+        # detector's confidence; both are optional on the wire.
         return FaceRead(
             face_detected=bbox is not None,
             recognized=False,
+            similarity=_coerce_float(result.get("similarity")) if bbox else None,
             face_bbox=bbox,
+            confidence=confidence if bbox else None,
             threshold=threshold,
             correlation_id=correlation_id,
             raw=dict(result),
@@ -166,6 +179,7 @@ def _parse_recognition_response(
         category=_coerce_str(result.get("category")),
         similarity=_coerce_float(result.get("similarity")),
         face_bbox=bbox,
+        confidence=confidence,
         threshold=threshold,
         correlation_id=correlation_id,
         raw=dict(result),

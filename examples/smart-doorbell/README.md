@@ -30,7 +30,10 @@ web UI.
                                              │ FaceRead
                                              ▼
                               ┌───────────────────────────────────┐
-                              │ classify: family / known / unknown │
+                              │ visits.py: one verdict per VISIT  │
+                              │   match → the name, at once       │
+                              │   no match for the hold → stranger │
+                              │   near miss → unclear, not alerted │
                               └──────────────┬────────────────────┘
                                              │
                                              ▼
@@ -46,6 +49,41 @@ web UI.
 A single `correlation_id` flows through every step so KAI-C's audit
 log joins the chain end-to-end: alert → KAI-C inference event →
 adapter audit line.
+
+### One verdict per visit
+
+The first frame of an approach is the worst one: side-on, blurred,
+half out of shot. Judged alone it is "no match", and a doorbell that
+announced a stranger on it would then, one clean frame later, announce
+the same person by name. Everything that does this well decides per
+visit — Frigate scores a tracked person over the whole track, Double
+Take retries up to ten frames before calling anyone unknown, the
+Dahua and Hikvision recorders pick one best shot and compare once —
+and so does this app:
+
+* A face opens a **visit** on that camera. A match ends it at once:
+  nobody waits to be greeted.
+* No match by the end of `decision_hold_seconds` (4 s) and the visit
+  is decided from its **best frame** — the largest face it saw.
+* If the nearest enrolled face came within `unknown_score` of the
+  threshold on any frame, the verdict is **unclear**: a tile on the
+  wall, a line in the feed, no alert. That is a known person seen
+  badly far more often than a stranger who resembles one, and the
+  tile is where the missing angle gets enrolled from.
+* Frames below the quality gate (`min_face_px`, `min_face_confidence`)
+  neither open nor decide a visit.
+* A visit already announced as a stranger that matches later is
+  **upgraded**: the `known_visitor` alert carries
+  `evidence.supersedes` (the stranger alert's id) and a
+  `supersedes:<id>` tag, the tile comes off the wall, the feed line is
+  corrected, and the bell does not ring twice. A relay that can
+  replace a notification (ntfy, Home Assistant) should key on it.
+
+Set `decision_hold_seconds: 0` to decide on the first frame and rely
+on corrections, if four seconds is too long for a gate. The InsightFace
+adapter from 0.1.11 returns `similarity` and `confidence` on a miss;
+with an older adapter the band and the gate pass what they are not
+told, and the hold alone still removes the false strangers.
 
 ## Why the REST-only enrollment matters
 
@@ -178,8 +216,9 @@ Real-world failure modes the example does NOT yet handle:
   `recognition_threshold` is a global knob, not per-person.
 * **Aggressive face-occlusion** (sunglasses, scarf, hat). The
   adapter may detect the face but recognition similarity drops
-  below threshold → falls back to UNKNOWN. Set `dedup_window`
-  appropriately so a family member walking past doesn't flood you.
+  below threshold. The near-miss band usually turns that into an
+  "unclear" tile rather than a stranger alert; a full scarf will
+  still read as unknown.
 * **Bad enrollment photos.** A frontal, well-lit JPEG is what
   InsightFace expects. A side profile gives a poor embedding and
   the person won't match consistently.
@@ -370,6 +409,7 @@ examples/smart-doorbell/
 ├── face_recognition_pipeline.py   Testable pipeline (no daemon loop)
 ├── alerts.py                      Alert envelope + stdout/webhook/NATS dispatchers
 ├── chime.py                       When the door rings, and with what
+├── visits.py                      One verdict per visit: hold, band, gate, upgrade
 ├── visit_log.py                   Who came to the door, kept across restarts
 ├── frame_sources.py               file:// + http(s):// frame fetchers
 ├── config.example.yml             Operator config with every option
@@ -390,7 +430,8 @@ PYTHONPATH=. pytest tests/
 
 31 tests total. The tests stub the recognition client (no KAI-C
 needed) and exercise the parser, dedup window, severity routing,
-snapshot attachment.
+snapshot attachment, and the per-visit decision (hold, near-miss band,
+quality gate, upgrade in place).
 
 ## Why this is a template
 

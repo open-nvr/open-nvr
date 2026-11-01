@@ -75,7 +75,11 @@ type Person = {
   last_seen?: number | null
 }
 
-type Stranger = { id: string; image: string; label: string; time: number }
+type Stranger = {
+  id: string; image: string; label: string; time: number
+  /** The nearest enrolled face came close: probably someone known, seen badly. Not alerted. */
+  uncertain?: boolean
+}
 
 type Visit = {
   message: string
@@ -85,6 +89,10 @@ type Visit = {
   name?: string | null
   category?: string | null
   similarity?: number | null
+  /** A near miss the door recorded but did not alert on. */
+  uncertain?: boolean
+  /** Announced as a stranger first, then matched — one visit, one line, now with the name. */
+  corrected?: boolean
 }
 
 type CameraHealth = { camera_id: string; status: string; last_frame_age_s: number | null; error?: string | null }
@@ -552,7 +560,14 @@ export function People() {
                       <img src={s.image} alt="unrecognised face" className="w-full h-20 object-cover" loading="lazy" />
                       <div className="px-1.5 py-1 text-[11px] leading-tight">
                         <div className="truncate">{s.label}</div>
-                        <div className="text-[var(--text-dim)]">{ago(s.time)}</div>
+                        <div className="flex items-center gap-1 text-[var(--text-dim)]">
+                          <span>{ago(s.time)}</span>
+                          {s.uncertain && (
+                            // A near miss: the door held its verdict and did not alert.
+                            // Enrolling from this tile is what fixes the next one.
+                            <span className="ml-auto text-[var(--warning)]" title="Looked like someone enrolled but did not match. Enrol this angle.">unclear</span>
+                          )}
+                        </div>
                       </div>
                     </button>
                   ))}
@@ -573,10 +588,11 @@ export function People() {
                 <ul className="divide-y divide-[var(--border)] text-sm">
                   {visits.map((v, i) => (
                     <li key={i} className="flex items-center gap-2 py-1.5">
-                      <span className={`font-medium ${v.level === 'high' ? 'text-[var(--danger)]' : 'text-[var(--ok)]'}`}>
-                        {v.name ?? 'Unknown visitor'}
+                      <span className={`font-medium ${v.level === 'high' ? 'text-[var(--danger)]' : v.uncertain ? 'text-[var(--warning)]' : 'text-[var(--ok)]'}`}>
+                        {v.name ?? (v.uncertain ? 'Unclear face' : 'Unknown visitor')}
                       </span>
                       {v.category && <Badge variant={CATEGORY_VARIANT[v.category] ?? 'neutral'}>{v.category}</Badge>}
+                      {v.corrected && <Badge variant="neutral" title="Flagged as a stranger first, then recognised">corrected</Badge>}
                       <span className="text-[var(--text-dim)] truncate">{v.camera}</span>
                       {typeof v.similarity === 'number' && (
                         <span className="text-xs text-[var(--text-dim)]">{v.similarity.toFixed(2)}</span>

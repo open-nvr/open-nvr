@@ -211,6 +211,7 @@ def _config(**overrides) -> AppConfig:
                               frame_url="http://example.invalid/snap.jpg")],
         poll_interval_seconds=0.0,
         request_timeout_seconds=1.0,
+        decision_hold_seconds=0.0,
     )
     for k, v in overrides.items():
         setattr(base, k, v)

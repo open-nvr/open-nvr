@@ -6,6 +6,25 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Smart Doorbell no longer announces a known person as a stranger first.**
+  Every polled frame used to be judged alone, so the side-on, blurred first
+  frame of an approach fired `unknown_visitor` and the clean frame a second
+  later fired the name. The doorbell now decides per visit (`visits.py`): a
+  face opens a visit, a match ends it at once, and only a visit that runs
+  `decision_hold_seconds` (4 s) without a match is called a stranger, from
+  its largest face. A miss whose nearest enrolled face came within
+  `unknown_score` (0.35) of the threshold is recorded as "unclear" on the
+  wall and not alerted; faces narrower than `min_face_px` or below
+  `min_face_confidence` are not decided from. A stranger that matches later
+  is upgraded in place: the `known_visitor` alert carries
+  `evidence.supersedes` and a `supersedes:<id>` tag, the tile leaves the
+  wall, the feed line is corrected, and the bell does not ring twice. All
+  five knobs are catalog params and apply live. Needs ai-adapter 0.1.11 for
+  the band and the gate (the InsightFace miss reply now carries
+  `similarity` and `confidence`); the hold works with any adapter.
+
 ## [0.1.10] — 2026-10-31
 
 ### Added

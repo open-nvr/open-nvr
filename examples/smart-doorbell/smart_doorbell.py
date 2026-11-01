@@ -25,7 +25,12 @@ What stays here — deliberately:
 * the recognised/unknown severity routing, the snapshot-for-strangers
   policy, and the dedup ledger (a plain dict keyed by
   ``(camera, person-or-unknown-bucket)`` — its shape is pinned by this
-  app's tests).
+  app's tests);
+* the per-VISIT decision (``visits.py``): a face opens a visit, a match
+  ends it at once, and only a visit that ran its hold without a match
+  is called a stranger — from its best frame, and never when the
+  nearest enrolled face came close. A stranger that matches later is
+  upgraded in place rather than announced twice.
 
 Run as a daemon:
     python smart_doorbell.py daemon --config config.yml
@@ -80,9 +85,18 @@ from face_recognition_pipeline import (
     FaceRecognitionPipelineConfig,
     RecognitionClient,
 )
-from chime import ChimePolicy
+from chime import ChimeDecision, ChimePolicy
 from frame_sources import FrameSource, FrameSourceError, build_frame_source
 from visit_log import VisitLog
+from visits import (
+    DEFAULT_GAP_SECONDS,
+    DEFAULT_HOLD_SECONDS,
+    DEFAULT_MIN_FACE_CONFIDENCE,
+    DEFAULT_MIN_FACE_PX,
+    DEFAULT_UNKNOWN_SCORE,
+    Decision,
+    VisitTracker,
+)
 from opennvr_app_sdk import (
     Action, AlertType, AppManifest, FrameApp, KaiCClient, Param, StateView,
 )
@@ -163,6 +177,32 @@ MANIFEST = AppManifest(
         Param("recognition_threshold", float, default=DEFAULT_RECOGNITION_THRESHOLD),
         Param("dedup_window_seconds", float, default=60.0,
               description="Per-(camera, person) re-fire suppression; 0 fires every read."),
+        # WHEN A FACE BECOMES A VERDICT. The first frame of an approach
+        # is the worst one; these decide how long the door waits for a
+        # better one before calling anybody a stranger.
+        Param("decision_hold_seconds", float, default=DEFAULT_HOLD_SECONDS,
+              label="Hold before calling a face unknown", group="Deciding",
+              description=(
+                  "Seconds a visit keeps looking for a match before it is "
+                  "decided from its best frame. A match ends the wait at "
+                  "once. 0 decides on the first frame, with corrections "
+                  "after.")),
+        Param("unknown_score", float, default=DEFAULT_UNKNOWN_SCORE,
+              label="Near-miss floor", group="Deciding",
+              description=(
+                  "A miss whose nearest enrolled face scored at or above "
+                  "this (and below the threshold) is recorded as unclear, "
+                  "not alerted as a stranger. 0 alerts on every miss.")),
+        Param("min_face_px", int, default=DEFAULT_MIN_FACE_PX,
+              label="Smallest face to judge", group="Deciding", advanced=True,
+              description="Faces narrower than this many pixels are not decided from."),
+        Param("min_face_confidence", float, default=DEFAULT_MIN_FACE_CONFIDENCE,
+              label="Least detector confidence to judge", group="Deciding",
+              advanced=True,
+              description="Faces the detector scored below this are not decided from."),
+        Param("visit_gap_seconds", float, default=DEFAULT_GAP_SECONDS,
+              label="Gap that ends a visit", group="Deciding", advanced=True,
+              description="No face for this long and the next face is a new visit."),
         Param("attach_snapshot_for_unknowns", bool, default=True,
               description="Embed a base64 JPEG in unknown-face alerts only."),
         Param("snapshot_max_bytes", int, default=_DEFAULT_SNAPSHOT_MAX_BYTES,
@@ -354,6 +394,16 @@ class AppConfig:
     # alert within this window. Set 0 to fire every read.
     dedup_window_seconds: float = 60.0
 
+    # The per-visit decision (see visits.py). A face opens a visit; a
+    # match ends it; a visit that runs its hold without one is decided
+    # from its best frame — a stranger, or merely unclear when the
+    # nearest enrolled face came within the band.
+    decision_hold_seconds: float = DEFAULT_HOLD_SECONDS
+    unknown_score: float = DEFAULT_UNKNOWN_SCORE
+    min_face_px: int = DEFAULT_MIN_FACE_PX
+    min_face_confidence: float = DEFAULT_MIN_FACE_CONFIDENCE
+    visit_gap_seconds: float = DEFAULT_GAP_SECONDS
+
     # If True, embed a base64 JPEG snapshot in UNKNOWN-face alert
     # envelopes only. A small downstream relay (see alerts-subscriber/)
     # can then forward the photo to Telegram / ntfy / Discord without
@@ -455,6 +505,14 @@ def load_config(path: str | Path) -> AppConfig:
             raw.get("recognition_threshold", DEFAULT_RECOGNITION_THRESHOLD)
         ),
         dedup_window_seconds=float(raw.get("dedup_window_seconds", 60.0)),
+        decision_hold_seconds=max(0.0, float(
+            raw.get("decision_hold_seconds", DEFAULT_HOLD_SECONDS))),
+        unknown_score=max(0.0, float(raw.get("unknown_score", DEFAULT_UNKNOWN_SCORE))),
+        min_face_px=max(0, int(raw.get("min_face_px", DEFAULT_MIN_FACE_PX))),
+        min_face_confidence=max(0.0, float(
+            raw.get("min_face_confidence", DEFAULT_MIN_FACE_CONFIDENCE))),
+        visit_gap_seconds=max(0.0, float(
+            raw.get("visit_gap_seconds", DEFAULT_GAP_SECONDS))),
         attach_snapshot_for_unknowns=bool(
             raw.get("attach_snapshot_for_unknowns", True)
         ),
@@ -738,12 +796,23 @@ class SmartDoorbell(FrameApp):
         # "last actually-fired", never refreshes on suppression, and
         # its shape is pinned by this app's test suite.
         self._last_fired: dict[tuple[str, Any], float] = {}
+        # Open visits and the rule that decides them. Fed every face
+        # and the time; what it returns is what gets published.
+        self._tracker = VisitTracker(
+            hold_seconds=self.config.decision_hold_seconds,
+            unknown_score=self.config.unknown_score,
+            min_face_px=self.config.min_face_px,
+            min_face_confidence=self.config.min_face_confidence,
+            gap_seconds=self.config.visit_gap_seconds,
+        )
+        # Monotonic, and an attribute so a test can move it.
+        self._clock = time.monotonic
         # Rolling feed of the most recent visitors — powers the "Recent
         # visitors" log on the app's dashboard. Kept lightweight (no
         # embedded snapshots) since /state is polled frequently.
         self._recent: deque[dict[str, Any]] = deque(maxlen=25)
         # Visits since start, by outcome — the two headline numbers.
-        self._visits: dict[str, int] = {"known": 0, "unknown": 0}
+        self._visits: dict[str, int] = {"known": 0, "unknown": 0, "uncertain": 0}
         self._started_at = time.time()
         # Thumbnails of the latest strangers for the gallery view — small
         # (see _thumbnail_data_uri) because /state is polled every few s.
@@ -911,13 +980,16 @@ class SmartDoorbell(FrameApp):
 
     # ── The rule (one camera × one fetched frame) ──────────────────
 
+    def _cam(self, camera_id: str) -> CameraConfig:
+        # A YAML camera, or — connected to OpenNVR — a camera picked for
+        # this app in the catalog, which needs no YAML entry at all.
+        return self._cameras_by_id.get(camera_id) or CameraConfig(
+            camera_id=camera_id, frame_url="opennvr:core")
+
     def on_frame(
         self, camera_id: str, frame_bytes: bytes
     ) -> Iterable[Alert] | None:
-        # A YAML camera, or — connected to OpenNVR — a camera picked for
-        # this app in the catalog, which needs no YAML entry at all.
-        cam = self._cameras_by_id.get(camera_id) or CameraConfig(
-            camera_id=camera_id, frame_url="opennvr:core")
+        cam = self._cam(camera_id)
         correlation_id = uuid.uuid4().hex
         # First frame after a start: put yesterday's visitors back on the
         # feed and the wall before this one joins them.
@@ -930,27 +1002,80 @@ class SmartDoorbell(FrameApp):
             # example app — keep this one focused on the doorbell.)
             return None
 
+        # The frame goes to the visit, and the VISIT decides. A match
+        # comes straight back; a miss comes back when the hold runs
+        # out, as a stranger or merely unclear; a miss that was already
+        # announced and matches now comes back as an upgrade.
+        now = self._clock()
+        decisions = self._tracker.observe(
+            cam.camera_id, read, frame_bytes, now=now, wall=time.time())
+        decisions += self._tracker.settle(now)
+        for decision in decisions:
+            self._publish(decision, now=now)
+        return None
+
+    def handle_tick(self) -> list[Alert]:
+        fired = super().handle_tick()
+        # A hold runs out whether or not the camera answered this tick,
+        # and whether or not the visitor is still in shot.
+        now = self._clock()
+        for decision in self._tracker.settle(now):
+            self._publish(decision, now=now)
+        return fired
+
+    # ── Publishing a decision ────────────────────────────────────────
+
+    def _publish(self, decision: Decision, *, now: float) -> None:
+        """Act on one visit decision: alert, ring, feed, wall, history.
+
+        ``known`` and ``unknown`` are the two announcements. ``uncertain``
+        is a record and a wall tile with no alert — a known face seen
+        badly far more often than a stranger, and the tile is where the
+        missing angle gets enrolled from. ``upgrade`` is a name for a
+        visit already announced as a stranger: the alert goes out
+        saying which one it supersedes, the stranger tile comes down,
+        the feed line is corrected, and the bell does not ring twice.
+        """
+        visit, read, frame = decision.visit, decision.read, decision.obs.frame
+        cam = self._cam(visit.camera_id)
+        if decision.kind == "uncertain":
+            self._record_uncertain(cam, visit, read, frame)
+            return
+
+        upgrade = decision.kind == "upgrade"
+        if upgrade:
+            self._retract_stranger(visit)
+
         bucket = read.person_id or self._UNKNOWN_BUCKET
         plate_key = (cam.camera_id, bucket)
-        now = time.monotonic()
-        if self.config.dedup_window_seconds > 0:
+        if self.config.dedup_window_seconds > 0 and not upgrade:
+            # A correction is new information and is never deduped;
+            # a repeat of the same verdict is.
             last = self._last_fired.get(plate_key)
             if last is not None and (now - last) < self.config.dedup_window_seconds:
-                return None
-            self._last_fired[plate_key] = now
+                return
+        self._last_fired[plate_key] = now
 
         # Decided BEFORE the alert is built, because the decision rides
         # in the envelope: whatever actually rings — a relay into ntfy,
         # a Home Assistant automation, a smart speaker — reads it from
         # there, and reads the reason when nothing rang.
-        chime = self._chime.decide(
-            key=f"{cam.camera_id}|{read.person_id or '?'}",
-            category=read.category, recognized=read.recognized, now=now,
-        )
+        if upgrade and visit.rang:
+            # The visitor was rung for as a stranger seconds ago. The
+            # name is a correction, not a second caller.
+            chime = ChimeDecision(
+                self._chime.tone_for(read.category, read.recognized), False,
+                "already rang for this visit")
+        else:
+            chime = self._chime.decide(
+                key=f"{cam.camera_id}|{read.person_id or '?'}",
+                category=read.category, recognized=read.recognized, now=now,
+            )
         self._last_chime = {**chime.as_dict(), "at": time.time(),
                             "camera": cam.camera_id}
         if chime.ring:
             self._rings += 1
+            visit.rang = True
 
         attach_snapshot = (
             self.config.attach_snapshot_for_unknowns and not read.recognized
@@ -958,19 +1083,22 @@ class SmartDoorbell(FrameApp):
         snapshot_bytes: bytes | None = None
         if attach_snapshot:
             cap = max(0, int(self.config.snapshot_max_bytes))
-            if cap == 0 or len(frame_bytes) <= cap:
-                snapshot_bytes = frame_bytes
+            if cap == 0 or len(frame) <= cap:
+                snapshot_bytes = frame
             else:
                 logger.warning(
                     "camera=%s: snapshot %d bytes exceeds snapshot_max_bytes=%d; "
                     "dropping from alert envelope correlation_id=%s",
-                    cam.camera_id, len(frame_bytes), cap, read.correlation_id,
+                    cam.camera_id, len(frame), cap, read.correlation_id,
                 )
-        alert = self._build_alert(cam, read, snapshot_bytes, chime)
+        alert = self._build_alert(
+            cam, read, snapshot_bytes, chime,
+            supersedes=visit.alert_id if upgrade else None)
         self.dispatcher.dispatch(alert)
+        visit.alert_id = alert.alert_id
         now_wall = time.time()
         display = read.name or read.person_id or "?"
-        self._recent.append({
+        entry = {
             "message": (f"{display} recognised" if read.recognized
                         else "Unknown visitor")
                        + f" at {cam.camera_id}",
@@ -980,7 +1108,23 @@ class SmartDoorbell(FrameApp):
             "name": display if read.recognized else None,
             "category": read.category if read.recognized else None,
             "similarity": read.similarity,
-        })
+            "visit": visit.key,
+        }
+        if upgrade:
+            # The line the stranger got is corrected in place: one visit,
+            # one line, now with the name. It keeps the visit's time.
+            line = next((e for e in self._recent if e.get("visit") == visit.key), None)
+            if line is not None:
+                entry["time"] = line.get("time", now_wall)
+                line.clear()
+                line.update(entry, corrected=True)
+            else:
+                self._recent.append({**entry, "corrected": True})
+            counted = visit.extra.pop("counted", None)
+            if counted in self._visits and self._visits[counted] > 0:
+                self._visits[counted] -= 1
+        else:
+            self._recent.append(entry)
         self._visits["known" if read.recognized else "unknown"] += 1
         if read.recognized and read.person_id:
             self._last_seen[read.person_id] = now_wall
@@ -988,24 +1132,9 @@ class SmartDoorbell(FrameApp):
         thumb: str | None = None
         sid: str | None = None
         if not read.recognized:
-            # One full-frame decode: the 320 px crop, then the ~190 px wall
-            # thumbnail from the crop — a face, not a whole porch, in a
-            # tile 120 px wide.
-            crop = _face_crop_jpeg(frame_bytes, read.face_bbox)
-            thumb = _thumbnail_data_uri(crop if crop is not None else frame_bytes)
-            if thumb is not None:
-                self._stranger_seq += 1
-                sid = f"s{self._stranger_seq}"
-                if crop is not None:
-                    self._stranger_crops[sid] = crop
-                self._stranger_gallery.append({
-                    "id": sid, "image": thumb, "label": cam.camera_id, "time": now_wall,
-                })
-                # Keep the crop store in step with the wall (deque drops the
-                # oldest silently).
-                live = {g["id"] for g in self._stranger_gallery}
-                for old in [k for k in self._stranger_crops if k not in live]:
-                    self._stranger_crops.pop(old, None)
+            visit.extra["counted"] = "unknown"
+            sid, thumb, crop = self._add_stranger_tile(cam, read, frame, now_wall)
+            visit.tile_id = sid
 
         # Durable, and LAST: the alert has already gone out and the
         # dashboard is already right. A doorbell that failed to ring
@@ -1016,7 +1145,75 @@ class SmartDoorbell(FrameApp):
         # (/health's alerts_fired) — the base loop can't see it because
         # on_frame returns None.
         self._contract_note_alerts(1)
-        return None
+
+    def _record_uncertain(self, cam: CameraConfig, visit: Any, read: FaceRead,
+                          frame: bytes) -> None:
+        """A visit that ran its hold with a near miss and no match.
+        Recorded and put on the wall, so the operator can enrol the
+        angle that was missing; not alerted, because "somebody who
+        looks a lot like Alice" is not a stranger at the door."""
+        now_wall = time.time()
+        self._visits["uncertain"] += 1
+        visit.extra["counted"] = "uncertain"
+        sid, thumb, crop = self._add_stranger_tile(
+            cam, read, frame, now_wall, uncertain=True)
+        visit.tile_id = sid
+        self._recent.append({
+            "message": f"Unclear face at {cam.camera_id}",
+            "time": now_wall,
+            "level": "medium",
+            "camera": cam.camera_id,
+            "name": None,
+            "category": None,
+            "similarity": read.similarity,
+            "uncertain": True,
+            "visit": visit.key,
+        })
+        logger.info("camera=%s: unclear face (nearest %s, threshold %s) — "
+                    "recorded, not alerted", cam.camera_id,
+                    f"{read.similarity:.2f}" if read.similarity is not None else "n/a",
+                    read.threshold)
+        self._remember(cam, read, now_wall, visit_id=sid, thumb=thumb, crop=crop)
+
+    def _add_stranger_tile(self, cam: CameraConfig, read: FaceRead, frame: bytes,
+                           at: float, *, uncertain: bool = False
+                           ) -> tuple[str | None, str | None, bytes | None]:
+        """The wall tile for a face nobody matched. One full-frame decode:
+        the 320 px crop, then the ~190 px wall thumbnail from the crop —
+        a face, not a whole porch, in a tile 120 px wide."""
+        crop = _face_crop_jpeg(frame, read.face_bbox)
+        thumb = _thumbnail_data_uri(crop if crop is not None else frame)
+        if thumb is None:
+            return None, None, crop
+        self._stranger_seq += 1
+        sid = f"s{self._stranger_seq}"
+        if crop is not None:
+            self._stranger_crops[sid] = crop
+        tile = {"id": sid, "image": thumb, "label": cam.camera_id, "time": at}
+        if uncertain:
+            tile["uncertain"] = True
+        self._stranger_gallery.append(tile)
+        # Keep the crop store in step with the wall (deque drops the
+        # oldest silently).
+        live = {g["id"] for g in self._stranger_gallery}
+        for old in [k for k in self._stranger_crops if k not in live]:
+            self._stranger_crops.pop(old, None)
+        return sid, thumb, crop
+
+    def _retract_stranger(self, visit: Any) -> None:
+        """The visit has a name now; the stranger it was shown as goes."""
+        sid = visit.tile_id
+        if not sid:
+            return
+        visit.tile_id = None
+        kept = [g for g in self._stranger_gallery if g.get("id") != sid]
+        self._stranger_gallery.clear()
+        self._stranger_gallery.extend(kept)
+        self._stranger_crops.pop(sid, None)
+        try:
+            self._tiles.forget(sid)
+        except Exception:  # noqa: BLE001 — a tile is not worth a miss
+            logger.debug("stranger tile %s not forgotten", sid, exc_info=True)
 
     def _remember(self, cam: Any, read: Any, at: float, *,
                   visit_id: str | None, thumb: str | None,
@@ -1167,6 +1364,10 @@ class SmartDoorbell(FrameApp):
             "deduped_visitors_tracked": len(self._last_fired),
             "enrolled_faces": self._enrolled_count(),
             "visits": dict(self._visits),
+            # Visits still being decided, and the rule deciding them —
+            # "why did it take four seconds?" answered without a log.
+            "open_visits": len(self._tracker.open_visits),
+            "decision": self._tracker.settings(),
             # How the names this app wrote were attached (RFC-0003).
             # `nearest` climbing means it is seeing faces between
             # visits rather than during them, which is a tuning signal
@@ -1200,6 +1401,17 @@ class SmartDoorbell(FrameApp):
                 logger.info("recognition_threshold updated live: %.2f", thr)
         if "dedup_window_seconds" in config:
             self.config.dedup_window_seconds = float(config["dedup_window_seconds"])
+        for key, attr, cast in (
+            ("decision_hold_seconds", "hold_seconds", float),
+            ("unknown_score", "unknown_score", float),
+            ("min_face_px", "min_face_px", int),
+            ("min_face_confidence", "min_face_confidence", float),
+            ("visit_gap_seconds", "gap_seconds", float),
+        ):
+            if key in config:
+                value = max(cast(0), cast(config[key]))
+                setattr(self.config, key, value)
+                setattr(self._tracker, attr, value)
         if "attach_snapshot_for_unknowns" in config:
             self.config.attach_snapshot_for_unknowns = bool(config["attach_snapshot_for_unknowns"])
         if "snapshot_max_bytes" in config:
@@ -1586,6 +1798,7 @@ page. Threshold and re-fire window are edited in the config form and apply live.
         read: FaceRead,
         snapshot: bytes | None,
         chime: Any = None,
+        supersedes: str | None = None,
     ) -> Alert:
         kind = "unknown_visitor"
         if read.recognized:
@@ -1656,6 +1869,13 @@ page. Threshold and re-fire window are edited in the config form and apply live.
         if chime is not None:
             evidence["chime"] = chime.as_dict()
             tags.append(f"chime:{chime.tone}" if chime.ring else "chime:silent")
+        if supersedes:
+            # The same visit, announced as a stranger first. A relay that
+            # can replace a notification replaces it by this id; one that
+            # cannot at least says which alert this corrects.
+            evidence["supersedes"] = supersedes
+            tags.append(f"supersedes:{supersedes}")
+            description += " Supersedes the unknown-visitor alert for this visit."
 
         return Alert(
             severity=severity,
