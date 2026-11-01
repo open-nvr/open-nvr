@@ -17,6 +17,17 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Camera agent: a selected camera no longer breaks the LLM's cached
+  prompt prefix.** The UI's selected camera went in as a second system
+  message; Ollama collates system messages ahead of the tool schemas, so
+  every turn with a camera selected re-prefilled ~4k tokens (measured:
+  1,267 of 4,958 reused, 288 s of eight ARM cores). The hint now rides in
+  the user turn with the clock and the router's hint. The pre-warm records
+  a fingerprint of what it cached; a turn whose prefix differs logs which
+  part (system prompt or tool schemas) and marks the trace; a tool rebuild
+  that changes the prefix re-warms it; the voice pipeline keeps the clock
+  out of the system prompt too. A caller whose camera scope differs from
+  the full roster still misses, and the warning now says so.
 - **Smart Doorbell no longer announces a known person as a stranger first.**
   Every polled frame used to be judged alone, so the side-on, blurred first
   frame of an approach fired `unknown_visitor` and the clean frame a second
