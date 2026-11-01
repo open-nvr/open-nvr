@@ -38,6 +38,23 @@ export type CameraMaskBody = {
   labels: string[] | null
 }
 
+export type ObjectFilter = {
+  min_area?: number | null
+  max_area?: number | null
+  min_ratio?: number | null
+  max_ratio?: number | null
+  min_score?: number | null
+}
+export type DetectionSettings = {
+  fps?: number | null
+  motion_enabled?: boolean | null
+  motion_threshold?: number | null
+  motion_contour_area?: number | null
+  min_spawn_score?: number | null
+  stationary_interval?: number | null
+  object_filters?: Record<string, ObjectFilter> | null
+}
+
 export const cameraService = {
   // Streams
   getWhepUrl: (cameraId: number) => api.get(`/api/v1/streams/webrtc/${cameraId}`),
@@ -81,6 +98,12 @@ export const cameraService = {
     api.put(`/api/v1/cameras/${cameraId}/masks/${maskId}`, body),
   deleteCameraMask: (cameraId: number, maskId: number) =>
     api.delete(`/api/v1/cameras/${cameraId}/masks/${maskId}`),
+  // This camera's overrides of the detect-pipeline's global knobs. PUT
+  // replaces the whole record; {} clears every override.
+  getDetectionSettings: (cameraId: number) =>
+    api.get(`/api/v1/cameras/${cameraId}/detection-settings`),
+  putDetectionSettings: (cameraId: number, body: DetectionSettings) =>
+    api.put(`/api/v1/cameras/${cameraId}/detection-settings`, body),
   getCamera: (cameraId: number) => api.get(`/api/v1/cameras/${cameraId}`),
   // A single JPEG still of the camera's current view — backs the App
   // Catalog geometry editors (draw a zone/tripwire on the real scene).
