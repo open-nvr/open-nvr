@@ -230,6 +230,10 @@ def record_frame(
     masked = int(getattr(result, "masked_detections", 0) or 0)
     if masked:
         metrics.inc("tier0_object_masked_total", cam, value=float(masked))
+    # Per-label size/shape/score filters (tuning.py): same rule, never silent.
+    filtered = int(getattr(result, "filtered_detections", 0) or 0)
+    if filtered:
+        metrics.inc("tier0_object_filtered_total", cam, value=float(filtered))
     # Motion gate: the #373 deadline firing is the signal that the gate
     # cannot model this scene. It used to be invisible — the repeat WARN
     # is demoted to debug, so a gate feeding the detector 1.5% of frames

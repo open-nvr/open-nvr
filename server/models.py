@@ -280,6 +280,13 @@ class Camera(Base):
     # roster's ``analyze``). NULL = on: nullable so the additive column
     # self-heal can add it, and so every existing camera keeps detecting.
     detection_enabled = Column(Boolean, nullable=True, default=True)
+    # This camera's overrides of the pipeline's global DETECT_* knobs
+    # (services/detection_settings.py): analysis fps, motion gate, spawn
+    # score, stationary interval and per-label object filters. NULL / {} =
+    # inherit everything. Nullable so the additive column self-heal can
+    # add it. Handed to the detect-pipeline as ``detection`` in the
+    # camera-agent sources listing.
+    detection_settings = Column(JSON, nullable=True)
     # Where detections come from: NULL/'opennvr' (ours; native events are
     # history only), 'camera' (the camera's own analytics become alerts,
     # Tier-0 paused here) or 'both'. See services/native_analytics.py.
