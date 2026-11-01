@@ -142,11 +142,21 @@ def decode_args(hwaccel: HwAccel, *, device: str = "/dev/dri/renderD128",
 
 
 def scale_filter(hwaccel: HwAccel, *, width: int, height: int, fps: int) -> str:
-    """The ``-vf`` value that scales, downloads to system memory, and yields I420."""
-    if fps <= 0:
-        raise ValueError(f"fps must be positive, got {fps}")
+    """The ``-vf`` value that scales, downloads to system memory, and yields I420.
+
+    ``fps=0`` leaves the ``fps`` stage out: every decoded frame is passed
+    through at its own time. That is what a keyframe-only decode needs —
+    the ``fps`` filter would otherwise DUPLICATE each keyframe to fill
+    the rate, and a reader stamping frames on arrival would take a copy
+    of a seconds-old picture for a fresh one.
+    """
+    if fps < 0:
+        raise ValueError(f"fps must be positive or 0 (no rate filter), got {fps}")
+    template = _SCALE[hwaccel]
+    if fps == 0:
+        template = template.replace("fps={fps},", "").replace(",fps={fps}", "")
     return (
-        _SCALE[hwaccel]
+        template
         .replace("{w}", str(width))
         .replace("{h}", str(height))
         .replace("{fps}", str(fps))

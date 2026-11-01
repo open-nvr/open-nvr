@@ -83,9 +83,12 @@ def test_build_command_rejects_non_rtsp_url():
         build_decode_command("http://x/y", width=640, height=360, fps=5)
 
 
-def test_scale_rejects_nonpositive_fps():
+def test_scale_rejects_negative_fps_and_zero_means_no_rate_filter():
     with pytest.raises(ValueError):
-        scale_filter(HwAccel.CPU, width=640, height=360, fps=0)
+        scale_filter(HwAccel.CPU, width=640, height=360, fps=-1)
+    # 0 is a deliberate "every frame at its own time" (keyframe-only
+    # evidence), not a mistake — see test_fps_zero_leaves_the_rate_filter_out.
+    assert "fps=" not in scale_filter(HwAccel.CPU, width=640, height=360, fps=0)
 
 
 # ── decode-side frame skip (DETECT_DECODE_SKIP) ────────────────────────
@@ -310,3 +313,21 @@ def test_decode_command_carries_hwaccel_args_when_resolved():
     assert "-hwaccel" in cmd and cmd[cmd.index("-hwaccel") + 1] == "vaapi"
     assert "/dev/dri/renderD128" in cmd
     assert "scale_vaapi" in cmd[cmd.index("-vf") + 1]
+
+
+def test_fps_zero_leaves_the_rate_filter_out_on_every_backend():
+    """Keyframe-only evidence needs frames at their own time: an ``fps``
+    stage would fill the rate with duplicates of each keyframe."""
+    import pytest
+
+    from detect_pipeline.ffmpeg_presets import HwAccel, build_decode_command, scale_filter
+    for accel in HwAccel:
+        vf = scale_filter(accel, width=640, height=360, fps=0)
+        assert "fps=" not in vf, (accel, vf)
+        assert not vf.startswith(",") and ",," not in vf and not vf.endswith(","), (accel, vf)
+    assert scale_filter(HwAccel.CPU, width=640, height=360, fps=0) == "scale=640:360,format=yuv420p"
+    argv = build_decode_command("rtsp://m/cam-1", width=1920, height=1080, fps=0,
+                                decode_skip="nokey")
+    assert "nokey" in argv and "fps=" not in argv[argv.index("-vf") + 1]
+    with pytest.raises(ValueError):
+        scale_filter(HwAccel.CPU, width=640, height=360, fps=-1)

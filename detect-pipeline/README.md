@@ -175,7 +175,13 @@ quiet seconds → stop), and a main frame further than
 the detect frame's own crop, so a crop is never of the wrong moment.
 `tier0_evidence_crops_total{source="main"|"detect"}` says which stream
 each camera's evidence came from; `tier0_evidence_active` whether its main
-decode is running. `DETECT_EVIDENCE_STREAM=detect` turns it off. Core
+decode is running. `DETECT_EVIDENCE_STREAM=detect` turns it off.
+`DETECT_EVIDENCE_DECODE=nokey` decodes only the main stream's keyframes
+while active — roughly a tenth of the decode cost, the same `-skip_frame
+nokey` adaptive idle uses — at the price of a crop up to half a GOP (1–2 s
+on most cameras) from the detect frame; the skew window is widened to at
+least 2 s so the lookups still hit, and the `fps` filter is dropped so a
+keyframe is never duplicated and stamped as fresh. Core
 offers the main tap as `evidence_url` beside a sub `frame_url` (the
 `-sub` MediaMTX path), so this needs nothing but a stored substream URL.
 If the sub tap cannot be opened at all (the camera's second stream

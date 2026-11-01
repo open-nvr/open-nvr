@@ -392,6 +392,7 @@ class CameraWorker:
         evidence_fps: int = 5,                   # main-stream frames kept per second while active
         evidence_idle_after: float = 15.0,       # quiet seconds before the main decode stops
         evidence_max_skew_s: float = 0.35,       # a main frame further than this from the sub frame is refused
+        evidence_decode: str = "full",           # "full": every main frame while active; "nokey": keyframes only
         evidence_url_provider=None,              # freshest main-tap URL (its JWT rotates)
         evidence_source_factory=None,            # injectable for tests: () -> source with stream()/close()
     ) -> None:
@@ -401,6 +402,7 @@ class CameraWorker:
         self.evidence_fps = max(1, min(30, int(evidence_fps)))
         self.evidence_idle_after = evidence_idle_after
         self.evidence_max_skew_s = evidence_max_skew_s
+        self.evidence_decode = (evidence_decode or "full").strip().lower()
         self.evidence_url_provider = evidence_url_provider
         self._evidence_source_factory = evidence_source_factory
         self._evidence = None
@@ -558,6 +560,22 @@ class CameraWorker:
         )
         return src, w, h
 
+    #: Keyframe-only evidence yields one main frame per GOP (1–4 s on most
+    #: cameras), so the skew window must be at least half a typical GOP or
+    #: every lookup would be refused and the mode would silently equal
+    #: "detect". The operator's DETECT_EVIDENCE_MAX_SKEW_S still wins when
+    #: it is wider.
+    NOKEY_MIN_SKEW_S = 2.0
+
+    @property
+    def _evidence_nokey(self) -> bool:
+        return self.evidence_decode == "nokey"
+
+    def _evidence_skew(self) -> float:
+        if self._evidence_nokey:
+            return max(float(self.evidence_max_skew_s), self.NOKEY_MIN_SKEW_S)
+        return float(self.evidence_max_skew_s)
+
     def _make_evidence(self, sub_w: int, sub_h: int):
         """The main-stream evidence source for this camera, or None.
 
@@ -576,7 +594,7 @@ class CameraWorker:
             return EvidenceSource(
                 self.spec.camera_id, self._evidence_source_factory,
                 idle_after=self.evidence_idle_after,
-                max_skew_s=self.evidence_max_skew_s,
+                max_skew_s=self._evidence_skew(),
             )
         probed = probe_stream(url)
         if probed is None:
@@ -591,26 +609,41 @@ class CameraWorker:
             return None
         hwaccel = self._effective_hwaccel()
 
-        def factory(_self=self, _w=mw, _h=mh, _hw=hwaccel):
+        nokey = self._evidence_nokey
+
+        def factory(_self=self, _w=mw, _h=mh, _hw=hwaccel, _nokey=nokey):
+            # Keyframes only: the decoder skips everything but I-frames
+            # (the ~10x cheaper decode measured for adaptive idle), and
+            # the fps filter is left out (fps=0) because it would fill the
+            # rate with DUPLICATES of each keyframe, stamped on arrival —
+            # a seconds-old picture passing the skew check as fresh.
             return FrameSource(
                 _self.evidence_url_provider() if _self.evidence_url_provider else _self.spec.evidence_url,
-                width=_w, height=_h, fps=_self.evidence_fps,
+                width=_w, height=_h, fps=0 if _nokey else _self.evidence_fps,
                 hwaccel=_hw, device=_self.device,
-                decode_skip=_self.decode_skip,
+                decode_skip="nokey" if _nokey else _self.decode_skip,
                 decode_threads=_self.decode_threads,
                 fast_decode=_self.fast_decode,
                 rtsp_timeout_s=_self.rtsp_timeout_s,
                 url_provider=_self.evidence_url_provider,
             )
 
-        log.info("tier0 %s: evidence from the main stream (%dx%d, %d fps while "
-                 "active, idle after %.0fs) — detecting on the %dx%d sub",
-                 self.spec.camera_id, mw, mh, self.evidence_fps,
-                 self.evidence_idle_after, sub_w, sub_h)
+        skew = self._evidence_skew()
+        if nokey:
+            log.info("tier0 %s: evidence from the main stream's KEYFRAMES only "
+                     "(%dx%d, idle after %.0fs, crops up to %.1fs from the detect "
+                     "frame) — detecting on the %dx%d sub",
+                     self.spec.camera_id, mw, mh, self.evidence_idle_after, skew,
+                     sub_w, sub_h)
+        else:
+            log.info("tier0 %s: evidence from the main stream (%dx%d, %d fps while "
+                     "active, idle after %.0fs) — detecting on the %dx%d sub",
+                     self.spec.camera_id, mw, mh, self.evidence_fps,
+                     self.evidence_idle_after, sub_w, sub_h)
         return EvidenceSource(
             self.spec.camera_id, factory,
             idle_after=self.evidence_idle_after,
-            max_skew_s=self.evidence_max_skew_s,
+            max_skew_s=skew,
         )
 
     def _run(self) -> None:
@@ -1058,11 +1091,13 @@ class WorkerManager:
         evidence_fps: int = 5,
         evidence_idle_after: float = 15.0,
         evidence_max_skew_s: float = 0.35,
+        evidence_decode: str = "full",
     ) -> None:
         self._evidence_stream = evidence_stream
         self._evidence_fps = evidence_fps
         self._evidence_idle_after = evidence_idle_after
         self._evidence_max_skew_s = evidence_max_skew_s
+        self._evidence_decode = evidence_decode
         # Freshest main-tap URL per camera, beside _latest_url (same reason:
         # the JWT rotates; the running worker's source reads it on respawn).
         self._latest_evidence_url: dict[str, str] = {}
@@ -1177,6 +1212,7 @@ class WorkerManager:
             evidence_fps=self._evidence_fps,
             evidence_idle_after=self._evidence_idle_after,
             evidence_max_skew_s=self._evidence_max_skew_s,
+            evidence_decode=self._evidence_decode,
             evidence_url_provider=lambda cid=spec.camera_id: self.current_evidence_url(cid),
         )
 
