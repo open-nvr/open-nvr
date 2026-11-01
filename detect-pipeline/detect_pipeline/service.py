@@ -36,6 +36,7 @@ from .dispatch import dispatch_escalations
 from .gate import Gate
 from .ffmpeg_presets import DEFAULT_RTSP_TIMEOUT_S, HwAccel, resolve_hwaccel
 from .metrics import (
+    detector_backend_phrase,
     metrics as _metrics,
     record_frame,
     record_gate,
@@ -714,14 +715,19 @@ class CameraWorker:
                 now = time.monotonic()
                 if now - drop_t0 >= DROP_REPORT_WINDOW_S:
                     if drop_n and drop_n >= (drop_n + drop_seen) * DROP_WARN_SHARE:
+                        # Named with what the detector runs on: this warning
+                        # on every camera at once was the only visible sign
+                        # of a pipeline rebuilt without its NPU (Ventuno Q,
+                        # 2026-11-01), and it read as "the box is too small".
                         log.warning(
                             "tier0 %s: detection exceeds this box's capacity — "
                             "%d of %d decoded frames in the last %.0fs were never "
                             "detected on (detection ran on %d); the stream is "
-                            "intact, the frames are not. Fewer regions, a smaller "
+                            "intact, the frames are not. %sFewer regions, a smaller "
                             "input, a lower fps or more CPU.",
                             self.spec.camera_id, drop_n, drop_n + drop_seen,
                             now - drop_t0, drop_seen,
+                            (detector_backend_phrase() + ". ") if detector_backend_phrase() else "",
                         )
                     drop_t0, drop_n, drop_seen = now, 0, 0
                 t0 = time.monotonic()
