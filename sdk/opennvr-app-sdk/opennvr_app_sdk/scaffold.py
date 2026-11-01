@@ -251,7 +251,8 @@ def main(argv: list[str] | None = None, *, repo_root: Path | None = None,
          default_dest: Path | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="opennvr-app",
-        description=f"OpenNVR App SDK {__version__} — scaffold and validate vision apps.")
+        description=f"OpenNVR App SDK {__version__} — scaffold and validate vision apps, "
+                    "and try a workflow's AI step.")
     sub = parser.add_subparsers(dest="command", required=True)
     new = sub.add_parser("new", help="scaffold a runnable Detector app")
     new.add_argument("app_id", help="kebab-case app id, e.g. 'gate-watch' (= AppManifest.id)")
@@ -294,7 +295,15 @@ def main(argv: list[str] | None = None, *, repo_root: Path | None = None,
     dev.add_argument("--no-zones", action="store_true",
                      help="do not draw stand-in polygons for zones the app declares "
                           "but no operator has configured.")
+    from .aitry import add_parser as _add_ai
+
+    _add_ai(sub)
     args = parser.parse_args(argv)
+
+    if args.command == "ai":
+        from .aitry import run_try
+
+        return run_try(args)
 
     if args.command == "spec":
         from .speccmd import run_spec
