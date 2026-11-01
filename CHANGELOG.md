@@ -22,6 +22,15 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as `detection` in the sources listing, picked up on the next reconcile
   tick; `tier0_object_filtered_total{camera}` counts what the filters
   dropped.
+- **Keyframe-only main-stream evidence** (`DETECT_EVIDENCE_DECODE=nokey`).
+  With detection on the substream, the main decode while something is in
+  front of the camera was the remaining cost on a CPU-only box. The new
+  mode decodes only the main stream's keyframes (the `-skip_frame nokey`
+  adaptive idle already uses, measured at roughly a tenth of a full
+  decode) at the price of a crop up to half a GOP from the detect frame;
+  the skew window is widened to at least 2 s so lookups still hit, and the
+  `fps` filter is left out so a keyframe is never duplicated and stamped
+  as fresh. Default stays `full`.
 - **Motion masks and object masks per camera** (Settings → Camera-Config →
   Masks). A motion mask is a polygon under which nothing counts as motion
   — a clock burned into the picture, a tree in the wind, a road at the

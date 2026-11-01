@@ -450,3 +450,44 @@ def test_a_sub_tap_that_cannot_be_probed_falls_back_to_the_main_stream(monkeypat
         assert "could not probe" in str(e)
     else:
         raise AssertionError("expected a probe failure")
+
+
+# ── Keyframe-only evidence (DETECT_EVIDENCE_DECODE=nokey) ────────────
+
+def test_evidence_decode_dial_is_read_and_defaults_to_full():
+    from detect_pipeline.run import config_from_env
+    assert config_from_env({}).evidence_decode == "full"
+    assert config_from_env({"DETECT_EVIDENCE_DECODE": "NoKey"}).evidence_decode == "nokey"
+    assert config_from_env({"DETECT_EVIDENCE_DECODE": "half"}).evidence_decode == "full"
+
+
+def test_nokey_evidence_decodes_keyframes_without_a_rate_filter_and_widens_the_skew(monkeypatch):
+    """The main FrameSource gets -skip_frame nokey and NO fps stage (a
+    duplicate of a keyframe stamped on arrival would pass the skew check
+    as fresh), and the skew window floors at NOKEY_MIN_SKEW_S."""
+    import detect_pipeline.service as svc
+
+    monkeypatch.setattr(svc, "probe_stream", lambda url: (1920, 1080, 15.0))
+    built = []
+
+    class _FS:
+        def __init__(self, url, **kw):
+            built.append(kw)
+
+    monkeypatch.setattr(svc, "FrameSource", _FS)
+    spec = _spec("cam-nk", evidence_url="rtsp://m/cam-nk?jwt=a")
+    for decode, skew in (("nokey", 0.35), ("nokey", 5.0), ("full", 0.35)):
+        built.clear()
+        worker = CameraWorker(spec, _TrackSink(), detector=_GrowingDetector(),
+                              frame_source=_SubSource(1), evidence_decode=decode,
+                              evidence_max_skew_s=skew)
+        ev = worker._make_evidence(640, 360)
+        assert ev is not None
+        ev._factory()                       # build the source without starting it
+        kw = built[0]
+        if decode == "nokey":
+            assert kw["decode_skip"] == "nokey" and kw["fps"] == 0
+            assert ev.max_skew_s == max(skew, CameraWorker.NOKEY_MIN_SKEW_S)
+        else:
+            assert kw["decode_skip"] != "nokey" and kw["fps"] == worker.evidence_fps
+            assert ev.max_skew_s == skew

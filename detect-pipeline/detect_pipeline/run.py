@@ -129,6 +129,10 @@ class ServiceConfig:
     evidence_fps: int = 5
     evidence_idle_after: float = 15.0
     evidence_max_skew_s: float = 0.35
+    # "full" decodes every main-stream frame while active (default);
+    # "nokey" decodes keyframes only — a fraction of the cost, crops up to
+    # a GOP old (the skew window is widened to at least 2 s to match).
+    evidence_decode: str = "full"
 
 
 def _clean_env(value: str | None) -> str:
@@ -230,6 +234,16 @@ def _evidence_stream_from_env(env: dict) -> str:
     return "main"
 
 
+def _evidence_decode_from_env(env: dict) -> str:
+    """DETECT_EVIDENCE_DECODE: ``full`` (default) or ``nokey``; anything
+    else is named and treated as the default."""
+    raw = (env.get("DETECT_EVIDENCE_DECODE") or "full").strip().lower()
+    if raw in ("full", "nokey"):
+        return raw
+    log.warning("DETECT_EVIDENCE_DECODE=%r is not full|nokey; using full", raw)
+    return "full"
+
+
 def config_from_env(env: dict) -> ServiceConfig:
     return ServiceConfig(
         enabled=_truthy(env.get("DETECT_PIPELINE_ENABLED", "true")),
@@ -263,6 +277,7 @@ def config_from_env(env: dict) -> ServiceConfig:
         evidence_fps=_env_int(env, "DETECT_EVIDENCE_FPS", 5),
         evidence_idle_after=_env_float(env, "DETECT_EVIDENCE_IDLE_AFTER", 15.0),
         evidence_max_skew_s=_env_float(env, "DETECT_EVIDENCE_MAX_SKEW_S", 0.35),
+        evidence_decode=_evidence_decode_from_env(env),
         gate_heartbeat_s=_env_float(env, "DETECT_GATE_HEARTBEAT_S", 0.0),
         gate_critical_classes=env.get("DETECT_GATE_CRITICAL_CLASSES", ""),
         gate_cooldown_s=_env_float(env, "DETECT_GATE_COOLDOWN_S", 30.0),
@@ -576,6 +591,7 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
         evidence_fps=cfg.evidence_fps,
         evidence_idle_after=cfg.evidence_idle_after,
         evidence_max_skew_s=cfg.evidence_max_skew_s,
+        evidence_decode=cfg.evidence_decode,
     )
     manager.best_frames = best_frames            # expose so main() can serve it
     # Same reason: main() wires this into /health. It is a LOCAL of this
