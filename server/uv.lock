@@ -799,6 +799,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "openapi-spec-validator", specifier = ">=0.7" },
+    { name = "pillow", specifier = ">=10.0" },
     { name = "pytest", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", specifier = ">=0.23" },
 ]

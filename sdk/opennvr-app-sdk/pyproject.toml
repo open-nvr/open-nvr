@@ -54,6 +54,9 @@ dev = [
     # Asserts the generated app-contract documents really are OpenAPI 3.1
     # (tests/test_openapi.py skips without it).
     "openapi-spec-validator>=0.7",
+    # `opennvr-app ai try` shrinks pictures with Pillow when it is there;
+    # the SDK itself does not need it (tests/test_ai_try.py).
+    "pillow>=10.0",
 ]
 
 [build-system]

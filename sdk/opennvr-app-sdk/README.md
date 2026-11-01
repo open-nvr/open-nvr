@@ -57,6 +57,31 @@ opennvr-app validate .           # what a reviewer would check
 opennvr-app spec                 # its OpenAPI 3.1 document
 ```
 
+## Try a workflow's AI step
+
+Write a Look step as it goes in a workflow file (RFC #620) and run it on
+your own snapshots with a local model, before any workflow exists:
+
+```yaml
+# gate.yml
+mode: look
+prompt: Someone is at the gate. Who are they?
+decision: [delivery, cab, visitor]
+fields: { company: [swiggy, zomato, amazon, other, none] }
+```
+
+```bash
+opennvr-app ai try gate.yml snap1.jpg snap2.jpg --model qwen3-vl:2b-instruct
+```
+
+It prints each picture's decision, the facts, the rule that fired, the
+reason and the seconds, and says why when the answer is `unsure`. The
+step is checked and run by the same code the engine uses
+(`opennvr_app_sdk.workflows`). Pictures are shrunk to 768 px on the long
+side when Pillow is installed: on CPU a 1080p picture alone can use most
+of a step's 120 s. `--input plate=KA01AB1234` passes an event value as
+data, `--json` prints the results for a script.
+
 Your app self-describes: the contract server it gets for free serves
 **OpenAPI 3.1** at `/openapi.json` and **AsyncAPI 3.0** at
 `/asyncapi.json`, both generated from your manifest — a declared action

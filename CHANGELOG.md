@@ -6,6 +6,15 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`opennvr-app ai try`: a workflow's Look step on your own pictures.**
+  Write the step as it goes in a workflow file, point it at snapshots and
+  a local model, and see each decision, the facts, the rule that fired,
+  the reason and the seconds, before any engine or workflow UI exists.
+  Checked and run by the same code the engine uses; pictures shrunk to
+  768 px first when Pillow is installed. For the next SDK release.
+
 ## [0.1.10] — 2026-10-31
 
 ### Added
