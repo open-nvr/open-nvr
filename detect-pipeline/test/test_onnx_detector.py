@@ -486,6 +486,62 @@ def test_provider_options_layers_defaults_shorthand_and_env():
     assert provider_options("CPUExecutionProvider", env={}) == {}
 
 
+@pytest.fixture(autouse=True)
+def _htp_device_present(monkeypatch, tmp_path):
+    """The HTP backend now needs the DSP node the host lends the container;
+    the plugin tests run as if it were lent (a plain file stands in for
+    /dev/fastrpc-cdsp). The one test about its absence points it away."""
+    dev = tmp_path / "fastrpc-cdsp"
+    dev.write_bytes(b"")
+    monkeypatch.setattr("detect_pipeline.onnx_detector.QNN_HTP_DEVICE", str(dev))
+
+
+def test_ort_backend_runs_on_cpu_and_says_so_without_the_dsp_node(monkeypatch, tmp_path, caplog):
+    """The field failure (Ventuno Q, 2026-11-01): a detect-pipeline recreated
+    by a plain `docker compose up` had no /dev/fastrpc-cdsp, yet the QNN
+    plugin still listed an HTP device, so the session was built, named QNN
+    and ran every node on CPU — 18 cameras over capacity. Without the node
+    the plugin is not attached: ORT gets the classic CPU list, the backend
+    reports CPU against the QNN request, and the warning names the missing
+    file and the overlay that lends it."""
+    import sys, types
+    od = _reset_plugin_registry(monkeypatch)
+    calls = {}
+
+    class _Opts:
+        def add_provider_for_devices(self, devices, opts):
+            raise AssertionError("no DSP node, nothing to attach")
+
+    class _Session(_FakeSession):
+        def __init__(self, model_path, sess_options=None, providers="UNSET"):
+            super().__init__(_output([]))
+            calls["providers"] = providers
+        def get_providers(self):
+            return ["CPUExecutionProvider"]
+
+    fake_ort = types.SimpleNamespace(
+        get_available_providers=lambda: ["CPUExecutionProvider"],
+        register_execution_provider_library=lambda name, path: None,
+        get_ep_devices=lambda: [types.SimpleNamespace(ep_name="QNNExecutionProvider")],   # the plugin lies
+        SessionOptions=_Opts,
+        InferenceSession=_Session,
+    )
+    monkeypatch.setitem(sys.modules, "onnxruntime", fake_ort)
+    monkeypatch.setitem(sys.modules, "onnxruntime_qnn", types.SimpleNamespace(get_library_path=lambda: "/x.so"))
+    monkeypatch.setattr("detect_pipeline.onnx_detector.QNN_HTP_DEVICE", str(tmp_path / "absent"))
+    monkeypatch.setenv("DETECT_CV_THREADS", "0")
+    model = tmp_path / "m.onnx"; model.write_bytes(b"")
+    import logging
+    with caplog.at_level(logging.WARNING):
+        b = OrtBackend(str(model), providers="QNNExecutionProvider:htp")
+    assert calls["providers"] == ["CPUExecutionProvider"]
+    assert b.requested[0] == ("QNNExecutionProvider", {"backend_type": "htp"})
+    assert b.effective == ["CPUExecutionProvider"]
+    assert "not in this container" in caplog.text and "accel-qualcomm" in caplog.text
+    # QNN's own CPU backend needs no DSP
+    assert od.plugin_device_missing("QNNExecutionProvider", ("QNNExecutionProvider", {"backend_type": "cpu"})) is None
+
+
 def test_ort_backend_attaches_plugin_provider_through_session_options(monkeypatch, tmp_path):
     """A registered plugin EP goes in via SessionOptions.add_provider and the
     session is built WITHOUT a providers list (CPU stays the implicit fallback)."""

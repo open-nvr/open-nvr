@@ -556,3 +556,24 @@ def record_detector_backend(backend: str, requested: str, effective: str) -> Non
     }
     metrics.drop_series("tier0_detector_backend", "backend", labels["backend"])
     metrics.gauge("tier0_detector_backend", 1.0, labels)
+    last_detector_backend.update(labels)
+
+
+#: The labels the last ``record_detector_backend`` call exported, for a log
+#: line that must say what the detector runs on — the capacity warning: "18
+#: cameras over capacity" reads very differently with "on CPUExecutionProvider,
+#: QNNExecutionProvider(htp) requested" after it.
+last_detector_backend: dict[str, str] = {"backend": "", "requested": "", "effective": ""}
+
+
+def detector_backend_phrase() -> str:
+    """``on <effective>`` plus ``, <requested> requested`` when they differ —
+    empty before the first detector is built."""
+    eff, req = last_detector_backend.get("effective", ""), last_detector_backend.get("requested", "")
+    if not eff:
+        return ""
+    phrase = f"detector on {eff}"
+    wanted = req.split(",")[0].strip().split("(")[0]     # "QNNExecutionProvider(htp)" → the provider
+    if wanted and wanted != eff.split(",")[0].strip():
+        phrase += f" ({req} requested — not accelerated)"
+    return phrase
