@@ -12,6 +12,7 @@ import {
   useKaiCHealth,
   useMediaMtxHealth,
   useSystemResources,
+  useTier0Health,
 } from '../../lib/queries'
 import { formatBytes } from './WidgetFrame'
 
@@ -56,6 +57,16 @@ function Chip({ level, label, value, title, to }: { level: Level; label: string;
   )
 }
 
+/** The accelerator a provider list names, in the word an operator uses. */
+function acceleratorWord(effective: string): string {
+  const first = effective.split(',')[0].trim()
+  if (first.startsWith('QNN')) return 'NPU'
+  if (first.startsWith('OpenVINO')) return /NPU/.test(effective) ? 'NPU' : 'iGPU'
+  if (first.startsWith('CUDA') || first.startsWith('Tensorrt') || first.startsWith('TensorRT')) return 'GPU'
+  if (first.startsWith('CPU') || !first) return 'CPU'
+  return first.replace('ExecutionProvider', '')
+}
+
 function formatUptime(s: number): string {
   const d = Math.floor(s / 86400)
   const h = Math.floor((s % 86400) / 3600)
@@ -77,6 +88,7 @@ export function HealthBar({ actions }: { actions?: ReactNode }) {
   const kaic = useKaiCHealth()
   const cams = useCameras()
   const res = useSystemResources()
+  const tier0 = useTier0Health()
   const socketUp = useCameraStatusConnected()
 
   const coreLevel: Level = core.isError ? 'crit' : core.data ? 'ok' : 'unknown'
@@ -99,11 +111,36 @@ export function HealthBar({ actions }: { actions?: ReactNode }) {
       : diskThr != null && disk.percent >= diskThr ? 'warn' : 'ok'
   const resourceAlerts = res.data?.active_alerts?.length ?? 0
 
+  // The detect-pipeline: a stack whose detector is down, idle, or on CPU
+  // after asking for an accelerator looked healthy everywhere on this bar
+  // for an hour (Ventuno Q, 2026-11-01). It is its own chip, and a dead
+  // pipeline is an outage: every alarm, app and search rides on it.
+  const t0 = tier0.data
+  const t0Backend = t0?.backend ?? null
+  const detLevel: Level = tier0.isError
+    ? 'warn'
+    : !t0 ? 'unknown'
+      : !t0.available ? (t0.reason === 'disabled' ? 'unknown' : 'crit')
+        : t0.mode === 'not_running' || t0Backend?.fallback ? 'warn'
+          : (t0.health && t0.health.workers_total > 0 && t0.health.workers_up < t0.health.workers_total) ? 'warn' : 'ok'
+  const detValue =
+    !t0 ? '…'
+      : !t0.available ? (t0.reason === 'disabled' ? t('dashboard.health.off') : t('dashboard.health.down'))
+        : t0Backend?.fallback ? t('dashboard.health.cpuFallback')
+          : t0.mode === 'not_running' ? t('dashboard.health.noFrames')
+            : [t0.health ? `${t0.health.workers_up}/${t0.health.workers_total}` : '', t0Backend ? acceleratorWord(t0Backend.effective) : '']
+              .filter(Boolean).join(' · ')
+  const detTitle = t0Backend
+    ? `${t0Backend.requested ? `${t0Backend.requested} requested · ` : ''}${t0Backend.effective || 'CPUExecutionProvider'} in use`
+    : t0?.reason === 'unreachable' ? t('dashboard.health.detectionDownHint') : undefined
+
   const problems: string[] = []
   if (coreLevel === 'crit') problems.push(t('dashboard.health.coreApi'))
   if (mtxLevel === 'crit') problems.push(t('dashboard.health.mediaServer'))
   if (diskLevel === 'crit') problems.push(t('dashboard.health.storage'))
+  if (detLevel === 'crit') problems.push(t('dashboard.health.detection'))
   const warnings: string[] = []
+  if (detLevel === 'warn') warnings.push(`${t('dashboard.health.detection')}: ${detValue}`)
   if (stalled > 0) warnings.push(t('dashboard.health.recording'))
   if (diskLevel === 'warn') warnings.push(t('dashboard.health.storage'))
   if (resourceAlerts > 0) warnings.push(t('dashboard.health.resources'))
@@ -154,6 +191,13 @@ export function HealthBar({ actions }: { actions?: ReactNode }) {
           label={t('dashboard.health.aiEngine')}
           value={aiLevel === 'warn' ? t('dashboard.health.unavailable') : aiLevel === 'ok' ? t('dashboard.health.up') : '…'}
           title={kaic.data?.message ?? undefined}
+          to="/ai-adapters"
+        />
+        <Chip
+          level={detLevel}
+          label={t('dashboard.health.detection')}
+          value={detValue}
+          title={detTitle}
           to="/ai-adapters"
         />
         <Chip
