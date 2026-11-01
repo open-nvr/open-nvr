@@ -185,6 +185,11 @@ _PLUGIN_EPS = {
     "QNNExecutionProvider": "onnxruntime_qnn",   # the -qualcomm flavour
 }
 _registered_plugin_eps: set[str] = set()
+#: The Hexagon compute DSP, as the host lends it to a container
+#: (docker-compose.accel-qualcomm.yml). The QNN plugin lists the HTP as a
+#: device on any Qualcomm host and compiles the graph without opening it,
+#: so this node is the only honest sign the NPU is reachable from here.
+QNN_HTP_DEVICE = "/dev/fastrpc-cdsp"
 
 # Options a plugin provider gets on top of the ``:device`` shorthand. QNN's
 # HTP defaults are tuned for an always-on detector: sustained clocks rather
@@ -201,6 +206,34 @@ _PROVIDER_DEFAULTS = {
         "htp_graph_finalization_optimization_mode": "3",
     },
 }
+
+
+def plugin_device_missing(name: str, entry) -> str | None:
+    """Why ``entry`` cannot run on its accelerator from THIS container, or None.
+
+    Measured on a Ventuno Q, 2026-11-01: a detect-pipeline recreated without
+    the Qualcomm overlay — no ``/dev/fastrpc-cdsp`` — still got an HTP
+    device from ``get_ep_devices()``, built the session and ran every node
+    on CPU, 18 cameras over capacity, while the backend metric could name
+    QNN as effective. The runtime never says. The device node does.
+    """
+    import os as _os
+    if name != "QNNExecutionProvider":
+        return None
+    opts = entry[1] if isinstance(entry, tuple) and isinstance(entry[1], dict) else {}
+    backend = str(opts.get("backend_type", "htp")).strip().lower()
+    if backend != "htp":
+        return None   # QNN's own CPU (or GPU) backend needs no DSP
+    dev = QNN_HTP_DEVICE
+    if not _os.path.exists(dev):
+        return (f"{name}(htp) requested but {dev} is not in this container — the "
+                "Qualcomm overlay (docker-compose.accel-qualcomm.yml, applied by "
+                "./start.sh up) lends it; running on CPU")
+    if not _os.access(dev, _os.R_OK | _os.W_OK):
+        return (f"{name}(htp) requested but {dev} is not accessible from this "
+                "container — check FASTRPC_GID / DMAHEAP_GID in .env match the host's "
+                "fastrpc and dmaheap groups; running on CPU")
+    return None
 
 
 def register_plugin_providers(ort, requested) -> set[str]:
@@ -525,6 +558,10 @@ class OrtBackend:
                     # by name refuses it ("Provider configuration is not
                     # supported") — that one is for the built-in providers.
                     name = provider_name(p)
+                    missing = plugin_device_missing(name, p)
+                    if missing:
+                        log.warning("%s", missing)
+                        continue
                     devices = [d for d in ort.get_ep_devices() if d.ep_name == name]
                     if not devices:
                         log.warning("ORT plugin provider %s reports no device on this host; skipping", name)

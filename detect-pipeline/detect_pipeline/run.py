@@ -717,8 +717,15 @@ def main() -> int:  # pragma: no cover - integration entrypoint
             cv2.setNumThreads(threads)
         except Exception:  # cv2 optional (stub/hog detectors)
             pass
-    log.info("tier0 service starting (enabled=%s, detector=%s, hwaccel=%s, cv_threads=%s)",
-             cfg.enabled, cfg.detector, cfg.hwaccel, threads or "uncapped")
+    # The flavour this image was built as and the providers it was asked
+    # for, on the first line: a `-qualcomm` image started without the
+    # overlay says "flavour=qualcomm providers=(default)" here, which is
+    # the whole diagnosis, instead of eighteen capacity warnings later.
+    log.info("tier0 service starting (enabled=%s, detector=%s, hwaccel=%s, cv_threads=%s, "
+             "flavour=%s, providers=%s)",
+             cfg.enabled, cfg.detector, cfg.hwaccel, threads or "uncapped",
+             os.environ.get("OPENNVR_ACCEL_FLAVOUR") or "cpu",
+             cfg.onnx_providers or "(default)")
 
     publish, close, nats_connected = _make_publisher(
         cfg.nats_url, os.environ.get("NATS_TOKEN") or cfg.api_key
