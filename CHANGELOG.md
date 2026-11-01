@@ -8,6 +8,16 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A Detection chip on the dashboard's health bar.** The detect-pipeline
+  sat in Created for an hour on a test box while every chip read green,
+  and later ran on CPU after being rebuilt without its NPU while the bar
+  said the same. The bar now asks core's Tier-0 scrape: unreachable is an
+  outage (alarms, apps and search ride on it), no frames is a warning,
+  and an accelerator requested but not in use shows **CPU fallback**; a
+  healthy pipeline reads `16/16 · NPU`. The scrape (`/ai-models/tier0-metrics`)
+  gains a `backend` block with the request, the effective providers and
+  `fallback`.
+
 - **`opennvr-app ai try`: a workflow's Look step on your own pictures.**
   Write the step as it goes in a workflow file, point it at snapshots and
   a local model, and see each decision, the facts, the rule that fired,
