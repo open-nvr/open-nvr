@@ -326,6 +326,39 @@ export function useCoreHealth() {
 
 /** AI engine (KAI-C) reachability. `kai_c_status` is 'ok' when up; the
  *  core reports 'error' with a message when it cannot reach it. */
+export type Tier0HealthResp = {
+  available: boolean
+  reason?: 'disabled' | 'unreachable' | 'parse_error'
+  mode?: 'not_running' | 'off' | 'shadow' | 'enforce'
+  health?: { workers_up: number; workers_total: number; frames_dropped_total?: number }
+  backend?: {
+    backend: string
+    requested: string
+    effective: string
+    accelerated: boolean
+    fallback: boolean
+  } | null
+}
+
+/**
+ * The detect-pipeline as the health bar reads it: reachable, decoding,
+ * and on the hardware it was asked for. Scraped by core from the
+ * pipeline's /metrics; `available: false` with a reason is a normal
+ * answer (gate off, not deployed, or — the one that matters — down).
+ */
+export function useTier0Health() {
+  return useQuery({
+    queryKey: ['tier0-health'],
+    queryFn: async () => {
+      const { data } = await apiService.getTier0Metrics()
+      return data as Tier0HealthResp
+    },
+    refetchInterval: 30_000,
+    staleTime: 15_000,
+    retry: 0,
+  })
+}
+
 export function useKaiCHealth() {
   return useQuery({
     queryKey: ['kaic-health'],
