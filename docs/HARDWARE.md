@@ -80,8 +80,14 @@ and every adapter build their session again on CPU, log an error, and
 report `accelerator_fallback_error` (adapters) or `requested != effective`
 (the `tier0_detector_backend` metric) — see the next section.
 
-Running compose by hand instead of `start.sh`: add the overlay(s) with `-f`
-and export the three `DETECT_*` values, or set them in `.env`.
+`start.sh` writes what it resolved into `.env` — `COMPOSE_FILE`,
+`COMPOSE_PROFILES`, the `DETECT_*` values it filled, the device group ids —
+so a bare `docker compose up -d <service>` in the checkout rebuilds that
+service with the same overlays and the same accelerator. Passing `-f` by
+hand replaces that file set and drops the flavour: the detect-pipeline and
+the adapters come back as the plain cpu images (measured: a Ventuno Q went
+from 16 cameras on the HTP to 99 % CPU this way). To add an overlay, put it
+in `OPENNVR_EXAMPLE_COMPOSE` / `OPENNVR_EXAMPLE_PROFILE` and run `./start.sh up`.
 
 ### What runs where (qualcomm defaults)
 

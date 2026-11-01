@@ -17,6 +17,7 @@
 #   ./start.sh logs         # tail logs
 #   ./start.sh status       # show container status
 #   ./start.sh validate     # run pre-flight checks only
+#   ./start.sh prune        # remove image tags from earlier releases (disk)
 #   ./start.sh token        # re-print the first-time setup token
 #   ./start.sh update       # update to the latest release (scripts/update-host.sh)
 #   ./start.sh auto-update enable|disable|status   # the runner for in-app updates
@@ -151,18 +152,33 @@ accel_args() {
 # (shell wins over .env). This must run in the PARENT shell — compose_args
 # is used as $(compose_args), and an export inside that subshell is lost —
 # so every command that builds ARGS calls apply_accel_env first.
+#
+# PERSISTED to .env (set_env_var), not merely exported: this process is one
+# of several compose entry points. A `docker compose up -d <service>` run by
+# hand — to add a fake-camera rig, to restart one app — rebuilds every
+# service whose config differs from the running one, and with these values
+# living only in start.sh's environment it rebuilt them WITHOUT the
+# accelerator: the detect-pipeline and the yolov8 adapter came back as the
+# plain cpu image, no NPU device, and the host went to 99 % CPU while every
+# health check still said "accelerator in use" (Ventuno Q, 2026-11-01).
+# With the resolved values in .env, every entry point sees the same stack.
+# Only values the operator left at the default are filled, and a value a
+# previous flavour filled is reset when the flavour changes, so an
+# operator's own setting is never overwritten.
 apply_accel_env() {
-    case "$(detect_accel)" in
+    local accel; accel=$(detect_accel)
+    reset_stale_accel_fills "$accel"
+    case "$accel" in
         intel)
-            case "$(get_env_var DETECT_HWACCEL)" in ""|cpu) export DETECT_HWACCEL=vaapi ;; esac
-            case "$(get_env_var DETECT_ONNX_BACKEND)" in ""|auto) export DETECT_ONNX_BACKEND=ort ;; esac
+            case "$(get_env_var DETECT_HWACCEL)" in ""|cpu) set_env_var DETECT_HWACCEL vaapi ;; esac
+            case "$(get_env_var DETECT_ONNX_BACKEND)" in ""|auto) set_env_var DETECT_ONNX_BACKEND ort ;; esac
             # Pin the device rather than AUTO: AUTO warms up on CPU and can sit
             # there for a long time — measured on Arrow Lake: NPU 7.4 ms/frame,
             # iGPU 7.7, OpenVINO CPU 15.5, AUTO 17.0 after 30 frames. The NPU
             # also leaves the iGPU to decode and costs almost no CPU.
             if [[ -z "$(get_env_var DETECT_ONNX_PROVIDERS)" ]]; then
-                if [[ -e /dev/accel/accel0 ]]; then export DETECT_ONNX_PROVIDERS="OpenVINOExecutionProvider:NPU"
-                else export DETECT_ONNX_PROVIDERS="OpenVINOExecutionProvider:GPU"; fi
+                if [[ -e /dev/accel/accel0 ]]; then set_env_var DETECT_ONNX_PROVIDERS "OpenVINOExecutionProvider:NPU"
+                else set_env_var DETECT_ONNX_PROVIDERS "OpenVINOExecutionProvider:GPU"; fi
             fi
             # The ONNX adapters: each follows <NAME>_ONNX_PROVIDERS, then the
             # shared ADAPTER_ONNX_PROVIDERS, then the overlay's default — an
@@ -172,25 +188,69 @@ apply_accel_env() {
             # and package detection stay on CPU until proven. Everything is
             # a plain env override in .env; see docs/HARDWARE.md.
             if [[ -z "$(get_env_var YOLO_POSE_ONNX_PROVIDERS)" && -z "$(get_env_var ADAPTER_ONNX_PROVIDERS)" ]]; then
-                [[ -e /dev/accel/accel0 ]] && export YOLO_POSE_ONNX_PROVIDERS="OpenVINOExecutionProvider:NPU"
+                [[ -e /dev/accel/accel0 ]] && set_env_var YOLO_POSE_ONNX_PROVIDERS "OpenVINOExecutionProvider:NPU"
             fi
             ;;
         qualcomm)
             # Decode stays in software (ffmpeg has no path to the Qualcomm
             # video core); the detector goes to the Hexagon Tensor Processor.
-            case "$(get_env_var DETECT_ONNX_BACKEND)" in ""|auto) export DETECT_ONNX_BACKEND=ort ;; esac
-            [[ -n "$(get_env_var DETECT_ONNX_PROVIDERS)" ]] || export DETECT_ONNX_PROVIDERS="QNNExecutionProvider:htp"
+            case "$(get_env_var DETECT_ONNX_BACKEND)" in ""|auto) set_env_var DETECT_ONNX_BACKEND ort ;; esac
+            [[ -n "$(get_env_var DETECT_ONNX_PROVIDERS)" ]] || set_env_var DETECT_ONNX_PROVIDERS "QNNExecutionProvider:htp"
             # The DSP and DMA-heap nodes are group-owned; the overlay adds the
             # groups to the container. Read them off the host unless .env pins them.
             local gid
             if [[ -z "$(get_env_var FASTRPC_GID)" ]]; then
-                gid=$(getent group fastrpc 2>/dev/null | cut -d: -f3); [[ -n "$gid" ]] && export FASTRPC_GID="$gid"
+                gid=$(getent group fastrpc 2>/dev/null | cut -d: -f3); [[ -n "$gid" ]] && set_env_var FASTRPC_GID "$gid"
             fi
             if [[ -z "$(get_env_var DMAHEAP_GID)" ]]; then
-                gid=$(getent group dmaheap 2>/dev/null | cut -d: -f3); [[ -n "$gid" ]] && export DMAHEAP_GID="$gid"
+                gid=$(getent group dmaheap 2>/dev/null | cut -d: -f3); [[ -n "$gid" ]] && set_env_var DMAHEAP_GID "$gid"
             fi
             ;;
     esac
+    write_env_var OPENNVR_ACCEL_RESOLVED "$accel"
+}
+
+# The flavour changed since the last run (OPENNVR_ACCEL edited, or the disk
+# moved to another box). Put back the CPU default in every value the
+# PREVIOUS flavour filled — recognised by being exactly that flavour's fill,
+# so a value the operator typed survives.
+reset_stale_accel_fills() {
+    local now="$1" prev; prev=$(get_env_var OPENNVR_ACCEL_RESOLVED)
+    [[ -z "$prev" || "$prev" == "$now" ]] && return 0
+    local key val
+    for key in DETECT_HWACCEL DETECT_ONNX_BACKEND DETECT_ONNX_PROVIDERS YOLO_POSE_ONNX_PROVIDERS; do
+        val=$(get_env_var "$key")
+        case "$prev:$key:$val" in
+            intel:DETECT_HWACCEL:vaapi) write_env_var DETECT_HWACCEL cpu ;;
+            intel:DETECT_ONNX_BACKEND:ort|qualcomm:DETECT_ONNX_BACKEND:ort) write_env_var DETECT_ONNX_BACKEND auto ;;
+            intel:DETECT_ONNX_PROVIDERS:OpenVINOExecutionProvider:NPU|intel:DETECT_ONNX_PROVIDERS:OpenVINOExecutionProvider:GPU|qualcomm:DETECT_ONNX_PROVIDERS:QNNExecutionProvider:htp)
+                write_env_var DETECT_ONNX_PROVIDERS "" ;;
+            intel:YOLO_POSE_ONNX_PROVIDERS:OpenVINOExecutionProvider:NPU) write_env_var YOLO_POSE_ONNX_PROVIDERS "" ;;
+        esac
+    done
+    echo -e "  ${YELLOW}Accelerate:${NC} flavour changed ${prev} → ${now}; the values ${prev} had filled in .env were reset." >&2
+}
+
+# The compose file set and profiles this run resolved, written where every
+# `docker compose` invocation in this directory reads them (Compose takes
+# COMPOSE_FILE / COMPOSE_PROFILES / COMPOSE_PATH_SEPARATOR from .env). A
+# bare `docker compose up -d <service>` then rebuilds that service with the
+# same overlays — the accelerator flavour included — instead of the plain
+# base file. Passing -f by hand still replaces the set, so the documented
+# way to add an overlay is OPENNVR_EXAMPLE_COMPOSE / OPENNVR_EXAMPLE_PROFILE
+# in .env and `./start.sh up`.
+persist_compose_set() {
+    local args="$1" files="" profiles="" tok prev=""
+    for tok in $args; do
+        case "$prev" in
+            -f) files="${files:+$files:}$tok" ;;
+            --profile) profiles="${profiles:+$profiles,}$tok" ;;
+        esac
+        prev="$tok"
+    done
+    write_env_var COMPOSE_PATH_SEPARATOR ":"
+    write_env_var COMPOSE_FILE "$files"
+    write_env_var COMPOSE_PROFILES "$profiles"
 }
 accel_summary() {
     local accel; accel=$(detect_accel)
@@ -708,6 +768,32 @@ run_validate() {
         fi
     fi
 
+    # 6b. Disk space where the images and the models land. A full disk is
+    # the one failure that leaves half a stack behind: the pull of a model
+    # dies with "no space left on device", a container is created but never
+    # started, and every later health check reads green around the hole
+    # (Ventuno Q, 55 GB eMMC, 2026-11-01). Say it before the pull.
+    local docker_root free_gb least_gb least_at path
+    docker_root=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null)
+    least_gb=""; least_at=""
+    for path in "${docker_root:-/var/lib/docker}" "."; do
+        free_gb=$(df -Pk "$path" 2>/dev/null | awk 'NR==2 {printf "%d", $4/1024/1024}')
+        [ -z "$free_gb" ] && continue
+        if [ -z "$least_gb" ] || [ "$free_gb" -lt "$least_gb" ]; then least_gb=$free_gb; least_at=$path; fi
+    done
+    if [ -n "$least_gb" ]; then
+        if [ "$least_gb" -lt "${OPENNVR_DISK_MIN_GB:-2}" ]; then
+            echo -e "  ${RED}✗ ${least_gb} GB free at ${least_at} — not enough to pull an image or a model${NC}"
+            echo -e "      → ${CYAN}./start.sh prune${NC} removes image tags from earlier releases; move RECORDINGS_PATH to a bigger disk."
+            errors=$((errors + 1))
+        elif [ "$least_gb" -lt "${OPENNVR_DISK_WARN_GB:-8}" ]; then
+            echo -e "  ${YELLOW}⚠ ${least_gb} GB free at ${least_at} — a release upgrade or a new model may not fit${NC}"
+            echo -e "      → ${CYAN}./start.sh prune${NC} removes image tags from earlier releases."
+            warnings=$((warnings + 1))
+        else
+            echo -e "  ${GREEN}✓ ${least_gb} GB free at ${least_at}${NC}"
+        fi
+    fi
     # 7. Port conflicts
     local ports=(8000 8554 8888 8889 9997)
     local busy_ports=()
@@ -1659,6 +1745,7 @@ run_up() {
     print_banner
     run_validate || exit 1
     apply_accel_env; ARGS=$(compose_args)
+    persist_compose_set "$ARGS"
     configure_nginx_bind_host || exit 1
     configure_webrtc_ice_port || exit 1
     preflight_published_ports "$ARGS" || exit 1
@@ -1686,6 +1773,40 @@ run_up() {
     check_edge_reachable
 }
 
+# Image tags from earlier releases, and dangling layers. An upgrade pulls the
+# new release's tags next to the old ones and nothing removes the old: three
+# releases in, a 55 GB disk held 23 GB of images, nine of them unreachable.
+# Keeps every tag of the release in .env (CORE_TAG / ADAPTER_TAG, in every
+# flavour), every image a container still references, and the weights images.
+run_prune() {
+    local core_tag adapter_tag in_use img tag repo root
+    core_tag=$(get_env_var CORE_TAG); adapter_tag=$(get_env_var ADAPTER_TAG)
+    root=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo /var/lib/docker)
+    in_use=$(docker ps -a --format '{{.Image}}' 2>/dev/null | sort -u)
+    local -a victims=()
+    while read -r img; do
+        [ -z "$img" ] && continue
+        case "$img" in ghcr.io/open-nvr/*) ;; *) continue ;; esac
+        repo="${img%:*}"; tag="${img##*:}"
+        case "$repo" in *-weights) continue ;; esac
+        if [ -n "$core_tag" ] && { [ "$tag" = "$core_tag" ] || [[ "$tag" == "$core_tag"-* ]]; }; then continue; fi
+        if [ -n "$adapter_tag" ] && { [ "$tag" = "$adapter_tag" ] || [[ "$tag" == "$adapter_tag"-* ]]; }; then continue; fi
+        grep -qx "$img" <<<"$in_use" && continue
+        victims+=("$img")
+    done < <(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -v '<none>')
+    echo -e "  ${BRIGHT_CYAN}Disk before:${NC} $(df -Ph "$root" | awk 'NR==2 {print $4" free of "$2}')"
+    if [ ${#victims[@]} -eq 0 ]; then
+        echo -e "  ${GREEN}✓ No image tags from earlier releases to remove.${NC}"
+    else
+        echo -e "  ${YELLOW}Removing ${#victims[@]} image tag(s) not from release ${core_tag:-?} / adapters ${adapter_tag:-?}:${NC}"
+        printf '      %s\n' "${victims[@]}"
+        docker rmi "${victims[@]}" >/dev/null 2>&1 || true
+    fi
+    docker image prune -f >/dev/null 2>&1 || true
+    echo -e "  ${BRIGHT_CYAN}Disk after:${NC}  $(df -Ph "$root" | awk 'NR==2 {print $4" free of "$2}')"
+    echo -e "  ${GRAY}Models Ollama holds are not touched: ${CYAN}ollama list${GRAY} / ${CYAN}ollama rm <model>${GRAY}.${NC}"
+}
+
 run_build() {
     if [ ! -f ".env" ]; then
         echo -e "${RED}  No .env found. Run ./start.sh (no arguments) to set up.${NC}"
@@ -1694,6 +1815,7 @@ run_build() {
     print_banner
     run_validate || exit 1
     apply_accel_env; ARGS=$(compose_args)
+    persist_compose_set "$ARGS"
     configure_nginx_bind_host || exit 1
     configure_webrtc_ice_port || exit 1
     preflight_published_ports "$ARGS" || exit 1
@@ -1806,6 +1928,10 @@ case "$COMMAND" in
     print_banner
     run_validate
     ;;
+  prune)
+    print_banner
+    run_prune
+    ;;
 
   token)
     # Re-surface the first-time setup token on demand (e.g. if it scrolled off
@@ -1900,7 +2026,7 @@ case "$COMMAND" in
 
   *)
     echo -e "${RED}Unknown command: $COMMAND${NC}"
-    echo "Usage: ./start.sh [start|restart|up|build|down|logs|status|validate|token|refresh-net|install|reconfigure|refresh-certs|update|auto-update]"
+    echo "Usage: ./start.sh [start|restart|up|build|down|logs|status|validate|prune|token|refresh-net|install|reconfigure|refresh-certs|update|auto-update]"
     exit 1
     ;;
 esac
