@@ -195,6 +195,10 @@ git checkout -B opennvr-release vX.Y.Z
 
 # 4. Start it. Images are pulled and the database migrates on boot.
 ./start.sh up            # Windows: .\start.ps1 up
+
+# 5. Once it is up, drop the previous release's image tags. Nothing
+#    removes them otherwise, and three releases fill a small disk.
+./start.sh prune
 ```
 
 To go back, restore the dump into a stopped core, check out the previous
