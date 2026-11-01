@@ -238,6 +238,11 @@ def _to_spec(c: dict) -> CameraSpec:
         labels=labels,
         extra_labels=extra_labels,
         skills=skills,
+        # Core offers the main tap beside a sub tap so evidence can be cut
+        # at full resolution (evidence.py). Absent on older cores and on
+        # cameras whose frame_url already IS the main stream.
+        evidence_url=(str(c.get("evidence_url")).strip() or None)
+        if c.get("evidence_url") else None,
     )
 
 

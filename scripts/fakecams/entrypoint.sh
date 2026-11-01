@@ -41,6 +41,17 @@ GROUP="${FAKECAM_GROUP:-folder}"
 # consecutive scans to agree on its contents before it starts, so a file still
 # being copied in is never published half-written.
 SCAN_INTERVAL="${FAKECAM_SCAN_INTERVAL:-5}"
+# Height of a low-res SUBSTREAM published beside every stream wider than
+# FAKECAM_SUBSTREAM_MIN_WIDTH, at <name>-sub — e.g. FAKECAM_SUBSTREAM=360
+# gives rtsp://<rig>:8554/gate-entry-sub at 640x360. What a real camera's
+# second stream is: same sensor, same moment, fewer pixels. Register it as
+# the camera's substream_url and Tier-0 detects on it while recording,
+# live view and full-res evidence keep the main stream. Empty = off. It is
+# a live re-encode (libx264 ultrafast at FAKECAM_SUBSTREAM_FPS), so it
+# costs real CPU per stream — the rig's, not the stack's.
+SUB_HEIGHT="${FAKECAM_SUBSTREAM:-}"
+SUB_MIN_WIDTH="${FAKECAM_SUBSTREAM_MIN_WIDTH:-640}"
+SUB_FPS="${FAKECAM_SUBSTREAM_FPS:-10}"
 
 ENCODE="-c:v libx264 -preset veryfast -tune zerolatency -pix_fmt yuv420p -g 50 -bf 0"
 
@@ -335,6 +346,39 @@ publish_forever() {
   done
 }
 
+# The substream publisher: reads the stream's OWN main path back from
+# MediaMTX and republishes it scaled down, so it never has to know how the
+# main one was built (file, playlist or render). Restarts whenever the main
+# publisher does — an exit on EOF is just the loop seam.
+publish_sub_forever() {
+  slug="$1"
+  while [ ! -e "$STATE/$slug.stop" ]; do
+    ffmpeg -hide_banner -loglevel warning -nostdin \
+      -rtsp_transport tcp -i "rtsp://127.0.0.1:${RTSP_PORT}/${slug}" \
+      -an -vf "scale=-2:${SUB_HEIGHT},fps=${SUB_FPS}" \
+      -c:v libx264 -preset ultrafast -tune zerolatency -pix_fmt yuv420p \
+      -g $((SUB_FPS * 2)) -bf 0 -f rtsp -rtsp_transport tcp \
+      "rtsp://127.0.0.1:${RTSP_PORT}/${slug}-sub" &
+    echo $! > "$STATE/$slug.subffpid"
+    wait "$!" 2>/dev/null || true
+    rm -f "$STATE/$slug.subffpid"
+    [ ! -e "$STATE/$slug.stop" ] || break
+    sleep 3
+  done
+}
+
+# Whether this group gets a substream: FAKECAM_SUBSTREAM set, and the first
+# clip wider than FAKECAM_SUBSTREAM_MIN_WIDTH (a 384-wide clip already IS
+# substream-sized; scaling it down again proves nothing).
+wants_sub() {
+  [ -n "$SUB_HEIGHT" ] || return 1
+  first=$(head -1 "$STATE/$1.files")
+  w=$(ffprobe -v error -select_streams v:0 -show_entries stream=width \
+        -of default=nw=1:nk=1 "$first" 2>/dev/null | head -1)
+  case "$w" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$w" -gt "$SUB_MIN_WIDTH" ]
+}
+
 start_group() {
   slug="$1"
   rm -f "$STATE/$slug.stop"
@@ -342,6 +386,11 @@ start_group() {
   cp "$SCAN/$slug.sig" "$STATE/$slug.sig"
   publish_forever "$slug" &
   echo $! > "$STATE/$slug.pid"
+  if wants_sub "$slug"; then
+    log "publishing '$slug-sub' (${SUB_HEIGHT}p substream of '$slug' at ${SUB_FPS} fps)"
+    publish_sub_forever "$slug" &
+    echo $! > "$STATE/$slug.subpid"
+  fi
 }
 
 # Flag first so the supervisor will not respawn, then kill ffmpeg and reap the
@@ -349,15 +398,20 @@ start_group() {
 stop_group() {
   slug="$1"
   touch "$STATE/$slug.stop"
-  if [ -f "$STATE/$slug.ffpid" ]; then
-    kill "$(cat "$STATE/$slug.ffpid")" 2>/dev/null || true
-  fi
-  if [ -f "$STATE/$slug.pid" ]; then
-    pid=$(cat "$STATE/$slug.pid")
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
-  fi
-  rm -f "$STATE/$slug.pid" "$STATE/$slug.ffpid" "$STATE/$slug.files" \
+  for f in ffpid subffpid; do
+    if [ -f "$STATE/$slug.$f" ]; then
+      kill "$(cat "$STATE/$slug.$f")" 2>/dev/null || true
+    fi
+  done
+  for f in pid subpid; do
+    if [ -f "$STATE/$slug.$f" ]; then
+      pid=$(cat "$STATE/$slug.$f")
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+    fi
+  done
+  rm -f "$STATE/$slug.pid" "$STATE/$slug.ffpid" "$STATE/$slug.subpid" \
+        "$STATE/$slug.subffpid" "$STATE/$slug.files" \
         "$STATE/$slug.sig" "$STATE/$slug.concat" "$STATE/$slug.stop" \
         "$STATE/$slug.mp4" "$STATE/$slug.mp4.part" "$STATE/$slug.norender"
 }

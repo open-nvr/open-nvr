@@ -121,6 +121,14 @@ class ServiceConfig:
     dispatch_max_inflight: int = 4
     bestframe_max_entries: int = 0
     visits_enabled: bool = True
+    # Main-stream evidence while detecting on the sub (evidence.py):
+    # "main" cuts crops/scenes/plate candidates from the camera's main
+    # stream when core offers it beside the sub tap; "detect" keeps them
+    # on the detect stream (the pre-feature behaviour).
+    evidence_stream: str = "main"
+    evidence_fps: int = 5
+    evidence_idle_after: float = 15.0
+    evidence_max_skew_s: float = 0.35
 
 
 def _clean_env(value: str | None) -> str:
@@ -212,6 +220,16 @@ def _detector_pool_from_env(env: dict) -> int:
     return max(2, min(8, cores // per_detector))
 
 
+def _evidence_stream_from_env(env: dict) -> str:
+    """DETECT_EVIDENCE_STREAM: ``main`` (default) or ``detect``; anything
+    else is named and treated as the default, never as "off"."""
+    raw = (env.get("DETECT_EVIDENCE_STREAM") or "main").strip().lower()
+    if raw in ("main", "detect"):
+        return raw
+    log.warning("DETECT_EVIDENCE_STREAM=%r is not main|detect; using main", raw)
+    return "main"
+
+
 def config_from_env(env: dict) -> ServiceConfig:
     return ServiceConfig(
         enabled=_truthy(env.get("DETECT_PIPELINE_ENABLED", "true")),
@@ -241,6 +259,10 @@ def config_from_env(env: dict) -> ServiceConfig:
         refresh_seconds=_env_float(env, "DETECT_REFRESH_SECONDS", 30.0),
         gate_mode=env.get("DETECT_GATE_MODE", "shadow").strip().lower(),
         visits_enabled=_truthy(env.get("DETECT_VISITS_ENABLED", "true")),
+        evidence_stream=_evidence_stream_from_env(env),
+        evidence_fps=_env_int(env, "DETECT_EVIDENCE_FPS", 5),
+        evidence_idle_after=_env_float(env, "DETECT_EVIDENCE_IDLE_AFTER", 15.0),
+        evidence_max_skew_s=_env_float(env, "DETECT_EVIDENCE_MAX_SKEW_S", 0.35),
         gate_heartbeat_s=_env_float(env, "DETECT_GATE_HEARTBEAT_S", 0.0),
         gate_critical_classes=env.get("DETECT_GATE_CRITICAL_CLASSES", ""),
         gate_cooldown_s=_env_float(env, "DETECT_GATE_COOLDOWN_S", 30.0),
@@ -550,6 +572,10 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
         router=router,
         visit_poster=visit_poster,
         attempt_poster=attempt_poster,
+        evidence_stream=cfg.evidence_stream,
+        evidence_fps=cfg.evidence_fps,
+        evidence_idle_after=cfg.evidence_idle_after,
+        evidence_max_skew_s=cfg.evidence_max_skew_s,
     )
     manager.best_frames = best_frames            # expose so main() can serve it
     # Same reason: main() wires this into /health. It is a LOCAL of this

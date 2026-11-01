@@ -8,6 +8,25 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Detect on the substream, keep the evidence from the main stream.**
+  Tier-0 already detects on a camera's low-res substream when one is
+  stored (the ~5-10x decode saving), at the price of every crop, scene,
+  plate candidate and Tier-1 escalation being cut from the same 640x360
+  frame. The detect-pipeline now runs a second ffmpeg on the camera's MAIN
+  stream only while something is in front of the camera and cuts its
+  evidence from the main frame captured at the same moment as the detect
+  frame (`evidence.py`; a main frame further than
+  `DETECT_EVIDENCE_MAX_SKEW_S` away is refused and the detect crop kept).
+  Core offers the main tap as `evidence_url` beside a sub `frame_url`;
+  `DETECT_EVIDENCE_STREAM=detect` restores the old behaviour.
+  `tier0_evidence_crops_total{source}` and `tier0_evidence_active` show
+  what each camera's evidence came from. A camera moving between the main
+  and sub taps (an operator storing a substream URL) now restarts its
+  worker on the next reconcile tick instead of on its next ffmpeg respawn.
+  The fake-camera rig can publish a `<name>-sub` substream per clip
+  (`FAKECAM_SUBSTREAM=360`), which `register_fake_cameras.py` stores as the
+  camera's `substream_url`, so the whole path is testable without a camera.
+
 - **`opennvr-app ai try`: a workflow's Look step on your own pictures.**
   Write the step as it goes in a workflow file, point it at snapshots and
   a local model, and see each decision, the facts, the rule that fired,

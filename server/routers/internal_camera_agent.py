@@ -1036,6 +1036,7 @@ def list_camera_agent_sources(
         cameras = [c for c in cameras if int(c.id) in roster]
     out: list[dict[str, object]] = []
     for cam in cameras:
+        evidence_url: str | None = None
         stream_name = _build_stream_name(
             settings.mediamtx_stream_prefix,
             int(cam.id),
@@ -1098,6 +1099,22 @@ def list_camera_agent_sources(
             if token:
                 frame_url = f"{frame_url}?jwt={urlquote(token, safe='.')}"
             source = "mediamtx-sub" if use_sub else "mediamtx"
+            if use_sub:
+                # The MAIN tap beside the sub one: the detect-pipeline
+                # detects on the sub and cuts its evidence (best-frame
+                # crops, scenes, plate candidates, Tier-1 escalations)
+                # from the main stream while something is in front of
+                # the camera — full-resolution evidence at substream
+                # decode cost. Its own token for an app (one path per
+                # token); the platform wildcard covers both for the rest.
+                evidence_url = f"{base}/{stream_name}"
+                main_token = (
+                    _mint_mediamtx_jwt(camera_path=stream_name,
+                                       username=f"app:{getattr(principal, 'app_id', 'app')}")
+                    if is_app else mediamtx_jwt
+                )
+                if main_token:
+                    evidence_url = f"{evidence_url}?jwt={urlquote(main_token, safe='.')}"
         elif is_app:
             # No tap: the camera's own RTSP URL is all there is, and it
             # embeds the camera's credentials. Never hand that to an app —
@@ -1128,6 +1145,10 @@ def list_camera_agent_sources(
                 "frame_url": frame_url,
                 "role": role,
                 "source": source,
+                # The main tap, offered only beside a sub frame_url (see
+                # above); None otherwise. The detect-pipeline's evidence
+                # source reads it; everything else may ignore it.
+                "evidence_url": evidence_url,
                 # Per-camera capability assignment. [] = nothing
                 # assigned: the camera is eligible for any skill's picker
                 # but adopted by none, so no app inference runs on it.
