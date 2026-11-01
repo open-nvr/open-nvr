@@ -23,6 +23,7 @@ import urllib.request
 
 from .masks import parse_motion_masks, parse_object_masks
 from .service import CameraSpec
+from .tuning import parse_tuning
 
 log = logging.getLogger("detect_pipeline.providers")
 
@@ -226,6 +227,7 @@ def _to_spec(c: dict) -> CameraSpec:
                 "will fall back to parsing the handle",
                 handle, c.get("open_nvr_camera_id"),
             )
+    tuning = parse_tuning(c.get("detection"))
     return CameraSpec(
         camera_id=str(c["camera_id"]),
         nvr_camera_id=nvr_id,
@@ -234,7 +236,7 @@ def _to_spec(c: dict) -> CameraSpec:
         analyze=bool(c.get("analyze", True)) and assignment_analyze,
         width=c.get("width"),
         height=c.get("height"),
-        fps=int(c.get("fps", _default_fps())),
+        fps=tuning.fps if tuning.fps is not None else int(c.get("fps", _default_fps())),
         hwaccel=(c.get("hwaccel") or None),   # None = not declared → global applies
         labels=labels,
         extra_labels=extra_labels,
@@ -247,6 +249,9 @@ def _to_spec(c: dict) -> CameraSpec:
         # The operator's masks (masks.py). Absent on older cores = none.
         motion_masks=parse_motion_masks(c.get("motion_masks")),
         object_masks=parse_object_masks(c.get("object_masks")),
+        # This camera's overrides of the global knobs (tuning.py); the
+        # per-camera fps there wins over the listing's fps and the env.
+        tuning=tuning,
     )
 
 

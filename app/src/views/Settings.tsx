@@ -25,6 +25,7 @@ import { CameraConfigManager } from './settings/CameraConfigManager'
 import { CameraDeviceConfig } from './settings/CameraDeviceConfig'
 import { CameraZones } from './settings/CameraZones'
 import { CameraMasks } from './settings/CameraMasks'
+import { CameraDetectionSettings } from './settings/CameraDetectionSettings'
 import { DeviceFirewall } from './settings/DeviceFirewall'
 import { ApiTokens } from './settings/ApiTokens'
 import { PasswordPolicy } from './settings/PasswordPolicy'
@@ -59,6 +60,7 @@ const SETTINGS_REGISTRY: TabEntry[] = [
       { slug: 'streaming', label: 'Streaming & Recording', panel: () => <CameraConfigManager /> },
       { slug: 'zones', label: 'Zones', panel: () => <CameraZones /> },
       { slug: 'masks', label: 'Masks', panel: () => <CameraMasks /> },
+      { slug: 'detection', label: 'Detection', panel: () => <CameraDetectionSettings /> },
     ],
   },
   { key: 'recording', label: 'Recording', panel: () => <RecordingSettings />, submenu: [] },

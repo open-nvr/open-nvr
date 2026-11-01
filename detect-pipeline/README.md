@@ -119,6 +119,21 @@ The polygons are rasterised once per worker; a redrawn mask restarts the
 camera's worker on the next reconcile tick. Same semantics as Frigate's
 `motion.mask` and `objects.filters.<label>.mask`.
 
+**Per-camera tuning** (`tuning.py`). The `DETECT_*` knobs below are one
+value for the whole pipeline; core's per-camera detection settings
+(Settings → Camera-Config → Detection, delivered as `detection` in the
+camera listing) override them for one camera: `fps`, `motion_enabled`,
+`motion_threshold`, `motion_contour_area`, `min_spawn_score`,
+`stationary_interval`, and `object_filters` — per label, `min_area` /
+`max_area` as fractions of the frame area (so the same numbers hold on
+the substream and the main stream), `min_ratio` / `max_ratio` on
+width÷height, and `min_score`. Filters run after NMS and the object mask;
+what they drop counts in `tier0_object_filtered_total{camera}`. Absent =
+inherit, so a camera with nothing set behaves exactly as before, and a
+changed record restarts the worker like a mask change does. Same
+semantics as Frigate's per-camera `detect.fps`, `motion.threshold`,
+`motion.contour_area` and `objects.filters`.
+
 **Worst case is bounded by design.** A cluttered scene (a desk of wires
 and boards) once drove the field failure this section exists for: at
 confidence 0.25 across all 80 COCO classes, yolov8n hallucinated

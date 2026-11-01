@@ -75,6 +75,9 @@ class FrameResult:
     # Detections dropped THIS frame because they stood inside an object
     # mask (exported as tier0_object_masked_total; see masks.py).
     masked_detections: int = 0
+    # Detections dropped THIS frame by the camera's per-label size, shape
+    # or score filters (exported as tier0_object_filtered_total; tuning.py).
+    filtered_detections: int = 0
     # Motion-gate state, for metrics. ``motion_forced_exit`` is a per-frame
     # EDGE (did the calibration deadline fire on this frame?), not the
     # detector's running total — a cumulative value fed to a Prometheus
@@ -207,8 +210,12 @@ class DetectPipeline:
         allowed_labels: frozenset[str] | set[str] | None = None,
         cross_label_iou: float | None = CROSS_LABEL_IOU,
         object_mask: Callable[[list[Detection]], list[Detection]] | None = None,
+        object_filter: Callable[[list[Detection]], list[Detection]] | None = None,
     ) -> None:
         self.frame_source = frame_source
+        # The camera's per-label size/shape/score filters (tuning.py), run
+        # after NMS and the object mask so one object is judged once.
+        self.object_filter = object_filter
         # The operator's object masks (masks.ObjectMaskFilter): detections
         # standing inside one are dropped before they can start a track.
         self.object_mask = object_mask
@@ -302,6 +309,7 @@ class DetectPipeline:
         dets: list[Detection] = []
         bgr = None
         masked = 0
+        filtered = 0
         detect_latency_s: float | None = None
         if regions:
             _t = time.monotonic()
@@ -329,6 +337,10 @@ class DetectPipeline:
                 dets = self.object_mask(dets)
                 masked = before - len(dets)
             dets = nms(dets, cross_label_iou=self.cross_label_iou)
+            if self.object_filter is not None and dets:
+                before = len(dets)
+                dets = self.object_filter(dets)
+                filtered = before - len(dets)
             detect_latency_s = time.monotonic() - _t   # pure detector time (this model)
             stages["detect"] = detect_latency_s
 
@@ -344,7 +356,7 @@ class DetectPipeline:
             tracks, motion_boxes, regions, False,
             detections=dets, detect_latency_s=detect_latency_s, stage_latency_s=stages,
             skipped_stationary=skipped, regions_capped=regions_capped,
-            masked_detections=masked,
+            masked_detections=masked, filtered_detections=filtered,
             track_population=self.tracker.population,
             motion_forced_exit=getattr(
                 self.motion, "forced_exit_this_frame", False),

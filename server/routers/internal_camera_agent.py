@@ -1036,6 +1036,7 @@ def list_camera_agent_sources(
         cameras = [c for c in cameras if int(c.id) in roster]
     # The operator's masks (services.masks), one query for the fleet: what
     # the detect-pipeline's motion gate and object filter must ignore.
+    from services.detection_settings import normalize as normalize_detection
     from services.masks import masks_for_cameras
 
     masks = masks_for_cameras(db, (int(c.id) for c in cameras))
@@ -1166,6 +1167,9 @@ def list_camera_agent_sources(
                 # object_masks drop detections standing inside them.
                 # Always present (empty lists = none drawn).
                 **masks.get(int(cam.id), {"motion_masks": [], "object_masks": []}),
+                # This camera's overrides of the pipeline's global knobs
+                # (services/detection_settings.py). {} = inherit all.
+                "detection": normalize_detection(cam.detection_settings),
             }
         )
 

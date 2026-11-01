@@ -226,7 +226,9 @@ def test_worker_constructs_motion_from_env_with_camera_label():
     from pathlib import Path as _P
     src = (_P(__file__).resolve().parents[1]
            / "detect_pipeline" / "service.py").read_text()
-    assert "motion_config_from_env(), label=self.spec.camera_id" in src
+    # The env config, with the camera's own overrides layered on (tuning.py).
+    assert "tuning.motion_config(motion_config_from_env())" in src
+    assert "label=self.spec.camera_id" in src
     assert "MotionDetector((h, w), MotionConfig())" not in src
 
 

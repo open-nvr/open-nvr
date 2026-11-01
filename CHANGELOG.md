@@ -8,6 +8,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Per-camera detection settings and object filters** (Settings →
+  Camera-Config → Detection). The detect-pipeline's `DETECT_*` knobs were
+  one value for every camera; a camera can now override the analysis fps,
+  the motion gate (on/off, threshold, smallest motion area), the score a
+  track needs to start and the stationary re-check interval, and carry
+  per-label **object filters** — a detection is dropped when its box is
+  too small or too large for that camera (fractions of the frame, so the
+  same numbers hold on the substream and the main stream), the wrong
+  width/height ratio, or below a score. Empty = inherit the system value,
+  so nothing changes for cameras with no overrides. Stored on the camera
+  (`/cameras/{id}/detection-settings`, audited), delivered to the pipeline
+  as `detection` in the sources listing, picked up on the next reconcile
+  tick; `tier0_object_filtered_total{camera}` counts what the filters
+  dropped.
 - **Motion masks and object masks per camera** (Settings → Camera-Config →
   Masks). A motion mask is a polygon under which nothing counts as motion
   — a clock burned into the picture, a tree in the wind, a road at the

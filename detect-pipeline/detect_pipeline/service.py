@@ -54,6 +54,7 @@ from .metrics import (
 )
 from .masks import ObjectMask, ObjectMaskFilter, Polygon
 from .motion import MotionConfig, MotionDetector
+from .tuning import ObjectSizeFilter, Tuning
 from .pipeline import DetectPipeline, FrameResult, RegionBudgetController
 from .tracking import TrackConfig, Tracker
 
@@ -189,6 +190,11 @@ class CameraSpec:
     # restarts on the next reconcile tick with the new mask rasterised.
     motion_masks: tuple[Polygon, ...] = ()
     object_masks: tuple[ObjectMask, ...] = ()
+    # This camera's overrides of the global DETECT_* knobs (tuning.py):
+    # analysis rate, motion gate, spawn score, stationary interval and
+    # per-label object filters. Tuning() = inherit everything. Hashable,
+    # so a change restarts the worker on the next reconcile tick.
+    tuning: Tuning = Tuning()
 
 
 def _tap_kind(url: str | None) -> str:
@@ -720,9 +726,13 @@ class CameraWorker:
                      self.spec.camera_id,
                      _env_int("DETECT_PLATE_CANDIDATES", 4),
                      _env_int("DETECT_PLATE_EARLY_ATTEMPTS", 2))
+        tuning = self.spec.tuning
+        if not tuning.is_default:
+            log.info("tier0 %s: per-camera tuning: %s", self.spec.camera_id,
+                     tuning.describe())
         motion = MotionDetector(
-            (h, w), motion_config_from_env(), label=self.spec.camera_id,
-            mask=self.spec.motion_masks,
+            (h, w), tuning.motion_config(motion_config_from_env()),
+            label=self.spec.camera_id, mask=self.spec.motion_masks,
         )
         if self.spec.motion_masks:
             log.info("tier0 %s: motion mask active — %d polygon(s) blind %.0f%% "
@@ -738,7 +748,9 @@ class CameraWorker:
             fps=self.spec.fps,
             max_tracks=_env_int("DETECT_MAX_TRACKS", 50),
             coast_ttl_seconds=float(_env_int("DETECT_TRACK_TTL", 300)),
-            min_spawn_score=_env_float("DETECT_MIN_SPAWN_SCORE", 0.5),
+            min_spawn_score=(
+                tuning.min_spawn_score if tuning.min_spawn_score is not None
+                else _env_float("DETECT_MIN_SPAWN_SCORE", 0.5)),
         ))
         # Evidence/candidate crop margin, clamped to something sane: 0
         # is the bare box, 2 is a crop five times the box on each axis.
@@ -773,14 +785,20 @@ class CameraWorker:
                 320, min(_env_int("DETECT_SCENE_MAX_PX", 1280), 1920))
             tracker.scene_quality = max(
                 40, min(_env_int("DETECT_SCENE_JPEG_QUALITY", 78), 95))
+        object_filter = None
+        if tuning.object_filters:
+            object_filter = ObjectSizeFilter(tuning.filters(), (h, w))
         pipe = DetectPipeline(
             None, motion, self.detector, tracker,
             model_size=(self.model_size, self.model_size),
-            stationary_interval=_env_int("DETECT_STATIONARY_INTERVAL", 10),
+            stationary_interval=(
+                tuning.stationary_interval if tuning.stationary_interval is not None
+                else _env_int("DETECT_STATIONARY_INTERVAL", 10)),
             max_regions=_env_int("DETECT_MAX_REGIONS", 8),
             allowed_labels=allowed_labels_for(self.spec),
             cross_label_iou=_env_float("DETECT_NMS_CROSS_LABEL_IOU", 0.85),
             object_mask=object_mask,
+            object_filter=object_filter,
         )
         if self.spec.labels is not None:
             log.info(
