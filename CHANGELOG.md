@@ -36,6 +36,17 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Storing a substream URL on an existing camera now creates its `-sub`
+  MediaMTX path at once.** The update took the "main path unchanged" branch
+  of the provisioner, which skipped the substream entirely, while the
+  Tier-0 tap listing already handed `cam-N-sub` to the detect-pipeline:
+  that camera's detection died with "path not configured" every tick
+  until the next core restart. The unchanged branch now refreshes the sub
+  path like the replace branch does.
+- **A detect-pipeline worker whose substream tap cannot be opened detects
+  on the main stream instead of going dark.** With the main URL in hand
+  (core's `evidence_url`) it probes that, warns that it is decoding full
+  resolution, and runs no evidence source; without one it fails as before.
 - **The detect-pipeline refuses QNN on the HTP, out loud, when the DSP node
   is not in its container.** ORT's QNN plugin lists an HTP device on any
   Qualcomm host and compiles the graph without opening it, so a pipeline

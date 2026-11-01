@@ -31,7 +31,7 @@ from dataclasses import dataclass, field, replace
 from typing import Protocol
 
 from .detector import DetectorAdapter, DetectorPool, StubDetector
-from .frame_source import FrameSource, probe_stream
+from .frame_source import FrameSource, probe_stream, redact_url
 from .dispatch import dispatch_escalations
 from .gate import Gate
 from .ffmpeg_presets import DEFAULT_RTSP_TIMEOUT_S, HwAccel, resolve_hwaccel
@@ -397,6 +397,9 @@ class CameraWorker:
         self.evidence_url_provider = evidence_url_provider
         self._evidence_source_factory = evidence_source_factory
         self._evidence = None
+        # Set when the sub tap could not be opened and the worker detects on
+        # the main stream instead (see _make_source); no evidence source then.
+        self._detect_on_main = False
         self.detector = detector or StubDetector()
         self.model_size = model_size
         self.model_id = model_id
@@ -511,19 +514,40 @@ class CameraWorker:
         if self._frame_source is not None:
             return self._frame_source, self._frame_source.width, self._frame_source.height
         w, h = self.spec.width, self.spec.height
+        url = self.spec.substream_url
         if not (w and h):
-            probed = probe_stream(self.spec.substream_url)
+            probed = probe_stream(url)
+            if probed is None and self.spec.evidence_url:
+                # The sub tap is dead but core also handed us the main one.
+                # Detect on the main stream rather than on nothing: a
+                # camera with a stored substream URL MediaMTX cannot serve
+                # (the path not provisioned yet, the camera's second stream
+                # disabled) used to retry the sub every tick and go dark.
+                # Costlier, but visible — the warning names it, and the
+                # evidence source is skipped (detect and evidence are then
+                # the same stream).
+                probed = probe_stream(self.spec.evidence_url)
+                if probed is not None:
+                    log.warning(
+                        "tier0 %s: the substream tap is not reachable — detecting "
+                        "on the MAIN stream instead (full-res decode; check the "
+                        "camera's substream URL and the %s-sub MediaMTX path)",
+                        self.spec.camera_id, redact_url(url).split("?")[0].rsplit("/", 1)[-1],
+                    )
+                    url = self.spec.evidence_url
+                    self._detect_on_main = True
             if probed is None:
                 raise RuntimeError(f"could not probe {self.spec.camera_id} stream")
             w, h, _fps = probed
         src = FrameSource(
-            self.spec.substream_url, width=w, height=h, fps=self.spec.fps,
+            url, width=w, height=h, fps=self.spec.fps,
             hwaccel=self._effective_hwaccel(), device=self.device,
             decode_skip=self.decode_skip if decode_skip is None else decode_skip,
             decode_threads=self.decode_threads,
             fast_decode=self.fast_decode,
             rtsp_timeout_s=self.rtsp_timeout_s,
-            url_provider=self.url_provider,
+            url_provider=(self.evidence_url_provider if self._detect_on_main
+                          else self.url_provider),
         )
         return src, w, h
 
@@ -539,7 +563,7 @@ class CameraWorker:
         from .evidence import EvidenceSource
 
         url = self.spec.evidence_url
-        if self.evidence_stream != "main" or not url:
+        if self.evidence_stream != "main" or not url or self._detect_on_main:
             return None
         if self._evidence_source_factory is not None:
             return EvidenceSource(

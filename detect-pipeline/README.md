@@ -158,6 +158,18 @@ each camera's evidence came from; `tier0_evidence_active` whether its main
 decode is running. `DETECT_EVIDENCE_STREAM=detect` turns it off. Core
 offers the main tap as `evidence_url` beside a sub `frame_url` (the
 `-sub` MediaMTX path), so this needs nothing but a stored substream URL.
+If the sub tap cannot be opened at all (the camera's second stream
+disabled, the path not yet served), the worker detects on the main
+stream and warns, rather than retrying the sub forever with no detection.
+
+The honest cost model: an idle camera pays only its sub decode; a camera
+with something in front of it pays the main decode for as long as that
+lasts, plus the sub. A camera that is never quiet (a busy road) therefore
+costs what it did on the main stream, plus a few percent — measured on a
+Ventuno Q with a 1114x720 clip: 3 % of a core for the 558x360 sub, 28-34 %
+for the main decode while active, the same 28-34 % the main stream cost
+before. The saving is on every camera that is quiet most of the day,
+which is most cameras.
 
 **Third dial: configure the substream.** Tier-0 decodes each
 camera's *substream* (a low-res second stream every mainstream camera

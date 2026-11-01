@@ -409,3 +409,44 @@ def test_provider_carries_evidence_url_and_config_reads_the_dials(monkeypatch):
     assert (cfg.evidence_stream, cfg.evidence_fps, cfg.evidence_idle_after,
             cfg.evidence_max_skew_s) == ("detect", 8, 30.0, 0.5)
     assert config_from_env({"DETECT_EVIDENCE_STREAM": "sometimes"}).evidence_stream == "main"
+
+
+# ── Worker: a dead sub tap falls back to the main stream, visibly ────
+
+def test_a_sub_tap_that_cannot_be_probed_falls_back_to_the_main_stream(monkeypatch, caplog):
+    """Core hands out `cam-N-sub` as soon as a substream URL is stored; if
+    MediaMTX cannot serve it yet the worker used to retry the sub every
+    tick and the camera stayed dark. With the main URL in hand it detects
+    on that instead — louder and costlier, but not blind — and runs no
+    evidence source (detect and evidence are then the same stream)."""
+    import logging
+    import detect_pipeline.service as svc
+    probes = []
+
+    def fake_probe(url, **kw):
+        probes.append(url.split("?")[0])
+        return None if url.startswith("rtsp://m/cam-7-sub") else (1280, 720, 25.0)
+
+    class _FS:
+        def __init__(self, url, **kw):
+            self.url, self.kw = url, kw
+            self.width, self.height = kw["width"], kw["height"]
+    monkeypatch.setattr(svc, "probe_stream", fake_probe)
+    monkeypatch.setattr(svc, "FrameSource", _FS)
+    w = CameraWorker(_spec("cam-7", evidence_url="rtsp://m/cam-7?jwt=a"), _TrackSink(),
+                     evidence_url_provider=lambda: "rtsp://m/cam-7?jwt=fresh")
+    with caplog.at_level(logging.WARNING):
+        src, width, height = w._make_source()
+    assert probes == ["rtsp://m/cam-7-sub", "rtsp://m/cam-7"]
+    assert src.url == "rtsp://m/cam-7?jwt=a" and (width, height) == (1280, 720)
+    assert src.kw["url_provider"]() == "rtsp://m/cam-7?jwt=fresh", "respawns read the MAIN url"
+    assert "detecting on the MAIN stream" in caplog.text and "cam-7-sub" in caplog.text
+    assert w._make_evidence(width, height) is None, "no second decode of the same stream"
+    # no main URL to fall back to: the old behaviour, a plain failure
+    w2 = CameraWorker(_spec("cam-7"), _TrackSink())
+    try:
+        w2._make_source()
+    except RuntimeError as e:
+        assert "could not probe" in str(e)
+    else:
+        raise AssertionError("expected a probe failure")
