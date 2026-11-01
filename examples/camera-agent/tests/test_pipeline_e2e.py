@@ -92,7 +92,7 @@ def runtime():
         cfg=cfg, whisper=_Whisper(), ollama=_Ollama(), piper=_Piper(),
         tool_definitions=[{"type": "function", "function": {"name": "describe_camera", "parameters": {}}}],
         tool_handlers={"describe_camera": describe_camera},
-        build_system_prompt=lambda: "You are the camera agent.",
+        build_system_prompt=lambda clock=True: "You are the camera agent.",
     )
     rt.describe_calls = describe_calls
     return rt

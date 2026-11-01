@@ -163,6 +163,34 @@ give the box more CPU — watch `tier0_visits_dropped_total{reason="too_short"}`
 after a change.
 
 
+**The substream does not cost you the evidence.** Since 0.1.11 the
+pipeline detects on the substream and cuts its evidence from the main
+stream: each track's best-frame crop, the scene behind it, the plate
+candidates the OCR adapter reads and the Tier-1 escalations come from a
+full-resolution main frame captured at the same moment as the detect
+frame. The main decode runs only while something is in front of the
+camera (first motion box or track → start; `DETECT_EVIDENCE_IDLE_AFTER`
+quiet seconds → stop), and a main frame further than
+`DETECT_EVIDENCE_MAX_SKEW_S` from the detect frame is refused in favour of
+the detect frame's own crop, so a crop is never of the wrong moment.
+`tier0_evidence_crops_total{source="main"|"detect"}` says which stream
+each camera's evidence came from; `tier0_evidence_active` whether its main
+decode is running. `DETECT_EVIDENCE_STREAM=detect` turns it off. Core
+offers the main tap as `evidence_url` beside a sub `frame_url` (the
+`-sub` MediaMTX path), so this needs nothing but a stored substream URL.
+If the sub tap cannot be opened at all (the camera's second stream
+disabled, the path not yet served), the worker detects on the main
+stream and warns, rather than retrying the sub forever with no detection.
+
+The honest cost model: an idle camera pays only its sub decode; a camera
+with something in front of it pays the main decode for as long as that
+lasts, plus the sub. A camera that is never quiet (a busy road) therefore
+costs what it did on the main stream, plus a few percent — measured on a
+Ventuno Q with a 1114x720 clip: 3 % of a core for the 558x360 sub, 28-34 %
+for the main decode while active, the same 28-34 % the main stream cost
+before. The saving is on every camera that is quiet most of the day,
+which is most cameras.
+
 **Third dial: configure the substream.** Tier-0 decodes each
 camera's *substream* (a low-res second stream every mainstream camera
 provides). If a camera has no substream configured, Tier-0 falls back to

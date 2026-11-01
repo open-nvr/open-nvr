@@ -163,6 +163,15 @@ class Track:
     # repr=False is load-bearing, not cosmetic — 150 KB of bytes in a log
     # line or a pytest assertion diff is its own outage.
     best_scene_jpeg: object | None = field(default=None, repr=False, compare=False)
+    # Which stream best_crop (and the scene) were cut from: "main" when the
+    # worker runs an evidence source on the camera's main stream and a main
+    # frame close enough in time was there, else "detect" (the frame the
+    # detector ran on). The skew is the capture-time distance between the
+    # sub frame and the main frame the crop came from. Both exist so a
+    # quality study can tell the two apart per visit; None = no evidence
+    # source configured, the pre-feature behaviour.
+    best_crop_source: str | None = field(default=None, compare=False)
+    best_crop_skew_s: float | None = field(default=None, compare=False)
 
     @property
     def stationary(self) -> bool:
@@ -267,6 +276,20 @@ class Tracker:
         self._scene_bgr = None
         self._scene_jpeg: bytes | None = None
         self._scene_done = False
+        # Evidence from the MAIN stream (see evidence.py): a callable that,
+        # given the detect frame's capture stamp, returns the main frame
+        # captured nearest to it (or None). When it answers, every crop
+        # this update stores — best crop, scene, plate candidates — is cut
+        # from that frame instead of the detect frame, at the main stream's
+        # resolution. None (the default) = crops from the detect frame, as
+        # before. Resolved ONCE per update, not per track.
+        self.evidence = None
+        self._ev = None
+        self._ev_skew: float | None = None
+        self._ev_ts: float | None = None
+        # How many best-crop updates were cut from which stream, for the
+        # worker's metrics. "main" / "detect" keys, monotonic.
+        self.evidence_stats: dict[str, int] = {"main": 0, "detect": 0}
 
     @property
     def population(self) -> int:
@@ -286,6 +309,7 @@ class Tracker:
     def update(
         self, detections: list[Detection], bgr=None,
         scanned_regions: list[Box] | None = None,
+        frame_ts: float | None = None,
     ) -> list[Track]:
         # ``bgr`` (the full-frame BGR image) is optional: when given, the best
         # frame's crop pixels are retained on the track for Tier-1 dispatch.
@@ -306,6 +330,16 @@ class Tracker:
         # the encode is shared by every track that peaks on this frame, and
         # the frame reference never outlives the call.
         self._scene_bgr, self._scene_jpeg, self._scene_done = bgr, None, False
+        # The main frame for this update's crops, looked up once. ``frame_ts``
+        # is the detect frame's capture stamp (Frame.ts); the evidence
+        # source refuses a main frame too far from it, and then the detect
+        # frame's own pixels are used — never a crop of the wrong moment.
+        self._ev, self._ev_skew, self._ev_ts = None, None, frame_ts
+        if self.evidence is not None and bgr is not None and detections:
+            try:
+                self._ev = self.evidence(frame_ts)
+            except Exception:
+                self._ev = None
         unmatched_tracks = set(range(len(self._tracks)))
         unmatched_dets = set(range(len(detections)))
 
@@ -378,6 +412,7 @@ class Tracker:
         # referenced, and that path already unwinds into the worker's
         # crashed-camera handler, which drops the whole Tracker.)
         self._scene_bgr, self._scene_jpeg, self._scene_done = None, None, False
+        self._ev, self._ev_skew = None, None
         return self.tracks
 
     def _match(self, tr: Track, det: Detection, bgr=None, now: float | None = None) -> None:
@@ -424,17 +459,46 @@ class Tracker:
         if tr.best is None or is_better_thumbnail(tr.best, cand, self.frame_shape):
             tr.best = cand
             if bgr is not None:                       # retain the best frame's pixels
-                crop = _crop_bgr(bgr, det.box, margin=self.crop_margin)
+                crop, source, frame_bgr = self._crop_for(bgr, det.box)
                 if crop is not None:
                     tr.best_crop = crop
                     tr.best_crop_ts = self._clock()
+                    if self.evidence is not None:
+                        tr.best_crop_source = source
+                        tr.best_crop_skew_s = (
+                            self._ev_skew if source == "main" else None)
+                        self.evidence_stats[source] = (
+                            self.evidence_stats.get(source, 0) + 1)
                     # Gated on the crop, so the two evidence images always
                     # describe the SAME frame — a scene whose crop was
-                    # rejected would be an inconsistent pair.
-                    scene = self._scene_jpeg_for(bgr)
+                    # rejected would be an inconsistent pair. Same frame
+                    # as the crop: the main one when the crop came from it.
+                    scene = self._scene_jpeg_for(frame_bgr)
                     if scene is not None:
                         tr.best_scene_jpeg = scene
         self._update_plate_candidates(tr, det, bgr)
+
+    def _crop_for(self, bgr, box: Box):
+        """``(crop, source, frame)``: the crop of ``box`` with the context
+        margin, from the main-stream evidence frame when this update has
+        one (the box scaled by the resolution ratio — same sensor, same
+        pixels), else from the detect frame. ``frame`` is the array the
+        crop was cut from, for the scene that must describe the same
+        moment."""
+        ev = self._ev
+        if ev is not None:
+            main = ev.bgr()
+            if main is not None and main.shape[0] > 0 and main.shape[1] > 0:
+                h, w = bgr.shape[:2]
+                sx = main.shape[1] / float(w)
+                sy = main.shape[0] / float(h)
+                scaled = (box[0] * sx, box[1] * sy, box[2] * sx, box[3] * sy)
+                crop = _crop_bgr(main, scaled, margin=self.crop_margin)
+                if crop is not None:
+                    if self._ev_skew is None and self._ev_ts is not None:
+                        self._ev_skew = abs(ev.ts - float(self._ev_ts))
+                    return crop, "main", main
+        return _crop_bgr(bgr, box, margin=self.crop_margin), "detect", bgr
 
     def _scene_jpeg_for(self, bgr) -> bytes | None:
         """This frame as JPEG — encoded at most ONCE per ``update`` call.
@@ -477,7 +541,7 @@ class Tracker:
         )
         if det.label not in VEHICLE_LABELS:
             return
-        crop = _crop_bgr(bgr, det.box, margin=self.crop_margin)
+        crop, _source, _frame = self._crop_for(bgr, det.box)
         if crop is None:
             return
         if tr.plate_ring is None:

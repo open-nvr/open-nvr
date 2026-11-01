@@ -239,6 +239,11 @@ def _to_spec(c: dict) -> CameraSpec:
         labels=labels,
         extra_labels=extra_labels,
         skills=skills,
+        # Core offers the main tap beside a sub tap so evidence can be cut
+        # at full resolution (evidence.py). Absent on older cores and on
+        # cameras whose frame_url already IS the main stream.
+        evidence_url=(str(c.get("evidence_url")).strip() or None)
+        if c.get("evidence_url") else None,
         # The operator's masks (masks.py). Absent on older cores = none.
         motion_masks=parse_motion_masks(c.get("motion_masks")),
         object_masks=parse_object_masks(c.get("object_masks")),

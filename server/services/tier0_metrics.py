@@ -155,6 +155,37 @@ def _decode_row(labels: dict | None) -> dict | None:
     }
 
 
+def _provider_name(spec: str) -> str:
+    """``"QNNExecutionProvider(htp), CPUExecutionProvider"`` → ``QNNExecutionProvider``."""
+    return spec.split(",")[0].strip().split("(")[0].strip()
+
+
+def _backend_row(samples: list[Sample]) -> dict | None:
+    """What the Tier-0 detector runs on, from the ``tier0_detector_backend``
+    info-metric: the request against the live session, and whether the
+    accelerator asked for is the one in use. ``fallback`` is the state the
+    dashboard must show: an accelerator was requested and CPU is doing the
+    work — a pipeline recreated without its NPU device looked exactly like
+    "the box is too small" until somebody read its log (Ventuno Q,
+    2026-11-01)."""
+    row = next((s for s in samples if s.name == "tier0_detector_backend"), None)
+    if row is None:
+        return None
+    requested = row.labels.get("requested") or ""
+    effective = row.labels.get("effective") or ""
+    wanted = _provider_name(requested)
+    got = _provider_name(effective)
+    accelerator_requested = bool(wanted) and wanted != "CPUExecutionProvider"
+    accelerated = accelerator_requested and got == wanted
+    return {
+        "backend": row.labels.get("backend") or "unknown",
+        "requested": requested,
+        "effective": effective,
+        "accelerated": accelerated,
+        "fallback": accelerator_requested and not accelerated,
+    }
+
+
 def _dominant_label(samples: list[Sample], name: str, label: str) -> str | None:
     """The label value carrying the most weight (e.g. the active detector model)."""
     grouped = _sums_grouped_by(samples, name, label)
@@ -345,6 +376,8 @@ def reduce_metrics(samples: list[Sample]) -> dict[str, Any]:
         "mode": mode,
         "model": model,
         "health": health,
+        # The detector's hardware, for the dashboard's health bar.
+        "backend": _backend_row(samples),
         "detector": {
             "latency_avg_ms": det_avg_ms,
             "latency_p95_ms": det_p95_ms,

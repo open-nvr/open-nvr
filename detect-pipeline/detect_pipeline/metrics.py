@@ -325,6 +325,22 @@ def sample_frame_age_metrics(now: float | None = None) -> None:
         metrics.gauge("tier0_frame_age_seconds", age, {"camera": cam})
 
 
+def record_evidence(camera_id: str, active: bool, stats: dict, *,
+                    frames: int = 0, starts: int = 0) -> None:
+    """Main-stream evidence (evidence.py): whether the camera's main decode
+    is running right now, how many best-crop updates were cut from which
+    stream, and how many main frames it has read. The split by source is
+    the number a quality study reads: evidence from "main" is full-res,
+    evidence from "detect" is the sub-sized fallback (no main frame close
+    enough in time, or the main decode was still starting)."""
+    metrics.gauge("tier0_evidence_active", 1.0 if active else 0.0, {"camera": camera_id})
+    for source in ("main", "detect"):
+        metrics.gauge("tier0_evidence_crops_total", float(stats.get(source, 0)),
+                      {"camera": camera_id, "source": source})
+    metrics.gauge("tier0_evidence_frames_total", float(frames), {"camera": camera_id})
+    metrics.gauge("tier0_evidence_starts_total", float(starts), {"camera": camera_id})
+
+
 def record_mainstream_fallback(camera_id: str, active: bool) -> None:
     """Gauge: 1 while Tier-0 decodes a high-resolution main stream for this
     camera (no usable substream) — the expensive path the README warns about."""

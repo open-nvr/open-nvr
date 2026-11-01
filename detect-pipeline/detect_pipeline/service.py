@@ -31,13 +31,14 @@ from dataclasses import dataclass, field, replace
 from typing import Protocol
 
 from .detector import DetectorAdapter, DetectorPool, StubDetector
-from .frame_source import FrameSource, probe_stream
+from .frame_source import FrameSource, probe_stream, redact_url
 from .dispatch import dispatch_escalations
 from .gate import Gate
 from .ffmpeg_presets import DEFAULT_RTSP_TIMEOUT_S, HwAccel, resolve_hwaccel
 from .metrics import (
     detector_backend_phrase,
     metrics as _metrics,
+    record_evidence,
     record_frame,
     record_gate,
     record_processing_fps,
@@ -175,12 +176,26 @@ class CameraSpec:
     # an app being picked for a camera restarts its worker with the
     # wider set on the next reconcile tick.
     extra_labels: frozenset[str] | None = None
+    # The camera's MAIN stream, offered by core only when ``substream_url``
+    # is the SUB tap (see evidence.py): where full-resolution evidence is
+    # cut from while detection runs on the sub. None = detection and
+    # evidence share one stream (no sub, or core predates the field).
+    # Volatile like substream_url (its JWT rotates), so the manager keeps
+    # the freshest one aside and bakes only its presence.
+    evidence_url: str | None = None
     # The operator's masks for this camera (masks.py), normalised polygons
     # from core's ``motion_masks`` / ``object_masks`` fields. Tuples, so the
     # spec stays hashable and a redrawn mask is a spec change: the worker
     # restarts on the next reconcile tick with the new mask rasterised.
     motion_masks: tuple[Polygon, ...] = ()
     object_masks: tuple[ObjectMask, ...] = ()
+
+
+def _tap_kind(url: str | None) -> str:
+    """``"sub"`` for a MediaMTX ``-sub`` tap, else ``"main"`` — the part of
+    a stream URL that means something, with its rotating token left out."""
+    path = (url or "").split("?", 1)[0].rstrip("/")
+    return "sub" if path.endswith("-sub") else "main"
 
 
 def hwaccel_for(spec: "CameraSpec", default: str) -> str:
@@ -373,9 +388,25 @@ class CameraWorker:
         router=None,                             # escalation → adapter routing
         visit_poster=None,                       # events store: post finished visits (RFC-0001 C1)
         attempt_poster=None,                     # multi-frame OCR: early plate attempts (shared)
+        evidence_stream: str = "main",           # "main": crops from the main stream when core offers it; "detect": never
+        evidence_fps: int = 5,                   # main-stream frames kept per second while active
+        evidence_idle_after: float = 15.0,       # quiet seconds before the main decode stops
+        evidence_max_skew_s: float = 0.35,       # a main frame further than this from the sub frame is refused
+        evidence_url_provider=None,              # freshest main-tap URL (its JWT rotates)
+        evidence_source_factory=None,            # injectable for tests: () -> source with stream()/close()
     ) -> None:
         self.spec = spec
         self.sink = sink
+        self.evidence_stream = (evidence_stream or "main").strip().lower()
+        self.evidence_fps = max(1, min(30, int(evidence_fps)))
+        self.evidence_idle_after = evidence_idle_after
+        self.evidence_max_skew_s = evidence_max_skew_s
+        self.evidence_url_provider = evidence_url_provider
+        self._evidence_source_factory = evidence_source_factory
+        self._evidence = None
+        # Set when the sub tap could not be opened and the worker detects on
+        # the main stream instead (see _make_source); no evidence source then.
+        self._detect_on_main = False
         self.detector = detector or StubDetector()
         self.model_size = model_size
         self.model_id = model_id
@@ -433,6 +464,13 @@ class CameraWorker:
                 except Exception:  # pragma: no cover - defensive
                     log.debug("tier0 %s: error closing source",
                               self.spec.camera_id, exc_info=True)
+        ev = self._evidence
+        if ev is not None:
+            try:
+                ev.close()
+            except Exception:  # pragma: no cover - defensive
+                log.debug("tier0 %s: error closing the evidence source",
+                          self.spec.camera_id, exc_info=True)
 
     def join(self, timeout: float) -> bool:
         """Wait up to ``timeout`` for the thread to exit; True if it did."""
@@ -483,21 +521,97 @@ class CameraWorker:
         if self._frame_source is not None:
             return self._frame_source, self._frame_source.width, self._frame_source.height
         w, h = self.spec.width, self.spec.height
+        url = self.spec.substream_url
         if not (w and h):
-            probed = probe_stream(self.spec.substream_url)
+            probed = probe_stream(url)
+            if probed is None and self.spec.evidence_url:
+                # The sub tap is dead but core also handed us the main one.
+                # Detect on the main stream rather than on nothing: a
+                # camera with a stored substream URL MediaMTX cannot serve
+                # (the path not provisioned yet, the camera's second stream
+                # disabled) used to retry the sub every tick and go dark.
+                # Costlier, but visible — the warning names it, and the
+                # evidence source is skipped (detect and evidence are then
+                # the same stream).
+                probed = probe_stream(self.spec.evidence_url)
+                if probed is not None:
+                    log.warning(
+                        "tier0 %s: the substream tap is not reachable — detecting "
+                        "on the MAIN stream instead (full-res decode; check the "
+                        "camera's substream URL and the %s-sub MediaMTX path)",
+                        self.spec.camera_id, redact_url(url).split("?")[0].rsplit("/", 1)[-1],
+                    )
+                    url = self.spec.evidence_url
+                    self._detect_on_main = True
             if probed is None:
                 raise RuntimeError(f"could not probe {self.spec.camera_id} stream")
             w, h, _fps = probed
         src = FrameSource(
-            self.spec.substream_url, width=w, height=h, fps=self.spec.fps,
+            url, width=w, height=h, fps=self.spec.fps,
             hwaccel=self._effective_hwaccel(), device=self.device,
             decode_skip=self.decode_skip if decode_skip is None else decode_skip,
             decode_threads=self.decode_threads,
             fast_decode=self.fast_decode,
             rtsp_timeout_s=self.rtsp_timeout_s,
-            url_provider=self.url_provider,
+            url_provider=(self.evidence_url_provider if self._detect_on_main
+                          else self.url_provider),
         )
         return src, w, h
+
+    def _make_evidence(self, sub_w: int, sub_h: int):
+        """The main-stream evidence source for this camera, or None.
+
+        Built only when core offered a main URL beside the sub tap and the
+        operator left DETECT_EVIDENCE_STREAM at ``main``. The main stream is
+        probed once here, which is also the check that it IS bigger than
+        the detect stream: a main no larger than the sub would cost a second
+        decode for nothing.
+        """
+        from .evidence import EvidenceSource
+
+        url = self.spec.evidence_url
+        if self.evidence_stream != "main" or not url or self._detect_on_main:
+            return None
+        if self._evidence_source_factory is not None:
+            return EvidenceSource(
+                self.spec.camera_id, self._evidence_source_factory,
+                idle_after=self.evidence_idle_after,
+                max_skew_s=self.evidence_max_skew_s,
+            )
+        probed = probe_stream(url)
+        if probed is None:
+            log.warning("tier0 %s: could not probe the main stream for evidence — "
+                        "evidence stays on the detect stream", self.spec.camera_id)
+            return None
+        mw, mh, _fps = probed
+        if (mw or 0) * (mh or 0) <= (sub_w or 0) * (sub_h or 0):
+            log.info("tier0 %s: main stream (%dx%d) is no bigger than the detect "
+                     "stream (%dx%d) — evidence stays on the detect stream",
+                     self.spec.camera_id, mw, mh, sub_w, sub_h)
+            return None
+        hwaccel = self._effective_hwaccel()
+
+        def factory(_self=self, _w=mw, _h=mh, _hw=hwaccel):
+            return FrameSource(
+                _self.evidence_url_provider() if _self.evidence_url_provider else _self.spec.evidence_url,
+                width=_w, height=_h, fps=_self.evidence_fps,
+                hwaccel=_hw, device=_self.device,
+                decode_skip=_self.decode_skip,
+                decode_threads=_self.decode_threads,
+                fast_decode=_self.fast_decode,
+                rtsp_timeout_s=_self.rtsp_timeout_s,
+                url_provider=_self.evidence_url_provider,
+            )
+
+        log.info("tier0 %s: evidence from the main stream (%dx%d, %d fps while "
+                 "active, idle after %.0fs) — detecting on the %dx%d sub",
+                 self.spec.camera_id, mw, mh, self.evidence_fps,
+                 self.evidence_idle_after, sub_w, sub_h)
+        return EvidenceSource(
+            self.spec.camera_id, factory,
+            idle_after=self.evidence_idle_after,
+            max_skew_s=self.evidence_max_skew_s,
+        )
 
     def _run(self) -> None:
         # Stagger the opening dial. A reconcile tick starts every new worker
@@ -635,6 +749,19 @@ class CameraWorker:
             tracker.plate_candidates_max = _env_int("DETECT_PLATE_CANDIDATES", 4)
             tracker.plate_candidates_gap_s = _env_float(
                 "DETECT_PLATE_CANDIDATE_GAP_S", 0.75)
+        # Main-stream evidence: the tracker asks the source for the main
+        # frame nearest to each detect frame it picks a best crop on.
+        evidence = None
+        try:
+            evidence = self._make_evidence(w, h)
+        except Exception:
+            log.warning("tier0 %s: evidence source unavailable — evidence stays "
+                        "on the detect stream", self.spec.camera_id, exc_info=True)
+        self._evidence = evidence
+        if evidence is not None:
+            tracker.evidence = evidence.nearest
+            if self._stop.is_set():             # stopped during the probe
+                evidence.close()
         if _env_bool("DETECT_SCENE_EVIDENCE", True):
             # A second JPEG per visit: the whole frame behind the best crop,
             # so the evidence dialog can show the car in its lane instead of
@@ -833,6 +960,15 @@ class CameraWorker:
                     log.debug("tier0 %s: sink error", self.spec.camera_id, exc_info=True)
                 if self.gate is not None:
                     self._run_gate(result, frame)
+                if evidence is not None:
+                    if evidence.observe(result):
+                        log.info("tier0 %s: main-stream evidence decode %s",
+                                 self.spec.camera_id,
+                                 "started" if evidence.active else "stopped (idle)")
+                    record_evidence(
+                        self.spec.camera_id, evidence.active, tracker.evidence_stats,
+                        frames=evidence.frames_total, starts=evidence.starts,
+                    )
                 # Adaptive decode: promote on the first sign of activity,
                 # demote after the quiet period. The flip terminates the
                 # current ffmpeg; the source's restart loop respawns it with
@@ -851,6 +987,8 @@ class CameraWorker:
         except Exception:
             log.exception("tier0 %s: worker loop crashed", self.spec.camera_id)
         finally:
+            if self._evidence is not None:
+                self._evidence.close()
             # Worker stopping: whatever is still live is a finished visit too.
             if self.visit_poster is not None:
                 for visit in lifecycle.flush():
@@ -916,7 +1054,18 @@ class WorkerManager:
         router=None,
         visit_poster=None,                                # events store (RFC-0001 C1), shared
         attempt_poster=None,                              # multi-frame OCR early attempts, shared
+        evidence_stream: str = "main",                    # main-stream evidence (evidence.py)
+        evidence_fps: int = 5,
+        evidence_idle_after: float = 15.0,
+        evidence_max_skew_s: float = 0.35,
     ) -> None:
+        self._evidence_stream = evidence_stream
+        self._evidence_fps = evidence_fps
+        self._evidence_idle_after = evidence_idle_after
+        self._evidence_max_skew_s = evidence_max_skew_s
+        # Freshest main-tap URL per camera, beside _latest_url (same reason:
+        # the JWT rotates; the running worker's source reads it on respawn).
+        self._latest_evidence_url: dict[str, str] = {}
         self.provider = provider
         self.sink = sink
         self.enabled = enabled
@@ -987,6 +1136,10 @@ class WorkerManager:
         """The freshest known stream URL for a camera (see _latest_url)."""
         return self._latest_url.get(camera_id)
 
+    def current_evidence_url(self, camera_id: str) -> str | None:
+        """The freshest known main-tap URL for a camera's evidence source."""
+        return self._latest_evidence_url.get(camera_id)
+
     def _make_worker(self, spec: CameraSpec, spread: float) -> Worker:
         """Build a worker, giving it a random slot inside the start window.
 
@@ -1020,6 +1173,11 @@ class WorkerManager:
             dispatcher=self._dispatcher, router=self._router,
             visit_poster=self._visit_poster,
             attempt_poster=self._attempt_poster,
+            evidence_stream=self._evidence_stream,
+            evidence_fps=self._evidence_fps,
+            evidence_idle_after=self._evidence_idle_after,
+            evidence_max_skew_s=self._evidence_max_skew_s,
+            evidence_url_provider=lambda cid=spec.camera_id: self.current_evidence_url(cid),
         )
 
     def running_ids(self) -> set[str]:
@@ -1069,7 +1227,17 @@ class WorkerManager:
         change means. substream_url carries a freshly minted JWT on every
         fetch; nvr_camera_id is compared separately (asymmetric: a fetch
         that degrades it to None must not bounce the worker)."""
-        return replace(spec, substream_url="", nvr_camera_id=None)
+        # The tap's KIND is baked (not its token): core moving a camera from
+        # the main tap to its sub, or offering a main URL for evidence, is
+        # a change of what the worker decodes and must restart it — before
+        # this it was masked with the JWT and only took effect on the next
+        # ffmpeg respawn.
+        return replace(
+            spec,
+            substream_url=_tap_kind(spec.substream_url),
+            evidence_url="main" if spec.evidence_url else None,
+            nvr_camera_id=None,
+        )
 
     def reconcile(self) -> None:
         """Start workers for new analyze-enabled cameras, stop the rest."""
@@ -1088,6 +1256,10 @@ class WorkerManager:
         for c in cams:
             if c.substream_url:
                 self._latest_url[c.camera_id] = c.substream_url
+            if c.evidence_url:
+                self._latest_evidence_url[c.camera_id] = c.evidence_url
+            else:
+                self._latest_evidence_url.pop(c.camera_id, None)
 
         doomed: dict[str, Worker] = {}
         for cid in list(self._workers):
@@ -1112,6 +1284,7 @@ class WorkerManager:
                     # Gone from core entirely — drop its frame-age entry so
                     # it stops being reported stale forever.
                     self._latest_url.pop(cid, None)
+                    self._latest_evidence_url.pop(cid, None)
                     forget_camera(cid)
                 if spec_changed:
                     log.info(

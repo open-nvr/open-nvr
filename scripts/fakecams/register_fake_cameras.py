@@ -131,16 +131,30 @@ def register(token, paths):
     )
     if status != 200:
         sys.exit(f"Could not list existing cameras (HTTP {status}): {existing}")
-    have = {
-        c.get("rtsp_url")
-        for c in (existing.get("cameras") or existing.get("items") or [])
-    }
+    rows = existing.get("cameras") or existing.get("items") or []
+    have = {c.get("rtsp_url"): c for c in rows}
+    # A <name>-sub path is the rig's substream of <name> (FAKECAM_SUBSTREAM):
+    # not a camera of its own, but the camera's substream_url — which is
+    # what makes Tier-0 detect on it, exactly as a real camera's second
+    # stream would.
+    subs = {name for name, _ready in paths if name.endswith("-sub")}
 
     created, skipped = [], []
     for name, ready in paths:
+        if name in subs:
+            continue
         url = f"rtsp://{CAM_IP}:{CAM_PORT}/{name}"
+        sub_url = f"rtsp://{CAM_IP}:{CAM_PORT}/{name}-sub" if f"{name}-sub" in subs else None
         if url in have:
             skipped.append(name)
+            cam = have[url]
+            if sub_url and not cam.get("substream_url") and cam.get("id"):
+                status, body = request("PUT", f"{API}/cameras/{cam['id']}", token,
+                                       {"substream_url": sub_url})
+                if status == 200:
+                    print(f"  ~~ camera {cam['id']}: substream set -> {sub_url}")
+                else:
+                    print(f"  !! camera {cam['id']}: could not set substream (HTTP {status}): {body}")
             continue
         payload = {
             "name": f"{PREFIX}{name}"[:100],
@@ -150,6 +164,8 @@ def register(token, paths):
             "rtsp_url": url,
             "location": "fake-cameras",
         }
+        if sub_url:
+            payload["substream_url"] = sub_url
         # force=true: every fake camera shares the rig's IP, which the
         # duplicate guard would otherwise reject after the first one.
         status, body = request("POST", f"{API}/cameras/?force=true", token, payload)
@@ -158,6 +174,8 @@ def register(token, paths):
             continue
         cam_id = body["id"]
         note = "" if ready else "  (rig reports no publisher yet)"
+        if sub_url:
+            note += f"  (substream {sub_url})"
         print(f"  ++ camera {cam_id}: {payload['name']} -> {url}{note}")
         created.append((cam_id, payload["name"], url))
 
