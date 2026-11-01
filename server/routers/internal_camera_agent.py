@@ -1034,6 +1034,11 @@ def list_camera_agent_sources(
     # here, where the frames are actually handed out.
     if is_app:
         cameras = [c for c in cameras if int(c.id) in roster]
+    # The operator's masks (services.masks), one query for the fleet: what
+    # the detect-pipeline's motion gate and object filter must ignore.
+    from services.masks import masks_for_cameras
+
+    masks = masks_for_cameras(db, (int(c.id) for c in cameras))
     out: list[dict[str, object]] = []
     for cam in cameras:
         evidence_url: str | None = None
@@ -1156,6 +1161,11 @@ def list_camera_agent_sources(
                 # Tier-0 detection on/off (NULL = on). detect-pipeline
                 # skips a camera with analyze=false; it keeps recording.
                 "analyze": cam.detection_enabled is not False,
+                # The operator's masks (services.masks): polygons in 0..1
+                # of the frame. motion_masks blind the motion gate;
+                # object_masks drop detections standing inside them.
+                # Always present (empty lists = none drawn).
+                **masks.get(int(cam.id), {"motion_masks": [], "object_masks": []}),
             }
         )
 

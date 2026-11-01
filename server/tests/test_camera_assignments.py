@@ -69,7 +69,7 @@ from sqlalchemy.orm import sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from core.database import Base, get_db  # noqa: E402
-from models import Camera, Role, User  # noqa: E402
+from models import Camera, CameraMask, Role, User  # noqa: E402
 from routers import internal_camera_agent as internal_router  # noqa: E402
 from schemas import CameraAssignment, CameraUpdate  # noqa: E402
 
@@ -135,7 +135,8 @@ def _make_app():
         poolclass=StaticPool,
     )
     Base.metadata.create_all(
-        engine, tables=[Camera.__table__, User.__table__, Role.__table__]
+        engine, tables=[Camera.__table__, CameraMask.__table__, User.__table__,
+                        Role.__table__]
     )
     session_factory = sessionmaker(bind=engine)
 

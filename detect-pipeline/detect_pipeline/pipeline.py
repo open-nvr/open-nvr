@@ -72,6 +72,9 @@ class FrameResult:
     # True when the per-frame region budget dropped at least one candidate
     # this frame (exported as tier0_regions_capped_total — no silent caps).
     regions_capped: bool = False
+    # Detections dropped THIS frame because they stood inside an object
+    # mask (exported as tier0_object_masked_total; see masks.py).
+    masked_detections: int = 0
     # Motion-gate state, for metrics. ``motion_forced_exit`` is a per-frame
     # EDGE (did the calibration deadline fire on this frame?), not the
     # detector's running total — a cumulative value fed to a Prometheus
@@ -203,8 +206,12 @@ class DetectPipeline:
         max_regions: int = 8,
         allowed_labels: frozenset[str] | set[str] | None = None,
         cross_label_iou: float | None = CROSS_LABEL_IOU,
+        object_mask: Callable[[list[Detection]], list[Detection]] | None = None,
     ) -> None:
         self.frame_source = frame_source
+        # The operator's object masks (masks.ObjectMaskFilter): detections
+        # standing inside one are dropped before they can start a track.
+        self.object_mask = object_mask
         self.motion = motion
         self.detector = detector
         self.tracker = tracker
@@ -294,6 +301,7 @@ class DetectPipeline:
 
         dets: list[Detection] = []
         bgr = None
+        masked = 0
         detect_latency_s: float | None = None
         if regions:
             _t = time.monotonic()
@@ -316,6 +324,10 @@ class DetectPipeline:
                 dets.extend(detections_to_frame(raws, region))
             if self.allowed_labels is not None:
                 dets = [d for d in dets if d.label in self.allowed_labels]
+            if self.object_mask is not None and dets:
+                before = len(dets)
+                dets = self.object_mask(dets)
+                masked = before - len(dets)
             dets = nms(dets, cross_label_iou=self.cross_label_iou)
             detect_latency_s = time.monotonic() - _t   # pure detector time (this model)
             stages["detect"] = detect_latency_s
@@ -332,6 +344,7 @@ class DetectPipeline:
             tracks, motion_boxes, regions, False,
             detections=dets, detect_latency_s=detect_latency_s, stage_latency_s=stages,
             skipped_stationary=skipped, regions_capped=regions_capped,
+            masked_detections=masked,
             track_population=self.tracker.population,
             motion_forced_exit=getattr(
                 self.motion, "forced_exit_this_frame", False),

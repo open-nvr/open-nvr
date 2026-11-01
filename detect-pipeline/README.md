@@ -96,8 +96,28 @@ staggered per object; motion touching it re-checks immediately) instead
 of feeding the detector every frame — an idle scene with parked objects
 now costs decode+motion, not inference. If CPU is still high on a still
 scene, look for perpetual motion sources: a camera-OSD timestamp burned
-into the substream ticks every second and defeats motion gating — turn
-the overlay off in the camera, or crop/mask it.
+into the substream ticks every second and defeats motion gating — draw a
+**motion mask** over it (Settings → Camera-Config → Masks), or turn the
+overlay off in the camera.
+
+**Masks** (`masks.py`). Two per-camera polygon kinds, drawn in core and
+delivered in the camera listing as `motion_masks` / `object_masks`:
+
+* a **motion mask** is ANDed into the thresholded difference image, so
+  pixels under it never count as motion — the OSD clock, a tree in the
+  wind, a road at the edge of the frame, a flag. The detector still sees
+  the whole frame once something else moves (regions are cut from the
+  full frame), so a person walking under a masked tree is still found.
+* an **object mask** drops a detection whose bottom-centre (where the
+  object stands) is inside it, before it can start a track — the TV
+  screen, the poster, the cars parked across the street. Optionally for
+  some labels only. Dropped detections count in
+  `tier0_object_masked_total{camera}` so a mask that swallows real
+  objects is visible.
+
+The polygons are rasterised once per worker; a redrawn mask restarts the
+camera's worker on the next reconcile tick. Same semantics as Frigate's
+`motion.mask` and `objects.filters.<label>.mask`.
 
 **Worst case is bounded by design.** A cluttered scene (a desk of wires
 and boards) once drove the field failure this section exists for: at

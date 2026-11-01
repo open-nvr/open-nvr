@@ -8,6 +8,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Motion masks and object masks per camera** (Settings → Camera-Config →
+  Masks). A motion mask is a polygon under which nothing counts as motion
+  — a clock burned into the picture, a tree in the wind, a road at the
+  edge of the frame — so it never wakes the object detector and a camera
+  with a ticking OSD clock can finally idle between visitors (the docs used
+  to say "disable the overlay in the camera"). An object mask drops a
+  detection standing inside it (the bottom-centre of its box) before it can
+  start a track — the TV screen, the poster, the cars parked across the
+  street — optionally for some labels only. Both are drawn on a live
+  snapshot like zones, stored in `camera_masks`
+  (`/cameras/{id}/masks`), delivered to the detect-pipeline in the
+  camera-agent sources listing as `motion_masks` / `object_masks`, and
+  picked up on the next reconcile tick. `tier0_object_masked_total{camera}`
+  counts what the object masks dropped. Recording is never affected.
 - **`./start.sh prune`** removes image tags from earlier releases (every tag
   of the release in `.env` is kept, in every flavour, plus the weights images
   and anything a container still references) and dangling layers. An upgrade

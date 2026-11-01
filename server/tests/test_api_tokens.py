@@ -158,7 +158,8 @@ def env(monkeypatch, tmp_path):
     routers = [importlib.import_module(m) for m in (
         "routers.system", "routers.cameras", "routers.api_tokens",
         "routers.recordings", "routers.audit_logs", "routers.events",
-        "routers.timeline_events", "routers.zones", "routers.live_state", "routers.media",
+        "routers.timeline_events", "routers.zones", "routers.masks", "routers.live_state",
+        "routers.media",
         "routers.alerts_inbox", "routers.site_mode", "routers.entities",
         "routers.search", "routers.tours", "routers.system_update")]
     for mod in routers:
@@ -452,8 +453,8 @@ def test_every_token_route_is_a_real_route():
     app = FastAPI()
     for mod in ("routers.system", "routers.cameras", "routers.recordings",
                 "routers.streams", "routers.timeline_events", "routers.alerts_inbox",
-                "routers.events", "routers.zones", "routers.live_state", "routers.media",
-                "routers.site_mode", "routers.entities", "routers.search",
+                "routers.events", "routers.zones", "routers.masks", "routers.live_state",
+                "routers.media", "routers.site_mode", "routers.entities", "routers.search",
                 "routers.api_tokens", "routers.system_update"):
         app.include_router(importlib.import_module(mod).router, prefix="/api/v1")
     # OpenAPI paths are full templates on every FastAPI version; app.routes

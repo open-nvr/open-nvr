@@ -1666,6 +1666,35 @@ class CameraZone(Base):
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
 
+class CameraMask(Base):
+    """A part of one camera's picture Tier-0 must ignore.
+
+    ``kind`` is ``motion`` (pixels under it never count as motion, so a
+    burned-in clock or a tree in the wind never wakes the detector) or
+    ``object`` (a detection standing inside it — the bottom-centre of its
+    box — is dropped before it can start a track; ``labels`` optionally
+    limits that to some object labels). ``polygon`` is ``[[x, y], ...]``
+    normalised to 0..1 of the frame, the same space as CameraZone. The
+    detect-pipeline reads them from the camera-agent sources listing.
+    """
+
+    __tablename__ = "camera_masks"
+    __table_args__ = (
+        UniqueConstraint("camera_id", "name", name="uq_camera_mask_name"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    camera_id = Column(
+        Integer, ForeignKey("cameras.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name = Column(String(60), nullable=False)
+    kind = Column(String(16), nullable=False, default="motion")
+    polygon = Column(JSON, nullable=False)
+    labels = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
 class CameraTour(Base):
     """A Live View tour: camera sets a display board cycles through.
 

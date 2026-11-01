@@ -52,6 +52,7 @@ from .metrics import (
     record_worker_straggler,
     forget_camera,
 )
+from .masks import ObjectMask, ObjectMaskFilter, Polygon
 from .motion import MotionConfig, MotionDetector
 from .pipeline import DetectPipeline, FrameResult, RegionBudgetController
 from .tracking import TrackConfig, Tracker
@@ -182,6 +183,12 @@ class CameraSpec:
     # Volatile like substream_url (its JWT rotates), so the manager keeps
     # the freshest one aside and bakes only its presence.
     evidence_url: str | None = None
+    # The operator's masks for this camera (masks.py), normalised polygons
+    # from core's ``motion_masks`` / ``object_masks`` fields. Tuples, so the
+    # spec stays hashable and a redrawn mask is a spec change: the worker
+    # restarts on the next reconcile tick with the new mask rasterised.
+    motion_masks: tuple[Polygon, ...] = ()
+    object_masks: tuple[ObjectMask, ...] = ()
 
 
 def _tap_kind(url: str | None) -> str:
@@ -715,7 +722,18 @@ class CameraWorker:
                      _env_int("DETECT_PLATE_EARLY_ATTEMPTS", 2))
         motion = MotionDetector(
             (h, w), motion_config_from_env(), label=self.spec.camera_id,
+            mask=self.spec.motion_masks,
         )
+        if self.spec.motion_masks:
+            log.info("tier0 %s: motion mask active — %d polygon(s) blind %.0f%% "
+                     "of the motion image", self.spec.camera_id,
+                     len(self.spec.motion_masks), motion.masked_fraction * 100)
+        object_mask = None
+        if self.spec.object_masks:
+            object_mask = ObjectMaskFilter(self.spec.object_masks, (h, w))
+            log.info("tier0 %s: object mask active — %d polygon(s); detections "
+                     "standing inside are dropped (tier0_object_masked_total)",
+                     self.spec.camera_id, len(self.spec.object_masks))
         tracker = Tracker((h, w), TrackConfig(
             fps=self.spec.fps,
             max_tracks=_env_int("DETECT_MAX_TRACKS", 50),
@@ -762,6 +780,7 @@ class CameraWorker:
             max_regions=_env_int("DETECT_MAX_REGIONS", 8),
             allowed_labels=allowed_labels_for(self.spec),
             cross_label_iou=_env_float("DETECT_NMS_CROSS_LABEL_IOU", 0.85),
+            object_mask=object_mask,
         )
         if self.spec.labels is not None:
             log.info(

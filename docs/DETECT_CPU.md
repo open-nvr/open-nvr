@@ -148,7 +148,8 @@ load signals.
    `/metrics`, or a startup warning) → store the substream URL.
 2. Lower the substream's encode fps in the camera itself (5–10 fps).
 3. Check for perpetual motion: a burned-in OSD clock ticking every second
-   defeats motion gating — disable the overlay or mask it.
+   defeats motion gating — draw a motion mask over it (Settings →
+   Camera-Config → Masks) or disable the overlay in the camera.
 4. Confirm adaptive decode is on (`DETECT_DECODE_IDLE=nokey`, the default)
    and check `tier0_decode_idle` — a camera that never idles has perpetual
    motion (see 3) or a genuinely busy scene.

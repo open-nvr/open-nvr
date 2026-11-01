@@ -30,6 +30,14 @@ export function duplicateCameraNames(e: any): string[] {
   return Array.isArray(dups) ? dups.map((d: any) => d?.name).filter(Boolean) : []
 }
 
+export type CameraMaskKind = 'motion' | 'object'
+export type CameraMaskBody = {
+  name: string
+  kind: CameraMaskKind
+  polygon: number[][]
+  labels: string[] | null
+}
+
 export const cameraService = {
   // Streams
   getWhepUrl: (cameraId: number) => api.get(`/api/v1/streams/webrtc/${cameraId}`),
@@ -64,6 +72,15 @@ export const cameraService = {
     api.put(`/api/v1/cameras/${cameraId}/zones/${zoneId}`, body),
   deleteCameraZone: (cameraId: number, zoneId: number) =>
     api.delete(`/api/v1/cameras/${cameraId}/zones/${zoneId}`),
+  // What Tier-0 must ignore in a camera's picture: motion masks (blind the
+  // motion gate) and object masks (drop detections standing inside).
+  listCameraMasks: (cameraId: number) => api.get(`/api/v1/cameras/${cameraId}/masks`),
+  createCameraMask: (cameraId: number, body: CameraMaskBody) =>
+    api.post(`/api/v1/cameras/${cameraId}/masks`, body),
+  updateCameraMask: (cameraId: number, maskId: number, body: CameraMaskBody) =>
+    api.put(`/api/v1/cameras/${cameraId}/masks/${maskId}`, body),
+  deleteCameraMask: (cameraId: number, maskId: number) =>
+    api.delete(`/api/v1/cameras/${cameraId}/masks/${maskId}`),
   getCamera: (cameraId: number) => api.get(`/api/v1/cameras/${cameraId}`),
   // A single JPEG still of the camera's current view — backs the App
   // Catalog geometry editors (draw a zone/tripwire on the real scene).

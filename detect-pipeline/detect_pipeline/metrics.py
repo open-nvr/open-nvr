@@ -225,6 +225,11 @@ def record_frame(
     # Bounded-load guards (#track-explosion) — never cap silently:
     if getattr(result, "regions_capped", False):
         metrics.inc("tier0_regions_capped_total", cam)
+    # Object masks (masks.py): detections dropped for standing inside one.
+    # Counted so a mask that swallows real objects is visible, not silent.
+    masked = int(getattr(result, "masked_detections", 0) or 0)
+    if masked:
+        metrics.inc("tier0_object_masked_total", cam, value=float(masked))
     # Motion gate: the #373 deadline firing is the signal that the gate
     # cannot model this scene. It used to be invisible — the repeat WARN
     # is demoted to debug, so a gate feeding the detector 1.5% of frames

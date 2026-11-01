@@ -21,6 +21,7 @@ import logging
 import os
 import urllib.request
 
+from .masks import parse_motion_masks, parse_object_masks
 from .service import CameraSpec
 
 log = logging.getLogger("detect_pipeline.providers")
@@ -243,6 +244,9 @@ def _to_spec(c: dict) -> CameraSpec:
         # cameras whose frame_url already IS the main stream.
         evidence_url=(str(c.get("evidence_url")).strip() or None)
         if c.get("evidence_url") else None,
+        # The operator's masks (masks.py). Absent on older cores = none.
+        motion_masks=parse_motion_masks(c.get("motion_masks")),
+        object_masks=parse_object_masks(c.get("object_masks")),
     )
 
 
