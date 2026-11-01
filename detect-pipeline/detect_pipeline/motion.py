@@ -21,10 +21,13 @@ whole-frame brightness change from flooding the detector at dawn/dusk.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 import cv2
 import numpy as np
+
+from .masks import Polygon, rasterize
 
 log = logging.getLogger(__name__)
 
@@ -91,6 +94,7 @@ class MotionDetector:
         contrast_frame_history: int = 50,
         interpolation: int = cv2.INTER_NEAREST,
         label: str = "",
+        mask: Iterable[Polygon] | None = None,
     ) -> None:
         self.config = config or MotionConfig()
         #: Camera id (or similar) for log attribution — #373's wedge was
@@ -101,6 +105,18 @@ class MotionDetector:
         fh = min(self.config.frame_height or frame_shape[0], frame_shape[0])
         self.resize_factor = frame_shape[0] / fh
         self.motion_frame_size = (fh, fh * frame_shape[1] // frame_shape[0])
+        # The operator's motion mask, rasterised once at the motion image's
+        # size: 255 where motion may count, 0 under a mask. ANDed into the
+        # thresholded difference every frame (one cheap op), so a masked
+        # OSD clock or tree never produces a motion box and never wakes
+        # the detector. None = no mask drawn. See masks.py.
+        self.mask_keep: np.ndarray | None = None
+        self.masked_fraction = 0.0
+        polys = tuple(mask or ())
+        if polys:
+            masked = rasterize(polys, self.motion_frame_size)
+            self.mask_keep = cv2.bitwise_not(masked)
+            self.masked_fraction = float(np.count_nonzero(masked)) / masked.size
         self.avg_frame = np.zeros(self.motion_frame_size, np.float32)
         self.motion_frame_count = 0
         # Gate OFF (#373): never calibrating, and detect() returns a
@@ -235,6 +251,9 @@ class MotionDetector:
         frame_delta = cv2.absdiff(resized, cv2.convertScaleAbs(self.avg_frame))
         thresh = cv2.threshold(frame_delta, self.config.threshold, 255, cv2.THRESH_BINARY)[1]
         thresh_dilated = cv2.dilate(thresh, None, iterations=1)
+        if self.mask_keep is not None:
+            # The operator's mask: motion under it is not motion.
+            thresh_dilated = cv2.bitwise_and(thresh_dilated, self.mask_keep)
         contours = _grab_contours(
             cv2.findContours(thresh_dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         )
