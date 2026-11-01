@@ -440,6 +440,15 @@ services:
       # detector reaction at all times).
       - DETECT_DECODE_IDLE=${DETECT_DECODE_IDLE:-nokey}
       - DETECT_DECODE_IDLE_AFTER=${DETECT_DECODE_IDLE_AFTER:-60}
+      # Evidence from the MAIN stream while detecting on the substream: a
+      # second decode that runs only while something is in front of the
+      # camera, so crops/scenes/plate candidates are full-resolution. See
+      # .env.example and detect-pipeline/README.md ("The substream does not
+      # cost you the evidence"). DETECT_EVIDENCE_STREAM=detect turns it off.
+      - DETECT_EVIDENCE_STREAM=${DETECT_EVIDENCE_STREAM:-main}
+      - DETECT_EVIDENCE_FPS=${DETECT_EVIDENCE_FPS:-5}
+      - DETECT_EVIDENCE_IDLE_AFTER=${DETECT_EVIDENCE_IDLE_AFTER:-15}
+      - DETECT_EVIDENCE_MAX_SKEW_S=${DETECT_EVIDENCE_MAX_SKEW_S:-0.35}
       # Gate: shadow (default — measure only, no behavior change; the app's
       # Compute-gated panel shows would-save numbers) | off | enforce (act;
       # enable only after validating shadow data — see detect-pipeline/ENABLEMENT.md).
