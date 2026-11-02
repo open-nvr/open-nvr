@@ -69,6 +69,28 @@ fi
 
 COMMAND="${1:-start}"
 
+# ── Refuse to run under sudo ──────────────────────────────
+# `sudo ./start.sh` leaves .env (written 0600 by root), the cert dirs and
+# whatever git touches owned by root; every later run as the normal user
+# then dies with ".env: Permission denied" and nothing can be read back
+# until someone with sudo chowns the checkout (seen on a test box,
+# 2026-11-02). Docker access comes from the docker group, not from root.
+# A genuine root login (no SUDO_USER) is left alone; OPENNVR_ALLOW_SUDO=1
+# overrides for the rare host that really must run this way.
+if [ "$(id -u)" = "0" ] && [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ] \
+   && [ "${OPENNVR_ALLOW_SUDO:-}" != "1" ]; then
+    echo -e "${RED}Do not run start.sh with sudo.${NC}" >&2
+    echo -e "  ${GRAY}Files it writes (.env, certificates, the checkout) would belong to root and the${NC}" >&2
+    echo -e "  ${GRAY}next ./start.sh as ${SUDO_USER} would fail with '.env: Permission denied'.${NC}" >&2
+    echo "" >&2
+    echo -e "  Run it as ${SUDO_USER} instead (add the user to the docker group if needed):" >&2
+    echo -e "    ${CYAN}sudo usermod -aG docker ${SUDO_USER} && newgrp docker${NC}" >&2
+    echo -e "  If a previous sudo run already left root-owned files here, give them back first:" >&2
+    echo -e "    ${CYAN}sudo chown -R ${SUDO_USER}:$(id -gn "${SUDO_USER}" 2>/dev/null || echo "${SUDO_USER}") \"$(pwd)\"${NC}" >&2
+    echo -e "  ${GRAY}(OPENNVR_ALLOW_SUDO=1 skips this check.)${NC}" >&2
+    exit 1
+fi
+
 # ── Helper: read a value from .env ────────────────────────
 get_env_var() {
     # The value as compose reads it: an unquoted inline comment (" # …") and
