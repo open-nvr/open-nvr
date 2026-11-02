@@ -129,10 +129,13 @@ class ServiceConfig:
     evidence_fps: int = 5
     evidence_idle_after: float = 15.0
     evidence_max_skew_s: float = 0.35
-    # "full" decodes every main-stream frame while active (default);
-    # "nokey" decodes keyframes only — a fraction of the cost, crops up to
-    # a GOP old (the skew window is widened to at least 2 s to match).
-    evidence_decode: str = "full"
+    # "nokey" (default) decodes only the main stream's keyframes while
+    # active — a fraction of the cost, crops up to a GOP old (the skew
+    # window is widened to at least 2 s to match); "full" decodes every
+    # main-stream frame for a crop from the same instant as the detect
+    # frame. Measured on a 960x1080 H.265 camera with a 1 s GOP: full
+    # ~27 % of a core while active, nokey ~5 %.
+    evidence_decode: str = "nokey"
 
 
 def _clean_env(value: str | None) -> str:
@@ -235,13 +238,13 @@ def _evidence_stream_from_env(env: dict) -> str:
 
 
 def _evidence_decode_from_env(env: dict) -> str:
-    """DETECT_EVIDENCE_DECODE: ``full`` (default) or ``nokey``; anything
+    """DETECT_EVIDENCE_DECODE: ``nokey`` (default) or ``full``; anything
     else is named and treated as the default."""
-    raw = (env.get("DETECT_EVIDENCE_DECODE") or "full").strip().lower()
+    raw = (env.get("DETECT_EVIDENCE_DECODE") or "nokey").strip().lower()
     if raw in ("full", "nokey"):
         return raw
-    log.warning("DETECT_EVIDENCE_DECODE=%r is not full|nokey; using full", raw)
-    return "full"
+    log.warning("DETECT_EVIDENCE_DECODE=%r is not nokey|full; using nokey", raw)
+    return "nokey"
 
 
 def config_from_env(env: dict) -> ServiceConfig:
