@@ -1336,10 +1336,14 @@ class WorkerManager:
                 self._specs.pop(cid, None)
                 if cid not in desired:
                     # Gone from core entirely — drop its frame-age entry so
-                    # it stops being reported stale forever.
+                    # it stops being reported stale forever. Its metric
+                    # series are dropped AFTER the worker is retired (below):
+                    # dropping them here, while the worker still runs, let
+                    # its teardown write tier0_worker_up=0 back, and the
+                    # deleted camera then counted as a down worker forever
+                    # (dashboard "Detection 1/2 — Degraded" with one camera).
                     self._latest_url.pop(cid, None)
                     self._latest_evidence_url.pop(cid, None)
-                    forget_camera(cid)
                 if spec_changed:
                     log.info(
                         "tier0: restarting %s — baked-in spec changed "
@@ -1355,7 +1359,12 @@ class WorkerManager:
         # instead of one-per-camera; the old serial loop turned a spec change
         # across a fleet into minutes of blocked reconcile.
         # Cameras still in `desired` are being REPLACED this tick, not removed.
-        self._retire(doomed, replaced={c for c in doomed if c in desired})
+        # Removed ones are superseded too: nothing owns their gauges any more,
+        # so their teardown must not write a DOWN that outlives the drop below.
+        removed = {c for c in doomed if c not in desired}
+        self._retire(doomed, replaced={c for c in doomed if c in desired} | removed)
+        for cid in removed:
+            forget_camera(cid)
 
         starting = [c for c in desired if c not in self._workers]
         # Spread this batch's opening dials. One tick starting N cameras means
