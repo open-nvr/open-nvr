@@ -109,6 +109,17 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Keyframe-only evidence decode (`DETECT_EVIDENCE_DECODE=nokey`) no
+  longer floods the worker with duplicate frames.** Dropping the `fps`
+  filter was only half the fix: ffmpeg's rawvideo output has no
+  timestamps, so its default constant-rate sync padded the keyframes
+  back to the stream's nominal rate with copies. On a CP Plus H.265 main
+  stream (1 keyframe/s, nominal 100 fps) the evidence ffmpeg sat at ~45 %
+  of a core and the worker at ~43 % reading ~100 duplicate 960x1080
+  frames a second — more than the full decode the mode exists to
+  replace. The decode command now pins `-fps_mode passthrough` whenever
+  the rate filter is out, so exactly one frame per keyframe crosses the
+  pipe; a real-ffmpeg test counts them.
 - **`start.sh` refuses to run under `sudo`.** A `sudo ./start.sh` left
   `.env` (0600, root) and parts of the checkout owned by root, and every
   later `./start.sh` as the normal user failed with `.env: Permission
