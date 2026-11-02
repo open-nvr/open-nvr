@@ -109,6 +109,14 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`start.sh` refuses to run under `sudo`.** A `sudo ./start.sh` left
+  `.env` (0600, root) and parts of the checkout owned by root, and every
+  later `./start.sh` as the normal user failed with `.env: Permission
+  denied` until someone with sudo chowned the files (seen on a test box).
+  The script now stops before doing anything, names the user that invoked
+  it, and prints the two repair commands (join the docker group, chown the
+  checkout back). A plain root login is unaffected; `OPENNVR_ALLOW_SUDO=1`
+  skips the check.
 - **MediaMTX no longer restarts its RTSP listener on every camera change.**
   The shipped MediaMTX templates set the deprecated `rtspUDPReadBufferSize: 0`.
   In MediaMTX 1.15 that key is a pointer field; the config clone MediaMTX
