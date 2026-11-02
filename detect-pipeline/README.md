@@ -611,6 +611,41 @@ to enable; it still only fires in `enforce` (`shadow`/`off` dispatch nothing).
 - The KAI-C-backed **accelerator** detector adapter (Coral/Hailo/OpenVINO/
   TensorRT) — the local ONNX detector is CPU via cv2.dnn until then.
 
-OpenCV 4.x **and** 5.x are supported (the suite passes on both). One thing to
-smoke-test on a host: real `yolov8n.onnx` inference through OpenCV 5's new DNN
-engine (it auto-falls-back to the classic engine if needed).
+OpenCV 4.x **and** 5.x are supported (the suite passes on both). The real-inference smoke test is now documented below and can be reproduced with the ENGINE_NEW smoke-test script.
+
+
+## OpenCV 5 ENGINE_NEW smoke test
+
+The default ONNX detector uses OpenCV DNN engine auto-selection. To explicitly
+verify inference on OpenCV 5's new engine with a real YOLOv8n model, use the
+manual smoke-test script below. This test is intentionally separate from CI:
+CI does not download model files.
+
+Download the model and sample image:
+
+```bash
+mkdir -p /tmp/opennvr-smoke
+curl -L 'https://huggingface.co/webml/yolov8n/resolve/main/onnx/yolov8n.onnx' -o /tmp/opennvr-smoke/yolov8n.onnx
+curl -L 'https://ultralytics.com/images/bus.jpg' -o /tmp/opennvr-smoke/bus.jpg
+shasum -a 256 /tmp/opennvr-smoke/yolov8n.onnx
+```
+
+Expected model SHA-256:
+
+```text
+190ba5f1e61411a001683e349d6b2cdb0804c0dc67a5e34cd8ff6fd00ee54b4d
+```
+
+Run from the repository root:
+
+```bash
+uv run --project detect-pipeline python detect-pipeline/scripts/smoke_test_opencv5_engine.py --model /tmp/opennvr-smoke/yolov8n.onnx --image /tmp/opennvr-smoke/bus.jpg
+```
+
+The script explicitly loads the model with `cv2.dnn.ENGINE_NEW` and exercises
+the `OnnxYoloDetector` postprocessing path. It checks for person and bus
+detections and validates normalized bounding-box coordinates. OpenCV 5.x
+is required.
+
+This is a runtime smoke test, not an accuracy benchmark or ground-truth
+evaluation. Model and image assets remain outside the repository.
