@@ -38,6 +38,7 @@ crop is actually taken from it.
 from __future__ import annotations
 
 import logging
+import statistics
 import threading
 import time
 from collections import deque
@@ -56,6 +57,17 @@ DEFAULT_RING = 8
 DEFAULT_MAX_SKEW_S = 0.35
 #: Quiet seconds before the main decode is stopped again.
 DEFAULT_IDLE_AFTER_S = 15.0
+#: Keyframe-only evidence is kept while the camera's measured keyframe
+#: interval (its GOP) is at most this. Above it the source switches ITSELF
+#: to full decode: a keyframe crop can be up to a GOP old, and past two
+#: seconds a walking person has left the box — the skew gate would refuse
+#: most lookups and the camera's evidence would quietly be the low-res
+#: detect crop. Dahua "smart codec" / Hikvision H.265+ stretch the GOP to
+#: tens of seconds, which is exactly the case this exists for.
+DEFAULT_NOKEY_MAX_GOP_S = 2.0
+#: Keyframe intervals needed before the GOP is judged (the median of them,
+#: so one interval stretched by a link stall does not carry the verdict).
+GOP_MIN_INTERVALS = 3
 
 
 class EvidenceFrame:
@@ -120,6 +132,10 @@ class EvidenceSource:
         idle_after: float = DEFAULT_IDLE_AFTER_S,
         max_skew_s: float = DEFAULT_MAX_SKEW_S,
         ring: int = DEFAULT_RING,
+        keyframes_only: bool = False,
+        max_gop_s: float = 0.0,
+        full_factory: Callable[[], object] | None = None,
+        full_max_skew_s: float | None = None,
         _clock=time.monotonic,
     ) -> None:
         self.camera_id = camera_id
@@ -133,6 +149,21 @@ class EvidenceSource:
         self._thread: threading.Thread | None = None
         self._last_activity: float | None = None
         self._closed = False
+        # Keyframe-only mode measures the camera's GOP from the spacing of
+        # the frames it reads (one per keyframe) and, past ``max_gop_s``,
+        # swaps ``source_factory`` for ``full_factory`` (every frame) and
+        # the skew window for ``full_max_skew_s``. 0 / None = never.
+        self.keyframes_only = bool(keyframes_only)
+        self.max_gop_s = max(0.0, float(max_gop_s or 0.0))
+        self._full_factory = full_factory
+        self._full_max_skew_s = full_max_skew_s
+        self._intervals: deque = deque(maxlen=8)
+        self._prev_ts: float | None = None
+        #: Median keyframe interval in seconds once GOP_MIN_INTERVALS have
+        #: been seen (keyframe-only mode), else None.
+        self.gop_s: float | None = None
+        #: True once this source gave up keyframes for full decode.
+        self.switched_to_full = False
         # Observability, read by the worker for metrics/logs.
         self.frames_total = 0
         self.starts = 0
@@ -152,6 +183,11 @@ class EvidenceSource:
             return False
         if now is None:
             now = self._clock()
+        if self._gop_too_long():
+            self._switch_to_full()
+            if _activity(result):
+                self._last_activity = now
+            return True
         if _activity(result):
             self._last_activity = now
             if not self.active:
@@ -164,6 +200,40 @@ class EvidenceSource:
             return True
         return False
 
+    # ── keyframe-only: GOP watch ─────────────────────────────────────
+
+    def _gop_too_long(self) -> bool:
+        if not self.keyframes_only or self.max_gop_s <= 0 \
+                or self._full_factory is None:
+            return False
+        with self._lock:
+            intervals = tuple(self._intervals)
+        if len(intervals) < GOP_MIN_INTERVALS:
+            return False
+        self.gop_s = float(statistics.median(intervals))
+        return self.gop_s > self.max_gop_s
+
+    def _switch_to_full(self) -> None:
+        """Keyframes arrive too far apart for a keyframe crop to be of the
+        same moment: from now on (for this worker's life) decode every
+        main frame. Restarts the decode at once when it is running."""
+        self.keyframes_only = False
+        self.switched_to_full = True
+        self._factory = self._full_factory
+        if self._full_max_skew_s is not None:
+            self.max_skew_s = max(0.0, float(self._full_max_skew_s))
+        log.warning(
+            "tier0 %s: the main stream's keyframes are %.1fs apart (more than "
+            "%.1fs) — a keyframe crop would be of where the subject WAS; "
+            "switching this camera's evidence decode to FULL (every main "
+            "frame while active). Set DETECT_EVIDENCE_DECODE=full to skip the "
+            "measurement, or DETECT_EVIDENCE_NOKEY_MAX_GOP_S to allow older crops.",
+            self.camera_id, self.gop_s or 0.0, self.max_gop_s,
+        )
+        if self.active:
+            self._stop()
+            self._start()
+
     def _start(self) -> None:
         try:
             src = self._factory()
@@ -172,6 +242,7 @@ class EvidenceSource:
                         self.camera_id, exc_info=True)
             return
         self._src = src
+        self._prev_ts = None          # intervals never span a restart
         self.starts += 1
         self._thread = threading.Thread(
             target=self._read, args=(src,),
@@ -182,9 +253,13 @@ class EvidenceSource:
     def _read(self, src) -> None:
         try:
             for frame in src.stream():
+                ts = float(frame.ts)
                 with self._lock:
                     self._ring.append(EvidenceFrame(frame))
                     self.frames_total += 1
+                    if self._prev_ts is not None and ts > self._prev_ts:
+                        self._intervals.append(ts - self._prev_ts)
+                    self._prev_ts = ts
         except Exception:
             log.debug("tier0 %s: evidence reader ended", self.camera_id, exc_info=True)
 

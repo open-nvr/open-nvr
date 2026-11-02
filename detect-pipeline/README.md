@@ -200,10 +200,20 @@ widened to at least 2 s so the lookups still hit, and the `fps` filter is
 dropped (with ffmpeg's output sync pinned to `passthrough`) so a keyframe
 is never duplicated and stamped as fresh. `DETECT_EVIDENCE_DECODE=full`
 decodes every main frame for a crop from the same instant — for cameras
-with a long GOP, or where decode is free and exact timing matters. (For
-comparison: Frigate takes snapshots from the detect stream and never
-decodes the record stream; ZoneMinder offers the same keyframes-only
-decoding as its CPU-saving mode.) Core
+with a long GOP, or where decode is free and exact timing matters. Two
+guards keep a keyframe crop honest without that dial: the source measures
+the camera's keyframe interval and, above `DETECT_EVIDENCE_NOKEY_MAX_GOP_S`
+(2 s), switches that camera to full decode on its own (`tier0_evidence_gop_seconds`,
+`tier0_evidence_keyframes_only`); and every main crop is compared with the
+detect crop of the same box before it is used (Pearson correlation of the
+two, `DETECT_EVIDENCE_MATCH_MIN`, 0.5) — a keyframe old enough for the
+subject to have moved on, or a sub-stream the camera crops to a different
+field of view, fails it, the detect crop is kept and
+`tier0_evidence_mismatch_total` counts the refusal (the AI Adapters page
+flags a camera whose evidence is going low-res). (For comparison: Frigate
+takes snapshots from the detect stream and never decodes the record
+stream; ZoneMinder offers the same keyframes-only decoding as its
+CPU-saving mode.) Core
 offers the main tap as `evidence_url` beside a sub `frame_url` (the
 `-sub` MediaMTX path), so this needs nothing but a stored substream URL.
 If the sub tap cannot be opened at all (the camera's second stream

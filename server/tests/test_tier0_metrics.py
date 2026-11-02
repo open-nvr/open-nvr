@@ -465,3 +465,26 @@ def test_backend_row_accelerated_and_plain_cpu():
     # no info-metric at all (an older pipeline): absent, not an error
     text = "\n".join(l for l in ENFORCE_TEXT.splitlines() if "tier0_detector_backend" not in l)
     assert reduce_metrics(parse_prometheus_text(text))["backend"] is None
+
+
+EVIDENCE_TEXT = """
+tier0_worker_up{camera="cam1"} 1
+tier0_worker_up{camera="cam2"} 1
+tier0_evidence_crops_total{camera="cam1",source="main"} 30
+tier0_evidence_crops_total{camera="cam1",source="detect"} 10
+tier0_evidence_mismatch_total{camera="cam1"} 6
+tier0_evidence_gop_seconds{camera="cam1"} 1.02
+tier0_evidence_keyframes_only{camera="cam1"} 1
+"""
+
+
+def test_camera_row_carries_the_evidence_split_and_mismatches():
+    r = reduce_metrics(parse_prometheus_text(EVIDENCE_TEXT))
+    cams = {c["camera"]: c for c in r["cameras"]}
+    assert cams["cam1"]["evidence"] == {
+        "main": 30, "detect": 10, "mismatch": 6,
+        "low_res_ratio": 0.25, "gop_s": 1.02, "keyframes_only": True,
+    }
+    # No evidence series at all (older pipeline, or no second stream):
+    # absent, never a fabricated zero.
+    assert cams["cam2"]["evidence"] is None

@@ -125,6 +125,36 @@ def _sum_by_camera(samples: list[Sample], name: str) -> dict[str, float]:
     return out
 
 
+def _by_label(samples: list[Sample], name: str, label: str, value: str) -> dict[str, float]:
+    """Latest value per camera of the series of ``name`` whose ``label``
+    equals ``value`` — one slice of a family split by a second label."""
+    out: dict[str, float] = {}
+    for s in samples:
+        if s.name == name and "camera" in s.labels and s.labels.get(label) == value:
+            out[s.labels["camera"]] = s.value
+    return out
+
+
+def _evidence_row(main, detect, mismatch, gop_s, keyframes_only) -> dict | None:
+    """The per-camera evidence block, or None when the pipeline never
+    reported one for this camera. ``low_res_ratio`` is the share of best
+    crops that ended up at detect-stream resolution; ``mismatch`` how many
+    of those were a main frame refused for not matching."""
+    if main is None and detect is None:
+        return None
+    m, d = int(main or 0), int(detect or 0)
+    total = m + d
+    return {
+        "main": m,
+        "detect": d,
+        "mismatch": int(mismatch or 0),
+        "low_res_ratio": round(d / total, 3) if total else None,
+        "gop_s": round(float(gop_s), 2) if gop_s is not None else None,
+        "keyframes_only": (None if keyframes_only is None
+                           else bool(keyframes_only >= 1.0)),
+    }
+
+
 def _labels_by_camera(samples: list[Sample], name: str) -> dict[str, dict]:
     """Label sets of an info-metric family, keyed by camera.
 
@@ -290,6 +320,18 @@ def reduce_metrics(samples: list[Sample]) -> dict[str, Any]:
     budget_cfg = _by_camera(samples, "tier0_regions_configured")
     tracks_act = _by_camera(samples, "tier0_tracks_active")
     mainstream = _by_camera(samples, "tier0_mainstream_fallback")
+    # Main-stream evidence (substream detection): which stream the best
+    # crops came from, and how many main crops were refused because they
+    # did not look like the detect frame (a keyframe too old for a moving
+    # subject, or a sub-stream with a different field of view). A camera
+    # whose refusals climb is one whose sharp evidence is quietly becoming
+    # low-res — the operator's cue to set DETECT_EVIDENCE_DECODE=full or
+    # fix the camera's second stream.
+    ev_main = _by_label(samples, "tier0_evidence_crops_total", "source", "main")
+    ev_detect = _by_label(samples, "tier0_evidence_crops_total", "source", "detect")
+    ev_mismatch = _by_camera(samples, "tier0_evidence_mismatch_total")
+    ev_gop = _by_camera(samples, "tier0_evidence_gop_seconds")
+    ev_keyonly = _by_camera(samples, "tier0_evidence_keyframes_only")
     visits_ok = _by_camera(samples, "tier0_visits_posted_total")
     visits_drop = _by_camera(samples, "tier0_visits_dropped_total")
     # Decoded frames detection never reached because it was still busy
@@ -339,6 +381,11 @@ def reduce_metrics(samples: list[Sample]) -> dict[str, Any]:
             "visits_dropped": int(visits_drop.get(cam, 0)),
             "frames_dropped": int(frames_drop.get(cam, 0)),
             "mainstream_fallback": bool(mainstream.get(cam, 0) >= 1.0),
+            # None when the pipeline predates main-stream evidence or the
+            # camera has no second stream — not a fabricated zero.
+            "evidence": _evidence_row(
+                ev_main.get(cam), ev_detect.get(cam), ev_mismatch.get(cam),
+                ev_gop.get(cam), ev_keyonly.get(cam)),
             "motion_latched_open": bool(latched.get(cam, 0) >= 1.0),
             "motion_forced_exits": int(forced_exits.get(cam, 0)),
             # None when the pipeline predates the metric — an older
