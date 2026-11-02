@@ -398,7 +398,7 @@ class CameraWorker:
         evidence_fps: int = 5,                   # main-stream frames kept per second while active
         evidence_idle_after: float = 15.0,       # quiet seconds before the main decode stops
         evidence_max_skew_s: float = 0.35,       # a main frame further than this from the sub frame is refused
-        evidence_decode: str = "full",           # "full": every main frame while active; "nokey": keyframes only
+        evidence_decode: str = "nokey",          # "nokey": keyframes only while active (default); "full": every main frame
         evidence_url_provider=None,              # freshest main-tap URL (its JWT rotates)
         evidence_source_factory=None,            # injectable for tests: () -> source with stream()/close()
     ) -> None:
@@ -408,7 +408,7 @@ class CameraWorker:
         self.evidence_fps = max(1, min(30, int(evidence_fps)))
         self.evidence_idle_after = evidence_idle_after
         self.evidence_max_skew_s = evidence_max_skew_s
-        self.evidence_decode = (evidence_decode or "full").strip().lower()
+        self.evidence_decode = (evidence_decode or "nokey").strip().lower()
         self.evidence_url_provider = evidence_url_provider
         self._evidence_source_factory = evidence_source_factory
         self._evidence = None
@@ -1109,7 +1109,7 @@ class WorkerManager:
         evidence_fps: int = 5,
         evidence_idle_after: float = 15.0,
         evidence_max_skew_s: float = 0.35,
-        evidence_decode: str = "full",
+        evidence_decode: str = "nokey",
     ) -> None:
         self._evidence_stream = evidence_stream
         self._evidence_fps = evidence_fps

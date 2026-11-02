@@ -107,6 +107,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Checked and run by the same code the engine uses; pictures shrunk to
   768 px first when Pillow is installed. For the next SDK release.
 
+### Changed
+
+- **Keyframe-only main-stream evidence is now the default**
+  (`DETECT_EVIDENCE_DECODE=nokey`; set `full` for the previous behaviour).
+  Measured on the Ventuno Q with a CP Plus H.265 960x1080 main stream
+  (1 s GOP): the evidence decode while something is in front of the
+  camera fell from ~27 % of a core to ~5 %, and the camera as a whole
+  (sub-stream detection plus evidence) from about half a core to about a
+  fifth. The crop can be up to half a GOP (0.5–1 s on most cameras) from
+  the detect frame; the skew window widens to at least 2 s to match.
+  `full` remains for long-GOP cameras or where decode is free and exact
+  timing matters.
+
 ### Fixed
 
 - **Keyframe-only evidence decode (`DETECT_EVIDENCE_DECODE=nokey`) no

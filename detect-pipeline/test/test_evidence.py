@@ -454,11 +454,12 @@ def test_a_sub_tap_that_cannot_be_probed_falls_back_to_the_main_stream(monkeypat
 
 # ── Keyframe-only evidence (DETECT_EVIDENCE_DECODE=nokey) ────────────
 
-def test_evidence_decode_dial_is_read_and_defaults_to_full():
+def test_evidence_decode_dial_is_read_and_defaults_to_nokey():
     from detect_pipeline.run import config_from_env
-    assert config_from_env({}).evidence_decode == "full"
+    assert config_from_env({}).evidence_decode == "nokey"
+    assert config_from_env({"DETECT_EVIDENCE_DECODE": "Full"}).evidence_decode == "full"
     assert config_from_env({"DETECT_EVIDENCE_DECODE": "NoKey"}).evidence_decode == "nokey"
-    assert config_from_env({"DETECT_EVIDENCE_DECODE": "half"}).evidence_decode == "full"
+    assert config_from_env({"DETECT_EVIDENCE_DECODE": "half"}).evidence_decode == "nokey"
 
 
 def test_nokey_evidence_decodes_keyframes_without_a_rate_filter_and_widens_the_skew(monkeypatch):

@@ -191,13 +191,19 @@ the detect frame's own crop, so a crop is never of the wrong moment.
 `tier0_evidence_crops_total{source="main"|"detect"}` says which stream
 each camera's evidence came from; `tier0_evidence_active` whether its main
 decode is running. `DETECT_EVIDENCE_STREAM=detect` turns it off.
-`DETECT_EVIDENCE_DECODE=nokey` decodes only the main stream's keyframes
-while active — roughly a tenth of the decode cost, the same `-skip_frame
-nokey` adaptive idle uses — at the price of a crop up to half a GOP (1–2 s
-on most cameras) from the detect frame; the skew window is widened to at
-least 2 s so the lookups still hit, and the `fps` filter is dropped (with
-ffmpeg's output sync pinned to `passthrough`) so a keyframe is never
-duplicated and stamped as fresh. Core
+By default (`DETECT_EVIDENCE_DECODE=nokey`) the main decode takes only the
+stream's keyframes — the same `-skip_frame nokey` adaptive idle uses —
+measured at ~5 % of a core while active on a 960x1080 H.265 camera with a
+1 s GOP, against ~27 % for `full`; the price is a crop up to half a GOP
+(0.5–1 s on most cameras) from the detect frame, so the skew window is
+widened to at least 2 s so the lookups still hit, and the `fps` filter is
+dropped (with ffmpeg's output sync pinned to `passthrough`) so a keyframe
+is never duplicated and stamped as fresh. `DETECT_EVIDENCE_DECODE=full`
+decodes every main frame for a crop from the same instant — for cameras
+with a long GOP, or where decode is free and exact timing matters. (For
+comparison: Frigate takes snapshots from the detect stream and never
+decodes the record stream; ZoneMinder offers the same keyframes-only
+decoding as its CPU-saving mode.) Core
 offers the main tap as `evidence_url` beside a sub `frame_url` (the
 `-sub` MediaMTX path), so this needs nothing but a stored substream URL.
 If the sub tap cannot be opened at all (the camera's second stream
