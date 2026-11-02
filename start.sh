@@ -558,6 +558,16 @@ for c in ps:
     if len(aliases) < 2 or spec.get("network_mode"):
         continue  # the bug only ever drops a SECONDARY network
     want = {real(a) for a in aliases}
+    # DNS names compose would have given the container on each network:
+    # the service name, the container name, and any aliases declared on
+    # that network. A bare `network connect` carries NONE of them, so the
+    # re-attached core answered on opennvr_internal but nothing on it
+    # could resolve `opennvr-core` — the detect-pipeline lost camera
+    # discovery for ten minutes on the Ventuno Q (2026-11-02).
+    dns = {}
+    for a in aliases:
+        extra = (decl.get(a) or {}).get("aliases") if isinstance(decl, dict) else None
+        dns[real(a)] = ",".join(dict.fromkeys([svc, name] + list(extra or [])))
     out = subprocess.run(
         ["docker", "inspect", "-f", "{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}", name],
         capture_output=True, text=True,
@@ -566,13 +576,21 @@ for c in ps:
         continue
     have = set(out.stdout.split())
     for net in sorted(want - have):
-        print(name, net)
+        print(name, net, dns.get(net, svc))
 ' 2>/dev/null) || return 0
     [ -n "$plan" ] || return 0
 
-    while read -r name net; do
+    local aliases alias_args a
+    while read -r name net aliases; do
         [ -n "$name" ] && [ -n "$net" ] || continue
-        if docker network connect "$net" "$name" >/dev/null 2>&1; then
+        # Re-attach WITH the names compose would have registered, or the
+        # container is reachable by IP only on that network.
+        alias_args=""
+        for a in ${aliases//,/ }; do
+            alias_args="$alias_args --alias $a"
+        done
+        # shellcheck disable=SC2086
+        if docker network connect $alias_args "$net" "$name" >/dev/null 2>&1; then
             echo -e "  ${YELLOW}⚠ Re-attached $name to $net${NC} — Compose left it off (see the Compose version warning)."
             fixed=$((fixed + 1))
         else
