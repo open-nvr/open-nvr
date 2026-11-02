@@ -173,7 +173,6 @@ multicastSRTCPPort: 8007
 rtspServerKey: server.key
 rtspServerCert: server.crt
 rtspAuthMethods: [basic]
-rtspUDPReadBufferSize: 0
 
 ###############################################
 # Global settings -> RTMP server

@@ -109,6 +109,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **MediaMTX no longer restarts its RTSP listener on every camera change.**
+  The shipped MediaMTX templates set the deprecated `rtspUDPReadBufferSize: 0`.
+  In MediaMTX 1.15 that key is a pointer field; the config clone MediaMTX
+  makes on every API change gives it a new address and the reload logic
+  compares it by identity, so every camera add, edit or delete restarted
+  the RTSP, RTSPS and API listeners — every detect-pipeline and recorder
+  reader was dropped (`closed: terminated`) and, when the new listener
+  bound before the old one was released, MediaMTX died with
+  `listen tcp :8554: bind: address already in use` (two crashes in an hour
+  of camera edits on the Ventuno Q loaner). The key is removed from
+  `mediamtx.docker.yml`, `mediamtx.yml` and `mediamtx.local.yml`; a test
+  keeps it out. Existing installs pick the fix up with `git pull` and a
+  MediaMTX restart (`./start.sh up` or `docker compose restart mediamtx`).
 - **A deleted camera no longer counts as a down detection worker.** The
   detect-pipeline dropped a removed camera's metric series and *then*
   stopped its worker, whose teardown wrote `tier0_worker_up=0` back, so the
