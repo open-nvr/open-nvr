@@ -109,6 +109,13 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A deleted camera no longer counts as a down detection worker.** The
+  detect-pipeline dropped a removed camera's metric series and *then*
+  stopped its worker, whose teardown wrote `tier0_worker_up=0` back, so the
+  camera stayed in `/metrics` as a dead worker until the pipeline restarted
+  (the dashboard showed "Detection 1/2 — Degraded" on a box with one
+  camera). Removed workers are now marked superseded before they are
+  stopped and their series are dropped after the stop.
 - **Storing a substream URL on an existing camera now creates its `-sub`
   MediaMTX path at once.** The update took the "main path unchanged" branch
   of the provisioner, which skipped the substream entirely, while the

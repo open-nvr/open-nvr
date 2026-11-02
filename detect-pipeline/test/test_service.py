@@ -76,6 +76,49 @@ def test_reconcile_adds_and_removes_workers():
     assert mgr.running_ids() == {"b", "d"}
 
 
+def test_removed_camera_leaves_no_worker_gauge_behind():
+    """A deleted camera must not keep reporting tier0_worker_up=0.
+
+    reconcile() dropped the camera's series and THEN stopped its worker, whose
+    teardown wrote the DOWN gauge back — so a camera deleted from core counted
+    as a down worker forever (dashboard "Detection 1/2 — Degraded" on a box
+    with one camera) until the pipeline restarted.
+    """
+    from detect_pipeline import metrics as m
+
+    class _GaugeWorker(_FakeWorker):
+        # Mirrors CameraWorker: UP once at start, DOWN at teardown unless
+        # the manager marked it superseded.
+        def __init__(self, spec, sink):
+            super().__init__(spec, sink)
+            self._superseded = False
+
+        def start(self):
+            super().start()
+            m.record_worker_state(self.spec.camera_id, True, target_fps=self.spec.fps)
+
+        def mark_superseded(self):
+            self._superseded = True
+
+        def stop(self):
+            super().stop()
+            if not self._superseded:
+                m.record_worker_state(self.spec.camera_id, False)
+
+    m.metrics.reset()
+    prov = _FakeProvider([_spec("a"), _spec("b")])
+    mgr = WorkerManager(prov, _FakeSink(), worker_factory=_GaugeWorker)
+    mgr.reconcile()
+    assert 'tier0_worker_up{camera="a"} 1' in m.metrics.render()
+
+    prov.specs = [_spec("b")]                        # a deleted from core
+    mgr.reconcile()
+    out = m.metrics.render()
+    assert 'camera="a"' not in out, out
+    assert 'tier0_worker_up{camera="b"} 1' in out    # the survivor is untouched
+    m.metrics.reset()
+
+
 def test_disabled_manager_runs_nothing_and_stops_all():
     prov = _FakeProvider([_spec("a")])
     mgr = WorkerManager(prov, _FakeSink(), worker_factory=_FakeWorker)
