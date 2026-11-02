@@ -61,7 +61,7 @@ Frigate-parity axis.
 Verified on a host with OpenCV 5.0.0 using a real YOLOv8n ONNX model and
 the Ultralytics bus image. The model was loaded explicitly with
 `cv2.dnn.ENGINE_NEW`, then exercised through `OnnxYoloDetector` using an
-injected DNN network. The run produced five detections, including `personand bus`, with normalized boxes inside `[0, 1]`.
+injected DNN network. The run produced five detections, including `person and bus`, with normalized boxes inside `[0, 1]`.
 
 Reproduce with `scripts/smoke_test_opencv5_engine.py`; see the README for
 asset download instructions and the model checksum.
