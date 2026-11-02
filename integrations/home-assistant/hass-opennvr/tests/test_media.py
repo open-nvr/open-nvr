@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+from freezegun.api import FrozenDateTimeFactory
 from pyopennvr import EntityCatalog, OpenNVRNotFoundError, SignedMedia
 import pytest
 from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClientMocker
@@ -36,7 +37,13 @@ async def entry(hass: HomeAssistant, mock_client: MagicMock, mock_stream: type[F
     return entry
 
 
-async def test_browse_tree(hass: HomeAssistant, entry, mock_client: MagicMock) -> None:
+async def test_browse_tree(hass: HomeAssistant, entry, mock_client: MagicMock,
+                           freezer: FrozenDateTimeFactory) -> None:
+    # Pin the clock: the recordings tree walks real local days, so on the day
+    # daylight-saving time ends the browsed day has 25 hour buckets (which is
+    # right) and the "24" below is wrong once a year (CI, 2026-11-02, the day
+    # after the US change). The fixtures already live on 2026-09-18.
+    freezer.move_to("2026-09-18T12:00:00+00:00")
     root = await async_browse_media(hass, ROOT)
     assert [c.title for c in root.children] == ["OpenNVR"]
     site = await async_browse_media(hass, f"{ROOT}/{entry.entry_id}")
