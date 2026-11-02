@@ -330,19 +330,33 @@ def sample_frame_age_metrics(now: float | None = None) -> None:
 
 
 def record_evidence(camera_id: str, active: bool, stats: dict, *,
-                    frames: int = 0, starts: int = 0) -> None:
+                    frames: int = 0, starts: int = 0, mismatches: int = 0,
+                    gop_s: float | None = None,
+                    keyframes_only: bool | None = None) -> None:
     """Main-stream evidence (evidence.py): whether the camera's main decode
     is running right now, how many best-crop updates were cut from which
     stream, and how many main frames it has read. The split by source is
     the number a quality study reads: evidence from "main" is full-res,
     evidence from "detect" is the sub-sized fallback (no main frame close
-    enough in time, or the main decode was still starting)."""
+    enough in time, the main decode still starting — or, counted on its
+    own as ``mismatch``, a main frame that did not LOOK like the detect
+    frame inside the box: a keyframe too old for a moving subject, or a
+    sub-stream with a different field of view). ``gop_s`` is the keyframe
+    interval keyframe-only mode measured; ``keyframes_only`` whether the
+    camera is still on keyframes (0 = full decode, by dial or because the
+    GOP was too long)."""
     metrics.gauge("tier0_evidence_active", 1.0 if active else 0.0, {"camera": camera_id})
     for source in ("main", "detect"):
         metrics.gauge("tier0_evidence_crops_total", float(stats.get(source, 0)),
                       {"camera": camera_id, "source": source})
+    metrics.gauge("tier0_evidence_mismatch_total", float(mismatches), {"camera": camera_id})
     metrics.gauge("tier0_evidence_frames_total", float(frames), {"camera": camera_id})
     metrics.gauge("tier0_evidence_starts_total", float(starts), {"camera": camera_id})
+    if gop_s is not None:
+        metrics.gauge("tier0_evidence_gop_seconds", float(gop_s), {"camera": camera_id})
+    if keyframes_only is not None:
+        metrics.gauge("tier0_evidence_keyframes_only", 1.0 if keyframes_only else 0.0,
+                      {"camera": camera_id})
 
 
 def record_mainstream_fallback(camera_id: str, active: bool) -> None:

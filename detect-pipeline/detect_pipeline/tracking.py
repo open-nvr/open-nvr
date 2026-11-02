@@ -27,6 +27,16 @@ from itertools import count
 from .regions import Box, intersection_over_union
 from .thumbnail import ThumbCandidate, is_better_thumbnail
 
+#: A main-stream crop must look at least this much like the detect-frame
+#: crop of the same box (Pearson correlation of the two boxes' luma, both
+#: reduced to a MATCH_THUMB x MATCH_THUMB thumbnail) or it is refused for
+#: the detect crop. Measured on a 960x1080 H.265 main against its 352x288
+#: sub (keyframes a second apart): regions of the same place scored
+#: 0.83-1.00, the neighbouring region at most 0.48, a half-shifted one at
+#: most 0.36. 0.5 sits in the gap; 0 disables the check.
+DEFAULT_EVIDENCE_MATCH_MIN = 0.5
+MATCH_THUMB = 16
+
 #: Labels the detector confuses on ONE object. A vehicle read as "car" on
 #: one frame and "truck" on the next is the same vehicle: matching strictly
 #: per label gave it two tracks, each fed on alternate frames, each ageing
@@ -211,6 +221,44 @@ def _coverage(inner: Box, outer: Box) -> float:
     return inter / area
 
 
+def _gray_thumb(bgr, n: int):
+    """``bgr`` as an n x n float32 luma thumbnail, area-averaged when the
+    crop is bigger than n on both sides, nearest-sampled when smaller."""
+    import numpy as np
+
+    gray = bgr.mean(axis=2, dtype=np.float32) if bgr.ndim == 3 else bgr.astype(np.float32)
+    h, w = gray.shape
+    if h >= n and w >= n:
+        ys = (np.arange(n + 1) * h // n)
+        xs = (np.arange(n + 1) * w // n)
+        sums = np.add.reduceat(np.add.reduceat(gray, ys[:-1], axis=0), xs[:-1], axis=1)
+        counts = np.outer(np.diff(ys), np.diff(xs)).astype(np.float32)
+        return sums / counts
+    yi = np.linspace(0, h - 1, n).astype(int)
+    xi = np.linspace(0, w - 1, n).astype(int)
+    return gray[yi][:, xi]
+
+
+def crop_similarity(a, b, n: int = MATCH_THUMB) -> float | None:
+    """How alike two crops of (supposedly) the same place look: Pearson
+    correlation of their n x n luma thumbnails, in [-1, 1]. Resolution,
+    aspect and encoder differences wash out in the thumbnail; brightness
+    and contrast differences in the normalisation. None when either crop
+    is empty or flat (no texture to compare) — undecidable, not unalike."""
+    import numpy as np
+
+    if a is None or b is None or a.size == 0 or b.size == 0:
+        return None
+    ta = _gray_thumb(a, n).ravel()
+    tb = _gray_thumb(b, n).ravel()
+    ta = ta - ta.mean()
+    tb = tb - tb.mean()
+    denom = float(np.sqrt(float((ta * ta).sum()) * float((tb * tb).sum())))
+    if denom < 1e-6:
+        return None
+    return float((ta * tb).sum() / denom)
+
+
 def _crop_bgr(bgr, box: Box, margin: float = 0.25):
     """Crop ``box`` plus a context margin, clamped to the frame; None if empty.
 
@@ -290,6 +338,15 @@ class Tracker:
         # How many best-crop updates were cut from which stream, for the
         # worker's metrics. "main" / "detect" keys, monotonic.
         self.evidence_stats: dict[str, int] = {"main": 0, "detect": 0}
+        # The main crop is only used when it LOOKS like the detect crop
+        # (crop_similarity). The two streams are the same sensor, so a
+        # correct pairing scores near 1; a keyframe old enough for the
+        # subject to have moved on, or a sub-stream the camera crops to
+        # a different field of view, scores near 0 — and either would
+        # otherwise hand the operator (and the VLM, and the plate reader)
+        # a sharp picture of the wrong thing. Refusals are counted.
+        self.evidence_match_min: float = DEFAULT_EVIDENCE_MATCH_MIN
+        self.evidence_mismatches = 0
 
     @property
     def population(self) -> int:
@@ -493,12 +550,31 @@ class Tracker:
                 sx = main.shape[1] / float(w)
                 sy = main.shape[0] / float(h)
                 scaled = (box[0] * sx, box[1] * sy, box[2] * sx, box[3] * sy)
-                crop = _crop_bgr(main, scaled, margin=self.crop_margin)
-                if crop is not None:
-                    if self._ev_skew is None and self._ev_ts is not None:
-                        self._ev_skew = abs(ev.ts - float(self._ev_ts))
-                    return crop, "main", main
+                if self._main_box_matches(main, scaled, bgr, box):
+                    crop = _crop_bgr(main, scaled, margin=self.crop_margin)
+                    if crop is not None:
+                        if self._ev_skew is None and self._ev_ts is not None:
+                            self._ev_skew = abs(ev.ts - float(self._ev_ts))
+                        return crop, "main", main
+                else:
+                    self.evidence_mismatches += 1
         return _crop_bgr(bgr, box, margin=self.crop_margin), "detect", bgr
+
+    def _main_box_matches(self, main, scaled: Box, bgr, box: Box) -> bool:
+        """Does the main frame show the same thing inside the box as the
+        detect frame did? Compared on the bare boxes (no margin — the
+        subject fills them, the margin is mostly shared background), and
+        undecidable (flat crops, a failed compare) counts as a match: the
+        guard only refuses on positive evidence of a mismatch."""
+        floor = float(self.evidence_match_min or 0.0)
+        if floor <= 0.0:
+            return True
+        try:
+            sim = crop_similarity(_crop_bgr(main, scaled, margin=0.0),
+                                  _crop_bgr(bgr, box, margin=0.0))
+        except Exception:
+            return True
+        return sim is None or sim >= floor
 
     def _scene_jpeg_for(self, bgr) -> bytes | None:
         """This frame as JPEG — encoded at most ONCE per ``update`` call.

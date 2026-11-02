@@ -811,6 +811,14 @@ type Tier0MetricsResp = {
     visits_dropped: number
     frames_dropped?: number
     mainstream_fallback: boolean
+    evidence?: {
+      main: number
+      detect: number
+      mismatch: number
+      low_res_ratio: number | null
+      gop_s: number | null
+      keyframes_only: boolean | null
+    } | null
     motion_latched_open?: boolean
     motion_forced_exits?: number
   }>
@@ -1086,6 +1094,19 @@ function ComputeGatedPanel() {
                       </td>
                       <td className="py-1">
                         {c.mainstream_fallback && <Badge variant="warning">main stream</Badge>}
+                        {/* Substream detection with main-stream evidence: warn when a
+                            meaningful share of the best crops fell back to the low-res
+                            detect frame, and say why when the main frame was refused for
+                            not matching (keyframe too old, or a second stream with a
+                            different field of view). */}
+                        {c.evidence && c.evidence.low_res_ratio != null
+                          && c.evidence.main + c.evidence.detect >= 10
+                          && c.evidence.low_res_ratio >= 0.25 && (
+                          <Badge variant="warning">
+                            {`evidence ${Math.round(c.evidence.low_res_ratio * 100)}% low-res`}
+                            {c.evidence.mismatch > 0 ? ` (${c.evidence.mismatch} mismatched)` : ''}
+                          </Badge>
+                        )}
                       </td>
                     </tr>
                   )

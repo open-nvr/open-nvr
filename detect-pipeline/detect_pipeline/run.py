@@ -136,6 +136,15 @@ class ServiceConfig:
     # frame. Measured on a 960x1080 H.265 camera with a 1 s GOP: full
     # ~27 % of a core while active, nokey ~5 %.
     evidence_decode: str = "nokey"
+    # nokey's two guards. The source measures the camera's keyframe
+    # interval and, above this many seconds, switches that camera to full
+    # decode on its own (a keyframe crop would be too old to be of the
+    # same moment); and a main crop is only kept when it looks at least
+    # this much like the detect crop of the same box (Pearson correlation
+    # of the two, 0 = off) — else the detect crop is used and the refusal
+    # counted (tier0_evidence_mismatch_total).
+    evidence_nokey_max_gop_s: float = 2.0
+    evidence_match_min: float = 0.5
 
 
 def _clean_env(value: str | None) -> str:
@@ -281,6 +290,8 @@ def config_from_env(env: dict) -> ServiceConfig:
         evidence_idle_after=_env_float(env, "DETECT_EVIDENCE_IDLE_AFTER", 15.0),
         evidence_max_skew_s=_env_float(env, "DETECT_EVIDENCE_MAX_SKEW_S", 0.35),
         evidence_decode=_evidence_decode_from_env(env),
+        evidence_nokey_max_gop_s=_env_float(env, "DETECT_EVIDENCE_NOKEY_MAX_GOP_S", 2.0),
+        evidence_match_min=_env_float(env, "DETECT_EVIDENCE_MATCH_MIN", 0.5),
         gate_heartbeat_s=_env_float(env, "DETECT_GATE_HEARTBEAT_S", 0.0),
         gate_critical_classes=env.get("DETECT_GATE_CRITICAL_CLASSES", ""),
         gate_cooldown_s=_env_float(env, "DETECT_GATE_COOLDOWN_S", 30.0),
@@ -595,6 +606,8 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
         evidence_idle_after=cfg.evidence_idle_after,
         evidence_max_skew_s=cfg.evidence_max_skew_s,
         evidence_decode=cfg.evidence_decode,
+        evidence_nokey_max_gop_s=cfg.evidence_nokey_max_gop_s,
+        evidence_match_min=cfg.evidence_match_min,
     )
     manager.best_frames = best_frames            # expose so main() can serve it
     # Same reason: main() wires this into /health. It is a LOCAL of this

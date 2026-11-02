@@ -31,6 +31,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the skew window is widened to at least 2 s so lookups still hit, and the
   `fps` filter is left out so a keyframe is never duplicated and stamped
   as fresh. Default stays `full`.
+- **Keyframe evidence guarded against the wrong moment and the wrong
+  place.** A crop cut from a main-stream keyframe can be up to a GOP old,
+  and on a long-GOP camera a walking person has left the box by then —
+  the Frigate objection to mixing two streams. The pipeline now measures
+  each camera's keyframe interval and switches that camera to full decode
+  by itself above `DETECT_EVIDENCE_NOKEY_MAX_GOP_S` (2 s; "smart codec"
+  cameras run to tens of seconds), and compares every main crop with the
+  detect crop of the same box before using it (`DETECT_EVIDENCE_MATCH_MIN`,
+  Pearson 0.5 — the same place on the two streams measured 0.83–1.00, a
+  shifted one under 0.5), keeping the detect crop otherwise. Refusals are
+  `tier0_evidence_mismatch_total`; the measured GOP and decode mode are
+  `tier0_evidence_gop_seconds` / `tier0_evidence_keyframes_only`; core's
+  tier0 metrics carry a per-camera `evidence` block and the AI Adapters
+  page flags a camera whose evidence is going low-res.
 - **Motion masks and object masks per camera** (Settings → Camera-Config →
   Masks). A motion mask is a polygon under which nothing counts as motion
   — a clock burned into the picture, a tree in the wind, a road at the

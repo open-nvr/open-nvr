@@ -450,6 +450,8 @@ services:
       - DETECT_EVIDENCE_IDLE_AFTER=${DETECT_EVIDENCE_IDLE_AFTER:-15}
       - DETECT_EVIDENCE_MAX_SKEW_S=${DETECT_EVIDENCE_MAX_SKEW_S:-0.35}
       - DETECT_EVIDENCE_DECODE=${DETECT_EVIDENCE_DECODE:-nokey}
+      - DETECT_EVIDENCE_NOKEY_MAX_GOP_S=${DETECT_EVIDENCE_NOKEY_MAX_GOP_S:-2.0}
+      - DETECT_EVIDENCE_MATCH_MIN=${DETECT_EVIDENCE_MATCH_MIN:-0.5}
       # Gate: shadow (default — measure only, no behavior change; the app's
       # Compute-gated panel shows would-save numbers) | off | enforce (act;
       # enable only after validating shadow data — see detect-pipeline/ENABLEMENT.md).

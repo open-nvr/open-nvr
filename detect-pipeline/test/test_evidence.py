@@ -492,3 +492,177 @@ def test_nokey_evidence_decodes_keyframes_without_a_rate_filter_and_widens_the_s
         else:
             assert kw["decode_skip"] != "nokey" and kw["fps"] == worker.evidence_fps
             assert ev.max_skew_s == skew
+
+
+# ── Tracker: a main crop must LOOK like the detect crop ──────────────
+
+def _scene(rng, shape, subject=None):
+    """A textured frame (so the compare has something to correlate) with
+    an optional textured subject — a bright patch with a dark cross —
+    drawn at ``subject`` = (x1, y1, x2, y2)."""
+    img = rng.integers(40, 90, size=(*shape, 3), dtype=np.uint8)
+    if subject is not None:
+        x1, y1, x2, y2 = subject
+        img[y1:y2, x1:x2] = 230
+        cy, cx = (y1 + y2) // 2, (x1 + x2) // 2
+        img[cy - 4:cy + 4, x1:x2] = 20
+        img[y1:y2, cx - 4:cx + 4] = 20
+    return img
+
+
+def test_main_crop_that_does_not_look_like_the_detect_crop_is_refused():
+    """The Frigate concern, guarded: the box was found on the sub frame,
+    but on the (older) main keyframe the subject is somewhere else — the
+    main crop would be a sharp picture of empty floor. Refused, counted,
+    the detect crop kept."""
+    rng = np.random.default_rng(1)
+    box = (100, 100, 200, 300)
+    sub = _scene(rng, SUB, subject=box)
+    # Main: the same (upscaled) background, the subject 300 px further on.
+    main = np.kron(_scene(rng, SUB, subject=(400, 100, 500, 300)), np.ones((2, 2, 1), np.uint8))
+    tk = _tracker(lambda ts: _Main(main, ts))
+    tk.update([Detection("person", box, 0.8)], sub, frame_ts=1.0)
+    tr = tk._tracks[0]
+    assert tr.best_crop_source == "detect"
+    assert tr.best_crop.shape == (200, 100, 3), "the detect frame's own crop"
+    assert tk.evidence_mismatches == 1
+    assert tk.evidence_stats == {"main": 0, "detect": 1}
+
+
+def test_main_crop_that_matches_the_detect_crop_is_kept():
+    rng = np.random.default_rng(2)
+    box = (100, 100, 200, 300)
+    sub = _scene(rng, SUB, subject=box)
+    main = np.kron(sub, np.ones((2, 2, 1), np.uint8))      # the same sensor, 2x
+    tk = _tracker(lambda ts: _Main(main, ts))
+    tk.update([Detection("person", box, 0.8)], sub, frame_ts=1.0)
+    tr = tk._tracks[0]
+    assert tr.best_crop_source == "main" and tr.best_crop.shape == (400, 200, 3)
+    assert tk.evidence_mismatches == 0
+
+
+def test_match_check_is_undecidable_on_flat_crops_and_can_be_switched_off():
+    from detect_pipeline.tracking import crop_similarity
+    flat_a = np.full((20, 10, 3), 50, np.uint8)
+    flat_b = np.full((40, 20, 3), 200, np.uint8)
+    assert crop_similarity(flat_a, flat_b) is None, "no texture → no verdict"
+    assert crop_similarity(None, flat_b) is None
+    rng = np.random.default_rng(3)
+    box = (100, 100, 200, 300)
+    sub = _scene(rng, SUB, subject=box)
+    main = np.kron(_scene(rng, SUB), np.ones((2, 2, 1), np.uint8))   # subject absent
+    tk = _tracker(lambda ts: _Main(main, ts))
+    tk.evidence_match_min = 0.0
+    tk.update([Detection("person", box, 0.8)], sub, frame_ts=1.0)
+    assert tk._tracks[0].best_crop_source == "main", "0 = the pre-guard behaviour"
+    assert tk.evidence_mismatches == 0
+
+
+def test_similarity_separates_the_same_place_from_a_shifted_one():
+    """Pins the measure the 0.5 floor was chosen against: the same place
+    on the two streams scores near 1, the box shifted by its own width
+    (the subject gone) near 0, even with the sub at a different aspect."""
+    from detect_pipeline.tracking import crop_similarity
+    rng = np.random.default_rng(4)
+    main = _scene(rng, (1080, 960), subject=(300, 300, 500, 700))
+    # A 4:3 CIF sub of the same 16:9-squeezed picture: nearest-sampled.
+    yi = np.linspace(0, 1079, 288).astype(int)
+    xi = np.linspace(0, 959, 352).astype(int)
+    sub = main[yi][:, xi]
+    sub_box = sub[int(300 * 288 / 1080):int(700 * 288 / 1080),
+                  int(300 * 352 / 960):int(500 * 352 / 960)]
+    same = crop_similarity(main[300:700, 300:500], sub_box)
+    shifted = crop_similarity(main[300:700, 500:700], sub_box)
+    assert same > 0.8 and shifted < 0.3, (same, shifted)
+
+
+# ── EvidenceSource: keyframes too far apart → full decode ────────────
+
+def test_keyframes_too_far_apart_switch_the_source_to_full_decode(caplog):
+    _Src.instances.clear()
+    clock = [0.0]
+    key_frames = [_frame(8, 8, ts) for ts in (0.0, 4.0, 8.0, 12.0)]   # a 4 s GOP
+    full_frames = [_frame(8, 8, ts) for ts in (12.2, 12.4)]
+    built = []
+
+    def keyframes():
+        built.append("nokey")
+        return _Src(list(key_frames))
+
+    def full():
+        built.append("full")
+        return _Src(list(full_frames))
+    ev = EvidenceSource("cam", keyframes, idle_after=60.0, max_skew_s=2.0,
+                        keyframes_only=True, max_gop_s=2.0,
+                        full_factory=full, full_max_skew_s=0.35,
+                        _clock=lambda: clock[0])
+    assert ev.observe(_Result(tracks=[1])) is True and ev.keyframes_only
+    assert _wait(lambda: ev.frames_total == 4)
+    clock[0] = 12.0
+    with caplog.at_level("WARNING"):
+        assert ev.observe(_Result(tracks=[1])) is True, "the switch is a state flip"
+    assert ev.switched_to_full and not ev.keyframes_only
+    assert ev.gop_s == 4.0
+    assert ev.max_skew_s == 0.35, "the operator's tight window is back"
+    assert built == ["nokey", "full"] and _Src.instances[0].closed.is_set()
+    assert "switching this camera's evidence decode to FULL" in caplog.text
+    assert _wait(lambda: ev.frames_total == 6)
+    assert ev.nearest(12.3).ts == 12.4
+    # the decision sticks: an idle stop and a restart build the FULL source
+    clock[0] = 100.0
+    assert ev.observe(_Result()) is True and not ev.active
+    clock[0] = 101.0
+    assert ev.observe(_Result(tracks=[1])) is True
+    assert built == ["nokey", "full", "full"]
+    ev.close()
+
+
+def test_a_short_gop_stays_on_keyframes_and_reports_its_length():
+    _Src.instances.clear()
+    frames = [_frame(8, 8, ts) for ts in (0.0, 1.0, 2.0, 3.0, 3.9)]
+    built = []
+    ev = EvidenceSource("cam", lambda: (built.append("nokey"), _Src(list(frames)))[1],
+                        keyframes_only=True, max_gop_s=2.0,
+                        full_factory=lambda: (built.append("full"), _Src([]))[1],
+                        full_max_skew_s=0.35, max_skew_s=2.0, _clock=lambda: 50.0)
+    ev.observe(_Result(tracks=[1]))
+    assert _wait(lambda: ev.frames_total == 5)
+    assert ev.observe(_Result(tracks=[1])) is False
+    assert ev.keyframes_only and not ev.switched_to_full and ev.max_skew_s == 2.0
+    assert ev.gop_s == 1.0 and built == ["nokey"]
+    ev.close()
+
+
+def test_gop_guard_dials_are_read_from_the_environment():
+    from detect_pipeline.run import config_from_env
+    cfg = config_from_env({})
+    assert cfg.evidence_nokey_max_gop_s == 2.0 and cfg.evidence_match_min == 0.5
+    cfg = config_from_env({"DETECT_EVIDENCE_NOKEY_MAX_GOP_S": "4",
+                           "DETECT_EVIDENCE_MATCH_MIN": "0"})
+    assert cfg.evidence_nokey_max_gop_s == 4.0 and cfg.evidence_match_min == 0.0
+
+
+def test_worker_gives_the_keyframe_source_a_full_decode_to_fall_back_to(monkeypatch):
+    import detect_pipeline.service as svc
+
+    monkeypatch.setattr(svc, "probe_stream", lambda url: (1920, 1080, 15.0))
+    built = []
+
+    class _FS:
+        def __init__(self, url, **kw):
+            built.append(kw)
+
+    monkeypatch.setattr(svc, "FrameSource", _FS)
+    spec = _spec("cam-gop", evidence_url="rtsp://m/cam-gop?jwt=a")
+    worker = CameraWorker(spec, _TrackSink(), detector=_GrowingDetector(),
+                          frame_source=_SubSource(1), evidence_decode="nokey",
+                          evidence_max_skew_s=0.35, evidence_nokey_max_gop_s=3.0,
+                          evidence_match_min=0.7)
+    ev = worker._make_evidence(640, 360)
+    assert ev.keyframes_only and ev.max_gop_s == 3.0 and ev._full_max_skew_s == 0.35
+    ev._full_factory()
+    assert built[-1]["decode_skip"] != "nokey" and built[-1]["fps"] == worker.evidence_fps
+    assert worker.evidence_match_min == 0.7
+    full = CameraWorker(spec, _TrackSink(), detector=_GrowingDetector(),
+                        frame_source=_SubSource(1), evidence_decode="full")
+    assert full._make_evidence(640, 360).keyframes_only is False

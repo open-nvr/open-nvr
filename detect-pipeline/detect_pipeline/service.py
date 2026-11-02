@@ -399,6 +399,8 @@ class CameraWorker:
         evidence_idle_after: float = 15.0,       # quiet seconds before the main decode stops
         evidence_max_skew_s: float = 0.35,       # a main frame further than this from the sub frame is refused
         evidence_decode: str = "nokey",          # "nokey": keyframes only while active (default); "full": every main frame
+        evidence_nokey_max_gop_s: float = 2.0,   # nokey: measured GOP above this → this camera switches itself to full
+        evidence_match_min: float = 0.5,         # a main crop must look this much like the detect crop (0 = no check)
         evidence_url_provider=None,              # freshest main-tap URL (its JWT rotates)
         evidence_source_factory=None,            # injectable for tests: () -> source with stream()/close()
     ) -> None:
@@ -409,6 +411,8 @@ class CameraWorker:
         self.evidence_idle_after = evidence_idle_after
         self.evidence_max_skew_s = evidence_max_skew_s
         self.evidence_decode = (evidence_decode or "nokey").strip().lower()
+        self.evidence_nokey_max_gop_s = max(0.0, float(evidence_nokey_max_gop_s or 0.0))
+        self.evidence_match_min = max(0.0, min(1.0, float(evidence_match_min or 0.0)))
         self.evidence_url_provider = evidence_url_provider
         self._evidence_source_factory = evidence_source_factory
         self._evidence = None
@@ -601,6 +605,10 @@ class CameraWorker:
                 self.spec.camera_id, self._evidence_source_factory,
                 idle_after=self.evidence_idle_after,
                 max_skew_s=self._evidence_skew(),
+                keyframes_only=self._evidence_nokey,
+                max_gop_s=self.evidence_nokey_max_gop_s,
+                full_factory=self._evidence_source_factory,
+                full_max_skew_s=float(self.evidence_max_skew_s),
             )
         probed = probe_stream(url)
         if probed is None:
@@ -634,6 +642,13 @@ class CameraWorker:
                 url_provider=_self.evidence_url_provider,
             )
 
+        # What keyframe-only mode falls back to when the camera's GOP turns
+        # out too long for a keyframe crop to be of the same moment (the
+        # source measures it — see EvidenceSource): the full-rate decode,
+        # with the operator's (tight) skew window back in force.
+        def full_factory(_factory=factory):
+            return _factory(_nokey=False)
+
         skew = self._evidence_skew()
         if nokey:
             log.info("tier0 %s: evidence from the main stream's KEYFRAMES only "
@@ -650,6 +665,10 @@ class CameraWorker:
             self.spec.camera_id, factory,
             idle_after=self.evidence_idle_after,
             max_skew_s=skew,
+            keyframes_only=nokey,
+            max_gop_s=self.evidence_nokey_max_gop_s,
+            full_factory=full_factory,
+            full_max_skew_s=float(self.evidence_max_skew_s),
         )
 
     def _run(self) -> None:
@@ -805,6 +824,7 @@ class CameraWorker:
         self._evidence = evidence
         if evidence is not None:
             tracker.evidence = evidence.nearest
+            tracker.evidence_match_min = self.evidence_match_min
             if self._stop.is_set():             # stopped during the probe
                 evidence.close()
         if _env_bool("DETECT_SCENE_EVIDENCE", True):
@@ -1019,6 +1039,9 @@ class CameraWorker:
                     record_evidence(
                         self.spec.camera_id, evidence.active, tracker.evidence_stats,
                         frames=evidence.frames_total, starts=evidence.starts,
+                        mismatches=tracker.evidence_mismatches,
+                        gop_s=evidence.gop_s,
+                        keyframes_only=evidence.keyframes_only,
                     )
                 # Adaptive decode: promote on the first sign of activity,
                 # demote after the quiet period. The flip terminates the
@@ -1110,12 +1133,16 @@ class WorkerManager:
         evidence_idle_after: float = 15.0,
         evidence_max_skew_s: float = 0.35,
         evidence_decode: str = "nokey",
+        evidence_nokey_max_gop_s: float = 2.0,
+        evidence_match_min: float = 0.5,
     ) -> None:
         self._evidence_stream = evidence_stream
         self._evidence_fps = evidence_fps
         self._evidence_idle_after = evidence_idle_after
         self._evidence_max_skew_s = evidence_max_skew_s
         self._evidence_decode = evidence_decode
+        self._evidence_nokey_max_gop_s = evidence_nokey_max_gop_s
+        self._evidence_match_min = evidence_match_min
         # Freshest main-tap URL per camera, beside _latest_url (same reason:
         # the JWT rotates; the running worker's source reads it on respawn).
         self._latest_evidence_url: dict[str, str] = {}
@@ -1231,6 +1258,8 @@ class WorkerManager:
             evidence_idle_after=self._evidence_idle_after,
             evidence_max_skew_s=self._evidence_max_skew_s,
             evidence_decode=self._evidence_decode,
+            evidence_nokey_max_gop_s=self._evidence_nokey_max_gop_s,
+            evidence_match_min=self._evidence_match_min,
             evidence_url_provider=lambda cid=spec.camera_id: self.current_evidence_url(cid),
         )
 
