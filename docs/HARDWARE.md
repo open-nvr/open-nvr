@@ -240,7 +240,11 @@ image has no Intel compute runtime (the detector quietly runs on CPU).
 
 ## Benchmark protocol
 
-The same recipe on every hardware class, so rows compare:
+`python3 tools/acceptance.py hardware` runs the measurable part of this
+protocol on the box itself and scores it — accelerator really in use,
+detector ms/frame, decode cost per stream, and a live window of the
+running stack — into a report ([ACCEPTANCE.md](ACCEPTANCE.md)). The
+recipe below is what the rows in this page were produced with:
 
 1. Fake cameras from the rig (`docker-compose.fakecams.yml`), 720p H264 in
    copy mode so the rig itself costs no CPU.

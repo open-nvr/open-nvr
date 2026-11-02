@@ -146,6 +146,8 @@ test_*.py
 server/test_*.py
 !server/tests/test_*.py
 !server/tests/**/test_*.py
+# tools/tests is run by CI too (ci.yml, server job) — track its suites.
+!tools/tests/test_*.py
 # KAI-C's pytest suite (A2.4): same negation pattern as server/tests/.
 !kai-c/test/test_*.py
 # The end-to-end suite (tests/e2e/): same negation pattern again. Without
@@ -311,3 +313,6 @@ tests/e2e/.artifacts/
 # Operator footage dropped in for local fake cameras: never in the repository.
 # (data/fake-cameras/README.md and demo1.mp4 are the repo's own.)
 data/fake-cameras/*/
+
+# acceptance reports (tools/acceptance.py) — yours to keep or send, not to commit
+acceptance-reports/
