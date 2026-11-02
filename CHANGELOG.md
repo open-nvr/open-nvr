@@ -109,6 +109,14 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`start.sh` refuses to run under `sudo`.** A `sudo ./start.sh` left
+  `.env` (0600, root) and parts of the checkout owned by root, and every
+  later `./start.sh` as the normal user failed with `.env: Permission
+  denied` until someone with sudo chowned the files (seen on a test box).
+  The script now stops before doing anything, names the user that invoked
+  it, and prints the two repair commands (join the docker group, chown the
+  checkout back). A plain root login is unaffected; `OPENNVR_ALLOW_SUDO=1`
+  skips the check.
 - **`start.sh`'s network re-attach now carries the service's DNS names.**
   On Docker Compose 2.24 (Ubuntu 24.04) a recreate can drop a container's
   secondary network; `start.sh` re-attaches it, but a bare `docker network
