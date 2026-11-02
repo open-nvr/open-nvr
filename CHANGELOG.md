@@ -109,6 +109,15 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`start.sh`'s network re-attach now carries the service's DNS names.**
+  On Docker Compose 2.24 (Ubuntu 24.04) a recreate can drop a container's
+  secondary network; `start.sh` re-attaches it, but a bare `docker network
+  connect` registers no alias, so the re-attached core answered on
+  `opennvr_internal` by IP only and nothing on that network could resolve
+  `opennvr-core`: the detect-pipeline lost camera discovery and MediaMTX
+  the recording path for ten minutes on a test box. The re-attach now
+  passes `--alias` for the service name, the container name and any
+  aliases declared in the compose file.
 - **MediaMTX no longer restarts its RTSP listener on every camera change.**
   The shipped MediaMTX templates set the deprecated `rtspUDPReadBufferSize: 0`.
   In MediaMTX 1.15 that key is a pointer field; the config clone MediaMTX
