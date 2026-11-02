@@ -103,6 +103,32 @@ def test_yaml_parses_cleanly(filename: str) -> None:
     assert isinstance(cfg, dict), f"{filename} did not parse to a dict"
 
 
+# Keys MediaMTX 1.15 marks deprecated and keeps behind a *pointer* field.
+# ``Conf.Clone()`` (a JSON round trip, run on every API config change) gives
+# the pointer a new address, and ``closeResources`` compares the field with
+# ``!=`` — so with any of these keys set, EVERY ``/config/paths/*`` call
+# restarts the RTSP, RTSPS and API listeners ("[RTSP] listener is closing"),
+# drops every RTSP reader (detect-pipeline, recorder taps) and, when the new
+# listener binds before the old one is released, kills the process with
+# ``listen tcp :8554: bind: address already in use``. Measured on the Ventuno
+# Q loaner on 2026-11-02 (two crashes in an hour of camera edits) and
+# reproduced against bluenviron/mediamtx:1.15.4 with the live config: removing
+# ``rtspUDPReadBufferSize`` is the whole fix.
+DEPRECATED_POINTER_KEYS = ("rtspUDPReadBufferSize",)
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ["mediamtx.docker.yml", "mediamtx.yml", "mediamtx.local.yml"],
+)
+def test_templates_do_not_set_deprecated_pointer_keys(filename: str) -> None:
+    """Deprecated pointer-typed keys make every config reload restart the
+    RTSP listener (see DEPRECATED_POINTER_KEYS); the templates must not set them."""
+    cfg = yaml.safe_load((REPO_ROOT / filename).read_text())
+    present = [k for k in DEPRECATED_POINTER_KEYS if k in cfg]
+    assert not present, f"{filename} sets deprecated key(s) {present}"
+
+
 @pytest.mark.parametrize(
     "filename",
     ["mediamtx.docker.yml", "mediamtx.yml"],
