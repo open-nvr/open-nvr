@@ -60,7 +60,7 @@ case "$1 $2" in
         [ -f "$STUB_DIR/networks/$name" ] || exit 1
         tr '\n' ' ' < "$STUB_DIR/networks/$name" ;;
     "network connect")
-        echo "$3 $4" >> "$STUB_DIR/connects.log" ;;
+        shift 2; echo "$*" >> "$STUB_DIR/connects.log" ;;
     *) exit 1 ;;
 esac
 STUB
@@ -109,7 +109,7 @@ cat > "$STUB_DIR/config.json" <<'JSON'
     "default": {"name": "open-nvr_default"}
   },
   "services": {
-    "opennvr-core": {"container_name": "opennvr_core", "networks": {"opennvr_internal": null, "opennvr_apps": null}},
+    "opennvr-core": {"container_name": "opennvr_core", "networks": {"opennvr_internal": {"aliases": ["core-alt"]}, "opennvr_apps": null}},
     "nats": {"container_name": "opennvr_nats", "networks": ["opennvr_internal", "opennvr_apps"]},
     "db": {"container_name": "opennvr_db", "networks": {"opennvr_internal": null}},
     "plain": {"container_name": "opennvr_plain"},
@@ -141,9 +141,18 @@ printf 'open-nvr_opennvr_internal\n' > "$STUB_DIR/networks/opennvr_fakecams"    
 start_test "re-attaches exactly the secondary networks a running container is missing"
 out=$(ensure_compose_networks "-f docker-compose.yml" 2>&1)
 got=$(sort "$STUB_DIR/connects.log" | tr '\n' ';')
-want="open-nvr_opennvr_apps opennvr_nats;open-nvr_opennvr_internal opennvr_core;"
+want="--alias nats --alias opennvr_nats open-nvr_opennvr_apps opennvr_nats;--alias opennvr-core --alias opennvr_core --alias core-alt open-nvr_opennvr_internal opennvr_core;"
 [ "$got" = "$want" ] && pass || fail "connects: '$got' (expected '$want')
       output: $out"
+
+# A bare `docker network connect` registers no DNS name on the network: the
+# re-attached core was reachable by IP only, and the detect-pipeline (which
+# dials http://opennvr-core:8000) lost camera discovery until core was
+# re-attached by hand with its aliases (Ventuno Q, 2026-11-02).
+start_test "re-attaches with the service name, container name and declared aliases"
+echo "$got" | tr ';' '\n' | grep -q -- "--alias opennvr-core --alias opennvr_core --alias core-alt open-nvr_opennvr_internal opennvr_core" \
+    && echo "$got" | tr ';' '\n' | grep -q -- "--alias nats --alias opennvr_nats open-nvr_opennvr_apps opennvr_nats" \
+    && pass || fail "connects: '$got'"
 
 start_test "says what it did and why"
 echo "$out" | grep -q "Re-attached opennvr_core to open-nvr_opennvr_internal" \
@@ -164,7 +173,7 @@ cat > "$STUB_DIR/ps.json" <<'JSON'
 JSON
 : > "$STUB_DIR/connects.log"
 ensure_compose_networks "-f docker-compose.yml" >/dev/null 2>&1
-[ "$(cat "$STUB_DIR/connects.log")" = "open-nvr_opennvr_internal opennvr_core" ] && pass || fail "connects: $(cat "$STUB_DIR/connects.log")"
+[ "$(cat "$STUB_DIR/connects.log")" = "--alias opennvr-core --alias opennvr_core --alias core-alt open-nvr_opennvr_internal opennvr_core" ] && pass || fail "connects: $(cat "$STUB_DIR/connects.log")"
 
 start_test "never fails the start when compose config cannot be read"
 rm -f "$STUB_DIR/config.json"
