@@ -188,7 +188,6 @@ multicastSRTCPPort: 8007
 rtspServerKey: /etc/mediamtx-certs/server.key
 rtspServerCert: /etc/mediamtx-certs/server.crt
 rtspAuthMethods: [basic]
-rtspUDPReadBufferSize: 0
 
 ###############################################
 # Global settings -> RTMP server
