@@ -196,3 +196,97 @@ def test_markdown_report_carries_grade_statuses_and_nested_measurements():
     assert "Grade **A**" in md and "Not measured: x" in md
     assert "720p-h264.full=8" in md and "**PASS**" in md and "**UNKNOWN**" in md
     assert "docs/ACCEPTANCE.md" in md
+
+
+# ── camera suite scorers ──────────────────────────────────────────────
+
+def test_report_urls_carry_no_credentials():
+    assert acc.redact_url("rtsp://admin:s3cret@10.0.0.5:554/cam/realmonitor?channel=1") == \
+        "rtsp://10.0.0.5:554/cam/realmonitor?channel=1"
+    assert acc.redact_url("rtsp://10.0.0.5/x") == "rtsp://10.0.0.5/x"
+    assert acc.redact_url(None) is None
+
+
+MAIN = {"codec": "hevc", "width": 1920, "height": 1080, "fps": 15.0}
+SUB = {"codec": "h264", "width": 704, "height": 576, "fps": 10.0}
+
+
+def test_streams_and_sub_fit():
+    assert acc.score_streams(MAIN, SUB).status == "pass"
+    only_main = acc.score_streams(MAIN, None)
+    assert only_main.status == "warn" and "main stream" in only_main.detail
+    assert acc.score_streams(None, None).status == "fail"
+    assert acc.score_sub_fit(SUB, 2.0).status == "pass"
+    assert acc.score_sub_fit(dict(SUB, height=240), 2.0).status == "warn"
+    assert acc.score_sub_fit(dict(SUB, fps=1.0), 2.0).status == "warn"
+    assert acc.score_sub_fit(None, 2.0).status == "unknown"
+
+
+def test_gop_uses_the_pipelines_jitter_allowance_then_the_smart_codec_ceiling():
+    assert acc.score_gop(2.03, 2.0).status == "pass", "a nominal 2 s camera measures a little over"
+    assert acc.score_gop(2.3, 2.0).status == "pass"
+    warn = acc.score_gop(4.0, 2.0)
+    assert warn.status == "warn" and "every main frame" in warn.detail
+    fail = acc.score_gop(30.0, 2.0)
+    assert fail.status == "fail" and "smart codec" in fail.detail
+    assert acc.score_gop(None, 2.0).status == "unknown"
+    assert acc.score_gop(2.8, 2.5).status == "pass", "the limit is the configured one"
+
+
+def test_fov_thresholds_come_from_the_measured_camera():
+    assert acc.score_fov(0.998).status == "pass"            # CP Plus, same view
+    assert acc.score_fov(0.80).status == "warn"
+    assert acc.score_fov(0.68).status == "fail"             # the simulated 80 % crop
+    assert acc.score_fov(None).status == "unknown"
+
+
+def test_gate_floor_is_scored_only_for_a_still_scene_and_names_an_osd():
+    hot = {"share": 0.97, "where": "row 1 col 10 of 10x10", "polygon": [[0.9, 0.0], [1.0, 0.0], [1.0, 0.1], [0.9, 0.1]]}
+    c = acc.score_gate_floor(0.94, hot, quiet=True)
+    assert c.status == "fail" and "burned-in clock" in c.detail and "[0.9, 0.0]" in c.detail
+    assert c.measured["hotspot"] == "row 1 col 10 of 10x10"
+    assert acc.score_gate_floor(0.0, None, quiet=True).status == "pass"
+    assert acc.score_gate_floor(0.12, {"share": 0.3, "where": "x", "polygon": []}, quiet=True).status == "warn"
+    info = acc.score_gate_floor(0.94, hot, quiet=False)
+    assert info.status == "info" and "--quiet" in info.detail
+    assert acc.score_gate_floor(None, None, quiet=True).status == "unknown"
+
+
+def _cam(**over):
+    base = {"measured": True, "minutes": 5, "up": True, "fps_ratio": 0.96, "frames": 600,
+            "gate_open_share": 0.0, "restarts": 0, "flips": 2, "evidence_main": 0, "evidence_detect": 0,
+            "evidence_mismatch": 0, "keyframes_only": 1.0, "gop_s": 2.03}
+    base.update(over)
+    return base
+
+
+def test_camera_live_green_still_scene_without_evidence():
+    by_id = {c.id: c for c in acc.score_camera_live(_cam(), quiet=True)}
+    assert by_id["cam_live"].status == "pass" and by_id["cam_feed"].status == "pass"
+    assert by_id["cam_gate"].status == "pass"
+    assert by_id["cam_evidence"].status == "unknown" and "walk through" in by_id["cam_evidence"].detail
+
+
+def test_camera_live_flags_down_restarts_noise_and_refused_evidence():
+    by_id = {c.id: c for c in acc.score_camera_live(
+        _cam(up=False, restarts=5, gate_open_share=0.9, evidence_main=20, evidence_detect=2,
+             evidence_mismatch=8), quiet=True)}
+    assert by_id["cam_live"].status == "fail"
+    assert by_id["cam_feed"].status == "fail"
+    assert by_id["cam_gate"].status == "fail"
+    assert by_id["cam_evidence"].status == "warn" and by_id["cam_evidence"].measured["refused_share"] == 0.267
+    assert acc.score_camera_live(_cam(evidence_main=20, evidence_mismatch=12), True)[-1].status == "fail"
+    ok = {c.id: c for c in acc.score_camera_live(_cam(evidence_main=30, evidence_mismatch=1), quiet=False)}
+    assert ok["cam_evidence"].status == "pass" and ok["cam_gate"].status == "info"
+    assert acc.score_camera_live({"measured": False, "reason": "nope"}, True)[0].status == "unknown"
+
+
+def test_camera_markdown_header_names_the_camera_not_the_host():
+    checks = [acc.score_fov(0.998)]
+    report = {"suite": "camera", "tool_version": "t", "started": "2026-11-03T10:00:00+00:00",
+              "camera": {"name": "lobby", "main": "rtsp://h/main", "sub": "rtsp://h/sub", "camera_id": "cam23"},
+              "host": {"hostname": "box", "image_tag": "main-qualcomm"},
+              "checks": [c.as_dict() for c in checks], "grade": acc.grade(checks)}
+    md = acc.render_markdown(report)
+    assert "# OpenNVR camera acceptance — lobby" in md and "pipeline camera `cam23`" in md
+    assert "--quiet" in md

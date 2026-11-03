@@ -1,7 +1,8 @@
 # Acceptance suites — does this hardware (or this camera) carry OpenNVR well?
 
-`tools/acceptance.py` measures a box running OpenNVR against the thresholds
-we hold our own reference hardware to and writes a scored report. It is
+`tools/acceptance.py` measures a box running OpenNVR, or a camera attached
+to it, against the thresholds we hold our own reference hardware and
+cameras to, and writes a scored report. It is
 read-only: it stores no credentials, changes no configuration, adds no
 cameras. It is meant to be run by **us** on every new hardware class and
 by **customers** on a box they are considering, and sent back as the
@@ -9,10 +10,9 @@ report. Nothing here runs in CI — the measurements need real hardware —
 but the parsers, scorers and report are unit-tested (`tools/tests`) so the
 tool does not rot between runs.
 
-Two suites are planned. The **hardware** suite is here; the **camera**
-suite (ONVIF/substream discovery, codec and GOP, main/sub field-of-view
-match, keyframe-evidence viability, motion-gate noise floor, recording
-continuity) follows once its checks have been exercised on real cameras.
+Two suites: **hardware** (is this box good enough?) and **camera** (does
+this camera model behave with the pipeline?). Both write the same kind of
+report and share the grading rule.
 
 ## Running the hardware suite
 
@@ -77,6 +77,51 @@ measures; 8 cameras is the smallest site we size for.
 - **Unknown** rows mean the tool could not measure, usually because the
   stack or a camera was down; they are listed under the grade so a report
   with half its rows unmeasured cannot read as a pass.
+
+## Running the camera suite
+
+On the host, with the stack up, pointing at the camera's own RTSP URLs
+(the tool probes through the detect-pipeline container; the report keeps
+the URLs without their credentials):
+
+```bash
+python3 tools/acceptance.py camera --main 'rtsp://user:pass@10.0.0.5:554/main' \
+    --sub 'rtsp://user:pass@10.0.0.5:554/sub' --camera-id 7 --quiet
+```
+
+- `--camera-id` is the camera's id in OpenNVR; with it the tool also reads
+  the pipeline's counters for that camera over `--minutes` (default 5).
+- `--quiet` says nothing moves in front of the camera during the run. The
+  two gate checks are scored only then; otherwise they are reported as
+  information, because an open gate on a busy scene is correct.
+- `--seconds` (default 60) is how much stream is replayed for the keyframe
+  and gate checks. `--sub` may be omitted for a camera without one.
+
+Run it twice on a new model: once on a still scene with `--quiet` for the
+gate floor, and once with someone walking through for the evidence check
+(it reports "unknown" until something was tracked).
+
+| Check | What is measured | pass | warn | fail |
+|---|---|---|---|---|
+| Streams reachable | `ffprobe` of the main and sub streams: codec, size, fps | both probe | main only (detection then decodes the main stream) | main fails |
+| Sub stream fit for detection | the sub stream's height and fps | ≥ 288 px tall and ≥ `DETECT_FPS` | smaller or slower | — |
+| Keyframe interval (evidence) | median gap between keyframes on the main stream over `--seconds` | ≤ `DETECT_EVIDENCE_NOKEY_MAX_GOP_S` × 1.15 (keyframe-only evidence applies) | ≤ 10 s (the pipeline switches that camera to full decode) | longer: "smart codec"; events can fall between keyframes of the recording |
+| Main and sub show the same view | Pearson correlation of one keyframe from each stream, both at 64x64 luma | ≥ 0.9 | ≥ 0.7 (some main crops will be refused) | less: cross-stream evidence would be of the wrong place |
+| Motion gate on a still scene | `--seconds` of the sub stream replayed through the pipeline's own motion detector, unmasked | ≤ 5 % of frames open | ≤ 25 % | more; when ≥ 80 % of the motion sits in one cell of a 10x10 grid the report names it as a burned-in clock/title and prints the mask polygon |
+| Camera in the pipeline | `tier0_worker_up`, achieved/target fps over the window | up, ≥ 0.9 | ≥ 0.7 | down or less |
+| Feed stayed up | `tier0_worker_restarts_total` over the window (adaptive-decode flips are reported beside it, not counted) | 0 | ≤ 2 | more |
+| Gate in service | detector runs / (runs + no-motion skips) over the window, masks applied | ≤ 5 % (still scene) | ≤ 25 % | more (info without `--quiet`) |
+| Main-stream evidence | `tier0_evidence_crops_total{main,detect}` and `tier0_evidence_mismatch_total` over the window | refused ≤ 10 % | ≤ 30 % | more; unknown below 10 crops |
+
+Where the numbers come from: the CP Plus used to build the suite measured
+2.03 s between keyframes at a nominal 2 s (hence the 15 % allowance, the
+same one the pipeline uses), 0.998 main/sub correlation (0.68 for a
+simulated 80 % crop), and a gate open on 94 % of frames of an empty room
+from its burned-in clock, 0 % with the clock masked.
+
+Not yet in the suite: ONVIF discovery of the sub stream, recording
+continuity, and a deliberate reconnect test — each is a measurement with a
+threshold waiting for the camera that shows the problem.
 
 ## Growing it
 
