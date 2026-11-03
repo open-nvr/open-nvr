@@ -17,15 +17,22 @@ What runs today:
   picture, shrunk first (``WORKFLOWS_LOOK_MAX_SIDE``). With no model set,
   an AI step answers ``unsure`` and the run carries on down that path.
   Investigate has no core tools yet, so it decides from the event alone.
+* **Ask a person**: an approval record (``workflow_approvals``); the run
+  waits, and a reply carries it on down that reply's path, after a
+  restart too. A timeout takes the step's ``no_answer`` path, never a
+  reply's (nobody chose it); ``inside For each`` it is not supported yet.
 * The actions **log**, **alert** (into the inbox, as the workflow, with
   the run's correlation id; an AI-decided ``high`` is capped at
-  ``medium``) and **site_mode**, plus **wait**.
+  ``medium``), **notify** (an inbox entry for ``who``), **app** (an
+  installed app's action, as the person who answered, audited as the
+  workflow's), **site_mode** and **wait**.
 
-Ask a person, app actions, notify and the other actions are recorded as
-"not available yet" and the path carries on; they come with approvals.
+The other actions (save_clip, ptz_preset, webhook, home_assistant) are
+recorded as "not available yet" and the path carries on.
 
 In **Test** every action is recorded as "would have" and nothing is done;
-AI steps run for real, so the trace is genuine (RFC #620, section 2).
+AI steps run for real, so the trace is genuine, and Ask a person asks
+nobody and takes its default (RFC #620, section 2 and corrections, 11).
 
 A workflow never triggers on an alert from a workflow. Camera roles are
 camera names, lower-cased with spaces as ``-`` ("Gate" is ``gate``),
@@ -50,14 +57,23 @@ from opennvr_app_sdk.agent import LLMClient, OllamaChat, OpenAIChat
 from opennvr_app_sdk.workflows import AIStep, parse_duration
 from sqlalchemy.orm import Session
 
-from models import Camera, Workflow, WorkflowRun, WorkflowRunStep, WorkflowVersion
+from models import (
+    Camera,
+    Workflow,
+    WorkflowApproval,
+    WorkflowRun,
+    WorkflowRunStep,
+    WorkflowVersion,
+)
 from workflows.ai_steps import run_ai_step_recorded
 
 log = logging.getLogger(__name__)
 
 LIMIT_DEFAULTS = {"cooldown": "1m", "one_at_a_time": "camera", "per_hour": 30,
                   "ai_per_hour": 60}
-NOT_YET = "not available yet: it comes with approvals"
+NOT_YET = "not available yet in this engine"
+#: How long an Ask a person step waits when it sets no timeout.
+DEFAULT_ASK_TIMEOUT = "5m"
 _PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 #: Event values a step may read, besides the alert's own scalar evidence.
 _SCALAR = (str, int, float, bool)
@@ -107,7 +123,8 @@ def context_from_alert(db: Session, envelope: dict[str, Any]) -> Context:
     values.update(app=source.get("name"), type=envelope.get("alert_type"),
                   title=envelope.get("title"), severity=envelope.get("severity"),
                   camera=camera_role(cam.name) if cam else str(handle or ""),
-                  camera_name=cam.name if cam else None)
+                  camera_name=cam.name if cam else None,
+                  camera_id=str(handle) if handle else None)
     images = evidence.get("images") if isinstance(evidence.get("images"), dict) else {}
     return Context(values=values, camera_handle=str(handle) if handle else None,
                    images=[p for p in images.values() if isinstance(p, str)])
@@ -325,22 +342,137 @@ class Engine:
 
     async def execute(self, run_id: int, doc: dict[str, Any], ctx: Context) -> None:
         db = self.session()
+        run = db.get(WorkflowRun, run_id)
+        walker = _Walker(self, db, run, ctx)
         try:
-            run = db.get(WorkflowRun, run_id)
-            walker = _Walker(self, db, run, ctx)
-            await walker.path(doc.get("then") or [], "then", ai_decided=False)
+            await walker.path(doc.get("then") or [], "then", ["then"], ai_decided=False)
             if doc.get("always"):
-                await walker.path(doc["always"], "always", ai_decided=False)
+                await walker.path(doc["always"], "always", ["always"], ai_decided=False)
             run.status = "done"
+            run.finished_at = self.now()
+        except _WaitingError as wait:
+            walker.suspend(wait)
         except Exception:
             log.exception("workflow run %s failed", run_id)
             db.rollback()
             run = db.get(WorkflowRun, run_id)
             run.status = "failed"
-        finally:
             run.finished_at = self.now()
+        finally:
             db.commit()
             db.close()
+
+    def answer(self, approval_id: int, reply: str | None, user_id: int | None) -> bool:
+        """A person's reply, or None for a timeout: record it and carry the
+        run on in the background. False when the approval is not open."""
+        db = self.session()
+        try:
+            approval = db.get(WorkflowApproval, approval_id)
+            if approval is None or approval.state != "open":
+                return False
+            approval.state = "answered" if reply is not None else "timed_out"
+            approval.reply = reply
+            approval.answered_by = user_id
+            approval.answered_at = self.now()
+            db.commit()
+        finally:
+            db.close()
+        task = asyncio.get_event_loop().create_task(self.resume(approval_id))
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+        return True
+
+    def expire_due(self) -> list[int]:
+        """Time out every open approval past its timeout; their runs take
+        the step's no_answer path."""
+        db = self.session()
+        try:
+            due = [a.id for a in db.query(WorkflowApproval)
+                   .filter(WorkflowApproval.state == "open").all()
+                   if _aware(a.timeout_at) <= self.now()]
+        finally:
+            db.close()
+        return [a for a in due if self.answer(a, None, None)]
+
+    async def resume(self, approval_id: int) -> None:
+        db = self.session()
+        approval = db.get(WorkflowApproval, approval_id)
+        run = db.get(WorkflowRun, approval.run_id)
+        state = approval.resume or {}
+        ctx = Context(values=dict(state.get("values") or {}),
+                      camera_handle=state.get("camera_handle"),
+                      images=list(state.get("images") or []))
+        if run.status != "waiting":
+            # Claimed already: a run carries on once, or an action could happen twice.
+            db.close()
+            return
+        run.status = "running"
+        db.commit()
+        walker = _Walker(self, db, run, ctx)
+        walker.approver_id = approval.answered_by
+        frames = [dict(f) for f in state.get("frames") or []]
+        try:
+            version = (db.query(WorkflowVersion)
+                       .filter(WorkflowVersion.workflow_id == run.workflow_id,
+                               WorkflowVersion.version == run.workflow_version).one())
+            doc = yaml.safe_load(version.yaml)
+            run.status = "running"
+            branch = approval.reply if approval.reply is not None else "no_answer"
+            step = db.get(WorkflowRunStep, approval.step_id) if approval.step_id else None
+            if step is not None:
+                step.status, step.outcome, step.finished_at = "done", branch, self.now()
+                step.reason = (f"answered {branch!r}" if approval.reply is not None
+                               else "no answer in time")
+            db.commit()
+            ctx.values["reply"] = branch
+            ask_tokens = state["tokens"]
+            ask_step = _resolve(doc, ask_tokens)
+            try:
+                await walker.path(ask_step.get(branch) or [], f"{approval.step_path}.{branch}",
+                                  [*ask_tokens, branch], ai_decided=False)
+            except _WaitingError as wait:
+                wait.frames.extend(frames)
+                raise
+            for k, frame in enumerate(frames):
+                try:
+                    await walker.path(_resolve(doc, frame["tokens"]), frame["p"],
+                                      frame["tokens"], ai_decided=frame["ai_decided"],
+                                      start=frame["next"])
+                except _WaitingError as wait:
+                    wait.frames.extend(frames[k + 1:])
+                    raise
+            if frames and frames[-1]["tokens"] == ["then"] and doc.get("always"):
+                await walker.path(doc["always"], "always", ["always"], ai_decided=False)
+            run.status = "done"
+            run.finished_at = self.now()
+        except _WaitingError as wait:
+            walker.suspend(wait)
+        except Exception:
+            log.exception("workflow run %s failed after an answer", run.id)
+            db.rollback()
+            run = db.get(WorkflowRun, approval.run_id)
+            run.status = "failed"
+            run.finished_at = self.now()
+        finally:
+            db.commit()
+            db.close()
+
+
+class _WaitingError(Exception):
+    """An Ask a person step is waiting; ``frames`` are the paths to carry
+    on with, innermost first, each ``{p, tokens, next, ai_decided}``."""
+
+    def __init__(self, approval_id: int) -> None:
+        super().__init__(approval_id)
+        self.approval_id = approval_id
+        self.frames: list[dict[str, Any]] = []
+
+
+def _resolve(doc: Any, tokens: list[Any]) -> Any:
+    node = doc
+    for t in tokens:
+        node = node[t]
+    return node
 
 
 class _Walker:
@@ -349,14 +481,25 @@ class _Walker:
         self.db = db
         self.run = run
         self.ctx = ctx
-        self.seq = 0
+        self.approver_id: int | None = None
+        self.in_for_each = 0
+
+    def suspend(self, wait: _WaitingError) -> None:
+        """Park the run: its approval keeps where to carry on."""
+        approval = self.db.get(WorkflowApproval, wait.approval_id)
+        approval.resume = {**(approval.resume or {}), "frames": wait.frames,
+                           "values": {k: v for k, v in self.ctx.values.items()
+                                      if isinstance(v, _SCALAR) or v is None},
+                           "camera_handle": self.ctx.camera_handle, "images": self.ctx.images}
+        self.run.status = "waiting"
 
     def record(self, path: str, kind: str, *, status: str = "done", outcome: str | None = None,
                inputs: Any = None, reason: str | None = None) -> WorkflowRunStep:
         now = self.engine.now()
         step = WorkflowRunStep(run_id=self.run.id, seq=self._next_seq(), step_path=path,
                                kind=kind, status=status, outcome=outcome, inputs=inputs,
-                               reason=reason, started_at=now, finished_at=now)
+                               reason=reason, started_at=now,
+                               finished_at=None if status == "waiting" else now)
         self.db.add(step)
         self.db.commit()
         return step
@@ -366,34 +509,75 @@ class _Walker:
                 .order_by(WorkflowRunStep.seq.desc()).first())
         return 0 if last is None else last[0] + 1
 
-    async def path(self, steps: list[Any], p: str, *, ai_decided: bool) -> None:
-        for i, step in enumerate(steps):
-            await self.step(step, f"{p}[{i}]", ai_decided=ai_decided)
+    async def path(self, steps: list[Any], p: str, tokens: list[Any], *, ai_decided: bool,
+                   start: int = 0) -> None:
+        for i in range(start, len(steps)):
+            try:
+                await self.step(steps[i], f"{p}[{i}]", [*tokens, i], ai_decided=ai_decided)
+            except _WaitingError as wait:
+                wait.frames.append({"p": p, "tokens": tokens, "next": i + 1,
+                                    "ai_decided": ai_decided})
+                raise
 
-    async def step(self, step: dict[str, Any], sp: str, *, ai_decided: bool) -> None:
+    async def step(self, step: dict[str, Any], sp: str, tokens: list[Any], *,
+                   ai_decided: bool) -> None:
         if "ai" in step:
-            await self.ai(step["ai"], sp)
+            await self.ai(step["ai"], sp, tokens)
         elif "if" in step:
             yes = holds(self.db, step["if"], self.ctx)
             branch = "then" if yes else "else"
             self.record(sp, "if", outcome=branch, inputs=step["if"])
-            await self.path(step.get(branch) or [], f"{sp}.{branch}", ai_decided=False)
+            await self.path(step.get(branch) or [], f"{sp}.{branch}", [*tokens, branch],
+                            ai_decided=False)
         elif "for_each" in step:
             cams = step["for_each"]["cameras"]
             self.record(sp, "for_each", outcome="done", inputs={"cameras": cams})
             before = self.ctx.values.get("camera")
-            for cam in cams:
-                self.ctx.values["camera"] = cam
-                await self.path(step.get("do") or [], f"{sp}.do", ai_decided=ai_decided)
-            self.ctx.values["camera"] = before
+            self.in_for_each += 1
+            try:
+                for cam in cams:
+                    self.ctx.values["camera"] = cam
+                    await self.path(step.get("do") or [], f"{sp}.do", [*tokens, "do"],
+                                    ai_decided=ai_decided)
+            finally:
+                self.in_for_each -= 1
+                self.ctx.values["camera"] = before
         elif "ask_person" in step:
-            self.record(sp, "ask_person", status="done", outcome="skipped", reason=NOT_YET,
-                        inputs=self.ctx.expand(step["ask_person"]))
+            await self.ask_person(step, sp, tokens)
         else:
             kind, spec = next(iter(step.items()))
             await self.action(kind, self.ctx.expand(spec), sp, ai_decided=ai_decided)
 
-    async def ai(self, raw: dict[str, Any], sp: str) -> None:
+    async def ask_person(self, step: dict[str, Any], sp: str, tokens: list[Any]) -> None:
+        spec = self.ctx.expand(step["ask_person"])
+        default = spec.get("default")
+        if self.run.test:
+            # Test asks nobody and takes the default (RFC #620, corrections, 11).
+            branch = default if default is not None else "no_answer"
+            self.record(sp, "ask_person", outcome=branch, inputs=spec,
+                        reason=f"would have asked {spec['who']}; took {branch!r} (Test)")
+            self.ctx.values["reply"] = branch
+            await self.path(step.get(branch) or [], f"{sp}.{branch}", [*tokens, branch],
+                            ai_decided=False)
+            return
+        if self.in_for_each:
+            self.record(sp, "ask_person", outcome="skipped", inputs=spec,
+                        reason="Ask a person inside For each is not supported yet")
+            return
+        now = self.engine.now()
+        row = self.record(sp, "ask_person", status="waiting", inputs=spec,
+                          reason=f"waiting for {spec['who']}")
+        timeout = parse_duration(spec.get("timeout") or DEFAULT_ASK_TIMEOUT)
+        approval = WorkflowApproval(
+            run_id=self.run.id, step_id=row.id, step_path=sp, question=str(spec["message"]),
+            who=str(spec["who"]), replies=list(spec["replies"]), default_reply=default,
+            state="open", created_at=now, timeout_at=now + timedelta(seconds=timeout),
+            resume={"tokens": tokens})
+        self.db.add(approval)
+        self.db.commit()
+        raise _WaitingError(approval.id)
+
+    async def ai(self, raw: dict[str, Any], sp: str, tokens: list[Any]) -> None:
         engine = self.engine
         step = AIStep.from_dict(raw)
         if self._ai_over_budget():
@@ -401,7 +585,8 @@ class _Walker:
                               "this hour is spent")
             row.mode, row.unsure_reason = step.mode, "over_budget"
             self.db.commit()
-            await self.path(raw.get("unsure") or [], f"{sp}.ai.unsure", ai_decided=True)
+            await self.path(raw.get("unsure") or [], f"{sp}.ai.unsure",
+                            [*tokens, "ai", "unsure"], ai_decided=True)
             return
         client = engine.client()
         if client is None:
@@ -409,7 +594,8 @@ class _Walker:
                               reason="no language model is set up (WORKFLOWS_LLM_URL)")
             row.mode, row.unsure_reason = step.mode, "llm_down"
             self.db.commit()
-            await self.path(raw.get("unsure") or [], f"{sp}.ai.unsure", ai_decided=True)
+            await self.path(raw.get("unsure") or [], f"{sp}.ai.unsure",
+                            [*tokens, "ai", "unsure"], ai_decided=True)
             return
         from core.config import settings
         images = []
@@ -423,7 +609,8 @@ class _Walker:
                 hardware=engine.hardware, model_name=settings.workflows_llm_model)
         self.ctx.values.update(result.values())
         outcome = result.outcome or "unsure"
-        await self.path(raw.get(outcome) or [], f"{sp}.ai.{outcome}", ai_decided=True)
+        await self.path(raw.get(outcome) or [], f"{sp}.ai.{outcome}",
+                        [*tokens, "ai", outcome], ai_decided=True)
 
     def _ai_over_budget(self) -> bool:
         wf = self.db.get(Workflow, self.run.workflow_id)
@@ -472,14 +659,53 @@ class _Walker:
         elif kind == "wait":
             await asyncio.sleep(parse_duration(spec))
             self.record(sp, kind, outcome="done", inputs=spec)
+        elif kind == "notify":
+            await self._raise_alert({"title": spec["message"]}, spec.get("severity", "low"),
+                                    who=spec.get("who"))
+            self.record(sp, kind, outcome="done", inputs=spec)
+        elif kind == "app":
+            outcome, why = await self._app_action(spec)
+            self.record(sp, kind, outcome=outcome, inputs=spec, reason=why)
         else:
             self.record(sp, kind, outcome="skipped", inputs=spec, reason=NOT_YET)
 
-    async def _raise_alert(self, spec: dict[str, Any], severity: str) -> None:
+    async def _app_action(self, spec: dict[str, Any]) -> tuple[str, str | None]:
+        """An installed app's action, as the person who answered the Ask a
+        person step on this path (or the workflow's author), audited as
+        the workflow's. ``(outcome, why)``."""
+        from fastapi import HTTPException
+
+        from models import InstalledApp, User
+        from routers.apps import call_app_action
+        from services.audit_service import write_audit_log
+
+        wf = self.db.get(Workflow, self.run.workflow_id)
+        app = self.db.get(InstalledApp, spec["id"])
+        if app is None or not app.enabled:
+            return "failed", f"{spec['id']} is not installed and enabled"
+        user_id = self.approver_id or wf.created_by
+        user = self.db.get(User, user_id) if user_id else None
+        if user is None:
+            return "failed", "no person to act as (the approver or the workflow's author)"
+        write_audit_log(self.db, action="workflow.app_action", user_id=user.id,
+                        entity_type="workflow", entity_id=wf.id,
+                        details={"run": self.run.id, "version": self.run.workflow_version,
+                                 "app": spec["id"], "action": spec["action"],
+                                 "param_keys": sorted((spec.get("args") or {}).keys())})
+        try:
+            await call_app_action(self.db, app, spec["action"], dict(spec.get("args") or {}),
+                                  user)
+        except HTTPException as err:
+            return "failed", str(err.detail)[:300]
+        return "done", f"as {user.username}"
+
+    async def _raise_alert(self, spec: dict[str, Any], severity: str,
+                           who: str | None = None) -> None:
         from services.alerts_inbox import apply_alert
         wf = self.db.get(Workflow, self.run.workflow_id)
         envelope = {"alert_id": f"wf-{uuid.uuid4().hex}", "title": spec.get("title"),
-                    "description": self.ctx.values.get("reason"), "severity": severity,
+                    "description": (f"For {who}. " if who else "")
+                    + str(self.ctx.values.get("reason") or ""), "severity": severity,
                     "source": {"kind": "workflow", "name": wf.name},
                     "camera_id": self.ctx.camera_handle, "alert_type": "workflow",
                     "correlation_id": self.run.correlation_id,

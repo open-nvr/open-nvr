@@ -23,21 +23,47 @@ SUBJECT = "opennvr.alerts.>"
 _RETRY_SECONDS = 60.0
 
 
+#: How often open approvals are checked for their timeout.
+SWEEP_SECONDS = 15.0
+_engine: Engine | None = None
+
+
 def make_engine() -> Engine:
     from core.database import SessionLocal
     return Engine(SessionLocal)
 
 
+def engine() -> Engine:
+    """The process's engine: the one the consumer runs, which the
+    approvals route hands answers to."""
+    global _engine
+    if _engine is None:
+        _engine = make_engine()
+    return _engine
+
+
 def start_engine() -> Engine:
     """The process's one engine, with the runs a stop left half-done
     closed. Once per process: a consumer restart must not fail the runs
-    this process is still walking."""
-    engine = make_engine()
-    closed = engine.close_interrupted()
+    this process is still walking. Waiting runs are left waiting: their
+    approvals carry them on."""
+    eng = engine()
+    closed = eng.close_interrupted()
     if closed:
         log.warning("workflows: %d run(s) were interrupted by a restart and marked failed",
                     closed)
-    return engine
+    return eng
+
+
+async def sweep_timeouts(eng: Engine) -> None:
+    """Time out open approvals for the process lifetime; their runs take
+    the no_answer path. Runs whether or not the bus is configured."""
+    while True:
+        try:
+            eng.expire_due()
+        except Exception:   # a bad row must not stop timeouts for every other
+            log.warning("workflows: timeout sweep failed", exc_info=True)
+        await asyncio.sleep(SWEEP_SECONDS)
 
 
 async def run_consumer_loop(engine: Engine) -> None:
