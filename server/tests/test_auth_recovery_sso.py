@@ -418,3 +418,19 @@ def test_migration_chains_off_head():
     text = (_HERE / "migrations" / "versions" / "cc44dd55ee66_add_user_token_version_and_oidc.py").read_text()
     assert 'revision: str = "cc44dd55ee66"' in text
     assert 'down_revision: str | None = "bb33cc44dd55"' in text
+
+
+def test_role_claims_may_be_a_list_a_string_or_a_map_of_roles():
+    """Zitadel sends project roles as a map keyed by role name."""
+    cfg = {"role_claim": "urn:zitadel:iam:org:project:roles"}
+    zitadel = {"urn:zitadel:iam:org:project:roles": {"admin": {"3979": "zitadel.example"}, "viewer": {"3979": "zitadel.example"}}}
+    assert sorted(oidc._claim_values(zitadel, cfg)) == ["admin", "viewer"]
+    assert oidc._claim_values({"groups": ["a", "b"]}, {}) == ["a", "b"]
+    assert oidc._claim_values({"groups": "a"}, {}) == ["a"]
+    assert oidc._claim_values({}, {}) == []
+    # Keycloak nests them; a claim whose name has dots is still found by name.
+    keycloak = {"realm_access": {"roles": ["operator", "offline_access"]}}
+    assert oidc._claim_values(keycloak, {"role_claim": "realm_access.roles"}) == ["operator", "offline_access"]
+    auth0 = {"https://example.com/roles": ["admin"]}
+    assert oidc._claim_values(auth0, {"role_claim": "https://example.com/roles"}) == ["admin"]
+    assert oidc._claim_values(keycloak, {"role_claim": "realm_access.missing"}) == []

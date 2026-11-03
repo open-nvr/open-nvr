@@ -146,6 +146,13 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Saving the single sign-on settings no longer shows "Something went
   wrong".** The save worked, but its answer lacked the role list the page
   redraws from; it now returns the same settings and roles as loading them.
+- **Single sign-on roles from Zitadel and Keycloak are applied.** A role
+  claim was read only as a flat list or a single value, so Zitadel's
+  (`urn:zitadel:iam:org:project:roles`, a map keyed by role) and Keycloak's
+  nested `realm_access.roles` matched nothing and every user got the default
+  role. A map's keys are now the roles, and the claim may be a dotted path
+  into nested claims. Zitadel needs "Assert Roles on Authentication" on the
+  project.
 
 - **A nominal 2 s GOP no longer trips the keyframe-evidence guard.** The
   guard compared the measured keyframe interval against
