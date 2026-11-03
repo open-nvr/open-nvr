@@ -68,6 +68,11 @@ DEFAULT_NOKEY_MAX_GOP_S = 2.0
 #: Keyframe intervals needed before the GOP is judged (the median of them,
 #: so one interval stretched by a link stall does not carry the verdict).
 GOP_MIN_INTERVALS = 3
+#: Slack on the GOP limit, as a fraction: a measured interval counts as
+#: too long only above max_gop_s * (1 + this). 15 % covers the drift of a
+#: camera whose fps runs under its nominal (a 2 s GOP at 15 fps nominal
+#: measured 2.03 s on a CP Plus) without admitting a 2.5 s one.
+GOP_JITTER_ALLOWANCE = 0.15
 
 
 class EvidenceFrame:
@@ -211,7 +216,10 @@ class EvidenceSource:
         if len(intervals) < GOP_MIN_INTERVALS:
             return False
         self.gop_s = float(statistics.median(intervals))
-        return self.gop_s > self.max_gop_s
+        # Cameras set their GOP in frames and run a little off their nominal
+        # fps, so a "2 s" camera measures 2.0-2.1 s; without slack the most
+        # common default was pushed onto full decode by timestamp jitter.
+        return self.gop_s > self.max_gop_s * (1.0 + GOP_JITTER_ALLOWANCE)
 
     def _switch_to_full(self) -> None:
         """Keyframes arrive too far apart for a keyframe crop to be of the
@@ -223,12 +231,14 @@ class EvidenceSource:
         if self._full_max_skew_s is not None:
             self.max_skew_s = max(0.0, float(self._full_max_skew_s))
         log.warning(
-            "tier0 %s: the main stream's keyframes are %.1fs apart (more than "
-            "%.1fs) — a keyframe crop would be of where the subject WAS; "
+            "tier0 %s: the main stream's keyframes are %.2fs apart (more than "
+            "%.1fs plus the %d%% jitter allowance) — a keyframe crop would be of "
+            "where the subject WAS; "
             "switching this camera's evidence decode to FULL (every main "
             "frame while active). Set DETECT_EVIDENCE_DECODE=full to skip the "
             "measurement, or DETECT_EVIDENCE_NOKEY_MAX_GOP_S to allow older crops.",
             self.camera_id, self.gop_s or 0.0, self.max_gop_s,
+            int(round(GOP_JITTER_ALLOWANCE * 100)),
         )
         if self.active:
             self._stop()

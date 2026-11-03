@@ -666,3 +666,25 @@ def test_worker_gives_the_keyframe_source_a_full_decode_to_fall_back_to(monkeypa
     full = CameraWorker(spec, _TrackSink(), detector=_GrowingDetector(),
                         frame_source=_SubSource(1), evidence_decode="full")
     assert full._make_evidence(640, 360).keyframes_only is False
+
+
+def test_a_nominal_2s_gop_that_measures_a_little_longer_stays_on_keyframes():
+    """A camera set to a 2 s keyframe interval does not deliver exactly 2.000 s:
+    the CP Plus on the Ventuno Q measured 2.03 s (15 fps nominal) and the guard,
+    comparing against 2.0 with no slack, switched it to full decode nine seconds
+    after start — the most common default GOP, pushed onto the expensive path by
+    timestamp jitter. The threshold now carries a jitter allowance; a GOP that
+    is clearly longer still switches."""
+    _Src.instances.clear()
+    for gop, expect_switch in ((2.03, False), (2.2, False), (2.4, True)):
+        frames = [_frame(8, 8, ts) for ts in (0.0, gop, 2 * gop, 3 * gop)]
+        ev = EvidenceSource("cam", lambda: _Src(list(frames)),
+                            keyframes_only=True, max_gop_s=2.0,
+                            full_factory=lambda: _Src([]), full_max_skew_s=0.35,
+                            max_skew_s=2.0, _clock=lambda: 50.0)
+        ev.observe(_Result(tracks=[1]))
+        assert _wait(lambda: ev.frames_total == 4)
+        ev.observe(_Result(tracks=[1]))
+        assert ev.switched_to_full is expect_switch, f"gop {gop}"
+        assert round(ev.gop_s, 2) == gop
+        ev.close()

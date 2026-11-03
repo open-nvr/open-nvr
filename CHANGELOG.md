@@ -136,6 +136,16 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A nominal 2 s GOP no longer trips the keyframe-evidence guard.** The
+  guard compared the measured keyframe interval against
+  `DETECT_EVIDENCE_NOKEY_MAX_GOP_S` (2 s) with no slack, and cameras set
+  their GOP in frames while running a little under nominal fps: a CP Plus
+  at "2 s" measured 2.03 s and was switched to full decode nine seconds
+  after start, the most common default pushed onto the expensive path by
+  timestamp jitter. The limit now carries a 15 % allowance (2.3 s switches,
+  2.1 s does not) and the warning prints the measured interval to two
+  decimals.
+
 - **Adaptive-decode flips no longer count as feed restarts.** The frame
   source cleared the "this stop was deliberate" flag when the flipped
   ffmpeg session ended, one step before the respawn read it, so the
