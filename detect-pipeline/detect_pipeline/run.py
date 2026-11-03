@@ -145,6 +145,9 @@ class ServiceConfig:
     # counted (tier0_evidence_mismatch_total).
     evidence_nokey_max_gop_s: float = 2.0
     evidence_match_min: float = 0.5
+    # A sub stream shorter than this (px) cannot show the detector a person at
+    # mid-distance: 'auto' cameras then detect on the main stream instead.
+    sub_min_height: int = 480
 
 
 def _clean_env(value: str | None) -> str:
@@ -292,6 +295,7 @@ def config_from_env(env: dict) -> ServiceConfig:
         evidence_decode=_evidence_decode_from_env(env),
         evidence_nokey_max_gop_s=_env_float(env, "DETECT_EVIDENCE_NOKEY_MAX_GOP_S", 2.0),
         evidence_match_min=_env_float(env, "DETECT_EVIDENCE_MATCH_MIN", 0.5),
+        sub_min_height=int(_env_float(env, "DETECT_SUB_MIN_HEIGHT", 480)),
         gate_heartbeat_s=_env_float(env, "DETECT_GATE_HEARTBEAT_S", 0.0),
         gate_critical_classes=env.get("DETECT_GATE_CRITICAL_CLASSES", ""),
         gate_cooldown_s=_env_float(env, "DETECT_GATE_COOLDOWN_S", 30.0),
@@ -608,6 +612,7 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
         evidence_decode=cfg.evidence_decode,
         evidence_nokey_max_gop_s=cfg.evidence_nokey_max_gop_s,
         evidence_match_min=cfg.evidence_match_min,
+        sub_min_height=cfg.sub_min_height,
     )
     manager.best_frames = best_frames            # expose so main() can serve it
     # Same reason: main() wires this into /health. It is a LOCAL of this

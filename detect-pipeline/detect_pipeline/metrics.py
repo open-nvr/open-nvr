@@ -359,6 +359,19 @@ def record_evidence(camera_id: str, active: bool, stats: dict, *,
                       {"camera": camera_id})
 
 
+#: Why a camera detects on its MAIN stream, as the value of
+#: ``tier0_detect_on_main{camera}`` (0 = detecting on the sub stream). A
+#: value rather than a label so a camera whose reason changes on restart
+#: leaves no stale series behind.
+DETECT_ON_MAIN_REASONS = {"": 0, "policy": 1, "no_substream": 2, "sub_unreachable": 3, "sub_too_small": 4}
+
+
+def record_detect_stream(camera_id: str, stream: str, reason: str = "") -> None:
+    """Which stream this camera's worker detects on, and why when it is the main."""
+    code = DETECT_ON_MAIN_REASONS.get(reason, 1) if stream == "main" else 0
+    metrics.gauge("tier0_detect_on_main", float(code), {"camera": camera_id})
+
+
 def record_mainstream_fallback(camera_id: str, active: bool) -> None:
     """Gauge: 1 while Tier-0 decodes a high-resolution main stream for this
     camera (no usable substream) — the expensive path the README warns about."""

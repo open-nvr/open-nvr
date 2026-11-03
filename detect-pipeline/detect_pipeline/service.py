@@ -44,6 +44,7 @@ from .metrics import (
     record_processing_fps,
     record_decode_config,
     record_mainstream_fallback,
+    record_detect_stream,
     record_published,
     record_sink_error,
     record_frames_dropped,
@@ -401,6 +402,7 @@ class CameraWorker:
         evidence_decode: str = "nokey",          # "nokey": keyframes only while active (default); "full": every main frame
         evidence_nokey_max_gop_s: float = 2.0,   # nokey: measured GOP above this → this camera switches itself to full
         evidence_match_min: float = 0.5,         # a main crop must look this much like the detect crop (0 = no check)
+        sub_min_height: int = 480,               # a shorter sub stream: 'auto' cameras detect on the main instead
         evidence_url_provider=None,              # freshest main-tap URL (its JWT rotates)
         evidence_source_factory=None,            # injectable for tests: () -> source with stream()/close()
     ) -> None:
@@ -413,6 +415,7 @@ class CameraWorker:
         self.evidence_decode = (evidence_decode or "nokey").strip().lower()
         self.evidence_nokey_max_gop_s = max(0.0, float(evidence_nokey_max_gop_s or 0.0))
         self.evidence_match_min = max(0.0, min(1.0, float(evidence_match_min or 0.0)))
+        self.sub_min_height = max(0, int(sub_min_height or 0))
         self.evidence_url_provider = evidence_url_provider
         self._evidence_source_factory = evidence_source_factory
         self._evidence = None
@@ -534,9 +537,18 @@ class CameraWorker:
             return self._frame_source, self._frame_source.width, self._frame_source.height
         w, h = self.spec.width, self.spec.height
         url = self.spec.substream_url
+        policy = self.spec.tuning.detect_stream or "auto"
+        reason = ""
+        if policy == "main" and self.spec.evidence_url and _tap_kind(url) == "sub":
+            # The operator chose the main stream for this camera. Core
+            # normally hands the main tap for that policy; this is the
+            # belt to that brace for a listing that still carries the sub.
+            url = self.spec.evidence_url
+            self._detect_on_main = True
+            reason = "policy"
         if not (w and h):
             probed = probe_stream(url)
-            if probed is None and self.spec.evidence_url:
+            if probed is None and self.spec.evidence_url and not self._detect_on_main:
                 # The sub tap is dead but core also handed us the main one.
                 # Detect on the main stream rather than on nothing: a
                 # camera with a stored substream URL MediaMTX cannot serve
@@ -555,9 +567,34 @@ class CameraWorker:
                     )
                     url = self.spec.evidence_url
                     self._detect_on_main = True
+                    reason = "sub_unreachable"
             if probed is None:
                 raise RuntimeError(f"could not probe {self.spec.camera_id} stream")
             w, h, _fps = probed
+            if (policy == "auto" and not self._detect_on_main and _tap_kind(url) == "sub"
+                    and self.spec.evidence_url and self.sub_min_height and h < self.sub_min_height):
+                # The sub stream is too small for the detector to see a
+                # person at mid-distance (a 352x288 "D1/CIF" sub shows one
+                # as ~15 px). Detect on the main stream instead — costlier,
+                # named in the log and the metric — unless the operator
+                # pins this camera to 'sub'.
+                main = probe_stream(self.spec.evidence_url)
+                if main is not None:
+                    log.warning(
+                        "tier0 %s: the sub stream is %dx%d, under the %d px floor for "
+                        "detection — detecting on the MAIN stream (%dx%d, full-res "
+                        "decode). Raise the camera's sub stream resolution, or set "
+                        "this camera's detect stream to 'sub' to use it anyway.",
+                        self.spec.camera_id, w, h, self.sub_min_height, main[0], main[1],
+                    )
+                    url = self.spec.evidence_url
+                    self._detect_on_main = True
+                    reason = "sub_too_small"
+                    w, h, _fps = main
+        on_main = self._detect_on_main or _tap_kind(url) == "main"
+        if on_main and not reason:
+            reason = "policy" if policy == "main" else "no_substream"
+        record_detect_stream(self.spec.camera_id, "main" if on_main else "sub", reason)
         src = FrameSource(
             url, width=w, height=h, fps=self.spec.fps,
             hwaccel=self._effective_hwaccel(), device=self.device,
@@ -1135,6 +1172,7 @@ class WorkerManager:
         evidence_decode: str = "nokey",
         evidence_nokey_max_gop_s: float = 2.0,
         evidence_match_min: float = 0.5,
+        sub_min_height: int = 480,
     ) -> None:
         self._evidence_stream = evidence_stream
         self._evidence_fps = evidence_fps
@@ -1143,6 +1181,7 @@ class WorkerManager:
         self._evidence_decode = evidence_decode
         self._evidence_nokey_max_gop_s = evidence_nokey_max_gop_s
         self._evidence_match_min = evidence_match_min
+        self._sub_min_height = sub_min_height
         # Freshest main-tap URL per camera, beside _latest_url (same reason:
         # the JWT rotates; the running worker's source reads it on respawn).
         self._latest_evidence_url: dict[str, str] = {}
@@ -1260,6 +1299,7 @@ class WorkerManager:
             evidence_decode=self._evidence_decode,
             evidence_nokey_max_gop_s=self._evidence_nokey_max_gop_s,
             evidence_match_min=self._evidence_match_min,
+            sub_min_height=self._sub_min_height,
             evidence_url_provider=lambda cid=spec.camera_id: self.current_evidence_url(cid),
         )
 

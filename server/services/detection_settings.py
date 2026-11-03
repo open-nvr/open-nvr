@@ -23,7 +23,7 @@ it changes.
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -66,6 +66,13 @@ class DetectionSettingsIn(BaseModel):
     motion_contour_area: int | None = Field(None, ge=1, le=100_000)
     min_spawn_score: float | None = Field(None, ge=0.0, le=1.0)
     stationary_interval: int | None = Field(None, ge=0, le=600)
+    # Which stream Tier-0 detects on for this camera. ``auto`` (the
+    # default) takes the sub stream when it is tall enough for the
+    # detector and the main stream otherwise; ``sub`` pins the sub even
+    # when small; ``main`` detects on the full-resolution stream (costlier,
+    # full-resolution evidence from the same frame) — the per-camera
+    # switch that lets the two be compared on the same scene.
+    detect_stream: Literal["auto", "sub", "main"] | None = None
     object_filters: dict[str, ObjectFilterIn] | None = None
 
     @field_validator("object_filters")

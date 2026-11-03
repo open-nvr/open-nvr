@@ -218,6 +218,7 @@ def test_streams_and_sub_fit():
     assert acc.score_streams(None, None).status == "fail"
     assert acc.score_sub_fit(SUB, 2.0).status == "pass"
     assert acc.score_sub_fit(dict(SUB, height=240), 2.0).status == "warn"
+    assert acc.score_sub_fit(dict(SUB, height=360), 2.0).status == "warn", "640x360 is under the 480 floor"
     assert acc.score_sub_fit(dict(SUB, fps=1.0), 2.0).status == "warn"
     assert acc.score_sub_fit(None, 2.0).status == "unknown"
 

@@ -52,6 +52,8 @@ export type DetectionSettings = {
   motion_contour_area?: number | null
   min_spawn_score?: number | null
   stationary_interval?: number | null
+  /** Which stream this camera detects on: auto (sub when tall enough, else main), sub, main. */
+  detect_stream?: 'auto' | 'sub' | 'main' | null
   object_filters?: Record<string, ObjectFilter> | null
 }
 
