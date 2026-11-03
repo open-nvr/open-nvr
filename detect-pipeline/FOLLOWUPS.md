@@ -56,12 +56,16 @@ v1.1 `DetectorSpec` (governed + audited region-crop dispatch). Also declare the
 chosen backend/provider through `DetectorSpec` so it's config, not hard-coded.
 Frigate-parity axis.
 
-## 3. Real-inference smoke on OpenCV 5
+## 3. Real-inference smoke on OpenCV 5 — verified (manual)
 
-Load the real `yolov8n.onnx` through `cv2.dnn` on OpenCV 5.0's new engine on a
-host, run one inference on a known image, confirm boxes are correct (the suite
-uses a fake net; CI has no model). Low risk (ENGINE_AUTO falls back to the
-classic engine) but the one runtime path not yet verified end-to-end.
+Done by hand, not in CI: `scripts/smoke_test_opencv5_engine.py` loads the
+shipped `yolo26n.onnx` through the service's own path (`OnnxYoloDetector`
+from a model path, engine auto-selected), confirms OpenCV 5 picked the new
+engine, and checks the `bus.jpg` scene (one large bus, people in front of
+it) agrees with an `ENGINE_NEW`-forced run. Last run: OpenCV 5.0.0, five
+detections, identical on both engines. Procedure and checksum: README,
+"OpenCV 5: real inference through the new DNN engine". Re-run it when the
+weights image or the OpenCV major changes.
 
 ## 4. Tracker: Kalman motion prediction (Norfair-style)
 

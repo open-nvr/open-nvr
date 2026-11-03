@@ -78,6 +78,44 @@ Detectors: `onnx` (YOLOv8/YOLO11 via cv2.dnn — the production default; pass
 download; the CLI default for a zero-asset demo), `blob` (deterministic, for
 smoke checks), `stub` (motion + regions only).
 
+### OpenCV 5: real inference through the new DNN engine
+
+CI runs the suite on OpenCV 4.x and 5.x with fake networks and downloads no
+model. This smoke test closes the gap by hand: it loads the model **the way
+the service does** (`OnnxYoloDetector(model_path=...)`, which lets OpenCV
+pick the engine and probes the input size), reports which engine OpenCV
+chose, and then runs the same model with `ENGINE_NEW` forced and checks the
+two agree. On the Ultralytics `bus.jpg` it expects one bus filling most of
+the frame and at least three people standing in front of it, so a run that
+returns garbage boxes fails rather than passing on "five detections".
+
+Use the model the stack actually ships, not a third-party export: take it
+from the weights image (or from a running stack's
+`/app/model_weights/yolo26n.onnx` in the `detect-pipeline` container).
+
+```bash
+mkdir -p /tmp/opennvr-smoke
+id=$(docker create ghcr.io/open-nvr/yolov8-weights:v8.4.0-yolo26n)
+docker cp "$id:/yolo26n.onnx" /tmp/opennvr-smoke/yolo26n.onnx && docker rm "$id"
+curl -L https://ultralytics.com/images/bus.jpg -o /tmp/opennvr-smoke/bus.jpg
+shasum -a 256 /tmp/opennvr-smoke/yolo26n.onnx
+# dba0b5ef0ede2168afe7714ed558b7b22bc6d43a81ef5f14a2b8398baea0f182  (v8.4.0-yolo26n)
+```
+
+Run from the repository root with an OpenCV 5 environment:
+
+```bash
+uv run --project detect-pipeline python detect-pipeline/scripts/smoke_test_opencv5_engine.py \
+  --model /tmp/opennvr-smoke/yolo26n.onnx --image /tmp/opennvr-smoke/bus.jpg
+```
+
+It prints the engine the service path got (`engine=new` is the pass
+condition), both detection lists, and `PASS`; exit status 1 on any failed
+check, and an exception with its traceback if OpenCV rejects the graph.
+Last verified: OpenCV 5.0.0, `yolo26n.onnx` (v8.4.0-yolo26n), auto-selection
+chose the new engine, five detections identical between auto and forced.
+This is a runtime smoke test, not an accuracy benchmark.
+
 ## As an OpenNVR service (integrated)
 
 Ships as the `detect-pipeline` container in `docker-compose.yml`. It's an
@@ -611,6 +649,6 @@ to enable; it still only fires in `enforce` (`shadow`/`off` dispatch nothing).
 - The KAI-C-backed **accelerator** detector adapter (Coral/Hailo/OpenVINO/
   TensorRT) — the local ONNX detector is CPU via cv2.dnn until then.
 
-OpenCV 4.x **and** 5.x are supported (the suite passes on both). One thing to
-smoke-test on a host: real `yolov8n.onnx` inference through OpenCV 5's new DNN
-engine (it auto-falls-back to the classic engine if needed).
+OpenCV 4.x **and** 5.x are supported (the suite passes on both). Real
+inference of the shipped model on 5.x's new DNN engine is verified by hand
+with the smoke test under "Manual verification" above, not in CI.
