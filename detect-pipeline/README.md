@@ -241,7 +241,8 @@ decodes every main frame for a crop from the same instant — for cameras
 with a long GOP, or where decode is free and exact timing matters. Two
 guards keep a keyframe crop honest without that dial: the source measures
 the camera's keyframe interval and, above `DETECT_EVIDENCE_NOKEY_MAX_GOP_S`
-(2 s), switches that camera to full decode on its own (`tier0_evidence_gop_seconds`,
+(2 s, with 15 % slack for a camera running a little under its nominal fps),
+switches that camera to full decode on its own (`tier0_evidence_gop_seconds`,
 `tier0_evidence_keyframes_only`); and every main crop is compared with the
 detect crop of the same box before it is used (Pearson correlation of the
 two, `DETECT_EVIDENCE_MATCH_MIN`, 0.5) — a keyframe old enough for the
