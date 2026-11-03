@@ -274,8 +274,10 @@ def test_camera_live_flags_down_restarts_noise_and_refused_evidence():
     assert by_id["cam_live"].status == "fail"
     assert by_id["cam_feed"].status == "fail"
     assert by_id["cam_gate"].status == "fail"
-    assert by_id["cam_evidence"].status == "warn" and by_id["cam_evidence"].measured["refused_share"] == 0.267
-    assert acc.score_camera_live(_cam(evidence_main=20, evidence_mismatch=12), True)[-1].status == "fail"
+    assert by_id["cam_evidence"].status == "warn" and by_id["cam_evidence"].measured["refused_share"] == 0.286
+    walk = acc.score_camera_live(_cam(evidence_main=1, evidence_detect=16, evidence_mismatch=16), True)[-1]
+    assert walk.status == "fail" and walk.measured["refused_share"] == 0.941, "16 of 17 attempts, not 16 of 33"
+    assert "wants full decode" in walk.detail
     ok = {c.id: c for c in acc.score_camera_live(_cam(evidence_main=30, evidence_mismatch=1), quiet=False)}
     assert ok["cam_evidence"].status == "pass" and ok["cam_gate"].status == "info"
     assert acc.score_camera_live({"measured": False, "reason": "nope"}, True)[0].status == "unknown"

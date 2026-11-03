@@ -111,7 +111,7 @@ gate floor, and once with someone walking through for the evidence check
 | Camera in the pipeline | `tier0_worker_up`, achieved/target fps over the window | up, ≥ 0.9 | ≥ 0.7 | down or less |
 | Feed stayed up | `tier0_worker_restarts_total` over the window (adaptive-decode flips are reported beside it, not counted) | 0 | ≤ 2 | more |
 | Gate in service | detector runs / (runs + no-motion skips) over the window, masks applied | ≤ 5 % (still scene) | ≤ 25 % | more (info without `--quiet`) |
-| Main-stream evidence | `tier0_evidence_crops_total{main,detect}` and `tier0_evidence_mismatch_total` over the window | refused ≤ 10 % | ≤ 30 % | more; unknown below 10 crops |
+| Main-stream evidence | `tier0_evidence_mismatch_total` over main-stream attempts (crops used + refused) in the window, from `tier0_evidence_crops_total` | refused ≤ 10 % | ≤ 30 % | more (a keyframe of a moving subject is of where it was: that camera wants full decode); unknown below 10 crops |
 
 Where the numbers come from: the CP Plus used to build the suite measured
 2.03 s between keyframes at a nominal 2 s (hence the 15 % allowance, the

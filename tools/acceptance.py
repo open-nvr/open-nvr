@@ -938,24 +938,32 @@ def score_camera_live(summary: dict, quiet: bool) -> list[Check]:
         checks.append(Check("cam_gate", "Gate in service", st, gm,
                             f"the detector ran on {g:.0%} of frames of a still scene (masks applied)",
                             f"≤ {GATE_FLOOR_WARN:.0%} pass, ≤ {GATE_FLOOR_FAIL:.0%} warn"))
-    crops = summary.get("evidence_main", 0) + summary.get("evidence_detect", 0)
-    em = {"main_crops": summary.get("evidence_main"), "detect_crops": summary.get("evidence_detect"),
-          "mismatches": summary.get("evidence_mismatch"), "keyframes_only": summary.get("keyframes_only"),
-          "gop_s": summary.get("gop_s")}
+    main_c, detect_c = summary.get("evidence_main", 0), summary.get("evidence_detect", 0)
+    refused = summary.get("evidence_mismatch", 0)
+    crops = main_c + detect_c
+    # A refused main crop is counted again as the detect crop it fell back to,
+    # so the attempts on the main stream are the used ones plus the refused ones;
+    # the rest of the detect crops had no main frame close enough in time.
+    attempts = main_c + refused
+    em = {"main_crops": main_c, "detect_crops": detect_c, "refused": refused,
+          "keyframes_only": summary.get("keyframes_only"), "gop_s": summary.get("gop_s")}
     thr = f"≥ {EVIDENCE_MIN_CROPS} crops; refused ≤ {EVIDENCE_MISMATCH_WARN:.0%} pass, ≤ {EVIDENCE_MISMATCH_FAIL:.0%} warn"
     if crops < EVIDENCE_MIN_CROPS:
         checks.append(Check("cam_evidence", "Main-stream evidence", "unknown", em,
                             f"only {crops} evidence crop(s) in the window — nothing (or too little) was "
                             "tracked; have someone walk through and run again", thr))
     else:
-        share = summary.get("evidence_mismatch", 0) / max(1, crops + summary.get("evidence_mismatch", 0))
+        share = refused / attempts if attempts else 0.0
         em["refused_share"] = round(share, 3)
         st = "pass" if share <= EVIDENCE_MISMATCH_WARN else "warn" if share <= EVIDENCE_MISMATCH_FAIL else "fail"
         checks.append(Check("cam_evidence", "Main-stream evidence", st, em,
-                            f"{summary.get('evidence_main')} main-stream crops, {summary.get('evidence_detect')} "
-                            f"fell back to the detect frame, {summary.get('evidence_mismatch')} refused "
-                            f"({share:.0%})" + ("; keyframe-only evidence" if summary.get("keyframes_only") else
-                                                "; full decode"), thr))
+                            f"{main_c} main-stream crops used, {refused} refused as not matching the detect "
+                            f"frame ({share:.0%} of {attempts} attempts), {max(0, detect_c - refused)} with no "
+                            "main frame close enough in time"
+                            + ("; keyframe-only evidence" if summary.get("keyframes_only") else "; full decode")
+                            + ("; a keyframe up to a GOP old of a moving subject is of where it was — "
+                               "this camera wants full decode while active" if share > EVIDENCE_MISMATCH_FAIL
+                               and summary.get("keyframes_only") else ""), thr))
     return checks
 
 
