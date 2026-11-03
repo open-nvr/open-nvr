@@ -456,11 +456,18 @@ class FrameSource:
         """
         restarts = 0
         fruitless = 0
+        # True while respawning after a deliberate decode flip: the flag that
+        # requested the flip is cleared when that session ends, so the
+        # respawn has to be told on its own — otherwise its first frame is
+        # unmarked and the worker counts every idle<->active flip as a feed
+        # restart (the metric operators are told to alert on).
+        flipped = False
         while True:
             if self._closing:
                 return
             self._refresh_url()
-            was_deliberate = self._skip_backoff_once
+            was_deliberate = flipped or self._skip_backoff_once
+            flipped = False
             proc = self._spawn(self.command())
             self._current_proc = proc
             stderr_tail = _StderrTail(getattr(proc, "stderr", None))
@@ -528,6 +535,7 @@ class FrameSource:
             if deliberate:
                 # Restart immediately, quietly — no backoff, no penalty.
                 self._skip_backoff_once = False
+                flipped = True
                 log.info("frame source for %s: decode mode -> %s",
                          redact_url(self.rtsp_url), self.decode_skip)
                 continue
