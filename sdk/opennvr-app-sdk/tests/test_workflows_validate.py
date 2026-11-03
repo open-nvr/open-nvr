@@ -254,3 +254,12 @@ def test_the_report_keeps_the_parsed_file_and_durations_parse():
     assert [parse_duration(v) for v in ("30s", "2m", "1h")] == [30, 120, 3600]
     with pytest.raises(ValueError):
         parse_duration("soon")
+
+
+def test_the_report_says_whether_the_file_moves_things():
+    assert validate(GATE, registry=SITE).moves_things is True     # opens the gate
+    assert validate(NIGHT).moves_things is False
+    g = doc(GATE)
+    g["then"][0]["ai"]["delivery"][0]["Let in"] = [
+        {"app": {"id": "gate-controller", "action": "status"}}]
+    assert validate(g, registry=SITE).moves_things is False

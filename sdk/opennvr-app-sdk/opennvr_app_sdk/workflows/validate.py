@@ -134,11 +134,14 @@ class Registry:
 class Report:
     """The check's answer. ``ok`` when there are no errors; warnings do
     not stop a file. ``needs`` names the skills, apps, camera roles,
-    webhooks and lists the file uses, for the import screen."""
+    webhooks and lists the file uses, for the import screen.
+    ``moves_things`` is whether any action in it moves things: turning
+    such a workflow On is an admin's decision (RFC #620, section 7)."""
 
     errors: list[Problem] = field(default_factory=list)
     warnings: list[Problem] = field(default_factory=list)
     needs: dict[str, list[str]] = field(default_factory=dict)
+    moves_things: bool = False
     doc: dict[str, Any] | None = None
 
     @property
@@ -493,6 +496,8 @@ class _Checker:
             moves = self.app_action(spec, ap)
         elif kind == "wait":
             self.duration(spec, ap)
+        if moves:
+            self.report.moves_things = True
         if moves and not guarded:
             self.err(ap, "this moves things, so it must follow an Ask a person reply or a plain "
                          "rule (if) on the same path" + (", not an AI outcome" if ai_decided
