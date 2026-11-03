@@ -712,6 +712,20 @@ async def lifespan(app: FastAPI):
     spawn_background(background_occupancy_event_consumer(),
                      name="occupancy-event-consumer")
 
+    # Agentic Workflows (RFC #620): app alerts start the workflows they
+    # trigger. Same best-effort posture as the consumers above.
+    async def background_workflow_engine():
+        from workflows.consumer import run_consumer_loop, start_engine
+
+        engine = await asyncio.to_thread(start_engine)
+
+        async def _loop():
+            await run_consumer_loop(engine)
+
+        await run_consumer_forever("Workflow engine", _loop)
+
+    spawn_background(background_workflow_engine(), name="workflow-engine")
+
     # Entry screenings: consume screening.completed.v1 into the
     # compliance ledger. Every screening, not only the ones that
     # alerted — a compliance rate needs its denominator.

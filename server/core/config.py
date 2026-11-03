@@ -573,6 +573,15 @@ class Settings(BaseSettings):
     # empty disables consumption (enrichment's synchronous fallback still
     # writes plate_text).
     nats_url: str = ""
+    # Agentic Workflows (RFC #620): the language/vision model AI steps run
+    # on. Empty URL = AI steps answer "unsure" (llm_down) and rule-based
+    # workflows still run. The model must see pictures for Look.
+    workflows_llm_url: str = ""
+    workflows_llm_model: str = "qwen3-vl:2b-instruct"
+    workflows_llm_api: str = "ollama"  # ollama | openai (an OpenAI-compatible server)
+    #: A Look step's picture is shrunk to this long side first: on CPU a
+    #: 1080p picture alone used most of a step's 120 s (#741). 0 = as is.
+    workflows_look_max_side: int = 768
     # Per-app bus credentials (services/nats_users.py): the users file the
     # nats-apps leaf server includes (a shared volume; empty = feature
     # off), and the URL apps are told to join with their own key.
