@@ -346,10 +346,28 @@ def resolve_user(db, claims: dict[str, Any], cfg: dict[str, Any]):
 
 
 def _claim_values(claims: dict[str, Any], cfg: dict[str, Any]) -> list[str]:
-    raw = claims.get(cfg.get("role_claim") or "groups")
+    """The role names a claim carries: a list (most providers), a single
+    string, or a map whose keys are the roles. Zitadel sends the map, as
+    ``urn:zitadel:iam:org:project:roles: {"admin": {"<org id>": "<domain>"}}``;
+    reading it as one value matched nothing and every user got the default role.
+
+    The claim may also be a dotted path into nested claims, for Keycloak's
+    ``realm_access.roles`` or ``resource_access.<client>.roles``. A claim whose
+    own name has dots (``https://example.com/roles``) is found by name first."""
+    name = cfg.get("role_claim") or "groups"
+    raw = claims.get(name)
+    if raw is None and "." in name:
+        raw = claims
+        for part in name.split("."):
+            raw = raw.get(part) if isinstance(raw, dict) else None
     if raw is None:
         return []
-    values = raw if isinstance(raw, list) else [raw]
+    if isinstance(raw, dict):
+        values = list(raw)
+    elif isinstance(raw, list):
+        values = raw
+    else:
+        values = [raw]
     return [str(v) for v in values]
 
 

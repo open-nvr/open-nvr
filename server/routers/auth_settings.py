@@ -87,11 +87,18 @@ class OidcSettingsUpdate(BaseModel):
     allow_local_login: bool | None = None
 
 
-@router.get("/oidc")
-async def get_oidc(db: Session = Depends(get_db), _: Any = Depends(get_current_superuser)):
+def _oidc_view(db) -> dict[str, Any]:
+    """The settings and the roles to offer new accounts. GET and PUT both
+    answer with it: the page redraws from what a save returns, and without
+    the roles it crashed after every successful save."""
     out = oidc.public(db)
     out["roles"] = [{"id": r.id, "name": r.name} for r in db.query(Role).order_by(Role.id).all()]
     return out
+
+
+@router.get("/oidc")
+async def get_oidc(db: Session = Depends(get_db), _: Any = Depends(get_current_superuser)):
+    return _oidc_view(db)
 
 
 @router.put("/oidc")
@@ -105,9 +112,9 @@ async def put_oidc(payload: OidcSettingsUpdate, request: Request, db: Session = 
         cfg = {**oidc.load(db), **{k: v for k, v in patch.items() if v is not None}}
         if not (cfg["issuer"] and cfg["client_id"]):
             raise HTTPException(status_code=422, detail="issuer and client_id are needed before enabling")
-    out = oidc.save(db, patch)
+    oidc.save(db, patch)
     _audit(db, request, user, "oidc", {k: ("***" if k == "client_secret" else v) for k, v in patch.items()})
-    return out
+    return _oidc_view(db)
 
 
 class OidcTest(BaseModel):
