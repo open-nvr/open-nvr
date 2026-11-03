@@ -136,6 +136,17 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **"Sign in with <provider>" no longer lands on a 404.** The app's
+  service worker answered every page visit with the app itself, so
+  `/api/v1/auth/oidc/start` (and the provider's return to `/callback`) never
+  reached the server, and single sign-on could not work in a browser that
+  had loaded the app before. Server paths (`/api/`, `/webrtc/`, `/hls/`,
+  `/playback/get|list`, `/healthz`) are now left to the network. A browser
+  picks this up after one reload following the upgrade.
+- **Saving the single sign-on settings no longer shows "Something went
+  wrong".** The save worked, but its answer lacked the role list the page
+  redraws from; it now returns the same settings and roles as loading them.
+
 - **A nominal 2 s GOP no longer trips the keyframe-evidence guard.** The
   guard compared the measured keyframe interval against
   `DETECT_EVIDENCE_NOKEY_MAX_GOP_S` (2 s) with no slack, and cameras set

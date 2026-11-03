@@ -74,7 +74,8 @@ function OidcSection() {
       }
       if (secret) payload.client_secret = secret
       const { data } = await apiService.putOidcSettings(payload)
-      setCfg(data as OidcSettings)
+      // Keeps the role list if a server answers without it (older cores did).
+      setCfg((cur) => ({ ...cur, ...(data as OidcSettings), roles: data.roles ?? cur?.roles ?? [] }))
       setSecret('')
       showSuccess(t('authSettings.saved'))
     } catch (e: any) {

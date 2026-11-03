@@ -54,6 +54,12 @@ export default defineConfig({
         globPatterns: ['index.html', '*.{ico,svg}', 'pwa-*.png', 'maskable-icon-*.png'],
         maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
         navigateFallback: '/index.html',
+        // Pages the server answers, not the app. Without this the worker
+        // served the app shell for them: "Sign in with <provider>" went to
+        // /api/v1/auth/oidc/start and showed the app's 404, and the
+        // provider's return to /api/v1/auth/oidc/callback would too; so did
+        // any download link under /api.
+        navigateFallbackDenylist: [/^\/api\//, /^\/webrtc\//, /^\/hls\//, /^\/playback\/(get|list)$/, /^\/healthz$/],
         runtimeCaching: [
           {
             urlPattern: /\/assets\/.*\.(?:js|css|woff2?)$/,

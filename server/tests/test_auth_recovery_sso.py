@@ -284,6 +284,8 @@ def idp(env, monkeypatch):
                        headers=_auth("root"))
     assert r.status_code == 200, r.text
     assert r.json()["has_client_secret"] is True and "client_secret" not in r.json()
+    # The settings page redraws from this answer; its role picker needs the roles.
+    assert {"id": env.viewer_role.id, "name": env.viewer_role.name} in r.json()["roles"]
     return fake
 
 
