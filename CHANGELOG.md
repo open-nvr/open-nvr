@@ -8,6 +8,16 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The workflows API (#773).** `workflows` and `workflow_versions`
+  tables, the permissions `workflows.view`, `.manage` and `.approve`
+  (granted on upgrade to the roles RFC #620 names, through `cameras.view`
+  and `cameras.manage`), and `/api/v1/workflows`: list, save a file (checked
+  by the SDK's validator against this site; `422` with each error at its
+  key), every save a new version, Off / Test / On, three templates (Gate
+  concierge, Safety gear check, Night intrusion triage), and a workflow's
+  runs, step by step with an AI step's calls. New workflows start in Test;
+  only an admin turns On one that moves things, and a new version whose AI
+  steps changed goes back to Test.
 - **`opennvr_app_sdk.workflows.validate`: the whole workflow file,
   `workflow: v1`.** The check the engine, the builder and outside tools
   share (RFC #620): the trigger, the guards, every step and path, with
