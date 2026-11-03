@@ -14,7 +14,7 @@ dependencies = [
     # model. The <6 is normal major-version hygiene (guard the next unreleased
     # major), NOT a block on 5.x. Note: HOG is gone on 5 (moved to opencv_contrib)
     # — that's why the default detector is ONNX and 'hog' is 4.x-only.
-    # Real yolov8n.onnx inference on OpenCV 5 ENGINE_NEW is verified by scripts/smoke_test_opencv5_engine.py.
+    # Real inference on 5.x's new engine: scripts/smoke_test_opencv5_engine.py (manual, see README).
     "opencv-python-headless>=4.9,<6",
 ]
 

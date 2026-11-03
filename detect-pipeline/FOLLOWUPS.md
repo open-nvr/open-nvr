@@ -56,18 +56,16 @@ v1.1 `DetectorSpec` (governed + audited region-crop dispatch). Also declare the
 chosen backend/provider through `DetectorSpec` so it's config, not hard-coded.
 Frigate-parity axis.
 
-## 3. Real-inference smoke on OpenCV 5 — VERIFIED
+## 3. Real-inference smoke on OpenCV 5 — verified (manual)
 
-Verified on a host with OpenCV 5.0.0 using a real YOLOv8n ONNX model and
-the Ultralytics bus image. The model was loaded explicitly with
-`cv2.dnn.ENGINE_NEW`, then exercised through `OnnxYoloDetector` using an
-injected DNN network. The run produced five detections, including `person and bus`, with normalized boxes inside `[0, 1]`.
-
-Reproduce with `scripts/smoke_test_opencv5_engine.py`; see the README for
-asset download instructions and the model checksum.
-
-This is a real-inference smoke test, not an accuracy benchmark or mAP
-measurement. CI still uses fake networks and does not download model assets.
+Done by hand, not in CI: `scripts/smoke_test_opencv5_engine.py` loads the
+shipped `yolo26n.onnx` through the service's own path (`OnnxYoloDetector`
+from a model path, engine auto-selected), confirms OpenCV 5 picked the new
+engine, and checks the `bus.jpg` scene (one large bus, people in front of
+it) agrees with an `ENGINE_NEW`-forced run. Last run: OpenCV 5.0.0, five
+detections, identical on both engines. Procedure and checksum: README,
+"OpenCV 5: real inference through the new DNN engine". Re-run it when the
+weights image or the OpenCV major changes.
 
 ## 4. Tracker: Kalman motion prediction (Norfair-style)
 
