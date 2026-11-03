@@ -136,6 +136,16 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Adaptive-decode flips no longer count as feed restarts.** The frame
+  source cleared the "this stop was deliberate" flag when the flipped
+  ffmpeg session ended, one step before the respawn read it, so the
+  respawn's first frame reached the worker unmarked and every
+  idle↔active flip was booked in `tier0_worker_restarts_total` (17 on a
+  healthy camera in one morning) while
+  `tier0_decode_mode_changes_total` never moved. The respawn now carries
+  the flag itself; a session that ends on its own still counts as a
+  restart.
+
 - **Keyframe-only evidence decode (`DETECT_EVIDENCE_DECODE=nokey`) no
   longer floods the worker with duplicate frames.** Dropping the `fps`
   filter was only half the fix: ffmpeg's rawvideo output has no
