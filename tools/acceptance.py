@@ -1,30 +1,29 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 OpenNVR
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""OpenNVR acceptance — does this hardware carry OpenNVR well?
+"""OpenNVR acceptance — does this hardware (or this camera) carry OpenNVR well?
 
-A customer-runnable, read-only measurement of a box running the OpenNVR
-stack, scored against the thresholds we hold our own reference hardware
-to, written as a report you can send us (or keep):
+Two suites, one scored report each (pass / warn / fail per check, a grade
+over the scored checks; "unknown" never passes):
 
     python3 tools/acceptance.py hardware                  # ~8 min: benches + a 5 min live window
     python3 tools/acceptance.py hardware --minutes 30     # longer live window (more cameras, more truth)
     python3 tools/acceptance.py hardware --skip live      # benches only
     python3 tools/acceptance.py hardware --clip ~/footage/lobby.mp4   # decode cost of YOUR footage
 
-It runs from the OpenNVR checkout on the box (the folder with
-docker-compose.yml and .env), talks to the running stack through
-``docker compose``, measures the host through /proc and /sys, and writes
-``acceptance-reports/hardware-<host>-<UTC>.json`` and ``.md``. It stores no
-credentials, changes no configuration and adds no cameras; the only things
-it creates are two short synthetic clips inside the detect-pipeline
-container's /tmp. Linux hosts only (the macOS/Windows Docker VMs expose no
-hardware to measure).
+    python3 tools/acceptance.py camera --main rtsp://… --sub rtsp://… --camera-id 7 --quiet
+        # streams, keyframe interval, main/sub view, motion gate on a still scene,
+        # and the pipeline's own counters for that camera over a window
 
-Every check is pass / warn / fail with the measured number beside it, or
-``unknown`` when it could not be measured — never a pass it did not earn.
-The pure scoring and report code is unit-tested (tools/tests); the
-measurements need the stack.
+Run on the Linux host that runs OpenNVR, from the checkout (docker-compose.yml
+and .env beside it), with the stack up. Needs python3 and docker compose,
+nothing else; the measurements run inside the detect-pipeline container.
+Writes ``acceptance-reports/<suite>-<subject>-<UTC>.json`` and ``.md``. It
+stores no credentials (stream URLs are written without them), changes no
+configuration and adds no cameras; the only things it reads from .env are
+the dials named in the report.
+
+Thresholds are constants at the top of this file and in docs/ACCEPTANCE.md.
 """
 from __future__ import annotations
 
@@ -41,7 +40,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 # ── thresholds (documented in docs/ACCEPTANCE.md; change them there too) ──
 
@@ -65,6 +64,35 @@ DETECTOR_CAMERAS_WARN, DETECTOR_CAMERAS_FAIL = 8, 4
 DECODE_720P_WARN, DECODE_720P_FAIL = 15.0, 30.0
 
 SAMPLE_EVERY_S = 5.0
+
+# ── camera suite thresholds ───────────────────────────────────────────
+
+#: Keyframe interval of the main stream. Keyframe-only evidence (the
+#: default) is viable up to DETECT_EVIDENCE_NOKEY_MAX_GOP_S plus the
+#: pipeline's jitter allowance; above that the pipeline decodes every main
+#: frame while something is in front of the camera (costly), and past
+#: GOP_FAIL_S ("smart codec") an event shorter than the interval can pass
+#: between keyframes of the recording.
+GOP_JITTER_ALLOWANCE = 0.15
+GOP_FAIL_S = 10.0
+#: Pearson correlation of the main and sub streams' luma at 64x64: the two
+#: streams show the same view. The CP Plus measured 0.998; a simulated
+#: 80 % centre crop of the sub measured 0.68.
+FOV_WARN, FOV_FAIL = 0.9, 0.7
+#: Share of frames on which the motion gate opens on a STILL scene (the
+#: operator says nothing moves). A CP Plus with its burned-in clock
+#: measured 0.94 unmasked and 0.00 masked.
+GATE_FLOOR_WARN, GATE_FLOOR_FAIL = 0.05, 0.25
+#: When this share of motion boxes sit in one cell of a 10x10 grid the
+#: trigger is a fixed-place OSD (clock, title), which a motion mask removes.
+OSD_CELL_SHARE = 0.8
+#: The sub stream must be at least this tall for the detector to see a
+#: person at mid-distance, and run at least DETECT_FPS.
+SUB_MIN_HEIGHT = 288
+#: Main-stream evidence crops the pipeline refused because they did not
+#: match the detect crop (tier0_evidence_mismatch_total over crops used + refused).
+EVIDENCE_MISMATCH_WARN, EVIDENCE_MISMATCH_FAIL = 0.10, 0.30
+EVIDENCE_MIN_CROPS = 10
 
 
 # ── data ──────────────────────────────────────────────────────────────
@@ -457,13 +485,22 @@ ICON = {"pass": "PASS", "warn": "WARN", "fail": "FAIL", "unknown": "UNKNOWN", "i
 def render_markdown(report: dict) -> str:
     g = report["grade"]
     host = report["host"]
-    lines = [f"# OpenNVR hardware acceptance — {host.get('hostname', '?')}", "",
+    suite = report.get("suite", "hardware")
+    if suite == "camera":
+        cam = report["camera"]
+        subject = cam.get("name", "?")
+        facts = (f"main `{cam.get('main', '?')}` · sub `{cam.get('sub') or 'none'}` · "
+                 f"pipeline camera `{cam.get('camera_id') or 'not given'}` · "
+                 f"box {host.get('hostname', '?')} · images `{host.get('image_tag', '?')}`")
+    else:
+        subject = host.get("hostname", "?")
+        facts = (f"{host.get('cpu_model', '?')} · {host.get('cores', '?')} cores · "
+                 f"{host.get('mem_total_mb', '?')} MB · flavour `{host.get('flavour', '?')}` · "
+                 f"images `{host.get('image_tag', '?')}`")
+    lines = [f"# OpenNVR {suite} acceptance — {subject}", "",
              f"Grade **{g['grade']}** ({g['points']:g}/{g['max']} points"
              + (f", {g['percent']:g} %" if g["percent"] is not None else "") + ")  ",
-             f"Run {report['started']} · tool {report['tool_version']} · "
-             f"{host.get('cpu_model', '?')} · {host.get('cores', '?')} cores · "
-             f"{host.get('mem_total_mb', '?')} MB · flavour `{host.get('flavour', '?')}` · "
-             f"images `{host.get('image_tag', '?')}`", ""]
+             f"Run {report['started']} · tool {report['tool_version']} · {facts}", ""]
     if g["unknown"]:
         lines += [f"Not measured: {', '.join(g['unknown'])} — these carry no points either way.", ""]
     lines += ["| Check | Result | Measured | Threshold |", "|---|---|---|---|"]
@@ -480,9 +517,11 @@ def render_markdown(report: dict) -> str:
     for c in report["checks"]:
         if c["detail"]:
             lines.append(f"- **{c['title']}** — {c['detail']}")
-    lines += ["", "Thresholds and what each check means: docs/ACCEPTANCE.md. "
-              "Benches ran beside whatever the stack was doing; for the cleanest "
-              "detector and decode numbers run them on an idle box.", ""]
+    tail = ("Benches ran beside whatever the stack was doing; for the cleanest detector "
+            "and decode numbers run them on an idle box." if suite != "camera" else
+            "The still-scene checks are scored only when the run was told the scene was "
+            "still (--quiet); evidence checks need something to have been tracked.")
+    lines += ["", "Thresholds and what each check means: docs/ACCEPTANCE.md. " + tail, ""]
     return "\n".join(lines)
 
 
@@ -509,8 +548,11 @@ class Stack:
         return subprocess.run(cmd, cwd=self.dir, capture_output=True, text=True,
                               timeout=timeout, check=check)
 
-    def exec(self, argv: list[str], timeout: float = 120.0, service: str | None = None) -> subprocess.CompletedProcess:
-        return self.run(["exec", "-T", service or self.service, *argv], timeout=timeout)
+    def exec(self, argv: list[str], timeout: float = 120.0, service: str | None = None,
+             stdin: str | None = None) -> subprocess.CompletedProcess:
+        cmd = ["docker", "compose", "exec", "-T", service or self.service, *argv]
+        return subprocess.run(cmd, cwd=self.dir, capture_output=True, text=True,
+                              timeout=timeout, input=stdin)
 
     def env(self, keys: list[str]) -> dict[str, str]:
         r = self.exec(["sh", "-c", " ".join(f'printf "%s=%s\\n" {k} "${k}";' for k in keys)], timeout=30)
@@ -750,6 +792,419 @@ def live_window(stack: Stack, minutes: float, log) -> dict:
     return summary
 
 
+# ── camera suite: pure scorers ────────────────────────────────────────
+
+def redact_url(url: str | None) -> str | None:
+    """``rtsp://user:pass@host/…`` → ``rtsp://host/…`` — reports carry no credentials."""
+    if not url:
+        return url
+    return re.sub(r"://[^/@]*@", "://", url)
+
+
+def score_streams(main: dict | None, sub: dict | None) -> Check:
+    """Both streams probe (codec, size, fps). No sub stream is a warning:
+    detection then runs on the main stream, a full decode per camera."""
+    def desc(info):
+        return f"{info['codec']} {info['width']}x{info['height']} @ {info['fps']:g} fps"
+    measured = {"main": desc(main) if main else None, "sub": desc(sub) if sub else None}
+    if main and sub:
+        return Check("streams", "Streams reachable", "pass", measured,
+                     f"main {desc(main)}; sub {desc(sub)}", "main and sub probe")
+    if main:
+        return Check("streams", "Streams reachable", "warn", measured,
+                     f"main {desc(main)}; no sub stream — detection will decode the main stream "
+                     "(the 1080p H.265 decode column of the hardware report, per camera)", "main and sub probe")
+    return Check("streams", "Streams reachable", "fail", measured,
+                 "the main stream could not be probed (URL, credentials, network)", "main and sub probe")
+
+
+def score_sub_fit(sub: dict | None, detect_fps: float) -> Check:
+    if not sub:
+        return Check("sub_fit", "Sub stream fit for detection", "unknown", {}, "no sub stream")
+    measured = {"height": sub["height"], "fps": sub["fps"]}
+    thr = f"height ≥ {SUB_MIN_HEIGHT}, fps ≥ DETECT_FPS ({detect_fps:g})"
+    if sub["height"] < SUB_MIN_HEIGHT:
+        return Check("sub_fit", "Sub stream fit for detection", "warn", measured,
+                     f"{sub['height']} px tall: a person at mid-distance is a few pixels wide for the "
+                     "detector; raise the sub stream's resolution in the camera", thr)
+    if sub["fps"] < detect_fps:
+        return Check("sub_fit", "Sub stream fit for detection", "warn", measured,
+                     f"{sub['fps']:g} fps is below DETECT_FPS {detect_fps:g}: the pipeline cannot reach "
+                     "its analysis rate on this camera", thr)
+    return Check("sub_fit", "Sub stream fit for detection", "pass", measured,
+                 f"{sub['width']}x{sub['height']} at {sub['fps']:g} fps", thr)
+
+
+def score_gop(gop_s: float | None, max_gop_s: float, stream: str = "main") -> Check:
+    """Measured keyframe interval against the keyframe-evidence limit (with
+    the pipeline's jitter allowance) and the smart-codec ceiling."""
+    ok = max_gop_s * (1.0 + GOP_JITTER_ALLOWANCE)
+    thr = f"≤ {ok:.2g} s keyframe evidence; ≤ {GOP_FAIL_S:g} s full decode; more = fail"
+    if gop_s is None:
+        return Check("gop", "Keyframe interval (evidence)", "unknown", {}, "could not measure keyframes", thr)
+    measured = {"gop_s": round(gop_s, 2), "limit_s": max_gop_s}
+    if gop_s <= ok:
+        return Check("gop", "Keyframe interval (evidence)", "pass", measured,
+                     f"{gop_s:.2f} s between keyframes on the {stream} stream: keyframe-only evidence "
+                     "(the cheap default) applies", thr)
+    if gop_s <= GOP_FAIL_S:
+        return Check("gop", "Keyframe interval (evidence)", "warn", measured,
+                     f"{gop_s:.2f} s between keyframes: the pipeline will decode every main frame while "
+                     "something is in front of this camera (the full-decode column of the hardware "
+                     "report); set the camera's I-frame interval to ≤ 2 s (or 1x its fps)", thr)
+    return Check("gop", "Keyframe interval (evidence)", "fail", measured,
+                 f"{gop_s:.2f} s between keyframes (\"smart codec\" / H.265+): evidence is full decode and "
+                 "an event shorter than the interval can land between keyframes of the recording; "
+                 "turn the camera's smart codec off and set the I-frame interval to ≤ 2 s", thr)
+
+
+def score_fov(r: float | None) -> Check:
+    thr = f"Pearson ≥ {FOV_WARN:g} pass, ≥ {FOV_FAIL:g} warn"
+    if r is None:
+        return Check("fov", "Main and sub show the same view", "unknown", {}, "no sub stream or no frames", thr)
+    measured = {"pearson": round(r, 3)}
+    if r >= FOV_WARN:
+        return Check("fov", "Main and sub show the same view", "pass", measured,
+                     f"the two streams agree ({r:.3f}); main-stream evidence crops land on the right place", thr)
+    if r >= FOV_FAIL:
+        return Check("fov", "Main and sub show the same view", "warn", measured,
+                     f"the streams differ ({r:.3f}): the sub stream may be cropped or offset; some "
+                     "main-stream crops will be refused (tier0_evidence_mismatch_total)", thr)
+    return Check("fov", "Main and sub show the same view", "fail", measured,
+                 f"the streams do not show the same view ({r:.3f}): main-stream evidence would be of "
+                 "the wrong place; set the camera's sub stream to the full view or "
+                 "DETECT_EVIDENCE_STREAM=detect for this camera", thr)
+
+
+def score_gate_floor(open_share: float | None, hotspot: dict | None, quiet: bool) -> Check:
+    """The motion gate replayed on the camera's own frames. Scored only when
+    the operator said the scene was still; otherwise reported."""
+    thr = f"still scene: ≤ {GATE_FLOOR_WARN:.0%} open pass, ≤ {GATE_FLOOR_FAIL:.0%} warn"
+    if open_share is None:
+        return Check("gate_floor", "Motion gate on a still scene", "unknown", {}, "no frames replayed", thr)
+    measured = {"open_share": round(open_share, 3)}
+    osd = ""
+    if hotspot and hotspot.get("share", 0) >= OSD_CELL_SHARE and open_share > GATE_FLOOR_WARN:
+        measured["hotspot"] = hotspot["where"]
+        osd = (f"; {hotspot['share']:.0%} of the motion sits in one spot ({hotspot['where']}) — a "
+               f"burned-in clock or title: add a motion mask over it (polygon {hotspot['polygon']})")
+    if not quiet:
+        return Check("gate_floor", "Motion gate on a still scene", "info", measured,
+                     f"gate open on {open_share:.0%} of frames (not scored: the run was not told the scene "
+                     "was still; pass --quiet when nothing moves)" + osd, thr)
+    if open_share <= GATE_FLOOR_WARN:
+        return Check("gate_floor", "Motion gate on a still scene", "pass", measured,
+                     f"gate open on {open_share:.0%} of frames of a still scene", thr)
+    status = "warn" if open_share <= GATE_FLOOR_FAIL else "fail"
+    return Check("gate_floor", "Motion gate on a still scene", status, measured,
+                 f"gate open on {open_share:.0%} of frames of a still scene: the detector runs on an "
+                 "empty room" + osd, thr)
+
+
+def score_camera_live(summary: dict, quiet: bool) -> list[Check]:
+    """The pipeline's own counters for this camera over the window."""
+    checks: list[Check] = []
+    if not summary.get("measured"):
+        return [Check("cam_live", "Camera in the pipeline", "unknown", {},
+                      summary.get("reason", "no metrics for this camera"))]
+    up, ratio = summary["up"], summary.get("fps_ratio")
+    m = {"up": up, "fps_ratio": round(ratio, 2) if ratio is not None else None,
+         "restarts": summary["restarts"], "decode_flips": summary["flips"]}
+    if not up:
+        checks.append(Check("cam_live", "Camera in the pipeline", "fail", m, "the worker is down", "up, fps ≥ 0.9 of target"))
+    elif ratio is not None and ratio < FPS_RATIO_FAIL:
+        checks.append(Check("cam_live", "Camera in the pipeline", "fail", m,
+                            f"only {ratio:.0%} of the target fps reached", "up, fps ≥ 0.9 of target"))
+    elif ratio is not None and ratio < FPS_RATIO_WARN:
+        checks.append(Check("cam_live", "Camera in the pipeline", "warn", m,
+                            f"{ratio:.0%} of the target fps reached", "up, fps ≥ 0.9 of target"))
+    else:
+        checks.append(Check("cam_live", "Camera in the pipeline", "pass", m,
+                            f"up, {ratio:.0%} of target fps" if ratio is not None else "up", "up, fps ≥ 0.9 of target"))
+    r = summary["restarts"]
+    checks.append(Check("cam_feed", "Feed stayed up", "pass" if r == 0 else "warn" if r <= 2 else "fail",
+                        {"restarts": r, "decode_flips": summary["flips"]},
+                        f"{r} feed restart(s) over the window; {summary['flips']} adaptive-decode flip(s) "
+                        "(flips are normal)", "0 restarts pass, ≤ 2 warn"))
+    g = summary.get("gate_open_share")
+    gm = {"open_share": round(g, 3) if g is not None else None, "frames": summary.get("frames")}
+    if g is None:
+        checks.append(Check("cam_gate", "Gate in service", "unknown", gm, "no frames in the window"))
+    elif not quiet:
+        checks.append(Check("cam_gate", "Gate in service", "info", gm,
+                            f"the detector ran on {g:.0%} of frames (not scored without --quiet)"))
+    else:
+        st = "pass" if g <= GATE_FLOOR_WARN else "warn" if g <= GATE_FLOOR_FAIL else "fail"
+        checks.append(Check("cam_gate", "Gate in service", st, gm,
+                            f"the detector ran on {g:.0%} of frames of a still scene (masks applied)",
+                            f"≤ {GATE_FLOOR_WARN:.0%} pass, ≤ {GATE_FLOOR_FAIL:.0%} warn"))
+    main_c, detect_c = summary.get("evidence_main", 0), summary.get("evidence_detect", 0)
+    refused = summary.get("evidence_mismatch", 0)
+    crops = main_c + detect_c
+    # A refused main crop is counted again as the detect crop it fell back to,
+    # so the attempts on the main stream are the used ones plus the refused ones;
+    # the rest of the detect crops had no main frame close enough in time.
+    attempts = main_c + refused
+    em = {"main_crops": main_c, "detect_crops": detect_c, "refused": refused,
+          "keyframes_only": summary.get("keyframes_only"), "gop_s": summary.get("gop_s")}
+    thr = f"≥ {EVIDENCE_MIN_CROPS} crops; refused ≤ {EVIDENCE_MISMATCH_WARN:.0%} pass, ≤ {EVIDENCE_MISMATCH_FAIL:.0%} warn"
+    if crops < EVIDENCE_MIN_CROPS:
+        checks.append(Check("cam_evidence", "Main-stream evidence", "unknown", em,
+                            f"only {crops} evidence crop(s) in the window — nothing (or too little) was "
+                            "tracked; have someone walk through and run again", thr))
+    else:
+        share = refused / attempts if attempts else 0.0
+        em["refused_share"] = round(share, 3)
+        st = "pass" if share <= EVIDENCE_MISMATCH_WARN else "warn" if share <= EVIDENCE_MISMATCH_FAIL else "fail"
+        checks.append(Check("cam_evidence", "Main-stream evidence", st, em,
+                            f"{main_c} main-stream crops used, {refused} refused as not matching the detect "
+                            f"frame ({share:.0%} of {attempts} attempts), {max(0, detect_c - refused)} with no "
+                            "main frame close enough in time"
+                            + ("; keyframe-only evidence" if summary.get("keyframes_only") else "; full decode")
+                            + ("; a keyframe up to a GOP old of a moving subject is of where it was — "
+                               "this camera wants full decode while active" if share > EVIDENCE_MISMATCH_FAIL
+                               and summary.get("keyframes_only") else ""), thr))
+    return checks
+
+
+# ── camera suite: measurements (inside the detect-pipeline container) ──
+
+def probe_stream(stack: Stack, url: str) -> dict | None:
+    r = stack.exec(["ffprobe", "-v", "error", "-rtsp_transport", "tcp", "-select_streams", "v:0",
+                    "-show_entries", "stream=codec_name,width,height,avg_frame_rate",
+                    "-of", "json", url], timeout=60)
+    try:
+        st = json.loads(r.stdout)["streams"][0]
+        num, den = st["avg_frame_rate"].split("/")
+        fps = float(num) / float(den) if float(den) else 0.0
+        return {"codec": st["codec_name"], "width": int(st["width"]), "height": int(st["height"]),
+                "fps": round(fps, 2)}
+    except (ValueError, KeyError, IndexError, json.JSONDecodeError, ZeroDivisionError):
+        return None
+
+
+def measure_gop(stack: Stack, url: str, seconds: int) -> float | None:
+    """Median interval between keyframes over ``seconds`` of the stream."""
+    r = stack.exec(["ffprobe", "-v", "error", "-rtsp_transport", "tcp", "-select_streams", "v:0",
+                    "-read_intervals", f"%+{seconds}", "-show_entries", "frame=key_frame,pts_time",
+                    "-of", "csv=p=0", url], timeout=seconds + 60)
+    keys = []
+    for line in r.stdout.splitlines():
+        parts = line.strip().split(",")
+        if len(parts) >= 2 and parts[0] == "1":
+            try:
+                keys.append(float(parts[1]))
+            except ValueError:
+                continue
+    gaps = sorted(b - a for a, b in zip(keys, keys[1:]) if b > a)
+    return gaps[len(gaps) // 2] if gaps else None
+
+
+_FOV_SCRIPT = r"""
+import subprocess, sys, json, numpy as np, cv2
+main, sub = sys.argv[1], sys.argv[2]
+def grab(url):
+    pr = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                         "stream=width,height", "-of", "csv=p=0", url], capture_output=True, text=True, timeout=30)
+    w, h = (int(v) for v in pr.stdout.strip().split(",")[:2])
+    p = subprocess.run(["ffmpeg", "-v", "error", "-rtsp_transport", "tcp", "-skip_frame", "nokey", "-i", url,
+                        "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True, timeout=40)
+    return np.frombuffer(p.stdout[:w * h], np.uint8).reshape(h, w)
+a, b = grab(main), grab(sub)
+x = cv2.resize(a, (64, 64), interpolation=cv2.INTER_AREA).astype(np.float64).ravel()
+y = cv2.resize(b, (64, 64), interpolation=cv2.INTER_AREA).astype(np.float64).ravel()
+r = float(np.corrcoef(x, y)[0, 1]) if x.std() > 0 and y.std() > 0 else None
+print(json.dumps({"pearson": r}))
+"""
+
+
+def measure_fov(stack: Stack, main: str, sub: str) -> float | None:
+    r = stack.exec(["python3", "-", main, sub], timeout=120, stdin=_FOV_SCRIPT)
+    out = last_json_object(r.stdout)
+    return out.get("pearson") if out else None
+
+
+_GATE_SCRIPT = r"""
+import subprocess, sys, json, numpy as np
+from detect_pipeline.motion import MotionDetector, MotionConfig
+url, secs, fps = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
+pr = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
+                     "-of", "csv=p=0", url], capture_output=True, text=True, timeout=30)
+w, h = (int(v) for v in pr.stdout.strip().split(",")[:2])
+p = subprocess.run(["ffmpeg", "-v", "error", "-rtsp_transport", "tcp", "-i", url, "-t", str(secs),
+                    "-vf", f"fps={fps}", "-f", "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True, timeout=secs + 60)
+frames = np.frombuffer(p.stdout, np.uint8)
+frames = frames[: (len(frames) // (w * h)) * w * h].reshape(-1, h, w)
+md = MotionDetector((h, w), MotionConfig(), label="acceptance")
+judged = opened = 0
+cells = {}
+for f in frames:
+    boxes = md.detect(f)
+    if md.is_calibrating():
+        continue
+    judged += 1
+    if boxes:
+        opened += 1
+        # one count per cell per FRAME: the share then reads "in this share of
+        # the open frames, that spot moved" — a clock ticks in every one of them
+        for key in {(min(9, int(10 * (y0 + y1) / 2 / h)), min(9, int(10 * (x0 + x1) / 2 / w)))
+                    for (x0, y0, x1, y1) in boxes}:
+            cells[key] = cells.get(key, 0) + 1
+hot = max(cells.items(), key=lambda kv: kv[1]) if cells else None
+hotspot = None
+if hot:
+    (r, c), n = hot
+    hotspot = {"share": n / opened, "where": f"row {r + 1} col {c + 1} of 10x10",
+               "polygon": [[round(c / 10, 2), round(r / 10, 2)], [round((c + 1) / 10, 2), round(r / 10, 2)],
+                           [round((c + 1) / 10, 2), round((r + 1) / 10, 2)], [round(c / 10, 2), round((r + 1) / 10, 2)]]}
+print(json.dumps({"frames": int(len(frames)), "judged": judged, "opened": opened,
+                  "open_share": (opened / judged) if judged else None, "hotspot": hotspot}))
+"""
+
+
+def measure_gate_floor(stack: Stack, url: str, seconds: int, fps: float) -> dict | None:
+    r = stack.exec(["python3", "-", url, str(seconds), str(fps)], timeout=seconds + 180, stdin=_GATE_SCRIPT)
+    return last_json_object(r.stdout)
+
+
+def camera_window(stack: Stack, camera: str, minutes: float, log) -> dict:
+    """This camera's pipeline counters over ``minutes``."""
+    rows0 = stack.metrics()
+    if rows0 is None:
+        return {"measured": False, "reason": "the pipeline's metrics are not reachable"}
+    t_end = time.monotonic() + minutes * 60.0
+    ups: list[float] = []
+    while time.monotonic() < t_end:
+        time.sleep(min(30.0, max(1.0, t_end - time.monotonic())))
+        rows = stack.metrics()
+        if rows:
+            ups.append(by_camera(rows, "tier0_worker_up").get(camera, 0.0))
+    rows1 = stack.metrics()
+    if rows1 is None:
+        return {"measured": False, "reason": "the pipeline's metrics went away during the window"}
+    if camera not in by_camera(rows1, "tier0_worker_up"):
+        return {"measured": False, "reason": f"no metrics for {camera} (is --camera-id the pipeline's id?)"}
+
+    def delta(name: str, **labels) -> float:
+        def pick(rows):
+            return sum(v for n, l, v in rows if n == name and l.get("camera") == camera
+                       and all(l.get(k) == val for k, val in labels.items()))
+        return pick(rows1) - pick(rows0)
+
+    def gauge(name: str):
+        vals = [v for n, l, v in rows1 if n == name and l.get("camera") == camera]
+        return vals[0] if vals else None
+
+    runs = delta("tier0_detector_runs_total")
+    skipped = delta("tier0_detector_skipped_total", reason="no_motion")
+    fps, tgt = gauge("tier0_processing_fps"), gauge("tier0_target_fps")
+    return {"measured": True, "minutes": minutes,
+            "up": bool(ups) and ups[-1] >= 1.0 and min(ups) >= 1.0,
+            "fps_ratio": (fps / tgt) if fps is not None and tgt else None,
+            "frames": int(delta("tier0_frames_total")),
+            "gate_open_share": (runs / (runs + skipped)) if (runs + skipped) > 0 else None,
+            "restarts": int(delta("tier0_worker_restarts_total")),
+            "flips": int(delta("tier0_decode_mode_changes_total")),
+            "evidence_main": int(delta("tier0_evidence_crops_total", source="main")),
+            "evidence_detect": int(delta("tier0_evidence_crops_total", source="detect")),
+            "evidence_mismatch": int(delta("tier0_evidence_mismatch_total")),
+            "keyframes_only": gauge("tier0_evidence_keyframes_only"),
+            "gop_s": gauge("tier0_evidence_gop_seconds")}
+
+
+# ── the camera suite ──────────────────────────────────────────────────
+
+def run_camera(args: argparse.Namespace) -> int:
+    def log(msg: str) -> None:
+        print(msg, flush=True)
+
+    project = Path(args.project_dir).resolve()
+    if not (project / "docker-compose.yml").exists():
+        log(f"{project} has no docker-compose.yml — run from the OpenNVR checkout or pass --project-dir.")
+        return 2
+    stack = Stack(project)
+    env_file = parse_env_file(project / ".env")
+    host = host_facts(stack, env_file)
+    if not host["image_tag"]:
+        log("the detect-pipeline container is not running — the camera suite measures through it.")
+        return 2
+    started = datetime.now(timezone.utc)
+    name = args.name or (args.main.rsplit("/", 1)[-1].split("?")[0] or "camera")
+    camera_id = f"cam{args.camera_id}" if args.camera_id else None
+    log(f"OpenNVR camera acceptance {VERSION} — {name} — {started:%Y-%m-%d %H:%M} UTC")
+    env = stack.env(["DETECT_FPS", "DETECT_EVIDENCE_NOKEY_MAX_GOP_S", "DETECT_EVIDENCE_STREAM"])
+    try:
+        detect_fps = float(env.get("DETECT_FPS") or 2)
+    except ValueError:
+        detect_fps = 2.0
+    try:
+        max_gop = float(env.get("DETECT_EVIDENCE_NOKEY_MAX_GOP_S") or 2.0)
+    except ValueError:
+        max_gop = 2.0
+
+    checks: list[Check] = []
+    log("probing the streams…")
+    main = probe_stream(stack, args.main)
+    sub = probe_stream(stack, args.sub) if args.sub else None
+    checks.append(score_streams(main, sub))
+    log(f"[{checks[-1].status}] {checks[-1].title}: {checks[-1].detail}")
+    checks.append(score_sub_fit(sub, detect_fps))
+    log(f"[{checks[-1].status}] {checks[-1].title}: {checks[-1].detail}")
+
+    if main:
+        log(f"measuring the main stream's keyframe interval ({args.seconds} s)…")
+        checks.append(score_gop(measure_gop(stack, args.main, args.seconds), max_gop))
+    else:
+        checks.append(score_gop(None, max_gop))
+    log(f"[{checks[-1].status}] {checks[-1].title}: {checks[-1].detail}")
+
+    if main and sub:
+        log("comparing the main and sub views…")
+        checks.append(score_fov(measure_fov(stack, args.main, args.sub)))
+    else:
+        checks.append(score_fov(None))
+    log(f"[{checks[-1].status}] {checks[-1].title}: {checks[-1].detail}")
+
+    gate_url = args.sub or args.main
+    if gate_url and (main or sub):
+        log(f"replaying {args.seconds} s through the motion gate…")
+        out = measure_gate_floor(stack, gate_url, args.seconds, detect_fps)
+        checks.append(score_gate_floor(out.get("open_share") if out else None,
+                                       out.get("hotspot") if out else None, args.quiet))
+    else:
+        checks.append(score_gate_floor(None, None, args.quiet))
+    log(f"[{checks[-1].status}] {checks[-1].title}: {checks[-1].detail}")
+
+    if camera_id and args.minutes > 0:
+        log(f"watching {camera_id} in the pipeline for {args.minutes:g} min…")
+        for c in score_camera_live(camera_window(stack, camera_id, args.minutes, log), args.quiet):
+            checks.append(c)
+            log(f"[{c.status}] {c.title}: {c.detail}")
+    else:
+        checks.append(Check("cam_live", "Camera in the pipeline", "unknown", {},
+                            "pass --camera-id <id> (the camera's id in OpenNVR) to read the pipeline's own counters"))
+
+    g = grade(checks)
+    report = {"tool": "opennvr-acceptance", "suite": "camera", "tool_version": VERSION,
+              "started": started.isoformat(timespec="seconds"),
+              "finished": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+              "camera": {"name": name, "main": redact_url(args.main), "sub": redact_url(args.sub),
+                         "camera_id": camera_id, "quiet_scene": bool(args.quiet)},
+              "host": host, "dials": {k: v for k, v in env.items() if v},
+              "checks": [c.as_dict() for c in checks], "grade": g}
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "-", name).strip("-") or "camera"
+    stem = f"camera-{safe}-{started:%Y%m%dT%H%M%SZ}"
+    (out_dir / f"{stem}.json").write_text(json.dumps(report, indent=2) + "\n")
+    md = render_markdown(report)
+    (out_dir / f"{stem}.md").write_text(md)
+    print()
+    print(md)
+    print(f"report: {out_dir / stem}.md (+ .json)")
+    return 0 if g["grade"] in ("A", "B") else 1
+
+
 # ── the hardware suite ────────────────────────────────────────────────
 
 def run_hardware(args: argparse.Namespace) -> int:
@@ -872,6 +1327,17 @@ def main(argv: list[str] | None = None) -> int:
     h.add_argument("--clip", default=None, help="a clip of your own footage to time the decode of")
     h.add_argument("--out", default="acceptance-reports", help="report folder (default acceptance-reports/)")
     h.set_defaults(func=run_hardware)
+    c = sub.add_parser("camera", help="score a camera: streams, keyframe interval, main/sub view, motion gate, pipeline counters")
+    c.add_argument("--main", required=True, help="the camera's main-stream RTSP URL (credentials are not stored)")
+    c.add_argument("--sub", default=None, help="the sub-stream RTSP URL (omit if the camera has none)")
+    c.add_argument("--camera-id", type=int, default=None, help="the camera's id in OpenNVR, to read the pipeline's counters")
+    c.add_argument("--name", default=None, help="a name for the report (default: from the URL)")
+    c.add_argument("--quiet", action="store_true", help="nothing moves in front of the camera during the run: score the gate checks")
+    c.add_argument("--seconds", type=int, default=60, help="seconds of stream to replay for the keyframe and gate checks (default 60)")
+    c.add_argument("--minutes", type=float, default=5.0, help="pipeline window with --camera-id (default 5; 0 skips)")
+    c.add_argument("--project-dir", default=".", help="the OpenNVR checkout (docker-compose.yml + .env)")
+    c.add_argument("--out", default="acceptance-reports", help="report folder (default acceptance-reports/)")
+    c.set_defaults(func=run_camera)
     args = p.parse_args(argv)
     return args.func(args)
 

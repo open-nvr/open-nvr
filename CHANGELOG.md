@@ -8,6 +8,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Acceptance suites** (`tools/acceptance.py`, docs/ACCEPTANCE.md): scored,
+  on-demand, customer-runnable checks for a new box (`hardware`: detector
+  backend really accelerated, detector latency as cameras-at-DETECT_FPS,
+  software decode cost per stream, CPU/thermal/memory/fps over a live
+  window) and for a new camera model (`camera`: streams and sub-stream
+  fit, keyframe interval against the keyframe-evidence limit, main/sub
+  field-of-view agreement, the motion gate replayed on a still scene with
+  a burned-in-clock finder that prints the mask polygon, and the
+  pipeline's own counters for that camera: feed restarts, gate share,
+  evidence crops refused). Each check is pass/warn/fail with the number
+  beside it, unknown never passes, grade A–F; reports land in
+  `acceptance-reports/` without credentials. Not CI: the measurements need
+  the real hardware or camera.
+
 - **Per-camera detection settings and object filters** (Settings →
   Camera-Config → Detection). The detect-pipeline's `DETECT_*` knobs were
   one value for every camera; a camera can now override the analysis fps,
