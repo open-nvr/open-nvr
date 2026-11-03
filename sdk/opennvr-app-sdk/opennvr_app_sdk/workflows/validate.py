@@ -44,7 +44,10 @@ with ``do``; ``ask_person`` (``who``, ``message``, ``replies``, optional
 ``timeout`` and ``default``) with a path per reply and ``no_answer``; and
 the actions ``alert``, ``notify``, ``log``, ``save_clip``,
 ``ptz_preset``, ``webhook``, ``home_assistant``, ``site_mode``, ``app``
-(an installed app's action) and ``wait``. ``call`` is Phase 3.
+(an installed app's action) and ``wait``. ``call`` is Phase 3. A step with
+paths runs the one chosen, then the flow carries on with the next step
+(the RFC's Gate concierge: Look, then ask the guard whatever it saw);
+paths never loop back.
 
 **The safety rule** (RFC #620, section 7): an action that moves things
 (``site_mode``, ``home_assistant``, and an app action that moves things)
