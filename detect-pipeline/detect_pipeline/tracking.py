@@ -36,6 +36,12 @@ from .thumbnail import ThumbCandidate, is_better_thumbnail
 #: most 0.36. 0.5 sits in the gap; 0 disables the check.
 DEFAULT_EVIDENCE_MATCH_MIN = 0.5
 MATCH_THUMB = 16
+#: Luma standard deviation (0-255) of a 16x16 thumbnail below which a crop
+#: is "flat": a blank wall, a night-IR patch, nothing to correlate.
+FLAT_TEXTURE = 2.0
+#: How many evidence attempts a camera's debug dump keeps before it stops
+#: writing (a walk-through is a few hundred; this is a disk guard).
+EVIDENCE_DUMP_MAX = 2000
 
 #: Labels the detector confuses on ONE object. A vehicle read as "car" on
 #: one frame and "truck" on the next is the same vehicle: matching strictly
@@ -239,6 +245,14 @@ def _gray_thumb(bgr, n: int):
     return gray[yi][:, xi]
 
 
+def crop_texture(a, n: int = MATCH_THUMB) -> float | None:
+    """How much there is to compare in a crop: the luma standard deviation
+    of its n x n thumbnail (0-255). None for an empty crop."""
+    if a is None or a.size == 0:
+        return None
+    return float(_gray_thumb(a, n).std())
+
+
 def crop_similarity(a, b, n: int = MATCH_THUMB) -> float | None:
     """How alike two crops of (supposedly) the same place look: Pearson
     correlation of their n x n luma thumbnails, in [-1, 1]. Resolution,
@@ -347,6 +361,31 @@ class Tracker:
         # a sharp picture of the wrong thing. Refusals are counted.
         self.evidence_match_min: float = DEFAULT_EVIDENCE_MATCH_MIN
         self.evidence_mismatches = 0
+        # Refusals by reason ("low_corr": the crops do not look alike;
+        # "flat_main": the sub saw a textured subject where the main shows a
+        # blank), and one sample per attempt — (score, skew_s, accepted,
+        # reason, sim_main_ref, sim_sub_ref) — for the worker's histograms;
+        # drained by drain_evidence_samples().
+        self.evidence_refusals: dict[str, int] = {}
+        self.evidence_samples: list[tuple] = []
+        # A second lookup: a main frame from a few seconds BEFORE the detect
+        # frame (the scene without the subject, if it moved in since). Only
+        # measured for now — sim(main, ref) high while sim(sub, main) is
+        # high too means the box is mostly background and the compare is
+        # uninformative — and written to the dump so the rule can be set
+        # from data rather than guessed. None = not measured.
+        self.evidence_ref = None
+        self._ev_ref = None
+        # DETECT_EVIDENCE_DEBUG_DIR: every attempt's crops and numbers go to
+        # <dir>/<camera>/ for the offline guard report (tools/
+        # evidence_guard_report.py). None = off.
+        self.evidence_debug_dir: str | None = None
+        self.evidence_debug_camera: str = "cam"
+        self._dumped = 0
+
+    def drain_evidence_samples(self) -> list[tuple]:
+        out, self.evidence_samples = self.evidence_samples, []
+        return out
 
     @property
     def population(self) -> int:
@@ -391,12 +430,17 @@ class Tracker:
         # is the detect frame's capture stamp (Frame.ts); the evidence
         # source refuses a main frame too far from it, and then the detect
         # frame's own pixels are used — never a crop of the wrong moment.
-        self._ev, self._ev_skew, self._ev_ts = None, None, frame_ts
+        self._ev, self._ev_skew, self._ev_ts, self._ev_ref = None, None, frame_ts, None
         if self.evidence is not None and bgr is not None and detections:
             try:
                 self._ev = self.evidence(frame_ts)
             except Exception:
                 self._ev = None
+            if self._ev is not None and self.evidence_ref is not None:
+                try:
+                    self._ev_ref = self.evidence_ref(frame_ts)
+                except Exception:
+                    self._ev_ref = None
         unmatched_tracks = set(range(len(self._tracks)))
         unmatched_dets = set(range(len(detections)))
 
@@ -550,31 +594,99 @@ class Tracker:
                 sx = main.shape[1] / float(w)
                 sy = main.shape[0] / float(h)
                 scaled = (box[0] * sx, box[1] * sy, box[2] * sx, box[3] * sy)
-                if self._main_box_matches(main, scaled, bgr, box):
+                skew = (abs(ev.ts - float(self._ev_ts))
+                        if self._ev_ts is not None else None)
+                ok, reason, sim = self._judge_main_crop(main, scaled, bgr, box)
+                refs = self._reference_sims(main, scaled, bgr, box, sx, sy)
+                self.evidence_samples.append((sim, skew, ok, reason, *refs))
+                if self.evidence_debug_dir:
+                    self._dump_attempt(main, scaled, bgr, box, ev, skew, sim, ok, reason, refs)
+                if ok:
                     crop = _crop_bgr(main, scaled, margin=self.crop_margin)
                     if crop is not None:
-                        if self._ev_skew is None and self._ev_ts is not None:
-                            self._ev_skew = abs(ev.ts - float(self._ev_ts))
+                        if self._ev_skew is None and skew is not None:
+                            self._ev_skew = skew
                         return crop, "main", main
                 else:
                     self.evidence_mismatches += 1
+                    self.evidence_refusals[reason] = self.evidence_refusals.get(reason, 0) + 1
         return _crop_bgr(bgr, box, margin=self.crop_margin), "detect", bgr
 
-    def _main_box_matches(self, main, scaled: Box, bgr, box: Box) -> bool:
-        """Does the main frame show the same thing inside the box as the
-        detect frame did? Compared on the bare boxes (no margin — the
-        subject fills them, the margin is mostly shared background), and
-        undecidable (flat crops, a failed compare) counts as a match: the
-        guard only refuses on positive evidence of a mismatch."""
+    def _judge_main_crop(self, main, scaled: Box, bgr, box: Box):
+        """``(accepted, reason, score)``: does the main frame show the same
+        thing inside the box as the detect frame did? Compared on the bare
+        boxes (no margin — the subject fills them, the margin is mostly
+        shared background). Refused on positive evidence only: the crops
+        do not correlate (``low_corr``), or the sub frame saw a textured
+        subject where the main frame shows a blank (``flat_main`` — a wall
+        or an IR-dark patch after the subject left, which the old rule
+        waved through as undecidable). Both flat, or a failed compare, is
+        undecidable and accepted, as before."""
         floor = float(self.evidence_match_min or 0.0)
         if floor <= 0.0:
-            return True
+            return True, "", None
         try:
-            sim = crop_similarity(_crop_bgr(main, scaled, margin=0.0),
-                                  _crop_bgr(bgr, box, margin=0.0))
+            mc = _crop_bgr(main, scaled, margin=0.0)
+            sc = _crop_bgr(bgr, box, margin=0.0)
+            sim = crop_similarity(mc, sc)
+            if sim is None:
+                tex_sub, tex_main = crop_texture(sc), crop_texture(mc)
+                if (tex_sub is not None and tex_main is not None
+                        and tex_sub >= FLAT_TEXTURE and tex_main < FLAT_TEXTURE):
+                    return False, "flat_main", None
+                return True, "", None
         except Exception:
-            return True
-        return sim is None or sim >= floor
+            return True, "", None
+        if sim >= floor:
+            return True, "", sim
+        return False, "low_corr", sim
+
+    def _reference_sims(self, main, scaled: Box, bgr, box: Box, sx: float, sy: float):
+        """``(sim_main_ref, sim_sub_ref)`` against the same box on the
+        reference frame (a main frame from before the subject arrived),
+        or ``(None, None)`` when there is no reference. Measurement only."""
+        ref = self._ev_ref
+        if ref is None:
+            return None, None
+        try:
+            rb = ref.bgr()
+            if rb is None or rb.shape[:2] != main.shape[:2]:
+                return None, None
+            rc = _crop_bgr(rb, scaled, margin=0.0)
+            return (crop_similarity(_crop_bgr(main, scaled, margin=0.0), rc),
+                    crop_similarity(_crop_bgr(bgr, box, margin=0.0), rc))
+        except Exception:
+            return None, None
+
+    def _dump_attempt(self, main, scaled: Box, bgr, box: Box, ev, skew, sim, ok, reason, refs) -> None:
+        """One evidence attempt to disk: the two bare-box crops as JPEG and
+        the numbers as JSON, for tools/evidence_guard_report.py. Best effort,
+        capped, never raises into the detect loop."""
+        if self._dumped >= EVIDENCE_DUMP_MAX:
+            return
+        try:
+            import json
+            import os
+            import cv2
+            d = os.path.join(self.evidence_debug_dir, self.evidence_debug_camera)
+            os.makedirs(d, exist_ok=True)
+            stem = os.path.join(d, f"{int((self._ev_ts or 0.0) * 1000):013d}_{self._dumped:04d}")
+            cv2.imwrite(stem + "_sub.jpg", _crop_bgr(bgr, box, margin=0.0))
+            cv2.imwrite(stem + "_main.jpg", _crop_bgr(main, scaled, margin=0.0))
+            with open(stem + ".json", "w") as f:
+                json.dump({
+                    "detect_ts": self._ev_ts, "main_ts": float(ev.ts), "skew_s": skew,
+                    "box": [float(v) for v in box], "scaled_box": [float(v) for v in scaled],
+                    "sub_shape": list(bgr.shape[:2]), "main_shape": list(main.shape[:2]),
+                    "score": sim, "accepted": bool(ok), "reason": reason,
+                    "sim_main_ref": refs[0], "sim_sub_ref": refs[1],
+                    "texture_sub": crop_texture(_crop_bgr(bgr, box, margin=0.0)),
+                    "texture_main": crop_texture(_crop_bgr(main, scaled, margin=0.0)),
+                    "floor": float(self.evidence_match_min or 0.0),
+                }, f)
+            self._dumped += 1
+        except Exception:
+            self._dumped = EVIDENCE_DUMP_MAX     # one failure switches the dump off
 
     def _scene_jpeg_for(self, bgr) -> bytes | None:
         """This frame as JPEG — encoded at most ONCE per ``update`` call.

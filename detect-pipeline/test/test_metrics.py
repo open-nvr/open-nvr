@@ -406,3 +406,21 @@ def test_drop_series_only_touches_the_named_metric():
     # narrower helper next to drop_label().
     assert m.value("tier0_worker_up", {"camera": "cam1"}) == 1.0
     assert m.value("tier0_frames_total", {"camera": "cam1"}) == 1.0
+
+
+def test_histograms_can_have_their_own_buckets_and_the_guard_is_measured():
+    from detect_pipeline.metrics import Metrics, SCORE_BUCKETS, record_evidence, metrics as global_metrics
+    m = Metrics()
+    m.observe("score", 0.55, {"camera": "c"}, buckets=SCORE_BUCKETS)
+    text = m.render()
+    assert 'score_bucket{camera="c",le="0.5"} 0' in text and 'score_bucket{camera="c",le="0.6"} 1' in text
+    assert 'le="0.005"' not in text.split("score_bucket")[1].split("\n")[0]
+    record_evidence("cam7", True, {"main": 3, "detect": 2}, mismatches=2,
+                    refusals={"low_corr": 1, "flat_main": 1},
+                    samples=[(0.92, 0.4, True, "", None, None), (0.21, 1.9, False, "low_corr", None, None),
+                             (None, 0.1, False, "flat_main", None, None)])
+    out = global_metrics.render()
+    assert 'tier0_evidence_refused_total{camera="cam7",reason="low_corr"} 1' in out
+    assert 'tier0_evidence_refused_total{camera="cam7",reason="flat_main"} 1' in out
+    assert 'tier0_evidence_match_score_count{camera="cam7"} 2' in out, "a None score is not observed"
+    assert 'tier0_evidence_skew_seconds_count{camera="cam7"} 3' in out

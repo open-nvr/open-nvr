@@ -688,3 +688,86 @@ def test_a_nominal_2s_gop_that_measures_a_little_longer_stays_on_keyframes():
         assert ev.switched_to_full is expect_switch, f"gop {gop}"
         assert round(ev.gop_s, 2) == gop
         ev.close()
+
+
+# ── the guard, measured: reasons, samples, the flat rule, the dump ────
+
+def test_a_blank_main_crop_where_the_sub_saw_a_subject_is_refused_as_flat():
+    """The old rule accepted a flat main crop as undecidable — a wall after
+    the subject left passed. Asymmetric now: the sub crop has texture (the
+    subject), the main crop has none → refused, reason ``flat_main``."""
+    rng = np.random.default_rng(4)
+    box = (100, 100, 200, 300)
+    sub = _scene(rng, SUB, subject=box)
+    main = np.kron(_scene(rng, SUB), np.ones((2, 2, 1), np.uint8))
+    main[200:600, 200:400] = 128                            # the box on the main: a blank wall
+    tk = _tracker(lambda ts: _Main(main, ts))
+    tk.update([Detection("person", box, 0.8)], sub, frame_ts=1.0)
+    assert tk._tracks[0].best_crop_source == "detect"
+    assert tk.evidence_refusals == {"flat_main": 1} and tk.evidence_mismatches == 1
+    (score, skew, ok, reason, ref_main, ref_sub), = tk.drain_evidence_samples()
+    assert ok is False and reason == "flat_main" and score is None and skew == 0.0
+    assert tk.drain_evidence_samples() == [], "drained"
+    # both flat is still undecidable → accepted, as before
+    sub2 = _scene(rng, SUB); sub2[100:300, 100:200] = 128
+    tk2 = _tracker(lambda ts: _Main(main, ts))
+    tk2.update([Detection("person", box, 0.8)], sub2, frame_ts=1.0)
+    assert tk2._tracks[0].best_crop_source == "main" and tk2.evidence_refusals == {}
+
+
+def test_every_attempt_leaves_a_sample_with_its_score_skew_and_reason():
+    rng = np.random.default_rng(5)
+    box = (100, 100, 200, 300)
+    sub = _scene(rng, SUB, subject=box)
+    good = np.kron(sub, np.ones((2, 2, 1), np.uint8))
+    bad = np.kron(_scene(rng, SUB, subject=(400, 100, 500, 300)), np.ones((2, 2, 1), np.uint8))
+    tk = _tracker(lambda ts: _Main(good, ts + 0.4))        # the main frame 0.4 s off
+    tk.update([Detection("person", box, 0.8)], sub, frame_ts=1.0)
+    tk.evidence = lambda ts: _Main(bad, ts)
+    tk.update([Detection("person", (102, 100, 202, 300), 0.9)], sub, frame_ts=2.0)
+    s1, s2 = tk.drain_evidence_samples()
+    assert s1[2] is True and s1[3] == "" and s1[0] > 0.8 and abs(s1[1] - 0.4) < 1e-6
+    assert s2[2] is False and s2[3] == "low_corr" and s2[0] < 0.5
+    assert tk.evidence_refusals == {"low_corr": 1}
+
+
+def test_reference_frame_similarities_are_measured_not_judged():
+    rng = np.random.default_rng(6)
+    box = (100, 100, 200, 300)
+    sub = _scene(rng, SUB, subject=box)
+    main = np.kron(sub, np.ones((2, 2, 1), np.uint8))
+    before = np.kron(_scene(rng, SUB), np.ones((2, 2, 1), np.uint8))   # the scene without the subject
+    tk = _tracker(lambda ts: _Main(main, ts))
+    tk.evidence_ref = lambda ts: _Main(before, ts - 3.0)
+    tk.update([Detection("person", box, 0.8)], sub, frame_ts=5.0)
+    (score, skew, ok, reason, ref_main, ref_sub), = tk.drain_evidence_samples()
+    assert ok and ref_main is not None and ref_sub is not None
+    assert ref_main < 0.5 and ref_sub < 0.5, "the subject is new: neither crop looks like the empty scene"
+
+
+def test_debug_dump_writes_the_pair_and_the_numbers(tmp_path):
+    import json
+    rng = np.random.default_rng(7)
+    box = (100, 100, 200, 300)
+    sub = _scene(rng, SUB, subject=box)
+    main = np.kron(sub, np.ones((2, 2, 1), np.uint8))
+    tk = _tracker(lambda ts: _Main(main, ts))
+    tk.evidence_debug_dir, tk.evidence_debug_camera = str(tmp_path), "cam9"
+    tk.update([Detection("person", box, 0.8)], sub, frame_ts=1.5)
+    files = sorted(p.name for p in (tmp_path / "cam9").iterdir())
+    assert len(files) == 3 and files[0].endswith(".json") and files[1].endswith("_main.jpg")
+    rec = json.loads((tmp_path / "cam9" / files[0]).read_text())
+    assert rec["accepted"] is True and rec["reason"] == "" and rec["score"] > 0.8
+    assert rec["detect_ts"] == 1.5 and rec["skew_s"] == 0.0 and rec["floor"] == 0.5
+    assert rec["sub_shape"] == list(SUB) and rec["main_shape"] == [2 * SUB[0], 2 * SUB[1]]
+    assert rec["texture_sub"] > 2.0
+
+
+def test_earliest_before_gives_the_oldest_frame_at_or_before_ts():
+    frames = [_frame(8, 8, ts) for ts in (10.0, 11.0, 12.0, 13.0)]
+    ev = EvidenceSource("cam", lambda: _Src(list(frames)), max_skew_s=2.0, _clock=lambda: 50.0)
+    ev.observe(_Result(tracks=[1]))
+    assert _wait(lambda: ev.frames_total == 4)
+    assert ev.earliest_before(12.5).ts == 10.0
+    assert ev.earliest_before(9.0) is None and ev.earliest_before(None) is None
+    ev.close()

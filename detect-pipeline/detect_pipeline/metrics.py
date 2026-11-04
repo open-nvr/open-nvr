@@ -40,6 +40,8 @@ from collections import defaultdict
 log = logging.getLogger("detect_pipeline.metrics")
 
 _BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0)
+#: For scores in [0, 1] (the evidence match score): tenths.
+SCORE_BUCKETS = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
 
 
 def _escape(v: str) -> str:
@@ -79,16 +81,19 @@ class Metrics:
         with self._lock:
             self._gauges[self._key(name, labels)] = value
 
-    def observe(self, name: str, value: float, labels: dict | None = None) -> None:
+    def observe(self, name: str, value: float, labels: dict | None = None,
+                buckets: tuple = _BUCKETS) -> None:
+        """``buckets`` fixes a histogram's bucket set on its first observe
+        (seconds by default; SCORE_BUCKETS for a [0, 1] score)."""
         k = self._key(name, labels)
         with self._lock:
             h = self._hist.get(k)
             if h is None:
-                h = {"buckets": {b: 0.0 for b in _BUCKETS}, "sum": 0.0, "count": 0.0}
+                h = {"buckets": {b: 0.0 for b in buckets}, "sum": 0.0, "count": 0.0}
                 self._hist[k] = h
             h["sum"] += value
             h["count"] += 1.0
-            for b in _BUCKETS:                    # cumulative le-buckets
+            for b in h["buckets"]:                # cumulative le-buckets
                 if value <= b:
                     h["buckets"][b] += 1.0
 
@@ -171,7 +176,7 @@ class Metrics:
         for (name, labels), h in hists:
             typ(name, "histogram")
             base = dict(labels)
-            for b in _BUCKETS:
+            for b in sorted(h["buckets"]):
                 bl = dict(base, le=str(b))
                 lines.append(f"{name}_bucket{_labels_str(bl)} {_fmt(h['buckets'][b])}")
             lines.append(f"{name}_bucket{_labels_str(dict(base, le='+Inf'))} {_fmt(h['count'])}")
@@ -332,7 +337,9 @@ def sample_frame_age_metrics(now: float | None = None) -> None:
 def record_evidence(camera_id: str, active: bool, stats: dict, *,
                     frames: int = 0, starts: int = 0, mismatches: int = 0,
                     gop_s: float | None = None,
-                    keyframes_only: bool | None = None) -> None:
+                    keyframes_only: bool | None = None,
+                    refusals: dict | None = None,
+                    samples: list | None = None) -> None:
     """Main-stream evidence (evidence.py): whether the camera's main decode
     is running right now, how many best-crop updates were cut from which
     stream, and how many main frames it has read. The split by source is
@@ -357,6 +364,22 @@ def record_evidence(camera_id: str, active: bool, stats: dict, *,
     if keyframes_only is not None:
         metrics.gauge("tier0_evidence_keyframes_only", 1.0 if keyframes_only else 0.0,
                       {"camera": camera_id})
+    # The guard, measured: refusals by reason (a crop that did not look
+    # like the detect crop vs a blank main crop where the sub saw a
+    # subject), the score of every attempt (tenths) and how far in time the
+    # main frame used was from the detect frame. Together they say whether
+    # a camera's refusals are timing (skew high, score low on moving
+    # subjects) or geometry/exposure (score low at any skew).
+    for reason, n in (refusals or {}).items():
+        metrics.gauge("tier0_evidence_refused_total", float(n),
+                      {"camera": camera_id, "reason": reason})
+    for sample in samples or ():
+        score, skew = sample[0], sample[1]
+        if score is not None:
+            metrics.observe("tier0_evidence_match_score", max(0.0, min(1.0, float(score))),
+                            {"camera": camera_id}, buckets=SCORE_BUCKETS)
+        if skew is not None:
+            metrics.observe("tier0_evidence_skew_seconds", float(skew), {"camera": camera_id})
 
 
 #: Why a camera detects on its MAIN stream, as the value of

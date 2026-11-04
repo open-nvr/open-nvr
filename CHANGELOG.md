@@ -8,6 +8,18 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The evidence crop-match guard, measured and tightened.** Refusals are
+  split by reason (`tier0_evidence_refused_total{reason}`: `low_corr`, the
+  main crop does not look like the detect crop; `flat_main`, the sub saw a
+  textured subject where the main shows a blank — which the old rule
+  accepted as undecidable), every attempt's score and main-to-detect time
+  gap go to histograms (`tier0_evidence_match_score`,
+  `tier0_evidence_skew_seconds`), and a reference similarity against the
+  scene a few seconds earlier is recorded for the rule to come.
+  `DETECT_EVIDENCE_DEBUG_DIR` writes each attempt's crops and numbers;
+  `tools/evidence_guard_report.py` reads a dump back: outcome split, score
+  and gap distributions, what each floor would refuse, a contact sheet.
+
 - **Per-camera detect stream, with a floor on the sub stream.** Detection
   settings gain *Detect on*: `auto` (default), `sub` or `main`. `main`
   detects on the full-resolution stream, with full-resolution evidence
