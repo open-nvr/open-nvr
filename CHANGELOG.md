@@ -185,6 +185,15 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Smart Doorbell: `min_face_px` defaults to 100 (was 40), and a name is
+  a vote.** The frames are the camera's main stream, so 100 px is a face
+  within a few metres of the door; below it a miss says distance, not
+  stranger (a match is never gated by size). Each matching frame now adds
+  its similarity, weighted by face size, to that person's tally; the new
+  `min_match_reads` (default 1, so the first match still decides at once)
+  is how many matching frames a name needs. With 2, a lone match is
+  recorded as unclear, leaning to that name, and the next match upgrades it.
+
 - **`DETECT_EVIDENCE_HOLD_S` defaults to 6 s** (was 3). A result from the
   recording takes the freshness wait, its turn behind the fetch interval
   and the decode, about 4 s at worst; with a 3 s hold four crops in one

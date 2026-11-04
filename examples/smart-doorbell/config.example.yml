@@ -66,9 +66,16 @@ decision_hold_seconds: 4.0     # 0 decides on the first frame, with corrections 
 unknown_score: 0.35
 # Frames not worth deciding from. Faces narrower than min_face_px, or
 # scored below min_face_confidence by the detector, neither open nor
-# decide a visit.
-min_face_px: 40
+# decide a visit. The frames are the camera's main stream, so 100 px
+# is a face within a few metres of the door; below it a miss says
+# distance, not stranger. A match is never gated by size.
+min_face_px: 100
 min_face_confidence: 0.6
+# Matching frames the same person needs before the visit is announced
+# as known. 1 announces on the first match; 2 trades a second of delay
+# for a second look (a lone match is then recorded as unclear, leaning
+# to that name, and the next matching frame upgrades it).
+min_match_reads: 1
 # No face for this long and the next face is a new visit.
 visit_gap_seconds: 10.0
 
