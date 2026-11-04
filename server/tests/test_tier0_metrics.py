@@ -482,7 +482,7 @@ def test_camera_row_carries_the_evidence_split_and_mismatches():
     r = reduce_metrics(parse_prometheus_text(EVIDENCE_TEXT))
     cams = {c["camera"]: c for c in r["cameras"]}
     assert cams["cam1"]["evidence"] == {
-        "main": 30, "detect": 10, "mismatch": 6,
+        "main": 30, "detect": 10, "playback": 0, "mismatch": 6,
         "low_res_ratio": 0.25, "gop_s": 1.02, "keyframes_only": True,
     }
     # No evidence series at all (older pipeline, or no second stream):

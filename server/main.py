@@ -58,6 +58,7 @@ from routers import (
     zones as zones_router,
     masks as masks_router,
     detection_settings as detection_settings_router,
+    evidence_escalation as evidence_escalation_router,
     live_state as live_state_router,
     media as media_router,
     site_mode as site_mode_router,
@@ -1118,6 +1119,7 @@ app.include_router(api_tokens_router.router, prefix=settings.api_prefix)
 app.include_router(zones_router.router, prefix=settings.api_prefix)
 app.include_router(masks_router.router, prefix=settings.api_prefix)
 app.include_router(detection_settings_router.router, prefix=settings.api_prefix)
+app.include_router(evidence_escalation_router.router, prefix=settings.api_prefix)
 app.include_router(live_state_router.router, prefix=settings.api_prefix)
 app.include_router(media_router.router, prefix=settings.api_prefix)
 app.include_router(site_mode_router.router, prefix=settings.api_prefix)

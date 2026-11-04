@@ -159,7 +159,7 @@ def env(monkeypatch, tmp_path):
         "routers.system", "routers.cameras", "routers.api_tokens",
         "routers.recordings", "routers.audit_logs", "routers.events",
         "routers.timeline_events", "routers.zones", "routers.masks", "routers.live_state",
-        "routers.media", "routers.detection_settings",
+        "routers.media", "routers.detection_settings", "routers.evidence_escalation",
         "routers.alerts_inbox", "routers.site_mode", "routers.entities",
         "routers.search", "routers.tours", "routers.system_update")]
     for mod in routers:
