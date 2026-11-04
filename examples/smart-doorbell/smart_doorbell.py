@@ -93,6 +93,7 @@ from visits import (
     DEFAULT_HOLD_SECONDS,
     DEFAULT_MIN_FACE_CONFIDENCE,
     DEFAULT_MIN_FACE_PX,
+    DEFAULT_MIN_MATCH_READS,
     DEFAULT_UNKNOWN_SCORE,
     Decision,
     VisitTracker,
@@ -195,7 +196,16 @@ MANIFEST = AppManifest(
                   "not alerted as a stranger. 0 alerts on every miss.")),
         Param("min_face_px", int, default=DEFAULT_MIN_FACE_PX,
               label="Smallest face to judge", group="Deciding", advanced=True,
-              description="Faces narrower than this many pixels are not decided from."),
+              description=(
+                  "Faces narrower than this many pixels are not decided "
+                  "from: below it a miss says distance, not stranger. A "
+                  "match is never gated by size.")),
+        Param("min_match_reads", int, default=DEFAULT_MIN_MATCH_READS,
+              label="Matching frames before a name", group="Deciding", advanced=True,
+              description=(
+                  "Frames that must match the same person before the "
+                  "visit is announced as known. 1 announces on the first "
+                  "match; 2 trades a second of delay for a second look.")),
         Param("min_face_confidence", float, default=DEFAULT_MIN_FACE_CONFIDENCE,
               label="Least detector confidence to judge", group="Deciding",
               advanced=True,
@@ -403,6 +413,7 @@ class AppConfig:
     min_face_px: int = DEFAULT_MIN_FACE_PX
     min_face_confidence: float = DEFAULT_MIN_FACE_CONFIDENCE
     visit_gap_seconds: float = DEFAULT_GAP_SECONDS
+    min_match_reads: int = DEFAULT_MIN_MATCH_READS
 
     # If True, embed a base64 JPEG snapshot in UNKNOWN-face alert
     # envelopes only. A small downstream relay (see alerts-subscriber/)
@@ -513,6 +524,7 @@ def load_config(path: str | Path) -> AppConfig:
             raw.get("min_face_confidence", DEFAULT_MIN_FACE_CONFIDENCE))),
         visit_gap_seconds=max(0.0, float(
             raw.get("visit_gap_seconds", DEFAULT_GAP_SECONDS))),
+        min_match_reads=max(1, int(raw.get("min_match_reads", DEFAULT_MIN_MATCH_READS))),
         attach_snapshot_for_unknowns=bool(
             raw.get("attach_snapshot_for_unknowns", True)
         ),
@@ -804,6 +816,7 @@ class SmartDoorbell(FrameApp):
             min_face_px=self.config.min_face_px,
             min_face_confidence=self.config.min_face_confidence,
             gap_seconds=self.config.visit_gap_seconds,
+            min_match_reads=self.config.min_match_reads,
         )
         # Monotonic, and an attribute so a test can move it.
         self._clock = time.monotonic
@@ -1407,6 +1420,7 @@ class SmartDoorbell(FrameApp):
             ("min_face_px", "min_face_px", int),
             ("min_face_confidence", "min_face_confidence", float),
             ("visit_gap_seconds", "gap_seconds", float),
+            ("min_match_reads", "min_match_reads", int),
         ):
             if key in config:
                 value = max(cast(0), cast(config[key]))
