@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import threading
 import time
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -235,3 +236,73 @@ def test_the_stamp_lead_is_subtracted_and_calibrated_from_accepted_frames():
     assert abs(res.signed_skew_s - (-0.1)) < 0.06, "the frame sits 0.1 s before the asked moment"
     assert 0.5 < pb.stamp_lead_s < 0.56, "the lead moved a quarter of the way towards 0.6"
     pb.close()
+
+
+# ── the worker holds a finished visit for its crop ────────────────────
+
+class _Poster:
+    def __init__(self):
+        self.posted = []
+    def submit(self, visit):
+        self.posted.append(visit)
+
+
+class _FakePlayback:
+    def __init__(self):
+        self.pending = set()
+        self.queue = []
+    def pending_for(self, tid):
+        return tid in self.pending
+    def results(self):
+        out, self.queue = self.queue, []
+        return out
+
+
+class _NoTracker:
+    """Every track has already ended: no result is taken live."""
+    def note_playback_result(self, res):
+        pass
+    def apply_evidence_result(self, res):
+        return False
+
+
+@dataclass
+class _Visit:
+    track_id: int
+    jpeg: bytes = b"sub"
+    scene_jpeg: bytes | None = None
+
+
+def test_a_held_visit_is_patched_when_its_crop_arrives_and_counted_when_the_hold_runs_out():
+    from detect_pipeline.service import CameraSpec, CameraWorker
+    poster = _Poster()
+    w = CameraWorker(CameraSpec("c", "c", "rtsp://h/c"), None, visit_poster=poster, evidence_hold_s=6.0)
+    pb = _FakePlayback()
+    w._playback = pb
+    tracker = _NoTracker()
+    box = (10, 10, 50, 90)
+    # track 1: its crop is still pending when the visit ends → held, not posted
+    pb.pending.add(1)
+    w._offer_visit(_Visit(1), now_mono=100.0)
+    assert poster.posted == [] and 1 in w._held and w._held[1][1] == 106.0
+    # the crop arrives 4 s later (inside the hold): patched in and posted
+    main = np.full((40, 40, 3), 200, np.uint8)
+    pb.pending.discard(1)
+    pb.queue.append(EvidenceResult(EvidenceRequest(1, 99.0, box, SUB, None), "accepted",
+                                   crop=main, frame=None, score=0.95, skew_s=0.05))
+    w._drain_playback(tracker, now_mono=104.0)
+    assert len(poster.posted) == 1 and poster.posted[0].jpeg != b"sub"
+    assert w._visits_patched == 1 and w._holds_expired == 0 and w._held == {}
+    # track 2: nothing comes back within the hold → posted as it was, counted
+    pb.pending.add(2)
+    w._offer_visit(_Visit(2), now_mono=110.0)
+    w._drain_playback(tracker, now_mono=115.9)
+    assert len(poster.posted) == 1, "still held just before the deadline"
+    w._drain_playback(tracker, now_mono=116.0)
+    assert len(poster.posted) == 2 and poster.posted[1].jpeg == b"sub"
+    assert w._holds_expired == 1
+    # its crop arriving after that is late, not patched
+    pb.queue.append(EvidenceResult(EvidenceRequest(2, 109.0, box, SUB, None), "accepted",
+                                   crop=main, score=0.9, skew_s=0.1))
+    w._drain_playback(tracker, now_mono=117.0)
+    assert w._results_late == 1 and len(poster.posted) == 2

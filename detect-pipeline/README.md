@@ -279,8 +279,10 @@ once (at most a GOP, ~0.3 core-seconds on a Qualcomm box), scores the
 frames nearest the moment with the same guard, and hands back the best.
 A live track takes the crop (`tier0_evidence_crops_total{source="playback"}`);
 a visit whose track has already ended is held up to
-`DETECT_EVIDENCE_HOLD_S` (3 s) for it and posted with the crop patched
-in. Per camera one fetch at a time and at least
+`DETECT_EVIDENCE_HOLD_S` (6 s: the recorder's freshness wait, the turn
+behind the fetch interval and the decode add up to about 4 s) for it and
+posted with the crop patched in; `tier0_evidence_visits_hold_expired_total`
+counts holds that ran out. Per camera one fetch at a time and at least
 `DETECT_EVIDENCE_FETCH_MIN_INTERVAL_S` apart (a newer best moment replaces
 a queued one); per box `DETECT_EVIDENCE_FETCH_PARALLEL` decodes at once; a
 request the budget cannot serve is dropped and the detect crop stands.

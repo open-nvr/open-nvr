@@ -417,7 +417,7 @@ class CameraWorker:
         evidence_debug_dir: str | None = None,   # DETECT_EVIDENCE_DEBUG_DIR: dump every evidence attempt here
         playback_url_provider=None,              # freshest playback URL for this camera (its token rotates)
         evidence_playback: bool = True,          # fetch the moment's main frame from the recording (playback.py)
-        evidence_hold_s: float = 3.0,            # how long a finished visit waits for its playback crop
+        evidence_hold_s: float = 6.0,            # how long a finished visit waits for its playback crop
         evidence_fetch_min_interval_s: float = 2.0,
         evidence_stamp_lead_s: float = 0.5,       # the sub path's stamp latency, calibrated per camera after
         evidence_url_provider=None,              # freshest main-tap URL (its JWT rotates)
@@ -443,6 +443,7 @@ class CameraWorker:
         self._held: dict = {}                    # track id -> (visit, deadline mono)
         self._visits_patched = 0                 # held visits that got their recording crop
         self._results_late = 0                   # accepted results with no track and no held visit
+        self._holds_expired = 0                  # held visits posted at the deadline without their crop
         self.evidence_url_provider = evidence_url_provider
         self._evidence_source_factory = evidence_source_factory
         self._evidence = None
@@ -693,6 +694,8 @@ class CameraWorker:
         for tid, (visit, deadline) in list(self._held.items()):
             if now_mono >= deadline or not pb.pending_for(tid):
                 self._held.pop(tid, None)
+                if now_mono >= deadline:
+                    self._holds_expired += 1
                 self._post_visit(visit)
 
     @staticmethod
@@ -1198,7 +1201,8 @@ class CameraWorker:
                     )
                 if self._playback is not None:
                     record_playback_evidence(self.spec.camera_id, self._playback, held=len(self._held),
-                                             patched=self._visits_patched, late=self._results_late)
+                                             patched=self._visits_patched, late=self._results_late,
+                                             expired=self._holds_expired)
                 # Adaptive decode: promote on the first sign of activity,
                 # demote after the quiet period. The flip terminates the
                 # current ffmpeg; the source's restart loop respawns it with
@@ -1294,7 +1298,7 @@ class WorkerManager:
         sub_min_height: int = 480,
         evidence_debug_dir: str | None = None,
         evidence_playback: bool = True,
-        evidence_hold_s: float = 3.0,
+        evidence_hold_s: float = 6.0,
         evidence_fetch_min_interval_s: float = 2.0,
         evidence_stamp_lead_s: float = 0.5,
         evidence_fetch_parallel: int = 2,

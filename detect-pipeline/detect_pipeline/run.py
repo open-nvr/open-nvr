@@ -155,7 +155,7 @@ class ServiceConfig:
     # offers a playback URL; how long a finished visit waits for its crop;
     # the minimum gap between fetches per camera; concurrent decodes per box.
     evidence_playback: bool = True
-    evidence_hold_s: float = 3.0
+    evidence_hold_s: float = 6.0
     evidence_fetch_min_interval_s: float = 2.0
     evidence_fetch_parallel: int = 2
     # How much later a detect frame's stamp is than the recorder's clock
@@ -311,7 +311,7 @@ def config_from_env(env: dict) -> ServiceConfig:
         sub_min_height=int(_env_float(env, "DETECT_SUB_MIN_HEIGHT", 480)),
         evidence_debug_dir=(env.get("DETECT_EVIDENCE_DEBUG_DIR") or "").strip(),
         evidence_playback=_env_bool(env, "DETECT_EVIDENCE_PLAYBACK", True),
-        evidence_hold_s=_env_float(env, "DETECT_EVIDENCE_HOLD_S", 3.0),
+        evidence_hold_s=_env_float(env, "DETECT_EVIDENCE_HOLD_S", 6.0),
         evidence_fetch_min_interval_s=_env_float(env, "DETECT_EVIDENCE_FETCH_MIN_INTERVAL_S", 2.0),
         evidence_fetch_parallel=_env_int(env, "DETECT_EVIDENCE_FETCH_PARALLEL", 2),
         evidence_stamp_lead_s=_env_float(env, "DETECT_EVIDENCE_STAMP_LEAD_S", 0.5),
