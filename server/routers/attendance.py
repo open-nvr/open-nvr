@@ -28,12 +28,12 @@ from datetime import UTC, date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
-from core.database import get_db
+from core.database import get_db, release
 from core.permissions import RequirePermission
 from models import (
     AttendanceAttempt,
@@ -50,7 +50,7 @@ from models import (
     User,
 )
 from routers.internal_camera_agent import _app_roster, _require_internal_key
-from services import attendance_policy, attendance_scheduler
+from services import attendance_faces, attendance_policy, attendance_scheduler
 from services.audit_service import audit_request
 from services.camera_scope import visible_camera_ids
 
@@ -409,7 +409,13 @@ async def remove_person(person_id: int, request: Request,
                         db: Session = Depends(get_db), user: User = Depends(_enroll)):
     """Removes a person from attendance. The row stays, so their past marks
     keep a name; they leave every group, so future sessions do not expect
-    them, and their reference number is free for somebody else."""
+    them, and their reference number is free for somebody else.
+
+    Their faces are forgotten FIRST. If the face service cannot confirm
+    that, the removal is refused (503) rather than leaving a biometric
+    record behind a person nobody can see any more."""
+    p = _person_or_404(db, person_id)
+    await _forget_faces_or_raise(db, p)
     p = _person_or_404(db, person_id)
     p.deleted_at = datetime.now(UTC)
     p.active = False
@@ -420,6 +426,180 @@ async def remove_person(person_id: int, request: Request,
                   entity_type="attendance_person", entity_id=p.id,
                   details={"display_name": p.display_name, "external_ref": p.external_ref})
     return {"removed": p.id}
+
+
+# ── Consent and faces ────────────────────────────────────────────────
+
+
+#: Photos per enrolment request, and bytes per photo (the adapter's cap).
+MAX_ENROL_PHOTOS = 10
+MAX_PHOTO_BYTES = 8 * 1024 * 1024
+
+
+async def _forget_faces_or_raise(db: Session, p: AttendancePerson) -> None:
+    """Delete the person's samples in the adapter, releasing the DB
+    connection across the call. One the adapter does not know is already
+    forgotten.
+
+    The adapter is asked even when core's count says 0: the count is
+    written after an enrolment's last photo, so a crash or a removal in
+    the middle of one leaves faces the count never saw. Skipped only for
+    someone whose consent was never recorded — nothing can have been
+    enrolled for them — so removing people works with no face service."""
+    if p.consent_at is None and not (p.face_samples or 0):
+        return
+    uuid = p.uuid
+    release(db)
+    try:
+        await attendance_faces.forget(uuid)
+    except attendance_faces.FaceGalleryError as e:
+        raise HTTPException(status_code=e.status, detail=(
+            f"{e.message} The person's faces could not be deleted, so nothing was changed.")
+        ) from None
+    db.query(AttendancePerson).filter(AttendancePerson.uuid == uuid).update(
+        {AttendancePerson.face_samples: 0}, synchronize_session=False)
+    db.commit()
+
+
+class ConsentIn(BaseModel):
+    given: bool
+
+
+@router.post("/people/{person_id}/consent")
+async def set_consent(person_id: int, payload: ConsentIn, request: Request,
+                      db: Session = Depends(get_db), user: User = Depends(_enroll)):
+    """Record that the person (or their guardian) agreed to face
+    recognition, or that they withdrew. Withdrawing deletes their faces;
+    faces cannot be enrolled without consent on record."""
+    p = _person_or_404(db, person_id)
+    if payload.given:
+        if p.consent_at is None:
+            p.consent_at, p.consent_by = datetime.now(UTC), user.id
+            db.commit()
+    else:
+        await _forget_faces_or_raise(db, p)
+        p = _person_or_404(db, person_id)
+        p.consent_at, p.consent_by = None, None
+        db.commit()
+    db.refresh(p)
+    audit_request(db, request, action="attendance.consent." + ("give" if payload.given else "withdraw"),
+                  user_id=user.id, entity_type="attendance_person", entity_id=p.id,
+                  details={"display_name": p.display_name})
+    return _person_out(p, _groups_of(db, [p.id])[p.id])
+
+
+@router.post("/people/{person_id}/faces")
+async def enrol_faces(person_id: int, request: Request,
+                      photos: list[UploadFile] = File(...),
+                      db: Session = Depends(get_db), user: User = Depends(_enroll)):
+    """Add face photos to a person (1 to 10 per request; several angles and
+    lightings recognise better than one). Each photo must hold exactly one
+    face, and one that already matches SOMEBODY ELSE enrolled is refused —
+    the same person enrolled twice, or the wrong photo under this name.
+    Every photo gets its own result; the ones that pass are kept."""
+    p = _person_or_404(db, person_id)
+    if p.consent_at is None:
+        raise HTTPException(status_code=409, detail=(
+            "Record this person's consent to face recognition before enrolling faces"))
+    if not 1 <= len(photos) <= MAX_ENROL_PHOTOS:
+        raise HTTPException(status_code=422, detail=f"Send 1 to {MAX_ENROL_PHOTOS} photos")
+    images: list[bytes | None] = []
+    for up in photos:
+        data = await up.read()
+        images.append(data if data and len(data) <= MAX_PHOTO_BYTES else None)
+    uuid, name, pid = p.uuid, p.display_name, p.id
+    release(db)  # the adapter takes ~0.5 s a photo; hold no connection meanwhile
+
+    results: list[dict[str, Any]] = []
+    samples = None
+    for i, image in enumerate(images):
+        if image is None:
+            results.append({"index": i, "ok": False,
+                            "error": f"empty or larger than {MAX_PHOTO_BYTES // (1024 * 1024)} MB"})
+            continue
+        try:
+            found = await attendance_faces.identify(image)
+            n = len(found.get("faces") or [])
+            if n != 1:
+                results.append({"index": i, "ok": False, "error": (
+                    "no face found" if n == 0 else
+                    f"{n} faces in the photo; enrolment needs exactly one")})
+                continue
+            dup = attendance_faces.duplicate_of(found, uuid)
+            if dup is not None:
+                other = db.query(AttendancePerson).filter(
+                    AttendancePerson.uuid == dup["person_uuid"]).first()
+                who = other.display_name if other is not None else "someone else"
+                release(db)
+                results.append({"index": i, "ok": False, "error": (
+                    f"this face is already enrolled as {who} "
+                    f"(similarity {dup['similarity']:.2f})"),
+                    "duplicate_of": other.id if other is not None else None})
+                continue
+            # Consent withdrawn or the person removed while this ran (each
+            # photo is half a second of adapter time): stop, and take back
+            # what this request added — forget already ran for them, and
+            # these would otherwise outlive it.
+            still = db.query(AttendancePerson.consent_at, AttendancePerson.deleted_at).filter(
+                AttendancePerson.id == pid).one()
+            release(db)
+            if still[0] is None or still[1] is not None:
+                if samples is not None:
+                    try:
+                        await attendance_faces.forget(uuid)
+                    except attendance_faces.FaceGalleryError:
+                        logger.warning("attendance: could not take back faces of person %s", pid)
+                raise HTTPException(status_code=409, detail=(
+                    "Consent was withdrawn or the person was removed during the enrolment; "
+                    "nothing from it was kept."))
+            samples = await attendance_faces.register(uuid, name, image)
+            results.append({"index": i, "ok": True})
+        except attendance_faces.FaceGalleryError as e:
+            if e.status in (502, 503):
+                # The service is down: the rest would fail the same way.
+                if not any(r["ok"] for r in results):
+                    raise HTTPException(status_code=e.status, detail=e.message) from None
+                results.append({"index": i, "ok": False, "error": e.message})
+                break
+            results.append({"index": i, "ok": False, "error": e.message})
+
+    enrolled = sum(1 for r in results if r["ok"])
+    if samples is not None:
+        db.query(AttendancePerson).filter(AttendancePerson.id == pid).update(
+            {AttendancePerson.face_samples: samples}, synchronize_session=False)
+        db.commit()
+    audit_request(db, request, action="attendance.face.enrol", user_id=user.id,
+                  entity_type="attendance_person", entity_id=pid,
+                  details={"sent": len(images), "enrolled": enrolled,
+                           "refused": len(results) - enrolled})
+    p = _person_or_404(db, pid)
+    return {"person": _person_out(p, _groups_of(db, [pid])[pid]),
+            "enrolled": enrolled, "results": results}
+
+
+@router.delete("/people/{person_id}/faces")
+async def forget_faces(person_id: int, request: Request,
+                       db: Session = Depends(get_db), user: User = Depends(_enroll)):
+    """Delete every face of the person and keep the person (to re-enrol
+    after a change of appearance, or because they asked)."""
+    p = _person_or_404(db, person_id)
+    had = p.face_samples or 0
+    if not had:
+        # Nothing on record here; ask the adapter anyway, in case a
+        # count was lost — forgetting must not depend on core's tally.
+        uuid = p.uuid
+        release(db)
+        try:
+            await attendance_faces.forget(uuid)
+        except attendance_faces.FaceGalleryError as e:
+            raise HTTPException(status_code=e.status, detail=e.message) from None
+    else:
+        await _forget_faces_or_raise(db, p)
+    audit_request(db, request, action="attendance.face.forget", user_id=user.id,
+                  entity_type="attendance_person", entity_id=person_id,
+                  details={"samples": had})
+    p = _person_or_404(db, person_id)
+    return _person_out(p, _groups_of(db, [p.id])[p.id])
 
 
 # ── Groups and members ───────────────────────────────────────────────
