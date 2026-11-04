@@ -171,6 +171,17 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`DETECT_FPS` defaults to 5** (was 2), Frigate's default and what the
+  tracker, the motion gate and the plate reader were tuned against: a
+  person is seen sooner, a fast subject keeps its track, plates get more
+  reads. The per-camera *Frames analysed per second* override is
+  unchanged, so a quiet indoor camera can still run at 2, and a CPU-only
+  box short of headroom can set `DETECT_FPS=2` system-wide as before. The
+  frame-counted dials keep their values and get shorter in seconds: the
+  motion calibration deadline (150 frames) is now ~30 s, the stationary
+  re-check (50 frames) ~10 s. The detector-latency check in the hardware
+  acceptance suite converts to cameras at the new rate.
+
 - **Keyframe-only main-stream evidence is now the default**
   (`DETECT_EVIDENCE_DECODE=nokey`; set `full` for the previous behaviour).
   Measured on the Ventuno Q with a CP Plus H.265 960x1080 main stream
