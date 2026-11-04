@@ -8,6 +8,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Evidence of the moment, fetched from the recording.** The nearest
+  decoded keyframe was a GOP older than its stamp (ffmpeg holds one frame
+  in its output path; with keyframes only, the next keyframe releases it),
+  so main-stream crops of a moving subject were of where it *was* and the
+  guard refused most of them. The pipeline now asks MediaMTX's playback
+  server for the main-stream frames around the detect frame's time once a
+  track's best crop improves, decodes that one clip, keeps the frame that
+  matches the detect crop, and gives it to the live track or to the visit
+  held for it (`DETECT_EVIDENCE_PLAYBACK`, `DETECT_EVIDENCE_HOLD_S`,
+  `DETECT_EVIDENCE_FETCH_MIN_INTERVAL_S`, `DETECT_EVIDENCE_FETCH_PARALLEL`;
+  core adds `playback_url` to the camera listing). Costs are metered per
+  camera (`tier0_evidence_fetch_total{outcome}`, fetch and decode seconds,
+  visits held). Keyframe evidence remains the synchronous fallback.
+
 - **The evidence crop-match guard, measured and tightened.** Refusals are
   split by reason (`tier0_evidence_refused_total{reason}`: `low_corr`, the
   main crop does not look like the detect crop; `flat_main`, the sub saw a

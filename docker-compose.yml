@@ -454,6 +454,10 @@ services:
       - DETECT_EVIDENCE_MATCH_MIN=${DETECT_EVIDENCE_MATCH_MIN:-0.5}
       - DETECT_SUB_MIN_HEIGHT=${DETECT_SUB_MIN_HEIGHT:-480}
       - DETECT_EVIDENCE_DEBUG_DIR=${DETECT_EVIDENCE_DEBUG_DIR:-}
+      - DETECT_EVIDENCE_PLAYBACK=${DETECT_EVIDENCE_PLAYBACK:-true}
+      - DETECT_EVIDENCE_HOLD_S=${DETECT_EVIDENCE_HOLD_S:-3.0}
+      - DETECT_EVIDENCE_FETCH_MIN_INTERVAL_S=${DETECT_EVIDENCE_FETCH_MIN_INTERVAL_S:-2.0}
+      - DETECT_EVIDENCE_FETCH_PARALLEL=${DETECT_EVIDENCE_FETCH_PARALLEL:-2}
       # Gate: shadow (default — measure only, no behavior change; the app's
       # Compute-gated panel shows would-save numbers) | off | enforce (act;
       # enable only after validating shadow data — see detect-pipeline/ENABLEMENT.md).

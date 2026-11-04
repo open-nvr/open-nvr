@@ -271,3 +271,21 @@ def test_a_camera_pinned_to_sub_keeps_it_even_with_hardware_decode(client, monke
     assert cams["cam1"]["source"] == "mediamtx"                     # ...for the auto camera
     assert cams["cam5"]["source"] == "mediamtx-sub"                 # ...not for the pinned one
     assert cams["cam5"]["detection"] == {"detect_stream": "sub"}
+
+
+# ── Playback URL beside the main tap (detect-pipeline playback.py) ──
+
+
+def test_sub_tap_cameras_get_a_playback_url_for_the_main_stream(client, monkeypatch):
+    monkeypatch.setattr(internal_router, "_playback_token_once", lambda: "tok")
+    monkeypatch.setattr(settings, "mediamtx_playback_url", "http://mediamtx:9996")
+    cams = _cams(client)
+    assert cams["cam1"]["playback_url"].startswith("http://mediamtx:9996/get?path=")
+    assert "jwt=tok" in cams["cam1"]["playback_url"]
+    assert cams["cam1"]["playback_url"].split("path=")[1].split("&")[0] == cams["cam1"]["evidence_url"].split("/")[-1].split("?")[0]
+    assert cams["cam3"]["playback_url"] is None, "no sub tap, detection already sees the main stream"
+
+
+def test_no_playback_token_means_no_playback_url(client, monkeypatch):
+    monkeypatch.setattr(internal_router, "_playback_token_once", lambda: None)
+    assert _cams(client)["cam1"]["playback_url"] is None

@@ -260,7 +260,33 @@ scores only at large gaps) reads differently from one whose streams
 disagree. `DETECT_EVIDENCE_DEBUG_DIR` dumps every attempt's crops and
 numbers for `tools/evidence_guard_report.py`, which prints the outcome
 split, the score and gap distributions, what each floor would refuse, and
-a contact sheet of the pairs. (For comparison: Frigate
+a contact sheet of the pairs.
+
+**Evidence of the moment, from the recording.** A keyframe-only decode
+hands over each keyframe about one GOP late (measured on the Ventuno Q:
+ffmpeg holds a frame in its output path and, with keyframes only, the
+next keyframe is what pushes it out), so the nearest decoded keyframe is of
+where a moving subject *was*, and the guard refused it 52 times out of 98
+on a walking person. The recorder has the right frame: MediaMTX's playback
+server serves a range ending about a second before now, as a decodable
+clip that starts at a keyframe and ends exactly at the requested time. So
+with `DETECT_EVIDENCE_PLAYBACK=true` (the default, when core offers a
+`playback_url` beside the main tap) the tracker *asks* for evidence: when
+a track's best crop improves it files a request with the detect frame's
+time, box and crop; a thread per camera (`playback.py`) waits until the
+recorder can serve that moment, fetches the clip around it, decodes it
+once (at most a GOP, ~0.3 core-seconds on a Qualcomm box), scores the
+frames nearest the moment with the same guard, and hands back the best.
+A live track takes the crop (`tier0_evidence_crops_total{source="playback"}`);
+a visit whose track has already ended is held up to
+`DETECT_EVIDENCE_HOLD_S` (3 s) for it and posted with the crop patched
+in. Per camera one fetch at a time and at least
+`DETECT_EVIDENCE_FETCH_MIN_INTERVAL_S` apart (a newer best moment replaces
+a queued one); per box `DETECT_EVIDENCE_FETCH_PARALLEL` decodes at once; a
+request the budget cannot serve is dropped and the detect crop stands.
+`tier0_evidence_fetch_total{outcome}`, `tier0_evidence_fetch_seconds_total`,
+`tier0_evidence_decode_seconds_total` and `tier0_evidence_visits_held` say
+what it costs. The keyframe source stays as the synchronous fallback. (For comparison: Frigate
 takes snapshots from the detect stream and never decodes the record
 stream; ZoneMinder offers the same keyframes-only decoding as its
 CPU-saving mode.) Core

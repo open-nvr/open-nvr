@@ -353,7 +353,7 @@ def record_evidence(camera_id: str, active: bool, stats: dict, *,
     camera is still on keyframes (0 = full decode, by dial or because the
     GOP was too long)."""
     metrics.gauge("tier0_evidence_active", 1.0 if active else 0.0, {"camera": camera_id})
-    for source in ("main", "detect"):
+    for source in ("main", "detect", "playback"):
         metrics.gauge("tier0_evidence_crops_total", float(stats.get(source, 0)),
                       {"camera": camera_id, "source": source})
     metrics.gauge("tier0_evidence_mismatch_total", float(mismatches), {"camera": camera_id})
@@ -380,6 +380,20 @@ def record_evidence(camera_id: str, active: bool, stats: dict, *,
                             {"camera": camera_id}, buckets=SCORE_BUCKETS)
         if skew is not None:
             metrics.observe("tier0_evidence_skew_seconds", float(skew), {"camera": camera_id})
+
+
+def record_playback_evidence(camera_id: str, pb, held: int = 0) -> None:
+    """Evidence fetched from the recording (playback.py): requests filed,
+    outcomes, what the fetches and decodes cost, and visits currently held
+    for a pending result."""
+    cam = {"camera": camera_id}
+    metrics.gauge("tier0_evidence_fetch_requests_total", float(pb.requests), cam)
+    metrics.gauge("tier0_evidence_fetch_dropped_total", float(pb.dropped), cam)
+    for outcome, n in pb.outcomes.items():
+        metrics.gauge("tier0_evidence_fetch_total", float(n), {"camera": camera_id, "outcome": outcome})
+    metrics.gauge("tier0_evidence_fetch_seconds_total", float(pb.fetch_seconds), cam)
+    metrics.gauge("tier0_evidence_decode_seconds_total", float(pb.decode_seconds), cam)
+    metrics.gauge("tier0_evidence_visits_held", float(held), cam)
 
 
 #: Why a camera detects on its MAIN stream, as the value of

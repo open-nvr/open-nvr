@@ -188,6 +188,9 @@ class Track:
     # source configured, the pre-feature behaviour.
     best_crop_source: str | None = field(default=None, compare=False)
     best_crop_skew_s: float | None = field(default=None, compare=False)
+    # The detect-frame stamp the latest evidence REQUEST (playback.py) was
+    # filed for; a result for an older moment is ignored.
+    best_crop_req_mono: float | None = field(default=None, compare=False)
 
     @property
     def stationary(self) -> bool:
@@ -352,6 +355,10 @@ class Tracker:
         # How many best-crop updates were cut from which stream, for the
         # worker's metrics. "main" / "detect" keys, monotonic.
         self.evidence_stats: dict[str, int] = {"main": 0, "detect": 0}
+        # Evidence from the recording (playback.py): a callable that takes
+        # an EvidenceRequest when a track's best crop improves. The result
+        # comes back later through apply_evidence_result(). None = off.
+        self.evidence_request = None
         # The main crop is only used when it LOOKS like the detect crop
         # (crop_similarity). The two streams are the same sensor, so a
         # correct pairing scores near 1; a keyframe old enough for the
@@ -564,7 +571,10 @@ class Tracker:
                 if crop is not None:
                     tr.best_crop = crop
                     tr.best_crop_ts = self._clock()
-                    if self.evidence is not None:
+                    # Labelled whenever any evidence path is on: a fresh detect
+                    # crop must not keep a "playback" label from the result it
+                    # just replaced.
+                    if self.evidence is not None or self.evidence_request is not None:
                         tr.best_crop_source = source
                         tr.best_crop_skew_s = (
                             self._ev_skew if source == "main" else None)
@@ -577,7 +587,46 @@ class Tracker:
                     scene = self._scene_jpeg_for(frame_bgr)
                     if scene is not None:
                         tr.best_scene_jpeg = scene
+                    self._request_evidence(tr, det, bgr)
         self._update_plate_candidates(tr, det, bgr)
+
+    def _request_evidence(self, tr: Track, det: Detection, bgr) -> None:
+        """File a request for the recording's frame of this moment (playback.py)."""
+        if self.evidence_request is None or self._ev_ts is None:
+            return
+        try:
+            from .playback import EvidenceRequest
+            sub_crop = _crop_bgr(bgr, det.box, margin=0.0)
+            if sub_crop is None:
+                return
+            tr.best_crop_req_mono = float(self._ev_ts)
+            self.evidence_request(EvidenceRequest(
+                track_id=tr.id, mono_ts=float(self._ev_ts), box=det.box,
+                frame_shape=tuple(bgr.shape[:2]), sub_crop=sub_crop, label=det.label))
+        except Exception:
+            pass                                          # evidence is an enhancement
+
+    def apply_evidence_result(self, res) -> bool:
+        """A playback result for a LIVE track: its full-resolution crop (and
+        scene) replace the best crop when the result is for the latest
+        requested moment and was accepted. Returns whether a track took it."""
+        tr = next((t for t in self._tracks if t.id == res.track_id), None)
+        if tr is None:
+            return False
+        if res.outcome != "accepted" or tr.best_crop_req_mono != res.request.mono_ts:
+            return True                                   # the track is live; nothing to change
+        tr.best_crop = res.crop
+        tr.best_crop_source = "playback"
+        tr.best_crop_skew_s = res.skew_s
+        tr.best_crop_ts = self._clock()
+        self.evidence_stats["playback"] = self.evidence_stats.get("playback", 0) + 1
+        if self.retain_scene and res.frame is not None:
+            try:
+                from .bestframe import encode_scene_jpeg
+                tr.best_scene_jpeg = encode_scene_jpeg(res.frame)
+            except Exception:
+                pass
+        return True
 
     def _crop_for(self, bgr, box: Box):
         """``(crop, source, frame)``: the crop of ``box`` with the context
