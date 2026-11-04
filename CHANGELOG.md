@@ -185,6 +185,12 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`DETECT_EVIDENCE_HOLD_S` defaults to 6 s** (was 3). A result from the
+  recording takes the freshness wait, its turn behind the fetch interval
+  and the decode, about 4 s at worst; with a 3 s hold four crops in one
+  walk-through arrived after their visit had gone. Holds that run out are
+  now counted (`tier0_evidence_visits_hold_expired_total`).
+
 - **Evidence from the recording asks for the right moment.** A detect
   frame's stamp is later than the recorder's clock for the same picture by
   the sub stream's own path (measured: median 0.56 s on a CP Plus through
