@@ -29,6 +29,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
@@ -896,6 +897,50 @@ def _session_or_404(db: Session, session_id: int) -> AttendanceSession:
     if s is None:
         raise HTTPException(status_code=404, detail="Session not found")
     return s
+
+
+#: Longest range one report covers: a school year, with room to spare.
+MAX_REPORT_DAYS = 400
+
+
+@router.get("/report")
+async def report(
+    request: Request,
+    group_id: int,
+    date_from: date = Query(..., alias="from"),
+    date_to: date = Query(..., alias="to"),
+    fmt: str = Query("json", alias="format", pattern="^(json|csv|xlsx)$"),
+    db: Session = Depends(get_db),
+    user: User = Depends(_view),
+):
+    """Person × session for one group over a date range (the group's
+    local dates): JSON for the page and for partner systems with an
+    ``attendance.view`` API token, CSV and XLSX to download. Every export
+    is audited, because it is a list of named people and where they were."""
+    from services import attendance_report
+
+    g = _group_or_404(db, group_id)
+    if date_to < date_from:
+        raise HTTPException(status_code=422, detail="'to' is before 'from'")
+    if (date_to - date_from).days > MAX_REPORT_DAYS:
+        raise HTTPException(status_code=422, detail=f"A report covers at most {MAX_REPORT_DAYS} days")
+    body = attendance_report.build(db, g, date_from, date_to)
+    audit_request(db, request, action="attendance.report", user_id=getattr(user, "id", None),
+                  entity_type="attendance_group", entity_id=g.id,
+                  details={"from": body["from"], "to": body["to"], "format": fmt,
+                           "people": len(body["people"]), "sessions": len(body["sessions"])})
+    if fmt == "json":
+        return body
+    stem = re.sub(r"[^A-Za-z0-9_-]+", "-", g.code or g.name).strip("-") or f"group-{g.id}"
+    name = f"attendance-{stem}-{body['from']}-to-{body['to']}"
+    if fmt == "csv":
+        return Response(content=attendance_report.to_csv(body).encode("utf-8-sig"),
+                        media_type="text/csv; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="{name}.csv"'})
+    return Response(
+        content=attendance_report.to_xlsx(body),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{name}.xlsx"'})
 
 
 @router.get("/sessions")

@@ -48,6 +48,7 @@ const SCOPES = [
   'cameras.view', 'live.view', 'recordings.view', 'alerts.view', 'settings.view',
   'alerts.manage', 'ptz.control', 'cameras.manage', 'events.create', 'apps.view',
   'apps.actions', 'recordings.pause', 'settings.manage', 'system.update',
+  'attendance.view',
 ] as const
 
 // What a Home Assistant install needs for cameras, sensors and notifications.
