@@ -100,6 +100,16 @@ def client(monkeypatch):
         id=3, name="Plain", ip_address="10.0.0.3", owner_id=1, is_active=True,
         rtsp_url="rtsp://u:p@10.0.0.3:554/opaque/onvif/path",
     ))
+    session.add(Camera(                      # stored sub, but the camera is pinned to MAIN
+        id=4, name="PinnedMain", ip_address="10.0.0.4", owner_id=1, is_active=True,
+        rtsp_url="rtsp://u:p@10.0.0.4:554/main", substream_url="rtsp://u:p@10.0.0.4:554/sub",
+        detection_settings={"detect_stream": "main"},
+    ))
+    session.add(Camera(                      # stored sub, pinned to SUB
+        id=5, name="PinnedSub", ip_address="10.0.0.5", owner_id=1, is_active=True,
+        rtsp_url="rtsp://u:p@10.0.0.5:554/main", substream_url="rtsp://u:p@10.0.0.5:554/sub",
+        detection_settings={"detect_stream": "sub"},
+    ))
     session.commit()
     session.close()
 
@@ -242,3 +252,22 @@ def test_forced_tap_modes_still_override_the_report(client, monkeypatch):
 def test_reported_capability_is_case_and_space_tolerant(client, monkeypatch):
     monkeypatch.setattr(settings, "detect_hwaccel", "vaapi")
     assert _cams_hw(client, " CPU ")["cam1"]["source"] == "mediamtx-sub"
+
+
+# ── Per-camera policy (detection settings → detect_stream) ─────────
+
+
+def test_a_camera_pinned_to_main_gets_the_main_tap_whatever_the_service_policy(client, monkeypatch):
+    monkeypatch.setattr(settings, "inference_tap_stream", "sub")
+    cams = _cams(client)
+    assert cams["cam1"]["source"] == "mediamtx-sub"
+    assert cams["cam4"]["source"] == "mediamtx" and not cams["cam4"]["frame_url"].endswith("-sub")
+    assert cams["cam4"]["detection"] == {"detect_stream": "main"}, "the policy also rides to the pipeline"
+
+
+def test_a_camera_pinned_to_sub_keeps_it_even_with_hardware_decode(client, monkeypatch):
+    monkeypatch.setattr(settings, "detect_hwaccel", "vaapi")      # 'auto' picks main here...
+    cams = _cams(client)
+    assert cams["cam1"]["source"] == "mediamtx"                     # ...for the auto camera
+    assert cams["cam5"]["source"] == "mediamtx-sub"                 # ...not for the pinned one
+    assert cams["cam5"]["detection"] == {"detect_stream": "sub"}

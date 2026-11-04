@@ -8,6 +8,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Per-camera detect stream, with a floor on the sub stream.** Detection
+  settings gain *Detect on*: `auto` (default), `sub` or `main`. `main`
+  detects on the full-resolution stream, with full-resolution evidence
+  from the same frame, at full decode cost — the per-camera switch that
+  lets the two approaches be compared on one scene and the instant
+  fallback when sub-stream detection is not enough. On `auto` a sub stream
+  shorter than `DETECT_SUB_MIN_HEIGHT` (480 px; a 352x288 "D1" sub shows a
+  person at 10 m as ~15 px, below what the detector resolves) makes the
+  camera detect on its main stream instead; `sub` pins the sub regardless.
+  The pipeline reports which stream it detects on and why
+  (`tier0_detect_on_main{camera}`), the AI Adapters page shows it, and the
+  camera acceptance suite applies the same floor.
+
 - **`opennvr_app_sdk.workflows.validate`: the whole workflow file,
   `workflow: v1`.** The check the engine, the builder and outside tools
   share (RFC #620): the trigger, the guards, every step and path, with

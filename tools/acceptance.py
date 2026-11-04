@@ -87,8 +87,10 @@ GATE_FLOOR_WARN, GATE_FLOOR_FAIL = 0.05, 0.25
 #: trigger is a fixed-place OSD (clock, title), which a motion mask removes.
 OSD_CELL_SHARE = 0.8
 #: The sub stream must be at least this tall for the detector to see a
-#: person at mid-distance, and run at least DETECT_FPS.
-SUB_MIN_HEIGHT = 288
+#: person at mid-distance (a 352x288 sub shows one at 10 m as ~15 px),
+#: and run at least DETECT_FPS. The same floor the pipeline applies
+#: (DETECT_SUB_MIN_HEIGHT): below it an 'auto' camera detects on the main.
+SUB_MIN_HEIGHT = 480
 #: Main-stream evidence crops the pipeline refused because they did not
 #: match the detect crop (tier0_evidence_mismatch_total over crops used + refused).
 EVIDENCE_MISMATCH_WARN, EVIDENCE_MISMATCH_FAIL = 0.10, 0.30

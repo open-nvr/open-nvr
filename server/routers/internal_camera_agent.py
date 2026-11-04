@@ -1077,6 +1077,14 @@ def list_camera_agent_sources(
             # not, so a guess never steers the detector.
             has_sub = bool((cam.substream_url or "").strip())
             mode = (settings.inference_tap_stream or "auto").strip().lower()
+            # The camera's own choice (detection settings → detect_stream)
+            # wins over the service-wide policy: 'main' hands the main tap
+            # (full-res detection and evidence on one stream), 'sub' pins the
+            # sub tap. 'auto' leaves the decision here, plus the pipeline's
+            # own floor on the sub stream's height.
+            per_cam = (normalize_detection(cam.detection_settings) or {}).get("detect_stream")
+            if per_cam in ("sub", "main"):
+                mode = per_cam
             if mode == "main":
                 use_sub = False
             elif mode == "sub":
