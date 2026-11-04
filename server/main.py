@@ -65,6 +65,7 @@ from routers import (
     entities as entities_router,
     search as search_router,
     apps,
+    attendance as attendance_router,
     audit_logs,
     auth,
     camera_config,
@@ -1128,6 +1129,7 @@ app.include_router(security.router, prefix=settings.api_prefix)
 app.include_router(webrtc.router, prefix=settings.api_prefix)
 app.include_router(window_settings.router, prefix=settings.api_prefix)
 app.include_router(tours.router, prefix=settings.api_prefix)
+app.include_router(attendance_router.router, prefix=settings.api_prefix)
 app.include_router(system_update.router, prefix=settings.api_prefix)
 app.include_router(device_firewall.router, prefix=settings.api_prefix)
 app.include_router(media_source.router, prefix=settings.api_prefix)

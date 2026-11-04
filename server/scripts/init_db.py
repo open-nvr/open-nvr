@@ -27,11 +27,7 @@ from core.auth import get_password_hash
 from core.config import settings
 from core.database import SessionLocal, init_db
 from models import Permission, Role, RolePermission, User
-from services.permission_catalog import (
-    NEW_PERMISSIONS_HA,
-    NEW_PERMISSIONS_UPDATE,
-    NEW_PERMISSIONS_WORKFLOWS,
-)
+from services.permission_catalog import UPGRADE_PATH_PERMISSIONS
 
 
 def create_initial_data():
@@ -188,11 +184,14 @@ def create_initial_data():
         )
         p_byom_manage = get_or_create_perm("byom.manage", "Manage custom AI models")
 
-        # Added for the Home Assistant integration / API tokens (HA-004). The
-        # descriptions are also the upgrade-path seed (main.py). Grant rules
-        # preserve behaviour: nobody gains or loses an ability on upgrade.
-        # OpenNVR updates (UPD-301): admins only, like every new ability.
-        for _perm in (*NEW_PERMISSIONS_HA, *NEW_PERMISSIONS_UPDATE, *NEW_PERMISSIONS_WORKFLOWS):
+        # Every permission added after the initial seed (Home Assistant /
+        # API tokens, OpenNVR updates, attendance, …): the SAME list main.py
+        # seeds on upgrade, so a fresh install can never miss one the
+        # upgrade path has. It once named two of its groups by hand and the
+        # next group added would have reached upgraded sites only. Grant
+        # rules preserve behaviour: nobody gains or loses an ability on
+        # upgrade; new abilities reach admins only (they get every row).
+        for _perm in UPGRADE_PATH_PERMISSIONS:
             get_or_create_perm(_perm.name, _perm.description)
 
         # Helper to set role permissions (replace)

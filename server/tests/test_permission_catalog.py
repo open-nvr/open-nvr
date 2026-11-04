@@ -35,6 +35,7 @@ os.environ.setdefault("CREDENTIAL_ENCRYPTION_KEY", Fernet.generate_key().decode(
 from core.database import Base  # noqa: E402
 from models import Permission, Role, RolePermission  # noqa: E402
 from services.permission_catalog import (  # noqa: E402
+    NEW_PERMISSIONS_ATTENDANCE,
     NEW_PERMISSIONS_HA,
     NEW_PERMISSIONS_WORKFLOWS,
     seed_new_permissions,
@@ -42,6 +43,7 @@ from services.permission_catalog import (  # noqa: E402
 
 HA_NAMES = {p.name for p in NEW_PERMISSIONS_HA}
 WORKFLOW_NAMES = {p.name for p in NEW_PERMISSIONS_WORKFLOWS}
+ATTENDANCE_NAMES = {p.name for p in NEW_PERMISSIONS_ATTENDANCE}
 
 
 @pytest.fixture
@@ -116,8 +118,10 @@ def test_upgrade_grants_ptz_to_exactly_the_live_view_roles(db):
     created = seed_new_permissions(db)
 
     # UPD-301 adds system.update on the same upgrade path, for admins only;
-    # the workflow permissions have their own test below.
-    assert {name for name, _g, _s in created} == HA_NAMES | {"system.update"} | WORKFLOW_NAMES
+    # attendance adds its three, none backfilled; the workflow permissions
+    # have their own test below.
+    assert {name for name, _g, _s in created} == (
+        HA_NAMES | {"system.update"} | WORKFLOW_NAMES | ATTENDANCE_NAMES)
     assert dict((n, g) for n, g, _s in created)["ptz.control"] == 2
 
     assert "ptz.control" in _perms_of(db, roles["operator"])
@@ -128,7 +132,8 @@ def test_upgrade_grants_ptz_to_exactly_the_live_view_roles(db):
 
     # No role gains any of the other new abilities.
     for role in roles.values():
-        assert not (_perms_of(db, role) & (HA_NAMES - {"ptz.control"} | {"system.update"}))
+        assert not (_perms_of(db, role)
+                    & (HA_NAMES - {"ptz.control"} | {"system.update"} | ATTENDANCE_NAMES))
 
 
 def test_upgrade_grants_workflows_to_the_rfc_s_roles(db):

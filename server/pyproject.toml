@@ -46,6 +46,9 @@ dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
     "pytest-cov>=4.1.0",
+    # IANA zone data for zoneinfo where the OS has none (Windows). The
+    # image has /usr/share/zoneinfo; attendance timetables need it in tests.
+    "tzdata>=2024.1",
 ]
 
 [build-system]
