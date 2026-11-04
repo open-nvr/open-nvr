@@ -234,6 +234,12 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A recording crop that landed between two frames no longer misses its
+  visit.** The playback thread could serve a result just before the track
+  ended; the visit saw nothing pending, was posted as it was, and the crop
+  was counted late. A served, uncollected result now keeps the track
+  pending, so the visit is held and patched on the next drain.
+
 - **"Sign in with <provider>" no longer lands on a 404.** The app's
   service worker answered every page visit with the app itself, so
   `/api/v1/auth/oidc/start` (and the provider's return to `/callback`) never
