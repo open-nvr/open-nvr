@@ -949,6 +949,29 @@ async def get_detect_config(
     return {"gate_mode": mode if mode in _VALID_GATE_MODES else None}
 
 
+_PLAYBACK_TOKEN_TTL_MIN = 60
+
+
+def _playback_token_once(_cache: dict = {}) -> str | None:
+    """A playback token for the listing, minted at most once a minute: the
+    pipeline re-reads the listing every reconcile tick, so a fresh one is
+    always on its way before the previous expires."""
+    import time as _time
+
+    now = _time.monotonic()
+    if _cache.get("token") and now < _cache.get("until", 0.0):
+        return _cache["token"]
+    try:
+        from services.mediamtx_jwt_service import MediaMtxJwtService
+
+        token = MediaMtxJwtService.create_admin_token(expiry_minutes=_PLAYBACK_TOKEN_TTL_MIN)
+    except Exception as exc:
+        logger.debug("could not mint a playback token for the listing: %s", exc)
+        return None
+    _cache["token"], _cache["until"] = token, now + 60.0
+    return token
+
+
 def _mint_mediamtx_jwt(camera_path: str = "~.*",
                        username: str = "camera-agent-internal") -> str | None:
     """Mint a short-lived MediaMTX JWT with wildcard read scope.
@@ -1043,6 +1066,7 @@ def list_camera_agent_sources(
     out: list[dict[str, object]] = []
     for cam in cameras:
         evidence_url: str | None = None
+        playback_url: str | None = None
         stream_name = _build_stream_name(
             settings.mediamtx_stream_prefix,
             int(cam.id),
@@ -1077,6 +1101,14 @@ def list_camera_agent_sources(
             # not, so a guess never steers the detector.
             has_sub = bool((cam.substream_url or "").strip())
             mode = (settings.inference_tap_stream or "auto").strip().lower()
+            # The camera's own choice (detection settings → detect_stream)
+            # wins over the service-wide policy: 'main' hands the main tap
+            # (full-res detection and evidence on one stream), 'sub' pins the
+            # sub tap. 'auto' leaves the decision here, plus the pipeline's
+            # own floor on the sub stream's height.
+            per_cam = (normalize_detection(cam.detection_settings) or {}).get("detect_stream")
+            if per_cam in ("sub", "main"):
+                mode = per_cam
             if mode == "main":
                 use_sub = False
             elif mode == "sub":
@@ -1121,6 +1153,16 @@ def list_camera_agent_sources(
                 )
                 if main_token:
                     evidence_url = f"{evidence_url}?jwt={urlquote(main_token, safe='.')}"
+                # The recorder's playback endpoint for the same main stream:
+                # the detect-pipeline fetches the frame of the MOMENT a
+                # track's best crop was seen (playback.py), instead of the
+                # nearest decoded keyframe. One admin playback token per
+                # listing (the playback server authorises on it, as core's
+                # own playback fetches do).
+                playback_token = _playback_token_once()
+                if settings.mediamtx_playback_url and playback_token:
+                    playback_url = (f"{settings.mediamtx_playback_url.rstrip('/')}/get"
+                                    f"?path={stream_name}&jwt={urlquote(playback_token, safe='.')}")
         elif is_app:
             # No tap: the camera's own RTSP URL is all there is, and it
             # embeds the camera's credentials. Never hand that to an app —
@@ -1155,6 +1197,9 @@ def list_camera_agent_sources(
                 # above); None otherwise. The detect-pipeline's evidence
                 # source reads it; everything else may ignore it.
                 "evidence_url": evidence_url,
+                # MediaMTX playback for the main stream, beside evidence_url
+                # (None without a sub tap or a playback server).
+                "playback_url": playback_url,
                 # Per-camera capability assignment. [] = nothing
                 # assigned: the camera is eligible for any skill's picker
                 # but adopted by none, so no app inference runs on it.

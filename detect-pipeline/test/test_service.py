@@ -1051,3 +1051,77 @@ def test_scene_knobs_are_clamped_not_merely_parsed(monkeypatch):
     monkeypatch.setenv("DETECT_SCENE_JPEG_QUALITY", "1")
     tk = _tracker_from_a_worker_run(monkeypatch)
     assert (tk.scene_max_px, tk.scene_quality) == (320, 40)
+
+
+# ── detect stream: the sub-stream floor and the per-camera policy ──────
+
+def _probe_for(answers):
+    def probe(url, **_kw):
+        for key, dims in answers.items():
+            if key in url:
+                return dims
+        return None
+    return probe
+
+
+def test_a_sub_stream_under_the_floor_moves_detection_to_the_main_stream(monkeypatch):
+    """A 352x288 sub shows a person at 10 m as ~15 px: on 'auto' the worker
+    detects on the main stream instead, says why in the metric, and runs no
+    separate evidence source (detect and evidence are then one stream)."""
+    import detect_pipeline.service as svc
+    from detect_pipeline.metrics import metrics
+    monkeypatch.setattr(svc, "probe_stream", _probe_for({"-sub": (352, 288, 7.0), "/cam-small?": (1920, 1080, 15.0)}))
+    spec = CameraSpec("cam-small", "small", "rtsp://m/cam-small-sub?jwt=a",
+                      evidence_url="rtsp://m/cam-small?jwt=b")
+    w = CameraWorker(spec, _FakeSink(), sub_min_height=480)
+    src, width, height = w._make_source()
+    assert (width, height) == (1920, 1080) and w._detect_on_main
+    assert metrics.value("tier0_detect_on_main", {"camera": "cam-small"}) == 4.0   # sub_too_small
+    assert w._make_evidence(352, 288) is None, "detect and evidence are one stream now: no evidence source"
+
+
+def test_a_tall_enough_sub_stream_stays_and_a_pinned_sub_is_never_moved(monkeypatch):
+    import detect_pipeline.service as svc
+    from detect_pipeline.metrics import metrics
+    from detect_pipeline.tuning import parse_tuning
+    monkeypatch.setattr(svc, "probe_stream", _probe_for({"-sub": (704, 576, 10.0), "/cam-ok?": (1920, 1080, 15.0)}))
+    spec = CameraSpec("cam-ok", "ok", "rtsp://m/cam-ok-sub?jwt=a", evidence_url="rtsp://m/cam-ok?jwt=b")
+    _, _, height = CameraWorker(spec, _FakeSink(), sub_min_height=480)._make_source()
+    assert height == 576 and metrics.value("tier0_detect_on_main", {"camera": "cam-ok"}) == 0.0
+    monkeypatch.setattr(svc, "probe_stream", _probe_for({"-sub": (352, 288, 7.0), "/cam-pin?": (1920, 1080, 15.0)}))
+    pinned = CameraSpec("cam-pin", "pin", "rtsp://m/cam-pin-sub?jwt=a", evidence_url="rtsp://m/cam-pin?jwt=b",
+                        tuning=parse_tuning({"detect_stream": "sub"}))
+    _, _, height = CameraWorker(pinned, _FakeSink(), sub_min_height=480)._make_source()
+    assert height == 288, "the operator pinned the sub: the floor does not move it"
+
+
+def test_the_main_policy_detects_on_the_main_even_if_core_still_hands_the_sub(monkeypatch):
+    import detect_pipeline.service as svc
+    from detect_pipeline.metrics import metrics
+    from detect_pipeline.tuning import parse_tuning
+    monkeypatch.setattr(svc, "probe_stream", _probe_for({"-sub": (704, 576, 10.0), "/cam-main?": (1920, 1080, 15.0)}))
+    spec = CameraSpec("cam-main", "main", "rtsp://m/cam-main-sub?jwt=a", evidence_url="rtsp://m/cam-main?jwt=b",
+                      tuning=parse_tuning({"detect_stream": "main"}))
+    _, _, height = CameraWorker(spec, _FakeSink(), sub_min_height=480)._make_source()
+    assert height == 1080 and metrics.value("tier0_detect_on_main", {"camera": "cam-main"}) == 1.0   # policy
+
+
+def test_manager_keeps_the_freshest_playback_url_per_camera_like_the_tap_urls():
+    """The playback URL carries a rotating token like the tap URLs, so the
+    manager hands workers a provider that reads the latest listing. The map
+    was declared but never filled on the first deploy: every fetch failed
+    with no_playback_url while the listing carried the URL."""
+    spec = CameraSpec("a", "a", "rtsp://m/a-sub?jwt=1", evidence_url="rtsp://m/a?jwt=1",
+                      playback_url="http://mediamtx:9996/get?path=a&jwt=1")
+    prov = _FakeProvider([spec])
+    mgr = WorkerManager(prov, _FakeSink(), worker_factory=_FakeWorker)
+    mgr.reconcile()
+    assert mgr.current_playback_url("a") == "http://mediamtx:9996/get?path=a&jwt=1"
+    assert mgr.current_evidence_url("a") == "rtsp://m/a?jwt=1"
+    prov.specs = [CameraSpec("a", "a", "rtsp://m/a-sub?jwt=2", evidence_url="rtsp://m/a?jwt=2",
+                             playback_url="http://mediamtx:9996/get?path=a&jwt=2")]
+    mgr.reconcile()
+    assert mgr.current_playback_url("a").endswith("jwt=2"), "rotated token reaches the provider"
+    prov.specs = []
+    mgr.reconcile()
+    assert mgr.current_playback_url("a") is None

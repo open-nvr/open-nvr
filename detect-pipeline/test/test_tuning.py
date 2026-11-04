@@ -129,3 +129,12 @@ def test_a_changed_record_is_a_restart_but_a_new_token_is_not():
     assert WorkerManager._baked(a) == WorkerManager._baked(same)
     assert WorkerManager._baked(a) != WorkerManager._baked(changed)
     assert WorkerManager._baked(a) != WorkerManager._baked(CameraSpec("cam9", "n", "rtsp://m/cam-9?jwt=b"))
+
+
+def test_detect_stream_policy_is_parsed_and_described():
+    from detect_pipeline.tuning import parse_tuning
+    assert parse_tuning({"detect_stream": "main"}).detect_stream == "main"
+    assert parse_tuning({"detect_stream": "sub"}).detect_stream == "sub"
+    assert parse_tuning({"detect_stream": "bogus"}).detect_stream is None
+    assert parse_tuning({}).detect_stream is None and parse_tuning({}).is_default
+    assert "detect_stream=main" in parse_tuning({"detect_stream": "main"}).describe()

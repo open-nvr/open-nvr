@@ -40,6 +40,8 @@ from collections import defaultdict
 log = logging.getLogger("detect_pipeline.metrics")
 
 _BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0)
+#: For scores in [0, 1] (the evidence match score): tenths.
+SCORE_BUCKETS = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
 
 
 def _escape(v: str) -> str:
@@ -79,16 +81,19 @@ class Metrics:
         with self._lock:
             self._gauges[self._key(name, labels)] = value
 
-    def observe(self, name: str, value: float, labels: dict | None = None) -> None:
+    def observe(self, name: str, value: float, labels: dict | None = None,
+                buckets: tuple = _BUCKETS) -> None:
+        """``buckets`` fixes a histogram's bucket set on its first observe
+        (seconds by default; SCORE_BUCKETS for a [0, 1] score)."""
         k = self._key(name, labels)
         with self._lock:
             h = self._hist.get(k)
             if h is None:
-                h = {"buckets": {b: 0.0 for b in _BUCKETS}, "sum": 0.0, "count": 0.0}
+                h = {"buckets": {b: 0.0 for b in buckets}, "sum": 0.0, "count": 0.0}
                 self._hist[k] = h
             h["sum"] += value
             h["count"] += 1.0
-            for b in _BUCKETS:                    # cumulative le-buckets
+            for b in h["buckets"]:                # cumulative le-buckets
                 if value <= b:
                     h["buckets"][b] += 1.0
 
@@ -171,7 +176,7 @@ class Metrics:
         for (name, labels), h in hists:
             typ(name, "histogram")
             base = dict(labels)
-            for b in _BUCKETS:
+            for b in sorted(h["buckets"]):
                 bl = dict(base, le=str(b))
                 lines.append(f"{name}_bucket{_labels_str(bl)} {_fmt(h['buckets'][b])}")
             lines.append(f"{name}_bucket{_labels_str(dict(base, le='+Inf'))} {_fmt(h['count'])}")
@@ -332,7 +337,9 @@ def sample_frame_age_metrics(now: float | None = None) -> None:
 def record_evidence(camera_id: str, active: bool, stats: dict, *,
                     frames: int = 0, starts: int = 0, mismatches: int = 0,
                     gop_s: float | None = None,
-                    keyframes_only: bool | None = None) -> None:
+                    keyframes_only: bool | None = None,
+                    refusals: dict | None = None,
+                    samples: list | None = None) -> None:
     """Main-stream evidence (evidence.py): whether the camera's main decode
     is running right now, how many best-crop updates were cut from which
     stream, and how many main frames it has read. The split by source is
@@ -346,7 +353,7 @@ def record_evidence(camera_id: str, active: bool, stats: dict, *,
     camera is still on keyframes (0 = full decode, by dial or because the
     GOP was too long)."""
     metrics.gauge("tier0_evidence_active", 1.0 if active else 0.0, {"camera": camera_id})
-    for source in ("main", "detect"):
+    for source in ("main", "detect", "playback"):
         metrics.gauge("tier0_evidence_crops_total", float(stats.get(source, 0)),
                       {"camera": camera_id, "source": source})
     metrics.gauge("tier0_evidence_mismatch_total", float(mismatches), {"camera": camera_id})
@@ -357,6 +364,59 @@ def record_evidence(camera_id: str, active: bool, stats: dict, *,
     if keyframes_only is not None:
         metrics.gauge("tier0_evidence_keyframes_only", 1.0 if keyframes_only else 0.0,
                       {"camera": camera_id})
+    # The guard, measured: refusals by reason (a crop that did not look
+    # like the detect crop vs a blank main crop where the sub saw a
+    # subject), the score of every attempt (tenths) and how far in time the
+    # main frame used was from the detect frame. Together they say whether
+    # a camera's refusals are timing (skew high, score low on moving
+    # subjects) or geometry/exposure (score low at any skew).
+    for reason, n in (refusals or {}).items():
+        metrics.gauge("tier0_evidence_refused_total", float(n),
+                      {"camera": camera_id, "reason": reason})
+    for sample in samples or ():
+        score, skew = sample[0], sample[1]
+        # A 7th element names the path ("keyframe" — the synchronous ring —
+        # or "playback", the recording); older samples are the keyframe path.
+        source = sample[6] if len(sample) > 6 else "keyframe"
+        labels = {"camera": camera_id, "source": source}
+        if score is not None:
+            metrics.observe("tier0_evidence_match_score", max(0.0, min(1.0, float(score))),
+                            labels, buckets=SCORE_BUCKETS)
+        if skew is not None:
+            metrics.observe("tier0_evidence_skew_seconds", float(skew), labels)
+
+
+def record_playback_evidence(camera_id: str, pb, held: int = 0, patched: int = 0, late: int = 0) -> None:
+    """Evidence fetched from the recording (playback.py): requests filed,
+    outcomes, what the fetches and decodes cost, and visits currently held
+    for a pending result."""
+    cam = {"camera": camera_id}
+    metrics.gauge("tier0_evidence_fetch_requests_total", float(pb.requests), cam)
+    metrics.gauge("tier0_evidence_fetch_dropped_total", float(pb.dropped), cam)
+    for outcome, n in pb.outcomes.items():
+        metrics.gauge("tier0_evidence_fetch_total", float(n), {"camera": camera_id, "outcome": outcome})
+    metrics.gauge("tier0_evidence_fetch_seconds_total", float(pb.fetch_seconds), cam)
+    metrics.gauge("tier0_evidence_decode_seconds_total", float(pb.decode_seconds), cam)
+    metrics.gauge("tier0_evidence_visits_held", float(held), cam)
+    # Held visits that got their recording crop before posting, and accepted
+    # results that found neither a live track nor a held visit (the hold was
+    # too short, or the request waited too long): the two numbers that say
+    # whether DETECT_EVIDENCE_HOLD_S is right for this camera.
+    metrics.gauge("tier0_evidence_visits_patched_total", float(patched), cam)
+    metrics.gauge("tier0_evidence_results_late_total", float(late), cam)
+
+
+#: Why a camera detects on its MAIN stream, as the value of
+#: ``tier0_detect_on_main{camera}`` (0 = detecting on the sub stream). A
+#: value rather than a label so a camera whose reason changes on restart
+#: leaves no stale series behind.
+DETECT_ON_MAIN_REASONS = {"": 0, "policy": 1, "no_substream": 2, "sub_unreachable": 3, "sub_too_small": 4}
+
+
+def record_detect_stream(camera_id: str, stream: str, reason: str = "") -> None:
+    """Which stream this camera's worker detects on, and why when it is the main."""
+    code = DETECT_ON_MAIN_REASONS.get(reason, 1) if stream == "main" else 0
+    metrics.gauge("tier0_detect_on_main", float(code), {"camera": camera_id})
 
 
 def record_mainstream_fallback(camera_id: str, active: bool) -> None:

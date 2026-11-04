@@ -100,6 +100,16 @@ def client(monkeypatch):
         id=3, name="Plain", ip_address="10.0.0.3", owner_id=1, is_active=True,
         rtsp_url="rtsp://u:p@10.0.0.3:554/opaque/onvif/path",
     ))
+    session.add(Camera(                      # stored sub, but the camera is pinned to MAIN
+        id=4, name="PinnedMain", ip_address="10.0.0.4", owner_id=1, is_active=True,
+        rtsp_url="rtsp://u:p@10.0.0.4:554/main", substream_url="rtsp://u:p@10.0.0.4:554/sub",
+        detection_settings={"detect_stream": "main"},
+    ))
+    session.add(Camera(                      # stored sub, pinned to SUB
+        id=5, name="PinnedSub", ip_address="10.0.0.5", owner_id=1, is_active=True,
+        rtsp_url="rtsp://u:p@10.0.0.5:554/main", substream_url="rtsp://u:p@10.0.0.5:554/sub",
+        detection_settings={"detect_stream": "sub"},
+    ))
     session.commit()
     session.close()
 
@@ -242,3 +252,40 @@ def test_forced_tap_modes_still_override_the_report(client, monkeypatch):
 def test_reported_capability_is_case_and_space_tolerant(client, monkeypatch):
     monkeypatch.setattr(settings, "detect_hwaccel", "vaapi")
     assert _cams_hw(client, " CPU ")["cam1"]["source"] == "mediamtx-sub"
+
+
+# ── Per-camera policy (detection settings → detect_stream) ─────────
+
+
+def test_a_camera_pinned_to_main_gets_the_main_tap_whatever_the_service_policy(client, monkeypatch):
+    monkeypatch.setattr(settings, "inference_tap_stream", "sub")
+    cams = _cams(client)
+    assert cams["cam1"]["source"] == "mediamtx-sub"
+    assert cams["cam4"]["source"] == "mediamtx" and not cams["cam4"]["frame_url"].endswith("-sub")
+    assert cams["cam4"]["detection"] == {"detect_stream": "main"}, "the policy also rides to the pipeline"
+
+
+def test_a_camera_pinned_to_sub_keeps_it_even_with_hardware_decode(client, monkeypatch):
+    monkeypatch.setattr(settings, "detect_hwaccel", "vaapi")      # 'auto' picks main here...
+    cams = _cams(client)
+    assert cams["cam1"]["source"] == "mediamtx"                     # ...for the auto camera
+    assert cams["cam5"]["source"] == "mediamtx-sub"                 # ...not for the pinned one
+    assert cams["cam5"]["detection"] == {"detect_stream": "sub"}
+
+
+# ── Playback URL beside the main tap (detect-pipeline playback.py) ──
+
+
+def test_sub_tap_cameras_get_a_playback_url_for_the_main_stream(client, monkeypatch):
+    monkeypatch.setattr(internal_router, "_playback_token_once", lambda: "tok")
+    monkeypatch.setattr(settings, "mediamtx_playback_url", "http://mediamtx:9996")
+    cams = _cams(client)
+    assert cams["cam1"]["playback_url"].startswith("http://mediamtx:9996/get?path=")
+    assert "jwt=tok" in cams["cam1"]["playback_url"]
+    assert cams["cam1"]["playback_url"].split("path=")[1].split("&")[0] == cams["cam1"]["evidence_url"].split("/")[-1].split("?")[0]
+    assert cams["cam3"]["playback_url"] is None, "no sub tap, detection already sees the main stream"
+
+
+def test_no_playback_token_means_no_playback_url(client, monkeypatch):
+    monkeypatch.setattr(internal_router, "_playback_token_once", lambda: None)
+    assert _cams(client)["cam1"]["playback_url"] is None

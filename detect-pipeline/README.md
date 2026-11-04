@@ -199,7 +199,7 @@ with an env dial and a metric (never a silent cap):
 **Second dial: lower `DETECT_FPS`.**
 Detection runs on every analyzed frame (the gate skips alarms, not
 inference), so pipeline CPU scales almost linearly with the per-camera
-analysis rate — `DETECT_FPS`, default 2 (the CPU-friendly setting that
+analysis rate — `DETECT_FPS`, default 5 (Frigate's default; 2 is the CPU-friendly setting that
 behaves well on laptops and any macOS/Windows Docker install, where the
 VM has no GPU). Servers with headroom — and especially `DETECT_HWACCEL`
 hosts — can raise it to 5-10 for finer motion/track granularity and a
@@ -249,7 +249,49 @@ two, `DETECT_EVIDENCE_MATCH_MIN`, 0.5) — a keyframe old enough for the
 subject to have moved on, or a sub-stream the camera crops to a different
 field of view, fails it, the detect crop is kept and
 `tier0_evidence_mismatch_total` counts the refusal (the AI Adapters page
-flags a camera whose evidence is going low-res). (For comparison: Frigate
+flags a camera whose evidence is going low-res). The guard is measured,
+not assumed: `tier0_evidence_refused_total{reason}` splits refusals into
+`low_corr` (the crops do not look alike) and `flat_main` (the sub saw a
+textured subject where the main shows a blank — a wall after the subject
+left, which used to pass as undecidable), `tier0_evidence_match_score` is
+the score of every attempt in tenths and `tier0_evidence_skew_seconds` the
+time between the two frames, so a camera whose refusals are timing (low
+scores only at large gaps) reads differently from one whose streams
+disagree. `DETECT_EVIDENCE_DEBUG_DIR` dumps every attempt's crops and
+numbers for `tools/evidence_guard_report.py`, which prints the outcome
+split, the score and gap distributions, what each floor would refuse, and
+a contact sheet of the pairs.
+
+**Evidence of the moment, from the recording.** A keyframe-only decode
+hands over each keyframe about one GOP late (measured on the Ventuno Q:
+ffmpeg holds a frame in its output path and, with keyframes only, the
+next keyframe is what pushes it out), so the nearest decoded keyframe is of
+where a moving subject *was*, and the guard refused it 52 times out of 98
+on a walking person. The recorder has the right frame: MediaMTX's playback
+server serves a range ending about a second before now, as a decodable
+clip that starts at a keyframe and ends exactly at the requested time. So
+with `DETECT_EVIDENCE_PLAYBACK=true` (the default, when core offers a
+`playback_url` beside the main tap) the tracker *asks* for evidence: when
+a track's best crop improves it files a request with the detect frame's
+time, box and crop; a thread per camera (`playback.py`) waits until the
+recorder can serve that moment, fetches the clip around it, decodes it
+once (at most a GOP, ~0.3 core-seconds on a Qualcomm box), scores the
+frames nearest the moment with the same guard, and hands back the best.
+A live track takes the crop (`tier0_evidence_crops_total{source="playback"}`);
+a visit whose track has already ended is held up to
+`DETECT_EVIDENCE_HOLD_S` (3 s) for it and posted with the crop patched
+in. Per camera one fetch at a time and at least
+`DETECT_EVIDENCE_FETCH_MIN_INTERVAL_S` apart (a newer best moment replaces
+a queued one); per box `DETECT_EVIDENCE_FETCH_PARALLEL` decodes at once; a
+request the budget cannot serve is dropped and the detect crop stands.
+`tier0_evidence_fetch_total{outcome}`, `tier0_evidence_fetch_seconds_total`,
+`tier0_evidence_decode_seconds_total` and `tier0_evidence_visits_held` say
+what it costs; `tier0_evidence_visits_patched_total` (held visits that got
+their crop) against `tier0_evidence_results_late_total` (crops that found
+neither a track nor a held visit) says whether the hold is long enough.
+The guard histograms and the debug dump carry a `source` (`keyframe` or
+`playback`), so `tools/evidence_guard_report.py` compares the two paths on
+the same walk-through. The keyframe source stays as the synchronous fallback. (For comparison: Frigate
 takes snapshots from the detect stream and never decodes the record
 stream; ZoneMinder offers the same keyframes-only decoding as its
 CPU-saving mode.) Core
@@ -314,7 +356,7 @@ default. CPU decode only (hardware decoders deblock in silicon for free).
 **The free lever is in the camera.** Decode cost scales with the
 *source* frame rate before any of these dials apply: a substream encoded
 at 25 fps costs 5× the decode of the same substream at 5 fps, and Tier-0
-analyzes `DETECT_FPS` (2) either way. Most cameras let you set the
+analyzes `DETECT_FPS` (5) either way. Most cameras let you set the
 substream to 5-10 fps and a ~1-2 s keyframe interval in their encode
 settings — do that first; it's the cheapest CPU you'll ever save.
 
@@ -383,7 +425,7 @@ the staged runbook in [ENABLEMENT.md](ENABLEMENT.md). Disable without a redeploy
 ```bash
 # .env
 DETECT_PIPELINE_ENABLED=false     # container stays up but idle
-DETECT_FPS=2                      # frames analyzed /s /camera (1-30, default 2) — the main CPU dial
+DETECT_FPS=5                      # frames analyzed /s /camera (1-30, default 5; 2 on a CPU-only box) — the main CPU dial
 DETECT_DECODE_SKIP=nonref         # nonref (default, lossless) | bidir | nokey | none — dial 4
 DETECT_DECODE_THREADS=2           # ffmpeg decoder thread cap (0 = auto) — dial 5, lossless
 DETECT_DECODE_FAST=false          # true = skip h264 loop filter (opt-in, not bit-exact)

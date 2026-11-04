@@ -39,6 +39,7 @@ type Form = {
   motion_contour_area: string
   min_spawn_score: string
   stationary_interval: string
+  detect_stream: '' | 'auto' | 'sub' | 'main'
   filters: FilterRow[]
 }
 
@@ -70,6 +71,7 @@ function toForm(d: DetectionSettings | null | undefined): Form {
     motion_contour_area: numStr(d?.motion_contour_area),
     min_spawn_score: numStr(d?.min_spawn_score),
     stationary_interval: numStr(d?.stationary_interval),
+    detect_stream: (d?.detect_stream ?? '') as Form['detect_stream'],
     filters,
   }
 }
@@ -94,6 +96,7 @@ function toBody(f: Form): DetectionSettings {
     motion_contour_area: numOrNull(f.motion_contour_area),
     min_spawn_score: numOrNull(f.min_spawn_score),
     stationary_interval: numOrNull(f.stationary_interval),
+    detect_stream: f.detect_stream === '' ? null : f.detect_stream,
     object_filters: Object.keys(object_filters).length ? object_filters : null,
   }
 }
@@ -226,6 +229,17 @@ export function CameraDetectionSettings() {
             {numberField('motion_contour_area', t('detect.contourArea'), t('detect.contourAreaHint'))}
             {numberField('min_spawn_score', t('detect.minSpawnScore'), t('detect.minSpawnScoreHint'), '0.05')}
             {numberField('stationary_interval', t('detect.stationary'), t('detect.stationaryHint'))}
+            <label className="block space-y-1">
+              <span className="text-sm">{t('detect.detectStream')}</span>
+              <select className={inputCls} value={form.detect_stream} disabled={!canEdit}
+                      onChange={(e) => set({ detect_stream: e.target.value as Form['detect_stream'] })}>
+                <option value="">{t('detect.inherit')}</option>
+                <option value="auto">{t('detect.streamAuto')}</option>
+                <option value="sub">{t('detect.streamSub')}</option>
+                <option value="main">{t('detect.streamMain')}</option>
+              </select>
+              <span className="block text-xs text-[var(--text-dim)]">{t('detect.detectStreamHint')}</span>
+            </label>
           </div>
 
           <div className="space-y-2">
