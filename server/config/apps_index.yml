@@ -409,7 +409,7 @@
 
 - id: attendance
   name: Attendance
-  summary: Takes attendance from the cameras during scheduled classes or shifts — recognises enrolled people in the room and marks them present, late or absent. Faces are biometric data; enrol only with consent.
+  summary: Takes attendance from the cameras during scheduled classes or shifts — recognises enrolled people in the room and marks them present, late or absent. Comes with its own web UI for registering people, timetables and reports. Faces are biometric data; enrol only with consent.
   category: people
   version: "1.0.0"
   image: ghcr.io/open-nvr/attendance:latest
@@ -427,8 +427,9 @@
   install:
     compose: |
       # INFORMATIONAL — this service already ships in
-      # docker-compose.apps.yml (with its config-init companion and its
-      # adapter pair); you do NOT paste this anywhere. Run the command
+      # docker-compose.apps.yml (with its config-init companion, its
+      # adapter pair, and attendance-web, the nginx that puts its web UI
+      # on the LAN at https://<host>:9218); you do NOT paste this anywhere. Run the command
       # below and compose brings it up from the shipped overlay.
       services:
         attendance:
@@ -441,6 +442,7 @@
             - KAIC_URL=http://opennvr-core:8100
           expose:
             - "9217"
+            - "9218"
           networks:
             - opennvr_apps
     command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d attendance

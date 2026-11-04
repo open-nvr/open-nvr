@@ -29,3 +29,12 @@ contract_port: 9217
 contract_bind_host: "0.0.0.0"
 contract_host: "attendance"
 opennvr_url: "http://opennvr-core:8000"
+
+# The web UI: attendly's screens, signed in with an OpenNVR account. Plain
+# HTTP here, on the apps network only; attendance-web (nginx, in
+# docker-compose.apps.yml) puts it on the LAN over HTTPS at
+# ATTENDANCE_WEB_PORT, so the webcam works for enrolment. "{host}" is the
+# host name the browser reached OpenNVR at.
+web_port: 9218
+web_bind_host: "0.0.0.0"
+web_ui_url: "https://{host}:${ATTENDANCE_WEB_PORT}/"

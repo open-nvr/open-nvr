@@ -7,9 +7,12 @@ license = { text = "AGPL-3.0" }
 
 # The SDK owns the runtime stack: httpx for core and KAI-C, PyYAML for
 # config, nats-py for the attempts, the FrameApp loop and the contract.
+# Starlette and uvicorn serve the web UI (attendance/webui.py).
 dependencies = [
     "opennvr-app-sdk",
     "PyYAML>=6.0,<7.0",
+    "starlette>=0.47,<1.0",
+    "uvicorn>=0.35,<1.0",
 ]
 
 [tool.uv.sources]

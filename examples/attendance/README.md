@@ -45,15 +45,52 @@ from the doorbell's: a school roster and a family's visitors must never
 match each other, and a crowded classroom frame must not make the door
 wait.
 
-Then, in OpenNVR:
+Then, in OpenNVR, **App Catalog → Attendance → Configure → Cameras**: pick
+the classroom cameras. The app looks only at picked cameras, and only
+during their sessions.
 
-1. **App Catalog → Attendance → Configure → Cameras**: pick the classroom
-   cameras. The app looks only at picked cameras, and only during their
-   sessions.
-2. **Attendance → People**: add people, record consent, enrol 3 to 5
-   photos each (front, slight left and right, with and without glasses).
-3. **Attendance → Groups** and **Timetable**: who meets when, on which
+Everything else can be done in either of two places, which read and write
+the same data:
+
+- **The attendance web UI**: App Catalog → Attendance → **Open app**, or
+  `https://<your OpenNVR host>:9218/` (`ATTENDANCE_WEB_PORT`). Its own
+  pages, laid out for the people who take attendance: Register (details,
+  consent, then photos or the webcam), People, Groups, Schedule,
+  Attendance, Reports, Settings.
+- **Attendance** in OpenNVR's own menu: the same, as tabs.
+
+In both:
+
+1. **Register** (or People): add people, record consent, enrol 3 to 5
+   photos each (front, slight left and right, chin up and down, with
+   glasses if they wear them).
+2. **Groups** and **Schedule** (Timetable): who meets when, on which
    cameras.
+
+## The web UI
+
+The app serves its own pages (`web/`, React) on port 9218 inside the apps
+network. `attendance-web`, a small nginx, puts them on the LAN over HTTPS
+with OpenNVR's own certificate: the apps network has no route out, and a
+browser only lets a page use the webcam over HTTPS.
+
+Users sign in with their **OpenNVR account**: the same password, MFA code
+and lockout. The app keeps no users and no session of its own. Every call
+the page makes goes through the app to OpenNVR's attendance API as the
+signed-in user (`attendance/webui.py`), so:
+
+- what someone can do is their OpenNVR role: `attendance.view` to see,
+  `attendance.manage` for groups, schedule, marks and settings,
+  `attendance.enroll` for people and faces;
+- every change is in OpenNVR's audit log under their name;
+- the app passes on only the attendance routes and the two reads the page
+  needs (the camera list and the user's permissions). Anything else is
+  refused before it reaches OpenNVR;
+- OpenNVR's device firewall still applies. A browser it has not approved
+  is refused here exactly as on OpenNVR's own page.
+
+The audit log shows the app's container address as the client IP, not the
+browser's: OpenNVR does not take a forwarded address from an app.
 
 ## Consent and privacy
 
@@ -102,3 +139,15 @@ PYTHONPATH=.:../../sdk/opennvr-app-sdk python -m pytest tests
 
 `attendance/core.py` holds every decision with no platform in it, and is
 tested on a synthetic clock.
+
+The web UI:
+
+```sh
+cd examples/attendance/web
+npm ci
+npm run dev        # http://localhost:5174, against ATTENDANCE_WEB_URL (default https://localhost:9218)
+npm run build      # into web/dist, which the app serves (the image builds it itself)
+```
+
+Without `web_port` in its config the app serves no UI and its manifest
+does not offer one.

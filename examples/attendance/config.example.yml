@@ -14,3 +14,5 @@ nats_token: "change-me"
 poll_interval_seconds: 15.0
 request_timeout_seconds: 30.0
 # contract_port: 9217                # serve /health /manifest /state
+# web_port: 9218                     # serve the web UI (attendly's screens) here
+# web_ui_url: "http://{host}:9218/"  # where OpenNVR's "Open app" points

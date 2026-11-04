@@ -15,6 +15,12 @@ A look that could not happen — no frame, the adapter down — is published
 too, with ``ok`` false: core then leaves that slice of the session out of
 everyone's ratio instead of reading an empty room.
 
+The app also serves the attendance web UI (attendance/webui.py) on a
+port of its own when ``web_port`` is set: attendly's screens, signed in
+with an OpenNVR account, reading and writing core's attendance API as
+that user. The manifest then says ``ui_mode="external"`` and the App
+Catalog shows "Open app".
+
 Run: ``python attendance_app.py --config config.yml``.
 """
 
@@ -22,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import logging
 import signal
 import threading
@@ -96,6 +103,23 @@ class AppConfig:
     #: Never read by this app (it watches what core says is running), but
     #: FrameApp's camera list defaults from it.
     cameras: tuple = ()
+    #: The web UI (attendance/webui.py). Off unless a port is set.
+    web_port: int | None = None
+    web_bind_host: str = "0.0.0.0"
+    #: Where "Open app" points; "{host}" is the browser's host name. The
+    #: default suits a browser that reaches this port directly.
+    web_ui_url: str = ""
+    #: The built page; defaults to web/dist beside this file.
+    web_dist_dir: str = ""
+
+
+def build_manifest(config: AppConfig) -> AppManifest:
+    """MANIFEST, plus the external UI when this app serves one."""
+    if not config.web_port:
+        return MANIFEST
+    return dataclasses.replace(
+        MANIFEST, has_ui=True, ui_mode="external",
+        ui_url=config.web_ui_url or f"http://{{host}}:{int(config.web_port)}/")
 
 
 def load_config(path: str | Path) -> AppConfig:
@@ -127,6 +151,7 @@ class AttendanceApp(FrameApp):
         self._published = 0
         self._failed = 0
         self._last_error: str | None = None
+        self.manifest = build_manifest(config)
         super().__init__(config, AlertDispatcher([StdoutChannel()]),
                          frame_source=self, cameras=[],
                          poll_interval_seconds=float(config.poll_interval_seconds))
@@ -261,7 +286,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     logging.basicConfig(level=args.log_level.upper(),
                         format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    app = AttendanceApp(load_config(args.config))
+    config = load_config(args.config)
+    app = AttendanceApp(config)
+    web = None
+    if config.web_port:
+        from attendance.webui import build_web_app, serve_in_thread
+
+        dist = config.web_dist_dir or str(Path(__file__).resolve().parent / "web" / "dist")
+        web = serve_in_thread(build_web_app(config.opennvr_url, dist),
+                              host=config.web_bind_host, port=int(config.web_port))
     loop = asyncio.new_event_loop()
 
     def _stop(signum, _frame):
@@ -273,6 +306,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         loop.run_until_complete(app.run())
     finally:
+        if web is not None:
+            web.should_exit = True
         loop.close()
     return 0
 

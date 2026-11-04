@@ -2300,12 +2300,17 @@ services:
         [ -f "$$tpl" ] || { echo "ERROR: no config template for attendance: mount examples/attendance at /template or use an image that bakes config.docker.yml" >&2; exit 1; }
         sed_esc() { printf '%s' "$$1" | sed -e 's/\\/\\\\/g; s/&/\\&/g; s/\//\\\//g'; }
         ikey=$$(sed_esc "$${INTERNAL_API_KEY}")
+        wport=$$(sed_esc "$${ATTENDANCE_WEB_PORT}")
         sed -e "s/[$$][{]INTERNAL_API_KEY[}]/$$ikey/g" \
+            -e "s/[$$][{]ATTENDANCE_WEB_PORT[}]/$$wport/g" \
             < "$$tpl" > /generated/config.yml
         echo "Wrote /generated/config.yml (attendance) from $$tpl."
     command: []
     environment:
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      # The LAN port of the web UI (attendance-web below): "Open app" in
+      # the App Catalog points there.
+      - ATTENDANCE_WEB_PORT=${ATTENDANCE_WEB_PORT:-9218}
     volumes:
       - ./examples/attendance:/template:ro
       - opennvr_attendance_config:/generated
@@ -2343,6 +2348,8 @@ services:
       - NO_PROXY=opennvr-core,nats,nats-apps,egress-proxy,mediamtx,detect-pipeline,ollama,localhost,127.0.0.1
     expose:
       - "9217"
+      # The web UI, plain HTTP: attendance-web is its only way in.
+      - "9218"
     volumes:
       - opennvr_attendance_config:/app/config:ro
     command:
@@ -2350,6 +2357,38 @@ services:
       - /app/config/config.yml
     networks:
       - opennvr_apps
+
+  # The attendance web UI on the LAN. The app lives on the apps network,
+  # which has no route out and cannot publish a port; this nginx sits on
+  # both, publishes ATTENDANCE_WEB_PORT over HTTPS (the webcam needs a
+  # secure page) with OpenNVR's own certificate, and passes everything to
+  # the app. It only forwards: who may do what is still core's decision,
+  # on every request, as the signed-in user (examples/attendance/README.md).
+  attendance-web:
+    profiles: [apps, attendance]
+    image: nginx:1.27-alpine
+    container_name: opennvr_attendance_web
+    logging: *svc-logs
+    restart: unless-stopped
+    depends_on:
+      nginx-certs-init:
+        condition: service_completed_successfully
+      attendance:
+        condition: service_started
+    ports:
+      - "${NGINX_BIND_HOST:-0.0.0.0}:${ATTENDANCE_WEB_PORT:-9218}:443"
+    volumes:
+      - ./nginx-certs:/etc/nginx/certs:ro
+      - ./examples/attendance/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - opennvr_apps
+      - opennvr_internal
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--no-check-certificate", "-O", "-", "https://localhost/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
 
   # ──────────────────────────────────────────────────────────────
   # CORE ENRICHMENT ADAPTERS
