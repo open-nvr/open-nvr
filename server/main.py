@@ -746,6 +746,28 @@ async def lifespan(app: FastAPI):
     spawn_background(background_guardscan_event_consumer(),
                      name="guardscan-event-consumer")
 
+    # Attendance: core keeps the clock (timetable → sessions → marks) and
+    # consumes the app's attempt.v1 events. Neither needs the other to
+    # run: with no bus, sessions still happen and finish as no-coverage.
+    async def background_attendance_consumer():
+        async def _loop():
+            from services.attendance_event_consumer import run_consumer_loop
+
+            await run_consumer_loop()
+
+        await run_consumer_forever("Attendance consumer", _loop)
+
+    async def background_attendance_scheduler():
+        async def _loop():
+            from services.attendance_scheduler import run_scheduler_loop
+
+            await run_scheduler_loop()
+
+        await run_consumer_forever("Attendance scheduler", _loop)
+
+    spawn_background(background_attendance_consumer(), name="attendance-consumer")
+    spawn_background(background_attendance_scheduler(), name="attendance-scheduler")
+
     # Live detection overlay: bridge Tier-0 tracks (NATS) onto the
     # in-process bus so /events/ws can stream normalized boxes to the
     # browser. Same best-effort posture: no bus → no overlay, never a
@@ -1130,6 +1152,7 @@ app.include_router(webrtc.router, prefix=settings.api_prefix)
 app.include_router(window_settings.router, prefix=settings.api_prefix)
 app.include_router(tours.router, prefix=settings.api_prefix)
 app.include_router(attendance_router.router, prefix=settings.api_prefix)
+app.include_router(attendance_router.internal_router, prefix=settings.api_prefix)
 app.include_router(system_update.router, prefix=settings.api_prefix)
 app.include_router(device_firewall.router, prefix=settings.api_prefix)
 app.include_router(media_source.router, prefix=settings.api_prefix)

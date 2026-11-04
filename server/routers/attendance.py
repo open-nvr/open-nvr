@@ -21,6 +21,7 @@ reference number for somebody new.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import UTC, date, datetime
@@ -35,21 +36,30 @@ from sqlalchemy.orm import Session
 from core.database import get_db
 from core.permissions import RequirePermission
 from models import (
+    AttendanceAttempt,
+    AttendanceAttemptSession,
     AttendanceGroup,
     AttendanceGroupMember,
+    AttendanceMark,
     AttendancePerson,
     AttendanceSession,
+    AttendanceSighting,
     AttendanceTimetableSlot,
     Camera,
+    SecuritySetting,
     User,
 )
-from services import attendance_policy
+from routers.internal_camera_agent import _app_roster, _require_internal_key
+from services import attendance_policy, attendance_scheduler
 from services.audit_service import audit_request
 from services.camera_scope import visible_camera_ids
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/attendance", tags=["attendance"])
+#: What the attendance app asks core: which sessions run now, on which of
+#: its cameras, for whom. App key or site key, never a user JWT.
+internal_router = APIRouter(prefix="/internal/app/attendance", tags=["app-platform"])
 
 _view = RequirePermission("attendance.view")
 _manage = RequirePermission("attendance.manage")
@@ -621,6 +631,12 @@ async def delete_slot(slot_id: int, request: Request,
     """Sessions already taken from the slot stay, with their marks."""
     s = _slot_or_404(db, slot_id)
     before = _slot_out(s)
+    # A session not yet started is the slot's future, not its history: it
+    # goes with the slot. Unlinked and left scheduled it would run anyway,
+    # with nothing to say where it came from.
+    db.query(AttendanceSession).filter(
+        AttendanceSession.slot_id == slot_id, AttendanceSession.status == "scheduled"
+    ).update({AttendanceSession.status: "cancelled"}, synchronize_session=False)
     # The FK says ON DELETE SET NULL, but SQLite only honours it with
     # foreign_keys on; unlinking here keeps the history on every database.
     db.query(AttendanceSession).filter(AttendanceSession.slot_id == slot_id).update(
@@ -630,3 +646,252 @@ async def delete_slot(slot_id: int, request: Request,
     audit_request(db, request, action="attendance.slot.delete", user_id=user.id,
                   entity_type="attendance_slot", entity_id=slot_id, details=before)
     return {"deleted": slot_id}
+
+
+# ── Site policy ──────────────────────────────────────────────────────
+
+
+@router.get("/policy")
+async def get_policy(db: Session = Depends(get_db), _user: User = Depends(_view)):
+    return {"policy": attendance_policy.site_policy(db),
+            "defaults": dict(attendance_policy.DEFAULT_POLICY)}
+
+
+@router.put("/policy")
+async def put_policy(payload: dict[str, Any], request: Request,
+                     db: Session = Depends(get_db), user: User = Depends(_manage)):
+    """Set any subset of the site policy; keys left out keep their value.
+    Every group's overrides must still make sense on top of the result."""
+    try:
+        changes = attendance_policy.validate_overrides(payload)
+        merged = {**attendance_policy.site_policy(db), **changes}
+        attendance_policy.check_consistent(merged)
+        for g in db.query(AttendanceGroup).filter(AttendanceGroup.policy.isnot(None)).all():
+            attendance_policy.check_consistent(
+                attendance_policy.effective_policy(merged, g.policy))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=f"policy: {e}") from None
+    row = db.query(SecuritySetting).filter(
+        SecuritySetting.key == attendance_policy.SITE_POLICY_KEY).first()
+    if row is None:
+        db.add(SecuritySetting(key=attendance_policy.SITE_POLICY_KEY, json_value=json.dumps(merged)))
+    else:
+        row.json_value = json.dumps(merged)
+    db.commit()
+    audit_request(db, request, action="attendance.policy.update", user_id=user.id,
+                  entity_type="attendance_policy", entity_id="site", details=changes)
+    return {"policy": merged}
+
+
+# ── Sessions and marks ───────────────────────────────────────────────
+
+
+MARK_STATUSES = ("PRESENT", "LATE", "ABSENT", "EXCUSED")
+
+
+def _session_out(s: AttendanceSession, counts: dict[str, int] | None = None) -> dict:
+    return {
+        "id": s.id, "group_id": s.group_id, "slot_id": s.slot_id,
+        "local_date": _iso(s.local_date), "start_at": _iso(s.start_at),
+        "end_at": _iso(s.end_at), "camera_ids": list(s.camera_ids or []),
+        "status": s.status, "finalized_at": _iso(s.finalized_at),
+        "total_buckets": s.total_buckets, "counted_buckets": s.counted_buckets,
+        "no_coverage": bool(s.no_coverage), "counts": counts or {},
+    }
+
+
+def _mark_counts(db: Session, session_ids: list[int]) -> dict[int, dict[str, int]]:
+    out: dict[int, dict[str, int]] = {sid: {} for sid in session_ids}
+    if not session_ids:
+        return out
+    for sid, status, n in (db.query(AttendanceMark.session_id, AttendanceMark.status, func.count())
+                           .filter(AttendanceMark.session_id.in_(session_ids))
+                           .group_by(AttendanceMark.session_id, AttendanceMark.status).all()):
+        out[sid][status] = n
+    return out
+
+
+def _session_or_404(db: Session, session_id: int) -> AttendanceSession:
+    s = db.get(AttendanceSession, session_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return s
+
+
+@router.get("/sessions")
+async def list_sessions(
+    date_from: date | None = Query(None, alias="from"),
+    date_to: date | None = Query(None, alias="to"),
+    group_id: int | None = None,
+    status_: str | None = Query(None, alias="status"),
+    limit: int = Query(200, ge=1, le=1000),
+    db: Session = Depends(get_db),
+    _user: User = Depends(_view),
+):
+    """Sessions by their local date (the group's), newest first."""
+    q = db.query(AttendanceSession)
+    if date_from:
+        q = q.filter(AttendanceSession.local_date >= date_from)
+    if date_to:
+        q = q.filter(AttendanceSession.local_date <= date_to)
+    if group_id is not None:
+        q = q.filter(AttendanceSession.group_id == group_id)
+    if status_:
+        q = q.filter(AttendanceSession.status == status_)
+    rows = q.order_by(AttendanceSession.start_at.desc(), AttendanceSession.id.desc()) \
+        .limit(limit).all()
+    counts = _mark_counts(db, [s.id for s in rows])
+    return {"sessions": [_session_out(s, counts[s.id]) for s in rows]}
+
+
+@router.get("/sessions/{session_id}")
+async def get_session(session_id: int, db: Session = Depends(get_db),
+                      _user: User = Depends(_view)):
+    """One session: every member's mark (or, before the verdict, who has
+    been seen so far), and how much of the session was actually watched."""
+    s = _session_or_404(db, session_id)
+    members = (db.query(AttendancePerson)
+               .join(AttendanceGroupMember, AttendanceGroupMember.person_id == AttendancePerson.id)
+               .filter(AttendanceGroupMember.group_id == s.group_id).all())
+    marks = {m.person_id: m for m in db.query(AttendanceMark)
+             .filter(AttendanceMark.session_id == s.id).all()}
+    # People with a mark who have since left the group still belong here.
+    member_ids = {m.id for m in members}
+    extra = db.query(AttendancePerson).filter(
+        AttendancePerson.id.in_([pid for pid in marks if pid not in member_ids])
+    ).all() if marks else []
+    seen = dict(db.query(AttendanceSighting.person_id, func.count())
+                .filter(AttendanceSighting.session_id == s.id)
+                .group_by(AttendanceSighting.person_id).all())
+    attempts = (db.query(func.count(), func.sum(AttendanceAttempt.faces_detected))
+                .join(AttendanceAttemptSession,
+                      AttendanceAttemptSession.attempt_id == AttendanceAttempt.id)
+                .filter(AttendanceAttemptSession.session_id == s.id,
+                        AttendanceAttempt.ok.is_(True)).one())
+    people = []
+    for p in sorted([*members, *extra], key=lambda p: (p.display_name.lower(), p.id)):
+        m = marks.get(p.id)
+        people.append({
+            "person_id": p.id, "display_name": p.display_name, "external_ref": p.external_ref,
+            "status": m.status if m else None, "source": m.source if m else None,
+            "buckets_present": m.buckets_present if m else None,
+            "buckets_total": m.buckets_total if m else None,
+            "first_seen_at": _iso(m.first_seen_at) if m else None,
+            "note": m.note if m else None, "sightings": seen.get(p.id, 0),
+        })
+    out = _session_out(s, _mark_counts(db, [s.id])[s.id])
+    out.update({"people": people,
+                "attempts_ok": int(attempts[0] or 0), "faces_seen": int(attempts[1] or 0)})
+    return out
+
+
+@router.post("/sessions/{session_id}/refinalize")
+async def refinalize(session_id: int, request: Request, db: Session = Depends(get_db),
+                     user: User = Depends(_manage)):
+    """Recompute the automatic marks (after a policy change, or a member
+    added late). Manual marks are kept."""
+    s = _session_or_404(db, session_id)
+    if s.status != "final":
+        raise HTTPException(status_code=409, detail="Only a finished session can be re-finalised")
+    if attendance_scheduler.evidence_pruned(s):
+        raise HTTPException(status_code=409, detail=(
+            "This session's camera records have been deleted by retention; its marks are now "
+            "the record and cannot be recomputed. Correct individual marks instead."))
+    counts = attendance_scheduler.finalize(db, s)
+    db.commit()
+    audit_request(db, request, action="attendance.session.refinalize", user_id=user.id,
+                  entity_type="attendance_session", entity_id=s.id, details=counts)
+    return _session_out(s, _mark_counts(db, [s.id])[s.id])
+
+
+class MarkIn(BaseModel):
+    status: str
+    note: str | None = Field(None, max_length=500)
+
+    @field_validator("status")
+    @classmethod
+    def _status(cls, v: str) -> str:
+        v = v.strip().upper()
+        if v not in (*MARK_STATUSES, "AUTO"):
+            raise ValueError(f"status is one of {', '.join(MARK_STATUSES)} or AUTO")
+        return v
+
+
+@router.patch("/sessions/{session_id}/marks/{person_id}")
+async def set_mark(session_id: int, person_id: int, payload: MarkIn, request: Request,
+                   db: Session = Depends(get_db), user: User = Depends(_manage)):
+    """A person's correction. It wins over the cameras and survives
+    re-finalising; ``AUTO`` hands the mark back to the cameras."""
+    s = _session_or_404(db, session_id)
+    if s.status != "final":
+        raise HTTPException(status_code=409, detail="Marks can be corrected once the session is final")
+    is_member = db.query(AttendanceGroupMember).filter(
+        AttendanceGroupMember.group_id == s.group_id,
+        AttendanceGroupMember.person_id == person_id).first() is not None
+    mark = db.query(AttendanceMark).filter(AttendanceMark.session_id == s.id,
+                                           AttendanceMark.person_id == person_id).first()
+    if mark is None and not is_member:
+        raise HTTPException(status_code=404, detail="Not part of this session")
+    before = (mark.status, mark.source) if mark else (None, None)
+    if payload.status == "AUTO":
+        if attendance_scheduler.evidence_pruned(s):
+            raise HTTPException(status_code=409, detail=(
+                "This session's camera records have been deleted by retention, so there is "
+                "nothing to hand the mark back to. Set the mark by hand instead."))
+        if mark is not None:
+            mark.source, mark.overridden_by, mark.note = "auto", None, None
+        # This one person only: the rest of a past session is not re-marked
+        # against today's roster.
+        attendance_scheduler.finalize(db, s, only_person=person_id)
+    else:
+        if mark is None:
+            mark = AttendanceMark(session_id=s.id, person_id=person_id)
+            db.add(mark)
+        mark.status, mark.source = payload.status, "manual"
+        mark.overridden_by, mark.note = user.id, payload.note
+    db.commit()
+    mark = db.query(AttendanceMark).filter(AttendanceMark.session_id == s.id,
+                                           AttendanceMark.person_id == person_id).first()
+    audit_request(db, request, action="attendance.mark.update", user_id=user.id,
+                  entity_type="attendance_session", entity_id=s.id,
+                  details={"person_id": person_id, "from": before,
+                           "to": (mark.status, mark.source) if mark else None,
+                           "note": payload.note})
+    return {"session_id": s.id, "person_id": person_id,
+            "status": mark.status if mark else None, "source": mark.source if mark else None}
+
+
+# ── For the attendance app ───────────────────────────────────────────
+
+
+@internal_router.get("/active")
+async def active_sessions(db: Session = Depends(get_db), principal=Depends(_require_internal_key)):
+    """Sessions running now on the calling app's cameras: what to look
+    at, how often, and whom to look for (gallery ids of the group's
+    members). Read by time, not only by status, so a session starts
+    being watched at its bell even between two scheduler ticks."""
+    now = datetime.now(UTC)
+    roster = _app_roster(db, principal)
+    rows = (db.query(AttendanceSession)
+            .filter(AttendanceSession.status.in_(("scheduled", "running"))).all())
+    out = []
+    for s in rows:
+        start, end = attendance_scheduler._utc(s.start_at), attendance_scheduler._utc(s.end_at)
+        if not (start <= now < end):
+            continue
+        cams = [c for c in (s.camera_ids or []) if roster is None or c in roster]
+        if not cams:
+            continue
+        policy = attendance_scheduler.session_policy(db, s)
+        uuids = [u for (u,) in db.query(AttendancePerson.uuid)
+                 .join(AttendanceGroupMember, AttendanceGroupMember.person_id == AttendancePerson.id)
+                 .filter(AttendanceGroupMember.group_id == s.group_id,
+                         AttendancePerson.deleted_at.is_(None),
+                         AttendancePerson.active.is_(True)).all()]
+        out.append({"session_id": s.id, "group_id": s.group_id, "camera_ids": cams,
+                    "start_at": start.isoformat(), "end_at": end.isoformat(),
+                    "person_ids": uuids,
+                    "attempt_interval_s": policy["attempt_interval_s"],
+                    "bucket_minutes": policy["bucket_minutes"],
+                    "match_threshold": policy["match_threshold"]})
+    return {"now": now.isoformat(), "sessions": out}
