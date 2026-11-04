@@ -66,8 +66,13 @@ def summarise(recs: list[dict]) -> dict:
     # empty scene too — the compare said nothing about the subject
     bg = sum(1 for r in recs if r.get("accepted") and (r.get("sim_main_ref") or 0) >= 0.8
              and (r.get("sim_sub_ref") or 0) >= 0.8)
+    by_source: dict[str, dict[str, int]] = {}
+    for r in recs:
+        src = r.get("source") or "keyframe"
+        key = r.get("reason") or ("accepted" if r.get("accepted") else "?")
+        by_source.setdefault(src, {})[key] = by_source.setdefault(src, {}).get(key, 0) + 1
     return {
-        "attempts": len(recs), "by_reason": by_reason,
+        "attempts": len(recs), "by_reason": by_reason, "by_source": by_source,
         "score_accepted": {"n": len(acc), "p10": _q(acc, 0.1), "median": _q(acc, 0.5)},
         "score_refused": {"n": len(ref), "median": _q(ref, 0.5), "p90": _q(ref, 0.9)},
         "skew_s": {"n": len(skews), "median": _q(skews, 0.5), "p90": _q(skews, 0.9)},
@@ -82,6 +87,9 @@ def render(summary: dict, camera: str) -> str:
     s = summary
     lines = [f"== {camera}: {s['attempts']} evidence attempts",
              "   outcome: " + ", ".join(f"{k} {v}" for k, v in sorted(s["by_reason"].items()))]
+    if len(s.get("by_source", {})) > 1:
+        for src, counts in sorted(s["by_source"].items()):
+            lines.append(f"   {src:<9}: " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())))
     a, r = s["score_accepted"], s["score_refused"]
     if a["n"]:
         lines.append(f"   accepted scores: n {a['n']}, p10 {a['p10']:.2f}, median {a['median']:.2f}")

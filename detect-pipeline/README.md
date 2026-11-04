@@ -286,7 +286,12 @@ a queued one); per box `DETECT_EVIDENCE_FETCH_PARALLEL` decodes at once; a
 request the budget cannot serve is dropped and the detect crop stands.
 `tier0_evidence_fetch_total{outcome}`, `tier0_evidence_fetch_seconds_total`,
 `tier0_evidence_decode_seconds_total` and `tier0_evidence_visits_held` say
-what it costs. The keyframe source stays as the synchronous fallback. (For comparison: Frigate
+what it costs; `tier0_evidence_visits_patched_total` (held visits that got
+their crop) against `tier0_evidence_results_late_total` (crops that found
+neither a track nor a held visit) says whether the hold is long enough.
+The guard histograms and the debug dump carry a `source` (`keyframe` or
+`playback`), so `tools/evidence_guard_report.py` compares the two paths on
+the same walk-through. The keyframe source stays as the synchronous fallback. (For comparison: Frigate
 takes snapshots from the detect stream and never decodes the record
 stream; ZoneMinder offers the same keyframes-only decoding as its
 CPU-saving mode.) Core

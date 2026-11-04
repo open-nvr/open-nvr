@@ -31,6 +31,7 @@ def test_summary_counts_reasons_floors_and_timing(tmp_path):
     assert len(loaded) == 6 and loaded[0]["_camera"] == "cam23"
     s = rep.summarise(loaded)
     assert s["by_reason"] == {"accepted": 3, "low_corr": 2, "flat_main": 1}
+    assert s["by_source"] == {"keyframe": {"accepted": 3, "low_corr": 2, "flat_main": 1}}
     assert s["scored"] == 5 and s["refused_at_floor"][0.5] == 2 and s["refused_at_floor"][0.9] if 0.9 in s["refused_at_floor"] else True
     assert s["refused_at_floor"][0.8] == 2 and s["refused_at_floor"][0.3] == 1
     assert s["score_near_vs_far"]["near_median"] > 0.8 and s["score_near_vs_far"]["far_median"] < 0.5

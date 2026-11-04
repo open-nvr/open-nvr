@@ -185,6 +185,15 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Evidence from the recording, measured and trimmed.** Two more counters
+  say whether the visit hold is long enough (`tier0_evidence_visits_patched_total`,
+  `tier0_evidence_results_late_total`); the guard histograms and the debug
+  dump carry a `source` label so the keyframe and recording paths can be
+  compared on one walk-through; the fetched clip is short (the recorder
+  serves from the keyframe before it anyway) and decoded with four threads
+  and the fast flags — about 0.65 s instead of 1.1 s per request on the
+  Qualcomm box.
+
 - **`DETECT_FPS` defaults to 5** (was 2), Frigate's default and what the
   tracker, the motion gate and the plate reader were tuned against: a
   person is seen sooner, a fast subject keeps its track, plates get more
