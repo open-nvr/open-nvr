@@ -56,7 +56,7 @@ class MotionConfig:
     #: signal. After this many consecutive calibrating frames the gate
     #: forces itself open (WARN logged): a scene that is always busy is
     #: the scene, and the detector should see it. 0 disables the
-    #: deadline (pre-#373 behaviour). Default 150 ≈ 75 s at 2 fps —
+    #: deadline (pre-#373 behaviour). Default 150 ≈ 30 s at 5 fps —
     #: real calibration settles in well under 50 frames.
     calibration_max_frames: int = 150
     #: Consecutive deadline-forced exits before the gate concludes this
@@ -70,7 +70,7 @@ class MotionConfig:
     #: consecutive forced exits turns that into a bounded, loud,
     #: self-healing failure. A natural calibration resets the count and
     #: releases the latch. 0 disables the latch (deadline-only, #373
-    #: behaviour). Default 2 ≈ 150 s at 2 fps before giving up: one
+    #: behaviour). Default 2 ≈ 60 s at 5 fps before giving up: one
     #: exit could be a genuine dawn flash over a busy road, two is a
     #: scene that will not settle.
     calibration_max_forced_exits: int = 2

@@ -811,6 +811,8 @@ type Tier0MetricsResp = {
     visits_dropped: number
     frames_dropped?: number
     mainstream_fallback: boolean
+    /** Which stream the worker detects on and why it is the main (per-camera setting, no sub, sub unreachable, sub too small). */
+    detect_stream?: { stream: 'sub' | 'main'; reason: string } | null
     evidence?: {
       main: number
       detect: number
@@ -1093,7 +1095,13 @@ function ComputeGatedPanel() {
                         {c.visits_dropped > 0 ? ` (+${c.visits_dropped} dropped)` : ''}
                       </td>
                       <td className="py-1">
-                        {c.mainstream_fallback && <Badge variant="warning">main stream</Badge>}
+                        {c.detect_stream?.stream === 'main' ? (
+                          <Badge variant="warning">
+                            {{ policy: 'detecting on main (chosen)', no_substream: 'detecting on main (no sub stream)',
+                               sub_unreachable: 'detecting on main (sub unreachable)',
+                               sub_too_small: 'detecting on main (sub too small)' }[c.detect_stream.reason] ?? 'detecting on main'}
+                          </Badge>
+                        ) : c.mainstream_fallback && <Badge variant="warning">main stream</Badge>}
                         {/* Substream detection with main-stream evidence: warn when a
                             meaningful share of the best crops fell back to the low-res
                             detect frame, and say why when the main frame was refused for

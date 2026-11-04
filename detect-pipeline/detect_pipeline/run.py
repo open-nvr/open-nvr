@@ -145,6 +145,19 @@ class ServiceConfig:
     # counted (tier0_evidence_mismatch_total).
     evidence_nokey_max_gop_s: float = 2.0
     evidence_match_min: float = 0.5
+    # A sub stream shorter than this (px) cannot show the detector a person at
+    # mid-distance: 'auto' cameras then detect on the main stream instead.
+    sub_min_height: int = 480
+    # DETECT_EVIDENCE_DEBUG_DIR: write every evidence attempt (crops + numbers)
+    # under this folder for tools/evidence_guard_report.py. Empty = off.
+    evidence_debug_dir: str = ""
+    # Evidence of the moment from the recording (playback.py): on when core
+    # offers a playback URL; how long a finished visit waits for its crop;
+    # the minimum gap between fetches per camera; concurrent decodes per box.
+    evidence_playback: bool = True
+    evidence_hold_s: float = 3.0
+    evidence_fetch_min_interval_s: float = 2.0
+    evidence_fetch_parallel: int = 2
 
 
 def _clean_env(value: str | None) -> str:
@@ -292,6 +305,12 @@ def config_from_env(env: dict) -> ServiceConfig:
         evidence_decode=_evidence_decode_from_env(env),
         evidence_nokey_max_gop_s=_env_float(env, "DETECT_EVIDENCE_NOKEY_MAX_GOP_S", 2.0),
         evidence_match_min=_env_float(env, "DETECT_EVIDENCE_MATCH_MIN", 0.5),
+        sub_min_height=int(_env_float(env, "DETECT_SUB_MIN_HEIGHT", 480)),
+        evidence_debug_dir=(env.get("DETECT_EVIDENCE_DEBUG_DIR") or "").strip(),
+        evidence_playback=_env_bool(env, "DETECT_EVIDENCE_PLAYBACK", True),
+        evidence_hold_s=_env_float(env, "DETECT_EVIDENCE_HOLD_S", 3.0),
+        evidence_fetch_min_interval_s=_env_float(env, "DETECT_EVIDENCE_FETCH_MIN_INTERVAL_S", 2.0),
+        evidence_fetch_parallel=_env_int(env, "DETECT_EVIDENCE_FETCH_PARALLEL", 2),
         gate_heartbeat_s=_env_float(env, "DETECT_GATE_HEARTBEAT_S", 0.0),
         gate_critical_classes=env.get("DETECT_GATE_CRITICAL_CLASSES", ""),
         gate_cooldown_s=_env_float(env, "DETECT_GATE_COOLDOWN_S", 30.0),
@@ -320,6 +339,16 @@ def _decode_idle_from_env(env: dict) -> str:
         )
         return ""
     return value
+
+
+def _env_bool(env: dict, name: str, default: bool) -> bool:
+    """``true/1/yes/on`` → True, ``false/0/no/off`` → False, anything else → default."""
+    raw = (env.get(name) or "").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return default
 
 
 def _env_int(env: dict, name: str, default: int) -> int:
@@ -608,6 +637,12 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
         evidence_decode=cfg.evidence_decode,
         evidence_nokey_max_gop_s=cfg.evidence_nokey_max_gop_s,
         evidence_match_min=cfg.evidence_match_min,
+        sub_min_height=cfg.sub_min_height,
+        evidence_debug_dir=cfg.evidence_debug_dir or None,
+        evidence_playback=cfg.evidence_playback,
+        evidence_hold_s=cfg.evidence_hold_s,
+        evidence_fetch_min_interval_s=cfg.evidence_fetch_min_interval_s,
+        evidence_fetch_parallel=cfg.evidence_fetch_parallel,
     )
     manager.best_frames = best_frames            # expose so main() can serve it
     # Same reason: main() wires this into /health. It is a LOCAL of this

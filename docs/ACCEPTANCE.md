@@ -104,7 +104,7 @@ gate floor, and once with someone walking through for the evidence check
 | Check | What is measured | pass | warn | fail |
 |---|---|---|---|---|
 | Streams reachable | `ffprobe` of the main and sub streams: codec, size, fps | both probe | main only (detection then decodes the main stream) | main fails |
-| Sub stream fit for detection | the sub stream's height and fps | ≥ 288 px tall and ≥ `DETECT_FPS` | smaller or slower | — |
+| Sub stream fit for detection | the sub stream's height and fps | ≥ 480 px tall (the pipeline's `DETECT_SUB_MIN_HEIGHT`: below it an auto camera detects on the main stream) and ≥ `DETECT_FPS` | smaller or slower | — |
 | Keyframe interval (evidence) | median gap between keyframes on the main stream over `--seconds` | ≤ `DETECT_EVIDENCE_NOKEY_MAX_GOP_S` × 1.15 (keyframe-only evidence applies) | ≤ 10 s (the pipeline switches that camera to full decode) | longer: "smart codec"; events can fall between keyframes of the recording |
 | Main and sub show the same view | Pearson correlation of one keyframe from each stream, both at 64x64 luma | ≥ 0.9 | ≥ 0.7 (some main crops will be refused) | less: cross-stream evidence would be of the wrong place |
 | Motion gate on a still scene | `--seconds` of the sub stream replayed through the pipeline's own motion detector, unmasked | ≤ 5 % of frames open | ≤ 25 % | more; when ≥ 80 % of the motion sits in one cell of a 10x10 grid the report names it as a burned-in clock/title and prints the mask polygon |

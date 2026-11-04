@@ -64,6 +64,11 @@ class Tuning:
     motion_contour_area: int | None = None
     min_spawn_score: float | None = None
     stationary_interval: int | None = None
+    # Which stream this camera detects on: "auto" (the sub when it is
+    # tall enough for the detector, else the main), "sub" (the sub even
+    # when small — the operator's call), "main" (full-res decode, full-res
+    # evidence from the same frame). None = auto.
+    detect_stream: str | None = None
     object_filters: tuple[tuple[str, ObjectFilter], ...] = ()
 
     @property
@@ -87,7 +92,7 @@ class Tuning:
     def describe(self) -> str:
         """The overrides, for the worker's start-up log line."""
         bits = []
-        for name in ("fps", "motion_enabled", "motion_threshold",
+        for name in ("fps", "motion_enabled", "motion_threshold", "detect_stream",
                      "motion_contour_area", "min_spawn_score", "stationary_interval"):
             v = getattr(self, name)
             if v is not None:
@@ -151,6 +156,7 @@ def parse_tuning(raw) -> Tuning:
                 log.warning("object filter for %r ignored: %r", label, spec)
     return Tuning(
         fps=_num(raw.get("fps"), *FPS_RANGE, integer=True),
+        detect_stream=(raw.get("detect_stream") if raw.get("detect_stream") in ("auto", "sub", "main") else None),
         motion_enabled=_bool(raw.get("motion_enabled")),
         motion_threshold=_num(raw.get("motion_threshold"), *MOTION_THRESHOLD_RANGE,
                               integer=True),
