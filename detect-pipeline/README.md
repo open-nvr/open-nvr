@@ -279,8 +279,10 @@ once (at most a GOP, ~0.3 core-seconds on a Qualcomm box), scores the
 frames nearest the moment with the same guard, and hands back the best.
 A live track takes the crop (`tier0_evidence_crops_total{source="playback"}`);
 a visit whose track has already ended is held up to
-`DETECT_EVIDENCE_HOLD_S` (3 s) for it and posted with the crop patched
-in. Per camera one fetch at a time and at least
+`DETECT_EVIDENCE_HOLD_S` (6 s: the recorder's freshness wait, the turn
+behind the fetch interval and the decode add up to about 4 s) for it and
+posted with the crop patched in; `tier0_evidence_visits_hold_expired_total`
+counts holds that ran out. Per camera one fetch at a time and at least
 `DETECT_EVIDENCE_FETCH_MIN_INTERVAL_S` apart (a newer best moment replaces
 a queued one); per box `DETECT_EVIDENCE_FETCH_PARALLEL` decodes at once; a
 request the budget cannot serve is dropped and the detect crop stands.
@@ -291,7 +293,12 @@ their crop) against `tier0_evidence_results_late_total` (crops that found
 neither a track nor a held visit) says whether the hold is long enough.
 The guard histograms and the debug dump carry a `source` (`keyframe` or
 `playback`), so `tools/evidence_guard_report.py` compares the two paths on
-the same walk-through. The keyframe source stays as the synchronous fallback. (For comparison: Frigate
+the same walk-through. A detect frame's stamp is later than the recorder's clock for the same
+picture by the sub path's own latency (measured 0.56 s on a CP Plus through
+the Qualcomm box); the request subtracts `DETECT_EVIDENCE_STAMP_LEAD_S`
+(0.5 s) and each camera then calibrates its own lead from the frames it
+accepts (`tier0_evidence_stamp_lead_seconds`). The keyframe source stays as
+the synchronous fallback. (For comparison: Frigate
 takes snapshots from the detect stream and never decodes the record
 stream; ZoneMinder offers the same keyframes-only decoding as its
 CPU-saving mode.) Core
@@ -503,7 +510,11 @@ This is the **stable slice consumers code against.** It is intentionally the who
 benefit by subscribing here; no separate perception contract is needed.
 
 **Best frame.** When a track has `"best": true`, its best-frame crop (the sharpest /
-largest / most-confident frame Tier-0 already selected) is fetchable at
+largest / most-confident frame Tier-0 already selected: Frigate's edge, score and
+area rules, plus a blur veto, `DETECT_BEST_FRAME_BLUR_VETO`, that keeps a much
+blurrier frame from winning on score or area; the recording is asked for the
+best frame's moment, so the pick decides how sharp the main-stream evidence is)
+is fetchable at
 `GET :<DETECT_METRICS_PORT>/best_frame?camera=<cam>&track=<id>` (JPEG; omit `&track=`
 for the camera's most-recent best). A consumer that needs to run a vision model
 should use this instead of grabbing an arbitrary live frame — more accurate, cheaper.

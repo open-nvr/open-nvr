@@ -75,3 +75,40 @@ def test_car_license_plate_priority():
 def test_no_improvement_keeps_current():
     cur = _cand(score=0.7)
     assert is_better_thumbnail(cur, _cand(score=0.7), FRAME) is False
+
+
+# ─── blur veto ──────────────────────────────────────────────────────────
+
+def test_a_much_blurrier_frame_does_not_win_on_score_or_area():
+    from detect_pipeline.thumbnail import blur_vetoed
+    cur = ThumbCandidate("person", (100, 100, 200, 300), 0.70, sharpness=200.0)
+    soft = ThumbCandidate("person", (100, 100, 230, 360), 0.80, sharpness=60.0)   # +0.1 score, +69 % area
+    assert blur_vetoed(cur, soft) is True
+    assert is_better_thumbnail(cur, soft, FRAME) is False
+    assert is_better_thumbnail(cur, soft, FRAME, blur_veto=0.0) is True, "the veto off: wins on score"
+    ok = ThumbCandidate("person", (100, 100, 230, 360), 0.80, sharpness=120.0)   # 0.6 of the current
+    assert is_better_thumbnail(cur, ok, FRAME) is True
+    # unmeasured sharpness (0) on either side never vetoes
+    assert is_better_thumbnail(ThumbCandidate("person", (100, 100, 200, 300), 0.7),
+                               soft, FRAME) is True
+
+
+def test_sharpness_is_measured_at_one_scale_so_a_closer_subject_is_not_softer():
+    """The same subject twice as large in the frame (upscaled pixels) must
+    still measure above the veto fraction of the far one, or walking closer
+    would be refused; a truly blurred crop measures far lower."""
+    import cv2
+    import numpy as np
+    from detect_pipeline.thumbnail import BLUR_VETO, crop_sharpness
+    small = np.full((80, 40, 3), 60, np.uint8)
+    small[10:70, 8:32] = 230; small[36:44, 8:32] = 20; small[10:70, 18:22] = 20   # bright body, dark cross
+    frame_small = np.zeros((200, 200, 3), np.uint8); frame_small[10:90, 10:50] = small
+    big = cv2.resize(small, (80, 160), interpolation=cv2.INTER_LINEAR)
+    frame_big = np.zeros((400, 400, 3), np.uint8); frame_big[10:170, 10:90] = big
+    s_small = crop_sharpness(frame_small, (10, 10, 50, 90))
+    s_big = crop_sharpness(frame_big, (10, 10, 90, 170))
+    assert s_small > 0 and s_big > BLUR_VETO * s_small, (s_small, s_big)
+    blurred = cv2.GaussianBlur(big, (0, 0), 4)
+    frame_blur = np.zeros((400, 400, 3), np.uint8); frame_blur[10:170, 10:90] = blurred
+    assert crop_sharpness(frame_blur, (10, 10, 90, 170)) < 0.1 * s_big
+    assert crop_sharpness(frame_big, (10, 10, 12, 12)) == 0.0, "degenerate box"

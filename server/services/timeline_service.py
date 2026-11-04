@@ -88,8 +88,17 @@ def record_track_visit(
     evidence_path: str | None = None,
     scene_evidence_path: str | None = None,
     zone_ids: list[int] | None = None,
+    evidence: dict | None = None,
 ) -> TimelineEvent:
-    """Persist one finished visit (source=tier0, event_type=track)."""
+    """Persist one finished visit (source=tier0, event_type=track).
+    ``evidence`` is the pipeline's account of the best crop (source, box
+    size, frame size, skew), kept under ``payload["evidence"]`` for the
+    per-camera evidence quality read (services/evidence_escalation.py)."""
+    payload: dict = {}
+    if stationary is not None:
+        payload["stationary"] = stationary
+    if evidence:
+        payload["evidence"] = dict(evidence)
     row = TimelineEvent(
         camera_id=camera_id,
         source="tier0",
@@ -101,7 +110,7 @@ def record_track_visit(
         ended_at=ended_at,
         evidence_path=evidence_path,
         scene_evidence_path=scene_evidence_path,
-        payload={"stationary": stationary} if stationary is not None else None,
+        payload=payload or None,
         zone_ids=zone_ids,
     )
     db.add(row)

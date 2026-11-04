@@ -417,8 +417,9 @@ class CameraWorker:
         evidence_debug_dir: str | None = None,   # DETECT_EVIDENCE_DEBUG_DIR: dump every evidence attempt here
         playback_url_provider=None,              # freshest playback URL for this camera (its token rotates)
         evidence_playback: bool = True,          # fetch the moment's main frame from the recording (playback.py)
-        evidence_hold_s: float = 3.0,            # how long a finished visit waits for its playback crop
+        evidence_hold_s: float = 6.0,            # how long a finished visit waits for its playback crop
         evidence_fetch_min_interval_s: float = 2.0,
+        evidence_stamp_lead_s: float = 0.5,       # the sub path's stamp latency, calibrated per camera after
         evidence_url_provider=None,              # freshest main-tap URL (its JWT rotates)
         evidence_source_factory=None,            # injectable for tests: () -> source with stream()/close()
     ) -> None:
@@ -437,10 +438,12 @@ class CameraWorker:
         self.evidence_playback = bool(evidence_playback)
         self.evidence_hold_s = max(0.0, float(evidence_hold_s or 0.0))
         self.evidence_fetch_min_interval_s = max(0.0, float(evidence_fetch_min_interval_s or 0.0))
+        self.evidence_stamp_lead_s = float(evidence_stamp_lead_s)
         self._playback = None
         self._held: dict = {}                    # track id -> (visit, deadline mono)
         self._visits_patched = 0                 # held visits that got their recording crop
         self._results_late = 0                   # accepted results with no track and no held visit
+        self._holds_expired = 0                  # held visits posted at the deadline without their crop
         self.evidence_url_provider = evidence_url_provider
         self._evidence_source_factory = evidence_source_factory
         self._evidence = None
@@ -661,7 +664,8 @@ class CameraWorker:
         gop = (lambda: evidence.gop_s) if evidence is not None else None
         self._playback = PlaybackEvidence(
             self.spec.camera_id, provider, match_min=self.evidence_match_min,
-            gop_s=gop, min_interval_s=self.evidence_fetch_min_interval_s)
+            gop_s=gop, min_interval_s=self.evidence_fetch_min_interval_s,
+            stamp_lead_s=self.evidence_stamp_lead_s)
         log.info("tier0 %s: evidence of the moment from the recording (playback), "
                  "min %.1fs between fetches, visits held up to %.1fs",
                  self.spec.camera_id, self.evidence_fetch_min_interval_s, self.evidence_hold_s)
@@ -690,6 +694,8 @@ class CameraWorker:
         for tid, (visit, deadline) in list(self._held.items()):
             if now_mono >= deadline or not pb.pending_for(tid):
                 self._held.pop(tid, None)
+                if now_mono >= deadline:
+                    self._holds_expired += 1
                 self._post_visit(visit)
 
     @staticmethod
@@ -703,7 +709,10 @@ class CameraWorker:
             from .bestframe import _encode_jpeg, encode_scene_jpeg
             jpeg = _encode_jpeg(res.crop)
             scene = encode_scene_jpeg(res.frame) if res.frame is not None else visit.scene_jpeg
-            return replace(visit, jpeg=jpeg or visit.jpeg, scene_jpeg=scene or visit.scene_jpeg)
+            if not jpeg:
+                return visit
+            return replace(visit, jpeg=jpeg, scene_jpeg=scene or visit.scene_jpeg,
+                           evidence_source="playback", evidence_skew_s=res.skew_s)
         except Exception:
             return visit
 
@@ -945,6 +954,10 @@ class CameraWorker:
         # is the bare box, 2 is a crop five times the box on each axis.
         tracker.crop_margin = max(0.0, min(2.0, _env_float(
             "DETECT_CROP_MARGIN", 0.25)))
+        # Best-frame blur veto: a candidate sharper than this fraction of
+        # the current best's sharpness may still replace it; 0 = off.
+        tracker.blur_veto = max(0.0, min(1.0, _env_float(
+            "DETECT_BEST_FRAME_BLUR_VETO", 0.5)))
         if lpr_camera:
             tracker.retain_plate_candidates = True
             tracker.plate_candidates_max = _env_int("DETECT_PLATE_CANDIDATES", 4)
@@ -1136,6 +1149,16 @@ class CameraWorker:
                     "tier0_track_spawns_dropped", float(tracker.spawns_dropped),
                     {"camera": self.spec.camera_id},
                 )
+                # Best-frame picks refused for blur, and plate candidates
+                # whose pixels the recording replaced at full resolution.
+                _metrics.gauge(
+                    "tier0_best_frame_blur_vetoes_total", float(tracker.blur_vetoes),
+                    {"camera": self.spec.camera_id},
+                )
+                _metrics.gauge(
+                    "tier0_plate_candidates_upgraded_total", float(tracker.plate_upgrades),
+                    {"camera": self.spec.camera_id},
+                )
                 # Retain each track's best crop for on-demand fetch (best-frame
                 # store) — cheap: a reference, encoded lazily only if requested.
                 if self.best_frames is not None:
@@ -1195,7 +1218,8 @@ class CameraWorker:
                     )
                 if self._playback is not None:
                     record_playback_evidence(self.spec.camera_id, self._playback, held=len(self._held),
-                                             patched=self._visits_patched, late=self._results_late)
+                                             patched=self._visits_patched, late=self._results_late,
+                                             expired=self._holds_expired)
                 # Adaptive decode: promote on the first sign of activity,
                 # demote after the quiet period. The flip terminates the
                 # current ffmpeg; the source's restart loop respawns it with
@@ -1291,8 +1315,9 @@ class WorkerManager:
         sub_min_height: int = 480,
         evidence_debug_dir: str | None = None,
         evidence_playback: bool = True,
-        evidence_hold_s: float = 3.0,
+        evidence_hold_s: float = 6.0,
         evidence_fetch_min_interval_s: float = 2.0,
+        evidence_stamp_lead_s: float = 0.5,
         evidence_fetch_parallel: int = 2,
     ) -> None:
         self._evidence_stream = evidence_stream
@@ -1307,6 +1332,7 @@ class WorkerManager:
         self._evidence_playback = evidence_playback
         self._evidence_hold_s = evidence_hold_s
         self._evidence_fetch_min_interval_s = evidence_fetch_min_interval_s
+        self._evidence_stamp_lead_s = evidence_stamp_lead_s
         from .playback import set_box_parallel
         set_box_parallel(evidence_fetch_parallel)
         # Freshest main-tap URL per camera, beside _latest_url (same reason:
@@ -1437,6 +1463,7 @@ class WorkerManager:
             evidence_playback=self._evidence_playback,
             evidence_hold_s=self._evidence_hold_s,
             evidence_fetch_min_interval_s=self._evidence_fetch_min_interval_s,
+            evidence_stamp_lead_s=self._evidence_stamp_lead_s,
             evidence_url_provider=lambda cid=spec.camera_id: self.current_evidence_url(cid),
         )
 
