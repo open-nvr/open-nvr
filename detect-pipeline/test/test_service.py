@@ -1104,3 +1104,24 @@ def test_the_main_policy_detects_on_the_main_even_if_core_still_hands_the_sub(mo
                       tuning=parse_tuning({"detect_stream": "main"}))
     _, _, height = CameraWorker(spec, _FakeSink(), sub_min_height=480)._make_source()
     assert height == 1080 and metrics.value("tier0_detect_on_main", {"camera": "cam-main"}) == 1.0   # policy
+
+
+def test_manager_keeps_the_freshest_playback_url_per_camera_like_the_tap_urls():
+    """The playback URL carries a rotating token like the tap URLs, so the
+    manager hands workers a provider that reads the latest listing. The map
+    was declared but never filled on the first deploy: every fetch failed
+    with no_playback_url while the listing carried the URL."""
+    spec = CameraSpec("a", "a", "rtsp://m/a-sub?jwt=1", evidence_url="rtsp://m/a?jwt=1",
+                      playback_url="http://mediamtx:9996/get?path=a&jwt=1")
+    prov = _FakeProvider([spec])
+    mgr = WorkerManager(prov, _FakeSink(), worker_factory=_FakeWorker)
+    mgr.reconcile()
+    assert mgr.current_playback_url("a") == "http://mediamtx:9996/get?path=a&jwt=1"
+    assert mgr.current_evidence_url("a") == "rtsp://m/a?jwt=1"
+    prov.specs = [CameraSpec("a", "a", "rtsp://m/a-sub?jwt=2", evidence_url="rtsp://m/a?jwt=2",
+                             playback_url="http://mediamtx:9996/get?path=a&jwt=2")]
+    mgr.reconcile()
+    assert mgr.current_playback_url("a").endswith("jwt=2"), "rotated token reaches the provider"
+    prov.specs = []
+    mgr.reconcile()
+    assert mgr.current_playback_url("a") is None

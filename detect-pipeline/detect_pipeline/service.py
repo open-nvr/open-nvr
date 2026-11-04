@@ -1511,6 +1511,7 @@ class WorkerManager:
                 self._latest_url[c.camera_id] = c.substream_url
             if c.evidence_url:
                 self._latest_evidence_url[c.camera_id] = c.evidence_url
+                self._latest_playback_url[c.camera_id] = c.playback_url
             else:
                 self._latest_evidence_url.pop(c.camera_id, None)
                 self._latest_playback_url.pop(c.camera_id, None)
