@@ -816,6 +816,8 @@ type Tier0MetricsResp = {
     evidence?: {
       main: number
       detect: number
+      /** Crops fetched from the recording: full-resolution, like main. Absent on an older core. */
+      playback?: number
       mismatch: number
       low_res_ratio: number | null
       gop_s: number | null
@@ -1108,7 +1110,7 @@ function ComputeGatedPanel() {
                             not matching (keyframe too old, or a second stream with a
                             different field of view). */}
                         {c.evidence && c.evidence.low_res_ratio != null
-                          && c.evidence.main + c.evidence.detect >= 10
+                          && c.evidence.main + c.evidence.detect + (c.evidence.playback ?? 0) >= 10
                           && c.evidence.low_res_ratio >= 0.25 && (
                           <Badge variant="warning">
                             {`evidence ${Math.round(c.evidence.low_res_ratio * 100)}% low-res`}

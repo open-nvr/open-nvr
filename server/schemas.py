@@ -755,6 +755,12 @@ class CameraResponse(CameraBase):
     # "resume_at" (None = until resumed), "by", "reason"}. recording_state
     # reads 'off' meanwhile; this says it was deliberate, and by whom.
     recording_pause: dict[str, Any] | None = None
+    # The escalation proposal (services/evidence_escalation.py): {"status":
+    # "proposed" | "accepted" | "dismissed", "reasons", "review_due"} when
+    # the camera's evidence on the sub stream is weak enough to propose
+    # detecting on the main stream, or a decision about that is in force.
+    # None = nothing to show. Only the camera list computes it.
+    escalation: dict[str, Any] | None = None
     # Live connectivity from the in-memory tracker (CameraStatusService:
     # MediaMTX path ready AND bytes flowing). None means UNKNOWN, not offline:
     # the backend restarted and the first reconcile pass has not landed yet,

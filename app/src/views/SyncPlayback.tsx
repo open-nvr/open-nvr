@@ -118,6 +118,11 @@ const MAX_TILES = 4
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v))
 
+// How far before a deep-linked instant the playhead lands (see the
+// per-day initialiser): long enough to cover the detect stream's latency
+// and a keyframe-only idle decode waking up a GOP late.
+const DEEP_LINK_LEAD_MS = 3000
+
 function parseSegments(raw: RawSegment[]): TimelineSegment[] {
   return raw
     .map((r) => {
@@ -214,6 +219,12 @@ export function SyncPlayback() {
   //: Consumed by the per-day initialiser below, then cleared — so it seeks
   //: once rather than every time the day's segments reload.
   const pendingSeekMs = useRef<number | null>(link.atMs)
+  //: A deep link whose instant has no footage on its camera: the playhead
+  //: goes to the nearest later recording, and the operator is TOLD, because
+  //: the alternative (what the master clock does on its own in dead air) is
+  //: a silent jump to footage of some other moment, which reads as "the
+  //: subject is not there".
+  const [deepLinkMiss, setDeepLinkMiss] = useState<{ askedMs: number; nearestMs: number | null } | null>(null)
 
   // ---- Selection -----------------------------------------------------------
   const [selectedDate, setSelectedDate] = useState<string | null>(
@@ -395,9 +406,27 @@ export function SyncPlayback() {
     // back to where the link pointed an hour ago.
     const asked = pendingSeekMs.current
     pendingSeekMs.current = null
-    setMasterMs(
-      asked != null && asked >= dayStart && asked < dayEnd ? asked : first,
-    )
+    let target = first
+    if (asked != null && asked >= dayStart && asked < dayEnd) {
+      // The linked camera's own footage decides, not the union: another
+      // camera recording at that instant is no help in finding this one.
+      const linkCam = deepLink.current?.camera ?? null
+      const own = linkCam != null ? segsByCam[linkCam] : undefined
+      const segs = own && own.length ? own : unionSegs
+      const hit = segs.find((s) => asked >= s.startMs && asked < s.endMs)
+      if (hit) {
+        // A little before the instant, inside the same segment: an event's
+        // start is stamped when the detector first saw the object, which is
+        // after it entered the frame (stream latency, and the idle decode
+        // that wakes up on a keyframe), so the entry is on screen too.
+        target = Math.max(hit.startMs, asked - DEEP_LINK_LEAD_MS)
+      } else {
+        const nx = segs.find((s) => s.startMs > asked)
+        setDeepLinkMiss({ askedMs: asked, nearestMs: nx ? nx.startMs : null })
+        if (nx) target = nx.startMs
+      }
+    }
+    setMasterMs(target)
     setView({ start: dayStart, end: dayEnd })
     setZoomIdx(0)
     setPlaying(true)
@@ -486,6 +515,7 @@ export function SyncPlayback() {
     const avail = (overview || []).filter((c) => c.recordings.some((r) => r.date === date)).map((c) => c.camera_id)
     setSelectedDate(date)
     dateInitRef.current = null
+    setDeepLinkMiss(null)
     setPlaying(false)
     setExportMode(false)
     setSelectedIds((prev) => {
@@ -817,6 +847,18 @@ export function SyncPlayback() {
           </span>
           {!mediamtxAvailable && (
             <span className="text-[11px] text-[var(--warn)] truncate">Playback server offline — playback unavailable</span>
+          )}
+          {deepLinkMiss && (
+            <span className="text-[11px] text-[var(--warn)] truncate" role="status">
+              {deepLinkMiss.nearestMs != null
+                ? t('playback.noFootageAtNearest', {
+                    at: fmt.time(deepLinkMiss.askedMs, { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }),
+                    next: fmt.time(deepLinkMiss.nearestMs, { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }),
+                  })
+                : t('playback.noFootageAt', {
+                    at: fmt.time(deepLinkMiss.askedMs, { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }),
+                  })}
+            </span>
           )}
           {cloudWatch && cloudStatus && (
             <span className="flex items-center gap-1 text-[11px] text-[var(--text-dim)] font-mono tabular-nums truncate" title={t('playback.cloudStatus')}>

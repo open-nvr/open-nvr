@@ -59,9 +59,30 @@ fi
 # files are fine; this migrates whatever an older stack left behind. Scoped
 # to files NOT already owned by opennvr, so on a healthy tree it is a
 # metadata-only scan, not a full re-chown.
+#
+# It must never hold up boot, and it used to. On a mount where ownership
+# does not stick (NFS with root_squash, SMB/CIFS, NTFS through Docker
+# Desktop, exFAT), every file stays "not opennvr" forever, so every start
+# walked and re-chowned the whole archive before supervisord ran. Core sat
+# on this line until its healthcheck marked it unhealthy, and a big
+# archive on a slow disk does the same even when chown works. So: probe
+# once, skip the walk where chown cannot work, and otherwise walk in the
+# background.
 if [ -d "/app/recordings" ]; then
-    echo "Fixing ownership of non-opennvr files in recordings tree..."
-    find /app/recordings ! -user opennvr -exec chown opennvr:opennvr {} + 2>/dev/null || true
+    _probe="/app/recordings/.opennvr-chown-probe.$$"
+    if touch "$_probe" 2>/dev/null \
+        && chown opennvr:opennvr "$_probe" 2>/dev/null \
+        && [ "$(stat -c %U "$_probe" 2>/dev/null)" = "opennvr" ]; then
+        rm -f "$_probe"
+        echo "Fixing ownership of non-opennvr files in recordings tree (in the background)..."
+        (
+            find /app/recordings ! -user opennvr -exec chown opennvr:opennvr {} + 2>/dev/null || true
+            echo "Recordings tree ownership fix finished."
+        ) &
+    else
+        rm -f "$_probe" 2>/dev/null || true
+        echo "Recordings mount does not keep file ownership; skipping the ownership fix."
+    fi
 fi
 
 # ──────────────────────────────────────────────────────────────────────

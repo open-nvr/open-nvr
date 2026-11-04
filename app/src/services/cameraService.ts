@@ -57,6 +57,36 @@ export type DetectionSettings = {
   object_filters?: Record<string, ObjectFilter> | null
 }
 
+/** The escalation proposal for a camera (services/evidence_escalation.py):
+ *  evidence quality over the last day and the decision in force. */
+export type EscalationView = {
+  camera_id: number
+  escalation: {
+    status: 'proposed' | 'accepted' | 'dismissed'
+    reasons?: string[]
+    proposed_at?: string | null
+    accepted_at?: string | null
+    dismissed_until?: string | null
+    previous?: string | null
+    by?: string | null
+    review_due?: boolean
+    cost_note?: string
+  } | null
+  evaluation: {
+    window_hours: number
+    visits: number
+    full_res: number
+    small: number
+    full_res_share: number | null
+    small_share: number | null
+    detect_stream: string
+    qualifies: boolean
+    reasons: string[]
+    thresholds: { min_visits: number; full_res_min: number; small_px: number; small_share_max: number }
+    cost_note: string
+  } | null
+}
+
 export const cameraService = {
   // Streams
   getWhepUrl: (cameraId: number) => api.get(`/api/v1/streams/webrtc/${cameraId}`),
@@ -106,6 +136,13 @@ export const cameraService = {
     api.get(`/api/v1/cameras/${cameraId}/detection-settings`),
   putDetectionSettings: (cameraId: number, body: DetectionSettings) =>
     api.put(`/api/v1/cameras/${cameraId}/detection-settings`, body),
+  // The escalation proposal: weak evidence on the sub stream → detect on main?
+  getEscalation: (cameraId: number, fresh = false) =>
+    api.get(`/api/v1/cameras/${cameraId}/escalation`, { params: fresh ? { fresh: true } : {} }),
+  acceptEscalation: (cameraId: number) => api.post(`/api/v1/cameras/${cameraId}/escalation/accept`),
+  dismissEscalation: (cameraId: number, days = 7) =>
+    api.post(`/api/v1/cameras/${cameraId}/escalation/dismiss`, { days }),
+  resetEscalation: (cameraId: number) => api.post(`/api/v1/cameras/${cameraId}/escalation/reset`),
   getCamera: (cameraId: number) => api.get(`/api/v1/cameras/${cameraId}`),
   // A single JPEG still of the camera's current view — backs the App
   // Catalog geometry editors (draw a zone/tripwire on the real scene).
