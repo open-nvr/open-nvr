@@ -44,6 +44,8 @@ from .metrics import (
     record_processing_fps,
     record_decode_config,
     record_mainstream_fallback,
+    record_detect_stream,
+    record_playback_evidence,
     record_published,
     record_sink_error,
     record_frames_dropped,
@@ -184,6 +186,11 @@ class CameraSpec:
     # Volatile like substream_url (its JWT rotates), so the manager keeps
     # the freshest one aside and bakes only its presence.
     evidence_url: str | None = None
+    # MediaMTX playback ``/get?path=…&jwt=…`` for the main stream, offered
+    # beside evidence_url: evidence of the same moment fetched from the
+    # recording after the fact (playback.py). Volatile like the URLs
+    # above (its token rotates); only its presence is baked.
+    playback_url: str | None = None
     # The operator's masks for this camera (masks.py), normalised polygons
     # from core's ``motion_masks`` / ``object_masks`` fields. Tuples, so the
     # spec stays hashable and a redrawn mask is a spec change: the worker
@@ -244,6 +251,11 @@ class ResultSink(Protocol):
         """Return True iff an event was actually published (not a no-op frame)."""
         ...
 
+
+#: How far before the detect frame the guard's reference main frame is
+#: taken (tracking.py _reference_sims): the scene without the subject,
+#: for a moving one.
+EVIDENCE_REF_BEFORE_S = 3.0
 
 #: How often a worker reports frames the drain dropped while detection was
 #: busy, and the share of decoded frames (dropped / (dropped + detected))
@@ -401,6 +413,12 @@ class CameraWorker:
         evidence_decode: str = "nokey",          # "nokey": keyframes only while active (default); "full": every main frame
         evidence_nokey_max_gop_s: float = 2.0,   # nokey: measured GOP above this → this camera switches itself to full
         evidence_match_min: float = 0.5,         # a main crop must look this much like the detect crop (0 = no check)
+        sub_min_height: int = 480,               # a shorter sub stream: 'auto' cameras detect on the main instead
+        evidence_debug_dir: str | None = None,   # DETECT_EVIDENCE_DEBUG_DIR: dump every evidence attempt here
+        playback_url_provider=None,              # freshest playback URL for this camera (its token rotates)
+        evidence_playback: bool = True,          # fetch the moment's main frame from the recording (playback.py)
+        evidence_hold_s: float = 3.0,            # how long a finished visit waits for its playback crop
+        evidence_fetch_min_interval_s: float = 2.0,
         evidence_url_provider=None,              # freshest main-tap URL (its JWT rotates)
         evidence_source_factory=None,            # injectable for tests: () -> source with stream()/close()
     ) -> None:
@@ -413,6 +431,16 @@ class CameraWorker:
         self.evidence_decode = (evidence_decode or "nokey").strip().lower()
         self.evidence_nokey_max_gop_s = max(0.0, float(evidence_nokey_max_gop_s or 0.0))
         self.evidence_match_min = max(0.0, min(1.0, float(evidence_match_min or 0.0)))
+        self.sub_min_height = max(0, int(sub_min_height or 0))
+        self.evidence_debug_dir = (evidence_debug_dir or "").strip() or None
+        self.playback_url_provider = playback_url_provider
+        self.evidence_playback = bool(evidence_playback)
+        self.evidence_hold_s = max(0.0, float(evidence_hold_s or 0.0))
+        self.evidence_fetch_min_interval_s = max(0.0, float(evidence_fetch_min_interval_s or 0.0))
+        self._playback = None
+        self._held: dict = {}                    # track id -> (visit, deadline mono)
+        self._visits_patched = 0                 # held visits that got their recording crop
+        self._results_late = 0                   # accepted results with no track and no held visit
         self.evidence_url_provider = evidence_url_provider
         self._evidence_source_factory = evidence_source_factory
         self._evidence = None
@@ -534,9 +562,18 @@ class CameraWorker:
             return self._frame_source, self._frame_source.width, self._frame_source.height
         w, h = self.spec.width, self.spec.height
         url = self.spec.substream_url
+        policy = self.spec.tuning.detect_stream or "auto"
+        reason = ""
+        if policy == "main" and self.spec.evidence_url and _tap_kind(url) == "sub":
+            # The operator chose the main stream for this camera. Core
+            # normally hands the main tap for that policy; this is the
+            # belt to that brace for a listing that still carries the sub.
+            url = self.spec.evidence_url
+            self._detect_on_main = True
+            reason = "policy"
         if not (w and h):
             probed = probe_stream(url)
-            if probed is None and self.spec.evidence_url:
+            if probed is None and self.spec.evidence_url and not self._detect_on_main:
                 # The sub tap is dead but core also handed us the main one.
                 # Detect on the main stream rather than on nothing: a
                 # camera with a stored substream URL MediaMTX cannot serve
@@ -555,9 +592,34 @@ class CameraWorker:
                     )
                     url = self.spec.evidence_url
                     self._detect_on_main = True
+                    reason = "sub_unreachable"
             if probed is None:
                 raise RuntimeError(f"could not probe {self.spec.camera_id} stream")
             w, h, _fps = probed
+            if (policy == "auto" and not self._detect_on_main and _tap_kind(url) == "sub"
+                    and self.spec.evidence_url and self.sub_min_height and h < self.sub_min_height):
+                # The sub stream is too small for the detector to see a
+                # person at mid-distance (a 352x288 "D1/CIF" sub shows one
+                # as ~15 px). Detect on the main stream instead — costlier,
+                # named in the log and the metric — unless the operator
+                # pins this camera to 'sub'.
+                main = probe_stream(self.spec.evidence_url)
+                if main is not None:
+                    log.warning(
+                        "tier0 %s: the sub stream is %dx%d, under the %d px floor for "
+                        "detection — detecting on the MAIN stream (%dx%d, full-res "
+                        "decode). Raise the camera's sub stream resolution, or set "
+                        "this camera's detect stream to 'sub' to use it anyway.",
+                        self.spec.camera_id, w, h, self.sub_min_height, main[0], main[1],
+                    )
+                    url = self.spec.evidence_url
+                    self._detect_on_main = True
+                    reason = "sub_too_small"
+                    w, h, _fps = main
+        on_main = self._detect_on_main or _tap_kind(url) == "main"
+        if on_main and not reason:
+            reason = "policy" if policy == "main" else "no_substream"
+        record_detect_stream(self.spec.camera_id, "main" if on_main else "sub", reason)
         src = FrameSource(
             url, width=w, height=h, fps=self.spec.fps,
             hwaccel=self._effective_hwaccel(), device=self.device,
@@ -585,6 +647,81 @@ class CameraWorker:
         if self._evidence_nokey:
             return max(float(self.evidence_max_skew_s), self.NOKEY_MIN_SKEW_S)
         return float(self.evidence_max_skew_s)
+
+    def _make_playback(self, evidence):
+        """Evidence from the recording for this camera (playback.py), when
+        core offered a playback URL and the dial is on; None otherwise."""
+        if not self.evidence_playback or self._detect_on_main:
+            return None
+        if not (self.spec.playback_url or self.playback_url_provider):
+            return None
+        from .playback import PlaybackEvidence
+
+        provider = self.playback_url_provider or (lambda: self.spec.playback_url)
+        gop = (lambda: evidence.gop_s) if evidence is not None else None
+        self._playback = PlaybackEvidence(
+            self.spec.camera_id, provider, match_min=self.evidence_match_min,
+            gop_s=gop, min_interval_s=self.evidence_fetch_min_interval_s)
+        log.info("tier0 %s: evidence of the moment from the recording (playback), "
+                 "min %.1fs between fetches, visits held up to %.1fs",
+                 self.spec.camera_id, self.evidence_fetch_min_interval_s, self.evidence_hold_s)
+        return self._playback
+
+    def _drain_playback(self, tracker, now_mono: float) -> None:
+        """Results from the recording: a live track takes its crop; a held
+        visit is patched and posted; held visits past their deadline go as
+        they are."""
+        pb = self._playback
+        if pb is None:
+            return
+        for res in pb.results():
+            tracker.note_playback_result(res)
+            if tracker.apply_evidence_result(res):
+                continue
+            held = self._held.pop(res.track_id, None)
+            if held is None:
+                if res.outcome == "accepted":
+                    self._results_late += 1      # the visit went before its crop arrived
+                continue
+            visit, _deadline = held
+            if res.outcome == "accepted" and res.crop is not None:
+                self._visits_patched += 1
+            self._post_visit(self._patch_visit(visit, res))
+        for tid, (visit, deadline) in list(self._held.items()):
+            if now_mono >= deadline or not pb.pending_for(tid):
+                self._held.pop(tid, None)
+                self._post_visit(visit)
+
+    @staticmethod
+    def _patch_visit(visit, res):
+        """The visit with the recording's crop (and scene) when the result
+        was accepted; unchanged otherwise."""
+        if res.outcome != "accepted" or res.crop is None:
+            return visit
+        try:
+            from dataclasses import replace
+            from .bestframe import _encode_jpeg, encode_scene_jpeg
+            jpeg = _encode_jpeg(res.crop)
+            scene = encode_scene_jpeg(res.frame) if res.frame is not None else visit.scene_jpeg
+            return replace(visit, jpeg=jpeg or visit.jpeg, scene_jpeg=scene or visit.scene_jpeg)
+        except Exception:
+            return visit
+
+    def _post_visit(self, visit) -> None:
+        if self.visit_poster is not None:
+            self.visit_poster.submit(visit)
+
+    def _offer_visit(self, visit, now_mono: float) -> None:
+        """A finished visit: posted now, or held for its pending playback crop."""
+        pb = self._playback
+        try:
+            tid = int(visit.track_id)
+        except (TypeError, ValueError):
+            tid = None
+        if pb is not None and tid is not None and self.evidence_hold_s > 0 and pb.pending_for(tid):
+            self._held[tid] = (visit, now_mono + self.evidence_hold_s)
+            return
+        self._post_visit(visit)
 
     def _make_evidence(self, sub_w: int, sub_h: int):
         """The main-stream evidence source for this camera, or None.
@@ -825,6 +962,16 @@ class CameraWorker:
         if evidence is not None:
             tracker.evidence = evidence.nearest
             tracker.evidence_match_min = self.evidence_match_min
+            # The scene a few seconds before the detect frame, for the
+            # guard's reference measurement (tracking.py _reference_sims).
+            tracker.evidence_ref = (lambda ts, _e=evidence:
+                                    _e.earliest_before(ts - EVIDENCE_REF_BEFORE_S)
+                                    if ts is not None else None)
+            tracker.evidence_debug_dir = self.evidence_debug_dir
+            tracker.evidence_debug_camera = self.spec.camera_id
+        playback = self._make_playback(evidence)
+        if playback is not None:
+            tracker.evidence_request = playback.request
             if self._stop.is_set():             # stopped during the probe
                 evidence.close()
         if _env_bool("DETECT_SCENE_EVIDENCE", True):
@@ -1010,7 +1157,8 @@ class CameraWorker:
                     fw, fh = getattr(frame, "width", None), getattr(frame, "height", None)
                     size = (fw, fh) if fw and fh else None
                     for visit in lifecycle.observe(result.tracks, time.time(), size):
-                        self.visit_poster.submit(visit)
+                        self._offer_visit(visit, time.monotonic())
+                self._drain_playback(tracker, time.monotonic())
                 # Sustained fps over a ~1s window — compared to target_fps, this is
                 # the "is the box keeping up with this camera" signal.
                 win_n += 1
@@ -1040,9 +1188,14 @@ class CameraWorker:
                         self.spec.camera_id, evidence.active, tracker.evidence_stats,
                         frames=evidence.frames_total, starts=evidence.starts,
                         mismatches=tracker.evidence_mismatches,
+                        refusals=tracker.evidence_refusals,
+                        samples=tracker.drain_evidence_samples(),
                         gop_s=evidence.gop_s,
                         keyframes_only=evidence.keyframes_only,
                     )
+                if self._playback is not None:
+                    record_playback_evidence(self.spec.camera_id, self._playback, held=len(self._held),
+                                             patched=self._visits_patched, late=self._results_late)
                 # Adaptive decode: promote on the first sign of activity,
                 # demote after the quiet period. The flip terminates the
                 # current ffmpeg; the source's restart loop respawns it with
@@ -1135,6 +1288,12 @@ class WorkerManager:
         evidence_decode: str = "nokey",
         evidence_nokey_max_gop_s: float = 2.0,
         evidence_match_min: float = 0.5,
+        sub_min_height: int = 480,
+        evidence_debug_dir: str | None = None,
+        evidence_playback: bool = True,
+        evidence_hold_s: float = 3.0,
+        evidence_fetch_min_interval_s: float = 2.0,
+        evidence_fetch_parallel: int = 2,
     ) -> None:
         self._evidence_stream = evidence_stream
         self._evidence_fps = evidence_fps
@@ -1143,9 +1302,17 @@ class WorkerManager:
         self._evidence_decode = evidence_decode
         self._evidence_nokey_max_gop_s = evidence_nokey_max_gop_s
         self._evidence_match_min = evidence_match_min
+        self._sub_min_height = sub_min_height
+        self._evidence_debug_dir = evidence_debug_dir
+        self._evidence_playback = evidence_playback
+        self._evidence_hold_s = evidence_hold_s
+        self._evidence_fetch_min_interval_s = evidence_fetch_min_interval_s
+        from .playback import set_box_parallel
+        set_box_parallel(evidence_fetch_parallel)
         # Freshest main-tap URL per camera, beside _latest_url (same reason:
         # the JWT rotates; the running worker's source reads it on respawn).
         self._latest_evidence_url: dict[str, str] = {}
+        self._latest_playback_url: dict[str, str] = {}
         self.provider = provider
         self.sink = sink
         self.enabled = enabled
@@ -1220,6 +1387,10 @@ class WorkerManager:
         """The freshest known main-tap URL for a camera's evidence source."""
         return self._latest_evidence_url.get(camera_id)
 
+    def current_playback_url(self, camera_id: str) -> str | None:
+        """The freshest known playback URL for a camera (playback.py)."""
+        return self._latest_playback_url.get(camera_id)
+
     def _make_worker(self, spec: CameraSpec, spread: float) -> Worker:
         """Build a worker, giving it a random slot inside the start window.
 
@@ -1260,6 +1431,12 @@ class WorkerManager:
             evidence_decode=self._evidence_decode,
             evidence_nokey_max_gop_s=self._evidence_nokey_max_gop_s,
             evidence_match_min=self._evidence_match_min,
+            sub_min_height=self._sub_min_height,
+            evidence_debug_dir=self._evidence_debug_dir,
+            playback_url_provider=lambda cid=spec.camera_id: self.current_playback_url(cid),
+            evidence_playback=self._evidence_playback,
+            evidence_hold_s=self._evidence_hold_s,
+            evidence_fetch_min_interval_s=self._evidence_fetch_min_interval_s,
             evidence_url_provider=lambda cid=spec.camera_id: self.current_evidence_url(cid),
         )
 
@@ -1319,6 +1496,7 @@ class WorkerManager:
             spec,
             substream_url=_tap_kind(spec.substream_url),
             evidence_url="main" if spec.evidence_url else None,
+            playback_url="playback" if spec.playback_url else None,
             nvr_camera_id=None,
         )
 
@@ -1341,8 +1519,10 @@ class WorkerManager:
                 self._latest_url[c.camera_id] = c.substream_url
             if c.evidence_url:
                 self._latest_evidence_url[c.camera_id] = c.evidence_url
+                self._latest_playback_url[c.camera_id] = c.playback_url
             else:
                 self._latest_evidence_url.pop(c.camera_id, None)
+                self._latest_playback_url.pop(c.camera_id, None)
 
         doomed: dict[str, Worker] = {}
         for cid in list(self._workers):
@@ -1373,6 +1553,7 @@ class WorkerManager:
                     # (dashboard "Detection 1/2 — Degraded" with one camera).
                     self._latest_url.pop(cid, None)
                     self._latest_evidence_url.pop(cid, None)
+                    self._latest_playback_url.pop(cid, None)
                 if spec_changed:
                     log.info(
                         "tier0: restarting %s — baked-in spec changed "

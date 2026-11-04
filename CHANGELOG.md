@@ -18,6 +18,46 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   runs, step by step with an AI step's calls. New workflows start in Test;
   only an admin turns On one that moves things, and a new version whose AI
   steps changed goes back to Test.
+
+- **Evidence of the moment, fetched from the recording.** The nearest
+  decoded keyframe was a GOP older than its stamp (ffmpeg holds one frame
+  in its output path; with keyframes only, the next keyframe releases it),
+  so main-stream crops of a moving subject were of where it *was* and the
+  guard refused most of them. The pipeline now asks MediaMTX's playback
+  server for the main-stream frames around the detect frame's time once a
+  track's best crop improves, decodes that one clip, keeps the frame that
+  matches the detect crop, and gives it to the live track or to the visit
+  held for it (`DETECT_EVIDENCE_PLAYBACK`, `DETECT_EVIDENCE_HOLD_S`,
+  `DETECT_EVIDENCE_FETCH_MIN_INTERVAL_S`, `DETECT_EVIDENCE_FETCH_PARALLEL`;
+  core adds `playback_url` to the camera listing). Costs are metered per
+  camera (`tier0_evidence_fetch_total{outcome}`, fetch and decode seconds,
+  visits held). Keyframe evidence remains the synchronous fallback.
+
+- **The evidence crop-match guard, measured and tightened.** Refusals are
+  split by reason (`tier0_evidence_refused_total{reason}`: `low_corr`, the
+  main crop does not look like the detect crop; `flat_main`, the sub saw a
+  textured subject where the main shows a blank — which the old rule
+  accepted as undecidable), every attempt's score and main-to-detect time
+  gap go to histograms (`tier0_evidence_match_score`,
+  `tier0_evidence_skew_seconds`), and a reference similarity against the
+  scene a few seconds earlier is recorded for the rule to come.
+  `DETECT_EVIDENCE_DEBUG_DIR` writes each attempt's crops and numbers;
+  `tools/evidence_guard_report.py` reads a dump back: outcome split, score
+  and gap distributions, what each floor would refuse, a contact sheet.
+
+- **Per-camera detect stream, with a floor on the sub stream.** Detection
+  settings gain *Detect on*: `auto` (default), `sub` or `main`. `main`
+  detects on the full-resolution stream, with full-resolution evidence
+  from the same frame, at full decode cost — the per-camera switch that
+  lets the two approaches be compared on one scene and the instant
+  fallback when sub-stream detection is not enough. On `auto` a sub stream
+  shorter than `DETECT_SUB_MIN_HEIGHT` (480 px; a 352x288 "D1" sub shows a
+  person at 10 m as ~15 px, below what the detector resolves) makes the
+  camera detect on its main stream instead; `sub` pins the sub regardless.
+  The pipeline reports which stream it detects on and why
+  (`tier0_detect_on_main{camera}`), the AI Adapters page shows it, and the
+  camera acceptance suite applies the same floor.
+
 - **`opennvr_app_sdk.workflows.validate`: the whole workflow file,
   `workflow: v1`.** The check the engine, the builder and outside tools
   share (RFC #620): the trigger, the guards, every step and path, with
@@ -155,6 +195,26 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   768 px first when Pillow is installed. For the next SDK release.
 
 ### Changed
+
+- **Evidence from the recording, measured and trimmed.** Two more counters
+  say whether the visit hold is long enough (`tier0_evidence_visits_patched_total`,
+  `tier0_evidence_results_late_total`); the guard histograms and the debug
+  dump carry a `source` label so the keyframe and recording paths can be
+  compared on one walk-through; the fetched clip is short (the recorder
+  serves from the keyframe before it anyway) and decoded with four threads
+  and the fast flags — about 0.65 s instead of 1.1 s per request on the
+  Qualcomm box.
+
+- **`DETECT_FPS` defaults to 5** (was 2), Frigate's default and what the
+  tracker, the motion gate and the plate reader were tuned against: a
+  person is seen sooner, a fast subject keeps its track, plates get more
+  reads. The per-camera *Frames analysed per second* override is
+  unchanged, so a quiet indoor camera can still run at 2, and a CPU-only
+  box short of headroom can set `DETECT_FPS=2` system-wide as before. The
+  frame-counted dials keep their values and get shorter in seconds: the
+  motion calibration deadline (150 frames) is now ~30 s, the stationary
+  re-check (50 frames) ~10 s. The detector-latency check in the hardware
+  acceptance suite converts to cameras at the new rate.
 
 - **Keyframe-only main-stream evidence is now the default**
   (`DETECT_EVIDENCE_DECODE=nokey`; set `full` for the previous behaviour).

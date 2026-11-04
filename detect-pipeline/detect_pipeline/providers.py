@@ -93,23 +93,24 @@ class HttpCameraProvider:
 
 
 def _default_fps() -> int:
-    """Per-camera analysis rate: DETECT_FPS env, else 2.
+    """Per-camera analysis rate: DETECT_FPS env, else 5 (Frigate's default; 2 on
+    a CPU-only box that needs the headroom — the camera's detection settings
+    override it per camera).
 
-    Detection currently runs on EVERY analyzed frame (the gate skips
-    alarms, not inference), so this is the single biggest CPU dial the
-    pipeline has. The default is the CPU-friendly 2: it behaves well on
-    laptops and ANY macOS/Windows Docker install (the VM has no GPU),
-    and pipeline CPU scales ~linearly if a server with headroom — or a
-    DETECT_HWACCEL host — raises it to 5-10 for finer motion/track
-    granularity. Clamped to [1, 30]; a camera dict carrying an explicit
-    per-camera ``fps`` still wins.
+    Detection runs on every analyzed frame the gate lets through, so this
+    is the single biggest CPU dial the pipeline has; CPU scales ~linearly
+    with it. 5 is what the tracker, the gate and the plate reader are tuned
+    against; a laptop, a macOS/Windows Docker install (the VM has no GPU)
+    or a CPU-only box short of headroom lowers it to 2. Clamped to
+    [1, 30]; a camera dict carrying an explicit per-camera ``fps`` still
+    wins.
     """
     try:
-        fps = int(os.environ.get("DETECT_FPS", "2"))
+        fps = int(os.environ.get("DETECT_FPS", "5"))
     except ValueError:
-        log.warning("DETECT_FPS=%r is not an integer; using 2",
+        log.warning("DETECT_FPS=%r is not an integer; using 5",
                     os.environ.get("DETECT_FPS"))
-        return 2
+        return 5
     return max(1, min(30, fps))
 
 
@@ -246,6 +247,11 @@ def _to_spec(c: dict) -> CameraSpec:
         # cameras whose frame_url already IS the main stream.
         evidence_url=(str(c.get("evidence_url")).strip() or None)
         if c.get("evidence_url") else None,
+        # The recorder's playback endpoint for this camera's main stream
+        # (playback.py): evidence of the same moment, asked for after the
+        # fact. Absent on older cores and when there is no second stream.
+        playback_url=(str(c.get("playback_url")).strip() or None)
+        if c.get("playback_url") else None,
         # The operator's masks (masks.py). Absent on older cores = none.
         motion_masks=parse_motion_masks(c.get("motion_masks")),
         object_masks=parse_object_masks(c.get("object_masks")),

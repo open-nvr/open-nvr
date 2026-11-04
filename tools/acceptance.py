@@ -87,8 +87,10 @@ GATE_FLOOR_WARN, GATE_FLOOR_FAIL = 0.05, 0.25
 #: trigger is a fixed-place OSD (clock, title), which a motion mask removes.
 OSD_CELL_SHARE = 0.8
 #: The sub stream must be at least this tall for the detector to see a
-#: person at mid-distance, and run at least DETECT_FPS.
-SUB_MIN_HEIGHT = 288
+#: person at mid-distance (a 352x288 sub shows one at 10 m as ~15 px),
+#: and run at least DETECT_FPS. The same floor the pipeline applies
+#: (DETECT_SUB_MIN_HEIGHT): below it an 'auto' camera detects on the main.
+SUB_MIN_HEIGHT = 480
 #: Main-stream evidence crops the pipeline refused because they did not
 #: match the detect crop (tier0_evidence_mismatch_total over crops used + refused).
 EVIDENCE_MISMATCH_WARN, EVIDENCE_MISMATCH_FAIL = 0.10, 0.30
@@ -1134,9 +1136,9 @@ def run_camera(args: argparse.Namespace) -> int:
     log(f"OpenNVR camera acceptance {VERSION} — {name} — {started:%Y-%m-%d %H:%M} UTC")
     env = stack.env(["DETECT_FPS", "DETECT_EVIDENCE_NOKEY_MAX_GOP_S", "DETECT_EVIDENCE_STREAM"])
     try:
-        detect_fps = float(env.get("DETECT_FPS") or 2)
+        detect_fps = float(env.get("DETECT_FPS") or 5)
     except ValueError:
-        detect_fps = 2.0
+        detect_fps = 5.0
     try:
         max_gop = float(env.get("DETECT_EVIDENCE_NOKEY_MAX_GOP_S") or 2.0)
     except ValueError:
@@ -1239,7 +1241,7 @@ def run_hardware(args: argparse.Namespace) -> int:
     env = stack.env(["DETECT_ONNX_MODEL", "DETECT_ONNX_PROVIDERS", "DETECT_ONNX_INPUT",
                      "DETECT_FPS", "DETECT_DETECTOR_POOL", "DETECT_DECODE_THREADS", "DETECT_HWACCEL"])
     try:
-        fps = float(env.get("DETECT_FPS") or 2)
+        fps = float(env.get("DETECT_FPS") or 5)
     except ValueError:
         fps = 2.0
     try:

@@ -135,6 +135,23 @@ def _by_label(samples: list[Sample], name: str, label: str, value: str) -> dict[
     return out
 
 
+#: Values of the pipeline's tier0_detect_on_main gauge (metrics.py
+#: DETECT_ON_MAIN_REASONS): 0 = detecting on the sub stream; otherwise why
+#: the main stream is being decoded for detection.
+_DETECT_ON_MAIN_REASONS = {1: "policy", 2: "no_substream", 3: "sub_unreachable", 4: "sub_too_small"}
+
+
+def _detect_stream_row(code) -> dict | None:
+    """``{"stream": "sub"|"main", "reason": ...}``; None when the pipeline
+    predates the gauge (an older image must read as unknown, not as sub)."""
+    if code is None:
+        return None
+    code = int(code)
+    if code == 0:
+        return {"stream": "sub", "reason": ""}
+    return {"stream": "main", "reason": _DETECT_ON_MAIN_REASONS.get(code, "policy")}
+
+
 def _evidence_row(main, detect, mismatch, gop_s, keyframes_only) -> dict | None:
     """The per-camera evidence block, or None when the pipeline never
     reported one for this camera. ``low_res_ratio`` is the share of best
@@ -320,6 +337,7 @@ def reduce_metrics(samples: list[Sample]) -> dict[str, Any]:
     budget_cfg = _by_camera(samples, "tier0_regions_configured")
     tracks_act = _by_camera(samples, "tier0_tracks_active")
     mainstream = _by_camera(samples, "tier0_mainstream_fallback")
+    detect_on_main = _by_camera(samples, "tier0_detect_on_main")
     # Main-stream evidence (substream detection): which stream the best
     # crops came from, and how many main crops were refused because they
     # did not look like the detect frame (a keyframe too old for a moving
@@ -381,6 +399,7 @@ def reduce_metrics(samples: list[Sample]) -> dict[str, Any]:
             "visits_dropped": int(visits_drop.get(cam, 0)),
             "frames_dropped": int(frames_drop.get(cam, 0)),
             "mainstream_fallback": bool(mainstream.get(cam, 0) >= 1.0),
+            "detect_stream": _detect_stream_row(detect_on_main.get(cam)),
             # None when the pipeline predates main-stream evidence or the
             # camera has no second stream — not a fabricated zero.
             "evidence": _evidence_row(

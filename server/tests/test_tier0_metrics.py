@@ -488,3 +488,19 @@ def test_camera_row_carries_the_evidence_split_and_mismatches():
     # No evidence series at all (older pipeline, or no second stream):
     # absent, never a fabricated zero.
     assert cams["cam2"]["evidence"] is None
+
+
+DETECT_STREAM_TEXT = """
+tier0_worker_up{camera="cam1"} 1
+tier0_worker_up{camera="cam2"} 1
+tier0_worker_up{camera="cam3"} 1
+tier0_detect_on_main{camera="cam1"} 0
+tier0_detect_on_main{camera="cam2"} 4
+"""
+
+
+def test_camera_row_says_which_stream_is_detected_on_and_why():
+    cams = {c["camera"]: c for c in reduce_metrics(parse_prometheus_text(DETECT_STREAM_TEXT))["cameras"]}
+    assert cams["cam1"]["detect_stream"] == {"stream": "sub", "reason": ""}
+    assert cams["cam2"]["detect_stream"] == {"stream": "main", "reason": "sub_too_small"}
+    assert cams["cam3"]["detect_stream"] is None, "an older pipeline reads as unknown, not as sub"
