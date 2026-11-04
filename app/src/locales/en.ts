@@ -409,6 +409,8 @@ export const translations: TranslationCatalog = {
   'playback.pageTitle': 'Playback',
   'playback.cloudStatus': 'Cloud Upload Status',
   'playback.loadingRecordings': 'Loading recordings…',
+  'playback.noFootageAt': 'No recording at {{at}} on this camera; nothing later that day either.',
+  'playback.noFootageAtNearest': 'No recording at {{at}} on this camera — playing the nearest footage, from {{next}}.',
   'calendar.weekdays': 'Su,Mo,Tu,We,Th,Fr,Sa',
   'calendar.months': 'January,February,March,April,May,June,July,August,September,October,November,December',
   'calendar.previousMonth': 'Previous month',
