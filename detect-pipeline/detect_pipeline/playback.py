@@ -40,7 +40,7 @@ import subprocess
 import threading
 import time
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable
 from urllib import request as _urlreq
 
@@ -85,7 +85,9 @@ class EvidenceRequest:
     frame_shape: tuple[int, int]    # (h, w) of the detect frame
     sub_crop: object                # bare-box BGR crop of the detect frame
     label: str = ""
-    enqueued_mono: float = field(default_factory=time.monotonic)
+    # Stamped by PlaybackEvidence.request() on the instance's clock (None
+    # until then), so the age check and the tests' injected clock agree.
+    enqueued_mono: float | None = None
 
 
 @dataclass
@@ -193,6 +195,8 @@ class PlaybackEvidence:
     def request(self, req: EvidenceRequest) -> None:
         """File (or replace) this track's request. Never blocks."""
         self.requests += 1
+        if req.enqueued_mono is None:
+            req.enqueued_mono = self._clock()
         with self._cond:
             if req.track_id in self._pending:
                 self._pending.pop(req.track_id)          # the newer moment replaces the older
@@ -236,7 +240,7 @@ class PlaybackEvidence:
                     self._cond.wait(timeout=min(wait, 1.0))
                     continue
                 self._pending.pop(tid)
-                if self._clock() - req.enqueued_mono > self.max_age_s:
+                if self._clock() - (req.enqueued_mono or self._clock()) > self.max_age_s:
                     self.dropped += 1
                     self._results.append(EvidenceResult(req, "dropped", reason="too_old"))
                     continue
