@@ -291,7 +291,12 @@ their crop) against `tier0_evidence_results_late_total` (crops that found
 neither a track nor a held visit) says whether the hold is long enough.
 The guard histograms and the debug dump carry a `source` (`keyframe` or
 `playback`), so `tools/evidence_guard_report.py` compares the two paths on
-the same walk-through. The keyframe source stays as the synchronous fallback. (For comparison: Frigate
+the same walk-through. A detect frame's stamp is later than the recorder's clock for the same
+picture by the sub path's own latency (measured 0.56 s on a CP Plus through
+the Qualcomm box); the request subtracts `DETECT_EVIDENCE_STAMP_LEAD_S`
+(0.5 s) and each camera then calibrates its own lead from the frames it
+accepts (`tier0_evidence_stamp_lead_seconds`). The keyframe source stays as
+the synchronous fallback. (For comparison: Frigate
 takes snapshots from the detect stream and never decodes the record
 stream; ZoneMinder offers the same keyframes-only decoding as its
 CPU-saving mode.) Core

@@ -419,6 +419,7 @@ class CameraWorker:
         evidence_playback: bool = True,          # fetch the moment's main frame from the recording (playback.py)
         evidence_hold_s: float = 3.0,            # how long a finished visit waits for its playback crop
         evidence_fetch_min_interval_s: float = 2.0,
+        evidence_stamp_lead_s: float = 0.5,       # the sub path's stamp latency, calibrated per camera after
         evidence_url_provider=None,              # freshest main-tap URL (its JWT rotates)
         evidence_source_factory=None,            # injectable for tests: () -> source with stream()/close()
     ) -> None:
@@ -437,6 +438,7 @@ class CameraWorker:
         self.evidence_playback = bool(evidence_playback)
         self.evidence_hold_s = max(0.0, float(evidence_hold_s or 0.0))
         self.evidence_fetch_min_interval_s = max(0.0, float(evidence_fetch_min_interval_s or 0.0))
+        self.evidence_stamp_lead_s = float(evidence_stamp_lead_s)
         self._playback = None
         self._held: dict = {}                    # track id -> (visit, deadline mono)
         self._visits_patched = 0                 # held visits that got their recording crop
@@ -661,7 +663,8 @@ class CameraWorker:
         gop = (lambda: evidence.gop_s) if evidence is not None else None
         self._playback = PlaybackEvidence(
             self.spec.camera_id, provider, match_min=self.evidence_match_min,
-            gop_s=gop, min_interval_s=self.evidence_fetch_min_interval_s)
+            gop_s=gop, min_interval_s=self.evidence_fetch_min_interval_s,
+            stamp_lead_s=self.evidence_stamp_lead_s)
         log.info("tier0 %s: evidence of the moment from the recording (playback), "
                  "min %.1fs between fetches, visits held up to %.1fs",
                  self.spec.camera_id, self.evidence_fetch_min_interval_s, self.evidence_hold_s)
@@ -1293,6 +1296,7 @@ class WorkerManager:
         evidence_playback: bool = True,
         evidence_hold_s: float = 3.0,
         evidence_fetch_min_interval_s: float = 2.0,
+        evidence_stamp_lead_s: float = 0.5,
         evidence_fetch_parallel: int = 2,
     ) -> None:
         self._evidence_stream = evidence_stream
@@ -1307,6 +1311,7 @@ class WorkerManager:
         self._evidence_playback = evidence_playback
         self._evidence_hold_s = evidence_hold_s
         self._evidence_fetch_min_interval_s = evidence_fetch_min_interval_s
+        self._evidence_stamp_lead_s = evidence_stamp_lead_s
         from .playback import set_box_parallel
         set_box_parallel(evidence_fetch_parallel)
         # Freshest main-tap URL per camera, beside _latest_url (same reason:
@@ -1437,6 +1442,7 @@ class WorkerManager:
             evidence_playback=self._evidence_playback,
             evidence_hold_s=self._evidence_hold_s,
             evidence_fetch_min_interval_s=self._evidence_fetch_min_interval_s,
+            evidence_stamp_lead_s=self._evidence_stamp_lead_s,
             evidence_url_provider=lambda cid=spec.camera_id: self.current_evidence_url(cid),
         )
 

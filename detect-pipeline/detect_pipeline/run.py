@@ -158,6 +158,9 @@ class ServiceConfig:
     evidence_hold_s: float = 3.0
     evidence_fetch_min_interval_s: float = 2.0
     evidence_fetch_parallel: int = 2
+    # How much later a detect frame's stamp is than the recorder's clock
+    # (the sub path's latency); the starting point of a per-camera calibration.
+    evidence_stamp_lead_s: float = 0.5
 
 
 def _clean_env(value: str | None) -> str:
@@ -311,6 +314,7 @@ def config_from_env(env: dict) -> ServiceConfig:
         evidence_hold_s=_env_float(env, "DETECT_EVIDENCE_HOLD_S", 3.0),
         evidence_fetch_min_interval_s=_env_float(env, "DETECT_EVIDENCE_FETCH_MIN_INTERVAL_S", 2.0),
         evidence_fetch_parallel=_env_int(env, "DETECT_EVIDENCE_FETCH_PARALLEL", 2),
+        evidence_stamp_lead_s=_env_float(env, "DETECT_EVIDENCE_STAMP_LEAD_S", 0.5),
         gate_heartbeat_s=_env_float(env, "DETECT_GATE_HEARTBEAT_S", 0.0),
         gate_critical_classes=env.get("DETECT_GATE_CRITICAL_CLASSES", ""),
         gate_cooldown_s=_env_float(env, "DETECT_GATE_COOLDOWN_S", 30.0),
@@ -643,6 +647,7 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
         evidence_hold_s=cfg.evidence_hold_s,
         evidence_fetch_min_interval_s=cfg.evidence_fetch_min_interval_s,
         evidence_fetch_parallel=cfg.evidence_fetch_parallel,
+        evidence_stamp_lead_s=cfg.evidence_stamp_lead_s,
     )
     manager.best_frames = best_frames            # expose so main() can serve it
     # Same reason: main() wires this into /health. It is a LOCAL of this

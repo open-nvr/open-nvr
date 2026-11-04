@@ -209,3 +209,29 @@ def test_playback_results_leave_samples_and_dump_pairs(tmp_path):
     import json
     rec = json.loads((tmp_path / "cam5" / [n for n in files if n.endswith("p.json")][0]).read_text())
     assert rec["source"] == "playback" and rec["candidates"] == 4 and rec["accepted"] is True
+
+
+def test_the_stamp_lead_is_subtracted_and_calibrated_from_accepted_frames():
+    """The detect frame's stamp is later than the recorder's clock; the
+    request asks for the moment stamp - lead and the lead follows the
+    accepted frames' signed offset a quarter of the way each time."""
+    rng = np.random.default_rng(9)
+    box = (100, 100, 200, 300)
+    sub = _scene(rng, SUB, subject=box)
+    # 20 frames at 10 fps ending at end = asked moment + 0.3 s; the subject
+    # is at the box only on the frame 0.4 s before the end (index 15), i.e.
+    # the true moment 999.4; elsewhere it is elsewhere.
+    frames = []
+    for k in range(20):
+        where = box if k == 15 else (400, 100, 500, 300)
+        frames.append(np.kron(_scene(rng, SUB, subject=where), np.ones((2, 2, 1), np.uint8)))
+    clock = _Clock(1003.0)
+    # stamp 1000.0; true moment 999.4 (0.6 s earlier); lead starts at 0.5 →
+    # asked moment 999.5, window ±0.5 → the right frame is a candidate
+    pb = _playback(frames, clock=clock, stamp_lead_s=0.5)
+    pb.request(EvidenceRequest(1, 1000.0, box, SUB, _crop_bgr(sub, box, margin=0.0)))
+    res, = _wait_results(pb)
+    assert res.outcome == "accepted" and res.score > 0.8
+    assert abs(res.signed_skew_s - (-0.1)) < 0.06, "the frame sits 0.1 s before the asked moment"
+    assert 0.5 < pb.stamp_lead_s < 0.56, "the lead moved a quarter of the way towards 0.6"
+    pb.close()
