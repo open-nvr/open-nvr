@@ -247,6 +247,11 @@ def _to_spec(c: dict) -> CameraSpec:
         # cameras whose frame_url already IS the main stream.
         evidence_url=(str(c.get("evidence_url")).strip() or None)
         if c.get("evidence_url") else None,
+        # The recorder's playback endpoint for this camera's main stream
+        # (playback.py): evidence of the same moment, asked for after the
+        # fact. Absent on older cores and when there is no second stream.
+        playback_url=(str(c.get("playback_url")).strip() or None)
+        if c.get("playback_url") else None,
         # The operator's masks (masks.py). Absent on older cores = none.
         motion_masks=parse_motion_masks(c.get("motion_masks")),
         object_masks=parse_object_masks(c.get("object_masks")),
