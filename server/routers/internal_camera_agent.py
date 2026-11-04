@@ -104,6 +104,22 @@ def _app_roster(db: Session, principal) -> set[int] | None:
     return app_camera_ids(db, row)
 
 
+def _evidence_facts(payload: "TrackEventIn") -> dict | None:
+    """The visit's evidence facts as stored under ``payload["evidence"]``;
+    None when the pipeline sent none (an older image)."""
+    src = (payload.evidence_source or "").strip().lower()[:16] or None
+    out: dict = {}
+    if src:
+        out["source"] = src
+    if payload.evidence_box_px is not None:
+        out["box_px"] = max(0, int(payload.evidence_box_px))
+    if payload.evidence_frame_px is not None:
+        out["frame_px"] = max(0, int(payload.evidence_frame_px))
+    if payload.evidence_skew_s is not None:
+        out["skew_s"] = round(float(payload.evidence_skew_s), 3)
+    return out or None
+
+
 class TrackEventIn(BaseModel):
     """One finished object visit, posted by the detect-pipeline at track end."""
 
@@ -142,6 +158,16 @@ class TrackEventIn(BaseModel):
     # visit under the camera's zones. Optional; a malformed path is ignored,
     # never a 422 (history beats zone tags).
     path: list[list[float]] | None = None
+    # Where ``evidence_jpeg_b64`` came from and how good a look it was
+    # (services/evidence_escalation.py reads these over a window of visits):
+    # the stream the crop was cut from ("detect" = the sub-sized fallback,
+    # "main" = the keyframe path, "playback" = the recording), the smaller
+    # side of the subject's box on the detect frame in pixels, the detect
+    # frame's height, and the crop's time skew from the detect frame.
+    evidence_source: str | None = None
+    evidence_box_px: int | None = None
+    evidence_frame_px: int | None = None
+    evidence_skew_s: float | None = None
 
 
 def _zone_ids_for(db: Session, payload: TrackEventIn) -> list[int] | None:
@@ -240,6 +266,7 @@ async def ingest_track_event(
             evidence_path=evidence_rel,
             scene_evidence_path=scene_rel,
             zone_ids=_zone_ids_for(db, payload),
+            evidence=_evidence_facts(payload),
         )
     except IntegrityError:
         # Retry raced an earlier success — the visit already exists

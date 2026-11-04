@@ -809,6 +809,14 @@ def get_cameras(
     from services import recording_pause
 
     pauses = recording_pause.paused(db) if camera_ids else {}
+    # One evaluation for the page: which cameras have a proposal or a
+    # decision about detecting on the main stream (cached a minute).
+    try:
+        from services import evidence_escalation
+
+        escalations = evidence_escalation.summary(db, list(camera_ids)) if camera_ids else {}
+    except Exception:  # noqa: BLE001 - a badge must never cost the list
+        escalations = {}
 
     # Populate extra fields for response
     results = []
@@ -840,6 +848,7 @@ def get_cameras(
             online_since.get(c.id),
         )
         c_resp.recording_pause = pauses.get(str(c.id))
+        c_resp.escalation = escalations.get(c.id)
 
         results.append(c_resp)
 

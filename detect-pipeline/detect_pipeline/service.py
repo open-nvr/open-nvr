@@ -709,7 +709,10 @@ class CameraWorker:
             from .bestframe import _encode_jpeg, encode_scene_jpeg
             jpeg = _encode_jpeg(res.crop)
             scene = encode_scene_jpeg(res.frame) if res.frame is not None else visit.scene_jpeg
-            return replace(visit, jpeg=jpeg or visit.jpeg, scene_jpeg=scene or visit.scene_jpeg)
+            if not jpeg:
+                return visit
+            return replace(visit, jpeg=jpeg, scene_jpeg=scene or visit.scene_jpeg,
+                           evidence_source="playback", evidence_skew_s=res.skew_s)
         except Exception:
             return visit
 

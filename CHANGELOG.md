@@ -8,6 +8,22 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The escalation proposal: weak evidence on the sub stream → detect on
+  the main stream, by consent.** Every posted visit now says where its crop
+  came from (sub-sized fallback, keyframe path, or the recording) and how
+  big the subject was on the detect frame. Core reads a day of those per
+  camera: when fewer than half the visits got a full-resolution crop, or
+  more than half had a subject under 48 px, over at least 20 visits, the
+  camera gets a proposal — a badge on the Cameras page and a card in
+  Settings → Detection with the numbers and the cost. Accept switches that
+  camera's detection to the main stream (the other overrides untouched, the
+  previous choice remembered); Not now puts it away for 7 days and it is
+  looked at again after; Reset puts the previous setting back. A week after
+  accepting, the badge asks for a review. `GET/POST
+  /api/v1/cameras/{id}/escalation[/accept|/dismiss|/reset]`, audited;
+  thresholds via `OPENNVR_ESCALATION_*`. The adapters page's evidence badge
+  now counts recording crops as full-resolution.
+
 - **Best frame: a blur veto.** A candidate much blurrier than the current
   best (sharpness under `DETECT_BEST_FRAME_BLUR_VETO` = 0.5 of it, measured
   at one scale so a subject walking closer is not mistaken for a softer one)

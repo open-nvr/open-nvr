@@ -23,8 +23,8 @@ import { useConfirm } from '../../components/ui/ConfirmDialog'
 import { apiService } from '../../lib/apiService'
 import { extractApiError } from '../../lib/apiError'
 import { usePermissions } from '../../hooks/usePermissions'
-import { useTranslation } from '../../i18n'
-import type { DetectionSettings, ObjectFilter } from '../../services/cameraService'
+import { useDateFormat, useTranslation } from '../../i18n'
+import type { DetectionSettings, EscalationView, ObjectFilter } from '../../services/cameraService'
 
 type Camera = { id: number; name: string }
 
@@ -112,6 +112,7 @@ const EMPTY_ROW: FilterRow = { label: '', min_area: '', max_area: '', min_ratio:
 export function CameraDetectionSettings() {
   const confirm = useConfirm()
   const { t } = useTranslation()
+  const fmt = useDateFormat()
   const { hasPermission } = usePermissions()
   const canEdit = hasPermission('cameras.manage')
   const { showSuccess, showError } = useSnackbar()
@@ -121,6 +122,11 @@ export function CameraDetectionSettings() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  // The escalation proposal for the selected camera: evidence quality over
+  // the last day and the decision in force. Loaded beside the settings;
+  // a failure here hides the card and never blocks the form.
+  const [esc, setEsc] = useState<EscalationView | null>(null)
+  const [escBusy, setEscBusy] = useState(false)
 
   useEffect(() => {
     apiService.getCameras({})
@@ -149,9 +155,42 @@ export function CameraDetectionSettings() {
     }
   }, [t])
 
+  const loadEsc = useCallback(async (cam: number, fresh = false) => {
+    try {
+      const { data } = await apiService.getEscalation(cam, fresh)
+      setEsc(data as EscalationView)
+    } catch {
+      setEsc(null)
+    }
+  }, [])
+
   useEffect(() => {
-    if (cameraId != null) load(cameraId)
-  }, [cameraId, load])
+    if (cameraId != null) {
+      load(cameraId)
+      loadEsc(cameraId)
+    }
+  }, [cameraId, load, loadEsc])
+
+  const decide = async (action: 'accept' | 'dismiss' | 'reset') => {
+    if (cameraId == null) return
+    if (action === 'accept' && !(await confirm({ title: t('detect.escalationConfirmAccept'), confirmLabel: t('detect.escalationAccept') }))) return
+    if (action === 'reset' && !(await confirm({ title: t('detect.escalationConfirmReset'), confirmLabel: t('detect.escalationReset'), danger: true }))) return
+    setEscBusy(true)
+    try {
+      const { data } = action === 'accept'
+        ? await apiService.acceptEscalation(cameraId)
+        : action === 'dismiss'
+          ? await apiService.dismissEscalation(cameraId, 7)
+          : await apiService.resetEscalation(cameraId)
+      setEsc(data as EscalationView)
+      if (action !== 'dismiss') await load(cameraId)       // detect_stream changed
+      showSuccess(t(action === 'accept' ? 'detect.escalationAccepted' : action === 'dismiss' ? 'detect.escalationDismissed' : 'detect.escalationWasReset'))
+    } catch (e: unknown) {
+      showError(extractApiError(e, t('detect.failedSave')))
+    } finally {
+      setEscBusy(false)
+    }
+  }
 
   const badLabel = form.filters.some((r) => r.label.trim() && !LABEL_RE.test(r.label.trim().toLowerCase()))
   const canSave = canEdit && !busy && !badLabel
@@ -208,6 +247,54 @@ export function CameraDetectionSettings() {
           {cameras.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
         </select>
       </label>
+
+      {esc?.escalation && (
+        <div className="max-w-3xl border border-[var(--border)] bg-[var(--panel)] p-3 space-y-2" role="status">
+          <div className="text-sm font-medium">
+            {esc.escalation.status === 'proposed' && t('detect.escalationProposedTitle')}
+            {esc.escalation.status === 'accepted' && (esc.escalation.review_due ? t('detect.escalationReviewTitle') : t('detect.escalationAcceptedTitle'))}
+            {esc.escalation.status === 'dismissed' && t('detect.escalationDismissedTitle')}
+          </div>
+          <p className="text-xs text-[var(--text-dim)]">
+            {(esc.escalation.reasons || []).map((r) => t(r === 'small_subjects' ? 'detect.escalationReasonSmall' : 'detect.escalationReasonLowRes')).join(' ')}
+            {esc.evaluation && esc.evaluation.visits > 0 && (
+              ` ${t('detect.escalationNumbers', {
+                visits: esc.evaluation.visits,
+                hours: esc.evaluation.window_hours,
+                full: Math.round((esc.evaluation.full_res_share ?? 0) * 100),
+                small: Math.round((esc.evaluation.small_share ?? 0) * 100),
+                px: esc.evaluation.thresholds.small_px,
+              })}`
+            )}
+          </p>
+          {esc.escalation.status === 'proposed' && (
+            <p className="text-xs text-[var(--text-dim)]">{t('detect.escalationCost')} {esc.escalation.cost_note}</p>
+          )}
+          {esc.escalation.status === 'accepted' && (
+            <p className="text-xs text-[var(--text-dim)]">
+              {t('detect.escalationSince', { at: fmt.dateTime(esc.escalation.accepted_at), by: esc.escalation.by || '—' })}
+            </p>
+          )}
+          {esc.escalation.status === 'dismissed' && (
+            <p className="text-xs text-[var(--text-dim)]">
+              {t('detect.escalationUntil', { at: fmt.dateTime(esc.escalation.dismissed_until) })}
+            </p>
+          )}
+          {canEdit && (
+            <div className="flex gap-2">
+              {esc.escalation.status === 'proposed' && (
+                <>
+                  <Button onClick={() => decide('accept')} disabled={escBusy}>{t('detect.escalationAccept')}</Button>
+                  <Button variant="outline" onClick={() => decide('dismiss')} disabled={escBusy}>{t('detect.escalationDismiss')}</Button>
+                </>
+              )}
+              {esc.escalation.status !== 'proposed' && (
+                <Button variant="outline" onClick={() => decide('reset')} disabled={escBusy}>{t('detect.escalationReset')}</Button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {loading ? <Skeleton className="h-32 w-full" /> : error ? (
         <ErrorCard message={error} onRetry={() => cameraId != null && load(cameraId)} />

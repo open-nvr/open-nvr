@@ -58,6 +58,9 @@ export type CameraItem = {
   display_aspect_ratio?: AspectOverride | null
   /** Free-text site or zone ("North", "Branch 12"); tours group cameras by it. */
   location?: string | null
+  /** The escalation proposal (weak evidence on the sub stream → detect on
+   *  main?) or the decision in force; absent when there is nothing to show. */
+  escalation?: { status: 'proposed' | 'accepted' | 'dismissed'; reasons: string[]; review_due: boolean } | null
 }
 
 /** What a video surface needs to render a camera at the right shape. A named
