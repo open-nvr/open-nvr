@@ -246,6 +246,11 @@ class ResultSink(Protocol):
         ...
 
 
+#: How far before the detect frame the guard's reference main frame is
+#: taken (tracking.py _reference_sims): the scene without the subject,
+#: for a moving one.
+EVIDENCE_REF_BEFORE_S = 3.0
+
 #: How often a worker reports frames the drain dropped while detection was
 #: busy, and the share of decoded frames (dropped / (dropped + detected))
 #: from which that report is a WARNING: a camera the box cannot serve is a
@@ -403,6 +408,7 @@ class CameraWorker:
         evidence_nokey_max_gop_s: float = 2.0,   # nokey: measured GOP above this → this camera switches itself to full
         evidence_match_min: float = 0.5,         # a main crop must look this much like the detect crop (0 = no check)
         sub_min_height: int = 480,               # a shorter sub stream: 'auto' cameras detect on the main instead
+        evidence_debug_dir: str | None = None,   # DETECT_EVIDENCE_DEBUG_DIR: dump every evidence attempt here
         evidence_url_provider=None,              # freshest main-tap URL (its JWT rotates)
         evidence_source_factory=None,            # injectable for tests: () -> source with stream()/close()
     ) -> None:
@@ -416,6 +422,7 @@ class CameraWorker:
         self.evidence_nokey_max_gop_s = max(0.0, float(evidence_nokey_max_gop_s or 0.0))
         self.evidence_match_min = max(0.0, min(1.0, float(evidence_match_min or 0.0)))
         self.sub_min_height = max(0, int(sub_min_height or 0))
+        self.evidence_debug_dir = (evidence_debug_dir or "").strip() or None
         self.evidence_url_provider = evidence_url_provider
         self._evidence_source_factory = evidence_source_factory
         self._evidence = None
@@ -862,6 +869,13 @@ class CameraWorker:
         if evidence is not None:
             tracker.evidence = evidence.nearest
             tracker.evidence_match_min = self.evidence_match_min
+            # The scene a few seconds before the detect frame, for the
+            # guard's reference measurement (tracking.py _reference_sims).
+            tracker.evidence_ref = (lambda ts, _e=evidence:
+                                    _e.earliest_before(ts - EVIDENCE_REF_BEFORE_S)
+                                    if ts is not None else None)
+            tracker.evidence_debug_dir = self.evidence_debug_dir
+            tracker.evidence_debug_camera = self.spec.camera_id
             if self._stop.is_set():             # stopped during the probe
                 evidence.close()
         if _env_bool("DETECT_SCENE_EVIDENCE", True):
@@ -1077,6 +1091,8 @@ class CameraWorker:
                         self.spec.camera_id, evidence.active, tracker.evidence_stats,
                         frames=evidence.frames_total, starts=evidence.starts,
                         mismatches=tracker.evidence_mismatches,
+                        refusals=tracker.evidence_refusals,
+                        samples=tracker.drain_evidence_samples(),
                         gop_s=evidence.gop_s,
                         keyframes_only=evidence.keyframes_only,
                     )
@@ -1173,6 +1189,7 @@ class WorkerManager:
         evidence_nokey_max_gop_s: float = 2.0,
         evidence_match_min: float = 0.5,
         sub_min_height: int = 480,
+        evidence_debug_dir: str | None = None,
     ) -> None:
         self._evidence_stream = evidence_stream
         self._evidence_fps = evidence_fps
@@ -1182,6 +1199,7 @@ class WorkerManager:
         self._evidence_nokey_max_gop_s = evidence_nokey_max_gop_s
         self._evidence_match_min = evidence_match_min
         self._sub_min_height = sub_min_height
+        self._evidence_debug_dir = evidence_debug_dir
         # Freshest main-tap URL per camera, beside _latest_url (same reason:
         # the JWT rotates; the running worker's source reads it on respawn).
         self._latest_evidence_url: dict[str, str] = {}
@@ -1300,6 +1318,7 @@ class WorkerManager:
             evidence_nokey_max_gop_s=self._evidence_nokey_max_gop_s,
             evidence_match_min=self._evidence_match_min,
             sub_min_height=self._sub_min_height,
+            evidence_debug_dir=self._evidence_debug_dir,
             evidence_url_provider=lambda cid=spec.camera_id: self.current_evidence_url(cid),
         )
 

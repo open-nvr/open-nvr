@@ -249,7 +249,18 @@ two, `DETECT_EVIDENCE_MATCH_MIN`, 0.5) — a keyframe old enough for the
 subject to have moved on, or a sub-stream the camera crops to a different
 field of view, fails it, the detect crop is kept and
 `tier0_evidence_mismatch_total` counts the refusal (the AI Adapters page
-flags a camera whose evidence is going low-res). (For comparison: Frigate
+flags a camera whose evidence is going low-res). The guard is measured,
+not assumed: `tier0_evidence_refused_total{reason}` splits refusals into
+`low_corr` (the crops do not look alike) and `flat_main` (the sub saw a
+textured subject where the main shows a blank — a wall after the subject
+left, which used to pass as undecidable), `tier0_evidence_match_score` is
+the score of every attempt in tenths and `tier0_evidence_skew_seconds` the
+time between the two frames, so a camera whose refusals are timing (low
+scores only at large gaps) reads differently from one whose streams
+disagree. `DETECT_EVIDENCE_DEBUG_DIR` dumps every attempt's crops and
+numbers for `tools/evidence_guard_report.py`, which prints the outcome
+split, the score and gap distributions, what each floor would refuse, and
+a contact sheet of the pairs. (For comparison: Frigate
 takes snapshots from the detect stream and never decodes the record
 stream; ZoneMinder offers the same keyframes-only decoding as its
 CPU-saving mode.) Core

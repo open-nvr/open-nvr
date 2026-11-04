@@ -312,6 +312,18 @@ class EvidenceSource:
         self.hits += 1
         return best
 
+    def earliest_before(self, ts: float | None) -> EvidenceFrame | None:
+        """The OLDEST main frame in the ring captured at or before ``ts``:
+        the scene as it was before the subject arrived, when the ring spans
+        that far back. The tracker measures a crop against it; it never
+        decides on it alone."""
+        if ts is None:
+            return None
+        with self._lock:
+            frames = tuple(self._ring)
+        older = [f for f in frames if f.ts <= ts]
+        return min(older, key=lambda f: f.ts) if older else None
+
     def skew_of(self, ev: EvidenceFrame, ts: float | None) -> float | None:
         if ts is None:
             return None
