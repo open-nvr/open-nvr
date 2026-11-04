@@ -1136,9 +1136,9 @@ def run_camera(args: argparse.Namespace) -> int:
     log(f"OpenNVR camera acceptance {VERSION} — {name} — {started:%Y-%m-%d %H:%M} UTC")
     env = stack.env(["DETECT_FPS", "DETECT_EVIDENCE_NOKEY_MAX_GOP_S", "DETECT_EVIDENCE_STREAM"])
     try:
-        detect_fps = float(env.get("DETECT_FPS") or 2)
+        detect_fps = float(env.get("DETECT_FPS") or 5)
     except ValueError:
-        detect_fps = 2.0
+        detect_fps = 5.0
     try:
         max_gop = float(env.get("DETECT_EVIDENCE_NOKEY_MAX_GOP_S") or 2.0)
     except ValueError:
@@ -1241,7 +1241,7 @@ def run_hardware(args: argparse.Namespace) -> int:
     env = stack.env(["DETECT_ONNX_MODEL", "DETECT_ONNX_PROVIDERS", "DETECT_ONNX_INPUT",
                      "DETECT_FPS", "DETECT_DETECTOR_POOL", "DETECT_DECODE_THREADS", "DETECT_HWACCEL"])
     try:
-        fps = float(env.get("DETECT_FPS") or 2)
+        fps = float(env.get("DETECT_FPS") or 5)
     except ValueError:
         fps = 2.0
     try:

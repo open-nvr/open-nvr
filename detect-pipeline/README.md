@@ -199,7 +199,7 @@ with an env dial and a metric (never a silent cap):
 **Second dial: lower `DETECT_FPS`.**
 Detection runs on every analyzed frame (the gate skips alarms, not
 inference), so pipeline CPU scales almost linearly with the per-camera
-analysis rate — `DETECT_FPS`, default 2 (the CPU-friendly setting that
+analysis rate — `DETECT_FPS`, default 5 (Frigate's default; 2 is the CPU-friendly setting that
 behaves well on laptops and any macOS/Windows Docker install, where the
 VM has no GPU). Servers with headroom — and especially `DETECT_HWACCEL`
 hosts — can raise it to 5-10 for finer motion/track granularity and a
@@ -325,7 +325,7 @@ default. CPU decode only (hardware decoders deblock in silicon for free).
 **The free lever is in the camera.** Decode cost scales with the
 *source* frame rate before any of these dials apply: a substream encoded
 at 25 fps costs 5× the decode of the same substream at 5 fps, and Tier-0
-analyzes `DETECT_FPS` (2) either way. Most cameras let you set the
+analyzes `DETECT_FPS` (5) either way. Most cameras let you set the
 substream to 5-10 fps and a ~1-2 s keyframe interval in their encode
 settings — do that first; it's the cheapest CPU you'll ever save.
 
@@ -394,7 +394,7 @@ the staged runbook in [ENABLEMENT.md](ENABLEMENT.md). Disable without a redeploy
 ```bash
 # .env
 DETECT_PIPELINE_ENABLED=false     # container stays up but idle
-DETECT_FPS=2                      # frames analyzed /s /camera (1-30, default 2) — the main CPU dial
+DETECT_FPS=5                      # frames analyzed /s /camera (1-30, default 5; 2 on a CPU-only box) — the main CPU dial
 DETECT_DECODE_SKIP=nonref         # nonref (default, lossless) | bidir | nokey | none — dial 4
 DETECT_DECODE_THREADS=2           # ffmpeg decoder thread cap (0 = auto) — dial 5, lossless
 DETECT_DECODE_FAST=false          # true = skip h264 loop filter (opt-in, not bit-exact)
