@@ -211,6 +211,30 @@ def test_tracker_files_a_request_when_the_best_crop_improves_and_takes_the_resul
     assert tk.apply_evidence_result(EvidenceResult(EvidenceRequest(99, 1.0, box, SUB, None), "accepted", crop=crop)) is False
 
 
+def test_a_tentative_track_files_its_request_only_once_confirmed():
+    """At 5 fps a track needs two hits to be confirmed; the first frame's
+    request waits, is filed on confirmation for that best moment, and a
+    track that dies tentative files nothing."""
+    rng = np.random.default_rng(6)
+    box = (100, 100, 200, 300)
+    sub = _scene(rng, SUB, subject=box)
+    filed = []
+    tk = Tracker(SUB, TrackConfig(fps=5))
+    tk.retain_scene = False
+    tk.evidence_request = filed.append
+    tk.update([Detection("person", box, 0.8)], sub, frame_ts=10.0)
+    tr = tk._tracks[0]
+    assert not tr.confirmed and filed == [] and tr.evidence_req_held is not None
+    assert tr.best_crop_req_mono is None
+    tk.update([Detection("person", box, 0.8)], sub, frame_ts=10.2)
+    assert tr.confirmed and len(filed) == 1 and filed[0].mono_ts == 10.0
+    assert tr.best_crop_req_mono == 10.0 and tr.evidence_req_held is None
+    # a second person's box that is seen once and gone: no request
+    tk.update([Detection("person", box, 0.8), Detection("person", (400, 100, 500, 300), 0.7)], sub, frame_ts=10.4)
+    tk.update([Detection("person", box, 0.8)], sub, frame_ts=10.6)
+    assert len(tk._tracks) == 1 and len(filed) == 1
+
+
 def test_playback_results_leave_samples_and_dump_pairs(tmp_path):
     rng = np.random.default_rng(8)
     box = (100, 100, 200, 300)
