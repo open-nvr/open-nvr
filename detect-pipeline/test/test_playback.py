@@ -316,6 +316,8 @@ class _Visit:
     track_id: int
     jpeg: bytes = b"sub"
     scene_jpeg: bytes | None = None
+    evidence_source: str | None = "detect"
+    evidence_skew_s: float | None = None
 
 
 def test_a_held_visit_is_patched_when_its_crop_arrives_and_counted_when_the_hold_runs_out():
@@ -337,6 +339,7 @@ def test_a_held_visit_is_patched_when_its_crop_arrives_and_counted_when_the_hold
                                    crop=main, frame=None, score=0.95, skew_s=0.05))
     w._drain_playback(tracker, now_mono=104.0)
     assert len(poster.posted) == 1 and poster.posted[0].jpeg != b"sub"
+    assert poster.posted[0].evidence_source == "playback" and poster.posted[0].evidence_skew_s == 0.05
     assert w._visits_patched == 1 and w._holds_expired == 0 and w._held == {}
     # track 2: nothing comes back within the hold → posted as it was, counted
     pb.pending.add(2)
