@@ -198,6 +198,7 @@ _EXPECTED_IDS = {
     "footage-search",
     "home-assistant-relay",
     "guard-scan-compliance",
+    "attendance",
     "camera-tamper",
     "gate-watch",
     "garbage-dumping",

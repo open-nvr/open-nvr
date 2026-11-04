@@ -407,6 +407,44 @@
             - opennvr_apps
     command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d guard-scan-compliance
 
+- id: attendance
+  name: Attendance
+  summary: Takes attendance from the cameras during scheduled classes or shifts — recognises enrolled people in the room and marks them present, late or absent. Faces are biometric data; enrol only with consent.
+  category: people
+  version: "1.0.0"
+  image: ghcr.io/open-nvr/attendance:latest
+  build_context: examples/attendance
+  requires_tasks: [face_identify]
+  # Its own InsightFace (its own face DB and queue), provisioned with the
+  # app and refcounted on uninstall (RFC-0002 decision 7).
+  requires_adapters: [insightface_attendance]
+  emits: []
+  docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/attendance/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/attendance
+  network_egress: []
+  install:
+    compose: |
+      # INFORMATIONAL — this service already ships in
+      # docker-compose.apps.yml (with its config-init companion and its
+      # adapter pair); you do NOT paste this anywhere. Run the command
+      # below and compose brings it up from the shipped overlay.
+      services:
+        attendance:
+          profiles: [apps]
+          image: ${ATTENDANCE_IMAGE:-opennvr/attendance:local-build}
+          restart: unless-stopped
+          environment:
+            - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
+            - OPENNVR_URL=http://opennvr-core:8000
+            - KAIC_URL=http://opennvr-core:8100
+          expose:
+            - "9217"
+          networks:
+            - opennvr_apps
+    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d attendance
+
 - id: license-plate-recognition
   # ANPR leads: it is the name most of the world uses for this (UK, EU,
   # India, AU), with the spelled-out term kept for newcomers and for US

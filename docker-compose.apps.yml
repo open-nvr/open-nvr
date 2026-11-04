@@ -107,7 +107,7 @@ services:
   # only. See docs/APP_NETWORK.md.
   # ──────────────────────────────────────────────────────────────
   egress-proxy:
-    profiles: [apps, default-apps, loitering-detection, occupancy-counting, line-crossing, abandoned-object, intrusion-detection, guard-scan-compliance, license-plate-recognition, gate-controller, alert-notifier, smart-doorbell, package-delivery, footage-search, home-assistant-relay, camera-tamper, gate-watch, garbage-dumping, ppe-check]
+    profiles: [apps, default-apps, loitering-detection, occupancy-counting, line-crossing, abandoned-object, intrusion-detection, guard-scan-compliance, license-plate-recognition, gate-controller, alert-notifier, smart-doorbell, package-delivery, footage-search, home-assistant-relay, camera-tamper, gate-watch, garbage-dumping, ppe-check, attendance]
     build:
       context: .
       dockerfile: scripts/egress-proxy/Dockerfile
@@ -1608,8 +1608,8 @@ services:
       start_period: 180s
       retries: 20
 
-  # One-shot KAI-C registration as ``insightface-attendance``: the route
-  # /api/v1/infer/insightface-attendance, which the attendance app's
+  # One-shot KAI-C registration as ``insightface_attendance``: the route
+  # /api/v1/infer/insightface_attendance, which the attendance app's
   # ``adapter`` setting names. Always exits 0 (see fast-plate-ocr-register).
   insightface-attendance-register:
     profiles: [apps, attendance]
@@ -1629,7 +1629,7 @@ services:
       - -c
       - |
         set -e
-        name="insightface-attendance"
+        name="insightface_attendance"
         url="http://insightface-attendance-adapter:9005"
         echo "Auto-registering '$$name' -> $$url with KAI-C…"
         i=0
@@ -2271,6 +2271,87 @@ services:
       - opennvr_apps
 
   # ──────────────────────────────────────────────────────────────
+  # Attendance — who was in the room, from the cameras. The app looks at
+  # the cameras of attendance sessions running now (core's timetable)
+  # and reports each look as attendance.attempt.v1; core decides the
+  # marks. It needs its own InsightFace (insightface-attendance-adapter
+  # above), so it starts only once that is up and registered.
+  # Contract surface on :9217.
+  # ──────────────────────────────────────────────────────────────
+  attendance-config-init:
+    profiles: [apps, attendance]
+    build:
+      context: .
+      dockerfile: examples/attendance/Dockerfile
+    image: ${ATTENDANCE_IMAGE:-opennvr/attendance:local-build}
+    pull_policy: ${APPS_PULL_POLICY:-build}
+    container_name: opennvr_attendance_config_init
+    logging: *svc-logs
+    restart: "no"
+    # The image bakes config.docker.yml; a mounted examples/attendance
+    # folder overrides it (edit the template, re-up).
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -e
+        tpl=/template/config.docker.yml
+        [ -f "$$tpl" ] || tpl=/app/config.docker.yml
+        [ -f "$$tpl" ] || { echo "ERROR: no config template for attendance: mount examples/attendance at /template or use an image that bakes config.docker.yml" >&2; exit 1; }
+        sed_esc() { printf '%s' "$$1" | sed -e 's/\\/\\\\/g; s/&/\\&/g; s/\//\\\//g'; }
+        ikey=$$(sed_esc "$${INTERNAL_API_KEY}")
+        sed -e "s/[$$][{]INTERNAL_API_KEY[}]/$$ikey/g" \
+            < "$$tpl" > /generated/config.yml
+        echo "Wrote /generated/config.yml (attendance) from $$tpl."
+    command: []
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+    volumes:
+      - ./examples/attendance:/template:ro
+      - opennvr_attendance_config:/generated
+  attendance:
+    profiles: [apps, attendance]
+    build:
+      context: .
+      dockerfile: examples/attendance/Dockerfile
+    # Digest pin slot — see docs/APPS_INSTALL.md → Digest pinning.
+    image: ${ATTENDANCE_IMAGE:-opennvr/attendance:local-build}
+    pull_policy: ${APPS_PULL_POLICY:-build}
+    container_name: opennvr_attendance
+    logging: *svc-logs
+    restart: unless-stopped
+    depends_on:
+      attendance-config-init:
+        condition: service_completed_successfully
+      nats-apps:
+        condition: service_healthy
+      opennvr-core:
+        condition: service_healthy
+      egress-proxy:
+        condition: service_started
+      # The adapter it cannot work without (RFC-0002 decision 7).
+      insightface-attendance-adapter:
+        condition: service_healthy
+      insightface-attendance-register:
+        condition: service_completed_successfully
+    environment:
+      - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      - OPENNVR_URL=http://opennvr-core:8000
+      - KAIC_URL=http://opennvr-core:8100
+      - HTTP_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - HTTPS_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - NO_PROXY=opennvr-core,nats,nats-apps,egress-proxy,mediamtx,detect-pipeline,ollama,localhost,127.0.0.1
+    expose:
+      - "9217"
+    volumes:
+      - opennvr_attendance_config:/app/config:ro
+    command:
+      - --config
+      - /app/config/config.yml
+    networks:
+      - opennvr_apps
+
+  # ──────────────────────────────────────────────────────────────
   # CORE ENRICHMENT ADAPTERS
   #
   # Every adapter above belongs to an app. These belong to none: core's
@@ -2450,5 +2531,6 @@ volumes:
   opennvr_home_assistant_relay_config:
   opennvr_guard_scan_config:
   opennvr_guard_scan_sessions:
+  opennvr_attendance_config:
   opennvr_yolo_pose_cache:
   opennvr_yolo_pose_weights:

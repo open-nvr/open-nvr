@@ -76,6 +76,7 @@ jobs:
       matrix:
         include:
           - { app: abandoned-object,           title: Abandoned Object }
+          - { app: attendance,                 title: Attendance }
           - { app: alert-notifier,             title: Alert Notifier }
           - { app: footage-search,             title: Footage Search }
           - { app: gate-controller,            title: Gate Controller }

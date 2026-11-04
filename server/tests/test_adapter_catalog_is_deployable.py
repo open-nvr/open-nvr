@@ -63,7 +63,7 @@ DELIBERATE_SECOND_INSTANCES = {
         "Attendance's own face DB and request queue. A school roster and a "
         "family's known visitors must never match each other, and a 10 s "
         "classroom frame must not hold up the door. The attendance app calls "
-        "it as /infer/insightface-attendance and the doorbell calls "
+        "it as /infer/insightface_attendance and the doorbell calls "
         "/infer/insightface; core never routes face tasks by task name "
         "(services/enrichment_plan.py: core does not write face_id).",
 }

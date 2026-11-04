@@ -103,7 +103,7 @@
   agent_skill: null
   aliases: []
   suggested_adapters: [insightface]
-  suggested_apps: []
+  suggested_apps: [attendance]
   hardware:
     min: 4-core CPU, ~2 GB RAM
     recommended: An accelerator, or one adapter instance per ~15 crowded cameras

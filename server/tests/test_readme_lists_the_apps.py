@@ -117,15 +117,20 @@ def test_the_stated_count_matches_the_table():
     test does not need editing every time an app is added — only when
     the sentence stops being true.
     """
-    m = re.search(r"([A-Za-z]+) of the ([a-z]+) shipped examples are "
+    m = re.search(r"([A-Za-z-]+) of the ([a-z-]+) shipped examples are "
                   r"listed above", _README)
     assert m, ("the sentence stating how many examples are listed has "
                "been reworded — update this test, or drop the count "
                "from the README so there is nothing to fall behind")
 
+    units = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+             "six": 6, "seven": 7, "eight": 8, "nine": 9}
     words = {"ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
              "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17,
-             "eighteen": 18, "nineteen": 19, "twenty": 20}
+             "eighteen": 18, "nineteen": 19, "twenty": 20, "thirty": 30}
+    # "twenty-one" and on, so adding an app is never a reason to reword.
+    words.update({f"{tens}-{u}": words[tens] + n
+                  for tens in ("twenty", "thirty") for u, n in units.items()})
     listed_claim = words[m.group(1).lower()]
     total_claim = words[m.group(2).lower()]
 
