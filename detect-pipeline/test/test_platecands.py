@@ -300,3 +300,19 @@ def test_visit_poster_ships_candidates_in_body():
         nvr_camera_id=1, candidate_jpegs=(b"\xff\xd8a", b"\xff\xd8b"),
     ))
     assert len(captured["body"]["candidate_jpegs_b64"]) == 2
+
+
+def test_the_recording_upgrades_the_candidate_cut_at_its_moment():
+    """Same moment, full-resolution pixels: the crop is swapped, the score
+    and the order stay; a moment the ring did not keep is not added."""
+    ring = CandidateRing(max_candidates=2, min_gap_s=0.0)
+    lo = np.zeros((20, 20, 3), np.uint8)
+    assert ring.offer(1.0, 100.0, lo, req_mono=10.0)
+    assert ring.offer(2.0, 300.0, lo, req_mono=11.0)
+    hi = np.zeros((80, 80, 3), np.uint8)
+    assert ring.upgrade(10.0, hi) is True
+    assert ring.upgrade(99.0, hi) is False and ring.upgrade(11.0, None) is False
+    ranked = ring.ranked()
+    assert [c.score for c in ranked] == [300.0, 100.0]
+    assert ranked[1].crop is hi and ranked[1].upgraded and not ranked[0].upgraded
+    assert len(ring) == 2
