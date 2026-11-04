@@ -1492,10 +1492,11 @@ services:
   # Same shape as the fast-plate-ocr pair above. The ~280 MB buffalo_l
   # weights download on first start into a named cache volume; the
   # enrolled-faces DB lives on its own volume so re-pulling the image
-  # never forgets a family member.
+  # never forgets a family member. The ``attendly`` profile starts the
+  # same pair for the Attendly app (docker-compose.attendly.yml).
   # ──────────────────────────────────────────────────────────────
   insightface-adapter:
-    profiles: [apps, smart-doorbell]
+    profiles: [apps, smart-doorbell, attendly]
     image: ghcr.io/open-nvr/insightface-adapter:${ADAPTER_TAG:-latest}
     container_name: opennvr_insightface_adapter
     logging: *svc-logs
@@ -1524,7 +1525,7 @@ services:
   # ``recognition_adapter`` config names. Always exits 0 (see
   # fast-plate-ocr-register).
   insightface-register:
-    profiles: [apps, smart-doorbell]
+    profiles: [apps, smart-doorbell, attendly]
     image: alpine:3.20
     container_name: opennvr_insightface_register
     logging: *svc-logs

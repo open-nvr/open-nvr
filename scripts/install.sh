@@ -933,6 +933,12 @@ choose_example() {
         ids+=("camera-agent"); composes+=("$manifest")
         names+=("Camera Agent"); summaries+=("Ask your cameras questions -- voice or chat, on a local LLM.")
     fi
+    # Attendly has its own overlay like the agent; its InsightFace adapter
+    # pair rides docker-compose.apps.yml under the same profile name.
+    if manifest=$(find_example_compose attendly); then
+        ids+=("attendly"); composes+=("$manifest")
+        names+=("Attendly"); summaries+=("Classroom attendance from your cameras -- enrol, schedule, roll call.")
+    fi
     while IFS=$'\t' read -r id title summary; do
         [[ -n "$id" ]] || continue
         ids+=("$id"); composes+=("docker-compose.apps.yml"); names+=("$title"); summaries+=("$summary")

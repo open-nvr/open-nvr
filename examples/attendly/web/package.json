@@ -1,0 +1,32 @@
+{
+  "name": "attendly-web",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "axios": "1.7.2",
+    "lucide-react": "^0.474.0",
+    "jspdf": "^2.5.1",
+    "jspdf-autotable": "^3.8.2",
+    "xlsx": "^0.18.5",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-router-dom": "^7.8.0"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.3",
+    "@types/react-dom": "18.3.0",
+    "@vitejs/plugin-react": "4.3.1",
+  "autoprefixer": "^10.4.20",
+  "postcss": "^8.4.41",
+  "tailwindcss": "^3.4.9",
+    "typescript": "5.5.3",
+    "vite": "5.3.1"
+  }
+}
