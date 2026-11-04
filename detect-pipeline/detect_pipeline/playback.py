@@ -53,7 +53,15 @@ log = logging.getLogger(__name__)
 #: two past the moment are candidates too), and how far around the moment
 #: a decoded frame may be to count as a candidate.
 DEFAULT_LEAD_S = 0.3
-DEFAULT_WINDOW_S = 0.35
+DEFAULT_WINDOW_S = 0.5
+#: How much later a detect frame's stamp is than the recorder's clock for the
+#: same picture: the sub stream's own path (MediaMTX tap, jitter buffer,
+#: decode, the fps filter). Measured on the Ventuno Q against a CP Plus:
+#: median +0.56 s, p10 +0.53, p90 +0.89. The request subtracts it, and the
+#: value is then calibrated per camera from accepted results.
+DEFAULT_STAMP_LEAD_S = 0.5
+#: Bounds and gain of the per-camera calibration.
+STAMP_LEAD_MIN_S, STAMP_LEAD_MAX_S, STAMP_LEAD_GAIN = -0.5, 2.0, 0.25
 #: The recorder serves ranges ending about this long before now; a request
 #: waits until the moment it wants is that old.
 DEFAULT_FRESHNESS_S = 1.2
@@ -98,6 +106,7 @@ class EvidenceResult:
     frame: object = None            # the main frame the crop came from (for the scene)
     score: float | None = None
     skew_s: float | None = None     # |candidate frame time - detect frame time|
+    signed_skew_s: float | None = None   # candidate - requested moment (+ = later than asked)
     reason: str = ""
     fetch_s: float = 0.0
     decode_s: float = 0.0
@@ -161,6 +170,7 @@ class PlaybackEvidence:
         match_min: float = 0.5, crop_margin: float = 0.25,
         gop_s: Callable[[], float | None] | None = None,
         lead_s: float = DEFAULT_LEAD_S, window_s: float = DEFAULT_WINDOW_S,
+        stamp_lead_s: float = DEFAULT_STAMP_LEAD_S,
         freshness_s: float = DEFAULT_FRESHNESS_S, min_interval_s: float = DEFAULT_MIN_INTERVAL_S,
         max_age_s: float = DEFAULT_MAX_AGE_S,
         fetch=http_fetch, probe=ffprobe_clip, decode=ffmpeg_decode_clip,
@@ -173,6 +183,7 @@ class PlaybackEvidence:
         self.crop_margin = float(crop_margin)
         self._gop_s = gop_s or (lambda: None)      # kept for the cost cap to come
         self.lead_s, self.window_s = float(lead_s), float(window_s)
+        self.stamp_lead_s = float(stamp_lead_s)     # calibrated as results come in
         self.freshness_s, self.min_interval_s = float(freshness_s), float(min_interval_s)
         self.max_age_s = float(max_age_s)
         self._fetch, self._probe, self._decode = fetch, probe, decode
@@ -266,7 +277,8 @@ class PlaybackEvidence:
         base = self._url_provider() if self._url_provider else None
         if not base:
             return EvidenceResult(req, "error", reason="no_playback_url")
-        wall_t = self._capture_wall(req.mono_ts)
+        # The detect frame was captured about stamp_lead_s before its stamp.
+        wall_t = self._capture_wall(req.mono_ts) - self.stamp_lead_s
         end = wall_t + self.lead_s
         # MediaMTX serves from the keyframe before ``start`` whatever the span,
         # so a short span is enough: measured on the Ventuno Q, 0.8 s costs
@@ -300,7 +312,8 @@ class PlaybackEvidence:
         candidates = 0
         for k, frame in enumerate(frames):
             t_k = end - (n - 1 - k) / fps
-            skew = abs(t_k - wall_t)
+            signed = t_k - wall_t
+            skew = abs(signed)
             if skew > self.window_s:
                 continue
             candidates += 1
@@ -315,17 +328,25 @@ class PlaybackEvidence:
             else:
                 sim_key = (sim, -skew)
             if best is None or sim_key > best[0]:
-                best = (sim_key, k, frame, sim, skew)
+                best = (sim_key, k, frame, sim, skew, signed)
         if best is None:
             return EvidenceResult(req, "no_frames", reason="no_frame_near_moment",
                                   fetch_s=fetch_s, decode_s=decode_s, candidates=0)
-        _, k, frame, sim, skew = best
+        _, k, frame, sim, skew, signed = best
         if sim is not None and sim < self.match_min:
-            return EvidenceResult(req, "refused", score=sim, skew_s=skew, reason="low_corr",
-                                  fetch_s=fetch_s, decode_s=decode_s, candidates=candidates)
+            return EvidenceResult(req, "refused", score=sim, skew_s=skew, signed_skew_s=signed,
+                                  reason="low_corr", fetch_s=fetch_s, decode_s=decode_s,
+                                  candidates=candidates)
         crop = _crop_bgr(frame, scaled, margin=self.crop_margin)
         if crop is None:
             return EvidenceResult(req, "no_frames", reason="empty_crop", fetch_s=fetch_s,
                                   decode_s=decode_s, candidates=candidates)
+        # Calibrate: a confidently matched frame that sits consistently
+        # before or after the asked moment says the stamp lead is off for
+        # this camera; follow it a quarter of the way each time, bounded.
+        if sim is not None and sim >= 0.8 and candidates >= 2:
+            self.stamp_lead_s = max(STAMP_LEAD_MIN_S, min(
+                STAMP_LEAD_MAX_S, self.stamp_lead_s - STAMP_LEAD_GAIN * signed))
         return EvidenceResult(req, "accepted", crop=crop, frame=frame, score=sim, skew_s=skew,
-                              fetch_s=fetch_s, decode_s=decode_s, candidates=candidates)
+                              signed_skew_s=signed, fetch_s=fetch_s, decode_s=decode_s,
+                              candidates=candidates)

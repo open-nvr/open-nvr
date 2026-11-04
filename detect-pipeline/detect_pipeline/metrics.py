@@ -404,6 +404,7 @@ def record_playback_evidence(camera_id: str, pb, held: int = 0, patched: int = 0
     # whether DETECT_EVIDENCE_HOLD_S is right for this camera.
     metrics.gauge("tier0_evidence_visits_patched_total", float(patched), cam)
     metrics.gauge("tier0_evidence_results_late_total", float(late), cam)
+    metrics.gauge("tier0_evidence_stamp_lead_seconds", float(getattr(pb, "stamp_lead_s", 0.0)), cam)
 
 
 #: Why a camera detects on its MAIN stream, as the value of

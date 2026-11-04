@@ -185,6 +185,16 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Evidence from the recording asks for the right moment.** A detect
+  frame's stamp is later than the recorder's clock for the same picture by
+  the sub stream's own path (measured: median 0.56 s on a CP Plus through
+  the Qualcomm box), so the fetched clip was centred half a second late
+  and a walking subject's best candidate sat at the edge of the window.
+  The request now subtracts `DETECT_EVIDENCE_STAMP_LEAD_S` (0.5 s), each
+  camera calibrates its own lead from the frames it accepts
+  (`tier0_evidence_stamp_lead_seconds`), and the candidate window is
+  ±0.5 s.
+
 - **Evidence from the recording, measured and trimmed.** Two more counters
   say whether the visit hold is long enough (`tier0_evidence_visits_patched_total`,
   `tier0_evidence_results_late_total`); the guard histograms and the debug

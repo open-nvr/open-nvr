@@ -458,6 +458,7 @@ services:
       - DETECT_EVIDENCE_HOLD_S=${DETECT_EVIDENCE_HOLD_S:-3.0}
       - DETECT_EVIDENCE_FETCH_MIN_INTERVAL_S=${DETECT_EVIDENCE_FETCH_MIN_INTERVAL_S:-2.0}
       - DETECT_EVIDENCE_FETCH_PARALLEL=${DETECT_EVIDENCE_FETCH_PARALLEL:-2}
+      - DETECT_EVIDENCE_STAMP_LEAD_S=${DETECT_EVIDENCE_STAMP_LEAD_S:-0.5}
       # Gate: shadow (default — measure only, no behavior change; the app's
       # Compute-gated panel shows would-save numbers) | off | enforce (act;
       # enable only after validating shadow data — see detect-pipeline/ENABLEMENT.md).
