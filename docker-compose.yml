@@ -455,9 +455,10 @@ services:
       - DETECT_SUB_MIN_HEIGHT=${DETECT_SUB_MIN_HEIGHT:-480}
       - DETECT_EVIDENCE_DEBUG_DIR=${DETECT_EVIDENCE_DEBUG_DIR:-}
       - DETECT_EVIDENCE_PLAYBACK=${DETECT_EVIDENCE_PLAYBACK:-true}
-      - DETECT_EVIDENCE_HOLD_S=${DETECT_EVIDENCE_HOLD_S:-3.0}
+      - DETECT_EVIDENCE_HOLD_S=${DETECT_EVIDENCE_HOLD_S:-6.0}
       - DETECT_EVIDENCE_FETCH_MIN_INTERVAL_S=${DETECT_EVIDENCE_FETCH_MIN_INTERVAL_S:-2.0}
       - DETECT_EVIDENCE_FETCH_PARALLEL=${DETECT_EVIDENCE_FETCH_PARALLEL:-2}
+      - DETECT_EVIDENCE_STAMP_LEAD_S=${DETECT_EVIDENCE_STAMP_LEAD_S:-0.5}
       # Gate: shadow (default — measure only, no behavior change; the app's
       # Compute-gated panel shows would-save numbers) | off | enforce (act;
       # enable only after validating shadow data — see detect-pipeline/ENABLEMENT.md).
@@ -519,6 +520,9 @@ services:
       # the box per side). Cosmetic: a wider margin keeps the whole car
       # in the read frame when the detector's box trails it.
       - DETECT_CROP_MARGIN=${DETECT_CROP_MARGIN:-}
+      # Best-frame blur veto (fraction of the current best's sharpness
+      # a candidate must reach to win on score or area); 0 = off.
+      - DETECT_BEST_FRAME_BLUR_VETO=${DETECT_BEST_FRAME_BLUR_VETO:-}
       # Scene evidence: a SECOND JPEG per visit — the whole frame the
       # best crop was taken from, so the evidence dialog can show the
       # car in its lane instead of a crop of the car.

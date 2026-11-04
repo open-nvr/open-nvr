@@ -8,6 +8,17 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Best frame: a blur veto.** A candidate much blurrier than the current
+  best (sharpness under `DETECT_BEST_FRAME_BLUR_VETO` = 0.5 of it, measured
+  at one scale so a subject walking closer is not mistaken for a softer one)
+  no longer wins on score or area alone. The recording is asked for the best
+  frame's moment, so the pick decides how sharp the evidence is.
+  `tier0_best_frame_blur_vetoes_total` counts refusals.
+- **Plate candidates at full resolution.** A plate candidate cut at the
+  moment the recording was asked for takes that result's full-resolution
+  pixels (same frame, same score, same order), so the OCR looks come from
+  the main stream. `tier0_plate_candidates_upgraded_total` counts them.
+
 - **Evidence of the moment, fetched from the recording.** The nearest
   decoded keyframe was a GOP older than its stamp (ffmpeg holds one frame
   in its output path; with keyframes only, the next keyframe releases it),
@@ -185,6 +196,31 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Smart Doorbell: `min_face_px` defaults to 100 (was 40), and a name is
+  a vote.** The frames are the camera's main stream, so 100 px is a face
+  within a few metres of the door; below it a miss says distance, not
+  stranger (a match is never gated by size). Each matching frame now adds
+  its similarity, weighted by face size, to that person's tally; the new
+  `min_match_reads` (default 1, so the first match still decides at once)
+  is how many matching frames a name needs. With 2, a lone match is
+  recorded as unclear, leaning to that name, and the next match upgrades it.
+
+- **`DETECT_EVIDENCE_HOLD_S` defaults to 6 s** (was 3). A result from the
+  recording takes the freshness wait, its turn behind the fetch interval
+  and the decode, about 4 s at worst; with a 3 s hold four crops in one
+  walk-through arrived after their visit had gone. Holds that run out are
+  now counted (`tier0_evidence_visits_hold_expired_total`).
+
+- **Evidence from the recording asks for the right moment.** A detect
+  frame's stamp is later than the recorder's clock for the same picture by
+  the sub stream's own path (measured: median 0.56 s on a CP Plus through
+  the Qualcomm box), so the fetched clip was centred half a second late
+  and a walking subject's best candidate sat at the edge of the window.
+  The request now subtracts `DETECT_EVIDENCE_STAMP_LEAD_S` (0.5 s), each
+  camera calibrates its own lead from the frames it accepts
+  (`tier0_evidence_stamp_lead_seconds`), and the candidate window is
+  ±0.5 s.
+
 - **Evidence from the recording, measured and trimmed.** Two more counters
   say whether the visit hold is long enough (`tier0_evidence_visits_patched_total`,
   `tier0_evidence_results_late_total`); the guard histograms and the debug
@@ -227,6 +263,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   whether chown works on the mount, skips the step if it does not, and
   otherwise runs it in the background. An operator who mounted their own
   entrypoint to get around this can go back to the stock one.
+
+- **A tentative track no longer asks the recording for its crop.** It
+  dies on a single miss, and a duplicate box on one person spawns such a
+  track every few frames; each result came back for a visit that never
+  existed (counted late) and cost a fetch and a decode. The request waits
+  until the track is confirmed and is then filed for its best moment so far.
+
+- **A recording crop that landed between two frames no longer misses its
+  visit.** The playback thread could serve a result just before the track
+  ended; the visit saw nothing pending, was posted as it was, and the crop
+  was counted late. A served, uncollected result now keeps the track
+  pending, so the visit is held and patched on the next drain.
+
 - **"Sign in with <provider>" no longer lands on a 404.** The app's
   service worker answered every page visit with the app itself, so
   `/api/v1/auth/oidc/start` (and the provider's return to `/callback`) never

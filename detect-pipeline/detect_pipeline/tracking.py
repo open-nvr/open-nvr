@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from itertools import count
 
 from .regions import Box, intersection_over_union
-from .thumbnail import ThumbCandidate, is_better_thumbnail
+from .thumbnail import BLUR_VETO, ThumbCandidate, blur_vetoed, crop_sharpness, is_better_thumbnail
 
 #: A main-stream crop must look at least this much like the detect-frame
 #: crop of the same box (Pearson correlation of the two boxes' luma, both
@@ -191,6 +191,10 @@ class Track:
     # The detect-frame stamp the latest evidence REQUEST (playback.py) was
     # filed for; a result for an older moment is ignored.
     best_crop_req_mono: float | None = field(default=None, compare=False)
+    # The request a tentative track would have filed: kept until the track
+    # is confirmed, since a tentative track dies on a single miss and its
+    # result would come back for a visit that never existed.
+    evidence_req_held: object | None = field(default=None, repr=False, compare=False)
 
     @property
     def stationary(self) -> bool:
@@ -355,6 +359,14 @@ class Tracker:
         # How many best-crop updates were cut from which stream, for the
         # worker's metrics. "main" / "detect" keys, monotonic.
         self.evidence_stats: dict[str, int] = {"main": 0, "detect": 0}
+        # Best-frame blur veto (thumbnail.py): a candidate much blurrier
+        # than the current best does not replace it on score or area; 0
+        # turns it off. Vetoes are counted for the worker's gauge.
+        self.blur_veto: float = BLUR_VETO
+        self.blur_vetoes: int = 0
+        # Plate candidates whose pixels the recording replaced at full
+        # resolution (CandidateRing.upgrade), for the worker's gauge.
+        self.plate_upgrades: int = 0
         # Evidence from the recording (playback.py): a callable that takes
         # an EvidenceRequest when a track's best crop improves. The result
         # comes back later through apply_evidence_result(). None = off.
@@ -545,6 +557,11 @@ class Tracker:
         tr.last_matched = now if now is not None else self._clock()
         if not tr.confirmed and tr.hits >= self.config.initialized():
             tr.confirmed = True
+            held = tr.evidence_req_held
+            if held is not None and self.evidence_request is not None:
+                tr.evidence_req_held = None
+                tr.best_crop_req_mono = held.mono_ts
+                self.evidence_request(held)           # its best moment so far
         self._update_best(tr, det, bgr)
 
     def _spawn(self, det: Detection, bgr=None, now: float | None = None) -> None:
@@ -563,8 +580,12 @@ class Tracker:
         self._tracks.append(tr)
 
     def _update_best(self, tr: Track, det: Detection, bgr=None) -> None:
-        cand = ThumbCandidate(label=det.label, box=det.box, score=det.score)
-        if tr.best is None or is_better_thumbnail(tr.best, cand, self.frame_shape):
+        sharp = crop_sharpness(bgr, det.box) if (bgr is not None and self.blur_veto > 0) else 0.0
+        cand = ThumbCandidate(label=det.label, box=det.box, score=det.score, sharpness=sharp)
+        if tr.best is not None and blur_vetoed(tr.best, cand, self.blur_veto) \
+                and is_better_thumbnail(tr.best, cand, self.frame_shape, blur_veto=0.0):
+            self.blur_vetoes += 1                      # would have won on score/area alone
+        if tr.best is None or is_better_thumbnail(tr.best, cand, self.frame_shape, self.blur_veto):
             tr.best = cand
             if bgr is not None:                       # retain the best frame's pixels
                 crop, source, frame_bgr = self._crop_for(bgr, det.box)
@@ -591,7 +612,12 @@ class Tracker:
         self._update_plate_candidates(tr, det, bgr)
 
     def _request_evidence(self, tr: Track, det: Detection, bgr) -> None:
-        """File a request for the recording's frame of this moment (playback.py)."""
+        """File a request for the recording's frame of this moment
+        (playback.py). A tentative track keeps its request until it is
+        confirmed: it dies on a single miss, and a duplicate box on one
+        person spawns such tracks every few frames; their results came
+        back for visits that never existed (counted late) and cost a
+        fetch and a decode each."""
         if self.evidence_request is None or self._ev_ts is None:
             return
         try:
@@ -599,10 +625,15 @@ class Tracker:
             sub_crop = _crop_bgr(bgr, det.box, margin=0.0)
             if sub_crop is None:
                 return
-            tr.best_crop_req_mono = float(self._ev_ts)
-            self.evidence_request(EvidenceRequest(
+            req = EvidenceRequest(
                 track_id=tr.id, mono_ts=float(self._ev_ts), box=det.box,
-                frame_shape=tuple(bgr.shape[:2]), sub_crop=sub_crop, label=det.label))
+                frame_shape=tuple(bgr.shape[:2]), sub_crop=sub_crop, label=det.label)
+            if not tr.confirmed:
+                tr.evidence_req_held = req
+                return
+            tr.evidence_req_held = None
+            tr.best_crop_req_mono = req.mono_ts
+            self.evidence_request(req)
         except Exception:
             pass                                          # evidence is an enhancement
 
@@ -650,8 +681,14 @@ class Tracker:
         tr = next((t for t in self._tracks if t.id == res.track_id), None)
         if tr is None:
             return False
-        if res.outcome != "accepted" or tr.best_crop_req_mono != res.request.mono_ts:
+        if res.outcome != "accepted" or res.crop is None:
             return True                                   # the track is live; nothing to change
+        # A plate candidate cut at the same moment takes the full-resolution
+        # pixels whatever became of the best crop since: it is the same frame.
+        if tr.plate_ring is not None and tr.plate_ring.upgrade(res.request.mono_ts, res.crop):
+            self.plate_upgrades += 1
+        if tr.best_crop_req_mono != res.request.mono_ts:
+            return True                                   # an older moment than the latest request
         tr.best_crop = res.crop
         tr.best_crop_source = "playback"
         tr.best_crop_skew_s = res.skew_s
@@ -827,4 +864,5 @@ class Tracker:
         from .regions import area as _area
         tr.plate_ring.offer(
             self._clock(), candidate_score(_area(det.box), crop), crop,
+            req_mono=float(self._ev_ts) if self._ev_ts is not None else None,
         )

@@ -958,7 +958,7 @@ def test_a_stranger_is_announced_when_the_hold_runs_out():
     """Nobody enrolled came close for four seconds: a stranger, from the
     best frame, even though no frame arrived on the tick that decided."""
     cfg = _app_config(decision_hold_seconds=4.0)
-    reads = [_miss(similarity=0.10, bbox=(0, 0, 50, 50)),
+    reads = [_miss(similarity=0.10, bbox=(0, 0, 120, 120)),
              _miss(similarity=0.12, bbox=(0, 0, 160, 160)), None, None, None]
     doorbell, _, dispatcher = _build_doorbell(reads, config=cfg)
     advance = _ticking(doorbell)
@@ -1120,3 +1120,68 @@ def test_the_deciding_knobs_apply_live():
     d = doorbell.state_snapshot()["decision"]
     assert d["hold_seconds"] == 2.5 and d["unknown_score"] == 0.4
     assert d["min_face_px"] == 64 and d["gap_seconds"] == 20.0
+
+
+# ── A name is a vote ──────────────────────────────────────────────
+
+def _vt(**kw):
+    from visits import VisitTracker
+    return VisitTracker(hold_seconds=4.0, **kw)
+
+
+def _match(pid, sim, side=150):
+    return FaceRead(face_detected=True, recognized=True, person_id=pid, name=pid.title(),
+                    similarity=sim, face_bbox=(0, 0, side, side), confidence=0.9, threshold=0.5)
+
+
+def test_with_min_match_reads_2_the_second_matching_frame_announces_once():
+    vt = _vt(min_match_reads=2)
+    assert vt.observe("door", _match("alice", 0.6), b"f1", now=10.0, wall=1.0) == []
+    assert vt.open_visits[0].leader == "alice" and vt.open_visits[0].decided is None
+    out = vt.observe("door", _match("alice", 0.8), b"f2", now=11.0, wall=2.0)
+    assert [d.kind for d in out] == ["known"] and out[0].visit.person_id == "alice"
+    assert out[0].obs.frame == b"f2", "announced from the closest match"
+    again = vt.observe("door", _match("alice", 0.7), b"f3", now=12.0, wall=3.0)
+    assert [(d.kind, d.repeat) for d in again] == [("known", True)]
+
+
+def test_a_lone_match_is_recorded_leaning_and_the_next_one_upgrades_it():
+    vt = _vt(min_match_reads=2)
+    vt.observe("door", _match("alice", 0.6), b"f1", now=10.0, wall=1.0)
+    assert vt.settle(13.9) == []
+    out = vt.settle(14.0)
+    assert [d.kind for d in out] == ["uncertain"]
+    assert out[0].visit.extra["leaning"] == "alice" and out[0].visit.person_id is None
+    out = vt.observe("door", _match("alice", 0.7), b"f2", now=15.0, wall=6.0)
+    assert [d.kind for d in out] == ["upgrade"] and out[0].visit.person_id == "alice"
+
+
+def test_the_leader_is_the_person_with_the_best_size_weighted_similarity():
+    """Bob matched once at 0.9 on a tiny face; Alice twice at 0.6 on big
+    ones. Two big frames outweigh one small one: Alice is announced."""
+    vt = _vt(min_match_reads=2)
+    vt.observe("door", _match("bob", 0.9, side=40), b"b", now=10.0, wall=1.0)
+    vt.observe("door", _match("alice", 0.6, side=200), b"a1", now=11.0, wall=2.0)
+    v = vt.open_visits[0]
+    assert v.leader == "bob", "one 0.9 against one 0.6: Bob leads by mean"
+    out = vt.observe("door", _match("alice", 0.6, side=200), b"a2", now=12.0, wall=3.0)
+    assert v.tallies["alice"].reads == 2 and v.tallies["bob"].reads == 1
+    # Bob still leads by mean (0.9 > 0.6) but has one frame; Alice has two
+    # yet is not the leader, so nothing is announced until the hold ends.
+    assert out == []
+    out = vt.settle(14.0)
+    assert [d.kind for d in out] == ["uncertain"] and out[0].visit.extra["leaning"] == "bob"
+
+
+def test_default_min_match_reads_keeps_the_first_match_deciding():
+    vt = _vt()
+    out = vt.observe("door", _match("alice", 0.6), b"f1", now=10.0, wall=1.0)
+    assert [d.kind for d in out] == ["known"]
+
+
+def test_min_match_reads_is_a_live_setting():
+    cfg = _app_config(min_match_reads=2)
+    doorbell, _, _ = _build_doorbell([], config=cfg)
+    assert doorbell._tracker.min_match_reads == 2
+    doorbell.on_config_update({"min_match_reads": 3})
+    assert doorbell._tracker.settings()["min_match_reads"] == 3
