@@ -254,6 +254,16 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Core no longer hangs at boot on "Fixing ownership of non-opennvr files
+  in recordings tree...".** Core's entrypoint chowned the recordings
+  archive in the foreground, before anything else started. On a mount where
+  ownership does not stick (NFS with root_squash, SMB/CIFS, some NTFS and
+  exFAT disks), every file was re-chowned on every start, so core sat there
+  until its healthcheck marked it unhealthy. The entrypoint now checks once
+  whether chown works on the mount, skips the step if it does not, and
+  otherwise runs it in the background. An operator who mounted their own
+  entrypoint to get around this can go back to the stock one.
+
 - **A tentative track no longer asks the recording for its crop.** It
   dies on a single miss, and a duplicate box on one person spawns such a
   track every few frames; each result came back for a visit that never
