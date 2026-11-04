@@ -399,6 +399,8 @@ export const translations: TranslationCatalog = {
   'playback.pageTitle': 'Lecture',
   'playback.cloudStatus': 'État de l’envoi cloud',
   'playback.loadingRecordings': 'Chargement des enregistrements…',
+  'playback.noFootageAt': 'Aucun enregistrement à {{at}} sur cette caméra, ni plus tard ce jour-là.',
+  'playback.noFootageAtNearest': 'Aucun enregistrement à {{at}} sur cette caméra — lecture de l’enregistrement le plus proche, à partir de {{next}}.',
   'calendar.weekdays': 'Di,Lu,Ma,Me,Je,Ve,Sa',
   'calendar.months': 'Janvier,Février,Mars,Avril,Mai,Juin,Juillet,Août,Septembre,Octobre,Novembre,Décembre',
   'calendar.previousMonth': 'Mois précédent',

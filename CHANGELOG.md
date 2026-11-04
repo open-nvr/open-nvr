@@ -254,6 +254,15 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A search result's "play the recording" lands where the subject is.**
+  The playhead now opens 3 s before the event's instant, inside the same
+  segment, so the entry is on screen (an event starts when the detector
+  first saw the object, which is after it entered the frame). When the
+  camera has no footage at that instant, the player used to jump silently
+  to the next recording of the day and play it as if it were the moment
+  asked for; it now says so in the playback header, with the time it is
+  playing from instead.
+
 - **Core no longer hangs at boot on "Fixing ownership of non-opennvr files
   in recordings tree...".** Core's entrypoint chowned the recordings
   archive in the foreground, before anything else started. On a mount where
