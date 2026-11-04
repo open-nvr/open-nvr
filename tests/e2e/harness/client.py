@@ -207,6 +207,9 @@ class OpenNVRClient:
     def put(self, path: str, **kw: Any) -> httpx.Response:
         return self.request("PUT", path, **kw)
 
+    def patch(self, path: str, **kw: Any) -> httpx.Response:
+        return self.request("PATCH", path, **kw)
+
     def delete(self, path: str, **kw: Any) -> httpx.Response:
         return self.request("DELETE", path, **kw)
 

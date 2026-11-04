@@ -38,6 +38,7 @@ markers = [
     "detection: additionally needs Tier-0 to detect a real object",
     "lpr: needs the fast_plate_ocr adapter and a vehicle clip",
     "ui: drives the browser with Playwright",
+    "attendance: drives a timetabled session through core's scheduler to its marks (about 4 minutes)",
     "sweep: before/after UI evidence (screenshots + API contract); opt-in, never part of a tier",
 ]
 

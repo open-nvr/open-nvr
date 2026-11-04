@@ -39,6 +39,7 @@ python tests/e2e/run.py --fresh            # wipe and start clean
 python tests/e2e/run.py -m media           # needs a publishing camera
 python tests/e2e/run.py -m detection       # needs real footage
 python tests/e2e/run.py -m ui              # Playwright
+python tests/e2e/run.py -m attendance      # a timetabled session to its marks (~4 min)
 python tests/e2e/run.py -m ""              # everything
 python tests/e2e/run.py --down             # tear the stack down afterwards
 ```
@@ -140,8 +141,9 @@ Tiers are markers, not directories. A test joins one by declaring it.
 | `detection` | 4 | **real footage** + Tier-0 detecting an object | ~6 min |
 | `lpr` | 3 | the above + the `fast_plate_ocr` adapter | several min |
 | `ui` | 10 | Playwright against nginx | ~45 s |
+| `attendance` | 1 | nothing but the stack (it plays the attendance app on the bus) | ~4 min |
 
-74 tests in total. `smoke` covers bootstrap, camera lifecycle, RBAC, security
+75 tests in total. `smoke` covers bootstrap, camera lifecycle, RBAC, security
 posture, the alerts inbox, occupancy and the harness's own guards.
 
 **Generated clips cannot drive detection, and this is not a limitation worth
@@ -217,7 +219,7 @@ python tests/e2e/run.py -- tests/test_rbac.py -k granted
 
 ### 4. Declare a marker
 
-`smoke`, `media`, `detection`, `lpr`, `ui`. Markers are strict — a typo is a
+`smoke`, `media`, `detection`, `lpr`, `ui`, `attendance`. Markers are strict — a typo is a
 collection error, not a test that quietly never runs.
 
 ```python

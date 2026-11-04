@@ -94,6 +94,12 @@ class Budgets:
     APP_INSTALLED: float = _seconds("APP_INSTALLED", 300.0)
     ALERT_DELIVERED: float = _seconds("ALERT_DELIVERED", 90.0)
 
+    # --- attendance --------------------------------------------------------
+    # Core's scheduler ticks every 30 s: a session exists and runs within two.
+    ATTENDANCE_SESSION_RUNNING: float = _seconds("ATTENDANCE_SESSION_RUNNING", 90.0)
+    # A 2-minute session, the 1-minute finalize grace, plus two ticks of slack.
+    ATTENDANCE_SESSION_FINAL: float = _seconds("ATTENDANCE_SESSION_FINAL", 300.0)
+
     # --- generic ---------------------------------------------------------
     # For "this should already be true, I am just avoiding a race" waits.
     QUICK: float = _seconds("QUICK", 20.0)
