@@ -218,8 +218,13 @@ class PlaybackEvidence:
             self._cond.notify()
 
     def pending_for(self, track_id: int) -> bool:
+        """True while this track has a request queued, in flight, or a
+        result served but not yet collected by ``results()``. The last
+        case matters at the end of a visit: a result that landed between
+        two frames would otherwise find its visit already posted."""
         with self._cond:
-            return track_id in self._pending or track_id in self._in_flight
+            return (track_id in self._pending or track_id in self._in_flight
+                    or any(r.track_id == track_id for r in self._results))
 
     def results(self) -> list[EvidenceResult]:
         with self._cond:

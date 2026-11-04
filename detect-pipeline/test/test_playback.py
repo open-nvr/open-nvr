@@ -94,6 +94,27 @@ def test_the_frame_of_the_moment_is_chosen_and_the_guard_accepts_it():
     pb.close()
 
 
+def test_a_served_result_keeps_the_track_pending_until_it_is_collected():
+    """Between two frames the thread may serve a result; a visit ending on
+    the next frame must still be held for it, so the track stays pending
+    until the worker drains the result."""
+    rng = np.random.default_rng(11)
+    box = (100, 100, 200, 300)
+    sub = _scene(rng, SUB, subject=box)
+    frames = [np.kron(sub, np.ones((2, 2, 1), np.uint8))] * 10
+    clock = _Clock(1002.0)
+    pb = _playback(frames, clock=clock)
+    pb.request(EvidenceRequest(4, 1000.0, box, SUB, _crop_bgr(sub, box, margin=0.0)))
+    t0 = time.time()
+    while time.time() - t0 < 3.0 and pb.outcomes.get("accepted", 0) < 1:
+        time.sleep(0.01)
+    assert pb.outcomes.get("accepted") == 1, "served"
+    assert pb.pending_for(4), "served but not collected: still pending"
+    res, = pb.results()
+    assert res.track_id == 4 and not pb.pending_for(4)
+    pb.close()
+
+
 def test_a_clip_where_the_subject_is_elsewhere_is_refused_with_a_score():
     rng = np.random.default_rng(2)
     box = (100, 100, 200, 300)
