@@ -21,6 +21,15 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`tier0_detect_on_main{camera}`), the AI Adapters page shows it, and the
   camera acceptance suite applies the same floor.
 
+- **`opennvr_app_sdk.workflows.validate`: the whole workflow file,
+  `workflow: v1`.** The check the engine, the builder and outside tools
+  share (RFC #620): the trigger, the guards, every step and path, with
+  each problem at its key (`then[0].ai.rules`). It enforces the safety
+  rule (an action that moves things only after a person's reply or a plain
+  rule, never straight under an AI outcome or a timeout), refuses
+  AI-decided critical alerts, catches YAML's unquoted `Yes`, requires
+  cameras by role, and resolves skills, apps, webhooks and lists against
+  the site when given. `Report.needs` lists what a file uses.
 - **Acceptance suites** (`tools/acceptance.py`, docs/ACCEPTANCE.md): scored,
   on-demand, customer-runnable checks for a new box (`hardware`: detector
   backend really accelerated, detector latency as cameras-at-DETECT_FPS,
