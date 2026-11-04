@@ -234,6 +234,12 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A tentative track no longer asks the recording for its crop.** It
+  dies on a single miss, and a duplicate box on one person spawns such a
+  track every few frames; each result came back for a visit that never
+  existed (counted late) and cost a fetch and a decode. The request waits
+  until the track is confirmed and is then filed for its best moment so far.
+
 - **A recording crop that landed between two frames no longer misses its
   visit.** The playback thread could serve a result just before the track
   ended; the visit saw nothing pending, was posted as it was, and the crop

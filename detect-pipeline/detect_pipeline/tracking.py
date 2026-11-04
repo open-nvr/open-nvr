@@ -191,6 +191,10 @@ class Track:
     # The detect-frame stamp the latest evidence REQUEST (playback.py) was
     # filed for; a result for an older moment is ignored.
     best_crop_req_mono: float | None = field(default=None, compare=False)
+    # The request a tentative track would have filed: kept until the track
+    # is confirmed, since a tentative track dies on a single miss and its
+    # result would come back for a visit that never existed.
+    evidence_req_held: object | None = field(default=None, repr=False, compare=False)
 
     @property
     def stationary(self) -> bool:
@@ -545,6 +549,11 @@ class Tracker:
         tr.last_matched = now if now is not None else self._clock()
         if not tr.confirmed and tr.hits >= self.config.initialized():
             tr.confirmed = True
+            held = tr.evidence_req_held
+            if held is not None and self.evidence_request is not None:
+                tr.evidence_req_held = None
+                tr.best_crop_req_mono = held.mono_ts
+                self.evidence_request(held)           # its best moment so far
         self._update_best(tr, det, bgr)
 
     def _spawn(self, det: Detection, bgr=None, now: float | None = None) -> None:
@@ -591,7 +600,12 @@ class Tracker:
         self._update_plate_candidates(tr, det, bgr)
 
     def _request_evidence(self, tr: Track, det: Detection, bgr) -> None:
-        """File a request for the recording's frame of this moment (playback.py)."""
+        """File a request for the recording's frame of this moment
+        (playback.py). A tentative track keeps its request until it is
+        confirmed: it dies on a single miss, and a duplicate box on one
+        person spawns such tracks every few frames; their results came
+        back for visits that never existed (counted late) and cost a
+        fetch and a decode each."""
         if self.evidence_request is None or self._ev_ts is None:
             return
         try:
@@ -599,10 +613,15 @@ class Tracker:
             sub_crop = _crop_bgr(bgr, det.box, margin=0.0)
             if sub_crop is None:
                 return
-            tr.best_crop_req_mono = float(self._ev_ts)
-            self.evidence_request(EvidenceRequest(
+            req = EvidenceRequest(
                 track_id=tr.id, mono_ts=float(self._ev_ts), box=det.box,
-                frame_shape=tuple(bgr.shape[:2]), sub_crop=sub_crop, label=det.label))
+                frame_shape=tuple(bgr.shape[:2]), sub_crop=sub_crop, label=det.label)
+            if not tr.confirmed:
+                tr.evidence_req_held = req
+                return
+            tr.evidence_req_held = None
+            tr.best_crop_req_mono = req.mono_ts
+            self.evidence_request(req)
         except Exception:
             pass                                          # evidence is an enhancement
 
