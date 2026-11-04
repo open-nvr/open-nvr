@@ -132,6 +132,9 @@ export const NAV_PERMISSIONS = {
   // The face directory holds photographs of named people, so it sits
   // with the alert inbox, like screening records do.
   '/people': 'alerts.view',
+  // Its own permission: who was where is a record of named people, and
+  // the API gates every attendance read on the same name.
+  '/attendance': 'attendance.view',
   '/tripwires': 'live.view', // counts are camera history — same tier as live view
   '/loitering': 'alerts.view', // dwellers now + alarms with snapshots — the alerts tier
   // Arming a site is an alarm-desk action, and the page shows alarm

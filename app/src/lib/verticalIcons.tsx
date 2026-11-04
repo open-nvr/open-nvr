@@ -9,7 +9,7 @@
 
 import type { ReactNode } from 'react'
 import {
-  BellRing, Boxes, Briefcase, Car, DoorOpen, GitCommitHorizontal, Hourglass,
+  BellRing, Boxes, Briefcase, Car, ClipboardCheck, DoorOpen, GitCommitHorizontal, Hourglass,
   PackageCheck, ShieldAlert, ShieldCheck, UserRound, Users,
 } from 'lucide-react'
 
@@ -29,6 +29,7 @@ const ICONS: Record<string, (size: number) => ReactNode> = {
   // Bell is already the alert inbox in the nav; BellRing is the one that
   // reads as "it actually went off on someone's phone".
   '/notifications': (s) => <BellRing size={s} />,
+  '/attendance': (s) => <ClipboardCheck size={s} />,
 }
 
 /** The route's icon, or a generic app glyph for a page not listed here. */
