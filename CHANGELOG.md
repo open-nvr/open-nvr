@@ -8,6 +8,17 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Best frame: a blur veto.** A candidate much blurrier than the current
+  best (sharpness under `DETECT_BEST_FRAME_BLUR_VETO` = 0.5 of it, measured
+  at one scale so a subject walking closer is not mistaken for a softer one)
+  no longer wins on score or area alone. The recording is asked for the best
+  frame's moment, so the pick decides how sharp the evidence is.
+  `tier0_best_frame_blur_vetoes_total` counts refusals.
+- **Plate candidates at full resolution.** A plate candidate cut at the
+  moment the recording was asked for takes that result's full-resolution
+  pixels (same frame, same score, same order), so the OCR looks come from
+  the main stream. `tier0_plate_candidates_upgraded_total` counts them.
+
 - **Evidence of the moment, fetched from the recording.** The nearest
   decoded keyframe was a GOP older than its stamp (ffmpeg holds one frame
   in its output path; with keyframes only, the next keyframe releases it),

@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from itertools import count
 
 from .regions import Box, intersection_over_union
-from .thumbnail import ThumbCandidate, is_better_thumbnail
+from .thumbnail import BLUR_VETO, ThumbCandidate, blur_vetoed, crop_sharpness, is_better_thumbnail
 
 #: A main-stream crop must look at least this much like the detect-frame
 #: crop of the same box (Pearson correlation of the two boxes' luma, both
@@ -359,6 +359,14 @@ class Tracker:
         # How many best-crop updates were cut from which stream, for the
         # worker's metrics. "main" / "detect" keys, monotonic.
         self.evidence_stats: dict[str, int] = {"main": 0, "detect": 0}
+        # Best-frame blur veto (thumbnail.py): a candidate much blurrier
+        # than the current best does not replace it on score or area; 0
+        # turns it off. Vetoes are counted for the worker's gauge.
+        self.blur_veto: float = BLUR_VETO
+        self.blur_vetoes: int = 0
+        # Plate candidates whose pixels the recording replaced at full
+        # resolution (CandidateRing.upgrade), for the worker's gauge.
+        self.plate_upgrades: int = 0
         # Evidence from the recording (playback.py): a callable that takes
         # an EvidenceRequest when a track's best crop improves. The result
         # comes back later through apply_evidence_result(). None = off.
@@ -572,8 +580,12 @@ class Tracker:
         self._tracks.append(tr)
 
     def _update_best(self, tr: Track, det: Detection, bgr=None) -> None:
-        cand = ThumbCandidate(label=det.label, box=det.box, score=det.score)
-        if tr.best is None or is_better_thumbnail(tr.best, cand, self.frame_shape):
+        sharp = crop_sharpness(bgr, det.box) if (bgr is not None and self.blur_veto > 0) else 0.0
+        cand = ThumbCandidate(label=det.label, box=det.box, score=det.score, sharpness=sharp)
+        if tr.best is not None and blur_vetoed(tr.best, cand, self.blur_veto) \
+                and is_better_thumbnail(tr.best, cand, self.frame_shape, blur_veto=0.0):
+            self.blur_vetoes += 1                      # would have won on score/area alone
+        if tr.best is None or is_better_thumbnail(tr.best, cand, self.frame_shape, self.blur_veto):
             tr.best = cand
             if bgr is not None:                       # retain the best frame's pixels
                 crop, source, frame_bgr = self._crop_for(bgr, det.box)
@@ -669,8 +681,14 @@ class Tracker:
         tr = next((t for t in self._tracks if t.id == res.track_id), None)
         if tr is None:
             return False
-        if res.outcome != "accepted" or tr.best_crop_req_mono != res.request.mono_ts:
+        if res.outcome != "accepted" or res.crop is None:
             return True                                   # the track is live; nothing to change
+        # A plate candidate cut at the same moment takes the full-resolution
+        # pixels whatever became of the best crop since: it is the same frame.
+        if tr.plate_ring is not None and tr.plate_ring.upgrade(res.request.mono_ts, res.crop):
+            self.plate_upgrades += 1
+        if tr.best_crop_req_mono != res.request.mono_ts:
+            return True                                   # an older moment than the latest request
         tr.best_crop = res.crop
         tr.best_crop_source = "playback"
         tr.best_crop_skew_s = res.skew_s
@@ -846,4 +864,5 @@ class Tracker:
         from .regions import area as _area
         tr.plate_ring.offer(
             self._clock(), candidate_score(_area(det.box), crop), crop,
+            req_mono=float(self._ev_ts) if self._ev_ts is not None else None,
         )

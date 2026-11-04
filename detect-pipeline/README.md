@@ -510,7 +510,11 @@ This is the **stable slice consumers code against.** It is intentionally the who
 benefit by subscribing here; no separate perception contract is needed.
 
 **Best frame.** When a track has `"best": true`, its best-frame crop (the sharpest /
-largest / most-confident frame Tier-0 already selected) is fetchable at
+largest / most-confident frame Tier-0 already selected: Frigate's edge, score and
+area rules, plus a blur veto, `DETECT_BEST_FRAME_BLUR_VETO`, that keeps a much
+blurrier frame from winning on score or area; the recording is asked for the
+best frame's moment, so the pick decides how sharp the main-stream evidence is)
+is fetchable at
 `GET :<DETECT_METRICS_PORT>/best_frame?camera=<cam>&track=<id>` (JPEG; omit `&track=`
 for the camera's most-recent best). A consumer that needs to run a vision model
 should use this instead of grabbing an arbitrary live frame — more accurate, cheaper.

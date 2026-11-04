@@ -351,3 +351,48 @@ def test_a_held_visit_is_patched_when_its_crop_arrives_and_counted_when_the_hold
                                    crop=main, score=0.9, skew_s=0.1))
     w._drain_playback(tracker, now_mono=117.0)
     assert w._results_late == 1 and len(poster.posted) == 2
+
+
+def test_a_vehicle_track_hands_the_recording_crop_to_its_plate_candidate():
+    """The plate candidate cut at the requested moment takes the full-res
+    pixels even when the best crop has since moved to a newer moment."""
+    rng = np.random.default_rng(12)
+    box = (100, 100, 300, 250)
+    sub = _scene(rng, SUB, subject=box)
+    filed = []
+    tk = _tracker()
+    tk.retain_plate_candidates = True
+    tk.evidence_request = filed.append
+    tk.update([Detection("car", box, 0.8)], sub, frame_ts=10.0)
+    tr = tk._tracks[0]
+    ring = tr.plate_ring
+    assert ring is not None and len(ring) == 1 and ring.ranked()[0].req_mono == 10.0
+    tk.update([Detection("car", (100, 100, 330, 280), 0.95)], sub, frame_ts=11.0)   # a better moment
+    assert tr.best_crop_req_mono == 11.0 and len(filed) == 2
+    main = np.kron(sub, np.ones((2, 2, 1), np.uint8))
+    crop = _crop_bgr(main, (200, 200, 600, 500), margin=0.25)
+    old = EvidenceResult(filed[0], "accepted", crop=crop, frame=main, score=0.9, skew_s=0.1)
+    assert tk.apply_evidence_result(old) is True
+    assert tr.best_crop_source != "playback", "the best crop is for the newer moment"
+    first = next(c for c in ring.ranked() if c.req_mono == 10.0)
+    assert first.crop is crop and first.upgraded and tk.plate_upgrades == 1
+
+
+def test_the_blur_veto_is_counted_when_a_soft_frame_would_have_won():
+    import cv2
+    rng = np.random.default_rng(13)
+    box = (100, 100, 200, 300)
+    sharp = _scene(rng, SUB, subject=box)
+    sharp[100:300, 100:200] = rng.integers(0, 255, size=(200, 100, 3), dtype=np.uint8)
+    soft = cv2.GaussianBlur(sharp, (0, 0), 5)
+    tk = _tracker()
+    tk.update([Detection("person", box, 0.7)], sharp, frame_ts=10.0)
+    tr = tk._tracks[0]
+    best_before = tr.best
+    # bigger and higher-scoring, but blurred: refused and counted
+    tk.update([Detection("person", (100, 100, 240, 380), 0.9)], soft, frame_ts=11.0)
+    assert tr.best is best_before and tk.blur_vetoes == 1
+    # the veto off: the same frame wins
+    tk.blur_veto = 0.0
+    tk.update([Detection("person", (100, 100, 240, 380), 0.9)], soft, frame_ts=12.0)
+    assert tr.best is not best_before and tk.blur_vetoes == 1

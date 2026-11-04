@@ -951,6 +951,10 @@ class CameraWorker:
         # is the bare box, 2 is a crop five times the box on each axis.
         tracker.crop_margin = max(0.0, min(2.0, _env_float(
             "DETECT_CROP_MARGIN", 0.25)))
+        # Best-frame blur veto: a candidate sharper than this fraction of
+        # the current best's sharpness may still replace it; 0 = off.
+        tracker.blur_veto = max(0.0, min(1.0, _env_float(
+            "DETECT_BEST_FRAME_BLUR_VETO", 0.5)))
         if lpr_camera:
             tracker.retain_plate_candidates = True
             tracker.plate_candidates_max = _env_int("DETECT_PLATE_CANDIDATES", 4)
@@ -1140,6 +1144,16 @@ class CameraWorker:
                 # cap / spawn-score floor (monotonic; exported as a gauge).
                 _metrics.gauge(
                     "tier0_track_spawns_dropped", float(tracker.spawns_dropped),
+                    {"camera": self.spec.camera_id},
+                )
+                # Best-frame picks refused for blur, and plate candidates
+                # whose pixels the recording replaced at full resolution.
+                _metrics.gauge(
+                    "tier0_best_frame_blur_vetoes_total", float(tracker.blur_vetoes),
+                    {"camera": self.spec.camera_id},
+                )
+                _metrics.gauge(
+                    "tier0_plate_candidates_upgraded_total", float(tracker.plate_upgrades),
                     {"camera": self.spec.camera_id},
                 )
                 # Retain each track's best crop for on-demand fetch (best-frame
