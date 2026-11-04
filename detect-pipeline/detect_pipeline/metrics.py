@@ -375,14 +375,18 @@ def record_evidence(camera_id: str, active: bool, stats: dict, *,
                       {"camera": camera_id, "reason": reason})
     for sample in samples or ():
         score, skew = sample[0], sample[1]
+        # A 7th element names the path ("keyframe" — the synchronous ring —
+        # or "playback", the recording); older samples are the keyframe path.
+        source = sample[6] if len(sample) > 6 else "keyframe"
+        labels = {"camera": camera_id, "source": source}
         if score is not None:
             metrics.observe("tier0_evidence_match_score", max(0.0, min(1.0, float(score))),
-                            {"camera": camera_id}, buckets=SCORE_BUCKETS)
+                            labels, buckets=SCORE_BUCKETS)
         if skew is not None:
-            metrics.observe("tier0_evidence_skew_seconds", float(skew), {"camera": camera_id})
+            metrics.observe("tier0_evidence_skew_seconds", float(skew), labels)
 
 
-def record_playback_evidence(camera_id: str, pb, held: int = 0) -> None:
+def record_playback_evidence(camera_id: str, pb, held: int = 0, patched: int = 0, late: int = 0) -> None:
     """Evidence fetched from the recording (playback.py): requests filed,
     outcomes, what the fetches and decodes cost, and visits currently held
     for a pending result."""
@@ -394,6 +398,12 @@ def record_playback_evidence(camera_id: str, pb, held: int = 0) -> None:
     metrics.gauge("tier0_evidence_fetch_seconds_total", float(pb.fetch_seconds), cam)
     metrics.gauge("tier0_evidence_decode_seconds_total", float(pb.decode_seconds), cam)
     metrics.gauge("tier0_evidence_visits_held", float(held), cam)
+    # Held visits that got their recording crop before posting, and accepted
+    # results that found neither a live track nor a held visit (the hold was
+    # too short, or the request waited too long): the two numbers that say
+    # whether DETECT_EVIDENCE_HOLD_S is right for this camera.
+    metrics.gauge("tier0_evidence_visits_patched_total", float(patched), cam)
+    metrics.gauge("tier0_evidence_results_late_total", float(late), cam)
 
 
 #: Why a camera detects on its MAIN stream, as the value of

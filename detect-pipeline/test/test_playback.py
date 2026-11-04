@@ -187,3 +187,25 @@ def test_tracker_files_a_request_when_the_best_crop_improves_and_takes_the_resul
     assert tk.apply_evidence_result(stale) is True and tr.best_crop_source != "playback"
     # an unknown track: not taken (the visit may be held in the worker)
     assert tk.apply_evidence_result(EvidenceResult(EvidenceRequest(99, 1.0, box, SUB, None), "accepted", crop=crop)) is False
+
+
+def test_playback_results_leave_samples_and_dump_pairs(tmp_path):
+    rng = np.random.default_rng(8)
+    box = (100, 100, 200, 300)
+    sub = _scene(rng, SUB, subject=box)
+    tk = _tracker()
+    tk.evidence_debug_dir, tk.evidence_debug_camera = str(tmp_path), "cam5"
+    req = EvidenceRequest(3, 10.0, box, SUB, _crop_bgr(sub, box, margin=0.0))
+    main = np.kron(sub, np.ones((2, 2, 1), np.uint8))
+    tk.note_playback_result(EvidenceResult(req, "accepted", crop=_crop_bgr(main, (200, 200, 400, 600)), frame=main,
+                                           score=0.97, skew_s=0.12, candidates=4))
+    tk.note_playback_result(EvidenceResult(req, "refused", crop=_crop_bgr(main, (200, 200, 400, 600)), score=0.3,
+                                           skew_s=0.2, reason="low_corr"))
+    tk.note_playback_result(EvidenceResult(req, "error", reason="OSError"))
+    s = tk.drain_evidence_samples()
+    assert [x[6] for x in s] == ["playback", "playback"] and s[0][2] is True and s[1][3] == "low_corr"
+    files = sorted(p.name for p in (tmp_path / "cam5").iterdir())
+    assert len(files) == 6 and any(n.endswith("p.json") for n in files)
+    import json
+    rec = json.loads((tmp_path / "cam5" / [n for n in files if n.endswith("p.json")][0]).read_text())
+    assert rec["source"] == "playback" and rec["candidates"] == 4 and rec["accepted"] is True

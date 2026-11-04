@@ -439,6 +439,8 @@ class CameraWorker:
         self.evidence_fetch_min_interval_s = max(0.0, float(evidence_fetch_min_interval_s or 0.0))
         self._playback = None
         self._held: dict = {}                    # track id -> (visit, deadline mono)
+        self._visits_patched = 0                 # held visits that got their recording crop
+        self._results_late = 0                   # accepted results with no track and no held visit
         self.evidence_url_provider = evidence_url_provider
         self._evidence_source_factory = evidence_source_factory
         self._evidence = None
@@ -673,12 +675,17 @@ class CameraWorker:
         if pb is None:
             return
         for res in pb.results():
+            tracker.note_playback_result(res)
             if tracker.apply_evidence_result(res):
                 continue
             held = self._held.pop(res.track_id, None)
             if held is None:
+                if res.outcome == "accepted":
+                    self._results_late += 1      # the visit went before its crop arrived
                 continue
             visit, _deadline = held
+            if res.outcome == "accepted" and res.crop is not None:
+                self._visits_patched += 1
             self._post_visit(self._patch_visit(visit, res))
         for tid, (visit, deadline) in list(self._held.items()):
             if now_mono >= deadline or not pb.pending_for(tid):
@@ -1187,7 +1194,8 @@ class CameraWorker:
                         keyframes_only=evidence.keyframes_only,
                     )
                 if self._playback is not None:
-                    record_playback_evidence(self.spec.camera_id, self._playback, held=len(self._held))
+                    record_playback_evidence(self.spec.camera_id, self._playback, held=len(self._held),
+                                             patched=self._visits_patched, late=self._results_late)
                 # Adaptive decode: promote on the first sign of activity,
                 # demote after the quiet period. The flip terminates the
                 # current ffmpeg; the source's restart loop respawns it with

@@ -137,8 +137,11 @@ def ffmpeg_decode_clip(data: bytes, width: int, height: int) -> list:
     """Every frame of the clip as a BGR array, in order (one ffmpeg run)."""
     import numpy as np
 
+    # Four threads and the fast decode flags the sub-stream path uses: on
+    # the Ventuno Q ~0.65 s for a short clip against ~0.8 s plain.
     r = subprocess.run(
-        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", "pipe:0",
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-threads", "4",
+         "-skip_loop_filter", "all", "-flags2", "fast", "-i", "pipe:0",
          "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1"],
         input=data, capture_output=True, timeout=60,
     )
@@ -168,7 +171,7 @@ class PlaybackEvidence:
         self._url_provider = url_provider
         self.match_min = float(match_min)
         self.crop_margin = float(crop_margin)
-        self._gop_s = gop_s or (lambda: None)
+        self._gop_s = gop_s or (lambda: None)      # kept for the cost cap to come
         self.lead_s, self.window_s = float(lead_s), float(window_s)
         self.freshness_s, self.min_interval_s = float(freshness_s), float(min_interval_s)
         self.max_age_s = float(max_age_s)
@@ -265,7 +268,10 @@ class PlaybackEvidence:
             return EvidenceResult(req, "error", reason="no_playback_url")
         wall_t = self._capture_wall(req.mono_ts)
         end = wall_t + self.lead_s
-        span = (self._gop_s() or DEFAULT_GOP_S) + self.lead_s + 0.5
+        # MediaMTX serves from the keyframe before ``start`` whatever the span,
+        # so a short span is enough: measured on the Ventuno Q, 0.8 s costs
+        # ~0.65 s to decode against ~1.1 s for a GOP-sized span.
+        span = self.lead_s + 0.5
         sep = "&" if "?" in base else "?"
         url = f"{base}{sep}start={_iso(end - span)}&duration={span:.3f}&format=fmp4"
         t0 = self._clock()

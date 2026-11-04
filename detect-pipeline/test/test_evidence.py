@@ -705,8 +705,8 @@ def test_a_blank_main_crop_where_the_sub_saw_a_subject_is_refused_as_flat():
     tk.update([Detection("person", box, 0.8)], sub, frame_ts=1.0)
     assert tk._tracks[0].best_crop_source == "detect"
     assert tk.evidence_refusals == {"flat_main": 1} and tk.evidence_mismatches == 1
-    (score, skew, ok, reason, ref_main, ref_sub), = tk.drain_evidence_samples()
-    assert ok is False and reason == "flat_main" and score is None and skew == 0.0
+    (score, skew, ok, reason, ref_main, ref_sub, source), = tk.drain_evidence_samples()
+    assert ok is False and reason == "flat_main" and score is None and skew == 0.0 and source == "keyframe"
     assert tk.drain_evidence_samples() == [], "drained"
     # both flat is still undecidable → accepted, as before
     sub2 = _scene(rng, SUB); sub2[100:300, 100:200] = 128
@@ -740,7 +740,7 @@ def test_reference_frame_similarities_are_measured_not_judged():
     tk = _tracker(lambda ts: _Main(main, ts))
     tk.evidence_ref = lambda ts: _Main(before, ts - 3.0)
     tk.update([Detection("person", box, 0.8)], sub, frame_ts=5.0)
-    (score, skew, ok, reason, ref_main, ref_sub), = tk.drain_evidence_samples()
+    (score, skew, ok, reason, ref_main, ref_sub, source), = tk.drain_evidence_samples()
     assert ok and ref_main is not None and ref_sub is not None
     assert ref_main < 0.5 and ref_sub < 0.5, "the subject is new: neither crop looks like the empty scene"
 

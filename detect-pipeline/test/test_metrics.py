@@ -422,5 +422,8 @@ def test_histograms_can_have_their_own_buckets_and_the_guard_is_measured():
     out = global_metrics.render()
     assert 'tier0_evidence_refused_total{camera="cam7",reason="low_corr"} 1' in out
     assert 'tier0_evidence_refused_total{camera="cam7",reason="flat_main"} 1' in out
-    assert 'tier0_evidence_match_score_count{camera="cam7"} 2' in out, "a None score is not observed"
-    assert 'tier0_evidence_skew_seconds_count{camera="cam7"} 3' in out
+    assert 'tier0_evidence_match_score_count{camera="cam7",source="keyframe"} 2' in out, "a None score is not observed"
+    assert 'tier0_evidence_skew_seconds_count{camera="cam7",source="keyframe"} 3' in out
+    record_evidence("cam7", True, {}, samples=[(0.99, 0.15, True, "", None, None, "playback")])
+    out = global_metrics.render()
+    assert 'tier0_evidence_match_score_count{camera="cam7",source="playback"} 1' in out

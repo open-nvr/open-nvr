@@ -606,6 +606,43 @@ class Tracker:
         except Exception:
             pass                                          # evidence is an enhancement
 
+    def note_playback_result(self, res) -> None:
+        """A recording result, whatever became of it: a sample for the
+        histograms (source "playback") and, when the dump is on, the pair on
+        disk beside the keyframe attempts, so the guard report compares the
+        two paths on the same walk-through."""
+        if res.outcome in ("accepted", "refused"):
+            self.evidence_samples.append((res.score, res.skew_s, res.outcome == "accepted",
+                                          "" if res.outcome == "accepted" else res.reason,
+                                          None, None, "playback"))
+        if self.evidence_debug_dir and res.outcome in ("accepted", "refused") and res.crop is not None:
+            self._dump_playback(res)
+
+    def _dump_playback(self, res) -> None:
+        if self._dumped >= EVIDENCE_DUMP_MAX:
+            return
+        try:
+            import json
+            import os
+            import cv2
+            req = res.request
+            d = os.path.join(self.evidence_debug_dir, self.evidence_debug_camera)
+            os.makedirs(d, exist_ok=True)
+            stem = os.path.join(d, f"{int(req.mono_ts * 1000):013d}_{self._dumped:04d}p")
+            cv2.imwrite(stem + "_sub.jpg", req.sub_crop)
+            cv2.imwrite(stem + "_main.jpg", res.crop)
+            with open(stem + ".json", "w") as f:
+                json.dump({
+                    "source": "playback", "detect_ts": req.mono_ts, "skew_s": res.skew_s,
+                    "box": [float(v) for v in req.box], "sub_shape": list(req.frame_shape),
+                    "score": res.score, "accepted": res.outcome == "accepted", "reason": res.reason,
+                    "candidates": res.candidates, "fetch_s": res.fetch_s, "decode_s": res.decode_s,
+                    "floor": float(self.evidence_match_min or 0.0),
+                }, f)
+            self._dumped += 1
+        except Exception:
+            self._dumped = EVIDENCE_DUMP_MAX
+
     def apply_evidence_result(self, res) -> bool:
         """A playback result for a LIVE track: its full-resolution crop (and
         scene) replace the best crop when the result is for the latest
@@ -647,7 +684,7 @@ class Tracker:
                         if self._ev_ts is not None else None)
                 ok, reason, sim = self._judge_main_crop(main, scaled, bgr, box)
                 refs = self._reference_sims(main, scaled, bgr, box, sx, sy)
-                self.evidence_samples.append((sim, skew, ok, reason, *refs))
+                self.evidence_samples.append((sim, skew, ok, reason, *refs, "keyframe"))
                 if self.evidence_debug_dir:
                     self._dump_attempt(main, scaled, bgr, box, ev, skew, sim, ok, reason, refs)
                 if ok:
@@ -732,6 +769,7 @@ class Tracker:
                     "texture_sub": crop_texture(_crop_bgr(bgr, box, margin=0.0)),
                     "texture_main": crop_texture(_crop_bgr(main, scaled, margin=0.0)),
                     "floor": float(self.evidence_match_min or 0.0),
+                    "source": "keyframe",
                 }, f)
             self._dumped += 1
         except Exception:
