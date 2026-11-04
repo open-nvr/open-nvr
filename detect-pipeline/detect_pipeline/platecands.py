@@ -71,6 +71,10 @@ class PlateCandidate:
     ts: float
     score: float
     crop: Any = field(repr=False, compare=False)
+    # The detect frame's stamp this crop was cut at: the recording's result
+    # for the same moment (playback.py) swaps in its full-resolution pixels.
+    req_mono: float | None = field(default=None, compare=False)
+    upgraded: bool = field(default=False, compare=False)
 
 
 class CandidateRing:
@@ -94,7 +98,7 @@ class CandidateRing:
     def __len__(self) -> int:
         return len(self._items)
 
-    def offer(self, ts: float, score: float, crop) -> bool:
+    def offer(self, ts: float, score: float, crop, req_mono: float | None = None) -> bool:
         """Consider one crop. Returns True if it was retained.
 
         Ring not full → accept if the diversity gap allows (or it beats
@@ -110,14 +114,27 @@ class CandidateRing:
         if len(self._items) < self.max_candidates:
             if not gap_ok and not self._beats_worst(score):
                 return False
-            self._items.append(PlateCandidate(ts=ts, score=score, crop=crop))
+            self._items.append(PlateCandidate(ts=ts, score=score, crop=crop, req_mono=req_mono))
         else:
             if not self._beats_worst(score):
                 return False
             worst = min(range(len(self._items)), key=lambda i: self._items[i].score)
-            self._items[worst] = PlateCandidate(ts=ts, score=score, crop=crop)
+            self._items[worst] = PlateCandidate(ts=ts, score=score, crop=crop, req_mono=req_mono)
         self._last_accept_ts = ts
         return True
+
+    def upgrade(self, req_mono: float, crop) -> bool:
+        """The recording's crop of the moment a retained candidate was cut
+        at: same frame, full resolution. The pixels are swapped, the score
+        (vehicle size × sharpness, measured on the detect frame) stays, so
+        the ring's order is unchanged. Returns True if a candidate took it."""
+        if crop is None:
+            return False
+        for c in self._items:
+            if c.req_mono is not None and c.req_mono == req_mono:
+                c.crop, c.upgraded = crop, True
+                return True
+        return False
 
     def _beats_worst(self, score: float) -> bool:
         return bool(self._items) and score > min(c.score for c in self._items)

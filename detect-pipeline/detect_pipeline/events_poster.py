@@ -91,6 +91,17 @@ class Visit:
     # Core files the visit under the camera's zones from it (HA-109). Empty
     # when frame size was unknown. Appended LAST, same rule as above.
     path: tuple = ()
+    # Where ``jpeg`` came from and how good a look it was, for core's
+    # per-camera evidence quality (the escalation proposal): the stream
+    # the crop was cut from ("detect" = the sub-sized fallback, "main" =
+    # the keyframe path, "playback" = the recording), the smaller side of
+    # the subject's box on the detect frame in pixels, the detect frame's
+    # height, and the crop's time skew from the detect frame. None when
+    # the tracker did not record them. Appended LAST, same rule as above.
+    evidence_source: str | None = None
+    evidence_box_px: int | None = None
+    evidence_frame_px: int | None = None
+    evidence_skew_s: float | None = None
 
 
 #: Most points kept per visit path. When a long visit fills it, every other
@@ -261,6 +272,14 @@ class VisitPoster:
             # visit ships no candidates and its sweep reads that crop.
             if v.evidence_ts is not None:
                 body["evidence_ts"] = float(v.evidence_ts)
+        if v.evidence_source:
+            body["evidence_source"] = str(v.evidence_source)
+        if v.evidence_box_px is not None:
+            body["evidence_box_px"] = int(v.evidence_box_px)
+        if v.evidence_frame_px is not None:
+            body["evidence_frame_px"] = int(v.evidence_frame_px)
+        if v.evidence_skew_s is not None:
+            body["evidence_skew_s"] = float(v.evidence_skew_s)
         # Omitted entirely when absent (not sent as null), so a core that
         # predates the field never sees a key it has no opinion about.
         if v.scene_jpeg:
@@ -323,6 +342,8 @@ class VisitLifecycle:
                     "stationary": False, "confirmed": False, "crop": None,
                     "crop_ts": None, "ring": None, "scene": None, "path": [],
                     "path_step": 1, "path_seen": 0,
+                    "crop_source": None, "crop_box_px": None, "crop_skew_s": None,
+                    "frame_px": None,
                 }
             v["end"] = now_wall
             v["label"] = tr.label
@@ -340,6 +361,16 @@ class VisitLifecycle:
                 # come from. getattr default, like best_crop itself —
                 # test doubles and older trackers lack the field.
                 v["crop_ts"] = getattr(tr, "best_crop_ts", None)
+                # The crop's provenance and the look's size, in lockstep
+                # with the crop for the same reason as the stamp.
+                v["crop_source"] = getattr(tr, "best_crop_source", None)
+                v["crop_skew_s"] = getattr(tr, "best_crop_skew_s", None)
+                best = getattr(tr, "best", None)
+                bbox = getattr(best, "box", None)
+                v["crop_box_px"] = (int(max(0, min(bbox[2] - bbox[0], bbox[3] - bbox[1])))
+                                    if bbox is not None else None)
+            if frame_size is not None:
+                v["frame_px"] = int(frame_size[1])
             # getattr with a default, like best_crop above: test doubles and
             # any older tracker simply do not carry the field.
             scene = getattr(tr, "best_scene_jpeg", None)
@@ -452,4 +483,9 @@ class VisitLifecycle:
             # and the candidates, which arrive as pixels).
             scene_jpeg=v.get("scene"),
             path=tuple(v.get("path") or ()),
+            evidence_source=(str(v["crop_source"]) if jpeg is not None and v.get("crop_source") else None),
+            evidence_box_px=(v.get("crop_box_px") if jpeg is not None else None),
+            evidence_frame_px=v.get("frame_px"),
+            evidence_skew_s=(float(v["crop_skew_s"])
+                             if jpeg is not None and v.get("crop_skew_s") is not None else None),
         )

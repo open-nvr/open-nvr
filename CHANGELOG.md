@@ -40,6 +40,33 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   only an admin turns On one that moves things, and a new version whose AI
   steps changed goes back to Test.
 
+- **The escalation proposal: weak evidence on the sub stream → detect on
+  the main stream, by consent.** Every posted visit now says where its crop
+  came from (sub-sized fallback, keyframe path, or the recording) and how
+  big the subject was on the detect frame. Core reads a day of those per
+  camera: when fewer than half the visits got a full-resolution crop, or
+  more than half had a subject under 48 px, over at least 20 visits, the
+  camera gets a proposal — a badge on the Cameras page and a card in
+  Settings → Detection with the numbers and the cost. Accept switches that
+  camera's detection to the main stream (the other overrides untouched, the
+  previous choice remembered); Not now puts it away for 7 days and it is
+  looked at again after; Reset puts the previous setting back. A week after
+  accepting, the badge asks for a review. `GET/POST
+  /api/v1/cameras/{id}/escalation[/accept|/dismiss|/reset]`, audited;
+  thresholds via `OPENNVR_ESCALATION_*`. The adapters page's evidence badge
+  now counts recording crops as full-resolution.
+
+- **Best frame: a blur veto.** A candidate much blurrier than the current
+  best (sharpness under `DETECT_BEST_FRAME_BLUR_VETO` = 0.5 of it, measured
+  at one scale so a subject walking closer is not mistaken for a softer one)
+  no longer wins on score or area alone. The recording is asked for the best
+  frame's moment, so the pick decides how sharp the evidence is.
+  `tier0_best_frame_blur_vetoes_total` counts refusals.
+- **Plate candidates at full resolution.** A plate candidate cut at the
+  moment the recording was asked for takes that result's full-resolution
+  pixels (same frame, same score, same order), so the OCR looks come from
+  the main stream. `tier0_plate_candidates_upgraded_total` counts them.
+
 - **Evidence of the moment, fetched from the recording.** The nearest
   decoded keyframe was a GOP older than its stamp (ffmpeg holds one frame
   in its output path; with keyframes only, the next keyframe releases it),
@@ -217,6 +244,31 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Smart Doorbell: `min_face_px` defaults to 100 (was 40), and a name is
+  a vote.** The frames are the camera's main stream, so 100 px is a face
+  within a few metres of the door; below it a miss says distance, not
+  stranger (a match is never gated by size). Each matching frame now adds
+  its similarity, weighted by face size, to that person's tally; the new
+  `min_match_reads` (default 1, so the first match still decides at once)
+  is how many matching frames a name needs. With 2, a lone match is
+  recorded as unclear, leaning to that name, and the next match upgrades it.
+
+- **`DETECT_EVIDENCE_HOLD_S` defaults to 6 s** (was 3). A result from the
+  recording takes the freshness wait, its turn behind the fetch interval
+  and the decode, about 4 s at worst; with a 3 s hold four crops in one
+  walk-through arrived after their visit had gone. Holds that run out are
+  now counted (`tier0_evidence_visits_hold_expired_total`).
+
+- **Evidence from the recording asks for the right moment.** A detect
+  frame's stamp is later than the recorder's clock for the same picture by
+  the sub stream's own path (measured: median 0.56 s on a CP Plus through
+  the Qualcomm box), so the fetched clip was centred half a second late
+  and a walking subject's best candidate sat at the edge of the window.
+  The request now subtracts `DETECT_EVIDENCE_STAMP_LEAD_S` (0.5 s), each
+  camera calibrates its own lead from the frames it accepts
+  (`tier0_evidence_stamp_lead_seconds`), and the candidate window is
+  ±0.5 s.
+
 - **Evidence from the recording, measured and trimmed.** Two more counters
   say whether the visit hold is long enough (`tier0_evidence_visits_patched_total`,
   `tier0_evidence_results_late_total`); the guard histograms and the debug
@@ -249,6 +301,37 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   timing matters.
 
 ### Fixed
+
+- **A search result's "play the recording" lands where the subject is.**
+  The playhead now opens 3 s before the event's instant, inside the same
+  segment, so the entry is on screen (an event starts when the detector
+  first saw the object, which is after it entered the frame). When the
+  camera has no footage at that instant, the player used to jump silently
+  to the next recording of the day and play it as if it were the moment
+  asked for; it now says so in the playback header, with the time it is
+  playing from instead.
+
+- **Core no longer hangs at boot on "Fixing ownership of non-opennvr files
+  in recordings tree...".** Core's entrypoint chowned the recordings
+  archive in the foreground, before anything else started. On a mount where
+  ownership does not stick (NFS with root_squash, SMB/CIFS, some NTFS and
+  exFAT disks), every file was re-chowned on every start, so core sat there
+  until its healthcheck marked it unhealthy. The entrypoint now checks once
+  whether chown works on the mount, skips the step if it does not, and
+  otherwise runs it in the background. An operator who mounted their own
+  entrypoint to get around this can go back to the stock one.
+
+- **A tentative track no longer asks the recording for its crop.** It
+  dies on a single miss, and a duplicate box on one person spawns such a
+  track every few frames; each result came back for a visit that never
+  existed (counted late) and cost a fetch and a decode. The request waits
+  until the track is confirmed and is then filed for its best moment so far.
+
+- **A recording crop that landed between two frames no longer misses its
+  visit.** The playback thread could serve a result just before the track
+  ended; the visit saw nothing pending, was posted as it was, and the crop
+  was counted late. A served, uncollected result now keeps the track
+  pending, so the visit is held and patched on the next drain.
 
 - **"Sign in with <provider>" no longer lands on a 404.** The app's
   service worker answered every page visit with the app itself, so

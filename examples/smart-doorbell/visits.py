@@ -36,6 +36,15 @@ Frames below the quality gate — a face narrower than ``min_face_px``
 or one the detector was not sure of — neither open nor decide a
 visit. They are the frames the mistakes come from.
 
+A name is a VOTE, not a verdict, when ``min_match_reads`` is above 1:
+each matching frame adds its similarity, weighted by the size of the
+face it was read from, to that person's tally, and the visit is
+announced as known once the leading person has that many matching
+frames. A lone match that never repeats within the hold is recorded
+as ``uncertain`` (leaning to that name) rather than announced, and
+the next matching frame upgrades it. The default of 1 keeps the
+first match deciding at once.
+
 This module holds the decision and nothing else: no alerts, no tiles,
 no clock of its own. The app feeds it reads and a time and acts on
 what comes back, which is what makes the rule testable in isolation.
@@ -55,8 +64,16 @@ DEFAULT_HOLD_SECONDS: float = 4.0
 #: came close; at or above it (and below the threshold) the face is
 #: probably somebody enrolled, seen badly.
 DEFAULT_UNKNOWN_SCORE: float = 0.35
-#: Faces narrower than this many pixels are not decided from.
-DEFAULT_MIN_FACE_PX: int = 40
+#: Faces narrower than this many pixels are not decided from. The
+#: frames are the camera's main stream, so 100 px is a face within a
+#: few metres of the door; below it "no match" is not evidence of a
+#: stranger, only of distance. A match is never gated by size.
+DEFAULT_MIN_FACE_PX: int = 100
+#: Matching frames a person needs before the visit is announced as
+#: known. 1 = the first match decides at once.
+DEFAULT_MIN_MATCH_READS: int = 1
+#: Face side (px) above which a frame's vote weighs no more.
+VOTE_WEIGHT_CAP_PX: int = 200
 #: Detector confidence below which a face is not decided from.
 DEFAULT_MIN_FACE_CONFIDENCE: float = 0.6
 #: A visit with no face for this long is over; the next face is a new
@@ -77,6 +94,25 @@ class Observation:
         b = self.read.face_bbox
         return (b[2] - b[0]) * (b[3] - b[1]) if b else 0
 
+    @property
+    def side(self) -> int:
+        """The smaller side of the face box; 0 without one."""
+        b = self.read.face_bbox
+        return max(0, min(b[2] - b[0], b[3] - b[1])) if b else 0
+
+
+@dataclass
+class Tally:
+    """One person's matching frames on a visit."""
+    weighted: float = 0.0        # Σ similarity × weight
+    weight: float = 0.0          # Σ weight (face side, capped)
+    reads: int = 0
+    best: Observation | None = None   # the closest match, to announce from
+
+    @property
+    def mean(self) -> float:
+        return self.weighted / self.weight if self.weight > 0 else 0.0
+
 
 @dataclass
 class Visit:
@@ -89,6 +125,9 @@ class Visit:
     #: Highest nearest-similarity seen on any unrecognised read — the
     #: band test. The best FRAME is chosen by size, not by this.
     max_similarity: float | None = None
+    #: Matching frames per person_id. The leader by weighted mean
+    #: similarity is the name, once it has ``min_match_reads`` frames.
+    tallies: dict[str, Tally] = field(default_factory=dict)
     #: None until decided; then "known" / "unknown" / "uncertain".
     decided: str | None = None
     person_id: str | None = None
@@ -102,6 +141,13 @@ class Visit:
     @property
     def key(self) -> str:
         return f"{self.camera_id}@{int(self.opened_wall)}"
+
+    @property
+    def leader(self) -> str | None:
+        """The person with the highest weighted mean similarity so far."""
+        if not self.tallies:
+            return None
+        return max(self.tallies, key=lambda pid: (self.tallies[pid].mean, self.tallies[pid].reads))
 
 
 @dataclass(frozen=True)
@@ -137,12 +183,14 @@ class VisitTracker:
         min_face_px: int = DEFAULT_MIN_FACE_PX,
         min_face_confidence: float = DEFAULT_MIN_FACE_CONFIDENCE,
         gap_seconds: float = DEFAULT_GAP_SECONDS,
+        min_match_reads: int = DEFAULT_MIN_MATCH_READS,
     ) -> None:
         self.hold_seconds = max(0.0, float(hold_seconds))
         self.unknown_score = max(0.0, float(unknown_score))
         self.min_face_px = max(0, int(min_face_px))
         self.min_face_confidence = max(0.0, float(min_face_confidence))
         self.gap_seconds = max(0.0, float(gap_seconds))
+        self.min_match_reads = max(1, int(min_match_reads))
         self._open: dict[str, Visit] = {}
 
     # ── Introspection ───────────────────────────────────────────────
@@ -158,6 +206,7 @@ class VisitTracker:
             "min_face_px": self.min_face_px,
             "min_face_confidence": self.min_face_confidence,
             "gap_seconds": self.gap_seconds,
+            "min_match_reads": self.min_match_reads,
         }
 
     # ── The quality gate ────────────────────────────────────────────
@@ -216,20 +265,28 @@ class VisitTracker:
 
         if read.recognized:
             pid = read.person_id or ""
+            tally = self._vote(visit, pid, obs)
+            leader = visit.leader
             if visit.decided is None:
-                visit.decided, visit.person_id = "known", pid
-                out.append(Decision("known", visit, obs))
+                if leader == pid and tally.reads >= self.min_match_reads:
+                    visit.decided, visit.person_id = "known", pid
+                    out.append(Decision("known", visit, tally.best or obs))
+                # else: a vote; the hold keeps looking for the next frame
             elif visit.decided in ("unknown", "uncertain"):
-                visit.decided, visit.person_id = "known", pid
-                out.append(Decision("upgrade", visit, obs))
+                if leader == pid and tally.reads >= self.min_match_reads:
+                    visit.decided, visit.person_id = "known", pid
+                    out.append(Decision("upgrade", visit, tally.best or obs))
             elif visit.person_id != pid:
-                # A second person at the same door. The first visit is
-                # over; this one is decided on the spot.
-                visit = Visit(camera_id=camera_id, opened_at=now, opened_wall=wall,
-                              best=obs, last_face_at=now, decided="known",
-                              person_id=pid)
-                self._open[camera_id] = visit
-                out.append(Decision("known", visit, obs))
+                # A second person at the same door, once they have the
+                # same number of matching frames the first one needed.
+                # The first visit is over; this one is decided on the spot.
+                if tally.reads >= self.min_match_reads:
+                    visit = Visit(camera_id=camera_id, opened_at=now, opened_wall=wall,
+                                  best=obs, last_face_at=now, decided="known",
+                                  person_id=pid)
+                    visit.tallies[pid] = tally
+                    self._open[camera_id] = visit
+                    out.append(Decision("known", visit, tally.best or obs))
             else:
                 # The same person, still there. Offered again as a
                 # repeat; the app's dedup window says whether anybody
@@ -273,9 +330,32 @@ class VisitTracker:
             return new.area > old.area
         return (new.read.confidence or 0.0) > (old.read.confidence or 0.0)
 
+    @staticmethod
+    def _vote(visit: Visit, pid: str, obs: Observation) -> Tally:
+        """Add a matching frame to ``pid``'s tally: its similarity
+        weighted by the face's size (a 200 px face counts twice a 100 px
+        one; a frame without a box counts as the smallest)."""
+        tally = visit.tallies.get(pid)
+        if tally is None:
+            tally = visit.tallies[pid] = Tally()
+        weight = float(min(max(obs.side, 1), VOTE_WEIGHT_CAP_PX))
+        sim = float(obs.read.similarity or 0.0)
+        tally.weighted += sim * weight
+        tally.weight += weight
+        tally.reads += 1
+        if tally.best is None or sim > float(tally.best.read.similarity or 0.0):
+            tally.best = obs
+        return tally
+
     def _decide_undecided(self, visit: Visit) -> Decision:
         near = visit.max_similarity
-        if self.unknown_score > 0 and near is not None and near >= self.unknown_score:
+        leader = visit.leader
+        if leader is not None:
+            # Matched, but not on enough frames to be announced: a name
+            # seen once is recorded, leaning to that person, not rung for.
+            visit.decided = "uncertain"
+            visit.extra["leaning"] = leader
+        elif self.unknown_score > 0 and near is not None and near >= self.unknown_score:
             visit.decided = "uncertain"
         else:
             visit.decided = "unknown"

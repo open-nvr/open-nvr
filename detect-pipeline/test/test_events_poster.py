@@ -452,3 +452,40 @@ def test_post_carries_the_path_only_when_there_is_one():
     assert "path" not in _post_body(_visit())
     body = _post_body(replace(_visit(), path=((0.1, 0.9), (0.2, 0.8))))
     assert body["path"] == [[0.1, 0.9], [0.2, 0.8]]
+
+
+# ── evidence facts (escalation proposal) ────────────────────────────
+
+def test_finished_visit_carries_where_its_crop_came_from_and_how_big_the_look_was():
+    from types import SimpleNamespace
+    import numpy as np
+
+    @dataclass
+    class _EvTr(_Tr):
+        best: object = None
+        best_crop_source: str | None = None
+        best_crop_skew_s: float | None = None
+        box: tuple = (100, 50, 160, 230)
+
+    tr = _EvTr(1, best_crop=np.zeros((8, 8, 3), np.uint8), best_crop_source="playback",
+               best_crop_skew_s=0.05, best=SimpleNamespace(box=(100, 50, 160, 230)))
+    lc = VisitLifecycle("3")
+    lc.observe([tr], T0, (640, 360))
+    lc.observe([tr], T0 + 3, (640, 360))
+    (v,) = lc.observe([], T0 + 4, (640, 360))
+    assert v.evidence_source == "playback" and v.evidence_box_px == 60
+    assert v.evidence_frame_px == 360 and v.evidence_skew_s == 0.05
+    # a visit without a crop carries no provenance, only the frame size
+    lc.observe([_Tr(2)], T0, (640, 360))
+    lc.observe([_Tr(2)], T0 + 3, (640, 360))
+    (v2,) = lc.observe([], T0 + 4, (640, 360))
+    assert v2.evidence_source is None and v2.evidence_box_px is None and v2.evidence_frame_px == 360
+
+
+def test_post_carries_the_evidence_facts_only_when_present():
+    body = _post_body(_visit())
+    assert not {"evidence_source", "evidence_box_px", "evidence_frame_px", "evidence_skew_s"} & body.keys()
+    body = _post_body(replace(_visit(), evidence_source="detect", evidence_box_px=42,
+                              evidence_frame_px=576, evidence_skew_s=0.1))
+    assert (body["evidence_source"], body["evidence_box_px"], body["evidence_frame_px"],
+            body["evidence_skew_s"]) == ("detect", 42, 576, 0.1)

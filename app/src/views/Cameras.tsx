@@ -117,6 +117,8 @@ type Camera = {
   last_recording_at?: string | null
   // Set while recording is deliberately paused; resume_at null = until resumed.
   recording_pause?: { since: string; resume_at: string | null; by: string; reason: string | null } | null
+  /** The escalation proposal (weak evidence on the sub stream → detect on main?) or the decision in force. */
+  escalation?: { status: 'proposed' | 'accepted' | 'dismissed'; reasons: string[]; review_due: boolean } | null
   // ONVIF device metadata
   manufacturer?: string | null
   model?: string | null
@@ -693,6 +695,15 @@ export function Cameras() {
                   <span className="truncate text-sm font-medium" title={c.name}>{c.name}</span>
                   {c.is_active && c.detection_enabled === false && (
                     <Badge variant="warning" className="shrink-0" title={t('cameras.detectionOffHint')}>{t('cameras.detectionOff')}</Badge>
+                  )}
+                  {c.escalation?.status === 'proposed' && (
+                    <Badge variant="warning" className="shrink-0" title={t('cameras.escalationProposedHint')}>{t('cameras.escalationProposed')}</Badge>
+                  )}
+                  {c.escalation?.status === 'accepted' && (
+                    <Badge variant={c.escalation.review_due ? 'warning' : 'info'} className="shrink-0"
+                           title={c.escalation.review_due ? t('cameras.escalationReviewHint') : t('cameras.escalationAcceptedHint')}>
+                      {c.escalation.review_due ? t('cameras.escalationReview') : t('cameras.escalationAccepted')}
+                    </Badge>
                   )}
                 </div>
                 <div className="truncate text-xs text-[var(--text-dim)]" title={c.location || undefined}>

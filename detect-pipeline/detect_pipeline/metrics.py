@@ -386,7 +386,8 @@ def record_evidence(camera_id: str, active: bool, stats: dict, *,
             metrics.observe("tier0_evidence_skew_seconds", float(skew), labels)
 
 
-def record_playback_evidence(camera_id: str, pb, held: int = 0, patched: int = 0, late: int = 0) -> None:
+def record_playback_evidence(camera_id: str, pb, held: int = 0, patched: int = 0, late: int = 0,
+                             expired: int = 0) -> None:
     """Evidence fetched from the recording (playback.py): requests filed,
     outcomes, what the fetches and decodes cost, and visits currently held
     for a pending result."""
@@ -404,6 +405,8 @@ def record_playback_evidence(camera_id: str, pb, held: int = 0, patched: int = 0
     # whether DETECT_EVIDENCE_HOLD_S is right for this camera.
     metrics.gauge("tier0_evidence_visits_patched_total", float(patched), cam)
     metrics.gauge("tier0_evidence_results_late_total", float(late), cam)
+    metrics.gauge("tier0_evidence_visits_hold_expired_total", float(expired), cam)
+    metrics.gauge("tier0_evidence_stamp_lead_seconds", float(getattr(pb, "stamp_lead_s", 0.0)), cam)
 
 
 #: Why a camera detects on its MAIN stream, as the value of

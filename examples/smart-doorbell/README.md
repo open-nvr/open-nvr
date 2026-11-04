@@ -71,7 +71,15 @@ and so does this app:
   badly far more often than a stranger who resembles one, and the
   tile is where the missing angle gets enrolled from.
 * Frames below the quality gate (`min_face_px`, `min_face_confidence`)
-  neither open nor decide a visit.
+  neither open nor decide a visit. The default of 100 px is a face
+  within a few metres on the camera's main stream; below it a miss
+  says distance, not stranger. A match is never gated by size.
+* A name is a vote: each matching frame adds its similarity, weighted
+  by the size of the face, to that person's tally, and the visit is
+  announced once the leading person has `min_match_reads` matching
+  frames (1 by default, so the first match still decides at once).
+  With 2, a lone match that never repeats is recorded as unclear,
+  leaning to that name, and the next matching frame upgrades it.
 * A visit already announced as a stranger that matches later is
   **upgraded**: the `known_visitor` alert carries
   `evidence.supersedes` (the stranger alert's id) and a
