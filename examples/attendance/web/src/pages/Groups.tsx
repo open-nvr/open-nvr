@@ -8,21 +8,55 @@ import { useEffect, useMemo, useState } from 'react'
 import { BookOpen, Pencil, Plus, Search, Trash2, UserMinus, UserPlus, Users } from 'lucide-react'
 import { errorText } from '../api'
 import { useAuth } from '../auth'
-import { api, type Group, type Person, type Policy } from '../attendance'
+import { POLICY_LIMITS, api, policyErrors, type Group, type Person, type Policy } from '../attendance'
 import { useFeedback } from '../components/feedback'
-import { Badge, Button, Card, Empty, ErrorNote, Field, Loading, Modal, PageTitle, inputClass } from '../components/ui'
+import { Badge, Button, Card, Empty, ErrorNote, Field, Loading, Modal, PageTitle, Table, ViewSwitch, inputClass, td, th, useViewMode } from '../components/ui'
 import { useGroups, useLoad } from '../hooks'
+
+/** Browsers name zones as CLDR does, which keeps names IANA has since
+ * changed: Chrome offers Asia/Calcutta and no Asia/Kolkata. The list
+ * shows today's IANA name for each (core accepts both). */
+const RENAMED: Record<string, string> = {
+  'Asia/Calcutta': 'Asia/Kolkata',
+  'Asia/Katmandu': 'Asia/Kathmandu',
+  'Asia/Saigon': 'Asia/Ho_Chi_Minh',
+  'Asia/Rangoon': 'Asia/Yangon',
+  'Asia/Thimbu': 'Asia/Thimphu',
+  'Asia/Dacca': 'Asia/Dhaka',
+  'Asia/Macao': 'Asia/Macau',
+  'Asia/Ujung_Pandang': 'Asia/Makassar',
+  'Europe/Kiev': 'Europe/Kyiv',
+  'Europe/Uzhgorod': 'Europe/Kyiv',
+  'Europe/Zaporozhye': 'Europe/Kyiv',
+  'Africa/Asmera': 'Africa/Asmara',
+  'Atlantic/Faeroe': 'Atlantic/Faroe',
+  'America/Godthab': 'America/Nuuk',
+  'America/Buenos_Aires': 'America/Argentina/Buenos_Aires',
+  'America/Catamarca': 'America/Argentina/Catamarca',
+  'America/Cordoba': 'America/Argentina/Cordoba',
+  'America/Jujuy': 'America/Argentina/Jujuy',
+  'America/Mendoza': 'America/Argentina/Mendoza',
+  'America/Indianapolis': 'America/Indiana/Indianapolis',
+  'America/Louisville': 'America/Kentucky/Louisville',
+  'America/Coral_Harbour': 'America/Atikokan',
+  'Pacific/Truk': 'Pacific/Chuuk',
+  'Pacific/Ponape': 'Pacific/Pohnpei',
+  'Pacific/Enderbury': 'Pacific/Kanton',
+}
+
+const current = (zone: string) => RENAMED[zone] ?? zone
 
 function timeZones(): string[] {
   try {
     const intl = Intl as unknown as { supportedValuesOf?: (k: string) => string[] }
-    return intl.supportedValuesOf?.('timeZone') ?? []
+    const zones = (intl.supportedValuesOf?.('timeZone') ?? []).map(current)
+    return [...new Set(['UTC', ...zones])].sort((a, b) => (a === 'UTC' ? -1 : b === 'UTC' ? 1 : a.localeCompare(b)))
   } catch {
     return []
   }
 }
 
-const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+const browserZone = current(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC')
 
 export default function Groups() {
   const { can } = useAuth()
@@ -30,6 +64,7 @@ export default function Groups() {
   const groups = useGroups()
   const [editing, setEditing] = useState<Group | 'new' | null>(null)
   const [members, setMembers] = useState<Group | null>(null)
+  const [view, setView] = useViewMode('groups', 'table')
 
   const remove = async (g: Group) => {
     const ok = await confirm({
@@ -48,17 +83,39 @@ export default function Groups() {
     }
   }
 
+
+  const actions = (g: Group) => (
+    <>
+      <Button variant="secondary" size="sm" onClick={() => setMembers(g)}>
+        <Users className="h-3.5 w-3.5" /> Members
+      </Button>
+      {can.manage && (
+        <>
+          <Button variant="ghost" size="sm" onClick={() => setEditing(g)}>
+            <Pencil className="h-3.5 w-3.5" /> Edit
+          </Button>
+          <Button variant="ghost" size="sm" onClick={() => remove(g)} aria-label={`Delete ${g.name}`}>
+            <Trash2 className="h-3.5 w-3.5 text-red-600" />
+          </Button>
+        </>
+      )}
+    </>
+  )
+
   return (
     <>
       <PageTitle
         title="Groups"
         subtitle="Classes, sections or shifts. Attendance is taken per group, at the times on the schedule."
         actions={
-          can.manage && (
-            <Button onClick={() => setEditing('new')}>
-              <Plus className="h-4 w-4" /> New group
-            </Button>
-          )
+          <div className="flex items-center gap-2">
+            <ViewSwitch value={view} onChange={setView} />
+            {can.manage && (
+              <Button onClick={() => setEditing('new')}>
+                <Plus className="h-4 w-4" /> New group
+              </Button>
+            )}
+          </div>
         }
       />
       {groups.error ? (
@@ -70,6 +127,46 @@ export default function Groups() {
           <Empty icon={<BookOpen className="h-10 w-10" />} title="No groups yet">
             Create a group for each class section or shift you take attendance for.
           </Empty>
+        </Card>
+      ) : view === 'table' ? (
+        <Card>
+          <Table>
+            <thead>
+              <tr>
+                <th className={th}>Group</th>
+                <th className={th}>Members</th>
+                <th className={th}>Time zone</th>
+                <th className={th}>Rules</th>
+                <th className={th}>Status</th>
+                <th className={th}>
+                  <span className="sr-only">Actions</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100 bg-white">
+              {groups.data.map((g) => (
+                <tr key={g.id} className={`hover:bg-gray-50 ${g.active ? '' : 'text-gray-400'}`}>
+                  <td className={td}>
+                    <div className="font-medium text-gray-900">{g.name}</div>
+                    <div className="text-xs text-gray-500">{[g.code, g.kind_label].filter(Boolean).join(' · ') || 'No code'}</div>
+                  </td>
+                  <td className={td}>
+                    <Badge tone="indigo">
+                      <Users className="h-3 w-3" /> {g.members}
+                    </Badge>
+                  </td>
+                  <td className={`${td} whitespace-nowrap`}>{g.timezone}</td>
+                  <td className={td}>
+                    {Object.keys(g.policy ?? {}).length > 0 ? <Badge tone="amber">Own rules</Badge> : <span className="text-gray-400">Site rules</span>}
+                  </td>
+                  <td className={td}>{g.active ? <Badge tone="green">Active</Badge> : <Badge>Inactive</Badge>}</td>
+                  <td className={`${td} whitespace-nowrap text-right`}>
+                    <div className="inline-flex gap-1">{actions(g)}</div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
         </Card>
       ) : (
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -91,21 +188,7 @@ export default function Groups() {
                 <Badge>{g.timezone}</Badge>
                 {Object.keys(g.policy ?? {}).length > 0 && <Badge tone="amber">Own rules</Badge>}
               </div>
-              <div className="mt-4 flex flex-wrap gap-2 border-t pt-3">
-                <Button variant="secondary" size="sm" onClick={() => setMembers(g)}>
-                  <Users className="h-3.5 w-3.5" /> Members
-                </Button>
-                {can.manage && (
-                  <>
-                    <Button variant="ghost" size="sm" onClick={() => setEditing(g)}>
-                      <Pencil className="h-3.5 w-3.5" /> Edit
-                    </Button>
-                    <Button variant="ghost" size="sm" onClick={() => remove(g)} aria-label={`Delete ${g.name}`}>
-                      <Trash2 className="h-3.5 w-3.5 text-red-600" />
-                    </Button>
-                  </>
-                )}
-              </div>
+              <div className="mt-4 flex flex-wrap gap-2 border-t pt-3">{actions(g)}</div>
             </Card>
           ))}
         </div>
@@ -157,8 +240,14 @@ function GroupForm({ group, onClose, onSaved }: { group: Group | null; onClose: 
   const [advanced, setAdvanced] = useState(Object.keys(group?.policy ?? {}).length > 0)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const wrong = policyErrors(policy)
+  const anyWrong = Object.keys(wrong).length > 0
 
   const save = async () => {
+    if (anyWrong) {
+      setAdvanced(true)
+      return
+    }
     setBusy(true)
     setError(null)
     const overrides: Partial<Policy> = {}
@@ -185,7 +274,7 @@ function GroupForm({ group, onClose, onSaved }: { group: Group | null; onClose: 
           <Button variant="secondary" onClick={onClose}>
             Cancel
           </Button>
-          <Button onClick={save} busy={busy} disabled={!name.trim() || !tz}>
+          <Button onClick={save} busy={busy} disabled={!name.trim() || !tz || anyWrong}>
             {group ? 'Save' : 'Create'}
           </Button>
         </>
@@ -228,15 +317,18 @@ function GroupForm({ group, onClose, onSaved }: { group: Group | null; onClose: 
         <button className="text-sm font-medium text-indigo-700" onClick={() => setAdvanced((a) => !a)}>
           {advanced ? '▾' : '▸'} This group's own rules
         </button>
+        {anyWrong && !advanced && <p className="mt-1 text-xs text-red-600">A rule here needs fixing before saving.</p>}
         {advanced && (
           <>
             <p className="mt-1 text-xs text-gray-500">Leave a field empty to use the site's rule (Settings).</p>
             <div className="mt-3 grid gap-3 sm:grid-cols-2">
               {POLICY_FIELDS.map((f) => (
-                <Field key={f.key} label={f.label} hint={f.hint}>
+                <Field key={f.key} label={f.label} hint={f.hint} error={wrong[f.key]}>
                   <input
                     type="number"
                     step={f.step}
+                    min={POLICY_LIMITS[f.key].min}
+                    max={POLICY_LIMITS[f.key].max}
                     className={inputClass}
                     value={policy[f.key] ?? ''}
                     onChange={(e) => setPolicy((p) => ({ ...p, [f.key]: e.target.value }))}

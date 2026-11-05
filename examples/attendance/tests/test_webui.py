@@ -58,6 +58,7 @@ def client(core, dist):
     ("PATCH", "attendance/sessions/9/marks/4", "/api/v1/attendance/sessions/9/marks/4"),
     ("DELETE", "attendance/groups/2", "/api/v1/attendance/groups/2"),
     ("GET", "cameras", "/api/v1/cameras/"),
+    ("GET", "cameras/3/snapshot", "/api/v1/cameras/3/snapshot"),
     ("GET", "users/me/permissions", "/api/v1/users/me/permissions"),
     ("GET", "auth/me", "/api/v1/auth/me"),
 ])
@@ -68,6 +69,10 @@ def test_the_attendance_routes_and_the_pages_reads_go_through(method, path, expe
 @pytest.mark.parametrize("method,path", [
     ("GET", "users"),                       # not the page's business
     ("POST", "cameras"),                    # cameras are read, never changed, from here
+    ("GET", "cameras/3"),                   # a camera's row carries its credentials
+    ("GET", "cameras/x/snapshot"),
+    ("POST", "cameras/3/snapshot"),
+    ("GET", "cameras/3/snapshot-still"),
     ("DELETE", "users/me/permissions"),
     ("GET", "internal/app/attendance/active"),
     ("GET", "attendance/internal/anything"),

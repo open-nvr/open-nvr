@@ -10,7 +10,7 @@ its own, and every call it makes goes through here to core:
   their OpenNVR account; MFA, lockout and setup-required stay core's.
 * ``/api/<path>`` passes through to core's ``/api/v1/<path>`` with the
   user's own bearer token, for the attendance routes and the few reads
-  the page needs (cameras, the user's permissions). Anything else is 404:
+  the page needs (cameras and their stills, the user's permissions). Anything else is 404:
   this is not a general way into core.
 
 The app keeps no session and decides no permission. Core checks every
@@ -90,6 +90,10 @@ def core_path(method: str, path: str) -> str | None:
     if method == "GET":
         if parts == ["cameras"]:
             return f"{CORE_API}/cameras/"
+        # One still of a camera, so the timetable's camera picker shows
+        # what each camera sees. Core checks the user may see it.
+        if len(parts) == 3 and parts[0] == "cameras" and parts[1].isdigit() and parts[2] == "snapshot":
+            return f"{CORE_API}/cameras/{int(parts[1])}/snapshot"
         if parts in (["users", "me", "permissions"], ["auth", "me"]):
             return f"{CORE_API}/{'/'.join(parts)}"
     return None

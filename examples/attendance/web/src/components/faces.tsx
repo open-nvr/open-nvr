@@ -76,3 +76,23 @@ export async function cutPicture(photo: Blob, bbox: number[], size = 192): Promi
   img.close()
   return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.85))
 }
+
+/** A photo as the face service should get it: a JPEG at most ``max``
+ * pixels on its long side, turned upright (a phone photo's EXIF
+ * orientation is applied here, so what is enrolled is what was seen).
+ * Small enough for core to keep, so the person's photos can be shown. */
+export async function shrinkPhoto(photo: Blob, max = 1600): Promise<Blob> {
+  try {
+    const img = await createImageBitmap(photo)
+    const scale = Math.min(1, max / Math.max(img.width, img.height))
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.round(img.width * scale)
+    canvas.height = Math.round(img.height * scale)
+    canvas.getContext('2d')?.drawImage(img, 0, 0, canvas.width, canvas.height)
+    img.close()
+    const out = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.9))
+    return out ?? photo
+  } catch {
+    return photo
+  }
+}

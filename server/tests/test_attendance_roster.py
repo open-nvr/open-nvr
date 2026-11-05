@@ -217,6 +217,12 @@ def test_timezones_must_be_iana_names(env):  # noqa: F811
                             json={"timezone": "Mars/Base"}).status_code == 422
 
 
+def test_an_old_zone_name_the_browser_reports_is_accepted(env):  # noqa: F811
+    # Chrome names India Asia/Calcutta; Debian 13 keeps that name only in
+    # tzdata-legacy, so core reads it from the tzdata package.
+    assert _group(env, name="India", tz="Asia/Calcutta")["timezone"] == "Asia/Calcutta"
+
+
 def test_group_policy_is_validated_against_the_site_policy(env):  # noqa: F811
     A = env.jwt("admin")
     g = _group(env, policy={"present_ratio": 0.75})

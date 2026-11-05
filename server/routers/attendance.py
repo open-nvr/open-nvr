@@ -498,9 +498,13 @@ async def enrol_faces(person_id: int, request: Request,
                       db: Session = Depends(get_db), user: User = Depends(_enroll)):
     """Add face photos to a person (1 to 10 per request; several angles and
     lightings recognise better than one). Each photo must hold exactly one
-    face, and one that already matches SOMEBODY ELSE enrolled is refused —
-    the same person enrolled twice, or the wrong photo under this name.
-    Every photo gets its own result; the ones that pass are kept."""
+    face. The set is one person: if ANY photo already matches somebody
+    else enrolled (the same person registered twice, or the wrong photo
+    under this name), none of the set is enrolled. A turned head can fall
+    under the duplicate threshold where the straight-on photo of the same
+    set did not, so judging photo by photo let the rest through.
+    Every photo gets its own result; the ones that pass are enrolled, and
+    kept so the person's enrolled photos can be seen and removed."""
     p = _person_or_404(db, person_id)
     if p.consent_at is None:
         raise HTTPException(status_code=409, detail=(
@@ -514,60 +518,90 @@ async def enrol_faces(person_id: int, request: Request,
     uuid, name, pid = p.uuid, p.display_name, p.id
     release(db)  # the adapter takes ~0.5 s a photo; hold no connection meanwhile
 
-    results: list[dict[str, Any]] = []
-    samples = None
+    # 1. Look at every photo before enrolling any.
+    errors: dict[int, dict[str, Any]] = {}
+    faces: dict[int, dict[str, Any]] = {}
+    duplicate: dict[str, Any] | None = None
     for i, image in enumerate(images):
         if image is None:
-            results.append({"index": i, "ok": False,
-                            "error": f"empty or larger than {MAX_PHOTO_BYTES // (1024 * 1024)} MB"})
+            errors[i] = {"error": f"empty or larger than {MAX_PHOTO_BYTES // (1024 * 1024)} MB"}
             continue
         try:
             found = await attendance_faces.identify(image)
-            n = len(found.get("faces") or [])
-            if n != 1:
-                results.append({"index": i, "ok": False, "error": (
-                    "no face found" if n == 0 else
-                    f"{n} faces in the photo; enrolment needs exactly one")})
-                continue
-            dup = attendance_faces.duplicate_of(found, uuid)
-            if dup is not None:
-                other = db.query(AttendancePerson).filter(
-                    AttendancePerson.uuid == dup["person_uuid"]).first()
-                who = other.display_name if other is not None else "someone else"
-                release(db)
-                results.append({"index": i, "ok": False, "error": (
-                    f"this face is already enrolled as {who} "
-                    f"(similarity {dup['similarity']:.2f})"),
-                    "duplicate_of": other.id if other is not None else None})
-                continue
-            # Consent withdrawn or the person removed while this ran (each
-            # photo is half a second of adapter time): stop, and take back
-            # what this request added — forget already ran for them, and
-            # these would otherwise outlive it.
-            still = db.query(AttendancePerson.consent_at, AttendancePerson.deleted_at).filter(
-                AttendancePerson.id == pid).one()
-            release(db)
-            if still[0] is None or still[1] is not None:
-                if samples is not None:
-                    try:
-                        await attendance_faces.forget(uuid)
-                    except attendance_faces.FaceGalleryError:
-                        logger.warning("attendance: could not take back faces of person %s", pid)
-                raise HTTPException(status_code=409, detail=(
-                    "Consent was withdrawn or the person was removed during the enrolment; "
-                    "nothing from it was kept."))
-            samples = await attendance_faces.register(uuid, name, image)
-            # Where the face is, so the page can cut the person's picture.
-            results.append({"index": i, "ok": True, "bbox": found["faces"][0].get("bbox")})
         except attendance_faces.FaceGalleryError as e:
             if e.status in (502, 503):
-                # The service is down: the rest would fail the same way.
-                if not any(r["ok"] for r in results):
-                    raise HTTPException(status_code=e.status, detail=e.message) from None
-                results.append({"index": i, "ok": False, "error": e.message})
-                break
-            results.append({"index": i, "ok": False, "error": e.message})
+                # The service is down: nothing is enrolled yet, and the
+                # rest would fail the same way.
+                raise HTTPException(status_code=e.status, detail=e.message) from None
+            errors[i] = {"error": e.message}
+            continue
+        n = len(found.get("faces") or [])
+        if n != 1:
+            errors[i] = {"error": ("no face found" if n == 0 else
+                                   f"{n} faces in the photo; enrolment needs exactly one")}
+            continue
+        dup = attendance_faces.duplicate_of(found, uuid)
+        if dup is not None:
+            other = db.query(AttendancePerson).filter(
+                AttendancePerson.uuid == dup["person_uuid"]).first()
+            who = other.display_name if other is not None else "someone else"
+            other_id = other.id if other is not None else None
+            release(db)
+            errors[i] = {"error": (f"this face is already enrolled as {who} "
+                                   f"(similarity {dup['similarity']:.2f})"),
+                         "duplicate_of": other_id}
+            duplicate = duplicate or {"who": who, "index": i, "id": other_id}
+            continue
+        faces[i] = found["faces"][0]
 
+    if duplicate is not None:
+        for i in faces:
+            errors[i] = {"error": (
+                f"not enrolled: photo {duplicate['index'] + 1} of this set is already "
+                f"enrolled as {duplicate['who']}, and one set is one person"),
+                "duplicate_of": duplicate["id"]}
+        faces = {}
+
+    # 2. Enrol the ones that passed.
+    samples = None
+    for i in sorted(faces):
+        # Consent withdrawn or the person removed while this ran (each
+        # photo is half a second of adapter time): stop, and take back
+        # what this request added. Forget already ran for them, and
+        # these would otherwise outlive it.
+        still = db.query(AttendancePerson.consent_at, AttendancePerson.deleted_at).filter(
+            AttendancePerson.id == pid).one()
+        release(db)
+        if still[0] is None or still[1] is not None:
+            if samples is not None:
+                try:
+                    await attendance_faces.forget(uuid)
+                except attendance_faces.FaceGalleryError:
+                    logger.warning("attendance: could not take back faces of person %s", pid)
+                attendance_faces.drop_photo(uuid)
+            raise HTTPException(status_code=409, detail=(
+                "Consent was withdrawn or the person was removed during the enrolment; "
+                "nothing from it was kept."))
+        try:
+            samples = await attendance_faces.register(uuid, name, images[i])
+        except attendance_faces.FaceGalleryError as e:
+            errors[i] = {"error": e.message}
+            if e.status in (502, 503):
+                # The service went down: the rest would fail the same way.
+                for j in faces:
+                    if j > i:
+                        errors.setdefault(j, {"error": e.message})
+                break
+            continue
+        attendance_faces.keep_photo(uuid, samples, images[i])
+
+    results: list[dict[str, Any]] = []
+    for i in range(len(images)):
+        if i in errors:
+            results.append({"index": i, "ok": False, **errors[i]})
+        else:
+            # Where the face is, so the page can cut the person's picture.
+            results.append({"index": i, "ok": True, "bbox": faces[i].get("bbox")})
     enrolled = sum(1 for r in results if r["ok"])
     if samples is not None:
         db.query(AttendancePerson).filter(AttendancePerson.id == pid).update(
@@ -576,10 +610,64 @@ async def enrol_faces(person_id: int, request: Request,
     audit_request(db, request, action="attendance.face.enrol", user_id=user.id,
                   entity_type="attendance_person", entity_id=pid,
                   details={"sent": len(images), "enrolled": enrolled,
-                           "refused": len(results) - enrolled})
+                           "refused": len(results) - enrolled,
+                           "duplicate_of": duplicate["id"] if duplicate else None})
     p = _person_or_404(db, pid)
     return {"person": _person_out(p, _groups_of(db, [pid])[pid]),
             "enrolled": enrolled, "results": results}
+
+
+@router.get("/people/{person_id}/faces")
+async def list_faces(person_id: int, db: Session = Depends(get_db),
+                     _user: User = Depends(_enroll)):
+    """The person's enrolled photos, oldest first, one per sample the face
+    service holds. ``kept`` is false for a sample enrolled before photos
+    were kept: it still counts, but there is nothing to show."""
+    p = _person_or_404(db, person_id)
+    entries = attendance_faces.kept_photos(p.uuid, p.face_samples or 0)
+    return {"samples": p.face_samples or 0, "photos": [
+        {"index": i, "kept": e is not None,
+         "enrolled_at": (datetime.fromtimestamp(e["at"], UTC).isoformat()
+                         if e and isinstance(e.get("at"), (int, float)) else None)}
+        for i, e in enumerate(entries)]}
+
+
+@router.get("/people/{person_id}/faces/{index}/image")
+async def face_image(person_id: int, index: int, db: Session = Depends(get_db),
+                     _user: User = Depends(_enroll)):
+    p = _person_or_404(db, person_id)
+    path = attendance_faces.kept_photo_file(p.uuid, p.face_samples or 0, index)
+    if path is None:
+        raise HTTPException(status_code=404, detail="That photo was not kept")
+    return Response(path.read_bytes(), media_type="image/jpeg",
+                    headers={"cache-control": "private, no-cache"})
+
+
+@router.delete("/people/{person_id}/faces/{index}")
+async def forget_face(person_id: int, index: int, request: Request,
+                      db: Session = Depends(get_db), user: User = Depends(_enroll)):
+    """Delete one enrolled photo (0 = the oldest): a blurred one, or one
+    that turned out to be somebody else. The last one cannot go this way;
+    deleting all of a person's photos is ``DELETE /people/{id}/faces``."""
+    p = _person_or_404(db, person_id)
+    had = p.face_samples or 0
+    if not 0 <= index < had:
+        raise HTTPException(status_code=404, detail="That photo is no longer enrolled.")
+    uuid = p.uuid
+    release(db)
+    try:
+        left = await attendance_faces.forget_sample(uuid, index)
+    except attendance_faces.FaceGalleryError as e:
+        raise HTTPException(status_code=e.status, detail=e.message) from None
+    attendance_faces.drop_kept_photo(uuid, had, index)
+    db.query(AttendancePerson).filter(AttendancePerson.id == person_id).update(
+        {AttendancePerson.face_samples: left}, synchronize_session=False)
+    db.commit()
+    audit_request(db, request, action="attendance.face.forget_one", user_id=user.id,
+                  entity_type="attendance_person", entity_id=person_id,
+                  details={"index": index, "samples": left})
+    p = _person_or_404(db, person_id)
+    return _person_out(p, _groups_of(db, [p.id])[p.id])
 
 
 @router.delete("/people/{person_id}/faces")
@@ -616,8 +704,9 @@ MAX_CHECK_BYTES = 2 * 1024 * 1024
 async def check_face(frame: UploadFile = File(...), db: Session = Depends(get_db),
                      _user: User = Depends(_enroll)):
     """Where the faces are in a webcam frame, so the enrolling page can say
-    "come closer" and take the photo itself once one face is well placed.
-    Nothing is kept and nobody is looked up: only boxes come back. The
+    "come closer" and take the photo itself once one face is well placed
+    and turned as asked. Nothing is kept, and who it is never comes back:
+    only boxes and landmarks. The
     page sends at most one at a time."""
     data = await frame.read()
     if not data or len(data) > MAX_CHECK_BYTES:
@@ -629,7 +718,10 @@ async def check_face(frame: UploadFile = File(...), db: Session = Depends(get_db
     except attendance_faces.FaceGalleryError as e:
         raise HTTPException(status_code=e.status, detail=e.message) from None
     return {
-        "faces": [{"bbox": f.get("bbox"), "confidence": f.get("confidence")}
+        # The landmarks (eyes, nose, mouth corners) say how the head is
+        # turned, so the page can check "chin up" was followed.
+        "faces": [{"bbox": f.get("bbox"), "confidence": f.get("confidence"),
+                   "landmarks": f.get("landmarks")}
                   for f in found.get("faces") or []],
         "too_small": int((found.get("dropped") or {}).get("too_small") or 0),
         "frame": found.get("frame") or {},

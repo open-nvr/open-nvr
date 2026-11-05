@@ -17,6 +17,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
+import time
+import uuid as uuidlib
 from pathlib import Path
 from typing import Any
 
@@ -121,6 +124,22 @@ async def register(person_uuid: str, name: str, image: bytes) -> int:
     return int(face.get("samples") or 0)
 
 
+async def forget_sample(person_uuid: str, index: int) -> int:
+    """Delete one of the person's samples (0 = the oldest); returns how
+    many are left. The adapter keeps at least one: removing the last is
+    a 409, and forgetting the person is how all of them go."""
+    resp = await _call("DELETE", f"/faces/{person_uuid}/samples/{index}")
+    if resp.status_code == 404:
+        raise FaceGalleryError(404, "That photo is no longer enrolled.")
+    if resp.status_code == 409:
+        raise FaceGalleryError(409, (
+            "This is their only enrolled photo. To remove it, delete all of "
+            "their face photos."))
+    _raise_for(resp)
+    face = (resp.json() or {}).get("face") or {}
+    return int(face.get("samples") or 0)
+
+
 async def forget(person_uuid: str) -> bool:
     """Delete every sample of the person. True if there were any; a person
     the adapter does not know is already forgotten, not an error."""
@@ -175,6 +194,109 @@ def save_photo(person_uuid: str, data: bytes) -> None:
 
 
 def drop_photo(person_uuid: str) -> None:
+    """Delete the person's picture and every photo kept of them."""
     path = photo_path(person_uuid)
     if path is not None:
         path.unlink(missing_ok=True)
+        shutil.rmtree(path.with_suffix(""), ignore_errors=True)
+
+
+# ── The enrolled photos, kept so a person can see what was enrolled ──
+#
+# The adapter keeps one embedding per enrolled photo, in order, oldest
+# first, and deletes one by its position. Core keeps the photos beside
+# them in ``<uuid>/photos.json``: one entry per sample, in the same
+# order, ``{"file", "at"}`` — or ``null`` for a sample enrolled before
+# photos were kept, or a photo too large to keep. The list is fitted to
+# the adapter's count on every change: padded at the front for samples
+# it never saw, trimmed at the front when the adapter dropped its oldest.
+
+#: An enrolled photo larger than this is enrolled but not kept (the page
+#: sends photos scaled to 1600 px, a few hundred KB).
+MAX_KEPT_PHOTO_BYTES = 2 * 1024 * 1024
+
+
+def _photos_dir(person_uuid: str) -> Path | None:
+    path = photo_path(person_uuid)
+    return path.with_suffix("") if path is not None else None
+
+
+def _read_manifest(folder: Path) -> list[dict[str, Any] | None]:
+    try:
+        data = json.loads((folder / "photos.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [e if isinstance(e, dict) else None for e in data] if isinstance(data, list) else []
+
+
+def _write_manifest(folder: Path, entries: list[dict[str, Any] | None]) -> None:
+    folder.mkdir(parents=True, exist_ok=True)
+    tmp = folder / "photos.json.partial"
+    tmp.write_text(json.dumps(entries), encoding="utf-8")
+    tmp.replace(folder / "photos.json")
+
+
+def _fit(folder: Path, entries: list[dict[str, Any] | None], count: int) -> list[dict[str, Any] | None]:
+    """The list at ``count`` entries: older samples it never saw padded
+    in front, samples the adapter has dropped (its oldest) cut off the
+    front with their files."""
+    while len(entries) > count:
+        gone = entries.pop(0)
+        if gone:
+            (folder / gone["file"]).unlink(missing_ok=True)
+    return [None] * (count - len(entries)) + entries
+
+
+def kept_photos(person_uuid: str, count: int) -> list[dict[str, Any] | None]:
+    """One entry per enrolled sample (``count``, the adapter's number):
+    ``{"file", "at"}``, or None where no photo was kept."""
+    folder = _photos_dir(person_uuid)
+    if folder is None:
+        return [None] * count
+    entries = _read_manifest(folder)
+    return [None] * (count - len(entries)) + entries[-count:] if count else []
+
+
+def kept_photo_file(person_uuid: str, count: int, index: int) -> Path | None:
+    entries = kept_photos(person_uuid, count)
+    folder = _photos_dir(person_uuid)
+    if folder is None or not 0 <= index < len(entries) or entries[index] is None:
+        return None
+    path = folder / entries[index]["file"]
+    return path if path.is_file() else None
+
+
+def keep_photo(person_uuid: str, count: int, image: bytes) -> None:
+    """Record the photo just enrolled as the newest of ``count`` samples.
+    Never fails an enrolment: a photo that cannot be kept is a gap."""
+    folder = _photos_dir(person_uuid)
+    if folder is None:
+        return
+    try:
+        entries = _read_manifest(folder)
+        entry = None
+        if image.startswith(b"\xff\xd8") and len(image) <= MAX_KEPT_PHOTO_BYTES:
+            folder.mkdir(parents=True, exist_ok=True)
+            name = f"{uuidlib.uuid4().hex}.jpg"
+            (folder / name).write_bytes(image)
+            entry = {"file": name, "at": time.time()}
+        entries = _fit(folder, entries + [entry], count)
+        _write_manifest(folder, entries)
+    except OSError:
+        logger.warning("attendance: could not keep an enrolled photo of %s", person_uuid, exc_info=True)
+
+
+def drop_kept_photo(person_uuid: str, count_before: int, index: int) -> None:
+    """The sample at ``index`` (of ``count_before``) was deleted."""
+    folder = _photos_dir(person_uuid)
+    if folder is None:
+        return
+    try:
+        entries = _fit(folder, _read_manifest(folder), count_before)
+        if 0 <= index < len(entries):
+            gone = entries.pop(index)
+            if gone:
+                (folder / gone["file"]).unlink(missing_ok=True)
+        _write_manifest(folder, entries)
+    except OSError:
+        logger.warning("attendance: could not drop a kept photo of %s", person_uuid, exc_info=True)

@@ -10,6 +10,7 @@ import { CalendarDays, Camera as CameraIcon, Plus } from 'lucide-react'
 import { errorText } from '../api'
 import { useAuth } from '../auth'
 import { WEEKDAYS, api, cameraNames, groupName, type Slot, type SlotIn } from '../attendance'
+import { CameraStill } from '../components/CameraStill'
 import { useFeedback } from '../components/feedback'
 import { Button, Card, Empty, ErrorNote, Field, Loading, Modal, PageTitle, inlineInputClass, inputClass } from '../components/ui'
 import { useCameras, useGroups, useLoad } from '../hooks'
@@ -243,17 +244,26 @@ function SlotForm({
         </Field>
         <div className="sm:col-span-2">
           <Field label="Cameras that see the room" error={!form.camera_ids.length ? 'Pick at least one' : undefined}>
-            <div className="grid max-h-48 gap-1 overflow-y-auto rounded-md border p-2 sm:grid-cols-2">
+            <div className="grid max-h-80 gap-2 overflow-y-auto rounded-md border p-2 sm:grid-cols-2">
               {cameras.error && <span className="text-sm text-red-600">{cameras.error}</span>}
-              {(cameras.data ?? []).map((c) => (
-                <label key={c.id} className="flex items-center gap-2 rounded px-1 py-1 text-sm hover:bg-gray-50">
-                  <input type="checkbox" className="h-4 w-4 accent-indigo-600" checked={form.camera_ids.includes(c.id)} onChange={() => toggle(c.id)} />
-                  <span className="truncate">
-                    {c.name}
-                    {c.location && <span className="text-gray-500"> · {c.location}</span>}
-                  </span>
-                </label>
-              ))}
+              {(cameras.data ?? []).map((c) => {
+                const picked = form.camera_ids.includes(c.id)
+                return (
+                  <label
+                    key={c.id}
+                    className={`block cursor-pointer rounded-lg border p-1.5 text-sm ${picked ? 'border-indigo-400 bg-indigo-50 ring-1 ring-indigo-300' : 'border-gray-200 hover:bg-gray-50'}`}
+                  >
+                    <CameraStill id={c.id} />
+                    <span className="mt-1.5 flex items-center gap-2 px-0.5">
+                      <input type="checkbox" className="h-4 w-4 shrink-0 accent-indigo-600" checked={picked} onChange={() => toggle(c.id)} />
+                      <span className="truncate">
+                        {c.name}
+                        {c.location && <span className="text-gray-500"> · {c.location}</span>}
+                      </span>
+                    </span>
+                  </label>
+                )
+              })}
               {cameras.data && !cameras.data.length && <span className="text-sm text-gray-500">No cameras you can see.</span>}
             </div>
           </Field>

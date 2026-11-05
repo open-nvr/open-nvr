@@ -33,6 +33,38 @@ export type Policy = {
   finalize_grace_minutes: number
 }
 
+/** Core's limits for each rule (server services/attendance_policy.py
+ * _BOUNDS): a value it would refuse is caught in the form, under its
+ * own field, instead of after Save in core's words. */
+export const POLICY_LIMITS: Record<keyof Policy, { min: number; max: number; whole: boolean }> = {
+  present_ratio: { min: 0.05, max: 1, whole: false },
+  late_grace_minutes: { min: 0, max: 240, whole: true },
+  match_threshold: { min: 0.3, max: 0.95, whole: false },
+  bucket_minutes: { min: 1, max: 60, whole: true },
+  attempt_interval_s: { min: 30, max: 1800, whole: true },
+  finalize_grace_minutes: { min: 1, max: 120, whole: true },
+}
+
+/** What is wrong with each rule as typed. An empty field is not wrong
+ * (a group's own rules leave it to the site's). */
+export function policyErrors(policy: Record<string, string>): Partial<Record<keyof Policy, string>> {
+  const out: Partial<Record<keyof Policy, string>> = {}
+  for (const [key, lim] of Object.entries(POLICY_LIMITS) as [keyof Policy, (typeof POLICY_LIMITS)[keyof Policy]][]) {
+    const raw = (policy[key] ?? '').trim()
+    if (!raw) continue
+    const v = Number(raw)
+    if (!Number.isFinite(v)) out[key] = 'Not a number'
+    else if (lim.whole && !Number.isInteger(v)) out[key] = 'A whole number'
+    else if (v < lim.min || v > lim.max) out[key] = `Between ${lim.min} and ${lim.max}`
+  }
+  const slice = Number(policy.bucket_minutes)
+  const look = Number(policy.attempt_interval_s)
+  if (!out.attempt_interval_s && !out.bucket_minutes && policy.bucket_minutes?.trim() && policy.attempt_interval_s?.trim() && look * 2 > slice * 60) {
+    out.attempt_interval_s = `At most ${(slice * 60) / 2} s: half the ${slice}-minute slice`
+  }
+  return out
+}
+
 export type Group = {
   id: number
   name: string
@@ -118,9 +150,17 @@ export type EnrolResult = {
   results: { index: number; ok: boolean; error?: string; duplicate_of?: number | null; bbox?: number[] | null }[]
 }
 
+/** One entry per enrolled sample, oldest first. ``kept`` is false for a
+ * sample enrolled before photos were kept: it counts, but has no image. */
+export type EnrolledPhotos = {
+  samples: number
+  photos: { index: number; kept: boolean; enrolled_at: string | null }[]
+}
+
 /** Where the faces are in a webcam frame (pixels of the frame sent). */
 export type FaceCheck = {
-  faces: { bbox: number[]; confidence: number | null }[]
+  /** ``landmarks``: eyes, nose, mouth corners (when the adapter gives them). */
+  faces: { bbox: number[]; confidence: number | null; landmarks?: number[][] | null }[]
   too_small: number
   frame: { w?: number; h?: number }
 }
@@ -156,6 +196,11 @@ export const api = {
   },
   forgetFaces: (id: number) => call<Person>('DELETE', `${A}/people/${id}/faces`),
   photo: (id: number) => fetchBlob(`${A}/people/${id}/photo`),
+  /** The camera's current view, one JPEG (core checks the user may see it). */
+  cameraStill: (id: number) => fetchBlob(`cameras/${id}/snapshot`),
+  enrolledPhotos: (id: number) => call<EnrolledPhotos>('GET', `${A}/people/${id}/faces`),
+  enrolledPhoto: (id: number, index: number) => fetchBlob(`${A}/people/${id}/faces/${index}/image`),
+  forgetFace: (id: number, index: number) => call<Person>('DELETE', `${A}/people/${id}/faces/${index}`),
   setPhoto: (id: number, jpeg: Blob) => call<Person>('PUT', `${A}/people/${id}/photo`, { raw: jpeg }),
   checkFace: (frame: Blob) => {
     const form = new FormData()

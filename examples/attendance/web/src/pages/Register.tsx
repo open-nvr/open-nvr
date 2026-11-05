@@ -6,15 +6,15 @@
 // Core checks each photo (exactly one face, not someone already enrolled)
 // and keeps the ones that pass.
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { Camera, CheckCircle2, ImagePlus, RotateCcw, Search, Trash2, UserPlus, Video, XCircle } from 'lucide-react'
 import { errorText } from '../api'
 import { useAuth } from '../auth'
 import { api, type EnrolResult, type FaceCheck, type Person } from '../attendance'
-import { Avatar, cutPicture, pictureChanged } from '../components/faces'
+import { Avatar, cutPicture, pictureChanged, shrinkPhoto } from '../components/faces'
 import { useFeedback } from '../components/feedback'
-import { Badge, Button, Card, Empty, ErrorNote, Field, Loading, PageTitle, inputClass } from '../components/ui'
+import { Badge, Button, Card, Empty, ErrorNote, Field, Loading, Modal, PageTitle, inputClass } from '../components/ui'
 import { useGroups, useLoad } from '../hooks'
 
 const MAX_PHOTOS = 10
@@ -199,6 +199,7 @@ function FaceStep({ person, onChanged, onDone }: { person: Person; onChanged: ()
   const webcamOk = typeof window !== 'undefined' && window.isSecureContext && !!navigator.mediaDevices?.getUserMedia
   const [mode, setMode] = useState<'photos' | 'webcam'>(webcamOk ? 'webcam' : 'photos')
   const [pictureVersion, setPictureVersion] = useState(0)
+  const review = useRef<HTMLDivElement>(null)
   const [shots, setShots] = useState<Shot[]>([])
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<{ shots: Shot[]; r: EnrolResult } | null>(null)
@@ -227,12 +228,14 @@ function FaceStep({ person, onChanged, onDone }: { person: Person; onChanged: ()
 
   // The person's picture: cut from the first photo core accepted (the
   // straight-on one, from the webcam). Not worth failing an enrolment for.
-  const keepPicture = async (r: EnrolResult) => {
+  // ``sent`` are the photos as enrolled (shrunk), which the face boxes
+  // in ``r`` are measured on.
+  const keepPicture = async (r: EnrolResult, sent: Blob[]) => {
     const first = r.results.find((x) => x.ok && x.bbox)
-    const shot = first ? shots[first.index] : undefined
-    if (!first?.bbox || !shot) return
+    const photo = first ? sent[first.index] : undefined
+    if (!first?.bbox || !photo) return
     try {
-      const picture = await cutPicture(shot.blob, first.bbox)
+      const picture = await cutPicture(photo, first.bbox)
       if (!picture) return
       await api.setPhoto(person.id, picture)
       pictureChanged(person.id)
@@ -246,8 +249,9 @@ function FaceStep({ person, onChanged, onDone }: { person: Person; onChanged: ()
     setBusy(true)
     setError(null)
     try {
-      const r = await api.enrol(person.id, shots.map((s) => s.blob))
-      await keepPicture(r)
+      const sent = await Promise.all(shots.map((s) => shrinkPhoto(s.blob)))
+      const r = await api.enrol(person.id, sent)
+      await keepPicture(r, sent)
       setResult({ shots, r })
       setShots([])
       onChanged()
@@ -261,7 +265,7 @@ function FaceStep({ person, onChanged, onDone }: { person: Person; onChanged: ()
 
   return (
     <div className="grid gap-4 lg:grid-cols-3">
-      <Card className="p-5 lg:col-span-1">
+      <Card className="order-last p-5 lg:order-none lg:col-span-1">
         <h2 className="mb-3 flex items-center gap-2 text-base font-semibold text-gray-900">
           <span className="flex h-6 w-6 items-center justify-center rounded-full bg-indigo-600 text-xs text-white">2</span>
           Enrol a face
@@ -273,10 +277,13 @@ function FaceStep({ person, onChanged, onDone }: { person: Person; onChanged: ()
           {person.external_ref && <div className="text-gray-600">ID {person.external_ref}</div>}
           {person.email && <div className="break-all text-gray-600">{person.email}</div>}
           <div className="pt-2">
-            <Badge tone={person.face_samples ? 'green' : 'amber'}>{person.face_samples} photos enrolled</Badge>
+            <Badge tone={person.face_samples ? 'green' : 'amber'}>
+              {person.face_samples} photo{person.face_samples === 1 ? '' : 's'} enrolled
+            </Badge>
           </div>
         </div>
         </div>
+        <EnrolledPhotos person={person} onChanged={onChanged} />
         <div className="mt-5 rounded-lg bg-gray-50 p-3 text-xs text-gray-600">
           <p className="mb-1 font-medium text-gray-700">For good recognition</p>
           <ul className="list-disc space-y-0.5 pl-4">
@@ -325,16 +332,28 @@ function FaceStep({ person, onChanged, onDone }: { person: Person; onChanged: ()
             <p className="mb-3 text-sm text-gray-600">
               {mode === 'photos'
                 ? 'Choose 3 to 5 clear photos of this person alone: straight on, and turned a little each way. Phone photos are fine.'
-                : 'Ask the person to sit in front of this computer. Follow the steps below; each angle is taken by itself.'}
+                : 'Ask the person to sit in front of the camera. Follow the steps below; each angle is taken by itself.'}
             </p>
             {mode === 'photos' ? (
               <PhotoPicker onAdd={add} room={MAX_PHOTOS - shots.length} />
             ) : (
-              <WebcamCapture onAdd={add} room={MAX_PHOTOS - shots.length} />
+              <WebcamCapture
+                onAdd={add}
+                room={MAX_PHOTOS - shots.length}
+                taken={shots.map((s) => s.label)}
+                onRestart={() =>
+                  setShots((all) => {
+                    const angles = new Set(ANGLES.map((a) => a.text))
+                    all.filter((s) => angles.has(s.label)).forEach((s) => URL.revokeObjectURL(s.url))
+                    return all.filter((s) => !angles.has(s.label))
+                  })
+                }
+                onReview={() => review.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+              />
             )}
 
             {shots.length > 0 && (
-              <div className="mt-5">
+              <div ref={review} className="mt-5 scroll-mt-20">
                 <div className="mb-2 text-sm font-medium text-gray-700">
                   Ready to enrol ({shots.length}/{MAX_PHOTOS})
                 </div>
@@ -445,12 +464,14 @@ function PhotoPicker({ onAdd, room }: { onAdd: (s: Shot[]) => void; room: number
   )
 }
 
-const ANGLES = [
-  'Look straight at the camera',
-  'Turn your head a little to the left',
-  'Turn your head a little to the right',
-  'Lift your chin slightly',
-  'Lower your chin slightly',
+type Angle = { key: 'front' | 'left' | 'right' | 'up' | 'down'; text: string }
+
+const ANGLES: Angle[] = [
+  { key: 'front', text: 'Look straight at the camera' },
+  { key: 'left', text: 'Turn your head a little to the left' },
+  { key: 'right', text: 'Turn your head a little to the right' },
+  { key: 'up', text: 'Lift your chin slightly' },
+  { key: 'down', text: 'Lower your chin slightly' },
 ]
 
 /** The guidance frame: small, since only the face's place is wanted. */
@@ -460,10 +481,35 @@ const STEADY = 2
 /** Time to take the next pose after a photo. */
 const NEXT_POSE_MS = 3000
 
-type Hint = { tone: 'wait' | 'fix' | 'good'; text: string }
+/** How the head is turned, from the detector's five points (eyes, nose,
+ * mouth corners). ``yaw``: the nose's offset from between the eyes, in
+ * eye-distances (0 facing the camera). ``pitch``: where the nose sits
+ * between the eye line (0) and the mouth line (1). Both are compared with
+ * the person's own straight-on photo, never with fixed values: faces
+ * differ more than the turns asked for. */
+type Pose = { yaw: number; pitch: number }
 
-/** What to tell the person about one checked frame. */
-function judge(check: FaceCheck, w: number, h: number): Hint {
+function poseOf(landmarks: number[][] | null | undefined): Pose | null {
+  if (!landmarks || landmarks.length < 5) return null
+  const [le, re, nose, ml, mr] = landmarks
+  const eyes = Math.hypot(re[0] - le[0], re[1] - le[1])
+  const eyeY = (le[1] + re[1]) / 2
+  const mouthY = (ml[1] + mr[1]) / 2
+  if (eyes < 1 || mouthY - eyeY < 1) return null
+  return { yaw: (nose[0] - (le[0] + re[0]) / 2) / eyes, pitch: (nose[1] - eyeY) / (mouthY - eyeY) }
+}
+
+/** Turns big enough to give recognition a different view; small enough
+ * that the face is still a face. */
+const TURN = { yawMin: 0.12, yawMax: 0.6, pitchMin: 0.07, pitchMax: 0.35, frontYaw: 0.1 }
+
+type Hint = { tone: 'fix' | 'good'; text: string }
+
+/** What to tell the person about one checked frame, for ``angle``.
+ * ``poses`` are the poses of the photos already taken. Which way is the
+ * person's left is not assumed (cameras and mirrors differ): the second
+ * of a pair must be the other way from the first. */
+function judge(check: FaceCheck, w: number, h: number, angle: Angle, poses: Map<string, Pose>): Hint {
   const faces = check.faces
   if (faces.length === 0) {
     return check.too_small
@@ -477,31 +523,145 @@ function judge(check: FaceCheck, w: number, h: number): Hint {
   const cy = (y1 + y2) / 2 / h
   if (width < 0.12) return { tone: 'fix', text: 'Come a little closer' }
   if (width > 0.42) return { tone: 'fix', text: 'Move back a little' }
-  if (Math.abs(cx - 0.5) > 0.14 || Math.abs(cy - 0.5) > 0.2) return { tone: 'fix', text: 'Move your face into the oval' }
+  if (Math.abs(cx - 0.5) > 0.16 || Math.abs(cy - 0.5) > 0.22) return { tone: 'fix', text: 'Move your face into the oval' }
   if ((faces[0].confidence ?? 1) < 0.6) return { tone: 'fix', text: 'Hold still, and face the light' }
+
+  const pose = poseOf(faces[0].landmarks)
+  const front = poses.get('front')
+  // An adapter without landmarks: the place is all that can be checked.
+  if (!pose) return { tone: 'good', text: 'Hold still…' }
+  if (angle.key === 'front') {
+    return Math.abs(pose.yaw) > TURN.frontYaw
+      ? { tone: 'fix', text: 'Face the camera straight on' }
+      : { tone: 'good', text: 'Hold still…' }
+  }
+  if (!front) return { tone: 'good', text: 'Hold still…' }
+  const pair = { left: 'right', right: 'left', up: 'down', down: 'up' } as const
+  const other = poses.get(pair[angle.key])
+  if (angle.key === 'left' || angle.key === 'right') {
+    const turn = pose.yaw - front.yaw
+    if (Math.abs(turn) > TURN.yawMax) return { tone: 'fix', text: 'Not so far, just a little' }
+    if (other && Math.sign(turn) === Math.sign(other.yaw - front.yaw) && Math.abs(turn) >= TURN.yawMin / 2) {
+      return { tone: 'fix', text: 'The other way, please' }
+    }
+    if (Math.abs(turn) < TURN.yawMin) return { tone: 'fix', text: 'Turn your head a little more' }
+    if (Math.abs(pose.pitch - front.pitch) > TURN.pitchMax) return { tone: 'fix', text: 'Keep your chin level' }
+    return { tone: 'good', text: 'Hold still…' }
+  }
+  const tilt = pose.pitch - front.pitch
+  if (Math.abs(tilt) > TURN.pitchMax) return { tone: 'fix', text: 'Not so far, just a little' }
+  if (other && Math.sign(tilt) === Math.sign(other.pitch - front.pitch) && Math.abs(tilt) >= TURN.pitchMin / 2) {
+    return { tone: 'fix', text: angle.key === 'up' ? 'Chin up, not down' : 'Chin down, not up' }
+  }
+  if (Math.abs(tilt) < TURN.pitchMin) {
+    return { tone: 'fix', text: angle.key === 'up' ? 'Lift your chin a little more' : 'Lower your chin a little more' }
+  }
+  if (Math.abs(pose.yaw - front.yaw) > TURN.yawMin) return { tone: 'fix', text: 'Keep facing the camera' }
   return { tone: 'good', text: 'Hold still…' }
 }
 
 const sleep = (ms: number) => new Promise((r) => window.setTimeout(r, ms))
 
-function WebcamCapture({ onAdd, room }: { onAdd: (s: Shot[]) => void; room: number }) {
+// Sounds, made here (no files): a camera shutter on each photo, a chime
+// when the set is done. A browser plays sound only after a click on the
+// page, so the context is made on "Start the camera".
+let audio: AudioContext | null = null
+
+function unlockSound() {
+  try {
+    audio ??= new AudioContext()
+    void audio.resume()
+  } catch {
+    audio = null
+  }
+}
+
+function shutterSound() {
+  if (!audio || audio.state !== 'running') return
+  const t = audio.currentTime
+  // A burst of noise that dies away in 80 ms, twice: the shutter opening
+  // and closing.
+  const length = Math.floor(audio.sampleRate * 0.08)
+  const buffer = audio.createBuffer(1, length, audio.sampleRate)
+  const data = buffer.getChannelData(0)
+  for (let i = 0; i < length; i++) data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / length, 4)
+  for (const [at, level] of [
+    [0, 0.35],
+    [0.06, 0.25],
+  ]) {
+    const src = audio.createBufferSource()
+    const gain = audio.createGain()
+    const tone = audio.createBiquadFilter()
+    tone.type = 'bandpass'
+    tone.frequency.value = 2500
+    src.buffer = buffer
+    gain.gain.value = level
+    src.connect(tone).connect(gain).connect(audio.destination)
+    src.start(t + at)
+  }
+}
+
+function doneSound() {
+  if (!audio || audio.state !== 'running') return
+  const t = audio.currentTime
+  for (const [at, freq] of [
+    [0, 660],
+    [0.14, 880],
+  ]) {
+    const osc = audio.createOscillator()
+    const gain = audio.createGain()
+    osc.type = 'sine'
+    osc.frequency.value = freq
+    gain.gain.setValueAtTime(0.0001, t + at)
+    gain.gain.exponentialRampToValueAtTime(0.2, t + at + 0.02)
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + at + 0.35)
+    osc.connect(gain).connect(audio.destination)
+    osc.start(t + at)
+    osc.stop(t + at + 0.4)
+  }
+}
+
+function WebcamCapture({
+  onAdd,
+  room,
+  taken,
+  onRestart,
+  onReview,
+}: {
+  onAdd: (s: Shot[]) => void
+  room: number
+  /** Labels of the photos waiting to be enrolled: an angle whose photo
+   * was deleted is taken again. */
+  taken: string[]
+  onRestart: () => void
+  onReview: () => void
+}) {
+  const box = useRef<HTMLDivElement>(null)
   const video = useRef<HTMLVideoElement>(null)
   const stream = useRef<MediaStream | null>(null)
+  const poses = useRef(new Map<string, Pose>())
+  /** Set by an automatic photo: the next angle starts with time to pose. */
+  const justTook = useRef(false)
   const [state, setState] = useState<'idle' | 'starting' | 'live' | 'error'>('idle')
   const [error, setError] = useState<string | null>(null)
-  const [step, setStep] = useState(0)
-  const stepRef = useRef(0)
   const [flash, setFlash] = useState(false)
   const [countdown, setCountdown] = useState<number | null>(null)
   const [auto, setAuto] = useState(true)
+  const [sound, setSound] = useState(true)
+  const soundRef = useRef(sound)
+  soundRef.current = sound
   const [hint, setHint] = useState<Hint | null>(null)
   const [nextIn, setNextIn] = useState<number | null>(null)
   const secure = typeof window !== 'undefined' && window.isSecureContext && !!navigator.mediaDevices?.getUserMedia
 
-  const goTo = (n: number) => {
-    stepRef.current = n
-    setStep(n)
-  }
+  const done = new Set(ANGLES.filter((a) => taken.includes(a.text)).map((a) => a.key))
+  const doneRef = useRef(done)
+  doneRef.current = done
+  // A deleted photo's pose no longer counts as a reference.
+  for (const key of [...poses.current.keys()]) if (!done.has(key as Angle['key'])) poses.current.delete(key)
+  const angle = ANGLES.find((a) => !done.has(a.key)) ?? null
+  const angleRef = useRef(angle)
+  angleRef.current = angle
 
   const stop = () => {
     stream.current?.getTracks().forEach((t) => t.stop())
@@ -518,11 +678,22 @@ function WebcamCapture({ onAdd, room }: { onAdd: (s: Shot[]) => void; room: numb
         audio: false,
       })
       stream.current = s
+      // The click on "Start the camera" is what lets the page play sound.
+      unlockSound()
       if (video.current) {
         video.current.srcObject = s
         await video.current.play()
       }
       setState('live')
+      // Bring the picture and its controls into view: their bottom at the
+      // window's bottom, but never the picture's top under the header.
+      window.requestAnimationFrame(() => {
+        const r = box.current?.getBoundingClientRect()
+        if (!r) return
+        const header = 80
+        const by = Math.min(r.bottom - window.innerHeight + 16, r.top - header)
+        if (by > 0) window.scrollBy({ top: by, behavior: 'smooth' })
+      })
     } catch (e) {
       const name = (e as DOMException)?.name
       setError(
@@ -550,14 +721,23 @@ function WebcamCapture({ onAdd, room }: { onAdd: (s: Shot[]) => void; room: numb
     )
   }
 
-  const capture = async () => {
+  /** Take the photo for the current angle; ``pose`` is how the head was
+   * turned in it, when known. Past the five angles, extra photos are
+   * labelled as such. */
+  const capture = async (pose?: Pose | null) => {
     const shot = await grab(Number.MAX_SAFE_INTEGER, 0.92)
     if (!shot) return
-    const label = ANGLES[stepRef.current % ANGLES.length]
+    const a = angleRef.current
+    if (a && pose) poses.current.set(a.key, pose)
+    const label = a ? a.text : `Extra photo ${new Date().toLocaleTimeString()}`
     onAdd([{ blob: shot.blob, url: URL.createObjectURL(shot.blob), label }])
-    goTo(stepRef.current + 1)
     setFlash(true)
     window.setTimeout(() => setFlash(false), 150)
+    if (soundRef.current) {
+      shutterSound()
+      // The last angle: a chime after the shutter says the set is done.
+      if (a && ANGLES.every((x) => x === a || doneRef.current.has(x.key))) window.setTimeout(doneSound, 350)
+    }
   }
 
   // A 3-2-1 so the person can hold the pose without anyone at the keyboard.
@@ -574,15 +754,25 @@ function WebcamCapture({ onAdd, room }: { onAdd: (s: Shot[]) => void; room: numb
 
   // Automatic capture: check a small frame about once a second, say what
   // to change, and take the photo once one face has been well placed and
-  // still for STEADY checks in a row. One check in flight at a time.
-  const running = state === 'live' && auto && room > 0 && step < ANGLES.length
+  // turned as asked for STEADY checks in a row. One check in flight at a
+  // time. Restarts for each angle, so a deleted photo is taken again.
+  const running = state === 'live' && auto && room > 0 && angle !== null
+  const key = angle?.key ?? null
   useEffect(() => {
-    if (!running) {
+    if (!running || key === null) {
       setHint(null)
       return
     }
     let cancelled = false
     ;(async () => {
+      if (justTook.current) {
+        justTook.current = false
+        for (let left = NEXT_POSE_MS; left > 0 && !cancelled; left -= 1000) {
+          setNextIn(Math.ceil(left / 1000))
+          await sleep(1000)
+        }
+        setNextIn(null)
+      }
       let steady = 0
       while (!cancelled) {
         const frame = await grab(CHECK_WIDTH, 0.8)
@@ -591,9 +781,13 @@ function WebcamCapture({ onAdd, room }: { onAdd: (s: Shot[]) => void; room: numb
           continue
         }
         let verdict: Hint
+        let pose: Pose | null = null
         try {
           const check = await api.checkFace(frame.blob)
-          verdict = judge(check, check.frame.w || frame.w, check.frame.h || frame.h)
+          const a = angleRef.current
+          if (!a) return
+          verdict = judge(check, check.frame.w || frame.w, check.frame.h || frame.h, a, poses.current)
+          pose = check.faces.length === 1 ? poseOf(check.faces[0].landmarks) : null
         } catch (e) {
           if (cancelled) return
           setHint({ tone: 'fix', text: `Cannot check the face right now: ${errorText(e)}` })
@@ -607,25 +801,19 @@ function WebcamCapture({ onAdd, room }: { onAdd: (s: Shot[]) => void; room: numb
           await sleep(400)
           continue
         }
-        steady = 0
-        await capture()
-        if (stepRef.current >= ANGLES.length) return
+        // The photo moves the page to the next angle, which restarts this
+        // loop, starting with time to take the pose.
+        justTook.current = true
         setHint({ tone: 'good', text: 'Got it!' })
-        for (let left = NEXT_POSE_MS; left > 0 && !cancelled; left -= 1000) {
-          setNextIn(Math.ceil(left / 1000))
-          await sleep(1000)
-        }
-        setNextIn(null)
+        await capture(pose)
+        return
       }
     })()
     return () => {
       cancelled = true
       setNextIn(null)
     }
-  }, [running]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const guide = useMemo(() => ANGLES[step % ANGLES.length], [step])
-  const done = step >= ANGLES.length
+  }, [running, key]) // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!secure) {
     return (
@@ -635,7 +823,8 @@ function WebcamCapture({ onAdd, room }: { onAdd: (s: Shot[]) => void; room: numb
     )
   }
 
-  const ring = hint?.tone === 'good' ? 'border-green-400' : hint?.tone === 'fix' ? 'border-amber-300' : 'border-white/70'
+  const waiting = nextIn !== null
+  const ring = waiting ? 'border-white/70' : hint?.tone === 'good' ? 'border-green-400' : hint?.tone === 'fix' ? 'border-amber-300' : 'border-white/70'
 
   return (
     <div>
@@ -643,88 +832,263 @@ function WebcamCapture({ onAdd, room }: { onAdd: (s: Shot[]) => void; room: numb
         <li>Sit facing the camera, about an arm's length away, with light in front of you (not a window behind).</li>
         <li>Take off a cap or mask. Keep glasses on if you usually wear them.</li>
         <li>
-          Put your face in the oval and follow the instruction at the top.{' '}
-          {auto ? 'The photo is taken by itself when your face is in place.' : 'Press Capture, or use the timer.'}
+          Put your face in the oval and do what the top of the picture says.{' '}
+          {auto ? 'Each photo is taken by itself once your face is placed and turned as asked.' : 'Press Capture, or use the timer.'}
         </li>
       </ol>
-      <div className="relative overflow-hidden rounded-xl bg-gray-900">
-        <video ref={video} playsInline muted className={`aspect-video w-full -scale-x-100 object-cover ${state === 'live' ? '' : 'invisible'}`} />
+      {/* As large as fits under the header with the controls still in view. */}
+      <div ref={box} className="mx-auto w-full scroll-mt-20" style={{ maxWidth: 'calc((100dvh - 13rem) * 16 / 9)' }}>
+        <div className="relative overflow-hidden rounded-xl bg-gray-900">
+          <video ref={video} playsInline muted className={`aspect-video w-full -scale-x-100 object-cover ${state === 'live' ? '' : 'invisible'}`} />
+          {state === 'live' && (
+            <>
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                <div className={`h-[62%] aspect-[3/4] rounded-[50%] border-4 ${ring} shadow-[0_0_0_9999px_rgba(0,0,0,0.25)] transition-colors`} />
+              </div>
+              <div className="absolute inset-x-0 top-0 bg-gradient-to-b from-black/70 to-transparent p-2 text-center text-white sm:p-3">
+                <div className="text-sm font-semibold sm:text-base">
+                  {!angle
+                    ? 'All angles taken'
+                    : waiting
+                      ? `Next: ${angle.text.toLowerCase()}… ${nextIn}`
+                      : `${ANGLES.indexOf(angle) + 1} of ${ANGLES.length}: ${angle.text}`}
+                </div>
+              </div>
+              {hint && angle && !waiting && (
+                <div className="absolute inset-x-0 bottom-0 flex justify-center p-2 sm:p-3">
+                  <span
+                    aria-live="polite"
+                    className={`rounded-full px-3 py-1 text-xs font-medium shadow sm:text-sm ${hint.tone === 'good' ? 'bg-green-600 text-white' : 'bg-amber-100 text-amber-900'}`}
+                  >
+                    {hint.text}
+                  </span>
+                </div>
+              )}
+              {countdown !== null && (
+                <div className="absolute inset-0 flex items-center justify-center text-7xl font-bold text-white drop-shadow">{countdown}</div>
+              )}
+              {flash && <div className="absolute inset-0 bg-white/70" />}
+            </>
+          )}
+          {state !== 'live' && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-6 text-center text-gray-300">
+              <Video className="h-10 w-10" />
+              {state === 'error' ? <p className="text-sm text-red-300">{error}</p> : <p className="text-sm">The camera is off.</p>}
+              <Button onClick={start} busy={state === 'starting'}>
+                Start the camera
+              </Button>
+            </div>
+          )}
+        </div>
         {state === 'live' && (
           <>
-            <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-              <div className={`h-[62%] aspect-[3/4] rounded-[50%] border-4 ${ring} shadow-[0_0_0_9999px_rgba(0,0,0,0.25)] transition-colors`} />
-            </div>
-            <div className="absolute inset-x-0 top-0 bg-gradient-to-b from-black/70 to-transparent p-3 text-center text-white">
-              <div className="text-base font-semibold">
-                {done
-                  ? 'All angles taken'
-                  : nextIn !== null
-                    ? `Next, ${guide.toLowerCase()}… ${nextIn}`
-                    : `${step + 1} of ${ANGLES.length}: ${guide}`}
-              </div>
-            </div>
-            {hint && !done && nextIn === null && (
-              <div className="absolute inset-x-0 bottom-0 flex justify-center p-3">
-                <span
-                  aria-live="polite"
-                  className={`rounded-full px-3 py-1 text-sm font-medium shadow ${hint.tone === 'good' ? 'bg-green-600 text-white' : 'bg-amber-100 text-amber-900'}`}
-                >
-                  {hint.text}
-                </span>
+            {!angle && (
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-green-50 p-3 text-sm text-green-800">
+                <span>All {ANGLES.length} angles are taken. Check the photos, remove any that are blurred, then enrol.</span>
+                <Button size="sm" onClick={onReview}>
+                  Review and enrol ↓
+                </Button>
               </div>
             )}
-            {countdown !== null && (
-              <div className="absolute inset-0 flex items-center justify-center text-7xl font-bold text-white drop-shadow">{countdown}</div>
-            )}
-            {flash && <div className="absolute inset-0 bg-white/70" />}
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="flex gap-1">
+                  {ANGLES.map((a) => (
+                    <span
+                      key={a.key}
+                      title={a.text}
+                      className={`h-2 w-6 rounded-full sm:w-8 ${done.has(a.key) ? 'bg-green-500' : a === angle ? 'bg-indigo-500' : 'bg-gray-200'}`}
+                    />
+                  ))}
+                </div>
+                <label className="flex items-center gap-1.5 text-sm text-gray-700">
+                  <input type="checkbox" className="h-4 w-4 accent-indigo-600" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
+                  Take photos automatically
+                </label>
+                <label className="flex items-center gap-1.5 text-sm text-gray-700">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 accent-indigo-600"
+                    checked={sound}
+                    onChange={(e) => {
+                      setSound(e.target.checked)
+                      if (e.target.checked) unlockSound()
+                    }}
+                  />
+                  Sound
+                </label>
+              </div>
+              <div className="flex gap-2">
+                <Button variant="ghost" size="sm" onClick={onRestart} disabled={!done.size}>
+                  <RotateCcw className="h-3.5 w-3.5" /> Start over
+                </Button>
+                {!auto && (
+                  <>
+                    <Button variant="secondary" onClick={() => setCountdown(3)} disabled={room <= 0 || countdown !== null}>
+                      Timer (3 s)
+                    </Button>
+                    <Button onClick={() => capture()} disabled={room <= 0 || countdown !== null}>
+                      <Camera className="h-4 w-4" /> Capture
+                    </Button>
+                  </>
+                )}
+              </div>
+            </div>
           </>
         )}
-        {state !== 'live' && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-6 text-center text-gray-300">
-            <Video className="h-10 w-10" />
-            {state === 'error' ? <p className="text-sm text-red-300">{error}</p> : <p className="text-sm">The camera is off.</p>}
-            <Button onClick={start} busy={state === 'starting'}>
-              Start the camera
-            </Button>
-          </div>
-        )}
       </div>
-      {state === 'live' && (
-        <>
-          {done && (
-            <p className="mt-3 rounded-lg bg-green-50 p-3 text-sm text-green-800">
-              All {ANGLES.length} angles are taken. Check the photos below, remove any that are blurred, then press Enrol.
-            </p>
-          )}
-          <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-3">
-              <div className="flex gap-1">
-                {ANGLES.map((a, i) => (
-                  <span key={a} title={a} className={`h-2 w-8 rounded-full ${i < step ? 'bg-green-500' : i === step ? 'bg-indigo-500' : 'bg-gray-200'}`} />
-                ))}
+    </div>
+  )
+}
+
+/** The photos the person is enrolled with: what recognition compares
+ * against. Each can be looked at and deleted; samples enrolled before
+ * photos were kept count, but have nothing to show. */
+function EnrolledPhotos({ person, onChanged }: { person: Person; onChanged: () => void }) {
+  const { toast, confirm } = useFeedback()
+  const list = useLoad(() => api.enrolledPhotos(person.id), [person.id, person.face_samples])
+  const [urls, setUrls] = useState<Record<number, string>>({})
+  const [open, setOpen] = useState<number | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    let live = true
+    const made: string[] = []
+    const kept = (list.data?.photos ?? []).filter((p) => p.kept)
+    Promise.all(
+      kept.map((p) =>
+        api
+          .enrolledPhoto(person.id, p.index)
+          .then((b) => (b ? [p.index, URL.createObjectURL(b)] : null))
+          .catch(() => null),
+      ),
+    ).then((pairs) => {
+      const next: Record<number, string> = {}
+      for (const pair of pairs) {
+        if (!pair) continue
+        const [i, u] = pair as [number, string]
+        made.push(u)
+        next[i] = u
+      }
+      if (live) setUrls(next)
+      else made.forEach((u) => URL.revokeObjectURL(u))
+    })
+    return () => {
+      live = false
+      made.forEach((u) => URL.revokeObjectURL(u))
+    }
+  }, [list.data, person.id])
+
+  const photos = list.data?.photos ?? []
+  const old = photos.filter((p) => !p.kept).length
+
+  const removeOne = async (index: number) => {
+    const ok = await confirm({
+      title: 'Delete this photo?',
+      body: `${person.display_name} will no longer be matched against this photo. Their other photos stay.`,
+      confirm: 'Delete photo',
+      danger: true,
+    })
+    if (!ok) return
+    setBusy(true)
+    try {
+      await api.forgetFace(person.id, index)
+      setOpen(null)
+      toast('success', 'Photo deleted')
+      onChanged()
+    } catch (e) {
+      toast('error', errorText(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const removeAll = async () => {
+    const ok = await confirm({
+      title: 'Delete all face photos?',
+      body: `All ${person.face_samples} enrolled photos of ${person.display_name} are deleted, and they are not recognised until new ones are enrolled. Consent and past attendance are kept.`,
+      confirm: 'Delete all',
+      danger: true,
+    })
+    if (!ok) return
+    setBusy(true)
+    try {
+      await api.forgetFaces(person.id)
+      pictureChanged(person.id)
+      toast('success', 'All face photos deleted')
+      onChanged()
+    } catch (e) {
+      toast('error', errorText(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!person.face_samples) {
+    return <p className="mt-4 text-sm text-gray-500">No photos enrolled yet. Enrol some on the right.</p>
+  }
+
+  return (
+    <div className="mt-4">
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-sm font-medium text-gray-700">Enrolled photos</span>
+        <Button variant="ghost" size="sm" onClick={removeAll} busy={busy}>
+          <Trash2 className="h-3.5 w-3.5" /> Delete all
+        </Button>
+      </div>
+      {list.error ? (
+        <ErrorNote message={list.error} onRetry={list.reload} />
+      ) : (
+        <div className="grid grid-cols-4 gap-2">
+          {photos.map((p) =>
+            p.kept && urls[p.index] ? (
+              <button
+                key={p.index}
+                onClick={() => setOpen(p.index)}
+                className="overflow-hidden rounded-lg border bg-gray-100 hover:ring-2 hover:ring-indigo-400"
+                title={p.enrolled_at ? `Enrolled ${new Date(p.enrolled_at).toLocaleString()}` : undefined}
+              >
+                <img src={urls[p.index]} alt={`Enrolled photo ${p.index + 1}`} className="aspect-square w-full object-cover" />
+              </button>
+            ) : (
+              <div
+                key={p.index}
+                className="flex aspect-square items-center justify-center rounded-lg border border-dashed bg-gray-50 text-gray-400"
+                title={p.kept ? 'Loading' : 'Enrolled before photos were kept'}
+              >
+                <ImagePlus className="h-5 w-5" />
               </div>
-              <label className="flex items-center gap-1.5 text-sm text-gray-700">
-                <input type="checkbox" className="h-4 w-4 accent-indigo-600" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
-                Take photos automatically
-              </label>
-            </div>
-            <div className="flex gap-2">
-              <Button variant="ghost" size="sm" onClick={() => goTo(0)}>
-                <RotateCcw className="h-3.5 w-3.5" /> Start over
+            ),
+          )}
+        </div>
+      )}
+      {old > 0 && (
+        <p className="mt-2 text-xs text-gray-500">
+          {old} {old === 1 ? 'photo was' : 'photos were'} enrolled before photos were kept, so {old === 1 ? 'it' : 'they'} cannot be
+          shown. To replace them, delete all and enrol again.
+        </p>
+      )}
+      {open !== null && urls[open] && (
+        <Modal
+          title={`Enrolled photo ${open + 1} of ${photos.length}`}
+          onClose={() => setOpen(null)}
+          wide
+          footer={
+            <>
+              <Button variant="secondary" onClick={() => setOpen(null)}>
+                Close
               </Button>
-              {!auto && (
-                <>
-                  <Button variant="secondary" onClick={() => setCountdown(3)} disabled={room <= 0 || countdown !== null}>
-                    Timer (3 s)
-                  </Button>
-                  <Button onClick={capture} disabled={room <= 0 || countdown !== null}>
-                    <Camera className="h-4 w-4" /> Capture
-                  </Button>
-                </>
-              )}
-            </div>
-          </div>
-        </>
+              <Button variant="danger" onClick={() => removeOne(open)} busy={busy} disabled={photos.length <= 1}>
+                <Trash2 className="h-4 w-4" /> Delete this photo
+              </Button>
+            </>
+          }
+        >
+          <img src={urls[open]} alt="" className="mx-auto max-h-[60vh] rounded-lg" />
+          {photos.length <= 1 && (
+            <p className="mt-2 text-sm text-gray-600">This is their only photo. To remove it, use Delete all.</p>
+          )}
+        </Modal>
       )}
     </div>
   )

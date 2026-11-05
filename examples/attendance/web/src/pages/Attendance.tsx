@@ -4,11 +4,11 @@
 // attendly's Attendance Records: the sessions of a day, each with its
 // count of present, late and absent, and a way into its marks.
 
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { useState } from 'react'
 import { AlertTriangle, ChevronLeft, ChevronRight, ClipboardList } from 'lucide-react'
 import { addDays, api, clock, groupName, isoDate, longDate, type Session, type SessionStatus } from '../attendance'
-import { Badge, Button, Card, Empty, ErrorNote, Loading, PageTitle, inlineInputClass, type Tone } from '../components/ui'
+import { Badge, Button, Card, Empty, ErrorNote, Loading, PageTitle, Table, ViewSwitch, inlineInputClass, td, th, useViewMode, type Tone } from '../components/ui'
 import { useGroups, useLoad } from '../hooks'
 
 export const SESSION_STATUS: Record<SessionStatus, { label: string; tone: Tone }> = {
@@ -29,6 +29,9 @@ export default function Attendance() {
     30000,
   )
   const tz = (s: Session) => groups.data?.find((g) => g.id === s.group_id)?.timezone
+  const [view, setView] = useViewMode('sessions', 'table')
+  const navigate = useNavigate()
+  const decided = (s: Session) => s.status === 'final' || s.status === 'finalizing'
 
   return (
     <>
@@ -55,6 +58,9 @@ export default function Attendance() {
           ))}
         </select>
         <span className="text-sm text-gray-500">{longDate(day)}</span>
+        <div className="ml-auto">
+          <ViewSwitch value={view} onChange={setView} />
+        </div>
       </Card>
 
       {sessions.error ? (
@@ -66,6 +72,58 @@ export default function Attendance() {
           <Empty icon={<ClipboardList className="h-10 w-10" />} title="No sessions on this day">
             Sessions come from the schedule. Add periods there and they appear here on their days.
           </Empty>
+        </Card>
+      ) : view === 'table' ? (
+        <Card>
+          <Table>
+            <thead>
+              <tr>
+                <th className={th}>Group</th>
+                <th className={th}>Time</th>
+                <th className={th}>Status</th>
+                <th className={`${th} text-right`}>Present</th>
+                <th className={`${th} text-right`}>Late</th>
+                <th className={`${th} text-right`}>Absent</th>
+                <th className={`${th} text-right`}>Excused</th>
+                <th className={th}>Cameras</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100 bg-white">
+              {sessions.data.map((s) => {
+                const st = SESSION_STATUS[s.status]
+                const n = (k: keyof Session['counts']) => (decided(s) ? (s.counts[k] ?? 0) : '—')
+                return (
+                  <tr key={s.id} className="cursor-pointer hover:bg-gray-50" onClick={() => navigate(`/attendance/${s.id}`)}>
+                    <td className={td}>
+                      <Link to={`/attendance/${s.id}`} className="font-medium text-gray-900 hover:text-indigo-700" onClick={(e) => e.stopPropagation()}>
+                        {groupName(groups.data, s.group_id)}
+                      </Link>
+                      {!s.slot_id && <span className="ml-2 text-xs text-gray-400">(one-off)</span>}
+                    </td>
+                    <td className={`${td} whitespace-nowrap`}>
+                      {clock(s.start_at, tz(s))}–{clock(s.end_at, tz(s))}
+                    </td>
+                    <td className={td}>
+                      <Badge tone={st.tone}>{st.label}</Badge>
+                    </td>
+                    <td className={`${td} text-right tabular-nums text-green-700`}>{n('PRESENT')}</td>
+                    <td className={`${td} text-right tabular-nums text-amber-700`}>{n('LATE')}</td>
+                    <td className={`${td} text-right tabular-nums text-red-700`}>{n('ABSENT')}</td>
+                    <td className={`${td} text-right tabular-nums text-blue-700`}>{n('EXCUSED')}</td>
+                    <td className={td}>
+                      {s.no_coverage ? (
+                        <span className="inline-flex items-center gap-1 text-xs text-amber-700" title="The cameras gave no frame during this session">
+                          <AlertTriangle className="h-3.5 w-3.5" /> No frames
+                        </span>
+                      ) : (
+                        <span className="text-xs text-gray-400">OK</span>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </Table>
         </Card>
       ) : (
         <div className="grid gap-3 md:grid-cols-2">

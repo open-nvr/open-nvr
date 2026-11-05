@@ -3,9 +3,9 @@
 //
 // attendly's look: white cards on gray-50, indigo for what you act on.
 
-import { useCallback, useEffect, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type CSSProperties, type ReactNode, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
-import { MoreHorizontal, X } from 'lucide-react'
+import { LayoutGrid, MoreHorizontal, Rows3, X } from 'lucide-react'
 import type { MarkStatus } from '../attendance'
 import { STATUS_LABEL } from '../attendance'
 
@@ -288,11 +288,101 @@ export function RowMenu({ label, children }: { label: string; children: (close: 
 
 export const menuItem = 'flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-gray-100'
 
-/** Tables scroll sideways on a phone instead of the page. */
-export function Table({ children }: { children: ReactNode }) {
+/** The height from ``ref``'s top to the bottom of the window, less
+ * ``reserve`` (for what sits under it, such as paging), as the page lays
+ * out at the top. Followed as the window and the page above change. */
+function useFillHeight(ref: RefObject<HTMLElement | null>, reserve: number, on: boolean): number | null {
+  const [height, setHeight] = useState<number | null>(null)
+  useLayoutEffect(() => {
+    if (!on) return
+    const fit = () => {
+      const el = ref.current
+      if (!el) return
+      const top = el.getBoundingClientRect().top + window.scrollY
+      // Never so short that a few rows are all there is room for.
+      setHeight(Math.max(240, Math.floor(window.innerHeight - top - reserve - 24)))
+    }
+    fit()
+    const watch = new ResizeObserver(fit)
+    watch.observe(document.body)
+    window.addEventListener('resize', fit)
+    return () => {
+      watch.disconnect()
+      window.removeEventListener('resize', fit)
+    }
+  }, [ref, reserve, on])
+  return height
+}
+
+/** A table that keeps its header in view: it always takes the window's
+ * height below it (``fill``, the default), however few its rows, and
+ * scrolls them inside it, and
+ * sideways on a phone instead of the page. Printed, it is all there. */
+export function Table({ children, fill = true, reserve = 0 }: { children: ReactNode; fill?: boolean; reserve?: number }) {
+  const box = useRef<HTMLDivElement>(null)
+  const height = useFillHeight(box, reserve, fill)
   return (
-    <div className="overflow-x-auto">
-      <table className="min-w-full divide-y divide-gray-200 text-sm">{children}</table>
+    <div
+      ref={box}
+      className="h-[var(--fill)] overflow-auto print:h-auto print:overflow-visible"
+      style={{ '--fill': height ? `${height}px` : 'auto' } as CSSProperties}
+    >
+      <table
+        className={
+          'min-w-full divide-y divide-gray-200 text-sm ' +
+          '[&_thead_th]:sticky [&_thead_th]:top-0 [&_thead_th]:z-10 [&_thead_th]:bg-gray-50 ' +
+          '[&_thead_th]:shadow-[inset_0_-1px_0_#e5e7eb] [&_thead_th:first-child]:z-20'
+        }
+      >
+        {children}
+      </table>
+    </div>
+  )
+}
+
+export type ViewMode = 'table' | 'cards'
+
+/** The page's choice of table or cards, remembered in this browser. */
+export function useViewMode(page: string, initial: ViewMode = 'table'): [ViewMode, (m: ViewMode) => void] {
+  const key = `attendance.view.${page}`
+  const [mode, setMode] = useState<ViewMode>(() => {
+    try {
+      const saved = window.localStorage.getItem(key)
+      return saved === 'table' || saved === 'cards' ? saved : initial
+    } catch {
+      return initial
+    }
+  })
+  const choose = (m: ViewMode) => {
+    setMode(m)
+    try {
+      window.localStorage.setItem(key, m)
+    } catch {
+      /* not remembered; still switched */
+    }
+  }
+  return [mode, choose]
+}
+
+export function ViewSwitch({ value, onChange }: { value: ViewMode; onChange: (m: ViewMode) => void }) {
+  const options = [
+    { mode: 'table' as const, label: 'Table', Icon: Rows3 },
+    { mode: 'cards' as const, label: 'Cards', Icon: LayoutGrid },
+  ]
+  return (
+    <div className="inline-flex rounded-lg border bg-gray-50 p-0.5" role="group" aria-label="View">
+      {options.map(({ mode, label, Icon }) => (
+        <button
+          key={mode}
+          onClick={() => onChange(mode)}
+          aria-pressed={value === mode}
+          title={label}
+          className={`flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm ${value === mode ? 'bg-white font-medium text-indigo-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}
+        >
+          <Icon className="h-4 w-4" />
+          <span className="hidden sm:inline">{label}</span>
+        </button>
+      ))}
     </div>
   )
 }

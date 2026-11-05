@@ -8,7 +8,7 @@ import { useEffect, useState } from 'react'
 import { Settings as SettingsIcon } from 'lucide-react'
 import { errorText } from '../api'
 import { useAuth } from '../auth'
-import { api, type Policy } from '../attendance'
+import { POLICY_LIMITS, api, policyErrors, type Policy } from '../attendance'
 import { useFeedback } from '../components/feedback'
 import { Button, Card, Empty, ErrorNote, Field, Loading, PageTitle, inputClass } from '../components/ui'
 import { useLoad } from '../hooks'
@@ -42,6 +42,8 @@ export default function Settings() {
     )
   }
 
+  const wrong = policyErrors(form)
+  const anyWrong = Object.keys(wrong).length > 0
   const changed = policy.data
     ? FIELDS.filter((f) => form[f.key] !== undefined && Number(form[f.key]) !== policy.data!.policy[f.key])
     : []
@@ -71,10 +73,17 @@ export default function Settings() {
         <Card className="p-5">
           <div className="grid gap-5 md:grid-cols-2">
             {FIELDS.map((f) => (
-              <Field key={f.key} label={f.label + (f.unit ? ` (${f.unit})` : '')} hint={`${f.hint} Default ${policy.data!.defaults[f.key]}.`}>
+              <Field
+                key={f.key}
+                label={f.label + (f.unit ? ` (${f.unit})` : '')}
+                hint={`${f.hint} Default ${policy.data!.defaults[f.key]}.`}
+                error={wrong[f.key] ?? (form[f.key]?.trim() === '' ? 'Needs a value' : undefined)}
+              >
                 <input
                   type="number"
                   step={f.step}
+                  min={POLICY_LIMITS[f.key].min}
+                  max={POLICY_LIMITS[f.key].max}
                   className={inputClass}
                   value={form[f.key] ?? ''}
                   onChange={(e) => setForm((s) => ({ ...s, [f.key]: e.target.value }))}
@@ -94,7 +103,7 @@ export default function Settings() {
             >
               Back to defaults
             </Button>
-            <Button onClick={save} busy={busy} disabled={!changed.length}>
+            <Button onClick={save} busy={busy} disabled={!changed.length || anyWrong || FIELDS.some((f) => form[f.key]?.trim() === '')}>
               Save {changed.length ? `(${changed.length})` : ''}
             </Button>
           </div>

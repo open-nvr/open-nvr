@@ -53,6 +53,17 @@ class FakeGallery:
         self.who[image] = uuid
         return len(self.samples[uuid])
 
+    async def forget_sample(self, uuid, index):
+        self.calls.append("forget_sample")
+        self._check()
+        samples = self.samples.get(uuid) or []
+        if not 0 <= index < len(samples):
+            raise attendance_faces.FaceGalleryError(404, "That photo is no longer enrolled.")
+        if len(samples) == 1:
+            raise attendance_faces.FaceGalleryError(409, "This is their only enrolled photo.")
+        self.who.pop(samples.pop(index), None)
+        return len(samples)
+
     async def forget(self, uuid):
         self.calls.append("forget")
         self._check()
@@ -64,7 +75,7 @@ class FakeGallery:
 @pytest.fixture()
 def gallery(monkeypatch):
     g = FakeGallery()
-    for name in ("identify", "register", "forget"):
+    for name in ("identify", "register", "forget", "forget_sample"):
         monkeypatch.setattr(attendance_faces, name, getattr(g, name))
     return g
 
@@ -302,7 +313,7 @@ def test_consent_withdrawn_mid_enrolment_keeps_nothing(env, gallery, monkeypatch
 JPEG = b"\xff\xd8\xff\xe0" + b"0" * 64
 
 
-@pytest.fixture()
+@pytest.fixture(autouse=True)
 def photos_dir(monkeypatch, tmp_path):
     from core.config import settings
 
@@ -381,14 +392,15 @@ def test_the_guidance_check_gives_boxes_and_never_names(env, gallery, monkeypatc
 
     async def identify(image):
         return {"faces": [{"bbox": [1, 2, 3, 4], "confidence": 0.9, "person_id": "u-1",
-                           "name": "Asha", "similarity": 0.8}],
+                           "name": "Asha", "similarity": 0.8, "landmarks": [[1, 1], [2, 1]]}],
                 "dropped": {"too_small": 2}, "frame": {"w": 640, "h": 360}}
 
     monkeypatch.setattr(attendance_faces, "identify", identify)
     frame = [("frame", ("f.jpg", b"jpeg", "image/jpeg"))]
     r = env.client.post(f"{URL}/faces/check", headers=env.jwt("admin"), files=frame)
     assert r.status_code == 200
-    assert r.json() == {"faces": [{"bbox": [1, 2, 3, 4], "confidence": 0.9}],
+    assert r.json() == {"faces": [{"bbox": [1, 2, 3, 4], "confidence": 0.9,
+                                   "landmarks": [[1, 1], [2, 1]]}],
                         "too_small": 2, "frame": {"w": 640, "h": 360}}
     assert "Asha" not in r.text and "u-1" not in r.text
     V = _role_user(env, "vic", ["attendance.view"])
@@ -397,3 +409,86 @@ def test_the_guidance_check_gives_boxes_and_never_names(env, gallery, monkeypatc
     monkeypatch.setattr(attendance_faces, "identify", gallery.identify)
     assert env.client.post(f"{URL}/faces/check", headers=env.jwt("admin"),
                            files=frame).status_code == 503
+
+
+# ── One set is one person; the enrolled photos are kept and shown ────
+
+J = b"\xff\xd8"   # a photo that is a JPEG, so it is kept
+
+
+def test_a_set_with_one_photo_of_someone_else_enrols_none(env, gallery):  # noqa: F811
+    asha = _person(env)
+    bilal = _person(env, name="Bilal", ref="R2")
+    _enrol(env, asha, J + b"asha-front")
+    # Asha again, under Bilal: her turned head is under the duplicate
+    # threshold, her straight-on photo is not.
+    r = _enrol(env, bilal, J + b"asha-left", J + b"asha-front", b"noface")
+    body = r.json()
+    assert body["enrolled"] == 0 and body["person"]["face_samples"] == 0
+    assert bilal["uuid"] not in gallery.samples
+    assert [x["ok"] for x in body["results"]] == [False, False, False]
+    assert "photo 2 of this set is already enrolled as Asha" in body["results"][0]["error"]
+    assert body["results"][0]["duplicate_of"] == asha["id"]
+    assert "already enrolled as Asha" in body["results"][1]["error"]
+    assert body["results"][2]["error"] == "no face found"
+    assert "register" not in gallery.calls[-3:]
+
+
+def test_the_enrolled_photos_are_listed_and_shown(env, gallery):  # noqa: F811
+    p = _person(env)
+    _enrol(env, p, b"not-a-jpeg")            # enrolled, but nothing to show
+    _enrol(env, p, J + b"a1", J + b"a2")
+    A = env.jwt("admin")
+    listed = env.client.get(f"{URL}/people/{p['id']}/faces", headers=A).json()
+    assert listed["samples"] == 3
+    assert [x["kept"] for x in listed["photos"]] == [False, True, True]
+    assert listed["photos"][1]["enrolled_at"]
+    img = env.client.get(f"{URL}/people/{p['id']}/faces/2/image", headers=A)
+    assert img.status_code == 200 and img.content == J + b"a2"
+    assert env.client.get(f"{URL}/people/{p['id']}/faces/0/image", headers=A).status_code == 404
+
+
+def test_samples_enrolled_before_photos_were_kept_are_gaps_in_front(env, gallery):  # noqa: F811
+    p = _person(env)
+    gallery.samples[p["uuid"]] = [b"old1", b"old2"]   # enrolled by an older core
+    _enrol(env, p, J + b"new")
+    listed = env.client.get(f"{URL}/people/{p['id']}/faces", headers=env.jwt("admin")).json()
+    assert [x["kept"] for x in listed["photos"]] == [False, False, True]
+
+
+def test_one_photo_can_be_deleted_and_the_rest_keep_their_place(env, gallery):  # noqa: F811
+    p = _person(env)
+    _enrol(env, p, J + b"a1", J + b"a2", J + b"a3")
+    A = env.jwt("admin")
+    r = env.client.delete(f"{URL}/people/{p['id']}/faces/1", headers=A)
+    assert r.status_code == 200 and r.json()["face_samples"] == 2
+    assert gallery.samples[p["uuid"]] == [J + b"a1", J + b"a3"]
+    assert env.client.get(f"{URL}/people/{p['id']}/faces/1/image", headers=A).content == J + b"a3"
+    s = env.Session()
+    assert s.query(env.models.AuditLog).filter(
+        env.models.AuditLog.action == "attendance.face.forget_one").count() == 1
+    s.close()
+    env.client.delete(f"{URL}/people/{p['id']}/faces/0", headers=A)
+    last = env.client.delete(f"{URL}/people/{p['id']}/faces/0", headers=A)
+    assert last.status_code == 409 and "only enrolled photo" in last.text
+    assert env.client.delete(f"{URL}/people/{p['id']}/faces/5", headers=A).status_code == 404
+
+
+def test_the_enrolled_photos_go_with_the_faces(env, gallery, photos_dir):  # noqa: F811
+    p = _person(env)
+    _enrol(env, p, J + b"a1")
+    folder = photos_dir / ".attendance" / "people" / p["uuid"]
+    assert any(folder.glob("*.jpg"))
+    env.client.delete(f"{URL}/people/{p['id']}/faces", headers=env.jwt("admin"))
+    assert not folder.exists()
+
+
+def test_enrolled_photos_need_the_enroll_permission(env, gallery):  # noqa: F811
+    from tests.test_attendance_roster import _role_user
+
+    p = _person(env)
+    _enrol(env, p, J + b"a1")
+    V = _role_user(env, "photoviewer", ["attendance.view"])
+    assert env.client.get(f"{URL}/people/{p['id']}/faces", headers=V).status_code == 403
+    assert env.client.get(f"{URL}/people/{p['id']}/faces/0/image", headers=V).status_code == 403
+    assert env.client.delete(f"{URL}/people/{p['id']}/faces/0", headers=V).status_code == 403

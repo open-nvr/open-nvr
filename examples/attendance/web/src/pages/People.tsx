@@ -12,7 +12,7 @@ import { useAuth } from '../auth'
 import { api, groupName, type Person } from '../attendance'
 import { Avatar } from '../components/faces'
 import { useFeedback } from '../components/feedback'
-import { Badge, Button, Card, Empty, ErrorNote, Field, Loading, Modal, PageTitle, RowMenu, Table, inlineInputClass, inputClass, menuItem, td, th } from '../components/ui'
+import { Badge, Button, Card, Empty, ErrorNote, Field, Loading, Modal, PageTitle, RowMenu, Table, ViewSwitch, inlineInputClass, inputClass, menuItem, td, th, useViewMode } from '../components/ui'
 import { useGroups, useLoad } from '../hooks'
 
 const PAGE = 50
@@ -81,6 +81,46 @@ export default function People() {
   }
 
   const total = people.data?.total ?? 0
+  const [view, setView] = useViewMode('people', 'table')
+
+  const menuFor = (p: Person) =>
+    can.enroll ? (
+      <RowMenu label={`Actions for ${p.display_name}`}>
+        {(close) => (
+          <>
+            <Link className={menuItem} to={`/register?person=${p.id}`} onClick={close}>
+              <Camera className="h-4 w-4" /> Face photos: see or add
+            </Link>
+            <button className={menuItem} onClick={() => (close(), setEditing(p))}>
+              <Pencil className="h-4 w-4" /> Edit details
+            </button>
+            {p.face_samples > 0 && (
+              <button className={menuItem} onClick={() => (close(), forget(p))}>
+                <Trash2 className="h-4 w-4" /> Delete face photos
+              </button>
+            )}
+            {p.consent_at && (
+              <button className={`${menuItem} text-red-600`} onClick={() => (close(), withdraw(p))}>
+                <ShieldOff className="h-4 w-4" /> Withdraw consent
+              </button>
+            )}
+            <button className={`${menuItem} text-red-600`} onClick={() => (close(), remove(p))}>
+              <Trash2 className="h-4 w-4" /> Remove
+            </button>
+          </>
+        )}
+      </RowMenu>
+    ) : null
+  const groupBadges = (p: Person) =>
+    p.group_ids.length ? (
+      p.group_ids.map((g) => (
+        <Badge key={g} tone="indigo">
+          {groupName(groups.data, g)}
+        </Badge>
+      ))
+    ) : (
+      <span className="text-gray-400">No group</span>
+    )
 
   return (
     <>
@@ -118,6 +158,9 @@ export default function People() {
             ))}
           </select>
           <span className="text-sm text-gray-500">{people.data ? `${total} ${total === 1 ? 'person' : 'people'}` : ''}</span>
+          <div className="ml-auto">
+            <ViewSwitch value={view} onChange={setView} />
+          </div>
         </div>
 
         {people.error ? (
@@ -134,8 +177,31 @@ export default function People() {
               </Link>
             )}
           </Empty>
+        ) : view === 'cards' ? (
+          <div className="grid gap-3 p-3 sm:grid-cols-2 lg:grid-cols-3">
+            {people.data.people.map((p) => (
+              <div key={p.id} className="flex flex-col rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+                <div className="flex items-start gap-3">
+                  <Avatar person={p} size={56} />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate font-semibold text-gray-900">{p.display_name}</div>
+                    <div className="text-sm text-gray-600">{p.external_ref ? `ID ${p.external_ref}` : 'No ID'}</div>
+                    {p.email && <div className="truncate text-xs text-gray-500">{p.email}</div>}
+                  </div>
+                  {menuFor(p)}
+                </div>
+                <div className="mt-3 flex flex-wrap gap-1.5 text-xs">{groupBadges(p)}</div>
+                <div className="mt-3 flex flex-wrap gap-2 border-t pt-3 text-xs">
+                  <Badge tone={p.face_samples ? 'green' : 'amber'}>
+                    {p.face_samples} face photo{p.face_samples === 1 ? '' : 's'}
+                  </Badge>
+                  {p.consent_at ? <Badge tone="green">Consent given</Badge> : <Badge tone="gray">No consent</Badge>}
+                </div>
+              </div>
+            ))}
+          </div>
         ) : (
-          <Table>
+          <Table reserve={total > PAGE ? 58 : 0}>
             <thead className="bg-gray-50">
               <tr>
                 <th className={th}>Name</th>
@@ -162,50 +228,14 @@ export default function People() {
                   </td>
                   <td className={`${td} whitespace-nowrap`}>{p.external_ref ?? '—'}</td>
                   <td className={td}>
-                    <div className="flex flex-wrap gap-1">
-                      {p.group_ids.length ? (
-                        p.group_ids.map((g) => (
-                          <Badge key={g} tone="indigo">
-                            {groupName(groups.data, g)}
-                          </Badge>
-                        ))
-                      ) : (
-                        <span className="text-gray-400">None</span>
-                      )}
-                    </div>
+                    <div className="flex flex-wrap gap-1">{groupBadges(p)}</div>
                   </td>
                   <td className={td}>
                     <Badge tone={p.face_samples ? 'green' : 'amber'}>{p.face_samples}</Badge>
                   </td>
                   <td className={td}>{p.consent_at ? <Badge tone="green">Given</Badge> : <Badge tone="gray">None</Badge>}</td>
                   <td className={`${td} text-right`}>
-                    {can.enroll && (
-                      <RowMenu label={`Actions for ${p.display_name}`}>
-                        {(close) => (
-                          <>
-                            <Link className={menuItem} to={`/register?person=${p.id}`} onClick={close}>
-                              <Camera className="h-4 w-4" /> Add face photos
-                            </Link>
-                            <button className={menuItem} onClick={() => (close(), setEditing(p))}>
-                              <Pencil className="h-4 w-4" /> Edit details
-                            </button>
-                            {p.face_samples > 0 && (
-                              <button className={menuItem} onClick={() => (close(), forget(p))}>
-                                <Trash2 className="h-4 w-4" /> Delete face photos
-                              </button>
-                            )}
-                            {p.consent_at && (
-                              <button className={`${menuItem} text-red-600`} onClick={() => (close(), withdraw(p))}>
-                                <ShieldOff className="h-4 w-4" /> Withdraw consent
-                              </button>
-                            )}
-                            <button className={`${menuItem} text-red-600`} onClick={() => (close(), remove(p))}>
-                              <Trash2 className="h-4 w-4" /> Remove
-                            </button>
-                          </>
-                        )}
-                      </RowMenu>
-                    )}
+                    {menuFor(p)}
                   </td>
                 </tr>
               ))}
