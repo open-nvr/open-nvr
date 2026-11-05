@@ -98,6 +98,13 @@ def test_nms_drops_a_part_box_inside_the_same_object():
     c = Detection("person", (330, 55, 450, 380), 0.82)
     out = nms([group, a, b, c])
     assert a in out and b in out and c in out
+    assert group not in out, "the box around the group is the duplicate, not the people"
+    # two people boxed together with both members detected: same verdict
+    pair = Detection("person", (80, 40, 340, 390), 0.75)
+    assert set(nms([pair, a, b])) == {a, b}
+    # one narrow box inside another, alone: a person in a group box whose
+    # other members were missed, or a sliver; left alone, both kept
+    assert set(nms([pair, b])) == {pair, b}
     # a second person partly behind the first is NOT a part: half outside
     other = Detection("person", (180, 60, 300, 380), 0.7)
     assert set(nms([body, other])) == {body, other}

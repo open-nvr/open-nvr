@@ -293,6 +293,12 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A box around a group of people is the duplicate, not the people.**
+  When the detector draws one box around people crossing together beside
+  the box per person, that group box now goes and the people stay (a box
+  with two or more same-label boxes inside it is a group; one that holds
+  exactly one, about as wide, is a whole with its part).
+
 - **A person inside a group box is not a part of it.** With three people
   crossing together the detector also drew one wide box around the group,
   and the part rule dropped the person in the middle as a part of it. A
