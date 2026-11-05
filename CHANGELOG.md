@@ -293,6 +293,25 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The tracker predicts motion and assigns globally, in two stages.**
+  Each track now carries a constant-velocity Kalman filter over its box
+  centre; detections are assigned to tracks by overlap with the predicted
+  box (or the last box, for someone who stops short), solved globally
+  (Hungarian) rather than nearest-first, in ByteTrack's two stages:
+  confident boxes against every track, then the detector's unsure boxes
+  (below 0.5) against the tracks seen last frame, so a person half hidden
+  behind a colleague keeps their track. The width-growth gate measures
+  against the track's widest box of the last second, not the narrow box
+  of a moment behind someone, and a box under half the predicted height
+  (a torso) never matches. The size-aware distance remains the coasting
+  fallback; `motion=False` on the TrackConfig restores the old matcher.
+  Why: with nearest-first on the distance, three people crossing swapped
+  identities (one track jumped 140 px to another person) and every swap
+  left a fresh track to confirm beside the live ones. Replayed on the
+  Ventuno Q from a three-person, seven-pass walk (2026-11-05): 27 visits
+  → 24, five of seven passes posting exactly three; replay wall time
+  unchanged (no scipy, a few lines of numpy).
+
 - **Groups of people no longer post two or three visits per person.** Five
   changes to the tracker and the visit lifecycle, measured by replaying
   the recordings of three walk-throughs with three people through the
