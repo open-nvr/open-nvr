@@ -1131,7 +1131,9 @@ class RecordingStorageSettings(BaseModel):
 class RecordingRetentionSettings(BaseModel):
     retention_days: int | None = Field(30, ge=0, le=3650)
     protect_flagged: bool = True
-    min_free_space_gb: int | None = Field(None, ge=1, le=100000)
+    # None = automatic (2 GB or 2 % of the recordings volume, whichever is
+    # more; see retention_service.effective_min_free_gb); 0 = off.
+    min_free_space_gb: int | None = Field(None, ge=0, le=100000)
     # Under disk pressure, also purge quarantined orphaned/ footage after all
     # indexed recordings are exhausted. Off by default: quarantine is meant to
     # stay recoverable (see retention_service._cleanup_orphans_by_age).
