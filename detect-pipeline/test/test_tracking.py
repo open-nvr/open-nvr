@@ -381,17 +381,13 @@ def test_a_part_box_inside_a_tracked_person_spawns_no_second_track():
     # the whole is missed, the upper body is boxed: absorbed, not spawned
     tk.update([Detection("person", (308, 102, 380, 170), 0.9)], frame_ts=1.4)   # head and shoulders
     assert len(tk._tracks) == 1 and tk.spawns_absorbed == 1
-    # a second person INSIDE a wide track box (the track latched onto a group
-    # box) is a third of its width: a person, not a part, so tracked
-    tk2 = Tracker((576, 704), TrackConfig(fps=5))
-    group = (80, 40, 460, 390)
-    tk2.update([Detection("person", group, 0.7)], frame_ts=1.0)
-    tk2.update([Detection("person", group, 0.7)], frame_ts=1.2)
-    tk2.update([Detection("person", group, 0.7), Detection("person", (210, 60, 320, 385), 0.8)], frame_ts=1.4)
-    assert len(tk2._tracks) == 2 and tk2.spawns_absorbed == 0
+    # a torso box 75 % inside the tracked person (arms out, wider than the
+    # body) beside the whole: one track, whichever way it got there
+    tk.update([Detection("person", body, 0.8), Detection("person", (304, 100, 422, 300), 0.9)], frame_ts=1.5)
+    assert len(tk._tracks) == 1
     # a person beside the first, half outside the box, is a new track
     tk.update([Detection("person", body, 0.8), Detection("person", (390, 110, 520, 430), 0.8)], frame_ts=1.6)
-    assert len(tk._tracks) == 2 and tk.spawns_absorbed == 1
+    assert len(tk._tracks) == 2
     # the guard can be switched off
     tk.spawn_containment = 0.0
     tk.update([Detection("person", body, 0.8), Detection("person", (390, 110, 520, 430), 0.8),
@@ -438,7 +434,34 @@ def test_a_box_around_two_tracked_people_is_a_group_box():
     g = (90, 90, 370, 410)
     tk3.update([Detection("person", g, 0.7)], frame_ts=1.0)
     tk3.update([Detection("person", g, 0.7)], frame_ts=1.2)
-    tk3.update([Detection("person", g, 0.7), Detection("person", a, 0.8), Detection("person", b, 0.8)], frame_ts=1.4)
-    tk3.update([Detection("person", g, 0.7), Detection("person", a, 0.8), Detection("person", b, 0.8)], frame_ts=1.6)
+    # (overlap suppression drops the group box on frames where its members
+    # are boxed, so the tracker sees the members alone; the group track
+    # coasts, and its box holds both)
+    tk3.update([Detection("person", a, 0.8), Detection("person", b, 0.8)], frame_ts=1.4)
+    tk3.update([Detection("person", a, 0.8), Detection("person", b, 0.8)], frame_ts=1.6)
     grp = next(t for t in tk3._tracks if t.box == g)
-    assert grp.group_now and grp.group_frames == 1 or grp.group_frames >= 1
+    assert grp.group_now and grp.group_frames >= 1 and len(tk3._tracks) == 3
+    assert grp.box == g, "the group track did not steal a member's box (size gate)"
+
+
+def test_a_box_of_a_very_different_size_never_matches():
+    """A person's track must not take the box the detector drew around a
+    group (three times as wide), nor a group track a member's box."""
+    tk = Tracker((576, 704), TrackConfig(fps=5))
+    person = (300, 100, 380, 400)
+    for ts in (1.0, 1.2):
+        tk.update([Detection("person", person, 0.8)], frame_ts=ts)
+    group = (200, 90, 560, 410)
+    tk.update([Detection("person", group, 0.7)], frame_ts=1.4)
+    assert len(tk._tracks) == 2 and tk._tracks[0].box == person, "coasting, not switched to the group box"
+    tk2 = Tracker((576, 704), TrackConfig(fps=5, width_grow_max=0.0, width_shrink_max=0.0))
+    for ts in (1.0, 1.2):
+        tk2.update([Detection("person", person, 0.8)], frame_ts=ts)
+    tk2.update([Detection("person", group, 0.7)], frame_ts=1.4)
+    assert len(tk2._tracks) == 1 and tk2._tracks[0].box == group, "the old behaviour with the gate off"
+    # half hidden behind a chair: a box half as wide is still this person
+    tk3 = Tracker((576, 704), TrackConfig(fps=5))
+    for ts in (1.0, 1.2):
+        tk3.update([Detection("person", person, 0.8)], frame_ts=ts)
+    tk3.update([Detection("person", (340, 100, 380, 400), 0.7)], frame_ts=1.4)
+    assert len(tk3._tracks) == 1 and tk3._tracks[0].box == (340, 100, 380, 400)

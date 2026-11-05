@@ -89,6 +89,17 @@ class TrackConfig:
     # (Ventuno Q, 2026-11-05). 0 keeps the gate fixed.
     coast_gate_growth: float = 0.25
     coast_gate_max: float = 3.0
+    # A detection much WIDER than the track's box (over width_grow_max
+    # times) or much narrower (under 1/width_shrink_max) is never a match,
+    # whatever the distance. The size-aware distance lets a box three
+    # times as wide through when the bottom-centres agree, so a track
+    # following one person took the box the detector drew around a group,
+    # and a group track stole a member (replayed on the Ventuno Q,
+    # 2026-11-05). Shrinking is allowed more: a person half hidden behind
+    # a chair is a narrower box of the same person. Width only: heights
+    # swing with pose and partial boxes. 0 turns a limit off.
+    width_grow_max: float = 1.6
+    width_shrink_max: float = 2.5
     # frames a confirmed track survives unmatched (Frigate: ~fps*5)
     max_disappeared: int | None = None
     # size-aware distance below which a detection matches a track (Frigate ~2.5)
@@ -237,9 +248,9 @@ def bottom_center_distance(a: Box, b: Box) -> float:
     return math.sqrt(dx * dx + dy * dy + dw * dw + dh * dh)
 
 
-#: See pipeline.PART_MIN_WIDTH_SHARE: a part is as wide as its whole; a
-#: person inside a wider group box is not a part.
-PART_MIN_WIDTH_SHARE = 0.6
+def _width_ratio(det: Box, track: Box) -> float:
+    """The detection's width over the track box's width."""
+    return max(det[2] - det[0], 1) / max(track[2] - track[0], 1)
 
 
 def _width_share(inner: Box, outer: Box) -> float:
@@ -348,7 +359,7 @@ class Tracker:
         # frame-level rule in pipeline.nms catches the pair when both boxes
         # are in one frame, this catches the part box on frames where the
         # whole was missed. 0 turns it off.
-        self.spawn_containment: float = 0.85
+        self.spawn_containment: float = 0.7
         self.spawns_absorbed = 0
         # Multi-frame OCR (opt-in per camera): retain top-K plate candidates
         # on vehicle tracks. The worker enables this only when the camera's
@@ -501,6 +512,10 @@ class Tracker:
             for di, det in enumerate(detections):
                 if not labels_match(det.label, tr.label):
                     continue
+                grow = _width_ratio(det.box, tr.box)
+                if (cfg.width_grow_max > 0 and grow > cfg.width_grow_max) or \
+                        (cfg.width_shrink_max > 0 and grow < 1.0 / cfg.width_shrink_max):
+                    continue
                 dist = bottom_center_distance(tr.box, det.box)
                 gate = cfg.threshold_for(det.label)
                 if tr.misses > 0 and cfg.coast_gate_growth > 0:
@@ -533,12 +548,13 @@ class Tracker:
             if self.spawn_containment > 0 and any(
                     labels_match(det.label, tr.label)
                     and _coverage(det.box, tr.box) >= self.spawn_containment
-                    and _width_share(det.box, tr.box) >= PART_MIN_WIDTH_SHARE
+                    and (tr.matched_now or _width_share(det.box, tr.box) >= 0.6)
                     for tr in self._tracks):
-                # The detector boxed a part of someone already tracked (an
-                # upper body on a frame where the whole was missed); its
+                # The detector boxed a part of someone already tracked; its
                 # bottom-centre sits far from the track's, so it did not
-                # match, and it would have become a second visit.
+                # match, and it would have become a second visit. Inside a
+                # COASTING track only a box about as wide counts as a part:
+                # a narrow one is as likely a person the group box covered.
                 self.spawns_absorbed += 1
                 continue
             self._spawn(det, bgr, now)
