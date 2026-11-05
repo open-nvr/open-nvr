@@ -319,6 +319,13 @@ class Tracker:
         # Spawns refused because the track cap or spawn-score floor was hit —
         # observability for the bounded-load guards (service exports it).
         self.spawns_dropped = 0
+        # Unmatched detections that were a PART of a tracked object (mostly
+        # inside a live track's box, same label) and so spawned nothing; the
+        # frame-level rule in pipeline.nms catches the pair when both boxes
+        # are in one frame, this catches the part box on frames where the
+        # whole was missed. 0 turns it off.
+        self.spawn_containment: float = 0.85
+        self.spawns_absorbed = 0
         # Multi-frame OCR (opt-in per camera): retain top-K plate candidates
         # on vehicle tracks. The worker enables this only when the camera's
         # assignments include the LPR skill.
@@ -487,6 +494,16 @@ class Tracker:
             det = detections[di]
             if det.score < cfg.min_spawn_score or len(self._tracks) >= cfg.max_tracks:
                 self.spawns_dropped += 1
+                continue
+            if self.spawn_containment > 0 and any(
+                    labels_match(det.label, tr.label)
+                    and _coverage(det.box, tr.box) >= self.spawn_containment
+                    for tr in self._tracks):
+                # The detector boxed a part of someone already tracked (an
+                # upper body on a frame where the whole was missed); its
+                # bottom-centre sits far from the track's, so it did not
+                # match, and it would have become a second visit.
+                self.spawns_absorbed += 1
                 continue
             self._spawn(det, bgr, now)
 

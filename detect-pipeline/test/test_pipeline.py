@@ -83,6 +83,12 @@ def test_nms_drops_a_part_box_inside_the_same_object():
     upper = Detection("person", (108, 52, 214, 190), 0.61)    # fully inside, IoU ≈ 0.4
     assert nms([body, upper]) == [body]
     assert nms([upper, body]) == [body], "order of arrival does not matter: the larger box wins"
+    # the part scoring HIGHER than the whole (the face is the clearest part,
+    # and what the walk-through on 2026-11-05 still produced after the first
+    # version of this rule): the whole still wins
+    sure_upper = Detection("person", (108, 52, 214, 190), 0.93)
+    assert nms([sure_upper, body]) == [body]
+    assert nms([body, sure_upper]) == [body]
     # a second person partly behind the first is NOT a part: half outside
     other = Detection("person", (180, 60, 300, 380), 0.7)
     assert set(nms([body, other])) == {body, other}

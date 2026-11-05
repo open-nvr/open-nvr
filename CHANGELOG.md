@@ -293,6 +293,15 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The part-box rule now holds when the part scores higher than the
+  whole, and on frames where only the part was detected.** Overlap
+  suppression applies the containment rule by size, largest first, so an
+  upper-body box with a better score than the full body no longer survives;
+  and the tracker absorbs an unmatched detection that lies mostly inside a
+  live track of the same label instead of starting a second track from it
+  (`tier0_track_spawns_absorbed_total`). One walk past the camera is one
+  visit.
+
 - **The pipeline's CPU gauge no longer spikes when two scrapers coincide.**
   `tier0_process_cpu_percent` is CPU time over the window since the previous
   scrape; a window of a few hundred milliseconds that caught one keyframe
