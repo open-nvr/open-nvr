@@ -95,7 +95,15 @@ def _default_encode_jpeg(frame: object, quality: int) -> Optional[bytes]:
 DRAIN_LIVE_EDGE_SECONDS = 0.015
 #: And never more than this many grabs per call, so a stream that keeps a
 #: deep queue (or lies about timing) costs a bounded amount per request.
+#: A drain that runs out of grabs before one has to wait has not reached
+#: the live edge (150 grabs is 6 s of video at 25 fps, 2.5 s at 60 fps):
+#: the capture is reopened instead, see ``get_jpeg``.
 DRAIN_MAX_GRABS = 150
+#: A capture idle for longer than this is reopened before it is read,
+#: without trying the drain first. The backlog after such a gap is far
+#: deeper than the drain can walk at any frame rate, and a caller that
+#: asks this rarely does not mind the ~1 s an RTSP reopen costs.
+REOPEN_AFTER_IDLE_SECONDS = 30.0
 
 
 @dataclass
@@ -104,6 +112,8 @@ class _CameraEntry:
     url: Optional[str] = None
     lock: threading.Lock = field(default_factory=threading.Lock)
     consecutive_failures: int = 0
+    #: ``clock()`` at the last frame handed out; None until the first.
+    last_read_at: Optional[float] = None
 
 
 class PersistentCapturePool:
@@ -115,10 +125,12 @@ class PersistentCapturePool:
         capture_factory: CaptureFactory | None = None,
         encode_jpeg: EncodeJpeg | None = None,
         jpeg_quality: int = 85,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self._factory = capture_factory or _default_capture_factory
         self._encode = encode_jpeg or _default_encode_jpeg
         self._jpeg_quality = int(jpeg_quality)
+        self._clock = clock or time.monotonic
         self._cameras: dict[int, _CameraEntry] = {}
         self._dict_lock = threading.Lock()
 
@@ -138,25 +150,39 @@ class PersistentCapturePool:
         entry = self._entry(camera_id)
         with entry.lock:
             # (Re)open if we have no capture or the URL changed (e.g. a
-            # rotated MediaMTX JWT in the query string).
-            if entry.capture is None or entry.url != url:
+            # rotated MediaMTX JWT in the query string), or if the capture
+            # sat idle so long that its backlog is minutes of the past.
+            idle = (entry.last_read_at is not None
+                    and self._clock() - entry.last_read_at > REOPEN_AFTER_IDLE_SECONDS)
+            fresh = entry.capture is None or entry.url != url or idle
+            if fresh:
                 self._open_locked(entry, url)
             if entry.capture is None:
                 return None
 
-            frame = self._read_locked(entry)
-            if frame is None:
+            frame, live = self._read_locked(entry)
+            if frame is not None and not live and not fresh:
+                # The drain ran out before it reached the live edge: the
+                # frame in hand is from the past (#796). Reopening reaches
+                # the present; whatever it yields is what the caller gets.
+                self._open_locked(entry, url)
+                if entry.capture is None:
+                    entry.consecutive_failures += 1
+                    return None
+                frame, _ = self._read_locked(entry)
+            elif frame is None:
                 # One transparent reopen + retry — covers a capture that
                 # silently died (stream restart, token rotation).
                 self._open_locked(entry, url)
                 if entry.capture is None:
                     return None
-                frame = self._read_locked(entry)
+                frame, _ = self._read_locked(entry)
             if frame is None:
                 entry.consecutive_failures += 1
                 return None
 
             entry.consecutive_failures = 0
+            entry.last_read_at = self._clock()
             try:
                 return self._encode(frame, self._jpeg_quality)
             except Exception:
@@ -193,16 +219,18 @@ class PersistentCapturePool:
         entry.url = url
 
     def _read_locked(self, entry: _CameraEntry):
-        # Caller holds entry.lock.
+        """``(frame, live)``: the frame (None on failure) and whether the
+        drain reached the live edge. A capture without grab()/retrieve()
+        cannot be drained and counts as live. Caller holds entry.lock."""
         cap = entry.capture
         if cap is None:
-            return None
+            return None, False
         if not (hasattr(cap, "grab") and hasattr(cap, "retrieve")):
             try:
                 ok, frame = cap.read()
             except Exception:
-                return None
-            return frame if ok and frame is not None else None
+                return None, False
+            return (frame if ok and frame is not None else None), True
         # Drain to the live edge. A persistent RTSP capture read once every
         # few seconds does not return the current picture: FFmpeg queues
         # the frames that arrived meanwhile (CAP_PROP_BUFFERSIZE is a
@@ -213,24 +241,32 @@ class PersistentCapturePool:
         # and returns at once while frames are queued; the first grab
         # that has to WAIT is the one that fetched a frame the camera
         # produced just now. Bounded, so a stalled stream cannot spin.
+        # A grab that FAILS mid-drain ends it too, keeping the last good
+        # grab — but that frame is not known to be live (the stream broke
+        # while we were still in the backlog), so it is reported as not.
         try:
             started = time.monotonic()
             if not cap.grab():
-                return None
+                return None, False
             waited = time.monotonic() - started >= DRAIN_LIVE_EDGE_SECONDS
+            live = waited
             for _ in range(DRAIN_MAX_GRABS):
                 if waited:
+                    live = True
                     break                       # that grab was the live one
                 started = time.monotonic()
                 if not cap.grab():
+                    live = False
                     break                       # keep the last good grab
                 waited = time.monotonic() - started >= DRAIN_LIVE_EDGE_SECONDS
+            else:
+                live = waited                   # the last grab may have waited
             ok, frame = cap.retrieve()
         except Exception:
-            return None
+            return None, False
         if not ok or frame is None:
-            return None
-        return frame
+            return None, False
+        return frame, live
 
     def release(self, camera_id: int) -> None:
         """Release the capture for one camera (e.g. when its inference
