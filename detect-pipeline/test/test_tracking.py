@@ -381,6 +381,14 @@ def test_a_part_box_inside_a_tracked_person_spawns_no_second_track():
     # the whole is missed, the upper body is boxed: absorbed, not spawned
     tk.update([Detection("person", (308, 102, 380, 170), 0.9)], frame_ts=1.4)   # head and shoulders
     assert len(tk._tracks) == 1 and tk.spawns_absorbed == 1
+    # a second person INSIDE a wide track box (the track latched onto a group
+    # box) is a third of its width: a person, not a part, so tracked
+    tk2 = Tracker((576, 704), TrackConfig(fps=5))
+    group = (80, 40, 460, 390)
+    tk2.update([Detection("person", group, 0.7)], frame_ts=1.0)
+    tk2.update([Detection("person", group, 0.7)], frame_ts=1.2)
+    tk2.update([Detection("person", group, 0.7), Detection("person", (210, 60, 320, 385), 0.8)], frame_ts=1.4)
+    assert len(tk2._tracks) == 2 and tk2.spawns_absorbed == 0
     # a person beside the first, half outside the box, is a new track
     tk.update([Detection("person", body, 0.8), Detection("person", (390, 110, 520, 430), 0.8)], frame_ts=1.6)
     assert len(tk._tracks) == 2 and tk.spawns_absorbed == 1

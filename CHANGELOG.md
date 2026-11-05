@@ -293,6 +293,13 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A person inside a group box is not a part of it.** With three people
+  crossing together the detector also drew one wide box around the group,
+  and the part rule dropped the person in the middle as a part of it. A
+  part is as wide as its whole; a box narrower than 60 % of the one around
+  it is a separate object and is kept, both in overlap suppression and in
+  the tracker's spawn guard.
+
 - **The part-box rule now holds when the part scores higher than the
   whole, and on frames where only the part was detected.** Overlap
   suppression applies the containment rule by size, largest first, so an

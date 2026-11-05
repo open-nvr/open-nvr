@@ -102,6 +102,13 @@ CROSS_LABEL_IOU = 0.85
 #: whose full body is already boxed), not a second one. IoU never catches
 #: it: a part is small, so its IoU with the whole is low. 0 or 1 = off.
 CONTAINMENT = 0.85
+#: A part spans (nearly) the width of its whole: an upper body is as wide
+#: as the person. A PERSON inside a wider box is not a part of it, it is
+#: one of several people the detector boxed together as a group (three
+#: people crossing side by side, Ventuno Q 2026-11-05: the group box
+#: swallowed the one in the middle). The inner box must be at least this
+#: share of the outer box's width to count as a part.
+PART_MIN_WIDTH_SHARE = 0.6
 
 
 def nms(
@@ -119,15 +126,18 @@ def nms(
     ``iou_threshold`` is raised to it, since suppressing ACROSS labels
     more eagerly than within one is never the intent.
 
-    A same-label box that is smaller than a kept box and lies at least
-    ``containment`` of its own area inside it is a part of that object —
-    the detector's second box on one person's upper body — and is dropped
+    A same-label box that is smaller than a kept box, lies at least
+    ``containment`` of its own area inside it AND spans at least
+    PART_MIN_WIDTH_SHARE of its width is a part of that object — the
+    detector's second box on one person's upper body — and is dropped
     whatever its IoU, which for a part is always low. Measured on the
     Ventuno Q (2026-11-05): with IoU alone one walk past the camera posted
     two or three visits per pass, each with its own recording fetch and
-    photo. ``None``, ``<= 0`` or ``>= 1`` disables the rule. A person in
-    front of a car is a different label and never affected; two people
-    where one is fully inside the other's box is the trade-off accepted.
+    photo. The width test keeps a person who stands inside a wider box the
+    detector drew around a group: a part is as wide as its whole, a person
+    in a group is a third of it. ``None``, ``<= 0`` or ``>= 1`` disables
+    the rule. A person in front of a car is a different label and never
+    affected.
 
     The losing label is gone from ``FrameResult.detections`` too, so a
     benchmark scoring per-label recall (evalcmp) measures this policy as
@@ -160,7 +170,7 @@ def nms(
     by_size = sorted(kept, key=lambda x: _area(x.box), reverse=True)
     whole: list[Detection] = []
     for d in by_size:
-        if any(k.label == d.label and contained_share(d.box, k.box) >= contain for k in whole):
+        if any(k.label == d.label and is_part_of(d.box, k.box, contain) for k in whole):
             continue
         whole.append(d)
     # back in score order, as callers expect
@@ -169,6 +179,15 @@ def nms(
 
 def _area(b: Box) -> float:
     return max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+
+
+def is_part_of(inner: Box, outer: Box, containment: float = CONTAINMENT) -> bool:
+    """Is ``inner`` a part of the object in ``outer``: mostly inside it and
+    about as wide (see PART_MIN_WIDTH_SHARE)?"""
+    if contained_share(inner, outer) < containment:
+        return False
+    iw, ow = max(0.0, inner[2] - inner[0]), max(0.0, outer[2] - outer[0])
+    return ow > 0 and iw / ow >= PART_MIN_WIDTH_SHARE
 
 
 def select_regions(
