@@ -367,3 +367,25 @@ def test_unrelated_labels_still_never_match():
     tk.update([Detection("car", box, 0.9)])
     tk.update([Detection("person", box, 0.9)])
     assert tk.population == 2
+
+
+def test_a_part_box_inside_a_tracked_person_spawns_no_second_track():
+    """Camera 23, 2026-11-05: on frames where only the upper body was
+    detected, that box sat far from the full-body track's bottom-centre,
+    spawned a track of its own and posted a second visit per pass."""
+    tk = Tracker((576, 704), TrackConfig(fps=5))
+    body = (300, 100, 420, 420)
+    tk.update([Detection("person", body, 0.8)], frame_ts=1.0)
+    tk.update([Detection("person", body, 0.8)], frame_ts=1.2)
+    assert len(tk._tracks) == 1 and tk._tracks[0].confirmed
+    # the whole is missed, the upper body is boxed: absorbed, not spawned
+    tk.update([Detection("person", (308, 102, 380, 170), 0.9)], frame_ts=1.4)   # head and shoulders
+    assert len(tk._tracks) == 1 and tk.spawns_absorbed == 1
+    # a person beside the first, half outside the box, is a new track
+    tk.update([Detection("person", body, 0.8), Detection("person", (390, 110, 520, 430), 0.8)], frame_ts=1.6)
+    assert len(tk._tracks) == 2 and tk.spawns_absorbed == 1
+    # the guard can be switched off
+    tk.spawn_containment = 0.0
+    tk.update([Detection("person", body, 0.8), Detection("person", (390, 110, 520, 430), 0.8),
+               Detection("person", (308, 102, 380, 170), 0.9)], frame_ts=1.8)
+    assert len(tk._tracks) == 3

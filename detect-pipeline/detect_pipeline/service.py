@@ -1150,6 +1150,10 @@ class CameraWorker:
                     "tier0_track_spawns_dropped", float(tracker.spawns_dropped),
                     {"camera": self.spec.camera_id},
                 )
+                _metrics.gauge(
+                    "tier0_track_spawns_absorbed_total", float(tracker.spawns_absorbed),
+                    {"camera": self.spec.camera_id},
+                )
                 # Best-frame picks refused for blur, and plate candidates
                 # whose pixels the recording replaced at full resolution.
                 _metrics.gauge(

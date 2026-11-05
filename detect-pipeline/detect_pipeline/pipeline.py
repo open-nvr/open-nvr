@@ -41,7 +41,7 @@ from .detector import (
     detections_to_frame,
     to_bgr,
 )
-from .regions import Box, calculate_region, get_min_region_size, intersection_over_union
+from .regions import Box, calculate_region, contained_share, get_min_region_size, intersection_over_union
 from .tracking import Detection, Track, Tracker
 
 log = logging.getLogger("detect_pipeline.pipeline")
@@ -104,15 +104,6 @@ CROSS_LABEL_IOU = 0.85
 CONTAINMENT = 0.85
 
 
-def contained_share(inner: Box, outer: Box) -> float:
-    """The share of ``inner``'s area that lies inside ``outer`` (0..1)."""
-    x1, y1 = max(inner[0], outer[0]), max(inner[1], outer[1])
-    x2, y2 = min(inner[2], outer[2]), min(inner[3], outer[3])
-    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
-    area = max(0.0, inner[2] - inner[0]) * max(0.0, inner[3] - inner[1])
-    return inter / area if area > 0 else 0.0
-
-
 def nms(
     dets: list[Detection],
     iou_threshold: float = 0.5,
@@ -157,13 +148,23 @@ def nms(
             if limit is not None and intersection_over_union(d.box, k.box) > limit:
                 duplicate = True
                 break
-            if (contain is not None and k.label == d.label and _area(d.box) < _area(k.box)
-                    and contained_share(d.box, k.box) >= contain):
-                duplicate = True
-                break
         if not duplicate:
             kept.append(d)
-    return kept
+    if contain is None or len(kept) < 2:
+        return kept
+    # The part rule, by SIZE rather than score: the detector often scores
+    # the upper body higher than the whole person (the face is the clearest
+    # part), so a score-ordered pass would keep the part and let the whole
+    # through. Largest first; a same-label box mostly inside a larger
+    # survivor is a part of it.
+    by_size = sorted(kept, key=lambda x: _area(x.box), reverse=True)
+    whole: list[Detection] = []
+    for d in by_size:
+        if any(k.label == d.label and contained_share(d.box, k.box) >= contain for k in whole):
+            continue
+        whole.append(d)
+    # back in score order, as callers expect
+    return [d for d in kept if any(d is w for w in whole)]
 
 
 def _area(b: Box) -> float:
