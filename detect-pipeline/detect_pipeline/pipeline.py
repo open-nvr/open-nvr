@@ -97,12 +97,27 @@ class FrameResult:
 #: not — that double box was the most visible overlay inaccuracy, and the
 #: tracker (which matches per label) spawned two tracks for it.
 CROSS_LABEL_IOU = 0.85
+#: A same-label box with at least this share of its own area inside a larger
+#: kept box is a PART of that object (a head-and-shoulders box on a person
+#: whose full body is already boxed), not a second one. IoU never catches
+#: it: a part is small, so its IoU with the whole is low. 0 or 1 = off.
+CONTAINMENT = 0.85
+
+
+def contained_share(inner: Box, outer: Box) -> float:
+    """The share of ``inner``'s area that lies inside ``outer`` (0..1)."""
+    x1, y1 = max(inner[0], outer[0]), max(inner[1], outer[1])
+    x2, y2 = min(inner[2], outer[2]), min(inner[3], outer[3])
+    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    area = max(0.0, inner[2] - inner[0]) * max(0.0, inner[3] - inner[1])
+    return inter / area if area > 0 else 0.0
 
 
 def nms(
     dets: list[Detection],
     iou_threshold: float = 0.5,
     cross_label_iou: float | None = CROSS_LABEL_IOU,
+    containment: float | None = CONTAINMENT,
 ) -> list[Detection]:
     """Greedy non-max suppression; keeps the highest score.
 
@@ -113,6 +128,16 @@ def nms(
     ``iou_threshold`` is raised to it, since suppressing ACROSS labels
     more eagerly than within one is never the intent.
 
+    A same-label box that is smaller than a kept box and lies at least
+    ``containment`` of its own area inside it is a part of that object —
+    the detector's second box on one person's upper body — and is dropped
+    whatever its IoU, which for a part is always low. Measured on the
+    Ventuno Q (2026-11-05): with IoU alone one walk past the camera posted
+    two or three visits per pass, each with its own recording fetch and
+    photo. ``None``, ``<= 0`` or ``>= 1`` disables the rule. A person in
+    front of a car is a different label and never affected; two people
+    where one is fully inside the other's box is the trade-off accepted.
+
     The losing label is gone from ``FrameResult.detections`` too, so a
     benchmark scoring per-label recall (evalcmp) measures this policy as
     well as the model; run such comparisons with the rule off
@@ -121,6 +146,9 @@ def nms(
     cross: float | None = None
     if cross_label_iou is not None and 0.0 < cross_label_iou < 1.0:
         cross = max(cross_label_iou, iou_threshold)
+    contain: float | None = None
+    if containment is not None and 0.0 < containment < 1.0:
+        contain = containment
     kept: list[Detection] = []
     for d in sorted(dets, key=lambda x: x.score, reverse=True):
         duplicate = False
@@ -129,9 +157,17 @@ def nms(
             if limit is not None and intersection_over_union(d.box, k.box) > limit:
                 duplicate = True
                 break
+            if (contain is not None and k.label == d.label and _area(d.box) < _area(k.box)
+                    and contained_share(d.box, k.box) >= contain):
+                duplicate = True
+                break
         if not duplicate:
             kept.append(d)
     return kept
+
+
+def _area(b: Box) -> float:
+    return max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
 
 
 def select_regions(
@@ -209,6 +245,7 @@ class DetectPipeline:
         max_regions: int = 8,
         allowed_labels: frozenset[str] | set[str] | None = None,
         cross_label_iou: float | None = CROSS_LABEL_IOU,
+        containment: float | None = CONTAINMENT,
         object_mask: Callable[[list[Detection]], list[Detection]] | None = None,
         object_filter: Callable[[list[Detection]], list[Detection]] | None = None,
     ) -> None:
@@ -242,6 +279,9 @@ class DetectPipeline:
         # See nms(): one object the model labels two ways is one box.
         # DETECT_NMS_CROSS_LABEL_IOU; 0 or 1 turns the rule off.
         self.cross_label_iou = cross_label_iou
+        # See nms(): a same-label box mostly inside a larger one is a part.
+        # DETECT_NMS_CONTAINMENT; 0 or 1 turns the rule off.
+        self.containment = containment
         self._frame_idx = 0
 
     def process_frame(self, frame) -> FrameResult:
@@ -336,7 +376,7 @@ class DetectPipeline:
                 before = len(dets)
                 dets = self.object_mask(dets)
                 masked = before - len(dets)
-            dets = nms(dets, cross_label_iou=self.cross_label_iou)
+            dets = nms(dets, cross_label_iou=self.cross_label_iou, containment=self.containment)
             if self.object_filter is not None and dets:
                 before = len(dets)
                 dets = self.object_filter(dets)

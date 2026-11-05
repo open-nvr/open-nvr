@@ -8,6 +8,17 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The workflows API (#773).** `workflows` and `workflow_versions`
+  tables, the permissions `workflows.view`, `.manage` and `.approve`
+  (granted on upgrade to the roles RFC #620 names, through `cameras.view`
+  and `cameras.manage`), and `/api/v1/workflows`: list, save a file (checked
+  by the SDK's validator against this site; `422` with each error at its
+  key), every save a new version, Off / Test / On, three templates (Gate
+  concierge, Safety gear check, Night intrusion triage), and a workflow's
+  runs, step by step with an AI step's calls. New workflows start in Test;
+  only an admin turns On one that moves things, and a new version whose AI
+  steps changed goes back to Test.
+
 - **The escalation proposal: weak evidence on the sub stream → detect on
   the main stream, by consent.** Every posted visit now says where its crop
   came from (sub-sized fallback, keyframe path, or the recording) and how
@@ -275,6 +286,14 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   scrape; a window of a few hundred milliseconds that caught one keyframe
   cycle read 60 to 140 % against a real load of 9 %. A window shorter than
   2 s now keeps the previous reading and keeps accumulating.
+
+- **One person no longer becomes two or three visits per pass.** The
+  detector sometimes boxes a person's upper body beside the full body; the
+  part's overlap ratio with the whole is low, so overlap suppression kept
+  both, and since the recording-request change each confirmed its own
+  track and posted its own visit, photo and fetch. A same-label box that
+  lies 85 % or more inside a larger box (`DETECT_NMS_CONTAINMENT`, 0 or 1
+  turns it off) is now dropped as a part of that object.
 
 - **A search result's "play the recording" lands where the subject is.**
   The playhead now opens 3 s before the event's instant, inside the same
