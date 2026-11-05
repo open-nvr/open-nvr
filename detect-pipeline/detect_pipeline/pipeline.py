@@ -167,12 +167,28 @@ def nms(
     # part), so a score-ordered pass would keep the part and let the whole
     # through. Largest first; a same-label box mostly inside a larger
     # survivor is a part of it.
+    # Two shapes of containment, told apart by COUNT. A box with two or
+    # more same-label boxes inside it is a GROUP box: the detector drew one
+    # box around people crossing together (three of them, Ventuno Q
+    # 2026-11-05) beside the box per person; the group box is the duplicate
+    # and the people are kept. A box with exactly one same-label box inside
+    # it that is about as wide is a whole with its PART (an upper body); the
+    # part is the duplicate. One narrow box inside another is left alone: a
+    # person in a group box whose other members were missed, or a sliver,
+    # and the two cannot be told apart from geometry.
     by_size = sorted(kept, key=lambda x: _area(x.box), reverse=True)
-    whole: list[Detection] = []
-    for d in by_size:
-        if any(k.label == d.label and is_part_of(d.box, k.box, contain) for k in whole):
+    dropped: set[int] = set()
+    for i, outer in enumerate(by_size):
+        if i in dropped:
             continue
-        whole.append(d)
+        inside = [j for j in range(i + 1, len(by_size))
+                  if j not in dropped and by_size[j].label == outer.label
+                  and contained_share(by_size[j].box, outer.box) >= contain]
+        if len(inside) >= 2:
+            dropped.add(i)                            # a group box
+        elif len(inside) == 1 and is_part_of(by_size[inside[0]].box, outer.box, contain):
+            dropped.add(inside[0])                    # a part of this one
+    whole = [d for j, d in enumerate(by_size) if j not in dropped]
     # back in score order, as callers expect
     return [d for d in kept if any(d is w for w in whole)]
 
