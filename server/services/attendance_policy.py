@@ -7,7 +7,8 @@ camera every ``attempt_interval_s``; a bucket in which at least one frame
 was looked at counts, and a person is PRESENT when they were recognised in
 at least ``present_ratio`` of the counted buckets — LATE if the first of
 those sightings came after ``late_grace_minutes``. ``match_threshold`` is
-the face similarity a sighting needs.
+the face similarity a sighting needs. A session watched in less than
+``min_coverage_ratio`` of its buckets is flagged ``no_coverage``.
 
 Stored in ``security_settings`` under ``attendance_policy`` (site) and on
 ``attendance_groups.policy`` (overrides, any subset of the keys). Unknown
@@ -32,6 +33,7 @@ DEFAULT_POLICY: dict[str, Any] = {
     "match_threshold": 0.5,
     "attempt_interval_s": 150,
     "finalize_grace_minutes": 5,
+    "min_coverage_ratio": 0.5,
 }
 
 #: key -> (type, low, high), inclusive. present_ratio's low bound is
@@ -45,6 +47,11 @@ _BOUNDS: dict[str, tuple[type, float, float]] = {
     # At least 1: a look sent right at the bell must reach core before
     # the verdict is drawn, or it is linked and never counted.
     "finalize_grace_minutes": (int, 1, 120),
+    # A session watched in less than this share of its buckets is flagged
+    # no_coverage and left out of the rates: an outage over most of a class
+    # is not evidence that the unseen were absent. 0 = only a session
+    # nobody watched at all.
+    "min_coverage_ratio": (float, 0.0, 1.0),
 }
 
 

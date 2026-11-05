@@ -2039,7 +2039,8 @@ class AttendanceSession(Base):
     start_at = Column(DateTime(timezone=True), nullable=False)
     end_at = Column(DateTime(timezone=True), nullable=False)
     camera_ids = Column(JSON, nullable=False)
-    #: scheduled | running | finalizing | final | cancelled
+    #: scheduled | running | finalizing | final | cancelled (by the timetable)
+    #: | off (called off by a person: a holiday; the scheduler leaves it)
     status = Column(String(16), nullable=False, default="scheduled", server_default="scheduled",
                     index=True)
     finalized_at = Column(DateTime(timezone=True), nullable=True)

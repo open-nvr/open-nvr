@@ -113,11 +113,16 @@ async def identify(image: bytes) -> dict[str, Any]:
     return result
 
 
-async def register(person_uuid: str, name: str, image: bytes) -> int:
-    """Add one photo to the person's samples; returns how many they have."""
+async def register(person_uuid: str, image: bytes) -> int:
+    """Add one photo to the person's samples; returns how many they have.
+
+    The adapter is told the uuid and nothing else about the person: its
+    ``name`` is the uuid too. KAI-C lets any holder of the site key ask
+    this adapter to identify a frame, and a name in the answer would hand
+    them the roster; the uuid means nothing outside core."""
     resp = await _call("POST", "/faces/register",
                        files={"frame": ("photo.jpg", image, "image/jpeg")},
-                       data={"person_id": person_uuid, "name": name,
+                       data={"person_id": person_uuid, "name": person_uuid,
                              "category": "attendance", "append": "true"})
     _raise_for(resp)
     face = (resp.json() or {}).get("face") or {}

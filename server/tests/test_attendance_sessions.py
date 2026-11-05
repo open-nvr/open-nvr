@@ -24,6 +24,7 @@ import pytest
 
 from services import (
     attendance_event_consumer as consumer,
+    attendance_faces,
     attendance_scheduler as sched,
 )
 from tests.test_api_tokens import env  # noqa: F401 - shared fixture
@@ -38,6 +39,21 @@ def _min(m: float) -> datetime:
     return T0 + timedelta(minutes=m)
 
 
+def _enrolled(env, *people, when=None):  # noqa: F811
+    """Consent on record and a face enrolled, written straight to the DB:
+    only such people can be recognised, so only they are marked."""
+    when = when or datetime(2026, 1, 1, tzinfo=UTC)
+    s = env.Session()
+    for p in people:
+        row = s.get(env.models.AttendancePerson, p["id"])
+        row.consent_at, row.face_samples = when, 1
+        # Joined before the (fake-clock) classes these tests run.
+        s.query(env.models.AttendanceGroupMember).filter(
+            env.models.AttendanceGroupMember.person_id == p["id"]).update({"added_at": when})
+    s.commit()
+    s.close()
+
+
 def _setup(env, members=("Asha", "Bilal", "Chen", "Dev"), cams=(1,), **slot):  # noqa: F811
     A = env.jwt("admin")
     g = env.client.post(f"{URL}/groups", headers=A,
@@ -48,6 +64,7 @@ def _setup(env, members=("Asha", "Bilal", "Chen", "Dev"), cams=(1,), **slot):  #
             "display_name": name, "external_ref": f"R{i}"}).json()
     env.client.put(f"{URL}/groups/{g['id']}/members", headers=A,
                    json={"person_ids": [p["id"] for p in people.values()]})
+    _enrolled(env, *people.values())
     body = {"group_id": g["id"], "weekday": 0, "start_time": "09:00", "end_time": "09:50",
             "camera_ids": list(cams), **slot}
     s = env.client.post(f"{URL}/timetable", headers=A, json=body)
@@ -360,7 +377,13 @@ def test_active_answers_by_time_with_the_members_to_look_for(env, internal, monk
     _, p, _ = _setup(env, members=("Asha", "Bilal"), cams=(1, 2))
     _tick(env, _min(-60))
     removed = p["Bilal"]
-    env.client.delete(f"{URL}/people/{removed['id']}", headers=env.jwt("admin"))
+
+    async def forgotten(_uuid):
+        return True
+
+    monkeypatch.setattr(attendance_faces, "forget", forgotten)
+    assert env.client.delete(f"{URL}/people/{removed['id']}",
+                             headers=env.jwt("admin")).status_code == 200
 
     import routers.attendance as ra
 
@@ -540,3 +563,130 @@ def test_finalize_grace_is_at_least_a_minute(env):  # noqa: F811
     A = env.jwt("admin")
     assert env.client.put(f"{URL}/policy", headers=A,
                           json={"finalize_grace_minutes": 0}).status_code == 422
+
+
+# ── Who is marked, coverage, calling a session off, one-off sessions ──
+
+
+def test_only_people_a_camera_could_recognise_are_marked(env):  # noqa: F811
+    """No consent, no face, inactive: unknown to the camera, so ABSENT
+    would not be evidence of anything. They get no mark at all."""
+    _, p, _ = _setup(env, members=("Asha", "NoConsent", "NoFace", "Inactive"))
+    s = env.Session()
+    s.get(env.models.AttendancePerson, p["NoConsent"]["id"]).consent_at = None
+    s.get(env.models.AttendancePerson, p["NoFace"]["id"]).face_samples = 0
+    s.get(env.models.AttendancePerson, p["Inactive"]["id"]).active = False
+    s.commit()
+    s.close()
+    _tick(env, _min(-60))
+    _tick(env, _min(0.5))
+    for bucket in range(10):
+        _attempt(env, _min(bucket * 5 + 1), [(p["Asha"], 0.9)])
+    _tick(env, _min(56))
+    marks, _ = _marks(env, _sessions(env)[0].id)
+    assert marks == {"Asha": "PRESENT", "NoConsent": None, "NoFace": None, "Inactive": None}
+
+
+def test_a_recompute_keeps_the_roster_the_session_was_decided_for(env):  # noqa: F811
+    g, p, _ = _setup(env, members=("Asha",))
+    _tick(env, _min(-60))
+    _tick(env, _min(0.5))
+    for bucket in range(10):
+        _attempt(env, _min(bucket * 5 + 1), [(p["Asha"], 0.9)])
+    _tick(env, _min(56))
+    sid = _sessions(env)[0].id
+    A = env.jwt("admin")
+    late = env.client.post(f"{URL}/people", headers=A,
+                           json={"display_name": "Joined later", "external_ref": "L1"}).json()
+    env.client.post(f"{URL}/groups/{g['id']}/members", headers=A, json={"person_ids": [late["id"]]})
+    _enrolled(env, late)
+    assert env.client.post(f"{URL}/sessions/{sid}/refinalize", headers=A).status_code == 200
+    marks, _ = _marks(env, sid)
+    assert marks == {"Asha": "PRESENT", "Joined later": None}
+
+
+def test_a_session_watched_too_little_is_flagged_and_not_counted(env):  # noqa: F811
+    """Two of ten buckets watched (the camera died): below the 0.5 floor,
+    so the session says so instead of passing for a full one."""
+    _, p, _ = _setup(env, members=("Asha", "Bilal"))
+    _tick(env, _min(-60))
+    _tick(env, _min(0.5))
+    for bucket in range(2):
+        _attempt(env, _min(bucket * 5 + 1), [(p["Asha"], 0.9)])
+    _tick(env, _min(56))
+    marks, detail = _marks(env, _sessions(env)[0].id)
+    assert detail["counted_buckets"] == 2 and detail["no_coverage"] is True
+    assert marks == {"Asha": "PRESENT", "Bilal": "ABSENT"}
+
+
+def test_a_session_called_off_is_not_watched_or_revived_and_can_be_restored(env):  # noqa: F811
+    _setup(env, members=("Asha",))
+    _tick(env, _min(-60))
+    sid = _sessions(env)[0].id
+    A = env.jwt("admin")
+    r = env.client.post(f"{URL}/sessions/{sid}/off", headers=A, json={"reason": "Diwali"})
+    assert r.status_code == 200 and r.json()["status"] == "off"
+    assert env.client.post(f"{URL}/sessions/{sid}/off", headers=A).status_code == 409
+    _tick(env, _min(-30))                 # the timetable still wants it
+    assert _sessions(env)[0].status == "off"
+    _tick(env, _min(56))
+    assert _sessions(env)[0].status == "off" and _sessions(env)[0].finalized_at is None
+
+    # Its end has passed (the test's Monday), so it goes back to be decided.
+    r = env.client.post(f"{URL}/sessions/{sid}/restore", headers=A)
+    assert r.status_code == 200 and r.json()["status"] == "finalizing"
+    assert env.client.post(f"{URL}/sessions/{sid}/restore", headers=A).status_code == 409
+
+
+def test_a_decided_session_called_off_keeps_its_marks_for_a_restore(env):  # noqa: F811
+    _, p, _ = _setup(env, members=("Asha",))
+    _tick(env, _min(-60))
+    _tick(env, _min(0.5))
+    _attempt(env, _min(1), [(p["Asha"], 0.9)])
+    _tick(env, _min(56))
+    sid = _sessions(env)[0].id
+    A = env.jwt("admin")
+    env.client.post(f"{URL}/sessions/{sid}/off", headers=A)
+    assert env.client.get(f"{URL}/sessions", headers=A).json()["sessions"][0]["status"] == "off"
+    r = env.client.post(f"{URL}/sessions/{sid}/restore", headers=A)
+    assert r.json()["status"] == "final" and r.json()["counts"] == {"PRESENT": 1}
+
+
+def test_a_one_off_session_is_added_and_runs_like_any_other(env):  # noqa: F811
+    from datetime import date as _date
+
+    g, p, _ = _setup(env, members=("Asha",))
+    A = env.jwt("admin")
+    future = (datetime.now(UTC) + timedelta(days=3)).date()
+    r = env.client.post(f"{URL}/sessions", headers=A, json={
+        "group_id": g["id"], "local_date": future.isoformat(),
+        "start_time": "14:00", "end_time": "24:00", "camera_ids": [1]})
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["slot_id"] is None and body["status"] == "scheduled"
+    from zoneinfo import ZoneInfo
+
+    midnight = datetime.combine(future + timedelta(days=1), datetime.min.time(),
+                                tzinfo=ZoneInfo("Asia/Kolkata"))
+    assert sched._utc(datetime.fromisoformat(body["end_at"])) == midnight.astimezone(UTC)
+    # One that has already ended is refused: nobody could have watched it.
+    r = env.client.post(f"{URL}/sessions", headers=A, json={
+        "group_id": g["id"], "local_date": _date(2020, 1, 6).isoformat(),
+        "start_time": "09:00", "end_time": "10:00", "camera_ids": [1]})
+    assert r.status_code == 422
+    r = env.client.post(f"{URL}/sessions", headers=A, json={
+        "group_id": g["id"], "local_date": future.isoformat(),
+        "start_time": "10:00", "end_time": "09:00", "camera_ids": [1]})
+    assert r.status_code == 422
+
+
+def test_a_slot_may_end_at_midnight(env):  # noqa: F811
+    g, _, _ = _setup(env, members=("Asha",))
+    r = env.client.post(f"{URL}/timetable", headers=env.jwt("admin"), json={
+        "group_id": g["id"], "weekday": 1, "start_time": "18:00", "end_time": "24:00",
+        "camera_ids": [1]})
+    assert r.status_code == 201, r.text
+    bad = env.client.post(f"{URL}/timetable", headers=env.jwt("admin"), json={
+        "group_id": g["id"], "weekday": 1, "start_time": "24:00", "end_time": "24:00",
+        "camera_ids": [1]})
+    assert bad.status_code == 422

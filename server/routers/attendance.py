@@ -21,6 +21,7 @@ reference number for somebody new.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -67,6 +68,9 @@ _manage = RequirePermission("attendance.manage")
 _enroll = RequirePermission("attendance.enroll")
 
 _HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+#: An end time may also be 24:00, the next midnight: a period that runs to
+#: the end of the day (a shift to midnight) has no 23:59 minute missing.
+_END_HHMM = re.compile(r"^(([01]\d|2[0-3]):[0-5]\d|24:00)$")
 #: Cameras one slot may watch. A room is a handful of cameras, not a site.
 MAX_SLOT_CAMERAS = 8
 
@@ -174,12 +178,20 @@ class SlotIn(BaseModel):
     valid_to: date | None = None
     active: bool = True
 
-    @field_validator("start_time", "end_time")
+    @field_validator("start_time")
     @classmethod
     def _hhmm(cls, v: str) -> str:
         v = v.strip()
         if not _HHMM.match(v):
-            raise ValueError("times are HH:MM, 00:00 to 23:59")
+            raise ValueError("a start time is HH:MM, 00:00 to 23:59")
+        return v
+
+    @field_validator("end_time")
+    @classmethod
+    def _end_hhmm(cls, v: str) -> str:
+        v = v.strip()
+        if not _END_HHMM.match(v):
+            raise ValueError("an end time is HH:MM, 00:01 to 24:00")
         return v
 
     @field_validator("camera_ids")
@@ -407,7 +419,7 @@ async def update_person(person_id: int, payload: PersonPatch, request: Request,
 
 
 @router.delete("/people/{person_id}")
-async def remove_person(person_id: int, request: Request,
+async def remove_person(person_id: int, request: Request, erase: bool = False,
                         db: Session = Depends(get_db), user: User = Depends(_enroll)):
     """Removes a person from attendance. The row stays, so their past marks
     keep a name; they leave every group, so future sessions do not expect
@@ -415,22 +427,57 @@ async def remove_person(person_id: int, request: Request,
 
     Their faces are forgotten FIRST. If the face service cannot confirm
     that, the removal is refused (503) rather than leaving a biometric
-    record behind a person nobody can see any more."""
-    p = _person_or_404(db, person_id)
-    await _forget_faces_or_raise(db, p)
-    p = _person_or_404(db, person_id)
-    p.deleted_at = datetime.now(UTC)
-    p.active = False
-    db.query(AttendanceGroupMember).filter(
-        AttendanceGroupMember.person_id == p.id).delete(synchronize_session=False)
+    record behind a person nobody can see any more.
+
+    ``?erase=true`` also erases who they were (an erasure request under
+    DPDP/GDPR): name, reference and e-mail are replaced, so their past
+    marks remain as counts about "Erased person #id". It works on someone
+    already removed too, which is the only way such a row is reached."""
+    if erase:
+        p = db.get(AttendancePerson, person_id)
+        if p is None:
+            raise HTTPException(status_code=404, detail="Person not found")
+    else:
+        p = _person_or_404(db, person_id)
+    was_removed = p.deleted_at is not None
+    if not was_removed:
+        await _forget_faces_or_raise(db, p)
+        p = _person_or_404(db, person_id)
+        p.deleted_at = datetime.now(UTC)
+        p.active = False
+        db.query(AttendanceGroupMember).filter(
+            AttendanceGroupMember.person_id == p.id).delete(synchronize_session=False)
+    if erase:
+        p.display_name = f"Erased person #{p.id}"
+        p.external_ref = p.email = None
+        p.consent_by = None
     db.commit()
-    audit_request(db, request, action="attendance.person.remove", user_id=user.id,
-                  entity_type="attendance_person", entity_id=p.id,
-                  details={"display_name": p.display_name, "external_ref": p.external_ref})
-    return {"removed": p.id}
+    # The audit row of an erasure names nobody: it would be the copy that
+    # outlives the erasure.
+    audit_request(db, request,
+                  action="attendance.person.erase" if erase else "attendance.person.remove",
+                  user_id=user.id, entity_type="attendance_person", entity_id=p.id,
+                  details=({"already_removed": was_removed} if erase else
+                           {"display_name": p.display_name, "external_ref": p.external_ref}))
+    return {"removed": p.id, "erased": erase}
 
 
 # ── Consent and faces ────────────────────────────────────────────────
+
+
+_FACE_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _face_lock(person_uuid: str) -> asyncio.Lock:
+    """One person's face changes, one at a time. The adapter numbers a
+    person's samples by position and core keeps a photo beside each, so
+    two enrolments (or an enrolment and a delete) of the same person
+    interleaving at their awaits would pair photos with the wrong
+    samples. Core runs one worker, so a process-local lock is enough."""
+    lock = _FACE_LOCKS.get(person_uuid)
+    if lock is None:
+        lock = _FACE_LOCKS[person_uuid] = asyncio.Lock()
+    return lock
 
 
 #: Photos per enrolment request, and bytes per photo (the adapter's cap).
@@ -448,18 +495,22 @@ async def _forget_faces_or_raise(db: Session, p: AttendancePerson) -> None:
     the middle of one leaves faces the count never saw. Skipped only for
     someone whose consent was never recorded — nothing can have been
     enrolled for them — so removing people works with no face service.
-    Their picture goes with their faces."""
-    attendance_faces.drop_photo(p.uuid)
-    if p.consent_at is None and not (p.face_samples or 0):
-        return
+    Their picture goes with their faces, once the adapter has confirmed
+    (deleting the photos first and then failing would make "nothing was
+    changed" untrue)."""
     uuid = p.uuid
+    if p.consent_at is None and not (p.face_samples or 0):
+        attendance_faces.drop_photo(uuid)
+        return
     release(db)
     try:
-        await attendance_faces.forget(uuid)
+        async with _face_lock(uuid):
+            await attendance_faces.forget(uuid)
     except attendance_faces.FaceGalleryError as e:
         raise HTTPException(status_code=e.status, detail=(
             f"{e.message} The person's faces could not be deleted, so nothing was changed.")
         ) from None
+    attendance_faces.drop_photo(uuid)
     db.query(AttendancePerson).filter(AttendancePerson.uuid == uuid).update(
         {AttendancePerson.face_samples: 0}, synchronize_session=False)
     db.commit()
@@ -515,7 +566,7 @@ async def enrol_faces(person_id: int, request: Request,
     for up in photos:
         data = await up.read()
         images.append(data if data and len(data) <= MAX_PHOTO_BYTES else None)
-    uuid, name, pid = p.uuid, p.display_name, p.id
+    uuid, pid = p.uuid, p.id
     release(db)  # the adapter takes ~0.5 s a photo; hold no connection meanwhile
 
     # 1. Look at every photo before enrolling any.
@@ -563,37 +614,50 @@ async def enrol_faces(person_id: int, request: Request,
         faces = {}
 
     # 2. Enrol the ones that passed.
-    samples = None
-    for i in sorted(faces):
+    async def gone_meanwhile(registered: bool) -> None:
         # Consent withdrawn or the person removed while this ran (each
-        # photo is half a second of adapter time): stop, and take back
-        # what this request added. Forget already ran for them, and
-        # these would otherwise outlive it.
+        # photo is half a second of adapter time): take back what this
+        # request added. Forget already ran for them, and these would
+        # otherwise outlive it - for a removed person, behind a row no
+        # route can reach any more.
         still = db.query(AttendancePerson.consent_at, AttendancePerson.deleted_at).filter(
             AttendancePerson.id == pid).one()
         release(db)
-        if still[0] is None or still[1] is not None:
-            if samples is not None:
-                try:
-                    await attendance_faces.forget(uuid)
-                except attendance_faces.FaceGalleryError:
-                    logger.warning("attendance: could not take back faces of person %s", pid)
-                attendance_faces.drop_photo(uuid)
-            raise HTTPException(status_code=409, detail=(
-                "Consent was withdrawn or the person was removed during the enrolment; "
-                "nothing from it was kept."))
-        try:
-            samples = await attendance_faces.register(uuid, name, images[i])
-        except attendance_faces.FaceGalleryError as e:
-            errors[i] = {"error": e.message}
-            if e.status in (502, 503):
-                # The service went down: the rest would fail the same way.
-                for j in faces:
-                    if j > i:
-                        errors.setdefault(j, {"error": e.message})
-                break
-            continue
-        attendance_faces.keep_photo(uuid, samples, images[i])
+        if still[0] is not None and still[1] is None:
+            return
+        if registered:
+            try:
+                await attendance_faces.forget(uuid)
+            except attendance_faces.FaceGalleryError:
+                logger.warning("attendance: could not take back faces of person %s", pid)
+            attendance_faces.drop_photo(uuid)
+            db.query(AttendancePerson).filter(AttendancePerson.id == pid).update(
+                {AttendancePerson.face_samples: 0}, synchronize_session=False)
+            db.commit()
+        raise HTTPException(status_code=409, detail=(
+            "Consent was withdrawn or the person was removed during the enrolment; "
+            "nothing from it was kept."))
+
+    samples = None
+    async with _face_lock(uuid):
+        for i in sorted(faces):
+            await gone_meanwhile(samples is not None)
+            try:
+                samples = await attendance_faces.register(uuid, images[i])
+            except attendance_faces.FaceGalleryError as e:
+                errors[i] = {"error": e.message}
+                if e.status in (502, 503):
+                    # The service went down: the rest would fail the same way.
+                    for j in faces:
+                        if j > i:
+                            errors.setdefault(j, {"error": e.message})
+                    break
+                continue
+            attendance_faces.keep_photo(uuid, samples, images[i])
+        # Once more after the last photo: a withdrawal that landed during
+        # it found nothing of this request to forget yet.
+        if samples is not None:
+            await gone_meanwhile(True)
 
     results: list[dict[str, Any]] = []
     for i in range(len(images)):
@@ -655,11 +719,12 @@ async def forget_face(person_id: int, index: int, request: Request,
         raise HTTPException(status_code=404, detail="That photo is no longer enrolled.")
     uuid = p.uuid
     release(db)
-    try:
-        left = await attendance_faces.forget_sample(uuid, index)
-    except attendance_faces.FaceGalleryError as e:
-        raise HTTPException(status_code=e.status, detail=e.message) from None
-    attendance_faces.drop_kept_photo(uuid, had, index)
+    async with _face_lock(uuid):
+        try:
+            left = await attendance_faces.forget_sample(uuid, index)
+        except attendance_faces.FaceGalleryError as e:
+            raise HTTPException(status_code=e.status, detail=e.message) from None
+        attendance_faces.drop_kept_photo(uuid, had, index)
     db.query(AttendancePerson).filter(AttendancePerson.id == person_id).update(
         {AttendancePerson.face_samples: left}, synchronize_session=False)
     db.commit()
@@ -681,12 +746,13 @@ async def forget_faces(person_id: int, request: Request,
         # Nothing on record here; ask the adapter anyway, in case a
         # count was lost — forgetting must not depend on core's tally.
         uuid = p.uuid
-        attendance_faces.drop_photo(uuid)
         release(db)
         try:
-            await attendance_faces.forget(uuid)
+            async with _face_lock(uuid):
+                await attendance_faces.forget(uuid)
         except attendance_faces.FaceGalleryError as e:
             raise HTTPException(status_code=e.status, detail=e.message) from None
+        attendance_faces.drop_photo(uuid)
     else:
         await _forget_faces_or_raise(db, p)
     audit_request(db, request, action="attendance.face.forget", user_id=user.id,
@@ -1098,8 +1164,10 @@ async def report(
         return Response(content=attendance_report.to_csv(body).encode("utf-8-sig"),
                         media_type="text/csv; charset=utf-8",
                         headers={"Content-Disposition": f'attachment; filename="{name}.csv"'})
+    # A year of a big group is seconds of openpyxl: off the event loop, so
+    # every other request does not wait for one export.
     return Response(
-        content=attendance_report.to_xlsx(body),
+        content=await asyncio.to_thread(attendance_report.to_xlsx, body),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{name}.xlsx"'})
 
@@ -1188,6 +1256,120 @@ async def refinalize(session_id: int, request: Request, db: Session = Depends(ge
     audit_request(db, request, action="attendance.session.refinalize", user_id=user.id,
                   entity_type="attendance_session", entity_id=s.id, details=counts)
     return _session_out(s, _mark_counts(db, [s.id])[s.id])
+
+
+class SessionOffIn(BaseModel):
+    #: Why (a holiday, an exam, the room moved): kept in the audit log.
+    reason: str | None = Field(None, max_length=200)
+
+
+@router.post("/sessions/{session_id}/off")
+async def call_off_session(session_id: int, request: Request,
+                           payload: SessionOffIn | None = None,
+                           db: Session = Depends(get_db), user: User = Depends(_manage)):
+    """Call one session off: a holiday, an exam, a class that did not
+    happen. It is not watched, not marked and not in any report; a
+    session already decided keeps its marks, hidden, until it is
+    restored. The timetable is untouched, and ``off`` (unlike the
+    scheduler's own ``cancelled``) is never revived by it."""
+    s = _session_or_404(db, session_id)
+    if s.status in ("off", "cancelled"):
+        raise HTTPException(status_code=409, detail="This session is not taking place already")
+    before = s.status
+    s.status = "off"
+    db.commit()
+    audit_request(db, request, action="attendance.session.off", user_id=user.id,
+                  entity_type="attendance_session", entity_id=s.id,
+                  details={"from": before, "reason": payload.reason if payload else None})
+    return _session_out(s, _mark_counts(db, [s.id])[s.id])
+
+
+@router.post("/sessions/{session_id}/restore")
+async def restore_session(session_id: int, request: Request,
+                          db: Session = Depends(get_db), user: User = Depends(_manage)):
+    """Undo calling a session off. One that had been decided is final
+    again with its marks; any other goes back to wherever its times put
+    it now, and the scheduler takes it from there (a session whose end
+    has passed is decided from whatever was watched)."""
+    s = _session_or_404(db, session_id)
+    if s.status != "off":
+        raise HTTPException(status_code=409, detail="Only a session that was called off can be restored")
+    now = datetime.now(UTC)
+    start, end = attendance_scheduler._utc(s.start_at), attendance_scheduler._utc(s.end_at)
+    if s.finalized_at is not None:
+        s.status = "final"
+    elif now < start:
+        s.status = "scheduled"
+    elif now < end:
+        s.status = "running"
+    else:
+        s.status = "finalizing"
+    db.commit()
+    audit_request(db, request, action="attendance.session.restore", user_id=user.id,
+                  entity_type="attendance_session", entity_id=s.id, details={"to": s.status})
+    return _session_out(s, _mark_counts(db, [s.id])[s.id])
+
+
+class AdHocSessionIn(BaseModel):
+    """A one-off session that is not on the timetable: an extra class, a
+    make-up lecture, an exam. Times are the group's local wall clock."""
+    group_id: int
+    local_date: date
+    start_time: str
+    end_time: str
+    camera_ids: list[int] = Field(..., min_length=1, max_length=MAX_SLOT_CAMERAS)
+
+    @field_validator("start_time")
+    @classmethod
+    def _hhmm(cls, v: str) -> str:
+        v = v.strip()
+        if not _HHMM.match(v):
+            raise ValueError("a start time is HH:MM, 00:00 to 23:59")
+        return v
+
+    @field_validator("end_time")
+    @classmethod
+    def _end_hhmm(cls, v: str) -> str:
+        v = v.strip()
+        if not _END_HHMM.match(v):
+            raise ValueError("an end time is HH:MM, 00:01 to 24:00")
+        return v
+
+    @field_validator("camera_ids")
+    @classmethod
+    def _dedupe(cls, v: list[int]) -> list[int]:
+        return list(dict.fromkeys(v))
+
+    @model_validator(mode="after")
+    def _order(self) -> AdHocSessionIn:
+        if self.start_time >= self.end_time:
+            raise ValueError("start_time must be before end_time")
+        return self
+
+
+@router.post("/sessions", status_code=201)
+async def create_session(payload: AdHocSessionIn, request: Request,
+                         db: Session = Depends(get_db), user: User = Depends(_manage)):
+    """Add a one-off session. It must not have ended yet: a session
+    nobody watched could only ever be "no coverage"."""
+    g = _group_or_404(db, payload.group_id)
+    tz = ZoneInfo(g.timezone)
+    start, end = attendance_scheduler._local_window(
+        payload.local_date, payload.start_time, payload.end_time, tz)
+    if end <= start:
+        raise HTTPException(status_code=422, detail="Those times do not exist on that day (a clock change)")
+    if end <= datetime.now(UTC):
+        raise HTTPException(status_code=422, detail="That session has already ended")
+    s = AttendanceSession(slot_id=None, group_id=g.id, local_date=payload.local_date,
+                          start_at=start, end_at=end,
+                          camera_ids=_checked_cameras(db, user, payload.camera_ids),
+                          status="scheduled")
+    db.add(s)
+    db.commit()
+    db.refresh(s)
+    audit_request(db, request, action="attendance.session.create", user_id=user.id,
+                  entity_type="attendance_session", entity_id=s.id, details=_session_out(s))
+    return _session_out(s)
 
 
 class MarkIn(BaseModel):

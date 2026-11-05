@@ -70,6 +70,8 @@ def _local_window(day: date, start: str, end: str, tz: ZoneInfo) -> tuple[dateti
     skipped."""
     def at(hhmm: str) -> datetime:
         h, m = (int(x) for x in hhmm.split(":"))
+        if (h, m) == (24, 0):       # an end of "24:00" is the next midnight
+            return datetime.combine(day + timedelta(days=1), time(0, 0), tzinfo=tz).astimezone(UTC)
         return datetime.combine(day, time(h, m), tzinfo=tz).astimezone(UTC)
     return at(start), at(end)
 
@@ -254,14 +256,30 @@ def finalize(db, session, *, now: datetime | None = None,
         buckets.add(b)
         seen[person_id] = (buckets, min(first, _utc(at)))
 
-    members = [pid for (pid,) in db.query(AttendanceGroupMember.person_id)
-               .join(AttendancePerson, AttendancePerson.id == AttendanceGroupMember.person_id)
-               .filter(AttendanceGroupMember.group_id == session.group_id,
-                       AttendancePerson.deleted_at.is_(None)).all()]
-    if only_person is not None:
-        members = [only_person]
     existing = {m.person_id: m for m in db.query(AttendanceMark)
                 .filter(AttendanceMark.session_id == session.id).all()}
+    if only_person is not None:
+        members = [only_person]
+    elif existing:
+        # A recompute is for the roster the session was decided for, not
+        # today's: a student who joined since was not in that class.
+        members = list(existing)
+    else:
+        # Marked are the people the cameras could have recognised: in
+        # the group before the class ended, active, consented and with a
+        # face enrolled. Anyone else would be ABSENT for being unknown to
+        # the camera, which is not evidence they were away. Somebody seen
+        # (a sighting) is marked whatever their state is now.
+        members = [pid for (pid, added_at) in db.query(AttendanceGroupMember.person_id,
+                                                       AttendanceGroupMember.added_at)
+                   .join(AttendancePerson, AttendancePerson.id == AttendanceGroupMember.person_id)
+                   .filter(AttendanceGroupMember.group_id == session.group_id,
+                           AttendancePerson.deleted_at.is_(None),
+                           AttendancePerson.active.is_(True),
+                           AttendancePerson.consent_at.isnot(None),
+                           AttendancePerson.face_samples > 0).all()
+                   if added_at is None or _utc(added_at) <= end]
+        members += [pid for pid in seen if pid not in set(members)]
     late_after = start + timedelta(minutes=int(policy["late_grace_minutes"]))
     out = {"PRESENT": 0, "LATE": 0, "ABSENT": 0, "manual": 0}
     for pid in members:
@@ -285,7 +303,8 @@ def finalize(db, session, *, now: datetime | None = None,
     if only_person is not None:
         return out
     session.total_buckets, session.counted_buckets = total, len(counted)
-    session.no_coverage = not counted
+    session.no_coverage = (not counted
+                           or len(counted) / total < float(policy.get("min_coverage_ratio", 0.0)))
     session.status = "final"
     session.finalized_at = _utc(now or datetime.now(UTC))
     return out

@@ -46,7 +46,7 @@ class FakeGallery:
         owner = self.who.get(image)
         return {"faces": [{"person_id": owner, "similarity": 0.9 if owner else 0.2}]}
 
-    async def register(self, uuid, name, image):
+    async def register(self, uuid, image):
         self.calls.append("register")
         self._check()
         self.samples.setdefault(uuid, []).append(image)
@@ -235,7 +235,7 @@ def test_client_sends_what_the_adapter_expects(adapter):
 
     seen, box = adapter
     box["handler"] = lambda r: httpx.Response(200, json={"ok": True, "face": {"samples": 3}})
-    assert _run(attendance_faces.register("u-1", "Asha", b"jpeg")) == 3
+    assert _run(attendance_faces.register("u-1", b"jpeg")) == 3
     req = seen[-1]
     assert req.url.path == "/faces/register"
     assert req.headers["authorization"] == f"Bearer {settings.internal_api_key}"
@@ -243,6 +243,9 @@ def test_client_sends_what_the_adapter_expects(adapter):
     for part in (b'name="person_id"', b"u-1", b'name="append"', b"true",
                  b'name="category"', b"attendance", b'name="frame"'):
         assert part in body
+    # The adapter's "name" is the uuid: KAI-C would hand a real name to
+    # any holder of the site key who asks it to identify a frame.
+    assert b'name="name"\r\n\r\nu-1\r\n' in body
 
     box["handler"] = lambda r: httpx.Response(200, json={"result": {"faces": [{"person_id": "u-2",
                                                                                 "similarity": 0.7}]}})
@@ -261,7 +264,7 @@ def test_client_maps_adapter_errors(adapter):
 
     box["handler"] = lambda r: httpx.Response(422, json={"detail": "image contains 2 faces"})
     with pytest.raises(attendance_faces.FaceGalleryError) as e:
-        _run(attendance_faces.register("u-1", "A", b"x"))
+        _run(attendance_faces.register("u-1", b"x"))
     assert e.value.status == 422 and "2 faces" in e.value.message
 
     # An adapter image from before face_identify answers without faces[].
@@ -292,8 +295,8 @@ def test_consent_withdrawn_mid_enrolment_keeps_nothing(env, gallery, monkeypatch
     p = _person(env)
     real_register = gallery.register
 
-    async def register_then_withdraw(uuid, name, image):
-        n = await real_register(uuid, name, image)
+    async def register_then_withdraw(uuid, image):
+        n = await real_register(uuid, image)
         # The person's consent is withdrawn while the next photo is in flight.
         s = env.Session()
         row = s.get(env.models.AttendancePerson, p["id"])
@@ -306,6 +309,37 @@ def test_consent_withdrawn_mid_enrolment_keeps_nothing(env, gallery, monkeypatch
     r = _enrol(env, p, b"a1", b"a2", b"a3")
     assert r.status_code == 409 and "nothing from it was kept" in r.text
     assert p["uuid"] not in gallery.samples
+
+
+@pytest.mark.parametrize("what", ["consent", "removed"])
+def test_a_withdrawal_during_the_last_photo_keeps_nothing(env, gallery, monkeypatch, what):  # noqa: F811
+    """The check before each photo cannot see a withdrawal that lands
+    while the LAST one is with the adapter; forget has already run by
+    then, so the faces would outlive it (and, for a removed person, no
+    route could reach them)."""
+    p = _person(env)
+    real_register = gallery.register
+
+    async def register_then_withdraw(uuid, image):
+        n = await real_register(uuid, image)
+        s = env.Session()
+        row = s.get(env.models.AttendancePerson, p["id"])
+        if what == "consent":
+            row.consent_at = None
+        else:
+            from datetime import UTC, datetime
+            row.deleted_at = datetime.now(UTC)
+        s.commit()
+        s.close()
+        return n
+
+    monkeypatch.setattr(attendance_faces, "register", register_then_withdraw)
+    r = _enrol(env, p, b"only")
+    assert r.status_code == 409 and "nothing from it was kept" in r.text
+    assert p["uuid"] not in gallery.samples
+    s = env.Session()
+    assert s.get(env.models.AttendancePerson, p["id"]).face_samples == 0
+    s.close()
 
 
 # ── The person's picture, and the webcam guidance check ─────────────
@@ -492,3 +526,23 @@ def test_enrolled_photos_need_the_enroll_permission(env, gallery):  # noqa: F811
     assert env.client.get(f"{URL}/people/{p['id']}/faces", headers=V).status_code == 403
     assert env.client.get(f"{URL}/people/{p['id']}/faces/0/image", headers=V).status_code == 403
     assert env.client.delete(f"{URL}/people/{p['id']}/faces/0", headers=V).status_code == 403
+
+
+def test_erasure_replaces_who_they_were_and_reaches_the_already_removed(env, gallery):  # noqa: F811
+    A = env.jwt("admin")
+    p = _person(env, name="Asha Rao", ref="R-77")
+    r = env.client.delete(f"{URL}/people/{p['id']}?erase=true", headers=A)
+    assert r.status_code == 200 and r.json() == {"removed": p["id"], "erased": True}
+    s = env.Session()
+    row = s.get(env.models.AttendancePerson, p["id"])
+    assert (row.display_name, row.external_ref, row.email) == (f"Erased person #{p['id']}", None, None)
+    assert row.deleted_at is not None and p["uuid"] not in gallery.samples
+    s.close()
+
+    q = _person(env, name="Bilal Khan", ref="R-78")
+    assert env.client.delete(f"{URL}/people/{q['id']}", headers=A).status_code == 200
+    assert env.client.delete(f"{URL}/people/{q['id']}", headers=A).status_code == 404
+    assert env.client.delete(f"{URL}/people/{q['id']}?erase=true", headers=A).status_code == 200
+    s = env.Session()
+    assert s.get(env.models.AttendancePerson, q["id"]).display_name == f"Erased person #{q['id']}"
+    s.close()
