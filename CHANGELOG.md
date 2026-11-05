@@ -223,6 +223,18 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Disk rotation instead of a purge that empties the box.** The free-space
+  floor now defaults to 2 GB, or 2 % of the recordings volume if that is
+  more (it used to be off, and installs that had set 10 GB on a small disk
+  could never reach it: core deleted every recording and every event photo,
+  forever). Below the floor core rotates: the oldest recordings go, oldest
+  first, in steps of a quarter of the floor rather than a flat 5 GB, and
+  recording never stops. Event photos are never deleted for space. While
+  rotation is on the dashboard says so, with the effective retention in
+  hours; when the floor cannot be reached even with no recordings left, it
+  says the disk is full of other data and by how much. The setting now
+  shows what "automatic" means on this disk; 0 turns rotation off.
+
 - **Smart Doorbell: `min_face_px` defaults to 100 (was 40), and a name is
   a vote.** The frames are the camera's main stream, so 100 px is a face
   within a few metres of the door; below it a miss says distance, not
