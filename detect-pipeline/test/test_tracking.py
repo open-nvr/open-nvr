@@ -524,10 +524,11 @@ def test_a_low_score_box_keeps_a_track_alive_but_never_spawns_one():
     tk.update([Detection("person", (600, 100, 680, 400), 0.3)], frame_ts=1.6)   # unsure box elsewhere: no track
     assert len(tk._tracks) == 1 and not tk._tracks[0].matched_now
     assert tk.spawns_dropped == 1
-    # an unsure box is not offered to a coasting track
+    # a coasting track still takes an unsure box where it last was (the
+    # distance fallback): a far, small person is unsure most frames
     tk.update([], frame_ts=1.8)
     tk.update([Detection("person", box, 0.3)], frame_ts=2.0)
-    assert not tk._tracks[0].matched_now
+    assert tk._tracks[0].matched_now and len(tk._tracks) == 1
 
 
 def test_a_person_who_stops_short_keeps_the_track():

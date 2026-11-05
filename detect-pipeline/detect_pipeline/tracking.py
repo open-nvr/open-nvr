@@ -678,13 +678,13 @@ class Tracker:
                 unmatched_tracks.discard(ti)
                 unmatched_dets.discard(di)
                 self.low_matches += 1
-            # Never spawn from an unsure box: refused like a weak spawn.
-            self.spawns_dropped += len(unmatched_dets & low_dets)
-            unmatched_dets -= low_dets
         # The size-aware distance: the whole matcher with motion off, the
         # coasting fallback with it on (a track whose prediction drifted
         # while it coasted can still take a box its last position vouches
-        # for, with the gate widening per miss).
+        # for, with the gate widening per miss). Unsure boxes are offered
+        # here too: on a far, small person the detector is unsure most
+        # frames, and a coasting track refused them starved and died
+        # while the person stood there (CAVIAR lobby replay, 2026-11-05).
         pairs: list[tuple[float, int, int]] = []
         for ti in unmatched_tracks:
             tr = self._tracks[ti]
@@ -706,6 +706,10 @@ class Tracker:
                 self._match(self._tracks[ti], detections[di], bgr, now)
                 unmatched_tracks.discard(ti)
                 unmatched_dets.discard(di)
+        if low_dets:
+            # Never spawn from an unsure box: refused like a weak spawn.
+            self.spawns_dropped += len(unmatched_dets & low_dets)
+            unmatched_dets -= low_dets
 
         # unmatched detections -> new tentative tracks (bounded: the track
         # cap and the spawn-score floor refuse, never grow without limit)
