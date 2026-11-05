@@ -343,10 +343,13 @@ class VisitLifecycle:
                     "crop_ts": None, "ring": None, "scene": None, "path": [],
                     "path_step": 1, "path_seen": 0,
                     "crop_source": None, "crop_box_px": None, "crop_skew_s": None,
-                    "frame_px": None,
+                    "frame_px": None, "frames": 0, "group_frames": 0,
                 }
             v["end"] = now_wall
             v["label"] = tr.label
+            v["frames"] += 1
+            if getattr(tr, "group_now", False):
+                v["group_frames"] += 1
             ring = getattr(tr, "plate_ring", None)
             if ring is not None:
                 v["ring"] = ring
@@ -420,6 +423,12 @@ class VisitLifecycle:
             # Kept for callers that feed unfiltered tracks (bench, replay);
             # it is NOT the junk-suppression rail — min_duration_s below is.
             record_visit_dropped(self.camera_id, "unconfirmed")
+            return None
+        if v.get("frames", 0) and v.get("group_frames", 0) * 2 > v["frames"]:
+            # The track followed a box the detector drew around a group of
+            # people, each tracked on their own: not a visit, a duplicate
+            # of several.
+            record_visit_dropped(self.camera_id, "group")
             return None
         if (end - v["start"]) < self.min_duration_s:
             # Junk suppression is deliberate, but it was previously invisible:

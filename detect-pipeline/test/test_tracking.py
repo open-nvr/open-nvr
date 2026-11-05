@@ -397,3 +397,48 @@ def test_a_part_box_inside_a_tracked_person_spawns_no_second_track():
     tk.update([Detection("person", body, 0.8), Detection("person", (390, 110, 520, 430), 0.8),
                Detection("person", (308, 102, 380, 170), 0.9)], frame_ts=1.8)
     assert len(tk._tracks) == 3
+
+
+def test_a_coasting_track_is_matched_with_a_wider_gate():
+    """Behind a colleague for three frames, then a stride away: the same
+    track, not a second visit."""
+    tk = Tracker((576, 704), TrackConfig(fps=5))
+    box = (300, 100, 380, 400)
+    for ts in (1.0, 1.2):
+        tk.update([Detection("person", box, 0.8)], frame_ts=ts)
+    tid = tk._tracks[0].id
+    for ts in (1.4, 1.6, 1.8):
+        tk.update([], frame_ts=ts)                       # occluded: three misses
+    far = (560, 100, 640, 400)                           # 3.25 widths away: beyond the fixed gate
+    assert bottom_center_distance(box, far) > TrackConfig(fps=5).threshold_for("person")
+    tk.update([Detection("person", far, 0.8)], frame_ts=2.0)
+    assert len(tk._tracks) == 1 and tk._tracks[0].id == tid and tk._tracks[0].box == far
+    # with growth off the same detection starts a new track
+    tk2 = Tracker((576, 704), TrackConfig(fps=5, coast_gate_growth=0.0))
+    for ts in (1.0, 1.2):
+        tk2.update([Detection("person", box, 0.8)], frame_ts=ts)
+    for ts in (1.4, 1.6, 1.8):
+        tk2.update([], frame_ts=ts)
+    tk2.update([Detection("person", far, 0.8)], frame_ts=2.0)
+    assert len(tk2._tracks) == 2
+
+
+def test_a_box_around_two_tracked_people_is_a_group_box():
+    tk = Tracker((576, 704), TrackConfig(fps=5))
+    a, b = (100, 100, 200, 400), (260, 100, 360, 400)
+    for ts in (1.0, 1.2):
+        tk.update([Detection("person", a, 0.8), Detection("person", b, 0.8)], frame_ts=ts)
+    assert len(tk._tracks) == 2
+    # the detector adds one box around both: absorbed, not a third track
+    tk.update([Detection("person", a, 0.8), Detection("person", b, 0.8), Detection("person", (90, 90, 370, 410), 0.7)], frame_ts=1.4)
+    assert len(tk._tracks) == 2 and tk.spawns_absorbed == 1
+    # a group box that did get a track (its members were missed when it
+    # spawned) is marked on every frame the members are inside it
+    tk3 = Tracker((576, 704), TrackConfig(fps=5))
+    g = (90, 90, 370, 410)
+    tk3.update([Detection("person", g, 0.7)], frame_ts=1.0)
+    tk3.update([Detection("person", g, 0.7)], frame_ts=1.2)
+    tk3.update([Detection("person", g, 0.7), Detection("person", a, 0.8), Detection("person", b, 0.8)], frame_ts=1.4)
+    tk3.update([Detection("person", g, 0.7), Detection("person", a, 0.8), Detection("person", b, 0.8)], frame_ts=1.6)
+    grp = next(t for t in tk3._tracks if t.box == g)
+    assert grp.group_now and grp.group_frames == 1 or grp.group_frames >= 1

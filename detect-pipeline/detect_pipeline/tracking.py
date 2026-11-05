@@ -81,6 +81,14 @@ class TrackConfig:
     fps: int = 5
     # consecutive hits before a track is "confirmed" (Frigate: min_initialized = fps//2)
     min_initialized: int | None = None
+    # A coasting track (missed the last frames) is matched with a wider
+    # gate: the distance threshold grows by this fraction per miss, up to
+    # ``coast_gate_max`` times. Someone who steps behind a colleague and
+    # reappears a stride away is the same track, not a new one; without
+    # this every occlusion in a group of people made a second visit
+    # (Ventuno Q, 2026-11-05). 0 keeps the gate fixed.
+    coast_gate_growth: float = 0.25
+    coast_gate_max: float = 3.0
     # frames a confirmed track survives unmatched (Frigate: ~fps*5)
     max_disappeared: int | None = None
     # size-aware distance below which a detection matches a track (Frigate ~2.5)
@@ -195,6 +203,12 @@ class Track:
     # is confirmed, since a tentative track dies on a single miss and its
     # result would come back for a visit that never existed.
     evidence_req_held: object | None = field(default=None, repr=False, compare=False)
+    # Frames on which this track's box held two or more other live tracks
+    # of the same label: the detector boxed a GROUP of people as one, and a
+    # track that follows the group box is not a visit. The lifecycle drops
+    # a visit that was a group for most of its frames.
+    group_frames: int = field(default=0, compare=False)
+    group_now: bool = field(default=False, compare=False)
 
     @property
     def stationary(self) -> bool:
@@ -488,7 +502,10 @@ class Tracker:
                 if not labels_match(det.label, tr.label):
                     continue
                 dist = bottom_center_distance(tr.box, det.box)
-                if dist <= cfg.threshold_for(det.label):
+                gate = cfg.threshold_for(det.label)
+                if tr.misses > 0 and cfg.coast_gate_growth > 0:
+                    gate *= min(cfg.coast_gate_max, 1.0 + cfg.coast_gate_growth * tr.misses)
+                if dist <= gate:
                     pairs.append((dist, ti, di))
         pairs.sort()
 
@@ -504,6 +521,14 @@ class Tracker:
             det = detections[di]
             if det.score < cfg.min_spawn_score or len(self._tracks) >= cfg.max_tracks:
                 self.spawns_dropped += 1
+                continue
+            if self.spawn_containment > 0 and sum(
+                    1 for tr in self._tracks
+                    if labels_match(det.label, tr.label)
+                    and _coverage(tr.box, det.box) >= self.spawn_containment) >= 2:
+                # The detector boxed a group of people already tracked one
+                # by one as a single person: a group box, never a track.
+                self.spawns_absorbed += 1
                 continue
             if self.spawn_containment > 0 and any(
                     labels_match(det.label, tr.label)
@@ -555,6 +580,22 @@ class Tracker:
         self._tracks = survivors
         for tr in survivors:
             tr.since_match_s = max(0.0, now - tr.last_matched)
+        # A live track whose box holds two or more other live tracks of the
+        # same label is following a group box this frame (the members may
+        # have been missed on the frame it spawned on, so the spawn guard
+        # could not know). Marked per frame; the lifecycle decides.
+        if self.spawn_containment > 0 and len(survivors) >= 3:
+            for tr in survivors:
+                inside = sum(
+                    1 for o in survivors
+                    if o is not tr and labels_match(o.label, tr.label)
+                    and _coverage(o.box, tr.box) >= self.spawn_containment)
+                tr.group_now = inside >= 2
+                if tr.group_now:
+                    tr.group_frames += 1
+        else:
+            for tr in survivors:
+                tr.group_now = False
         # Drop the frame reference: holding it would keep 6 MB alive between
         # frames for nothing. (An exception escaping above leaves one frame
         # referenced, and that path already unwinds into the worker's
