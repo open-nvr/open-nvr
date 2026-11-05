@@ -5,7 +5,7 @@
 // it. The same shapes as OpenNVR's own Attendance page
 // (app/src/services/attendanceService.ts): both read one API.
 
-import { call, download } from './api'
+import { call, download, fetchBlob } from './api'
 
 export type MarkStatus = 'PRESENT' | 'LATE' | 'ABSENT' | 'EXCUSED'
 
@@ -18,6 +18,7 @@ export type Person = {
   active: boolean
   consent_at: string | null
   face_samples: number
+  has_photo: boolean
   group_ids: number[]
   created_at: string | null
   removed_at: string | null
@@ -114,7 +115,14 @@ export type Report = {
 export type EnrolResult = {
   person: Person
   enrolled: number
-  results: { index: number; ok: boolean; error?: string; duplicate_of?: number | null }[]
+  results: { index: number; ok: boolean; error?: string; duplicate_of?: number | null; bbox?: number[] | null }[]
+}
+
+/** Where the faces are in a webcam frame (pixels of the frame sent). */
+export type FaceCheck = {
+  faces: { bbox: number[]; confidence: number | null }[]
+  too_small: number
+  frame: { w?: number; h?: number }
 }
 
 export type Camera = { id: number; name: string; location?: string | null }
@@ -147,6 +155,13 @@ export const api = {
     return call<EnrolResult>('POST', `${A}/people/${id}/faces`, { form })
   },
   forgetFaces: (id: number) => call<Person>('DELETE', `${A}/people/${id}/faces`),
+  photo: (id: number) => fetchBlob(`${A}/people/${id}/photo`),
+  setPhoto: (id: number, jpeg: Blob) => call<Person>('PUT', `${A}/people/${id}/photo`, { raw: jpeg }),
+  checkFace: (frame: Blob) => {
+    const form = new FormData()
+    form.append('frame', frame, 'frame.jpg')
+    return call<FaceCheck>('POST', `${A}/faces/check`, { form })
+  },
 
   // Groups
   listGroups: () => call<{ groups: Group[] }>('GET', `${A}/groups`).then((r) => r.groups),

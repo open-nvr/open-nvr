@@ -218,6 +218,7 @@ def _person_out(p: AttendancePerson, group_ids: list[int]) -> dict:
         "id": p.id, "uuid": p.uuid, "display_name": p.display_name,
         "external_ref": p.external_ref, "email": p.email, "active": bool(p.active),
         "consent_at": _iso(p.consent_at), "face_samples": p.face_samples or 0,
+        "has_photo": attendance_faces.has_photo(p.uuid),
         "group_ids": group_ids, "created_at": _iso(p.created_at),
         "removed_at": _iso(p.deleted_at),
     }
@@ -446,7 +447,9 @@ async def _forget_faces_or_raise(db: Session, p: AttendancePerson) -> None:
     written after an enrolment's last photo, so a crash or a removal in
     the middle of one leaves faces the count never saw. Skipped only for
     someone whose consent was never recorded — nothing can have been
-    enrolled for them — so removing people works with no face service."""
+    enrolled for them — so removing people works with no face service.
+    Their picture goes with their faces."""
+    attendance_faces.drop_photo(p.uuid)
     if p.consent_at is None and not (p.face_samples or 0):
         return
     uuid = p.uuid
@@ -554,7 +557,8 @@ async def enrol_faces(person_id: int, request: Request,
                     "Consent was withdrawn or the person was removed during the enrolment; "
                     "nothing from it was kept."))
             samples = await attendance_faces.register(uuid, name, image)
-            results.append({"index": i, "ok": True})
+            # Where the face is, so the page can cut the person's picture.
+            results.append({"index": i, "ok": True, "bbox": found["faces"][0].get("bbox")})
         except attendance_faces.FaceGalleryError as e:
             if e.status in (502, 503):
                 # The service is down: the rest would fail the same way.
@@ -589,6 +593,7 @@ async def forget_faces(person_id: int, request: Request,
         # Nothing on record here; ask the adapter anyway, in case a
         # count was lost — forgetting must not depend on core's tally.
         uuid = p.uuid
+        attendance_faces.drop_photo(uuid)
         release(db)
         try:
             await attendance_faces.forget(uuid)
@@ -600,6 +605,70 @@ async def forget_faces(person_id: int, request: Request,
                   entity_type="attendance_person", entity_id=person_id,
                   details={"samples": had})
     p = _person_or_404(db, person_id)
+    return _person_out(p, _groups_of(db, [p.id])[p.id])
+
+
+#: A guidance frame from the enrolling page's webcam, downscaled there.
+MAX_CHECK_BYTES = 2 * 1024 * 1024
+
+
+@router.post("/faces/check")
+async def check_face(frame: UploadFile = File(...), db: Session = Depends(get_db),
+                     _user: User = Depends(_enroll)):
+    """Where the faces are in a webcam frame, so the enrolling page can say
+    "come closer" and take the photo itself once one face is well placed.
+    Nothing is kept and nobody is looked up: only boxes come back. The
+    page sends at most one at a time."""
+    data = await frame.read()
+    if not data or len(data) > MAX_CHECK_BYTES:
+        raise HTTPException(status_code=422, detail=(
+            f"Send one frame of up to {MAX_CHECK_BYTES // (1024 * 1024)} MB"))
+    release(db)
+    try:
+        found = await attendance_faces.identify(data)
+    except attendance_faces.FaceGalleryError as e:
+        raise HTTPException(status_code=e.status, detail=e.message) from None
+    return {
+        "faces": [{"bbox": f.get("bbox"), "confidence": f.get("confidence")}
+                  for f in found.get("faces") or []],
+        "too_small": int((found.get("dropped") or {}).get("too_small") or 0),
+        "frame": found.get("frame") or {},
+    }
+
+
+@router.get("/people/{person_id}/photo")
+async def get_photo(person_id: int, db: Session = Depends(get_db),
+                    _user: User = Depends(_view)):
+    """The person's picture, cut from one of their enrolled photos."""
+    p = _person_or_404(db, person_id)
+    path = attendance_faces.photo_path(p.uuid)
+    if path is None or not path.is_file():
+        raise HTTPException(status_code=404, detail="No picture for this person")
+    return Response(path.read_bytes(), media_type="image/jpeg",
+                    headers={"cache-control": "private, no-cache"})
+
+
+@router.put("/people/{person_id}/photo")
+async def set_photo(person_id: int, request: Request, db: Session = Depends(get_db),
+                    user: User = Depends(_enroll)):
+    """Set the person's picture: a small JPEG (the enrolling page sends a
+    face crop of an accepted photo). Only with consent on record; it is
+    deleted whenever their faces are."""
+    p = _person_or_404(db, person_id)
+    if p.consent_at is None:
+        raise HTTPException(status_code=409, detail=(
+            "Record this person's consent to face recognition before adding a picture"))
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > attendance_faces.MAX_PHOTO_BYTES:
+        raise HTTPException(status_code=413, detail="The picture is too large")
+    data = await request.body()
+    try:
+        attendance_faces.save_photo(p.uuid, data)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from None
+    audit_request(db, request, action="attendance.photo.set", user_id=user.id,
+                  entity_type="attendance_person", entity_id=p.id,
+                  details={"bytes": len(data)})
     return _person_out(p, _groups_of(db, [p.id])[p.id])
 
 

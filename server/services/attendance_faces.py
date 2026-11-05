@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -27,6 +29,14 @@ logger = logging.getLogger(__name__)
 #: would share every sighting) or the wrong photo under this name.
 DUPLICATE_SIMILARITY = 0.6
 _TIMEOUT = httpx.Timeout(30.0, connect=5.0)
+
+#: A person's picture: a small face crop the enrolling page cuts from an
+#: accepted photo. Kept beside the recordings, but outside ``.evidence``
+#: and the camera folders, which the retention sweep empties; deleted with
+#: the person's faces (``drop_photo``), never by age.
+_PHOTO_DIR = Path(".attendance") / "people"
+MAX_PHOTO_BYTES = 256 * 1024
+_UUID = re.compile(r"^[0-9a-fA-F-]{8,64}$")
 
 
 class FaceGalleryError(Exception):
@@ -134,3 +144,37 @@ def duplicate_of(result: dict[str, Any], person_uuid: str) -> dict[str, Any] | N
             and sim >= DUPLICATE_SIMILARITY):
         return {"person_uuid": other, "similarity": float(sim)}
     return None
+
+
+def photo_path(person_uuid: str) -> Path | None:
+    if not _UUID.match(person_uuid or ""):
+        return None
+    from core.config import settings
+
+    return Path(settings.recordings_base_path) / _PHOTO_DIR / f"{person_uuid}.jpg"
+
+
+def has_photo(person_uuid: str) -> bool:
+    path = photo_path(person_uuid)
+    return path is not None and path.is_file()
+
+
+def save_photo(person_uuid: str, data: bytes) -> None:
+    """Replace the person's picture. Only a JPEG, and only a small one."""
+    if not data or len(data) > MAX_PHOTO_BYTES:
+        raise ValueError(f"the picture must be 1..{MAX_PHOTO_BYTES // 1024} KB")
+    if not data.startswith(b"\xff\xd8"):
+        raise ValueError("the picture is not a JPEG")
+    path = photo_path(person_uuid)
+    if path is None:
+        raise ValueError("bad person id")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".partial")
+    tmp.write_bytes(data)
+    tmp.replace(path)
+
+
+def drop_photo(person_uuid: str) -> None:
+    path = photo_path(person_uuid)
+    if path is not None:
+        path.unlink(missing_ok=True)

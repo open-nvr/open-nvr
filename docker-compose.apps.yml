@@ -2384,7 +2384,7 @@ services:
       - opennvr_apps
       - opennvr_internal
     healthcheck:
-      test: ["CMD", "wget", "-q", "--no-check-certificate", "-O", "-", "https://localhost/healthz"]
+      test: ["CMD", "wget", "-q", "--no-check-certificate", "-O", "-", "https://127.0.0.1/healthz"]
       interval: 30s
       timeout: 5s
       start_period: 10s

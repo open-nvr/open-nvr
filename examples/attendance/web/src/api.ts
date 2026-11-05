@@ -139,13 +139,16 @@ function qs(query?: Query): string {
   return s ? `?${s}` : ''
 }
 
-type Options = { query?: Query; json?: unknown; form?: FormData; blob?: boolean }
+type Options = { query?: Query; json?: unknown; form?: FormData; blob?: boolean; raw?: Blob }
 
 async function send(method: string, path: string, opts: Options, retried = false): Promise<Response> {
   const extra: Record<string, string> = {}
   let body: BodyInit | undefined
   if (opts.form) body = opts.form
-  else if (opts.json !== undefined) {
+  else if (opts.raw) {
+    extra['content-type'] = opts.raw.type || 'application/octet-stream'
+    body = opts.raw
+  } else if (opts.json !== undefined) {
     extra['content-type'] = 'application/json'
     body = JSON.stringify(opts.json)
   }
@@ -162,6 +165,17 @@ export async function call<T>(method: string, path: string, opts: Options = {}):
     throw new ApiError(res.status, messageOf(body, `${res.status} ${res.statusText}`), body)
   }
   return (await parse(res)) as T
+}
+
+/** A binary answer (a picture), or null when core has none (404). */
+export async function fetchBlob(path: string): Promise<Blob | null> {
+  const res = await send('GET', path, {})
+  if (res.status === 404) return null
+  if (!res.ok) {
+    const body = await parse(res)
+    throw new ApiError(res.status, messageOf(body, `${res.status} ${res.statusText}`), body)
+  }
+  return res.blob()
 }
 
 /** A file answer (the report as CSV/XLSX), with the name core gave it. */

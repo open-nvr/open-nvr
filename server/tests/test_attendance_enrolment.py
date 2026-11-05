@@ -295,3 +295,105 @@ def test_consent_withdrawn_mid_enrolment_keeps_nothing(env, gallery, monkeypatch
     r = _enrol(env, p, b"a1", b"a2", b"a3")
     assert r.status_code == 409 and "nothing from it was kept" in r.text
     assert p["uuid"] not in gallery.samples
+
+
+# ── The person's picture, and the webcam guidance check ─────────────
+
+JPEG = b"\xff\xd8\xff\xe0" + b"0" * 64
+
+
+@pytest.fixture()
+def photos_dir(monkeypatch, tmp_path):
+    from core.config import settings
+
+    monkeypatch.setattr(settings, "recordings_base_path", str(tmp_path))
+    return tmp_path
+
+
+def _put_photo(env, person, data=JPEG, headers=None):  # noqa: F811
+    return env.client.put(f"{URL}/people/{person['id']}/photo", content=data,
+                          headers={**(headers or env.jwt("admin")), "content-type": "image/jpeg"})
+
+
+def test_a_picture_is_kept_shown_and_audited(env, gallery, photos_dir):  # noqa: F811
+    p = _person(env)
+    assert p["has_photo"] is False
+    assert env.client.get(f"{URL}/people/{p['id']}/photo", headers=env.jwt("admin")).status_code == 404
+    r = _put_photo(env, p)
+    assert r.status_code == 200 and r.json()["has_photo"] is True
+    got = env.client.get(f"{URL}/people/{p['id']}/photo", headers=env.jwt("admin"))
+    assert got.status_code == 200 and got.content == JPEG
+    assert got.headers["content-type"] == "image/jpeg"
+    # Outside the folders the retention sweep empties.
+    assert (photos_dir / ".attendance" / "people" / f"{p['uuid']}.jpg").is_file()
+    assert not (photos_dir / ".evidence").exists()
+    s = env.Session()
+    assert s.query(env.models.AuditLog).filter(
+        env.models.AuditLog.action == "attendance.photo.set").count() == 1
+    s.close()
+
+
+def test_a_picture_needs_consent_a_jpeg_and_a_small_one(env, gallery, photos_dir):  # noqa: F811
+    assert _put_photo(env, _person(env, consent=False)).status_code == 409
+    p = _person(env, name="Bilal", ref="R2")
+    assert _put_photo(env, p, b"GIF89a").status_code == 422
+    assert _put_photo(env, p, b"").status_code == 422
+    big = JPEG + b"0" * attendance_faces.MAX_PHOTO_BYTES
+    assert _put_photo(env, p, big).status_code == 413
+
+
+def test_a_picture_needs_the_enroll_permission(env, gallery, photos_dir):  # noqa: F811
+    from tests.test_attendance_roster import _role_user
+
+    p = _person(env)
+    V = _role_user(env, "picviewer", ["attendance.view"])
+    assert _put_photo(env, p, headers=V).status_code == 403
+    _put_photo(env, p)
+    assert env.client.get(f"{URL}/people/{p['id']}/photo", headers=V).status_code == 200
+
+
+@pytest.mark.parametrize("how", ["withdraw", "forget", "remove"])
+def test_the_picture_goes_with_the_faces(env, gallery, photos_dir, how):  # noqa: F811
+    p = _person(env)
+    _enrol(env, p, b"a1")
+    _put_photo(env, p)
+    A = env.jwt("admin")
+    if how == "withdraw":
+        env.client.post(f"{URL}/people/{p['id']}/consent", headers=A, json={"given": False})
+    elif how == "forget":
+        env.client.delete(f"{URL}/people/{p['id']}/faces", headers=A)
+    else:
+        env.client.delete(f"{URL}/people/{p['id']}", headers=A)
+    assert not attendance_faces.has_photo(p["uuid"])
+
+
+def test_an_accepted_photo_says_where_the_face_is(env, gallery, monkeypatch):  # noqa: F811
+    async def identify(image):
+        return {"faces": [{"bbox": [10, 20, 110, 140], "person_id": None, "similarity": 0.1}]}
+
+    monkeypatch.setattr(attendance_faces, "identify", identify)
+    r = _enrol(env, _person(env), b"a1")
+    assert r.json()["results"][0]["bbox"] == [10, 20, 110, 140]
+
+
+def test_the_guidance_check_gives_boxes_and_never_names(env, gallery, monkeypatch):  # noqa: F811
+    from tests.test_attendance_roster import _role_user
+
+    async def identify(image):
+        return {"faces": [{"bbox": [1, 2, 3, 4], "confidence": 0.9, "person_id": "u-1",
+                           "name": "Asha", "similarity": 0.8}],
+                "dropped": {"too_small": 2}, "frame": {"w": 640, "h": 360}}
+
+    monkeypatch.setattr(attendance_faces, "identify", identify)
+    frame = [("frame", ("f.jpg", b"jpeg", "image/jpeg"))]
+    r = env.client.post(f"{URL}/faces/check", headers=env.jwt("admin"), files=frame)
+    assert r.status_code == 200
+    assert r.json() == {"faces": [{"bbox": [1, 2, 3, 4], "confidence": 0.9}],
+                        "too_small": 2, "frame": {"w": 640, "h": 360}}
+    assert "Asha" not in r.text and "u-1" not in r.text
+    V = _role_user(env, "vic", ["attendance.view"])
+    assert env.client.post(f"{URL}/faces/check", headers=V, files=frame).status_code == 403
+    gallery.down = True
+    monkeypatch.setattr(attendance_faces, "identify", gallery.identify)
+    assert env.client.post(f"{URL}/faces/check", headers=env.jwt("admin"),
+                           files=frame).status_code == 503

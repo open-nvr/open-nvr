@@ -10,6 +10,7 @@ import { Camera, Pencil, Search, ShieldOff, Trash2, UserPlus, Users } from 'luci
 import { errorText } from '../api'
 import { useAuth } from '../auth'
 import { api, groupName, type Person } from '../attendance'
+import { Avatar } from '../components/faces'
 import { useFeedback } from '../components/feedback'
 import { Badge, Button, Card, Empty, ErrorNote, Field, Loading, Modal, PageTitle, RowMenu, Table, inlineInputClass, inputClass, menuItem, td, th } from '../components/ui'
 import { useGroups, useLoad } from '../hooks'
@@ -151,8 +152,13 @@ export default function People() {
               {people.data.people.map((p) => (
                 <tr key={p.id} className="hover:bg-gray-50">
                   <td className={td}>
-                    <div className="font-medium text-gray-900">{p.display_name}</div>
-                    {p.email && <div className="text-xs text-gray-500">{p.email}</div>}
+                    <div className="flex items-center gap-3">
+                      <Avatar person={p} />
+                      <div className="min-w-0">
+                        <div className="font-medium text-gray-900">{p.display_name}</div>
+                        {p.email && <div className="truncate text-xs text-gray-500">{p.email}</div>}
+                      </div>
+                    </div>
                   </td>
                   <td className={`${td} whitespace-nowrap`}>{p.external_ref ?? '—'}</td>
                   <td className={td}>

@@ -11,7 +11,8 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { Camera, CheckCircle2, ImagePlus, RotateCcw, Search, Trash2, UserPlus, Video, XCircle } from 'lucide-react'
 import { errorText } from '../api'
 import { useAuth } from '../auth'
-import { api, type EnrolResult, type Person } from '../attendance'
+import { api, type EnrolResult, type FaceCheck, type Person } from '../attendance'
+import { Avatar, cutPicture, pictureChanged } from '../components/faces'
 import { useFeedback } from '../components/feedback'
 import { Badge, Button, Card, Empty, ErrorNote, Field, Loading, PageTitle, inputClass } from '../components/ui'
 import { useGroups, useLoad } from '../hooks'
@@ -195,7 +196,9 @@ function FindPerson({ onPick }: { onPick: (p: Person) => void }) {
 
 function FaceStep({ person, onChanged, onDone }: { person: Person; onChanged: () => void; onDone: () => void }) {
   const { toast } = useFeedback()
-  const [mode, setMode] = useState<'photos' | 'webcam'>('photos')
+  const webcamOk = typeof window !== 'undefined' && window.isSecureContext && !!navigator.mediaDevices?.getUserMedia
+  const [mode, setMode] = useState<'photos' | 'webcam'>(webcamOk ? 'webcam' : 'photos')
+  const [pictureVersion, setPictureVersion] = useState(0)
   const [shots, setShots] = useState<Shot[]>([])
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<{ shots: Shot[]; r: EnrolResult } | null>(null)
@@ -222,11 +225,29 @@ function FaceStep({ person, onChanged, onDone }: { person: Person; onChanged: ()
     }
   }
 
+  // The person's picture: cut from the first photo core accepted (the
+  // straight-on one, from the webcam). Not worth failing an enrolment for.
+  const keepPicture = async (r: EnrolResult) => {
+    const first = r.results.find((x) => x.ok && x.bbox)
+    const shot = first ? shots[first.index] : undefined
+    if (!first?.bbox || !shot) return
+    try {
+      const picture = await cutPicture(shot.blob, first.bbox)
+      if (!picture) return
+      await api.setPhoto(person.id, picture)
+      pictureChanged(person.id)
+      setPictureVersion((v) => v + 1)
+    } catch (e) {
+      toast('info', `Enrolled, but the picture was not saved: ${errorText(e)}`)
+    }
+  }
+
   const enrol = async () => {
     setBusy(true)
     setError(null)
     try {
       const r = await api.enrol(person.id, shots.map((s) => s.blob))
+      await keepPicture(r)
       setResult({ shots, r })
       setShots([])
       onChanged()
@@ -245,6 +266,8 @@ function FaceStep({ person, onChanged, onDone }: { person: Person; onChanged: ()
           <span className="flex h-6 w-6 items-center justify-center rounded-full bg-indigo-600 text-xs text-white">2</span>
           Enrol a face
         </h2>
+        <div className="flex items-start gap-3">
+          <Avatar person={{ ...person, has_photo: person.has_photo || pictureVersion > 0 }} size={56} version={pictureVersion} />
         <div className="space-y-1 text-sm">
           <div className="text-lg font-semibold text-gray-900">{person.display_name}</div>
           {person.external_ref && <div className="text-gray-600">ID {person.external_ref}</div>}
@@ -253,13 +276,16 @@ function FaceStep({ person, onChanged, onDone }: { person: Person; onChanged: ()
             <Badge tone={person.face_samples ? 'green' : 'amber'}>{person.face_samples} photos enrolled</Badge>
           </div>
         </div>
+        </div>
         <div className="mt-5 rounded-lg bg-gray-50 p-3 text-xs text-gray-600">
           <p className="mb-1 font-medium text-gray-700">For good recognition</p>
           <ul className="list-disc space-y-0.5 pl-4">
-            <li>One face per photo, clearly lit, nothing covering it.</li>
+            <li>One face per photo, clearly lit from the front, nothing covering it (no cap, mask or hand).</li>
             <li>3 to 5 photos: straight on, turned a little left and right, chin up and down.</li>
             <li>Glasses on if they usually wear them.</li>
+            <li>A recent photo of the person themselves, not of a printout or a screen.</li>
           </ul>
+          <p className="mt-2">The first accepted photo also becomes their picture in People.</p>
         </div>
         <div className="mt-5 flex flex-wrap gap-2">
           <Button variant="secondary" onClick={onDone}>
@@ -296,6 +322,11 @@ function FaceStep({ person, onChanged, onDone }: { person: Person; onChanged: ()
               ))}
             </div>
 
+            <p className="mb-3 text-sm text-gray-600">
+              {mode === 'photos'
+                ? 'Choose 3 to 5 clear photos of this person alone: straight on, and turned a little each way. Phone photos are fine.'
+                : 'Ask the person to sit in front of this computer. Follow the steps below; each angle is taken by itself.'}
+            </p>
             {mode === 'photos' ? (
               <PhotoPicker onAdd={add} room={MAX_PHOTOS - shots.length} />
             ) : (
@@ -422,15 +453,55 @@ const ANGLES = [
   'Lower your chin slightly',
 ]
 
+/** The guidance frame: small, since only the face's place is wanted. */
+const CHECK_WIDTH = 640
+/** Good checks in a row before the photo is taken: the person is still. */
+const STEADY = 2
+/** Time to take the next pose after a photo. */
+const NEXT_POSE_MS = 3000
+
+type Hint = { tone: 'wait' | 'fix' | 'good'; text: string }
+
+/** What to tell the person about one checked frame. */
+function judge(check: FaceCheck, w: number, h: number): Hint {
+  const faces = check.faces
+  if (faces.length === 0) {
+    return check.too_small
+      ? { tone: 'fix', text: 'Come closer to the camera' }
+      : { tone: 'fix', text: 'No face found. Look at the camera, with light on your face' }
+  }
+  if (faces.length > 1) return { tone: 'fix', text: 'Only one person in view, please' }
+  const [x1, y1, x2, y2] = faces[0].bbox
+  const width = (x2 - x1) / w
+  const cx = (x1 + x2) / 2 / w
+  const cy = (y1 + y2) / 2 / h
+  if (width < 0.12) return { tone: 'fix', text: 'Come a little closer' }
+  if (width > 0.42) return { tone: 'fix', text: 'Move back a little' }
+  if (Math.abs(cx - 0.5) > 0.14 || Math.abs(cy - 0.5) > 0.2) return { tone: 'fix', text: 'Move your face into the oval' }
+  if ((faces[0].confidence ?? 1) < 0.6) return { tone: 'fix', text: 'Hold still, and face the light' }
+  return { tone: 'good', text: 'Hold still…' }
+}
+
+const sleep = (ms: number) => new Promise((r) => window.setTimeout(r, ms))
+
 function WebcamCapture({ onAdd, room }: { onAdd: (s: Shot[]) => void; room: number }) {
   const video = useRef<HTMLVideoElement>(null)
   const stream = useRef<MediaStream | null>(null)
   const [state, setState] = useState<'idle' | 'starting' | 'live' | 'error'>('idle')
   const [error, setError] = useState<string | null>(null)
   const [step, setStep] = useState(0)
+  const stepRef = useRef(0)
   const [flash, setFlash] = useState(false)
   const [countdown, setCountdown] = useState<number | null>(null)
+  const [auto, setAuto] = useState(true)
+  const [hint, setHint] = useState<Hint | null>(null)
+  const [nextIn, setNextIn] = useState<number | null>(null)
   const secure = typeof window !== 'undefined' && window.isSecureContext && !!navigator.mediaDevices?.getUserMedia
+
+  const goTo = (n: number) => {
+    stepRef.current = n
+    setStep(n)
+  }
 
   const stop = () => {
     stream.current?.getTracks().forEach((t) => t.stop())
@@ -465,23 +536,26 @@ function WebcamCapture({ onAdd, room }: { onAdd: (s: Shot[]) => void; room: numb
     }
   }
 
-  const capture = () => {
+  /** The video's current frame as a JPEG, at most ``width`` wide. */
+  const grab = (width: number, quality: number): Promise<{ blob: Blob; w: number; h: number } | null> => {
     const v = video.current
-    if (!v || !v.videoWidth) return
+    if (!v || !v.videoWidth) return Promise.resolve(null)
+    const scale = Math.min(1, width / v.videoWidth)
     const canvas = document.createElement('canvas')
-    canvas.width = v.videoWidth
-    canvas.height = v.videoHeight
-    canvas.getContext('2d')?.drawImage(v, 0, 0)
-    const label = ANGLES[step % ANGLES.length]
-    canvas.toBlob(
-      (blob) => {
-        if (!blob) return
-        onAdd([{ blob, url: URL.createObjectURL(blob), label }])
-        setStep((s) => s + 1)
-      },
-      'image/jpeg',
-      0.92,
+    canvas.width = Math.round(v.videoWidth * scale)
+    canvas.height = Math.round(v.videoHeight * scale)
+    canvas.getContext('2d')?.drawImage(v, 0, 0, canvas.width, canvas.height)
+    return new Promise((resolve) =>
+      canvas.toBlob((blob) => resolve(blob ? { blob, w: canvas.width, h: canvas.height } : null), 'image/jpeg', quality),
     )
+  }
+
+  const capture = async () => {
+    const shot = await grab(Number.MAX_SAFE_INTEGER, 0.92)
+    if (!shot) return
+    const label = ANGLES[stepRef.current % ANGLES.length]
+    onAdd([{ blob: shot.blob, url: URL.createObjectURL(shot.blob), label }])
+    goTo(stepRef.current + 1)
     setFlash(true)
     window.setTimeout(() => setFlash(false), 150)
   }
@@ -498,7 +572,60 @@ function WebcamCapture({ onAdd, room }: { onAdd: (s: Shot[]) => void; room: numb
     return () => window.clearTimeout(t)
   }, [countdown]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Automatic capture: check a small frame about once a second, say what
+  // to change, and take the photo once one face has been well placed and
+  // still for STEADY checks in a row. One check in flight at a time.
+  const running = state === 'live' && auto && room > 0 && step < ANGLES.length
+  useEffect(() => {
+    if (!running) {
+      setHint(null)
+      return
+    }
+    let cancelled = false
+    ;(async () => {
+      let steady = 0
+      while (!cancelled) {
+        const frame = await grab(CHECK_WIDTH, 0.8)
+        if (!frame) {
+          await sleep(500)
+          continue
+        }
+        let verdict: Hint
+        try {
+          const check = await api.checkFace(frame.blob)
+          verdict = judge(check, check.frame.w || frame.w, check.frame.h || frame.h)
+        } catch (e) {
+          if (cancelled) return
+          setHint({ tone: 'fix', text: `Cannot check the face right now: ${errorText(e)}` })
+          await sleep(3000)
+          continue
+        }
+        if (cancelled) return
+        steady = verdict.tone === 'good' ? steady + 1 : 0
+        setHint(verdict)
+        if (steady < STEADY) {
+          await sleep(400)
+          continue
+        }
+        steady = 0
+        await capture()
+        if (stepRef.current >= ANGLES.length) return
+        setHint({ tone: 'good', text: 'Got it!' })
+        for (let left = NEXT_POSE_MS; left > 0 && !cancelled; left -= 1000) {
+          setNextIn(Math.ceil(left / 1000))
+          await sleep(1000)
+        }
+        setNextIn(null)
+      }
+    })()
+    return () => {
+      cancelled = true
+      setNextIn(null)
+    }
+  }, [running]) // eslint-disable-line react-hooks/exhaustive-deps
+
   const guide = useMemo(() => ANGLES[step % ANGLES.length], [step])
+  const done = step >= ANGLES.length
 
   if (!secure) {
     return (
@@ -508,18 +635,44 @@ function WebcamCapture({ onAdd, room }: { onAdd: (s: Shot[]) => void; room: numb
     )
   }
 
+  const ring = hint?.tone === 'good' ? 'border-green-400' : hint?.tone === 'fix' ? 'border-amber-300' : 'border-white/70'
+
   return (
     <div>
+      <ol className="mb-3 list-decimal space-y-0.5 pl-5 text-sm text-gray-700">
+        <li>Sit facing the camera, about an arm's length away, with light in front of you (not a window behind).</li>
+        <li>Take off a cap or mask. Keep glasses on if you usually wear them.</li>
+        <li>
+          Put your face in the oval and follow the instruction at the top.{' '}
+          {auto ? 'The photo is taken by itself when your face is in place.' : 'Press Capture, or use the timer.'}
+        </li>
+      </ol>
       <div className="relative overflow-hidden rounded-xl bg-gray-900">
         <video ref={video} playsInline muted className={`aspect-video w-full -scale-x-100 object-cover ${state === 'live' ? '' : 'invisible'}`} />
         {state === 'live' && (
           <>
             <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-              <div className="h-[62%] aspect-[3/4] rounded-[50%] border-4 border-white/70 shadow-[0_0_0_9999px_rgba(0,0,0,0.25)]" />
+              <div className={`h-[62%] aspect-[3/4] rounded-[50%] border-4 ${ring} shadow-[0_0_0_9999px_rgba(0,0,0,0.25)] transition-colors`} />
             </div>
-            <div className="absolute inset-x-0 top-0 bg-gradient-to-b from-black/60 to-transparent p-3 text-center text-sm font-medium text-white">
-              {step < ANGLES.length ? `${step + 1} of ${ANGLES.length}: ${guide}` : guide}
+            <div className="absolute inset-x-0 top-0 bg-gradient-to-b from-black/70 to-transparent p-3 text-center text-white">
+              <div className="text-base font-semibold">
+                {done
+                  ? 'All angles taken'
+                  : nextIn !== null
+                    ? `Next, ${guide.toLowerCase()}… ${nextIn}`
+                    : `${step + 1} of ${ANGLES.length}: ${guide}`}
+              </div>
             </div>
+            {hint && !done && nextIn === null && (
+              <div className="absolute inset-x-0 bottom-0 flex justify-center p-3">
+                <span
+                  aria-live="polite"
+                  className={`rounded-full px-3 py-1 text-sm font-medium shadow ${hint.tone === 'good' ? 'bg-green-600 text-white' : 'bg-amber-100 text-amber-900'}`}
+                >
+                  {hint.text}
+                </span>
+              </div>
+            )}
             {countdown !== null && (
               <div className="absolute inset-0 flex items-center justify-center text-7xl font-bold text-white drop-shadow">{countdown}</div>
             )}
@@ -537,24 +690,41 @@ function WebcamCapture({ onAdd, room }: { onAdd: (s: Shot[]) => void; room: numb
         )}
       </div>
       {state === 'live' && (
-        <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-          <div className="flex gap-1">
-            {ANGLES.map((a, i) => (
-              <span key={a} title={a} className={`h-2 w-8 rounded-full ${i < step ? 'bg-green-500' : i === step ? 'bg-indigo-500' : 'bg-gray-200'}`} />
-            ))}
+        <>
+          {done && (
+            <p className="mt-3 rounded-lg bg-green-50 p-3 text-sm text-green-800">
+              All {ANGLES.length} angles are taken. Check the photos below, remove any that are blurred, then press Enrol.
+            </p>
+          )}
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-3">
+              <div className="flex gap-1">
+                {ANGLES.map((a, i) => (
+                  <span key={a} title={a} className={`h-2 w-8 rounded-full ${i < step ? 'bg-green-500' : i === step ? 'bg-indigo-500' : 'bg-gray-200'}`} />
+                ))}
+              </div>
+              <label className="flex items-center gap-1.5 text-sm text-gray-700">
+                <input type="checkbox" className="h-4 w-4 accent-indigo-600" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
+                Take photos automatically
+              </label>
+            </div>
+            <div className="flex gap-2">
+              <Button variant="ghost" size="sm" onClick={() => goTo(0)}>
+                <RotateCcw className="h-3.5 w-3.5" /> Start over
+              </Button>
+              {!auto && (
+                <>
+                  <Button variant="secondary" onClick={() => setCountdown(3)} disabled={room <= 0 || countdown !== null}>
+                    Timer (3 s)
+                  </Button>
+                  <Button onClick={capture} disabled={room <= 0 || countdown !== null}>
+                    <Camera className="h-4 w-4" /> Capture
+                  </Button>
+                </>
+              )}
+            </div>
           </div>
-          <div className="flex gap-2">
-            <Button variant="ghost" size="sm" onClick={() => setStep(0)}>
-              <RotateCcw className="h-3.5 w-3.5" /> Start over
-            </Button>
-            <Button variant="secondary" onClick={() => setCountdown(3)} disabled={room <= 0 || countdown !== null}>
-              Timer (3 s)
-            </Button>
-            <Button onClick={capture} disabled={room <= 0 || countdown !== null}>
-              <Camera className="h-4 w-4" /> Capture
-            </Button>
-          </div>
-        </div>
+        </>
       )}
     </div>
   )
