@@ -492,6 +492,8 @@ services:
       #   DETECT_MIN_SPAWN_SCORE  score needed to CREATE a track
       #   DETECT_NMS_CROSS_LABEL_IOU  boxes of DIFFERENT labels this
       #                       coincident are one object (0 or 1 = off)
+      #   DETECT_NMS_CONTAINMENT  a same-label box this far inside a larger
+      #                       one is a part of it, not a second object
       - DETECT_LABELS=${DETECT_LABELS:-}
       - DETECT_CONF=${DETECT_CONF:-}
       - DETECT_MAX_REGIONS=${DETECT_MAX_REGIONS:-}
@@ -499,6 +501,7 @@ services:
       - DETECT_TRACK_TTL=${DETECT_TRACK_TTL:-}
       - DETECT_MIN_SPAWN_SCORE=${DETECT_MIN_SPAWN_SCORE:-}
       - DETECT_NMS_CROSS_LABEL_IOU=${DETECT_NMS_CROSS_LABEL_IOU:-}
+      - DETECT_NMS_CONTAINMENT=${DETECT_NMS_CONTAINMENT:-}
       # Motion-gate tunables (#373; see .env.example). The calibration
       # deadline keeps a permanently-busy scene from wedging the gate
       # shut — before it, a scene that never went quiet skipped EVERY
