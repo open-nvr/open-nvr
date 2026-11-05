@@ -33,7 +33,7 @@ from ..storage.repo import (
     streams_update,
 )
 from ..utils.image_io import save_frame_snapshot
-from .recognize import recognize_codes_in_frame
+from .recognize import RecognitionUnavailable, recognize_codes_in_frame
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +65,8 @@ class StreamWorker:
     stop_event: threading.Event = field(default_factory=threading.Event)
     on_exit: Optional[Callable[[], None]] = None
     attempts: int = 0
+    failed_attempts: int = 0
+    unwatched_slots: int = 0
     last_codes: List[str] = field(default_factory=list)
     # Test hook: a clock the loop reads instead of the wall clock.
     clock: Callable[[], datetime] = _utcnow
@@ -132,6 +134,21 @@ class StreamWorker:
             next_attempt_at = first_slot_start
             aggregated: Dict[str, bool] = {}
             saved_current_slot = False
+            slot_watched = False  # did any attempt in this slot actually look?
+
+            def save_slot(slot_end: datetime) -> None:
+                nonlocal saved_current_slot
+                if not self.class_id:
+                    return
+                try:
+                    save_snapshot(self.class_id, list(aggregated.keys()), slot_end, watched=slot_watched)
+                    saved_current_slot = True
+                    if not slot_watched:
+                        self.unwatched_slots += 1
+                    logger.info("Worker %s class=%s slot ending %s saved: %s, %d codes", self.stream_id, self.class_id,
+                                slot_end.isoformat(), "watched" if slot_watched else "UNWATCHED", len(aggregated))
+                except Exception:
+                    logger.exception("Snapshot aggregation save error")
             logger.info(
                 "Worker %s class=%s timing: delay=%ss base_slot=%ss attempt_interval=%ss first_slot=%s..%s",
                 self.stream_id, self.class_id, delay_s, base_slot_s, attempt_interval_s,
@@ -140,36 +157,36 @@ class StreamWorker:
             while not self.stop_event.is_set():
                 now = self.clock()
                 if self.end_time and now >= self.end_time:
-                    if self.class_id and not saved_current_slot and aggregated:
-                        try:
-                            save_snapshot(self.class_id, list(aggregated.keys()), current_slot_end)
-                        except Exception:
-                            logger.exception("Final flush snapshot error")
+                    # The last slot is flushed before the worker leaves —
+                    # even an empty one, so it counts like every other.
+                    if not saved_current_slot:
+                        save_slot(current_slot_end)
                     break
                 if now >= next_attempt_at and now < current_slot_end:
                     self.attempts += 1
                     try:
                         frame = self._fetch_frame()
-                        codes = self._recognize_codes(frame) if frame is not None else []
+                        if frame is None:
+                            raise RecognitionUnavailable("no frame from the camera")
+                        codes = self._recognize_codes(frame)
+                        slot_watched = True
                         for c in codes:
                             aggregated[c] = True
                         self.last_codes = codes
                         logger.info("Worker %s class=%s attempt #%d found %d codes: %s",
                                     self.stream_id, self.class_id, self.attempts, len(codes), ",".join(codes) or "none")
+                    except RecognitionUnavailable as exc:
+                        self.failed_attempts += 1
+                        logger.warning("Worker %s class=%s attempt #%d could not look: %s", self.stream_id,
+                                       self.class_id, self.attempts, exc)
                     except Exception:
+                        self.failed_attempts += 1
                         logger.exception("Recognition attempt error")
                     next_attempt_at = min(current_slot_end, now + timedelta(seconds=attempt_interval_s))
                 if now >= current_slot_end:
-                    if self.class_id:
-                        try:
-                            save_snapshot(self.class_id, list(aggregated.keys()), current_slot_end)
-                            saved_current_slot = True
-                            logger.info("Worker %s class=%s slot %s..%s saved with %d codes",
-                                        self.stream_id, self.class_id, current_slot_start.isoformat(),
-                                        current_slot_end.isoformat(), len(aggregated))
-                        except Exception:
-                            logger.exception("Snapshot aggregation save error")
+                    save_slot(current_slot_end)
                     aggregated = {}
+                    slot_watched = False
                     slot_len = base_slot_s if (self.start_time and self.end_time) else int(settings.snapshot_interval_minutes) * 60
                     next_start = current_slot_end
                     if self.end_time:
@@ -312,8 +329,11 @@ class StreamEngine:
         with self._lock:
             return {k: list(v) for k, v in self._schedules.items()}
 
-    def _finalize(self, class_id: str, stream_id: Optional[int]) -> None:
-        if class_id in self._finalized_classes:
+    def _finalize(self, class_id: str, stream_id: Optional[int], *, force: bool = False) -> None:
+        """Write the class's attendance from its snapshots. Runs once per
+        class from the schedule, and again (``force``) when the class's
+        worker exits, so the slot it flushed last is counted."""
+        if class_id in self._finalized_classes and not force:
             return
         try:
             res = finalize_attendance(class_id)
@@ -348,7 +368,7 @@ class StreamEngine:
                             continue
                         if start_dt <= now <= end_dt:
                             self._ensure_running(stream_id, class_id, start_dt, end_dt)
-                        if now > end_dt:
+                        if now > end_dt + timedelta(seconds=self._settings.finalize_grace_seconds):
                             self._finalize(class_id, stream_id)
                 if time.time() - last_reload >= 30:
                     self.reload_streams()
@@ -388,7 +408,8 @@ class StreamEngine:
                     continue
                 if sch.get("is_finalized"):
                     continue
-                if end_dt <= now:
+                grace = timedelta(seconds=self._settings.finalize_grace_seconds)
+                if end_dt + grace <= now:
                     if class_id not in self._finalized_classes:
                         self._finalize(class_id, stream_id)
                     else:
@@ -401,7 +422,7 @@ class StreamEngine:
                     self._aps.add_job(self._ensure_running, "date", run_date=max(start_dt, now),
                                       args=[stream_id, class_id, start_dt, end_dt],
                                       id=f"start-{stream_id}-{class_id}", replace_existing=True)
-                    self._aps.add_job(self._finalize, "date", run_date=end_dt, args=[class_id, stream_id],
+                    self._aps.add_job(self._finalize, "date", run_date=end_dt + grace, args=[class_id, stream_id],
                                       id=f"end-{stream_id}-{class_id}", replace_existing=True)
                 except Exception:
                     pass
@@ -436,7 +457,7 @@ class StreamEngine:
             camera_id=int(camera_id) if camera_id is not None else None, class_id=class_id,
             course_code=course_code, section=section, start_time=start_dt, end_time=end_dt,
             recognizer=self._recognizer_or_none(), frames=self._frames_or_none(),
-            on_exit=lambda: self._worker_slots.release(),
+            on_exit=lambda: self._worker_exited(stream_id, class_id),
         )
         with self._lock:
             old = self._workers.get(stream_id)
@@ -452,11 +473,31 @@ class StreamEngine:
             pass
         worker.start()
 
+    def _worker_exited(self, stream_id: int, class_id: Optional[str]) -> None:
+        self._worker_slots.release()
+        # The worker has flushed its last slot; count it now rather than
+        # whenever the scheduled finalisation happens to run.
+        if class_id and self.clock_now() >= self._class_end(stream_id, class_id):
+            self._finalize(class_id, stream_id, force=True)
+
+    def clock_now(self) -> datetime:
+        return _utcnow()
+
+    def _class_end(self, stream_id: int, class_id: str) -> datetime:
+        for sch in self.schedules().get(stream_id, []):
+            if str(sch.get("class_id") or "") == class_id and sch.get("end_iso"):
+                try:
+                    return _to_utc(datetime.fromisoformat(sch["end_iso"]))
+                except Exception:
+                    break
+        return datetime.min.replace(tzinfo=timezone.utc)
+
     def status(self) -> List[Dict[str, Any]]:
         with self._lock:
             return [{
                 "stream_id": sid, "name": w.name, "camera_id": w.camera_id, "class_id": w.class_id,
-                "running": w.running, "attempts": w.attempts, "last_codes": list(w.last_codes),
+                "running": w.running, "attempts": w.attempts, "failed_attempts": w.failed_attempts,
+                "unwatched_slots": w.unwatched_slots, "last_codes": list(w.last_codes),
                 "start_time": w.start_time.isoformat() if w.start_time else None,
                 "end_time": w.end_time.isoformat() if w.end_time else None,
             } for sid, w in self._workers.items()]

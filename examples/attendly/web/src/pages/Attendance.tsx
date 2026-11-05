@@ -21,7 +21,7 @@ type FinalizedAttendance = {
   slots_present: number
   total_slots: number
   ratio: number
-  status: 'PRESENT' | 'ABSENT'
+  status: 'PRESENT' | 'ABSENT' | 'UNWATCHED'
   finalized_at: string
 }
 
@@ -700,13 +700,17 @@ export default function Attendance() {
                             <svg className="w-5 h-5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                             </svg>
+                          ) : r.status === 'UNWATCHED' ? (
+                            <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                            </svg>
                           ) : (
                             <svg className="w-5 h-5 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                             </svg>
                           )}
-                          <span className={r.status === 'PRESENT' ? 'text-green-700' : 'text-red-700'}>
-                            {r.status === 'PRESENT' ? 'Present' : 'Absent'}
+                          <span className={r.status === 'PRESENT' ? 'text-green-700' : r.status === 'UNWATCHED' ? 'text-gray-500' : 'text-red-700'} title={r.status === 'UNWATCHED' ? 'The camera could not be watched during this class (no frames or recognition down); nobody was marked absent.' : undefined}>
+                            {r.status === 'PRESENT' ? 'Present' : r.status === 'UNWATCHED' ? 'Not watched' : 'Absent'}
                           </span>
                         </div>
                       </td>

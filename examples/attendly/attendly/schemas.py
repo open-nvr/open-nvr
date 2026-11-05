@@ -5,6 +5,11 @@ from typing import List, Optional
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
+class Enrolment(BaseModel):
+    course_code: str = Field(..., min_length=1, max_length=64)
+    section: str = Field(..., min_length=1, max_length=16)
+
+
 class StudentCreate(BaseModel):
     full_name: str = Field(..., min_length=1, max_length=256)
     course_code: str = Field(..., min_length=1, max_length=64)
@@ -22,6 +27,8 @@ class StudentUpdate(BaseModel):
     email: Optional[EmailStr] = None
     residence: Optional[str] = None
     hostel_block: Optional[str] = Field(None, max_length=64)
+    # Replaces the student's extra course/section pairs when given.
+    enrolments: Optional[List[Enrolment]] = None
 
 
 class StudentOut(BaseModel):
@@ -34,6 +41,7 @@ class StudentOut(BaseModel):
     email: Optional[str] = None
     residence: str = "day_scholar"
     hostel_block: Optional[str] = None
+    enrolments: List[Enrolment] = Field(default_factory=list)
     created_at: str
 
     model_config = ConfigDict(from_attributes=True)
@@ -50,6 +58,7 @@ def student_out(item: dict) -> StudentOut:
         email=item.get("email"),
         residence=str(item.get("residence") or "day_scholar"),
         hostel_block=item.get("hostel_block"),
+        enrolments=[Enrolment(**e) for e in (item.get("enrolments") or [])],
         created_at=str(item.get("created_at") or ""),
     )
 

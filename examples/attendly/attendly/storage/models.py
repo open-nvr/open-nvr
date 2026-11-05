@@ -22,6 +22,20 @@ class Student(Base):
     deleted_at = Column(String(40), nullable=True, index=True)
 
 
+class StudentEnrolment(Base):
+    """Further course/section pairs a student attends beyond the primary
+    one on the student row (a class of either marks them)."""
+
+    __tablename__ = "student_enrolments"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    student_code = Column(String(32), nullable=False, index=True)
+    course_code = Column(String(64), nullable=False, index=True)
+    section = Column(String(16), nullable=False)
+
+    __table_args__ = (Index("ix_student_enrolments_unique", "student_code", "course_code", "section", unique=True),)
+
+
 class Counter(Base):
     __tablename__ = "counters"
 
@@ -91,7 +105,10 @@ class AttendanceSnapshot(Base):
 class AttendanceFinal(Base):
     __tablename__ = "attendance_final"
 
-    id = Column(Integer, primary_key=True)  # crc32(class_id:student_code), stable
+    # Looked up by (class_id, student_code), never by id: the first port
+    # derived the id from a 31-bit hash of that pair, and two pairs that
+    # hashed alike overwrote each other.
+    id = Column(Integer, primary_key=True, autoincrement=True)
     class_id = Column(String(160), nullable=False, index=True)
     student_code = Column(String(32), nullable=False)
     slots_present = Column(Integer, nullable=False, default=0)
@@ -111,6 +128,9 @@ class AttendanceClassMeta(Base):
     class_id = Column(String(160), primary_key=True)
     finalized_at = Column(String(40), nullable=False)
     total_slots = Column(Integer, nullable=False, default=0)
+    # Slots the camera could not be watched in (outage, no worker): they
+    # do not count against anyone, and the report says so.
+    unwatched_slots = Column(Integer, nullable=False, default=0, server_default="0")
 
 
 class AttendanceRecord(Base):

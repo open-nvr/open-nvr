@@ -70,6 +70,9 @@ _LATER_COLUMNS = {
         ("direction", "VARCHAR(8) NOT NULL DEFAULT 'in'"),
         ("alert_on", "VARCHAR(8) NOT NULL DEFAULT 'all'"),
     ],
+    "attendance_class_meta": [
+        ("unwatched_slots", "INTEGER NOT NULL DEFAULT 0"),
+    ],
     "access_events": [
         ("movement", "VARCHAR(8)"),
         ("alerted", "BOOLEAN NOT NULL DEFAULT 0"),

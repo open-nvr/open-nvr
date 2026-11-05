@@ -25,7 +25,6 @@ export default function App() {
   const [stats, setStats] = useState<any>(null)
   const [statsLoading, setStatsLoading] = useState(false)
   const [statsError, setStatsError] = useState('')
-  const maxStudents = 100
 
   const API = config.API_BASE_URL
   const STATS_CACHE_KEY = 'attendly:dashboard:stats'
@@ -87,7 +86,7 @@ export default function App() {
                 <div className="flex items-center text-blue-600">
                   <Users className="w-6 h-6" />
                   <div className="text-2xl font-bold ml-2">
-                  {(stats.statistics?.total_students_with_faces ?? '-')}{typeof stats?.statistics?.total_students_with_faces === 'number' ? ` / ${maxStudents}` : ''}
+                  {(stats.statistics?.total_students_with_faces ?? '-')}{typeof stats?.statistics?.total_students_with_faces === 'number' && Number(stats?.statistics?.max_students) > 0 ? ` / ${stats.statistics.max_students}` : ''}
                   </div>
                 </div>
                 <div className="text-sm text-gray-600 mt-1">Registered Students</div>

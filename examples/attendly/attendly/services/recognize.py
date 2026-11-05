@@ -6,7 +6,12 @@ import logging
 from typing import List, Optional
 
 from ..config import get_settings
-from ..storage.repo import get_student
+from ..storage.repo import get_student, student_enrolled_in
+
+
+class RecognitionUnavailable(RuntimeError):
+    """Detection could not be run on this frame (KAI-C/adapter down): the
+    look did not happen, as opposed to happening and finding nobody."""
 from ..utils.image_io import save_detected_face
 
 logger = logging.getLogger(__name__)
@@ -111,7 +116,7 @@ def recognize_codes_in_frame(
         faces = engine.detect_faces(full_buf.tobytes())
     except Exception as exc:
         logger.warning("[%s] face detection failed: %s", tag, exc)
-        return []
+        raise RecognitionUnavailable(str(exc)) from exc
     logger.info("[%s] detected %d faces", tag, len(faces))
     if not faces:
         return []
@@ -130,9 +135,7 @@ def recognize_codes_in_frame(
             student = get_student(code)
             if student is None:
                 continue
-            if course_code and str(student.get("course_code")) != str(course_code):
-                continue
-            if section and str(student.get("section")) != str(section):
+            if not student_enrolled_in(student, course_code, section):
                 continue
             logger.debug("[%s] face %d: %s (%.3f)", tag, i, code, sim)
             found.append(code)

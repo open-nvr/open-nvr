@@ -67,7 +67,8 @@ class Settings(BaseSettings):
 
     # ── Domain ──────────────────────────────────────────────────────
     timezone: str = "Asia/Kolkata"
-    max_registered_students: int = 100
+    # 0 = no limit.
+    max_registered_students: int = 0
     student_code_prefix: str = "AT"
 
     # Snapshot attendance timing (unchanged from the AWS version)
@@ -82,7 +83,12 @@ class Settings(BaseSettings):
     min_schedule_duration_minutes: float = 10.0
     attendance_presence_threshold: float = 0.6
     planner_enforce_time_window: bool = False
-    max_workers: int = 10
+    # Rooms that can hold a class at the same moment (one thread each,
+    # one frame per attempt interval: cheap).
+    max_workers: int = 50
+    # Finalisation runs this long after the class ends, so the worker's
+    # last slot is on disk first; the worker also finalises when it exits.
+    finalize_grace_seconds: int = 30
 
     # ── Staff attendance ────────────────────────────────────────────
     staff_face_category: str = "attendly_staff"

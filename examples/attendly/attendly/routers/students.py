@@ -29,6 +29,20 @@ router = APIRouter()
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
 
+def _check_limit(settings) -> None:
+    """``ATTENDLY_MAX_REGISTERED_STUDENTS``; 0 (the default) is no limit."""
+    limit = int(settings.max_registered_students or 0)
+    if limit <= 0:
+        return
+    try:
+        n = count_students()
+    except Exception:
+        logger.warning("Failed to count students; proceeding")
+        return
+    if n >= limit:
+        raise HTTPException(status_code=403, detail=f"Registration limit reached ({limit}).")
+
+
 @log_call()
 def check_for_duplicate_face_sync(image_bytes: bytes, current_student_code: str) -> Optional[dict]:
     """Is the face in this image already enrolled for someone else?"""
@@ -144,13 +158,7 @@ def _enrol_images(
 @log_call()
 def create_student(payload: schemas.StudentCreate):
     settings = get_settings()
-    try:
-        if count_students() >= settings.max_registered_students:
-            raise HTTPException(status_code=403, detail=f"Registration limit reached ({settings.max_registered_students}).")
-    except HTTPException:
-        raise
-    except Exception:
-        logger.warning("Failed to count students; proceeding with create_student")
+    _check_limit(settings)
     if payload.email and get_student_by_email(str(payload.email)) is not None:
         raise HTTPException(status_code=409, detail="Email already registered")
     try:
@@ -192,6 +200,9 @@ def update_student(student_code: str, payload: schemas.StudentUpdate):
         )
     except KeyError:
         raise HTTPException(status_code=404, detail="student not found")
+    if payload.enrolments is not None:
+        repo.set_student_enrolments(student_code, [e.model_dump() for e in payload.enrolments])
+        updated = get_student(student_code) or updated
     # Keep the adapter's display name in step with ours (best effort).
     if payload.full_name:
         try:
@@ -199,6 +210,25 @@ def update_student(student_code: str, payload: schemas.StudentUpdate):
         except Exception:
             pass
     return schemas.student_out(updated)
+
+
+@router.get("/{student_code}/enrolments", response_model=List[schemas.Enrolment])
+@log_call()
+def get_enrolments(student_code: str):
+    if get_student(student_code) is None:
+        raise HTTPException(status_code=404, detail="student not found")
+    return repo.list_student_enrolments(student_code)
+
+
+@router.put("/{student_code}/enrolments", response_model=List[schemas.Enrolment])
+@log_call()
+def put_enrolments(student_code: str, payload: List[schemas.Enrolment]):
+    """The extra course/section pairs the student attends (the primary
+    pair stays on the student). A class of any of them marks them."""
+    try:
+        return repo.set_student_enrolments(student_code, [e.model_dump() for e in payload])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="student not found")
 
 
 @router.post("/{student_code}/register", response_model=schemas.RegisterFacesResponse)
@@ -250,13 +280,7 @@ def register_and_create_student(
     if len(images) > 10:
         raise HTTPException(status_code=400, detail="Maximum 10 images allowed")
     settings = get_settings()
-    try:
-        if count_students() >= settings.max_registered_students:
-            raise HTTPException(status_code=403, detail=f"Registration limit reached ({settings.max_registered_students}).")
-    except HTTPException:
-        raise
-    except Exception:
-        pass
+    _check_limit(settings)
     angle_list = [angle_tags] if isinstance(angle_tags, str) else angle_tags
     engine = FaceEngine.get_shared()
 

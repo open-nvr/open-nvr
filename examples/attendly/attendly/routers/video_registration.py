@@ -84,8 +84,9 @@ async def start_video_registration(
 ):
     settings = get_settings()
     try:
-        if count_students() >= settings.max_registered_students:
-            raise HTTPException(status_code=403, detail=f"Registration limit reached ({settings.max_registered_students}).")
+        limit = int(settings.max_registered_students or 0)
+        if limit > 0 and count_students() >= limit:
+            raise HTTPException(status_code=403, detail=f"Registration limit reached ({limit}).")
     except HTTPException:
         raise
     except Exception:

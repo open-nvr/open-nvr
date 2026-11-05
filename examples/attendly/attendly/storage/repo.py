@@ -26,6 +26,7 @@ from .models import (
     PlannerTemplate,
     Stream,
     Student,
+    StudentEnrolment,
 )
 
 _CLASS_ID_RE = re.compile(r"^(?P<course>.+)-(?P<section>[^-]+)-\d{8}-\d{4}-\d{4}$")
@@ -130,7 +131,10 @@ def get_student(student_code: str) -> Optional[Dict[str, Any]]:
         row = db.execute(
             select(Student).where(Student.student_code == student_code, Student.deleted_at.is_(None))
         ).scalar_one_or_none()
-        return _student_dict(row) if row else None
+        item = _student_dict(row) if row else None
+    if item is not None:
+        item["enrolments"] = list_student_enrolments(student_code)
+    return item
 
 
 def update_student(
@@ -212,7 +216,11 @@ def list_students(residence: Optional[str] = None, hostel_block: Optional[str] =
         if hostel_block:
             stmt = stmt.where(Student.hostel_block == hostel_block)
         rows = db.execute(stmt.order_by(Student.created_at.desc(), Student.id.desc())).scalars().all()
-        return [_student_dict(r) for r in rows]
+        items = [_student_dict(r) for r in rows]
+    extra = enrolments_for([it["student_code"] for it in items])
+    for it in items:
+        it["enrolments"] = extra.get(it["student_code"], [])
+    return items
 
 
 def list_hostel_blocks() -> List[str]:
@@ -223,12 +231,80 @@ def list_hostel_blocks() -> List[str]:
     return sorted({str(b).strip() for b in rows if b and str(b).strip()})
 
 
+# ── Enrolments: a student may attend more than one course/section ───
+
+
+def list_student_enrolments(student_code: str) -> List[Dict[str, str]]:
+    with session_scope() as db:
+        rows = db.execute(
+            select(StudentEnrolment).where(StudentEnrolment.student_code == student_code)
+            .order_by(StudentEnrolment.course_code, StudentEnrolment.section)
+        ).scalars().all()
+        return [{"course_code": r.course_code, "section": r.section} for r in rows]
+
+
+def enrolments_for(student_codes: List[str]) -> Dict[str, List[Dict[str, str]]]:
+    out: Dict[str, List[Dict[str, str]]] = {}
+    codes = [c for c in dict.fromkeys(student_codes) if c]
+    if not codes:
+        return out
+    with session_scope() as db:
+        for i in range(0, len(codes), 500):
+            rows = db.execute(select(StudentEnrolment).where(StudentEnrolment.student_code.in_(codes[i:i + 500]))).scalars()
+            for r in rows:
+                out.setdefault(r.student_code, []).append({"course_code": r.course_code, "section": r.section})
+    return out
+
+
+def set_student_enrolments(student_code: str, pairs: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Replace the extra enrolments (the primary pair on the row is not
+    repeated here)."""
+    wanted = []
+    seen = set()
+    for pr in pairs or []:
+        course = str(pr.get("course_code") or "").strip()
+        section = str(pr.get("section") or "").strip()
+        if not course or not section or (course, section) in seen:
+            continue
+        seen.add((course, section))
+        wanted.append((course, section))
+    with session_scope() as db:
+        row = db.execute(select(Student).where(Student.student_code == student_code)).scalar_one_or_none()
+        if row is None:
+            raise KeyError("student not found")
+        primary = (row.course_code, row.section)
+        for r in db.execute(select(StudentEnrolment).where(StudentEnrolment.student_code == student_code)).scalars().all():
+            db.delete(r)
+        for course, section in wanted:
+            if (course, section) == primary:
+                continue
+            db.add(StudentEnrolment(student_code=student_code, course_code=course, section=section))
+    return list_student_enrolments(student_code)
+
+
+def student_enrolled_in(student: Dict[str, Any], course_code: Optional[str], section: Optional[str]) -> bool:
+    """Does the class's course/section cover this student (primary pair or
+    an extra enrolment)? A missing course or section does not filter."""
+    if not course_code:
+        return True
+    if str(student.get("course_code")) == str(course_code) and (not section or str(student.get("section")) == str(section)):
+        return True
+    for e in student.get("enrolments") or list_student_enrolments(str(student.get("student_code") or "")):
+        if e["course_code"] == str(course_code) and (not section or e["section"] == str(section)):
+            return True
+    return False
+
+
 def list_sections_by_course(course_code: str) -> List[str]:
     with session_scope() as db:
         rows = db.execute(
             select(Student.section).where(Student.course_code == course_code, Student.deleted_at.is_(None))
         ).scalars().all()
-    return sorted({str(s).strip() for s in rows if s and str(s).strip()})
+        extra = db.execute(
+            select(StudentEnrolment.section).join(Student, Student.student_code == StudentEnrolment.student_code)
+            .where(StudentEnrolment.course_code == course_code, Student.deleted_at.is_(None))
+        ).scalars().all()
+    return sorted({str(s).strip() for s in list(rows) + list(extra) if s and str(s).strip()})
 
 
 def count_students() -> int:
@@ -251,7 +327,12 @@ def list_student_codes_by_course_section(course_code: str, section: str) -> List
                 Student.course_code == course_code, Student.section == section, Student.deleted_at.is_(None)
             )
         ).scalars().all()
-    return sorted(str(c) for c in rows)
+        extra = db.execute(
+            select(StudentEnrolment.student_code).join(Student, Student.student_code == StudentEnrolment.student_code)
+            .where(StudentEnrolment.course_code == course_code, StudentEnrolment.section == section,
+                   Student.deleted_at.is_(None))
+        ).scalars().all()
+    return sorted({str(c) for c in list(rows) + list(extra)})
 
 
 # ── Planner: courses ────────────────────────────────────────────────
@@ -539,16 +620,25 @@ def put_attendance(student_code: str, camera_name: Optional[str], confidence: Op
 # ── Snapshot attendance ─────────────────────────────────────────────
 
 
-def save_snapshot(class_id: str, student_codes: List[str], slot_time: datetime) -> Dict[str, Any]:
-    """One slot marker (so empty slots count) plus one present row per code."""
+SLOT_MARKER = "__slot__"
+UNWATCHED_MARKER = "__unwatched__"
+
+
+def save_snapshot(class_id: str, student_codes: List[str], slot_time: datetime, *, watched: bool = True) -> Dict[str, Any]:
+    """One slot marker (so an empty slot counts) plus one present row per
+    code. ``watched=False`` records a slot in which the camera could not
+    be looked at (no frame, detection down): it counts against nobody."""
     slot_iso = slot_time.isoformat()
     with session_scope() as db:
         db.add(AttendanceSnapshot(
-            class_id=class_id, student_code="__slot__", slot_time=slot_iso, present=False, is_slot_marker=True,
+            class_id=class_id, student_code=SLOT_MARKER if watched else UNWATCHED_MARKER, slot_time=slot_iso,
+            present=False, is_slot_marker=True,
         ))
-        for code in dict.fromkeys(student_codes):
-            db.add(AttendanceSnapshot(class_id=class_id, student_code=code, slot_time=slot_iso, present=True))
-    return {"ok": True, "count": len(student_codes), "class_id": class_id, "slot_time": slot_iso}
+        if watched:
+            for code in dict.fromkeys(student_codes):
+                db.add(AttendanceSnapshot(class_id=class_id, student_code=code, slot_time=slot_iso, present=True))
+    return {"ok": True, "count": len(student_codes) if watched else 0, "class_id": class_id, "slot_time": slot_iso,
+            "watched": watched}
 
 
 def list_snapshot_classes() -> List[str]:
@@ -560,12 +650,15 @@ def list_snapshot_classes() -> List[str]:
 def snapshot_summary(class_id: str) -> Dict[str, Any]:
     with session_scope() as db:
         rows = db.execute(select(AttendanceSnapshot).where(AttendanceSnapshot.class_id == class_id)).scalars().all()
-    slot_times = sorted({r.slot_time for r in rows if r.slot_time})
+    unwatched = {r.slot_time for r in rows if r.student_code == UNWATCHED_MARKER}
+    watched = {r.slot_time for r in rows if r.slot_time and r.student_code != UNWATCHED_MARKER}
+    unwatched -= watched  # a slot watched by one attempt is watched
     counts: Dict[str, int] = {}
     for r in rows:
-        if r.student_code and r.student_code != "__slot__" and r.present:
+        if r.student_code and r.student_code not in (SLOT_MARKER, UNWATCHED_MARKER) and r.present:
             counts[r.student_code] = counts.get(r.student_code, 0) + 1
-    return {"total_slots": len(slot_times), "counts": counts, "slot_times": slot_times}
+    slot_times = sorted(watched)
+    return {"total_slots": len(slot_times), "unwatched_slots": len(unwatched), "counts": counts, "slot_times": slot_times}
 
 
 def ensure_finalization_marker(class_id: str, total_slots: Optional[int] = None) -> None:
@@ -581,6 +674,7 @@ def finalize_attendance(class_id: str) -> Dict[str, Any]:
     s = get_settings()
     summary = snapshot_summary(class_id)
     total_slots = int(summary["total_slots"])
+    unwatched_slots = int(summary.get("unwatched_slots") or 0)
     counts: Dict[str, int] = summary["counts"]
     threshold = float(s.attendance_presence_threshold)
     finalized_at = _now_iso()
@@ -595,10 +689,10 @@ def finalize_attendance(class_id: str) -> Dict[str, Any]:
     with session_scope() as db:
         def upsert(code: str, slots_present: int, ratio: float, status: str) -> None:
             nonlocal written
-            rid = _stable_id(f"{class_id}:{code}")
-            row = db.get(AttendanceFinal, rid)
+            row = db.execute(select(AttendanceFinal).where(
+                AttendanceFinal.class_id == class_id, AttendanceFinal.student_code == code)).scalar_one_or_none()
             if row is None:
-                row = AttendanceFinal(id=rid, class_id=class_id, student_code=code, status=status, finalized_at=finalized_at)
+                row = AttendanceFinal(class_id=class_id, student_code=code, status=status, finalized_at=finalized_at)
                 db.add(row)
             row.slots_present = int(slots_present)
             row.total_slots = int(total_slots)
@@ -607,20 +701,26 @@ def finalize_attendance(class_id: str) -> Dict[str, Any]:
             row.finalized_at = finalized_at
             written += 1
 
+        # No slot was watched (outage, no worker): nobody is marked absent
+        # for a class the camera never saw.
+        nobody_seen = "UNWATCHED" if total_slots == 0 else "ABSENT"
         for code, slots_present in counts.items():
             ratio = (float(slots_present) / float(total_slots)) if total_slots > 0 else 0.0
-            upsert(code, slots_present, ratio, "PRESENT" if ratio >= threshold else "ABSENT")
+            upsert(code, slots_present, ratio, "PRESENT" if ratio >= threshold else nobody_seen)
         for code in missing:
-            upsert(code, 0, 0.0, "ABSENT")
+            upsert(code, 0, 0.0, nobody_seen)
 
         meta = db.get(AttendanceClassMeta, class_id)
         if meta is None:
-            db.add(AttendanceClassMeta(class_id=class_id, finalized_at=finalized_at, total_slots=total_slots))
+            db.add(AttendanceClassMeta(class_id=class_id, finalized_at=finalized_at, total_slots=total_slots,
+                                       unwatched_slots=unwatched_slots))
         else:
             meta.finalized_at = finalized_at
             meta.total_slots = total_slots
+            meta.unwatched_slots = unwatched_slots
 
-    return {"ok": True, "class_id": class_id, "written": written, "total_slots": total_slots}
+    return {"ok": True, "class_id": class_id, "written": written, "total_slots": total_slots,
+            "unwatched_slots": unwatched_slots}
 
 
 def _final_dict(r: AttendanceFinal) -> Dict[str, Any]:

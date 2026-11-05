@@ -82,7 +82,7 @@ def test_finalize_attendance_ratio_absent_rows_and_idempotence(env):
     assert repo.list_snapshot_classes() == [class_id]
 
     res = repo.finalize_attendance(class_id)
-    assert res == {"ok": True, "class_id": class_id, "written": 3, "total_slots": 4}
+    assert res == {"ok": True, "class_id": class_id, "written": 3, "total_slots": 4, "unwatched_slots": 0}
     rows = {r["student_code"]: r for r in repo.get_attendance_by_class(class_id)}
     assert rows["AT00001"]["status"] == "PRESENT" and rows["AT00001"]["ratio"] == 1.0
     assert rows["AT00002"]["status"] == "ABSENT" and rows["AT00002"]["slots_present"] == 2

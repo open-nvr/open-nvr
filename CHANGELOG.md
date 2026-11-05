@@ -31,6 +31,16 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   barrier runs in monitor mode: each student seen is logged as in or out,
   a who-is-in list is kept per block, and an OpenNVR alert names them
   (`hostel_in`, `hostel_out`, `gate_denied`, `mess_served`).
+  Review fixes (#798): the last slot of every class is counted
+  (finalisation waits a grace period and reruns when the worker exits);
+  a slot the camera could not be watched in counts against nobody and a
+  class with none finalises as "Not watched" instead of all-absent;
+  attendance rows are looked up by class and student rather than a
+  31-bit hash that let two classes overwrite each other; a student may
+  be enrolled in several course/section pairs; the 100-student limit is
+  off unless configured; the overlay defaults to Asia/Kolkata as the
+  README says; and slash-less `POST`/`PUT` calls from the UI (creating a
+  course) are redirected instead of answered 405.
 
 - **The escalation proposal: weak evidence on the sub stream → detect on
   the main stream, by consent.** Every posted visit now says where its crop

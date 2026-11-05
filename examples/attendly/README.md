@@ -52,6 +52,18 @@ aggregates who was seen per 10-minute slot. At the end of the class a student
 is PRESENT when seen in at least 60 % of the slots. Timing knobs are
 `ATTENDLY_*` settings in `attendly/config.py`.
 
+Two rules keep the record honest. A slot in which the camera could not be
+looked at (no frame from core, recognition down) is recorded as *unwatched*
+and counts against nobody; a class with no watched slot at all — an outage,
+or a room that never got a worker — finalises as **Not watched** rather than
+marking everyone absent. And finalisation runs after a short grace
+(`ATTENDLY_FINALIZE_GRACE_SECONDS`, 30 s) and again when the room's worker
+exits, so the last slot is always on disk before it is counted.
+
+A student has one primary course and section and may be enrolled in more
+(Student Data → edit → *Also enrolled in*); a class of any of them marks
+them.
+
 ## Hostel gates, the mess, and staff
 
 Three more jobs on the same cameras and the same face database:
@@ -139,7 +151,10 @@ raise it if strangers are matched. Changes take effect on restart.
 | `ATTENDLY_PUBLIC_URL` | — | browser-reachable URL; blank = `http://{host}:9300/` |
 | `ATTENDLY_AUTH_MODE` | `opennvr` | `none` opens every endpoint (loopback development only) |
 | `ATTENDLY_DATABASE_URL` | `sqlite:////data/attendly.db` (image) | the app's own SQLite |
-| `ATTENDLY_TIMEZONE` | `Asia/Kolkata` (`$TZ` in the overlay) | class windows are local times |
+| `ATTENDLY_TIMEZONE` | `Asia/Kolkata` (the overlay follows `$TZ` when set) | class windows and meal hours are local times |
+| `ATTENDLY_MAX_REGISTERED_STUDENTS` | `0` (no limit) | refuse enrolment past this many students |
+| `ATTENDLY_MAX_WORKERS` | `50` | rooms that may hold a class at the same moment |
+| `ATTENDLY_FINALIZE_GRACE_SECONDS` | `30` | wait after a class ends before its attendance is finalised |
 | `ATTENDLY_SAVE_DEBUG_FRAMES` | `false` | keep attempt frames and face crops under the data dir |
 
 ## Development

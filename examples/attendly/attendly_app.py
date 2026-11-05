@@ -261,16 +261,21 @@ def build_app(settings: Optional[Settings] = None, *, start_engine: bool = True,
             app.mount("/assets", StaticFiles(directory=str(web / "assets")), name="assets")
         index = web / "index.html"
 
-        @app.get("/{path:path}", include_in_schema=False)
+        # Every method, not only GET: a ``POST /courses`` (no trailing
+        # slash) used to match this route by path and fail with 405
+        # before the slash redirect could happen.
+        @app.api_route("/{path:path}", methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"], include_in_schema=False)
         async def spa(path: str, request: Request):
             # An API path that reached the catch-all is one without its
-            # trailing slash (the UI sends ``GET /courses``): redirect to
-            # the router's spelling instead of answering with the page.
+            # trailing slash (the UI sends ``/courses``): redirect to the
+            # router's spelling — 307 keeps the method and the body.
             if is_api_path(f"/{path}"):
                 if not path.endswith("/"):
                     url = request.url.replace(path=f"/{path}/")
                     return RedirectResponse(str(url), status_code=307)
                 raise HTTPException(status_code=404, detail="Not found")
+            if request.method not in ("GET", "HEAD"):
+                raise HTTPException(status_code=405, detail="Method not allowed")
             target = (web / path).resolve() if path else index
             if path and target.is_file() and str(target).startswith(str(web.resolve())):
                 return FileResponse(str(target))

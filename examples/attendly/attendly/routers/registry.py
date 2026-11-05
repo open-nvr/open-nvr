@@ -9,6 +9,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
+from ..config import get_settings
 from ..face.engine import FaceEngine, FaceServiceError
 from ..storage.repo import get_student, get_students_batch, list_students, move_student_to_deleted
 from ..utils.logging_utils import log_call
@@ -144,6 +145,7 @@ def get_registry_stats(
             "total_students_with_faces": len(with_faces), "total_faces": total_faces,
             "average_faces_per_student": round(total_faces / len(with_faces), 2) if with_faces else 0,
             "students_by_face_count": dict(distribution), "processing_time_seconds": round(time.time() - start, 2),
+            "max_students": int(get_settings().max_registered_students or 0),
         },
     }
     if include_students:
@@ -157,7 +159,7 @@ def get_registry_stats(
                 row.update({"student_name": info.get("full_name"), "student_class": info.get("class_name"),
                             "course_code": info.get("course_code"), "section": info.get("section"),
                             "student_email": info.get("email"), "residence": info.get("residence"),
-                            "hostel_block": info.get("hostel_block")})
+                            "hostel_block": info.get("hostel_block"), "enrolments": info.get("enrolments") or []})
             rows.append(row)
         rows.sort(key=lambda x: x["face_count"], reverse=True)
         response["students_with_faces"] = rows

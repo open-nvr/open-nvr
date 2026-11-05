@@ -63,8 +63,9 @@ services:
       - "${NGINX_BIND_HOST:-0.0.0.0}:9300:9300"
     environment:
       # Class windows are local times of day; must match core's TZ.
-      - TZ=${TZ:-UTC}
-      - ATTENDLY_TIMEZONE=${TZ:-UTC}
+      # Default Asia/Kolkata (the README's); set TZ in .env for another site.
+      - TZ=${TZ:-Asia/Kolkata}
+      - ATTENDLY_TIMEZONE=${ATTENDLY_TIMEZONE:-${TZ:-Asia/Kolkata}}
       # Platform wiring — the same names every app overlay uses.
       - OPENNVR_URL=http://opennvr-core:8000
       - KAIC_URL=http://opennvr-core:8100

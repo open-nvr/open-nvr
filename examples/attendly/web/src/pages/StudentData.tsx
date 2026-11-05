@@ -43,6 +43,7 @@ interface StudentFaceStats {
   student_email?: string | null
   residence?: string | null
   hostel_block?: string | null
+  enrolments?: Array<{ course_code: string; section: string }>
 }
 
 export default function StudentData() {
@@ -192,6 +193,9 @@ export default function StudentData() {
   const [editSection, setEditSection] = useState('')
   const [editResidence, setEditResidence] = useState<Residence>('day_scholar')
   const [editHostelBlock, setEditHostelBlock] = useState('')
+  const [editEnrolments, setEditEnrolments] = useState<Array<{ course_code: string; section: string }>>([])
+  const [newEnrolCourse, setNewEnrolCourse] = useState('')
+  const [newEnrolSection, setNewEnrolSection] = useState('')
   const [courseOptions, setCourseOptions] = useState<Array<{ code: string; name?: string }>>([])
   const [sectionOptions, setSectionOptions] = useState<string[]>([])
   const [sectionsLoading, setSectionsLoading] = useState(false)
@@ -215,6 +219,8 @@ export default function StudentData() {
     setEditSection(s.section || '')
     setEditResidence(s.residence === 'hostler' ? 'hostler' : 'day_scholar')
     setEditHostelBlock(s.hostel_block || '')
+    setEditEnrolments(Array.isArray(s.enrolments) ? s.enrolments.map(e => ({ course_code: String(e.course_code), section: String(e.section) })) : [])
+    setNewEnrolCourse(''); setNewEnrolSection('')
     setEditError('')
     setEditOpen(true)
     // Load courses if not loaded yet
@@ -260,6 +266,7 @@ export default function StudentData() {
         section: editSection || null,
         residence: editResidence,
         hostel_block: editResidence === 'hostler' ? editHostelBlock.trim() : '',
+        enrolments: editEnrolments,
       })
       // Refresh stats to reflect changes
       await loadStats()
@@ -514,7 +521,7 @@ export default function StudentData() {
                           return <span title={full} className="inline-block max-w-[240px] truncate align-bottom">{short}</span>
                         })()}
                       </td>
-                      <td className="px-3 py-1 whitespace-nowrap text-gray-500">{student.section || '-'}</td>
+                      <td className="px-3 py-1 whitespace-nowrap text-gray-500">{student.section || '-'}{Array.isArray(student.enrolments) && student.enrolments.length > 0 && <span className="ml-1 text-[10px] text-indigo-700" title={student.enrolments.map(e => `${e.course_code}/${e.section}`).join(', ')}>+{student.enrolments.length}</span>}</td>
                       <td className="px-3 py-1 whitespace-nowrap text-gray-500">{student.residence === 'hostler' ? `Hostler${student.hostel_block ? ` · ${student.hostel_block}` : ''}` : 'Day scholar'}</td>
                       <td className="px-3 py-1 whitespace-nowrap text-gray-900">{student.face_count}</td>
                                             <td className="px-3 py-1 whitespace-nowrap">
@@ -689,6 +696,32 @@ export default function StudentData() {
               </div>
               <div className="px-4 pb-4 grid grid-cols-2 gap-3">
                 <ResidenceFields compact residence={editResidence} hostelBlock={editHostelBlock} onResidence={setEditResidence} onHostelBlock={setEditHostelBlock} />
+              </div>
+              <div className="px-4 pb-4">
+                <label className="block text-sm font-medium text-gray-700 mb-1">Also enrolled in <span className="font-normal text-gray-500">(a class of any of these marks the student)</span></label>
+                {editEnrolments.length > 0 && (
+                  <div className="flex flex-wrap gap-1 mb-2">
+                    {editEnrolments.map((e, i) => (
+                      <span key={i} className="inline-flex items-center gap-1 text-xs bg-indigo-50 text-indigo-800 px-2 py-0.5 rounded">
+                        {e.course_code} / {e.section}
+                        <button type="button" className="text-indigo-500 hover:text-indigo-800" onClick={() => setEditEnrolments(editEnrolments.filter((_, j) => j !== i))} aria-label="Remove">×</button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <div className="flex gap-2">
+                  <select className="flex-1 rounded-md border border-gray-300 px-2 py-1.5 text-sm" value={newEnrolCourse} onChange={e => setNewEnrolCourse(e.target.value)}>
+                    <option value="">Course</option>
+                    {courseOptions.map(c => <option key={c.code} value={c.code}>{c.code}{c.name ? ` — ${c.name}` : ''}</option>)}
+                  </select>
+                  <input className="w-24 rounded-md border border-gray-300 px-2 py-1.5 text-sm" placeholder="Section" value={newEnrolSection} onChange={e => setNewEnrolSection(e.target.value)} />
+                  <button type="button" className="px-3 py-1.5 rounded-md bg-gray-100 hover:bg-gray-200 text-sm disabled:opacity-50" disabled={!newEnrolCourse || !newEnrolSection.trim()}
+                    onClick={() => {
+                      const pair = { course_code: newEnrolCourse, section: newEnrolSection.trim() }
+                      if (!editEnrolments.some(e => e.course_code === pair.course_code && e.section === pair.section)) setEditEnrolments([...editEnrolments, pair])
+                      setNewEnrolCourse(''); setNewEnrolSection('')
+                    }}>Add</button>
+                </div>
               </div>
               <div className="px-4 py-3 border-t bg-gray-50 flex justify-end gap-2">
                 <button onClick={() => setEditOpen(false)} className="px-4 py-2 rounded-md bg-gray-100 text-gray-700 hover:bg-gray-200">Cancel</button>

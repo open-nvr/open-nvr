@@ -18,7 +18,7 @@ from ..storage.repo import (
 )
 from ..utils.image_io import save_frame_snapshot
 from ..utils.logging_utils import log_call
-from .recognize import recognize_codes_in_frame
+from .recognize import RecognitionUnavailable, recognize_codes_in_frame
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +84,10 @@ def run_snapshot(stream_id: int, class_id: str, slot_time: Optional[datetime] = 
     if frame is None:
         return {"ok": False, "error": "no_frame"}
     save_frame_snapshot(frame, class_id=class_id, stream_id=stream_id, tag="slot")
-    codes = recognize_codes_in_frame(engine, frame, tag=f"manual-s{stream_id}")
+    try:
+        codes = recognize_codes_in_frame(engine, frame, tag=f"manual-s{stream_id}")
+    except RecognitionUnavailable as exc:
+        return {"ok": False, "error": "recognition_unavailable", "detail": str(exc)}
     slot_dt = slot_time or _utcnow()
     save_snapshot(class_id=class_id, student_codes=codes, slot_time=slot_dt)
     return {"ok": True, "class_id": class_id, "stream_id": stream_id, "recognized": codes,
@@ -103,7 +106,10 @@ def probe(stream_id: int) -> Dict[str, object]:
     frame = frames.snapshot(int(entry["camera_id"]))
     if frame is None:
         return {"ok": False, "error": "no_frame"}
-    codes = recognize_codes_in_frame(engine, frame, tag=f"probe-s{stream_id}")
+    try:
+        codes = recognize_codes_in_frame(engine, frame, tag=f"probe-s{stream_id}")
+    except RecognitionUnavailable as exc:
+        return {"ok": False, "error": "recognition_unavailable", "detail": str(exc)}
     return {"ok": True, "matches": [{"student_code": c, "student": get_student(c)} for c in codes]}
 
 
