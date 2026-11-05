@@ -81,6 +81,11 @@ def test_nms_drops_a_part_box_inside_the_same_object():
     small, so IoU alone kept both and each became its own visit."""
     body = Detection("person", (100, 50, 220, 380), 0.86)
     upper = Detection("person", (108, 52, 214, 190), 0.61)    # fully inside, IoU ≈ 0.4
+    # the torso box the detector drew beside the whole on the recordings
+    # (arms out: wider than the body box, 75 % inside it, IoU 0.46)
+    torso = Detection("person", (392, 197, 510, 400), 0.91)
+    whole = Detection("person", (388, 197, 480, 553), 0.88)
+    assert nms([torso, whole]) == [whole]
     assert nms([body, upper]) == [body]
     assert nms([upper, body]) == [body], "order of arrival does not matter: the larger box wins"
     # the part scoring HIGHER than the whole (the face is the clearest part,
@@ -102,9 +107,10 @@ def test_nms_drops_a_part_box_inside_the_same_object():
     # two people boxed together with both members detected: same verdict
     pair = Detection("person", (80, 40, 340, 390), 0.75)
     assert set(nms([pair, a, b])) == {a, b}
-    # one narrow box inside another, alone: a person in a group box whose
-    # other members were missed, or a sliver; left alone, both kept
-    assert set(nms([pair, b])) == {pair, b}
+    # one box inside another, alone, reads as a part: a person in a group
+    # box whose other members were missed loses this frame (the tracker's
+    # group marking covers the box over time)
+    assert nms([pair, b]) == [pair]
     # a second person partly behind the first is NOT a part: half outside
     other = Detection("person", (180, 60, 300, 380), 0.7)
     assert set(nms([body, other])) == {body, other}

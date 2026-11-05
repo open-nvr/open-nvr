@@ -293,6 +293,23 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Groups of people no longer post two or three visits per person.** Five
+  changes to the tracker and the visit lifecycle, measured by replaying
+  the recordings of three walk-throughs with three people through the
+  pipeline's own gate, detector and tracker on the Ventuno Q: 194 visits
+  over 22 passes became 101. A part box (torso, upper or lower body) 70 %
+  inside the whole is dropped whatever its width; a detection much wider
+  (over 1.6×) or narrower (under 0.4×) than a track's box never matches
+  it, so a person's track does not take the box drawn around a group and a
+  group track does not steal a member; a track that missed the last frames
+  is matched with a gate that grows a quarter per miss, so someone who
+  steps behind a colleague rejoins their track; a visit ends when the
+  object was last seen, not when its track expired, so a fragment seen for
+  a second is too short to count; and a track needs three hits at 5 fps
+  to confirm (`min_initialized`), a visit 1.5 s. A track whose box holds
+  two or more others is a group box and its visit is dropped
+  (`visits_dropped{reason="group"}`).
+
 - **A box around a group of people is the duplicate, not the people.**
   When the detector draws one box around people crossing together beside
   the box per person, that group box now goes and the people stay (a box
