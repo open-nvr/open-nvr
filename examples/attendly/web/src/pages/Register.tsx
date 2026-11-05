@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useMemo } from 'react'
 import { authService } from '../services/auth'
 import axios from 'axios'
 import Layout from '../components/Layout'
+import ResidenceFields, { type Residence } from '../components/ResidenceFields'
 import { config } from '../config/environment'
 
 const API = config.API_BASE_URL
@@ -42,6 +43,8 @@ export default function Register() {
   const [sectionOptions, setSectionOptions] = useState<string[]>([])
   const [sectionsLoading, setSectionsLoading] = useState<boolean>(false)
   const [email, setEmail] = useState('')
+  const [residence, setResidence] = useState<Residence>('day_scholar')
+  const [hostelBlock, setHostelBlock] = useState('')
   const [captured, setCaptured] = useState<Record<AngleTag, CapturedImage | null>>({
     front: null,
     left: null,
@@ -273,6 +276,8 @@ export default function Register() {
       form.append('course_code', courseCode)
       form.append('section', section)
       if (email) form.append('email', email)
+      form.append('residence', residence)
+      if (residence === 'hostler') form.append('hostel_block', hostelBlock.trim())
       for (const { angle, blob } of blobs) {
         const file = new File([blob], `${angle}.jpg`, { type: 'image/jpeg' })
         form.append('images', file)
@@ -334,6 +339,10 @@ export default function Register() {
     const user = authService.getUser()
     if (user && user.is_admin === false) {
       setMessage("This feature is disabled during trial use.")
+      return
+    }
+    if (residence === 'hostler' && !hostelBlock.trim()) {
+      setMessage('A hostler needs a hostel block.')
       return
     }
     await submitRegistration()
@@ -494,6 +503,7 @@ export default function Register() {
                   disabled={isSubmitting}
                 />
               </div>
+              <ResidenceFields residence={residence} hostelBlock={hostelBlock} onResidence={setResidence} onHostelBlock={setHostelBlock} disabled={isSubmitting} />
               <div className="w-full sm:w-auto">
                 <button
                   type="submit"

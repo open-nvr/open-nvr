@@ -145,3 +145,104 @@ enrol a student from the webcam → schedule a class for now → watch
 - InsightFace model packs are research-licensed (see the adapter README).
   Attendly is free to use; a commercial deployment would need its own
   licence from the model authors.
+
+---
+
+# Phase 2 — hostel gates, mess gates, staff attendance
+
+Three new jobs on the same lower layer (core snapshots, KAI-C detection and
+recognition, the InsightFace adapter's face database). Nothing new is
+installed; the profile already starts everything these need.
+
+## How a flap barrier is driven
+
+Attendly **decides**; it does not touch relays. Every decision at a gate is
+published on the platform bus as the contracted `access.decided.v1` event
+(docs/EVENT_CONTRACTS.md), keyed by the gate camera's handle. OpenNVR's
+**gate-controller** app subscribes to exactly that event and closes the
+barrier's contact over whichever wiring the site has (dry contact / GPIO,
+Shelly-style IP relay, Modbus, ONVIF door controller, MQTT). Run it with
+the `gate-controller` profile and list each barrier under its camera handle
+in its config; its HARDWARE.md is the wiring guide. The LPR app drives
+vehicle barriers the same way, so one controller serves both.
+
+The event's payload is the contract's: `plate_text` carries the credential
+(the student code), `decision` is `allow`/`deny`, `reason` says why
+(`hostler`, `booked` on allow; `unknown`, `day_scholar`, `wrong_block`,
+`not_booked`, `already_used`, `no_meal_window` on deny), `owner` is the
+name, `unit` the hostel block or the meal, `confidence` the similarity.
+Consumers actuate only on a literal `allow`.
+
+For a barrier with its own built-in relay that takes an HTTP trigger, a
+gate can also carry an `open_url`: attendly GETs it on allow. And a barrier
+controller that has its own camera can ask attendly directly:
+`POST /gates/{id}/check` with a JPEG returns the decision (and publishes it).
+
+## Data
+
+| Table | Purpose |
+|---|---|
+| `students` + `residence`, `hostel_block` | `hostler` or `day_scholar`; the block a hostler lives in |
+| `staff` | `ST00001`-coded people enrolled under `category=attendly_staff` |
+| `departments` | a staff attendance camera with a working window |
+| `staff_attendance` | one row per staff per day: first seen, last seen, sightings |
+| `gates` | kind `hostel` (block) or `mess` (meal windows), its camera, enabled, optional `open_url` |
+| `access_events` | every decision, with who, why and similarity |
+| `meal_bookings` | `(student, date, meal)` unique; `consumed_at` once the student passed the mess gate |
+
+Student and staff codes share the adapter's one face database (prefixes
+`AT` and `ST`), so a gate recognises either and looks the code up in the
+right table.
+
+## Services
+
+* `services/access.py` — the gate policy and the `GateWorker`: while a
+  gate is enabled it polls its camera (`gate_poll_seconds`, default 1 s),
+  takes the **largest** detected face (the person at the barrier),
+  recognises it, decides, records an `access_events` row, publishes the
+  event, and ignores the same person for `gate_cooldown_seconds`.
+  `GateEngine` keeps one worker per enabled gate and reloads from the
+  database every 15 s.
+* `services/staff_attendance.py` — `StaffWorker` per department: within
+  the working window it polls the camera every `staff_poll_seconds`
+  (default 60 s) and upserts the day's row for every staff member it
+  recognises. A staff member never seen that day is ABSENT in the report.
+* Meal bookings have no worker: the mess gate's policy reads them. Bookings
+  come from the Meal Bookings page, a CSV import, or the existing booking
+  system calling `POST /meals/bookings` with an OpenNVR token (the QR step
+  is replaced by the face at the barrier).
+
+## API
+
+| Prefix | Routes |
+|---|---|
+| `/students` | `residence`, `hostel_block` on create / update / register_new / video init |
+| `/staff` | list, create, update, delete (admin), `register_new` (photos), `{code}/register` |
+| `/departments` | CRUD; camera from the roster |
+| `/staff-attendance` | `?date=&department_id=` rows with ABSENT synthesised; `/engine_status` |
+| `/gates` | CRUD, `/status`, `/events?gate_id=&limit=`, `{id}/check` (JPEG → decision) |
+| `/meals` | `bookings?date=&meal=`, create (one student, one or more meals), `bookings/import` (CSV), delete, `summary?date=` |
+
+Role gate: GET → viewer; DELETE /staff and /gates → admin; other mutations → operator.
+
+## UI
+
+Register and Video Register gain a residence selector (hostler + block).
+New pages: **Staff** (people + departments, photo enrolment), **Staff
+Attendance** (date + department, CSV export), **Gates** (barriers, live
+decision feed), **Meal Bookings** (date, bookings, add, CSV import).
+
+## Testing
+
+Unit (no OpenNVR): policy table for hostel and mess decisions; the gate
+worker on a fake clock — largest face wins, cooldown, event row, publish
+called with the contract payload; the staff worker upserting first/last
+seen inside and outside the window; the meal booking uniqueness and
+consumption; every new router through the fakes.
+
+Live: enable the `gate-controller` profile with a `dry_run` config for the
+hostel camera handle, enrol a hostler and a day scholar, walk both past
+the camera, and watch the Gates page and gate-controller's page agree;
+book a meal for one student and repeat at the mess gate inside and outside
+the meal window; add a department and confirm staff rows appear during
+the window and ABSENT rows after it.

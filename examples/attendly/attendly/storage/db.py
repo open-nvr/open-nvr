@@ -53,7 +53,33 @@ def get_engine() -> Engine:
 def init_db() -> None:
     from . import models  # noqa: F401 - register tables
 
-    Base.metadata.create_all(bind=get_engine())
+    eng = get_engine()
+    Base.metadata.create_all(bind=eng)
+    _add_missing_columns(eng)
+
+
+# Columns added after a table first shipped: create_all never alters an
+# existing table, so each is added here when absent (SQLite ALTER ADD).
+_LATER_COLUMNS = {
+    "students": [
+        ("residence", "VARCHAR(16) NOT NULL DEFAULT 'day_scholar'"),
+        ("hostel_block", "VARCHAR(64)"),
+    ],
+}
+
+
+def _add_missing_columns(eng: Engine) -> None:
+    from sqlalchemy import inspect, text
+
+    insp = inspect(eng)
+    with eng.begin() as conn:
+        for table, cols in _LATER_COLUMNS.items():
+            if table not in insp.get_table_names():
+                continue
+            have = {c["name"] for c in insp.get_columns(table)}
+            for name, ddl in cols:
+                if name not in have:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
 
 
 def reset_db() -> None:

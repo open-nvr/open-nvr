@@ -40,6 +40,8 @@ class VideoRegistrationSession:
         self.email = email or None
         self.course_code: Optional[str] = None
         self.section: Optional[str] = None
+        self.residence: Optional[str] = None
+        self.hostel_block: Optional[str] = None
         self.student_code: Optional[str] = None
         self.collected_frames: List[bytes] = []
         self.start_time = time.time()
@@ -106,6 +108,7 @@ async def video_registration_websocket(websocket: WebSocket, session_id: str):
         return
     await websocket.accept()
     full_name, class_name, course_code_str, section_str, email = "", "", None, None, None
+    residence, hostel_block = None, None
     try:
         init_msg = await asyncio.wait_for(websocket.receive_text(), timeout=3.0)
         try:
@@ -116,6 +119,8 @@ async def video_registration_websocket(websocket: WebSocket, session_id: str):
                 course_code_str = str(init.get("course_code") or "") or None
                 section_str = str(init.get("section") or "") or None
                 email = str(init.get("email") or "") or None
+                residence = str(init.get("residence") or "") or None
+                hostel_block = str(init.get("hostel_block") or "") or None
         except Exception:
             pass
     except Exception:
@@ -124,6 +129,8 @@ async def video_registration_websocket(websocket: WebSocket, session_id: str):
     session = VideoRegistrationSession(session_id, websocket, full_name, class_name, email)
     session.course_code = course_code_str
     session.section = section_str
+    session.residence = residence
+    session.hostel_block = hostel_block
     active_sessions[session_id] = session
     try:
         await websocket.send_json({
@@ -257,7 +264,8 @@ async def process_video_registration(session: VideoRegistrationSession) -> None:
             pass
         try:
             put_student(allocated, session.full_name or "", session.class_name or "", session.email,
-                        course_code=session.course_code or None, section=session.section or None)
+                        course_code=session.course_code or None, section=session.section or None,
+                        residence=session.residence, hostel_block=session.hostel_block)
         except Exception as e:
             logger.error(f"Failed to persist student {allocated}: {e}")
             try:

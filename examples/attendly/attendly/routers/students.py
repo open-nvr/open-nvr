@@ -11,11 +11,13 @@ from .. import schemas
 from ..config import get_settings
 from ..face.engine import FaceEngine, FaceRejected, FaceServiceError
 from ..storage import repo
+from ..people import find_person
 from ..storage.repo import (
     count_students,
     generate_student_code,
     get_student,
     get_student_by_email,
+    normalise_residence,
     put_student,
     update_student as repo_update_student,
 )
@@ -36,13 +38,14 @@ def check_for_duplicate_face_sync(image_bytes: bytes, current_student_code: str)
         if matches:
             matched_code, similarity = matches[0]
             if matched_code != current_student_code:
-                info = get_student(matched_code)
-                if info:
+                person = find_person(matched_code)
+                if person:
+                    info = person["record"]
                     return {
                         "student_code": matched_code, "full_name": info.get("full_name", "Unknown"),
                         "class_name": info.get("class_name", ""), "email": info.get("email"),
                         "course_code": info.get("course_code"), "section": info.get("section"),
-                        "similarity": similarity * 100,
+                        "kind": person["kind"], "similarity": similarity * 100,
                     }
         return None
     except Exception as e:
@@ -93,7 +96,7 @@ def enhance_image_for_recognition(image_bytes: bytes) -> bytes:
 
 def _enrol_images(
     engine: FaceEngine, images: List[UploadFile], *, student_code: str, full_name: str,
-    angle_list: Optional[List[str]], validation_errors: List[str],
+    angle_list: Optional[List[str]], validation_errors: List[str], category: Optional[str] = None,
 ) -> tuple[int, List[str]]:
     """Index every usable image for ``student_code``; returns (count, angles)."""
     registered = 0
@@ -117,7 +120,7 @@ def _enrol_images(
                 logger.warning(msg)
                 continue
             try:
-                fid = engine.index_face(enhanced, student_code, name=full_name)
+                fid = engine.index_face(enhanced, student_code, name=full_name, category=category)
             except FaceRejected as e:
                 validation_errors.append(f"Image {idx + 1}: {e}")
                 continue
@@ -159,7 +162,8 @@ def create_student(payload: schemas.StudentCreate):
         code = generate_student_code()
         if get_student(code) is None:
             item = put_student(code, payload.full_name, None, str(payload.email) if payload.email else None,
-                               course_code=payload.course_code, section=payload.section)
+                               course_code=payload.course_code, section=payload.section,
+                               residence=payload.residence, hostel_block=payload.hostel_block)
             break
     else:
         raise HTTPException(status_code=500, detail="Failed to generate unique student code")
@@ -184,6 +188,7 @@ def update_student(student_code: str, payload: schemas.StudentUpdate):
             student_code, full_name=payload.full_name, class_name=payload.class_name,
             email=str(payload.email) if payload.email is not None else None,
             course_code=payload.course_code, section=payload.section,
+            residence=payload.residence, hostel_block=payload.hostel_block,
         )
     except KeyError:
         raise HTTPException(status_code=404, detail="student not found")
@@ -233,9 +238,13 @@ def register_and_create_student(
     email: str = Form(...),
     images: List[UploadFile] = File(..., description="Multiple face images from different angles"),
     angle_tags: Optional[Union[str, List[str]]] = Form(None),
+    residence: Optional[str] = Form(None),
+    hostel_block: Optional[str] = Form(None),
 ):
     """Enrol the photos first; the student row is written only when at
     least one face was accepted by the face model."""
+    if normalise_residence(residence) == "hostler" and not (hostel_block or "").strip():
+        raise HTTPException(status_code=400, detail="A hostler needs a hostel block")
     if len(images) == 0:
         raise HTTPException(status_code=400, detail="At least one image is required")
     if len(images) > 10:
@@ -298,7 +307,8 @@ def register_and_create_student(
         raise HTTPException(status_code=400, detail={"message": "No faces were successfully registered", "errors": validation_errors})
 
     try:
-        item = put_student(code_candidate, full_name, None, email, course_code=course_code, section=section)
+        item = put_student(code_candidate, full_name, None, email, course_code=course_code, section=section,
+                           residence=residence, hostel_block=hostel_block)
     except Exception as e:
         logger.error(f"Failed to persist student {code_candidate}: {e}")
         try:

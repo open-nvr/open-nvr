@@ -26,6 +26,7 @@ OPEN_PATHS = {"/health", "/manifest", "/state", "/api/auth/login", "/api/auth/lo
 API_PREFIXES = (
     "/api/", "/students", "/recognition", "/attendance", "/streams", "/classrooms", "/courses", "/schedules",
     "/video_registration", "/registry", "/planner", "/classes", "/cameras", "/docs", "/openapi.json", "/redoc",
+    "/staff", "/departments", "/staff-attendance", "/gates", "/meals",
 )
 
 DEV_USER = {"id": 0, "username": "dev", "email": "", "role_name": "admin", "is_superuser": True, "mfa_enabled": False,
@@ -39,7 +40,7 @@ def is_api_path(path: str) -> bool:
 def required_tier(method: str, path: str) -> str:
     if method in ("GET", "HEAD", "OPTIONS"):
         return "viewer"
-    if method == "DELETE" and path.startswith("/students"):
+    if method == "DELETE" and path.startswith(("/students", "/staff/", "/gates", "/departments")):
         return "admin"
     if path.startswith("/registry/student/") and (path.endswith("/soft_delete") or (method == "DELETE" and path.endswith("/faces"))):
         return "admin"

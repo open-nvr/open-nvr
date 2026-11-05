@@ -177,13 +177,14 @@ class FaceEngine:
         return (resp.json() or {}).get("face")
 
     def index_face(self, image_bytes: bytes, external_image_id: str, *, name: str = "",
-                   metadata: Optional[dict] = None) -> Optional[str]:
+                   metadata: Optional[dict] = None, category: Optional[str] = None) -> Optional[str]:
         """Add one photo to a person (creating them on the first). Returns
         the new sample's face id. Raises :class:`FaceRejected` when the
-        adapter refuses the image, :class:`FaceServiceError` otherwise."""
+        adapter refuses the image, :class:`FaceServiceError` otherwise.
+        ``category`` defaults to the students'; staff enrol under their own."""
         meta = {"app": "attendly", **(metadata or {})}
         data = {
-            "person_id": external_image_id, "name": name or "", "category": self.category,
+            "person_id": external_image_id, "name": name or "", "category": category or self.category,
             "metadata": json.dumps(meta), "append": "true",
         }
         files = {"frame": ("face.jpg", image_bytes, "image/jpeg")}
@@ -201,16 +202,16 @@ class FaceEngine:
         samples = int(face.get("samples") or 1)
         return face_id(external_image_id, samples - 1)
 
-    def list_persons(self) -> List[Dict[str, Any]]:
-        resp = self._faces_request("GET", "/faces", params={"category": self.category})
+    def list_persons(self, category: Optional[str] = None) -> List[Dict[str, Any]]:
+        resp = self._faces_request("GET", "/faces", params={"category": category or self.category})
         if resp.status_code >= 400:
             raise FaceServiceError(f"face adapter GET /faces: HTTP {resp.status_code}")
         return list((resp.json() or {}).get("faces") or [])
 
-    def list_faces(self, max_results: int = 1000) -> List[dict]:
+    def list_faces(self, max_results: int = 1000, category: Optional[str] = None) -> List[dict]:
         """One entry per enrolled sample, Rekognition-shaped."""
         out: List[dict] = []
-        for p in self.list_persons():
+        for p in self.list_persons(category):
             pid = str(p.get("person_id") or "")
             if not pid:
                 continue
@@ -219,8 +220,8 @@ class FaceEngine:
                             "Name": p.get("name"), "ImageId": None})
         return out
 
-    def describe_collection(self) -> dict:
-        persons = self.list_persons()
+    def describe_collection(self, category: Optional[str] = None) -> dict:
+        persons = self.list_persons(category)
         return {
             "CollectionId": self.adapter_name,
             "FaceCount": sum(int(p.get("samples") or 0) for p in persons),
@@ -229,9 +230,9 @@ class FaceEngine:
             "CreationTimestamp": None,
         }
 
-    def get_faces_by_external_id(self, external_image_id: str) -> List[dict]:
+    def get_faces_by_external_id(self, external_image_id: str, category: Optional[str] = None) -> List[dict]:
         p = self.person(external_image_id)
-        if not p or str(p.get("category") or "") != self.category:
+        if not p or str(p.get("category") or "") != (category or self.category):
             return []
         return [{"FaceId": face_id(external_image_id, i), "ExternalImageId": external_image_id,
                  "Confidence": None, "ImageId": None} for i in range(int(p.get("samples") or 0))]

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import axios from 'axios'
 import { authService } from '../services/auth'
 import Layout from '../components/Layout'
+import ResidenceFields, { type Residence } from '../components/ResidenceFields'
 import { config } from '../config/environment'
 
 const API = config.API_BASE_URL
@@ -81,6 +82,8 @@ export default function VideoRegister() {
   const [sectionOptions, setSectionOptions] = useState<string[]>([])
   const [sectionsLoading, setSectionsLoading] = useState<boolean>(false)
   const [email, setEmail] = useState('')
+  const [residence, setResidence] = useState<Residence>('day_scholar')
+  const [hostelBlock, setHostelBlock] = useState('')
   const [sessionId, setSessionId] = useState('')
   const [registrationState, setRegistrationState] = useState<VideoRegistrationState>({
     isRecording: false,
@@ -229,6 +232,10 @@ export default function VideoRegister() {
   const startVideoRegistration = async () => {
     try {
       setError('')
+      if (residence === 'hostler' && !hostelBlock.trim()) {
+        setError('A hostler needs a hostel block.')
+        return
+      }
       sessionFinalizedRef.current = false
       // const user = authService.getUser()
       // if (user && user.is_admin === false) {
@@ -280,7 +287,9 @@ export default function VideoRegister() {
             class_name: '',
             course_code: courseCode || '',
             section: section || '',
-            email: email || ''
+            email: email || '',
+            residence,
+            hostel_block: residence === 'hostler' ? hostelBlock.trim() : ''
           }))
         } catch {}
         
@@ -829,6 +838,7 @@ export default function VideoRegister() {
                   disabled={registrationState.isRecording}
                 />
               </div>
+              <ResidenceFields residence={residence} hostelBlock={hostelBlock} onResidence={setResidence} onHostelBlock={setHostelBlock} disabled={registrationState.isRecording} />
               {!registrationState.isRecording && (
                 <div className="sm:ml-auto self-end">
                   <button

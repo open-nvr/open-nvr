@@ -9,6 +9,7 @@ import ManageCourses from './ManageCourses'
 import { useToast } from '../components/ToastProvider'
 import { useConfirm } from '../components/ConfirmProvider'
 import { messages } from '../messages'
+import ResidenceFields, { type Residence } from '../components/ResidenceFields'
 
 const API = config.API_BASE_URL
 
@@ -40,6 +41,8 @@ interface StudentFaceStats {
   section?: string
   max_confidence?: number
   student_email?: string | null
+  residence?: string | null
+  hostel_block?: string | null
 }
 
 export default function StudentData() {
@@ -187,6 +190,8 @@ export default function StudentData() {
   const [editEmail, setEditEmail] = useState('')
   const [editCourse, setEditCourse] = useState('')
   const [editSection, setEditSection] = useState('')
+  const [editResidence, setEditResidence] = useState<Residence>('day_scholar')
+  const [editHostelBlock, setEditHostelBlock] = useState('')
   const [courseOptions, setCourseOptions] = useState<Array<{ code: string; name?: string }>>([])
   const [sectionOptions, setSectionOptions] = useState<string[]>([])
   const [sectionsLoading, setSectionsLoading] = useState(false)
@@ -208,6 +213,8 @@ export default function StudentData() {
     setEditEmail(s.student_email || '')
     setEditCourse(s.course_code || '')
     setEditSection(s.section || '')
+    setEditResidence(s.residence === 'hostler' ? 'hostler' : 'day_scholar')
+    setEditHostelBlock(s.hostel_block || '')
     setEditError('')
     setEditOpen(true)
     // Load courses if not loaded yet
@@ -251,6 +258,8 @@ export default function StudentData() {
         email: editEmail || null,
         course_code: editCourse || null,
         section: editSection || null,
+        residence: editResidence,
+        hostel_block: editResidence === 'hostler' ? editHostelBlock.trim() : '',
       })
       // Refresh stats to reflect changes
       await loadStats()
@@ -473,6 +482,7 @@ export default function StudentData() {
                     <th className="px-3 py-1 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider">Email</th>
                     <th className="px-3 py-1 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider">Course</th>
                     <th className="px-3 py-1 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider">Section</th>
+                    <th className="px-3 py-1 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider">Residence</th>
                     <th className="px-3 py-1 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider">Image captured</th>
                                         <th className="px-3 py-1 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider">Action</th>
                   </tr>
@@ -480,7 +490,7 @@ export default function StudentData() {
                 <tbody className="bg-white divide-y divide-gray-200">
                   {(!stats || statsLoading) && (
                     <tr>
-                      <td colSpan={6} className="px-3 py-6 text-center text-sm text-gray-600">
+                      <td colSpan={7} className="px-3 py-6 text-center text-sm text-gray-600">
                         <div className="inline-flex items-center gap-2">
                           <svg className="animate-spin h-4 w-4 text-gray-600" viewBox="0 0 24 24">
                             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
@@ -505,6 +515,7 @@ export default function StudentData() {
                         })()}
                       </td>
                       <td className="px-3 py-1 whitespace-nowrap text-gray-500">{student.section || '-'}</td>
+                      <td className="px-3 py-1 whitespace-nowrap text-gray-500">{student.residence === 'hostler' ? `Hostler${student.hostel_block ? ` · ${student.hostel_block}` : ''}` : 'Day scholar'}</td>
                       <td className="px-3 py-1 whitespace-nowrap text-gray-900">{student.face_count}</td>
                                             <td className="px-3 py-1 whitespace-nowrap">
                         <div className="flex items-center gap-2">
@@ -530,7 +541,7 @@ export default function StudentData() {
                   ))}
                   {stats && !statsLoading && paginatedStudents.length === 0 && (
                     <tr>
-                      <td colSpan={6} className="px-6 py-4 text-center text-gray-500">
+                      <td colSpan={7} className="px-6 py-4 text-center text-gray-500">
                         <div className="flex items-center justify-center gap-2">
                           <svg
                             xmlns="http://www.w3.org/2000/svg"
@@ -675,6 +686,9 @@ export default function StudentData() {
                     )}
                   </div>
                 </div>
+              </div>
+              <div className="px-4 pb-4 grid grid-cols-2 gap-3">
+                <ResidenceFields compact residence={editResidence} hostelBlock={editHostelBlock} onResidence={setEditResidence} onHostelBlock={setEditHostelBlock} />
               </div>
               <div className="px-4 py-3 border-t bg-gray-50 flex justify-end gap-2">
                 <button onClick={() => setEditOpen(false)} className="px-4 py-2 rounded-md bg-gray-100 text-gray-700 hover:bg-gray-200">Cancel</button>

@@ -46,6 +46,52 @@ def crop_boxes(frame, faces: List[dict]) -> List[tuple]:
     return out
 
 
+def recognize_faces_in_frame(
+    engine, frame, *, threshold: Optional[float] = None, tag: str = "frame", largest_only: bool = False,
+) -> List[dict]:
+    """Every recognised face in ``frame`` as ``{code, similarity, area,
+    bbox_px}``, unfiltered — the caller decides whether a code is a
+    student, a staff member or nobody it knows. ``largest_only`` keeps the
+    face nearest the camera (the person at a barrier) and returns at most
+    one entry, with ``code`` None when it was not recognised."""
+    if engine is None or frame is None:
+        return []
+    import cv2
+
+    settings = get_settings()
+    thr = float(threshold if threshold is not None else settings.recognition_threshold)
+    ok_full, full_buf = cv2.imencode(".jpg", frame)
+    if not ok_full:
+        return []
+    try:
+        faces = engine.detect_faces(full_buf.tobytes())
+    except Exception as exc:
+        logger.warning("[%s] face detection failed: %s", tag, exc)
+        return []
+    if not faces:
+        return []
+    boxes = crop_boxes(frame, faces)
+    if largest_only:
+        boxes.sort(key=lambda ic: -(ic[1].shape[0] * ic[1].shape[1]))
+        boxes = boxes[:1]
+    out: List[dict] = []
+    for i, crop in boxes:
+        ok_c, buf_c = cv2.imencode(".jpg", crop)
+        if not ok_c:
+            continue
+        entry = {"code": None, "similarity": 0.0, "area": int(crop.shape[0] * crop.shape[1]),
+                 "bbox_px": list((faces[i] or {}).get("bbox_px") or [])}
+        try:
+            matches = engine.search_faces(buf_c.tobytes(), threshold=thr, max_faces=1)
+        except Exception as exc:
+            logger.warning("[%s] face %d: recognition failed: %s", tag, i, exc)
+            matches = []
+        if matches:
+            entry["code"], entry["similarity"] = str(matches[0][0]), float(matches[0][1])
+        out.append(entry)
+    return out
+
+
 def recognize_codes_in_frame(
     engine, frame, *, threshold: Optional[float] = None, course_code: Optional[str] = None,
     section: Optional[str] = None, tag: str = "attempt",

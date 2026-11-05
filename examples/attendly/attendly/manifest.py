@@ -42,6 +42,9 @@ def app_manifest(settings: Settings | None = None) -> dict[str, Any]:
         ),
         requires_tasks=[],
         requires_adapters=["insightface"],
+        # Gate decisions go on the bus as access.decided.v1 (the
+        # gate-controller app actuates): a producer by declaration.
+        provides=["attendance"],
         # A platform component on the site key, like the agent: no picker.
         camera_picker=False,
         all_cameras=False,
@@ -51,5 +54,6 @@ def app_manifest(settings: Settings | None = None) -> dict[str, Any]:
         website=url,
         author="OpenNVR",
         license="AGPL-3.0",
-        use_cases=["classroom attendance", "lecture-hall roll call", "training-centre presence"],
+        use_cases=["classroom attendance", "lecture-hall roll call", "training-centre presence",
+                   "hostel flap barriers", "mess entry against meal bookings", "staff attendance"],
     ).to_dict()

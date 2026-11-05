@@ -56,6 +56,8 @@ services:
         condition: service_healthy
       insightface-register:
         condition: service_completed_successfully
+      nats:
+        condition: service_healthy
     ports:
       # LAN edge — bind host follows nginx; auth: OpenNVR login.
       - "${NGINX_BIND_HOST:-0.0.0.0}:9300:9300"
@@ -66,6 +68,9 @@ services:
       # Platform wiring — the same names every app overlay uses.
       - OPENNVR_URL=http://opennvr-core:8000
       - KAIC_URL=http://opennvr-core:8100
+      # Gate decisions go on the bus as access.decided.v1; the
+      # gate-controller app (profile gate-controller) drives the barriers.
+      - NATS_URL=nats://nats:4222
       - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
       # Enrolment / listing go to the adapter directly (KAI-C does not
       # proxy /faces/*); its token is the site key in the apps overlay.

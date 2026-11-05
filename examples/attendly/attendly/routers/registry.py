@@ -156,7 +156,8 @@ def get_registry_stats(
             if include_student_info:
                 row.update({"student_name": info.get("full_name"), "student_class": info.get("class_name"),
                             "course_code": info.get("course_code"), "section": info.get("section"),
-                            "student_email": info.get("email")})
+                            "student_email": info.get("email"), "residence": info.get("residence"),
+                            "hostel_block": info.get("hostel_block")})
             rows.append(row)
         rows.sort(key=lambda x: x["face_count"], reverse=True)
         response["students_with_faces"] = rows

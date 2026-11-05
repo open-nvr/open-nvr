@@ -106,4 +106,5 @@ def test_counts(env):
     repo.put_student("AT00001", "Asha", None, None, course_code="MBA-1", section="A")
     repo.streams_put("Lab 1", camera_id=7)
     repo.planner_course_put("MBA-1", 0, 0)
-    assert repo.counts() == {"students": 1, "rooms": 1, "courses": 1, "finalized_classes": 0}
+    assert repo.counts() == {"students": 1, "rooms": 1, "courses": 1, "finalized_classes": 0,
+                             "hostlers": 0, "staff": 0, "departments": 0, "gates": 0}

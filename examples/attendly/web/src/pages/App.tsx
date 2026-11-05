@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom'
 import { useEffect, useState } from 'react'
-import { Users, Image as ImageIcon, BarChart3, UserPlus, Video, School, Database, ClipboardList, Building2, BookOpen, CalendarDays } from 'lucide-react'
+import { Users, Image as ImageIcon, BarChart3, UserPlus, Video, Database, ClipboardList, Building2, BookOpen, CalendarDays, DoorOpen, UtensilsCrossed, BriefcaseBusiness, CalendarCheck } from 'lucide-react'
 import axios from 'axios'
 import Layout from '../components/Layout'
 import { config } from '../config/environment'
@@ -136,6 +136,13 @@ export default function App() {
         <Card to="/manage-courses" title="Manage Courses" desc="Create courses and sections" icon={BookOpen} />
         <Card to="/manage-schedule" title="Manage Schedule" desc="Plan weekly class schedule" icon={CalendarDays} />
         <Card to="/attendance" title="Attendance" desc="Monitor student attendance records" icon={ClipboardList} />
+      </div>
+
+      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 mt-2">
+        <Card to="/gates" title="Gates" desc="Hostel and mess flap barriers, live decisions" icon={DoorOpen} />
+        <Card to="/meals" title="Meal Bookings" desc="Who has booked which meal; the mess gate checks these" icon={UtensilsCrossed} />
+        <Card to="/staff" title="Staff" desc="Enrol staff and set department cameras" icon={BriefcaseBusiness} />
+        <Card to="/staff-attendance" title="Staff Attendance" desc="Daily check-in and check-out per department" icon={CalendarCheck} />
       </div>
     </Layout>
   )

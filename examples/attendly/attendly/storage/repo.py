@@ -19,7 +19,10 @@ from .models import (
     AttendanceRecord,
     AttendanceSnapshot,
     Counter,
+    Department,
+    Gate,
     PlannerCourse,
+    Staff,
     PlannerTemplate,
     Stream,
     Student,
@@ -76,6 +79,8 @@ def _student_dict(s: Student) -> Dict[str, Any]:
         "email": s.email,
         "course_code": s.course_code,
         "section": s.section,
+        "residence": s.residence or "day_scholar",
+        "hostel_block": s.hostel_block,
         "created_at": s.created_at,
         "deleted_at": s.deleted_at,
     }
@@ -88,9 +93,20 @@ def generate_student_code(prefix: Optional[str] = None, width: int = 5) -> str:
     return f"{prefix}{value:0{width}d}"
 
 
+RESIDENCES = ("day_scholar", "hostler")
+
+
+def normalise_residence(value: Optional[str]) -> str:
+    v = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if v in ("hostler", "hosteller", "hostel", "boarder", "resident"):
+        return "hostler"
+    return "day_scholar"
+
+
 def put_student(
     student_code: str, full_name: str, class_name: Optional[str], email: Optional[str] = None,
     *, course_code: Optional[str] = None, section: Optional[str] = None,
+    residence: Optional[str] = None, hostel_block: Optional[str] = None,
 ) -> Dict[str, Any]:
     with session_scope() as db:
         row = db.execute(select(Student).where(Student.student_code == student_code)).scalar_one_or_none()
@@ -102,6 +118,8 @@ def put_student(
         row.email = email or None
         row.course_code = course_code or None
         row.section = section or None
+        row.residence = normalise_residence(residence)
+        row.hostel_block = (hostel_block or "").strip() or None if row.residence == "hostler" else None
         row.deleted_at = None
         db.flush()
         return _student_dict(row)
@@ -118,6 +136,7 @@ def get_student(student_code: str) -> Optional[Dict[str, Any]]:
 def update_student(
     student_code: str, *, full_name: Optional[str] = None, class_name: Optional[str] = None,
     email: Optional[str] = None, course_code: Optional[str] = None, section: Optional[str] = None,
+    residence: Optional[str] = None, hostel_block: Optional[str] = None,
 ) -> Dict[str, Any]:
     with session_scope() as db:
         row = db.execute(
@@ -135,6 +154,12 @@ def update_student(
             row.course_code = course_code
         if section is not None:
             row.section = section
+        if residence is not None:
+            row.residence = normalise_residence(residence)
+        if hostel_block is not None:
+            row.hostel_block = hostel_block.strip() or None
+        if row.residence != "hostler":
+            row.hostel_block = None
         db.flush()
         return _student_dict(row)
 
@@ -179,12 +204,23 @@ def get_students_batch(student_codes: List[str], include_deleted: bool = True) -
     return out
 
 
-def list_students() -> List[Dict[str, Any]]:
+def list_students(residence: Optional[str] = None, hostel_block: Optional[str] = None) -> List[Dict[str, Any]]:
+    with session_scope() as db:
+        stmt = select(Student).where(Student.deleted_at.is_(None))
+        if residence:
+            stmt = stmt.where(Student.residence == normalise_residence(residence))
+        if hostel_block:
+            stmt = stmt.where(Student.hostel_block == hostel_block)
+        rows = db.execute(stmt.order_by(Student.created_at.desc(), Student.id.desc())).scalars().all()
+        return [_student_dict(r) for r in rows]
+
+
+def list_hostel_blocks() -> List[str]:
     with session_scope() as db:
         rows = db.execute(
-            select(Student).where(Student.deleted_at.is_(None)).order_by(Student.created_at.desc(), Student.id.desc())
+            select(Student.hostel_block).where(Student.deleted_at.is_(None), Student.hostel_block.isnot(None))
         ).scalars().all()
-        return [_student_dict(r) for r in rows]
+    return sorted({str(b).strip() for b in rows if b and str(b).strip()})
 
 
 def list_sections_by_course(course_code: str) -> List[str]:
@@ -644,4 +680,10 @@ def counts() -> Dict[str, int]:
         rooms = int(db.execute(select(func.count()).select_from(Stream).where(Stream.deleted_at.is_(None))).scalar() or 0)
         courses = int(db.execute(select(func.count()).select_from(PlannerCourse).where(PlannerCourse.deleted_at.is_(None))).scalar() or 0)
         classes = int(db.execute(select(func.count()).select_from(AttendanceClassMeta)).scalar() or 0)
-    return {"students": students, "rooms": rooms, "courses": courses, "finalized_classes": classes}
+        hostlers = int(db.execute(select(func.count()).select_from(Student).where(
+            Student.deleted_at.is_(None), Student.residence == "hostler")).scalar() or 0)
+        staff = int(db.execute(select(func.count()).select_from(Staff).where(Staff.deleted_at.is_(None))).scalar() or 0)
+        departments = int(db.execute(select(func.count()).select_from(Department).where(Department.deleted_at.is_(None))).scalar() or 0)
+        gates = int(db.execute(select(func.count()).select_from(Gate).where(Gate.deleted_at.is_(None))).scalar() or 0)
+    return {"students": students, "rooms": rooms, "courses": courses, "finalized_classes": classes,
+            "hostlers": hostlers, "staff": staff, "departments": departments, "gates": gates}

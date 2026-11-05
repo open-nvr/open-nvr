@@ -13,6 +13,10 @@ import ManageCourses from './pages/ManageCourses'
 import ManageSchedule from './pages/ManageSchedule'
 // import Test from './pages/Test'
 import StudentData from './pages/StudentData'
+import ManageGates from './pages/ManageGates'
+import MealBookings from './pages/MealBookings'
+import Staff from './pages/Staff'
+import StaffAttendance from './pages/StaffAttendance'
 import Login from './pages/Login'
 import ProtectedRoute from './components/ProtectedRoute'
 import ErrorBoundary from './components/ErrorBoundary'
@@ -100,6 +104,10 @@ const router = createBrowserRouter([
       </ProtectedRoute>
     ) 
   },
+  { path: '/gates', element: (<ProtectedRoute><ManageGates /></ProtectedRoute>) },
+  { path: '/meals', element: (<ProtectedRoute><MealBookings /></ProtectedRoute>) },
+  { path: '/staff', element: (<ProtectedRoute><Staff /></ProtectedRoute>) },
+  { path: '/staff-attendance', element: (<ProtectedRoute><StaffAttendance /></ProtectedRoute>) },
 ])
 
 ReactDOM.createRoot(document.getElementById('root')!).render(

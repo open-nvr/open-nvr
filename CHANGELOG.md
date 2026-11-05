@@ -19,6 +19,15 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Enrol students by photo or webcam, plan rooms, courses and a weekly
   timetable; each class takes recognition snapshots that finalise into a
   PRESENT/ABSENT roster. The installer lists it next to the Camera Agent.
+  It also runs the campus's flap barriers and staff attendance: students
+  enrol as day scholars or hostlers of a block, and a *hostel* gate admits
+  only that block's hostlers; a *mess* gate admits a student once per meal
+  against the day's meal bookings (booked on the page, by CSV, or by the
+  existing booking system through `POST /meals/bookings`); departments are
+  a camera plus a working window whose first and last sightings of each
+  staff member are the day's check-in and check-out. Gate decisions are
+  published as `access.decided.v1`, so the gate-controller app drives the
+  barriers exactly as it does for the licence-plate app.
 
 - **The escalation proposal: weak evidence on the sub stream → detect on
   the main stream, by consent.** Every posted visit now says where its crop

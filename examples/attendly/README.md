@@ -52,11 +52,54 @@ aggregates who was seen per 10-minute slot. At the end of the class a student
 is PRESENT when seen in at least 60 % of the slots. Timing knobs are
 `ATTENDLY_*` settings in `attendly/config.py`.
 
+## Hostel gates, the mess, and staff
+
+Three more jobs on the same cameras and the same face database:
+
+* **Hostel flap barriers.** Enrolment asks whether a student is a *day
+  scholar* or a *hostler*, and which block a hostler lives in. On the
+  **Gates** page add a gate of kind *hostel* per block entrance, bound to the
+  camera at the barrier. The gate's worker looks at the camera every second,
+  takes the largest face (the person at the barrier), recognises it, and
+  decides: a hostler of that block is allowed, everyone else refused. Every
+  decision is logged on the page.
+* **Mess entry against meal bookings.** Students book meals for the next day
+  (the **Meal Bookings** page, a CSV import, or your existing booking system
+  calling `POST /meals/bookings` with an OpenNVR token). A gate of kind
+  *mess* admits a student only inside a meal window and only with an unused
+  booking for that meal; passing consumes the booking, so the QR code at the
+  counter is replaced by the face at the barrier.
+* **Staff attendance.** The **Staff** page enrols staff from photos (their
+  own `ST` codes, their own category in the face database) and defines
+  departments: a camera plus a working window. Inside the window the camera
+  is checked every minute; the first sighting of the day is the check-in,
+  the last one the check-out. **Staff Attendance** shows the day per
+  department, with ABSENT for anyone not seen, and exports CSV.
+
+### Driving the barrier
+
+Attendly decides; it never touches a relay. Each gate decision goes on the
+platform bus as the contracted `access.decided.v1` event (keyed by the gate
+camera's handle, with the student code in `plate_text` and the name in
+`owner`), and OpenNVR's **gate-controller** app closes the barrier's contact
+on `allow` over the wiring your site has: a GPIO dry contact, a Shelly-style
+IP relay, Modbus, an ONVIF door controller or MQTT. Start it with the
+`gate-controller` profile and list each barrier under its camera handle in
+`examples/gate-controller/config.docker.yml`; its HARDWARE.md is the wiring
+guide. The licence-plate app drives vehicle barriers the same way, so one
+controller serves both.
+
+Two shortcuts for simpler sites: a gate can carry an **HTTP trigger URL**
+(attendly GETs it on allow, for a barrier whose own relay takes one), and a
+barrier controller with its own camera can POST a JPEG to
+`/gates/{id}/check` and act on the JSON decision.
+
 ## Roles
 
 Attendly keeps no users. OpenNVR's roles map to three tiers: **viewer** reads
-reports, **operator** enrols students and plans classes, **admin** also deletes
-students and re-finalises classes.
+reports, **operator** enrols students and staff, plans classes, books meals and
+configures gates, **admin** also deletes students, staff, gates and
+departments and re-finalises classes.
 
 ## Configuration
 
@@ -68,6 +111,13 @@ students and re-finalises classes.
 | `ATTENDLY_FACES_URL` | `http://insightface-adapter:9005` | the adapter's `/faces/*` (enrol, list, delete) |
 | `ATTENDLY_RECOGNITION_THRESHOLD` | `0.5` | cosine similarity to count a match |
 | `ATTENDLY_DUPLICATE_THRESHOLD` | `0.65` | similarity that flags a duplicate at enrolment |
+
+| `ATTENDLY_GATE_RECOGNITION_THRESHOLD` | `0` (= recognition threshold) | a stricter match for admitting people |
+| `ATTENDLY_GATE_POLL_SECONDS` / `ATTENDLY_GATE_COOLDOWN_SECONDS` | `1` / `8` | how often a gate camera is looked at; how long the same person is not re-decided |
+| `ATTENDLY_MEAL_WINDOWS` | `breakfast=07:00-09:30,lunch=12:00-14:30,dinner=19:00-21:30` | when the mess serves; a gate may override |
+| `ATTENDLY_STAFF_POLL_SECONDS` | `60` | how often a department camera is looked at |
+| `ATTENDLY_STAFF_WORK_START` / `ATTENDLY_STAFF_WORK_END` | `09:00` / `18:00` | the default working window for a new department |
+| `NATS_URL` | `nats://nats:4222` (overlay) | the bus for `access.decided.v1`; blank = decisions are logged only |
 
 Both thresholds are starting points. Tune them against real enrolments on
 your cameras: lower the match threshold if known students go unrecognised,

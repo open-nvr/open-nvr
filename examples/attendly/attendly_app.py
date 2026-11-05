@@ -43,15 +43,21 @@ from attendly.routers import (
     cameras,
     classrooms,
     courses,
+    gates,
+    meals,
     planner,
     recognition,
     registry,
     schedules,
+    staff,
+    staff_attendance,
     streams,
     students,
     video_registration,
 )
+from attendly.services.access import GateEngine
 from attendly.services.engine import StreamEngine
+from attendly.services.staff_attendance import StaffEngine
 from attendly.storage import repo
 from attendly.storage.db import init_db
 from attendly.utils.logging_utils import get_request_id, new_request_id, set_request_id
@@ -130,17 +136,19 @@ def build_app(settings: Optional[Settings] = None, *, start_engine: bool = True,
         if register and settings.opennvr_url:
             task = asyncio.create_task(register_with_app_catalog(settings), name="attendly-app-catalog-register")
         if start_engine:
-            try:
-                StreamEngine.get_shared().start()
-            except Exception as exc:
-                logger.error("Failed to start StreamEngine: %s", exc)
+            for name, eng in (("StreamEngine", StreamEngine), ("GateEngine", GateEngine), ("StaffEngine", StaffEngine)):
+                try:
+                    eng.get_shared().start()
+                except Exception as exc:
+                    logger.error("Failed to start %s: %s", name, exc)
         yield
         if task is not None and not task.done():
             task.cancel()
-        try:
-            StreamEngine.get_shared().shutdown()
-        except Exception:
-            pass
+        for eng in (StreamEngine, GateEngine, StaffEngine):
+            try:
+                eng.get_shared().shutdown()
+            except Exception:
+                pass
 
     app = FastAPI(title="Attendly on OpenNVR", version=APP_VERSION, lifespan=lifespan,
                   description="Classroom attendance on OpenNVR cameras, detection and face recognition.")
@@ -155,7 +163,7 @@ def build_app(settings: Optional[Settings] = None, *, start_engine: bool = True,
         set_request_id(req_id)
         try:
             response = await call_next(request)
-            if request.url.path.startswith(tuple(p for p in ("/api/", "/students", "/attendance", "/streams", "/registry"))):
+            if request.url.path.startswith(("/api/", "/students", "/attendance", "/streams", "/registry", "/staff", "/gates", "/meals", "/departments")):
                 logger.info("[req_id=%s] %s %s -> %s", req_id, request.method, request.url.path, response.status_code)
             return response
         finally:
@@ -183,11 +191,22 @@ def build_app(settings: Optional[Settings] = None, *, start_engine: bool = True,
             workers = StreamEngine.get_shared().status()
         except Exception:
             workers = []
+        try:
+            gate_workers = GateEngine.get_shared().status()
+        except Exception:
+            gate_workers = []
+        try:
+            staff_workers = StaffEngine.get_shared().status()
+        except Exception:
+            staff_workers = []
         return {
             "app": APP_ID, "version": APP_VERSION, "ui_url": app_ui_url(settings),
             "students": c.get("students", 0), "rooms": c.get("rooms", 0), "courses": c.get("courses", 0),
             "finalized_classes": c.get("finalized_classes", 0),
             "active_classes": sum(1 for w in workers if w.get("running")), "workers": workers,
+            "hostlers": c.get("hostlers", 0), "staff": c.get("staff", 0), "departments": c.get("departments", 0),
+            "gates": c.get("gates", 0), "active_gates": sum(1 for w in gate_workers if w.get("running")),
+            "gate_workers": gate_workers, "staff_workers": staff_workers,
         }
 
     # ── API ─────────────────────────────────────────────────────────
@@ -203,6 +222,11 @@ def build_app(settings: Optional[Settings] = None, *, start_engine: bool = True,
     app.include_router(video_registration.router, prefix="/video_registration", tags=["video_registration"])
     app.include_router(registry.router, prefix="/registry", tags=["registry"])
     app.include_router(planner.router, prefix="/planner", tags=["planner"])
+    app.include_router(staff.router, prefix="/staff", tags=["staff"])
+    app.include_router(staff.departments_router, prefix="/departments", tags=["staff"])
+    app.include_router(staff_attendance.router, prefix="/staff-attendance", tags=["staff"])
+    app.include_router(gates.router, prefix="/gates", tags=["gates"])
+    app.include_router(meals.router, prefix="/meals", tags=["meals"])
 
     @app.post("/classes/{class_id}/finalize")
     def finalize_class_attendance(class_id: str):

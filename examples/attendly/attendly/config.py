@@ -84,12 +84,44 @@ class Settings(BaseSettings):
     planner_enforce_time_window: bool = False
     max_workers: int = 10
 
+    # ── Staff attendance ────────────────────────────────────────────
+    staff_face_category: str = "attendly_staff"
+    staff_code_prefix: str = "ST"
+    staff_poll_seconds: float = 60.0
+    # Default working window for a department (local time, HH:MM).
+    staff_work_start: str = "09:00"
+    staff_work_end: str = "18:00"
+
+    # ── Gates (hostel blocks, the mess) ─────────────────────────────
+    gate_poll_seconds: float = 1.0
+    # The same person is not re-decided for this long after a decision.
+    gate_cooldown_seconds: float = 8.0
+    # 0 → recognition_threshold. Gates admit people, so a stricter value
+    # than the classroom's is reasonable.
+    gate_recognition_threshold: float = 0.0
+    # "meal=HH:MM-HH:MM,..." — when each meal is served; the mess gate
+    # admits only inside a window, against that meal's bookings.
+    meal_windows: str = "breakfast=07:00-09:30,lunch=12:00-14:30,dinner=19:00-21:30"
+    # Decisions go on the platform bus as access.decided.v1 (the
+    # gate-controller app drives the barrier). Blank → not published.
+    nats_url: str = Field("", validation_alias=AliasChoices("NATS_URL", "ATTENDLY_NATS_URL"))
+    nats_token: str = Field("", validation_alias=AliasChoices("NATS_TOKEN", "ATTENDLY_NATS_TOKEN"))
+    open_url_timeout_seconds: float = 3.0
+
     # ── Logging ─────────────────────────────────────────────────────
     log_level: str = "INFO"
 
     @property
     def effective_faces_token(self) -> str:
         return self.faces_token or self.internal_api_key
+
+    @property
+    def effective_nats_token(self) -> str:
+        return self.nats_token or self.internal_api_key
+
+    @property
+    def effective_gate_threshold(self) -> float:
+        return self.gate_recognition_threshold or self.recognition_threshold
 
 
 @lru_cache(maxsize=1)

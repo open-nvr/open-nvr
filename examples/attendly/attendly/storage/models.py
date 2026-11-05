@@ -15,6 +15,9 @@ class Student(Base):
     email = Column(String(256), nullable=True, index=True)
     course_code = Column(String(64), nullable=True, index=True)
     section = Column(String(16), nullable=True)
+    # "hostler" or "day_scholar"; the block a hostler lives in.
+    residence = Column(String(16), nullable=False, default="day_scholar", server_default="day_scholar")
+    hostel_block = Column(String(64), nullable=True, index=True)
     created_at = Column(String(40), nullable=False)
     deleted_at = Column(String(40), nullable=True, index=True)
 
@@ -120,3 +123,108 @@ class AttendanceRecord(Base):
     camera_name = Column(String(128), nullable=True)
     confidence = Column(Float, nullable=True)
     recognized_at = Column(String(40), nullable=False)
+
+
+# ── Phase 2: staff, departments, gates, meals ──────────────────────
+
+
+class Staff(Base):
+    __tablename__ = "staff"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    staff_code = Column(String(32), unique=True, nullable=False, index=True)
+    full_name = Column(String(256), nullable=False)
+    email = Column(String(256), nullable=True, index=True)
+    department_id = Column(Integer, nullable=True, index=True)
+    designation = Column(String(128), nullable=True)
+    created_at = Column(String(40), nullable=False)
+    deleted_at = Column(String(40), nullable=True, index=True)
+
+
+class Department(Base):
+    """A staff attendance camera with its working window."""
+
+    __tablename__ = "departments"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(128), nullable=False)
+    camera_id = Column(Integer, nullable=True, index=True)
+    camera_name = Column(String(128), nullable=True)
+    work_start = Column(String(5), nullable=False, default="09:00")
+    work_end = Column(String(5), nullable=False, default="18:00")
+    created_at = Column(String(40), nullable=False)
+    updated_at = Column(String(40), nullable=False)
+    deleted_at = Column(String(40), nullable=True)
+
+
+class StaffAttendance(Base):
+    """One row per staff member per day, written by the department worker."""
+
+    __tablename__ = "staff_attendance"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    staff_code = Column(String(32), nullable=False)
+    date = Column(String(10), nullable=False, index=True)
+    department_id = Column(Integer, nullable=True)
+    first_seen = Column(String(40), nullable=False)
+    last_seen = Column(String(40), nullable=False)
+    sightings = Column(Integer, nullable=False, default=1)
+
+    __table_args__ = (Index("ix_staff_attendance_day_staff", "date", "staff_code", unique=True),)
+
+
+class Gate(Base):
+    """A flap barrier watched by one camera: a hostel block entrance or the
+    mess entrance. Attendly decides; the gate-controller app actuates."""
+
+    __tablename__ = "gates"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(128), nullable=False)
+    kind = Column(String(16), nullable=False)  # hostel | mess
+    camera_id = Column(Integer, nullable=True, index=True)
+    camera_name = Column(String(128), nullable=True)
+    hostel_block = Column(String(64), nullable=True)
+    allow_staff = Column(Boolean, nullable=False, default=False)
+    enabled = Column(Boolean, nullable=False, default=True)
+    # Optional: an HTTP trigger a barrier with its own relay accepts.
+    open_url = Column(String(512), nullable=True)
+    # Optional per-gate meal windows ("meal=HH:MM-HH:MM,..."); blank → settings.
+    meal_windows = Column(String(256), nullable=True)
+    created_at = Column(String(40), nullable=False)
+    updated_at = Column(String(40), nullable=False)
+    deleted_at = Column(String(40), nullable=True)
+
+
+class AccessEvent(Base):
+    __tablename__ = "access_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    gate_id = Column(Integer, nullable=False, index=True)
+    gate_name = Column(String(128), nullable=True)
+    kind = Column(String(16), nullable=False)
+    person_code = Column(String(32), nullable=True, index=True)
+    person_name = Column(String(256), nullable=True)
+    person_kind = Column(String(16), nullable=True)  # student | staff
+    decision = Column(String(8), nullable=False)
+    reason = Column(String(32), nullable=False)
+    unit = Column(String(64), nullable=True)
+    similarity = Column(Float, nullable=True)
+    actuated = Column(Boolean, nullable=False, default=False)
+    source = Column(String(16), nullable=False, default="camera")  # camera | check
+    ts = Column(String(40), nullable=False, index=True)
+
+
+class MealBooking(Base):
+    __tablename__ = "meal_bookings"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    student_code = Column(String(32), nullable=False, index=True)
+    date = Column(String(10), nullable=False, index=True)
+    meal = Column(String(16), nullable=False)
+    source = Column(String(16), nullable=False, default="manual")  # manual | import | api
+    created_at = Column(String(40), nullable=False)
+    consumed_at = Column(String(40), nullable=True)
+    consumed_gate_id = Column(Integer, nullable=True)
+
+    __table_args__ = (Index("ix_meal_bookings_unique", "student_code", "date", "meal", unique=True),)

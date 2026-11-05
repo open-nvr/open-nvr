@@ -69,33 +69,38 @@ class FakeFaceEngine:
     def person(self, person_id: str):
         return self.enrolled.get(person_id)
 
-    def index_face(self, image_bytes: bytes, external_image_id: str, *, name: str = "", metadata=None) -> Optional[str]:
+    def index_face(self, image_bytes: bytes, external_image_id: str, *, name: str = "", metadata=None,
+                   category: Optional[str] = None) -> Optional[str]:
         from attendly.face.engine import FaceRejected
 
         self.calls.append("index")
         self.index_calls += 1
         if image_bytes in self.reject or self.index_calls in self.reject_calls:
             raise FaceRejected("no face detected in the supplied image")
-        rec = self.enrolled.setdefault(external_image_id, {"person_id": external_image_id, "name": name, "category": self.category, "samples": 0})
+        rec = self.enrolled.setdefault(external_image_id, {"person_id": external_image_id, "name": name,
+                                                           "category": category or self.category, "samples": 0})
         if name:
             rec["name"] = name
         rec["samples"] += 1
         return f"{external_image_id}#{rec['samples'] - 1}"
 
-    def list_persons(self):
-        return [dict(r) for r in self.enrolled.values()]
+    def list_persons(self, category: Optional[str] = None):
+        cat = category or self.category
+        return [dict(r) for r in self.enrolled.values() if r["category"] == cat]
 
-    def list_faces(self, max_results: int = 1000):
+    def list_faces(self, max_results: int = 1000, category: Optional[str] = None):
         return [{"FaceId": f"{pid}#{i}", "ExternalImageId": pid, "Confidence": None, "Name": r["name"], "ImageId": None}
-                for pid, r in self.enrolled.items() for i in range(r["samples"])]
+                for pid, r in self.enrolled.items() if r["category"] == (category or self.category)
+                for i in range(r["samples"])]
 
-    def describe_collection(self):
-        return {"CollectionId": self.adapter_name, "FaceCount": sum(r["samples"] for r in self.enrolled.values()),
-                "PersonCount": len(self.enrolled), "FaceModelVersion": "insightface", "CreationTimestamp": None}
+    def describe_collection(self, category: Optional[str] = None):
+        persons = self.list_persons(category)
+        return {"CollectionId": self.adapter_name, "FaceCount": sum(r["samples"] for r in persons),
+                "PersonCount": len(persons), "FaceModelVersion": "insightface", "CreationTimestamp": None}
 
-    def get_faces_by_external_id(self, external_image_id: str):
+    def get_faces_by_external_id(self, external_image_id: str, category: Optional[str] = None):
         r = self.enrolled.get(external_image_id)
-        if not r:
+        if not r or r["category"] != (category or self.category):
             return []
         return [{"FaceId": f"{external_image_id}#{i}", "ExternalImageId": external_image_id, "Confidence": None, "ImageId": None}
                 for i in range(r["samples"])]
@@ -145,6 +150,27 @@ class FakeCameraSource:
         return self.frames.get(int(camera_id))
 
 
+class FakePublisher:
+    """The AccessPublisher surface: remembers every decision it was handed."""
+
+    nats_url = "nats://fake"
+
+    def __init__(self) -> None:
+        self.events: List[tuple] = []
+        self.published = 0
+        self.last_error = None
+        self.fail = False
+
+    def publish(self, gate, decision) -> bool:
+        from attendly.services.access import AccessPublisher
+
+        self.events.append((gate, decision, AccessPublisher.payload(decision)))
+        if self.fail:
+            return False
+        self.published += 1
+        return True
+
+
 @pytest.fixture
 def fake_engine():
     return FakeFaceEngine()
@@ -162,7 +188,9 @@ def env(tmp_path, monkeypatch, fake_engine, fake_cameras):
     from attendly.config import reset_settings_cache
     from attendly.face.engine import FaceEngine
     from attendly.gate import set_gate
+    from attendly.services.access import AccessPublisher, GateEngine, set_publisher
     from attendly.services.engine import StreamEngine
+    from attendly.services.staff_attendance import StaffEngine
     from attendly.storage.db import init_db, reset_db
 
     monkeypatch.setenv("ATTENDLY_DATABASE_URL", f"sqlite:///{tmp_path / 'attendly.db'}")
@@ -174,8 +202,20 @@ def env(tmp_path, monkeypatch, fake_engine, fake_cameras):
     FaceEngine.set_shared(fake_engine)  # type: ignore[arg-type]
     CameraSource.set_shared(fake_cameras)  # type: ignore[arg-type]
     StreamEngine.set_shared(StreamEngine(recognizer=fake_engine, frames=fake_cameras))
+    publisher = FakePublisher()
+    set_publisher(publisher)
+    GateEngine.set_shared(GateEngine(recognizer=fake_engine, frames=fake_cameras, publisher=publisher))
+    StaffEngine.set_shared(StaffEngine(recognizer=fake_engine, frames=fake_cameras))
     set_gate(None)
-    yield {"engine": fake_engine, "cameras": fake_cameras, "tmp": tmp_path}
+    yield {"engine": fake_engine, "cameras": fake_cameras, "tmp": tmp_path, "publisher": publisher}
+    for eng in (GateEngine, StaffEngine):
+        try:
+            eng.get_shared().shutdown()
+        except Exception:
+            pass
+    GateEngine.set_shared(None)
+    StaffEngine.set_shared(None)
+    set_publisher(None)
     StreamEngine.set_shared(None)
     FaceEngine.set_shared(None)
     CameraSource.set_shared(None)
