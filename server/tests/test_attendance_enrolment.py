@@ -36,7 +36,7 @@ class FakeGallery:
         if self.down:
             raise attendance_faces.FaceGalleryError(503, "The attendance face service is not reachable.")
 
-    async def identify(self, image):
+    async def identify(self, image, match=True):
         self.calls.append("identify")
         self._check()
         if image == b"noface":
@@ -253,6 +253,8 @@ def test_client_sends_what_the_adapter_expects(adapter):
     assert b'"task": "face_identify"' in seen[-1].content and seen[-1].url.path == "/infer"
     assert attendance_faces.duplicate_of(found, "u-1") == {"person_uuid": "u-2", "similarity": 0.7}
     assert attendance_faces.duplicate_of(found, "u-2") is None
+    _run(attendance_faces.identify(b"jpeg", match=False))
+    assert b'"match": false' in seen[-1].content
 
 
 def test_client_maps_adapter_errors(adapter):
@@ -413,7 +415,7 @@ def test_the_picture_goes_with_the_faces(env, gallery, photos_dir, how):  # noqa
 
 
 def test_an_accepted_photo_says_where_the_face_is(env, gallery, monkeypatch):  # noqa: F811
-    async def identify(image):
+    async def identify(image, match=True):
         return {"faces": [{"bbox": [10, 20, 110, 140], "person_id": None, "similarity": 0.1}]}
 
     monkeypatch.setattr(attendance_faces, "identify", identify)
@@ -424,7 +426,10 @@ def test_an_accepted_photo_says_where_the_face_is(env, gallery, monkeypatch):  #
 def test_the_guidance_check_gives_boxes_and_never_names(env, gallery, monkeypatch):  # noqa: F811
     from tests.test_attendance_roster import _role_user
 
-    async def identify(image):
+    asked = []
+
+    async def identify(image, match=True):
+        asked.append(match)
         return {"faces": [{"bbox": [1, 2, 3, 4], "confidence": 0.9, "person_id": "u-1",
                            "name": "Asha", "similarity": 0.8, "landmarks": [[1, 1], [2, 1]]}],
                 "dropped": {"too_small": 2}, "frame": {"w": 640, "h": 360}}
@@ -437,6 +442,7 @@ def test_the_guidance_check_gives_boxes_and_never_names(env, gallery, monkeypatc
                                    "landmarks": [[1, 1], [2, 1]]}],
                         "too_small": 2, "frame": {"w": 640, "h": 360}}
     assert "Asha" not in r.text and "u-1" not in r.text
+    assert asked == [False], "the guidance check asks for the detector alone"
     V = _role_user(env, "vic", ["attendance.view"])
     assert env.client.post(f"{URL}/faces/check", headers=V, files=frame).status_code == 403
     gallery.down = True

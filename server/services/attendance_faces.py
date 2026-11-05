@@ -98,11 +98,17 @@ def _raise_for(resp: httpx.Response) -> None:
     raise FaceGalleryError(502, f"The attendance face service failed: {detail}")
 
 
-async def identify(image: bytes) -> dict[str, Any]:
-    """``face_identify`` on one photo: every face, each looked up."""
+async def identify(image: bytes, *, match: bool = True) -> dict[str, Any]:
+    """``face_identify`` on one photo: every face, each looked up — or,
+    with ``match=False``, only where the faces are and how they are turned
+    (the detector alone; an adapter from before the flag ignores it and
+    looks them up anyway, which callers must not pass on)."""
+    params: dict[str, Any] = {"task": "face_identify"}
+    if not match:
+        params["match"] = False
     resp = await _call("POST", "/infer",
                        files={"frame": ("photo.jpg", image, "image/jpeg")},
-                       data={"params": json.dumps({"task": "face_identify"})})
+                       data={"params": json.dumps(params)})
     _raise_for(resp)
     body = resp.json()
     result = body.get("result") if isinstance(body, dict) else None

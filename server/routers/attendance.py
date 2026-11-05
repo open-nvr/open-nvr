@@ -780,7 +780,9 @@ async def check_face(frame: UploadFile = File(...), db: Session = Depends(get_db
             f"Send one frame of up to {MAX_CHECK_BYTES // (1024 * 1024)} MB"))
     release(db)
     try:
-        found = await attendance_faces.identify(data)
+        # The detector alone: this runs about once a second per enrolling
+        # page, beside the classroom looks on the same adapter.
+        found = await attendance_faces.identify(data, match=False)
     except attendance_faces.FaceGalleryError as e:
         raise HTTPException(status_code=e.status, detail=e.message) from None
     return {
