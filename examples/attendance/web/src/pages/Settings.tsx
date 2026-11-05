@@ -20,6 +20,7 @@ const FIELDS: { key: keyof Policy; label: string; hint: string; step: number; un
   { key: 'bucket_minutes', label: 'Slice length', hint: 'A session is counted in slices of this length.', step: 1, unit: 'minutes' },
   { key: 'attempt_interval_s', label: 'Look at each camera every', hint: 'At most half a slice, so every slice gets two chances.', step: 10, unit: 'seconds' },
   { key: 'finalize_grace_minutes', label: 'Decide the marks after the end', hint: 'Lets the last looks arrive. At least 1.', step: 1, unit: 'minutes' },
+  { key: 'min_coverage_ratio', label: 'Count a session when watched for at least', hint: 'Share of its slices, 0–1. Below it the session is shown but left out of every rate: a dead camera is not an empty room.', step: 0.05 },
 ]
 
 export default function Settings() {

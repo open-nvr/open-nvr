@@ -224,6 +224,7 @@ const POLICY_FIELDS: { key: keyof Policy; label: string; hint: string; step: num
   { key: 'bucket_minutes', label: 'Slice length (minutes)', hint: 'The session is counted in slices', step: 1 },
   { key: 'attempt_interval_s', label: 'Look every (seconds)', hint: 'At most half a slice', step: 10 },
   { key: 'finalize_grace_minutes', label: 'Decide after the end (minutes)', hint: 'At least 1', step: 1 },
+  { key: 'min_coverage_ratio', label: 'Counted when watched for at least (0–1)', hint: 'Less is left out of the rates', step: 0.05 },
 ]
 
 function GroupForm({ group, onClose, onSaved }: { group: Group | null; onClose: () => void; onSaved: () => void }) {

@@ -8,7 +8,7 @@
 
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { RefreshCw } from 'lucide-react'
+import { Ban, RefreshCw, RotateCcw } from 'lucide-react'
 import { Modal } from '../../components/Modal'
 import { Button, ErrorCard, Skeleton } from '../../components/ui'
 import { Input, Select } from '../../components/ui/form'
@@ -36,7 +36,7 @@ export function SessionDetail({ sessionId, groupName, timeZone, onClose }: {
     queryKey: ['attendance', 'session', sessionId],
     queryFn: () => attendanceService.session(sessionId),
     refetchInterval: (query) =>
-      query.state.data && query.state.data.status !== 'final' && query.state.data.status !== 'cancelled'
+      query.state.data && !['final', 'cancelled', 'off'].includes(query.state.data.status)
         ? 15_000 : false,
   })
   const invalidate = () => {
@@ -47,6 +47,18 @@ export function SessionDetail({ sessionId, groupName, timeZone, onClose }: {
     mutationFn: () => attendanceService.refinalize(sessionId),
     onSuccess: () => { invalidate(); showSuccess('Marks recomputed from the cameras') },
     onError: (e) => showError(extractApiError(e, 'Could not recompute the marks')),
+  })
+  // A holiday or a class that did not happen: not watched, not marked, in
+  // no report. A decided session keeps its marks, hidden, for a restore.
+  const off = useMutation({
+    mutationFn: () => attendanceService.callOff(sessionId),
+    onSuccess: () => { invalidate(); showSuccess('Session called off') },
+    onError: (e) => showError(extractApiError(e, 'Could not call the session off')),
+  })
+  const restore = useMutation({
+    mutationFn: () => attendanceService.restore(sessionId),
+    onSuccess: () => { invalidate(); showSuccess('Session restored') },
+    onError: (e) => showError(extractApiError(e, 'Could not restore the session')),
   })
 
   const s = q.data
@@ -64,22 +76,36 @@ export function SessionDetail({ sessionId, groupName, timeZone, onClose }: {
         <div className="space-y-3">
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
             <span>{clock(fmt, s.start_at, timeZone)}–{clock(fmt, s.end_at, timeZone)}</span>
-            <span className="capitalize">{s.status}</span>
+            <span className="capitalize">{s.status === 'off' ? 'called off' : s.status}</span>
             {watched && <span className="text-[var(--text-dim)]">{watched}</span>}
             {s.no_coverage && (
               <span className="text-[var(--danger)]">
-                Nothing was watched: the camera or the attendance app was down, so these
-                marks say nothing about who was there.
+                Too little was watched (the camera or the attendance app was down), so these
+                marks are left out of every rate.
               </span>
             )}
-            {final && canManage && (
-              <Button size="sm" variant="outline" className="ml-auto" disabled={refin.isPending}
-                      onClick={() => refin.mutate()}>
-                <RefreshCw size={14} /> Recompute
-              </Button>
-            )}
+            <span className="ml-auto flex gap-2">
+              {final && canManage && (
+                <Button size="sm" variant="outline" disabled={refin.isPending}
+                        onClick={() => refin.mutate()}>
+                  <RefreshCw size={14} /> Recompute
+                </Button>
+              )}
+              {canManage && s.status !== 'off' && s.status !== 'cancelled' && (
+                <Button size="sm" variant="outline" disabled={off.isPending}
+                        onClick={() => off.mutate()}>
+                  <Ban size={14} /> Call off
+                </Button>
+              )}
+              {canManage && s.status === 'off' && (
+                <Button size="sm" variant="outline" disabled={restore.isPending}
+                        onClick={() => restore.mutate()}>
+                  <RotateCcw size={14} /> Restore
+                </Button>
+              )}
+            </span>
           </div>
-          {!final && s.status !== 'cancelled' && (
+          {!final && s.status !== 'cancelled' && s.status !== 'off' && (
             <p className="text-sm text-[var(--text-dim)]">
               Marks are decided a few minutes after the session ends. Until then this shows
               how often each person has been seen so far.

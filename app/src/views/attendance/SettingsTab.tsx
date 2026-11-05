@@ -27,6 +27,8 @@ const FIELDS: { key: keyof Policy; label: string; hint: string; step: number; pe
     hint: 'Higher is stricter. 0.5 suits most cameras; raise it if strangers are matched.' },
   { key: 'finalize_grace_minutes', label: 'Decide marks after the end (minutes)', step: 1,
     hint: 'Waits for the last looks to arrive before deciding.' },
+  { key: 'min_coverage_ratio', label: 'Count a session when watched for at least (%)', step: 5, percent: true,
+    hint: 'Of its slices. Below this the session is shown but left out of every rate: a dead camera is not an empty room.' },
 ]
 
 export function SettingsTab() {

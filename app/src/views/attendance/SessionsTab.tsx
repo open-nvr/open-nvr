@@ -17,6 +17,7 @@ import { addDays, cameraNames, clock, groupName, isoDate, useCameras, useGroups 
 
 const STATUS_BADGE = {
   scheduled: 'neutral', running: 'info', finalizing: 'warning', final: 'success', cancelled: 'neutral',
+  off: 'neutral',
 } as const
 
 export function SessionsTab({ today = false }: { today?: boolean }) {
@@ -82,7 +83,7 @@ export function SessionsTab({ today = false }: { today?: boolean }) {
                 <td className="max-w-48 truncate">{cameraNames(cameras.data, s.camera_ids)}</td>
                 <td>
                   <Badge variant={STATUS_BADGE[s.status]}>{s.status}</Badge>
-                  {s.no_coverage && <Badge variant="destructive" className="ml-1">not watched</Badge>}
+                  {s.no_coverage && <Badge variant="destructive" className="ml-1">too little watched</Badge>}
                 </td>
                 <td>{s.counts.PRESENT ?? '—'}</td>
                 <td>{s.counts.LATE ?? '—'}</td>

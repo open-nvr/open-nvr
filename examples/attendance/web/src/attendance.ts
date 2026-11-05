@@ -31,6 +31,7 @@ export type Policy = {
   match_threshold: number
   attempt_interval_s: number
   finalize_grace_minutes: number
+  min_coverage_ratio: number
 }
 
 /** Core's limits for each rule (server services/attendance_policy.py
@@ -43,6 +44,7 @@ export const POLICY_LIMITS: Record<keyof Policy, { min: number; max: number; who
   bucket_minutes: { min: 1, max: 60, whole: true },
   attempt_interval_s: { min: 30, max: 1800, whole: true },
   finalize_grace_minutes: { min: 1, max: 120, whole: true },
+  min_coverage_ratio: { min: 0, max: 1, whole: false },
 }
 
 /** What is wrong with each rule as typed. An empty field is not wrong
@@ -91,7 +93,9 @@ export type Slot = {
 
 export type SlotIn = Omit<Slot, 'id'>
 
-export type SessionStatus = 'scheduled' | 'running' | 'finalizing' | 'final' | 'cancelled'
+/** ``cancelled``: the timetable dropped it. ``off``: a person called it
+ * off (a holiday); not watched, not marked, not in reports. */
+export type SessionStatus = 'scheduled' | 'running' | 'finalizing' | 'final' | 'cancelled' | 'off'
 
 export type Session = {
   id: number
@@ -236,6 +240,12 @@ export const api = {
   setMark: (sessionId: number, personId: number, status: MarkStatus | 'AUTO', note?: string) =>
     call<unknown>('PATCH', `${A}/sessions/${sessionId}/marks/${personId}`, { json: { status, note } }),
   refinalize: (sessionId: number) => call<unknown>('POST', `${A}/sessions/${sessionId}/refinalize`),
+  callOff: (sessionId: number, reason?: string) =>
+    call<Session>('POST', `${A}/sessions/${sessionId}/off`, { json: { reason: reason || null } }),
+  restore: (sessionId: number) => call<Session>('POST', `${A}/sessions/${sessionId}/restore`),
+  addSession: (body: { group_id: number; local_date: string; start_time: string; end_time: string; camera_ids: number[] }) =>
+    call<Session>('POST', `${A}/sessions`, { json: body }),
+  erasePerson: (id: number) => call<unknown>('DELETE', `${A}/people/${id}`, { query: { erase: true } }),
 
   // Report
   report: (groupId: number, from: string, to: string) =>

@@ -7,7 +7,7 @@
 
 import { useState, type ReactNode } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { AlertTriangle, ArrowLeft, RefreshCw } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, Ban, RefreshCw, RotateCcw } from 'lucide-react'
 import { errorText } from '../api'
 import { useAuth } from '../auth'
 import { STATUS_LABEL, api, cameraNames, clock, groupName, longDate, type MarkStatus, type SessionPerson } from '../attendance'
@@ -40,6 +40,40 @@ export default function SessionPage() {
     try {
       await api.setMark(d.id, p.person_id, status, note)
       toast('success', status === 'AUTO' ? `${p.display_name}: back to the cameras' mark` : `${p.display_name}: ${STATUS_LABEL[status]}`)
+      s.reload()
+    } catch (e) {
+      toast('error', errorText(e))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const callOff = async () => {
+    const ok = await confirm({
+      title: 'Call this session off?',
+      body: d.status === 'final'
+        ? 'For a holiday or a class that did not happen. Its marks are hidden and it leaves every report; restoring it brings them back.'
+        : 'For a holiday or a class that will not happen. The cameras will not look and nobody is marked. The timetable is not changed.',
+      confirm: 'Call off',
+    })
+    if (!ok) return
+    setBusy('all')
+    try {
+      await api.callOff(d.id)
+      toast('success', 'Called off')
+      s.reload()
+    } catch (e) {
+      toast('error', errorText(e))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const restore = async () => {
+    setBusy('all')
+    try {
+      await api.restore(d.id)
+      toast('success', 'Restored')
       s.reload()
     } catch (e) {
       toast('error', errorText(e))
@@ -87,6 +121,16 @@ export default function SessionPage() {
                 <RefreshCw className="h-3.5 w-3.5" /> Recompute
               </Button>
             )}
+            {can.manage && d.status !== 'off' && d.status !== 'cancelled' && (
+              <Button variant="secondary" size="sm" onClick={callOff} busy={busy === 'all'}>
+                <Ban className="h-3.5 w-3.5" /> Call off
+              </Button>
+            )}
+            {can.manage && d.status === 'off' && (
+              <Button variant="secondary" size="sm" onClick={restore} busy={busy === 'all'}>
+                <RotateCcw className="h-3.5 w-3.5" /> Restore
+              </Button>
+            )}
           </div>
         </div>
         <div className="mt-4 grid gap-3 text-sm sm:grid-cols-4">
@@ -102,9 +146,9 @@ export default function SessionPage() {
         {d.no_coverage && (
           <div className="mt-4 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-            The cameras gave no frame during this session, so nobody could be seen. Its automatic marks say ABSENT, but
-            the report leaves them out of every count and rate: a dead camera is not an empty room. A mark you set by
-            hand does count.
+            The cameras gave a frame for too little of this session (under the site's coverage rule), so being unseen
+            says little. Its automatic marks are shown, but the report leaves them out of every count and rate: a dead
+            camera is not an empty room. A mark you set by hand does count.
           </div>
         )}
       </Card>

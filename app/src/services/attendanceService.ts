@@ -58,9 +58,10 @@ export type Policy = {
   match_threshold: number
   attempt_interval_s: number
   finalize_grace_minutes: number
+  min_coverage_ratio: number
 }
 
-export type SessionStatus = 'scheduled' | 'running' | 'finalizing' | 'final' | 'cancelled'
+export type SessionStatus = 'scheduled' | 'running' | 'finalizing' | 'final' | 'cancelled' | 'off'
 
 export type Session = {
   id: number
@@ -179,6 +180,8 @@ export const attendanceService = {
   setMark: (sessionId: number, personId: number, status: MarkStatus | 'AUTO', note?: string) =>
     api.patch(`${A}/sessions/${sessionId}/marks/${personId}`, { status, note }),
   refinalize: (sessionId: number) => api.post(`${A}/sessions/${sessionId}/refinalize`),
+  callOff: (sessionId: number) => api.post(`${A}/sessions/${sessionId}/off`, {}),
+  restore: (sessionId: number) => api.post(`${A}/sessions/${sessionId}/restore`),
 
   // Report
   report: (groupId: number, from: string, to: string) =>
