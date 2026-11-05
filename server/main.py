@@ -108,6 +108,7 @@ from routers import (
     webrtc,
     window_settings,
     device_firewall,
+    workflows as workflows_router,
 )
 from scripts.init_db import create_initial_data
 from services.mediamtx_admin_service import MediaMtxAdminService as _MtxAdmin
@@ -1165,6 +1166,7 @@ app.include_router(system, prefix=settings.api_prefix)
 app.include_router(events_router, prefix=settings.api_prefix)
 app.include_router(occupancy_router.router, prefix=settings.api_prefix)
 app.include_router(guardscan_router.router, prefix=settings.api_prefix)
+app.include_router(workflows_router.router, prefix=settings.api_prefix)
 
 
 # =============================================================================
