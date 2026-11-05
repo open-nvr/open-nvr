@@ -373,7 +373,7 @@ def test_a_part_box_inside_a_tracked_person_spawns_no_second_track():
     """Camera 23, 2026-11-05: on frames where only the upper body was
     detected, that box sat far from the full-body track's bottom-centre,
     spawned a track of its own and posted a second visit per pass."""
-    tk = Tracker((576, 704), TrackConfig(fps=5))
+    tk = Tracker((576, 704), TrackConfig(fps=5, min_initialized=2))
     body = (300, 100, 420, 420)
     tk.update([Detection("person", body, 0.8)], frame_ts=1.0)
     tk.update([Detection("person", body, 0.8)], frame_ts=1.2)
@@ -398,7 +398,7 @@ def test_a_part_box_inside_a_tracked_person_spawns_no_second_track():
 def test_a_coasting_track_is_matched_with_a_wider_gate():
     """Behind a colleague for three frames, then a stride away: the same
     track, not a second visit."""
-    tk = Tracker((576, 704), TrackConfig(fps=5))
+    tk = Tracker((576, 704), TrackConfig(fps=5, min_initialized=2))
     box = (300, 100, 380, 400)
     for ts in (1.0, 1.2):
         tk.update([Detection("person", box, 0.8)], frame_ts=ts)
@@ -406,11 +406,11 @@ def test_a_coasting_track_is_matched_with_a_wider_gate():
     for ts in (1.4, 1.6, 1.8):
         tk.update([], frame_ts=ts)                       # occluded: three misses
     far = (560, 100, 640, 400)                           # 3.25 widths away: beyond the fixed gate
-    assert bottom_center_distance(box, far) > TrackConfig(fps=5).threshold_for("person")
+    assert bottom_center_distance(box, far) > TrackConfig(fps=5, min_initialized=2).threshold_for("person")
     tk.update([Detection("person", far, 0.8)], frame_ts=2.0)
     assert len(tk._tracks) == 1 and tk._tracks[0].id == tid and tk._tracks[0].box == far
     # with growth off the same detection starts a new track
-    tk2 = Tracker((576, 704), TrackConfig(fps=5, coast_gate_growth=0.0))
+    tk2 = Tracker((576, 704), TrackConfig(fps=5, min_initialized=2, coast_gate_growth=0.0))
     for ts in (1.0, 1.2):
         tk2.update([Detection("person", box, 0.8)], frame_ts=ts)
     for ts in (1.4, 1.6, 1.8):
@@ -420,7 +420,7 @@ def test_a_coasting_track_is_matched_with_a_wider_gate():
 
 
 def test_a_box_around_two_tracked_people_is_a_group_box():
-    tk = Tracker((576, 704), TrackConfig(fps=5))
+    tk = Tracker((576, 704), TrackConfig(fps=5, min_initialized=2))
     a, b = (100, 100, 200, 400), (260, 100, 360, 400)
     for ts in (1.0, 1.2):
         tk.update([Detection("person", a, 0.8), Detection("person", b, 0.8)], frame_ts=ts)
@@ -430,7 +430,7 @@ def test_a_box_around_two_tracked_people_is_a_group_box():
     assert len(tk._tracks) == 2 and tk.spawns_absorbed == 1
     # a group box that did get a track (its members were missed when it
     # spawned) is marked on every frame the members are inside it
-    tk3 = Tracker((576, 704), TrackConfig(fps=5))
+    tk3 = Tracker((576, 704), TrackConfig(fps=5, min_initialized=2))
     g = (90, 90, 370, 410)
     tk3.update([Detection("person", g, 0.7)], frame_ts=1.0)
     tk3.update([Detection("person", g, 0.7)], frame_ts=1.2)
@@ -447,20 +447,20 @@ def test_a_box_around_two_tracked_people_is_a_group_box():
 def test_a_box_of_a_very_different_size_never_matches():
     """A person's track must not take the box the detector drew around a
     group (three times as wide), nor a group track a member's box."""
-    tk = Tracker((576, 704), TrackConfig(fps=5))
+    tk = Tracker((576, 704), TrackConfig(fps=5, min_initialized=2))
     person = (300, 100, 380, 400)
     for ts in (1.0, 1.2):
         tk.update([Detection("person", person, 0.8)], frame_ts=ts)
     group = (200, 90, 560, 410)
     tk.update([Detection("person", group, 0.7)], frame_ts=1.4)
     assert len(tk._tracks) == 2 and tk._tracks[0].box == person, "coasting, not switched to the group box"
-    tk2 = Tracker((576, 704), TrackConfig(fps=5, width_grow_max=0.0, width_shrink_max=0.0))
+    tk2 = Tracker((576, 704), TrackConfig(fps=5, min_initialized=2, width_grow_max=0.0, width_shrink_max=0.0))
     for ts in (1.0, 1.2):
         tk2.update([Detection("person", person, 0.8)], frame_ts=ts)
     tk2.update([Detection("person", group, 0.7)], frame_ts=1.4)
     assert len(tk2._tracks) == 1 and tk2._tracks[0].box == group, "the old behaviour with the gate off"
     # half hidden behind a chair: a box half as wide is still this person
-    tk3 = Tracker((576, 704), TrackConfig(fps=5))
+    tk3 = Tracker((576, 704), TrackConfig(fps=5, min_initialized=2))
     for ts in (1.0, 1.2):
         tk3.update([Detection("person", person, 0.8)], frame_ts=ts)
     tk3.update([Detection("person", (340, 100, 380, 400), 0.7)], frame_ts=1.4)

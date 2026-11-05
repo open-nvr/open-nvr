@@ -322,7 +322,10 @@ class VisitLifecycle:
         camera_id: str,
         *,
         nvr_camera_id: int | None = None,
-        min_duration_s: float = 1.0,
+        # A visit shorter than this (first to last sighting) is a flicker,
+        # not history. 1.5 s: the fragments a crowd produces last a second;
+        # a person crossing the frame takes longer on any sane camera.
+        min_duration_s: float = 1.5,
     ) -> None:
         self.camera_id = camera_id
         self.nvr_camera_id = nvr_camera_id

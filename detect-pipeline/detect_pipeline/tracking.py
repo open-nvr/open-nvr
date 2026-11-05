@@ -132,7 +132,12 @@ class TrackConfig:
     min_spawn_score: float = 0.0
 
     def initialized(self) -> int:
-        return self.min_initialized if self.min_initialized is not None else max(1, self.fps // 2)
+        # Three hits at 5 fps (0.6 s), six at 10. Two hits let every
+        # fragment the detector boxes for a moment in a crowd (a head, a
+        # sleeve) confirm a track and post a visit: replayed on the Ventuno
+        # Q, 2026-11-05, three hits took a three-person pass from six
+        # visits to between three and five.
+        return self.min_initialized if self.min_initialized is not None else max(1, self.fps * 3 // 5)
 
     def disappeared(self) -> int:
         return self.max_disappeared if self.max_disappeared is not None else max(1, self.fps * 5)
