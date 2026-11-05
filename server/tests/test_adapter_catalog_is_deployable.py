@@ -71,7 +71,7 @@ def _repo(image: str) -> str:
 #: the captioner". The candidates are the ones .env.example documents.
 SELECTABLE_SERVICES = {
     "docker-compose.camera-agent.yml:caption-adapter": (
-        "CAPTION_ADAPTER", ("ollamavlm", "moondream", "blip")),
+        "CAPTION_ADAPTER", ("ollamavlm", "moondream", "blip", "litertlm")),
     "docker-compose.camera-agent.yml:whisper-adapter": (
         "STT_ADAPTER", ("parakeet", "whisper")),
 }

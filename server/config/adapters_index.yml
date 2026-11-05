@@ -358,6 +358,37 @@
   source: https://github.com/open-nvr/ai-adapter/tree/main/adapters/moondream
   contact: https://github.com/open-nvr/ai-adapter/issues
 
+- id: litertlm-gemma-npu
+  name: Gemma on the Qualcomm NPU (LiteRT-LM)
+  summary: >-
+    Captions and visual Q&A from Gemma 4 E2B running on the Hexagon NPU of
+    Qualcomm Dragonwing boards (Ventuno Q / IQ-8275) through LiteRT-LM — the
+    caption slot for a box whose CPU cannot keep up with a vision model.
+    Measured on a Ventuno Q: 2.5 s a photo warm, 4.3 s cold. NPU only:
+    needs the qualcomm flavour (start.sh picks it there). The 2.7 GB model
+    and Qualcomm's runtime libraries download once at first start.
+  version: "1.0.0"
+  tier: first_party
+  image: ghcr.io/open-nvr/litertlm-adapter:latest-qualcomm
+  tasks_advertised: [visual_qa, scene_caption]
+  model:
+    framework: litert-lm
+    modalities_in: [image, text]
+    modalities_out: [text]
+    fingerprinted: true
+  permissions:
+    gpu: false
+    network_egress: ["https://huggingface.co", "https://softwarecenter.qualcomm.com"]
+    host_filesystem: ["/dev/fastrpc-cdsp", "/dev/dma_heap"]
+  scheduling: { max_inflight: 1, fair_queuing: per_camera }
+  supports_stream: false
+  license: Apache-2.0
+  vendor: open-nvr
+  model_card_url: https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm
+  docs_url: https://github.com/open-nvr/ai-adapter/blob/main/adapters/litertlm/README.md
+  source: https://github.com/open-nvr/ai-adapter/tree/main/adapters/litertlm
+  contact: https://github.com/open-nvr/ai-adapter/issues
+
 - id: open-vocab-detection
   name: Open-Vocabulary Detection
   summary: >-

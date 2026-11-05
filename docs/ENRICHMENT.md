@@ -114,6 +114,11 @@ camera; never `ollamavlm` there. Nothing recorded while they are off is
 lost: the on-demand lane describes what a question needs, and the backfill
 honours the same flags when you turn them back on.
 
+A Qualcomm box (Ventuno Q and other Dragonwing / Snapdragon boards with the
+Hexagon NPU) is the exception: `start.sh` fills `CAPTION_ADAPTER=litertlm`,
+Gemma 4 E2B on the NPU at ~2.5 s a photo (docs/HARDWARE.md), and the
+installer defaults both flags to **true** there.
+
 ## Checking it worked
 
 - `docker logs opennvr_core | grep -i 'enrichment'` — a warning naming the
