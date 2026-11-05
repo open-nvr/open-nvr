@@ -36,10 +36,12 @@ from core.database import Base  # noqa: E402
 from models import Permission, Role, RolePermission  # noqa: E402
 from services.permission_catalog import (  # noqa: E402
     NEW_PERMISSIONS_HA,
+    NEW_PERMISSIONS_WORKFLOWS,
     seed_new_permissions,
 )
 
 HA_NAMES = {p.name for p in NEW_PERMISSIONS_HA}
+WORKFLOW_NAMES = {p.name for p in NEW_PERMISSIONS_WORKFLOWS}
 
 
 @pytest.fixture
@@ -113,8 +115,9 @@ def test_upgrade_grants_ptz_to_exactly_the_live_view_roles(db):
     roles = _pre_ha_install(db)
     created = seed_new_permissions(db)
 
-    # UPD-301 adds system.update on the same upgrade path, for admins only.
-    assert {name for name, _g, _s in created} == HA_NAMES | {"system.update"}
+    # UPD-301 adds system.update on the same upgrade path, for admins only;
+    # the workflow permissions have their own test below.
+    assert {name for name, _g, _s in created} == HA_NAMES | {"system.update"} | WORKFLOW_NAMES
     assert dict((n, g) for n, g, _s in created)["ptz.control"] == 2
 
     assert "ptz.control" in _perms_of(db, roles["operator"])
@@ -126,6 +129,17 @@ def test_upgrade_grants_ptz_to_exactly_the_live_view_roles(db):
     # No role gains any of the other new abilities.
     for role in roles.values():
         assert not (_perms_of(db, role) & (HA_NAMES - {"ptz.control"} | {"system.update"}))
+
+
+def test_upgrade_grants_workflows_to_the_rfc_s_roles(db):
+    """RFC #620: viewing for admin, operator and viewer; managing and
+    approving for admin and operator, through cameras.view / .manage."""
+    roles = _pre_ha_install(db)
+    seed_new_permissions(db)
+    assert _perms_of(db, roles["operator"]) >= WORKFLOW_NAMES
+    assert _perms_of(db, roles["viewer"]) & WORKFLOW_NAMES == {"workflows.view"}
+    assert not (_perms_of(db, roles["archivist"]) & WORKFLOW_NAMES)
+    assert _perms_of(db, roles["admin"]) == {"full_access"}
 
 
 def test_upgrade_backfill_is_once_only(db):

@@ -1,0 +1,33 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+workflow: v1
+name: Night intrusion triage
+description: >-
+  A person in the yard at night while the site is armed. An Investigate step
+  looks at the camera and recent events and reports who it probably is; plain
+  rules decide whether to log it or alert. Investigate runs only
+  where the site's model passes the Investigate cases (Phase 2).
+limits: { cooldown: 2m, one_at_a_time: track, per_hour: 20, ai_per_hour: 40 }
+when:
+  alert: { app: intrusion-detection, type: intrusion, cameras: [yard] }
+if:
+  - site_mode: [armed_home, armed_away]
+  - time: { from: "22:00", to: "06:00" }
+then:
+  - ai:
+      mode: investigate
+      goal: Decide whether the person in the yard is a threat, and who they probably are.
+      instructions: Guards on patrol are not intruders. Treat anyone near the fence line as suspicious.
+      tools: [describe_camera, recent_events, search_footage]
+      decision: [ignore, alert]
+      fields: { who: [staff, guard, unknown] }
+      rules:
+        - { when: { who: [staff, guard] }, then: ignore }
+        - { when: { who: unknown }, then: alert }
+      limits: { tool_calls: 4 }
+      ignore: [ log: "{reason}" ]
+      alert: [ alert: { severity: medium, title: "Intruder on {camera}" } ]
+      unsure:
+        - ask_person: { who: role:guard, message: "Possible intruder on {camera}. Threat?",
+                        replies: ["Yes", "No"], timeout: 60s }
+          "Yes": [ alert: { severity: high, title: "Intruder on {camera}" } ]
