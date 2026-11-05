@@ -68,6 +68,10 @@ students and re-finalises classes.
 | `ATTENDLY_FACES_URL` | `http://insightface-adapter:9005` | the adapter's `/faces/*` (enrol, list, delete) |
 | `ATTENDLY_RECOGNITION_THRESHOLD` | `0.5` | cosine similarity to count a match |
 | `ATTENDLY_DUPLICATE_THRESHOLD` | `0.65` | similarity that flags a duplicate at enrolment |
+
+Both thresholds are starting points. Tune them against real enrolments on
+your cameras: lower the match threshold if known students go unrecognised,
+raise it if strangers are matched. Changes take effect on restart.
 | `ATTENDLY_PUBLIC_URL` | — | browser-reachable URL; blank = `http://{host}:9300/` |
 | `ATTENDLY_AUTH_MODE` | `opennvr` | `none` opens every endpoint (loopback development only) |
 | `ATTENDLY_DATABASE_URL` | `sqlite:////data/attendly.db` (image) | the app's own SQLite |

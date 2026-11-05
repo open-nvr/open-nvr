@@ -143,3 +143,5 @@ enrol a student from the webcam → schedule a class for now → watch
   entries are separated by `category`. Student names and metadata live in the
   app's SQLite, keyed by `student_code` = adapter `person_id`.
 - InsightFace model packs are research-licensed (see the adapter README).
+  Attendly is free to use; a commercial deployment would need its own
+  licence from the model authors.
