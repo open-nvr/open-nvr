@@ -1,0 +1,34 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+workflow: v1
+name: Gate concierge
+description: >-
+  An unknown plate at the gate. A Look step says who it is (delivery, cab or
+  visitor) from the gate picture, then the guard is asked, and the gate opens
+  only on "Let in". Needs the plate app and the gate controller.
+limits: { cooldown: 1m, one_at_a_time: plate }
+when:
+  alert: { app: license-plate-recognition, type: plate_unknown, cameras: [gate] }
+then:
+  - ai:
+      mode: look
+      input: picture
+      prompt: >-
+        Someone is at the gate. Say who they are: a delivery rider (a courier or
+        food delivery, often with a branded bag, box or uniform), a cab driver (a
+        taxi or ride-hailing car), or a visitor. Name the delivery company if a
+        logo, bag or uniform shows it.
+      decision: [delivery, cab, visitor]
+      fields: { company: [amazon, flipkart, swiggy, zomato, dhl, other, none] }
+      delivery: []
+      cab: []
+      visitor: []
+      unsure: []
+  - ask_person:
+      who: role:guard
+      message: "{outcome} at the gate ({company}): {reason} Let them in?"
+      replies: ["Let in", "Refuse"]
+      default: "Refuse"
+      timeout: 2m
+    "Let in": [ app: { id: gate-controller, action: open_now, args: { camera: "{camera}" } } ]
+    "Refuse": [ log: "Refused at the gate: {reason}" ]

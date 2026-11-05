@@ -27,7 +27,11 @@ from core.auth import get_password_hash
 from core.config import settings
 from core.database import SessionLocal, init_db
 from models import Permission, Role, RolePermission, User
-from services.permission_catalog import NEW_PERMISSIONS_HA, NEW_PERMISSIONS_UPDATE
+from services.permission_catalog import (
+    NEW_PERMISSIONS_HA,
+    NEW_PERMISSIONS_UPDATE,
+    NEW_PERMISSIONS_WORKFLOWS,
+)
 
 
 def create_initial_data():
@@ -188,7 +192,7 @@ def create_initial_data():
         # descriptions are also the upgrade-path seed (main.py). Grant rules
         # preserve behaviour: nobody gains or loses an ability on upgrade.
         # OpenNVR updates (UPD-301): admins only, like every new ability.
-        for _perm in (*NEW_PERMISSIONS_HA, *NEW_PERMISSIONS_UPDATE):
+        for _perm in (*NEW_PERMISSIONS_HA, *NEW_PERMISSIONS_UPDATE, *NEW_PERMISSIONS_WORKFLOWS):
             get_or_create_perm(_perm.name, _perm.description)
 
         # Helper to set role permissions (replace)
@@ -218,6 +222,10 @@ def create_initial_data():
                 # existing ownership check (see services/permission_catalog),
                 # granted with live.view so it narrows nobody.
                 "ptz.control",
+                # Agentic Workflows (RFC #620, section 7).
+                "workflows.view",
+                "workflows.manage",
+                "workflows.approve",
             ],
         )
         set_role_perms(
@@ -227,6 +235,7 @@ def create_initial_data():
                 "live.view",
                 "recordings.view",
                 "ptz.control",
+                "workflows.view",
             ],
         )
 
