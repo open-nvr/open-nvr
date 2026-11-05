@@ -164,6 +164,16 @@ export async function call<T>(method: string, path: string, opts: Options = {}):
     const body = await parse(res)
     throw new ApiError(res.status, messageOf(body, `${res.status} ${res.statusText}`), body)
   }
+  // Core answers a route it does not have with its own web page (200,
+  // HTML). That is an OpenNVR older than this app, not data: say so,
+  // rather than hand a page of HTML to code that expects a list.
+  if ((res.headers.get('content-type') ?? '').includes('text/html')) {
+    throw new ApiError(
+      502,
+      'OpenNVR does not answer the attendance requests. Its server is probably an older version than this app: update OpenNVR.',
+      null,
+    )
+  }
   return (await parse(res)) as T
 }
 

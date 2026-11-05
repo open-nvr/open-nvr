@@ -17,6 +17,7 @@ import People from './pages/People'
 import Groups from './pages/Groups'
 import Schedule from './pages/Schedule'
 import Attendance from './pages/Attendance'
+import { PageErrorBoundary } from './components/ErrorBoundary'
 import SessionPage from './pages/Session'
 import Reports from './pages/Reports'
 import Settings from './pages/Settings'
@@ -63,18 +64,20 @@ function Gate({ children }: { children: ReactNode }) {
 function App() {
   return (
     <Gate>
-      <Routes>
-        <Route path="/" element={<Dashboard />} />
-        <Route path="/register" element={<Register />} />
-        <Route path="/people" element={<People />} />
-        <Route path="/groups" element={<Groups />} />
-        <Route path="/schedule" element={<Schedule />} />
-        <Route path="/attendance" element={<Attendance />} />
-        <Route path="/attendance/:id" element={<SessionPage />} />
-        <Route path="/reports" element={<Reports />} />
-        <Route path="/settings" element={<Settings />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+      <PageErrorBoundary>
+        <Routes>
+          <Route path="/" element={<Dashboard />} />
+          <Route path="/register" element={<Register />} />
+          <Route path="/people" element={<People />} />
+          <Route path="/groups" element={<Groups />} />
+          <Route path="/schedule" element={<Schedule />} />
+          <Route path="/attendance" element={<Attendance />} />
+          <Route path="/attendance/:id" element={<SessionPage />} />
+          <Route path="/reports" element={<Reports />} />
+          <Route path="/settings" element={<Settings />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </PageErrorBoundary>
     </Gate>
   )
 }
