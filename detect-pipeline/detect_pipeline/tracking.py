@@ -223,6 +223,16 @@ def bottom_center_distance(a: Box, b: Box) -> float:
     return math.sqrt(dx * dx + dy * dy + dw * dw + dh * dh)
 
 
+#: See pipeline.PART_MIN_WIDTH_SHARE: a part is as wide as its whole; a
+#: person inside a wider group box is not a part.
+PART_MIN_WIDTH_SHARE = 0.6
+
+
+def _width_share(inner: Box, outer: Box) -> float:
+    ow = max(0.0, outer[2] - outer[0])
+    return (max(0.0, inner[2] - inner[0]) / ow) if ow > 0 else 0.0
+
+
 def _coverage(inner: Box, outer: Box) -> float:
     """Fraction of ``inner``'s area that lies inside ``outer`` (0..1)."""
     ix1, iy1 = max(inner[0], outer[0]), max(inner[1], outer[1])
@@ -498,6 +508,7 @@ class Tracker:
             if self.spawn_containment > 0 and any(
                     labels_match(det.label, tr.label)
                     and _coverage(det.box, tr.box) >= self.spawn_containment
+                    and _width_share(det.box, tr.box) >= PART_MIN_WIDTH_SHARE
                     for tr in self._tracks):
                 # The detector boxed a part of someone already tracked (an
                 # upper body on a frame where the whole was missed); its

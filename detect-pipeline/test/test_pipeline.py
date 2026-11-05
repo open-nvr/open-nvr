@@ -89,6 +89,15 @@ def test_nms_drops_a_part_box_inside_the_same_object():
     sure_upper = Detection("person", (108, 52, 214, 190), 0.93)
     assert nms([sure_upper, body]) == [body]
     assert nms([body, sure_upper]) == [body]
+    # three people crossing together: the detector also drew one wide box
+    # around the group; each person is inside it but a third of its width,
+    # so they are people, not parts, and the group box does not swallow them
+    group = Detection("person", (80, 40, 460, 390), 0.7)
+    a = Detection("person", (90, 50, 200, 380), 0.85)
+    b = Detection("person", (210, 60, 320, 385), 0.8)
+    c = Detection("person", (330, 55, 450, 380), 0.82)
+    out = nms([group, a, b, c])
+    assert a in out and b in out and c in out
     # a second person partly behind the first is NOT a part: half outside
     other = Detection("person", (180, 60, 300, 380), 0.7)
     assert set(nms([body, other])) == {body, other}
