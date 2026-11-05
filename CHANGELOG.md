@@ -281,6 +281,12 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The pipeline's CPU gauge no longer spikes when two scrapers coincide.**
+  `tier0_process_cpu_percent` is CPU time over the window since the previous
+  scrape; a window of a few hundred milliseconds that caught one keyframe
+  cycle read 60 to 140 % against a real load of 9 %. A window shorter than
+  2 s now keeps the previous reading and keeps accumulating.
+
 - **One person no longer becomes two or three visits per pass.** The
   detector sometimes boxes a person's upper body beside the full body; the
   part's overlap ratio with the whole is low, so overlap suppression kept
