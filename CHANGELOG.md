@@ -270,6 +270,12 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The pipeline's CPU gauge no longer spikes when two scrapers coincide.**
+  `tier0_process_cpu_percent` is CPU time over the window since the previous
+  scrape; a window of a few hundred milliseconds that caught one keyframe
+  cycle read 60 to 140 % against a real load of 9 %. A window shorter than
+  2 s now keeps the previous reading and keeps accumulating.
+
 - **A search result's "play the recording" lands where the subject is.**
   The playhead now opens 3 s before the event's instant, inside the same
   segment, so the entry is on screen (an event starts when the detector
