@@ -345,7 +345,14 @@ class VisitLifecycle:
                     "crop_source": None, "crop_box_px": None, "crop_skew_s": None,
                     "frame_px": None, "frames": 0, "group_frames": 0,
                 }
-            v["end"] = now_wall
+            # The visit ends when the object was LAST SEEN, not when its
+            # track finally expired: a track coasts for seconds after its
+            # last match, and a fragment the detector boxed for four frames
+            # in a crowd (a head, a sleeve) read as a six-second visit and
+            # sailed past min_duration_s (replayed on the Ventuno Q,
+            # 2026-11-05). Test doubles without the flag count every frame.
+            if getattr(tr, "matched_now", True):
+                v["end"] = now_wall
             v["label"] = tr.label
             v["frames"] += 1
             if getattr(tr, "group_now", False):
