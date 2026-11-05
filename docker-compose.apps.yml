@@ -2357,6 +2357,15 @@ services:
       - /app/config/config.yml
     networks:
       - opennvr_apps
+    # The web UI's /health: the process is up and serving the page. Not
+    # the contract /health, which reports "not ready" while the face
+    # adapter is down — the page must still open then, to say so.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx, sys; sys.exit(0 if httpx.get('http://127.0.0.1:9218/health', timeout=2).status_code == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
 
   # The attendance web UI on the LAN. The app lives on the apps network,
   # which has no route out and cannot publish a port; this nginx sits on
@@ -2374,7 +2383,7 @@ services:
       nginx-certs-init:
         condition: service_completed_successfully
       attendance:
-        condition: service_started
+        condition: service_healthy
     ports:
       - "${NGINX_BIND_HOST:-0.0.0.0}:${ATTENDANCE_WEB_PORT:-9218}:443"
     volumes:

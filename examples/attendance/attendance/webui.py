@@ -55,7 +55,12 @@ MAX_AUTH_BODY_BYTES = 16 * 1024
 TIMEOUT_SECONDS = 120.0
 
 _METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
-_REQUEST_HEADERS = ("authorization", "content-type", "accept", "user-agent", "x-device-token")
+#: x-forwarded-for: the attendance nginx appends the browser's address,
+#: and core reads it from the right, trusting only its own network, so
+#: the audit log and the device firewall see the browser, not this
+#: container (a forged entry stays to the left and is never used).
+_REQUEST_HEADERS = ("authorization", "content-type", "accept", "user-agent", "x-device-token",
+                    "x-forwarded-for")
 _RESPONSE_HEADERS = ("content-type", "content-disposition", "retry-after",
                      "x-setup-required", "www-authenticate")
 
@@ -89,15 +94,26 @@ def core_path(method: str, path: str) -> str | None:
         return f"{CORE_API}/{'/'.join(parts)}"
     if method == "GET":
         if parts == ["cameras"]:
-            return f"{CORE_API}/cameras/"
+            # Every camera the user may see, inactive ones too (a slot can
+            # be set up before its camera is switched on): core's default
+            # is the first 100 active ones. The page's own query is not
+            # passed on for this one.
+            return CAMERA_LIST
         # One still of a camera, so the timetable's camera picker shows
         # what each camera sees. Core checks the user may see it.
-        if len(parts) == 3 and parts[0] == "cameras" and parts[1].isdigit() and parts[2] == "snapshot":
+        # isascii: "²".isdigit() is True and int("²") raises.
+        if (len(parts) == 3 and parts[0] == "cameras" and parts[1].isascii()
+                and parts[1].isdigit() and parts[2] == "snapshot"):
             return f"{CORE_API}/cameras/{int(parts[1])}/snapshot"
         if parts in (["users", "me", "permissions"], ["auth", "me"]):
             return f"{CORE_API}/{'/'.join(parts)}"
     return None
 
+
+#: Core's camera list as the page reads it. Its answer carries stream
+#: URLs with credentials, so it is matched by this exact value and cut
+#: down to names (``_cameras_only_names``).
+CAMERA_LIST = f"{CORE_API}/cameras/?limit=1000&status=all"
 
 #: What the page needs of a camera: which one, and what it is called.
 _CAMERA_FIELDS = ("id", "name", "location")
@@ -172,7 +188,7 @@ def build_web_app(core_url: str, dist_dir: str | Path, *,
         headers = {k: v for k in _REQUEST_HEADERS if (v := request.headers.get(k))}
         if stand_in_device and not headers.get("x-device-token"):
             headers["x-device-token"] = NO_DEVICE
-        url = path + (f"?{request.url.query}" if request.url.query else "")
+        url = path if "?" in path else path + (f"?{request.url.query}" if request.url.query else "")
         try:
             resp = await core.get().request(method, url, content=body or None, headers=headers)
         except httpx.TimeoutException:
@@ -187,7 +203,7 @@ def build_web_app(core_url: str, dist_dir: str | Path, *,
         out = {k: v for k in _RESPONSE_HEADERS if (v := resp.headers.get(k))}
         out["cache-control"] = "no-store"
         content = resp.content
-        if path == f"{CORE_API}/cameras/" and resp.status_code == 200:
+        if path == CAMERA_LIST and resp.status_code == 200:
             content = _cameras_only_names(content)
             out.pop("content-length", None)
         return Response(content, status_code=resp.status_code, headers=out)

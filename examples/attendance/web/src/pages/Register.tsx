@@ -87,7 +87,15 @@ function DetailsForm({ onCreated }: { onCreated: (p: Person) => void }) {
         external_ref: ref.trim() || null,
         email: email.trim() || null,
       })
-      await api.setConsent(p.id, true)
+      try {
+        await api.setConsent(p.id, true)
+      } catch (e) {
+        // Not left half-registered: a retry would collide on the
+        // reference number of a person with no consent. Removing someone
+        // with no consent needs no face service.
+        await api.removePerson(p.id).catch(() => undefined)
+        throw e
+      }
       if (groupId) {
         try {
           await api.addMembers(Number(groupId), [p.id])
@@ -205,9 +213,18 @@ function FaceStep({ person, onChanged, onDone }: { person: Person; onChanged: ()
   const [result, setResult] = useState<{ shots: Shot[]; r: EnrolResult } | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  useEffect(() => () => shots.forEach((s) => URL.revokeObjectURL(s.url)), []) // eslint-disable-line react-hooks/exhaustive-deps
+  // The photos on screen when the step goes away; a ref, because the
+  // cleanup closure would otherwise see only the first (empty) list.
+  const shotsNow = useRef(shots)
+  shotsNow.current = shots
+  useEffect(() => () => shotsNow.current.forEach((s) => URL.revokeObjectURL(s.url)), [])
 
-  const add = (more: Shot[]) => setShots((s) => [...s, ...more].slice(0, MAX_PHOTOS))
+  const add = (more: Shot[]) =>
+    setShots((s) => {
+      const all = [...s, ...more]
+      all.slice(MAX_PHOTOS).forEach((x) => URL.revokeObjectURL(x.url))
+      return all.slice(0, MAX_PHOTOS)
+    })
   const remove = (i: number) =>
     setShots((s) => {
       URL.revokeObjectURL(s[i].url)
@@ -535,7 +552,12 @@ function judge(check: FaceCheck, w: number, h: number, angle: Angle, poses: Map<
       ? { tone: 'fix', text: 'Face the camera straight on' }
       : { tone: 'good', text: 'Hold still…' }
   }
-  if (!front) return { tone: 'good', text: 'Hold still…' }
+  if (!front) {
+    // No straight-on reference (taken before the guide could see it):
+    // a turn is judged from facing forward, and up/down is not judged.
+    if (angle.key === 'up' || angle.key === 'down') return { tone: 'good', text: 'Hold still…' }
+    return judge(check, w, h, angle, new Map([...poses, ['front', { ...pose, yaw: 0 }]]))
+  }
   const pair = { left: 'right', right: 'left', up: 'down', down: 'up' } as const
   const other = poses.get(pair[angle.key])
   if (angle.key === 'left' || angle.key === 'right') {
@@ -640,6 +662,10 @@ function WebcamCapture({
   const video = useRef<HTMLVideoElement>(null)
   const stream = useRef<MediaStream | null>(null)
   const poses = useRef(new Map<string, Pose>())
+  /** The pose in the latest check, and when: a photo taken by hand (the
+   * button, the timer) records it too, or the straight-on reference would
+   * be missing and every turn after it would pass unchecked. */
+  const lastPose = useRef<{ pose: Pose; at: number } | null>(null)
   /** Set by an automatic photo: the next angle starts with time to pose. */
   const justTook = useRef(false)
   const [state, setState] = useState<'idle' | 'starting' | 'live' | 'error'>('idle')
@@ -728,7 +754,9 @@ function WebcamCapture({
     const shot = await grab(Number.MAX_SAFE_INTEGER, 0.92)
     if (!shot) return
     const a = angleRef.current
-    if (a && pose) poses.current.set(a.key, pose)
+    const recent = lastPose.current && Date.now() - lastPose.current.at < 2000 ? lastPose.current.pose : null
+    const taken = pose ?? recent
+    if (a && taken) poses.current.set(a.key, taken)
     const label = a ? a.text : `Extra photo ${new Date().toLocaleTimeString()}`
     onAdd([{ blob: shot.blob, url: URL.createObjectURL(shot.blob), label }])
     setFlash(true)
@@ -788,6 +816,7 @@ function WebcamCapture({
           if (!a) return
           verdict = judge(check, check.frame.w || frame.w, check.frame.h || frame.h, a, poses.current)
           pose = check.faces.length === 1 ? poseOf(check.faces[0].landmarks) : null
+          lastPose.current = pose ? { pose, at: Date.now() } : null
         } catch (e) {
           if (cancelled) return
           setHint({ tone: 'fix', text: `Cannot check the face right now: ${errorText(e)}` })

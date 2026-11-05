@@ -81,7 +81,8 @@ def test_a_look_publishes_one_attempt_with_its_members_and_evidence():
         {"recognized": True, "person_id": "visitor", "similarity": 0.9}]}
     app.handle_tick()
 
-    assert nvr.ai.calls == [("insightface_attendance", "face_identify", "cam1", {"threshold": 0.5})]
+    assert nvr.ai.calls == [("insightface_attendance", "face_identify", "cam1",
+                             {"threshold": 0.5, "min_face_px": 20})]
     [(schema, cam, payload)] = bus.sent
     assert schema == "attendance.attempt.v1" and cam == "cam1"
     assert payload["ok"] is True and payload["faces_detected"] == 30
@@ -164,3 +165,35 @@ def test_a_look_is_dated_when_its_frame_was_taken_not_when_the_tick_began():
     stamps = [p["at"] for _s, _c, p in bus.sent]
     assert stamps == [(T0 + timedelta(minutes=1, seconds=1)).isoformat(),
                       (T0 + timedelta(minutes=3)).isoformat()]
+
+
+def test_one_failed_poll_does_not_leave_the_app_not_ready():
+    app, nvr, _bus, _ = _app(None, T0 - timedelta(hours=8))   # evening, no class
+    app.handle_tick()
+    assert "did not answer" in app.not_ready_reason()
+    nvr._http.active = {"sessions": []}
+    app.handle_tick()
+    assert app.not_ready_reason() is None
+
+
+def test_a_stop_request_ends_the_tick_between_cameras():
+    app, nvr, bus, _ = _app({"sessions": [_session(cams=(1, 2))]}, T0 + timedelta(minutes=1))
+    real = nvr.snapshot
+
+    def snapshot_then_stop(camera):
+        app.request_stop()                 # docker stop lands during the first look
+        return real(camera)
+
+    nvr.snapshot = snapshot_then_stop
+    app.handle_tick()
+    assert [cam for _s, cam, _p in bus.sent] == ["cam1"]
+
+
+def test_a_tick_stops_looking_after_its_time_and_the_rest_wait():
+    app, nvr, bus, _ = _app({"sessions": [_session(cams=(1, 2))]}, T0 + timedelta(minutes=1))
+    app.cfg.max_tick_seconds = 0.0          # out of time after the first look
+    app.handle_tick()
+    assert [cam for _s, cam, _p in bus.sent] == ["cam1"]
+    app.cfg.max_tick_seconds = 60.0
+    app.handle_tick()                       # cam2 is still due; cam1 is not
+    assert [cam for _s, cam, _p in bus.sent] == ["cam1", "cam2"]

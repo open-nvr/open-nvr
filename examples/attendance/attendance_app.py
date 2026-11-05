@@ -36,6 +36,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 import yaml
@@ -100,6 +101,13 @@ class AppConfig:
     contract_host: str | None = None
     request_timeout_seconds: float = 30.0
     poll_interval_seconds: float = TICK_SECONDS
+    #: Faces smaller than this (pixels, either side) are not identified: a
+    #: face a few pixels wide is how a stranger is matched to somebody.
+    min_face_px: int = 20
+    #: One tick looks at cameras for at most this long; the cameras still
+    #: due are looked at on the next tick. Keeps the poll of what is
+    #: running fresh, and a stop request is never minutes away.
+    max_tick_seconds: float = 60.0
     #: Never read by this app (it watches what core says is running), but
     #: FrameApp's camera list defaults from it.
     cameras: tuple = ()
@@ -150,7 +158,11 @@ class AttendanceApp(FrameApp):
         self._recent: deque = deque(maxlen=50)
         self._published = 0
         self._failed = 0
-        self._last_error: str | None = None
+        #: Why the app is not ready: core's answer failed (cleared by the
+        #: next good poll) or a look failed (cleared by the next good one).
+        self._poll_error: str | None = None
+        self._look_error: str | None = None
+        self._stopping = threading.Event()
         self.manifest = build_manifest(config)
         super().__init__(config, AlertDispatcher([StdoutChannel()]),
                          frame_source=self, cameras=[],
@@ -201,14 +213,26 @@ class AttendanceApp(FrameApp):
         body = self.nvr._http.get_json("/api/v1/internal/app/attendance/active")
         sessions = parse_active(body)
         if sessions is None:
-            self._last_error = "OpenNVR did not answer which sessions are running"
+            self._poll_error = "OpenNVR did not answer which sessions are running"
             return []        # keep the planner's memory; try again next tick
+        self._poll_error = None
         with self._lock:
             self._sessions = sessions
         now = self._clock()
+        started = monotonic()
         for work in self.planner.due(sessions, now):
+            if self._stopping.is_set():
+                break
             self.look(work, now)
+            if monotonic() - started >= float(self.cfg.max_tick_seconds):
+                # The rest are still due; the next tick takes them.
+                break
         return []
+
+    def request_stop(self) -> None:
+        """From the signal handler: no further look starts."""
+        self._stopping.set()
+        self.stop()
 
     def look(self, work: CameraWork, now: datetime) -> None:
         """One camera, once: frame → face_identify → one attempt event."""
@@ -229,14 +253,15 @@ class AttendanceApp(FrameApp):
         try:
             resp = self.nvr.ai.infer(self.cfg.adapter, frame, task="face_identify",
                                      camera_id=handle,
-                                     params={"threshold": work.threshold})
+                                     params={"threshold": work.threshold,
+                                             "min_face_px": int(self.cfg.min_face_px)})
         except Exception as exc:
             logger.warning("face_identify on %s failed: %s", handle, exc)
-            self._last_error = f"face adapter: {exc}"[:200]
+            self._look_error = f"face adapter: {exc}"[:200]
             return self._publish(work, taken, ok=False, note="adapter failed")
         result = (resp or {}).get("result") or {}
         if not isinstance(result.get("faces"), list):
-            self._last_error = ("the face adapter does not answer face_identify; "
+            self._look_error = ("the face adapter does not answer face_identify; "
                                 "update it to a release that has it")
             return self._publish(work, taken, ok=False, note="adapter too old")
         evidence = None
@@ -246,7 +271,7 @@ class AttendanceApp(FrameApp):
                 evidence = self.nvr.save_evidence(frame)
             except Exception as exc:
                 logger.warning("evidence upload for %s failed: %s", handle, exc)
-        self._last_error = None
+        self._look_error = None
         self._publish(work, taken, ok=True, result=result, evidence=evidence,
                       note=f"{payload['faces_detected']} faces, {len(payload['matches'])} recognised")
 
@@ -276,7 +301,7 @@ class AttendanceApp(FrameApp):
             }
 
     def not_ready_reason(self) -> str | None:
-        return self._last_error
+        return self._poll_error or self._look_error
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -299,6 +324,9 @@ def main(argv: list[str] | None = None) -> int:
 
     def _stop(signum, _frame):
         logger.info("signal %s; stopping", signum)
+        # Set at once, not on the loop: the loop is inside a tick's looks,
+        # which check this between cameras.
+        app.request_stop()
         loop.call_soon_threadsafe(app.stop)
 
     signal.signal(signal.SIGINT, _stop)

@@ -57,7 +57,7 @@ def client(core, dist):
     ("POST", "attendance/people/3/faces", "/api/v1/attendance/people/3/faces"),
     ("PATCH", "attendance/sessions/9/marks/4", "/api/v1/attendance/sessions/9/marks/4"),
     ("DELETE", "attendance/groups/2", "/api/v1/attendance/groups/2"),
-    ("GET", "cameras", "/api/v1/cameras/"),
+    ("GET", "cameras", "/api/v1/cameras/?limit=1000&status=all"),
     ("GET", "cameras/3/snapshot", "/api/v1/cameras/3/snapshot"),
     ("GET", "users/me/permissions", "/api/v1/users/me/permissions"),
     ("GET", "auth/me", "/api/v1/auth/me"),
@@ -71,6 +71,7 @@ def test_the_attendance_routes_and_the_pages_reads_go_through(method, path, expe
     ("POST", "cameras"),                    # cameras are read, never changed, from here
     ("GET", "cameras/3"),                   # a camera's row carries its credentials
     ("GET", "cameras/x/snapshot"),
+    ("GET", "cameras/²/snapshot"),         # "²".isdigit() is True; int() is not
     ("POST", "cameras/3/snapshot"),
     ("GET", "cameras/3/snapshot-still"),
     ("DELETE", "users/me/permissions"),
@@ -136,9 +137,22 @@ def test_cameras_come_back_as_names_never_stream_credentials(client, core):
                               "rtsp_url": "rtsp://admin:secret@10.0.0.5/1",
                               "password": "secret", "username": "admin"}],
                  "total": 1}
-    r = client.get("/api/cameras", headers={"authorization": "Bearer t"})
+    r = client.get("/api/cameras?limit=5", headers={"authorization": "Bearer t"})
     assert r.json() == {"cameras": [{"id": 1, "name": "Room 101", "location": "Block A"}]}
     assert b"secret" not in r.content
+    # Every camera, inactive too; the page's own query is not passed on.
+    assert core.calls[0].url.query == b"limit=1000&status=all"
+
+
+def test_the_browsers_address_reaches_core_for_the_audit_log(client, core):
+    client.get("/api/attendance/groups", headers={"authorization": "Bearer t",
+                                                  "x-forwarded-for": "6.6.6.6, 192.168.1.20"})
+    assert core.calls[0].headers["x-forwarded-for"] == "6.6.6.6, 192.168.1.20"
+
+
+def test_a_unicode_digit_in_a_camera_id_is_a_404_not_a_500(client, core):
+    r = client.get("/api/cameras/%C2%B2/snapshot", headers={"authorization": "Bearer t"})
+    assert r.status_code == 404 and core.calls == []
 
 
 def test_photos_go_through_as_multipart(client, core):
