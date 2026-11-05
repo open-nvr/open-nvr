@@ -20,6 +20,7 @@ def app_ui_url(settings: Settings | None = None) -> str:
 
 def app_manifest(settings: Settings | None = None) -> dict[str, Any]:
     from opennvr_app_sdk import AppManifest
+    from opennvr_app_sdk.manifest import AlertType
 
     s = settings or get_settings()
     url = app_ui_url(s)
@@ -45,6 +46,14 @@ def app_manifest(settings: Settings | None = None) -> dict[str, Any]:
         # Gate decisions go on the bus as access.decided.v1 (the
         # gate-controller app actuates): a producer by declaration.
         provides=["attendance"],
+        emits=[
+            AlertType("hostel_in", severity="low", description="A student entered the hostel (name and block)."),
+            AlertType("hostel_out", severity="low", description="A student left the hostel (name and block)."),
+            AlertType("gate_denied", severity="medium",
+                      description="Someone a gate's policy does not admit: unknown face, day scholar at a "
+                                  "hostel, another block, or no meal booking."),
+            AlertType("mess_served", severity="low", description="A booked student entered the mess."),
+        ],
         # A platform component on the site key, like the agent: no picker.
         camera_picker=False,
         all_cameras=False,

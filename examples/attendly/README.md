@@ -89,6 +89,20 @@ IP relay, Modbus, an ONVIF door controller or MQTT. Start it with the
 guide. The licence-plate app drives vehicle barriers the same way, so one
 controller serves both.
 
+### No barrier? Monitor mode
+
+A hostel entrance with no flap barrier still gets the same camera and the
+same gate, set to **Monitor only**. Nobody is stopped; every student the
+camera recognises is logged as *came in* or *went out* and an OpenNVR alert
+names them — "Asha Rao came in — Block B door" — in core's alert inbox and
+wherever the alert-notifier app forwards (email, Slack, Telegram…). A day
+scholar walking into a hostel, or a hostler at the wrong block, raises a
+high-severity alert instead of a refusal. Set the gate's **direction** to
+entry or exit when there is a camera on each, or to *both* for a single
+camera, which alternates each student's state. The Gates page keeps a
+**who is in / who is out** list per block with a one-click correction, and
+alerts can be limited to refusals or switched off per gate.
+
 Two shortcuts for simpler sites: a gate can carry an **HTTP trigger URL**
 (attendly GETs it on allow, for a barrier whose own relay takes one), and a
 barrier controller with its own camera can POST a JPEG to

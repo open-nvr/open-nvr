@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import Layout from '../components/Layout'
-import { camerasService, gatesService, type AccessEvent, type CameraOption, type Gate } from '../services/admin'
-import { DoorOpen, Pencil, Plus, Trash2, X as XIcon, Radio } from 'lucide-react'
+import { camerasService, gatesService, type AccessEvent, type CameraOption, type Gate, type Presence } from '../services/admin'
+import { DoorOpen, Pencil, Plus, Trash2, X as XIcon, Radio, Bell, Users, LogIn, LogOut } from 'lucide-react'
 import { useConfirm } from '../components/ConfirmProvider'
 import { useToast } from '../components/ToastProvider'
 
-type Form = { name: string; kind: 'hostel' | 'mess'; camera_id: string; hostel_block: string; allow_staff: boolean; enabled: boolean; open_url: string; meal_windows: string }
-const EMPTY: Form = { name: '', kind: 'hostel', camera_id: '', hostel_block: '', allow_staff: false, enabled: true, open_url: '', meal_windows: '' }
+type Form = { name: string; kind: 'hostel' | 'mess'; camera_id: string; hostel_block: string; allow_staff: boolean; enabled: boolean; mode: 'barrier' | 'monitor'; direction: 'in' | 'out' | 'toggle'; alert_on: 'all' | 'deny' | 'none'; open_url: string; meal_windows: string }
+const EMPTY: Form = { name: '', kind: 'hostel', camera_id: '', hostel_block: '', allow_staff: false, enabled: true, mode: 'barrier', direction: 'in', alert_on: 'all', open_url: '', meal_windows: '' }
 
 const REASONS: Record<string, string> = {
   hostler: 'Hostler of this block', booked: 'Meal booked', staff: 'Staff', unknown: 'Face not recognised',
@@ -22,6 +22,8 @@ export default function ManageGates() {
   const [status, setStatus] = useState<any>(null)
   const [events, setEvents] = useState<AccessEvent[]>([])
   const [filterGate, setFilterGate] = useState<string>('')
+  const [presence, setPresence] = useState<{ summary: Record<string, { in: number; out: number }>; rows: Presence[] } | null>(null)
+  const [presenceStatus, setPresenceStatus] = useState<'in' | 'out'>('in')
   const [loading, setLoading] = useState(true)
   const [form, setForm] = useState<Form>(EMPTY)
   const [editing, setEditing] = useState<Gate | null>(null)
@@ -41,12 +43,14 @@ export default function ManageGates() {
   }
   const loadLive = async () => {
     try {
-      const [st, ev] = await Promise.all([
+      const [st, ev, pr] = await Promise.all([
         gatesService.status(),
         gatesService.events({ limit: 60, ...(filterGate ? { gate_id: Number(filterGate) } : {}) }),
+        gatesService.presence({ status: presenceStatus }),
       ])
       setStatus(st.data)
       setEvents(Array.isArray(ev.data) ? ev.data : [])
+      setPresence(pr.data)
     } catch {}
   }
   const loadCameras = async () => {
@@ -65,7 +69,7 @@ export default function ManageGates() {
     loadLive()
     const id = setInterval(loadLive, 3000)
     return () => clearInterval(id)
-  }, [filterGate])
+  }, [filterGate, presenceStatus])
 
   const workerFor = (id: number) => (status?.workers || []).find((w: any) => w.gate_id === id)
 
@@ -73,7 +77,8 @@ export default function ManageGates() {
     setEditing(g)
     setForm(g ? {
       name: g.name, kind: g.kind, camera_id: g.camera_id != null ? String(g.camera_id) : '', hostel_block: g.hostel_block || '',
-      allow_staff: !!g.allow_staff, enabled: !!g.enabled, open_url: g.open_url || '', meal_windows: g.meal_windows || '',
+      allow_staff: !!g.allow_staff, enabled: !!g.enabled, mode: g.mode || 'barrier', direction: g.direction || 'in', alert_on: g.alert_on || 'all',
+      open_url: g.open_url || '', meal_windows: g.meal_windows || '',
     } : EMPTY)
     setError(null)
     setIsFormOpen(true)
@@ -85,7 +90,8 @@ export default function ManageGates() {
     if (!form.name.trim() || !cid) { setError('Name and an OpenNVR camera are required'); return }
     const payload = {
       name: form.name.trim(), kind: form.kind, camera_id: cid, hostel_block: form.kind === 'hostel' ? form.hostel_block.trim() : '',
-      allow_staff: form.allow_staff, enabled: form.enabled, open_url: form.open_url.trim(), meal_windows: form.kind === 'mess' ? form.meal_windows.trim() : '',
+      allow_staff: form.allow_staff, enabled: form.enabled, mode: form.mode, direction: form.kind === 'hostel' ? form.direction : 'in', alert_on: form.alert_on,
+      open_url: form.open_url.trim(), meal_windows: form.kind === 'mess' ? form.meal_windows.trim() : '',
     }
     try {
       setIsSaving(true)
@@ -122,6 +128,15 @@ export default function ManageGates() {
   }
 
   const cameraLabel = (c: CameraOption) => `${c.name}${c.handle ? ` (${c.handle})` : ''}`
+  const correct = async (p: Presence) => {
+    try {
+      await gatesService.setPresence(p.student_code, p.status === 'in' ? 'out' : 'in')
+      await loadLive()
+    } catch (e: any) {
+      showToast('error', String(e?.response?.data?.detail || 'Failed to update'))
+    }
+  }
+  const DIRECTION: Record<string, string> = { in: 'entry', out: 'exit', toggle: 'entry & exit' }
   const mealWindows = useMemo(() => Object.entries(status?.meal_windows || {}).map(([m, w]: any) => `${m} ${w[0]}–${w[1]}`).join(' · '), [status])
 
   return (
@@ -144,7 +159,7 @@ export default function ManageGates() {
             <div className="bg-red-50 border border-red-200 rounded-lg p-3"><div className="text-2xl font-bold text-red-700">{status.today?.denied ?? 0}</div><div className="text-gray-600">Denied today</div></div>
             <div className={`border rounded-lg p-3 ${status.bus?.configured ? 'bg-blue-50 border-blue-200' : 'bg-gray-50 border-gray-200'}`}>
               <div className="flex items-center gap-2 text-blue-700"><Radio className="w-4 h-4" /><span className="font-semibold">{status.bus?.configured ? `${status.bus.published} on the bus` : 'Bus not configured'}</span></div>
-              <div className="text-gray-600 text-xs mt-1">{status.bus?.configured ? 'access.decided.v1 → gate-controller app' : 'Set NATS_URL to drive barriers'}{status.bus?.last_error ? ` · ${status.bus.last_error}` : ''}</div>
+              <div className="text-gray-600 text-xs mt-1">{status.bus?.configured ? `access.decided.v1 → gate-controller · ${status.bus.alerts ?? 0} alerts raised` : 'Set NATS_URL for barriers and alerts'}{status.bus?.last_error ? ` · ${status.bus.last_error}` : ''}</div>
             </div>
             <div className="bg-gray-50 border border-gray-200 rounded-lg p-3"><div className="font-semibold text-gray-800">Meal hours</div><div className="text-gray-600 text-xs mt-1">{mealWindows || '—'}</div></div>
           </div>
@@ -162,12 +177,15 @@ export default function ManageGates() {
                         <div className="text-base font-semibold text-gray-900 flex items-center gap-2">
                           {g.name}
                           <span className={`text-[10px] uppercase px-1.5 py-0.5 rounded ${g.kind === 'mess' ? 'bg-amber-100 text-amber-800' : 'bg-indigo-100 text-indigo-800'}`}>{g.kind}</span>
+                          <span className={`text-[10px] uppercase px-1.5 py-0.5 rounded ${g.mode === 'monitor' ? 'bg-sky-100 text-sky-800' : 'bg-gray-100 text-gray-700'}`} title={g.mode === 'monitor' ? 'No barrier: sightings raise alerts' : 'Decisions drive the barrier'}>{g.mode === 'monitor' ? 'monitor' : 'barrier'}</span>
                         </div>
                         <div className="mt-1 text-xs text-gray-500 truncate">{g.camera_name || (g.camera_id != null ? `Camera #${g.camera_id}` : 'No camera')}</div>
                         <div className="mt-1 text-xs text-gray-600">
                           {g.kind === 'hostel' ? (g.hostel_block ? `Block ${g.hostel_block}` : 'Every hostler') : (g.meal_windows || 'Default meal hours')}
+                          {g.kind === 'hostel' ? ` · ${DIRECTION[g.direction] || g.direction}` : ''}
                           {g.allow_staff ? ' · staff allowed' : ''}
                           {g.open_url ? ' · HTTP trigger' : ''}
+                          {g.alert_on === 'none' ? ' · no alerts' : g.alert_on === 'deny' ? ' · alerts on deny' : ' · alerts'}
                         </div>
                         <div className="mt-2 text-xs">
                           {w ? (
@@ -194,6 +212,35 @@ export default function ManageGates() {
         </div>
 
         <div className="bg-white border rounded-lg">
+          <div className="px-4 py-3 border-b flex flex-wrap items-center justify-between gap-2">
+            <div className="text-sm font-medium text-gray-800 flex items-center gap-2"><Users className="w-4 h-4" /> Hostel presence
+              <span className="font-normal text-gray-500">{Object.entries(presence?.summary || {}).map(([b, c]) => `Block ${b}: ${c.in} in / ${c.out} out`).join(' · ') || '— no sightings yet'}</span>
+            </div>
+            <div className="flex gap-1 text-xs">
+              {(['in', 'out'] as const).map(st => <button key={st} className={`px-2 py-1 rounded ${presenceStatus === st ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-700'}`} onClick={() => setPresenceStatus(st)}>{st === 'in' ? 'Who is in' : 'Who is out'}</button>)}
+            </div>
+          </div>
+          <div className="overflow-auto" style={{ maxHeight: '30vh' }}>
+            <table className="min-w-full text-sm">
+              <thead className="bg-gray-50 sticky top-0"><tr>{['Student', 'Block', 'Status', 'Since', 'Gate', ''].map((h, i) => <th key={i} className="px-3 py-1 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider">{h}</th>)}</tr></thead>
+              <tbody className="divide-y">
+                {(presence?.rows || []).map(p => (
+                  <tr key={p.student_code}>
+                    <td className="px-3 py-1 whitespace-nowrap">{p.student?.full_name || p.student_code} <span className="text-xs text-gray-400">{p.student_code}</span></td>
+                    <td className="px-3 py-1 text-gray-600">{p.hostel_block || '-'}</td>
+                    <td className="px-3 py-1"><span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs ${p.status === 'in' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-700'}`}>{p.status === 'in' ? <LogIn className="w-3 h-3" /> : <LogOut className="w-3 h-3" />}{p.status}</span></td>
+                    <td className="px-3 py-1 text-gray-500 whitespace-nowrap">{new Date(p.since).toLocaleString()}</td>
+                    <td className="px-3 py-1 text-gray-500">{p.gate_name || '-'}</td>
+                    <td className="px-3 py-1 text-right"><button className="text-xs px-2 py-0.5 rounded bg-gray-100 hover:bg-gray-200" title="Correct a missed sighting" onClick={() => correct(p)}>mark {p.status === 'in' ? 'out' : 'in'}</button></td>
+                  </tr>
+                ))}
+                {(presence?.rows || []).length === 0 && <tr><td colSpan={6} className="px-3 py-4 text-center text-gray-500">Nobody is {presenceStatus} right now.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="bg-white border rounded-lg">
           <div className="px-4 py-3 border-b flex items-center justify-between">
             <div className="text-sm font-medium text-gray-800">Decisions (live)</div>
             <select className="rounded border px-2 py-1 text-sm" value={filterGate} onChange={e => setFilterGate(e.target.value)}>
@@ -205,7 +252,7 @@ export default function ManageGates() {
             <table className="min-w-full text-sm">
               <thead className="bg-gray-50 sticky top-0">
                 <tr>
-                  {['Time', 'Gate', 'Person', 'Decision', 'Why', 'Similarity', 'Barrier'].map(h => <th key={h} className="px-3 py-1 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider">{h}</th>)}
+                  {['Time', 'Gate', 'Person', 'Decision', 'Why', 'Movement', 'Similarity', 'Barrier', 'Alert'].map(h => <th key={h} className="px-3 py-1 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider">{h}</th>)}
                 </tr>
               </thead>
               <tbody className="divide-y">
@@ -216,11 +263,13 @@ export default function ManageGates() {
                     <td className="px-3 py-1 whitespace-nowrap">{e.person_name || <span className="text-gray-400">unknown</span>}{e.person_code ? <span className="text-gray-400 text-xs"> {e.person_code}</span> : null}</td>
                     <td className="px-3 py-1"><span className={`px-2 py-0.5 rounded text-xs ${e.decision === 'allow' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>{e.decision}</span></td>
                     <td className="px-3 py-1 text-gray-600">{REASONS[e.reason] || e.reason}{e.unit ? ` (${e.unit})` : ''}</td>
+                    <td className="px-3 py-1">{e.movement ? <span className={`inline-flex items-center gap-1 text-xs ${e.movement === 'in' ? 'text-green-700' : 'text-gray-700'}`}>{e.movement === 'in' ? <LogIn className="w-3 h-3" /> : <LogOut className="w-3 h-3" />}{e.movement === 'in' ? 'came in' : 'went out'}</span> : '-'}</td>
                     <td className="px-3 py-1 text-gray-500">{e.similarity != null ? `${Math.round(e.similarity * 100)}%` : '-'}</td>
                     <td className="px-3 py-1 text-gray-500">{e.decision === 'allow' ? (e.actuated ? 'opened' : 'not sent') : '-'}{e.source === 'check' ? ' · check' : ''}</td>
+                    <td className="px-3 py-1 text-gray-500">{e.alerted ? <Bell className="w-3.5 h-3.5 text-amber-600" /> : '-'}</td>
                   </tr>
                 ))}
-                {events.length === 0 && <tr><td colSpan={7} className="px-3 py-6 text-center text-gray-500">No decisions yet.</td></tr>}
+                {events.length === 0 && <tr><td colSpan={9} className="px-3 py-6 text-center text-gray-500">No decisions yet.</td></tr>}
               </tbody>
             </table>
           </div>
@@ -251,8 +300,34 @@ export default function ManageGates() {
                   </select>
                 </div>
               </div>
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-sm text-gray-700 mb-1">Mode</label>
+                  <select className="w-full rounded border px-3 py-2" value={form.mode} onChange={e => setForm({ ...form, mode: e.target.value as any })} disabled={isSaving}>
+                    <option value="barrier">Flap barrier</option>
+                    <option value="monitor">Monitor only</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm text-gray-700 mb-1">Direction</label>
+                  <select className="w-full rounded border px-3 py-2" value={form.direction} onChange={e => setForm({ ...form, direction: e.target.value as any })} disabled={isSaving || form.kind !== 'hostel'}>
+                    <option value="in">Entry (in)</option>
+                    <option value="out">Exit (out)</option>
+                    <option value="toggle">Both (alternate)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm text-gray-700 mb-1">OpenNVR alerts</label>
+                  <select className="w-full rounded border px-3 py-2" value={form.alert_on} onChange={e => setForm({ ...form, alert_on: e.target.value as any })} disabled={isSaving}>
+                    <option value="all">Every sighting</option>
+                    <option value="deny">Only refusals</option>
+                    <option value="none">None</option>
+                  </select>
+                </div>
+              </div>
+              <p className="text-xs text-gray-500">{form.mode === 'monitor' ? 'No barrier here: nobody is stopped. Each student seen is logged as in or out and an alert names them in OpenNVR.' : 'Decisions are published for the gate-controller app, which opens the barrier on allow.'}</p>
               <div>
-                <label className="block text-sm text-gray-700 mb-1">OpenNVR camera at the barrier</label>
+                <label className="block text-sm text-gray-700 mb-1">OpenNVR camera at the {form.mode === 'monitor' ? 'door' : 'barrier'}</label>
                 <select className="w-full rounded border px-3 py-2" value={form.camera_id} onChange={e => setForm({ ...form, camera_id: e.target.value })} disabled={isSaving}>
                   <option value="">Select camera</option>
                   {cameras.map(c => <option key={c.id} value={String(c.id)}>{cameraLabel(c)}</option>)}

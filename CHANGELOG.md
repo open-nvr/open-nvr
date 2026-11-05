@@ -27,7 +27,10 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a camera plus a working window whose first and last sightings of each
   staff member are the day's check-in and check-out. Gate decisions are
   published as `access.decided.v1`, so the gate-controller app drives the
-  barriers exactly as it does for the licence-plate app.
+  barriers exactly as it does for the licence-plate app. A gate with no
+  barrier runs in monitor mode: each student seen is logged as in or out,
+  a who-is-in list is kept per block, and an OpenNVR alert names them
+  (`hostel_in`, `hostel_out`, `gate_denied`, `mess_served`).
 
 - **The escalation proposal: weak evidence on the sub stream → detect on
   the main stream, by consent.** Every posted visit now says where its crop

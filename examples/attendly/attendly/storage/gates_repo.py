@@ -7,9 +7,12 @@ from sqlalchemy import func, select
 
 from ..utils.time import now_local_iso
 from .db import session_scope
-from .models import AccessEvent, Gate, MealBooking
+from .models import AccessEvent, Gate, HostelPresence, MealBooking
 
 GATE_KINDS = ("hostel", "mess")
+GATE_MODES = ("barrier", "monitor")
+DIRECTIONS = ("in", "out", "toggle")
+ALERT_ON = ("all", "deny", "none")
 MEALS = ("breakfast", "lunch", "dinner")
 
 
@@ -20,10 +23,16 @@ def _now_iso() -> str:
 # ── Gates ───────────────────────────────────────────────────────────
 
 
+def _check_choice(name: str, value: str, choices: tuple) -> None:
+    if value not in choices:
+        raise ValueError(f"{name} must be one of {choices}")
+
+
 def _gate_dict(g: Gate) -> Dict[str, Any]:
     return {
         "id": int(g.id), "name": g.name, "kind": g.kind, "camera_id": g.camera_id, "camera_name": g.camera_name,
         "hostel_block": g.hostel_block, "allow_staff": bool(g.allow_staff), "enabled": bool(g.enabled),
+        "mode": g.mode or "barrier", "direction": g.direction or "in", "alert_on": g.alert_on or "all",
         "open_url": g.open_url, "meal_windows": g.meal_windows, "created_at": g.created_at,
         "updated_at": g.updated_at, "deleted_at": g.deleted_at,
     }
@@ -32,16 +41,21 @@ def _gate_dict(g: Gate) -> Dict[str, Any]:
 def gate_put(
     name: str, kind: str, *, camera_id: Optional[int], camera_name: Optional[str] = None,
     hostel_block: Optional[str] = None, allow_staff: bool = False, enabled: bool = True,
-    open_url: Optional[str] = None, meal_windows: Optional[str] = None,
+    open_url: Optional[str] = None, meal_windows: Optional[str] = None, mode: str = "barrier",
+    direction: str = "in", alert_on: str = "all",
 ) -> Dict[str, Any]:
     if kind not in GATE_KINDS:
         raise ValueError(f"kind must be one of {GATE_KINDS}")
+    _check_choice("mode", mode, GATE_MODES)
+    _check_choice("direction", direction, DIRECTIONS)
+    _check_choice("alert_on", alert_on, ALERT_ON)
     with session_scope() as db:
         ts = _now_iso()
         row = Gate(
             name=name, kind=kind, camera_id=int(camera_id) if camera_id is not None else None,
             camera_name=camera_name, hostel_block=(hostel_block or "").strip() or None if kind == "hostel" else None,
             allow_staff=bool(allow_staff), enabled=bool(enabled), open_url=(open_url or "").strip() or None,
+            mode=mode, direction=direction, alert_on=alert_on,
             meal_windows=(meal_windows or "").strip() or None if kind == "mess" else None,
             created_at=ts, updated_at=ts,
         )
@@ -86,6 +100,10 @@ def gate_update(gate_id: int, **fields) -> Optional[Dict[str, Any]]:
             row.hostel_block = str(fields["hostel_block"]).strip() or None
         if fields.get("allow_staff") is not None:
             row.allow_staff = bool(fields["allow_staff"])
+        for name, choices in (("mode", GATE_MODES), ("direction", DIRECTIONS), ("alert_on", ALERT_ON)):
+            if fields.get(name) is not None:
+                _check_choice(name, str(fields[name]), choices)
+                setattr(row, name, str(fields[name]))
         if fields.get("enabled") is not None:
             row.enabled = bool(fields["enabled"])
         if "open_url" in fields and fields["open_url"] is not None:
@@ -118,21 +136,21 @@ def _event_dict(e: AccessEvent) -> Dict[str, Any]:
         "id": int(e.id), "gate_id": int(e.gate_id), "gate_name": e.gate_name, "kind": e.kind,
         "person_code": e.person_code, "person_name": e.person_name, "person_kind": e.person_kind,
         "decision": e.decision, "reason": e.reason, "unit": e.unit, "similarity": e.similarity,
-        "actuated": bool(e.actuated), "source": e.source, "ts": e.ts,
+        "actuated": bool(e.actuated), "source": e.source, "movement": e.movement, "alerted": bool(e.alerted), "ts": e.ts,
     }
 
 
 def access_event_put(
     *, gate: Dict[str, Any], decision: str, reason: str, person_code: Optional[str], person_name: Optional[str],
     person_kind: Optional[str], unit: Optional[str], similarity: Optional[float], actuated: bool,
-    source: str = "camera", ts: Optional[str] = None,
+    source: str = "camera", ts: Optional[str] = None, movement: Optional[str] = None, alerted: bool = False,
 ) -> Dict[str, Any]:
     with session_scope() as db:
         row = AccessEvent(
             gate_id=int(gate["id"]), gate_name=gate.get("name"), kind=str(gate.get("kind") or ""),
             person_code=person_code, person_name=person_name, person_kind=person_kind, decision=decision,
             reason=reason, unit=unit, similarity=float(similarity) if similarity is not None else None,
-            actuated=bool(actuated), source=source, ts=ts or _now_iso(),
+            actuated=bool(actuated), source=source, ts=ts or _now_iso(), movement=movement, alerted=bool(alerted),
         )
         db.add(row)
         db.flush()
@@ -162,6 +180,68 @@ def access_counts(date: str) -> Dict[str, int]:
         denied = int(db.execute(select(func.count()).select_from(AccessEvent).where(
             AccessEvent.ts.startswith(date), AccessEvent.decision != "allow")).scalar() or 0)
     return {"allowed": allowed, "denied": denied}
+
+
+def access_event_mark_alerted(event_id: int) -> None:
+    with session_scope() as db:
+        row = db.get(AccessEvent, int(event_id))
+        if row is not None:
+            row.alerted = True
+
+
+# ── Hostel presence (who is in) ─────────────────────────────────────
+
+
+def _presence_dict(p: HostelPresence) -> Dict[str, Any]:
+    return {"student_code": p.student_code, "hostel_block": p.hostel_block, "status": p.status, "since": p.since,
+            "gate_id": p.gate_id, "gate_name": p.gate_name}
+
+
+def presence_get(student_code: str) -> Optional[Dict[str, Any]]:
+    with session_scope() as db:
+        row = db.get(HostelPresence, student_code)
+        return _presence_dict(row) if row else None
+
+
+def presence_set(student_code: str, status: str, *, hostel_block: Optional[str], ts: Optional[str] = None,
+                 gate: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if status not in ("in", "out"):
+        raise ValueError("status must be in or out")
+    with session_scope() as db:
+        row = db.get(HostelPresence, student_code)
+        if row is None:
+            row = HostelPresence(student_code=student_code, since=ts or _now_iso())
+            db.add(row)
+        row.status = status
+        row.since = ts or _now_iso()
+        row.hostel_block = hostel_block
+        row.gate_id = int(gate["id"]) if gate else None
+        row.gate_name = gate.get("name") if gate else None
+        db.flush()
+        return _presence_dict(row)
+
+
+def presence_list(hostel_block: Optional[str] = None, status: Optional[str] = None) -> List[Dict[str, Any]]:
+    with session_scope() as db:
+        stmt = select(HostelPresence)
+        if hostel_block:
+            stmt = stmt.where(HostelPresence.hostel_block == hostel_block)
+        if status:
+            stmt = stmt.where(HostelPresence.status == status)
+        rows = db.execute(stmt.order_by(HostelPresence.since.desc())).scalars().all()
+        return [_presence_dict(r) for r in rows]
+
+
+def presence_summary() -> Dict[str, Dict[str, int]]:
+    """``{block: {"in": n, "out": n}}`` over students with a presence row."""
+    out: Dict[str, Dict[str, int]] = {}
+    with session_scope() as db:
+        rows = db.execute(select(HostelPresence.hostel_block, HostelPresence.status)).all()
+    for block, status in rows:
+        b = out.setdefault(str(block or "?"), {"in": 0, "out": 0})
+        if status in b:
+            b[status] += 1
+    return out
 
 
 # ── Meal bookings ───────────────────────────────────────────────────

@@ -187,6 +187,14 @@ class Gate(Base):
     hostel_block = Column(String(64), nullable=True)
     allow_staff = Column(Boolean, nullable=False, default=False)
     enabled = Column(Boolean, nullable=False, default=True)
+    # "barrier": decisions actuate (bus + open_url). "monitor": nothing is
+    # stopped; every sighting is recorded as a movement and raises an alert.
+    mode = Column(String(16), nullable=False, default="barrier", server_default="barrier")
+    # Which way a person passing this camera is going: in | out | toggle
+    # (one camera for both ways: alternates with the person's last state).
+    direction = Column(String(8), nullable=False, default="in", server_default="in")
+    # Which events raise an OpenNVR alert: all | deny | none
+    alert_on = Column(String(8), nullable=False, default="all", server_default="all")
     # Optional: an HTTP trigger a barrier with its own relay accepts.
     open_url = Column(String(512), nullable=True)
     # Optional per-gate meal windows ("meal=HH:MM-HH:MM,..."); blank → settings.
@@ -212,7 +220,22 @@ class AccessEvent(Base):
     similarity = Column(Float, nullable=True)
     actuated = Column(Boolean, nullable=False, default=False)
     source = Column(String(16), nullable=False, default="camera")  # camera | check
+    movement = Column(String(8), nullable=True)  # in | out when a presence changed
+    alerted = Column(Boolean, nullable=False, default=False, server_default="0")
     ts = Column(String(40), nullable=False, index=True)
+
+
+class HostelPresence(Base):
+    """Who is inside: one row per student, moved by hostel-gate sightings."""
+
+    __tablename__ = "hostel_presence"
+
+    student_code = Column(String(32), primary_key=True)
+    hostel_block = Column(String(64), nullable=True, index=True)
+    status = Column(String(8), nullable=False, default="out")  # in | out
+    since = Column(String(40), nullable=False)
+    gate_id = Column(Integer, nullable=True)
+    gate_name = Column(String(128), nullable=True)
 
 
 class MealBooking(Base):

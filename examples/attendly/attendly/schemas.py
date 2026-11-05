@@ -187,6 +187,9 @@ class GateCreate(BaseModel):
     hostel_block: Optional[str] = Field(None, max_length=64)
     allow_staff: bool = False
     enabled: bool = True
+    mode: str = Field("barrier", pattern=r"^(barrier|monitor)$")
+    direction: str = Field("in", pattern=r"^(in|out|toggle)$")
+    alert_on: str = Field("all", pattern=r"^(all|deny|none)$")
     open_url: Optional[str] = Field(None, max_length=512)
     meal_windows: Optional[str] = Field(None, max_length=256)
 
@@ -198,6 +201,9 @@ class GateUpdate(BaseModel):
     hostel_block: Optional[str] = Field(None, max_length=64)
     allow_staff: Optional[bool] = None
     enabled: Optional[bool] = None
+    mode: Optional[str] = Field(None, pattern=r"^(barrier|monitor)$")
+    direction: Optional[str] = Field(None, pattern=r"^(in|out|toggle)$")
+    alert_on: Optional[str] = Field(None, pattern=r"^(all|deny|none)$")
     open_url: Optional[str] = Field(None, max_length=512)
     meal_windows: Optional[str] = Field(None, max_length=256)
 
@@ -211,8 +217,15 @@ class GateOut(BaseModel):
     hostel_block: Optional[str] = None
     allow_staff: bool = False
     enabled: bool = True
+    mode: str = "barrier"
+    direction: str = "in"
+    alert_on: str = "all"
     open_url: Optional[str] = None
     meal_windows: Optional[str] = None
+
+
+class PresenceSet(BaseModel):
+    status: str = Field(..., pattern=r"^(in|out)$")
 
 
 class MealBookingCreate(BaseModel):

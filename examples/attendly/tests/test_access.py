@@ -252,3 +252,94 @@ def test_students_carry_residence(client, env):
                     files=[("images", ("a.jpg", io.BytesIO(jpeg_bytes(seed=2)), "image/jpeg"))])
     assert r.status_code == 400 and "hostel block" in r.json()["detail"]
     assert client.get("/gates/status").json()["hostel_blocks"] == []
+
+
+# ── monitor mode: alerts instead of a barrier ───────────────────────
+
+
+def test_monitor_gate_moves_presence_and_alerts_instead_of_actuating(env):
+    _people()
+    pub = env["publisher"]
+    entry = gates_repo.gate_put("Block B door (in)", "hostel", camera_id=7, hostel_block="B", mode="monitor", direction="in")
+    exit_ = gates_repo.gate_put("Block B door (out)", "hostel", camera_id=9, hostel_block="B", mode="monitor", direction="out")
+    row = decide_and_record(entry, "AT00001", 0.8, now=at("21:00"), publisher=pub)
+    assert row["movement"] == "in" and row["actuated"] is False and row["alerted"] is True
+    assert pub.events == []  # nothing on the access bus: there is no barrier
+    a = pub.alerts_sent[-1]
+    assert a.alert_type == "hostel_in" and a.title == "Asha Rao came in — Block B door (in) (Block B)"
+    assert a.camera_id == "cam7" and a.severity == "low" and a.source.name == "attendly"
+    assert gates_repo.presence_get("AT00001") == {"student_code": "AT00001", "hostel_block": "B", "status": "in",
+                                                  "since": at("21:00").isoformat(), "gate_id": entry["id"],
+                                                  "gate_name": entry["name"]}
+    row = decide_and_record(exit_, "AT00001", 0.8, now=at("21:30"), publisher=pub)
+    assert row["movement"] == "out" and pub.alerts_sent[-1].alert_type == "hostel_out"
+    assert gates_repo.presence_get("AT00001")["status"] == "out"
+    assert gates_repo.presence_summary() == {"B": {"in": 0, "out": 1}}
+    # a day scholar walked in: nothing stopped them, the alert says so loudly
+    row = decide_and_record(entry, "AT00002", 0.7, now=at("22:00"), publisher=pub)
+    assert row["decision"] == "deny" and row["movement"] == "in"
+    a = pub.alerts_sent[-1]
+    assert a.alert_type == "gate_denied" and a.severity == "high" and "Day scholar" in a.title and "came in" in a.title
+    assert gates_repo.presence_get("AT00002")["status"] == "in"
+    # unknown face: a medium alert, no movement
+    row = decide_and_record(entry, None, None, now=at("22:05"), publisher=pub)
+    assert row["movement"] is None and pub.alerts_sent[-1].title.startswith("Unknown face")
+
+
+def test_toggle_direction_alternates_per_student(env):
+    _people()
+    pub = env["publisher"]
+    door = gates_repo.gate_put("Block B door", "hostel", camera_id=7, hostel_block="B", mode="monitor", direction="toggle")
+    assert decide_and_record(door, "AT00001", 0.8, now=at("08:00"), publisher=pub)["movement"] == "in"
+    assert decide_and_record(door, "AT00001", 0.8, now=at("09:00"), publisher=pub)["movement"] == "out"
+    assert decide_and_record(door, "AT00001", 0.8, now=at("18:00"), publisher=pub)["movement"] == "in"
+    assert [a.alert_type for a in pub.alerts_sent] == ["hostel_in", "hostel_out", "hostel_in"]
+
+
+def test_barrier_gate_presence_only_on_allow_and_alert_policy(env):
+    _people()
+    pub = env["publisher"]
+    quiet = gates_repo.gate_put("Block B", "hostel", camera_id=7, hostel_block="B", alert_on="deny")
+    row = decide_and_record(quiet, "AT00001", 0.8, now=at("21:00"), publisher=pub)
+    assert row["movement"] == "in" and row["actuated"] is True and row["alerted"] is False
+    assert len(pub.events) == 1 and pub.alerts_sent == []
+    row = decide_and_record(quiet, "AT00002", 0.8, now=at("21:01"), publisher=pub)
+    assert row["decision"] == "deny" and row["movement"] is None and row["alerted"] is True
+    assert pub.alerts_sent[-1].alert_type == "gate_denied" and pub.alerts_sent[-1].severity == "medium"
+    assert gates_repo.presence_get("AT00002") is None
+    silent = gates_repo.gate_put("Block C", "hostel", camera_id=9, hostel_block="C", alert_on="none")
+    decide_and_record(silent, None, None, now=at("21:02"), publisher=pub)
+    assert len(pub.alerts_sent) == 1
+    # a mess gate rings low on a served meal, when asked to
+    mess = gates_repo.gate_put("Mess", "mess", camera_id=9)
+    gates_repo.meal_booking_put("AT00001", "2026-11-05", "lunch")
+    decide_and_record(mess, "AT00001", 0.9, now=at("13:00"), publisher=pub)
+    assert pub.alerts_sent[-1].alert_type == "mess_served"
+
+
+def test_presence_api_and_gate_mode_fields(client, env):
+    _people()
+    r = client.post("/gates/", json={"name": "Block B door", "kind": "hostel", "camera_id": 7, "hostel_block": "B",
+                                     "mode": "monitor", "direction": "toggle", "alert_on": "all"})
+    assert r.status_code == 200, r.text
+    g = r.json()
+    assert (g["mode"], g["direction"], g["alert_on"]) == ("monitor", "toggle", "all")
+    assert client.post("/gates/", json={"name": "x", "kind": "hostel", "camera_id": 7, "mode": "ghost"}).status_code == 422
+    from attendly.services.access import decide_and_record as dar
+
+    dar(g, "AT00001", 0.8, now=at("08:00"), publisher=env["publisher"])
+    p = client.get("/gates/presence").json()
+    assert p["summary"] == {"B": {"in": 1, "out": 0}}
+    assert p["rows"][0]["student"]["full_name"] == "Asha Rao" and p["rows"][0]["status"] == "in"
+    assert client.get("/gates/presence", params={"status": "out"}).json()["rows"] == []
+    r = client.put("/gates/presence/AT00001", json={"status": "out"})
+    assert r.json()["status"] == "out" and r.json()["hostel_block"] == "B"
+    assert client.put("/gates/presence/NOPE", json={"status": "in"}).status_code == 404
+    ev = client.get("/gates/events").json()
+    assert ev[0]["movement"] == "in" and ev[0]["alerted"] is True
+    st = client.get("/gates/status").json()
+    assert st["presence"] == {"B": {"in": 0, "out": 1}} and st["bus"]["alerts"] == 1
+    r = client.put(f"/gates/{g['id']}", json={"mode": "barrier", "direction": "in"})
+    assert r.json()["mode"] == "barrier"
+    m = client.get("/manifest").json()
+    assert {a["name"] for a in m["emits"]} >= {"hostel_in", "hostel_out", "gate_denied"}

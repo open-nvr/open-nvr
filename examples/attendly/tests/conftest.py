@@ -157,7 +157,9 @@ class FakePublisher:
 
     def __init__(self) -> None:
         self.events: List[tuple] = []
+        self.alerts_sent: List[object] = []
         self.published = 0
+        self.alerts = 0
         self.last_error = None
         self.fail = False
 
@@ -168,6 +170,16 @@ class FakePublisher:
         if self.fail:
             return False
         self.published += 1
+        return True
+
+    def alert(self, gate, decision, movement, *, ts) -> bool:
+        from attendly.services.access import build_alert
+
+        a = build_alert(gate, decision, movement, ts=ts)
+        if a is None:
+            return False
+        self.alerts_sent.append(a)
+        self.alerts += 1
         return True
 
 

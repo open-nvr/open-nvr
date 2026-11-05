@@ -65,6 +65,15 @@ _LATER_COLUMNS = {
         ("residence", "VARCHAR(16) NOT NULL DEFAULT 'day_scholar'"),
         ("hostel_block", "VARCHAR(64)"),
     ],
+    "gates": [
+        ("mode", "VARCHAR(16) NOT NULL DEFAULT 'barrier'"),
+        ("direction", "VARCHAR(8) NOT NULL DEFAULT 'in'"),
+        ("alert_on", "VARCHAR(8) NOT NULL DEFAULT 'all'"),
+    ],
+    "access_events": [
+        ("movement", "VARCHAR(8)"),
+        ("alerted", "BOOLEAN NOT NULL DEFAULT 0"),
+    ],
 }
 
 

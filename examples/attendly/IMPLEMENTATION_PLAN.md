@@ -173,6 +173,14 @@ The event's payload is the contract's: `plate_text` carries the credential
 name, `unit` the hostel block or the meal, `confidence` the similarity.
 Consumers actuate only on a literal `allow`.
 
+**No barrier:** a gate in `monitor` mode publishes nothing on the access
+bus. Each recognised student becomes a movement (`in`/`out` by the gate's
+`direction`, or alternating for `toggle`) that moves a `hostel_presence`
+row, and an OpenNVR alert (`hostel_in`, `hostel_out`; `gate_denied` when
+the policy would have refused) goes on `opennvr.alerts.app.attendly.<cam>`
+through the SDK's `NatsAlertChannel`. `alert_on` per gate: `all`, `deny`,
+`none`. The manifest declares these alert types in `emits`.
+
 For a barrier with its own built-in relay that takes an HTTP trigger, a
 gate can also carry an `open_url`: attendly GETs it on allow. And a barrier
 controller that has its own camera can ask attendly directly:

@@ -13,7 +13,7 @@ from ..config import get_settings
 from ..face.engine import FaceEngine
 from ..services.access import GateEngine, decide_and_record, get_publisher, parse_meal_windows
 from ..storage import gates_repo as repo
-from ..storage.repo import list_hostel_blocks
+from ..storage.repo import get_student, get_students_batch, list_hostel_blocks
 from ..utils.logging_utils import log_call
 from ..utils.time import now_local
 
@@ -50,7 +50,8 @@ def create_gate(payload: schemas.GateCreate):
     g = repo.gate_put(
         payload.name, payload.kind, camera_id=payload.camera_id, camera_name=_camera_name(payload.camera_id),
         hostel_block=payload.hostel_block, allow_staff=payload.allow_staff, enabled=payload.enabled,
-        open_url=payload.open_url, meal_windows=payload.meal_windows,
+        open_url=payload.open_url, meal_windows=payload.meal_windows, mode=payload.mode,
+        direction=payload.direction, alert_on=payload.alert_on,
     )
     _refresh_engine()
     return _out(g)
@@ -95,7 +96,9 @@ def gates_status():
     today = now_local().strftime("%Y-%m-%d")
     return {
         "workers": GateEngine.get_shared().status(), "today": repo.access_counts(today),
-        "bus": {"configured": bool(pub.nats_url), "published": pub.published, "last_error": pub.last_error},
+        "bus": {"configured": bool(pub.nats_url), "published": pub.published, "alerts": pub.alerts,
+                "last_error": pub.last_error},
+        "presence": repo.presence_summary(),
         "meal_windows": parse_meal_windows(s.meal_windows), "hostel_blocks": list_hostel_blocks(),
         "threshold": s.effective_gate_threshold, "cooldown_seconds": s.gate_cooldown_seconds,
     }
@@ -106,6 +109,33 @@ def gates_status():
 def list_events(gate_id: Optional[int] = None, limit: int = Query(100, ge=1, le=1000),
                 date: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"), decision: Optional[str] = None):
     return repo.access_events_list(gate_id, limit=limit, date=date, decision=decision)
+
+
+@router.get("/presence")
+@log_call()
+def presence(hostel_block: Optional[str] = None, status: Optional[str] = None):
+    """Who is inside the hostel right now (and who went out), from the
+    hostel gates' sightings."""
+    if status and status not in ("in", "out"):
+        raise HTTPException(status_code=400, detail="status must be in or out")
+    rows = repo.presence_list(hostel_block, status)
+    students = get_students_batch([r["student_code"] for r in rows])
+    out = []
+    for r in rows:
+        s = students.get(r["student_code"])
+        out.append({**r, "student": schemas.student_out(s).model_dump() if s else None})
+    return {"summary": repo.presence_summary(), "rows": out}
+
+
+@router.put("/presence/{student_code}")
+@log_call()
+def set_presence(student_code: str, payload: schemas.PresenceSet):
+    """An operator's correction (a missed sighting, a student who left
+    by another way)."""
+    student = get_student(student_code)
+    if student is None:
+        raise HTTPException(status_code=404, detail="student not found")
+    return repo.presence_set(student_code, payload.status, hostel_block=student.get("hostel_block"))
 
 
 @router.post("/{gate_id}/check")

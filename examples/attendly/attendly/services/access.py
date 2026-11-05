@@ -32,10 +32,13 @@ from ..config import get_settings
 from ..people import find_person
 from ..storage.gates_repo import (
     MEALS,
+    access_event_mark_alerted,
     access_event_put,
     gate_list,
     meal_booking_consume,
     meal_booking_get,
+    presence_get,
+    presence_set,
 )
 from ..utils.time import now_local
 from .recognize import recognize_faces_in_frame
@@ -136,6 +139,96 @@ def decide(gate: Dict[str, Any], code: Optional[str], similarity: Optional[float
     return Decision("deny", "unknown_gate_kind", **base)
 
 
+# ── Movements and alerts ────────────────────────────────────────────
+
+
+def movement_for(gate: Dict[str, Any], decision: Decision) -> Optional[str]:
+    """``in``/``out`` when this sighting moves a student's hostel presence.
+    At a barrier only an allowed student passed; in monitor mode nobody is
+    stopped, so every recognised student moved — including one the policy
+    would have refused (that is what the alert is for)."""
+    if gate.get("kind") != "hostel" or decision.person_kind != "student" or not decision.person_code:
+        return None
+    if gate.get("mode", "barrier") == "barrier" and not decision.allow:
+        return None
+    direction = str(gate.get("direction") or "in")
+    if direction in ("in", "out"):
+        return direction
+    current = presence_get(decision.person_code)
+    return "out" if current and current.get("status") == "in" else "in"
+
+
+def _wants_alert(gate: Dict[str, Any], decision: Decision, movement: Optional[str]) -> bool:
+    policy = str(gate.get("alert_on") or "all")
+    if policy == "none":
+        return False
+    if policy == "deny":
+        return not decision.allow
+    return True
+
+
+def build_alert(gate: Dict[str, Any], decision: Decision, movement: Optional[str], *, ts: str):
+    """The SDK ``Alert`` for one sighting, or None when there is nothing
+    worth ringing about (an unknown face is reported once per cooldown)."""
+    from opennvr_app_sdk.alerts import Alert, AlertSource
+
+    from .. import APP_ID, APP_VERSION
+
+    name = decision.person_name or "Unknown person"
+    place = str(gate.get("name") or "gate")
+    block = decision.unit if gate.get("kind") == "hostel" else None
+    where = f"{place}" + (f" (Block {block})" if block else "")
+    sim = f"{decision.similarity * 100:.0f}%" if decision.similarity is not None else "-"
+    code = decision.person_code or "-"
+    evidence = {"gate_id": gate.get("id"), "gate": place, "kind": gate.get("kind"), "mode": gate.get("mode"),
+                "person_code": decision.person_code, "person_kind": decision.person_kind, "decision": decision.decision,
+                "reason": decision.reason, "unit": decision.unit, "similarity": decision.similarity, "movement": movement,
+                "at": ts}
+    tags = [f"gate:{gate.get('id')}", f"kind:{gate.get('kind')}"]
+    if decision.person_code:
+        tags.append(f"person:{decision.person_code}")
+
+    if movement == "in":
+        kind, severity, title = "hostel_in", "low", f"{name} came in — {where}"
+        desc = f"{name} ({code}) entered the hostel at {place}. Match {sim}."
+    elif movement == "out":
+        kind, severity, title = "hostel_out", "low", f"{name} went out — {where}"
+        desc = f"{name} ({code}) left the hostel at {place}. Match {sim}."
+    elif decision.allow and gate.get("kind") == "mess":
+        kind, severity, title = "mess_served", "low", f"{name} served {decision.unit or ''} — {place}".replace("  ", " ")
+        desc = f"{name} ({code}) entered the mess for {decision.unit or 'a meal'}. Match {sim}."
+    elif decision.allow:
+        return None
+    else:
+        kind, severity = "gate_denied", "medium"
+        why = REASON_TEXT.get(decision.reason, decision.reason)
+        title = f"{name} not admitted — {where}" if decision.person_code else f"Unknown face — {where}"
+        desc = f"{why} at {place}." + (f" {name} ({code}), match {sim}." if decision.person_code else "")
+        if gate.get("mode") == "monitor" and decision.person_code:
+            desc += " Nothing stopped them: this gate only watches."
+            severity = "high"
+    if not decision.allow and movement:
+        # a monitor gate: the movement happened AND the policy says it should not have
+        kind, severity = "gate_denied", "high"
+        why = REASON_TEXT.get(decision.reason, decision.reason)
+        title = f"{name} {'came in' if movement == 'in' else 'went out'} — {where} — {why}"
+        desc = f"{name} ({code}) passed {place} ({'in' if movement == 'in' else 'out'}) but {why.lower()}. Match {sim}."
+    camera = gate.get("camera_id")
+    return Alert(
+        title=title, description=desc, camera_id=f"cam{int(camera)}" if camera is not None else "unknown",
+        severity=severity, alert_type=kind, source=AlertSource(kind="app", name=APP_ID, version=APP_VERSION),
+        evidence=evidence, tags=tags,
+    )
+
+
+REASON_TEXT = {
+    "hostler": "Hostler of this block", "booked": "Meal booked", "staff": "Staff", "unknown": "Face not recognised",
+    "day_scholar": "Day scholar", "wrong_block": "Lives in another block", "not_booked": "No booking for this meal",
+    "already_used": "Booking already used", "no_meal_window": "Outside meal hours",
+    "staff_not_allowed": "Staff not allowed here",
+}
+
+
 # ── The way out ─────────────────────────────────────────────────────
 
 
@@ -147,17 +240,21 @@ class AccessPublisher:
     def __init__(self, *, nats_url: str = "", nats_token: str = "", http_get: Optional[Callable[[str, float], bool]] = None,
                  timeout: float = 3.0) -> None:
         self._publisher = None
+        self._alerts = None
         self.nats_url = nats_url
         if nats_url:
             try:
+                from opennvr_app_sdk.alerts import NatsAlertChannel
                 from opennvr_app_sdk.domain_events import DomainEventPublisher
 
                 self._publisher = DomainEventPublisher(nats_url, token=nats_token or None, producer="app:attendly")
+                self._alerts = NatsAlertChannel(nats_url, token=nats_token or None)
             except Exception as exc:  # noqa: BLE001
-                logger.warning("domain event publisher unavailable: %s", exc)
+                logger.warning("bus publisher unavailable: %s", exc)
         self._http_get = http_get or self._default_get
         self._timeout = timeout
         self.published = 0
+        self.alerts = 0
         self.last_error: Optional[str] = None
 
     @staticmethod
@@ -199,6 +296,22 @@ class AccessPublisher:
                 acted = True
         return acted
 
+    def alert(self, gate: Dict[str, Any], decision: "Decision", movement: Optional[str], *, ts: str) -> bool:
+        """An OpenNVR alert for this sighting: who came in or went out, or
+        who a gate did not admit. Rings in core's alert inbox and reaches
+        whatever the alert-notifier app forwards to."""
+        alert = build_alert(gate, decision, movement, ts=ts)
+        if alert is None or self._alerts is None:
+            return False
+        try:
+            ok = bool(self._alerts.send(alert))
+        except Exception as exc:  # noqa: BLE001
+            self.last_error = str(exc)
+            return False
+        if ok:
+            self.alerts += 1
+        return ok
+
 
 _publisher: Optional[AccessPublisher] = None
 _publisher_lock = threading.Lock()
@@ -224,25 +337,39 @@ def decide_and_record(
     gate: Dict[str, Any], code: Optional[str], similarity: Optional[float], *, source: str = "camera",
     actuate: bool = True, now: Optional[datetime] = None, publisher: Optional[AccessPublisher] = None,
 ) -> Dict[str, Any]:
-    """Decide, consume a meal booking on allow, write the log row, publish.
-    Returns the log row (with the decision's reason)."""
+    """Decide, consume a meal booking on allow, move the hostel presence,
+    write the log row, then act: at a barrier the decision goes on the bus
+    (and the open_url); in monitor mode nothing actuates. Either way an
+    OpenNVR alert is raised when the gate's ``alert_on`` says so. Returns
+    the log row."""
     now = now or now_local()
+    ts = now.isoformat()
     d = decide(gate, code, similarity, now=now)
+    monitor = str(gate.get("mode") or "barrier") == "monitor"
     if d.allow and d.booking_id is not None:
-        if not meal_booking_consume(d.booking_id, gate_id=int(gate["id"]), ts=now.isoformat()):
+        if not meal_booking_consume(d.booking_id, gate_id=int(gate["id"]), ts=ts):
             d = Decision("deny", "already_used", person_code=d.person_code, person_name=d.person_name,
                          person_kind=d.person_kind, unit=d.unit, similarity=d.similarity)
+    movement = movement_for(gate, d)
+    if movement and d.person_code:
+        block = d.unit if gate.get("kind") == "hostel" else None
+        presence_set(d.person_code, movement, hostel_block=block, ts=ts, gate=gate)
+    pub = publisher or get_publisher()
     acted = False
-    if actuate:
-        pub = publisher or get_publisher()
+    if actuate and not monitor:
         acted = pub.publish(gate, d)
     row = access_event_put(
         gate=gate, decision=d.decision, reason=d.reason, person_code=d.person_code, person_name=d.person_name,
         person_kind=d.person_kind, unit=d.unit, similarity=d.similarity, actuated=acted, source=source,
-        ts=now.isoformat(),
+        ts=ts, movement=movement,
     )
-    logger.info("gate %s (%s): %s %s for %s (%s) sim=%s", gate.get("name"), gate.get("kind"), d.decision, d.reason,
-                d.person_code or "?", d.person_name or "unknown", f"{d.similarity:.2f}" if d.similarity else "-")
+    if actuate and _wants_alert(gate, d, movement):
+        if pub.alert(gate, d, movement, ts=ts):
+            access_event_mark_alerted(int(row["id"]))
+            row["alerted"] = True
+    logger.info("gate %s (%s/%s): %s %s%s for %s (%s) sim=%s", gate.get("name"), gate.get("kind"), gate.get("mode"),
+                d.decision, d.reason, f" {movement}" if movement else "", d.person_code or "?",
+                d.person_name or "unknown", f"{d.similarity:.2f}" if d.similarity else "-")
     return row
 
 

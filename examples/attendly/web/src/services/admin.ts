@@ -46,8 +46,9 @@ export const schedulesService = {
 // ── Phase 2: staff, departments, gates, meals ──────────────────────
 export type Department = { id: number; name: string; camera_id: number | null; camera_name: string | null; work_start: string; work_end: string }
 export type Staff = { id: number; staff_code: string; full_name: string; email: string | null; department_id: number | null; department_name: string | null; designation: string | null; created_at: string }
-export type Gate = { id: number; name: string; kind: 'hostel' | 'mess'; camera_id: number | null; camera_name: string | null; hostel_block: string | null; allow_staff: boolean; enabled: boolean; open_url: string | null; meal_windows: string | null }
-export type AccessEvent = { id: number; gate_id: number; gate_name: string | null; kind: string; person_code: string | null; person_name: string | null; person_kind: string | null; decision: string; reason: string; unit: string | null; similarity: number | null; actuated: boolean; source: string; ts: string }
+export type Gate = { id: number; name: string; kind: 'hostel' | 'mess'; camera_id: number | null; camera_name: string | null; hostel_block: string | null; allow_staff: boolean; enabled: boolean; mode: 'barrier' | 'monitor'; direction: 'in' | 'out' | 'toggle'; alert_on: 'all' | 'deny' | 'none'; open_url: string | null; meal_windows: string | null }
+export type AccessEvent = { id: number; gate_id: number; gate_name: string | null; kind: string; person_code: string | null; person_name: string | null; person_kind: string | null; decision: string; reason: string; unit: string | null; similarity: number | null; actuated: boolean; source: string; movement: 'in' | 'out' | null; alerted: boolean; ts: string }
+export type Presence = { student_code: string; hostel_block: string | null; status: 'in' | 'out'; since: string; gate_id: number | null; gate_name: string | null; student?: { full_name: string; course_code?: string | null; section?: string | null } | null }
 export type MealBooking = { id: number; student_code: string; date: string; meal: string; source: string; created_at: string; consumed_at: string | null; student?: { full_name: string; course_code?: string | null; section?: string | null; email?: string | null } | null }
 
 export const departmentsService = {
@@ -77,6 +78,8 @@ export const gatesService = {
   remove: (id: number) => api.delete(`/gates/${id}`),
   status: () => api.get('/gates/status'),
   events: (params: { gate_id?: number; limit?: number; date?: string; decision?: string }) => api.get<AccessEvent[]>('/gates/events', { params }),
+  presence: (params?: { hostel_block?: string; status?: string }) => api.get<{ summary: Record<string, { in: number; out: number }>; rows: Presence[] }>('/gates/presence', { params: params || {} }),
+  setPresence: (code: string, status: 'in' | 'out') => api.put(`/gates/presence/${encodeURIComponent(code)}`, { status }),
 }
 
 export const mealsService = {
