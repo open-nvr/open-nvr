@@ -1010,6 +1010,7 @@ class CameraWorker:
             max_regions=_env_int("DETECT_MAX_REGIONS", 8),
             allowed_labels=allowed_labels_for(self.spec),
             cross_label_iou=_env_float("DETECT_NMS_CROSS_LABEL_IOU", 0.85),
+            containment=_env_float("DETECT_NMS_CONTAINMENT", 0.85),
             object_mask=object_mask,
             object_filter=object_filter,
         )
