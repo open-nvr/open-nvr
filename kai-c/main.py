@@ -50,7 +50,7 @@ from kai_c.domain_events import normalise_completion
 from kai_c.events import InferenceCompletedEvent
 from kai_c.nats_publisher import NatsPublisher
 from kai_c.persistence import RegistryStateStore
-from kai_c.registry import AdapterRegistry
+from kai_c.registry import AdapterRegistry, AdapterTimeout
 from kai_c.schemas import KAIRequest
 from kai_c.sovereignty import SovereigntyViolation
 from kai_c.stream_proxy import (
@@ -1477,6 +1477,19 @@ async def v1_infer(
         # emitted inference.refused_permission (it owns the pending-key
         # detail); we just translate to a 403 for the caller.
         raise HTTPException(status_code=403, detail=str(exc))
+    except AdapterTimeout as exc:
+        latency_ms = int((time.monotonic() - started) * 1000)
+        audit.emit(
+            AuditEventType.INFERENCE_FAILED,
+            correlation_id=correlation_id,
+            adapter=adapter_name,
+            camera_id=camera_id,
+            latency_ms=latency_ms,
+            error_category="transport_error",
+            error_code="adapter_timeout",
+            error_message=str(exc),
+        )
+        raise HTTPException(status_code=504, detail=f"adapter timeout: {exc}")
     except Exception as exc:
         latency_ms = int((time.monotonic() - started) * 1000)
         audit.emit(

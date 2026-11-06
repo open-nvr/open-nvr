@@ -84,6 +84,25 @@ WINDOW = 200
 LIVE_GRACE_S = 120.0
 
 
+def _in_caption_cooldown(failed_at: Any) -> bool:
+    """The last caption call for this visit failed less than
+    events_caption_retry_cooldown_s ago: not missing a caption for now."""
+    if not failed_at:
+        return False
+    from datetime import UTC, datetime
+    from core.config import settings
+    cooldown = float(getattr(settings, "events_caption_retry_cooldown_s", 600.0) or 0)
+    if cooldown <= 0:
+        return False
+    try:
+        t = datetime.fromisoformat(str(failed_at))
+    except ValueError:
+        return False
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=UTC)
+    return (datetime.now(UTC) - t).total_seconds() < cooldown
+
+
 def missing_for(db, *, filters: dict[str, Any], labels: list[str] | None,
                 camera_ids: list[int] | None, want_caption: bool,
                 want_kinds: set[str], cap: int | None = None) -> dict[str, Any]:
@@ -109,6 +128,7 @@ def missing_for(db, *, filters: dict[str, Any], labels: list[str] | None,
     from core.config import settings
     from models import Camera
     from services.caption_enrichment import (
+        CAPTION_FAILED_AT,
         CAPTION_SKILL,
         CAPTIONABLE_LABELS,
         wants_caption,
@@ -177,6 +197,7 @@ def missing_for(db, *, filters: dict[str, Any], labels: list[str] | None,
         need_caption = bool(
             want_caption and rid not in captioned and CAPTION_SKILL not in looked
             and CAPTION_SKILL in skills
+            and not _in_caption_cooldown((row.payload or {}).get(CAPTION_FAILED_AT))
             and wants_caption(row.label, row.evidence_path, True, skills))
         askable = [k for k in want_kinds if k in LABEL_KINDS.get(label, ())]
         need_kinds = [
