@@ -67,6 +67,16 @@ LABEL_SYNONYMS: dict[str, tuple[str, ...]] = {
     "person": ("person",), "people": ("person",), "man": ("person",),
     "woman": ("person",), "child": ("person",), "someone": ("person",),
     "somebody": ("person",), "anyone": ("person",), "pedestrian": ("person",),
+    # plurals and the words people actually type ("did you see the 3
+    # persons together" matched nothing: "persons" was free text)
+    "persons": ("person",), "men": ("person",), "women": ("person",),
+    "guy": ("person",), "guys": ("person",), "lady": ("person",),
+    "ladies": ("person",), "gentleman": ("person",), "boy": ("person",),
+    "girl": ("person",), "boys": ("person",), "girls": ("person",),
+    "kid": ("person",), "kids": ("person",), "children": ("person",),
+    "visitor": ("person",), "visitors": ("person",), "intruder": ("person",),
+    "stranger": ("person",), "human": ("person",), "humans": ("person",),
+    "individual": ("person",), "individuals": ("person",),
     "car": ("car",), "cars": ("car",), "vehicle": ("car", "truck", "bus", "motorcycle"),
     "vehicles": ("car", "truck", "bus", "motorcycle"),
     "truck": ("truck",), "trucks": ("truck",), "lorry": ("truck",),
@@ -82,6 +92,19 @@ LABEL_SYNONYMS: dict[str, tuple[str, ...]] = {
     "handbag": ("handbag",), "parcel": ("box",), "package": ("box",), "box": ("box",),
     "dog": ("dog",), "cat": ("cat",), "animal": ("dog", "cat"),
 }
+
+#: How many: a number (digit or word) beside a people word, or a word
+#: that means "more than one" on its own. Resolved to ``min_people``,
+#: which the search answers from the pipeline's count of people in frame
+#: with each visit — never from the caption, which may say "three men"
+#: or nothing at all.
+_NUMBER_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "couple": 2, "pair": 2,
+    "both": 2, "several": 3, "few": 3, "multiple": 2, "many": 3,
+}
+_GROUP_WORDS = {"together", "group", "groups", "crowd", "gathering", "gathered"}
+_PEOPLE_WORDS = {w for w, labels in LABEL_SYNONYMS.items() if labels == ("person",)}
 
 #: Words that carry no meaning here. Anything not listed survives as
 #: free text, where a caption may well match it — which is why the list
@@ -181,6 +204,9 @@ class ParsedQuery:
     #: Words that meant nothing to the parser AND nothing as text — kept
     #: so the UI can say what it ignored instead of pretending.
     ignored: list[str] = field(default_factory=list)
+    #: "3 people", "two men together", "a group": at least this many people
+    #: in frame with the visit. None = not asked.
+    min_people: int | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -194,6 +220,7 @@ class ParsedQuery:
             "attrs": [f"{k}:{v}" for k, v in self.attrs],
             "matched": self.matched,
             "ignored": self.ignored,
+            "min_people": self.min_people,
         }
 
 
@@ -380,6 +407,19 @@ def parse_query(
             out.matched["camera"] = " ".join(dict.fromkeys(cam_words))
             words = [w for w in words if w not in set(cam_words)]
 
+    # Counts and groups, before the labels pass takes the people word.
+    count_words: list[str] = []
+    for i, w in enumerate(words):
+        n = _NUMBER_WORDS.get(w) or (int(w) if w.isdigit() and 0 < int(w) < 100 else None)
+        if n and n > 1 and any(x in _PEOPLE_WORDS for x in words[i + 1:i + 3]):
+            out.min_people = max(out.min_people or 0, n)
+            count_words.append(w)
+        elif w in _GROUP_WORDS and (out.labels or any(x in _PEOPLE_WORDS for x in words)):
+            out.min_people = max(out.min_people or 0, 2)
+            count_words.append(w)
+    if count_words:
+        out.matched["count"] = " ".join(dict.fromkeys(count_words))
+        words = [w for w in words if w not in set(count_words)]
     labels: list[str] = []
     label_words: list[str] = []
     rest: list[str] = []

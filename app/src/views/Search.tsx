@@ -38,7 +38,8 @@ import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Camera as CameraIcon, CarFront, Clock, CornerDownLeft, ImageOff, Info, LayoutGrid, List, Play, Route,
-  Search as SearchIcon, Sparkles, Tag, Type, UserRound, X,
+  Search as SearchIcon, Sparkles, Tag, Type, UserRound, X,,
+  Users,
 } from 'lucide-react'
 import { api } from '../lib/api'
 import { apiService } from '../lib/apiService'
@@ -76,6 +77,7 @@ type Interpretation = {
   attrs: string[]
   matched: Record<string, string>
   ignored: string[]
+  min_people?: number | null
   source: 'parsed' | 'explicit' | string
   overridden: string[]
 }
@@ -156,6 +158,8 @@ type Filters = {
   plate: string
   /** kind:value claims a skill made, ANDed. */
   attrs: string[]
+  /** "three people together": at least this many people in frame. */
+  minPeople: number | null
 }
 
 /** The server names the field; the UI already has a dropper keyed by
@@ -256,6 +260,7 @@ export function Search() {
       for (const a of filters!.attrs) qs.append('attr', a)
       if (filters!.text) qs.set('text', filters!.text)
       if (filters!.plate) qs.set('plate', filters!.plate)
+      if (filters!.minPeople) qs.set('min_people', String(filters!.minPeople))
       if (filters!.from) qs.set('from', filters!.from)
       if (filters!.to) qs.set('to', filters!.to)
     } else if (sentence) {
@@ -366,6 +371,7 @@ export function Search() {
     text: interp?.text ?? '',
     plate: interp?.plate ?? '',
     attrs: [...(interp?.attrs ?? [])],
+    minPeople: interp?.min_people ?? null,
   })
 
   const drop = (part: keyof Filters, value?: string) => {
@@ -374,6 +380,7 @@ export function Search() {
     if (part === 'cameraIds') base.cameraIds = []
     if (part === 'text') base.text = ''
     if (part === 'plate') base.plate = ''
+    if (part === 'minPeople') base.minPeople = null
     if (part === 'from' || part === 'to') { base.from = null; base.to = null }
     // One claim at a time: dropping "colour:red" must not also drop
     // "vehicle_type:van" that is narrowing the same search.
@@ -547,6 +554,14 @@ export function Search() {
           label: interp.plate,
           title: 'Number plates containing this.',
         },
+        interp.min_people && interp.min_people > 1 && {
+          key: 'minPeople' as const,
+          icon: <Users size={12} />,
+          label: `${interp.min_people}+ people together`,
+          title: interp.matched?.count
+            ? `"${interp.matched.count}" = at least ${interp.min_people} people in frame at once`
+            : `At least ${interp.min_people} people in frame at once.`,
+        },
       ].filter(Boolean) as {
         key: keyof Filters; value?: string; icon: React.ReactNode; label: string; title: string
       }[]
@@ -610,9 +625,14 @@ export function Search() {
   if (relaxed && results.length > 0) {
     notices.push({
       key: 'relaxed',
-      tone: 'info',
+      tone: 'warn',
       icon: <Info size={13} />,
-      text: <>No results for “<b>{relaxed.dropped}</b>”, so showing results for the rest of your search.</>,
+      text: (
+        <>
+          <b>These are not what you searched for.</b> Nothing matched “<b>{relaxed.dropped}</b>”, so
+          these are the {relaxed.without} visits that match the rest of your search.
+        </>
+      ),
       action: (
         <Button
           variant="outline"

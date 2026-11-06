@@ -102,6 +102,14 @@ class Visit:
     evidence_box_px: int | None = None
     evidence_frame_px: int | None = None
     evidence_skew_s: float | None = None
+    # The most people the detector had in frame at once while this visit
+    # was live, this one included — counted per frame over the confirmed
+    # tracks of the same label actually matched that frame. "Three
+    # people together" is a question the search can only answer from this:
+    # a caption may say "three men", a track never knows it had company
+    # (walk 13 on the Ventuno Q, 2026-11-06). 1 for a visit alone; None
+    # from a lifecycle that never saw the tracks (test doubles).
+    people_in_frame: int | None = None
 
 
 #: Most points kept per visit path. When a long visit fills it, every other
@@ -272,6 +280,8 @@ class VisitPoster:
             # visit ships no candidates and its sweep reads that crop.
             if v.evidence_ts is not None:
                 body["evidence_ts"] = float(v.evidence_ts)
+        if v.people_in_frame:
+            body["people_in_frame"] = int(v.people_in_frame)
         if v.evidence_source:
             body["evidence_source"] = str(v.evidence_source)
         if v.evidence_box_px is not None:
@@ -347,6 +357,7 @@ class VisitLifecycle:
                     "path_step": 1, "path_seen": 0,
                     "crop_source": None, "crop_box_px": None, "crop_skew_s": None,
                     "frame_px": None, "frames": 0, "group_frames": 0,
+                    "people_max": 0,
                 }
             # The visit ends when the object was LAST SEEN, not when its
             # track finally expired: a track coasts for seconds after its
@@ -358,6 +369,11 @@ class VisitLifecycle:
                 v["end"] = now_wall
             v["label"] = tr.label
             v["frames"] += 1
+            if getattr(tr, "matched_now", True) and getattr(tr, "confirmed", False):
+                v["people_max"] = max(v["people_max"], sum(
+                    1 for o in tracks
+                    if o.label == tr.label and getattr(o, "confirmed", False)
+                    and getattr(o, "matched_now", True)))
             if getattr(tr, "group_now", False):
                 v["group_frames"] += 1
             ring = getattr(tr, "plate_ring", None)
@@ -507,4 +523,5 @@ class VisitLifecycle:
             evidence_frame_px=v.get("frame_px"),
             evidence_skew_s=(float(v["crop_skew_s"])
                              if jpeg is not None and v.get("crop_skew_s") is not None else None),
+            people_in_frame=(v.get("people_max") or None),
         )

@@ -1719,3 +1719,55 @@ def test_the_window_finds_rows_whatever_the_local_timezone(client, db, monkeypat
     body = client.get("/api/v1/search", params={"q": "any car in the last 5 mins"}).json()
     assert body["interpretation"]["matched"]["when"] == "last 5 mins"
     assert body["total"] == 3
+
+
+# ── counts and groups ───────────────────────────────────────────────
+
+def test_counts_and_groups_become_min_people_not_words():
+    """'did you see the 3 persons together' used to parse to free text
+    'persons together', match nothing, and relax to every visit."""
+    p = _p("did you see the 3 persons together")
+    assert p.labels == ["person"] and p.min_people == 3 and p.text == ""
+    assert p.matched["count"] == "3 together" and p.ignored == []
+    p = _p("two people")
+    assert p.labels == ["person"] and p.min_people == 2 and p.text == ""
+    p = _p("a group of men near the door")
+    assert p.labels == ["person"] and p.min_people == 2 and p.text == "door"
+    p = _p("three cars")
+    assert p.labels == ["car"] and p.min_people is None, "a count of cars is not a people count"
+    p = _p("person blue")
+    assert p.min_people is None and p.text == "blue"
+    assert "min_people" in p.as_dict()
+
+
+def test_min_people_filters_on_the_pipelines_count(db):
+    from services.search_service import count_search_events
+    from services.timeline_service import record_track_visit
+    t = NOW
+    alone = record_track_visit(db, camera_id=1, label="person", started_at=t, ended_at=t,
+                               people=1)
+    trio = record_track_visit(db, camera_id=1, label="person", started_at=t, ended_at=t,
+                              track_id="b", people=3)
+    old = record_track_visit(db, camera_id=1, label="person", started_at=t, ended_at=t,
+                             track_id="c")                      # before the count existed
+    db.commit()
+    assert trio.payload["people"] == 3 and "people" not in (old.payload or {})
+    base = dict(from_=None, to=None, plate=None, source=None, scope=None, zone_id=None, has_plate=False)
+    assert count_search_events(db, labels=["person"], camera_ids=None, text="", attrs=None,
+                               min_people=2, **base) == 1
+    assert count_search_events(db, labels=["person"], camera_ids=None, text="", attrs=None,
+                               min_people=None, **base) == 3
+
+
+def test_a_colour_binds_to_the_thing_it_describes_in_the_text_query():
+    """'blue shirt' is blue within two words of shirt, not blue anywhere
+    plus shirt anywhere; 'blue' alone with a person is blue clothing."""
+    from services.search_service import fts_query
+    assert fts_query("blue shirt") == ("to_tsquery", "blue <2> shirt")
+    assert fts_query("light blue t-shirt") == ("to_tsquery", "light & blue <2> shirt")
+    fn, arg = fts_query("blue")
+    assert fn == "to_tsquery" and arg.startswith("blue <2> (shirt | t | tshirt | tee | top")
+    assert fts_query("beard laptop") == ("plainto_tsquery", "beard laptop")
+    assert fts_query("red van") == ("to_tsquery", "red <2> van")
+    fn, arg = fts_query("man red carrying box")
+    assert fn == "to_tsquery" and arg.startswith("man & red <2> (shirt") and arg.endswith(") & carrying & box")

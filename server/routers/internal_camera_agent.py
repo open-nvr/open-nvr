@@ -130,6 +130,11 @@ class TrackEventIn(BaseModel):
     started_at: datetime
     ended_at: datetime | None = None
     stationary: bool | None = None
+    # The most people the detector had in frame at once during this
+    # visit, this one included (detect-pipeline counts confirmed tracks of
+    # the same label per frame). Kept under payload["people"]; the search
+    # answers "three people together" from it.
+    people_in_frame: int | None = None
     # Best-frame crop (JPEG, base64). Optional: a visit with no retained crop
     # is still history worth keeping.
     evidence_jpeg_b64: str | None = None
@@ -267,6 +272,7 @@ async def ingest_track_event(
             scene_evidence_path=scene_rel,
             zone_ids=_zone_ids_for(db, payload),
             evidence=_evidence_facts(payload),
+            people=(max(1, int(payload.people_in_frame)) if payload.people_in_frame else None),
         )
     except IntegrityError:
         # Retry raced an earlier success — the visit already exists
