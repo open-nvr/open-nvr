@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 
 from .. import schemas
 from ..services.streams_service import finalize_attendance as svc_finalize

@@ -51,7 +51,7 @@ examples/attendly/
   web/                       the React app (Vite + Tailwind), built into web/dist by the Dockerfile
   tests/                     pytest (see below)
   Dockerfile                 node build stage + python runtime, port 9300
-docker-compose.attendly.yml  overlay: profile `attendly`, depends on core + insightface-adapter
+docker-compose.apps.yml      service `attendly`, profile `attendly`, depends on core + insightface-adapter
 docker-compose.apps.yml      insightface-adapter / insightface-register gain the `attendly` profile
 scripts/install.sh           Attendly listed next to the Camera Agent in the app picker
 .github/workflows/ci.yml     attendly added to the examples pytest matrix
@@ -129,7 +129,7 @@ React app (there is no node on the dev machine, so the image build is the
 frontend's type/bundle check) and installs from `uv.lock`.
 
 Integration (manual, needs a running OpenNVR with one camera):
-`OPENNVR_EXAMPLE_COMPOSE=docker-compose.attendly.yml`,
+`OPENNVR_EXAMPLE_COMPOSE=docker-compose.apps.yml`,
 `OPENNVR_EXAMPLE_PROFILE=attendly`, `./start.sh`, open the catalog → Attendly
 → Open app → log in with the OpenNVR admin → add a room from the camera list →
 enrol a student from the webcam → schedule a class for now → watch

@@ -11,8 +11,8 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Attendly: classroom attendance as an OpenNVR application.** The
   attendance app that ran on AWS Rekognition and DynamoDB now runs beside
   OpenNVR the way the Camera Agent does — its own container
-  (`examples/attendly`, overlay `docker-compose.attendly.yml`, profile
-  `attendly`, port 9300), its own web UI, OpenNVR login, and a card in the
+  (`examples/attendly`, a service in `docker-compose.apps.yml` and an App
+  Catalog entry, profile `attendly`, port 9300), its own web UI, OpenNVR login, and a card in the
   App Catalog whose "Open app" opens that UI in a new tab. Rooms are OpenNVR
   cameras; frames come from core's snapshot path; detection and recognition
   go through KAI-C to the InsightFace adapter, which the profile starts.
@@ -40,7 +40,12 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   be enrolled in several course/section pairs; the 100-student limit is
   off unless configured; the overlay defaults to Asia/Kolkata as the
   README says; and slash-less `POST`/`PUT` calls from the UI (creating a
-  course) are redirected instead of answered 405.
+  course) are redirected instead of answered 405. Attendly is a regular
+  catalog app: a service in `docker-compose.apps.yml` with an
+  `apps_index.yml` entry, so the installer's app menu and the App
+  Catalog's Install button both offer it; its contract surface rides the
+  SDK's `ContractApp`; and a browser refresh on a UI page whose path
+  shares an API prefix (`/attendance`, `/gates`…) serves the page.
 
 - **The escalation proposal: weak evidence on the sub stream → detect on
   the main stream, by consent.** Every posted visit now says where its crop

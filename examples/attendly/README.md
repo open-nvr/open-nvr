@@ -14,26 +14,27 @@ the `attendly` compose profile starts.
 
 ## Run it
 
-OpenNVR must be running. From the repo root:
+OpenNVR must be running. Attendly is a catalog app: pick it when the
+installer asks which apps to run from the first start (answer **y** to
+"Pick apps to run from the first start?" and choose **attendly**), install
+it later from **Settings → App Catalog**, or from the repo root:
 
 ```bash
-docker compose -f docker-compose.yml \
-               -f docker-compose.apps.yml \
-               -f docker-compose.attendly.yml \
-               --profile attendly up -d
+docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile attendly up -d
 ```
 
-or let the installer pick it: `./scripts/install.sh` lists **attendly** next to
-**camera-agent**, which writes to `.env`:
+That profile starts the app and the InsightFace adapter it needs. To keep
+it in `./start.sh`'s hands, the installer writes (or you add) to `.env`:
 
 ```
-OPENNVR_EXAMPLE_COMPOSE=docker-compose.attendly.yml
+OPENNVR_EXAMPLE_COMPOSE=docker-compose.apps.yml
 OPENNVR_EXAMPLE_PROFILE=attendly
 ```
 
-Then open `http://<host>:9300/` — or OpenNVR → Apps → Attendly → **Open app**.
-Set `ATTENDLY_PUBLIC_URL` in `.env` when the app sits behind a reverse proxy
-or a public hostname; the catalog card and the manifest carry that address.
+Then open **http://\<host\>:9300/** — or the Attendly card in the App Catalog,
+whose **Open app** button opens the same page in a new tab. Sign in with your
+OpenNVR account. For a reverse proxy or public hostname set
+`ATTENDLY_PUBLIC_URL`; the card and the manifest carry that address.
 
 ## What you do in it
 

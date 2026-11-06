@@ -175,8 +175,9 @@ def test_student_limit_is_off_by_default_and_configurable(client, env, monkeypat
 def test_overlay_timezone_default():
     import pathlib
 
-    text = pathlib.Path(__file__).resolve().parents[3].joinpath("docker-compose.attendly.yml").read_text()
-    assert "TZ=${TZ:-Asia/Kolkata}" in text and "ATTENDLY_TIMEZONE=${ATTENDLY_TIMEZONE:-${TZ:-Asia/Kolkata}}" in text
+    text = pathlib.Path(__file__).resolve().parents[3].joinpath("docker-compose.apps.yml").read_text()
+    block = text.split("\n  attendly:\n", 1)[1].split("\n  smart-doorbell-config-init:", 1)[0]
+    assert "TZ=${TZ:-Asia/Kolkata}" in block and "ATTENDLY_TIMEZONE=${ATTENDLY_TIMEZONE:-${TZ:-Asia/Kolkata}}" in block
 
 
 # 7. Slash-less writes from the UI reach the routers.
@@ -200,3 +201,12 @@ def test_slashless_post_and_put_are_redirected_not_405(env, tmp_path, monkeypatc
         assert c.put(f"/classrooms/{room['id']}", json={"name": "Lab 2"}).json()["name"] == "Lab 2"
         assert c.get("/manage-courses").status_code == 200  # the SPA still serves pages
         assert c.post("/manage-courses").status_code == 405
+        # a page whose path shares an API prefix: the browser (text/html) gets
+        # the page, the UI's own API calls (JSON) get the router
+        html = {"accept": "text/html,application/xhtml+xml"}
+        for page in ("/attendance", "/gates", "/staff", "/meals", "/staff-attendance"):
+            r = c.get(page, headers=html, follow_redirects=False)
+            assert r.status_code == 200 and "ui" in r.text, page
+        r = c.get("/courses", headers={"accept": "application/json, text/plain, */*"}, follow_redirects=False)
+        assert r.status_code == 307 and r.headers["location"].endswith("/courses/")
+        assert c.get("/gates/status", headers=html).status_code == 200  # a real API route is unaffected

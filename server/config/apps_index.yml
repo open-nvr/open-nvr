@@ -538,6 +538,47 @@
             - opennvr_internal
     command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d alert-notifier
 
+- id: attendly
+  name: Attendly
+  summary: Attendance by face on your cameras — classroom rosters from a weekly timetable, hostel and mess flap barriers (or in/out alerts without one), meal bookings, and staff check-in/out per department. A full application with its own web UI (opens in a new tab) and OpenNVR login.
+  category: attendance
+  version: "1.0.0"
+  image: ghcr.io/open-nvr/attendly:latest
+  build_context: examples/attendly
+  requires_tasks: [face_detection, face_recognition]
+  requires_adapters: [insightface]
+  emits: [hostel_in, hostel_out, gate_denied, mess_served]
+  docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/attendly/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/attendly
+  network_egress: []
+  install:
+    compose: |
+      # INFORMATIONAL — this service already ships in
+      # docker-compose.apps.yml (with its data volume); you do NOT paste
+      # this anywhere. Run the command below and compose brings it up
+      # from the shipped overlay, which also publishes the app's web UI
+      # on host port 9300 (the catalog card opens it).
+      services:
+        attendly:
+          profiles: [apps]
+          image: ${ATTENDLY_IMAGE:-opennvr/attendly:local-build}
+          restart: unless-stopped
+          environment:
+            - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
+            - NATS_URL=nats://nats:4222
+            - OPENNVR_URL=http://opennvr-core:8000
+            - KAIC_URL=http://opennvr-core:8100
+            - ATTENDLY_FACES_URL=http://insightface-adapter:9005
+          expose:
+            - "9300"
+          volumes:
+            - opennvr_attendly_data:/data
+          networks:
+            - opennvr_internal
+    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d attendly
+
 - id: smart-doorbell
   name: Smart Doorbell
   summary: Recognises faces at the door and keeps the People directory — family, residents, staff, contractors with expiry dates, a watchlist; strangers alert with a snapshot you can enrol from.

@@ -18,7 +18,8 @@ def app_ui_url(settings: Settings | None = None) -> str:
     return f"http://{{host}}:{s.port}/"
 
 
-def app_manifest(settings: Settings | None = None) -> dict[str, Any]:
+def build_manifest(settings: Settings | None = None):
+    """The SDK ``AppManifest`` (``app_manifest`` is its dict)."""
     from opennvr_app_sdk import AppManifest
     from opennvr_app_sdk.manifest import AlertType
 
@@ -65,4 +66,8 @@ def app_manifest(settings: Settings | None = None) -> dict[str, Any]:
         license="AGPL-3.0",
         use_cases=["classroom attendance", "lecture-hall roll call", "training-centre presence",
                    "hostel flap barriers", "mess entry against meal bookings", "staff attendance"],
-    ).to_dict()
+    )
+
+
+def app_manifest(settings: Settings | None = None) -> dict[str, Any]:
+    return build_manifest(settings).to_dict()

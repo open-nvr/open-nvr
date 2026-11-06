@@ -20,8 +20,6 @@ import asyncio
 import logging
 import os
 import socket
-import sys
-import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -37,6 +35,7 @@ from attendly import APP_ID, APP_VERSION
 from attendly.config import Settings, get_settings
 from attendly.gate import auth_middleware, is_api_path
 from attendly.manifest import app_manifest, app_ui_url
+from attendly.platform import get_platform_app, reset_platform_app
 from attendly.routers import (
     attendance,
     auth,
@@ -58,7 +57,6 @@ from attendly.routers import (
 from attendly.services.access import GateEngine
 from attendly.services.engine import StreamEngine
 from attendly.services.staff_attendance import StaffEngine
-from attendly.storage import repo
 from attendly.storage.db import init_db
 from attendly.utils.logging_utils import get_request_id, new_request_id, set_request_id
 
@@ -171,43 +169,21 @@ def build_app(settings: Optional[Settings] = None, *, start_engine: bool = True,
 
     app.middleware("http")(auth_middleware)
 
-    # ── Contract surface (open) ─────────────────────────────────────
+    # ── Contract surface (open) — answered by the SDK's ContractApp ──
+    reset_platform_app()
+    platform = get_platform_app(settings)
+
     @app.get("/health")
     async def health():
-        return {"status": "ok", "ready": True, "app": APP_ID, "version": APP_VERSION,
-                "uptime_seconds": int(time.time() - STARTED_AT)}
+        return platform.health()
 
     @app.get("/manifest")
     async def manifest():
-        return app_manifest(settings)
+        return platform.manifest_snapshot()
 
     @app.get("/state")
     async def state():
-        try:
-            c = repo.counts()
-        except Exception:
-            c = {}
-        try:
-            workers = StreamEngine.get_shared().status()
-        except Exception:
-            workers = []
-        try:
-            gate_workers = GateEngine.get_shared().status()
-        except Exception:
-            gate_workers = []
-        try:
-            staff_workers = StaffEngine.get_shared().status()
-        except Exception:
-            staff_workers = []
-        return {
-            "app": APP_ID, "version": APP_VERSION, "ui_url": app_ui_url(settings),
-            "students": c.get("students", 0), "rooms": c.get("rooms", 0), "courses": c.get("courses", 0),
-            "finalized_classes": c.get("finalized_classes", 0),
-            "active_classes": sum(1 for w in workers if w.get("running")), "workers": workers,
-            "hostlers": c.get("hostlers", 0), "staff": c.get("staff", 0), "departments": c.get("departments", 0),
-            "gates": c.get("gates", 0), "active_gates": sum(1 for w in gate_workers if w.get("running")),
-            "gate_workers": gate_workers, "staff_workers": staff_workers,
-        }
+        return platform.state_snapshot()
 
     # ── API ─────────────────────────────────────────────────────────
     app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
@@ -266,10 +242,15 @@ def build_app(settings: Optional[Settings] = None, *, start_engine: bool = True,
         # before the slash redirect could happen.
         @app.api_route("/{path:path}", methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"], include_in_schema=False)
         async def spa(path: str, request: Request):
+            # The UI's pages (/attendance, /gates, /staff, /meals…) share
+            # their first segment with API routers. A browser navigating
+            # to a page asks for text/html; the UI's own API calls and
+            # every other client ask for JSON — that is the difference.
+            wants_page = request.method in ("GET", "HEAD") and "text/html" in request.headers.get("accept", "")
             # An API path that reached the catch-all is one without its
             # trailing slash (the UI sends ``/courses``): redirect to the
             # router's spelling — 307 keeps the method and the body.
-            if is_api_path(f"/{path}"):
+            if is_api_path(f"/{path}") and not wants_page:
                 if not path.endswith("/"):
                     url = request.url.replace(path=f"/{path}/")
                     return RedirectResponse(str(url), status_code=307)

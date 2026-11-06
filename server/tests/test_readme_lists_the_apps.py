@@ -117,7 +117,7 @@ def test_the_stated_count_matches_the_table():
     test does not need editing every time an app is added — only when
     the sentence stops being true.
     """
-    m = re.search(r"([A-Za-z]+) of the ([a-z]+) shipped examples are "
+    m = re.search(r"([A-Za-z]+) of the ([a-z-]+) shipped examples are "
                   r"listed above", _README)
     assert m, ("the sentence stating how many examples are listed has "
                "been reworded — update this test, or drop the count "
@@ -125,7 +125,8 @@ def test_the_stated_count_matches_the_table():
 
     words = {"ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
              "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17,
-             "eighteen": 18, "nineteen": 19, "twenty": 20}
+             "eighteen": 18, "nineteen": 19, "twenty": 20, "twenty-one": 21,
+             "twenty-two": 22, "twenty-three": 23, "twenty-four": 24}
     listed_claim = words[m.group(1).lower()]
     total_claim = words[m.group(2).lower()]
 
