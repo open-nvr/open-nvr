@@ -14,6 +14,7 @@ OpenNVR describes a visit in words (a caption and two visual questions per visit
 | captioner | runs on | one 124 KB evidence photo | outcome |
 |---|---|---|---|
 | qwen3-vl 2B instruct via Ollama (`CAPTION_ADAPTER=ollamavlm`) | 4 ARM cores | 60–90 s | every call outran KAI-C's 30 s proxy timeout; the box sat at 100 % CPU for an hour writing zero captions |
+| moondream 0.5B int8 in-container (`CAPTION_ADAPTER=moondream`, the CPU default), measured 2026-11-06 on this board | ARM cores | 16.0 / 17.1 / 17.4 s a caption, 14.5 s a visual question; 2.0 GiB RSS | works, but a busy camera outruns it; the caption was correct ("a man in a green shirt and blue jeans works on a computer…") |
 
 The Hexagon can run a language model, but only one compiled ahead of time for the exact SoC. The only
 vision-language bundles published for the QCS8275 are Google's LiteRT-LM releases of Gemma
