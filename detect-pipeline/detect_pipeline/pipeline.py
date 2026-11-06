@@ -41,7 +41,7 @@ from .detector import (
     detections_to_frame,
     to_bgr,
 )
-from .regions import Box, calculate_region, get_min_region_size, intersection_over_union
+from .regions import Box, calculate_region, contained_share, get_min_region_size, intersection_over_union
 from .tracking import Detection, Track, Tracker
 
 log = logging.getLogger("detect_pipeline.pipeline")
@@ -97,12 +97,18 @@ class FrameResult:
 #: not — that double box was the most visible overlay inaccuracy, and the
 #: tracker (which matches per label) spawned two tracks for it.
 CROSS_LABEL_IOU = 0.85
+#: A same-label box with at least this share of its own area inside a larger
+#: kept box is a PART of that object (a head-and-shoulders box on a person
+#: whose full body is already boxed), not a second one. IoU never catches
+#: it: a part is small, so its IoU with the whole is low. 0 or 1 = off.
+CONTAINMENT = 0.7
 
 
 def nms(
     dets: list[Detection],
     iou_threshold: float = 0.5,
     cross_label_iou: float | None = CROSS_LABEL_IOU,
+    containment: float | None = CONTAINMENT,
 ) -> list[Detection]:
     """Greedy non-max suppression; keeps the highest score.
 
@@ -113,6 +119,19 @@ def nms(
     ``iou_threshold`` is raised to it, since suppressing ACROSS labels
     more eagerly than within one is never the intent.
 
+    A same-label box that is smaller than a kept box and lies at least
+    ``containment`` of its own area inside it is a part of that object —
+    the detector's second box on one person's upper body, lower body or
+    torso, which on a crowded frame it draws beside the whole person with
+    an IoU of 0.4 to 0.5 — and is dropped whatever its IoU. Measured on
+    the Ventuno Q (2026-11-05, replayed from the recordings): with IoU
+    alone a pass of three people posted up to eighteen visits. The one
+    shape of containment that is NOT a part is the group box, a box the
+    detector draws around several people beside their own boxes: it holds
+    two or more same-label boxes, and it is the group box that goes.
+    ``None``, ``<= 0`` or ``>= 1`` disables the rule. A person in front of
+    a car is a different label and never affected.
+
     The losing label is gone from ``FrameResult.detections`` too, so a
     benchmark scoring per-label recall (evalcmp) measures this policy as
     well as the model; run such comparisons with the rule off
@@ -121,6 +140,9 @@ def nms(
     cross: float | None = None
     if cross_label_iou is not None and 0.0 < cross_label_iou < 1.0:
         cross = max(cross_label_iou, iou_threshold)
+    contain: float | None = None
+    if containment is not None and 0.0 < containment < 1.0:
+        contain = containment
     kept: list[Detection] = []
     for d in sorted(dets, key=lambda x: x.score, reverse=True):
         duplicate = False
@@ -131,7 +153,45 @@ def nms(
                 break
         if not duplicate:
             kept.append(d)
-    return kept
+    if contain is None or len(kept) < 2:
+        return kept
+    # The part rule, by SIZE rather than score: the detector often scores
+    # the upper body higher than the whole person (the face is the clearest
+    # part), so a score-ordered pass would keep the part and let the whole
+    # through. Largest first; a same-label box mostly inside a larger
+    # survivor is a part of it.
+    # Two shapes of containment, told apart by COUNT. A box with two or
+    # more same-label boxes inside it is a GROUP box: the detector drew one
+    # box around people crossing together (three of them, Ventuno Q
+    # 2026-11-05) beside the box per person; the group box is the duplicate
+    # and the people are kept. A box with exactly one same-label box inside
+    # it is a whole with its PART (an upper body, a torso); the part is the
+    # duplicate. (A person inside a group box whose other members were
+    # missed on this frame reads as a part too and loses this frame; their
+    # track coasts, and the tracker marks the group box's track by the
+    # members it holds over time.)
+    by_size = sorted(kept, key=lambda x: _area(x.box), reverse=True)
+    dropped: set[int] = set()
+    for i, outer in enumerate(by_size):
+        if i in dropped:
+            continue
+        inside = [j for j in range(i + 1, len(by_size))
+                  if j not in dropped and by_size[j].label == outer.label
+                  and contained_share(by_size[j].box, outer.box) >= contain]
+        if len(inside) >= 2:
+            dropped.add(i)                            # a group box
+        elif len(inside) == 1:
+            dropped.add(inside[0])                    # a part of this one
+    whole = [d for j, d in enumerate(by_size) if j not in dropped]
+    # back in score order, as callers expect
+    return [d for d in kept if any(d is w for w in whole)]
+
+
+def _area(b: Box) -> float:
+    return max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+
+
+
 
 
 def select_regions(
@@ -209,6 +269,7 @@ class DetectPipeline:
         max_regions: int = 8,
         allowed_labels: frozenset[str] | set[str] | None = None,
         cross_label_iou: float | None = CROSS_LABEL_IOU,
+        containment: float | None = CONTAINMENT,
         object_mask: Callable[[list[Detection]], list[Detection]] | None = None,
         object_filter: Callable[[list[Detection]], list[Detection]] | None = None,
     ) -> None:
@@ -242,6 +303,9 @@ class DetectPipeline:
         # See nms(): one object the model labels two ways is one box.
         # DETECT_NMS_CROSS_LABEL_IOU; 0 or 1 turns the rule off.
         self.cross_label_iou = cross_label_iou
+        # See nms(): a same-label box mostly inside a larger one is a part.
+        # DETECT_NMS_CONTAINMENT; 0 or 1 turns the rule off.
+        self.containment = containment
         self._frame_idx = 0
 
     def process_frame(self, frame) -> FrameResult:
@@ -336,7 +400,7 @@ class DetectPipeline:
                 before = len(dets)
                 dets = self.object_mask(dets)
                 masked = before - len(dets)
-            dets = nms(dets, cross_label_iou=self.cross_label_iou)
+            dets = nms(dets, cross_label_iou=self.cross_label_iou, containment=self.containment)
             if self.object_filter is not None and dets:
                 before = len(dets)
                 dets = self.object_filter(dets)

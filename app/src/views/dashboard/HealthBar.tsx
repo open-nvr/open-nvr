@@ -110,6 +110,18 @@ export function HealthBar({ actions }: { actions?: ReactNode }) {
     : disk.percent >= 98 ? 'crit'
       : diskThr != null && disk.percent >= diskThr ? 'warn' : 'ok'
   const resourceAlerts = res.data?.active_alerts?.length ?? 0
+  // Disk rotation: core is deleting the oldest recordings to keep its
+  // headroom. Recording continues; the operator should know what the
+  // effective retention has become, or that the floor cannot be reached
+  // because the disk is full of other data.
+  const rotation = res.data?.rotation ?? null
+  const rotationText = rotation
+    ? rotation.unreachable
+      ? t('dashboard.health.rotationUnreachable', { gb: rotation.min_free_gb ?? '' })
+      : rotation.effective_retention_hours != null
+        ? t('dashboard.health.rotating', { hours: Math.round(rotation.effective_retention_hours) })
+        : t('dashboard.health.rotatingShort')
+    : null
 
   // The detect-pipeline: a stack whose detector is down, idle, or on CPU
   // after asking for an accelerator looked healthy everywhere on this bar
@@ -143,6 +155,7 @@ export function HealthBar({ actions }: { actions?: ReactNode }) {
   if (detLevel === 'warn') warnings.push(`${t('dashboard.health.detection')}: ${detValue}`)
   if (stalled > 0) warnings.push(t('dashboard.health.recording'))
   if (diskLevel === 'warn') warnings.push(t('dashboard.health.storage'))
+  if (rotationText && diskLevel !== 'crit') warnings.push(rotationText)
   if (resourceAlerts > 0) warnings.push(t('dashboard.health.resources'))
   if (!socketUp) warnings.push(t('dashboard.health.liveEvents'))
 
@@ -213,10 +226,10 @@ export function HealthBar({ actions }: { actions?: ReactNode }) {
           to="/cameras"
         />
         <Chip
-          level={diskLevel}
+          level={rotation && diskLevel === 'ok' ? 'warn' : diskLevel}
           label={t('dashboard.health.storage')}
-          value={disk ? `${formatBytes(disk.free)} ${t('dashboard.free')}` : diskLevel === 'crit' ? t('dashboard.health.error') : '…'}
-          title={disk ? `${disk.path} · ${Math.round(disk.percent)}% ${t('dashboard.used')}` : res.data?.disk_error ?? undefined}
+          value={disk ? `${formatBytes(disk.free)} ${t('dashboard.free')}${rotation ? ` · ${t('dashboard.health.rotatingShort')}` : ''}` : diskLevel === 'crit' ? t('dashboard.health.error') : '…'}
+          title={rotation?.description ?? (disk ? `${disk.path} · ${Math.round(disk.percent)}% ${t('dashboard.used')}` : res.data?.disk_error ?? undefined)}
         />
       </div>
 

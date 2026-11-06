@@ -508,6 +508,13 @@ class Settings(BaseSettings):
     # (60 s, doubling to 10 min, one probe per cooldown) and records the
     # `enrichment_adapter_too_slow` system event so the UI says why.
     events_enrichment_breaker_timeouts: int = 5
+    # A visit whose caption call failed (timed out, adapter unreachable)
+    # is not asked about again by the on-demand lane for this long. The
+    # failure is not recorded as "looked and found nothing" — that would
+    # hide the visit from every later pass — but asking again at once was
+    # how one Search kept a slow captioner computing the same photo for
+    # an hour. 0 = ask again every time.
+    events_caption_retry_cooldown_s: float = 600.0
     # The governor (services/enrichment_governor.py): whether the box can
     # afford enrichment at all right now, from the host monitor's CPU
     # sample and each adapter's smoothed latency. Above this CPU% the

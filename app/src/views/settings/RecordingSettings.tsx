@@ -78,6 +78,8 @@ export function RecordingSettings() {
     const [retentionDays, setRetentionDays] = useState(30)
     const [protectFlagged, setProtectFlagged] = useState(true)
     const [minFreeSpace, setMinFreeSpace] = useState<number | ''>('')
+    // The floor in force when the field is empty (automatic: 2 GB or 2 % of the disk).
+    const [autoFreeSpace, setAutoFreeSpace] = useState<number | null>(null)
     const [purgeOrphaned, setPurgeOrphaned] = useState(false)
 
     // Disk usage of the effective recordings volume (absent on older
@@ -117,6 +119,7 @@ export function RecordingSettings() {
             setRetentionDays(retention.retention_days ?? 30)
             setProtectFlagged(retention.protect_flagged ?? true)
             setMinFreeSpace(retention.min_free_space_gb ?? '')
+            setAutoFreeSpace(retention.effective_min_free_space_gb ?? null)
             setPurgeOrphaned(retention.purge_orphaned_under_pressure ?? false)
         } catch (e: any) {
             showError(e?.message || 'Failed to load recording settings')
@@ -369,16 +372,18 @@ export function RecordingSettings() {
                             <label className="block text-sm font-medium mb-1">Minimum Free Space (GB)</label>
                             <input
                                 type="number"
-                                min={1}
+                                min={0}
                                 max={100000}
                                 value={minFreeSpace}
                                 onChange={(e) => setMinFreeSpace(e.target.value === '' ? '' : parseInt(e.target.value))}
                                 className="w-full px-3 py-2 bg-[var(--bg-2)] border border-[var(--border)] focus:border-[var(--accent)] focus:outline-none"
-                                placeholder="Leave empty to disable"
+                                placeholder={autoFreeSpace != null ? `Automatic: ${autoFreeSpace} GB` : 'Automatic'}
                             />
                             <p className="text-xs text-[var(--text-dim)] mt-1">
-                                If free space falls below this threshold, oldest recordings will be deleted until space is freed.
-                                Leave empty to disable this feature.
+                                Below this much free space the oldest recordings are rotated out, oldest first, and recording
+                                continues. Leave empty for automatic: 2 GB or 2 % of the disk, whichever is more
+                                {autoFreeSpace != null ? ` (${autoFreeSpace} GB here)` : ''}. Photos of events are never
+                                deleted for space. Set 0 to turn rotation off.
                             </p>
                         </div>
 

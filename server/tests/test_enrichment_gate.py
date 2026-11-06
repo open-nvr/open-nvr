@@ -495,3 +495,44 @@ def test_an_interactive_call_waits_its_turn_but_is_never_refused_for_load(monkey
     body = _run(eg.infer_through_gate("clip", {"text": "white van"}, kind="embed",
                                       log=eg.logger, caller="t", interactive=True))
     assert body == {"result": {"embedding": [0.1, 0.2]}}
+
+
+def test_a_504_from_kaic_counts_as_a_timeout(_quiet_notify, clock, monkeypatch):
+    """KAI-C's proxy gave up waiting for the adapter (its own timeout) and
+    answered 504: the model is slow, not down. Read as a plain error the
+    breaker never tripped and the Search lane asked the same visit again
+    every time (Ventuno Q, 2026-11-05)."""
+    import httpx
+
+    from core.config import settings
+    from services import caption_enrichment as cap
+
+    monkeypatch.setattr(settings, "events_enrichment_breaker_timeouts", 2, raising=False)
+
+    class _Resp:
+        status_code = 504
+
+        @staticmethod
+        def json():
+            return {"detail": "adapter timeout"}
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: _Client())
+
+    async def call():
+        return await cap._caption_jpeg(b"jpeg", "moondream-vlm", "cam1", event_id=1)
+
+    gate = eg.gate_for("moondream-vlm")
+    assert _run(call()) is None and not gate.is_open
+    assert _run(call()) is None
+    assert gate.is_open, "two 504s in a row are two timeouts: the breaker trips"
+    assert gate.timeouts == 2

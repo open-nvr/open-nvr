@@ -489,3 +489,38 @@ def test_post_carries_the_evidence_facts_only_when_present():
                               evidence_frame_px=576, evidence_skew_s=0.1))
     assert (body["evidence_source"], body["evidence_box_px"], body["evidence_frame_px"],
             body["evidence_skew_s"]) == ("detect", 42, 576, 0.1)
+
+
+def test_a_visit_that_was_a_group_box_for_most_of_its_frames_is_dropped():
+    @dataclass
+    class _G(_Tr):
+        group_now: bool = False
+    lc = VisitLifecycle("3")
+    lc.observe([_G(1, group_now=True)], T0)
+    lc.observe([_G(1, group_now=True)], T0 + 2)
+    lc.observe([_G(1, group_now=False)], T0 + 4)
+    assert lc.observe([], T0 + 5) == [], "two of three frames a group: dropped"
+    lc.observe([_G(2, group_now=True)], T0)
+    lc.observe([_G(2)], T0 + 2)
+    lc.observe([_G(2)], T0 + 4)
+    (v,) = lc.observe([], T0 + 5)
+    assert v.track_id == "2", "one of three frames a group: a visit"
+
+
+def test_a_visit_ends_when_the_object_was_last_seen_not_when_its_track_expired():
+    @dataclass
+    class _M(_Tr):
+        matched_now: bool = True
+    lc = VisitLifecycle("3")
+    lc.observe([_M(1)], T0)
+    lc.observe([_M(1)], T0 + 3)
+    for k in range(1, 6):                                    # coasting for five seconds
+        lc.observe([_M(1, matched_now=False)], T0 + 3 + k)
+    (v,) = lc.observe([], T0 + 9)
+    assert v.ended_at.timestamp() == T0 + 3
+    # a fragment seen for 0.6 s then coasting: too short, never a visit
+    lc.observe([_M(2)], T0)
+    lc.observe([_M(2)], T0 + 0.6)
+    for k in range(1, 6):
+        lc.observe([_M(2, matched_now=False)], T0 + 0.6 + k)
+    assert lc.observe([], T0 + 7) == []

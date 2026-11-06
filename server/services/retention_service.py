@@ -37,6 +37,25 @@ from services.storage_service import get_effective_recordings_base_path
 
 RETENTION_SETTINGS_KEY = "recordings_retention"
 
+#: The free-space floor when the operator has not set one: 2 GB, or 2 % of
+#: the recordings volume if that is more (80 GB on a 4 TB disk). Below it
+#: core ROTATES: the oldest recordings go, oldest first, and recording never
+#: stops. The old default was "off", and a shipped box with a small disk
+#: sat at 10 GB free from an installer value it could never reach (Ventuno
+#: Q, 2026-11-04): the purge deleted every recording and every evidence
+#: photo, forever, and Search showed "no photo". 0 in the setting = off.
+DEFAULT_MIN_FREE_GB = 2.0
+DEFAULT_MIN_FREE_FRACTION = 0.02
+#: A rotation deletes past the floor by this much so the pressure loop does
+#: not thrash at the boundary: a quarter of the floor, at least 0.5 GB. It
+#: used to be a flat 5 GB, which with a 2 GB floor meant the first rotation
+#: deleted down to 7 GB free, nearly every recording on a small disk.
+HYSTERESIS_FRACTION = 0.25
+HYSTERESIS_MIN_GB = 0.5
+#: Edge-triggered system event while rotation is on (data carries the floor,
+#: the effective retention in hours, and whether the floor is reachable).
+ROTATION_EVENT = "disk_rotation"
+
 
 class RetentionService:
     """Service for managing recording retention and cleanup."""
@@ -137,8 +156,9 @@ class RetentionService:
             # remux cache) runs regardless of the recording retention policy.
             aux = RetentionService.cleanup_auxiliary(db, retention_days)
 
-            # If retention_days is 0, keep all recordings (unless min_free_space is triggered)
-            if retention_days == 0 and not min_free_space_gb:
+            # If retention_days is 0 and the floor is explicitly off, keep all
+            # recordings. (An unset floor is the automatic one, not off.)
+            if retention_days == 0 and min_free_space_gb is not None and float(min_free_space_gb) <= 0:
                 recording_logger.info(
                     "Retention policy: Keep all recordings indefinitely"
                 )
@@ -156,6 +176,7 @@ class RetentionService:
                     f"Recordings base path does not exist: {base_path}"
                 )
                 return {"deleted_files": 0, "deleted_records": 0, "freed_space_mb": 0}
+            min_free_space_gb = RetentionService.effective_min_free_gb(settings_dict, base_path)
 
             stats = {
                 "deleted_files": 0,
@@ -217,6 +238,10 @@ class RetentionService:
                         stats["deleted_files"] += stats_space["deleted_files"]
                         stats["deleted_records"] += stats_space["deleted_records"]
                         stats["freed_space_mb"] += stats_space["freed_space_mb"]
+                        RetentionService._note_rotation(db, base_path, min_free_space_gb, stats_space)
+                    else:
+                        RetentionService._clear_rotation_if_clear(
+                            base_path, min_free_space_gb, free_space_gb)
 
             # Evidence JPEGs age out with the recordings.
             stats["deleted_evidence"] = RetentionService.cleanup_evidence(
@@ -450,14 +475,47 @@ class RetentionService:
     DELETE_BATCH_SIZE = 500
     # Free-space hysteresis: once below the threshold, delete until we're this
     # far ABOVE it, so the pressure loop doesn't thrash at the boundary.
-    FREE_SPACE_HYSTERESIS_GB = 5.0
+    @staticmethod
+    def effective_min_free_gb(settings_dict: dict[str, Any], base_path: Path | str) -> float | None:
+        """The floor in force: the operator's value, the automatic one when
+        unset, None when explicitly 0 (off)."""
+        raw = settings_dict.get("min_free_space_gb")
+        if raw is not None:
+            try:
+                val = float(raw)
+            except (TypeError, ValueError):
+                val = 0.0
+            return val if val > 0 else None
+        total_gb = RetentionService._get_disk_total_gb(str(base_path))
+        if total_gb is None:
+            return DEFAULT_MIN_FREE_GB
+        return max(DEFAULT_MIN_FREE_GB, round(total_gb * DEFAULT_MIN_FREE_FRACTION, 1))
+
+    @staticmethod
+    def hysteresis_gb(min_free_gb: float) -> float:
+        return max(HYSTERESIS_MIN_GB, float(min_free_gb) * HYSTERESIS_FRACTION)
+
+    @staticmethod
+    def _get_disk_total_gb(path: str) -> float | None:
+        try:
+            return shutil.disk_usage(path).total / (1024 ** 3)
+        except OSError:
+            return None
 
     @staticmethod
     def _delete_rows_batch(
-        db: Session, base_path: Path, rows: list, stats: dict[str, Any]
+        db: Session, base_path: Path, rows: list, stats: dict[str, Any],
+        stop_when=None,
     ) -> None:
-        """Delete a batch of Recording rows and their files (+ empty dirs)."""
+        """Delete a batch of Recording rows and their files (+ empty dirs).
+
+        ``stop_when``, when given, is asked after every file whether the
+        goal is met (a ``disk_usage`` call, microseconds): a space rotation
+        then stops at its target inside the batch instead of taking the
+        whole batch, which with 500 rows is hours of footage."""
         for row in rows:
+            if stop_when is not None and stop_when():
+                break
             try:
                 file_path = base_path / row.file_path
                 size_mb = 0.0
@@ -635,18 +693,20 @@ class RetentionService:
 
         DB-driven oldest-first batches; ``shutil.disk_usage`` runs once per
         BATCH (the old version called it per file after two full ``rglob``
-        passes). Deletes until threshold + hysteresis so the 5-minute
-        pressure loop doesn't thrash at the boundary.
+        passes). Deletes until threshold + hysteresis (a quarter of the
+        floor, at least 0.5 GB) so the pressure loop doesn't thrash at the
+        boundary without wiping the archive in one pass.
 
         When indexed recordings run out, falls back to non-indexed consumers
-        oldest-first: filesystem-orphan clips, then evidence JPEGs, then (only
-        with ``purge_orphaned``, an explicit operator opt-in) the quarantined
-        ``orphaned/`` tree. Still below target after all that -> a critical
-        ``disk_purge_exhausted`` system event: the disk WILL fill and MediaMTX
-        will stop writing.
+        oldest-first: filesystem-orphan clips, then (only with
+        ``purge_orphaned``, an explicit operator opt-in) the quarantined
+        ``orphaned/`` tree. Evidence photos are never deleted for space.
+        Still below target after all that -> a critical
+        ``disk_purge_exhausted`` system event that says whether the floor is
+        reachable at all: the disk WILL fill and MediaMTX will stop writing.
         """
         stats = {"deleted_files": 0, "deleted_records": 0, "freed_space_mb": 0}
-        target_gb = min_free_space_gb + RetentionService.FREE_SPACE_HYSTERESIS_GB
+        target_gb = min_free_space_gb + RetentionService.hysteresis_gb(min_free_space_gb)
         exhausted_reason: str | None = None
 
         for _ in range(RetentionService.MAX_SPACE_BATCHES):
@@ -670,7 +730,12 @@ class RetentionService:
                 exhausted_reason = "no more deletable recordings"
                 break
             files_before = stats["deleted_files"]
-            RetentionService._delete_rows_batch(db, base_path, rows, stats)
+
+            def _cleared() -> bool:
+                f = RetentionService._get_disk_free_space_gb(str(base_path))
+                return f is not None and f >= target_gb
+
+            RetentionService._delete_rows_batch(db, base_path, rows, stats, stop_when=_cleared)
             if stats["deleted_files"] == files_before:
                 # Rows deleted but zero files freed: pure DB/FS drift. Keeping
                 # going would spin-delete the whole recordings index without
@@ -702,20 +767,119 @@ class RetentionService:
                 if orphaned_gb and not purge_orphaned
                 else ""
             )
+            # Is the floor reachable at all? With every indexed recording
+            # gone the disk would have free + recordings. When even that is
+            # under the floor, the space is taken by something else on the
+            # volume and no amount of rotation fixes it: say so, and say
+            # how much, instead of grinding on every minute.
+            recordings_gb = RetentionService._indexed_recordings_gb(db)
+            unreachable = (free_gb + recordings_gb) < min_free_space_gb
+            cause = (
+                f"; even with every recording deleted the disk would have "
+                f"{free_gb + recordings_gb:.1f} GB free: the space is taken by other "
+                f"data on this volume, not by recordings"
+                if unreachable else ""
+            )
             desc = (
                 f"Disk purge exhausted: {free_gb:.1f} GB free < target "
                 f"{target_gb:.1f} GB ({exhausted_reason or 'nothing left to delete'})"
-                f"{quarantine_note}"
+                f"{quarantine_note}{cause}"
             )
             recording_logger.warning(desc)
             RetentionService._set_purge_exhausted(
                 True, free_gb, target_gb, description=desc
             )
             stats["exhausted"] = True
+            stats["unreachable"] = unreachable
         elif free_gb is not None:
             RetentionService._set_purge_exhausted(False, free_gb, target_gb)
 
         return stats
+
+    @staticmethod
+    def _indexed_recordings_gb(db: Session) -> float:
+        """Size of every indexed recording, from the index (file_size)."""
+        try:
+            from sqlalchemy import func as _f
+
+            total = db.query(_f.coalesce(_f.sum(Recording.file_size), 0.0)).scalar() or 0.0
+            return float(total) / (1024 ** 3)
+        except Exception:  # noqa: BLE001 - a size estimate must never fail the purge
+            return 0.0
+
+    @staticmethod
+    def rotation_state(db: Session, base_path: Path, min_free_gb: float) -> dict[str, Any]:
+        """What rotation means right now: the floor, the oldest recording
+        still held (the effective retention), and whether the floor can be
+        reached at all."""
+        oldest = (
+            db.query(Recording.start_time)
+            .order_by(Recording.start_time.asc())
+            .first()
+        )
+        oldest_at = oldest[0] if oldest else None
+        if oldest_at is not None and oldest_at.tzinfo is None:
+            oldest_at = oldest_at.replace(tzinfo=UTC)
+        hours = (
+            round((datetime.now(UTC) - oldest_at).total_seconds() / 3600, 1)
+            if oldest_at else None
+        )
+        free_gb = RetentionService._get_disk_free_space_gb(str(base_path))
+        recordings_gb = RetentionService._indexed_recordings_gb(db)
+        return {
+            "min_free_gb": round(float(min_free_gb), 2),
+            "free_gb": round(free_gb, 2) if free_gb is not None else None,
+            "recordings_gb": round(recordings_gb, 2),
+            "oldest_recording_at": oldest_at.isoformat() if oldest_at else None,
+            "effective_retention_hours": hours,
+            "unreachable": bool(free_gb is not None and (free_gb + recordings_gb) < float(min_free_gb)),
+        }
+
+    @staticmethod
+    def _note_rotation(db: Session, base_path: Path, min_free_gb: float, stats: dict[str, Any]) -> None:
+        """Rotation is on: raise (or refresh) the edge-triggered event the
+        dashboard reads. Best-effort."""
+        try:
+            from services.system_events import record_system_event_edge
+
+            state = RetentionService.rotation_state(db, base_path, min_free_gb)
+            hours = state["effective_retention_hours"]
+            if state["unreachable"]:
+                desc = (
+                    f"Disk full: the {state['min_free_gb']:g} GB headroom cannot be kept even with "
+                    f"every recording deleted ({state['free_gb']} GB free, {state['recordings_gb']} GB "
+                    f"of recordings); the space is taken by other data on this volume"
+                )
+            else:
+                desc = (
+                    f"Disk full: rotating recordings to keep {state['min_free_gb']:g} GB free; "
+                    f"footage is kept for about {hours:g} hours instead of the configured retention"
+                    if hours is not None else
+                    f"Disk full: rotating recordings to keep {state['min_free_gb']:g} GB free"
+                )
+            record_system_event_edge(
+                event_type=ROTATION_EVENT, active=True, severity="warning",
+                description=desc, data={**state, "deleted_files": stats.get("deleted_files", 0)},
+            )
+        except Exception as e:  # noqa: BLE001
+            recording_logger.warning(f"{ROTATION_EVENT} event failed: {e}")
+
+    @staticmethod
+    def _clear_rotation_if_clear(base_path: Path, min_free_gb: float, free_gb: float) -> None:
+        """Free space is back above the floor plus its margin: rotation is
+        over. Edge-triggered, so this is a no-op while nothing changes."""
+        if free_gb < float(min_free_gb) + RetentionService.hysteresis_gb(min_free_gb):
+            return
+        try:
+            from services.system_events import record_system_event_edge
+
+            record_system_event_edge(
+                event_type=ROTATION_EVENT, active=False, severity="warning",
+                description=f"Disk rotation over: {free_gb:.1f} GB free",
+                data={"min_free_gb": round(float(min_free_gb), 2), "free_gb": round(free_gb, 2)},
+            )
+        except Exception as e:  # noqa: BLE001
+            recording_logger.warning(f"{ROTATION_EVENT} clear failed: {e}")
 
     @staticmethod
     def _set_purge_exhausted(
@@ -750,9 +914,15 @@ class RetentionService:
     ) -> None:
         """Free space from files the recordings index doesn't cover.
 
-        Order: filesystem-orphan clips in camera dirs (no DB row), then
-        .evidence JPEGs, then — opt-in only — quarantined orphaned/ clips.
-        Each group is deleted oldest-first until the target clears.
+        Order: filesystem-orphan clips in camera dirs (no DB row), then —
+        opt-in only — quarantined orphaned/ clips. Each group is deleted
+        oldest-first until the target clears.
+
+        Evidence JPEGs are NOT a group. They are about 50 KB each, so
+        deleting thousands frees nothing that matters, and each one is the
+        photo of an event: on the Ventuno Q (2026-11-04) a floor the disk
+        could never reach purged every photo and Search showed "no photo"
+        for every visit. Evidence ages out with the events, never for space.
         """
         try:
             from services.camera_identity import ORPHANED_DIR_NAME
@@ -770,10 +940,6 @@ class RetentionService:
                     if rel not in known:
                         fs_orphans.append(f)
             groups.append(fs_orphans)
-
-            evidence_dir = base_path / ".evidence"
-            if evidence_dir.is_dir():
-                groups.append(list(evidence_dir.rglob("*.jpg")))
 
             if purge_orphaned:
                 orphan_root = base_path / ORPHANED_DIR_NAME
@@ -868,11 +1034,11 @@ class RetentionService:
             close_db = True
         try:
             settings_dict = RetentionService._get_retention_settings(db)
-            min_free = settings_dict.get("min_free_space_gb")
-            if not min_free:
-                return None
             base_path = Path(get_effective_recordings_base_path(db))
             if not base_path.exists():
+                return None
+            min_free = RetentionService.effective_min_free_gb(settings_dict, base_path)
+            if not min_free:
                 return None
             free_gb = RetentionService._get_disk_free_space_gb(str(base_path))
             if free_gb is None:
@@ -880,6 +1046,7 @@ class RetentionService:
                 # monitor raises disk_stat_error for visibility.
                 return None
             if free_gb >= min_free:
+                RetentionService._clear_rotation_if_clear(base_path, min_free, free_gb)
                 return None
             recording_logger.warning(
                 f"Disk pressure: {free_gb:.1f}GB free < {min_free}GB threshold — "
@@ -894,6 +1061,7 @@ class RetentionService:
                     "purge_orphaned_under_pressure", False
                 ),
             )
+            RetentionService._note_rotation(db, base_path, min_free, stats)
             # History row for the purge itself (discrete occurrence, not an
             # active/inactive pair). The async loop in main.py publishes the
             # live bus copy — this thread only persists.

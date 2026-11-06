@@ -219,7 +219,7 @@ def test_a_tentative_track_files_its_request_only_once_confirmed():
     box = (100, 100, 200, 300)
     sub = _scene(rng, SUB, subject=box)
     filed = []
-    tk = Tracker(SUB, TrackConfig(fps=5))
+    tk = Tracker(SUB, TrackConfig(fps=5, min_initialized=2))
     tk.retain_scene = False
     tk.evidence_request = filed.append
     tk.update([Detection("person", box, 0.8)], sub, frame_ts=10.0)

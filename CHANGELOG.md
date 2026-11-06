@@ -20,6 +20,22 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   triggers on a workflow's alert; a run a restart interrupted is marked
   failed, not redone. Ask a person, app actions and `notify` are recorded
   as "not available yet" until approvals land.
+
+- **Captions on the Qualcomm NPU.** The qualcomm flavour now runs the
+  captioner on the Hexagon too: `start.sh` fills `CAPTION_ADAPTER=litertlm`
+  (ai-adapter's new LiteRT-LM adapter: Gemma 4 E2B compiled for the
+  QCS8275) and the `-qualcomm` image tag when `.env` still named a CPU
+  captioner with no tag of its own, the overlay lends the service the DSP
+  and two volumes (the 2.7 GB model, downloaded once from Hugging Face;
+  Qualcomm's runtime libraries, fetched once), and the installer suggests
+  it and defaults visit descriptions on there. Measured on a Ventuno Q
+  (2026-11-05): 2.5 s a photo warm, 4.3 s cold, the detector sharing the
+  NPU 38 → 44 ms an inference. Why: a Search "describe" on the field box
+  went to qwen3-vl 2B through Ollama on the ARM cores — 60–90 s a photo
+  against a 30 s deadline, so every caption was computed, discarded and
+  requested again, and the box sat at 100 % CPU. Moving the flavour back
+  to cpu resets the pick to moondream.
+
 - **The workflows API (#773).** `workflows` and `workflow_versions`
   tables, the permissions `workflows.view`, `.manage` and `.approve`
   (granted on upgrade to the roles RFC #620 names, through `cameras.view`
@@ -235,6 +251,18 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Disk rotation instead of a purge that empties the box.** The free-space
+  floor now defaults to 2 GB, or 2 % of the recordings volume if that is
+  more (it used to be off, and installs that had set 10 GB on a small disk
+  could never reach it: core deleted every recording and every event photo,
+  forever). Below the floor core rotates: the oldest recordings go, oldest
+  first, in steps of a quarter of the floor rather than a flat 5 GB, and
+  recording never stops. Event photos are never deleted for space. While
+  rotation is on the dashboard says so, with the effective retention in
+  hours; when the floor cannot be reached even with no recordings left, it
+  says the disk is full of other data and by how much. The setting now
+  shows what "automatic" means on this disk; 0 turns rotation off.
+
 - **Smart Doorbell: `min_face_px` defaults to 100 (was 40), and a name is
   a vote.** The frames are the camera's main stream, so 100 px is a face
   within a few metres of the door; below it a miss says distance, not
@@ -292,6 +320,92 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   timing matters.
 
 ### Fixed
+
+- **The tracker predicts motion and assigns globally, in two stages.**
+  Each track now carries a constant-velocity Kalman filter over its box
+  centre; detections are assigned to tracks by overlap with the predicted
+  box (or the last box, for someone who stops short), solved globally
+  (Hungarian) rather than nearest-first, in ByteTrack's two stages:
+  confident boxes against every track, then the detector's unsure boxes
+  (below 0.5) against the tracks seen last frame, so a person half hidden
+  behind a colleague keeps their track. The width-growth gate measures
+  against the track's widest box of the last second, not the narrow box
+  of a moment behind someone, and a box under half the predicted height
+  (a torso) never matches. The size-aware distance remains the coasting
+  fallback; `motion=False` on the TrackConfig restores the old matcher.
+  Why: with nearest-first on the distance, three people crossing swapped
+  identities (one track jumped 140 px to another person) and every swap
+  left a fresh track to confirm beside the live ones. Replayed on the
+  Ventuno Q from a three-person, seven-pass walk (2026-11-05): 27 visits
+  → 24, five of seven passes posting exactly three; replay wall time
+  unchanged (no scipy, a few lines of numpy).
+
+- **A slow captioner no longer computes captions nobody saves.** One
+  Search "describe" on the field box sent the visit's photo to qwen3-vl
+  2B through Ollama on the ARM cores: 60–90 s a caption against KAI-C's
+  fixed 30 s proxy timeout, so every call was cut off, core read the
+  502 as a plain failure (not a timeout, so the breaker never tripped),
+  the visit stayed "missing a caption", and the next question asked for
+  it again — the box sat at 100 % CPU for an hour with zero captions
+  written. Three fixes: KAI-C's proxy wait is `KAI_C_INFER_TIMEOUT_S`
+  (default 90 s, the same as core's enrichment timeout) and a timeout is
+  a 504 of its own; core counts that 504 as a timeout, so repeated ones
+  trip the adapter's breaker; and a visit whose caption call failed is
+  stamped and left alone by the on-demand lane for
+  `EVENTS_CAPTION_RETRY_COOLDOWN_S` (default 10 min) — not recorded as
+  "looked and found nothing", so later passes still get to it.
+- **Groups of people no longer post two or three visits per person.** Five
+  changes to the tracker and the visit lifecycle, measured by replaying
+  the recordings of three walk-throughs with three people through the
+  pipeline's own gate, detector and tracker on the Ventuno Q: 194 visits
+  over 22 passes became 101. A part box (torso, upper or lower body) 70 %
+  inside the whole is dropped whatever its width; a detection much wider
+  (over 1.6×) or narrower (under 0.4×) than a track's box never matches
+  it, so a person's track does not take the box drawn around a group and a
+  group track does not steal a member; a track that missed the last frames
+  is matched with a gate that grows a quarter per miss, so someone who
+  steps behind a colleague rejoins their track; a visit ends when the
+  object was last seen, not when its track expired, so a fragment seen for
+  a second is too short to count; and a track needs three hits at 5 fps
+  to confirm (`min_initialized`), a visit 1.5 s. A track whose box holds
+  two or more others is a group box and its visit is dropped
+  (`visits_dropped{reason="group"}`).
+
+- **A box around a group of people is the duplicate, not the people.**
+  When the detector draws one box around people crossing together beside
+  the box per person, that group box now goes and the people stay (a box
+  with two or more same-label boxes inside it is a group; one that holds
+  exactly one, about as wide, is a whole with its part).
+
+- **A person inside a group box is not a part of it.** With three people
+  crossing together the detector also drew one wide box around the group,
+  and the part rule dropped the person in the middle as a part of it. A
+  part is as wide as its whole; a box narrower than 60 % of the one around
+  it is a separate object and is kept, both in overlap suppression and in
+  the tracker's spawn guard.
+
+- **The part-box rule now holds when the part scores higher than the
+  whole, and on frames where only the part was detected.** Overlap
+  suppression applies the containment rule by size, largest first, so an
+  upper-body box with a better score than the full body no longer survives;
+  and the tracker absorbs an unmatched detection that lies mostly inside a
+  live track of the same label instead of starting a second track from it
+  (`tier0_track_spawns_absorbed_total`). One walk past the camera is one
+  visit.
+
+- **The pipeline's CPU gauge no longer spikes when two scrapers coincide.**
+  `tier0_process_cpu_percent` is CPU time over the window since the previous
+  scrape; a window of a few hundred milliseconds that caught one keyframe
+  cycle read 60 to 140 % against a real load of 9 %. A window shorter than
+  2 s now keeps the previous reading and keeps accumulating.
+
+- **One person no longer becomes two or three visits per pass.** The
+  detector sometimes boxes a person's upper body beside the full body; the
+  part's overlap ratio with the whole is low, so overlap suppression kept
+  both, and since the recording-request change each confirmed its own
+  track and posted its own visit, photo and fetch. A same-label box that
+  lies 85 % or more inside a larger box (`DETECT_NMS_CONTAINMENT`, 0 or 1
+  turns it off) is now dropped as a part of that object.
 
 - **A search result's "play the recording" lands where the subject is.**
   The playhead now opens 3 s before the event's instant, inside the same
