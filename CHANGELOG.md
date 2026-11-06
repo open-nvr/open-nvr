@@ -8,6 +8,21 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Captions on the Qualcomm NPU.** The qualcomm flavour now runs the
+  captioner on the Hexagon too: `start.sh` fills `CAPTION_ADAPTER=litertlm`
+  (ai-adapter's new LiteRT-LM adapter: Gemma 4 E2B compiled for the
+  QCS8275) and the `-qualcomm` image tag when `.env` still named a CPU
+  captioner with no tag of its own, the overlay lends the service the DSP
+  and two volumes (the 2.7 GB model, downloaded once from Hugging Face;
+  Qualcomm's runtime libraries, fetched once), and the installer suggests
+  it and defaults visit descriptions on there. Measured on a Ventuno Q
+  (2026-11-05): 2.5 s a photo warm, 4.3 s cold, the detector sharing the
+  NPU 38 → 44 ms an inference. Why: a Search "describe" on the field box
+  went to qwen3-vl 2B through Ollama on the ARM cores — 60–90 s a photo
+  against a 30 s deadline, so every caption was computed, discarded and
+  requested again, and the box sat at 100 % CPU. Moving the flavour back
+  to cpu resets the pick to moondream.
+
 - **The workflows API (#773).** `workflows` and `workflow_versions`
   tables, the permissions `workflows.view`, `.manage` and `.approve`
   (granted on upgrade to the roles RFC #620 names, through `cameras.view`

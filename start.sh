@@ -227,9 +227,31 @@ apply_accel_env() {
             if [[ -z "$(get_env_var DMAHEAP_GID)" ]]; then
                 gid=$(getent group dmaheap 2>/dev/null | cut -d: -f3); [[ -n "$gid" ]] && set_env_var DMAHEAP_GID "$gid"
             fi
+            # The captioner goes to the NPU too: the litertlm adapter (Gemma
+            # 4 E2B compiled for the Hexagon, 2.5 s a photo on a Ventuno Q
+            # where Ollama's qwen3-vl on the same CPU took 60–90 s and saved
+            # nothing). Filled only when .env still names a CPU captioner
+            # with no tag of its own — an operator's own pick (blip, a
+            # pinned tag) is kept — and only when the image exists for this
+            # ADAPTER_TAG (or as latest-qualcomm before a release ships it).
+            fill_qualcomm_captioner
             ;;
     esac
     write_env_var OPENNVR_ACCEL_RESOLVED "$accel"
+}
+fill_qualcomm_captioner() {
+    case "$(get_env_var CAPTION_ADAPTER)" in ""|moondream|ollamavlm) ;; *) return 0 ;; esac
+    [[ -z "$(get_env_var CAPTION_ADAPTER_TAG)" ]] || return 0
+    local tag img; tag=$(get_env_var ADAPTER_TAG)
+    for tag in "${tag:-latest}-qualcomm" "latest-qualcomm"; do
+        img="ghcr.io/open-nvr/litertlm-adapter:${tag}"
+        if accel_image_available "$img"; then
+            set_env_var CAPTION_ADAPTER litertlm
+            set_env_var CAPTION_ADAPTER_TAG "$tag"
+            return 0
+        fi
+    done
+    echo -e "${YELLOW}Accelerate:${NC} the NPU captioner image ghcr.io/open-nvr/litertlm-adapter:*-qualcomm is not available (no registry access?) — the captioner stays on $(get_env_var CAPTION_ADAPTER)." >&2
 }
 
 # The flavour changed since the last run (OPENNVR_ACCEL edited, or the disk
@@ -240,10 +262,13 @@ reset_stale_accel_fills() {
     local now="$1" prev; prev=$(get_env_var OPENNVR_ACCEL_RESOLVED)
     [[ -z "$prev" || "$prev" == "$now" ]] && return 0
     local key val
-    for key in DETECT_HWACCEL DETECT_ONNX_BACKEND DETECT_ONNX_PROVIDERS YOLO_POSE_ONNX_PROVIDERS; do
+    for key in DETECT_HWACCEL DETECT_ONNX_BACKEND DETECT_ONNX_PROVIDERS YOLO_POSE_ONNX_PROVIDERS CAPTION_ADAPTER; do
         val=$(get_env_var "$key")
         case "$prev:$key:$val" in
             intel:DETECT_HWACCEL:vaapi) write_env_var DETECT_HWACCEL cpu ;;
+            # The NPU captioner has no CPU image: back to the installer's
+            # non-CUDA pick, riding ADAPTER_TAG again.
+            qualcomm:CAPTION_ADAPTER:litertlm) write_env_var CAPTION_ADAPTER moondream; write_env_var CAPTION_ADAPTER_TAG "" ;;
             intel:DETECT_ONNX_BACKEND:ort|qualcomm:DETECT_ONNX_BACKEND:ort) write_env_var DETECT_ONNX_BACKEND auto ;;
             intel:DETECT_ONNX_PROVIDERS:OpenVINOExecutionProvider:NPU|intel:DETECT_ONNX_PROVIDERS:OpenVINOExecutionProvider:GPU|qualcomm:DETECT_ONNX_PROVIDERS:QNNExecutionProvider:htp)
                 write_env_var DETECT_ONNX_PROVIDERS "" ;;
@@ -291,7 +316,7 @@ accel_summary() {
             echo -e "${CYAN}Accelerate:${NC} intel flavour — iGPU decode (${DETECT_HWACCEL:-$(get_env_var DETECT_HWACCEL)}), detector on ${DETECT_ONNX_PROVIDERS:-$(get_env_var DETECT_ONNX_PROVIDERS)}, ${adapters} (${npu} present)"
             ;;
         qualcomm)
-            echo -e "${CYAN}Accelerate:${NC} qualcomm flavour — software decode, detector on ${DETECT_ONNX_PROVIDERS:-$(get_env_var DETECT_ONNX_PROVIDERS)} (Hexagon NPU via /dev/fastrpc-cdsp); adapters: yolov8, yolo-pose, insightface, package-detection, fast-plate-ocr on the NPU (override <NAME>_ONNX_PROVIDERS or ADAPTER_ONNX_PROVIDERS in .env)"
+            echo -e "${CYAN}Accelerate:${NC} qualcomm flavour — software decode, detector on ${DETECT_ONNX_PROVIDERS:-$(get_env_var DETECT_ONNX_PROVIDERS)} (Hexagon NPU via /dev/fastrpc-cdsp); adapters: yolov8, yolo-pose, insightface, package-detection, fast-plate-ocr on the NPU (override <NAME>_ONNX_PROVIDERS or ADAPTER_ONNX_PROVIDERS in .env); captioner: $(get_env_var CAPTION_ADAPTER)$([[ "$(get_env_var CAPTION_ADAPTER)" == litertlm ]] && echo " (Gemma on the NPU)")"
             ;;
         *) echo -e "${GRAY}Accelerate:${NC} cpu flavour (set OPENNVR_ACCEL in .env, or add an Intel iGPU / a Qualcomm NPU)" ;;
     esac
