@@ -124,7 +124,8 @@ six Qualcomm AI Runtime 2.50 libraries fetched once from Qualcomm's download
 server into `opennvr_litertlm_npu` (their terms do not allow redistributing
 them in the image). The model is compiled for the QCS8275's Hexagon v75; a
 different SoC needs its own compiled bundle. The first start downloads for a
-few minutes; `/health` on the adapter says `loading` until then.
+few minutes; `/health` on the adapter says `loading` until then. The measurements are in
+[`bench/ventuno-q-npu-captioner-2026-11-05.md`](../bench/ventuno-q-npu-captioner-2026-11-05.md).
 
 ### Device shorthand
 
