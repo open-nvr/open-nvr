@@ -723,6 +723,7 @@ services:
       - EVENTS_ENRICHMENT_QUEUE_DEPTH=${EVENTS_ENRICHMENT_QUEUE_DEPTH:-}
       - EVENTS_ENRICHMENT_TIMEOUT_S=${EVENTS_ENRICHMENT_TIMEOUT_S:-}
       - EVENTS_ENRICHMENT_BREAKER_TIMEOUTS=${EVENTS_ENRICHMENT_BREAKER_TIMEOUTS:-}
+      - EVENTS_CAPTION_RETRY_COOLDOWN_S=${EVENTS_CAPTION_RETRY_COOLDOWN_S:-}
       # The governor: soft CPU line, slow-call budget, backfill idle
       # period and optional clock window.
       - EVENTS_ENRICHMENT_GOVERNOR_CPU_PERCENT=${EVENTS_ENRICHMENT_GOVERNOR_CPU_PERCENT:-}
@@ -745,6 +746,10 @@ services:
       # Where KAI-C persists runtime adapter registrations (#371) —
       # points at the opennvr_kai_c_state volume mounted above.
       - KAI_C_STATE_DIR=/app/kai-c-state
+      # How long KAI-C waits for one adapter answer (a CPU captioner can
+      # take a minute); core's EVENTS_ENRICHMENT_TIMEOUT_S should not be
+      # longer than this. A timeout is a 504 and trips core's breaker.
+      - KAI_C_INFER_TIMEOUT_S=${KAI_C_INFER_TIMEOUT_S:-90}
       # ONVIF discovery auto-detection: inside this bridge container the only
       # visible network is the compose bridge, so the launchers export the
       # host's LAN IPs as the real subnet hints — OPENNVR_HOST_IP (default

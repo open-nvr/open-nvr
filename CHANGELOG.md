@@ -327,6 +327,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   → 24, five of seven passes posting exactly three; replay wall time
   unchanged (no scipy, a few lines of numpy).
 
+- **A slow captioner no longer computes captions nobody saves.** One
+  Search "describe" on the field box sent the visit's photo to qwen3-vl
+  2B through Ollama on the ARM cores: 60–90 s a caption against KAI-C's
+  fixed 30 s proxy timeout, so every call was cut off, core read the
+  502 as a plain failure (not a timeout, so the breaker never tripped),
+  the visit stayed "missing a caption", and the next question asked for
+  it again — the box sat at 100 % CPU for an hour with zero captions
+  written. Three fixes: KAI-C's proxy wait is `KAI_C_INFER_TIMEOUT_S`
+  (default 90 s, the same as core's enrichment timeout) and a timeout is
+  a 504 of its own; core counts that 504 as a timeout, so repeated ones
+  trip the adapter's breaker; and a visit whose caption call failed is
+  stamped and left alone by the on-demand lane for
+  `EVENTS_CAPTION_RETRY_COOLDOWN_S` (default 10 min) — not recorded as
+  "looked and found nothing", so later passes still get to it.
 - **Groups of people no longer post two or three visits per person.** Five
   changes to the tracker and the visit lifecycle, measured by replaying
   the recordings of three walk-throughs with three people through the

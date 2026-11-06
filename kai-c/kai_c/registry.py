@@ -47,6 +47,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+import os
+
 import httpx
 
 from kai_c.audit import AuditEventType, AuditStore
@@ -204,6 +206,30 @@ def _capabilities_diff(
     if old.endpoints.model_dump() != new.endpoints.model_dump():
         diff["endpoints"] = "changed"
     return diff
+
+
+#: How long the proxy waits for one adapter answer. A caption on a CPU
+#: vision model can take a minute; the hard-coded 30 s this replaced cut
+#: every such call off, the caller read the 502 as a plain failure rather
+#: than a timeout, and asked again — the box computed captions nobody
+#: ever saved (Ventuno Q, 2026-11-05). Core's own enrichment timeout is
+#: 90 s by default; this default matches it so core, not the proxy, is the
+#: one that decides.
+DEFAULT_INFER_TIMEOUT_SECONDS = 90.0
+
+
+def infer_timeout_s() -> float:
+    raw = os.environ.get("KAI_C_INFER_TIMEOUT_S", "").strip()
+    try:
+        return max(1.0, float(raw)) if raw else DEFAULT_INFER_TIMEOUT_SECONDS
+    except ValueError:
+        return DEFAULT_INFER_TIMEOUT_SECONDS
+
+
+class AdapterTimeout(Exception):
+    """The adapter accepted the call and did not answer in time: a 504 to
+    the caller, which counts it as a timeout (its breaker), not as the
+    adapter being unreachable."""
 
 
 # ── Registry state ─────────────────────────────────────────────────
@@ -1088,8 +1114,13 @@ class AdapterRegistry:
                 f"{adapter.url}/infer",
                 json=payload,
                 headers={"X-Correlation-Id": correlation_id},
-                timeout=30.0,
+                timeout=infer_timeout_s(),
             )
+        except httpx.TimeoutException as exc:
+            proxy_metrics.record(
+                adapter_name, "timeout", time.monotonic() - started)
+            raise AdapterTimeout(
+                f"{adapter_name} gave no answer within {infer_timeout_s():.0f} s") from exc
         except Exception:
             proxy_metrics.record(
                 adapter_name, "exception", time.monotonic() - started)
