@@ -432,6 +432,13 @@ detect_llm_hardware() {
             # away from a GPU — the field report this came from had a
             # 30 GB CUDA box suggesting qwen3:1.7b.
             HW_ACCEL="cuda"
+        elif [[ "$(uname -m)" == "aarch64" && -e /dev/fastrpc-cdsp ]]; then
+            # Qualcomm Dragonwing / Snapdragon with the Hexagon NPU (the
+            # same test start.sh's OPENNVR_ACCEL=auto makes). The LLM still
+            # runs on the ARM cores — Ollama has no Hexagon backend — so the
+            # LLM tier is sized like a CPU box; what the NPU changes is the
+            # captioner (suggest_models).
+            HW_ACCEL="qualcomm"
         fi
     fi
 }
@@ -540,7 +547,7 @@ suggest_models() {
     # against ~1-2 s on a GPU. Fitting in RAM and answering before the
     # operator gives up are different questions.
     local vlm_speed_cap=9
-    [[ "$HW_ACCEL" == "cpu" ]] && vlm_speed_cap=1        # CPU: the fast tier only
+    [[ "$HW_ACCEL" == "cpu" || "$HW_ACCEL" == "qualcomm" ]] && vlm_speed_cap=1        # CPU: the fast tier only
     picked=$(catalog_pick vlm "$remaining" "$vlm_speed_cap")
     SUGGEST_VLM="${picked%%|*}"
     # Vision through Ollama is a GPU path, full stop. Ollama's `moondream`
@@ -558,6 +565,15 @@ suggest_models() {
     elif [[ "$HW_ACCEL" == "cuda" ]]; then
         SUGGEST_CAPTION_ADAPTER="moondream"
         SUGGEST_CAPTION_REASON="too little RAM left for an Ollama vision model beside the LLM"
+        SUGGEST_VLM=""
+    elif [[ "$HW_ACCEL" == "qualcomm" ]]; then
+        # The Hexagon NPU runs Gemma 4 E2B through LiteRT-LM: 2.5 s a photo
+        # warm on a Ventuno Q, where Ollama's qwen3-vl 2B on the same ARM
+        # cores took 60–90 s and every caption outran core's deadline
+        # (2026-11-05). start.sh's qualcomm flavour fills the same pick and
+        # the -qualcomm tag; this keeps the installer's story consistent.
+        SUGGEST_CAPTION_ADAPTER="litertlm"
+        SUGGEST_CAPTION_REASON="the Qualcomm NPU runs Gemma 4 E2B at ~2.5 s a photo; a CPU vision model here takes a minute"
         SUGGEST_VLM=""
     else
         SUGGEST_CAPTION_ADAPTER="moondream"
@@ -589,6 +605,8 @@ suggest_enrichment_default() {
     local adapter="${1:-}"
     if [[ "$HW_ACCEL" == "cuda" && "$adapter" == "ollamavlm" ]]; then
         echo "true"
+    elif [[ "$HW_ACCEL" == "qualcomm" && "$adapter" == "litertlm" ]]; then
+        echo "true"            # the NPU captioner: seconds a photo, off the ARM cores
     else
         echo "false"
     fi
@@ -1284,10 +1302,19 @@ choose_example() {
         local caption_default="moondream"
         if [[ "$llm_where" == "host" && "$SUGGEST_CAPTION_ADAPTER" == "ollamavlm" ]]; then
             caption_default="ollamavlm"
+        elif [[ "$SUGGEST_CAPTION_ADAPTER" == "litertlm" ]]; then
+            caption_default="litertlm"
         fi
         configure_value CAPTION_ADAPTER "Scene-description model" "$caption_default" \
-            "Describes what a camera sees. moondream runs inside Docker (0.5B, answers questions, the right pick without a CUDA GPU — on CPU it is ~10x faster than Ollama's 1.8B moondream); blip runs inside Docker (plain captions only, fastest); ollamavlm proxies to your Ollama (only worth it on an NVIDIA GPU; needs an adapter tag newer than 0.1.3)." "yes" \
-            "moondream | blip | ollamavlm — all local."
+            "Describes what a camera sees. moondream runs inside Docker (0.5B, answers questions, the right pick without a CUDA GPU — on CPU it is ~10x faster than Ollama's 1.8B moondream); blip runs inside Docker (plain captions only, fastest); ollamavlm proxies to your Ollama (only worth it on an NVIDIA GPU; needs an adapter tag newer than 0.1.3); litertlm runs Gemma 4 E2B on the Qualcomm Hexagon NPU (Dragonwing / Snapdragon boards only; a 2.7 GB one-time download; the -qualcomm image tag, which start.sh fills in)." "yes" \
+            "moondream | blip | ollamavlm | litertlm — all local."
+        if [[ "$(env_get CAPTION_ADAPTER)" == "litertlm" && -z "$(env_get CAPTION_ADAPTER_TAG)" ]]; then
+            # The NPU captioner is published only as a -qualcomm image; its
+            # first release is after ADAPTER_TAG's pin, so start.sh resolves
+            # the exact tag (ADAPTER_TAG-qualcomm, else latest-qualcomm) at
+            # every start. Nothing to pin here.
+            info "litertlm rides the -qualcomm image tag; start.sh fills CAPTION_ADAPTER_TAG on the first start."
+        fi
         # ollamavlm chosen → suggest a VLM sized like the LLM was.
         if [[ "$(env_get CAPTION_ADAPTER)" == "ollamavlm" ]]; then
             # Chosen where it was not suggested (no CUDA GPU, or no RAM

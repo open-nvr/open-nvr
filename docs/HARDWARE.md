@@ -107,14 +107,24 @@ through QNN, a second target for dynamic-shape graphs.
 | InsightFace adapter | NPU | `INSIGHTFACE_ONNX_PROVIDERS` | proven: `/infer` 57–60 ms vs 436–485 ms on CPU (buffalo_l; the dynamic detector pinned to 640, the recogniser's batch to 1); 18 s first start, 8 s with cached graphs |
 | Package detection adapter | NPU | `PACKAGE_DETECTION_ONNX_PROVIDERS` | proven: `/infer` 55 ms vs 103 ms on CPU; dynamic export pinned to 416 |
 | Plate OCR adapter | NPU | `FAST_PLATE_OCR_ONNX_PROVIDERS` | proven: 79 ms a plate vs 276 ms on CPU (single crop per call); the QNN GPU backend hung at load |
+| Captioner (`caption-adapter`) | NPU: `CAPTION_ADAPTER=litertlm` (Gemma 4 E2B through LiteRT-LM) | `CAPTION_ADAPTER`, `CAPTION_ADAPTER_TAG` | proven: 2.5 s a photo warm, 4.3 s cold, image encoder on the NPU too; ~1.2 GiB resident; the detector sharing the NPU 38 → 44 ms. qwen3-vl 2B via Ollama on the CPU: 60–90 s, every caption past core's deadline (Ventuno Q, 2026-11-05) |
 | Parakeet (speech) | CPU | `ADAPTER_ONNX_PROVIDERS` | measured: loads on the HTP, fails at inference (dynamic-length graphs, Expand node); CPU does 3 s of audio in 0.6 s |
 | Whisper, BLIP, CLIP, open-vocab, Ollama | CPU | — | ctranslate2 / torch / Ollama: no Hexagon backend in those engines |
 
 `start.sh` prints the decision on every start:
 
 ```
-Accelerate: qualcomm flavour — software decode, detector on QNNExecutionProvider:htp (Hexagon NPU via /dev/fastrpc-cdsp); adapters: yolov8, yolo-pose, insightface, package-detection, fast-plate-ocr on the NPU (override <NAME>_ONNX_PROVIDERS or ADAPTER_ONNX_PROVIDERS in .env)
+Accelerate: qualcomm flavour — software decode, detector on QNNExecutionProvider:htp (Hexagon NPU via /dev/fastrpc-cdsp); adapters: yolov8, yolo-pose, insightface, package-detection, fast-plate-ocr on the NPU (override <NAME>_ONNX_PROVIDERS or ADAPTER_ONNX_PROVIDERS in .env); captioner: litertlm (Gemma on the NPU)
 ```
+
+The captioner is not an ONNX adapter: `litertlm` is Google's LiteRT-LM
+running the NPU-compiled `gemma-4-E2B-it_Qualcomm_QCS8275.litertlm` (2.7 GB,
+Apache-2.0, downloaded once into the `opennvr_litertlm_models` volume) with
+six Qualcomm AI Runtime 2.50 libraries fetched once from Qualcomm's download
+server into `opennvr_litertlm_npu` (their terms do not allow redistributing
+them in the image). The model is compiled for the QCS8275's Hexagon v75; a
+different SoC needs its own compiled bundle. The first start downloads for a
+few minutes; `/health` on the adapter says `loading` until then.
 
 ### Device shorthand
 

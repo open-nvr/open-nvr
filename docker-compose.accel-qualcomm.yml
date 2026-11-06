@@ -146,3 +146,41 @@ services:
       # (single crop per call). The QNN GPU backend hung at load.
       - ADAPTER_ONNX_PROVIDERS=${FAST_PLATE_OCR_ONNX_PROVIDERS:-${ADAPTER_ONNX_PROVIDERS:-QNNExecutionProvider:htp}}
       - ADAPTER_ONNX_PROVIDER_OPTIONS=${ADAPTER_ONNX_PROVIDER_OPTIONS:-}
+  # ── The captioner: Gemma on the Hexagon NPU through LiteRT-LM ──
+  # start.sh fills CAPTION_ADAPTER=litertlm and CAPTION_ADAPTER_TAG=
+  # <tag>-qualcomm on this flavour (only when .env still held a CPU
+  # captioner and no tag of its own), so the camera-agent file's image
+  # expression resolves to ghcr.io/open-nvr/litertlm-adapter:…-qualcomm.
+  # What is added here is the same host bits as above plus two volumes: the
+  # 2.7 GB NPU-compiled model, downloaded once from Hugging Face, and the
+  # six Qualcomm AI Runtime libraries fetched once from Qualcomm (their
+  # terms do not allow redistribution in the image). Inert for moondream /
+  # ollamavlm (extra device nodes, unused volumes). Measured on a Ventuno Q
+  # (2026-11-05): 2.5 s a photo warm, 4.3 s cold, the detector sharing the
+  # NPU 38 → 44 ms an inference; qwen3-vl 2B via Ollama on the same CPU
+  # took 60–90 s and outran every deadline. Keeps the profiles of the
+  # service it overrides.
+  caption-adapter:
+    profiles: [camera-agent, camera-agent-chat, enrichment, descriptions]
+    devices:
+      - /dev/fastrpc-cdsp:/dev/fastrpc-cdsp
+      - /dev/dma_heap/system:/dev/dma_heap/system
+      - /dev/dma_heap/qcom,system:/dev/dma_heap/qcom,system
+    group_add:
+      - "${FASTRPC_GID:-125}"
+      - "${DMAHEAP_GID:-989}"
+    volumes:
+      - ${QCOM_LIB_DIR:-/usr/lib/aarch64-linux-gnu}/libcdsprpc.so.1.0.0:/usr/lib/aarch64-linux-gnu/libcdsprpc.so:ro
+      - ${QCOM_LIB_DIR:-/usr/lib/aarch64-linux-gnu}/libdmabufheap.so.0:/usr/lib/aarch64-linux-gnu/libdmabufheap.so.0:ro
+      - opennvr_litertlm_models:/models
+      - opennvr_litertlm_npu:/opt/npu/lib
+    environment:
+      # Read by the litertlm adapter only. The model download runs once
+      # into the volume; set LITERTLM_MODEL_URL= (empty) in .env to mount
+      # the file yourself instead.
+      - OPENNVR_LITERTLM_MODEL_URL=${LITERTLM_MODEL_URL:-https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it_Qualcomm_QCS8275.litertlm}
+      - OPENNVR_LITERTLM_MAX_IMAGE_PX=${LITERTLM_MAX_IMAGE_PX:-768}
+
+volumes:
+  opennvr_litertlm_models:
+  opennvr_litertlm_npu:
