@@ -239,7 +239,7 @@ def test_scene_only_moves_when_the_best_crop_does(monkeypatch):
     assert calls["n"] == 1
     kept = tk.tracks[0].best_scene_jpeg
     # Same track, smaller + lower score: not a better thumbnail.
-    tk.update([Detection("person", (105, 105, 200, 400), 0.6)], _frame())
+    tk.update([Detection("person", (105, 105, 200, 450), 0.6)], _frame())
     assert tk.tracks[0].best_scene_jpeg is kept
     assert calls["n"] == 1, "encoded for a frame that was not the best"
 
@@ -465,3 +465,113 @@ def test_a_box_of_a_very_different_size_never_matches():
         tk3.update([Detection("person", person, 0.8)], frame_ts=ts)
     tk3.update([Detection("person", (340, 100, 380, 400), 0.7)], frame_ts=1.4)
     assert len(tk3._tracks) == 1 and tk3._tracks[0].box == (340, 100, 380, 400)
+
+
+# ── Motion-predicted, two-stage assignment (walk 13, 2026-11-05) ─────
+
+def test_the_motion_filter_predicts_along_the_velocity_and_keeps_the_size():
+    from detect_pipeline.tracking import BoxMotion
+    kf = BoxMotion((100, 100, 200, 400))
+    for x in (120, 140, 160, 180):                      # 20 px a frame to the right
+        kf.predict()
+        kf.update((x, 100, x + 100, 400))
+    p = kf.predict()
+    assert 190 < p[0] < 210 and 290 < p[2] < 310, p    # ahead of the last box
+    assert abs((p[2] - p[0]) - 100) < 5 and abs((p[3] - p[1]) - 300) < 5
+    # the size carries no velocity: two narrow frames do not predict a narrower one
+    kf.update((p[0], 100, p[0] + 60, 400))
+    kf.predict()
+    kf.update((p[0] + 20, 100, p[0] + 60, 400))
+    q = kf.predict()
+    assert q[2] - q[0] > 45, "width predicted from measurements, never extrapolated"
+
+
+def test_assignment_is_global_not_greedy():
+    import numpy as np
+    from detect_pipeline.tracking import assign
+    # greedy takes (0,0) at 0.1 and leaves row 1 with 0.9; optimal is (0,1)+(1,0) = 0.35
+    cost = np.array([[0.1, 0.2], [0.15, 0.9]])
+    assert sorted(assign(cost, 1.0)) == [(0, 1), (1, 0)]
+    # rectangular, and pairs at or above max_cost are not returned
+    cost = np.array([[0.1, 1.0, 1.0]])
+    assert assign(cost, 1.0) == [(0, 0)]
+    assert assign(np.ones((2, 3)), 1.0) == []
+    assert assign(np.zeros((0, 3)), 1.0) == []
+
+
+def test_crossing_people_keep_their_ids_by_motion():
+    """Two people walking towards each other and crossing: with a motion
+    prediction each keeps the box on their own side of the cross."""
+    tk = Tracker((576, 704), TrackConfig(fps=5, min_initialized=2))
+    a = lambda i: (100 + 40 * i, 100, 180 + 40 * i, 400)      # left to right
+    b = lambda i: (500 - 40 * i, 100, 580 - 40 * i, 400)      # right to left
+    for i in range(10):
+        tracks = tk.update([Detection("person", a(i), 0.9), Detection("person", b(i), 0.9)], frame_ts=i / 5)
+    assert len(tracks) == 2
+    by_id = {t.id: t.box for t in tracks}
+    assert by_id[1] == a(9) and by_id[2] == b(9)
+
+
+def test_a_low_score_box_keeps_a_track_alive_but_never_spawns_one():
+    tk = Tracker((576, 704), TrackConfig(fps=5, min_initialized=2, high_score=0.5))
+    box = (300, 100, 380, 400)
+    tk.update([Detection("person", box, 0.8)], frame_ts=1.0)
+    tk.update([Detection("person", box, 0.8)], frame_ts=1.2)
+    tid = tk._tracks[0].id
+    tk.update([Detection("person", (305, 100, 385, 400), 0.3)], frame_ts=1.4)   # unsure box, same place
+    assert len(tk._tracks) == 1 and tk._tracks[0].id == tid and tk._tracks[0].matched_now
+    assert tk.low_matches == 1
+    tk.update([Detection("person", (600, 100, 680, 400), 0.3)], frame_ts=1.6)   # unsure box elsewhere: no track
+    assert len(tk._tracks) == 1 and not tk._tracks[0].matched_now
+    assert tk.spawns_dropped == 1
+    # a coasting track still takes an unsure box where it last was (the
+    # distance fallback): a far, small person is unsure most frames
+    tk.update([], frame_ts=1.8)
+    tk.update([Detection("person", box, 0.3)], frame_ts=2.0)
+    assert tk._tracks[0].matched_now and len(tk._tracks) == 1
+
+
+def test_a_person_who_stops_short_keeps_the_track():
+    """Walking fast to a wall and stopping: the prediction runs past
+    them, the last box does not."""
+    tk = Tracker((576, 704), TrackConfig(fps=5, min_initialized=2))
+    for i in range(6):
+        tk.update([Detection("person", (100 + 60 * i, 100, 180 + 60 * i, 400), 0.9)], frame_ts=i / 5)
+    tid = tk._tracks[0].id
+    last = (400, 100, 480, 400)
+    tk.update([Detection("person", last, 0.9)], frame_ts=1.2)              # stopped
+    tk.update([Detection("person", last, 0.9)], frame_ts=1.4)
+    assert len(tk._tracks) == 1 and tk._tracks[0].id == tid
+
+
+def test_a_narrow_moment_does_not_block_the_full_box_after_it():
+    """Half behind a colleague for a few frames (a narrow box), then the
+    whole person again: the width gate measures against the recent
+    widest box, so the full box is still this track."""
+    tk = Tracker((576, 704), TrackConfig(fps=5, min_initialized=2))
+    full = (300, 100, 400, 400)
+    for ts in (1.0, 1.2, 1.4):
+        tk.update([Detection("person", full, 0.9)], frame_ts=ts)
+    tid = tk._tracks[0].id
+    for ts in (1.6, 1.8):
+        tk.update([Detection("person", (300, 100, 350, 400), 0.9)], frame_ts=ts)   # half as wide
+    assert len(tk._tracks) == 1 and tk._tracks[0].box[2] == 350
+    tk.update([Detection("person", full, 0.9)], frame_ts=2.0)
+    assert len(tk._tracks) == 1 and tk._tracks[0].id == tid and tk._tracks[0].box == full
+
+
+def test_a_torso_box_never_matches_the_person_it_belongs_to():
+    tk = Tracker((576, 704), TrackConfig(fps=5, min_initialized=2))
+    body = (300, 100, 400, 400)
+    for ts in (1.0, 1.2):
+        tk.update([Detection("person", body, 0.9)], frame_ts=ts)
+    tk.update([Detection("person", (300, 100, 400, 220), 0.9)], frame_ts=1.4)   # 120 of 300 high
+    tr = tk._tracks[0]
+    assert tr.box == body and not tr.matched_now and len(tk._tracks) == 1, "a part: absorbed, not matched"
+
+
+def test_motion_off_restores_the_distance_matcher():
+    tk = Tracker((576, 704), TrackConfig(fps=5, min_initialized=1, motion=False))
+    tk.update([Detection("person", (100, 100, 180, 400), 0.9)], frame_ts=1.0)
+    tk.update([Detection("person", (120, 100, 200, 400), 0.9)], frame_ts=1.2)
+    assert len(tk._tracks) == 1 and tk._tracks[0].kf is None and tk._tracks[0].matched_now
