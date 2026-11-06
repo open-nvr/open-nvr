@@ -12,15 +12,26 @@ lifecycle (initialization delay, max-disappeared) and a ``motionless_count`` so 
 later stage (PR B) can treat settled objects as stationary and skip re-detecting
 them.
 
-Deliberately lean: this is greedy matching over the size-aware distance, not a
-full Norfair/Kalman port. Kalman motion prediction (Frigate's per-class R/Q
-tuning) is a worthwhile follow-up but is not required for the metric that
-prevents ID churn. Kept dependency-light on purpose.
+Matching (2026-11-05, replayed on the Ventuno Q): each track carries a
+constant-velocity Kalman filter; every frame it PREDICTS where its box will
+be, and detections are assigned to tracks by overlap with that prediction,
+globally (Hungarian), in two stages the way ByteTrack does it — confident
+boxes first, against every track; then the low-score boxes the detector is
+unsure of, against the tracks still unmatched that were seen last frame,
+so a person half hidden behind a colleague keeps their track instead of
+losing it and getting a second one. The size-aware distance stays as the
+coasting fallback. Greedy nearest-first on the distance alone let three
+people crossing swap identities (one track jumped 140 px to another
+person) and every swap left a fresh track to confirm beside the live ones.
+Kept dependency-light on purpose: the filter and the assignment are a few
+lines of numpy, no scipy.
 """
 from __future__ import annotations
 
 import math
 import time
+
+import numpy as np
 from dataclasses import dataclass, field
 from itertools import count
 
@@ -81,6 +92,45 @@ class TrackConfig:
     fps: int = 5
     # consecutive hits before a track is "confirmed" (Frigate: min_initialized = fps//2)
     min_initialized: int | None = None
+    # A coasting track (missed the last frames) is matched with a wider
+    # gate: the distance threshold grows by this fraction per miss, up to
+    # ``coast_gate_max`` times. Someone who steps behind a colleague and
+    # reappears a stride away is the same track, not a new one; without
+    # this every occlusion in a group of people made a second visit
+    # (Ventuno Q, 2026-11-05). 0 keeps the gate fixed.
+    coast_gate_growth: float = 0.25
+    coast_gate_max: float = 3.0
+    # A detection much WIDER than the track's box (over width_grow_max
+    # times) or much narrower (under 1/width_shrink_max) is never a match,
+    # whatever the distance. The size-aware distance lets a box three
+    # times as wide through when the bottom-centres agree, so a track
+    # following one person took the box the detector drew around a group,
+    # and a group track stole a member (replayed on the Ventuno Q,
+    # 2026-11-05). Shrinking is allowed more: a person half hidden behind
+    # a chair is a narrower box of the same person. Width only: heights
+    # swing with pose and partial boxes. 0 turns a limit off.
+    width_grow_max: float = 1.6
+    width_shrink_max: float = 2.5
+    # A detection under 1/height_shrink_max of the PREDICTED height is a
+    # part (a torso box on the frame the whole person was missed) and
+    # never a match: matched, it would shrink the track to the torso and
+    # the next whole-person box would not overlap it. A torso is about
+    # half a person, so the limit sits well above that. 0 turns it off.
+    height_shrink_max: float = 2.0
+    # ── Motion-predicted, two-stage assignment ───────────────────────
+    # Stage 1: detections scoring at least ``high_score`` are assigned to
+    # every track by overlap (IoU) with the track's Kalman-predicted box,
+    # globally; ``match_iou`` is the least overlap that counts for a track
+    # seen last frame, ``coast_match_iou`` for one that is coasting (its
+    # prediction is less sure). Stage 2: the lower-scoring detections go
+    # to the tracks stage 1 left unmatched that WERE seen last frame, at
+    # ``low_match_iou``; they keep a track alive and never spawn one.
+    # ``motion=False`` returns to the greedy size-aware distance alone.
+    motion: bool = True
+    high_score: float = 0.5
+    match_iou: float = 0.2
+    coast_match_iou: float = 0.1
+    low_match_iou: float = 0.4
     # frames a confirmed track survives unmatched (Frigate: ~fps*5)
     max_disappeared: int | None = None
     # size-aware distance below which a detection matches a track (Frigate ~2.5)
@@ -113,7 +163,12 @@ class TrackConfig:
     min_spawn_score: float = 0.0
 
     def initialized(self) -> int:
-        return self.min_initialized if self.min_initialized is not None else max(1, self.fps // 2)
+        # Three hits at 5 fps (0.6 s), six at 10. Two hits let every
+        # fragment the detector boxes for a moment in a crowd (a head, a
+        # sleeve) confirm a track and post a visit: replayed on the Ventuno
+        # Q, 2026-11-05, three hits took a three-person pass from six
+        # visits to between three and five.
+        return self.min_initialized if self.min_initialized is not None else max(1, self.fps * 3 // 5)
 
     def disappeared(self) -> int:
         return self.max_disappeared if self.max_disappeared is not None else max(1, self.fps * 5)
@@ -195,6 +250,26 @@ class Track:
     # is confirmed, since a tentative track dies on a single miss and its
     # result would come back for a visit that never existed.
     evidence_req_held: object | None = field(default=None, repr=False, compare=False)
+    # Frames on which this track's box held two or more other live tracks
+    # of the same label: the detector boxed a GROUP of people as one, and a
+    # track that follows the group box is not a visit. The lifecycle drops
+    # a visit that was a group for most of its frames.
+    group_frames: int = field(default=0, compare=False)
+    group_now: bool = field(default=False, compare=False)
+    # The motion filter and the box it predicts for the current frame
+    # (``box`` stays the last DETECTED box: evidence, overlays and the
+    # stationary test read that; only matching reads the prediction).
+    kf: object | None = field(default=None, repr=False, compare=False)
+    predicted: Box | None = field(default=None, compare=False)
+    # The widest the box has been over the last second of matches: the
+    # width-growth gate measures against THIS, not the current box. A
+    # person half behind a colleague is a narrow box for a few frames;
+    # measured against that, their own full box on the next frame was
+    # "2.6 times wider" and refused, and a new track took it (replayed on
+    # the Ventuno Q, 2026-11-05: track 13 lost, track 15 spawned on the
+    # same person 0.4 s later).
+    width_ref: float = field(default=0.0, compare=False)
+    _widths: list = field(default_factory=list, repr=False, compare=False)
 
     @property
     def stationary(self) -> bool:
@@ -223,9 +298,9 @@ def bottom_center_distance(a: Box, b: Box) -> float:
     return math.sqrt(dx * dx + dy * dy + dw * dw + dh * dh)
 
 
-#: See pipeline.PART_MIN_WIDTH_SHARE: a part is as wide as its whole; a
-#: person inside a wider group box is not a part.
-PART_MIN_WIDTH_SHARE = 0.6
+def _width_ratio(det: Box, track: Box) -> float:
+    """The detection's width over the track box's width."""
+    return max(det[2] - det[0], 1) / max(track[2] - track[0], 1)
 
 
 def _width_share(inner: Box, outer: Box) -> float:
@@ -313,8 +388,105 @@ def _crop_bgr(bgr, box: Box, margin: float = 0.25):
     return crop.copy() if crop.size else None
 
 
+class BoxMotion:
+    """A constant-velocity Kalman filter over a box: centre (cx, cy) with
+    its velocity, width and height without one. SORT / ByteTrack also
+    carry a size velocity; here the detector's part boxes make the size
+    jump by half from one frame to the next, and a size velocity learnt
+    from that predicted a box far wider than the person, whose real box
+    then failed the shrink gate (replayed on the Ventuno Q, 2026-11-05).
+    Noise scales with the box height so a far-away person and a near one
+    are treated alike. Pure numpy."""
+
+    __slots__ = ("mean", "cov", "_dt")
+    _POS = 1.0 / 20   # measurement / process noise, as a share of height
+    _VEL = 1.0 / 160
+
+    def __init__(self, box: Box, dt: float = 1.0) -> None:
+        z = self._measure(box)
+        self.mean = np.r_[z, np.zeros(2)]
+        h = max(z[3], 1.0)
+        std = np.r_[[2 * self._POS * h] * 4, [10 * self._VEL * h] * 2]
+        self.cov = np.diag(std ** 2)
+        self._dt = dt
+
+    @staticmethod
+    def _measure(box: Box) -> np.ndarray:
+        w, h = max(box[2] - box[0], 1.0), max(box[3] - box[1], 1.0)
+        return np.array([box[0] + w / 2, box[1] + h / 2, w, h], dtype=float)
+
+    def predict(self) -> Box:
+        """Advance one frame; returns the predicted box."""
+        F = np.eye(6)
+        F[0, 4] = F[1, 5] = self._dt
+        h = max(self.mean[3], 1.0)
+        std = np.r_[[self._POS * h] * 4, [self._VEL * h] * 2]
+        self.mean = F @ self.mean
+        self.cov = F @ self.cov @ F.T + np.diag(std ** 2)
+        return self.box
+
+    def update(self, box: Box) -> None:
+        H = np.eye(4, 6)
+        h = max(self.mean[3], 1.0)
+        R = np.diag([(self._POS * h) ** 2] * 4)
+        S = H @ self.cov @ H.T + R
+        K = self.cov @ H.T @ np.linalg.inv(S)
+        self.mean = self.mean + K @ (self._measure(box) - H @ self.mean)
+        self.cov = (np.eye(6) - K @ H) @ self.cov
+
+    @property
+    def box(self) -> Box:
+        cx, cy, w, h = self.mean[:4]
+        w, h = max(w, 1.0), max(h, 1.0)
+        return (float(cx - w / 2), float(cy - h / 2), float(cx + w / 2), float(cy + h / 2))
+
+
+def assign(cost: np.ndarray, max_cost: float) -> list[tuple[int, int]]:
+    """Minimum-cost one-to-one assignment (Hungarian, O(n^3)) of rows to
+    columns, returning the (row, col) pairs whose cost is below
+    ``max_cost``. Small matrices only (tracks x detections in one frame)."""
+    if cost.size == 0:
+        return []
+    rows, cols = cost.shape
+    transposed = rows > cols
+    a = cost.T if transposed else cost
+    n, m = a.shape                                    # n <= m
+    INF = float("inf")
+    u = [0.0] * (n + 1); v = [0.0] * (m + 1); p = [0] * (m + 1); way = [0] * (m + 1)
+    for i in range(1, n + 1):
+        p[0] = i; j0 = 0
+        minv = [INF] * (m + 1); used = [False] * (m + 1)
+        while True:
+            used[j0] = True
+            i0 = p[j0]; delta = INF; j1 = 0
+            for j in range(1, m + 1):
+                if used[j]:
+                    continue
+                cur = a[i0 - 1, j - 1] - u[i0] - v[j]
+                if cur < minv[j]:
+                    minv[j] = cur; way[j] = j0
+                if minv[j] < delta:
+                    delta = minv[j]; j1 = j
+            for j in range(m + 1):
+                if used[j]:
+                    u[p[j]] += delta; v[j] -= delta
+                else:
+                    minv[j] -= delta
+            j0 = j1
+            if p[j0] == 0:
+                break
+        while j0:
+            j1 = way[j0]; p[j0] = p[j1]; j0 = j1
+    out = []
+    for j in range(1, m + 1):
+        if p[j] and a[p[j] - 1, j - 1] < max_cost:
+            out.append((j - 1, p[j] - 1) if transposed else (p[j] - 1, j - 1))
+    return out
+
+
 class Tracker:
-    """Greedy, size-aware multi-object tracker."""
+    """Multi-object tracker: motion-predicted two-stage assignment (see the
+    module docstring), with the size-aware distance as the coasting fallback."""
 
     def __init__(
         self, frame_shape: tuple[int, int], config: TrackConfig | None = None,
@@ -334,8 +506,10 @@ class Tracker:
         # frame-level rule in pipeline.nms catches the pair when both boxes
         # are in one frame, this catches the part box on frames where the
         # whole was missed. 0 turns it off.
-        self.spawn_containment: float = 0.85
+        self.spawn_containment: float = 0.7
         self.spawns_absorbed = 0
+        # Stage-2 matches: a low-score box that kept a track alive.
+        self.low_matches = 0
         # Multi-frame OCR (opt-in per camera): retain top-K plate candidates
         # on vehicle tracks. The worker enables this only when the camera's
         # assignments include the LPR skill.
@@ -479,24 +653,63 @@ class Tracker:
                     self._ev_ref = None
         unmatched_tracks = set(range(len(self._tracks)))
         unmatched_dets = set(range(len(detections)))
-
-        # candidate pairs (same label — or a confusable one, see
-        # labels_match — within per-class distance threshold)
+        # Low-score boxes only ever KEEP a track (stage 2); they never
+        # spawn one and are not offered to coasting tracks.
+        low_dets: set[int] = set()
+        if cfg.motion:
+            low_dets = {di for di, d in enumerate(detections) if d.score < cfg.high_score}
+            seen_last = {ti for ti, tr in enumerate(self._tracks) if tr.misses == 0}
+            for tr in self._tracks:
+                if tr.kf is None:
+                    tr.kf = BoxMotion(tr.box)
+                tr.predicted = tr.kf.predict()
+            # Stage 1: confident boxes against every track, by overlap
+            # with the prediction.
+            for ti, di in self._assign_stage(
+                    detections, unmatched_tracks, unmatched_dets - low_dets,
+                    lambda tr: cfg.match_iou if tr.misses == 0 else cfg.coast_match_iou, bgr, now):
+                unmatched_tracks.discard(ti)
+                unmatched_dets.discard(di)
+            # Stage 2: the unsure boxes against the tracks seen last frame
+            # that stage 1 left unmatched.
+            for ti, di in self._assign_stage(
+                    detections, unmatched_tracks & seen_last, unmatched_dets & low_dets,
+                    lambda tr: cfg.low_match_iou, bgr, now):
+                unmatched_tracks.discard(ti)
+                unmatched_dets.discard(di)
+                self.low_matches += 1
+        # The size-aware distance: the whole matcher with motion off, the
+        # coasting fallback with it on (a track whose prediction drifted
+        # while it coasted can still take a box its last position vouches
+        # for, with the gate widening per miss). Unsure boxes are offered
+        # here too: on a far, small person the detector is unsure most
+        # frames, and a coasting track refused them starved and died
+        # while the person stood there (CAVIAR lobby replay, 2026-11-05).
         pairs: list[tuple[float, int, int]] = []
-        for ti, tr in enumerate(self._tracks):
-            for di, det in enumerate(detections):
-                if not labels_match(det.label, tr.label):
+        for ti in unmatched_tracks:
+            tr = self._tracks[ti]
+            if cfg.motion and tr.misses == 0:
+                continue
+            for di in unmatched_dets:
+                det = detections[di]
+                if not labels_match(det.label, tr.label) or not self._size_ok(det.box, tr.box, tr):
                     continue
                 dist = bottom_center_distance(tr.box, det.box)
-                if dist <= cfg.threshold_for(det.label):
+                gate = cfg.threshold_for(det.label)
+                if tr.misses > 0 and cfg.coast_gate_growth > 0:
+                    gate *= min(cfg.coast_gate_max, 1.0 + cfg.coast_gate_growth * tr.misses)
+                if dist <= gate:
                     pairs.append((dist, ti, di))
         pairs.sort()
-
         for _dist, ti, di in pairs:
             if ti in unmatched_tracks and di in unmatched_dets:
                 self._match(self._tracks[ti], detections[di], bgr, now)
                 unmatched_tracks.discard(ti)
                 unmatched_dets.discard(di)
+        if low_dets:
+            # Never spawn from an unsure box: refused like a weak spawn.
+            self.spawns_dropped += len(unmatched_dets & low_dets)
+            unmatched_dets -= low_dets
 
         # unmatched detections -> new tentative tracks (bounded: the track
         # cap and the spawn-score floor refuse, never grow without limit)
@@ -505,15 +718,24 @@ class Tracker:
             if det.score < cfg.min_spawn_score or len(self._tracks) >= cfg.max_tracks:
                 self.spawns_dropped += 1
                 continue
+            if self.spawn_containment > 0 and sum(
+                    1 for tr in self._tracks
+                    if labels_match(det.label, tr.label)
+                    and _coverage(tr.box, det.box) >= self.spawn_containment) >= 2:
+                # The detector boxed a group of people already tracked one
+                # by one as a single person: a group box, never a track.
+                self.spawns_absorbed += 1
+                continue
             if self.spawn_containment > 0 and any(
                     labels_match(det.label, tr.label)
                     and _coverage(det.box, tr.box) >= self.spawn_containment
-                    and _width_share(det.box, tr.box) >= PART_MIN_WIDTH_SHARE
+                    and (tr.matched_now or _width_share(det.box, tr.box) >= 0.6)
                     for tr in self._tracks):
-                # The detector boxed a part of someone already tracked (an
-                # upper body on a frame where the whole was missed); its
+                # The detector boxed a part of someone already tracked; its
                 # bottom-centre sits far from the track's, so it did not
-                # match, and it would have become a second visit.
+                # match, and it would have become a second visit. Inside a
+                # COASTING track only a box about as wide counts as a part:
+                # a narrow one is as likely a person the group box covered.
                 self.spawns_absorbed += 1
                 continue
             self._spawn(det, bgr, now)
@@ -555,6 +777,22 @@ class Tracker:
         self._tracks = survivors
         for tr in survivors:
             tr.since_match_s = max(0.0, now - tr.last_matched)
+        # A live track whose box holds two or more other live tracks of the
+        # same label is following a group box this frame (the members may
+        # have been missed on the frame it spawned on, so the spawn guard
+        # could not know). Marked per frame; the lifecycle decides.
+        if self.spawn_containment > 0 and len(survivors) >= 3:
+            for tr in survivors:
+                inside = sum(
+                    1 for o in survivors
+                    if o is not tr and labels_match(o.label, tr.label)
+                    and _coverage(o.box, tr.box) >= self.spawn_containment)
+                tr.group_now = inside >= 2
+                if tr.group_now:
+                    tr.group_frames += 1
+        else:
+            for tr in survivors:
+                tr.group_now = False
         # Drop the frame reference: holding it would keep 6 MB alive between
         # frames for nothing. (An exception escaping above leaves one frame
         # referenced, and that path already unwinds into the worker's
@@ -563,6 +801,51 @@ class Tracker:
         self._ev, self._ev_skew = None, None
         return self.tracks
 
+    def _size_ok(self, det: Box, ref: Box, tr: Track | None = None) -> bool:
+        """The width and height gates against a reference box (the
+        prediction when matching by motion, the last box otherwise).
+        Growth is measured against the track's recent widest box."""
+        cfg = self.config
+        grow = _width_ratio(det, ref)
+        wide = max(ref[2] - ref[0], tr.width_ref if tr is not None else 0.0, 1.0)
+        if (cfg.width_grow_max > 0 and (det[2] - det[0]) / wide > cfg.width_grow_max) or \
+                (cfg.width_shrink_max > 0 and grow < 1.0 / cfg.width_shrink_max):
+            return False
+        if cfg.height_shrink_max > 0:
+            dh = max(det[3] - det[1], 1.0) / max(ref[3] - ref[1], 1.0)
+            if dh < 1.0 / cfg.height_shrink_max:
+                return False
+        return True
+
+    def _assign_stage(self, detections, track_ids: set[int], det_ids: set[int],
+                      iou_floor, bgr, now) -> list[tuple[int, int]]:
+        """One assignment stage: overlap of each candidate detection with
+        each track's predicted box, solved globally; matches are applied
+        and returned as (track index, detection index)."""
+        if not track_ids or not det_ids:
+            return []
+        tis, dis = sorted(track_ids), sorted(det_ids)
+        cost = np.ones((len(tis), len(dis)))
+        for r, ti in enumerate(tis):
+            tr = self._tracks[ti]
+            floor = iou_floor(tr)
+            for c, di in enumerate(dis):
+                det = detections[di]
+                if not labels_match(det.label, tr.label) or not self._size_ok(det.box, tr.predicted, tr):
+                    continue
+                # Overlap with the prediction OR with the last box: a
+                # person who stops short (at a wall, to turn) is behind
+                # the prediction but still on their last box.
+                iou = max(intersection_over_union(tr.predicted, det.box),
+                          intersection_over_union(tr.box, det.box))
+                if iou >= floor:
+                    cost[r, c] = 1.0 - iou
+        matched = []
+        for r, c in assign(cost, 1.0):
+            self._match(self._tracks[tis[r]], detections[dis[c]], bgr, now)
+            matched.append((tis[r], dis[c]))
+        return matched
+
     def _match(self, tr: Track, det: Detection, bgr=None, now: float | None = None) -> None:
         iou = intersection_over_union(tr.box, det.box)
         if iou >= self.config.motionless_iou:
@@ -570,6 +853,11 @@ class Tracker:
         else:
             tr.motionless_count = 0
         tr.box = det.box
+        if tr.kf is not None:
+            tr.kf.update(det.box)
+        tr._widths.append(det.box[2] - det.box[0])
+        del tr._widths[:-max(1, self.config.fps)]
+        tr.width_ref = max(tr._widths)
         tr.score = det.score
         tr.hits += 1
         tr.age += 1
@@ -604,6 +892,11 @@ class Tracker:
             label_votes={det.label: 1},
         )
         tr.confirmed = self.config.initialized() <= 1
+        tr._widths = [det.box[2] - det.box[0]]
+        tr.width_ref = tr._widths[0]
+        if self.config.motion:
+            tr.kf = BoxMotion(det.box)
+            tr.predicted = det.box
         self._update_best(tr, det, bgr)
         self._tracks.append(tr)
 

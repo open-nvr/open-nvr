@@ -101,14 +101,7 @@ CROSS_LABEL_IOU = 0.85
 #: kept box is a PART of that object (a head-and-shoulders box on a person
 #: whose full body is already boxed), not a second one. IoU never catches
 #: it: a part is small, so its IoU with the whole is low. 0 or 1 = off.
-CONTAINMENT = 0.85
-#: A part spans (nearly) the width of its whole: an upper body is as wide
-#: as the person. A PERSON inside a wider box is not a part of it, it is
-#: one of several people the detector boxed together as a group (three
-#: people crossing side by side, Ventuno Q 2026-11-05: the group box
-#: swallowed the one in the middle). The inner box must be at least this
-#: share of the outer box's width to count as a part.
-PART_MIN_WIDTH_SHARE = 0.6
+CONTAINMENT = 0.7
 
 
 def nms(
@@ -126,18 +119,18 @@ def nms(
     ``iou_threshold`` is raised to it, since suppressing ACROSS labels
     more eagerly than within one is never the intent.
 
-    A same-label box that is smaller than a kept box, lies at least
-    ``containment`` of its own area inside it AND spans at least
-    PART_MIN_WIDTH_SHARE of its width is a part of that object — the
-    detector's second box on one person's upper body — and is dropped
-    whatever its IoU, which for a part is always low. Measured on the
-    Ventuno Q (2026-11-05): with IoU alone one walk past the camera posted
-    two or three visits per pass, each with its own recording fetch and
-    photo. The width test keeps a person who stands inside a wider box the
-    detector drew around a group: a part is as wide as its whole, a person
-    in a group is a third of it. ``None``, ``<= 0`` or ``>= 1`` disables
-    the rule. A person in front of a car is a different label and never
-    affected.
+    A same-label box that is smaller than a kept box and lies at least
+    ``containment`` of its own area inside it is a part of that object —
+    the detector's second box on one person's upper body, lower body or
+    torso, which on a crowded frame it draws beside the whole person with
+    an IoU of 0.4 to 0.5 — and is dropped whatever its IoU. Measured on
+    the Ventuno Q (2026-11-05, replayed from the recordings): with IoU
+    alone a pass of three people posted up to eighteen visits. The one
+    shape of containment that is NOT a part is the group box, a box the
+    detector draws around several people beside their own boxes: it holds
+    two or more same-label boxes, and it is the group box that goes.
+    ``None``, ``<= 0`` or ``>= 1`` disables the rule. A person in front of
+    a car is a different label and never affected.
 
     The losing label is gone from ``FrameResult.detections`` too, so a
     benchmark scoring per-label recall (evalcmp) measures this policy as
@@ -172,10 +165,11 @@ def nms(
     # box around people crossing together (three of them, Ventuno Q
     # 2026-11-05) beside the box per person; the group box is the duplicate
     # and the people are kept. A box with exactly one same-label box inside
-    # it that is about as wide is a whole with its PART (an upper body); the
-    # part is the duplicate. One narrow box inside another is left alone: a
-    # person in a group box whose other members were missed, or a sliver,
-    # and the two cannot be told apart from geometry.
+    # it is a whole with its PART (an upper body, a torso); the part is the
+    # duplicate. (A person inside a group box whose other members were
+    # missed on this frame reads as a part too and loses this frame; their
+    # track coasts, and the tracker marks the group box's track by the
+    # members it holds over time.)
     by_size = sorted(kept, key=lambda x: _area(x.box), reverse=True)
     dropped: set[int] = set()
     for i, outer in enumerate(by_size):
@@ -186,7 +180,7 @@ def nms(
                   and contained_share(by_size[j].box, outer.box) >= contain]
         if len(inside) >= 2:
             dropped.add(i)                            # a group box
-        elif len(inside) == 1 and is_part_of(by_size[inside[0]].box, outer.box, contain):
+        elif len(inside) == 1:
             dropped.add(inside[0])                    # a part of this one
     whole = [d for j, d in enumerate(by_size) if j not in dropped]
     # back in score order, as callers expect
@@ -197,13 +191,7 @@ def _area(b: Box) -> float:
     return max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
 
 
-def is_part_of(inner: Box, outer: Box, containment: float = CONTAINMENT) -> bool:
-    """Is ``inner`` a part of the object in ``outer``: mostly inside it and
-    about as wide (see PART_MIN_WIDTH_SHARE)?"""
-    if contained_share(inner, outer) < containment:
-        return False
-    iw, ow = max(0.0, inner[2] - inner[0]), max(0.0, outer[2] - outer[0])
-    return ow > 0 and iw / ow >= PART_MIN_WIDTH_SHARE
+
 
 
 def select_regions(

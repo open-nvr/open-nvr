@@ -949,6 +949,10 @@ class CameraWorker:
             min_spawn_score=(
                 tuning.min_spawn_score if tuning.min_spawn_score is not None
                 else _env_float("DETECT_MIN_SPAWN_SCORE", 0.5)),
+            # The field switch back to the greedy distance matcher: a
+            # camera whose visits get worse under motion prediction can
+            # say so in .env without a redeploy.
+            motion=_env_bool("DETECT_TRACK_MOTION", True),
         ))
         # Evidence/candidate crop margin, clamped to something sane: 0
         # is the bare box, 2 is a crop five times the box on each axis.

@@ -490,6 +490,7 @@ services:
       #   DETECT_MAX_TRACKS   live tracks per camera, hard cap
       #   DETECT_TRACK_TTL    seconds an unverified track may live (0 = off)
       #   DETECT_MIN_SPAWN_SCORE  score needed to CREATE a track
+      #   DETECT_TRACK_MOTION     false = the old greedy distance matcher (no motion prediction)
       #   DETECT_NMS_CROSS_LABEL_IOU  boxes of DIFFERENT labels this
       #                       coincident are one object (0 or 1 = off)
       #   DETECT_NMS_CONTAINMENT  a same-label box this far inside a larger
@@ -500,6 +501,7 @@ services:
       - DETECT_MAX_TRACKS=${DETECT_MAX_TRACKS:-}
       - DETECT_TRACK_TTL=${DETECT_TRACK_TTL:-}
       - DETECT_MIN_SPAWN_SCORE=${DETECT_MIN_SPAWN_SCORE:-}
+      - DETECT_TRACK_MOTION=${DETECT_TRACK_MOTION:-true}
       - DETECT_NMS_CROSS_LABEL_IOU=${DETECT_NMS_CROSS_LABEL_IOU:-}
       - DETECT_NMS_CONTAINMENT=${DETECT_NMS_CONTAINMENT:-}
       # Motion-gate tunables (#373; see .env.example). The calibration

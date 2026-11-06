@@ -308,6 +308,42 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The tracker predicts motion and assigns globally, in two stages.**
+  Each track now carries a constant-velocity Kalman filter over its box
+  centre; detections are assigned to tracks by overlap with the predicted
+  box (or the last box, for someone who stops short), solved globally
+  (Hungarian) rather than nearest-first, in ByteTrack's two stages:
+  confident boxes against every track, then the detector's unsure boxes
+  (below 0.5) against the tracks seen last frame, so a person half hidden
+  behind a colleague keeps their track. The width-growth gate measures
+  against the track's widest box of the last second, not the narrow box
+  of a moment behind someone, and a box under half the predicted height
+  (a torso) never matches. The size-aware distance remains the coasting
+  fallback; `motion=False` on the TrackConfig restores the old matcher.
+  Why: with nearest-first on the distance, three people crossing swapped
+  identities (one track jumped 140 px to another person) and every swap
+  left a fresh track to confirm beside the live ones. Replayed on the
+  Ventuno Q from a three-person, seven-pass walk (2026-11-05): 27 visits
+  → 24, five of seven passes posting exactly three; replay wall time
+  unchanged (no scipy, a few lines of numpy).
+
+- **Groups of people no longer post two or three visits per person.** Five
+  changes to the tracker and the visit lifecycle, measured by replaying
+  the recordings of three walk-throughs with three people through the
+  pipeline's own gate, detector and tracker on the Ventuno Q: 194 visits
+  over 22 passes became 101. A part box (torso, upper or lower body) 70 %
+  inside the whole is dropped whatever its width; a detection much wider
+  (over 1.6×) or narrower (under 0.4×) than a track's box never matches
+  it, so a person's track does not take the box drawn around a group and a
+  group track does not steal a member; a track that missed the last frames
+  is matched with a gate that grows a quarter per miss, so someone who
+  steps behind a colleague rejoins their track; a visit ends when the
+  object was last seen, not when its track expired, so a fragment seen for
+  a second is too short to count; and a track needs three hits at 5 fps
+  to confirm (`min_initialized`), a visit 1.5 s. A track whose box holds
+  two or more others is a group box and its visit is dropped
+  (`visits_dropped{reason="group"}`).
+
 - **A box around a group of people is the duplicate, not the people.**
   When the detector draws one box around people crossing together beside
   the box per person, that group box now goes and the people stay (a box
