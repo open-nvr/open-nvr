@@ -378,7 +378,7 @@
     fingerprinted: true
   permissions:
     gpu: false
-    network_egress: ["https://huggingface.co", "https://softwarecenter.qualcomm.com"]
+    network_egress: [huggingface.co, softwarecenter.qualcomm.com]
     host_filesystem: ["/dev/fastrpc-cdsp", "/dev/dma_heap"]
   scheduling: { max_inflight: 1, fair_queuing: per_camera }
   supports_stream: false
