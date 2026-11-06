@@ -287,9 +287,17 @@ adapter=$(cut -d'|' -f3 <<<"$got"); vlm=$(cut -d'|' -f2 <<<"$got")
 [[ "$adapter" == "ollamavlm" && -n "$vlm" ]] && pass \
     || fail "CUDA box lost the Ollama vision path (got: ${got})"
 
+start_test "a Qualcomm NPU box is handed the litertlm captioner, LLM sized as CPU"
+# The Hexagon runs Gemma through LiteRT-LM (2.5 s a photo on a Ventuno Q);
+# Ollama has no Hexagon backend, so the LLM tier is the CPU one.
+got=$(size 16 8 qualcomm); cpu_llm=$(cut -d'|' -f1 <<<"$(size 16 8 cpu)")
+adapter=$(cut -d'|' -f3 <<<"$got"); vlm=$(cut -d'|' -f2 <<<"$got"); llm=$(cut -d'|' -f1 <<<"$got")
+[[ "$adapter" == "litertlm" && -z "$vlm" && "$llm" == "$cpu_llm" ]] && pass \
+    || fail "16 GB / 8-core Qualcomm got '${adapter}' VLM '${vlm}' LLM '${llm}' (CPU LLM: ${cpu_llm})"
+
 start_test "every suggestion carries a reason the operator is shown"
 missing=""
-for spec in "8 4 cpu" "32 16 cpu" "32 12 metal" "8 8 cuda" "32 12 cuda"; do
+for spec in "8 4 cpu" "32 16 cpu" "32 12 metal" "8 8 cuda" "32 12 cuda" "16 8 qualcomm"; do
     unset SUGGEST_CAPTION_REASON            # a stale one from the last spec must not count
     size $spec >/dev/null
     [[ -n "${SUGGEST_CAPTION_REASON:-}" ]] || missing="${missing} ${spec};"
@@ -310,6 +318,12 @@ HW_ACCEL=cuda
 a=$(suggest_enrichment_default moondream); b=$(suggest_enrichment_default blip)
 [[ "$a" == "false" && "$b" == "false" ]] && pass \
     || fail "CUDA+moondream='${a}' CUDA+blip='${b}' — those captioners run on CPU"
+
+start_test "visit descriptions default ON for the NPU captioner, OFF for a CPU one on the same board"
+HW_ACCEL=qualcomm
+a=$(suggest_enrichment_default litertlm); b=$(suggest_enrichment_default moondream)
+[[ "$a" == "true" && "$b" == "false" ]] && pass \
+    || fail "qualcomm+litertlm='${a}' qualcomm+moondream='${b}'"
 
 start_test "visit descriptions default OFF on CPU and Metal"
 HW_ACCEL=cpu;   a=$(suggest_enrichment_default moondream)

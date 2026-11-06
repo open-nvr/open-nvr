@@ -33,6 +33,8 @@ Env:
   DETECT_NMS_CROSS_LABEL_IOU  IoU above which boxes of DIFFERENT labels are one
                             object (default 0.85; 0 or 1 = off). Off for
                             per-label benchmarking (evalcmp).
+  DETECT_NMS_CONTAINMENT  share of a same-label box inside a larger one above which
+                       it is a part of that object, not a second one (0.85; 0 or 1 = off)
   DETECT_DECODE_SKIP        nonref (default) | bidir | nokey | none (decode CPU dial)
   DETECT_DECODE_THREADS     ffmpeg decoder thread cap (default 2; 0 = auto)
   DETECT_BESTFRAME_PER_CAMERA  best-frame crops retained per camera (default 16)

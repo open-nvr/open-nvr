@@ -246,6 +246,16 @@ export type SystemResourcesResp = {
   disk?: { path: string; total: number; used: number; free: number; percent: number } | null
   disk_error?: string | null
   active_alerts?: { alert_type: string; severity: string; description: string; since?: string }[]
+  /** Disk rotation in force: core deletes the oldest recordings to keep its headroom (null when not). */
+  rotation?: {
+    active: boolean
+    description?: string
+    min_free_gb?: number
+    free_gb?: number | null
+    recordings_gb?: number
+    effective_retention_hours?: number | null
+    unreachable?: boolean
+  } | null
   thresholds?: {
     enabled?: boolean
     cpu_percent_threshold?: number | null

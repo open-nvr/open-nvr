@@ -406,3 +406,28 @@ def test_missing_for_never_trips_the_ingest_unassigned_counter(db):
     out = er.missing_for(db, filters=FILTERS, labels=None, camera_ids=None,
                          want_caption=True, want_kinds={"colour"})
     assert out["total"] == 0 and cap._unassigned_skipped == before
+
+
+def test_a_visit_whose_caption_call_failed_is_left_alone_for_the_cooldown(db, monkeypatch):
+    """A timed-out call is not 'looked and found nothing' — the visit stays
+    missing for later passes — but the on-demand lane must not ask the
+    same slow captioner about it again on the very next question."""
+    from datetime import UTC, datetime
+    from core.config import settings
+    from services.caption_enrichment import CAPTION_FAILED_AT
+
+    just = _visit(db); long_ago = _visit(db); fresh = _visit(db)
+    for row, ago_s in ((just, 30), (long_ago, 3600)):
+        row.payload = {CAPTION_FAILED_AT: (datetime.now(UTC) - timedelta(seconds=ago_s)).isoformat()}
+        db.commit()
+    monkeypatch.setattr(settings, "events_caption_retry_cooldown_s", 600.0, raising=False)
+    out = er.missing_for(db, filters=FILTERS, labels=["car"], camera_ids=None,
+                         want_caption=True, want_kinds=set())
+    assert just.id not in out["needs"], "failed 30 s ago: inside the cooldown"
+    assert long_ago.id in out["needs"] and fresh.id in out["needs"]
+    assert out["caption"] == 2
+    # cooldown off: asked again at once
+    monkeypatch.setattr(settings, "events_caption_retry_cooldown_s", 0, raising=False)
+    out = er.missing_for(db, filters=FILTERS, labels=["car"], camera_ids=None,
+                         want_caption=True, want_kinds=set())
+    assert just.id in out["needs"]

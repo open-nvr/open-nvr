@@ -75,6 +75,54 @@ def test_nms_cross_label_rule_can_be_disabled():
         assert len(nms([car, truck], cross_label_iou=off)) == 2, off
 
 
+def test_nms_drops_a_part_box_inside_the_same_object():
+    """Camera 23, 2026-11-05: the detector boxed the walker's full body and,
+    at lower score, head and shoulders. IoU between a part and the whole is
+    small, so IoU alone kept both and each became its own visit."""
+    body = Detection("person", (100, 50, 220, 380), 0.86)
+    upper = Detection("person", (108, 52, 214, 190), 0.61)    # fully inside, IoU ≈ 0.4
+    # the torso box the detector drew beside the whole on the recordings
+    # (arms out: wider than the body box, 75 % inside it, IoU 0.46)
+    torso = Detection("person", (392, 197, 510, 400), 0.91)
+    whole = Detection("person", (388, 197, 480, 553), 0.88)
+    assert nms([torso, whole]) == [whole]
+    assert nms([body, upper]) == [body]
+    assert nms([upper, body]) == [body], "order of arrival does not matter: the larger box wins"
+    # the part scoring HIGHER than the whole (the face is the clearest part,
+    # and what the walk-through on 2026-11-05 still produced after the first
+    # version of this rule): the whole still wins
+    sure_upper = Detection("person", (108, 52, 214, 190), 0.93)
+    assert nms([sure_upper, body]) == [body]
+    assert nms([body, sure_upper]) == [body]
+    # three people crossing together: the detector also drew one wide box
+    # around the group; each person is inside it but a third of its width,
+    # so they are people, not parts, and the group box does not swallow them
+    group = Detection("person", (80, 40, 460, 390), 0.7)
+    a = Detection("person", (90, 50, 200, 380), 0.85)
+    b = Detection("person", (210, 60, 320, 385), 0.8)
+    c = Detection("person", (330, 55, 450, 380), 0.82)
+    out = nms([group, a, b, c])
+    assert a in out and b in out and c in out
+    assert group not in out, "the box around the group is the duplicate, not the people"
+    # two people boxed together with both members detected: same verdict
+    pair = Detection("person", (80, 40, 340, 390), 0.75)
+    assert set(nms([pair, a, b])) == {a, b}
+    # one box inside another, alone, reads as a part: a person in a group
+    # box whose other members were missed loses this frame (the tracker's
+    # group marking covers the box over time)
+    assert nms([pair, b]) == [pair]
+    # a second person partly behind the first is NOT a part: half outside
+    other = Detection("person", (180, 60, 300, 380), 0.7)
+    assert set(nms([body, other])) == {body, other}
+    # the rule can be switched off
+    assert len(nms([body, upper], containment=0.0)) == 2
+    assert len(nms([body, upper], containment=1.0)) == 2
+    # a person inside a car's box is a different label: kept
+    car = Detection("car", (0, 0, 400, 300), 0.9)
+    person = Detection("person", (150, 50, 250, 290), 0.8)
+    assert set(nms([car, person])) == {car, person}
+
+
 def test_nms_cross_label_never_stricter_than_same_label():
     # Touching, barely overlapping boxes of different labels: a cross-label
     # value below the same-label threshold is raised to it, not applied.
