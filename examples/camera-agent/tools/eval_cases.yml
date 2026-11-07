@@ -98,3 +98,171 @@
           after: "22:00"
         state:
           alarms: {target: person, window: "after 22:00", camera_ids: "{camera}"}
+
+# ── the NPU set (7 November 2026) ─────────────────────────────────────
+# Added when the agent's LLM moved to the Hexagon on the qualcomm flavour
+# (bench/ventuno-q-npu-agent-llm-2026-11-07.md): thirty cases, so a run on
+# the CPU model and one on the NPU can be compared on more than nine
+# questions. Phrasings from the design doc's capability map and the
+# router's exemplars, in the words people use at a door or a gate.
+
+- id: count-people-live
+  ask: "how many people are at {camera} right now?"
+  expect:
+    tool: detect_objects
+    args: {camera_id: "{camera}"}
+
+- id: any-vehicles-live
+  ask: "are there any cars on {camera}?"
+  expect:
+    tool: detect_objects
+    args: {camera_id: "{camera}"}
+
+- id: generic-describe
+  ask: "what do you see on {camera}?"
+  expect:
+    tool: describe_camera
+    args: {camera_id: "{camera}"}
+    reply_source: llm
+
+- id: what-is-happening
+  ask: "what's happening at {camera}?"
+  expect:
+    tool: [describe_camera, detect_objects]
+    args: {camera_id: "{camera}"}
+
+- id: is-the-gate-clear
+  ask: "is {camera} clear?"
+  expect:
+    tool: [detect_objects, describe_camera]
+    args: {camera_id: "{camera}"}
+
+- id: anyone-anywhere
+  note: "No camera named and 'anywhere': every camera, not a guess at one."
+  ask: "is anyone anywhere right now?"
+  expect:
+    tool: [detect_objects, describe_camera]
+    args: {camera_id: [all, "{camera}"]}
+
+- id: white-van-yesterday
+  note: "A thing in the past: the history, with the thing as the label."
+  ask: "did a white van come to {camera} yesterday?"
+  expect:
+    tool: [search_history, search_footage]
+
+- id: last-night
+  ask: "what happened at {camera} last night?"
+  expect:
+    tool: [search_history, recent_events, describe_window, search_footage]
+
+- id: last-ten-minutes
+  ask: "anything on {camera} in the last 10 minutes?"
+  expect:
+    tool: [recent_events, search_history, detect_objects, describe_camera]
+
+- id: between-two-and-three
+  ask: "what happened on {camera} between 2pm and 3pm?"
+  expect:
+    tool: [describe_window, search_history, recent_events]
+
+- id: who-came-this-morning
+  note: "WHO: the history, matching faces if the agent can; never a live look."
+  ask: "who came to {camera} this morning?"
+  expect:
+    tool: [search_history, recent_events]
+
+- id: delivery-today
+  ask: "did a delivery come to {camera} today?"
+  expect:
+    tool: [search_history, recent_app_alerts, recent_events, search_footage]
+
+- id: notify-car-arrives
+  ask: "let me know when a car arrives at {camera}"
+  expect:
+    tool: create_monitor
+    args: {target: car, camera_id: "{camera}"}
+    state:
+      monitors: {target: car}
+
+- id: monitor-more-than-two
+  ask: "tell me if more than 2 people are at {camera}"
+  expect:
+    tool: create_monitor
+    args: {target: person, max_count: 2}
+    state:
+      monitors: {kind: count, target: person, max_count: 2}
+
+- id: alarm-before-6am
+  ask: "sound the siren if anyone is at {camera} before 6am"
+  expect:
+    tool: create_alarm
+    args:
+      target: person
+      before: "06:00"
+    state:
+      alarms: {target: person, window: "before 06:00"}
+
+- id: alarm-silent
+  note: "The ring is part of the ask: a silent alarm must not blast the siren."
+  ask: "set a silent alarm for a person at {camera} after 11pm"
+  expect:
+    tool: create_alarm
+    args:
+      target: person
+      after: "23:00"
+      ring: silent
+
+- id: alarm-then-stop
+  note: "The second turn names nothing: the alarm it stops is the one just made."
+  turns:
+    - ask: "ring an alarm if a person is at {camera} after 9pm"
+      expect:
+        tool: create_alarm
+        args: {target: person, after: "21:00"}
+    - ask: "actually, cancel that alarm"
+      expect:
+        tool: stop_alarm
+
+- id: monitor-then-stop
+  turns:
+    - ask: "notify me when a person shows up at {camera}"
+      expect:
+        tool: create_monitor
+        args: {target: person}
+    - ask: "stop watching for that"
+      expect:
+        tool: stop_monitor
+
+- id: which-apps
+  ask: "which apps are running?"
+  expect:
+    tool: [list_apps, app_status]
+
+- id: plate-alerts
+  note: "Plates are an app's business: its alerts, not a live frame."
+  ask: "any number plates spotted today?"
+  expect:
+    tool: [recent_app_alerts, search_history, list_apps, app_status]
+
+- id: how-many-cameras
+  note: "The roster answers; the model never counts cameras."
+  ask: "how many cameras are configured?"
+  expect:
+    no_tool: true
+    reply_source: roster
+
+- id: good-morning
+  ask: "good morning"
+  expect:
+    no_tool: true
+    reply_source: llm
+
+- id: follow-up-same-camera
+  note: "A follow-up with no camera named keeps the camera of the turn before."
+  turns:
+    - ask: "is anyone on {camera}?"
+    - ask: "and any cars there?"
+      expect:
+        tool: detect_objects
+        args: {camera_id: "{camera}"}
+
