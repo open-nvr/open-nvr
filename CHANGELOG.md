@@ -364,6 +364,16 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   for" and gives the count. Visits recorded before this release carry no
   count and never match a group query.
 
+- **The camera agent's start-up LLM pre-warm is a setting, off on CPU
+  boxes.** At start the agent sent its system prompt and tool schemas
+  through the LLM once so the first question skips the cold prefill. On a
+  GPU that is seconds; on an 8-core ARM box it was one chat call of 3 min
+  50 s at every restart, six cores busy for nothing a person asked for
+  (Ventuno Q, 2026-11-06). `LLM_PREWARM` in .env (`llm_prewarm` in the
+  agent config) turns it off; the installer writes false wherever the LLM
+  runs on the CPU and true on a CUDA box. Off, the first question pays the
+  prefill instead, and the log says so.
+
 - **A slow captioner no longer computes captions nobody saves.** One
   Search "describe" on the field box sent the visit's photo to qwen3-vl
   2B through Ollama on the ARM cores: 60–90 s a caption against KAI-C's

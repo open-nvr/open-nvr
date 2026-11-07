@@ -500,18 +500,21 @@ services:
         ourl=$$(sed_esc "$${OLLAMA_URL}")
         cadapter=$$(sed_esc "$${CAPTION_ADAPTER}")
         ouiurl=$$(sed_esc "$${OPENNVR_UI_URL}")
+        lprewarm=$$(sed_esc "$${LLM_PREWARM:-true}")
         sed -e "s/[$$][{]INTERNAL_API_KEY[}]/$$ikey/g" \
             -e "s/[$$][{]CAMERA_AGENT_LISTEN_HOST[}]/$$lhost/g" \
             -e "s/[$$][{]OLLAMA_MODEL[}]/$$omodel/g" \
             -e "s/[$$][{]OLLAMA_URL[}]/$$ourl/g" \
             -e "s/[$$][{]CAPTION_ADAPTER[}]/$$cadapter/g" \
             -e "s/[$$][{]OPENNVR_UI_URL[}]/$$ouiurl/g" \
+            -e "s/[$$][{]LLM_PREWARM[}]/$$lprewarm/g" \
             < /template/config.docker.yml > /generated/config.yml
         echo "Wrote /generated/config.yml (voice) from template."
     environment:
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - CAMERA_AGENT_LISTEN_HOST=0.0.0.0
       - OLLAMA_MODEL=${OLLAMA_MODEL:-granite4:micro}
+      - LLM_PREWARM=${LLM_PREWARM:-true}
       # Where the agent reaches the LLM runtime. Default: the bundled
       # ollama container. Set OLLAMA_EXTERNAL_URL in .env (e.g.
       # http://host.docker.internal:11434 for native Ollama on the host
@@ -601,18 +604,21 @@ services:
         ourl=$$(sed_esc "$${OLLAMA_URL}")
         cadapter=$$(sed_esc "$${CAPTION_ADAPTER}")
         ouiurl=$$(sed_esc "$${OPENNVR_UI_URL}")
+        lprewarm=$$(sed_esc "$${LLM_PREWARM:-true}")
         sed -e "s/[$$][{]INTERNAL_API_KEY[}]/$$ikey/g" \
             -e "s/[$$][{]CAMERA_AGENT_LISTEN_HOST[}]/$$lhost/g" \
             -e "s/[$$][{]OLLAMA_MODEL[}]/$$omodel/g" \
             -e "s/[$$][{]OLLAMA_URL[}]/$$ourl/g" \
             -e "s/[$$][{]CAPTION_ADAPTER[}]/$$cadapter/g" \
             -e "s/[$$][{]OPENNVR_UI_URL[}]/$$ouiurl/g" \
+            -e "s/[$$][{]LLM_PREWARM[}]/$$lprewarm/g" \
             < /template/config.docker.chat.yml > /generated/config.yml
         echo "Wrote /generated/config.yml (chat) from template."
     environment:
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - CAMERA_AGENT_LISTEN_HOST=0.0.0.0
       - OLLAMA_MODEL=${OLLAMA_MODEL:-granite4:micro}
+      - LLM_PREWARM=${LLM_PREWARM:-true}
       # See the voice config-init: bundled ollama by default, or the
       # operator's external runtime via OLLAMA_EXTERNAL_URL in .env.
       - OLLAMA_URL=${OLLAMA_EXTERNAL_URL:-http://ollama:11434}

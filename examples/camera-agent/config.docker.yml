@@ -172,6 +172,10 @@ filler_source: template
 # prompt first, which quietly breaks tool routing. 8192 gives comfortable
 # headroom; KV-cache cost for a 1.5-2b model at 8k is a few hundred MB.
 llm_num_ctx: 8192
+# Pre-warm the LLM at start (system prompt + tools, one token). false where
+# the LLM runs on the CPU: minutes of cores at every restart (the installer
+# sets LLM_PREWARM).
+llm_prewarm: ${LLM_PREWARM}
 
 # 1.0 (was 2.0) so the camera screen's 1 fps still refresh actually gets a
 # NEW frame each second — at TTL 2.0 every other poll returned the same

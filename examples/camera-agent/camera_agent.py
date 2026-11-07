@@ -287,6 +287,13 @@ class AppConfig:
     # host-run Ollama stays warm even without OLLAMA_KEEP_ALIVE in its env).
     # -1 = forever (default). A duration string like "5m" frees RAM when idle.
     llm_keep_alive: str | float = -1
+    # Send the system prompt and tool schemas to the LLM once at start so
+    # the first real question skips the cold prefill. Worth it on a GPU;
+    # on an 8-core ARM box it is about four minutes of six cores at every
+    # restart (Ventuno Q, 2026-11-06: one 3 m 50 s chat call), paying up
+    # front a cost that would otherwise land on the first question. The
+    # installer sets LLM_PREWARM=false where the LLM runs on the CPU.
+    llm_prewarm: bool = True
 
     # Text/chat mode: the UI defaults to a text box (no mic) and the voice
     # adapters (Whisper/Piper) aren't required. The lighter on-ramp — used by
@@ -3003,6 +3010,13 @@ def load_config(path: str | Path) -> AppConfig:
         except (TypeError, ValueError):
             raise SystemExit(f"config: {key} must be a number; got {raw.get(key)!r}")
 
+    def _truthy(value: Any, default: bool) -> bool:
+        if value is None or value == "":
+            return default
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() not in ("0", "false", "no", "off")
+
     def _int(key: str, default: int) -> int:
         try:
             return int(raw.get(key, default))
@@ -3054,6 +3068,7 @@ def load_config(path: str | Path) -> AppConfig:
         llm_num_threads=(int(raw["llm_num_threads"]) if raw.get("llm_num_threads") else None),
         llm_num_ctx=int(raw.get("llm_num_ctx") or 4096),
         llm_keep_alive=(raw["llm_keep_alive"] if raw.get("llm_keep_alive") is not None else -1),
+        llm_prewarm=_truthy(raw.get("llm_prewarm"), True),
         piper_url=_str("piper_url", "http://127.0.0.1:9001"),
         piper_token=_str("piper_token", ""),
         piper_voice=_str("piper_voice", os.environ.get("PIPER_VOICE", "")),
@@ -5236,9 +5251,14 @@ class CameraAgentRuntime:
         # + prefills on first inference). We fire a throwaway one-token
         # chat; with OLLAMA_KEEP_ALIVE=-1 the model then stays resident.
         # Best-effort: failures here must never block startup.
-        self._warmup_task = asyncio.create_task(
-            self._prewarm_llm(), name="camera-agent-llm-prewarm"
-        )
+        if self.cfg.llm_prewarm:
+            self._warmup_task = asyncio.create_task(
+                self._prewarm_llm(), name="camera-agent-llm-prewarm"
+            )
+        else:
+            self._warmup_task = None
+            logger.info("camera-agent: LLM pre-warm off (llm_prewarm: false); "
+                        "the first question pays the cold prefill instead.")
 
         # Pre-warm the vision detector so its model is loaded (and its
         # weights downloaded) BEFORE the first real question. This is the

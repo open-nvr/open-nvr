@@ -27,6 +27,10 @@ llm_max_tokens: 220
 # See config.docker.yml — 13 tool schemas + the system prompt overflow the
 # 4096 default, and Ollama truncates the system prompt first on overflow.
 llm_num_ctx: 8192
+# Pre-warm the LLM at start (system prompt + tools, one token). false where
+# the LLM runs on the CPU: minutes of cores at every restart (the installer
+# sets LLM_PREWARM).
+llm_prewarm: ${LLM_PREWARM}
 
 # detect_objects -> YOLOv8 (name "default"); describe_camera -> the caption/VQA
 # adapter selected by CAPTION_ADAPTER (auto-registered by caption-adapter-register
