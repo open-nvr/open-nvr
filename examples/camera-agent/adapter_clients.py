@@ -665,6 +665,11 @@ class OpenAILLMClient(_ReusableClientMixin):
         self._model = model
         self._timeout = timeout_seconds
 
+    @property
+    def models_url(self) -> str:
+        """``GET /v1/models`` beside the chat URL: what /health probes."""
+        return self._url[: -len("/chat/completions")] + "/models"
+
     async def chat(
         self,
         *,

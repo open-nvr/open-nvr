@@ -387,6 +387,33 @@ including one on another LAN machine. The installer offers this as the
 "LLM runtime" question when you select the camera-agent example.
 
 
+## Running the LLM on an NPU (the qualcomm flavour)
+
+On a Qualcomm box the litertlm caption adapter answers `/v1/chat/completions`
+on the same Gemma 4 E2B engine it captions with (ai-adapter #83), and
+`start.sh` points the agent at it: `LLM_PROVIDER=openai`,
+`LLM_BASE_URL=http://caption-adapter:9006`, `LLM_WINDOW_TOKENS=4096`, the
+bundled Ollama skipped. Measured on a Ventuno Q with the agent's real system
+prompt and seven of its tool schemas
+(`bench/ventuno-q-npu-agent-llm-2026-11-07.md`): 10 of 10 right tool
+choices on the evaluation questions, twice over, at 0.8–2.0 s a turn, where
+granite4:micro on the same box's CPU takes 20–25 s and 3 m 50 s to warm up.
+
+The catch is the window. The bundle is compiled with 4,096 tokens and the
+runtime refuses a longer prompt instead of truncating it; the agent's full
+prompt (system text plus fourteen schemas plus eight messages of history,
+about 5,000 tokens) does not fit. `llm_window_tokens` makes each turn send
+what fits (`prompt_budget.py`): the tool schemas the question is likely to
+need — the router's hint first, then the tools the words point at (an
+alarm word, a past tense, "apps"), then a fixed priority order whose first
+seven are the set the spike ran — and the newest history in whole pairs,
+two turns at least. A tool left out cannot be called that turn, the same
+as the cloud config's `enabled_tools`, only decided per question. The
+prefix cache that rules 1–4 above protect does not exist on this path (a
+conversation is created per call and prefills in well under a second), so
+a changing tool list costs nothing here; leave `llm_window_tokens` at 0
+on an Ollama host, where it does.
+
 ## What the installer suggests (hardware-aware defaults)
 
 The installer detects the machine that will RUN the LLM (host vs the

@@ -8,6 +8,27 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The camera agent's LLM runs on the NPU on the qualcomm flavour.** The
+  litertlm caption adapter answers `/v1/chat/completions` on the same
+  Gemma engine (ai-adapter #83), and `start.sh` points the agent at it:
+  `LLM_PROVIDER=openai`, `LLM_BASE_URL=http://caption-adapter:9006`,
+  `LLM_MODEL`, `LLM_WINDOW_TOKENS=4096`, the pre-warm back on (seconds on
+  the NPU), the bundled Ollama skipped; leaving the flavour resets them,
+  an operator's own provider is kept. Measured on a Ventuno Q with the
+  agent's real prompt: 10 of 10 right tool choices on its evaluation
+  questions at 0.8–2.0 s a turn, against 20–25 s for granite4:micro on
+  the CPU (`bench/ventuno-q-npu-agent-llm-2026-11-07.md`). The same
+  `.env` keys put the agent on any OpenAI-compatible endpoint. New
+  `llm_window_tokens` (agent config): a window the runtime cannot grow
+  — the bundle's 4,096 tokens hold the system prompt and thirteen of the
+  fourteen schemas, or seven and eight turns of history — so each turn
+  sends only the tool schemas the question is likely to need (the
+  router's hint first, then what the words point at, then a fixed
+  priority) and the newest history, whole pairs, two turns at least; a
+  prompt the runtime still refuses mid-turn is retried without history,
+  then with three tools. `/health` probes an OpenAI-compatible endpoint's
+  `/v1/models` instead of reporting it unprobed.
+
 - **The dashboard shows the NPU and the GPU beside CPU, memory and disk.**
   The host monitor's sample carries `accelerators`: the device the
   detector runs on (from its own backend gauge: Hexagon, Intel NPU or

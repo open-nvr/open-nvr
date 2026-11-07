@@ -108,7 +108,20 @@ enabled_tools:
 # pull and this config; qwen2.5:0.5b is the low-RAM floor.
 # Whichever model you pick, it MUST support tool calling — see
 # https://ollama.com/blog/tool-support.
-llm_model: ${OLLAMA_MODEL}
+# The LLM runtime. ollama (default): Ollama's native API at ollama_url.
+# openai: any OpenAI-compatible chat API at llm_base_url — a cloud provider,
+# a local server, or the NPU caption adapter's /v1/chat/completions (the
+# qualcomm flavour: start.sh fills LLM_PROVIDER=openai and the adapter's
+# URL, and a turn runs on the Hexagon in 1–2 s instead of 20–25 s on the
+# CPU; bench/ventuno-q-npu-agent-llm-2026-11-07.md). All from .env.
+llm_provider: ${LLM_PROVIDER}
+llm_base_url: ${LLM_BASE_URL}
+llm_api_key: ${LLM_API_KEY}
+llm_model: ${LLM_MODEL}
+# A context window the runtime cannot grow (the NPU bundle: 4096). Each
+# turn then sends only the tool schemas the question is likely to need and
+# the newest history (prompt_budget.py). 0 = the runtime manages the window.
+llm_window_tokens: ${LLM_WINDOW_TOKENS}
 # Pre-set so that IF you switch OLLAMA_MODEL to a "thinking" model (e.g. a qwen3)
 # it stays snappy and non-verbose; a harmless no-op for the non-thinking qwen2.5
 # default.

@@ -102,6 +102,7 @@ from tools import CameraTools, build_tool_definitions
 # the container, and a module that imports camera_agent executes it a
 # second time. They keep their names in this namespace for the tests
 # and the forced-grounding path.
+import prompt_budget as _prompt_budget
 from router import (  # noqa: F401 — re-exported
     _CAMERA_WORDS,
     _CAMERA_RE,
@@ -283,6 +284,12 @@ class AppConfig:
     # faster prefill, but must hold the prompt).
     llm_num_threads: int | None = None
     llm_num_ctx: int = 4096
+    # A window the runtime cannot grow (a model compiled for an NPU: the
+    # Gemma bundle on a Ventuno Q holds 4,096 tokens and refuses a longer
+    # prompt). When set, each turn sends only the tool schemas the question
+    # is likely to need and the newest history, so the prompt and the
+    # answer fit (prompt_budget.py). 0 = the runtime manages the window.
+    llm_window_tokens: int = 0
     # How long Ollama keeps the model resident (sent on every request so a
     # host-run Ollama stays warm even without OLLAMA_KEEP_ALIVE in its env).
     # -1 = forever (default). A duration string like "5m" frees RAM when idle.
@@ -3067,6 +3074,7 @@ def load_config(path: str | Path) -> AppConfig:
         llm_think=(None if raw.get("llm_think") is None else bool(raw.get("llm_think"))),
         llm_num_threads=(int(raw["llm_num_threads"]) if raw.get("llm_num_threads") else None),
         llm_num_ctx=int(raw.get("llm_num_ctx") or 4096),
+        llm_window_tokens=int(raw.get("llm_window_tokens") or 0),
         llm_keep_alive=(raw["llm_keep_alive"] if raw.get("llm_keep_alive") is not None else -1),
         llm_prewarm=_truthy(raw.get("llm_prewarm"), True),
         piper_url=_str("piper_url", "http://127.0.0.1:9001"),
@@ -4935,7 +4943,21 @@ class CameraAgentRuntime:
 
         async def check_llm():
             if self.cfg.llm_provider.strip().lower() == "openai":
-                return OK, "external OpenAI-compatible endpoint (not probed)"
+                murl = getattr(self.ollama, "models_url", None)
+                if not murl:
+                    return OK, "external OpenAI-compatible endpoint (not probed)"
+                headers = {}
+                key = self.cfg.llm_api_key or self.cfg.ollama_token
+                if key:
+                    headers["Authorization"] = f"Bearer {key}"
+                async with httpx.AsyncClient(timeout=8.0) as client:
+                    resp = await client.get(murl, headers=headers)
+                    resp.raise_for_status()
+                data = resp.json() if resp.content else {}
+                ids = [str(m.get("id")) for m in ((data or {}).get("data") or [])
+                       if isinstance(m, dict) and m.get("id")]
+                return OK, (f"OpenAI-compatible endpoint reachable"
+                            + (f"; models: {', '.join(ids[:5])}" if ids else ""))
             url = f"{self.cfg.ollama_url.rstrip('/')}/api/tags"
             async with httpx.AsyncClient(timeout=8.0) as client:
                 resp = await client.get(url)
@@ -5301,6 +5323,12 @@ class CameraAgentRuntime:
             # weight load. (KEEP_ALIVE=-1 keeps the cache resident.)
             system = self.build_system_prompt(clock=False)
             tools = self.tool_definitions
+            window = int(getattr(self.cfg, "llm_window_tokens", 0) or 0)
+            if window:
+                # The same cut a turn makes (prompt_budget): a fixed window
+                # refuses the whole list, and a refused warm-up warms nothing.
+                tools = _prompt_budget.fit(system=system, history=[], user_turn="hello",
+                                           tools=tools, window=window, max_tokens=1).tools
             await self.ollama.chat(
                 messages=[
                     {"role": "system", "content": system},
@@ -7720,6 +7748,45 @@ async def _chat_or_explain(runtime: "CameraAgentRuntime", **kw: Any) -> dict[str
     return response
 
 
+async def _chat_within_window(
+    runtime: "CameraAgentRuntime",
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None,
+    *,
+    history_len: int,
+    user_text: str,
+    hint: str | None,
+    trace: list[dict[str, Any]],
+) -> tuple[dict[str, Any], list[dict[str, Any]] | None]:
+    """One LLM iteration that survives the runtime refusing the prompt as
+    too long (``context_length_exceeded``, which a fixed-window runtime
+    answers instead of truncating): a tool result mid-turn can push a
+    prompt that fitted over the edge. The history goes first, then all
+    but the three best-ranked tools (prompt_budget.shrink_for_retry);
+    ``messages`` is shrunk in place so the rest of the turn sees it.
+    Returns the response and the tools the turn should carry on with."""
+    for attempt in range(3):
+        try:
+            response = await _chat_or_explain(
+                runtime, messages=messages, tools=tools,
+                temperature=runtime.cfg.llm_temperature,
+                max_tokens=runtime.cfg.llm_max_tokens)
+            return response, tools
+        except LLMTurnError as exc:
+            if "context_length_exceeded" not in str(exc) or attempt == 2:
+                raise
+            shrunk = _prompt_budget.shrink_for_retry(
+                messages, tools, history_len=history_len, user_text=user_text, hint=hint)
+            if shrunk is None:
+                raise
+            new_messages, tools, what = shrunk
+            messages[:] = new_messages
+            history_len = 0
+            trace.append({"step": "prompt", "detail": f"too long for the window; {what}", "ms": 0})
+            logger.warning("converse: the prompt did not fit the LLM's window; %s and retrying", what)
+    raise AssertionError("unreachable")
+
+
 async def _run_conversation_turn(
     runtime: "CameraAgentRuntime",
     history: list[dict[str, str]],
@@ -7809,7 +7876,6 @@ async def _conversation_turn_body(
     messages.extend(history)
     messages.append({"role": "user", "content": _user_turn(
         runtime, user_text, hint=" ".join(turn_hints) or None)})
-    _note_prefix_cache(runtime, messages[0]["content"], tools, trace)
     # The question itself, for tools that decide by it (face matching only
     # when somebody asked WHO — tools.search_history). Task-local: a
     # background task's or a scheduled report's turn does not overwrite
@@ -7918,16 +7984,39 @@ async def _conversation_turn_body(
             hint=" ".join(turn_hints + [
                 f"This question most likely needs the {decision.hint} tool."]))}
 
+    # A window the runtime cannot grow (llm_window_tokens; the NPU bundle):
+    # send only the tool schemas this question is likely to need and the
+    # newest history, so the prompt and the answer fit. Decided AFTER the
+    # router so its hint is the first tool kept. Off (0), the prompt goes
+    # out whole and the Ollama prefix cache keeps working.
+    window = int(getattr(runtime.cfg, "llm_window_tokens", 0) or 0)
+    history_len = len(history)
+    if window and not routed:
+        fitted = _prompt_budget.fit(
+            system=messages[0]["content"], history=history,
+            user_turn=messages[-1]["content"], tools=tools, window=window,
+            max_tokens=runtime.cfg.llm_max_tokens, user_text=user_text,
+            hint=decision.hint)
+        if fitted.trimmed:
+            messages[:] = [messages[0], *fitted.history, messages[-1]]
+            if tools:
+                tools = fitted.tools
+            history_len = len(fitted.history)
+            detail = (f"window {window}: {len(fitted.tools)} of {len(tools or [])} tools, "
+                      f"{len(fitted.history)} of {len(history)} history, ~{fitted.tokens} tokens")
+            if fitted.dropped_tools:
+                detail += " (left out: " + ", ".join(fitted.dropped_tools) + ")"
+            trace.append({"step": "prompt", "detail": detail, "ms": 0})
+            logger.info("converse: prompt %s", detail)
+    elif not window:
+        _note_prefix_cache(runtime, messages[0]["content"], tools, trace)
+
     if not routed:
         for iteration in range(max_iterations):
             _llm_t0 = time.perf_counter()
-            response = await _chat_or_explain(
-                runtime,
-                messages=messages,
-                tools=tools,
-                temperature=runtime.cfg.llm_temperature,
-                max_tokens=runtime.cfg.llm_max_tokens,
-            )
+            response, tools = await _chat_within_window(
+                runtime, messages, tools, history_len=history_len,
+                user_text=user_text, hint=decision.hint, trace=trace)
             trace.append({"step": "llm", "detail": f"iter {iteration + 1}",
                           "ms": int((time.perf_counter() - _llm_t0) * 1000)})
             message = response.get("message") or {}

@@ -78,6 +78,11 @@ caption_adapter: blip
 llm_model: granite4:micro
 llm_temperature: 0.4
 llm_max_tokens: 256
+# A context window the runtime cannot grow (a model compiled for an NPU:
+# 4096 on the Ventuno Q's Gemma bundle). Each turn then sends only the
+# tool schemas the question is likely to need and the newest history, so
+# the prompt and the answer fit. 0 = the runtime manages the window.
+llm_window_tokens: 0
 
 # ── Turn-taking ───────────────────────────────────────────────────
 # Silero VAD opens a turn; Smart Turn v3 (Pipecat's semantic end-of-turn
