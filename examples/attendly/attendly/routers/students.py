@@ -13,7 +13,7 @@ from ..config import get_settings
 from ..face.engine import FaceEngine, FaceRejected, FaceServiceError
 from ..storage import repo
 from ..people import find_person
-from ..pictures import drop_picture, has_picture, picture_path, save_picture
+from ..pictures import drop_picture, picture_path, save_picture
 from ..storage.repo import (
     count_students,
     erase_student,
