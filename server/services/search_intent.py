@@ -35,7 +35,7 @@ from services.descriptor_enrichment import (
 )
 
 __all__ = ["Need", "resolve_needs", "STATE_AVAILABLE", "STATE_UNASSIGNED",
-           "STATE_MISSING", "PERSON_KIND"]
+           "STATE_MISSING", "STATE_PEOPLE_OFF", "PERSON_KIND", "PEOPLE_KINDS"]
 
 PERSON_KIND = "face_id"
 
@@ -45,8 +45,21 @@ STATE_AVAILABLE = "available"
 #: claim of this kind — it was never assigned to a camera (or the flag
 #: that admits people is off). The fix is a setting, not an install.
 STATE_UNASSIGNED = "never-produced"
+#: The skill is here and producing, but this kind is about a PERSON and
+#: the setting that admits people (EVENTS_DESCRIPTOR_PEOPLE) is off: the
+#: captioner is asked about vehicles only. A setting, not an install,
+#: and not the app the skill came with — the old message sent people to
+#: the Agent app's scene description, which was already on (measured
+#: on the Ventuno Q, 2026-11-07: "blue kurta" in the caption, the notice
+#: saying blue could not be searched).
+STATE_PEOPLE_OFF = "people-off"
 #: No healthy skill on this box produces this kind.
 STATE_MISSING = "not-on-this-box"
+
+#: Descriptor kinds written only when people descriptions are on
+#: (descriptor_enrichment: clothing_top and carrying for every person
+#: label; the extended kinds with the second flag).
+PEOPLE_KINDS = frozenset({"clothing_top", "carrying", "gender", "clothing_bottom", "headwear"})
 
 #: kind → the canonical task that produces it (mirrors enrichment_plan).
 KIND_SKILL: dict[str, str] = {
@@ -110,6 +123,9 @@ class BoxAbilities:
     claimed_kinds: set[str] = field(default_factory=set)
     #: a healthy captioner is registered (colour words can match captions)
     captions: bool = False
+    #: EVENTS_DESCRIPTOR_PEOPLE: descriptors are written for people too,
+    #: not just vehicles
+    people_descriptors: bool = False
     #: skill → names of installed apps whose manifest brings it
     apps_by_skill: dict[str, list[str]] = field(default_factory=dict)
 
@@ -117,9 +133,11 @@ class BoxAbilities:
 def _state(kind: str, box: BoxAbilities) -> str:
     if kind not in box.offered_kinds:
         return STATE_MISSING
-    if kind not in box.claimed_kinds:
-        return STATE_UNASSIGNED
-    return STATE_AVAILABLE
+    if kind in box.claimed_kinds:
+        return STATE_AVAILABLE
+    if kind in PEOPLE_KINDS and not box.people_descriptors:
+        return STATE_PEOPLE_OFF
+    return STATE_UNASSIGNED
 
 
 def resolve_needs(
