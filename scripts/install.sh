@@ -1254,6 +1254,9 @@ choose_example() {
             "yes" "$llm_suggest"
         pick_model_from_catalog llm "$llm_suggest" "Local LLM model (Ollama)"
         env_set OLLAMA_MODEL "$PICKED_MODEL"
+        # The agent's start-up pre-warm (prompt + tools through the LLM once)
+        # is seconds on a GPU and minutes of every core on a CPU box: off there.
+        if [[ "$HW_ACCEL" == "cuda" ]]; then env_set LLM_PREWARM true; else env_set LLM_PREWARM false; fi
         # Pull offer AFTER the model choice, so it pulls what was chosen.
         if [[ "$llm_where" == "host" ]]; then
             local ext_model

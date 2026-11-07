@@ -374,3 +374,16 @@ class TestLoadOpenNvrCameras:
 
         assert len(parsed.cameras) == 1
         assert parsed.cameras[0].camera_id == "cam1"
+
+
+def test_llm_prewarm_is_on_by_default_and_off_when_the_installer_says_so(tmp_path):
+    """The start-up pre-warm costs minutes of every core on a CPU box; the
+    installer writes LLM_PREWARM=false there and the template passes it
+    through as a string, so 'false' and '0' must read as off."""
+    base = "kaic_url: http://x\nkaic_api_key: y\ncameras: []\n"
+    assert load_config(_write(tmp_path, base)).llm_prewarm is True
+    assert load_config(_write(tmp_path, base + "llm_prewarm: false\n")).llm_prewarm is False
+    assert load_config(_write(tmp_path, base + "llm_prewarm: '0'\n")).llm_prewarm is False
+    assert load_config(_write(tmp_path, base + "llm_prewarm: ${LLM_PREWARM}\n")).llm_prewarm is True, \
+        "an unsubstituted placeholder keeps the default"
+    assert load_config(_write(tmp_path, base + "llm_prewarm: true\n")).llm_prewarm is True
