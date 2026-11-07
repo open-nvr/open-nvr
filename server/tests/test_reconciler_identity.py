@@ -241,3 +241,18 @@ def test_orphan_aging_removes_fully_aged_tree(tmp_path):
         tmp_path, datetime(2026, 6, 1, tzinfo=UTC)
     )
     assert not orphan.exists()
+
+
+def test_a_row_indexed_without_a_size_gets_it_from_the_scan(db, tmp_path):
+    """The segment-complete hook could not open the file (a relative
+    MediaMTX path) and indexed the row with no size; the reconciler's scan
+    knows the size and fills it in, so rotation's "GB of recordings" is real."""
+    cam = _add_camera(db, created_at=datetime(2026, 8, 1, tzinfo=UTC))
+    _seg(tmp_path, f"cam-{cam.id}", "2026-08-10", "12", "00-00-000000.mp4")
+    reconcile_camera(db, cam.id, tmp_path, None)
+    row = db.query(Recording).one()
+    row.file_size = None
+    db.commit()
+    ins, dele = reconcile_camera(db, cam.id, tmp_path, None)
+    assert (ins, dele) == (0, 0)
+    assert db.query(Recording).one().file_size == 10
