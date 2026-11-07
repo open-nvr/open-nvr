@@ -248,6 +248,16 @@ fill_qualcomm_captioner() {
         if accel_image_available "$img"; then
             set_env_var CAPTION_ADAPTER litertlm
             set_env_var CAPTION_ADAPTER_TAG "$tag"
+            # The NPU captioner keeps up with every visit (1.7 s a photo on
+            # a Ventuno Q; measured with the detector live, bench/), so the
+            # visit descriptions the CPU installer switched off come on
+            # with it: captions, colour/type questions, and the catch-up on
+            # visits already recorded. Filled only at this moment — the
+            # switch from a CPU captioner — so a value the operator set
+            # since is never touched; leaving the flavour resets them.
+            case "$(get_env_var EVENTS_CAPTION_ENRICHMENT)" in ""|false) set_env_var EVENTS_CAPTION_ENRICHMENT true ;; esac
+            case "$(get_env_var EVENTS_DESCRIPTOR_ENRICHMENT)" in ""|false) set_env_var EVENTS_DESCRIPTOR_ENRICHMENT true ;; esac
+            case "$(get_env_var EVENTS_ENRICHMENT_BACKFILL)" in ""|false) set_env_var EVENTS_ENRICHMENT_BACKFILL true ;; esac
             return 0
         fi
     done
@@ -268,7 +278,11 @@ reset_stale_accel_fills() {
             intel:DETECT_HWACCEL:vaapi) write_env_var DETECT_HWACCEL cpu ;;
             # The NPU captioner has no CPU image: back to the installer's
             # non-CUDA pick, riding ADAPTER_TAG again.
-            qualcomm:CAPTION_ADAPTER:litertlm) write_env_var CAPTION_ADAPTER moondream; write_env_var CAPTION_ADAPTER_TAG "" ;;
+            qualcomm:CAPTION_ADAPTER:litertlm)
+                write_env_var CAPTION_ADAPTER moondream; write_env_var CAPTION_ADAPTER_TAG ""
+                # ...and the descriptions it switched on: a CPU captioner
+                # cannot keep up with every visit (#583).
+                write_env_var EVENTS_CAPTION_ENRICHMENT false; write_env_var EVENTS_DESCRIPTOR_ENRICHMENT false; write_env_var EVENTS_ENRICHMENT_BACKFILL false ;;
             intel:DETECT_ONNX_BACKEND:ort|qualcomm:DETECT_ONNX_BACKEND:ort) write_env_var DETECT_ONNX_BACKEND auto ;;
             intel:DETECT_ONNX_PROVIDERS:OpenVINOExecutionProvider:NPU|intel:DETECT_ONNX_PROVIDERS:OpenVINOExecutionProvider:GPU|qualcomm:DETECT_ONNX_PROVIDERS:QNNExecutionProvider:htp)
                 write_env_var DETECT_ONNX_PROVIDERS "" ;;

@@ -46,3 +46,14 @@ query-only agent structurally cannot.
 
 The scoring/summary logic is stdlib-only and unit-tested (`test_bench.py`); the
 network parts need a running detector / backend.
+
+## Measured on hardware
+
+Reports taken on real boards, every number from a run on that board:
+
+- [`ventuno-q-benchmark-2026-10-30.md`](ventuno-q-benchmark-2026-10-30.md) — the Tier-0 detector on the
+  Hexagon NPU of an Arduino Ventuno Q (QCS8275) against the CPU: 8.6 ms an inference on the HTP, sixteen
+  cameras clean where the CPU managed four.
+- [`ventuno-q-npu-captioner-2026-11-05.md`](ventuno-q-npu-captioner-2026-11-05.md) — Gemma 4 E2B as the
+  caption / visual-question model on the same NPU through LiteRT-LM: 1.7 s a photo where a CPU vision model
+  took a minute, with the detector sharing the NPU.

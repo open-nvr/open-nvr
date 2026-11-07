@@ -30,5 +30,5 @@ then:
       replies: ["Let in", "Refuse"]
       default: "Refuse"
       timeout: 2m
-    "Let in": [ app: { id: gate-controller, action: open_now, args: { camera: "{camera}" } } ]
+    "Let in": [ app: { id: gate-controller, action: open_now, args: { camera: "{camera_id}" } } ]
     "Refuse": [ log: "Refused at the gate: {reason}" ]
