@@ -1614,7 +1614,7 @@ def test_the_response_names_the_skill_a_question_needs(client, db):
     assert "clothing_top" in needs
     assert needs["clothing_top"]["word"] == "red"
     assert needs["clothing_top"]["skill"] == "vqa"
-    assert needs["clothing_top"]["state"] in ("not-on-this-box", "never-produced")
+    assert needs["clothing_top"]["state"] in ("not-on-this-box", "never-produced", "people-off")
 
 
 def test_a_bare_attr_word_also_matches_the_caption(db):

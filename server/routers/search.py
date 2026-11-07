@@ -326,9 +326,10 @@ async def _needs_for(db: Session, scope: set[int] | None, *, parsed: ParsedQuery
     ``services.search_intent``. Best-effort: an unreachable registry
     means every need reads as not-on-this-box, which is the honest
     answer at that moment, and never an error."""
+    from core.config import settings
     from services.enrichment_plan import compute_enrichment_plan
     from services.search_intent import BoxAbilities, resolve_needs
-    box = BoxAbilities()
+    box = BoxAbilities(people_descriptors=bool(getattr(settings, "events_descriptor_people", False)))
     try:
         plan = await compute_enrichment_plan(None)
         for s in plan.get("skills") or []:

@@ -364,6 +364,16 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Search no longer says a colour "can't be searched yet" when the
+  scene description already holds it.** With a captioner on the box the
+  notice is an info line that leads with the match ("blue" is matched
+  from scene descriptions) and then names what would make it exact. A
+  clothing colour on a box that describes vehicles only is its own state,
+  `people-off`, naming the setting (`EVENTS_DESCRIPTOR_PEOPLE`) instead of
+  sending the operator to turn on the Agent app's scene description that
+  was already on (Ventuno Q, 2026-11-07: "light blue kurta" in the
+  caption, found, and the notice saying blue could not be searched).
+
 - **The Vitals card with an NPU tile no longer puts one tile alone on a
   second row.** Seven tiles fill one row when the card is wide, and 4+3
   when it is narrow with the last tile spanning the gap, so no empty cell
