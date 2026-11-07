@@ -262,7 +262,7 @@ the window and ABSENT rows after it.
 Decision (2026-11-07): #798 stays the attendance app, isolated in
 `examples/attendly`. ai-adapter #81 is merged. The parts of #791 worth
 having come across; its core-side data model does not. Each phase is its
-own commit.
+own commit. **Status: A–D landed** (see the CHANGELOG entry).
 
 ## A. Recognition
 

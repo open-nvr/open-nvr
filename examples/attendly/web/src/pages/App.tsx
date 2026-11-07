@@ -134,7 +134,11 @@ export default function App() {
         <Card to="/manage-rooms" title="Manage Rooms" desc="Add/update Rooms Details" icon={Building2} />
         <Card to="/manage-courses" title="Manage Courses" desc="Create courses and sections" icon={BookOpen} />
         <Card to="/manage-schedule" title="Manage Schedule" desc="Plan weekly class schedule" icon={CalendarDays} />
-        <Card to="/attendance" title="Attendance" desc="Monitor student attendance records" icon={ClipboardList} />
+        <Card to="/attendance" title="Attendance" desc="Each class's marks: review, correct, call off" icon={ClipboardList} />
+      </div>
+
+      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 mt-2">
+        <Card to="/report" title="Report" desc="Student × class with totals and a rate; Excel and CSV" icon={BarChart3} />
       </div>
 
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 mt-2">

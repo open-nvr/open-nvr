@@ -50,7 +50,15 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   instance (`insightface_attendly`, own face database and queue, detector
   at 1280), uses `face_identify` when the adapter answers it (one call
   per frame, a margin against the runner-up) with detect-then-crop as
-  the fallback, and gives the adapter codes only, never names.
+  the fallback, and gives the adapter codes only, never names. Marks:
+  LATE after a grace, a person's corrections (with EXCUSED and a note)
+  that survive a recompute, a coverage floor, a frozen roster, call-off
+  and restore, one-off classes, an evidence frame per slot, and a class
+  review on the Attendance page. Enrolment: consent first, the webcam
+  that takes the photos itself with on-screen and spoken guidance and a
+  duplicate told at the first photo, a picture per student, consent
+  withdrawal that deletes the faces, and erasure. A Report page:
+  student × class with totals and a rate, Excel and CSV.
 
 - **The escalation proposal: weak evidence on the sub stream → detect on
   the main stream, by consent.** Every posted visit now says where its crop

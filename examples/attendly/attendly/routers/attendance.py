@@ -7,7 +7,9 @@ from fastapi import APIRouter, HTTPException, Response
 from .. import schemas
 from ..services.streams_service import finalize_attendance as svc_finalize
 from ..storage.repo import (
+    attendance_report,
     class_evidence,
+    report_csv,
     class_meta,
     get_attendance_by_class,
     get_students_batch,
@@ -89,6 +91,27 @@ def refinalize_all_classes() -> dict:
         except Exception as e:
             results.append({"class_id": cid, "error": str(e)})
     return {"ok": True, "classes": classes, "total_written": total, "results": results}
+
+
+@router.get("/report")
+@log_call()
+def report(course: str, section: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None,
+           format: str = "json"):
+    """Student × class for a course and date range, with totals and a rate
+    ``(present + late) / (marked − excused)``, as JSON or CSV (cells escaped
+    against formula injection). Called-off classes are left out; a class
+    too little watched is shown but counts for nothing."""
+    for d in (date_from, date_to):
+        if d and not __import__("re").fullmatch(r"\d{4}-\d{2}-\d{2}", d):
+            raise HTTPException(status_code=400, detail="dates are YYYY-MM-DD")
+    rep = attendance_report(course, section, date_from, date_to)
+    if format == "csv":
+        name = f"attendance-{course}{'-' + section if section else ''}.csv"
+        return Response(content=report_csv(rep), media_type="text/csv",
+                        headers={"Content-Disposition": f'attachment; filename="{name}"'})
+    if format != "json":
+        raise HTTPException(status_code=400, detail="format is json or csv")
+    return rep
 
 
 @router.get("/scheduled")

@@ -989,6 +989,103 @@ def list_all_attendance_classes() -> List[str]:
     return sorted(str(c) for c in (a | b) if c)
 
 
+# ── The report: student × class, totals and a rate ──────────────────
+
+
+def attendance_report(course_code: str, section: Optional[str] = None, date_from: Optional[str] = None,
+                      date_to: Optional[str] = None) -> Dict[str, Any]:
+    """Every decided class of the course (and section) between the dates,
+    every student who has a mark in any of them, the mark per class, and
+    per student the counts and a rate ``(present + late) / (marked −
+    excused)``. Called-off classes are left out; a class flagged
+    ``no_coverage`` is shown but its UNWATCHED marks count for nothing."""
+    rows = [r for r in list_finalized_rows() if str(r.get("class_id") or "").startswith(f"{course_code}-")]
+    classes: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        cid = str(r["class_id"])
+        if cid in classes:
+            continue
+        c_course, c_section = parse_class_id(cid)
+        if c_course != course_code or (section and c_section != section):
+            continue
+        start, end = class_window(cid)
+        day = start.strftime("%Y-%m-%d") if start else cid
+        if date_from and day < date_from:
+            continue
+        if date_to and day > date_to:
+            continue
+        meta = class_meta(cid) or {}
+        if meta.get("called_off"):
+            continue
+        classes[cid] = {"class_id": cid, "section": c_section, "date": day,
+                        "start": start.strftime("%H:%M") if start else None, "end": end.strftime("%H:%M") if end else None,
+                        "no_coverage": bool(meta.get("no_coverage")), "total_slots": int(meta.get("total_slots") or 0)}
+    ordered = sorted(classes.values(), key=lambda c: (c["date"], c["start"] or "", c["class_id"]))
+    by_student: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        cid = str(r["class_id"])
+        if cid not in classes:
+            continue
+        code = str(r["student_code"])
+        entry = by_student.setdefault(code, {"student_code": code, "marks": {}, "present": 0, "late": 0, "absent": 0,
+                                            "excused": 0, "unwatched": 0})
+        status = str(r.get("status") or "")
+        entry["marks"][cid] = {"status": status, "source": r.get("source") or "auto"}
+        key = status.lower()
+        if key in entry:
+            entry[key] += 1
+    students = get_students_batch(list(by_student.keys()), include_deleted=True)
+    out_rows = []
+    for code, e in by_student.items():
+        marked = e["present"] + e["late"] + e["absent"]
+        rate = round((e["present"] + e["late"]) / marked, 4) if marked else None
+        st = students.get(code) or {}
+        out_rows.append({**e, "full_name": st.get("full_name") or code, "email": st.get("email"),
+                         "section": st.get("section"), "rate": rate})
+    out_rows.sort(key=lambda r: (str(r["full_name"]).lower(), r["student_code"]))
+    return {"course_code": course_code, "section": section, "date_from": date_from, "date_to": date_to,
+            "classes": ordered, "rows": out_rows}
+
+
+def _safe_cell(value: Any) -> Any:
+    """A name like ``=HYPERLINK(...)`` must not become a formula in a
+    spreadsheet (CSV/formula injection): a leading = + - @ tab or CR is
+    prefixed with an apostrophe."""
+    if isinstance(value, str) and value[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + value
+    return value
+
+
+def report_table(report: Dict[str, Any]) -> List[List[Any]]:
+    """The report as rows for CSV/XLSX: one line per student, a column per
+    class, then the totals and the rate."""
+    classes = report["classes"]
+    head = ["Student code", "Name", "Section"] + [f"{c['date']} {c['start'] or ''}".strip() for c in classes] + \
+           ["Present", "Late", "Absent", "Excused", "Not watched", "Rate %"]
+    short = {"PRESENT": "P", "LATE": "L", "ABSENT": "A", "EXCUSED": "E", "UNWATCHED": "-"}
+    lines = [head]
+    for r in report["rows"]:
+        cells = [r["student_code"], _safe_cell(r["full_name"]), _safe_cell(r.get("section") or "")]
+        for c in classes:
+            m = r["marks"].get(c["class_id"])
+            cells.append(short.get(m["status"], m["status"]) + ("*" if m["source"] == "manual" else "") if m else "")
+        cells += [r["present"], r["late"], r["absent"], r["excused"], r["unwatched"],
+                  "" if r["rate"] is None else round(r["rate"] * 100, 1)]
+        lines.append(cells)
+    return lines
+
+
+def report_csv(report: Dict[str, Any]) -> str:
+    import csv
+    import io as _io
+
+    buf = _io.StringIO()
+    w = csv.writer(buf, lineterminator="\n")
+    for line in report_table(report):
+        w.writerow(line)
+    return buf.getvalue()
+
+
 # ── Dashboard counts (the /state view) ──────────────────────────────
 
 

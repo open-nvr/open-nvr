@@ -46,6 +46,7 @@ export default function Layout({ children, title }: { children: React.ReactNode;
               <Link className="text-gray-700 hover:text-indigo-600" to="/manage-courses">Courses</Link>
               <Link className="text-gray-700 hover:text-indigo-600" to="/manage-schedule">Schedule</Link>
               <Link className="text-gray-700 hover:text-indigo-600" to="/attendance">Attendance</Link>
+              <Link className="text-gray-700 hover:text-indigo-600" to="/report">Report</Link>
               <Link className="text-gray-700 hover:text-indigo-600" to="/gates">Gates</Link>
               <Link className="text-gray-700 hover:text-indigo-600" to="/meals">Meals</Link>
               <Link className="text-gray-700 hover:text-indigo-600" to="/staff">Staff</Link>

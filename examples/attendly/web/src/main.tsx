@@ -17,6 +17,7 @@ import ManageGates from './pages/ManageGates'
 import MealBookings from './pages/MealBookings'
 import Staff from './pages/Staff'
 import StaffAttendance from './pages/StaffAttendance'
+import Report from './pages/Report'
 import Login from './pages/Login'
 import ProtectedRoute from './components/ProtectedRoute'
 import ErrorBoundary from './components/ErrorBoundary'
@@ -108,6 +109,7 @@ const router = createBrowserRouter([
   { path: '/meals', element: (<ProtectedRoute><MealBookings /></ProtectedRoute>) },
   { path: '/staff', element: (<ProtectedRoute><Staff /></ProtectedRoute>) },
   { path: '/staff-attendance', element: (<ProtectedRoute><StaffAttendance /></ProtectedRoute>) },
+  { path: '/report', element: (<ProtectedRoute><Report /></ProtectedRoute>) },
 ])
 
 ReactDOM.createRoot(document.getElementById('root')!).render(

@@ -52,7 +52,17 @@ OpenNVR account. For a reverse proxy or public hostname set
    e-mail and keeps only the counts (DPDP/GDPR).
 4. **Manage Schedule** — the weekly timetable; *Publish Today* turns it into
    concrete class windows on each room.
-5. **Attendance** — finalised rosters per class, with PDF/Excel export.
+5. **Attendance** — the day's classes (scheduled, running, decided,
+   called off), each one's review — the mark per student and who set it,
+   slots seen, first seen, corrections with a note, recompute, call off or
+   restore, a one-off class, the evidence frames — and the finalised
+   rosters with PDF/Excel export. Marks are PRESENT, LATE (first seen
+   after `ATTENDLY_LATE_GRACE_MINUTES`, 10), ABSENT, EXCUSED (a person's
+   mark) or Not watched.
+6. **Report** — student × class for a course and date range, totals and a
+   rate `(present + late) / (marked − excused)`, as Excel or CSV (cells
+   escaped against formula injection); called-off classes are left out
+   and a class too little watched counts for nothing.
 
 During a class window the room's worker fetches a frame from core every
 attempt interval (2 min), detects every face, recognises each crop, and
@@ -172,6 +182,9 @@ raise it if strangers are matched. Changes take effect on restart.
 | `ATTENDLY_MAX_REGISTERED_STUDENTS` | `0` (no limit) | refuse enrolment past this many students |
 | `ATTENDLY_MAX_WORKERS` | `50` | rooms that may hold a class at the same moment |
 | `ATTENDLY_FINALIZE_GRACE_SECONDS` | `30` | wait after a class ends before its attendance is finalised |
+| `ATTENDLY_LATE_GRACE_MINUTES` | `10` | first seen after this many minutes into the class → LATE |
+| `ATTENDLY_MIN_COVERAGE_RATIO` | `0.5` | a class watched in fewer of its slots is flagged; its automatic marks are Not watched |
+| `ATTENDLY_KEEP_EVIDENCE_FRAMES` | `true` | one frame per slot with a recognition goes to core's evidence store |
 | `ATTENDLY_SAVE_DEBUG_FRAMES` | `false` | keep attempt frames and face crops under the data dir |
 
 ## Development
