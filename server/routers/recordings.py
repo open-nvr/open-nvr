@@ -574,7 +574,17 @@ async def get_retention(
     obj = RecordingRetentionSettings(
         **{**RecordingRetentionSettings().model_dump(), **val}
     )
-    return obj.model_dump()
+    out = obj.model_dump()
+    # The floor in force, so the form can show what "automatic" means here.
+    try:
+        from services.retention_service import RetentionService
+        from services.storage_service import get_effective_recordings_base_path
+
+        out["effective_min_free_space_gb"] = RetentionService.effective_min_free_gb(
+            out, get_effective_recordings_base_path(db))
+    except Exception:  # noqa: BLE001 - informational
+        out["effective_min_free_space_gb"] = None
+    return out
 
 
 @router.put("/retention")

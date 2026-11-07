@@ -372,6 +372,8 @@ async def search(
     label: list[str] | None = Query(None, description="Object class; repeatable (OR)."),
     camera_id: list[int] | None = Query(None, description="Camera; repeatable (OR)."),
     text: str | None = Query(None, description="Words to match in captions/attributes."),
+    min_people: int | None = Query(None, ge=1, le=99,
+                                   description="At least this many people in frame with the visit."),
     plate: str | None = Query(None),
     zone: str | None = Query(None, max_length=60,
                              description="Zone id or name (among the caller's cameras)."),
@@ -445,12 +447,23 @@ async def search(
         attrs = list(parsed.attrs)
     # "What is the plate of…" — only visits that carry a read can answer.
     wants_plate = bool(parsed.wants_plate) and plate is None
+    # "Three people together": from the pipeline's count of people in
+    # frame with each visit. An explicit ``min_people`` beats the parse.
+    people_min = min_people if min_people is not None else parsed.min_people
     filters = dict(
         from_=start, to=end, plate=plate_q or None, source=source, scope=scope,
-        zone_id=zone_id, has_plate=wants_plate,
+        zone_id=zone_id, has_plate=wants_plate, min_people=people_min or None,
     )
     needs, box = await _needs_for(db, scope, parsed=parsed, labels=labels, words=words,
                                   attrs=attrs, wants_plate=wants_plate, plate=plate_q or "")
+    # A typed "red van" or "blue shirt" filters on the claim where this box
+    # holds claims of that kind (exact), and stays a caption word where it
+    # does not. Only for a parsed question: explicit text= is never touched.
+    if parse and text is None and not attr:
+        from services.search_intent import promote_words_to_claims
+        if promote_words_to_claims(parsed, box):
+            attrs = list(parsed.attrs)
+            words = parsed.text
     # What the question needs that the matching visits may not have, and
     # the request to produce it (services/enrichment_requests). Words
     # need a caption; a chip needs a claim of its kind; a need the box
@@ -589,6 +602,7 @@ async def search(
         "plate": plate_q or "",
         "attrs": [f"{k}:{v}" for k, v in attrs],
         "wants_plate": wants_plate,
+        "min_people": people_min or None,
         # What the question asked of the box's skills, and whether each
         # is here — the difference between "nothing was red" and "nothing
         # here has ever looked at a colour".
@@ -607,9 +621,28 @@ async def search(
         ),
     })
 
+    # App alerts are not visits — occupancy over a limit, loitering, a
+    # package left — but a question like "loitering at the gate last night"
+    # has its answer in the alerts table. Matched on the words against the
+    # alert's type, title and description, in the same window and cameras,
+    # newest first, and shown beside the visits rather than mixed in.
+    alerts_out = _matching_alerts(db, scope, current_user, words=words or "",
+                                  labels=labels, camera_ids=cams, start=start, end=end,
+                                  cameras=cameras)
+
+    # No time in the question: the whole index was searched. Say how far
+    # back that reaches and how much it covered, so the operator can
+    # narrow with one click instead of scrolling a year.
+    scope_note = None
+    if start is None and end is None:
+        scope_note = _all_time_scope(db, cams or sorted(scope) if scope else cams, total)
+
     return {
         "query": q,
         "interpretation": interpretation,
+        "alerts": alerts_out,
+
+        "scope": scope_note,
         # What is not described yet and what this call queued (None when
         # the question needed nothing a description would add).
         "pending": pending,
@@ -821,6 +854,81 @@ def _resolve_zone(db: Session, zone: str | None, camera_id: int | None,
                             detail=f"Zone name {zone!r} is on several cameras; add camera_id")
     return rows[0].id
 
+
+
+#: Words that name an app alert's subject rather than a visit's: a question
+#: carrying one of these looks in the alerts table too. Alert types are
+#: matched by prefix so "loiter" finds "loitering_detected".
+ALERT_WORDS: frozenset[str] = frozenset({
+    "alert", "alerts", "alarm", "alarms", "loiter", "loitering", "occupancy",
+    "crowd", "crowded", "overcrowding", "capacity", "package", "parcel",
+    "delivery", "intrusion", "intruder", "tamper", "tampering", "guard",
+    "patrol", "violence", "fight", "fall", "fallen", "abandoned", "garbage",
+    "fire", "smoke", "weapon", "gun", "knife", "queue", "dwell",
+})
+
+
+def _matching_alerts(db, scope, current_user, *, words: str, labels, camera_ids,
+                     start, end, cameras: dict[int, str] | None = None,
+                     limit: int = 20) -> list[dict] | None:
+    """App alerts the question's words name, in the same window and cameras.
+    None when the question names nothing alert-shaped or the caller may not
+    see alerts; [] when it does and nothing matched."""
+    tokens = [w for w in (words or "").lower().split() if w]
+    hits = [w for w in tokens if w in ALERT_WORDS or any(w.startswith(a) for a in ALERT_WORDS if len(a) > 4)]
+    if not hits:
+        return None
+    if not user_has_permission(current_user, "alerts.view"):
+        return None
+    from routers.alerts_inbox import _scope_alerts
+    q = _scope_alerts(db.query(AppAlert), scope)
+    if start:
+        q = q.filter(AppAlert.fired_at >= start)
+    if end:
+        q = q.filter(AppAlert.fired_at < end)
+    if camera_ids:
+        handles = [f"cam{int(c)}" for c in camera_ids] + [str(int(c)) for c in camera_ids]
+        q = q.filter(AppAlert.camera_id.in_(handles))
+    from sqlalchemy import or_
+    conds = []
+    for w in hits:
+        if w in ("alert", "alerts", "alarm", "alarms"):
+            continue
+        like = f"%{w[:6]}%"
+        conds.append(or_(func.lower(func.coalesce(AppAlert.alert_type, "")).like(like),
+                         func.lower(AppAlert.title).like(like),
+                         func.lower(func.coalesce(AppAlert.description, "")).like(like),
+                         func.lower(func.coalesce(AppAlert.source_name, "")).like(like)))
+    if conds:
+        q = q.filter(or_(*conds))
+    rows = q.order_by(AppAlert.fired_at.desc()).limit(limit).all()
+    out = []
+    for a in rows:
+        out.append({
+            "alert_id": a.alert_id, "fired_at": a.fired_at.isoformat() if a.fired_at else None,
+            "severity": a.severity, "title": a.title, "description": a.description,
+            "alert_type": a.alert_type, "source_name": a.source_name,
+            "camera_id": _alert_camera_num(a.camera_id),
+            "camera_name": (cameras or {}).get(_alert_camera_num(a.camera_id) or -1),
+        })
+    return out
+
+def _all_time_scope(db, camera_ids, total: int) -> dict | None:
+    """How far back an all-time search reached: the oldest visit's day in
+    scope and the span in days. The query itself is cheap (an index); what
+    a long span costs is the operator's time scrolling, and the describing
+    of undescribed visits, which is capped per question."""
+    try:
+        q = db.query(func.min(TimelineEvent.started_at), func.max(TimelineEvent.started_at))
+        if camera_ids:
+            q = q.filter(TimelineEvent.camera_id.in_([int(c) for c in camera_ids]))
+        oldest, newest = q.one()
+    except Exception:  # noqa: BLE001 — a note must never break a search
+        return None
+    if oldest is None:
+        return None
+    days = max(1, (newest - oldest).days + 1) if newest else 1
+    return {"all_time": True, "oldest": oldest.isoformat(), "days": days, "total": int(total)}
 
 def _alert_camera_num(handle: str | None) -> int | None:
     from services.alerts_inbox import _camera_num

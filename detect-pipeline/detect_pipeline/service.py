@@ -949,6 +949,10 @@ class CameraWorker:
             min_spawn_score=(
                 tuning.min_spawn_score if tuning.min_spawn_score is not None
                 else _env_float("DETECT_MIN_SPAWN_SCORE", 0.5)),
+            # The field switch back to the greedy distance matcher: a
+            # camera whose visits get worse under motion prediction can
+            # say so in .env without a redeploy.
+            motion=_env_bool("DETECT_TRACK_MOTION", True),
         ))
         # Evidence/candidate crop margin, clamped to something sane: 0
         # is the bare box, 2 is a crop five times the box on each axis.
@@ -1010,6 +1014,7 @@ class CameraWorker:
             max_regions=_env_int("DETECT_MAX_REGIONS", 8),
             allowed_labels=allowed_labels_for(self.spec),
             cross_label_iou=_env_float("DETECT_NMS_CROSS_LABEL_IOU", 0.85),
+            containment=_env_float("DETECT_NMS_CONTAINMENT", 0.85),
             object_mask=object_mask,
             object_filter=object_filter,
         )
@@ -1147,6 +1152,10 @@ class CameraWorker:
                 # cap / spawn-score floor (monotonic; exported as a gauge).
                 _metrics.gauge(
                     "tier0_track_spawns_dropped", float(tracker.spawns_dropped),
+                    {"camera": self.spec.camera_id},
+                )
+                _metrics.gauge(
+                    "tier0_track_spawns_absorbed_total", float(tracker.spawns_absorbed),
                     {"camera": self.spec.camera_id},
                 )
                 # Best-frame picks refused for blur, and plate candidates

@@ -179,3 +179,52 @@ def resolve_needs(
     if plate or wants_plate:
         _add(plate or "plate", "plate", None)
     return needs
+
+#: Which claim kind a vocabulary word belongs to, by the class the question
+#: named. A colour is a vehicle's ``colour`` or a person's ``clothing_top``;
+#: with no class named the word stays a caption word (a claim filter of the
+#: wrong kind would hide the right visits).
+_PERSON = frozenset({"person"})
+
+
+def promote_words_to_claims(parsed, box: "BoxAbilities") -> list[tuple[str, str]]:
+    """Move the parsed free words that name a claim VALUE this box actually
+    holds claims of into ``parsed.attrs`` as (kind, value) filters, and
+    return what was promoted. "red van" typed used to match "red" and "van"
+    anywhere in a caption; where the plate or description app has written
+    ``colour:red`` on visits, the claim is exact and the caption word is
+    not. Words whose kind no visit in scope carries stay free text, where a
+    caption can still match them. The UI chip for a promoted word is the
+    same chip a picker would have made, so it can be dropped the same way."""
+    words = [w for w in (parsed.text or "").split() if w]
+    if not words or not box.claimed_kinds:
+        return []
+    labels = set(parsed.labels or [])
+    person = bool(labels & _PERSON)
+    vehicle = bool(labels and not person)
+    promoted: list[tuple[str, str]] = []
+    rest: list[str] = []
+    for w in words:
+        kind = None
+        if w in COLOUR_WORDS:
+            if person or any(c in words for c in CLOTHING_CUES):
+                kind = "clothing_top"
+            elif vehicle:
+                kind = "colour"
+        elif w in VEHICLE_TYPE_WORDS and not person:
+            kind = "vehicle_type"
+        elif w in CARRYING_WORDS and person:
+            kind = "carrying"
+        elif w in HEADWEAR_WORDS and person:
+            kind = "headwear"
+        elif w in GENDER_WORDS and person:
+            kind = "gender"
+        if kind and kind in box.claimed_kinds and (kind, w) not in parsed.attrs:
+            promoted.append((kind, w))
+        elif w not in CLOTHING_CUES or not promoted:
+            rest.append(w)
+    if promoted:
+        parsed.attrs = list(parsed.attrs) + promoted
+        parsed.text = " ".join(rest)
+        parsed.matched["claims"] = " ".join(f"{k}:{v}" for k, v in promoted)
+    return promoted

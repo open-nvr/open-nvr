@@ -1719,3 +1719,116 @@ def test_the_window_finds_rows_whatever_the_local_timezone(client, db, monkeypat
     body = client.get("/api/v1/search", params={"q": "any car in the last 5 mins"}).json()
     assert body["interpretation"]["matched"]["when"] == "last 5 mins"
     assert body["total"] == 3
+
+
+# ── counts and groups ───────────────────────────────────────────────
+
+def test_counts_and_groups_become_min_people_not_words():
+    """'did you see the 3 persons together' used to parse to free text
+    'persons together', match nothing, and relax to every visit."""
+    p = _p("did you see the 3 persons together")
+    assert p.labels == ["person"] and p.min_people == 3 and p.text == ""
+    assert p.matched["count"] == "3 together" and p.ignored == []
+    p = _p("two people")
+    assert p.labels == ["person"] and p.min_people == 2 and p.text == ""
+    p = _p("a group of men near the door")
+    assert p.labels == ["person"] and p.min_people == 2 and p.text == "door"
+    p = _p("three cars")
+    assert p.labels == ["car"] and p.min_people is None, "a count of cars is not a people count"
+    p = _p("person blue")
+    assert p.min_people is None and p.text == "blue"
+    assert "min_people" in p.as_dict()
+
+
+def test_min_people_filters_on_the_pipelines_count(db):
+    from services.search_service import count_search_events
+    from services.timeline_service import record_track_visit
+    t = NOW
+    alone = record_track_visit(db, camera_id=1, label="person", started_at=t, ended_at=t,
+                               people=1)
+    trio = record_track_visit(db, camera_id=1, label="person", started_at=t, ended_at=t,
+                              track_id="b", people=3)
+    old = record_track_visit(db, camera_id=1, label="person", started_at=t, ended_at=t,
+                             track_id="c")                      # before the count existed
+    db.commit()
+    assert trio.payload["people"] == 3 and "people" not in (old.payload or {})
+    base = dict(from_=None, to=None, plate=None, source=None, scope=None, zone_id=None, has_plate=False)
+    assert count_search_events(db, labels=["person"], camera_ids=None, text="", attrs=None,
+                               min_people=2, **base) == 1
+    assert count_search_events(db, labels=["person"], camera_ids=None, text="", attrs=None,
+                               min_people=None, **base) == 3
+
+
+def test_a_colour_binds_to_the_thing_it_describes_in_the_text_query():
+    """'blue shirt' is blue within two words of shirt, not blue anywhere
+    plus shirt anywhere; 'blue' alone with a person is blue clothing."""
+    from services.search_service import fts_query
+    # <N> is EXACTLY N apart in Postgres, so "within two" is <-> OR <2>
+    assert fts_query("blue shirt") == ("to_tsquery", "((blue <-> shirt) | (blue <2> shirt))")
+    assert fts_query("light blue t-shirt") == ("to_tsquery", "light & ((blue <-> shirt) | (blue <2> shirt))")
+    fn, arg = fts_query("blue")
+    assert fn == "to_tsquery" and arg.startswith("((blue <-> (shirt | t | tshirt | tee | top")
+    assert fts_query("beard laptop") == ("plainto_tsquery", "beard laptop")
+    assert fts_query("red van") == ("to_tsquery", "((red <-> van) | (red <2> van))")
+    fn, arg = fts_query("man red carrying box")
+    assert fn == "to_tsquery" and arg.startswith("man & ((red <-> (shirt") and arg.endswith(")) & carrying & box")
+def test_alert_words_bring_matching_app_alerts_beside_the_visits(db):
+    """"loitering at the gate" has its answer in the alerts table, not in a
+    visit: the words that name an alert's subject bring the matching app
+    alerts in the same window; other questions bring none."""
+    from types import SimpleNamespace
+    from models import AppAlert
+    from routers.search import _matching_alerts
+    t = NOW
+    db.add(AppAlert(alert_id="l1", fired_at=t - timedelta(minutes=5), severity="high",
+                    title="Person loitering at gate", camera_id="cam1", source_name="loitering",
+                    alert_type="loitering_detected"))
+    db.add(AppAlert(alert_id="p1", fired_at=t - timedelta(minutes=4), severity="low",
+                    title="Package left at door", camera_id="cam2", source_name="package-delivery",
+                    alert_type="package_left"))
+    db.add(AppAlert(alert_id="old", fired_at=t - timedelta(days=3), severity="high",
+                    title="Person loitering at gate", camera_id="cam1", source_name="loitering"))
+    db.commit()
+    su = SimpleNamespace(is_superuser=True, role=None, id=1)
+    win = dict(start=t - timedelta(hours=1), end=t + timedelta(hours=1), labels=[], camera_ids=[])
+    assert _matching_alerts(db, None, su, words="car blue", **win) is None, "no alert word: no lane"
+    got = _matching_alerts(db, None, su, words="loitering gate", **win)
+    assert [a["alert_id"] for a in got] == ["l1"]
+    assert got[0]["camera_id"] == 1 and got[0]["severity"] == "high"
+    got = _matching_alerts(db, None, su, words="package", camera_ids=[2], start=win["start"], end=win["end"], labels=[])
+    assert [a["alert_id"] for a in got] == ["p1"]
+    assert _matching_alerts(db, None, su, words="package", camera_ids=[1], start=win["start"], end=win["end"], labels=[]) == []
+    assert _matching_alerts(db, None, su, words="any alerts", **win) and len(_matching_alerts(db, None, su, words="alerts", **win)) == 2
+# ── calendar phrases: months, years, dates ──────────────────────────
+
+def test_month_and_year_phrases_become_windows():
+    """NOW is 18 Sep 2026. A month name alone is the most recent one that
+    has started; two months joined by "or" are one window; "last month",
+    "this year", "N months ago" and dated days all resolve."""
+    jan = _p("did you see a car in january")
+    assert (jan.from_, jan.to) == (datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 2, 1, tzinfo=UTC))
+    assert jan.labels == ["car"] and jan.text == "" and jan.matched["when"] == "january"
+    span = _p("anything last year somewhere in january or february")
+    assert (span.from_, span.to) == (datetime(2025, 1, 1, tzinfo=UTC), datetime(2025, 3, 1, tzinfo=UTC)) or \
+        (span.from_, span.to) == (datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 3, 1, tzinfo=UTC))
+    assert span.text == ""
+    dec = _p("the van in december")                       # december has not come this year
+    assert (dec.from_, dec.to) == (datetime(2025, 12, 1, tzinfo=UTC), datetime(2026, 1, 1, tzinfo=UTC))
+    lm = _p("last month")
+    assert (lm.from_, lm.to) == (datetime(2026, 8, 1, tzinfo=UTC), datetime(2026, 9, 1, tzinfo=UTC))
+    tm = _p("this month")
+    assert tm.from_ == datetime(2026, 9, 1, tzinfo=UTC) and tm.to == NOW
+    ly = _p("last year")
+    assert (ly.from_, ly.to) == (datetime(2025, 1, 1, tzinfo=UTC), datetime(2026, 1, 1, tzinfo=UTC))
+    ago = _p("two months ago")
+    assert (ago.from_, ago.to) == (datetime(2026, 7, 1, tzinfo=UTC), datetime(2026, 8, 1, tzinfo=UTC))
+    six = _p("last 6 months")
+    assert six.from_ == datetime(2026, 3, 1, tzinfo=UTC) and six.to == NOW
+    day = _p("on 5th november 2025 a truck")
+    assert (day.from_, day.to) == (datetime(2025, 11, 5, tzinfo=UTC), datetime(2025, 11, 6, tzinfo=UTC))
+    assert day.labels == ["truck"] and day.text == ""
+    day2 = _p("nov 5")                                     # future this year → last year's
+    assert day2.from_ == datetime(2025, 11, 5, tzinfo=UTC)
+    may = _p("may")                                        # a month word that is also a verb: still a month
+    assert may.from_ == datetime(2026, 5, 1, tzinfo=UTC)
+    assert _p("car with plate KA01AB1234").from_ is None, "no time means all time"

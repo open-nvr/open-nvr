@@ -248,6 +248,32 @@ def _mark_attempted(event_id: int) -> None:
         db.close()
 
 
+#: Payload key: wall-clock ISO time of the last caption call that failed.
+CAPTION_FAILED_AT = "caption_failed_at"
+
+
+def _mark_failed(event_id: int) -> None:
+    """The call was made and never answered. Stamped with the time so the
+    request lane applies its cooldown; cleared by the next caption."""
+    from datetime import UTC, datetime
+    from core.database import SessionLocal
+    from models import TimelineEvent
+    db = SessionLocal()
+    try:
+        row = db.get(TimelineEvent, int(event_id))
+        if row is None:
+            return
+        seen = dict(row.payload or {})
+        seen[CAPTION_FAILED_AT] = datetime.now(UTC).isoformat()
+        row.payload = seen
+        db.commit()
+    except Exception:                              # noqa: BLE001
+        logger.debug("caption enrichment: could not mark %s failed", event_id, exc_info=True)
+        db.rollback()
+    finally:
+        db.close()
+
+
 async def enrich_event_caption(event_id: int,
                                evidence_jpeg: bytes | None = None, *,
                                priority: str = "live") -> str | None:
@@ -338,8 +364,12 @@ async def enrich_event_caption(event_id: int,
         return "dropped"
     if caption is None:
         # Timed out, unreachable, a non-200: the adapter never answered.
-        # NOT recorded — a transient failure must not read as "looked and
-        # found nothing" and hide the visit from every later pass.
+        # NOT recorded as looked — a transient failure must not read as
+        # "looked and found nothing" and hide the visit from every later
+        # pass — but stamped, so the on-demand lane leaves this visit
+        # alone for events_caption_retry_cooldown_s instead of asking
+        # again on the next question.
+        _mark_failed(event_id)
         return
     if not caption:
         _mark_attempted(event_id)

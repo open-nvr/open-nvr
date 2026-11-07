@@ -556,6 +556,14 @@ def record_processing_fps(camera_id: str, fps: float) -> None:
 
 
 _proc_prev: dict[str, float | None] = {"cpu_s": None, "t": None}
+#: The CPU gauge is CPU time over the window since the previous sample. Two
+#: scrapers landing within a second of each other (the dashboard poll, the
+#: health check, an operator's curl) made windows of a few hundred
+#: milliseconds, and the process does its work in bursts of about 0.3 CPU-s
+#: per keyframe cycle: a window that caught one burst read 60 to 140 %
+#: (Ventuno Q, 2026-11-04/05) while the real load was 9 %. A window shorter
+#: than this keeps the previous reading and keeps accumulating.
+CPU_WINDOW_MIN_S = 2.0
 
 
 def sample_process_metrics(registry: Metrics | None = None) -> None:
@@ -564,6 +572,8 @@ def sample_process_metrics(registry: Metrics | None = None) -> None:
     Emitted so the OpenNVR app can show detect-pipeline CPU/RAM next to the AI
     adapters (which already export the same shape) and compare before/after
     enabling the gate. No dependency — reads /proc directly; a no-op off Linux.
+    The CPU figure is only recomputed over a window of at least
+    CPU_WINDOW_MIN_S, so coinciding scrapers cannot invent a spike.
     """
     reg = registry or metrics
     try:
@@ -576,8 +586,11 @@ def sample_process_metrics(registry: Metrics | None = None) -> None:
         return
     now = time.monotonic()
     reg.gauge("tier0_process_resident_memory_bytes", float(rss))
-    if _proc_prev["cpu_s"] is not None and now > _proc_prev["t"]:
-        pct = (cpu_s - _proc_prev["cpu_s"]) / (now - _proc_prev["t"]) * 100.0
+    if _proc_prev["cpu_s"] is not None:
+        elapsed = now - _proc_prev["t"]
+        if elapsed < CPU_WINDOW_MIN_S:
+            return                                   # too short a window: keep the last reading
+        pct = (cpu_s - _proc_prev["cpu_s"]) / elapsed * 100.0
         reg.gauge("tier0_process_cpu_percent", max(0.0, pct))
     _proc_prev["cpu_s"], _proc_prev["t"] = cpu_s, now
 

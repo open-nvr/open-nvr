@@ -42,6 +42,24 @@ from models import Camera
 faststart_logger = logging.getLogger("opennvr.faststart")
 
 
+def absolute_segment_path(segment_path: str) -> str:
+    """The segment path as a path THIS process can open.
+
+    MediaMTX reports MTX_SEGMENT_PATH exactly as ``recordPath`` spells it,
+    and the shipped config spells it relative (``./app/recordings/…``),
+    relative to MediaMTX's own working directory, which is ``/``. Opened
+    as given from core's working directory (``/app``) that became
+    ``/app/app/recordings/…``: no file, so every segment was indexed with
+    no size and no codec, the rotation read "0 GB of recordings" and
+    playback probed what the webhook had already read (Ventuno Q,
+    2026-11-07: 1,051 of 1,051 rows). Both containers share the same
+    ``/app/recordings`` mount, so a relative path resolves from ``/``."""
+    s = (segment_path or "").replace("\\", "/")
+    if s and not os.path.isabs(s):
+        s = os.path.normpath(os.path.join("/", s))
+    return s
+
+
 def validate_segment_path(segment_path: str) -> str:
     """
     Validate that the segment path is safe and free of directory traversal attacks.
@@ -190,6 +208,7 @@ async def hook_segment_create(
     # SECURITY FIX: Validate path for directory traversal
     if segment_path:
         validate_segment_path(segment_path)
+        segment_path = absolute_segment_path(segment_path)
 
     # For create event, we can just acknowledge; details are available on complete
     return {

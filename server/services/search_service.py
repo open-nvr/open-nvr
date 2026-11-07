@@ -155,6 +155,66 @@ def _is_postgres(db) -> bool:
     return db.bind.dialect.name == "postgresql" if db.bind is not None else False
 
 
+#: Colour words, and the things a colour is said OF. "blue shirt" means
+#: blue next to shirt; "person in blue" means blue clothing. Plain word
+#: matching read "blue" anywhere ("blue jeans", "light blue wall") and
+#: "blue shirt" as blue AND shirt in any roles ("green t-shirt and blue
+#: jeans" matched). Postgres can say "within two words": the query below
+#: is built as `blue <2> (shirt | top | ...)`, which is what the words
+#: meant. CLIP-family embeddings lose exactly this binding (bag-of-words
+#: behaviour, arXiv 2502.03566), so the lexical lane has to carry it.
+COLOUR_WORDS = frozenset({
+    "red", "blue", "green", "yellow", "orange", "purple", "pink", "black",
+    "white", "grey", "gray", "brown", "beige", "navy", "maroon", "silver",
+    "gold", "golden", "cream", "teal", "violet", "khaki", "tan", "olive",
+})
+CLOTHING_WORDS = (
+    "shirt", "t-shirt", "tshirt", "tee", "top", "jacket", "coat", "hoodie",
+    "sweater", "sweatshirt", "jumper", "kurta", "dress", "saree", "sari",
+    "suit", "uniform", "vest", "blouse", "trousers", "pants", "jeans",
+    "shorts", "skirt", "cap", "hat", "helmet", "scarf", "turban", "hijab",
+    "clothes", "clothing", "outfit", "bag", "backpack", "van", "car", "truck",
+    "bike", "scooter", "umbrella",
+)
+
+
+def fts_query(text: str) -> tuple[str, str]:
+    """The Postgres text-search query for the words: ``(function, argument)``.
+
+    A colour followed by a thing within two words becomes a proximity
+    query on that pair; a colour on its own becomes a proximity query on
+    the colour and any clothing word; everything else is the plain AND
+    of the words (``plainto_tsquery``). Returns ``("to_tsquery", expr)``
+    or ``("plainto_tsquery", text)``."""
+    words = [w for w in text.lower().replace("-", " ").split() if w]
+    if not words or not any(w in COLOUR_WORDS for w in words):
+        return "plainto_tsquery", text
+    # Postgres's ``<N>`` means EXACTLY N positions apart (``<->`` is ``<1>``),
+    # not "within N": ``blue <2> shirt`` missed "light blue shirt" on the
+    # Ventuno Q (2026-11-07) and matched only "blue cotton shirt". Within
+    # two words is the two distances OR'd.
+    def near(a: str, b: str) -> str:
+        return f"(({a} <-> {b}) | ({a} <2> {b}))"
+
+    parts: list[str] = []
+    i = 0
+    while i < len(words):
+        w = words[i]
+        if w in COLOUR_WORDS:
+            nxt = [x for x in words[i + 1:i + 3] if x not in COLOUR_WORDS]
+            thing = next((x for x in nxt if x.replace("-", "") in {c.replace("-", "") for c in CLOTHING_WORDS}), None)
+            if thing is not None:
+                parts.append(near(w, thing))
+                i = words.index(thing, i + 1) + 1
+                continue
+            alts = " | ".join(dict.fromkeys(c.replace("-", " ").split()[0] for c in CLOTHING_WORDS))
+            parts.append(near(w, f"({alts})"))
+        else:
+            parts.append(w)
+        i += 1
+    return "to_tsquery", " & ".join(parts)
+
+
 def db_exists_claim(kind: str | None, value: str):
     """A correlated EXISTS over one descriptor claim.
 
@@ -263,9 +323,10 @@ def _apply_search_filters(
             )
     if text:
         if postgres:
+            fn, arg = fts_query(text)
             q = q.filter(
-                sql_text(f"{FTS_EXPR} @@ plainto_tsquery('simple', :fts_q)")
-                .bindparams(fts_q=text)
+                sql_text(f"{FTS_EXPR} @@ {fn}('simple', :fts_q)")
+                .bindparams(fts_q=arg)
             )
         else:
             # SQLite: every word must appear in the caption or the
@@ -320,8 +381,11 @@ def search_events(
                  attrs=attrs)
 
     if text and _is_postgres(db):
-        score = func.ts_rank(
-            sql_text(FTS_EXPR), func.plainto_tsquery("simple", text)
+        _fn, _arg = fts_query(text)
+        # Cover density: words near each other rank above the same words
+        # scattered through a long caption.
+        score = func.ts_rank_cd(
+            sql_text(FTS_EXPR), getattr(func, _fn)("simple", _arg)
         ).label("score")
         # Recency still breaks ties: two rows that fit the words equally
         # well are not equally interesting, and the newer one is the one

@@ -60,6 +60,88 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   withdrawal that deletes the faces, and erasure. A Report page:
   student × class with totals and a rate, Excel and CSV.
 
+- **The camera agent's LLM runs on the NPU on the qualcomm flavour.** The
+  litertlm caption adapter answers `/v1/chat/completions` on the same
+  Gemma engine (ai-adapter #83), and `start.sh` points the agent at it:
+  `LLM_PROVIDER=openai`, `LLM_BASE_URL=http://caption-adapter:9006`,
+  `LLM_MODEL`, `LLM_WINDOW_TOKENS=4096`, the pre-warm back on (seconds on
+  the NPU), the bundled Ollama skipped; leaving the flavour resets them,
+  an operator's own provider is kept. Measured on a Ventuno Q with the
+  agent's real prompt: 10 of 10 right tool choices on its evaluation
+  questions at 0.8–2.0 s a turn, against 20–25 s for granite4:micro on
+  the CPU (`bench/ventuno-q-npu-agent-llm-2026-11-07.md`). The same
+  `.env` keys put the agent on any OpenAI-compatible endpoint. New
+  `llm_window_tokens` (agent config): a window the runtime cannot grow
+  — the bundle's 4,096 tokens hold the system prompt and thirteen of the
+  fourteen schemas, or seven and eight turns of history — so each turn
+  sends only the tool schemas the question is likely to need (the
+  router's hint first, then what the words point at, then a fixed
+  priority) and the newest history, whole pairs, two turns at least; a
+  prompt the runtime still refuses mid-turn is retried without history,
+  then with three tools. `/health` probes an OpenAI-compatible endpoint's
+  `/v1/models` instead of reporting it unprobed.
+
+- **The dashboard shows the NPU and the GPU beside CPU, memory and disk.**
+  The host monitor's sample carries `accelerators`: the device the
+  detector runs on (from its own backend gauge: Hexagon, Intel NPU or
+  GPU, CUDA) and how busy it is, as the share of the sample window its
+  users spent computing, from the inference time the detector and KAI-C
+  already report, per user (detector, captioner, the ONNX adapters on the
+  qualcomm flavour). Most boards expose no utilisation counter a
+  container can read, so the number is labelled as an inference-time
+  share; where Intel's NPU driver exports its busy counter that is used
+  and labelled sysfs. The trend chart gains NPU and GPU lines when the
+  box has one in use, the vitals card a tile with the users, and the
+  history keeps `npu_percent` and `gpu_percent`.
+
+- **Ask a person, and the gate opens on a person's word.** A workflow's
+  Ask a person step creates an approval (`workflow_approvals`) and the run
+  waits; `GET /api/v1/approvals` and `POST /api/v1/approvals/{id}` (#773,
+  `workflows.approve` and the run's camera) answer it, and the run carries
+  on down that reply's path, after a restart too. A timeout takes the
+  `no_answer` path, never a reply's; Test asks nobody and takes the
+  default. The `app` action calls an installed app's action as the person
+  who answered, audited as the workflow's (the Gate concierge's
+  `open_now`), and `notify` puts a message in the inbox for `who`.
+- **The workflow engine runs workflows.** An app's alert starts every
+  On or Test workflow it triggers (`when: alert`), after the file's `if:`
+  guards and its limits (cooldown, one at a time, per hour, AI per hour);
+  the run walks its steps and records each one: If, For each, the AI step
+  (Look sees the alert's picture, shrunk with ffmpeg; the model is
+  `WORKFLOWS_LLM_URL` / `WORKFLOWS_LLM_MODEL`, loaded at start so the first
+  alert does not run out of time), and the actions `log`, `alert` (into the
+  inbox as the workflow, AI-decided `high` capped at `medium`), `site_mode`
+  and `wait`. Test records every action as "would have". A workflow never
+  triggers on a workflow's alert; a run a restart interrupted is marked
+  failed, not redone. Ask a person, app actions and `notify` are recorded
+  as "not available yet" until approvals land.
+
+- **Captions on the Qualcomm NPU.** The qualcomm flavour now runs the
+  captioner on the Hexagon too: `start.sh` fills `CAPTION_ADAPTER=litertlm`
+  (ai-adapter's new LiteRT-LM adapter: Gemma 4 E2B compiled for the
+  QCS8275) and the `-qualcomm` image tag when `.env` still named a CPU
+  captioner with no tag of its own, the overlay lends the service the DSP
+  and two volumes (the 2.7 GB model, downloaded once from Hugging Face;
+  Qualcomm's runtime libraries, fetched once), and the installer suggests
+  it and defaults visit descriptions on there. Measured on a Ventuno Q
+  (2026-11-05): 2.5 s a photo warm, 4.3 s cold, the detector sharing the
+  NPU 38 → 44 ms an inference. Why: a Search "describe" on the field box
+  went to qwen3-vl 2B through Ollama on the ARM cores — 60–90 s a photo
+  against a 30 s deadline, so every caption was computed, discarded and
+  requested again, and the box sat at 100 % CPU. Moving the flavour back
+  to cpu resets the pick to moondream.
+
+- **The workflows API (#773).** `workflows` and `workflow_versions`
+  tables, the permissions `workflows.view`, `.manage` and `.approve`
+  (granted on upgrade to the roles RFC #620 names, through `cameras.view`
+  and `cameras.manage`), and `/api/v1/workflows`: list, save a file (checked
+  by the SDK's validator against this site; `422` with each error at its
+  key), every save a new version, Off / Test / On, three templates (Gate
+  concierge, Safety gear check, Night intrusion triage), and a workflow's
+  runs, step by step with an AI step's calls. New workflows start in Test;
+  only an admin turns On one that moves things, and a new version whose AI
+  steps changed goes back to Test.
+
 - **The escalation proposal: weak evidence on the sub stream → detect on
   the main stream, by consent.** Every posted visit now says where its crop
   came from (sub-sized fallback, keyframe path, or the recording) and how
@@ -264,6 +346,18 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Disk rotation instead of a purge that empties the box.** The free-space
+  floor now defaults to 2 GB, or 2 % of the recordings volume if that is
+  more (it used to be off, and installs that had set 10 GB on a small disk
+  could never reach it: core deleted every recording and every event photo,
+  forever). Below the floor core rotates: the oldest recordings go, oldest
+  first, in steps of a quarter of the floor rather than a flat 5 GB, and
+  recording never stops. Event photos are never deleted for space. While
+  rotation is on the dashboard says so, with the effective retention in
+  hours; when the floor cannot be reached even with no recordings left, it
+  says the disk is full of other data and by how much. The setting now
+  shows what "automatic" means on this disk; 0 turns rotation off.
+
 - **Smart Doorbell: `min_face_px` defaults to 100 (was 40), and a name is
   a vote.** The frames are the camera's main stream, so 100 px is a face
   within a few metres of the door; below it a miss says distance, not
@@ -321,6 +415,142 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   timing matters.
 
 ### Fixed
+
+- **Search reads months, years and dates, and says when it searched all
+  time.** "in January", "January or February", "last month", "this year",
+  "two months ago", "last 6 months", "5th November 2025", "nov 5" all
+  become windows now (a month alone is the most recent one that has
+  started; a "last year" in the sentence sets the year of the month it
+  qualifies). A question with no time still searches everything, because
+  a plate or a name is usually wanted wherever it is and the index makes
+  that cheap; the page now says how many days and visits that covered and
+  offers last 24 hours, 7 days and 30 days in one click. Nothing is
+  withheld and nobody is asked to retype.
+
+- **The tracker predicts motion and assigns globally, in two stages.**
+  Each track now carries a constant-velocity Kalman filter over its box
+  centre; detections are assigned to tracks by overlap with the predicted
+  box (or the last box, for someone who stops short), solved globally
+  (Hungarian) rather than nearest-first, in ByteTrack's two stages:
+  confident boxes against every track, then the detector's unsure boxes
+  (below 0.5) against the tracks seen last frame, so a person half hidden
+  behind a colleague keeps their track. The width-growth gate measures
+  against the track's widest box of the last second, not the narrow box
+  of a moment behind someone, and a box under half the predicted height
+  (a torso) never matches. The size-aware distance remains the coasting
+  fallback; `motion=False` on the TrackConfig restores the old matcher.
+  Why: with nearest-first on the distance, three people crossing swapped
+  identities (one track jumped 140 px to another person) and every swap
+  left a fresh track to confirm beside the live ones. Replayed on the
+  Ventuno Q from a three-person, seven-pass walk (2026-11-05): 27 visits
+  → 24, five of seven passes posting exactly three; replay wall time
+  unchanged (no scipy, a few lines of numpy).
+
+- **Search understands counts and groups, and says loudly when it fell
+  back.** "Did you see the 3 persons together" used to parse to the words
+  "persons together", match no caption, and quietly show every visit.
+  Now: every visit carries the most people the detector had in frame with
+  it at once (detect-pipeline counts confirmed tracks per frame; core
+  keeps it as ``payload["people"]``), the parser reads "3 persons",
+  "two men", "a group", "together" as *at least N people in frame*
+  (``min_people``, also a query parameter), the search filters on it and
+  shows a "3+ people together" chip, and the parser knows "persons",
+  "men", "women", "guys", "kids", "visitors" and the rest of the words
+  people type. When words still match nothing and search shows the rest,
+  the notice is a warning that starts "These are not what you searched
+  for" and gives the count. Visits recorded before this release carry no
+  count and never match a group query.
+
+- **The camera agent's start-up LLM pre-warm is a setting, off on CPU
+  boxes.** At start the agent sent its system prompt and tool schemas
+  through the LLM once so the first question skips the cold prefill. On a
+  GPU that is seconds; on an 8-core ARM box it was one chat call of 3 min
+  50 s at every restart, six cores busy for nothing a person asked for
+  (Ventuno Q, 2026-11-06). `LLM_PREWARM` in .env (`llm_prewarm` in the
+  agent config) turns it off; the installer writes false wherever the LLM
+  runs on the CPU and true on a CUDA box. Off, the first question pays the
+  prefill instead, and the log says so.
+
+- **Search uses the claims other apps wrote, and finds app alerts.** A
+  typed "red van" or "person in a blue shirt" now filters on the colour,
+  vehicle-type, clothing, carrying or headwear claim where this box holds
+  claims of that kind (the description questions, the plate and face
+  apps write them), which is exact, and stays a caption word where it
+  does not. The chip is the same one the picker makes and drops the same
+  way. And a question that names an alert's subject (loitering,
+  occupancy, a package, an intruder, "any alerts") brings the matching
+  app alerts in the same window and cameras beside the visits, newest
+  first, with severity, camera and source, for callers with
+  `alerts.view`; the page shows them above the results and says when
+  none fired. Search still starts no model: it reads what the running
+  apps already stored.
+
+- **A slow captioner no longer computes captions nobody saves.** One
+  Search "describe" on the field box sent the visit's photo to qwen3-vl
+  2B through Ollama on the ARM cores: 60–90 s a caption against KAI-C's
+  fixed 30 s proxy timeout, so every call was cut off, core read the
+  502 as a plain failure (not a timeout, so the breaker never tripped),
+  the visit stayed "missing a caption", and the next question asked for
+  it again — the box sat at 100 % CPU for an hour with zero captions
+  written. Three fixes: KAI-C's proxy wait is `KAI_C_INFER_TIMEOUT_S`
+  (default 90 s, the same as core's enrichment timeout) and a timeout is
+  a 504 of its own; core counts that 504 as a timeout, so repeated ones
+  trip the adapter's breaker; and a visit whose caption call failed is
+  stamped and left alone by the on-demand lane for
+  `EVENTS_CAPTION_RETRY_COOLDOWN_S` (default 10 min) — not recorded as
+  "looked and found nothing", so later passes still get to it.
+- **Groups of people no longer post two or three visits per person.** Five
+  changes to the tracker and the visit lifecycle, measured by replaying
+  the recordings of three walk-throughs with three people through the
+  pipeline's own gate, detector and tracker on the Ventuno Q: 194 visits
+  over 22 passes became 101. A part box (torso, upper or lower body) 70 %
+  inside the whole is dropped whatever its width; a detection much wider
+  (over 1.6×) or narrower (under 0.4×) than a track's box never matches
+  it, so a person's track does not take the box drawn around a group and a
+  group track does not steal a member; a track that missed the last frames
+  is matched with a gate that grows a quarter per miss, so someone who
+  steps behind a colleague rejoins their track; a visit ends when the
+  object was last seen, not when its track expired, so a fragment seen for
+  a second is too short to count; and a track needs three hits at 5 fps
+  to confirm (`min_initialized`), a visit 1.5 s. A track whose box holds
+  two or more others is a group box and its visit is dropped
+  (`visits_dropped{reason="group"}`).
+
+- **A box around a group of people is the duplicate, not the people.**
+  When the detector draws one box around people crossing together beside
+  the box per person, that group box now goes and the people stay (a box
+  with two or more same-label boxes inside it is a group; one that holds
+  exactly one, about as wide, is a whole with its part).
+
+- **A person inside a group box is not a part of it.** With three people
+  crossing together the detector also drew one wide box around the group,
+  and the part rule dropped the person in the middle as a part of it. A
+  part is as wide as its whole; a box narrower than 60 % of the one around
+  it is a separate object and is kept, both in overlap suppression and in
+  the tracker's spawn guard.
+
+- **The part-box rule now holds when the part scores higher than the
+  whole, and on frames where only the part was detected.** Overlap
+  suppression applies the containment rule by size, largest first, so an
+  upper-body box with a better score than the full body no longer survives;
+  and the tracker absorbs an unmatched detection that lies mostly inside a
+  live track of the same label instead of starting a second track from it
+  (`tier0_track_spawns_absorbed_total`). One walk past the camera is one
+  visit.
+
+- **The pipeline's CPU gauge no longer spikes when two scrapers coincide.**
+  `tier0_process_cpu_percent` is CPU time over the window since the previous
+  scrape; a window of a few hundred milliseconds that caught one keyframe
+  cycle read 60 to 140 % against a real load of 9 %. A window shorter than
+  2 s now keeps the previous reading and keeps accumulating.
+
+- **One person no longer becomes two or three visits per pass.** The
+  detector sometimes boxes a person's upper body beside the full body; the
+  part's overlap ratio with the whole is low, so overlap suppression kept
+  both, and since the recording-request change each confirmed its own
+  track and posted its own visit, photo and fetch. A same-label box that
+  lies 85 % or more inside a larger box (`DETECT_NMS_CONTAINMENT`, 0 or 1
+  turns it off) is now dropped as a part of that object.
 
 - **A search result's "play the recording" lands where the subject is.**
   The playhead now opens 3 s before the event's instant, inside the same

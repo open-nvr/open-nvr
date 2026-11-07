@@ -61,10 +61,24 @@ NEW_PERMISSIONS_UPDATE: tuple[NewPermission, ...] = (
     NewPermission("system.update", "Install OpenNVR updates and set the update policy"),
 )
 
+#: Agentic Workflows (RFC #620, section 7). The RFC gives viewing to admin,
+#: operator and viewer, and managing and approving to admin and operator:
+#: exactly the roles that hold cameras.view and cameras.manage by default,
+#: so those are the backfill sources.
+NEW_PERMISSIONS_WORKFLOWS: tuple[NewPermission, ...] = (
+    NewPermission("workflows.view", "View workflows and their runs",
+                  backfill_from="cameras.view"),
+    NewPermission("workflows.manage", "Create, edit and turn workflows on or off",
+                  backfill_from="cameras.manage"),
+    NewPermission("workflows.approve", "Answer a workflow's Ask a person approvals",
+                  backfill_from="cameras.manage"),
+)
+
 UPGRADE_PATH_PERMISSIONS: tuple[NewPermission, ...] = (
     *_EARLIER_LATE_PERMISSIONS,
     *NEW_PERMISSIONS_HA,
     *NEW_PERMISSIONS_UPDATE,
+    *NEW_PERMISSIONS_WORKFLOWS,
 )
 
 

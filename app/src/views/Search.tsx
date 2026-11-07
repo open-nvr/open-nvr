@@ -39,6 +39,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Camera as CameraIcon, CarFront, Clock, CornerDownLeft, ImageOff, Info, LayoutGrid, List, Play, Route,
   Search as SearchIcon, Sparkles, Tag, Type, UserRound, X,
+  Users,
 } from 'lucide-react'
 import { api } from '../lib/api'
 import { apiService } from '../lib/apiService'
@@ -47,7 +48,7 @@ import SearchAnswer, { type SearchAnswerData } from '../components/SearchAnswer'
 import { AuthedImage } from '../components/AuthedImage'
 import { JourneyPanel } from '../components/JourneyPanel'
 import { useTranslation, useDateFormat, type DateFormatters } from '../i18n'
-import { Badge, Button, EmptyState, Skeleton } from '../components/ui'
+import { Badge, Button, EmptyState, SeverityBadge, Skeleton } from '../components/ui'
 import { DataTable, type Column } from '../components/ui/DataTable'
 import { Pagination } from '../components/ui/Pagination'
 import { SegmentedControl } from '../components/ui/SegmentedControl'
@@ -76,8 +77,20 @@ type Interpretation = {
   attrs: string[]
   matched: Record<string, string>
   ignored: string[]
+  min_people?: number | null
   source: 'parsed' | 'explicit' | string
   overridden: string[]
+}
+type SearchAlert = {
+  alert_id: string
+  fired_at: string | null
+  severity: string
+  title: string
+  description: string | null
+  alert_type: string | null
+  source_name: string | null
+  camera_id: number | null
+  camera_name: string | null
 }
 type Claim = {
   kind: string
@@ -126,10 +139,16 @@ type SearchResponse = {
    *  These results are not the search that was typed, so the page owes
    *  the operator a visible say-so and a way back. */
   relaxed?: { dropped: string; without: number }
+  /** No time in the question: how far back the whole-index search went. */
+  scope?: { all_time: boolean; oldest: string; days: number; total: number } | null
   /** Why the ranking looks the way it does, when a second arm took part
    *  — or why it could not. Absent on a deployment that has never
    *  embedded anything, which is most of them. */
   semantic?: { used: boolean; reason?: string; note?: string; text_total?: number }
+  /** App alerts the question's words named (loitering, occupancy, a
+   *  package…), in the same window and cameras. Null when the question
+   *  named nothing alert-shaped; [] when it did and nothing fired. */
+  alerts?: SearchAlert[] | null
   /** What the question needed that the matching visits do not have yet,
    *  and what this search queued to be described now. "Not yet" is a
    *  different answer from "no": an empty page over undescribed visits
@@ -156,6 +175,8 @@ type Filters = {
   plate: string
   /** kind:value claims a skill made, ANDed. */
   attrs: string[]
+  /** "three people together": at least this many people in frame. */
+  minPeople: number | null
 }
 
 /** The server names the field; the UI already has a dropper keyed by
@@ -256,6 +277,7 @@ export function Search() {
       for (const a of filters!.attrs) qs.append('attr', a)
       if (filters!.text) qs.set('text', filters!.text)
       if (filters!.plate) qs.set('plate', filters!.plate)
+      if (filters!.minPeople) qs.set('min_people', String(filters!.minPeople))
       if (filters!.from) qs.set('from', filters!.from)
       if (filters!.to) qs.set('to', filters!.to)
     } else if (sentence) {
@@ -366,6 +388,7 @@ export function Search() {
     text: interp?.text ?? '',
     plate: interp?.plate ?? '',
     attrs: [...(interp?.attrs ?? [])],
+    minPeople: interp?.min_people ?? null,
   })
 
   const drop = (part: keyof Filters, value?: string) => {
@@ -374,6 +397,7 @@ export function Search() {
     if (part === 'cameraIds') base.cameraIds = []
     if (part === 'text') base.text = ''
     if (part === 'plate') base.plate = ''
+    if (part === 'minPeople') base.minPeople = null
     if (part === 'from' || part === 'to') { base.from = null; base.to = null }
     // One claim at a time: dropping "colour:red" must not also drop
     // "vehicle_type:van" that is narrowing the same search.
@@ -547,6 +571,14 @@ export function Search() {
           label: interp.plate,
           title: 'Number plates containing this.',
         },
+        interp.min_people && interp.min_people > 1 && {
+          key: 'minPeople' as const,
+          icon: <Users size={12} />,
+          label: `${interp.min_people}+ people together`,
+          title: interp.matched?.count
+            ? `"${interp.matched.count}" = at least ${interp.min_people} people in frame at once`
+            : `At least ${interp.min_people} people in frame at once.`,
+        },
       ].filter(Boolean) as {
         key: keyof Filters; value?: string; icon: React.ReactNode; label: string; title: string
       }[]
@@ -595,6 +627,38 @@ export function Search() {
   if (interp?.wants_plate) {
     notices.push({ key: 'plate', tone: 'info', icon: <CarFront size={13} />, text: t('search.needs.wantsPlate') })
   }
+  // A question with no time searches everything the box holds. Cheap for
+  // the database, expensive for the person scrolling: say how far back it
+  // reached and offer the usual windows in one click. An explicit window
+  // (even an edited one) means the operator chose, so no notice.
+  if (data?.scope?.all_time && data.scope.days > 1 && !(editing && filters?.from)) {
+    const narrow = (days: number) => {
+      const base = editing ? { ...filters! } : asFilters()
+      const now = new Date()
+      base.from = new Date(now.getTime() - days * 86400000).toISOString()
+      base.to = null
+      setFilters(base)
+      setPage(0)
+    }
+    notices.push({
+      key: 'scope',
+      tone: 'info',
+      icon: <Clock size={13} />,
+      text: (
+        <>
+          No time in the question, so this searched all {data.scope.days} days the box holds
+          ({data.scope.total} visits). Add a time to narrow it:
+        </>
+      ),
+      action: (
+        <span className="flex gap-1">
+          <Button variant="outline" size="sm" onClick={() => narrow(1)}>last 24 h</Button>
+          <Button variant="outline" size="sm" onClick={() => narrow(7)}>7 days</Button>
+          <Button variant="outline" size="sm" onClick={() => narrow(30)}>30 days</Button>
+        </span>
+      ),
+    })
+  }
   if (interp && interp.ignored.length > 0) {
     notices.push({
       key: 'ignored',
@@ -610,9 +674,14 @@ export function Search() {
   if (relaxed && results.length > 0) {
     notices.push({
       key: 'relaxed',
-      tone: 'info',
+      tone: 'warn',
       icon: <Info size={13} />,
-      text: <>No results for “<b>{relaxed.dropped}</b>”, so showing results for the rest of your search.</>,
+      text: (
+        <>
+          <b>These are not what you searched for.</b> Nothing matched “<b>{relaxed.dropped}</b>”, so
+          these are the {relaxed.without} visits that match the rest of your search.
+        </>
+      ),
       action: (
         <Button
           variant="outline"
@@ -933,6 +1002,27 @@ export function Search() {
         <div className={shell}>
           <div className="shrink-0 border-b border-[var(--border)]">{toolbar}</div>
           <div className="min-h-0 flex-1 overflow-y-auto thin-scroll p-3">
+            {data?.alerts && data.alerts.length > 0 && (
+              <div className="mb-3 rounded-md border border-border bg-muted/30 p-2" data-testid="search-alerts">
+                <div className="mb-1 text-xs font-medium text-muted-foreground">
+                  {data.alerts.length === 1 ? '1 app alert matches' : `${data.alerts.length} app alerts match`}
+                </div>
+                <ul className="space-y-1">
+                  {data.alerts.map((a) => (
+                    <li key={a.alert_id} className="flex flex-wrap items-baseline gap-x-2 text-sm">
+                      <SeverityBadge severity={a.severity} />
+                      <span className="font-medium">{a.title}</span>
+                      {a.camera_id != null && <span className="text-muted-foreground">{a.camera_name ?? `camera ${a.camera_id}`}</span>}
+                      {a.fired_at && <span className="text-muted-foreground">{fmt.dateTime(new Date(a.fired_at))}</span>}
+                      {a.source_name && <span className="text-xs text-muted-foreground">{a.source_name}</span>}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {data?.alerts && data.alerts.length === 0 && results.length === 0 && (
+              <div className="mb-3 text-sm text-muted-foreground" data-testid="search-alerts-none">No app alert matched in this window either.</div>
+            )}
             {searchQuery.isPending ? (
               <div className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] items-start gap-2">
                 {Array.from({ length: 12 }).map((_, i) => <Skeleton key={i} className="aspect-video" />)}

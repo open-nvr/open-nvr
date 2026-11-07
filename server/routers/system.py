@@ -173,7 +173,27 @@ async def get_system_resources(
         load_monitoring_settings,
     )
 
-    return get_system_monitor().snapshot(load_monitoring_settings(db))
+    out = get_system_monitor().snapshot(load_monitoring_settings(db))
+    # Disk rotation (retention_service): on while core deletes the oldest
+    # recordings to keep its headroom. The dashboard says so, with the
+    # effective retention, instead of a bare "Degraded".
+    try:
+        from models import SystemEvent
+        from services.retention_service import ROTATION_EVENT
+
+        row = (
+            db.query(SystemEvent)
+            .filter(SystemEvent.event_type == ROTATION_EVENT)
+            .order_by(SystemEvent.id.desc())
+            .first()
+        )
+        out["rotation"] = (
+            {"active": True, "description": row.description, **(row.data or {})}
+            if row is not None and row.event_state == "active" else None
+        )
+    except Exception:  # noqa: BLE001 - informational
+        out["rotation"] = None
+    return out
 
 
 @router.get("/resources/history")

@@ -102,6 +102,14 @@ class Visit:
     evidence_box_px: int | None = None
     evidence_frame_px: int | None = None
     evidence_skew_s: float | None = None
+    # The most people the detector had in frame at once while this visit
+    # was live, this one included — counted per frame over the confirmed
+    # tracks of the same label actually matched that frame. "Three
+    # people together" is a question the search can only answer from this:
+    # a caption may say "three men", a track never knows it had company
+    # (walk 13 on the Ventuno Q, 2026-11-06). 1 for a visit alone; None
+    # from a lifecycle that never saw the tracks (test doubles).
+    people_in_frame: int | None = None
 
 
 #: Most points kept per visit path. When a long visit fills it, every other
@@ -272,6 +280,8 @@ class VisitPoster:
             # visit ships no candidates and its sweep reads that crop.
             if v.evidence_ts is not None:
                 body["evidence_ts"] = float(v.evidence_ts)
+        if v.people_in_frame:
+            body["people_in_frame"] = int(v.people_in_frame)
         if v.evidence_source:
             body["evidence_source"] = str(v.evidence_source)
         if v.evidence_box_px is not None:
@@ -322,7 +332,10 @@ class VisitLifecycle:
         camera_id: str,
         *,
         nvr_camera_id: int | None = None,
-        min_duration_s: float = 1.0,
+        # A visit shorter than this (first to last sighting) is a flicker,
+        # not history. 1.5 s: the fragments a crowd produces last a second;
+        # a person crossing the frame takes longer on any sane camera.
+        min_duration_s: float = 1.5,
     ) -> None:
         self.camera_id = camera_id
         self.nvr_camera_id = nvr_camera_id
@@ -343,10 +356,26 @@ class VisitLifecycle:
                     "crop_ts": None, "ring": None, "scene": None, "path": [],
                     "path_step": 1, "path_seen": 0,
                     "crop_source": None, "crop_box_px": None, "crop_skew_s": None,
-                    "frame_px": None,
+                    "frame_px": None, "frames": 0, "group_frames": 0,
+                    "people_max": 0,
                 }
-            v["end"] = now_wall
+            # The visit ends when the object was LAST SEEN, not when its
+            # track finally expired: a track coasts for seconds after its
+            # last match, and a fragment the detector boxed for four frames
+            # in a crowd (a head, a sleeve) read as a six-second visit and
+            # sailed past min_duration_s (replayed on the Ventuno Q,
+            # 2026-11-05). Test doubles without the flag count every frame.
+            if getattr(tr, "matched_now", True):
+                v["end"] = now_wall
             v["label"] = tr.label
+            v["frames"] += 1
+            if getattr(tr, "matched_now", True) and getattr(tr, "confirmed", False):
+                v["people_max"] = max(v["people_max"], sum(
+                    1 for o in tracks
+                    if o.label == tr.label and getattr(o, "confirmed", False)
+                    and getattr(o, "matched_now", True)))
+            if getattr(tr, "group_now", False):
+                v["group_frames"] += 1
             ring = getattr(tr, "plate_ring", None)
             if ring is not None:
                 v["ring"] = ring
@@ -421,6 +450,12 @@ class VisitLifecycle:
             # it is NOT the junk-suppression rail — min_duration_s below is.
             record_visit_dropped(self.camera_id, "unconfirmed")
             return None
+        if v.get("frames", 0) and v.get("group_frames", 0) * 2 > v["frames"]:
+            # The track followed a box the detector drew around a group of
+            # people, each tracked on their own: not a visit, a duplicate
+            # of several.
+            record_visit_dropped(self.camera_id, "group")
+            return None
         if (end - v["start"]) < self.min_duration_s:
             # Junk suppression is deliberate, but it was previously invisible:
             # there was no way to tell "nothing happened" from "the floor is
@@ -488,4 +523,5 @@ class VisitLifecycle:
             evidence_frame_px=v.get("frame_px"),
             evidence_skew_s=(float(v["crop_skew_s"])
                              if jpeg is not None and v.get("crop_skew_s") is not None else None),
+            people_in_frame=(v.get("people_max") or None),
         )

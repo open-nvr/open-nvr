@@ -152,14 +152,24 @@ def test_operator_health_recorders():
     metrics.reset()
 
 
-def test_sample_process_metrics_sets_rss_on_linux():
+def test_sample_process_metrics_sets_rss_on_linux(monkeypatch):
+    from detect_pipeline import metrics as mm
     m = Metrics()
+    mm._proc_prev["cpu_s"], mm._proc_prev["t"] = None, None
     sample_process_metrics(m)          # first sample: RSS set, CPU% needs a delta
     if not os.path.exists("/proc/self/stat"):
         return                          # no-op off Linux; nothing to assert
     assert m.value("tier0_process_resident_memory_bytes") > 0
-    sample_process_metrics(m)          # second sample: CPU% gauge now present
+    # a second scrape a moment later is too short a window: no CPU figure yet,
+    # and the window keeps accumulating from the FIRST sample
+    sample_process_metrics(m)
+    assert "tier0_process_cpu_percent" not in m.render()
+    t0 = mm._proc_prev["t"]
+    real = mm.time.monotonic
+    monkeypatch.setattr(mm.time, "monotonic", lambda: real() + mm.CPU_WINDOW_MIN_S + 0.5)
+    sample_process_metrics(m)          # a window of 2.5 s: the gauge is set
     assert "tier0_process_cpu_percent" in m.render()
+    assert mm._proc_prev["t"] > t0
 
 
 # ── per-camera staleness (a dead feed must not hide behind a live one) ──

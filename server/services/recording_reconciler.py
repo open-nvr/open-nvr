@@ -36,6 +36,7 @@ filesystem work happens in a worker thread via ``asyncio.to_thread``.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 from datetime import UTC, datetime, timedelta
@@ -72,6 +73,9 @@ _IN_PROGRESS_MTIME_SECONDS = 120
 _PERIODIC_WINDOW_HOURS = 48
 _PERIODIC_INTERVAL_SECONDS = 15 * 60
 
+
+
+logger = logging.getLogger(__name__)
 
 def _relative_posix(f: Path, root: Path) -> str:
     return os.path.relpath(f, root).replace("\\", "/")
@@ -135,6 +139,8 @@ def reconcile_camera(
     db_rows = {r.file_path: r for r in q.all()}
 
     inserted = 0
+
+    repaired = 0
     deleted = 0
 
     # Files with no row → insert. Sorted so end_time can be estimated from
@@ -179,6 +185,13 @@ def reconcile_camera(
         if inserted % 500 == 0:
             db.commit()  # bound transaction size on big backfills
 
+    # Rows indexed without a size (the segment-complete hook could not open
+    # the file: a relative MediaMTX path, before fix/segment-path-relative)
+    # get it from the scan — the rotation's "GB of recordings" reads this.
+    for rel, row in db_rows.items():
+        if row.file_size is None and rel in on_disk:
+            row.file_size = on_disk[rel][2]
+            repaired += 1
     # Rows whose file is gone → delete. Only within the scanned window, where
     # the disk picture is authoritative.
     for rel, row in db_rows.items():
@@ -189,6 +202,8 @@ def reconcile_camera(
                 deleted += 1
 
     db.commit()
+    if repaired:
+        logger.info("recording reconciler: filled file_size on %d rows for camera %s", repaired, camera_id)
     return inserted, deleted
 
 

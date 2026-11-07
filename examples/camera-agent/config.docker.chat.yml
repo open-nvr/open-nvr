@@ -20,13 +20,30 @@ kaic_api_key: ${INTERNAL_API_KEY}
 
 ollama_url: ${OLLAMA_URL}
 ollama_token:
-llm_model: ${OLLAMA_MODEL}
+# The LLM runtime. ollama (default): Ollama's native API at ollama_url.
+# openai: any OpenAI-compatible chat API at llm_base_url — a cloud provider,
+# a local server, or the NPU caption adapter's /v1/chat/completions (the
+# qualcomm flavour: start.sh fills LLM_PROVIDER=openai and the adapter's
+# URL, and a turn runs on the Hexagon in 1–2 s instead of 20–25 s on the
+# CPU; bench/ventuno-q-npu-agent-llm-2026-11-07.md). All from .env.
+llm_provider: ${LLM_PROVIDER}
+llm_base_url: ${LLM_BASE_URL}
+llm_api_key: ${LLM_API_KEY}
+llm_model: ${LLM_MODEL}
+# A context window the runtime cannot grow (the NPU bundle: 4096). Each
+# turn then sends only the tool schemas the question is likely to need and
+# the newest history (prompt_budget.py). 0 = the runtime manages the window.
+llm_window_tokens: ${LLM_WINDOW_TOKENS}
 llm_think: false   # Qwen3 default: snappy non-thinking tool-calling
 llm_temperature: 0.3
 llm_max_tokens: 220
 # See config.docker.yml — 13 tool schemas + the system prompt overflow the
 # 4096 default, and Ollama truncates the system prompt first on overflow.
 llm_num_ctx: 8192
+# Pre-warm the LLM at start (system prompt + tools, one token). false where
+# the LLM runs on the CPU: minutes of cores at every restart (the installer
+# sets LLM_PREWARM).
+llm_prewarm: ${LLM_PREWARM}
 
 # detect_objects -> YOLOv8 (name "default"); describe_camera -> the caption/VQA
 # adapter selected by CAPTION_ADAPTER (auto-registered by caption-adapter-register

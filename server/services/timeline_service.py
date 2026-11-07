@@ -89,12 +89,16 @@ def record_track_visit(
     scene_evidence_path: str | None = None,
     zone_ids: list[int] | None = None,
     evidence: dict | None = None,
+    people: int | None = None,
 ) -> TimelineEvent:
     """Persist one finished visit (source=tier0, event_type=track).
     ``evidence`` is the pipeline's account of the best crop (source, box
     size, frame size, skew), kept under ``payload["evidence"]`` for the
     per-camera evidence quality read (services/evidence_escalation.py)."""
     payload: dict = {}
+    if people:
+        # How many people were in frame with this visit at its fullest.
+        payload["people"] = int(people)
     if stationary is not None:
         payload["stationary"] = stationary
     if evidence:
@@ -200,6 +204,7 @@ def _events_query(
     has_plate: bool = False,
     zone_id: int | None = None,
     attrs: list[tuple[str | None, str]] | None = None,
+    min_people: int | None = None,
     has_descriptor: bool = False,
 ):
     """Scope + filters, with NO ordering, offset or limit.
@@ -252,6 +257,11 @@ def _events_query(
             .where(VisitDescriptor.event_id == TimelineEvent.id)
             .exists()
         )
+    if min_people and int(min_people) > 1:
+        # "Three people together": the pipeline's count of people in frame
+        # with the visit at its fullest (payload["people"]); a visit from
+        # before the count existed has none and cannot be a group.
+        q = q.filter(TimelineEvent.payload["people"].as_integer() >= int(min_people))
     if source:
         q = q.filter(TimelineEvent.source == source)
     if plate:

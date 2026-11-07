@@ -1830,3 +1830,82 @@ class WorkflowToolCall(Base):
     tokens_out = Column(Integer, nullable=True)
 
     step = relationship("WorkflowRunStep", back_populates="tool_calls")
+
+
+class Workflow(Base):
+    """A workflow (RFC #620): its name, its state and its current version.
+
+    The file itself is in :class:`WorkflowVersion`; every save is a new
+    version, so each run records which version decided it. ``state`` is
+    the product's, not the file's: ``off``, ``test`` (everything runs,
+    actions are recorded as "would have"), or ``on``. New workflows start
+    in Test. ``needs_attention`` says why a workflow stopped (a step lost
+    its provider), or is null."""
+
+    __tablename__ = "workflows"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(200), nullable=False)
+    state = Column(String(8), nullable=False, default="test")
+    needs_attention = Column(String(300), nullable=True)
+    current_version = Column(Integer, nullable=False, default=1)
+    #: Whether the current version has an action that moves things; such a
+    #: workflow is turned On by an admin only.
+    moves_things = Column(Boolean, nullable=False, default=False)
+    created_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    versions = relationship("WorkflowVersion", back_populates="workflow",
+                            cascade="all, delete-orphan", order_by="WorkflowVersion.version")
+
+
+class WorkflowVersion(Base):
+    """One saved version of a workflow file, as written (``workflow: v1``),
+    with what it needs (skills, apps, camera roles) as the validator found."""
+
+    __tablename__ = "workflow_versions"
+    __table_args__ = (UniqueConstraint("workflow_id", "version", name="uq_workflow_version"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    workflow_id = Column(Integer, ForeignKey("workflows.id", ondelete="CASCADE"),
+                         nullable=False, index=True)
+    version = Column(Integer, nullable=False)
+    yaml = Column(Text, nullable=False)
+    needs = Column(JSON, nullable=True)
+    created_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    workflow = relationship("Workflow", back_populates="versions")
+
+
+class WorkflowApproval(Base):
+    """An Ask a person step waiting for, or given, an answer (RFC #620).
+
+    Its own record, with its own permission (``workflows.approve``), so
+    acknowledging alerts never clears one. ``resume`` is where the run
+    carries on once answered: the enclosing paths and the run's values,
+    so a reply after a restart resumes the run where it stopped. A
+    timeout takes the step's ``no_answer`` path, never a reply's: nobody
+    chose it."""
+
+    __tablename__ = "workflow_approvals"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_id = Column(Integer, ForeignKey("workflow_runs.id", ondelete="CASCADE"),
+                    nullable=False, index=True)
+    step_id = Column(Integer, ForeignKey("workflow_run_steps.id", ondelete="CASCADE"),
+                     nullable=True)
+    step_path = Column(String(120), nullable=False)
+    question = Column(Text, nullable=False)
+    who = Column(String(120), nullable=False)
+    replies = Column(JSON, nullable=False)
+    default_reply = Column(String(120), nullable=True)
+    # open | answered | timed_out
+    state = Column(String(16), nullable=False, default="open", index=True)
+    reply = Column(String(120), nullable=True)
+    answered_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    timeout_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    answered_at = Column(DateTime(timezone=True), nullable=True)
+    resume = Column(JSON, nullable=True)

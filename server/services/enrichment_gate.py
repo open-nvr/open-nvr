@@ -459,6 +459,12 @@ async def infer_through_gate(adapter: str, body: dict[str, Any], *,
             )
         if resp.status_code == 200:
             outcome = "ok"
+        elif resp.status_code == 504:
+            # KAI-C's proxy gave up waiting for the adapter: the model is
+            # slow, not down. Counted as a timeout so the breaker trips;
+            # read as a plain failure it never did, and the Search lane
+            # asked the same visit again every time (Ventuno Q, 2026-11-05).
+            outcome = "timeout"
     except (httpx.ReadTimeout, httpx.WriteTimeout):
         outcome = "timeout"
         log.warning(

@@ -108,6 +108,8 @@ from routers import (
     webrtc,
     window_settings,
     device_firewall,
+    workflows as workflows_router,
+    approvals as approvals_router,
 )
 from scripts.init_db import create_initial_data
 from services.mediamtx_admin_service import MediaMtxAdminService as _MtxAdmin
@@ -712,6 +714,23 @@ async def lifespan(app: FastAPI):
     spawn_background(background_occupancy_event_consumer(),
                      name="occupancy-event-consumer")
 
+    # Agentic Workflows (RFC #620): app alerts start the workflows they
+    # trigger. Same best-effort posture as the consumers above.
+    async def background_workflow_engine():
+        from workflows.consumer import run_consumer_loop, start_engine
+
+        engine = await asyncio.to_thread(start_engine)
+        from workflows.consumer import sweep_timeouts
+
+        spawn_background(sweep_timeouts(engine), name="workflow-approval-timeouts")
+
+        async def _loop():
+            await run_consumer_loop(engine)
+
+        await run_consumer_forever("Workflow engine", _loop)
+
+    spawn_background(background_workflow_engine(), name="workflow-engine")
+
     # Entry screenings: consume screening.completed.v1 into the
     # compliance ledger. Every screening, not only the ones that
     # alerted — a compliance rate needs its denominator.
@@ -1165,6 +1184,8 @@ app.include_router(system, prefix=settings.api_prefix)
 app.include_router(events_router, prefix=settings.api_prefix)
 app.include_router(occupancy_router.router, prefix=settings.api_prefix)
 app.include_router(guardscan_router.router, prefix=settings.api_prefix)
+app.include_router(workflows_router.router, prefix=settings.api_prefix)
+app.include_router(approvals_router.router, prefix=settings.api_prefix)
 
 
 # =============================================================================

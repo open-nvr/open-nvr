@@ -123,6 +123,9 @@ export function VitalsWidget({ editing, onRemove }: { editing?: boolean; onRemov
   const disk = res.data?.disk
   const thr = res.data?.thresholds
   const cpuPts = (hist.data ?? []).map((p) => p.cpu_percent)
+  const accel = res.data?.accelerators ?? []
+  const npu = accel.find((a) => a.kind === 'npu')
+  const npuPts = (hist.data ?? []).map((p) => p.npu_percent ?? null)
   const memPts = (hist.data ?? []).map((p) => p.memory_percent)
 
   const alarmList = alarms.data?.alerts ?? []
@@ -186,6 +189,19 @@ export function VitalsWidget({ editing, onRemove }: { editing?: boolean; onRemov
         >
           <div className="text-[var(--accent)]"><Sparkline points={cpuPts} height={16} /></div>
         </Tile>
+
+        {npu && (
+          <Tile
+            icon={<Cpu size={12} />}
+            label="NPU"
+            value={pct(npu.busy_percent)}
+            unit="%"
+            tone={level(npu.busy_percent, 90)}
+            sub={npu.users.length ? npu.users.map((u) => `${u.name} ${Math.round(u.percent)}%`).join(' · ') : npu.name}
+          >
+            <div className="text-[var(--accent)]"><Sparkline points={npuPts} height={16} /></div>
+          </Tile>
+        )}
 
         <Tile
           icon={<MemoryStick size={12} />}

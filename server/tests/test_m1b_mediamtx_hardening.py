@@ -953,3 +953,15 @@ def test_a_failure_to_mint_does_not_break_the_call(monkeypatch) -> None:
     headers = MediaMtxAdminService._headers()
     assert "Authorization" not in headers
     assert headers["Content-Type"] == "application/json"
+
+
+def test_a_relative_mediamtx_segment_path_resolves_from_the_root():
+    """The shipped recordPath is relative (./app/recordings/…); MediaMTX
+    reports it as spelled, from its working directory /. Opened from
+    core's /app it was /app/app/recordings/… and nothing was ever found."""
+    from routers.mediamtx_hooks import absolute_segment_path
+    assert absolute_segment_path("./app/recordings/cam-23/2026-11-07/00/11-37-571384.mp4") == \
+        "/app/recordings/cam-23/2026-11-07/00/11-37-571384.mp4"
+    assert absolute_segment_path("app/recordings/cam-1/x.mp4") == "/app/recordings/cam-1/x.mp4"
+    assert absolute_segment_path("/app/recordings/cam-1/x.mp4") == "/app/recordings/cam-1/x.mp4"
+    assert absolute_segment_path("") == ""
