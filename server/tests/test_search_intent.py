@@ -135,3 +135,25 @@ def test_names_and_plates_are_needs_too():
 
 def test_plain_class_words_need_nothing():
     assert resolve_needs(words=[], labels=["car"], box=_box()) == []
+
+
+def test_typed_attribute_words_become_claims_where_the_box_holds_them():
+    """"red van" typed: where visits carry colour and vehicle_type claims
+    the words become exact claim filters; where they do not, they stay
+    caption words. A colour on a person is clothing; without a class it
+    stays a word."""
+    from services.search_intent import BoxAbilities, promote_words_to_claims
+    box = BoxAbilities(claimed_kinds={"colour", "vehicle_type", "clothing_top"})
+    p = _p("red van")
+    assert promote_words_to_claims(p, box) == [("colour", "red")]
+    assert p.labels == ["truck"] and p.attrs == [("colour", "red")] and p.text == ""
+    assert p.matched["claims"] == "colour:red"
+    p = _p("person in a blue shirt")
+    assert promote_words_to_claims(p, box) == [("clothing_top", "blue")]
+    assert p.text == "", "the clothing cue goes with the colour it qualified"
+    p = _p("blue")                                   # no class named
+    assert promote_words_to_claims(p, box) == [] and p.text == "blue"
+    p = _p("car carrying box")                       # a kind nobody claims
+    assert promote_words_to_claims(p, BoxAbilities(claimed_kinds={"colour"})) == []
+    p = _p("red van")
+    assert promote_words_to_claims(p, BoxAbilities()) == [] and p.text == "red"

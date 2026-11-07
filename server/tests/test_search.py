@@ -1771,3 +1771,30 @@ def test_a_colour_binds_to_the_thing_it_describes_in_the_text_query():
     assert fts_query("red van") == ("to_tsquery", "red <2> van")
     fn, arg = fts_query("man red carrying box")
     assert fn == "to_tsquery" and arg.startswith("man & red <2> (shirt") and arg.endswith(") & carrying & box")
+def test_alert_words_bring_matching_app_alerts_beside_the_visits(db):
+    """"loitering at the gate" has its answer in the alerts table, not in a
+    visit: the words that name an alert's subject bring the matching app
+    alerts in the same window; other questions bring none."""
+    from types import SimpleNamespace
+    from models import AppAlert
+    from routers.search import _matching_alerts
+    t = NOW
+    db.add(AppAlert(alert_id="l1", fired_at=t - timedelta(minutes=5), severity="high",
+                    title="Person loitering at gate", camera_id="cam1", source_name="loitering",
+                    alert_type="loitering_detected"))
+    db.add(AppAlert(alert_id="p1", fired_at=t - timedelta(minutes=4), severity="low",
+                    title="Package left at door", camera_id="cam2", source_name="package-delivery",
+                    alert_type="package_left"))
+    db.add(AppAlert(alert_id="old", fired_at=t - timedelta(days=3), severity="high",
+                    title="Person loitering at gate", camera_id="cam1", source_name="loitering"))
+    db.commit()
+    su = SimpleNamespace(is_superuser=True, role=None, id=1)
+    win = dict(start=t - timedelta(hours=1), end=t + timedelta(hours=1), labels=[], camera_ids=[])
+    assert _matching_alerts(db, None, su, words="car blue", **win) is None, "no alert word: no lane"
+    got = _matching_alerts(db, None, su, words="loitering gate", **win)
+    assert [a["alert_id"] for a in got] == ["l1"]
+    assert got[0]["camera_id"] == 1 and got[0]["severity"] == "high"
+    got = _matching_alerts(db, None, su, words="package", camera_ids=[2], start=win["start"], end=win["end"], labels=[])
+    assert [a["alert_id"] for a in got] == ["p1"]
+    assert _matching_alerts(db, None, su, words="package", camera_ids=[1], start=win["start"], end=win["end"], labels=[]) == []
+    assert _matching_alerts(db, None, su, words="any alerts", **win) and len(_matching_alerts(db, None, su, words="alerts", **win)) == 2

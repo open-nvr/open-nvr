@@ -374,6 +374,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   runs on the CPU and true on a CUDA box. Off, the first question pays the
   prefill instead, and the log says so.
 
+- **Search uses the claims other apps wrote, and finds app alerts.** A
+  typed "red van" or "person in a blue shirt" now filters on the colour,
+  vehicle-type, clothing, carrying or headwear claim where this box holds
+  claims of that kind (the description questions, the plate and face
+  apps write them), which is exact, and stays a caption word where it
+  does not. The chip is the same one the picker makes and drops the same
+  way. And a question that names an alert's subject (loitering,
+  occupancy, a package, an intruder, "any alerts") brings the matching
+  app alerts in the same window and cameras beside the visits, newest
+  first, with severity, camera and source, for callers with
+  `alerts.view`; the page shows them above the results and says when
+  none fired. Search still starts no model: it reads what the running
+  apps already stored.
+
 - **A slow captioner no longer computes captions nobody saves.** One
   Search "describe" on the field box sent the visit's photo to qwen3-vl
   2B through Ollama on the ARM cores: 60–90 s a caption against KAI-C's

@@ -48,7 +48,7 @@ import SearchAnswer, { type SearchAnswerData } from '../components/SearchAnswer'
 import { AuthedImage } from '../components/AuthedImage'
 import { JourneyPanel } from '../components/JourneyPanel'
 import { useTranslation, useDateFormat, type DateFormatters } from '../i18n'
-import { Badge, Button, EmptyState, Skeleton } from '../components/ui'
+import { Badge, Button, EmptyState, SeverityBadge, Skeleton } from '../components/ui'
 import { DataTable, type Column } from '../components/ui/DataTable'
 import { Pagination } from '../components/ui/Pagination'
 import { SegmentedControl } from '../components/ui/SegmentedControl'
@@ -80,6 +80,17 @@ type Interpretation = {
   min_people?: number | null
   source: 'parsed' | 'explicit' | string
   overridden: string[]
+}
+type SearchAlert = {
+  alert_id: string
+  fired_at: string | null
+  severity: string
+  title: string
+  description: string | null
+  alert_type: string | null
+  source_name: string | null
+  camera_id: number | null
+  camera_name: string | null
 }
 type Claim = {
   kind: string
@@ -132,6 +143,10 @@ type SearchResponse = {
    *  — or why it could not. Absent on a deployment that has never
    *  embedded anything, which is most of them. */
   semantic?: { used: boolean; reason?: string; note?: string; text_total?: number }
+  /** App alerts the question's words named (loitering, occupancy, a
+   *  package…), in the same window and cameras. Null when the question
+   *  named nothing alert-shaped; [] when it did and nothing fired. */
+  alerts?: SearchAlert[] | null
   /** What the question needed that the matching visits do not have yet,
    *  and what this search queued to be described now. "Not yet" is a
    *  different answer from "no": an empty page over undescribed visits
@@ -953,6 +968,27 @@ export function Search() {
         <div className={shell}>
           <div className="shrink-0 border-b border-[var(--border)]">{toolbar}</div>
           <div className="min-h-0 flex-1 overflow-y-auto thin-scroll p-3">
+            {data?.alerts && data.alerts.length > 0 && (
+              <div className="mb-3 rounded-md border border-border bg-muted/30 p-2" data-testid="search-alerts">
+                <div className="mb-1 text-xs font-medium text-muted-foreground">
+                  {data.alerts.length === 1 ? '1 app alert matches' : `${data.alerts.length} app alerts match`}
+                </div>
+                <ul className="space-y-1">
+                  {data.alerts.map((a) => (
+                    <li key={a.alert_id} className="flex flex-wrap items-baseline gap-x-2 text-sm">
+                      <SeverityBadge severity={a.severity} />
+                      <span className="font-medium">{a.title}</span>
+                      {a.camera_id != null && <span className="text-muted-foreground">{a.camera_name ?? `camera ${a.camera_id}`}</span>}
+                      {a.fired_at && <span className="text-muted-foreground">{fmt.dateTime(new Date(a.fired_at))}</span>}
+                      {a.source_name && <span className="text-xs text-muted-foreground">{a.source_name}</span>}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {data?.alerts && data.alerts.length === 0 && results.length === 0 && (
+              <div className="mb-3 text-sm text-muted-foreground" data-testid="search-alerts-none">No app alert matched in this window either.</div>
+            )}
             {searchQuery.isPending ? (
               <div className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] items-start gap-2">
                 {Array.from({ length: 12 }).map((_, i) => <Skeleton key={i} className="aspect-video" />)}
