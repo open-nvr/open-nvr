@@ -38,7 +38,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Camera as CameraIcon, CarFront, Clock, CornerDownLeft, ImageOff, Info, LayoutGrid, List, Play, Route,
-  Search as SearchIcon, Sparkles, Tag, Type, UserRound, X,,
+  Search as SearchIcon, Sparkles, Tag, Type, UserRound, X,
   Users,
 } from 'lucide-react'
 import { api } from '../lib/api'
