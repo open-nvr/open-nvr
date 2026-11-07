@@ -57,3 +57,7 @@ Reports taken on real boards, every number from a run on that board:
 - [`ventuno-q-npu-captioner-2026-11-05.md`](ventuno-q-npu-captioner-2026-11-05.md) — Gemma 4 E2B as the
   caption / visual-question model on the same NPU through LiteRT-LM: 1.7 s a photo where a CPU vision model
   took a minute, with the detector sharing the NPU.
+- [`ventuno-q-npu-agent-llm-2026-11-07.md`](ventuno-q-npu-agent-llm-2026-11-07.md) — the same Gemma bundle as
+  the camera agent's LLM: native tool calling, 10 of 10 tool choices right on the agent's evaluation questions
+  at 0.8–2.0 s a turn (20–25 s on the CPU), and the exact fit of the 4,096-token window (13 of 14 schemas, or
+  7 schemas plus eight turns of history).
