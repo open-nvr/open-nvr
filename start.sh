@@ -235,6 +235,7 @@ apply_accel_env() {
             # pinned tag) is kept — and only when the image exists for this
             # ADAPTER_TAG (or as latest-qualcomm before a release ships it).
             fill_qualcomm_captioner
+            fill_qualcomm_agent_llm
             ;;
     esac
     write_env_var OPENNVR_ACCEL_RESOLVED "$accel"
@@ -264,6 +265,27 @@ fill_qualcomm_captioner() {
     echo -e "${YELLOW}Accelerate:${NC} the NPU captioner image ghcr.io/open-nvr/litertlm-adapter:*-qualcomm is not available (no registry access?) — the captioner stays on $(get_env_var CAPTION_ADAPTER)." >&2
 }
 
+fill_qualcomm_agent_llm() {
+    # The camera agent's LLM goes to the NPU too: the litertlm adapter
+    # answers /v1/chat/completions on the engine the captioner uses (a
+    # turn 0.8–2.0 s on a Ventuno Q against 20–25 s for granite4:micro on
+    # its CPU, 10 of 10 tool choices right on the agent's evaluation
+    # questions; bench/ventuno-q-npu-agent-llm-2026-11-07.md). Filled only
+    # when the captioner fill put litertlm there and .env names no LLM
+    # provider of its own — an operator's cloud endpoint is kept. The
+    # bundle's window is fixed at 4,096 tokens: LLM_WINDOW_TOKENS makes
+    # the agent send each turn only the tool schemas the question needs.
+    [[ "$(get_env_var CAPTION_ADAPTER)" == litertlm ]] || return 0
+    case "$(get_env_var LLM_PROVIDER)" in ""|ollama) ;; *) return 0 ;; esac
+    [[ -z "$(get_env_var LLM_BASE_URL)" ]] || return 0
+    set_env_var LLM_PROVIDER openai
+    set_env_var LLM_BASE_URL http://caption-adapter:9006
+    set_env_var LLM_MODEL gemma-4-e2b-npu
+    set_env_var LLM_WINDOW_TOKENS 4096
+    # A pre-warm is seconds on the NPU; the installer turned it off for the CPU.
+    case "$(get_env_var LLM_PREWARM)" in ""|false) set_env_var LLM_PREWARM true ;; esac
+}
+
 # The flavour changed since the last run (OPENNVR_ACCEL edited, or the disk
 # moved to another box). Put back the CPU default in every value the
 # PREVIOUS flavour filled — recognised by being exactly that flavour's fill,
@@ -272,7 +294,7 @@ reset_stale_accel_fills() {
     local now="$1" prev; prev=$(get_env_var OPENNVR_ACCEL_RESOLVED)
     [[ -z "$prev" || "$prev" == "$now" ]] && return 0
     local key val
-    for key in DETECT_HWACCEL DETECT_ONNX_BACKEND DETECT_ONNX_PROVIDERS YOLO_POSE_ONNX_PROVIDERS CAPTION_ADAPTER; do
+    for key in DETECT_HWACCEL DETECT_ONNX_BACKEND DETECT_ONNX_PROVIDERS YOLO_POSE_ONNX_PROVIDERS CAPTION_ADAPTER LLM_BASE_URL; do
         val=$(get_env_var "$key")
         case "$prev:$key:$val" in
             intel:DETECT_HWACCEL:vaapi) write_env_var DETECT_HWACCEL cpu ;;
@@ -283,6 +305,11 @@ reset_stale_accel_fills() {
                 # ...and the descriptions it switched on: a CPU captioner
                 # cannot keep up with every visit (#583).
                 write_env_var EVENTS_CAPTION_ENRICHMENT false; write_env_var EVENTS_DESCRIPTOR_ENRICHMENT false; write_env_var EVENTS_ENRICHMENT_BACKFILL false ;;
+            # The agent's LLM on the NPU adapter: back to Ollama, the CPU
+            # pre-warm off again, the window the runtime's own.
+            qualcomm:LLM_BASE_URL:http://caption-adapter:9006)
+                write_env_var LLM_PROVIDER ""; write_env_var LLM_BASE_URL ""; write_env_var LLM_MODEL ""
+                write_env_var LLM_WINDOW_TOKENS ""; write_env_var LLM_PREWARM false ;;
             intel:DETECT_ONNX_BACKEND:ort|qualcomm:DETECT_ONNX_BACKEND:ort) write_env_var DETECT_ONNX_BACKEND auto ;;
             intel:DETECT_ONNX_PROVIDERS:OpenVINOExecutionProvider:NPU|intel:DETECT_ONNX_PROVIDERS:OpenVINOExecutionProvider:GPU|qualcomm:DETECT_ONNX_PROVIDERS:QNNExecutionProvider:htp)
                 write_env_var DETECT_ONNX_PROVIDERS "" ;;
@@ -366,8 +393,12 @@ compose_args() {
         # operator's endpoint instead — the GPU path on macOS/Windows,
         # where the in-VM container is CPU-only. Only meaningful for the
         # camera-agent profiles, and harmless to append with them.
+        # The same overlay when the agent's LLM is an OpenAI-compatible
+        # endpoint (LLM_PROVIDER=openai: a cloud provider, or the NPU
+        # caption adapter on the qualcomm flavour): no Ollama to start.
         local external_llm
         external_llm=$(get_env_var "OLLAMA_EXTERNAL_URL")
+        [[ "$(get_env_var LLM_PROVIDER)" == openai ]] && external_llm="${external_llm:-openai}"
         if [[ -n "$external_llm" && "$example_compose" == *camera-agent.yml* ]]; then
             args="$args -f docker-compose.camera-agent.external-llm.yml"
         fi
