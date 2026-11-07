@@ -189,6 +189,13 @@ def fts_query(text: str) -> tuple[str, str]:
     words = [w for w in text.lower().replace("-", " ").split() if w]
     if not words or not any(w in COLOUR_WORDS for w in words):
         return "plainto_tsquery", text
+    # Postgres's ``<N>`` means EXACTLY N positions apart (``<->`` is ``<1>``),
+    # not "within N": ``blue <2> shirt`` missed "light blue shirt" on the
+    # Ventuno Q (2026-11-07) and matched only "blue cotton shirt". Within
+    # two words is the two distances OR'd.
+    def near(a: str, b: str) -> str:
+        return f"(({a} <-> {b}) | ({a} <2> {b}))"
+
     parts: list[str] = []
     i = 0
     while i < len(words):
@@ -197,11 +204,11 @@ def fts_query(text: str) -> tuple[str, str]:
             nxt = [x for x in words[i + 1:i + 3] if x not in COLOUR_WORDS]
             thing = next((x for x in nxt if x.replace("-", "") in {c.replace("-", "") for c in CLOTHING_WORDS}), None)
             if thing is not None:
-                parts.append(f"{w} <2> {thing}")
+                parts.append(near(w, thing))
                 i = words.index(thing, i + 1) + 1
                 continue
             alts = " | ".join(dict.fromkeys(c.replace("-", " ").split()[0] for c in CLOTHING_WORDS))
-            parts.append(f"{w} <2> ({alts})")
+            parts.append(near(w, f"({alts})"))
         else:
             parts.append(w)
         i += 1
