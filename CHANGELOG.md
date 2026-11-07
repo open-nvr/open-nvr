@@ -330,6 +330,17 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Search reads months, years and dates, and says when it searched all
+  time.** "in January", "January or February", "last month", "this year",
+  "two months ago", "last 6 months", "5th November 2025", "nov 5" all
+  become windows now (a month alone is the most recent one that has
+  started; a "last year" in the sentence sets the year of the month it
+  qualifies). A question with no time still searches everything, because
+  a plate or a name is usually wanted wherever it is and the index makes
+  that cheap; the page now says how many days and visits that covered and
+  offers last 24 hours, 7 days and 30 days in one click. Nothing is
+  withheld and nobody is asked to retype.
+
 - **The tracker predicts motion and assigns globally, in two stages.**
   Each track now carries a constant-velocity Kalman filter over its box
   centre; detections are assigned to tracks by overlap with the predicted

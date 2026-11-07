@@ -630,10 +630,19 @@ async def search(
                                   labels=labels, camera_ids=cams, start=start, end=end,
                                   cameras=cameras)
 
+    # No time in the question: the whole index was searched. Say how far
+    # back that reaches and how much it covered, so the operator can
+    # narrow with one click instead of scrolling a year.
+    scope_note = None
+    if start is None and end is None:
+        scope_note = _all_time_scope(db, cams or sorted(scope) if scope else cams, total)
+
     return {
         "query": q,
         "interpretation": interpretation,
         "alerts": alerts_out,
+
+        "scope": scope_note,
         # What is not described yet and what this call queued (None when
         # the question needed nothing a description would add).
         "pending": pending,
@@ -903,6 +912,23 @@ def _matching_alerts(db, scope, current_user, *, words: str, labels, camera_ids,
             "camera_name": (cameras or {}).get(_alert_camera_num(a.camera_id) or -1),
         })
     return out
+
+def _all_time_scope(db, camera_ids, total: int) -> dict | None:
+    """How far back an all-time search reached: the oldest visit's day in
+    scope and the span in days. The query itself is cheap (an index); what
+    a long span costs is the operator's time scrolling, and the describing
+    of undescribed visits, which is capped per question."""
+    try:
+        q = db.query(func.min(TimelineEvent.started_at), func.max(TimelineEvent.started_at))
+        if camera_ids:
+            q = q.filter(TimelineEvent.camera_id.in_([int(c) for c in camera_ids]))
+        oldest, newest = q.one()
+    except Exception:  # noqa: BLE001 — a note must never break a search
+        return None
+    if oldest is None:
+        return None
+    days = max(1, (newest - oldest).days + 1) if newest else 1
+    return {"all_time": True, "oldest": oldest.isoformat(), "days": days, "total": int(total)}
 
 def _alert_camera_num(handle: str | None) -> int | None:
     from services.alerts_inbox import _camera_num
