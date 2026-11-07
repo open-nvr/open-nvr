@@ -84,6 +84,7 @@ export default function VideoRegister() {
   const [email, setEmail] = useState('')
   const [residence, setResidence] = useState<Residence>('day_scholar')
   const [hostelBlock, setHostelBlock] = useState('')
+  const [consent, setConsent] = useState(false)
   const [sessionId, setSessionId] = useState('')
   const [registrationState, setRegistrationState] = useState<VideoRegistrationState>({
     isRecording: false,
@@ -236,6 +237,10 @@ export default function VideoRegister() {
         setError('A hostler needs a hostel block.')
         return
       }
+      if (!consent) {
+        setError('Consent must be recorded before a face is enrolled.')
+        return
+      }
       sessionFinalizedRef.current = false
       // const user = authService.getUser()
       // if (user && user.is_admin === false) {
@@ -289,7 +294,8 @@ export default function VideoRegister() {
             section: section || '',
             email: email || '',
             residence,
-            hostel_block: residence === 'hostler' ? hostelBlock.trim() : ''
+            hostel_block: residence === 'hostler' ? hostelBlock.trim() : '',
+            consent: consent ? 'true' : ''
           }))
         } catch {}
         
@@ -839,6 +845,10 @@ export default function VideoRegister() {
                 />
               </div>
               <ResidenceFields residence={residence} hostelBlock={hostelBlock} onResidence={setResidence} onHostelBlock={setHostelBlock} disabled={registrationState.isRecording} />
+              <label className="flex items-start gap-2 text-sm text-gray-700 basis-full">
+                <input type="checkbox" className="mt-0.5 h-4 w-4 accent-blue-600" checked={consent} onChange={e => setConsent(e.target.checked)} disabled={registrationState.isRecording} required />
+                <span>The student (or their guardian) consents to their face being enrolled for attendance.</span>
+              </label>
               {!registrationState.isRecording && (
                 <div className="sm:ml-auto self-end">
                   <button

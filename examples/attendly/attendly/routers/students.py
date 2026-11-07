@@ -4,7 +4,8 @@ import io
 import logging
 from typing import List, Optional, Union
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse
 from PIL import Image, ImageEnhance
 
 from .. import schemas
@@ -12,11 +13,14 @@ from ..config import get_settings
 from ..face.engine import FaceEngine, FaceRejected, FaceServiceError
 from ..storage import repo
 from ..people import find_person
+from ..pictures import drop_picture, has_picture, picture_path, save_picture
 from ..storage.repo import (
     count_students,
+    erase_student,
     generate_student_code,
     get_student,
     get_student_by_email,
+    move_student_to_deleted,
     normalise_residence,
     put_student,
     update_student as repo_update_student,
@@ -27,6 +31,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
+
+
+CONSENT_NEEDED = "Consent must be recorded before a face is enrolled"
+
+
+def _truthy(v) -> bool:
+    return str(v or "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _check_limit(settings) -> None:
@@ -171,7 +182,7 @@ def create_student(payload: schemas.StudentCreate):
         if get_student(code) is None:
             item = put_student(code, payload.full_name, None, str(payload.email) if payload.email else None,
                                course_code=payload.course_code, section=payload.section,
-                               residence=payload.residence, hostel_block=payload.hostel_block)
+                               residence=payload.residence, hostel_block=payload.hostel_block, consent=payload.consent)
             break
     else:
         raise HTTPException(status_code=500, detail="Failed to generate unique student code")
@@ -196,10 +207,12 @@ def update_student(student_code: str, payload: schemas.StudentUpdate):
             student_code, full_name=payload.full_name, class_name=payload.class_name,
             email=str(payload.email) if payload.email is not None else None,
             course_code=payload.course_code, section=payload.section,
-            residence=payload.residence, hostel_block=payload.hostel_block,
+            residence=payload.residence, hostel_block=payload.hostel_block, consent=payload.consent,
         )
     except KeyError:
         raise HTTPException(status_code=404, detail="student not found")
+    if payload.consent is False:
+        _forget_faces(student_code)
     if payload.enrolments is not None:
         repo.set_student_enrolments(student_code, [e.model_dump() for e in payload.enrolments])
         updated = get_student(student_code) or updated
@@ -235,6 +248,8 @@ def register_faces(
     student_data = get_student(student_code)
     if not student_data:
         raise HTTPException(status_code=404, detail="student not found")
+    if not student_data.get("consent_at"):
+        raise HTTPException(status_code=403, detail=CONSENT_NEEDED)
     if len(images) == 0:
         raise HTTPException(status_code=400, detail="At least one image is required")
     if len(images) > 10:
@@ -264,9 +279,12 @@ def register_and_create_student(
     angle_tags: Optional[Union[str, List[str]]] = Form(None),
     residence: Optional[str] = Form(None),
     hostel_block: Optional[str] = Form(None),
+    consent: Optional[str] = Form(None),
 ):
     """Enrol the photos first; the student row is written only when at
-    least one face was accepted by the face model."""
+    least one face was accepted by the face model. Consent first."""
+    if not _truthy(consent):
+        raise HTTPException(status_code=403, detail=CONSENT_NEEDED)
     if normalise_residence(residence) == "hostler" and not (hostel_block or "").strip():
         raise HTTPException(status_code=400, detail="A hostler needs a hostel block")
     if len(images) == 0:
@@ -326,7 +344,7 @@ def register_and_create_student(
 
     try:
         item = put_student(code_candidate, full_name, None, email, course_code=course_code, section=section,
-                           residence=residence, hostel_block=hostel_block)
+                           residence=residence, hostel_block=hostel_block, consent=True)
     except Exception as e:
         logger.error(f"Failed to persist student {code_candidate}: {e}")
         try:
@@ -339,3 +357,147 @@ def register_and_create_student(
         student=schemas.student_out(item), num_faces_registered=registered, angles=angles,
         validation_errors=validation_errors or None,
     )
+
+
+# ── Consent, erasure, the picture ───────────────────────────────────
+
+
+def _forget_faces(student_code: str) -> int:
+    """The faces and the picture go together."""
+    deleted = 0
+    try:
+        engine = FaceEngine.get_shared()
+        faces = engine.get_faces_by_external_id(student_code)
+        if faces and engine.delete_person(student_code):
+            deleted = len(faces)
+    except FaceServiceError as e:
+        logger.warning("could not remove faces of %s: %s", student_code, e)
+    drop_picture(student_code)
+    return deleted
+
+
+@router.post("/{student_code}/consent", response_model=schemas.StudentOut)
+@log_call()
+def record_consent(student_code: str):
+    try:
+        item = repo_update_student(student_code, consent=True)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="student not found")
+    return schemas.student_out(item)
+
+
+@router.post("/{student_code}/consent/withdraw", response_model=schemas.StudentOut)
+@log_call()
+def withdraw_consent(student_code: str):
+    """Consent withdrawn: the faces are deleted first, then the record says so."""
+    if get_student(student_code) is None:
+        raise HTTPException(status_code=404, detail="student not found")
+    _forget_faces(student_code)
+    item = repo_update_student(student_code, consent=False)
+    return schemas.student_out(item)
+
+
+@router.delete("/{student_code}")
+@log_call()
+def delete_student(student_code: str, erase: bool = Query(False)):
+    """Remove a student: faces and picture go, the row retires (attendance
+    history keeps the name). ``erase=true`` also blanks name, e-mail and
+    block and keeps only the counts (DPDP/GDPR) — also for someone
+    already removed."""
+    current = get_student(student_code)
+    if current is None and not erase:
+        raise HTTPException(status_code=404, detail="student not found")
+    deleted = _forget_faces(student_code)
+    if erase:
+        item = erase_student(student_code)
+        if item is None:
+            raise HTTPException(status_code=404, detail="student not found")
+    else:
+        item = move_student_to_deleted(student_code)
+    return {"ok": True, "student_code": student_code, "faces_deleted": deleted, "erased": bool(erase)}
+
+
+@router.put("/{student_code}/picture")
+@log_call()
+def put_picture(student_code: str, image: UploadFile = File(...)):
+    if get_student(student_code) is None:
+        raise HTTPException(status_code=404, detail="student not found")
+    data = image.file.read()
+    if not data or len(data) > 2 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="a JPEG up to 2 MB")
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            im.verify()
+    except Exception:
+        raise HTTPException(status_code=400, detail="not an image")
+    save_picture(student_code, data)
+    return {"ok": True, "student_code": student_code}
+
+
+@router.get("/{student_code}/picture")
+@log_call()
+def get_picture(student_code: str):
+    p = picture_path(student_code)
+    if not p or not p.is_file():
+        raise HTTPException(status_code=404, detail="no picture")
+    return FileResponse(str(p), media_type="image/jpeg", headers={"Cache-Control": "private, max-age=300"})
+
+
+# ── The webcam's guidance: where the face is, nothing kept ──────────
+
+
+@router.post("/check_frame")
+@log_call()
+def check_frame(image: UploadFile = File(...)):
+    """For the enrolling page, about once a second: every face's box (and
+    its five landmarks when the adapter gives them), the frame's size, and
+    whether faces were dropped for being too small. Nobody is looked up;
+    nothing is stored."""
+    data = image.file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Empty file")
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            w, h = im.size
+    except Exception:
+        raise HTTPException(status_code=400, detail="not an image")
+    engine = FaceEngine.get_shared()
+    settings = get_settings()
+    faces: List[dict] = []
+    too_small = False
+    try:
+        ident = engine.identify_faces(data, match=False) if hasattr(engine, "identify_faces") else None
+    except FaceServiceError as e:
+        raise HTTPException(status_code=502, detail=f"Face service unavailable: {e}")
+    if ident is not None:
+        for f in ident.get("faces") or []:
+            if isinstance(f, dict) and isinstance(f.get("bbox"), (list, tuple)) and len(f["bbox"]) >= 4:
+                faces.append({"bbox": [int(v) for v in f["bbox"][:4]], "confidence": f.get("confidence"),
+                              "landmarks": f.get("landmarks")})
+        dropped = ident.get("dropped") or {}
+        too_small = int(dropped.get("too_small") or 0) > 0
+    else:
+        try:
+            detected = engine.detect_faces(data)
+        except FaceServiceError as e:
+            raise HTTPException(status_code=502, detail=f"Face service unavailable: {e}")
+        for f in detected:
+            x1, y1, x2, y2 = [int(v) for v in (f.get("bbox_px") or [0, 0, 0, 0])]
+            if min(x2 - x1, y2 - y1) < int(settings.min_face_px):
+                too_small = True
+                continue
+            faces.append({"bbox": [x1, y1, x2, y2], "confidence": (f.get("Confidence") or 0) / 100.0, "landmarks": None})
+    return {"faces": faces, "frame": {"w": w, "h": h}, "too_small": too_small and not faces}
+
+
+@router.post("/check_duplicate")
+@log_call()
+def check_duplicate(image: UploadFile = File(...), exclude_code: Optional[str] = Form(None)):
+    """Is this face already enrolled for somebody else? Asked of each
+    webcam photo as it is taken, so a person registered twice is told at
+    the first photo rather than after the whole set."""
+    data = image.file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Empty file")
+    dup = check_for_duplicate_face_sync(enhance_image_for_recognition(data), exclude_code or "__pending__")
+    return {"duplicate": dup}

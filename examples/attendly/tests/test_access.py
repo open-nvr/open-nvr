@@ -247,7 +247,7 @@ def test_students_carry_residence(client, env):
     code = r.json()["student_code"]
     r = client.put(f"/students/{code}", json={"residence": "day_scholar"})
     assert r.json()["residence"] == "day_scholar" and r.json()["hostel_block"] is None
-    r = client.post("/students/register_new", data={"full_name": "H", "course_code": "MBA-1", "section": "A",
+    r = client.post("/students/register_new", data={"consent": "true", "full_name": "H", "course_code": "MBA-1", "section": "A",
                                                      "email": "h@example.com", "residence": "hostler"},
                     files=[("images", ("a.jpg", io.BytesIO(jpeg_bytes(seed=2)), "image/jpeg"))])
     assert r.status_code == 400 and "hostel block" in r.json()["detail"]

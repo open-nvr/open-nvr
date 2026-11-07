@@ -109,7 +109,7 @@ async def video_registration_websocket(websocket: WebSocket, session_id: str):
         return
     await websocket.accept()
     full_name, class_name, course_code_str, section_str, email = "", "", None, None, None
-    residence, hostel_block = None, None
+    residence, hostel_block, consent = None, None, False
     try:
         init_msg = await asyncio.wait_for(websocket.receive_text(), timeout=3.0)
         try:
@@ -122,11 +122,16 @@ async def video_registration_websocket(websocket: WebSocket, session_id: str):
                 email = str(init.get("email") or "") or None
                 residence = str(init.get("residence") or "") or None
                 hostel_block = str(init.get("hostel_block") or "") or None
+                consent = str(init.get("consent") or "").strip().lower() in ("1", "true", "yes", "on")
         except Exception:
             pass
     except Exception:
         pass
 
+    if not consent:
+        await websocket.send_json({"type": "error", "message": "Consent must be recorded before a face is enrolled", "progress": 0})
+        await websocket.close(code=4403)
+        return
     session = VideoRegistrationSession(session_id, websocket, full_name, class_name, email)
     session.course_code = course_code_str
     session.section = section_str
@@ -266,7 +271,7 @@ async def process_video_registration(session: VideoRegistrationSession) -> None:
         try:
             put_student(allocated, session.full_name or "", session.class_name or "", session.email,
                         course_code=session.course_code or None, section=session.section or None,
-                        residence=session.residence, hostel_block=session.hostel_block)
+                        residence=session.residence, hostel_block=session.hostel_block, consent=True)
         except Exception as e:
             logger.error(f"Failed to persist student {allocated}: {e}")
             try:

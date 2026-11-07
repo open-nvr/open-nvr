@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef } from 'react'
 import axios from 'axios'
 import Layout from '../components/Layout'
-import { Pencil, Trash2 } from 'lucide-react'
+import { Pencil, Trash2, ShieldOff, Eraser } from 'lucide-react'
 import { Users } from 'lucide-react'
 import { config } from '../config/environment'
 import { authService } from '../services/auth'
@@ -44,6 +44,8 @@ interface StudentFaceStats {
   residence?: string | null
   hostel_block?: string | null
   enrolments?: Array<{ course_code: string; section: string }>
+  consent_at?: string | null
+  has_picture?: boolean
 }
 
 export default function StudentData() {
@@ -251,6 +253,31 @@ export default function StudentData() {
       })(s.course_code)
     } else {
       setSectionOptions([])
+    }
+  }
+
+  const withdrawConsent = async (code: string, name: string) => {
+    const ok = await confirm({ description: `Withdraw ${name}'s consent? Their enrolled faces and picture are deleted now; the record stays.`, confirmText: 'Withdraw' })
+    if (!ok) return
+    try {
+      await axios.post(`${API}/students/${encodeURIComponent(code)}/consent/withdraw`)
+      showToast('success', `Consent withdrawn for ${name}; faces deleted`)
+      await loadStats()
+    } catch (e: any) {
+      showToast('error', String(e?.response?.data?.detail || 'Failed to withdraw consent'))
+    }
+  }
+
+  const eraseStudent = async (code: string, name: string) => {
+    const ok = await confirm({ description: `Erase ${name} (${code})? Faces and picture are deleted, name and e-mail are blanked, and only attendance counts remain. This cannot be undone.`, confirmText: 'Erase' })
+    if (!ok) return
+    try {
+      await axios.delete(`${API}/students/${encodeURIComponent(code)}`, { params: { erase: true } })
+      showToast('success', `${name} erased`)
+      await loadDashboardData()
+      await loadStats()
+    } catch (e: any) {
+      showToast('error', String(e?.response?.data?.detail || 'Failed to erase'))
     }
   }
 
@@ -485,11 +512,13 @@ export default function StudentData() {
               <table className="min-w-full divide-y divide-gray-200 text-xs leading-8">
                 <thead className="bg-gray-50 sticky top-0 z-10">
                   <tr>
+                    <th className="px-3 py-1 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider"></th>
                     <th className="px-3 py-1 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider">Name</th>
                     <th className="px-3 py-1 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider">Email</th>
                     <th className="px-3 py-1 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider">Course</th>
                     <th className="px-3 py-1 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider">Section</th>
                     <th className="px-3 py-1 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider">Residence</th>
+                    <th className="px-3 py-1 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider">Consent</th>
                     <th className="px-3 py-1 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider">Image captured</th>
                                         <th className="px-3 py-1 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider">Action</th>
                   </tr>
@@ -497,7 +526,7 @@ export default function StudentData() {
                 <tbody className="bg-white divide-y divide-gray-200">
                   {(!stats || statsLoading) && (
                     <tr>
-                      <td colSpan={7} className="px-3 py-6 text-center text-sm text-gray-600">
+                      <td colSpan={9} className="px-3 py-6 text-center text-sm text-gray-600">
                         <div className="inline-flex items-center gap-2">
                           <svg className="animate-spin h-4 w-4 text-gray-600" viewBox="0 0 24 24">
                             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
@@ -510,6 +539,7 @@ export default function StudentData() {
                   )}
                   {stats && !statsLoading && paginatedStudents.length > 0 && paginatedStudents.map((student) => (
                     <tr key={student.student_code} className="hover:bg-gray-50">
+                      <td className="px-3 py-1"><Avatar code={student.student_code} name={student.student_name || '?'} has={!!student.has_picture} /></td>
                       <td className="px-3 py-1 whitespace-nowrap text-gray-900">{student.student_name || 'Unknown'}</td>
                       <td className="px-3 py-1 whitespace-nowrap text-gray-500 break-all">{student.student_email || '-'}</td>
                       <td className="px-3 py-1 whitespace-nowrap text-gray-500">
@@ -523,9 +553,28 @@ export default function StudentData() {
                       </td>
                       <td className="px-3 py-1 whitespace-nowrap text-gray-500">{student.section || '-'}{Array.isArray(student.enrolments) && student.enrolments.length > 0 && <span className="ml-1 text-[10px] text-indigo-700" title={student.enrolments.map(e => `${e.course_code}/${e.section}`).join(', ')}>+{student.enrolments.length}</span>}</td>
                       <td className="px-3 py-1 whitespace-nowrap text-gray-500">{student.residence === 'hostler' ? `Hostler${student.hostel_block ? ` · ${student.hostel_block}` : ''}` : 'Day scholar'}</td>
+                      <td className="px-3 py-1 whitespace-nowrap text-gray-600">{student.consent_at ? <span title={new Date(student.consent_at).toLocaleString()} className="text-green-700">on record</span> : <span className="text-red-700">none</span>}</td>
                       <td className="px-3 py-1 whitespace-nowrap text-gray-900">{student.face_count}</td>
                                             <td className="px-3 py-1 whitespace-nowrap">
                         <div className="flex items-center gap-2">
+                          {student.consent_at && (
+                            <button
+                              onClick={() => withdrawConsent(student.student_code, student.student_name || student.student_code)}
+                              className="inline-flex items-center justify-center p-2 rounded-md bg-yellow-50 text-yellow-800 hover:bg-yellow-100"
+                              title="Withdraw consent (deletes the faces)"
+                              aria-label="Withdraw consent"
+                            >
+                              <ShieldOff className="w-4 h-4" />
+                            </button>
+                          )}
+                          <button
+                            onClick={() => eraseStudent(student.student_code, student.student_name || student.student_code)}
+                            className="inline-flex items-center justify-center p-2 rounded-md bg-gray-100 text-gray-700 hover:bg-gray-200"
+                            title="Erase: remove and blank name and e-mail, keep only the counts"
+                            aria-label="Erase"
+                          >
+                            <Eraser className="w-4 h-4" />
+                          </button>
                           <button
                             onClick={() => openEdit(student)}
                             className="inline-flex items-center justify-center p-2 rounded-md bg-gray-100 hover:bg-gray-200"
@@ -548,7 +597,7 @@ export default function StudentData() {
                   ))}
                   {stats && !statsLoading && paginatedStudents.length === 0 && (
                     <tr>
-                      <td colSpan={7} className="px-6 py-4 text-center text-gray-500">
+                      <td colSpan={9} className="px-6 py-4 text-center text-gray-500">
                         <div className="flex items-center justify-center gap-2">
                           <svg
                             xmlns="http://www.w3.org/2000/svg"
@@ -757,4 +806,24 @@ export default function StudentData() {
       </div>
     </Layout>
   )
+}
+
+
+/** The student's picture (fetched with the user's token, kept per page), or
+ * their initials. */
+function Avatar({ code, name, has }: { code: string; name: string; has: boolean }) {
+  const [url, setUrl] = useState<string | null>(null)
+  useEffect(() => {
+    let live = true
+    setUrl(null)
+    if (!has) return
+    axios.get(`${API}/students/${encodeURIComponent(code)}/picture`, { responseType: 'blob' })
+      .then(r => { if (live) setUrl(URL.createObjectURL(r.data)) })
+      .catch(() => {})
+    return () => { live = false }
+  }, [code, has])
+  const initials = name.trim().split(/\s+/).filter(Boolean).map(p => p[0]).slice(0, 2).join('').toUpperCase() || '?'
+  return url
+    ? <img src={url} alt="" className="w-8 h-8 rounded-full object-cover ring-1 ring-gray-200" />
+    : <span className="w-8 h-8 rounded-full bg-indigo-100 text-indigo-700 text-xs font-semibold flex items-center justify-center" aria-hidden>{initials}</span>
 }

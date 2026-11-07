@@ -17,6 +17,7 @@ class StudentCreate(BaseModel):
     email: EmailStr
     residence: Optional[str] = Field(None, description="hostler or day_scholar")
     hostel_block: Optional[str] = Field(None, max_length=64)
+    consent: Optional[bool] = None
 
 
 class StudentUpdate(BaseModel):
@@ -29,6 +30,7 @@ class StudentUpdate(BaseModel):
     hostel_block: Optional[str] = Field(None, max_length=64)
     # Replaces the student's extra course/section pairs when given.
     enrolments: Optional[List[Enrolment]] = None
+    consent: Optional[bool] = None
 
 
 class StudentOut(BaseModel):
@@ -42,6 +44,9 @@ class StudentOut(BaseModel):
     residence: str = "day_scholar"
     hostel_block: Optional[str] = None
     enrolments: List[Enrolment] = Field(default_factory=list)
+    consent_at: Optional[str] = None
+    erased_at: Optional[str] = None
+    has_picture: bool = False
     created_at: str
 
     model_config = ConfigDict(from_attributes=True)
@@ -59,8 +64,17 @@ def student_out(item: dict) -> StudentOut:
         residence=str(item.get("residence") or "day_scholar"),
         hostel_block=item.get("hostel_block"),
         enrolments=[Enrolment(**e) for e in (item.get("enrolments") or [])],
+        consent_at=item.get("consent_at"),
+        erased_at=item.get("erased_at"),
+        has_picture=_has_picture(str(item.get("student_code") or "")),
         created_at=str(item.get("created_at") or ""),
     )
+
+
+def _has_picture(code: str) -> bool:
+    from .pictures import has_picture
+
+    return has_picture(code)
 
 
 class RegisterFacesResponse(BaseModel):

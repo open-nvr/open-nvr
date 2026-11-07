@@ -18,6 +18,10 @@ class Student(Base):
     # "hostler" or "day_scholar"; the block a hostler lives in.
     residence = Column(String(16), nullable=False, default="day_scholar", server_default="day_scholar")
     hostel_block = Column(String(64), nullable=True, index=True)
+    # Faces are enrolled only with consent on record; withdrawing it
+    # deletes them. Erasure blanks who they were and keeps the counts.
+    consent_at = Column(String(40), nullable=True)
+    erased_at = Column(String(40), nullable=True)
     created_at = Column(String(40), nullable=False)
     deleted_at = Column(String(40), nullable=True, index=True)
 

@@ -10,6 +10,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 
 from ..config import get_settings
+from ..pictures import has_picture as _has_picture
 from ..face.engine import FaceEngine, FaceServiceError
 from ..storage.repo import get_student, get_students_batch, list_students, move_student_to_deleted
 from ..utils.logging_utils import log_call
@@ -115,6 +116,9 @@ def soft_delete_student(student_code: str):
         raise _service_error(e, "Failed to delete student faces")
     if move_student_to_deleted(student_code) is None:
         raise HTTPException(status_code=404, detail="Student not found")
+    from ..pictures import drop_picture
+
+    drop_picture(student_code)
     return {"student_code": student_code, "deleted_faces": deleted, "moved_to": "deleted_students", "success": True}
 
 
@@ -159,7 +163,8 @@ def get_registry_stats(
                 row.update({"student_name": info.get("full_name"), "student_class": info.get("class_name"),
                             "course_code": info.get("course_code"), "section": info.get("section"),
                             "student_email": info.get("email"), "residence": info.get("residence"),
-                            "hostel_block": info.get("hostel_block"), "enrolments": info.get("enrolments") or []})
+                            "hostel_block": info.get("hostel_block"), "enrolments": info.get("enrolments") or [],
+                            "consent_at": info.get("consent_at"), "has_picture": _has_picture(code)})
             rows.append(row)
         rows.sort(key=lambda x: x["face_count"], reverse=True)
         response["students_with_faces"] = rows

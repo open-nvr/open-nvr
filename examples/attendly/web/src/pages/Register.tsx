@@ -3,6 +3,7 @@ import { authService } from '../services/auth'
 import axios from 'axios'
 import Layout from '../components/Layout'
 import ResidenceFields, { type Residence } from '../components/ResidenceFields'
+import GuidedCapture, { cutPicture, hush, type Shot } from '../components/GuidedCapture'
 import { config } from '../config/environment'
 
 const API = config.API_BASE_URL
@@ -45,6 +46,8 @@ export default function Register() {
   const [email, setEmail] = useState('')
   const [residence, setResidence] = useState<Residence>('day_scholar')
   const [hostelBlock, setHostelBlock] = useState('')
+  const [consent, setConsent] = useState(false)
+  const [shots, setShots] = useState<Shot[]>([])
   const [captured, setCaptured] = useState<Record<AngleTag, CapturedImage | null>>({
     front: null,
     left: null,
@@ -254,23 +257,20 @@ export default function Register() {
     setIsSubmitting(true)
     
     try {
-      const blobs: Array<{ angle: AngleTag; blob: Blob }> = []
-      for (const angle of ANGLES) {
-        const capturedImage = captured[angle]
-        if (capturedImage) {
-          blobs.push({ angle, blob: capturedImage.blob })
-        }
-      }
-      
-      if (blobs.length === 0) {
-        setMessage('Capture at least one angle before submitting.')
+      const taken = shots
+      if (taken.length === 0) {
+        setMessage('Take at least one photo before submitting.')
         return
       }
-      
-      if (blobs.length < 3) {
-        setMessage('For better accuracy, capture at least 3 different angles.')
+      if (taken.length < 3) {
+        setMessage('For better accuracy, take at least 3 different angles.')
       }
-      
+      if (!consent) {
+        setMessage('Consent must be recorded before a face is enrolled.')
+        return
+      }
+      hush()
+
       const form = new FormData()
       form.append('full_name', fullName)
       form.append('course_code', courseCode)
@@ -278,18 +278,29 @@ export default function Register() {
       if (email) form.append('email', email)
       form.append('residence', residence)
       if (residence === 'hostler') form.append('hostel_block', hostelBlock.trim())
-      for (const { angle, blob } of blobs) {
-        const file = new File([blob], `${angle}.jpg`, { type: 'image/jpeg' })
+      form.append('consent', 'true')
+      for (const sh of taken) {
+        const file = new File([sh.blob], `${sh.key}.jpg`, { type: 'image/jpeg' })
         form.append('images', file)
-        form.append('angle_tags', angle)
+        form.append('angle_tags', sh.key)
       }
-      
+
       const res = await axios.post(`${API}/students/register_new`, form, {
         headers: { 'Content-Type': 'multipart/form-data' },
       })
       
       const response = res.data
       let message = `Successfully registered ${response.num_faces_registered} faces for ${response.student.full_name}`
+      // The person's picture: cut from the first photo with a face box, kept beside the record.
+      try {
+        const first = taken.find(sh => sh.bbox && sh.bbox.length === 4) || taken[0]
+        const pic = first.bbox ? await cutPicture(first.blob, first.bbox) : null
+        if (pic) {
+          const pf = new FormData()
+          pf.append('image', pic, 'picture.jpg')
+          await axios.put(`${API}/students/${encodeURIComponent(response.student.student_code)}/picture`, pf)
+        }
+      } catch {}
       
       // Show success snackbar
       showSnackbar(
@@ -304,14 +315,9 @@ export default function Register() {
         setMessage('')
       }
       
-      // Clear captured images after successful submission
-      setCaptured({
-        front: null,
-        left: null,
-        right: null,
-        up: null,
-        down: null,
-      })
+      // Clear the photos after a successful submission
+      taken.forEach(sh => URL.revokeObjectURL(sh.url))
+      setShots([])
       
     } catch (error: any) {
       console.error('Registration error:', error)
@@ -348,26 +354,6 @@ export default function Register() {
     await submitRegistration()
   }
 
-  useEffect(() => {
-    const init = async () => {
-      await detectCameras()
-      const first = selectedCameraId || (availableCameras[0]?.deviceId || undefined)
-      await startCameraWithDevice(first)
-    }
-    init()
-    const handleDeviceChange = () => {
-      detectCameras()
-    }
-    try {
-      navigator.mediaDevices?.addEventListener('devicechange', handleDeviceChange)
-    } catch {}
-    return () => {
-      try {
-        navigator.mediaDevices?.removeEventListener('devicechange', handleDeviceChange)
-      } catch {}
-      stopCamera()
-    }
-  }, [])
 
   // Load course and section options (similar to Video Register)
   useEffect(() => {
@@ -436,7 +422,7 @@ export default function Register() {
       <div className="max-w-4xl mx-auto">
         <div className="mb-6">
           <h1 className="mb-1 text-2xl font-bold tracking-tight">Student Registration</h1>
-          <p className="text-gray-600">Register students with faces via Images</p>
+          <p className="text-gray-600">Details and consent first, then the webcam takes the photos: five angles, guided on screen and out loud.</p>
         </div>
 
         {/* Student Information Form */}
@@ -504,182 +490,23 @@ export default function Register() {
                 />
               </div>
               <ResidenceFields residence={residence} hostelBlock={hostelBlock} onResidence={setResidence} onHostelBlock={setHostelBlock} disabled={isSubmitting} />
+              <label className="flex items-start gap-2 text-sm text-gray-700 basis-full">
+                <input type="checkbox" className="mt-0.5 h-4 w-4 accent-blue-600" checked={consent} onChange={e => setConsent(e.target.checked)} disabled={isSubmitting} required />
+                <span>The student (or their guardian) consents to their face being enrolled for attendance. Faces are deleted when consent is withdrawn.</span>
+              </label>
               <div className="w-full sm:w-auto">
                 <button
                   type="submit"
                   className="w-full sm:w-auto px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 font-medium"
-                  disabled={isSubmitting || Object.values(captured).every(img => img === null)}
+                  disabled={isSubmitting || shots.length === 0 || !consent}
                 >
                   {isSubmitting ? 'Registering...' : 'Submit Registration'}
                 </button>
               </div>
             </div>
 
-            {/* Camera and Capture Section */}
-            <div className="grid gap-6 lg:grid-cols-2">
-              {/* Camera Section */}
-              <div>
-                <h4 className="text-sm font-medium text-gray-700 mb-3">Camera Preview</h4>
-                <div className="bg-gray-100 rounded-lg p-4">
-                  <video 
-                    ref={videoRef} 
-                    className="w-full h-64 bg-gray-900 rounded-lg" 
-                    muted 
-                    playsInline 
-                    autoPlay
-                  />
-                  
-                  {/* Camera Selection */}
-                  <div className="mt-3">
-                    <label className="block text-xs font-medium text-gray-600 mb-1">Select Camera</label>
-                    <div className="flex gap-2 items-center">
-                      <select
-                        value={selectedCameraId}
-                        onChange={(e) => handleCameraChange(e.target.value)}
-                        className="flex-1 text-xs rounded border border-gray-300 px-2 py-1 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-                        disabled={isSubmitting || availableCameras.length === 0}
-                      >
-                        {availableCameras.length > 0 ? (
-                          availableCameras.map((camera) => (
-                            <option key={camera.deviceId} value={camera.deviceId}>
-                              {camera.label}
-                            </option>
-                          ))
-                        ) : (
-                          <option value="">No cameras detected</option>
-                        )}
-                      </select>
-                      <button
-                        type="button"
-                        className="px-2 py-1 bg-gray-100 text-gray-700 rounded hover:bg-gray-200 text-xs"
-                        onClick={detectCameras}
-                        disabled={isSubmitting}
-                        title="Refresh cameras"
-                      >
-                        🔄 Refresh
-                      </button>
-                    </div>
-                    {availableCameras.length > 1 && (
-                      <div className="mt-2 flex gap-2 flex-wrap">
-                        {availableCameras.map((camera) => {
-                          const lower = camera.label.toLowerCase()
-                          const isFront = lower.includes('front') || lower.includes('user')
-                          const isBack = lower.includes('back') || lower.includes('rear') || lower.includes('environment')
-                          const isWebcam = lower.includes('webcam') || lower.includes('integrated')
-                          let icon = '📷'
-                          let shortLabel = 'Camera'
-                          if (isFront) {
-                            icon = '🤳'
-                            shortLabel = 'Front'
-                          } else if (isBack) {
-                            icon = '📷'
-                            shortLabel = 'Back'
-                          } else if (isWebcam) {
-                            icon = '💻'
-                            shortLabel = 'Webcam'
-                          }
-                          return (
-                            <button
-                              key={camera.deviceId}
-                              type="button"
-                              onClick={() => handleCameraChange(camera.deviceId)}
-                              className={`px-2 py-1 text-xs rounded border transition-colors ${
-                                selectedCameraId === camera.deviceId
-                                  ? 'bg-blue-100 border-blue-300 text-blue-700'
-                                  : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'
-                              }`}
-                              disabled={isSubmitting}
-                              title={camera.label}
-                            >
-                              {icon} {shortLabel}
-                            </button>
-                          )
-                        })}
-                      </div>
-                    )}
-                    {!cameraPermissionGranted && availableCameras.length === 0 && (
-                      <div className="mt-3 p-2 bg-yellow-50 border border-yellow-200 rounded text-xs">
-                        <div className="flex items-center gap-2">
-                          <span>⚠️</span>
-                          <span className="text-yellow-700">
-                            Camera permission required. Click "Refresh cameras" to grant access.
-                          </span>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={detectCameras}
-                          className="mt-2 px-3 py-1 bg-yellow-200 text-yellow-800 rounded text-xs hover:bg-yellow-300"
-                        >
-                          Refresh cameras
-                        </button>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Quick Camera Switch Buttons for Mobile */}
-                  {/* Removed: duplicate quick switch (now embedded above) */}
-
-                  {/* Simple Camera Info */}
-                  <div className="mt-4 flex gap-3 flex-wrap">
-                    {availableCameras.length > 0 && (
-                      <div className="flex items-center text-xs text-gray-500 px-2">
-                        📷 {availableCameras.length} camera(s) detected
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              {/* Capture Images */}
-              <div>
-                <h4 className="text-sm font-medium text-gray-700 mb-3">Capture Images</h4>
-                <div className="grid gap-4 grid-cols-2 sm:grid-cols-3">
-                  {ANGLES.map((angle) => (
-                    <div key={angle} className="bg-white border rounded-lg p-3">
-                      <div className="flex justify-between items-center mb-2">
-                        <span className="text-sm font-medium capitalize">{angle}</span>
-                        {captured[angle] && (
-                          <span className="text-xs px-2 py-1 bg-green-100 text-green-700 rounded">
-                            ✓
-                          </span>
-                        )}
-                      </div>
-                      
-                      <div className="bg-gray-100 rounded-lg h-24 mb-3 flex items-center justify-center overflow-hidden">
-                        {captured[angle] ? (
-                          <img
-                            alt={angle}
-                            className="h-full w-full object-cover rounded-lg"
-                            src={URL.createObjectURL(captured[angle]!.blob)}
-                          />
-                        ) : (
-                          <span className="text-xs text-gray-400">No image</span>
-                        )}
-                      </div>
-                      
-                      <div className="flex gap-2">
-                        <button
-                          type="button"
-                          className="flex-1 px-3 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700 disabled:opacity-50"
-                          onClick={() => captureAngle(angle)}
-                          disabled={!cameraOn || isSubmitting}
-                        >
-                          Capture
-                        </button>
-                        <button
-                          type="button"
-                          className="px-3 py-1 bg-gray-400 text-white rounded text-xs hover:bg-gray-500 disabled:opacity-50"
-                          onClick={() => clearAngle(angle)}
-                          disabled={!captured[angle] || isSubmitting}
-                        >
-                          Clear
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
+            {/* The webcam that takes the photos itself: guided, spoken, checked for duplicates */}
+            <GuidedCapture shots={shots} onShots={setShots} personName={fullName} disabled={isSubmitting} />
 
             {/* Student Information removed from below; submit moved to top row */}
           </form>

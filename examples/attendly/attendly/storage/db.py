@@ -64,6 +64,8 @@ _LATER_COLUMNS = {
     "students": [
         ("residence", "VARCHAR(16) NOT NULL DEFAULT 'day_scholar'"),
         ("hostel_block", "VARCHAR(64)"),
+        ("consent_at", "VARCHAR(40)"),
+        ("erased_at", "VARCHAR(40)"),
     ],
     "gates": [
         ("mode", "VARCHAR(16) NOT NULL DEFAULT 'barrier'"),

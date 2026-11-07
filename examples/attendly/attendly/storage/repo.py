@@ -82,6 +82,8 @@ def _student_dict(s: Student) -> Dict[str, Any]:
         "section": s.section,
         "residence": s.residence or "day_scholar",
         "hostel_block": s.hostel_block,
+        "consent_at": s.consent_at,
+        "erased_at": s.erased_at,
         "created_at": s.created_at,
         "deleted_at": s.deleted_at,
     }
@@ -107,7 +109,7 @@ def normalise_residence(value: Optional[str]) -> str:
 def put_student(
     student_code: str, full_name: str, class_name: Optional[str], email: Optional[str] = None,
     *, course_code: Optional[str] = None, section: Optional[str] = None,
-    residence: Optional[str] = None, hostel_block: Optional[str] = None,
+    residence: Optional[str] = None, hostel_block: Optional[str] = None, consent: Optional[bool] = None,
 ) -> Dict[str, Any]:
     with session_scope() as db:
         row = db.execute(select(Student).where(Student.student_code == student_code)).scalar_one_or_none()
@@ -121,6 +123,10 @@ def put_student(
         row.section = section or None
         row.residence = normalise_residence(residence)
         row.hostel_block = (hostel_block or "").strip() or None if row.residence == "hostler" else None
+        if consent is True and not row.consent_at:
+            row.consent_at = _now_iso()
+        elif consent is False:
+            row.consent_at = None
         row.deleted_at = None
         db.flush()
         return _student_dict(row)
@@ -140,7 +146,7 @@ def get_student(student_code: str) -> Optional[Dict[str, Any]]:
 def update_student(
     student_code: str, *, full_name: Optional[str] = None, class_name: Optional[str] = None,
     email: Optional[str] = None, course_code: Optional[str] = None, section: Optional[str] = None,
-    residence: Optional[str] = None, hostel_block: Optional[str] = None,
+    residence: Optional[str] = None, hostel_block: Optional[str] = None, consent: Optional[bool] = None,
 ) -> Dict[str, Any]:
     with session_scope() as db:
         row = db.execute(
@@ -148,6 +154,10 @@ def update_student(
         ).scalar_one_or_none()
         if row is None:
             raise KeyError("student not found")
+        if consent is True and not row.consent_at:
+            row.consent_at = _now_iso()
+        elif consent is False:
+            row.consent_at = None
         if full_name is not None:
             row.full_name = full_name
         if class_name is not None:
@@ -176,6 +186,28 @@ def get_student_by_email(email: str) -> Optional[Dict[str, Any]]:
             select(Student).where(func.lower(Student.email) == email.strip().lower(), Student.deleted_at.is_(None))
         ).scalars().first()
         return _student_dict(row) if row else None
+
+
+def erase_student(student_code: str) -> Optional[Dict[str, Any]]:
+    """Retire the row and blank who they were (DPDP/GDPR erasure): the
+    code stays so attendance counts still add up; name, e-mail and block
+    go. Works on a student already removed."""
+    with session_scope() as db:
+        row = db.execute(select(Student).where(Student.student_code == student_code)).scalar_one_or_none()
+        if row is None:
+            return None
+        now = _now_iso()
+        row.full_name = "Erased"
+        row.email = None
+        row.class_name = None
+        row.hostel_block = None
+        row.consent_at = None
+        row.erased_at = now
+        row.deleted_at = row.deleted_at or now
+        db.flush()
+        for e in db.execute(select(StudentEnrolment).where(StudentEnrolment.student_code == student_code)).scalars().all():
+            db.delete(e)
+        return _student_dict(row)
 
 
 def move_student_to_deleted(student_code: str) -> Optional[Dict[str, Any]]:

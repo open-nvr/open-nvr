@@ -40,9 +40,16 @@ OpenNVR account. For a reverse proxy or public hostname set
 
 1. **Manage Rooms** — bind a classroom to one of OpenNVR's cameras.
 2. **Manage Courses** — course codes and their sections.
-3. **Image Register / Video Register** — enrol a student from photos or the
-   webcam. The face model refuses frames with no face or several faces; a
-   face already enrolled for another student is reported as a duplicate.
+3. **Image Register / Video Register** — enrol a student. Details and
+   consent first; then the webcam takes the photos itself: a small frame
+   is checked about once a second (face boxes only, nothing kept), the
+   page says what to change — distance, the oval, which way to turn — and
+   says it out loud when Voice is on, and takes each angle's photo once
+   the face is steady. Each photo is checked against everyone already
+   enrolled, so a person registered twice is told at the first photo. A
+   picture is cut from the first photo and shown in Student Data.
+   Withdrawing consent deletes the faces; *Erase* also blanks name and
+   e-mail and keeps only the counts (DPDP/GDPR).
 4. **Manage Schedule** — the weekly timetable; *Publish Today* turns it into
    concrete class windows on each room.
 5. **Attendance** — finalised rosters per class, with PDF/Excel export.

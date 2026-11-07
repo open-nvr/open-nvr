@@ -48,7 +48,7 @@ def test_register_new_student_enrols_then_persists(client, env):
     eng = env["engine"]
     good1, good2, bad = jpeg_bytes(seed=1), jpeg_bytes(seed=2), jpeg_bytes(seed=3)
     eng.reject_calls.add(3)
-    r = client.post("/students/register_new", data={"full_name": "Asha Rao", "course_code": "MBA-1", "section": "A",
+    r = client.post("/students/register_new", data={"consent": "true", "full_name": "Asha Rao", "course_code": "MBA-1", "section": "A",
                                                      "email": "asha@example.com", "angle_tags": ["front", "left", "right"]},
                     files=[("images", _upload("a.jpg", good1)), ("images", _upload("b.jpg", good2)), ("images", _upload("c.jpg", bad))])
     assert r.status_code == 200, r.text
@@ -59,7 +59,7 @@ def test_register_new_student_enrols_then_persists(client, env):
     assert eng.enrolled["AT00001"]["samples"] == 2 and eng.enrolled["AT00001"]["name"] == ""  # no name reaches the adapter
     # the course was auto-created; the email is taken
     assert client.get("/courses/MBA-1/sections").json()["sections"] == ["A"]
-    r = client.post("/students/register_new", data={"full_name": "Dup", "course_code": "MBA-1", "section": "A", "email": "asha@example.com"},
+    r = client.post("/students/register_new", data={"consent": "true", "full_name": "Dup", "course_code": "MBA-1", "section": "A", "email": "asha@example.com"},
                     files=[("images", _upload("a.jpg", jpeg_bytes(seed=4)))])
     assert r.status_code == 409
 
@@ -70,19 +70,19 @@ def test_register_new_rejects_a_duplicate_face_and_all_bad_images(client, env):
     dup = jpeg_bytes(seed=5)
     # the duplicate check runs on the enhanced image, so match any image
     eng.search_faces = lambda image_bytes, threshold=None, max_faces=1: [("AT00009", 0.9)]
-    r = client.post("/students/register_new", data={"full_name": "New", "course_code": "MBA-1", "section": "A", "email": "n@example.com"},
+    r = client.post("/students/register_new", data={"consent": "true", "full_name": "New", "course_code": "MBA-1", "section": "A", "email": "n@example.com"},
                     files=[("images", _upload("a.jpg", dup))])
     assert r.status_code == 409 and "Duplicate face" in r.json()["detail"]["errors"][0]
     eng.search_faces = lambda image_bytes, threshold=None, max_faces=1: []
     eng.index_face = lambda *a, **k: (_ for _ in ()).throw(__import__("attendly.face.engine", fromlist=["FaceRejected"]).FaceRejected("no face detected"))
-    r = client.post("/students/register_new", data={"full_name": "New", "course_code": "MBA-1", "section": "A", "email": "n@example.com"},
+    r = client.post("/students/register_new", data={"consent": "true", "full_name": "New", "course_code": "MBA-1", "section": "A", "email": "n@example.com"},
                     files=[("images", _upload("a.jpg", jpeg_bytes(seed=6)))])
     assert r.status_code == 400 and "no face detected" in r.json()["detail"]["errors"][0]
     assert repo.count_students() == 1  # nothing persisted
 
 
 def test_register_more_faces_for_existing_student(client, env):
-    repo.put_student("AT00001", "Asha", None, None, course_code="MBA-1", section="A")
+    repo.put_student("AT00001", "Asha", None, None, course_code="MBA-1", section="A", consent=True)
     r = client.post("/students/AT00001/register", files=[("images", _upload("a.jpg", jpeg_bytes(seed=7)))])
     assert r.status_code == 200 and r.json()["num_faces_registered"] == 1
     assert env["engine"].enrolled["AT00001"]["name"] == ""
