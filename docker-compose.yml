@@ -814,6 +814,10 @@ services:
       # platform bus with the site token.
       - NATS_APPS_URL=${NATS_APPS_URL:-nats://nats-apps:4222}
       - NATS_USERS_CONF=/var/lib/opennvr/nats/users.conf
+      # Agentic Workflows (RFC #620): the model AI steps run on. Empty =
+      # AI steps answer "unsure" and rule-based workflows still run.
+      - WORKFLOWS_LLM_URL=${WORKFLOWS_LLM_URL:-}
+      - WORKFLOWS_LLM_MODEL=${WORKFLOWS_LLM_MODEL:-qwen3-vl:2b-instruct}
       - FRAMES_DIR=/app/AI-adapters/AIAdapters/frames
       - HOST=${HOST:-0.0.0.0}
       # Avoid inheriting a generic host DEBUG value (some shells/tools set
