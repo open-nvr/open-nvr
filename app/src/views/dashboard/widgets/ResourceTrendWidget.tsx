@@ -32,15 +32,24 @@ export function ResourceTrendWidget({ editing, onRemove }: { editing?: boolean; 
       cpu: p.cpu_percent != null ? Math.round(p.cpu_percent * 10) / 10 : null,
       mem: p.memory_percent != null ? Math.round(p.memory_percent * 10) / 10 : null,
       disk: p.disk_percent != null ? Math.round(p.disk_percent * 10) / 10 : null,
+      npu: p.npu_percent != null ? Math.round(p.npu_percent * 10) / 10 : null,
+      gpu: p.gpu_percent != null ? Math.round(p.gpu_percent * 10) / 10 : null,
     })),
     [hist.data],
   )
   const last = data[data.length - 1]
 
-  const series = [
+  // The NPU and GPU lines appear only on a box that has one in use: a share
+  // of the device's time spent computing, from the inference time the
+  // detector and the adapters report (no kernel counter on most boards).
+  const hasNpu = (hist.data ?? []).some((p) => p.npu_percent != null)
+  const hasGpu = (hist.data ?? []).some((p) => p.gpu_percent != null)
+  const series: { key: 'cpu' | 'mem' | 'disk' | 'npu' | 'gpu'; label: string; ink: string }[] = [
     { key: 'cpu', label: 'CPU', ink: 'var(--series-1)' },
     { key: 'mem', label: t('dashboard.memory'), ink: 'var(--series-2)' },
     { key: 'disk', label: t('dashboard.disk'), ink: 'var(--series-3)' },
+    ...(hasNpu ? [{ key: 'npu' as const, label: 'NPU', ink: 'var(--series-4)' }] : []),
+    ...(hasGpu ? [{ key: 'gpu' as const, label: 'GPU', ink: 'var(--series-5)' }] : []),
   ] as const
 
   const tick = (v: number) =>

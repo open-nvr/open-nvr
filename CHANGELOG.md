@@ -8,6 +8,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The dashboard shows the NPU and the GPU beside CPU, memory and disk.**
+  The host monitor's sample carries `accelerators`: the device the
+  detector runs on (from its own backend gauge: Hexagon, Intel NPU or
+  GPU, CUDA) and how busy it is, as the share of the sample window its
+  users spent computing, from the inference time the detector and KAI-C
+  already report, per user (detector, captioner, the ONNX adapters on the
+  qualcomm flavour). Most boards expose no utilisation counter a
+  container can read, so the number is labelled as an inference-time
+  share; where Intel's NPU driver exports its busy counter that is used
+  and labelled sysfs. The trend chart gains NPU and GPU lines when the
+  box has one in use, the vitals card a tile with the users, and the
+  history keeps `npu_percent` and `gpu_percent`.
+
 - **Ask a person, and the gate opens on a person's word.** A workflow's
   Ask a person step creates an approval (`workflow_approvals`) and the run
   waits; `GET /api/v1/approvals` and `POST /api/v1/approvals/{id}` (#773,
