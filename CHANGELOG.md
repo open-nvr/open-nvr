@@ -8,6 +8,58 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Attendly: classroom attendance as an OpenNVR application.** The
+  attendance app that ran on AWS Rekognition and DynamoDB now runs beside
+  OpenNVR the way the Camera Agent does — its own container
+  (`examples/attendly`, a service in `docker-compose.apps.yml` and an App
+  Catalog entry, profile `attendly`, port 9300), its own web UI, OpenNVR login, and a card in the
+  App Catalog whose "Open app" opens that UI in a new tab. Rooms are OpenNVR
+  cameras; frames come from core's snapshot path; detection and recognition
+  go through KAI-C to the InsightFace adapter, which the profile starts.
+  Enrol students by photo or webcam, plan rooms, courses and a weekly
+  timetable; each class takes recognition snapshots that finalise into a
+  PRESENT/ABSENT roster. The installer lists it next to the Camera Agent.
+  It also runs the campus's flap barriers and staff attendance: students
+  enrol as day scholars or hostlers of a block, and a *hostel* gate admits
+  only that block's hostlers; a *mess* gate admits a student once per meal
+  against the day's meal bookings (booked on the page, by CSV, or by the
+  existing booking system through `POST /meals/bookings`); departments are
+  a camera plus a working window whose first and last sightings of each
+  staff member are the day's check-in and check-out. Gate decisions are
+  published as `access.decided.v1`, so the gate-controller app drives the
+  barriers exactly as it does for the licence-plate app. A gate with no
+  barrier runs in monitor mode: each student seen is logged as in or out,
+  a who-is-in list is kept per block, and an OpenNVR alert names them
+  (`hostel_in`, `hostel_out`, `gate_denied`, `mess_served`).
+  Review fixes (#798): the last slot of every class is counted
+  (finalisation waits a grace period and reruns when the worker exits);
+  a slot the camera could not be watched in counts against nobody and a
+  class with none finalises as "Not watched" instead of all-absent;
+  attendance rows are looked up by class and student rather than a
+  31-bit hash that let two classes overwrite each other; a student may
+  be enrolled in several course/section pairs; the 100-student limit is
+  off unless configured; the overlay defaults to Asia/Kolkata as the
+  README says; and slash-less `POST`/`PUT` calls from the UI (creating a
+  course) are redirected instead of answered 405. Attendly is a regular
+  catalog app: a service in `docker-compose.apps.yml` with an
+  `apps_index.yml` entry, so the installer's app menu and the App
+  Catalog's Install button both offer it; its contract surface rides the
+  SDK's `ContractApp`; and a browser refresh on a UI page whose path
+  shares an API prefix (`/attendance`, `/gates`…) serves the page.
+  From PR #791 and ai-adapter#81: Attendly runs its own InsightFace
+  instance (`insightface_attendly`, own face database and queue, detector
+  at 1280), uses `face_identify` when the adapter answers it (one call
+  per frame, a margin against the runner-up) with detect-then-crop as
+  the fallback, and gives the adapter codes only, never names. Marks:
+  LATE after a grace, a person's corrections (with EXCUSED and a note)
+  that survive a recompute, a coverage floor, a frozen roster, call-off
+  and restore, one-off classes, an evidence frame per slot, and a class
+  review on the Attendance page. Enrolment: consent first, the webcam
+  that takes the photos itself with on-screen and spoken guidance and a
+  duplicate told at the first photo, a picture per student, consent
+  withdrawal that deletes the faces, and erasure. A Report page:
+  student × class with totals and a rate, Excel and CSV.
+
 - **The camera agent's LLM runs on the NPU on the qualcomm flavour.** The
   litertlm caption adapter answers `/v1/chat/completions` on the same
   Gemma engine (ai-adapter #83), and `start.sh` points the agent at it:
