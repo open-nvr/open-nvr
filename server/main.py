@@ -109,6 +109,7 @@ from routers import (
     window_settings,
     device_firewall,
     workflows as workflows_router,
+    approvals as approvals_router,
 )
 from scripts.init_db import create_initial_data
 from services.mediamtx_admin_service import MediaMtxAdminService as _MtxAdmin
@@ -719,6 +720,9 @@ async def lifespan(app: FastAPI):
         from workflows.consumer import run_consumer_loop, start_engine
 
         engine = await asyncio.to_thread(start_engine)
+        from workflows.consumer import sweep_timeouts
+
+        spawn_background(sweep_timeouts(engine), name="workflow-approval-timeouts")
 
         async def _loop():
             await run_consumer_loop(engine)
@@ -1181,6 +1185,7 @@ app.include_router(events_router, prefix=settings.api_prefix)
 app.include_router(occupancy_router.router, prefix=settings.api_prefix)
 app.include_router(guardscan_router.router, prefix=settings.api_prefix)
 app.include_router(workflows_router.router, prefix=settings.api_prefix)
+app.include_router(approvals_router.router, prefix=settings.api_prefix)
 
 
 # =============================================================================

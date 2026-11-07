@@ -8,6 +8,15 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Ask a person, and the gate opens on a person's word.** A workflow's
+  Ask a person step creates an approval (`workflow_approvals`) and the run
+  waits; `GET /api/v1/approvals` and `POST /api/v1/approvals/{id}` (#773,
+  `workflows.approve` and the run's camera) answer it, and the run carries
+  on down that reply's path, after a restart too. A timeout takes the
+  `no_answer` path, never a reply's; Test asks nobody and takes the
+  default. The `app` action calls an installed app's action as the person
+  who answered, audited as the workflow's (the Gate concierge's
+  `open_now`), and `notify` puts a message in the inbox for `who`.
 - **The workflow engine runs workflows.** An app's alert starts every
   On or Test workflow it triggers (`when: alert`), after the file's `if:`
   guards and its limits (cooldown, one at a time, per hour, AI per hour);

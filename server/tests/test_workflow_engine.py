@@ -274,13 +274,14 @@ def test_guards_if_for_each_and_site_mode(env):
     assert steps(env, run_id) == [
         ("then[0]", "if", "else"), ("then[0].else[0]", "site_mode", "done"),
         ("then[1]", "for_each", "done"), ("then[1].do[0]", "log", "done"),
-        ("then[1].do[0]", "log", "done"), ("then[2]", "notify", "skipped")]
+        ("then[1].do[0]", "log", "done"), ("then[2]", "notify", "done")]
     assert env.mode == {"mode": "armed_away", "actor": "workflow:1"}
     logs = [s.reason for s in env.db.query(WorkflowRunStep).filter_by(run_id=run_id,
                                                                         kind="log")]
     assert logs == ["look at yard", "look at gate"]
-    notify = env.db.query(WorkflowRunStep).filter_by(run_id=run_id, kind="notify").one()
-    assert "not available yet" in notify.reason
+    note = env.db.query(AppAlert).one()
+    assert (note.title, note.severity, note.source_kind) == ("hi", "low", "workflow")
+    assert note.description.startswith("For role:guard.")
 
 
 def test_conditions():
@@ -371,3 +372,172 @@ def test_warm_up_loads_the_model_once_and_never_raises(env):
             raise OSError("connection refused")
     env.model["client"] = Down()
     assert asyncio.run(env.engine.warm_up()) is False
+
+
+# ── Ask a person ───────────────────────────────────────────────────────
+
+GATE = """
+workflow: v1
+name: Gate
+when:
+  alert: { app: license-plate-recognition, type: plate_unknown }
+then:
+  - ai:
+      mode: look
+      prompt: Who is at the gate?
+      decision: [delivery, visitor]
+      delivery:
+        - ask_person: { who: role:guard, message: "Delivery {plate}. Let in?",
+                        replies: ["Let in", "Refuse"], default: "Refuse", timeout: 2m }
+          "Let in": [ app: { id: gate-controller, action: open_now,
+                             args: { camera: "{camera_id}" } } ]
+          "Refuse": [ log: "refused {plate}" ]
+          no_answer: [ log: "nobody answered" ]
+        - log: "after the question: {reply}"
+      visitor: [ log: "visitor" ]
+      unsure: [ log: "unsure" ]
+  - log: "after the AI step"
+always: [ log: "always" ]
+"""
+
+
+def delivery():
+    return {"reason": "a courier bag", "decision": "delivery", "confidence": 1}
+
+
+@pytest.fixture()
+def gate(env, monkeypatch):
+    from models import InstalledApp
+    env.db.add(InstalledApp(id="gate-controller", name="Gate", version="1", url="http://g",
+                            manifest_json={"actions": [{"name": "open_now", "confirm": True}]},
+                            config_json={}, enabled=True))
+    env.db.add(User(id=2, username="guard", email="g@x.test", hashed_password="x",
+                    is_active=True, role_id=1))
+    env.db.commit()
+    calls = []
+
+    async def call(db, row, action, params, user, **kw):
+        calls.append((row.id, action, params, user.username))
+        return {"ok": True}
+    import routers.apps as apps
+    monkeypatch.setattr(apps, "call_app_action", call)
+    import services.audit_service as audit
+    monkeypatch.setattr(audit, "write_audit_log", lambda db, **kw: calls.append(("audit", kw)))
+    wf = add(env, GATE)
+    wf.created_by = 1
+    env.db.commit()
+    env.model["client"] = Script(delivery())
+    env.calls = calls
+    return env
+
+
+def gate_alert():
+    return alert(camera="cam4", app="license-plate-recognition", type_="plate_unknown",
+                 plate="KA01")
+
+
+def answer_and_wait(env, approval_id, reply, user_id, engine=None):
+    engine = engine or env.engine
+
+    async def go():
+        ok = engine.answer(approval_id, reply, user_id)
+        await asyncio.gather(*engine.tasks)
+        return ok
+    return asyncio.run(go())
+
+
+def test_ask_a_person_waits_and_a_reply_carries_the_run_on(gate):
+    from models import WorkflowApproval
+    (run_id,) = fire(gate, gate_alert())
+    run = gate.db.get(WorkflowRun, run_id)
+    assert run.status == "waiting"
+    a = gate.db.query(WorkflowApproval).one()
+    assert (a.question, a.replies, a.state, a.default_reply) == (
+        "Delivery KA01. Let in?", ["Let in", "Refuse"], "open", "Refuse")
+    assert steps(gate, run_id)[-1] == ("then[0].ai.delivery[0]", "ask_person", None)
+
+    assert answer_and_wait(gate, a.id, "Let in", 2) is True
+    gate.db.expire_all()
+    assert gate.db.get(WorkflowRun, run_id).status == "done"
+    assert steps(gate, run_id) == [
+        ("then[0]", "ai", "delivery"),
+        ("then[0].ai.delivery[0]", "ask_person", "Let in"),
+        ('then[0].ai.delivery[0].Let in[0]', "app", "done"),
+        ("then[0].ai.delivery[1]", "log", "done"),
+        ("then[1]", "log", "done"),
+        ("always[0]", "log", "done")]
+    # The gate opened as the guard who answered, on the alert's camera, audited.
+    assert ("gate-controller", "open_now", {"camera": "cam4"}, "guard") in gate.calls
+    audit = next(kw for c, kw in (x for x in gate.calls if x[0] == "audit"))
+    assert audit["action"] == "workflow.app_action" and audit["details"]["run"] == run_id
+    logged = [s.reason for s in gate.db.query(WorkflowRunStep).filter_by(run_id=run_id,
+                                                                         kind="log")]
+    assert logged[0] == "after the question: Let in"
+    # Answered once only.
+    assert answer_and_wait(gate, a.id, "Refuse", 2) is False
+
+
+def test_a_reply_after_a_restart_resumes_the_run(gate):
+    from models import WorkflowApproval
+    (run_id,) = fire(gate, gate_alert())
+    a = gate.db.query(WorkflowApproval).one()
+    restarted = Engine(gate.make, client=lambda: None, now=lambda: gate.clock["now"])
+    assert restarted.close_interrupted() == 0                 # waiting is not interrupted
+    answer_and_wait(gate, a.id, "Refuse", 2, engine=restarted)
+    gate.db.expire_all()
+    assert gate.db.get(WorkflowRun, run_id).status == "done"
+    assert ("then[0].ai.delivery[0].Refuse[0]", "log", "done") in steps(gate, run_id)
+    assert not [c for c in gate.calls if c[0] == "gate-controller"]
+
+
+def test_a_timeout_takes_no_answer_never_a_reply(gate):
+    from models import WorkflowApproval
+    (run_id,) = fire(gate, gate_alert())
+    gate.clock["now"] = T0 + timedelta(minutes=1)
+    assert gate.engine.expire_due() == []                     # not due yet
+    gate.clock["now"] = T0 + timedelta(minutes=3)
+
+    async def go():
+        ids = gate.engine.expire_due()
+        await asyncio.gather(*gate.engine.tasks)
+        return ids
+    assert len(asyncio.run(go())) == 1
+    gate.db.expire_all()
+    a = gate.db.query(WorkflowApproval).one()
+    assert (a.state, a.reply) == ("timed_out", None)
+    assert ("then[0].ai.delivery[0]", "ask_person", "no_answer") in steps(gate, run_id)
+    assert ("then[0].ai.delivery[0].no_answer[0]", "log", "done") in steps(gate, run_id)
+    assert not [c for c in gate.calls if c[0] == "gate-controller"]   # the gate stays shut
+
+
+def test_test_mode_asks_nobody_and_takes_the_default(gate):
+    from models import WorkflowApproval
+    gate.db.query(Workflow).update({"state": "test"})
+    gate.db.commit()
+    (run_id,) = fire(gate, gate_alert())
+    assert gate.db.query(WorkflowApproval).count() == 0
+    assert ("then[0].ai.delivery[0]", "ask_person", "Refuse") in steps(gate, run_id)
+    assert ("then[0].ai.delivery[0].Refuse[0]", "log", "would_have") in steps(gate, run_id)
+    assert gate.db.get(WorkflowRun, run_id).status == "done"
+
+
+def test_an_app_action_with_nobody_to_act_as_fails_the_step_not_the_run(gate):
+    from models import WorkflowApproval
+    gate.db.query(Workflow).update({"created_by": None})
+    gate.db.commit()
+    (run_id,) = fire(gate, gate_alert())
+    a = gate.db.query(WorkflowApproval).one()
+    answer_and_wait(gate, a.id, "Let in", None)
+    step = gate.db.query(WorkflowRunStep).filter_by(run_id=run_id, kind="app").one()
+    assert step.outcome == "failed" and "no person to act as" in step.reason
+    assert gate.db.get(WorkflowRun, run_id).status == "done"
+
+
+def test_ask_a_person_inside_for_each_is_not_supported_yet(env):
+    add(env, RULES_ONLY.replace('do: [ log: "look at {camera}" ]',
+                                'do: [ ask_person: { who: role:guard, message: "ok?", '
+                                'replies: ["Yes"] } ]'))
+    (run_id,) = fire(env, alert())
+    rows = env.db.query(WorkflowRunStep).filter_by(run_id=run_id, kind="ask_person").all()
+    assert {r.outcome for r in rows} == {"skipped"}
+    assert env.db.get(WorkflowRun, run_id).status == "done"
