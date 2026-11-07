@@ -35,6 +35,8 @@
   --series-1: #3987e5;    /* blue   */
   --series-2: #d95926;    /* orange */
   --series-3: #199e70;    /* aqua   */
+  --series-4: #8e5bd9;    /* violet: NPU */
+  --series-5: #c9a227;    /* gold: GPU */
   /* Aliases for names some views reached for that were never defined. An
      undefined var() with no fallback resolves to nothing (Cameras' --muted
      text, Updates' --bg-sub), and one with a hex fallback ignores the light
@@ -97,6 +99,8 @@
   --series-1: #2a78d6;
   --series-2: #eb6834;
   --series-3: #1baf7a;
+  --series-4: #9b6ee8;
+  --series-5: #d9b23a;
   --radius: 0px;
   --radius-card: 0px;
   --radius-input: 0px;

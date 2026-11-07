@@ -40,6 +40,7 @@ from core.database import SessionLocal
 from core.logging_config import main_logger
 from models import SecuritySetting
 from schemas import SystemMonitoringSettings
+from services.accelerator_usage import AcceleratorUsage, fetch_text
 from services.storage_service import get_effective_recordings_base_path
 from services.system_events import latest_event_state, record_system_event
 
@@ -88,6 +89,9 @@ class SystemMonitorService:
 
     def __init__(self) -> None:
         self._fine: deque[dict[str, Any]] = deque(maxlen=_FINE_MAXLEN)
+        # NPU / GPU busy share from the inference time the detector and
+        # KAI-C already report (services/accelerator_usage.py).
+        self._accel = AcceleratorUsage()
         self._coarse: deque[dict[str, Any]] = deque(maxlen=_COARSE_MAXLEN)
         self._coarse_acc: list[dict[str, Any]] = []
         self._last_sample: dict[str, Any] | None = None
@@ -116,6 +120,10 @@ class SystemMonitorService:
             # No GPU probe yet; the key is part of the API contract (HA-105)
             # so clients can rely on it and read null as "unknown".
             "gpu": None,
+            # The accelerators in use and how busy each is: a share of the
+            # device's time spent computing, from the inference time the
+            # detector and KAI-C report. [] when nothing runs on one.
+            "accelerators": [],
         }
         if psutil is not None:
             try:
@@ -134,6 +142,15 @@ class SystemMonitorService:
                     pass
             except Exception as e:
                 main_logger.warning(f"psutil sampling failed: {e}")
+
+        try:
+            from core.config import settings as _settings
+            out["accelerators"] = self._accel.update(
+                fetch_text(f"{_settings.detect_pipeline_metrics_url.rstrip('/')}/metrics"),
+                fetch_text(f"{_settings.kai_c_url.rstrip('/')}/metrics"),
+            )
+        except Exception as e:  # noqa: BLE001 — never fail the sample over a scrape
+            main_logger.debug(f"accelerator usage sampling failed: {e}")
 
         try:
             base_path = get_effective_recordings_base_path(db)
@@ -155,12 +172,15 @@ class SystemMonitorService:
 
     def _record_sample(self, sample: dict[str, Any]) -> None:
         self._last_sample = sample
+        accel = {a["kind"]: a.get("busy_percent") for a in (sample.get("accelerators") or [])}
         point = {
             "ts": sample["ts"],
             "cpu_percent": sample.get("cpu_percent"),
             "memory_percent": (sample.get("memory") or {}).get("percent"),
             "disk_percent": (sample.get("disk") or {}).get("percent"),
             "disk_free": (sample.get("disk") or {}).get("free"),
+            "npu_percent": accel.get("npu"),
+            "gpu_percent": accel.get("gpu"),
         }
         self._fine.append(point)
         self._coarse_acc.append(point)
@@ -178,6 +198,8 @@ class SystemMonitorService:
                 "memory_percent": avg("memory_percent"),
                 "disk_percent": avg("disk_percent"),
                 "disk_free": acc[-1]["disk_free"],
+                "npu_percent": avg("npu_percent"),
+                "gpu_percent": avg("gpu_percent"),
             })
 
     def history(self, minutes: int) -> list[dict[str, Any]]:

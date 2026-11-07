@@ -245,6 +245,10 @@ export type SystemResourcesResp = {
   memory?: { total: number; used: number; percent: number } | null
   disk?: { path: string; total: number; used: number; free: number; percent: number } | null
   disk_error?: string | null
+  /** Accelerators in use (NPU, GPU) and how busy each is: a share of the device's
+   *  time spent computing, from the inference time the detector and the adapters
+   *  report (no kernel counter on most boards). [] when nothing runs on one. */
+  accelerators?: { kind: string; name: string; busy_percent: number | null; users: { name: string; percent: number }[]; source: string }[]
   active_alerts?: { alert_type: string; severity: string; description: string; since?: string }[]
   /** Disk rotation in force: core deletes the oldest recordings to keep its headroom (null when not). */
   rotation?: {
@@ -298,6 +302,8 @@ export type ResourceHistoryPoint = {
   ts: number
   cpu_percent: number | null
   memory_percent: number | null
+  npu_percent?: number | null
+  gpu_percent?: number | null
   disk_percent: number | null
   disk_free: number | null
 }
