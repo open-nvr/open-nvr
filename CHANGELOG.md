@@ -8,6 +8,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The workflow engine runs workflows.** An app's alert starts every
+  On or Test workflow it triggers (`when: alert`), after the file's `if:`
+  guards and its limits (cooldown, one at a time, per hour, AI per hour);
+  the run walks its steps and records each one: If, For each, the AI step
+  (Look sees the alert's picture, shrunk with ffmpeg; the model is
+  `WORKFLOWS_LLM_URL` / `WORKFLOWS_LLM_MODEL`, loaded at start so the first
+  alert does not run out of time), and the actions `log`, `alert` (into the
+  inbox as the workflow, AI-decided `high` capped at `medium`), `site_mode`
+  and `wait`. Test records every action as "would have". A workflow never
+  triggers on a workflow's alert; a run a restart interrupted is marked
+  failed, not redone. Ask a person, app actions and `notify` are recorded
+  as "not available yet" until approvals land.
+
 - **Captions on the Qualcomm NPU.** The qualcomm flavour now runs the
   captioner on the Hexagon too: `start.sh` fills `CAPTION_ADAPTER=litertlm`
   (ai-adapter's new LiteRT-LM adapter: Gemma 4 E2B compiled for the
