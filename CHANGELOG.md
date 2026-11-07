@@ -349,6 +349,21 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   → 24, five of seven passes posting exactly three; replay wall time
   unchanged (no scipy, a few lines of numpy).
 
+- **Search understands counts and groups, and says loudly when it fell
+  back.** "Did you see the 3 persons together" used to parse to the words
+  "persons together", match no caption, and quietly show every visit.
+  Now: every visit carries the most people the detector had in frame with
+  it at once (detect-pipeline counts confirmed tracks per frame; core
+  keeps it as ``payload["people"]``), the parser reads "3 persons",
+  "two men", "a group", "together" as *at least N people in frame*
+  (``min_people``, also a query parameter), the search filters on it and
+  shows a "3+ people together" chip, and the parser knows "persons",
+  "men", "women", "guys", "kids", "visitors" and the rest of the words
+  people type. When words still match nothing and search shows the rest,
+  the notice is a warning that starts "These are not what you searched
+  for" and gives the count. Visits recorded before this release carry no
+  count and never match a group query.
+
 - **A slow captioner no longer computes captions nobody saves.** One
   Search "describe" on the field box sent the visit's photo to qwen3-vl
   2B through Ollama on the ARM cores: 60–90 s a caption against KAI-C's

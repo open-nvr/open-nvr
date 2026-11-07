@@ -372,6 +372,8 @@ async def search(
     label: list[str] | None = Query(None, description="Object class; repeatable (OR)."),
     camera_id: list[int] | None = Query(None, description="Camera; repeatable (OR)."),
     text: str | None = Query(None, description="Words to match in captions/attributes."),
+    min_people: int | None = Query(None, ge=1, le=99,
+                                   description="At least this many people in frame with the visit."),
     plate: str | None = Query(None),
     zone: str | None = Query(None, max_length=60,
                              description="Zone id or name (among the caller's cameras)."),
@@ -445,9 +447,12 @@ async def search(
         attrs = list(parsed.attrs)
     # "What is the plate of…" — only visits that carry a read can answer.
     wants_plate = bool(parsed.wants_plate) and plate is None
+    # "Three people together": from the pipeline's count of people in
+    # frame with each visit. An explicit ``min_people`` beats the parse.
+    people_min = min_people if min_people is not None else parsed.min_people
     filters = dict(
         from_=start, to=end, plate=plate_q or None, source=source, scope=scope,
-        zone_id=zone_id, has_plate=wants_plate,
+        zone_id=zone_id, has_plate=wants_plate, min_people=people_min or None,
     )
     needs, box = await _needs_for(db, scope, parsed=parsed, labels=labels, words=words,
                                   attrs=attrs, wants_plate=wants_plate, plate=plate_q or "")
@@ -589,6 +594,7 @@ async def search(
         "plate": plate_q or "",
         "attrs": [f"{k}:{v}" for k, v in attrs],
         "wants_plate": wants_plate,
+        "min_people": people_min or None,
         # What the question asked of the box's skills, and whether each
         # is here — the difference between "nothing was red" and "nothing
         # here has ever looked at a colour".
