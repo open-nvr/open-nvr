@@ -6,6 +6,8 @@ import { config } from '../config/environment'
 import { SlidersHorizontal, FileText, FileSpreadsheet, CheckCircle, ChevronDown, ChevronUp } from 'lucide-react'
 import { useToast } from '../components/ToastProvider'
 import { messages } from '../messages'
+import ClassReview, { MarkBadge, STATUS_LABEL, type MarkStatus } from '../components/ClassReview'
+import ClassesPanel from '../components/ClassesPanel'
 // @ts-ignore - runtime import available after install
 import jsPDF from 'jspdf'
 // @ts-ignore - runtime import available after install
@@ -21,7 +23,10 @@ type FinalizedAttendance = {
   slots_present: number
   total_slots: number
   ratio: number
-  status: 'PRESENT' | 'ABSENT' | 'UNWATCHED'
+  status: MarkStatus
+  source?: 'auto' | 'manual'
+  note?: string | null
+  first_seen?: string | null
   finalized_at: string
 }
 
@@ -30,6 +35,9 @@ export default function Attendance() {
   const { showToast } = useToast()
   // const isAdmin = !!(user && user.is_admin)
   const [classId, setClassId] = useState('')
+  const [reviewClass, setReviewClass] = useState<string | null>(null)
+  const [classesKey, setClassesKey] = useState(0)
+  const canManage = !!user && (user.tier === 'operator' || user.tier === 'admin' || user.is_admin === true)
   const [items, setItems] = useState<FinalizedAttendance[]>([])
   const [loading, setLoading] = useState(false)
   const [classes, setClasses] = useState<string[]>([])
@@ -319,7 +327,7 @@ export default function Attendance() {
           r.student?.course_code ?? '-',
           r.student?.section ?? '-',
           schedule,
-          r.status,
+          STATUS_LABEL[r.status] || r.status,
           pct,
         ]
       })
@@ -380,7 +388,7 @@ export default function Attendance() {
             Course: r.student?.course_code ?? '-',
             Section: r.student?.section ?? '-',
             Schedule: schedule,
-            Status: r.status,
+            Status: STATUS_LABEL[r.status] || r.status,
             'Presence %': `${Math.round(r.ratio * 100)}%`,
           }
         })
@@ -401,6 +409,11 @@ export default function Attendance() {
 
   return (
     <Layout title="Attendance Records">
+      {reviewClass && (
+        <ClassReview classId={reviewClass} canManage={canManage} onClose={() => setReviewClass(null)}
+          onChanged={() => { setClassesKey(k => k + 1); if (classId === reviewClass) loadByClassId(reviewClass) }} />
+      )}
+      <ClassesPanel canManage={canManage} refreshKey={classesKey} onReview={cid => setReviewClass(cid)} />
       <div className="bg-white border rounded-lg p-4 mb-2 flex items-center justify-between">
         <div className="flex items-center gap-2 text-base font-medium text-gray-900">
           <CheckCircle className="w-5 h-5 text-gray-500" />
@@ -440,7 +453,12 @@ export default function Attendance() {
                   Loading recent classes...
                 </div>
               ) : (
-                <div className="flex flex-wrap gap-2">
+                <div className="flex flex-wrap gap-2 items-center">
+                  {classId && (
+                    <button className="px-2 py-1 rounded border text-xs bg-indigo-600 text-white border-indigo-600 hover:bg-indigo-700" onClick={() => setReviewClass(classId)} title="Marks, first seen, corrections, evidence">
+                      Review this class
+                    </button>
+                  )}
                   {classes.slice(0, 5).map(cid => (
                     <button
                       key={cid}
@@ -696,22 +714,8 @@ export default function Attendance() {
                           <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700 font-mono">{schedule}</td>
                       <td className="px-6 py-4 whitespace-nowrap">
                         <div className="flex items-center gap-2 text-sm">
-                          {r.status === 'PRESENT' ? (
-                            <svg className="w-5 h-5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                            </svg>
-                          ) : r.status === 'UNWATCHED' ? (
-                            <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                            </svg>
-                          ) : (
-                            <svg className="w-5 h-5 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                            </svg>
-                          )}
-                          <span className={r.status === 'PRESENT' ? 'text-green-700' : r.status === 'UNWATCHED' ? 'text-gray-500' : 'text-red-700'} title={r.status === 'UNWATCHED' ? 'The camera could not be watched during this class (no frames or recognition down); nobody was marked absent.' : undefined}>
-                            {r.status === 'PRESENT' ? 'Present' : r.status === 'UNWATCHED' ? 'Not watched' : 'Absent'}
-                          </span>
+                          <MarkBadge status={r.status} manual={r.source === 'manual'} />
+                          {r.note && <span className="text-xs text-gray-500 truncate max-w-[12rem]" title={r.note}>{r.note}</span>}
                         </div>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
@@ -719,7 +723,7 @@ export default function Attendance() {
                           <span className="font-medium">{Math.round(r.ratio * 100)}%</span>
                           <div className="w-28 h-2 bg-gray-200 rounded">
                             <div
-                              className={`h-2 rounded ${r.status === 'PRESENT' ? 'bg-gray-800' : 'bg-gray-500'}`}
+                              className={`h-2 rounded ${r.status === 'PRESENT' || r.status === 'LATE' ? 'bg-gray-800' : 'bg-gray-500'}`}
                               style={{ width: `${Math.max(0, Math.min(100, Math.round(r.ratio * 100)))}%` }}
                             />
                           </div>
