@@ -1798,3 +1798,36 @@ def test_alert_words_bring_matching_app_alerts_beside_the_visits(db):
     assert [a["alert_id"] for a in got] == ["p1"]
     assert _matching_alerts(db, None, su, words="package", camera_ids=[1], start=win["start"], end=win["end"], labels=[]) == []
     assert _matching_alerts(db, None, su, words="any alerts", **win) and len(_matching_alerts(db, None, su, words="alerts", **win)) == 2
+# ── calendar phrases: months, years, dates ──────────────────────────
+
+def test_month_and_year_phrases_become_windows():
+    """NOW is 18 Sep 2026. A month name alone is the most recent one that
+    has started; two months joined by "or" are one window; "last month",
+    "this year", "N months ago" and dated days all resolve."""
+    jan = _p("did you see a car in january")
+    assert (jan.from_, jan.to) == (datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 2, 1, tzinfo=UTC))
+    assert jan.labels == ["car"] and jan.text == "" and jan.matched["when"] == "january"
+    span = _p("anything last year somewhere in january or february")
+    assert (span.from_, span.to) == (datetime(2025, 1, 1, tzinfo=UTC), datetime(2025, 3, 1, tzinfo=UTC)) or \
+        (span.from_, span.to) == (datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 3, 1, tzinfo=UTC))
+    assert span.text == ""
+    dec = _p("the van in december")                       # december has not come this year
+    assert (dec.from_, dec.to) == (datetime(2025, 12, 1, tzinfo=UTC), datetime(2026, 1, 1, tzinfo=UTC))
+    lm = _p("last month")
+    assert (lm.from_, lm.to) == (datetime(2026, 8, 1, tzinfo=UTC), datetime(2026, 9, 1, tzinfo=UTC))
+    tm = _p("this month")
+    assert tm.from_ == datetime(2026, 9, 1, tzinfo=UTC) and tm.to == NOW
+    ly = _p("last year")
+    assert (ly.from_, ly.to) == (datetime(2025, 1, 1, tzinfo=UTC), datetime(2026, 1, 1, tzinfo=UTC))
+    ago = _p("two months ago")
+    assert (ago.from_, ago.to) == (datetime(2026, 7, 1, tzinfo=UTC), datetime(2026, 8, 1, tzinfo=UTC))
+    six = _p("last 6 months")
+    assert six.from_ == datetime(2026, 3, 1, tzinfo=UTC) and six.to == NOW
+    day = _p("on 5th november 2025 a truck")
+    assert (day.from_, day.to) == (datetime(2025, 11, 5, tzinfo=UTC), datetime(2025, 11, 6, tzinfo=UTC))
+    assert day.labels == ["truck"] and day.text == ""
+    day2 = _p("nov 5")                                     # future this year → last year's
+    assert day2.from_ == datetime(2025, 11, 5, tzinfo=UTC)
+    may = _p("may")                                        # a month word that is also a verb: still a month
+    assert may.from_ == datetime(2026, 5, 1, tzinfo=UTC)
+    assert _p("car with plate KA01AB1234").from_ is None, "no time means all time"

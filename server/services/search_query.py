@@ -154,6 +154,66 @@ _ISO_DATE_RE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
 _REL_RE = re.compile(
     r"\b(?:last|past|previous)\s+(\d+)?\s*(minute|min|hour|hr|day|week)s?\b"
 )
+#: Calendar phrases. A month name on its own is the most recent one that
+#: has started (in November, "january" is this year's; "december" is last
+#: year's); with a day it is that day; with a year, that year. Two months
+#: joined by "or", "and", "to" or a dash are one window from the first's
+#: start to the second's end — what "in January or February" means to the
+#: person asking, even if a few weeks of March ride along between
+#: non-adjacent months (the chip says what was searched).
+_MONTHS = {
+    "january": 1, "jan": 1, "february": 2, "feb": 2, "march": 3, "mar": 3,
+    "april": 4, "apr": 4, "may": 5, "june": 6, "jun": 6, "july": 7, "jul": 7,
+    "august": 8, "aug": 8, "september": 9, "sep": 9, "sept": 9, "october": 10,
+    "oct": 10, "november": 11, "nov": 11, "december": 12, "dec": 12,
+}
+_MONTH_ALT = "|".join(sorted(_MONTHS, key=len, reverse=True))
+_DAY = r"(\d{1,2})(?:st|nd|rd|th)?"
+#: "5 november", "5th nov 2025", "november 5", "nov 5th 2025", "november",
+#: "november 2025" — day and year optional either side of the month.
+_MONTH_RE = re.compile(
+    rf"\b(?:(?:on\s+)?(?:the\s+)?{_DAY}\s+(?:of\s+)?)?({_MONTH_ALT})\b(?:\s+{_DAY}\b)?(?:,?\s+(\d{{4}})\b)?"
+)
+_SPAN_RE = re.compile(
+    rf"\b(?:in\s+|during\s+|around\s+|somewhere\s+in\s+)?({_MONTH_ALT})\s+(?:or|and|to|-|through|till|until)\s+({_MONTH_ALT})\b(?:\s+(\d{{4}}))?"
+)
+_CAL_RE = re.compile(
+    r"\b(this|last|previous|past)\s+(week|month|year)\b"
+)
+_AGO_RE = re.compile(r"\b(\d+|a|an|one|two|three|four|five|six)\s+(week|month|year)s?\s+ago\b")
+_LONG_REL_RE = re.compile(r"\b(?:last|past|previous)\s+(\d+)\s*(month|year)s?\b")
+_SMALL = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6}
+
+
+def _month_start(year: int, month: int, tz) -> datetime:
+    return datetime(year, month, 1, tzinfo=tz)
+
+
+def _add_months(d: datetime, n: int) -> datetime:
+    y, m = d.year + (d.month - 1 + n) // 12, (d.month - 1 + n) % 12 + 1
+    return d.replace(year=y, month=m, day=1)
+
+
+_YEAR_HINT_RE = re.compile(r"\b(this|last|previous)\s+year\b")
+
+
+def _year_hint(q: str, now: datetime) -> tuple[int | None, str]:
+    """"last year ... in january": the year word qualifies the month, so it
+    is read with it rather than left over as a word nobody wrote in a
+    caption. Returns (year, q without the year words)."""
+    m = _YEAR_HINT_RE.search(q)
+    if not m:
+        return None, q
+    year = now.year if m.group(1) == "this" else now.year - 1
+    return year, q.replace(m.group(0), " ")
+
+
+def _resolve_month(name: str, year: str | None, now: datetime) -> tuple[int, int]:
+    m = _MONTHS[name]
+    if year:
+        return int(year), m
+    y = now.year if m <= now.month else now.year - 1
+    return y, m
 _WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday",
              "saturday", "sunday")
 #: Words that say the next token IS a registration, so it is taken as one
@@ -250,6 +310,71 @@ def _extract_time(q: str, now: datetime) -> tuple[datetime | None, datetime | No
         start, end = _day_bounds(day)
         return start, end, q.replace(m.group(0), ""), m.group(0)
 
+    m = _SPAN_RE.search(q)
+    if m:
+        hint, q = _year_hint(q, now)
+        year = m.group(3) or (str(hint) if hint else None)
+        y1, m1 = _resolve_month(m.group(1), year, now)
+        y2, m2 = _resolve_month(m.group(2), year, now)
+        a = _month_start(y1, m1, now.tzinfo)
+        b = _add_months(_month_start(y2, m2, now.tzinfo), 1)
+        if b <= a:                                    # "december or january": spans the year end
+            a = _month_start(y1 - 1, m1, now.tzinfo)
+        return a, b, q.replace(m.group(0), " "), m.group(0).strip()
+    m = _AGO_RE.search(q)
+    if m:
+        n = _SMALL.get(m.group(1)) or int(m.group(1))
+        unit = m.group(2)
+        if unit == "week":
+            start, _ = _day_bounds(now - timedelta(weeks=n))
+            start -= timedelta(days=start.weekday())
+            return start, start + timedelta(weeks=1), q.replace(m.group(0), " "), m.group(0)
+        if unit == "month":
+            a = _add_months(_month_start(now.year, now.month, now.tzinfo), -n)
+            return a, _add_months(a, 1), q.replace(m.group(0), " "), m.group(0)
+        a = _month_start(now.year - n, 1, now.tzinfo)
+        return a, _month_start(now.year - n + 1, 1, now.tzinfo), q.replace(m.group(0), " "), m.group(0)
+    m = _LONG_REL_RE.search(q)
+    if m:
+        n = int(m.group(1))
+        if m.group(2) == "month":
+            return _add_months(_month_start(now.year, now.month, now.tzinfo), -n), now, q.replace(m.group(0), " "), m.group(0)
+        return _month_start(now.year - n, 1, now.tzinfo), now, q.replace(m.group(0), " "), m.group(0)
+    m = _CAL_RE.search(q)
+    if m:
+        which, unit = m.group(1), m.group(2)
+        if unit == "week":
+            start, _ = _day_bounds(now)
+            start -= timedelta(days=start.weekday())
+            if which == "this":
+                return start, now, q.replace(m.group(0), " "), m.group(0)
+            return start - timedelta(weeks=1), start, q.replace(m.group(0), " "), m.group(0)
+        if unit == "month":
+            this = _month_start(now.year, now.month, now.tzinfo)
+            if which == "this":
+                return this, now, q.replace(m.group(0), " "), m.group(0)
+            return _add_months(this, -1), this, q.replace(m.group(0), " "), m.group(0)
+        this = _month_start(now.year, 1, now.tzinfo)
+        if which == "this":
+            return this, now, q.replace(m.group(0), " "), m.group(0)
+        return _month_start(now.year - 1, 1, now.tzinfo), this, q.replace(m.group(0), " "), m.group(0)
+    m = _MONTH_RE.search(q)
+    if m and m.group(2):
+        hint, q = _year_hint(q, now)
+        day = m.group(1) or m.group(3)
+        y, mo = _resolve_month(m.group(2), m.group(4) or (str(hint) if hint else None), now)
+        if day:
+            try:
+                d = datetime(y, mo, int(day), tzinfo=now.tzinfo)
+            except ValueError:
+                d = None
+            if d is not None:
+                if d > now and not m.group(4):
+                    d = d.replace(year=d.year - 1)
+                start, end = _day_bounds(d)
+                return start, end, q.replace(m.group(0), " "), m.group(0).strip()
+        a = _month_start(y, mo, now.tzinfo)
+        return a, _add_months(a, 1), q.replace(m.group(0), " "), m.group(0).strip()
     m = _REL_RE.search(q)
     if m:
         n = int(m.group(1) or 1)

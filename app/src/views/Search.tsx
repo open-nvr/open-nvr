@@ -139,6 +139,8 @@ type SearchResponse = {
    *  These results are not the search that was typed, so the page owes
    *  the operator a visible say-so and a way back. */
   relaxed?: { dropped: string; without: number }
+  /** No time in the question: how far back the whole-index search went. */
+  scope?: { all_time: boolean; oldest: string; days: number; total: number } | null
   /** Why the ranking looks the way it does, when a second arm took part
    *  — or why it could not. Absent on a deployment that has never
    *  embedded anything, which is most of them. */
@@ -624,6 +626,38 @@ export function Search() {
   }
   if (interp?.wants_plate) {
     notices.push({ key: 'plate', tone: 'info', icon: <CarFront size={13} />, text: t('search.needs.wantsPlate') })
+  }
+  // A question with no time searches everything the box holds. Cheap for
+  // the database, expensive for the person scrolling: say how far back it
+  // reached and offer the usual windows in one click. An explicit window
+  // (even an edited one) means the operator chose, so no notice.
+  if (data?.scope?.all_time && data.scope.days > 1 && !(editing && filters?.from)) {
+    const narrow = (days: number) => {
+      const base = editing ? { ...filters! } : asFilters()
+      const now = new Date()
+      base.from = new Date(now.getTime() - days * 86400000).toISOString()
+      base.to = null
+      setFilters(base)
+      setPage(0)
+    }
+    notices.push({
+      key: 'scope',
+      tone: 'info',
+      icon: <Clock size={13} />,
+      text: (
+        <>
+          No time in the question, so this searched all {data.scope.days} days the box holds
+          ({data.scope.total} visits). Add a time to narrow it:
+        </>
+      ),
+      action: (
+        <span className="flex gap-1">
+          <Button variant="outline" size="sm" onClick={() => narrow(1)}>last 24 h</Button>
+          <Button variant="outline" size="sm" onClick={() => narrow(7)}>7 days</Button>
+          <Button variant="outline" size="sm" onClick={() => narrow(30)}>30 days</Button>
+        </span>
+      ),
+    })
   }
   if (interp && interp.ignored.length > 0) {
     notices.push({
