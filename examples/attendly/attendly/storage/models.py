@@ -100,6 +100,10 @@ class AttendanceSnapshot(Base):
     slot_time = Column(String(40), nullable=False)
     present = Column(Boolean, nullable=False, default=False)
     is_slot_marker = Column(Boolean, nullable=False, default=False)
+    # When the person was first seen in the slot (LATE needs the time, not
+    # the slot); on a slot marker, the evidence frame kept for it.
+    seen_at = Column(String(40), nullable=True)
+    evidence_path = Column(String(512), nullable=True)
 
 
 class AttendanceFinal(Base):
@@ -114,7 +118,12 @@ class AttendanceFinal(Base):
     slots_present = Column(Integer, nullable=False, default=0)
     total_slots = Column(Integer, nullable=False, default=0)
     ratio = Column(Float, nullable=False, default=0.0)
+    # PRESENT | LATE | ABSENT | EXCUSED | UNWATCHED
     status = Column(String(16), nullable=False)
+    # "auto" (the cameras) or "manual" (a correction, never overwritten)
+    source = Column(String(8), nullable=False, default="auto", server_default="auto")
+    note = Column(String(500), nullable=True)
+    first_seen = Column(String(40), nullable=True)
     finalized_at = Column(String(40), nullable=False)
 
     __table_args__ = (Index("ix_attendance_final_class_student", "class_id", "student_code", unique=True),)
@@ -131,6 +140,11 @@ class AttendanceClassMeta(Base):
     # Slots the camera could not be watched in (outage, no worker): they
     # do not count against anyone, and the report says so.
     unwatched_slots = Column(Integer, nullable=False, default=0, server_default="0")
+    # Too little of the class was watched: automatic marks are UNWATCHED
+    # and the class is left out of every rate.
+    no_coverage = Column(Boolean, nullable=False, default=False, server_default="0")
+    # A holiday, a class that did not happen: not watched, not marked.
+    called_off = Column(Boolean, nullable=False, default=False, server_default="0")
 
 
 class AttendanceRecord(Base):

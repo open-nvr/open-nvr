@@ -66,6 +66,22 @@ class CameraSource:
             logger.warning("snapshot of camera %s failed: %s", camera_id, exc)
             return None
 
+    def save_evidence(self, jpeg: bytes) -> Optional[str]:
+        """Keep a frame in core's evidence store (retention applies);
+        the path, or None when core would not take it."""
+        try:
+            return self._nvr.save_evidence(jpeg)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("evidence upload failed: %s", exc)
+            return None
+
+    def read_evidence(self, path: str) -> Optional[bytes]:
+        try:
+            return self._nvr.read_evidence(path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("evidence read failed: %s", exc)
+            return None
+
     def snapshot(self, camera_id: int):
         """The camera's current frame as a BGR array, or None."""
         jpeg = self.snapshot_jpeg(camera_id)

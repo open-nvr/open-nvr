@@ -72,6 +72,17 @@ _LATER_COLUMNS = {
     ],
     "attendance_class_meta": [
         ("unwatched_slots", "INTEGER NOT NULL DEFAULT 0"),
+        ("no_coverage", "BOOLEAN NOT NULL DEFAULT 0"),
+        ("called_off", "BOOLEAN NOT NULL DEFAULT 0"),
+    ],
+    "attendance_snapshots": [
+        ("seen_at", "VARCHAR(40)"),
+        ("evidence_path", "VARCHAR(512)"),
+    ],
+    "attendance_final": [
+        ("source", "VARCHAR(8) NOT NULL DEFAULT 'auto'"),
+        ("note", "VARCHAR(500)"),
+        ("first_seen", "VARCHAR(40)"),
     ],
     "access_events": [
         ("movement", "VARCHAR(8)"),

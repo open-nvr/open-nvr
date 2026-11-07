@@ -86,15 +86,24 @@ def test_unwatched_slots_do_not_count_against_anyone(env):
     _, class2, _ = _class(env, length_min=20) if False else (None, "MBA-1-A-20260106-0900-0920", None)
     repo.finalize_attendance(class2)
     assert {r["status"] for r in repo.get_attendance_by_class(class2)} == {"UNWATCHED"}
-    # one watched slot among unwatched ones: the ratio is over the watched one only
+    # one watched slot among two unwatched: under the coverage floor (0.5),
+    # so the class is flagged and nobody is marked from it
     t1 = datetime(2026, 1, 7, 9, 0, tzinfo=timezone.utc)
     class3 = "MBA-1-A-20260107-0900-0930"
     repo.save_snapshot(class3, [], t1 + timedelta(minutes=10), watched=False)
     repo.save_snapshot(class3, ["AT00001"], t1 + timedelta(minutes=20))
     repo.save_snapshot(class3, [], t1 + timedelta(minutes=30), watched=False)
-    repo.finalize_attendance(class3)
-    rows = {r["student_code"]: r for r in repo.get_attendance_by_class(class3)}
-    assert rows["AT00001"]["status"] == "PRESENT" and rows["AT00001"]["total_slots"] == 1
+    res = repo.finalize_attendance(class3)
+    assert res["no_coverage"] is True
+    assert {r["status"] for r in repo.get_attendance_by_class(class3)} == {"UNWATCHED"}
+    # two watched of three: the ratio is over the watched slots only
+    class4 = "MBA-1-A-20260108-0900-0930"
+    repo.save_snapshot(class4, ["AT00001"], t1 + timedelta(days=1, minutes=10))
+    repo.save_snapshot(class4, [], t1 + timedelta(days=1, minutes=20), watched=False)
+    repo.save_snapshot(class4, ["AT00001"], t1 + timedelta(days=1, minutes=30))
+    assert repo.finalize_attendance(class4)["no_coverage"] is False
+    rows = {r["student_code"]: r for r in repo.get_attendance_by_class(class4)}
+    assert rows["AT00001"]["status"] == "PRESENT" and rows["AT00001"]["total_slots"] == 2
     assert rows["AT00002"]["status"] == "ABSENT"
 
 

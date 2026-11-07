@@ -15,6 +15,9 @@ os.environ.setdefault("OPENNVR_URL", "http://core.test")
 os.environ.setdefault("KAIC_URL", "http://kaic.test")
 os.environ.setdefault("OPENNVR_INTERNAL_API_KEY", "site-key")
 os.environ.setdefault("ATTENDLY_FACES_URL", "http://faces.test")
+# Class ids carry local-time windows and the tests build slot times in UTC:
+# one clock for both.
+os.environ.setdefault("ATTENDLY_TIMEZONE", "UTC")
 
 
 def jpeg_bytes(width: int = 64, height: int = 48, seed: int = 1) -> bytes:
@@ -137,6 +140,7 @@ class FakeCameraSource:
                         {"id": 9, "handle": "cam9", "name": "Hall camera", "role": ""}]
         self.frames: Dict[int, Optional[np.ndarray]] = {}
         self.snapshots = 0
+        self.evidence: Dict[str, bytes] = {}
 
     def list_cameras(self):
         return [dict(c) for c in self.cameras]
@@ -158,6 +162,14 @@ class FakeCameraSource:
     def snapshot(self, camera_id: int):
         self.snapshots += 1
         return self.frames.get(int(camera_id))
+
+    def save_evidence(self, jpeg: bytes):
+        path = f"ev/{len(self.evidence) + 1}.jpg"
+        self.evidence[path] = jpeg
+        return path
+
+    def read_evidence(self, path: str):
+        return self.evidence.get(path)
 
 
 class FakePublisher:
@@ -218,6 +230,7 @@ def env(tmp_path, monkeypatch, fake_engine, fake_cameras):
     monkeypatch.setenv("ATTENDLY_DATABASE_URL", f"sqlite:///{tmp_path / 'attendly.db'}")
     monkeypatch.setenv("ATTENDLY_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("ATTENDLY_AUTH_MODE", "none")
+    monkeypatch.setenv("ATTENDLY_TIMEZONE", "UTC")
     reset_settings_cache()
     reset_db()
     init_db()

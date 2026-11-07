@@ -84,9 +84,25 @@ class FinalizedAttendanceOut(BaseModel):
     total_slots: int
     ratio: float
     status: str
+    source: str = "auto"
+    note: Optional[str] = None
+    first_seen: Optional[str] = None
     finalized_at: str
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class MarkSet(BaseModel):
+    status: str = Field(..., pattern=r"^(AUTO|PRESENT|LATE|ABSENT|EXCUSED|UNWATCHED)$")
+    note: Optional[str] = Field(None, max_length=500)
+
+
+class OneOffClass(BaseModel):
+    course: str = Field(..., min_length=1, max_length=64)
+    section: str = Field(..., min_length=1, max_length=16)
+    date: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
+    start: str = Field(..., pattern=r"^\d{2}:\d{2}$")
+    end: str = Field(..., pattern=r"^\d{2}:\d{2}$")
 
 
 class StreamCreate(BaseModel):

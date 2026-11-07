@@ -127,6 +127,40 @@ def finalize_attendance(class_id: str):
     return svc.finalize_attendance(class_id)
 
 
+@router.post("/{stream_id}/classes")
+@log_call()
+def add_one_off_class(stream_id: int, payload: schemas.OneOffClass):
+    """A class that is not on the timetable: an extra lecture, an exam.
+    Local times; it must not have ended yet."""
+    from datetime import datetime
+
+    from ..services.planner_publisher import _class_id
+    from ..utils.time import local_tz, now_local
+
+    cur = streams_get(stream_id)
+    if not cur or cur.get("deleted_at"):
+        raise HTTPException(status_code=404, detail="Stream not found")
+    try:
+        day = datetime.fromisoformat(payload.date).replace(tzinfo=local_tz())
+        sdt = day.replace(hour=int(payload.start[:2]), minute=int(payload.start[3:]))
+        edt = day.replace(hour=int(payload.end[:2]), minute=int(payload.end[3:]))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="bad date or time")
+    if edt <= sdt:
+        raise HTTPException(status_code=400, detail="the class must end after it starts")
+    if edt <= now_local():
+        raise HTTPException(status_code=400, detail="the class has already ended; nobody could have watched it")
+    class_id = _class_id(payload.course.strip(), payload.section.strip(), day, payload.start, payload.end)
+    schedule = list(cur.get("schedule") or [])
+    if any(str(e.get("class_id")) == class_id for e in schedule):
+        raise HTTPException(status_code=409, detail="that class is already scheduled on this room")
+    schedule.append({"class_id": class_id, "start_iso": sdt.isoformat(), "end_iso": edt.isoformat(),
+                     "course": payload.course.strip(), "section": payload.section.strip()})
+    streams_update(stream_id, schedule=schedule)
+    _reload_engine()
+    return {"ok": True, "class_id": class_id, "stream_id": stream_id, "start_iso": sdt.isoformat(), "end_iso": edt.isoformat()}
+
+
 @router.post("/{stream_id}/schedule")
 @log_call()
 def schedule_class(stream_id: int, class_id: str, class_start_iso: str, class_end_iso: str):

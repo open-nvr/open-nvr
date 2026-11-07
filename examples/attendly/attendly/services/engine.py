@@ -107,6 +107,21 @@ class StreamWorker:
             logger.warning("Worker %s snapshot failed: %s", self.stream_id, exc)
             return None
 
+    def _keep_evidence(self, frame) -> Optional[str]:
+        """The frame somebody was recognised in, into core's evidence store
+        (one per slot; retention applies). Best effort."""
+        fn = getattr(self.frames, "save_evidence", None)
+        if fn is None or not get_settings().keep_evidence_frames:
+            return None
+        try:
+            import cv2
+
+            ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+            return fn(buf.tobytes()) if ok else None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Worker %s evidence not kept: %s", self.stream_id, exc)
+            return None
+
     def _recognize_codes(self, frame) -> List[str]:
         if frame is None or self.recognizer is None:
             return []
@@ -132,16 +147,18 @@ class StreamWorker:
                 current_slot_end = first_slot_start + timedelta(seconds=int(settings.snapshot_interval_minutes) * 60)
             current_slot_start = first_slot_start
             next_attempt_at = first_slot_start
-            aggregated: Dict[str, bool] = {}
+            aggregated: Dict[str, str] = {}  # code → first seen in this slot
             saved_current_slot = False
             slot_watched = False  # did any attempt in this slot actually look?
+            slot_evidence: Optional[str] = None  # one frame per slot in which somebody was seen
 
             def save_slot(slot_end: datetime) -> None:
                 nonlocal saved_current_slot
                 if not self.class_id:
                     return
                 try:
-                    save_snapshot(self.class_id, list(aggregated.keys()), slot_end, watched=slot_watched)
+                    save_snapshot(self.class_id, dict(aggregated), slot_end, watched=slot_watched,
+                                  evidence_path=slot_evidence)
                     saved_current_slot = True
                     if not slot_watched:
                         self.unwatched_slots += 1
@@ -171,7 +188,9 @@ class StreamWorker:
                         codes = self._recognize_codes(frame)
                         slot_watched = True
                         for c in codes:
-                            aggregated[c] = True
+                            aggregated.setdefault(c, now.isoformat())
+                        if codes and slot_evidence is None:
+                            slot_evidence = self._keep_evidence(frame)
                         self.last_codes = codes
                         logger.info("Worker %s class=%s attempt #%d found %d codes: %s",
                                     self.stream_id, self.class_id, self.attempts, len(codes), ",".join(codes) or "none")
@@ -187,6 +206,7 @@ class StreamWorker:
                     save_slot(current_slot_end)
                     aggregated = {}
                     slot_watched = False
+                    slot_evidence = None
                     slot_len = base_slot_s if (self.start_time and self.end_time) else int(settings.snapshot_interval_minutes) * 60
                     next_start = current_slot_end
                     if self.end_time:
@@ -324,6 +344,14 @@ class StreamEngine:
             schedules_by_id[sid] = schedule
         with self._lock:
             self._schedules = schedules_by_id
+            running = [(sid, w) for sid, w in self._workers.items() if w.running and w.class_id]
+        # A class called off while its worker runs: the worker stops, and
+        # the slot it was on is not written (nothing happened in the room).
+        for sid, w in running:
+            for ent in schedules_by_id.get(sid, []):
+                if str(ent.get("class_id") or "") == w.class_id and ent.get("called_off"):
+                    logger.info("Class %s called off; stopping worker %s", w.class_id, sid)
+                    w.stop()
 
     def schedules(self) -> Dict[int, List[Dict[str, Any]]]:
         with self._lock:
@@ -364,7 +392,7 @@ class StreamEngine:
                             end_dt = _to_utc(datetime.fromisoformat(end_iso))
                         except Exception:
                             continue
-                        if sch.get("is_finalized") or class_id in self._finalized_classes:
+                        if sch.get("is_finalized") or sch.get("called_off") or class_id in self._finalized_classes:
                             continue
                         if start_dt <= now <= end_dt:
                             self._ensure_running(stream_id, class_id, start_dt, end_dt)
@@ -406,7 +434,7 @@ class StreamEngine:
                     end_dt = _to_utc(datetime.fromisoformat(end_iso))
                 except Exception:
                     continue
-                if sch.get("is_finalized"):
+                if sch.get("is_finalized") or sch.get("called_off"):
                     continue
                 grace = timedelta(seconds=self._settings.finalize_grace_seconds)
                 if end_dt + grace <= now:

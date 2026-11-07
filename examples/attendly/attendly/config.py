@@ -88,6 +88,14 @@ class Settings(BaseSettings):
     min_attempt_interval_seconds: int = 120
     min_schedule_duration_minutes: float = 10.0
     attendance_presence_threshold: float = 0.6
+    # Seen first after this many minutes into the class → LATE.
+    late_grace_minutes: int = 10
+    # A class watched in fewer than this share of its slots is flagged and
+    # its automatic marks are UNWATCHED (an outage is not an absence).
+    min_coverage_ratio: float = 0.5
+    # One frame per slot in which somebody was recognised goes to core's
+    # evidence store, for the class review.
+    keep_evidence_frames: bool = True
     planner_enforce_time_window: bool = False
     # Rooms that can hold a class at the same moment (one thread each,
     # one frame per attempt interval: cheap).

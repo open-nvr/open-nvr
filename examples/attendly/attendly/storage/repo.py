@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import zlib
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
@@ -564,6 +564,45 @@ def streams_update(
         return _stream_dict(row)
 
 
+def streams_find_class(class_id: str) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """``(room, schedule entry)`` holding this class id, or Nones."""
+    for it in streams_list(include_deleted=False):
+        for ent in it.get("schedule") or []:
+            if str(ent.get("class_id") or "") == class_id:
+                return it, ent
+    return None, None
+
+
+def streams_set_class_called_off(class_id: str, called_off: bool) -> bool:
+    with session_scope() as db:
+        for row in db.execute(select(Stream).where(Stream.deleted_at.is_(None))).scalars().all():
+            schedule = [dict(e) for e in (row.schedule or [])]
+            hit = False
+            for ent in schedule:
+                if str(ent.get("class_id") or "") == class_id:
+                    ent["called_off"] = bool(called_off)
+                    hit = True
+            if hit:
+                row.schedule = schedule
+                row.updated_at = _now_iso()
+                return True
+    return False
+
+
+def list_scheduled_classes() -> List[Dict[str, Any]]:
+    """Every published class window on every room, latest first."""
+    out: List[Dict[str, Any]] = []
+    for it in streams_list(include_deleted=False):
+        for ent in it.get("schedule") or []:
+            out.append({
+                "class_id": str(ent.get("class_id") or ""), "course": ent.get("course"), "section": ent.get("section"),
+                "start_iso": ent.get("start_iso"), "end_iso": ent.get("end_iso"), "is_finalized": bool(ent.get("is_finalized")),
+                "called_off": bool(ent.get("called_off")), "stream_id": int(it["id"]), "room": it.get("name"),
+            })
+    out.sort(key=lambda e: str(e.get("start_iso") or ""), reverse=True)
+    return out
+
+
 def streams_mark_schedule_finalized(stream_id: int, class_id: str) -> bool:
     with session_scope() as db:
         row = db.get(Stream, int(stream_id))
@@ -624,19 +663,25 @@ SLOT_MARKER = "__slot__"
 UNWATCHED_MARKER = "__unwatched__"
 
 
-def save_snapshot(class_id: str, student_codes: List[str], slot_time: datetime, *, watched: bool = True) -> Dict[str, Any]:
+def save_snapshot(class_id: str, student_codes, slot_time: datetime, *, watched: bool = True,
+                  seen_at: Optional[Dict[str, str]] = None, evidence_path: Optional[str] = None) -> Dict[str, Any]:
     """One slot marker (so an empty slot counts) plus one present row per
     code. ``watched=False`` records a slot in which the camera could not
-    be looked at (no frame, detection down): it counts against nobody."""
+    be looked at (no frame, detection down): it counts against nobody.
+    ``student_codes`` may be a ``{code: first_seen_iso}`` mapping."""
     slot_iso = slot_time.isoformat()
+    if isinstance(student_codes, dict):
+        seen_at = {**(seen_at or {}), **{k: v for k, v in student_codes.items() if v}}
+        student_codes = list(student_codes.keys())
     with session_scope() as db:
         db.add(AttendanceSnapshot(
             class_id=class_id, student_code=SLOT_MARKER if watched else UNWATCHED_MARKER, slot_time=slot_iso,
-            present=False, is_slot_marker=True,
+            present=False, is_slot_marker=True, evidence_path=evidence_path if watched else None,
         ))
         if watched:
             for code in dict.fromkeys(student_codes):
-                db.add(AttendanceSnapshot(class_id=class_id, student_code=code, slot_time=slot_iso, present=True))
+                db.add(AttendanceSnapshot(class_id=class_id, student_code=code, slot_time=slot_iso, present=True,
+                                          seen_at=(seen_at or {}).get(code) or slot_iso))
     return {"ok": True, "count": len(student_codes) if watched else 0, "class_id": class_id, "slot_time": slot_iso,
             "watched": watched}
 
@@ -654,11 +699,48 @@ def snapshot_summary(class_id: str) -> Dict[str, Any]:
     watched = {r.slot_time for r in rows if r.slot_time and r.student_code != UNWATCHED_MARKER}
     unwatched -= watched  # a slot watched by one attempt is watched
     counts: Dict[str, int] = {}
+    first_seen: Dict[str, str] = {}
+    evidence: List[Dict[str, Any]] = []
     for r in rows:
+        if r.student_code == SLOT_MARKER and r.evidence_path:
+            evidence.append({"slot_time": r.slot_time, "path": r.evidence_path})
         if r.student_code and r.student_code not in (SLOT_MARKER, UNWATCHED_MARKER) and r.present:
             counts[r.student_code] = counts.get(r.student_code, 0) + 1
+            at = r.seen_at or r.slot_time
+            if at and (r.student_code not in first_seen or at < first_seen[r.student_code]):
+                first_seen[r.student_code] = at
     slot_times = sorted(watched)
-    return {"total_slots": len(slot_times), "unwatched_slots": len(unwatched), "counts": counts, "slot_times": slot_times}
+    evidence.sort(key=lambda e: e["slot_time"])
+    return {"total_slots": len(slot_times), "unwatched_slots": len(unwatched), "counts": counts, "slot_times": slot_times,
+            "first_seen": first_seen, "evidence": evidence}
+
+
+_CLASS_WINDOW_RE = re.compile(r"-(\d{8})-(\d{4})-(\d{4})$")
+MARK_STATUSES = ("PRESENT", "LATE", "ABSENT", "EXCUSED", "UNWATCHED")
+
+
+def class_window(class_id: str) -> tuple[Optional[datetime], Optional[datetime]]:
+    """The class's start and end (aware, local) from its id, or Nones."""
+    m = _CLASS_WINDOW_RE.search(class_id)
+    if not m:
+        return None, None
+    from ..utils.time import local_tz
+
+    try:
+        day = datetime.strptime(m.group(1), "%Y%m%d")
+        start = day.replace(hour=int(m.group(2)[:2]), minute=int(m.group(2)[2:]), tzinfo=local_tz())
+        end = day.replace(hour=int(m.group(3)[:2]), minute=int(m.group(3)[2:]), tzinfo=local_tz())
+        return start, end
+    except ValueError:
+        return None, None
+
+
+def _aware(iso: str) -> Optional[datetime]:
+    try:
+        dt = datetime.fromisoformat(iso)
+    except Exception:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 def ensure_finalization_marker(class_id: str, total_slots: Optional[int] = None) -> None:
@@ -669,65 +751,168 @@ def ensure_finalization_marker(class_id: str, total_slots: Optional[int] = None)
 
 
 def finalize_attendance(class_id: str) -> Dict[str, Any]:
-    """Presence ratio per student from the snapshots → PRESENT/ABSENT rows,
-    plus ABSENT rows for rostered students never seen. Idempotent."""
+    """Presence ratio per student from the snapshots → marks. Idempotent,
+    and safe to run again:
+
+    * PRESENT when seen in ≥ ``attendance_presence_threshold`` of the
+      watched slots, LATE when the first sighting came after
+      ``late_grace_minutes``, ABSENT otherwise; students of the class never
+      seen get ABSENT rows;
+    * a class watched in fewer than ``min_coverage_ratio`` of its slots (or
+      in none) is flagged ``no_coverage`` and its automatic marks are
+      UNWATCHED — nobody is absent for a camera that was down;
+    * rows set by a person (``source='manual'``) keep their status and
+      note; their counts are refreshed;
+    * the roster is the one the class was first decided for: a student who
+      joined the course afterwards is not added by a re-finalisation.
+    A called-off class is left alone.
+    """
     s = get_settings()
+    with session_scope() as db:
+        meta = db.get(AttendanceClassMeta, class_id)
+        if meta is not None and meta.called_off:
+            return {"ok": False, "class_id": class_id, "reason": "called_off", "written": 0, "total_slots": 0}
+        existing_codes = set(db.execute(
+            select(AttendanceFinal.student_code).where(AttendanceFinal.class_id == class_id)).scalars().all())
     summary = snapshot_summary(class_id)
     total_slots = int(summary["total_slots"])
     unwatched_slots = int(summary.get("unwatched_slots") or 0)
     counts: Dict[str, int] = summary["counts"]
+    first_seen: Dict[str, str] = summary.get("first_seen") or {}
     threshold = float(s.attendance_presence_threshold)
     finalized_at = _now_iso()
+    all_slots = total_slots + unwatched_slots
+    no_coverage = total_slots == 0 or (all_slots > 0 and total_slots / all_slots < float(s.min_coverage_ratio))
 
-    course_code, section = parse_class_id(class_id)
-    roster: set[str] = set()
-    if course_code and section:
-        roster = set(list_student_codes_by_course_section(course_code, section))
-    missing = sorted(c for c in roster if c not in counts) if roster else []
+    if existing_codes:
+        roster = set(existing_codes)
+    else:
+        course_code, section = parse_class_id(class_id)
+        roster = set(list_student_codes_by_course_section(course_code, section)) if course_code and section else set()
+    missing = sorted(c for c in roster if c not in counts)
+
+    start, end = class_window(class_id)
+    late_after = start + timedelta(minutes=int(s.late_grace_minutes)) if start else None
+
+    def auto_status(code: str, slots_present: int, ratio: float) -> str:
+        if no_coverage:
+            return "UNWATCHED"
+        if ratio < threshold:
+            return "ABSENT"
+        seen = _aware(first_seen.get(code, "")) if first_seen.get(code) else None
+        # Late means arrived during the class after the grace; a sighting
+        # recorded after the class (a snapshot taken later by hand) is not.
+        if late_after is not None and seen is not None and seen > late_after and (end is None or seen <= end):
+            return "LATE"
+        return "PRESENT"
 
     written = 0
+    by_status: Dict[str, int] = {}
     with session_scope() as db:
-        def upsert(code: str, slots_present: int, ratio: float, status: str) -> None:
+        def upsert(code: str, slots_present: int, ratio: float) -> None:
             nonlocal written
             row = db.execute(select(AttendanceFinal).where(
                 AttendanceFinal.class_id == class_id, AttendanceFinal.student_code == code)).scalar_one_or_none()
             if row is None:
-                row = AttendanceFinal(class_id=class_id, student_code=code, status=status, finalized_at=finalized_at)
+                row = AttendanceFinal(class_id=class_id, student_code=code, status="ABSENT", finalized_at=finalized_at)
                 db.add(row)
             row.slots_present = int(slots_present)
             row.total_slots = int(total_slots)
             row.ratio = float(ratio)
-            row.status = status
+            row.first_seen = first_seen.get(code)
             row.finalized_at = finalized_at
+            if (row.source or "auto") != "manual":
+                row.status = auto_status(code, slots_present, ratio)
+            by_status[row.status] = by_status.get(row.status, 0) + 1
             written += 1
 
-        # No slot was watched (outage, no worker): nobody is marked absent
-        # for a class the camera never saw.
-        nobody_seen = "UNWATCHED" if total_slots == 0 else "ABSENT"
         for code, slots_present in counts.items():
             ratio = (float(slots_present) / float(total_slots)) if total_slots > 0 else 0.0
-            upsert(code, slots_present, ratio, "PRESENT" if ratio >= threshold else nobody_seen)
+            upsert(code, slots_present, ratio)
         for code in missing:
-            upsert(code, 0, 0.0, nobody_seen)
+            upsert(code, 0, 0.0)
 
         meta = db.get(AttendanceClassMeta, class_id)
         if meta is None:
             db.add(AttendanceClassMeta(class_id=class_id, finalized_at=finalized_at, total_slots=total_slots,
-                                       unwatched_slots=unwatched_slots))
+                                       unwatched_slots=unwatched_slots, no_coverage=no_coverage))
         else:
             meta.finalized_at = finalized_at
             meta.total_slots = total_slots
             meta.unwatched_slots = unwatched_slots
+            meta.no_coverage = no_coverage
 
     return {"ok": True, "class_id": class_id, "written": written, "total_slots": total_slots,
-            "unwatched_slots": unwatched_slots}
+            "unwatched_slots": unwatched_slots, "no_coverage": no_coverage, "by_status": by_status}
+
+
+def set_mark(class_id: str, student_code: str, status: str, note: Optional[str] = None) -> Dict[str, Any]:
+    """A person's correction. ``AUTO`` hands the row back to the cameras
+    (the class is re-finalised); any other status is kept through every
+    re-finalisation."""
+    status = str(status or "").upper()
+    if status == "AUTO":
+        with session_scope() as db:
+            row = db.execute(select(AttendanceFinal).where(
+                AttendanceFinal.class_id == class_id, AttendanceFinal.student_code == student_code)).scalar_one_or_none()
+            if row is not None:
+                row.source = "auto"
+                row.note = (note or "").strip() or None
+        finalize_attendance(class_id)
+    else:
+        if status not in MARK_STATUSES:
+            raise ValueError(f"status must be one of {MARK_STATUSES} or AUTO")
+        with session_scope() as db:
+            row = db.execute(select(AttendanceFinal).where(
+                AttendanceFinal.class_id == class_id, AttendanceFinal.student_code == student_code)).scalar_one_or_none()
+            if row is None:
+                row = AttendanceFinal(class_id=class_id, student_code=student_code, slots_present=0, total_slots=0,
+                                      ratio=0.0, status=status, finalized_at=_now_iso())
+                db.add(row)
+            row.status = status
+            row.source = "manual"
+            row.note = (note or "").strip() or None
+            row.finalized_at = _now_iso()
+    with session_scope() as db:
+        row = db.execute(select(AttendanceFinal).where(
+            AttendanceFinal.class_id == class_id, AttendanceFinal.student_code == student_code)).scalar_one_or_none()
+        if row is None:
+            raise KeyError("no mark for this student in this class")
+        return _final_dict(row)
+
+
+def class_meta(class_id: str) -> Optional[Dict[str, Any]]:
+    with session_scope() as db:
+        m = db.get(AttendanceClassMeta, class_id)
+        if m is None:
+            return None
+        return {"class_id": m.class_id, "finalized_at": m.finalized_at, "total_slots": int(m.total_slots or 0),
+                "unwatched_slots": int(m.unwatched_slots or 0), "no_coverage": bool(m.no_coverage),
+                "called_off": bool(m.called_off)}
+
+
+def set_class_called_off(class_id: str, called_off: bool) -> Dict[str, Any]:
+    """A holiday, a class that did not happen. The marks (if any) stay,
+    hidden behind the flag, for a restore."""
+    with session_scope() as db:
+        m = db.get(AttendanceClassMeta, class_id)
+        if m is None:
+            m = AttendanceClassMeta(class_id=class_id, finalized_at=_now_iso(), total_slots=0)
+            db.add(m)
+        m.called_off = bool(called_off)
+    return class_meta(class_id) or {}
+
+
+def class_evidence(class_id: str) -> List[Dict[str, Any]]:
+    return list(snapshot_summary(class_id).get("evidence") or [])
 
 
 def _final_dict(r: AttendanceFinal) -> Dict[str, Any]:
     return {
         "id": int(r.id), "class_id": r.class_id, "student_code": r.student_code,
         "slots_present": int(r.slots_present), "total_slots": int(r.total_slots), "ratio": float(r.ratio),
-        "status": r.status, "finalized_at": r.finalized_at,
+        "status": r.status, "source": r.source or "auto", "note": r.note, "first_seen": r.first_seen,
+        "finalized_at": r.finalized_at,
     }
 
 
@@ -745,7 +930,8 @@ def get_attendance_by_class(class_id: str) -> List[Dict[str, Any]]:
         roster = list_student_codes_by_course_section(course_code, section) if course_code and section else []
         items = [{
             "id": _stable_id(f"{class_id}:{code}"), "class_id": class_id, "student_code": code,
-            "slots_present": 0, "total_slots": meta_total, "ratio": 0.0, "status": "ABSENT", "finalized_at": meta_at,
+            "slots_present": 0, "total_slots": meta_total, "ratio": 0.0, "status": "ABSENT", "source": "auto",
+            "note": None, "first_seen": None, "finalized_at": meta_at,
         } for code in roster]
     items.sort(key=lambda x: x.get("student_code", ""))
     return items
