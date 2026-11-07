@@ -796,6 +796,39 @@ async def check_face(frame: UploadFile = File(...), db: Session = Depends(get_db
     }
 
 
+@router.post("/people/{person_id}/faces/duplicate")
+async def check_duplicate(person_id: int, photo: UploadFile = File(...),
+                          db: Session = Depends(get_db), _user: User = Depends(_enroll)):
+    """Is this photo of somebody else already enrolled? The webcam asks
+    after each photo it takes, so a person registered twice is told at the
+    first photo instead of after the whole set is refused. The same answer
+    enrolling the photo would give (and to the same permission); nothing
+    is kept or enrolled."""
+    p = _person_or_404(db, person_id)
+    uuid = p.uuid
+    data = await photo.read()
+    if not data or len(data) > MAX_PHOTO_BYTES:
+        raise HTTPException(status_code=422, detail=(
+            f"Send one photo of up to {MAX_PHOTO_BYTES // (1024 * 1024)} MB"))
+    release(db)
+    try:
+        found = await attendance_faces.identify(data)
+    except attendance_faces.FaceGalleryError as e:
+        raise HTTPException(status_code=e.status, detail=e.message) from None
+    dup = attendance_faces.duplicate_of(found, uuid)
+    if dup is None:
+        return {"duplicate": None}
+    other = db.query(AttendancePerson).filter(
+        AttendancePerson.uuid == dup["person_uuid"],
+        AttendancePerson.deleted_at.is_(None)).first()
+    if other is None:
+        return {"duplicate": {"id": None, "display_name": None, "external_ref": None,
+                              "email": None, "similarity": round(dup["similarity"], 4)}}
+    return {"duplicate": {"id": other.id, "display_name": other.display_name,
+                          "external_ref": other.external_ref, "email": other.email,
+                          "similarity": round(dup["similarity"], 4)}}
+
+
 @router.get("/people/{person_id}/photo")
 async def get_photo(person_id: int, db: Session = Depends(get_db),
                     _user: User = Depends(_view)):

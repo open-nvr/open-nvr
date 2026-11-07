@@ -11,7 +11,7 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { Camera, CheckCircle2, ImagePlus, RotateCcw, Search, Trash2, UserPlus, Video, XCircle } from 'lucide-react'
 import { errorText } from '../api'
 import { useAuth } from '../auth'
-import { api, type EnrolResult, type FaceCheck, type Person } from '../attendance'
+import { api, type Duplicate, type EnrolResult, type FaceCheck, type Person } from '../attendance'
 import { Avatar, cutPicture, pictureChanged, shrinkPhoto } from '../components/faces'
 import { useFeedback } from '../components/feedback'
 import { Badge, Button, Card, Empty, ErrorNote, Field, Loading, Modal, PageTitle, inputClass } from '../components/ui'
@@ -355,6 +355,7 @@ function FaceStep({ person, onChanged, onDone }: { person: Person; onChanged: ()
               <PhotoPicker onAdd={add} room={MAX_PHOTOS - shots.length} />
             ) : (
               <WebcamCapture
+                person={person}
                 onAdd={add}
                 room={MAX_PHOTOS - shots.length}
                 taken={shots.map((s) => s.label)}
@@ -410,10 +411,43 @@ function FaceStep({ person, onChanged, onDone }: { person: Person; onChanged: ()
   )
 }
 
+/** Who the refused face belongs to, said with what tells two people of
+ * the same name apart: the ID and e-mail. */
+function DuplicateNote({ id, self }: { id: number; self: Person }) {
+  const other = useLoad(() => api.person(id), [id])
+  const p = other.data
+  const name = p ? p.display_name : `person ${id}`
+  const details = p ? [p.external_ref && `ID ${p.external_ref}`, p.email].filter(Boolean).join(', ') : ''
+  const sameName = p && p.display_name.trim().toLowerCase() === self.display_name.trim().toLowerCase()
+  return (
+    <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+      <p>
+        <strong>This face is already enrolled</strong> as{' '}
+        <strong>
+          {name}
+          {details && ` (${details})`}
+        </strong>
+        {sameName ? ', another record with the same name' : ''}. A face can belong to one person only, so no photo was enrolled.
+      </p>
+      <p className="mt-1">
+        If it is the same person, use that record and remove this one. If it is not, check the photos are of {self.display_name}.
+      </p>
+      <div className="mt-2">
+        <Link className="font-medium text-indigo-700 underline" to={`/register?person=${id}`}>
+          Open {name}
+          {p?.external_ref ? ` (ID ${p.external_ref})` : ''} →
+        </Link>
+      </div>
+    </div>
+  )
+}
+
 function EnrolOutcome({ shots, r }: { shots: Shot[]; r: EnrolResult }) {
+  const dup = r.results.find((x) => x.duplicate_of)?.duplicate_of ?? null
   return (
     <div className="mt-6 border-t pt-4">
       <div className="mb-2 text-sm font-medium text-gray-700">Last enrolment</div>
+      {dup && <DuplicateNote id={dup} self={r.person} />}
       <ul className="space-y-2">
         {r.results.map((x) => {
           const shot = shots[x.index]
@@ -423,7 +457,7 @@ function EnrolOutcome({ shots, r }: { shots: Shot[]; r: EnrolResult }) {
               {x.ok ? <CheckCircle2 className="h-4 w-4 text-green-600" /> : <XCircle className="h-4 w-4 text-red-600" />}
               <span className={x.ok ? 'text-gray-700' : 'text-red-700'}>
                 {shot?.label ?? `Photo ${x.index + 1}`}: {x.ok ? 'enrolled' : x.error ?? 'refused'}
-                {x.duplicate_of ? (
+                {x.duplicate_of && x.duplicate_of !== dup ? (
                   <>
                     {' '}
                     — <Link className="underline" to={`/register?person=${x.duplicate_of}`}>see that person</Link>
@@ -643,13 +677,74 @@ function doneSound() {
   }
 }
 
+// Spoken guidance, with the browser's own speech (no files, no server):
+// the person in front of the camera is often not the one reading the
+// screen. A voice installed on the computer is preferred, so the words do
+// not leave it; a browser that has only an online voice uses that (the
+// words are these fixed instructions, nothing about the person).
+const speech = typeof window !== 'undefined' && 'speechSynthesis' in window ? window.speechSynthesis : null
+let voice: SpeechSynthesisVoice | null = null
+let lastSaid = ''
+let lastSaidAt = 0
+/** The same correction is not repeated sooner than this. */
+const REPEAT_MS = 6000
+
+function pickVoice(): SpeechSynthesisVoice | null {
+  if (!speech) return null
+  const all = speech.getVoices()
+  const lang = (document.documentElement.lang || navigator.language || 'en').toLowerCase()
+  const base = lang.split('-')[0]
+  const score = (v: SpeechSynthesisVoice) =>
+    (v.lang.toLowerCase() === lang ? 4 : v.lang.toLowerCase().startsWith(base) ? 2 : 0) + (v.localService ? 1 : 0)
+  return all.length ? all.reduce((best, v) => (score(v) > score(best) ? v : best)) : null
+}
+speech?.addEventListener?.('voiceschanged', () => {
+  voice = pickVoice()
+})
+
+/** Say ``text``. An instruction (``now``) cuts off whatever is being said;
+ * a correction waits its turn and is dropped if something is still being
+ * said, or if it was just said: the checks come about once a second, far
+ * faster than anyone can be talked to. */
+function say(text: string, now = false) {
+  if (!speech) return
+  const words = text.replace(/[…!]/g, '').trim()
+  if (!words) return
+  if (now) speech.cancel()
+  else if (speech.speaking || speech.pending || (words === lastSaid && Date.now() - lastSaidAt < REPEAT_MS)) return
+  voice ??= pickVoice()
+  const u = new SpeechSynthesisUtterance(words)
+  if (voice) {
+    u.voice = voice
+    u.lang = voice.lang
+  }
+  u.rate = 0.95
+  lastSaid = words
+  lastSaidAt = Date.now()
+  speech.speak(u)
+}
+
+function hush() {
+  speech?.cancel()
+  lastSaid = ''
+}
+
+/** "Suraj (ID 1001, suraj@example.com)": enough to tell two records of
+ * the same name apart. */
+function dupName(d: Duplicate): string {
+  const details = [d.external_ref && `ID ${d.external_ref}`, d.email].filter(Boolean).join(', ')
+  return `${d.display_name ?? 'someone else'}${details ? ` (${details})` : ''}`
+}
+
 function WebcamCapture({
+  person,
   onAdd,
   room,
   taken,
   onRestart,
   onReview,
 }: {
+  person: Person
   onAdd: (s: Shot[]) => void
   room: number
   /** Labels of the photos waiting to be enrolled: an angle whose photo
@@ -676,8 +771,14 @@ function WebcamCapture({
   const [sound, setSound] = useState(true)
   const soundRef = useRef(sound)
   soundRef.current = sound
+  const [voiceOn, setVoiceOn] = useState(!!speech)
+  const voiceRef = useRef(voiceOn)
+  voiceRef.current = voiceOn
   const [hint, setHint] = useState<Hint | null>(null)
   const [nextIn, setNextIn] = useState<number | null>(null)
+  /** Somebody else already enrolled with this face, found in a photo just
+   * taken: taking the rest would only have the whole set refused. */
+  const [dup, setDup] = useState<Duplicate | null>(null)
   const secure = typeof window !== 'undefined' && window.isSecureContext && !!navigator.mediaDevices?.getUserMedia
 
   const done = new Set(ANGLES.filter((a) => taken.includes(a.text)).map((a) => a.key))
@@ -693,7 +794,13 @@ function WebcamCapture({
     stream.current?.getTracks().forEach((t) => t.stop())
     stream.current = null
   }
-  useEffect(() => stop, [])
+  useEffect(
+    () => () => {
+      stop()
+      hush()
+    },
+    [],
+  )
 
   const start = async () => {
     setState('starting')
@@ -759,6 +866,23 @@ function WebcamCapture({
     if (a && taken) poses.current.set(a.key, taken)
     const label = a ? a.text : `Extra photo ${new Date().toLocaleTimeString()}`
     onAdd([{ blob: shot.blob, url: URL.createObjectURL(shot.blob), label }])
+    // Asked of each photo while the next pose is being taken (~0.5 s, well
+    // inside the time to pose); a failure here is not worth stopping for:
+    // enrolling checks again.
+    const personId = person.id
+    api
+      .checkDuplicate(personId, shot.blob)
+      .then(({ duplicate }) => {
+        if (!duplicate) return
+        setDup((d) => d ?? duplicate)
+        if (voiceRef.current) {
+          const who = duplicate.display_name
+            ? `${duplicate.display_name}${duplicate.external_ref ? `, ID ${duplicate.external_ref}` : ''}`
+            : 'someone else'
+          window.setTimeout(() => say(`Please stop. This face is already registered as ${who}.`, true), 400)
+        }
+      })
+      .catch(() => {})
     setFlash(true)
     window.setTimeout(() => setFlash(false), 150)
     if (soundRef.current) {
@@ -766,7 +890,16 @@ function WebcamCapture({
       // The last angle: a chime after the shutter says the set is done.
       if (a && ANGLES.every((x) => x === a || doneRef.current.has(x.key))) window.setTimeout(doneSound, 350)
     }
+    if (voiceRef.current && a && ANGLES.every((x) => x === a || doneRef.current.has(x.key))) {
+      window.setTimeout(() => say('All done. Thank you.', true), 700)
+    }
   }
+
+  // Taking photos by hand: the pose is said when it changes; the person
+  // holds it for whoever presses Capture.
+  useEffect(() => {
+    if (state === 'live' && !auto && angle && voiceRef.current) say(angle.text, true)
+  }, [state, auto, angle?.key]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // A 3-2-1 so the person can hold the pose without anyone at the keyboard.
   useEffect(() => {
@@ -784,7 +917,7 @@ function WebcamCapture({
   // to change, and take the photo once one face has been well placed and
   // turned as asked for STEADY checks in a row. One check in flight at a
   // time. Restarts for each angle, so a deleted photo is taken again.
-  const running = state === 'live' && auto && room > 0 && angle !== null
+  const running = state === 'live' && auto && room > 0 && angle !== null && dup === null
   const key = angle?.key ?? null
   useEffect(() => {
     if (!running || key === null) {
@@ -793,6 +926,13 @@ function WebcamCapture({
     }
     let cancelled = false
     ;(async () => {
+      // The pose is said at the start, so it is heard during the time to
+      // take it. After a photo, the shutter goes first.
+      const a0 = angleRef.current
+      if (a0 && voiceRef.current) {
+        if (justTook.current) window.setTimeout(() => !cancelled && voiceRef.current && say(a0.text, true), 400)
+        else say(a0.text, true)
+      }
       if (justTook.current) {
         justTook.current = false
         for (let left = NEXT_POSE_MS; left > 0 && !cancelled; left -= 1000) {
@@ -802,6 +942,7 @@ function WebcamCapture({
         setNextIn(null)
       }
       let steady = 0
+      let lastFix = ''
       while (!cancelled) {
         const frame = await grab(CHECK_WIDTH, 0.8)
         if (!frame) {
@@ -826,6 +967,10 @@ function WebcamCapture({
         if (cancelled) return
         steady = verdict.tone === 'good' ? steady + 1 : 0
         setHint(verdict)
+        // A correction is said only once it has been seen twice running: a
+        // single odd frame is not worth a word.
+        if (voiceRef.current && verdict.tone === 'fix' && verdict.text === lastFix) say(verdict.text)
+        lastFix = verdict.text
         if (steady < STEADY) {
           await sleep(400)
           continue
@@ -876,7 +1021,9 @@ function WebcamCapture({
               </div>
               <div className="absolute inset-x-0 top-0 bg-gradient-to-b from-black/70 to-transparent p-2 text-center text-white sm:p-3">
                 <div className="text-sm font-semibold sm:text-base">
-                  {!angle
+                  {dup
+                    ? 'Already registered'
+                    : !angle
                     ? 'All angles taken'
                     : waiting
                       ? `Next: ${angle.text.toLowerCase()}… ${nextIn}`
@@ -897,6 +1044,43 @@ function WebcamCapture({
                 <div className="absolute inset-0 flex items-center justify-center text-7xl font-bold text-white drop-shadow">{countdown}</div>
               )}
               {flash && <div className="absolute inset-0 bg-white/70" />}
+              {dup && (
+                <div className="absolute inset-0 flex items-center justify-center bg-black/55 p-4">
+                  <div role="alert" className="max-w-md rounded-xl bg-white p-4 text-center text-sm text-gray-800 shadow-lg">
+                    <XCircle className="mx-auto mb-2 h-8 w-8 text-red-600" />
+                    <div className="text-base font-semibold text-gray-900">This face is already registered</div>
+                    <div className="mt-1">
+                      as <strong>{dupName(dup)}</strong>
+                      {dup.display_name && dup.display_name.trim().toLowerCase() === person.display_name.trim().toLowerCase()
+                        ? ', another record with the same name'
+                        : ''}
+                      . A face can belong to one person only, so these photos cannot be enrolled for {person.display_name}.
+                    </div>
+                    <div className="mt-3 flex flex-wrap justify-center gap-2">
+                      {dup.id !== null && (
+                        <Link
+                          to={`/register?person=${dup.id}`}
+                          className="rounded-lg bg-indigo-600 px-3 py-1.5 font-medium text-white hover:bg-indigo-700"
+                        >
+                          Open {dup.display_name}
+                          {dup.external_ref ? ` (ID ${dup.external_ref})` : ''}
+                        </Link>
+                      )}
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => {
+                          hush()
+                          setDup(null)
+                          onRestart()
+                        }}
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" /> Start over with someone else
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              )}
             </>
           )}
           {state !== 'live' && (
@@ -946,6 +1130,22 @@ function WebcamCapture({
                   />
                   Sound
                 </label>
+                {speech && (
+                  <label className="flex items-center gap-1.5 text-sm text-gray-700" title="Say each step and correction out loud">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 accent-indigo-600"
+                      checked={voiceOn}
+                      onChange={(e) => {
+                        setVoiceOn(e.target.checked)
+                        if (e.target.checked) {
+                          if (angle) say(angle.text, true)
+                        } else hush()
+                      }}
+                    />
+                    Voice
+                  </label>
+                )}
               </div>
               <div className="flex gap-2">
                 <Button variant="ghost" size="sm" onClick={onRestart} disabled={!done.size}>

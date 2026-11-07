@@ -127,6 +127,32 @@ def test_a_face_already_enrolled_as_someone_else_is_refused(env, gallery):  # no
     assert _enrol(env, asha, b"asha-front").json()["enrolled"] == 1
 
 
+def test_a_photo_can_be_checked_for_a_duplicate_before_enrolling(env, gallery):  # noqa: F811
+    asha = _person(env)
+    bilal = _person(env, name="Bilal", ref="R2")
+    _enrol(env, asha, b"asha-front")
+
+    def check(person, data):
+        return env.client.post(f"{URL}/people/{person['id']}/faces/duplicate", headers=env.jwt("admin"),
+                               files={"photo": ("p.jpg", data, "image/jpeg")})
+
+    r = check(bilal, b"asha-front")
+    assert r.status_code == 200, r.text
+    dup = r.json()["duplicate"]
+    assert dup["id"] == asha["id"] and dup["display_name"] == "Asha" and dup["external_ref"] == "R1"
+    # Her own face, a stranger's and a photo with no face: no duplicate.
+    assert check(asha, b"asha-front").json() == {"duplicate": None}
+    assert check(bilal, b"stranger").json() == {"duplicate": None}
+    assert check(bilal, b"noface").json() == {"duplicate": None}
+    # Nothing was enrolled by asking.
+    assert bilal["uuid"] not in gallery.samples
+    assert check(bilal, b"").status_code == 422
+    # Who is enrolled is not for a viewer.
+    r = env.client.post(f"{URL}/people/{bilal['id']}/faces/duplicate", headers=env.jwt("vera"),
+                        files={"photo": ("p.jpg", b"asha-front", "image/jpeg")})
+    assert r.status_code == 403
+
+
 def test_photo_count_is_bounded(env, gallery):  # noqa: F811
     p = _person(env)
     assert _enrol(env, p, *[b"x%d" % i for i in range(11)]).status_code == 422

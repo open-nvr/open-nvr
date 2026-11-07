@@ -148,6 +148,16 @@ export type Report = {
   }[]
 }
 
+/** Somebody else already enrolled with this face. ``id`` is null when the
+ * face service knows them but OpenNVR no longer does. */
+export type Duplicate = {
+  id: number | null
+  display_name: string | null
+  external_ref: string | null
+  email: string | null
+  similarity: number
+}
+
 export type EnrolResult = {
   person: Person
   enrolled: number
@@ -206,6 +216,13 @@ export const api = {
   enrolledPhoto: (id: number, index: number) => fetchBlob(`${A}/people/${id}/faces/${index}/image`),
   forgetFace: (id: number, index: number) => call<Person>('DELETE', `${A}/people/${id}/faces/${index}`),
   setPhoto: (id: number, jpeg: Blob) => call<Person>('PUT', `${A}/people/${id}/photo`, { raw: jpeg }),
+  /** Whether a photo is of somebody else already enrolled; nothing is
+   * enrolled by asking. */
+  checkDuplicate: (id: number, photo: Blob) => {
+    const form = new FormData()
+    form.append('photo', photo, 'photo.jpg')
+    return call<{ duplicate: Duplicate | null }>('POST', `${A}/people/${id}/faces/duplicate`, { form })
+  },
   checkFace: (frame: Blob) => {
     const form = new FormData()
     form.append('frame', frame, 'frame.jpg')
