@@ -51,6 +51,47 @@ def crop_boxes(frame, faces: List[dict]) -> List[tuple]:
     return out
 
 
+def _identify_entries(result: dict, *, margin: float, largest_only: bool) -> List[dict]:
+    """``face_identify``'s faces as this module's entries. A hit whose lead
+    over the runner-up is under ``margin`` is kept as a face but not as a
+    person: two look-alikes must not swap marks silently."""
+    out: List[dict] = []
+    for f in result.get("faces") or []:
+        if not isinstance(f, dict):
+            continue
+        bbox = f.get("bbox") or []
+        if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+            continue
+        x1, y1, x2, y2 = [int(v) for v in bbox[:4]]
+        entry = {"code": None, "similarity": float(f.get("similarity") or 0.0), "area": max(0, x2 - x1) * max(0, y2 - y1),
+                 "bbox_px": [x1, y1, x2, y2], "landmarks": f.get("landmarks"), "ambiguous": False}
+        if f.get("recognized") and f.get("person_id"):
+            second = f.get("second_similarity")
+            if isinstance(second, (int, float)) and entry["similarity"] - float(second) < margin:
+                entry["ambiguous"] = True
+            else:
+                entry["code"] = str(f["person_id"])
+        out.append(entry)
+    if largest_only:
+        out.sort(key=lambda e: -e["area"])
+        out = out[:1]
+    return out
+
+
+def identify_or_none(engine, jpeg: bytes, *, threshold: float, tag: str) -> Optional[dict]:
+    """The adapter's ``face_identify`` answer, or None when it has no such
+    task (the caller then detects and crops). An outage raises
+    :class:`RecognitionUnavailable`, as detection would."""
+    fn = getattr(engine, "identify_faces", None)
+    if fn is None:
+        return None
+    try:
+        return fn(jpeg, threshold=threshold)
+    except Exception as exc:
+        logger.warning("[%s] face_identify failed: %s", tag, exc)
+        raise RecognitionUnavailable(str(exc)) from exc
+
+
 def recognize_faces_in_frame(
     engine, frame, *, threshold: Optional[float] = None, tag: str = "frame", largest_only: bool = False,
 ) -> List[dict]:
@@ -68,11 +109,17 @@ def recognize_faces_in_frame(
     ok_full, full_buf = cv2.imencode(".jpg", frame)
     if not ok_full:
         return []
+    jpeg = full_buf.tobytes()
+    identified = identify_or_none(engine, jpeg, threshold=thr, tag=tag)
+    if identified is not None:
+        entries = _identify_entries(identified, margin=settings.identify_margin, largest_only=largest_only)
+        logger.info("[%s] face_identify: %d faces, %d recognised", tag, len(entries), sum(1 for e in entries if e["code"]))
+        return entries
     try:
-        faces = engine.detect_faces(full_buf.tobytes())
+        faces = engine.detect_faces(jpeg)
     except Exception as exc:
         logger.warning("[%s] face detection failed: %s", tag, exc)
-        return []
+        raise RecognitionUnavailable(str(exc)) from exc
     if not faces:
         return []
     boxes = crop_boxes(frame, faces)
@@ -112,8 +159,22 @@ def recognize_codes_in_frame(
     ok_full, full_buf = cv2.imencode(".jpg", frame)
     if not ok_full:
         return []
+    jpeg = full_buf.tobytes()
+    identified = identify_or_none(engine, jpeg, threshold=thr, tag=tag)
+    if identified is not None:
+        found = []
+        for e in _identify_entries(identified, margin=settings.identify_margin, largest_only=False):
+            code = e["code"]
+            if not code:
+                continue
+            student = get_student(code)
+            if student is None or not student_enrolled_in(student, course_code, section):
+                continue
+            found.append(code)
+        logger.info("[%s] face_identify: %d faces, %d of this class", tag, len(identified.get("faces") or []), len(found))
+        return list(dict.fromkeys(found))
     try:
-        faces = engine.detect_faces(full_buf.tobytes())
+        faces = engine.detect_faces(jpeg)
     except Exception as exc:
         logger.warning("[%s] face detection failed: %s", tag, exc)
         raise RecognitionUnavailable(str(exc)) from exc

@@ -44,6 +44,12 @@ class Settings(BaseSettings):
     recognition_threshold: float = 0.5
     duplicate_threshold: float = 0.65
     top_k: int = 5
+    # face_identify (ai-adapter#81): one call per frame when the adapter
+    # answers it; detect-then-crop otherwise. A match whose lead over the
+    # runner-up is under the margin is ambiguous, not a hit.
+    identify_margin: float = 0.05
+    min_face_px: int = 20
+    max_faces: int = 60
     platform_timeout_seconds: float = 15.0
 
     # ── Serving ─────────────────────────────────────────────────────

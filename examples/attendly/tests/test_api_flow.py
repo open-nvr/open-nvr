@@ -56,7 +56,7 @@ def test_register_new_student_enrols_then_persists(client, env):
     assert body["student"]["student_code"] == "AT00001" and body["student"]["course_code"] == "MBA-1"
     assert body["num_faces_registered"] == 2 and body["angles"] == ["front", "left"]
     assert body["validation_errors"] and "Image 3" in body["validation_errors"][0]
-    assert eng.enrolled["AT00001"]["samples"] == 2 and eng.enrolled["AT00001"]["name"] == "Asha Rao"
+    assert eng.enrolled["AT00001"]["samples"] == 2 and eng.enrolled["AT00001"]["name"] == ""  # no name reaches the adapter
     # the course was auto-created; the email is taken
     assert client.get("/courses/MBA-1/sections").json()["sections"] == ["A"]
     r = client.post("/students/register_new", data={"full_name": "Dup", "course_code": "MBA-1", "section": "A", "email": "asha@example.com"},
@@ -85,7 +85,7 @@ def test_register_more_faces_for_existing_student(client, env):
     repo.put_student("AT00001", "Asha", None, None, course_code="MBA-1", section="A")
     r = client.post("/students/AT00001/register", files=[("images", _upload("a.jpg", jpeg_bytes(seed=7)))])
     assert r.status_code == 200 and r.json()["num_faces_registered"] == 1
-    assert env["engine"].enrolled["AT00001"]["name"] == "Asha"
+    assert env["engine"].enrolled["AT00001"]["name"] == ""
     assert client.post("/students/NOPE/register", files=[("images", _upload("a.jpg", jpeg_bytes()))]).status_code == 404
     v = client.get("/video_registration/verify_registration/AT00001").json()
     assert v["registered"] is True and v["face_count"] == 1

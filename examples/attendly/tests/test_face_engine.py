@@ -115,3 +115,76 @@ def test_delete_faces_groups_samples_and_whole_persons(engine):
     assert [c.request.url.path for c in sample_del.calls] == ["/faces/AT00001/samples/2", "/faces/AT00001/samples/0"]
     assert person_del.called
     assert {d["FaceId"] for d in out["DeletedFaces"]} == {"AT00001#0", "AT00001#2", "AT00002#0", "AT00002#1"}
+
+
+# ── face_identify (ai-adapter#81): one call per frame, with a fallback ──
+
+
+def _identify_result(*faces):
+    return {"task": "face_identify", "faces": list(faces), "recognized_count": sum(1 for f in faces if f.get("recognized"))}
+
+
+def test_identify_path_recognises_every_face_and_honours_the_margin(env):
+    from attendly.services.recognize import recognize_codes_in_frame, recognize_faces_in_frame
+    from attendly.storage.repo import put_student
+    import numpy as np
+
+    put_student("AT00001", "Asha", None, None, course_code="MBA-1", section="A")
+    put_student("AT00002", "Bilal", None, None, course_code="MBA-1", section="A")
+    put_student("AT00003", "Chen", None, None, course_code="ECO-2", section="B")
+    eng = env["engine"]
+    eng.identify = _identify_result(
+        {"bbox": [10, 10, 110, 110], "recognized": True, "person_id": "AT00001", "similarity": 0.81, "second_similarity": 0.40},
+        {"bbox": [200, 10, 260, 70], "recognized": True, "person_id": "AT00002", "similarity": 0.62, "second_similarity": 0.60},
+        {"bbox": [300, 10, 340, 50], "recognized": True, "person_id": "AT00003", "similarity": 0.70, "second_similarity": 0.1},
+        {"bbox": [400, 10, 440, 50], "recognized": False, "person_id": None, "similarity": 0.3, "second_similarity": 0.2},
+    )
+    frame = np.zeros((200, 500, 3), dtype=np.uint8)
+    faces = recognize_faces_in_frame(eng, frame)
+    assert [f["code"] for f in faces] == ["AT00001", None, "AT00003", None]
+    assert faces[1]["ambiguous"] is True and faces[1]["similarity"] == 0.62  # 0.02 lead < margin
+    assert "detect" not in eng.calls and eng.calls.count("identify") == 1
+    # the class filter still applies, the largest face wins at a gate
+    assert recognize_codes_in_frame(eng, frame, course_code="MBA-1", section="A") == ["AT00001"]
+    assert recognize_faces_in_frame(eng, frame, largest_only=True)[0]["code"] == "AT00001"
+
+
+def test_identify_absent_falls_back_to_detect_then_crop(env):
+    from attendly.services.recognize import recognize_codes_in_frame
+    from attendly.storage.repo import put_student
+    import cv2
+    import numpy as np
+
+    put_student("AT00001", "Asha", None, None, course_code="MBA-1", section="A")
+    eng = env["engine"]
+    eng.identify = None  # the adapter has no such task
+    frame = np.full((200, 300, 3), 100, dtype=np.uint8)
+    eng.faces_in[cv2.imencode(".jpg", frame)[1].tobytes()] = [[10, 10, 60, 60]]
+    eng.search_faces = lambda *a, **k: [("AT00001", 0.9)]
+    assert recognize_codes_in_frame(eng, frame) == ["AT00001"]
+    assert eng.identify_calls and "detect" in eng.calls
+
+
+@respx.mock
+def test_real_engine_marks_identify_unsupported_on_a_4xx_and_retries_later(monkeypatch):
+    from attendly.face.engine import FaceEngine, FaceServiceError
+
+    eng = FaceEngine(kaic_url="http://kaic.test", kaic_api_key="k", adapter_name="insightface",
+                     faces_url="http://faces.test", faces_token="t", category="attendly_student")
+    route = respx.post("http://kaic.test/api/v1/infer/insightface").mock(
+        return_value=httpx.Response(400, json={"detail": "unknown task 'face_identify'"}))
+    assert eng.identify_faces(b"jpeg") is None and eng.identify_supported is False
+    assert eng.identify_faces(b"jpeg") is None and route.call_count == 1  # remembered, not re-asked
+    eng._identify_checked_at -= FaceEngine.IDENTIFY_RECHECK_SECONDS + 1
+    route.mock(return_value=httpx.Response(200, json={"result": {"task": "face_identify", "faces": [
+        {"bbox": [1, 2, 30, 40], "recognized": True, "person_id": "AT00001", "similarity": 0.9, "second_similarity": 0.3}]}}))
+    res = eng.identify_faces(b"jpeg", threshold=0.6)
+    assert res["faces"][0]["person_id"] == "AT00001" and eng.identify_supported is True
+    import json
+
+    body = json.loads(route.calls[-1].request.content)
+    assert body["task"] == "face_identify" and body["threshold"] == 0.6 and body["min_face_px"] == 20
+    route.mock(return_value=httpx.Response(503, text="adapter busy"))
+    with pytest.raises(FaceServiceError):
+        eng.identify_faces(b"jpeg")
+    assert eng.identify_supported is True  # an outage is not "unsupported"

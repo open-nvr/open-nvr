@@ -75,7 +75,7 @@ def test_staff_and_departments_api(client, env):
     body = r.json()
     code = body["staff"]["staff_code"]
     assert code == "ST00001" and body["num_faces_registered"] == 2 and body["staff"]["department_name"] == "Physics"
-    assert eng.enrolled[code]["category"] == "attendly_staff" and eng.enrolled[code]["name"] == "Dr Rao"
+    assert eng.enrolled[code]["category"] == "attendly_staff" and eng.enrolled[code]["name"] == ""
     # students' registry does not see staff
     assert client.get("/registry/collection/info").json()["person_count"] == 0
     assert client.get(f"/staff/{code}/faces").json()["total_faces"] == 2

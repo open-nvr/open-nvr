@@ -157,10 +157,13 @@ def check_at_gate(gate_id: int, image: UploadFile = File(...), actuate: bool = T
     frame = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
     if frame is None:
         raise HTTPException(status_code=400, detail="Not an image")
-    from ..services.recognize import recognize_faces_in_frame
+    from ..services.recognize import RecognitionUnavailable, recognize_faces_in_frame
 
-    faces = recognize_faces_in_frame(FaceEngine.get_shared(), frame, threshold=get_settings().effective_gate_threshold,
-                                     tag=f"check{gate_id}", largest_only=True)
+    try:
+        faces = recognize_faces_in_frame(FaceEngine.get_shared(), frame, threshold=get_settings().effective_gate_threshold,
+                                         tag=f"check{gate_id}", largest_only=True)
+    except RecognitionUnavailable as exc:
+        raise HTTPException(status_code=502, detail=f"Face recognition unavailable: {exc}")
     if not faces:
         return {"gate_id": gate_id, "decision": "deny", "reason": "no_face", "person_code": None, "person_name": None}
     face = faces[0]

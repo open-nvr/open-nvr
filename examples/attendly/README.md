@@ -135,7 +135,11 @@ departments and re-finalises classes.
 | `OPENNVR_URL` | `http://opennvr-core:8000` | core (cameras, snapshots, login, catalog) |
 | `KAIC_URL` | `http://opennvr-core:8100` | KAI-C (`face_detection`, `face_recognition`) |
 | `OPENNVR_INTERNAL_API_KEY` | — | the site key, as the overlay passes it |
-| `ATTENDLY_FACES_URL` | `http://insightface-adapter:9005` | the adapter's `/faces/*` (enrol, list, delete) |
+| `ATTENDLY_RECOGNITION_ADAPTER` | `insightface_attendly` (overlay) | the KAI-C adapter name; the overlay runs Attendly's own InsightFace instance |
+| `ATTENDLY_FACES_URL` | `http://insightface-attendly-adapter:9005` | the adapter's `/faces/*` (enrol, list, delete) |
+| `ATTENDLY_DET_SIZE` | `1280` | the adapter's detector input (back rows in a 1080p frame); an adapter older than ai-adapter#81 ignores it |
+| `ATTENDLY_IDENTIFY_MARGIN` | `0.05` | with `face_identify`, a match this close to the runner-up is ambiguous, not a hit |
+| `ATTENDLY_MIN_FACE_PX` / `ATTENDLY_MAX_FACES` | `20` / `60` | faces smaller than this are ignored; a frame holds at most this many |
 | `ATTENDLY_RECOGNITION_THRESHOLD` | `0.5` | cosine similarity to count a match |
 | `ATTENDLY_DUPLICATE_THRESHOLD` | `0.65` | similarity that flags a duplicate at enrolment |
 
@@ -145,6 +149,11 @@ departments and re-finalises classes.
 | `ATTENDLY_STAFF_POLL_SECONDS` | `60` | how often a department camera is looked at |
 | `ATTENDLY_STAFF_WORK_START` / `ATTENDLY_STAFF_WORK_END` | `09:00` / `18:00` | the default working window for a new department |
 | `NATS_URL` | `nats://nats:4222` (overlay) | the bus for `access.decided.v1`; blank = decisions are logged only |
+
+Recognition uses the adapter's `face_identify` task (ai-adapter#81) when it
+answers it — one call per frame, every face matched, a margin against the
+runner-up — and detect-then-crop (one recognition call per face) on an
+older adapter. The adapter is given each person's code, never their name.
 
 Both thresholds are starting points. Tune them against real enrolments on
 your cameras: lower the match threshold if known students go unrecognised,

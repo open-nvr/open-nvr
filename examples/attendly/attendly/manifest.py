@@ -43,7 +43,7 @@ def build_manifest(settings: Settings | None = None):
             "and detections come from the platform."
         ),
         requires_tasks=[],
-        requires_adapters=["insightface"],
+        requires_adapters=[s.recognition_adapter],
         # Gate decisions go on the bus as access.decided.v1 (the
         # gate-controller app actuates): a producer by declaration.
         provides=["attendance"],

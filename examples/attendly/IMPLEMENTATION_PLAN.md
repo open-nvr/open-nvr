@@ -254,3 +254,73 @@ the camera, and watch the Gates page and gate-controller's page agree;
 book a meal for one student and repeat at the mess gate inside and outside
 the meal window; add a department and confirm staff rows appear during
 the window and ABSENT rows after it.
+
+---
+
+# Phase 3 — what is taken from PR #791 (and ai-adapter #81)
+
+Decision (2026-11-07): #798 stays the attendance app, isolated in
+`examples/attendly`. ai-adapter #81 is merged. The parts of #791 worth
+having come across; its core-side data model does not. Each phase is its
+own commit.
+
+## A. Recognition
+
+* **Own InsightFace instance.** `insightface-attendly-adapter` +
+  `insightface-attendly-register` in the apps overlay (adapter name
+  `insightface_attendly`, own face database and cache volumes, detector
+  size `ATTENDLY_DET_SIZE`, default 1280 so back rows are found). A
+  school's gallery and queue never share with the doorbell.
+* **`face_identify` when the adapter has it.** One call per frame returns
+  every face with its match and the runner-up's score. Attendly uses it
+  when the adapter answers it, keeps detect-then-crop as the fallback
+  (older adapter, no change needed on the operator's side), and treats a
+  match whose lead over the runner-up is under `identify_margin` as
+  ambiguous rather than a hit. `min_face_px` and `max_faces` go with the
+  request.
+* **The adapter knows people only by code.** No name is sent at
+  enrolment; another app asking the adapter who is in a frame learns a
+  code, not a name.
+
+## B. Marks
+
+* **LATE**: first sighting after `late_grace_minutes` (10). Sightings
+  carry the attempt time, not only the slot.
+* **Manual corrections** (`PRESENT`/`LATE`/`ABSENT`/`EXCUSED`, with a
+  note) that survive re-finalisation; `AUTO` hands the row back to the
+  cameras. `source` on every row.
+* **Coverage**: a class watched in fewer than `min_coverage_ratio` (0.5)
+  of its slots is flagged and its automatic marks are UNWATCHED.
+* **The roster is frozen** at first finalisation: a re-finalisation keeps
+  the people the class was decided for.
+* **Call off / restore** a published class (a holiday) and **one-off
+  classes** from the rooms page.
+* **One evidence frame per slot** in which somebody was recognised, kept
+  in core's evidence store, shown on the class review.
+* **Class review** on the Attendance page: per student the mark, slots
+  seen, first seen, correction; recompute; call off; the evidence frames.
+
+## C. Enrolment
+
+* **Guided webcam capture**: a small frame is checked about once a second
+  (`POST /students/check_frame`, face boxes and landmarks only, nothing
+  kept); the page says what to change — distance, place in the oval, which
+  way to turn, judged from the five landmarks against the person's own
+  straight-on photo — and takes each angle's photo once the face is steady.
+* **Spoken guidance** with the browser's own speech, a local voice
+  preferred; each step, each correction (not repeated within 6 s), "Got
+  it", "All done".
+* **A duplicate is told at the first photo**, by name, and the capture
+  stops.
+* **Consent** recorded at enrolment; withdrawing it deletes the faces.
+  **Erase** (`DELETE /students/{code}?erase=true`) blanks name and e-mail
+  and keeps the counts (DPDP/GDPR).
+* **A picture per student**, cut from the first accepted photo, shown in
+  Student Data; deleted with the faces.
+
+## D. Report
+
+* Student × class for a course and date range, with totals and a rate
+  `(present + late) / (marked − excused)`, as JSON, CSV and XLSX; cells
+  escaped against formula injection. Unwatched classes are left out of the
+  rate.

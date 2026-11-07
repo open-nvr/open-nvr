@@ -546,7 +546,7 @@
   image: ghcr.io/open-nvr/attendly:latest
   build_context: examples/attendly
   requires_tasks: [face_detection, face_recognition]
-  requires_adapters: [insightface]
+  requires_adapters: [insightface_attendly]
   emits: [hostel_in, hostel_out, gate_denied, mess_served]
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/attendly/README.md
   author: OpenNVR
@@ -570,7 +570,7 @@
             - NATS_URL=nats://nats:4222
             - OPENNVR_URL=http://opennvr-core:8000
             - KAIC_URL=http://opennvr-core:8100
-            - ATTENDLY_FACES_URL=http://insightface-adapter:9005
+            - ATTENDLY_FACES_URL=http://insightface-attendly-adapter:9005
           expose:
             - "9300"
           volumes:

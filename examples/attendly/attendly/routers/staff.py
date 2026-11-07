@@ -85,11 +85,6 @@ def update_staff(staff_code: str, payload: schemas.StaffUpdate):
         item = repo.update_staff(staff_code, **fields)
     except KeyError:
         raise HTTPException(status_code=404, detail="staff not found")
-    if payload.full_name:
-        try:
-            FaceEngine.get_shared()._faces_request("PATCH", f"/faces/{staff_code}", json={"name": payload.full_name})
-        except Exception:
-            pass
     return _out(item)
 
 

@@ -47,8 +47,19 @@ class FakeFaceEngine:
         self.reject_calls: set[int] = set()
         self.index_calls = 0
         self.calls: List[str] = []
+        # face_identify: None = the adapter has no such task; a dict = the
+        # result for every frame; a callable = result per image bytes
+        self.identify: object = None
+        self.identify_calls: List[dict] = []
 
     # KAI-C side
+    def identify_faces(self, image_bytes: bytes, *, threshold=None, match: bool = True, min_face_px=None, max_faces=None):
+        self.identify_calls.append({"threshold": threshold, "match": match})
+        if self.identify is None:
+            return None
+        self.calls.append("identify")
+        return self.identify(image_bytes) if callable(self.identify) else self.identify
+
     def detect_faces(self, image_bytes: bytes) -> List[dict]:
         self.calls.append("detect")
         boxes = self.faces_in.get(image_bytes, self.default_faces)
@@ -77,10 +88,9 @@ class FakeFaceEngine:
         self.index_calls += 1
         if image_bytes in self.reject or self.index_calls in self.reject_calls:
             raise FaceRejected("no face detected in the supplied image")
-        rec = self.enrolled.setdefault(external_image_id, {"person_id": external_image_id, "name": name,
+        # like the real engine: the name is not sent to the adapter
+        rec = self.enrolled.setdefault(external_image_id, {"person_id": external_image_id, "name": "",
                                                            "category": category or self.category, "samples": 0})
-        if name:
-            rec["name"] = name
         rec["samples"] += 1
         return f"{external_image_id}#{rec['samples'] - 1}"
 

@@ -46,6 +46,11 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Catalog's Install button both offer it; its contract surface rides the
   SDK's `ContractApp`; and a browser refresh on a UI page whose path
   shares an API prefix (`/attendance`, `/gates`…) serves the page.
+  From PR #791 and ai-adapter#81: Attendly runs its own InsightFace
+  instance (`insightface_attendly`, own face database and queue, detector
+  at 1280), uses `face_identify` when the adapter answers it (one call
+  per frame, a margin against the runner-up) with detect-then-crop as
+  the fallback, and gives the adapter codes only, never names.
 
 - **The escalation proposal: weak evidence on the sub stream → detect on
   the main stream, by consent.** Every posted visit now says where its crop

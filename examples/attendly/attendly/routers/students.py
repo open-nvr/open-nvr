@@ -203,12 +203,6 @@ def update_student(student_code: str, payload: schemas.StudentUpdate):
     if payload.enrolments is not None:
         repo.set_student_enrolments(student_code, [e.model_dump() for e in payload.enrolments])
         updated = get_student(student_code) or updated
-    # Keep the adapter's display name in step with ours (best effort).
-    if payload.full_name:
-        try:
-            FaceEngine.get_shared()._faces_request("PATCH", f"/faces/{student_code}", json={"name": payload.full_name})
-        except Exception:
-            pass
     return schemas.student_out(updated)
 
 

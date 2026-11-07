@@ -20,6 +20,7 @@ import io
 import json
 import logging
 import threading
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -89,6 +90,11 @@ class FaceEngine:
         self._http = http_client or httpx.Client(timeout=timeout_seconds, trust_env=False)
         self._kaic = KaiCClient(kaic_url, adapter_name, api_key=kaic_api_key or None,
                                 timeout_seconds=timeout_seconds, http_client=self._http)
+        # Does the adapter answer face_identify? Unknown until asked; a
+        # refusal is remembered for a while so every frame does not pay
+        # for a round trip that fails.
+        self._identify_ok: Optional[bool] = None
+        self._identify_checked_at = 0.0
 
     @classmethod
     def get_shared(cls) -> "FaceEngine":
@@ -144,6 +150,49 @@ class FaceEngine:
             })
         return out
 
+    IDENTIFY_RECHECK_SECONDS = 600.0
+
+    @property
+    def identify_supported(self) -> Optional[bool]:
+        return self._identify_ok
+
+    def identify_faces(self, image_bytes: bytes, *, threshold: Optional[float] = None, match: bool = True,
+                       min_face_px: Optional[int] = None, max_faces: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        """``face_identify``: every face in the frame, each looked up (or,
+        with ``match=False``, only where they are and how they are turned).
+        ``None`` when this adapter does not answer the task — the caller
+        falls back to detect-then-crop. Raises :class:`FaceServiceError`
+        when the adapter is reachable but failed."""
+        from opennvr_app_sdk.frame_app import KaiCError
+
+        now = time.monotonic()
+        if self._identify_ok is False and now - self._identify_checked_at < self.IDENTIFY_RECHECK_SECONDS:
+            return None
+        s = get_settings()
+        params: Dict[str, Any] = {
+            "threshold": min(1.0, max(0.01, float(threshold if threshold is not None else s.recognition_threshold))),
+            "min_face_px": int(min_face_px if min_face_px is not None else s.min_face_px),
+            "max_faces": int(max_faces if max_faces is not None else s.max_faces),
+        }
+        if not match:
+            params["match"] = False
+        try:
+            body = self._kaic.infer(image_bytes, task="face_identify", params=params)
+        except KaiCError as exc:
+            text = str(exc)
+            # KAI-C relays the adapter's refusal of an unknown task as a
+            # 4xx; anything else is an outage, which is not "unsupported".
+            if "HTTP 4" in text and ("task" in text.lower() or "unknown" in text.lower() or "unsupported" in text.lower()):
+                self._identify_ok, self._identify_checked_at = False, now
+                logger.info("adapter %s has no face_identify; using detect-then-crop", self.adapter_name)
+                return None
+            raise FaceServiceError(text) from exc
+        result = body.get("result") if isinstance(body, dict) else None
+        if not isinstance(result, dict) or not isinstance(result.get("faces"), list):
+            raise FaceServiceError("KAI-C face_identify: no faces list in response")
+        self._identify_ok, self._identify_checked_at = True, now
+        return result
+
     def search_faces(self, image_bytes: bytes, threshold: Optional[float] = None,
                      max_faces: int = 1) -> List[Tuple[str, float]]:
         """Who is the best face in this image? ``[(person_id, similarity)]``
@@ -181,10 +230,13 @@ class FaceEngine:
         """Add one photo to a person (creating them on the first). Returns
         the new sample's face id. Raises :class:`FaceRejected` when the
         adapter refuses the image, :class:`FaceServiceError` otherwise.
-        ``category`` defaults to the students'; staff enrol under their own."""
+        ``category`` defaults to the students'; staff enrol under their own.
+        The adapter is given the code only, never the name: another app
+        asking it who is in a frame learns a code, and names stay here."""
+        del name  # kept in the signature for callers; deliberately not sent
         meta = {"app": "attendly", **(metadata or {})}
         data = {
-            "person_id": external_image_id, "name": name or "", "category": category or self.category,
+            "person_id": external_image_id, "name": "", "category": category or self.category,
             "metadata": json.dumps(meta), "append": "true",
         }
         files = {"frame": ("face.jpg", image_bytes, "image/jpeg")}
