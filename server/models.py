@@ -26,6 +26,7 @@ from sqlalchemy import (
     JSON,
     Boolean,
     Column,
+    Date,
     DateTime,
     Enum as SAEnum,
     Float,
@@ -1909,3 +1910,225 @@ class WorkflowApproval(Base):
     timeout_at = Column(DateTime(timezone=True), nullable=False, index=True)
     answered_at = Column(DateTime(timezone=True), nullable=True)
     resume = Column(JSON, nullable=True)
+
+
+# ── Attendance ────────────────────────────────────────────────────────
+#
+# Who was in the room, from the cameras. The attendance app turns frames
+# into sightings (face_identify on its own InsightFace); core owns the
+# clock (timetable → sessions) and the verdict (sightings → marks), so the
+# answer survives the app being restarted or reinstalled — the guard-scan
+# split. The tables are generic on purpose: a Group is a class section or
+# a work shift, and the UI's words for it are a label, not a schema.
+
+
+class AttendancePerson(Base):
+    """Somebody whose attendance is taken.
+
+    ``uuid`` is the face gallery's ``person_id``: the adapter knows people
+    only by it, never by the integer id, so a database restore cannot
+    re-point somebody's face at a different row. ``face_samples`` is a
+    count kept for the UI; the faces themselves live in the adapter.
+
+    Removing a person sets ``deleted_at`` and keeps the row, because past
+    marks must still say who they were about. ``external_ref`` (roll
+    number, USN, employee id) is unique among people NOT removed, so a
+    removed student's number can be given to a new one — attendly could
+    not reuse a deleted student's e-mail, and that was a bug.
+    """
+
+    __tablename__ = "attendance_people"
+    __table_args__ = (
+        Index("uq_attendance_people_live_ref", "external_ref", unique=True,
+              postgresql_where=text("deleted_at IS NULL"),
+              sqlite_where=text("deleted_at IS NULL")),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    uuid = Column(String(36), unique=True, nullable=False, index=True,
+                  default=lambda: str(uuid.uuid4()))
+    display_name = Column(String(200), nullable=False)
+    external_ref = Column(String(64), nullable=True)
+    email = Column(String(255), nullable=True)
+    active = Column(Boolean, nullable=False, default=True, server_default=text("true"))
+    #: Biometric consent. Faces can be enrolled only once it is recorded.
+    consent_at = Column(DateTime(timezone=True), nullable=True)
+    consent_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    face_samples = Column(Integer, nullable=False, default=0, server_default="0")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    deleted_at = Column(DateTime(timezone=True), nullable=True, index=True)
+
+
+class AttendanceGroup(Base):
+    """People whose attendance is taken together: a class section, a shift.
+
+    ``timezone`` (IANA) is where the timetable's wall-clock times live; the
+    sessions they become are stored in UTC. ``policy`` overrides the site's
+    attendance policy for this group (JSON, keys as the site policy)."""
+
+    __tablename__ = "attendance_groups"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(120), nullable=False)
+    code = Column(String(40), nullable=True, unique=True)
+    #: What the UI calls a group here ("Section", "Shift"), not a type.
+    kind_label = Column(String(40), nullable=True)
+    timezone = Column(String(64), nullable=False)
+    policy = Column(JSON, nullable=True)
+    active = Column(Boolean, nullable=False, default=True, server_default=text("true"))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class AttendanceGroupMember(Base):
+    __tablename__ = "attendance_group_members"
+
+    group_id = Column(Integer, ForeignKey("attendance_groups.id", ondelete="CASCADE"),
+                      primary_key=True)
+    person_id = Column(Integer, ForeignKey("attendance_people.id", ondelete="CASCADE"),
+                       primary_key=True, index=True)
+    added_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class AttendanceTimetableSlot(Base):
+    """One weekly period: this group, this weekday, these local times, on
+    these cameras. A room is just the cameras that see it, so a big hall
+    can be two. Camera ids are plain JSON, as in camera tours: a camera
+    hard-deleted later simply drops out when the slot is read."""
+
+    __tablename__ = "attendance_timetable_slots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    group_id = Column(Integer, ForeignKey("attendance_groups.id", ondelete="CASCADE"),
+                      nullable=False, index=True)
+    #: 0 = Monday … 6 = Sunday (datetime.weekday()).
+    weekday = Column(Integer, nullable=False)
+    start_time = Column(String(5), nullable=False)   # "HH:MM", group's timezone
+    end_time = Column(String(5), nullable=False)
+    camera_ids = Column(JSON, nullable=False)
+    #: Inclusive local dates bounding the term; NULL = open-ended.
+    valid_from = Column(Date, nullable=True)
+    valid_to = Column(Date, nullable=True)
+    active = Column(Boolean, nullable=False, default=True, server_default=text("true"))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class AttendanceSession(Base):
+    """One concrete class or shift: a slot on a date, or an ad-hoc one.
+
+    Unique per (slot, local date), so materialising the timetable twice —
+    a restart, two scheduler ticks — can never create a second session.
+    attendly appended every published class to a list and duplicated them
+    on every re-publish; this is the fix. Times are UTC; ``local_date`` is
+    the date in the group's timezone that the slot was taken for."""
+
+    __tablename__ = "attendance_sessions"
+    __table_args__ = (
+        UniqueConstraint("slot_id", "local_date", name="uq_attendance_session_slot_date"),
+        Index("ix_attendance_sessions_window", "start_at", "end_at"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    slot_id = Column(Integer, ForeignKey("attendance_timetable_slots.id", ondelete="SET NULL"),
+                     nullable=True, index=True)
+    group_id = Column(Integer, ForeignKey("attendance_groups.id", ondelete="CASCADE"),
+                      nullable=False, index=True)
+    local_date = Column(Date, nullable=False, index=True)
+    start_at = Column(DateTime(timezone=True), nullable=False)
+    end_at = Column(DateTime(timezone=True), nullable=False)
+    camera_ids = Column(JSON, nullable=False)
+    #: scheduled | running | finalizing | final | cancelled (by the timetable)
+    #: | off (called off by a person: a holiday; the scheduler leaves it)
+    status = Column(String(16), nullable=False, default="scheduled", server_default="scheduled",
+                    index=True)
+    finalized_at = Column(DateTime(timezone=True), nullable=True)
+    #: Buckets in the session, and those with at least one sampled frame.
+    total_buckets = Column(Integer, nullable=True)
+    counted_buckets = Column(Integer, nullable=True)
+    #: True when no bucket was sampled at all: the app or every camera was
+    #: down, so the marks say nothing about who was there.
+    no_coverage = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class AttendanceAttempt(Base):
+    """One frame the app looked at, on one camera, at one moment — whether
+    or not it recognised anybody. These rows are the coverage record: a
+    bucket counts toward a person's ratio only if an ``ok`` attempt fell in
+    it, so a camera outage is a gap, not a class marked absent."""
+
+    __tablename__ = "attendance_attempts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    #: Producer-assigned envelope id: the bus is at-least-once.
+    event_id = Column(String(64), unique=True, nullable=False, index=True)
+    camera_id = Column(Integer, nullable=False, index=True)
+    at = Column(DateTime(timezone=True), nullable=False, index=True)
+    ok = Column(Boolean, nullable=False)
+    faces_detected = Column(Integer, nullable=False, default=0)
+    matched = Column(Integer, nullable=False, default=0)
+    evidence_path = Column(String(500), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class AttendanceAttemptSession(Base):
+    """Which sessions an attempt served: one frame of a room shared by two
+    groups at once is one attempt for both."""
+
+    __tablename__ = "attendance_attempt_sessions"
+
+    attempt_id = Column(Integer, ForeignKey("attendance_attempts.id", ondelete="CASCADE"),
+                        primary_key=True)
+    session_id = Column(Integer, ForeignKey("attendance_sessions.id", ondelete="CASCADE"),
+                        primary_key=True, index=True)
+
+
+class AttendanceSighting(Base):
+    """A member of the session's group, recognised in an attempt."""
+
+    __tablename__ = "attendance_sightings"
+    __table_args__ = (
+        UniqueConstraint("attempt_id", "session_id", "person_id",
+                         name="uq_attendance_sighting"),
+        Index("ix_attendance_sightings_session_person", "session_id", "person_id"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    attempt_id = Column(Integer, ForeignKey("attendance_attempts.id", ondelete="CASCADE"),
+                        nullable=False)
+    session_id = Column(Integer, ForeignKey("attendance_sessions.id", ondelete="CASCADE"),
+                        nullable=False)
+    person_id = Column(Integer, ForeignKey("attendance_people.id", ondelete="CASCADE"),
+                       nullable=False)
+    similarity = Column(Float, nullable=False)
+    #: Pixel box in the attempt's frame, for drawing it on the evidence.
+    bbox = Column(JSON, nullable=True)
+
+
+class AttendanceMark(Base):
+    """The verdict for one person in one session.
+
+    ``source`` auto is the finalizer's and is recomputed by a re-finalise;
+    manual is a person's override and is never overwritten by it."""
+
+    __tablename__ = "attendance_marks"
+    __table_args__ = (
+        UniqueConstraint("session_id", "person_id", name="uq_attendance_mark"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(Integer, ForeignKey("attendance_sessions.id", ondelete="CASCADE"),
+                        nullable=False, index=True)
+    person_id = Column(Integer, ForeignKey("attendance_people.id", ondelete="CASCADE"),
+                       nullable=False, index=True)
+    #: PRESENT | LATE | ABSENT | EXCUSED
+    status = Column(String(10), nullable=False)
+    buckets_present = Column(Integer, nullable=False, default=0)
+    buckets_total = Column(Integer, nullable=False, default=0)
+    first_seen_at = Column(DateTime(timezone=True), nullable=True)
+    source = Column(String(8), nullable=False, default="auto", server_default="auto")
+    overridden_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    note = Column(Text, nullable=True)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

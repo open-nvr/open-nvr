@@ -86,6 +86,7 @@ const Cameras = lazy(reloadOnStale(() => import('./views/Cameras').then((m) => (
 const Vehicles = lazy(reloadOnStale(() => import('./views/Vehicles').then((m) => ({ default: m.Vehicles }))))
 const Occupancy = lazy(reloadOnStale(() => import('./views/Occupancy').then((m) => ({ default: m.Occupancy }))))
 const People = lazy(reloadOnStale(() => import('./views/People').then((m) => ({ default: m.People }))))
+const Attendance = lazy(reloadOnStale(() => import('./views/Attendance').then((m) => ({ default: m.Attendance }))))
 const Tripwires = lazy(reloadOnStale(() => import('./views/Tripwires').then((m) => ({ default: m.Tripwires }))))
 const Loitering = lazy(reloadOnStale(() => import('./views/Loitering').then((m) => ({ default: m.Loitering }))))
 const Perimeter = lazy(reloadOnStale(() => import('./views/Perimeter').then((m) => ({ default: m.Perimeter }))))
@@ -184,6 +185,7 @@ const router = createBrowserRouter([
           { path: 'vehicles', element: <Vehicles /> },
           { path: 'occupancy', element: <Occupancy /> },
           { path: 'people', element: <People /> },
+          { path: 'attendance', element: <Attendance /> },
           { path: 'tripwires', element: <Tripwires /> },
           { path: 'loitering', element: <Loitering /> },
           { path: 'perimeter', element: <Perimeter /> },

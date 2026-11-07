@@ -432,3 +432,48 @@ Subject: `opennvr.events.screening.completed.v1.<camera_id>`
 | `flagged` | The wand's indicator lit during this screening. |
 | `ended_by` | `left`, `complete`, `timeout`, `walked_off`, `feed_lost`. |
 | `images` | Relative paths into the evidence store — never image bytes. |
+
+## `attendance.attempt.v1` — one camera, looked at once, for attendance
+
+Published by the attendance app every time it looks at a camera of a
+running attendance session. Core consumes it into `attendance_attempts`
+and `attendance_sightings` (`services/attendance_event_consumer.py`); the
+scheduler (`services/attendance_scheduler.py`) turns those into marks.
+
+**Every look is published, the empty ones included.** Core counts a slice
+of a session toward anyone's attendance only if a frame was looked at in
+it. An attempt that recognised nobody still says "the room was watched";
+one with `ok: false` says "it was not". Leaving either out would turn a
+camera outage into a class marked absent.
+
+Subject: `opennvr.events.attendance.attempt.v1.<camera_id>`
+
+```json
+{
+  "id": "0b6f…",
+  "schema": "attendance.attempt.v1",
+  "camera_id": "cam3",
+  "ts": 1793590260.0,
+  "producer": "app:attendance",
+  "payload": {
+    "at": "2026-11-02T03:31:00+00:00",
+    "ok": true,
+    "faces_detected": 41,
+    "matches": [
+      { "person_id": "7f0c2b1e-…", "similarity": 0.63, "bbox": [812, 300, 870, 372] }
+    ],
+    "session_ids": [12],
+    "evidence_path": "ab/<sha>.jpg"
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `id` (envelope) | The dedup key: the bus is at-least-once, and a redelivered attempt must not count twice. |
+| `at` | When the frame was taken. An attempt dated more than two minutes ahead of core's clock is refused. |
+| `ok` | `false` when no frame could be had. Counts no bucket; carries no matches. |
+| `matches[].person_id` | The face gallery id, which is the person's `uuid` in core — never a name. |
+| `matches[].similarity` | Cosine similarity. Core drops matches below the group's `match_threshold`. |
+| `session_ids` | Informative only. Core links the attempt to every session running on that camera at `at`, so one frame of a room two groups share serves both. |
+| `evidence_path` | A path into the evidence store, sent at most once per camera per bucket. |

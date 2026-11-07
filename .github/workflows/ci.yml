@@ -183,6 +183,7 @@ jobs:
         example:
           - abandoned-object
           - alert-notifier
+          - attendance
           - camera-tamper
           - alerts-subscriber
           - camera-agent

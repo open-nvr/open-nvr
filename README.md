@@ -178,11 +178,12 @@ The three-tier model, the wire contracts and the offline-first design are in [`d
 | [`smart-doorbell`](examples/smart-doorbell) | Face recognition with enrolment, strangers alerted with a photo |
 | [`package-delivery`](examples/package-delivery) | Arrival, linger and pickup per parcel |
 | [`guard-scan-compliance`](examples/guard-scan-compliance) | Was every person wanded, and what did the scanner find |
+| [`attendance`](examples/attendance) | Who was in the room during each class or shift, marked present, late or absent from the cameras; with its own web UI for registering people, timetables and reports |
 | [`footage-search`](examples/footage-search) | "Red truck at the dock yesterday" over recorded footage |
 | [`alert-notifier`](examples/alert-notifier) | What actually deserves to reach the guard's phone |
 | [`camera-agent`](examples/camera-agent) | Ask your cameras questions, by voice or text, all local |
 
-Seventeen of the twenty shipped examples are listed above; [`inference-listener`](examples/inference-listener) and [`alerts-subscriber`](examples/alerts-subscriber) are minimal subscriber templates, and [`home-assistant-relay`](examples/home-assistant-relay) is kept only as a NATS-to-MQTT bridge example now that Home Assistant support is [built in](docs/HOME_ASSISTANT_USER_GUIDE.md). Every app is a copy-as-template starting point. Replace the predicate and you have a purpose-built NVR for your domain. Gallery and roadmap: [`examples/README.md`](examples/README.md), [`docs/ROADMAP.md`](docs/ROADMAP.md).
+Eighteen of the twenty-one shipped examples are listed above; [`inference-listener`](examples/inference-listener) and [`alerts-subscriber`](examples/alerts-subscriber) are minimal subscriber templates, and [`home-assistant-relay`](examples/home-assistant-relay) is kept only as a NATS-to-MQTT bridge example now that Home Assistant support is [built in](docs/HOME_ASSISTANT_USER_GUIDE.md). Every app is a copy-as-template starting point. Replace the predicate and you have a purpose-built NVR for your domain. Gallery and roadmap: [`examples/README.md`](examples/README.md), [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Works with Home Assistant
 

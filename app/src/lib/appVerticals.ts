@@ -150,6 +150,14 @@ export const APP_VERTICALS: AppVertical[] = [
     // page is about whether people are being screened properly.
     legacy: (m) => (m.requires_tasks ?? []).includes('pose_estimation'),
   },
+  {
+    capability: 'attendance',
+    to: '/attendance',
+    // Named for what the office reads at the end of the day: who was
+    // there. The people, groups and timetable live on the same page.
+    label: 'Attendance',
+    legacy: (m) => (m.requires_tasks ?? []).includes('face_identify'),
+  },
 ]
 
 /** Does this manifest provide `vertical`? Capability first, legacy

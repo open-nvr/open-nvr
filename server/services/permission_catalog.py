@@ -74,11 +74,24 @@ NEW_PERMISSIONS_WORKFLOWS: tuple[NewPermission, ...] = (
                   backfill_from="cameras.manage"),
 )
 
+#: Attendance (routers/attendance.py). New abilities, so admins only on
+#: upgrade. ``enroll`` is separate from ``manage`` because it is the one
+#: that touches biometric data — who may photograph and enrol faces is a
+#: narrower question than who may edit a timetable.
+NEW_PERMISSIONS_ATTENDANCE: tuple[NewPermission, ...] = (
+    NewPermission("attendance.view", "See attendance sessions, marks and reports"),
+    NewPermission("attendance.manage",
+                  "Manage attendance groups and timetables, and correct marks"),
+    NewPermission("attendance.enroll",
+                  "Manage the people attendance is taken for, and enrol their faces"),
+)
+
 UPGRADE_PATH_PERMISSIONS: tuple[NewPermission, ...] = (
     *_EARLIER_LATE_PERMISSIONS,
     *NEW_PERMISSIONS_HA,
     *NEW_PERMISSIONS_UPDATE,
     *NEW_PERMISSIONS_WORKFLOWS,
+    *NEW_PERMISSIONS_ATTENDANCE,
 )
 
 

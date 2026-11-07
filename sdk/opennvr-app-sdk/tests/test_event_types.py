@@ -9,9 +9,9 @@ import json
 import pytest
 
 from opennvr_app_sdk import (
-    EVENT_TYPES, AccessDecided, DetectionObserved, OccupancyChanged, OccupancyFootfall,
-    OccupancyHeatmap, OverlayBoxes, PlateRecognized, ScreeningCompleted, VisitRecorded,
-    typed_payload,
+    EVENT_TYPES, AccessDecided, AttendanceAttempt, DetectionObserved, OccupancyChanged,
+    OccupancyFootfall, OccupancyHeatmap, OverlayBoxes, PlateRecognized, ScreeningCompleted,
+    VisitRecorded, typed_payload,
 )
 from opennvr_app_sdk.domain_events import DomainEventPublisher
 from opennvr_app_sdk.domain_subscriber import parse_domain_event
@@ -43,6 +43,10 @@ def test_every_v1_contract_is_typed_and_round_trips():
                              "duration_s": 108.4, "engaged_s": 38.2, "ended_by": "left",
                              "guard_key": "g1", "guard_name": "Ravi",
                              "images": {"face": "ab/0.jpg"}, "alert_id": None},
+        AttendanceAttempt: {"at": "2026-11-02T03:31:00+00:00", "ok": True, "faces_detected": 41,
+                            "matches": [{"person_id": "7f0c2b1e-0000-4000-8000-000000000001",
+                                         "similarity": 0.63, "bbox": [812, 300, 870, 372]}],
+                            "session_ids": [12], "evidence_path": "ab/<sha>.jpg"},
     }
     assert set(EVENT_TYPES) == {c.SCHEMA for c in samples}
     for cls, payload in samples.items():

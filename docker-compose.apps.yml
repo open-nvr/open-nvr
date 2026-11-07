@@ -107,7 +107,7 @@ services:
   # only. See docs/APP_NETWORK.md.
   # ──────────────────────────────────────────────────────────────
   egress-proxy:
-    profiles: [apps, default-apps, loitering-detection, occupancy-counting, line-crossing, abandoned-object, intrusion-detection, guard-scan-compliance, license-plate-recognition, gate-controller, alert-notifier, smart-doorbell, package-delivery, footage-search, home-assistant-relay, camera-tamper, gate-watch, garbage-dumping, ppe-check]
+    profiles: [apps, default-apps, loitering-detection, occupancy-counting, line-crossing, abandoned-object, intrusion-detection, guard-scan-compliance, license-plate-recognition, gate-controller, alert-notifier, smart-doorbell, package-delivery, footage-search, home-assistant-relay, camera-tamper, gate-watch, garbage-dumping, ppe-check, attendance]
     build:
       context: .
       dockerfile: scripts/egress-proxy/Dockerfile
@@ -1571,6 +1571,94 @@ services:
       - opennvr_internal
 
   # ──────────────────────────────────────────────────────────────
+  # InsightFace for attendance — a SECOND instance, not the doorbell's.
+  # Its own face DB, because an attendance roster and a family's
+  # known-visitor list must never match each other; its own one-request
+  # queue, because a 50-face classroom frame costs ~10 s on CPU and must
+  # not make the door wait. Its own weights cache too: sharing the
+  # doorbell's would save ~280 MB but both would download into it at
+  # once on a fresh install with both profiles up.
+  # opennvr_internal only: the attendance app reaches it through KAI-C
+  # (face_identify), and core's enrolment calls /faces/* from the same
+  # network — nothing on opennvr_apps talks to it directly.
+  # ──────────────────────────────────────────────────────────────
+  insightface-attendance-adapter:
+    profiles: [apps, attendance]
+    image: ghcr.io/open-nvr/insightface-adapter:${ADAPTER_TAG:-latest}
+    container_name: opennvr_insightface_attendance_adapter
+    logging: *svc-logs
+    restart: unless-stopped
+    environment:
+      - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
+      - OPENNVR_INSIGHTFACE_FACE_DB=/data/faces.json
+      # buffalo_l by default; buffalo_s is ~10x cheaper per face and much
+      # less accurate. 640 by default; 1280 finds smaller faces at ~3.5x
+      # the detection cost. See the adapter README's sizing table.
+      - OPENNVR_INSIGHTFACE_MODEL=${ATTENDANCE_FACE_MODEL:-buffalo_l}
+      - OPENNVR_INSIGHTFACE_DET_SIZE=${ATTENDANCE_FACE_DET_SIZE:-640}
+    volumes:
+      - opennvr_insightface_attendance_faces:/data
+      - opennvr_insightface_attendance_cache:/root/.insightface
+    networks:
+      - opennvr_internal
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx, sys; sys.exit(0 if httpx.get('http://127.0.0.1:9005/health', timeout=2).status_code == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 180s
+      retries: 20
+
+  # One-shot KAI-C registration as ``insightface_attendance``: the route
+  # /api/v1/infer/insightface_attendance, which the attendance app's
+  # ``adapter`` setting names. Always exits 0 (see fast-plate-ocr-register).
+  insightface-attendance-register:
+    profiles: [apps, attendance]
+    image: alpine:3.20
+    container_name: opennvr_insightface_attendance_register
+    logging: *svc-logs
+    restart: "no"
+    depends_on:
+      opennvr-core:
+        condition: service_healthy
+      insightface-attendance-adapter:
+        condition: service_healthy
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        name="insightface_attendance"
+        url="http://insightface-attendance-adapter:9005"
+        echo "Auto-registering '$$name' -> $$url with KAI-C…"
+        i=0
+        while [ $$i -lt 30 ]; do
+          if wget -q -O- \
+               --header="Content-Type: application/json" \
+               --header="X-Internal-Api-Key: $${INTERNAL_API_KEY}" \
+               --post-data="{\"name\":\"$$name\",\"url\":\"$$url\"}" \
+               http://opennvr-core:8100/api/v1/adapters/register >/dev/null 2>&1; then
+            echo "Registered '$$name'."
+            if wget -q -O- \
+                 --header="X-Internal-Api-Key: $${INTERNAL_API_KEY}" \
+                 --header="X-Actor: install" \
+                 --post-data="" \
+                 "http://opennvr-core:8100/api/v1/adapters/$$name/permissions/approve-all" >/dev/null 2>&1; then
+              echo "Approved '$$name' declared permissions (install-time grant, audited)."
+            else
+              echo "WARN: could not approve '$$name' permissions — if attendance recognition 403s, grant them via the AI models page." >&2
+            fi
+            exit 0
+          fi
+          i=$$((i+1)); echo "register attempt $$i/30 failed (adapter warming up?); retry in 5s"; sleep 5
+        done
+        echo "WARN: could not register '$$name' after retries — attendance recognition will 404 until it is registered via the AI models page." >&2
+        exit 0
+    networks:
+      - opennvr_internal
+
+  # ──────────────────────────────────────────────────────────────
   # Smart doorbell — face recognition at the door via InsightFace
   # through KAI-C (FrameApp); known visitors low-severity, strangers
   # high with a snapshot. Contract surface on :9206.
@@ -2183,6 +2271,135 @@ services:
       - opennvr_apps
 
   # ──────────────────────────────────────────────────────────────
+  # Attendance — who was in the room, from the cameras. The app looks at
+  # the cameras of attendance sessions running now (core's timetable)
+  # and reports each look as attendance.attempt.v1; core decides the
+  # marks. It needs its own InsightFace (insightface-attendance-adapter
+  # above), so it starts only once that is up and registered.
+  # Contract surface on :9217.
+  # ──────────────────────────────────────────────────────────────
+  attendance-config-init:
+    profiles: [apps, attendance]
+    build:
+      context: .
+      dockerfile: examples/attendance/Dockerfile
+    image: ${ATTENDANCE_IMAGE:-opennvr/attendance:local-build}
+    pull_policy: ${APPS_PULL_POLICY:-build}
+    container_name: opennvr_attendance_config_init
+    logging: *svc-logs
+    restart: "no"
+    # The image bakes config.docker.yml; a mounted examples/attendance
+    # folder overrides it (edit the template, re-up).
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -e
+        tpl=/template/config.docker.yml
+        [ -f "$$tpl" ] || tpl=/app/config.docker.yml
+        [ -f "$$tpl" ] || { echo "ERROR: no config template for attendance: mount examples/attendance at /template or use an image that bakes config.docker.yml" >&2; exit 1; }
+        sed_esc() { printf '%s' "$$1" | sed -e 's/\\/\\\\/g; s/&/\\&/g; s/\//\\\//g'; }
+        ikey=$$(sed_esc "$${INTERNAL_API_KEY}")
+        wport=$$(sed_esc "$${ATTENDANCE_WEB_PORT}")
+        sed -e "s/[$$][{]INTERNAL_API_KEY[}]/$$ikey/g" \
+            -e "s/[$$][{]ATTENDANCE_WEB_PORT[}]/$$wport/g" \
+            < "$$tpl" > /generated/config.yml
+        echo "Wrote /generated/config.yml (attendance) from $$tpl."
+    command: []
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      # The LAN port of the web UI (attendance-web below): "Open app" in
+      # the App Catalog points there.
+      - ATTENDANCE_WEB_PORT=${ATTENDANCE_WEB_PORT:-9218}
+    volumes:
+      - ./examples/attendance:/template:ro
+      - opennvr_attendance_config:/generated
+  attendance:
+    profiles: [apps, attendance]
+    build:
+      context: .
+      dockerfile: examples/attendance/Dockerfile
+    # Digest pin slot — see docs/APPS_INSTALL.md → Digest pinning.
+    image: ${ATTENDANCE_IMAGE:-opennvr/attendance:local-build}
+    pull_policy: ${APPS_PULL_POLICY:-build}
+    container_name: opennvr_attendance
+    logging: *svc-logs
+    restart: unless-stopped
+    depends_on:
+      attendance-config-init:
+        condition: service_completed_successfully
+      nats-apps:
+        condition: service_healthy
+      opennvr-core:
+        condition: service_healthy
+      egress-proxy:
+        condition: service_started
+      # The adapter it cannot work without (RFC-0002 decision 7).
+      insightface-attendance-adapter:
+        condition: service_healthy
+      insightface-attendance-register:
+        condition: service_completed_successfully
+    environment:
+      - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      - OPENNVR_URL=http://opennvr-core:8000
+      - KAIC_URL=http://opennvr-core:8100
+      - HTTP_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - HTTPS_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+      - NO_PROXY=opennvr-core,nats,nats-apps,egress-proxy,mediamtx,detect-pipeline,ollama,localhost,127.0.0.1
+    expose:
+      - "9217"
+      # The web UI, plain HTTP: attendance-web is its only way in.
+      - "9218"
+    volumes:
+      - opennvr_attendance_config:/app/config:ro
+    command:
+      - --config
+      - /app/config/config.yml
+    networks:
+      - opennvr_apps
+    # The web UI's /health: the process is up and serving the page. Not
+    # the contract /health, which reports "not ready" while the face
+    # adapter is down — the page must still open then, to say so.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx, sys; sys.exit(0 if httpx.get('http://127.0.0.1:9218/health', timeout=2).status_code == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  # The attendance web UI on the LAN. The app lives on the apps network,
+  # which has no route out and cannot publish a port; this nginx sits on
+  # both, publishes ATTENDANCE_WEB_PORT over HTTPS (the webcam needs a
+  # secure page) with OpenNVR's own certificate, and passes everything to
+  # the app. It only forwards: who may do what is still core's decision,
+  # on every request, as the signed-in user (examples/attendance/README.md).
+  attendance-web:
+    profiles: [apps, attendance]
+    image: nginx:1.27-alpine
+    container_name: opennvr_attendance_web
+    logging: *svc-logs
+    restart: unless-stopped
+    depends_on:
+      nginx-certs-init:
+        condition: service_completed_successfully
+      attendance:
+        condition: service_healthy
+    ports:
+      - "${NGINX_BIND_HOST:-0.0.0.0}:${ATTENDANCE_WEB_PORT:-9218}:443"
+    volumes:
+      - ./nginx-certs:/etc/nginx/certs:ro
+      - ./examples/attendance/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - opennvr_apps
+      - opennvr_internal
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--no-check-certificate", "-O", "-", "https://127.0.0.1/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  # ──────────────────────────────────────────────────────────────
   # CORE ENRICHMENT ADAPTERS
   #
   # Every adapter above belongs to an app. These belong to none: core's
@@ -2343,6 +2560,9 @@ volumes:
   opennvr_fast_plate_ocr_cache:
   opennvr_insightface_faces:
   opennvr_insightface_cache:
+  # Attendance's own InsightFace: its roster of faces, and its weights.
+  opennvr_insightface_attendance_faces:
+  opennvr_insightface_attendance_cache:
   opennvr_smart_doorbell_config:
   opennvr_package_delivery_config:
   # Package-detection weights: fetched once from
@@ -2359,5 +2579,6 @@ volumes:
   opennvr_home_assistant_relay_config:
   opennvr_guard_scan_config:
   opennvr_guard_scan_sessions:
+  opennvr_attendance_config:
   opennvr_yolo_pose_cache:
   opennvr_yolo_pose_weights:

@@ -123,6 +123,7 @@ export default defineConfig([
       'src/views/apps/StackedDialog.tsx',
       'src/views/PlaybackView.tsx',
       'src/views/guardscan/ScreeningReport.tsx',
+      'src/views/attendance/ReportPrint.tsx',
     ],
     rules: { 'no-restricted-syntax': 'off' },
   },

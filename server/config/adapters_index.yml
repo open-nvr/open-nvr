@@ -125,7 +125,7 @@
   version: "1.0.0"
   tier: first_party
   image: ghcr.io/open-nvr/insightface-adapter:latest
-  tasks_advertised: [face_detection, face_recognition]
+  tasks_advertised: [face_detection, face_recognition, face_identify]
   model:
     framework: onnxruntime
     modalities_in: [image]

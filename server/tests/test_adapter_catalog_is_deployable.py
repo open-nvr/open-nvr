@@ -53,6 +53,21 @@ LISTED_WITHOUT_A_SERVICE = {
         "nothing in this repo composes one yet.",
 }
 
+#: A second container of an adapter that is already composed, on purpose.
+#: Same rule as above: each one is a decision with its reason, and the
+#: one-adapter-per-task check below skips it only because it is named
+#: here. What makes one legitimate is that nothing picks it by task — every
+#: caller names it — so "which one did KAI-C choose" never arises.
+DELIBERATE_SECOND_INSTANCES = {
+    "docker-compose.apps.yml:insightface-attendance-adapter":
+        "Attendance's own face DB and request queue. A school roster and a "
+        "family's known visitors must never match each other, and a 10 s "
+        "classroom frame must not hold up the door. The attendance app calls "
+        "it as /infer/insightface_attendance and the doorbell calls "
+        "/infer/insightface; core never routes face tasks by task name "
+        "(services/enrichment_plan.py: core does not write face_id).",
+}
+
 
 def _repo(image: str) -> str:
     """``ghcr.io/open-nvr/clip-adapter:${ADAPTER_TAG:-latest}`` → the repo.
@@ -201,6 +216,8 @@ def test_no_task_is_answered_by_two_adapters_in_one_profile():
     """
     claimed: dict[tuple[str, str], list[str]] = {}
     for fname, svc_name, svc in _adapter_services():
+        if f"{fname}:{svc_name}" in DELIBERATE_SECOND_INSTANCES:
+            continue
         for profile in (svc.get("profiles") or []):
             for task in svc["_entry"].get("tasks_advertised") or []:
                 claimed.setdefault((profile, task), []).append(
@@ -210,6 +227,19 @@ def test_no_task_is_answered_by_two_adapters_in_one_profile():
         "these profiles start two adapters for the same task: "
         f"{ {f'{p}/{t}': v for (p, t), v in doubled.items()} }"
     )
+
+
+def test_every_deliberate_second_instance_exists_and_is_registered_by_name():
+    """An exemption that outlives its service would quietly widen the
+    check above. And a second instance is only safe while it is reached by
+    its own name, so it must have a registration job that gives it one."""
+    services = {f"{f}:{n}": svc for f, n, svc in _adapter_services()}
+    text = _compose_text()
+    for key in DELIBERATE_SECOND_INSTANCES:
+        assert key in services, f"{key} is exempted but no longer composed"
+        svc_name = key.split(":", 1)[1]
+        assert f'url="http://{svc_name}:' in text, (
+            f"{svc_name} has no KAI-C registration job naming it")
 
 
 def test_the_enrichment_profile_actually_covers_enrichment():

@@ -1,0 +1,43 @@
+/* Copyright (c) 2026 OpenNVR
+ * SPDX-License-Identifier: AGPL-3.0-or-later */
+@import "tailwindcss";
+
+/* Tailwind 4 draws a bare `border` in the text colour; attendly's look
+ * (Tailwind 3) is light gray. Tailwind's own compatibility rule. */
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-gray-200, currentColor);
+  }
+}
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  background: #f9fafb;
+  color: #111827;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+/* The report prints as a sheet: no header, no buttons, the full table. */
+@media print {
+  @page {
+    size: A4 landscape;
+    margin: 12mm;
+  }
+  body {
+    background: #fff;
+  }
+  .print-sheet {
+    box-shadow: none !important;
+    border: 0 !important;
+  }
+  .print-sheet .overflow-x-auto {
+    overflow: visible !important;
+  }
+}

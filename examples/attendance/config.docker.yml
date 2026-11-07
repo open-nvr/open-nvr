@@ -1,0 +1,40 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# attendance config consumed by docker-compose.apps.yml. ${VAR} values
+# are substituted by the attendance-config-init container at compose-up
+# time; change .env and re-run `docker compose up` instead of editing them.
+
+# KAI-C, inside opennvr-core: face_identify runs on the attendance
+# InsightFace (insightface-attendance-adapter), registered under this name.
+kaic_url: "http://opennvr-core:8100"
+kaic_api_key: "${INTERNAL_API_KEY}"
+adapter: "insightface_attendance"
+
+# Attempts go onto the apps bus; core consumes them.
+nats_url: "nats://nats-apps:4222"
+nats_token: "${INTERNAL_API_KEY}"
+
+# No cameras here, on purpose. The app looks only at the cameras of
+# attendance sessions running now (OpenNVR's Attendance → Timetable), and
+# only those of them picked for it in App Catalog → Configure → Cameras.
+
+# How often to ask OpenNVR what is running. Each camera is still looked
+# at only every attempt_interval_s (the attendance policy, 150 s default).
+poll_interval_seconds: 15.0
+request_timeout_seconds: 30.0
+
+# App contract (/health /manifest /state) and self-registration.
+contract_port: 9217
+contract_bind_host: "0.0.0.0"
+contract_host: "attendance"
+opennvr_url: "http://opennvr-core:8000"
+
+# The web UI: attendly's screens, signed in with an OpenNVR account. Plain
+# HTTP here, on the apps network only; attendance-web (nginx, in
+# docker-compose.apps.yml) puts it on the LAN over HTTPS at
+# ATTENDANCE_WEB_PORT, so the webcam works for enrolment. "{host}" is the
+# host name the browser reached OpenNVR at.
+web_port: 9218
+web_bind_host: "0.0.0.0"
+web_ui_url: "https://{host}:${ATTENDANCE_WEB_PORT}/"

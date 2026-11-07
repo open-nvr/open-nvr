@@ -269,12 +269,37 @@ class ScreeningCompleted(TypedPayload):
     alert_id: str | None = None
 
 
+@dataclass(frozen=True)
+class AttendanceAttempt(TypedPayload):
+    """``attendance.attempt.v1`` — one camera, looked at once, for attendance.
+
+    Published for EVERY look, the ones that recognised nobody and the ones
+    that got no frame (``ok`` false) included: core counts a bucket of a
+    session toward anyone's ratio only if a frame was actually looked at
+    in it, so a camera outage is a gap and not a class marked absent.
+
+    ``matches`` holds ``{person_id, similarity, bbox}``, ``person_id`` being
+    the face gallery id (the person's uuid in core), never a name. Core,
+    not the producer, decides which sessions an attempt belongs to and
+    which matches count; ``session_ids`` is informative only.
+    """
+
+    SCHEMA: ClassVar[str] = "attendance.attempt.v1"
+    REQUIRED: ClassVar[tuple[str, ...]] = ("at",)
+    at: str = ""
+    ok: bool = True
+    faces_detected: int = 0
+    matches: list[dict[str, Any]] = field(default_factory=list)
+    session_ids: list[int] = field(default_factory=list)
+    evidence_path: str | None = None
+
+
 #: schema → typed payload class, for every contract this SDK knows.
 EVENT_TYPES: dict[str, type[TypedPayload]] = {
     cls.SCHEMA: cls for cls in (
         DetectionObserved, VisitRecorded, PlateRecognized, AccessDecided,
         OccupancyChanged, OccupancyHeatmap, OccupancyFootfall, OverlayBoxes,
-        ScreeningCompleted,
+        ScreeningCompleted, AttendanceAttempt,
     )
 }
 

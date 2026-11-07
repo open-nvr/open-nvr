@@ -109,9 +109,9 @@ from .domain_subscriber import (
 )
 from .egress import connect_via_proxy, proxy_address
 from .event_types import (
-    EVENT_TYPES, AccessDecided, DetectionObserved, OccupancyChanged, OccupancyFootfall, OverlayBoxes,
-    OccupancyHeatmap, PlateRecognized, ScreeningCompleted, TypedPayload, VisitRecorded,
-    typed_payload,
+    EVENT_TYPES, AccessDecided, AttendanceAttempt, DetectionObserved, OccupancyChanged,
+    OccupancyFootfall, OverlayBoxes, OccupancyHeatmap, PlateRecognized, ScreeningCompleted,
+    TypedPayload, VisitRecorded, typed_payload,
 )
 from .tier0 import (
     BestFrameClient,
@@ -258,6 +258,7 @@ EVENTS: tuple[str, ...] = (
     "OccupancyChanged",
     "OccupancyHeatmap",
     "ScreeningCompleted",
+    "AttendanceAttempt",
     "OccupancyFootfall",
     "OverlayBoxes",
     "Tier0Snapshot",

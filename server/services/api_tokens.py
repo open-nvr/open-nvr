@@ -60,6 +60,9 @@ ALLOWED_SCOPES: frozenset[str] = frozenset({
     # update the host found, or withdraws that request. Never the policy. A
     # token gets it only from an admin who ticks it; not in the HA preset.
     "system.update",
+    # Attendance reports for a partner system (a school's ERP, payroll):
+    # read only. No token can enrol, correct or change a timetable.
+    "attendance.view",
 })
 
 _A = "/api/v1"
@@ -115,6 +118,14 @@ TOKEN_ROUTES: dict[tuple[str, str], str] = {
     ("GET", f"{_A}/alerts-inbox/{{alert_id}}/images/{{name}}"): "alerts.view",
     ("POST", f"{_A}/alerts-inbox/ack"): "alerts.manage",
     ("POST", f"{_A}/recordings/export/ticket"): "recordings.view",
+    # Attendance, read only: find the group, read its report or a session.
+    # The camera allow-list does not narrow these: attendance is per group,
+    # and every group is visible to attendance.view (routers/attendance.py).
+    ("GET", f"{_A}/attendance/groups"): "attendance.view",
+    ("GET", f"{_A}/attendance/groups/{{group_id}}"): "attendance.view",
+    ("GET", f"{_A}/attendance/sessions"): "attendance.view",
+    ("GET", f"{_A}/attendance/sessions/{{session_id}}"): "attendance.view",
+    ("GET", f"{_A}/attendance/report"): "attendance.view",
     # A token mints a card's session token; checked further in the route.
     ("POST", f"{_A}/api-tokens/session"): "cameras.view",
 }

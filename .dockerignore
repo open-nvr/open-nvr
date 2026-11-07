@@ -32,6 +32,8 @@ kai-c/.env*
 # Dependencies (We install them FRESH inside docker)
 node_modules/
 app/node_modules/
+# Any other front end's (examples/attendance/web): built in its own stage.
+**/node_modules/
 venv/
 .venv/
 server/venv/
@@ -56,6 +58,7 @@ server/logs/
 build/
 dist/
 app/dist/
+examples/attendance/web/dist/
 .vscode/
 .idea/
 

@@ -394,6 +394,10 @@ class Settings(BaseSettings):
     credential_encryption_key: str  # Base64-encoded Fernet key
     internal_api_key: str  # For adapter authentication
     kai_c_url: str = "http://localhost:8100"  # KAI-C orchestrator URL
+    # Attendance's own InsightFace (docker-compose.apps.yml), for enrolment:
+    # KAI-C proxies /infer but not /faces/*, so core calls it directly with
+    # internal_api_key, which the adapter takes as its bearer token.
+    attendance_face_adapter_url: str = "http://insightface-attendance-adapter:9005"
     kai_c_ip: str = "127.0.0.1"  # KAI-C IP for whitelisting
     # detect-pipeline Tier-0 Prometheus /metrics (compute-gated inference).
     # Polled read-only for the app's Compute-gated panel; empty disables it.

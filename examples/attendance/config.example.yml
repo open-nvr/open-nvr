@@ -1,0 +1,18 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Running the attendance app outside compose, against an OpenNVR you can
+# reach. It needs OpenNVR (for the sessions and the frames), KAI-C (for
+# face_identify) and the apps bus (for its attempts).
+
+opennvr_url: "http://localhost:8000"
+kaic_url: "http://localhost:8100"
+kaic_api_key: "change-me"            # the deployment's INTERNAL_API_KEY
+adapter: "insightface_attendance"
+nats_url: "nats://localhost:4223"
+nats_token: "change-me"
+poll_interval_seconds: 15.0
+request_timeout_seconds: 30.0
+# contract_port: 9217                # serve /health /manifest /state
+# web_port: 9218                     # serve the web UI (attendly's screens) here
+# web_ui_url: "http://{host}:9218/"  # where OpenNVR's "Open app" points

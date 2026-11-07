@@ -99,6 +99,24 @@
     ram_gb: 2
     gpu: recommended
 
+- task: face_identify
+  label: Face Identification (every face)
+  summary: Identifies every enrolled person visible in a frame at once — who is in the room, for attendance.
+  categories: [vision, identity]
+  tags: [face, identity, attendance, roster]
+  agent_skill: null
+  aliases: []
+  suggested_adapters: [insightface]
+  suggested_apps: [attendance]
+  hardware:
+    min: 4-core CPU, ~2 GB RAM
+    recommended: An accelerator, or one adapter instance per ~15 crowded cameras
+    note: Cost is per face — ~170 ms per face on a 2013 laptop CPU with buffalo_l, so a 50-face room is ~10 s a frame.
+    # Structured, for the catalog's fit badge (services/hardware_profile.py):
+    cores: 4
+    ram_gb: 2
+    gpu: recommended
+
 - task: image_captioning
   label: Image Captioning
   summary: Produces a natural-language description of a frame.
