@@ -456,6 +456,14 @@ async def search(
     )
     needs, box = await _needs_for(db, scope, parsed=parsed, labels=labels, words=words,
                                   attrs=attrs, wants_plate=wants_plate, plate=plate_q or "")
+    # A typed "red van" or "blue shirt" filters on the claim where this box
+    # holds claims of that kind (exact), and stays a caption word where it
+    # does not. Only for a parsed question: explicit text= is never touched.
+    if parse and text is None and not attr:
+        from services.search_intent import promote_words_to_claims
+        if promote_words_to_claims(parsed, box):
+            attrs = list(parsed.attrs)
+            words = parsed.text
     # What the question needs that the matching visits may not have, and
     # the request to produce it (services/enrichment_requests). Words
     # need a caption; a chip needs a claim of its kind; a need the box
@@ -613,9 +621,19 @@ async def search(
         ),
     })
 
+    # App alerts are not visits — occupancy over a limit, loitering, a
+    # package left — but a question like "loitering at the gate last night"
+    # has its answer in the alerts table. Matched on the words against the
+    # alert's type, title and description, in the same window and cameras,
+    # newest first, and shown beside the visits rather than mixed in.
+    alerts_out = _matching_alerts(db, scope, current_user, words=words or "",
+                                  labels=labels, camera_ids=cams, start=start, end=end,
+                                  cameras=cameras)
+
     return {
         "query": q,
         "interpretation": interpretation,
+        "alerts": alerts_out,
         # What is not described yet and what this call queued (None when
         # the question needed nothing a description would add).
         "pending": pending,
@@ -827,6 +845,64 @@ def _resolve_zone(db: Session, zone: str | None, camera_id: int | None,
                             detail=f"Zone name {zone!r} is on several cameras; add camera_id")
     return rows[0].id
 
+
+
+#: Words that name an app alert's subject rather than a visit's: a question
+#: carrying one of these looks in the alerts table too. Alert types are
+#: matched by prefix so "loiter" finds "loitering_detected".
+ALERT_WORDS: frozenset[str] = frozenset({
+    "alert", "alerts", "alarm", "alarms", "loiter", "loitering", "occupancy",
+    "crowd", "crowded", "overcrowding", "capacity", "package", "parcel",
+    "delivery", "intrusion", "intruder", "tamper", "tampering", "guard",
+    "patrol", "violence", "fight", "fall", "fallen", "abandoned", "garbage",
+    "fire", "smoke", "weapon", "gun", "knife", "queue", "dwell",
+})
+
+
+def _matching_alerts(db, scope, current_user, *, words: str, labels, camera_ids,
+                     start, end, cameras: dict[int, str] | None = None,
+                     limit: int = 20) -> list[dict] | None:
+    """App alerts the question's words name, in the same window and cameras.
+    None when the question names nothing alert-shaped or the caller may not
+    see alerts; [] when it does and nothing matched."""
+    tokens = [w for w in (words or "").lower().split() if w]
+    hits = [w for w in tokens if w in ALERT_WORDS or any(w.startswith(a) for a in ALERT_WORDS if len(a) > 4)]
+    if not hits:
+        return None
+    if not user_has_permission(current_user, "alerts.view"):
+        return None
+    from routers.alerts_inbox import _scope_alerts
+    q = _scope_alerts(db.query(AppAlert), scope)
+    if start:
+        q = q.filter(AppAlert.fired_at >= start)
+    if end:
+        q = q.filter(AppAlert.fired_at < end)
+    if camera_ids:
+        handles = [f"cam{int(c)}" for c in camera_ids] + [str(int(c)) for c in camera_ids]
+        q = q.filter(AppAlert.camera_id.in_(handles))
+    from sqlalchemy import or_
+    conds = []
+    for w in hits:
+        if w in ("alert", "alerts", "alarm", "alarms"):
+            continue
+        like = f"%{w[:6]}%"
+        conds.append(or_(func.lower(func.coalesce(AppAlert.alert_type, "")).like(like),
+                         func.lower(AppAlert.title).like(like),
+                         func.lower(func.coalesce(AppAlert.description, "")).like(like),
+                         func.lower(func.coalesce(AppAlert.source_name, "")).like(like)))
+    if conds:
+        q = q.filter(or_(*conds))
+    rows = q.order_by(AppAlert.fired_at.desc()).limit(limit).all()
+    out = []
+    for a in rows:
+        out.append({
+            "alert_id": a.alert_id, "fired_at": a.fired_at.isoformat() if a.fired_at else None,
+            "severity": a.severity, "title": a.title, "description": a.description,
+            "alert_type": a.alert_type, "source_name": a.source_name,
+            "camera_id": _alert_camera_num(a.camera_id),
+            "camera_name": (cameras or {}).get(_alert_camera_num(a.camera_id) or -1),
+        })
+    return out
 
 def _alert_camera_num(handle: str | None) -> int | None:
     from services.alerts_inbox import _camera_num
