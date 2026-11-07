@@ -364,6 +364,11 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The Vitals card with an NPU tile no longer puts one tile alone on a
+  second row.** Seven tiles fill one row when the card is wide, and 4+3
+  when it is narrow with the last tile spanning the gap, so no empty cell
+  shows the border colour (#813 added the tile, the grid still counted six).
+
 - **Search reads months, years and dates, and says when it searched all
   time.** "in January", "January or February", "last month", "this year",
   "two months ago", "last 6 months", "5th November 2025", "nov 5" all

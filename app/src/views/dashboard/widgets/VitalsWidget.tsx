@@ -32,6 +32,7 @@ function Tile({
   tone = 'neutral',
   onClick,
   children,
+  className,
 }: {
   icon: ReactNode
   label: string
@@ -41,6 +42,7 @@ function Tile({
   tone?: Tone
   onClick?: () => void
   children?: ReactNode
+  className?: string
 }) {
   const Comp = onClick ? 'button' : 'div'
   return (
@@ -50,6 +52,7 @@ function Tile({
       className={clsx(
         'vital-tile relative flex flex-col min-w-0 min-h-0 text-left px-3 py-1.5 bg-[var(--panel-2)] overflow-hidden',
         onClick && 'hover:bg-[color-mix(in_oklab,var(--panel)_60%,var(--panel-2))] transition-colors',
+        className,
       )}
       style={tone === 'warn' || tone === 'crit' ? { boxShadow: `inset 0 2px 0 ${TONE_INK[tone]}` } : undefined}
     >
@@ -139,7 +142,16 @@ export function VitalsWidget({ editing, onRemove }: { editing?: boolean; onRemov
 
   return (
     <WidgetFrame icon={<Activity size={13} />} title={t('dashboard.w.vitals')} editing={editing} onRemove={onRemove}>
-      <div className="absolute inset-0 grid grid-cols-3 @4xl:grid-cols-6 auto-rows-fr gap-px bg-[var(--border)]">
+      {/* Six tiles, or seven with the NPU: one row when wide, and when
+          narrow 3+3 or 4+3 with the last tile spanning the gap, so no
+          empty cell shows the border colour (a seventh tile used to sit
+          alone on a second row). */}
+      <div
+        className={clsx(
+          'absolute inset-0 grid auto-rows-fr gap-px bg-[var(--border)]',
+          npu ? 'grid-cols-4 @4xl:grid-cols-7' : 'grid-cols-3 @4xl:grid-cols-6',
+        )}
+      >
         <Tile
           icon={<Camera size={12} />}
           label={t('dashboard.camerasOnline')}
@@ -236,6 +248,7 @@ export function VitalsWidget({ editing, onRemove }: { editing?: boolean; onRemov
               : unacked ? t('dashboard.lowSeverityOnly') : t('dashboard.allClear'))
             : undefined}
           onClick={() => navigate('/alerts-incidents')}
+          className={npu ? 'col-span-2 @4xl:col-span-1' : undefined}
         />
       </div>
     </WidgetFrame>
