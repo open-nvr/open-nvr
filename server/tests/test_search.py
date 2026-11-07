@@ -1763,14 +1763,15 @@ def test_a_colour_binds_to_the_thing_it_describes_in_the_text_query():
     """'blue shirt' is blue within two words of shirt, not blue anywhere
     plus shirt anywhere; 'blue' alone with a person is blue clothing."""
     from services.search_service import fts_query
-    assert fts_query("blue shirt") == ("to_tsquery", "blue <2> shirt")
-    assert fts_query("light blue t-shirt") == ("to_tsquery", "light & blue <2> shirt")
+    # <N> is EXACTLY N apart in Postgres, so "within two" is <-> OR <2>
+    assert fts_query("blue shirt") == ("to_tsquery", "((blue <-> shirt) | (blue <2> shirt))")
+    assert fts_query("light blue t-shirt") == ("to_tsquery", "light & ((blue <-> shirt) | (blue <2> shirt))")
     fn, arg = fts_query("blue")
-    assert fn == "to_tsquery" and arg.startswith("blue <2> (shirt | t | tshirt | tee | top")
+    assert fn == "to_tsquery" and arg.startswith("((blue <-> (shirt | t | tshirt | tee | top")
     assert fts_query("beard laptop") == ("plainto_tsquery", "beard laptop")
-    assert fts_query("red van") == ("to_tsquery", "red <2> van")
+    assert fts_query("red van") == ("to_tsquery", "((red <-> van) | (red <2> van))")
     fn, arg = fts_query("man red carrying box")
-    assert fn == "to_tsquery" and arg.startswith("man & red <2> (shirt") and arg.endswith(") & carrying & box")
+    assert fn == "to_tsquery" and arg.startswith("man & ((red <-> (shirt") and arg.endswith(")) & carrying & box")
 def test_alert_words_bring_matching_app_alerts_beside_the_visits(db):
     """"loitering at the gate" has its answer in the alerts table, not in a
     visit: the words that name an alert's subject bring the matching app
