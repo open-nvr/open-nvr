@@ -76,13 +76,22 @@ def _samples(text: str) -> list[tuple[str, dict[str, str], float]]:
 
 
 def _provider_key(spec: str) -> str:
-    """``QNNExecutionProvider:htp`` → ``QNNExecutionProvider``; OpenVINO keeps
+    """The FIRST provider of what the detector reports, normalised.
+
+    The gauge carries the session's provider list as ONNX Runtime spells
+    it: ``effective="QNNExecutionProvider, CPUExecutionProvider"`` (the
+    accelerator first, CPU as the fallback for unsupported nodes) and
+    ``requested="QNNExecutionProvider(htp)"`` (Ventuno Q, 2026-11-07).
+    ``QNNExecutionProvider:htp`` → ``QNNExecutionProvider``; OpenVINO keeps
     its device suffix because NPU and GPU are different devices."""
-    spec = (spec or "").strip()
-    if spec.startswith("OpenVINOExecutionProvider"):
-        dev = spec.split(":", 1)[1].upper() if ":" in spec else "CPU"
+    first = (spec or "").split(",")[0].strip()
+    if first.startswith("OpenVINOExecutionProvider"):
+        rest = first[len("OpenVINOExecutionProvider"):]
+        dev = rest.strip(":() ").split(",")[0].upper() if rest.strip(":() ") else "CPU"
         return f"OpenVINOExecutionProvider:{dev}"
-    return spec.split(":", 1)[0]
+    for sep in (":", "("):
+        first = first.split(sep, 1)[0]
+    return first.strip()
 
 
 @dataclass
