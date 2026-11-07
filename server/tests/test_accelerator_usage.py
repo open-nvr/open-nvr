@@ -47,3 +47,19 @@ def test_intel_openvino_devices_are_told_apart():
     u.update(_fill(gpu, det=0.0), None, at=0.0)
     out = u.update(_fill(gpu, det=3.0), None, at=10.0)
     assert out[0]["kind"] == "gpu" and out[0]["name"] == "Intel GPU" and out[0]["busy_percent"] == 30.0
+
+
+def test_the_detectors_real_provider_list_is_read():
+    """What the box reports: the session's provider list, accelerator first,
+    CPU as the fallback, and the requested spec with its device in brackets."""
+    from services.accelerator_usage import _provider_key
+    real = DETECT.replace('requested="QNNExecutionProvider:htp",effective="QNNExecutionProvider:htp"',
+                          'effective="QNNExecutionProvider, CPUExecutionProvider",requested="QNNExecutionProvider(htp)"')
+    u = AcceleratorUsage()
+    u.update(_fill(real, det=0.0), None, at=0.0)
+    out = u.update(_fill(real, det=1.5), None, at=15.0)
+    assert out and out[0]["name"] == "Qualcomm Hexagon NPU" and out[0]["busy_percent"] == 10.0
+    assert _provider_key("OpenVINOExecutionProvider(NPU), CPUExecutionProvider") == "OpenVINOExecutionProvider:NPU"
+    assert _provider_key("OpenVINOExecutionProvider:GPU") == "OpenVINOExecutionProvider:GPU"
+    assert _provider_key("CUDAExecutionProvider, CPUExecutionProvider") == "CUDAExecutionProvider"
+    assert _provider_key("CPUExecutionProvider") == "CPUExecutionProvider"
