@@ -2255,7 +2255,7 @@ def _create_alarm_tool(camera_enum_all: list[str]) -> dict[str, Any]:
                     "camera_id": {"type": "string", "enum": camera_enum_all, "description": "A camera id, or 'all'."},
                     "camera_ids": {"type": "array", "items": {"type": "string", "enum": camera_enum_all}},
                     "after": {"type": "string", "description": "Only active after this time of day, in the SITE's local time. 24h 'HH:MM' preferred (e.g. '18:00' for after 6pm; '12:10' for after 12:10 pm); '12:10 pm' style also accepted. The window repeats daily."},
-                    "before": {"type": "string", "description": "Only active before this time of day (site-local; 24h 'HH:MM' preferred). With 'after' later than 'before' the window wraps midnight."},
+                    "before": {"type": "string", "description": "Only active BEFORE this time of day (site-local; 24h 'HH:MM' preferred): 'before 6am' is before='06:00', never after. With 'after' later than 'before' the window wraps midnight."},
                     "ring": {"type": "string",
                              "enum": ["siren", "pulse", "chime", "silent"],
                              "description": "How it announces. 'siren' rings until "
@@ -3370,20 +3370,31 @@ class CameraAgentRuntime:
                     return str(cam.opennvr_camera_id)
             return cid
 
+        def _pipeline_camera(cid: str) -> str:
+            """The id Tier-0 (detect-pipeline) knows the camera by: ``cam<server
+            id>`` — its bus subjects, metrics, /best_frame and /latest_frame.
+            Not the bare server id: resolving to "23" made every pipeline
+            fetch a 404 and every live look a 6 s RTSP grab (Ventuno Q,
+            2026-11-08). A camera with no server id keeps its own handle."""
+            for cam in self.context.cameras:
+                if cam.camera_id == cid and cam.opennvr_camera_id is not None:
+                    return f"cam{cam.opennvr_camera_id}"
+            return cid
+
         # Best-frame fetch (optional): describe_camera runs the VLM on Tier-0's best
         # frame when the detect-pipeline origin is configured.
         best_frame_fetch = None
         if cfg.bestframe_base_url:
             from tools import make_best_frame_fetch
             best_frame_fetch = make_best_frame_fetch(
-                cfg.bestframe_base_url, resolve_camera=_resolve_camera,
+                cfg.bestframe_base_url, resolve_camera=_pipeline_camera,
             )
             # And the newest decoded frame for every live look (detect,
             # describe with no active track, snapshots): the pipeline's
             # /latest_frame instead of a fresh RTSP session of our own.
             from opennvr_app_sdk import make_latest_frame_fetch
             self.context.set_latest_frame_fetch(make_latest_frame_fetch(
-                cfg.bestframe_base_url, resolve_camera=_resolve_camera,
+                cfg.bestframe_base_url, resolve_camera=_pipeline_camera,
             ))
 
         # Events store (the platform's memory, RFC-0001 C1): built whenever the
@@ -3439,6 +3450,7 @@ class CameraAgentRuntime:
             recognition_client=self.recognition_client,
             best_frame_fetch=best_frame_fetch,
             resolve_camera=_resolve_camera,
+            pipeline_camera=_pipeline_camera,
             events_client=events_client,
             timeline=timeline,
         )
