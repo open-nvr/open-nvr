@@ -117,6 +117,9 @@ def test_converse_empty_body_400(harness):
 
 def test_converse_full_tool_turn(harness):
     client, state = harness
+    # A question the router leaves to the model (it asks WHO), so the
+    # model's own tool call is what gets exercised.
+    state["transcript"] = "who is on cam1"
 
     async def chat(*, messages, tools=None, temperature=0.4, max_tokens=256, **kw):
         # Second pass (tool result present) → final answer.
@@ -132,7 +135,7 @@ def test_converse_full_tool_turn(harness):
     resp = client.post("/converse", content=_wav_blob())
     assert resp.status_code == 200, resp.text
     data = resp.json()
-    assert data["transcript"] == "what do you see"
+    assert data["transcript"] == "who is on cam1"
     assert data["reply"] == "I see one person."
     assert data["audio_b64"] == base64.b64encode(b"FAKEWAVBYTES").decode()
     assert state["detect_args"] == {"camera_id": "cam1"}
@@ -193,10 +196,11 @@ def test_converse_bogus_camera_hint_falls_back(harness):
         return {"message": {"role": "assistant", "content": "There is a cat."}}
     state["set_chat"](chat)
 
-    # Unknown camera id is ignored → falls back to first camera (cam1).
+    # Unknown camera id is ignored → with no camera named, every camera
+    # (the first camera used to stand in for the fleet).
     resp = client.post("/converse?camera=does-not-exist", content=_wav_blob())
     assert resp.status_code == 200, resp.text
-    assert state["detect_args"] == {"camera_id": "cam1"}
+    assert state["detect_args"] == {"camera_id": "all"}
 
 
 # ── empty transcript short-circuits before the LLM ─────────────────────

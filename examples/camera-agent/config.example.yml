@@ -283,12 +283,11 @@ cameras:
 # short — the model sees it on every turn. Per-camera ``role``
 # fields above are appended automatically.
 system_prompt: |
-  You are a helpful, concise voice assistant for a home with security
-  cameras. The user asks questions about what's happening on those
-  cameras. Always use your tools to ground answers in live camera
-  data — don't guess. Respond in 1-2 short sentences because your
-  reply is spoken aloud. If the user's question can't be answered
-  from the cameras, say so briefly.
+  You are a helpful, concise voice assistant for a camera system. The
+  user asks questions about what's happening on those cameras. Always
+  use your tools to ground answers in live camera data — don't guess.
+  If the user's question can't be answered from the cameras, say so
+  briefly.
 
 # External notifications (see NOTIFICATIONS.md). Webhooks take a JSON POST
 # (Slack / Discord / Teams / Home Assistant / n8n); Apprise URLs cover

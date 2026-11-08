@@ -480,9 +480,10 @@ class AppConfig:
 
 
 _DEFAULT_SYSTEM_PROMPT = (
-    "You are a concise voice assistant for a home security camera system. "
-    "You have NO knowledge of what any camera currently shows — the ONLY way "
-    "to know is to call a tool.\n\n"
+    "You are a concise voice assistant for a camera system. You have NO "
+    "knowledge of what any camera currently shows — the ONLY way to know is "
+    "to call a tool; if you have not called one this turn, you do not know, "
+    "and you never describe a camera from imagination.\n\n"
     "RULES:\n"
     "- For ANY question about what a camera sees, what is happening, who or "
     "what is present, or how many of something, you MUST call a tool BEFORE "
@@ -497,9 +498,6 @@ _DEFAULT_SYSTEM_PROMPT = (
     "'which cars entered today?', 'was a dog here yesterday?') call "
     "search_history — the NVR remembers every visit with a photo and can "
     "name recognised people.\n"
-    "- NEVER invent, guess, or describe what is on a camera from imagination. "
-    "If you have not called a tool this turn, you do not know.\n"
-    "- Base your answer ONLY on the tool result, in 1-2 short spoken sentences.\n"
     "- If a tool says a camera cannot be reached, tell the user that camera "
     "appears to be offline."
 )
@@ -5556,9 +5554,11 @@ class CameraAgentRuntime:
         _now = _dt.now().astimezone()
         return (
             f"The current date and time is "
-            f"{_now.strftime('%A %Y-%m-%d %H:%M (UTC%z)')}. When a tool takes "
-            f"an ISO 8601 time window, compute it from THIS clock and include "
-            f"the timezone offset (e.g. {_now.strftime('%Y-%m-%dT%H:%M:00%z')})."
+            f"{_now.strftime('%A %Y-%m-%d %H:%M (UTC%z)')}. 'Yesterday', 'this "
+            f"morning', 'last night' and every other relative time are counted "
+            f"from THIS clock, never from memory. When a tool takes an ISO 8601 "
+            f"time window, compute it from this clock and include the timezone "
+            f"offset (e.g. {_now.strftime('%Y-%m-%dT%H:%M:00%z')})."
         )
 
     def build_compose_prompt(self) -> str:
@@ -5598,16 +5598,19 @@ class CameraAgentRuntime:
             f"Cameras available to you:\n{roster}\n\n"
             f"Always pass one of the camera_id values exactly as listed "
             f"when calling a tool.\n\n"
-            f"Your replies are SPOKEN ALOUD. Refer to each camera by its "
-            f"location (e.g. 'the front door'), never its raw id like "
-            f"'front_door'. Answer in 1-2 short, natural sentences a person "
-            f"would say out loud — no ids, colons, lists, or markdown.\n"
-            f"Give the ANSWER directly. Never reply with filler like 'I'll "
-            f"check', 'let me see', or 'one moment' — if you need to look, call "
-            f"the tool and then state what you found.\n\n"
+            f"Your replies are SPOKEN ALOUD and come ONLY from the tool result. "
+            f"Refer to each camera by its location (e.g. 'the front door'), "
+            f"never its raw id like 'front_door'. Answer in 1-2 short, natural "
+            f"sentences a person would say out loud — no ids, colons, lists, or "
+            f"markdown.\n"
+            f"Give the ANSWER directly. Never reply with filler INSTEAD of an "
+            f"answer ('I'll check', 'let me see', 'one moment') — if you need to "
+            f"look, call the tool and then state what you found.\n\n"
             f"You can look at ONE camera, SEVERAL, or 'all' of them — pass "
             f"camera_id='all' (or a camera_ids list) when the user asks about "
-            f"every camera or more than one."
+            f"every camera or more than one. If the user names NO camera and "
+            f"none is selected, look at all of them and say which camera each "
+            f"finding is on."
         )
         # Tool-specific guidance is emitted ONLY for tools the model can
         # actually call this turn. Teaching a small model a route to a tool
@@ -5673,15 +5676,19 @@ class CameraAgentRuntime:
             prompt += (
                 "\n\nWhen you call a tool, also write ONE short sentence (under twelve "
                 "words) telling the user what you are about to check — for example "
-                "'Let me look at the gate camera between two and three.' Never guess "
-                "the answer in that sentence."
+                "'Let me look at the gate camera between two and three.' That is the "
+                "one place such a sentence belongs: beside the tool call, never "
+                "instead of it. Never guess the answer in that sentence."
             )
         # Last of the prose when it is here at all (see the docstring). Only
         # Qwen3's ``/no_think`` switch may follow: a control token the model
         # wants at the very end, constant across turns.
         if clock:
             prompt += "\n\n" + clock_line
-        if self.cfg.llm_think is False:
+        # Qwen3's switch, and Qwen3's only: granite and Gemma read it as a
+        # stray line of text at the end of their instructions (the NPU
+        # prompt dump, 2026-11-07).
+        if self.cfg.llm_think is False and "qwen" in (self.cfg.llm_model or "").lower():
             prompt += "\n\n/no_think"
         return prompt
 
@@ -7980,7 +7987,14 @@ async def _conversation_turn_body(
     )
     trace.append({"step": "route", "detail": f"tier{decision.tier}"
                   + (f" {decision.tool}" if decision.tool else "")
-                  + (f" hint={decision.hint}" if decision.hint else ""), "ms": 0})
+                  + (f" hint={decision.hint}" if decision.hint else "")
+                  + (" ask" if decision.ask else ""), "ms": 0})
+    if decision.ask:
+        # No camera named, several to choose from, and a description of
+        # every one would be a caption per camera: ask, with the cameras
+        # by their locations. No model, no tool.
+        trace.append({"step": "reply", "detail": "router"})
+        return decision.ask
     routed = decision.routed
     small_talk = routed and decision.tool is None
     reasked = False

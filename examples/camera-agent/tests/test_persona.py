@@ -55,12 +55,18 @@ def test_custom_agent_name_used():
     assert CameraAgentRuntime(cfg).agent_name == "Nova"
 
 
-def test_llm_think_false_appends_no_think():
-    # Qwen3 default runs non-thinking for snappy tool-calling
+def test_llm_think_false_appends_no_think_for_qwen_only():
+    # Qwen3 runs non-thinking for snappy tool-calling: its own switch, at the end
     cfg = AppConfig(kaic_url="http://k", kaic_api_key="x", system_prompt="t",
-                    llm_think=False,
+                    llm_think=False, llm_model="qwen3:1.7b",
                     cameras=[CameraSpec(camera_id="c", frame_url="http://x/1.jpg", role="r")])
     assert CameraAgentRuntime(cfg).build_system_prompt().rstrip().endswith("/no_think")
+    # granite, Gemma and the rest read "/no_think" as a stray line of text
+    for model in ("granite4:micro", "gemma-4-e2b-npu", "llama3.2"):
+        cfg = AppConfig(kaic_url="http://k", kaic_api_key="x", system_prompt="t",
+                        llm_think=False, llm_model=model,
+                        cameras=[CameraSpec(camera_id="c", frame_url="http://x/1.jpg", role="r")])
+        assert "/no_think" not in CameraAgentRuntime(cfg).build_system_prompt(), model
 
 
 def test_llm_think_default_and_true_do_not_append():
@@ -257,3 +263,20 @@ def test_intro_takes_the_operators_hour_and_the_page_greets_on_open():
     assert '"/intro?hour="+new Date().getHours()' in html
     # autoplay-safe: held audio is spoken on the first gesture or on Talk
     assert "playHeldIntro" in html and 'addEventListener("pointerdown"' in html
+
+
+def test_prompt_says_each_rule_once_and_names_no_home():
+    """The operator block and the built-in spoken rules used to overlap
+    (first person, 1-2 sentences, never invent — each twice); on a 4,096-
+    token window that was a tool schema's worth of repetition."""
+    from camera_agent import _DEFAULT_SYSTEM_PROMPT
+    rt = CameraAgentRuntime(AppConfig(
+        kaic_url="http://k", kaic_api_key="x", system_prompt=_DEFAULT_SYSTEM_PROMPT,
+        cameras=[CameraSpec(camera_id="c", frame_url="http://x/1.jpg", role="r")]))
+    p = rt.build_system_prompt(clock=False)
+    assert p.count("1-2 short") == 1
+    assert p.lower().count("imagination") == 1
+    assert "home security" not in p
+    assert "names NO camera" in p
+    assert "from THIS clock, never from memory" in rt._clock_line()
+
