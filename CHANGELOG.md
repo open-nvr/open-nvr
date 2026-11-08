@@ -8,6 +8,16 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The camera agent's live look is a memory read, not an RTSP session.**
+  detect-pipeline keeps the newest frame each camera's worker decoded and
+  serves it at `/latest_frame?camera=&max_age=` (JPEG, `X-Frame-Age-Seconds`;
+  404 when nothing is fresher than `max_age`, default 3 s). The SDK gains
+  `make_latest_frame_fetch`, and the agent's frame cache asks it before the
+  camera's own frame source, falling back to that source when the pipeline
+  has nothing fresh. Measured on a Ventuno Q (the 32-case eval, 2026-11-08):
+  a live look cost 5.6–6.2 s, of which the RTSP grab was all but the
+  detector's 0.1 s and the answer's 0.5 s.
+
 - **The camera agent's LLM runs on the NPU on the qualcomm flavour.** The
   litertlm caption adapter answers `/v1/chat/completions` on the same
   Gemma engine (ai-adapter #83), and `start.sh` points the agent at it:

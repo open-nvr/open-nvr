@@ -389,6 +389,7 @@ class CameraWorker:
         model_size: int = 320,
         model_id: str | None = None,             # detector identity for benchmarking labels
         best_frames=None,                        # shared BestFrameStore (on-demand best frame)
+        latest_frames=None,                      # shared LatestFrameStore (the newest decoded frame)
         device: str = "/dev/dri/renderD128",
         hwaccel: str = "cpu",             # service-wide DETECT_HWACCEL default
         decode_skip: str = "none",               # ffmpeg -skip_frame (decode-side CPU dial)
@@ -454,6 +455,7 @@ class CameraWorker:
         self.model_size = model_size
         self.model_id = model_id
         self.best_frames = best_frames
+        self.latest_frames = latest_frames
         self.device = device
         self.hwaccel = hwaccel
         self.decode_skip = decode_skip
@@ -1170,6 +1172,10 @@ class CameraWorker:
                 )
                 # Retain each track's best crop for on-demand fetch (best-frame
                 # store) — cheap: a reference, encoded lazily only if requested.
+                # The newest decoded frame, for /latest_frame: a reference
+                # per processed frame, encoded only if someone asks.
+                if self.latest_frames is not None:
+                    self.latest_frames.put(self.spec.camera_id, frame)
                 if self.best_frames is not None:
                     ts = getattr(frame, "ts", None)
                     for tr in result.tracks:
@@ -1300,6 +1306,7 @@ class WorkerManager:
         model_size: int = 320,
         model_id: str | None = None,                      # detector identity (benchmark labels)
         best_frames=None,                                 # shared BestFrameStore (thread-safe)
+        latest_frames=None,                               # shared LatestFrameStore (thread-safe)
         device: str = "/dev/dri/renderD128",
         hwaccel: str = "cpu",                             # service-wide DETECT_HWACCEL
         decode_skip: str = "none",                        # ffmpeg -skip_frame (decode-side CPU dial)
@@ -1374,6 +1381,7 @@ class WorkerManager:
         self._model_size = model_size
         self._model_id = model_id
         self._best_frames = best_frames
+        self._latest_frames = latest_frames
         self._device = device
         self._hwaccel = hwaccel
         # Max window over which a batch of new workers opens its streams.
@@ -1444,7 +1452,8 @@ class WorkerManager:
             spec, sink,
             detector=self._shared_detector or self._detector_factory(),
             model_size=self._model_size, model_id=self._model_id,
-            best_frames=self._best_frames, device=self._device,
+            best_frames=self._best_frames, latest_frames=self._latest_frames,
+            device=self._device,
             hwaccel=self._hwaccel,
             decode_skip=self._decode_skip,
             decode_threads=self._decode_threads,

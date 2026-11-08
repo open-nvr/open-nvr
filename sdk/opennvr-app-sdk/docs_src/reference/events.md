@@ -53,3 +53,5 @@ runs, free to consume.
 ::: opennvr_app_sdk.BestFrameClient
 
 ::: opennvr_app_sdk.make_best_frame_fetch
+
+::: opennvr_app_sdk.make_latest_frame_fetch
