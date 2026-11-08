@@ -104,6 +104,39 @@ _SMALL_TALK_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: The user is done: a fixed goodbye, no model (the model answered "I don't
+#: want to talk more" with "Understood. I will stop monitoring now" — an
+#: invented action — in the office session of 2026-11-08).
+_CLOSING_RE = re.compile(
+    r"^\s*(?:that'?s\s+enough|enough(?:\s+for\s+now)?|stop\s+talking|leave\s+it|never\s*mind"
+    r"|forget\s+it|we'?re\s+done|i'?m\s+done|that\s+will\s+be\s+all|that\s+is\s+enough)"
+    r"\s*[,.!?]*\s*$", re.IGNORECASE)
+#: Anywhere in the utterance (spoken turns stutter: "I I don't want to talk more").
+_CLOSING_PHRASE_RE = re.compile(
+    r"\b(?:don'?t|do not|didn'?t)\s+want\s+to\s+(?:talk|chat|speak)(?:\s+(?:any\s*)?more|\s+anymore)?\b",
+    re.IGNORECASE)
+
+#: The user doubts the last look ("there should be more than that", "are
+#: you sure", "look again", "there are three chairs") — the answer is a
+#: fresh look, not a model that agrees with the user against its own tool.
+_DISPUTE_RE = re.compile(
+    r"^\s*(?:no\b|nope\b|wrong\b|that'?s\s+(?:not\s+right|wrong|incorrect)|are\s+you\s+sure"
+    r"|(?:please\s+)?(?:look|check|count|try)\s+again|recount|there\s+(?:should|must)\s+be"
+    r"|(?:there\s+(?:are|is)\s+)?(?:more|less|fewer)\s+than\s+that|i\s+(?:can\s+)?see\s+(?:\w+\s+)?(?:more|three|four|five|two)"
+    r"|(?:and\s+)?why\s+(?:(?:did|do|are|were|have)\s+you|you\s+(?:were|have|had)?\s*)\s*(?:say|said|think|saying|thought)"
+    r"|there\s+(?:are|is)\s+(?:\w+)\s+\w+s?\s*[.!?]*\s*$)",
+    re.IGNORECASE)
+
+
+def is_closing(text: str) -> bool:
+    t = text or ""
+    return bool(_CLOSING_RE.match(t) or (len(t.split()) <= 12 and _CLOSING_PHRASE_RE.search(t)))
+
+
+def is_dispute(text: str) -> bool:
+    return bool(_DISPUTE_RE.match(text or ""))
+
+
 # The model's reply claims to have LOOKED ("I see the front door. It's dark
 # outside", "there's a person at the gate") — as opposed to offering to look
 # ("I can watch the cameras for you"). "I see..." / "I see," is the filler

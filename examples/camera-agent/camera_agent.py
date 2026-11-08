@@ -104,6 +104,8 @@ from tools import CameraTools, build_tool_definitions
 # and the forced-grounding path.
 import prompt_budget as _prompt_budget
 from router import clock_window_from_text
+from router import is_closing as _router_is_closing
+from router import is_dispute as _router_is_dispute
 from router import (  # noqa: F401 — re-exported
     _CAMERA_WORDS,
     _CAMERA_RE,
@@ -833,6 +835,28 @@ _STT_NOISE_PHRASES = frozenset({
 })
 
 
+_ENGLISH_HINTS = frozenset("""
+the a an and or but if so is are was were be been am do does did have has had
+i you he she it we they me him her us them my your his its our their this that
+these those there here what which who whom whose when where why how can could
+will would shall should may might must not no yes please ok okay thanks thank
+to of in on at by for with from about into over under up down out off any some
+all many much more most few less now then today tonight yesterday tomorrow
+morning afternoon evening night last next again still just only also very
+see look show tell me check count find watch want know think say said
+one two three four five six seven eight nine ten
+""".split())
+
+
+def _english_hint(word: str) -> bool:
+    w = word.strip(".,!?;:\"'()[]").lower().replace("'", "")
+    if not w:
+        return False
+    if w in _ENGLISH_HINTS or w.rstrip("s") in _ENGLISH_HINTS:
+        return True
+    return bool(_CAMERA_RE.search(w) or _DETECTION_RE.search(w) or _DESCRIBE_RE.search(w))
+
+
 def looks_like_noise(transcript: str) -> bool:
     """True if a transcript is almost certainly a noise/silence hallucination
     rather than a real spoken question — so the voice loop can ignore it and
@@ -846,7 +870,16 @@ def looks_like_noise(transcript: str) -> bool:
     letters = [c for c in t if c.isalpha()]
     if len(letters) < 2:                       # punctuation / single letter
         return True
+    # Garbled: a multilingual STT model hallucinating another language from
+    # ambient or accented speech ("Que ela é mamadura? Oh!" in the office
+    # session of 2026-11-08, answered with a look at the camera). Letters
+    # outside ASCII in a fifth of the text, or three-plus words none of
+    # which is an English function word or a word the agent knows.
+    if sum(1 for c in letters if ord(c) > 127) > 0.2 * len(letters):
+        return True
     words = norm.split()
+    if len(words) >= 3 and not any(_english_hint(w) for w in words):
+        return True
     if len(words) <= 2 and all(w in _STT_NOISE_PHRASES for w in words):
         return True
     # Repetition hallucination: Whisper on sustained background noise loops a
@@ -3264,6 +3297,9 @@ class CameraAgentRuntime:
         self.llm_degraded_since: float | None = None
         self._llm_probe_at: float = 0.0
         self._llm_notice_pending: bool = False
+        # The last detect/describe call a turn made (tool, args, at): a
+        # dispute of its answer repeats it instead of asking the model.
+        self.last_look: dict[str, Any] | None = None
 
         self.context = CameraContext(
             cameras=cfg.cameras,
@@ -7643,6 +7679,10 @@ async def _invoke_tool(runtime: "CameraAgentRuntime", call: dict[str, Any], *,
         name.startswith("create_") and result.rstrip().endswith("?"))
     _trace_tool(runtime, name, args, None, _tool_t0, by=by, asked=asked, hinted=hinted,
                 failed=failed)
+    # The last look, for a dispute ("there should be more than that"): the
+    # same call is made again and answered from its result, with no model.
+    if not failed and name in ("detect_objects", "describe_camera", "camera_snapshot"):
+        runtime.last_look = {"tool": name, "args": dict(args), "at": time.time()}
     if len(result) > 1200:
         result = result[:1200] + " …(truncated)"
     return name, result
@@ -7999,6 +8039,27 @@ async def _conversation_turn_body(
     if _is_config_question(user_text):
         trace.append({"step": "reply", "detail": "roster"})
         return _roster_answer(runtime.visible_cameras())
+    # The user is done: a goodbye, no model. ("I don't want to talk more"
+    # drew "Understood. I will stop monitoring now." from the model — an
+    # action it never took.)
+    if _router_is_closing(user_text):
+        trace.append({"step": "reply", "detail": "closing"})
+        return "Alright. I'll be here when you need me."
+    # The user doubts the last look: look again, the same way, and answer
+    # from what the look says — never from the user's number. (Told "there
+    # are three chairs", the model called the detector, was told one, and
+    # replied "I see three chairs".)
+    look = getattr(runtime, "last_look", None)
+    if look and _router_is_dispute(user_text) and time.time() - float(look.get("at") or 0) < LAST_LOOK_TTL_S:
+        call = {"id": "recheck-0", "type": "function",
+                "function": {"name": look["tool"], "arguments": dict(look["args"])}}
+        name, result = await _invoke_tool(runtime, call, by="recheck")
+        said = _humanize_for_speech(result, runtime.visible_cameras()).rstrip(".")
+        hedge = (" The detector can miss things that are partly hidden or overlapping."
+                 if name == "detect_objects" else "")
+        trace.append({"step": "reply", "detail": "recheck"})
+        logger.info("converse: RECHECK %s %s -> %s", name, look["args"], result[:120])
+        return f"Looking again: {said}.{hedge}"
 
     # No clock in the system prompt: Ollama renders the tool schemas right
     # after it, and a line that changes every minute in front of ~3.5k
@@ -8273,8 +8334,21 @@ async def _conversation_turn_body(
     # reasoning) but a tool ran, surface that result. Roster/config
     # questions never reach here: they are answered before the loop.
     cleaned = _clean_for_speech(final, runtime.visible_cameras())
+    extra_issues: list[str] = []
     if cleaned and not _is_deflection(cleaned):
         reply, source = cleaned, "llm"
+        # The reply must agree with the tool it rests on. A count the model
+        # states for a thing the detector just counted differently is the
+        # detector's count, hedged; an action the model claims when no tool
+        # ran did not happen.
+        corrected = _count_disagreement(cleaned, last_tool_result, runtime.visible_cameras())
+        if corrected:
+            reply, source = corrected, "tool_fallback"
+            extra_issues.append("count_mismatch")
+        elif tools_called == 0 and _claims_action(cleaned):
+            reply, source = ("Nothing has been changed. Say 'stop the monitor' or 'cancel the "
+                             "alarm' if that is what you want."), "none"
+            extra_issues.append("action_claim")
     elif last_tool_result:
         reply, source = _humanize_for_speech(last_tool_result, runtime.visible_cameras()), "tool_fallback"
     else:
@@ -8284,7 +8358,7 @@ async def _conversation_turn_body(
     # answer is diagnosable from the logs (camera offline, adapter down, the LLM
     # not calling tools, a deflection, etc.) without re-running.
     degraded = _degradation_reasons(last_tool_result, final, cleaned,
-                                    grounded, tools_called)
+                                    grounded, tools_called) + extra_issues
     # Where the answer came from. No "ms": it is a label, not a stage, so
     # the latency medians (fillers.record_stages) and the demo's flow line
     # leave it out.
@@ -8307,6 +8381,71 @@ _DEFLECTION_RE = re.compile(
 def _is_deflection(text: str) -> bool:
     t = (text or "").strip().lower().lstrip(".… ")
     return bool(_DEFLECTION_RE.match(t)) and len(t) < 80
+
+
+#: How long a look stays "the last look" a dispute refers to.
+LAST_LOOK_TTL_S = 180.0
+
+_NUMBER_WORDS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+                 "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12}
+_COUNT_RE = re.compile(r"\b(\d+|an?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+([a-z][a-z-]*)")
+_ACTION_CLAIM_RE = re.compile(
+    r"\bI(?:'ll| will| have|'ve| am|'m)?\s+(?:now\s+|just\s+)?(?:stop(?:ped)?|cancel(?:l?ed)?|disarm(?:ed)?|"
+    r"silenced?|arm(?:ed)?|set(?:\s+up)?|creat(?:e|ed)|start(?:ed)?|turn(?:ed)?\s+(?:on|off)|"
+    r"(?:am|will be)\s+monitoring|monitor(?:ing)?)\b", re.IGNORECASE)
+_OFFER_RE = re.compile(r"\b(?:can|could|would|if you|say the word|let me know)\b", re.IGNORECASE)
+
+
+def _singular(label: str) -> str:
+    w = label.lower()
+    irregular = {"people": "person", "men": "man", "women": "woman", "children": "child", "buses": "bus"}
+    if w in irregular:
+        return irregular[w]
+    if w.endswith("ies"):
+        return w[:-3] + "y"
+    if w.endswith("es") and w[:-2].endswith(("s", "x", "ch", "sh")):
+        return w[:-2]
+    if w.endswith("s") and not w.endswith("ss"):
+        return w[:-1]
+    return w
+
+
+def _counts_in(text: str) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for num, label in _COUNT_RE.findall((text or "").lower()):
+        n = int(num) if num.isdigit() else _NUMBER_WORDS.get(num)
+        if n is None:
+            continue
+        out[_singular(label)] = n
+    return out
+
+
+def _count_disagreement(reply: str, tool_result: str, cameras=None) -> str | None:
+    """When the model's reply states a different count than the detector's
+    result for the same thing, the detector's count, hedged — else None.
+    Only detector results carry counts ("On cam23: 2 chairs."); a caption
+    ("several chairs") is prose and is left alone."""
+    if not tool_result or "no objects" in tool_result or not re.match(r"^(On |Across )", tool_result or ""):
+        return None
+    tool_counts = _counts_in(tool_result)
+    if not tool_counts:
+        return None
+    said = _counts_in(reply)
+    clash = [label for label, n in said.items() if label in tool_counts and tool_counts[label] != n]
+    if not clash:
+        return None
+    seen = _humanize_for_speech(tool_result, cameras).rstrip(".")
+    return (f"I can make out {seen[0].lower() + seen[1:]}. The detector can miss things that are "
+            f"partly hidden or overlapping, so there may be more.")
+
+
+def _claims_action(reply: str) -> bool:
+    """The reply says an alarm, monitor or report was set, stopped or
+    changed — as a statement, not an offer or a question."""
+    r = (reply or "").strip()
+    if not r or r.endswith("?") or _OFFER_RE.search(r):
+        return False
+    return bool(_ACTION_CLAIM_RE.search(r))
 
 
 def _degradation_reasons(last_tool_result: str, final: str, cleaned: str,
