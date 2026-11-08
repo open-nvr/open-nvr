@@ -287,6 +287,14 @@ fill_qualcomm_agent_llm() {
     # bundle's window is fixed at 4,096 tokens: LLM_WINDOW_TOKENS makes
     # the agent send each turn only the tool schemas the question needs.
     [[ "$(get_env_var CAPTION_ADAPTER)" == litertlm ]] || return 0
+    # A box this fill already put on the NPU adapter (its own URL, so no
+    # operator's endpoint is being touched) gains the fallback when .env
+    # names a host Ollama, even though the switch itself is past.
+    if [[ "$(get_env_var LLM_BASE_URL)" == "http://caption-adapter:9006" ]]; then
+        local ext0; ext0=$(get_env_var OLLAMA_EXTERNAL_URL)
+        [[ -n "$ext0" && -z "$(get_env_var LLM_FALLBACK_URL)" ]] && set_env_var LLM_FALLBACK_URL "$ext0"
+        return 0
+    fi
     case "$(get_env_var LLM_PROVIDER)" in ""|ollama) ;; *) return 0 ;; esac
     [[ -z "$(get_env_var LLM_BASE_URL)" ]] || return 0
     set_env_var LLM_PROVIDER openai
@@ -295,6 +303,11 @@ fill_qualcomm_agent_llm() {
     set_env_var LLM_WINDOW_TOKENS 4096
     # A pre-warm is seconds on the NPU; the installer turned it off for the CPU.
     case "$(get_env_var LLM_PREWARM)" in ""|false) set_env_var LLM_PREWARM true ;; esac
+    # A host Ollama, when .env names one, answers while the NPU adapter is
+    # away (restarting, reloading its model): slower, with a spoken notice.
+    local ext; ext=$(get_env_var OLLAMA_EXTERNAL_URL)
+    [[ -n "$ext" && -z "$(get_env_var LLM_FALLBACK_URL)" ]] && set_env_var LLM_FALLBACK_URL "$ext"
+    return 0
 }
 
 # The flavour changed since the last run (OPENNVR_ACCEL edited, or the disk
@@ -321,7 +334,7 @@ reset_stale_accel_fills() {
             # pre-warm off again, the window the runtime's own.
             qualcomm:LLM_BASE_URL:http://caption-adapter:9006)
                 write_env_var LLM_PROVIDER ""; write_env_var LLM_BASE_URL ""; write_env_var LLM_MODEL ""
-                write_env_var LLM_WINDOW_TOKENS ""; write_env_var LLM_PREWARM false ;;
+                write_env_var LLM_WINDOW_TOKENS ""; write_env_var LLM_PREWARM false; write_env_var LLM_FALLBACK_URL "" ;;
             intel:DETECT_ONNX_BACKEND:ort|qualcomm:DETECT_ONNX_BACKEND:ort) write_env_var DETECT_ONNX_BACKEND auto ;;
             intel:DETECT_ONNX_PROVIDERS:OpenVINOExecutionProvider:NPU|intel:DETECT_ONNX_PROVIDERS:OpenVINOExecutionProvider:GPU|qualcomm:DETECT_ONNX_PROVIDERS:QNNExecutionProvider:htp)
                 write_env_var DETECT_ONNX_PROVIDERS "" ;;

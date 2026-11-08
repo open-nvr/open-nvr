@@ -291,6 +291,13 @@ class AppConfig:
     # is likely to need and the newest history, so the prompt and the
     # answer fit (prompt_budget.py). 0 = the runtime manages the window.
     llm_window_tokens: int = 0
+    # When the LLM is an OpenAI-compatible endpoint that can go away (the
+    # NPU adapter restarting, its model reloading), an Ollama to answer
+    # from meanwhile: slower, but an answer. None = no fallback, the turn
+    # fails as before. The qualcomm fill points this at the host Ollama
+    # when .env names one (OLLAMA_EXTERNAL_URL).
+    llm_fallback_url: str | None = None
+    llm_fallback_model: str = "granite4:micro"
     # How long Ollama keeps the model resident (sent on every request so a
     # host-run Ollama stays warm even without OLLAMA_KEEP_ALIVE in its env).
     # -1 = forever (default). A duration string like "5m" frees RAM when idle.
@@ -3085,6 +3092,8 @@ def load_config(path: str | Path) -> AppConfig:
         llm_num_threads=(int(raw["llm_num_threads"]) if raw.get("llm_num_threads") else None),
         llm_num_ctx=int(raw.get("llm_num_ctx") or 4096),
         llm_window_tokens=int(raw.get("llm_window_tokens") or 0),
+        llm_fallback_url=(str(raw.get("llm_fallback_url")).strip() or None) if raw.get("llm_fallback_url") else None,
+        llm_fallback_model=_str("llm_fallback_model", "granite4:micro"),
         llm_keep_alive=(raw["llm_keep_alive"] if raw.get("llm_keep_alive") is not None else -1),
         llm_prewarm=_truthy(raw.get("llm_prewarm"), True),
         piper_url=_str("piper_url", "http://127.0.0.1:9001"),
@@ -3246,6 +3255,15 @@ class CameraAgentRuntime:
         # Set/cleared ONLY by the turn loop (real questions), never by
         # boot-time prewarm, whose transient failures are not a verdict.
         self.last_llm_error: str | None = None
+        # The fallback LLM (an Ollama) and whether we are on it: set when the
+        # primary refused a connection or had no model loaded, cleared when
+        # a probe of the primary answers again. The notice is spoken once
+        # per episode, at the start of the first reply the fallback gave.
+        self.llm_fallback = None
+        self.llm_degraded: bool = False
+        self.llm_degraded_since: float | None = None
+        self._llm_probe_at: float = 0.0
+        self._llm_notice_pending: bool = False
 
         self.context = CameraContext(
             cameras=cfg.cameras,
@@ -3267,6 +3285,15 @@ class CameraAgentRuntime:
             )
             logger.info("LLM brain: OpenAI-compatible at %s (model=%s)",
                         cfg.llm_base_url or cfg.ollama_url, cfg.llm_model)
+            if cfg.llm_fallback_url:
+                _fb_think = False if "qwen3" in (cfg.llm_fallback_model or "").lower() else None
+                self.llm_fallback = OllamaClient(
+                    url=cfg.llm_fallback_url, token=cfg.ollama_token, model=cfg.llm_fallback_model,
+                    num_thread=cfg.llm_num_threads, num_ctx=cfg.llm_num_ctx,
+                    think=_fb_think, keep_alive=cfg.llm_keep_alive,
+                )
+                logger.info("LLM fallback: Ollama at %s (model=%s) when the brain is unreachable",
+                            cfg.llm_fallback_url, cfg.llm_fallback_model)
         else:
             # Auto-disable thinking for Qwen3 (a thinking model) unless the
             # operator set llm_think explicitly — on CPU, thinking burns the
@@ -4990,6 +5017,12 @@ class CameraAgentRuntime:
 
         async def check_llm():
             if self.cfg.llm_provider.strip().lower() == "openai":
+                if self.llm_degraded and self.llm_fallback is not None:
+                    since = self.llm_degraded_since
+                    ago = f" for {int(time.time() - since) // 60} min" if since else ""
+                    return DEGRADED, (f"the LLM at {self.cfg.llm_base_url or self.cfg.ollama_url} is "
+                                      f"unreachable{ago}; answering on the backup model "
+                                      f"{self.cfg.llm_fallback_model} at {self.cfg.llm_fallback_url} (slower)")
                 murl = getattr(self.ollama, "models_url", None)
                 if not murl:
                     return OK, "external OpenAI-compatible endpoint (not probed)"
@@ -5184,6 +5217,7 @@ class CameraAgentRuntime:
             },
             "llm_model": self.cfg.llm_model,
             "llm_error": getattr(self, "last_llm_error", None),
+            "llm_degraded": bool(getattr(self, "llm_degraded", False)),
             "vision_error": getattr(self.tools, "last_vision_error", None),
             # Which store has answered footage search since start-up.
             # This is here because a counter nobody can read is not
@@ -6260,6 +6294,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             # The last LLM failure from a real turn (None = answering).
             # Issue #344: the brain crash-looped for days behind a green dot.
             "llm_error": getattr(runtime, "last_llm_error", None),
+            "llm_degraded": bool(getattr(runtime, "llm_degraded", False)),
             "history": getattr(runtime, "events_client", None) is not None,
         }
 
@@ -7775,7 +7810,7 @@ async def _chat_or_explain(runtime: "CameraAgentRuntime", **kw: Any) -> dict[str
              if runtime.cfg.llm_provider.strip().lower() == "openai"
              else runtime.cfg.ollama_url)
     try:
-        response = await runtime.ollama.chat(**kw)
+        response, where = await _chat_with_fallback(runtime, where, **kw)
     except httpx.HTTPStatusError as exc:
         # The body is the diagnosis ("model X not found, try pulling it
         # first") — keep it. Cap it: error pages can be arbitrarily long.
@@ -7841,6 +7876,65 @@ async def _chat_within_window(
             trace.append({"step": "prompt", "detail": f"too long for the window; {what}", "ms": 0})
             logger.warning("converse: the prompt did not fit the LLM's window; %s and retrying", what)
     raise AssertionError("unreachable")
+
+
+#: How often, while on the fallback, the primary LLM is tried again.
+LLM_PROBE_INTERVAL_S = 60.0
+
+
+def _is_llm_outage(exc: BaseException) -> bool:
+    """The failures that mean "the brain is not there", as opposed to a bad
+    request: no connection, a timeout, or a 5xx (the adapter answers 503
+    model_not_loaded while its engine comes up)."""
+    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.TimeoutException)):
+        return True
+    return isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code >= 500
+
+
+async def _chat_with_fallback(runtime: "CameraAgentRuntime", where: str, **kw: Any) -> tuple[dict[str, Any], str]:
+    """One LLM call on the primary, or on the fallback Ollama when the
+    primary is away: returns (response, the URL that answered).
+
+    The primary is tried first unless we are already on the fallback and
+    the last probe was under LLM_PROBE_INTERVAL_S ago — then the fallback
+    answers directly, and the primary is tried again on the next probe.
+    An outage on the primary (connection refused, timeout, 5xx) with a
+    fallback configured marks the episode (health DEGRADED, one spoken
+    notice) and the same request goes to the fallback; its errors, and
+    every non-outage error of the primary, propagate as before."""
+    fb = getattr(runtime, "llm_fallback", None)
+    if fb is None:
+        return await runtime.ollama.chat(**kw), where
+    now = time.monotonic()
+    fb_where = f"{runtime.cfg.llm_fallback_url} ({runtime.cfg.llm_fallback_model}, backup)"
+    if runtime.llm_degraded and now - runtime._llm_probe_at < LLM_PROBE_INTERVAL_S:
+        return await fb.chat(**kw), fb_where
+    try:
+        response = await runtime.ollama.chat(**kw)
+    except Exception as exc:  # noqa: BLE001 — classified below
+        if not _is_llm_outage(exc):
+            raise
+        runtime._llm_probe_at = now
+        if not runtime.llm_degraded:
+            runtime.llm_degraded = True
+            runtime.llm_degraded_since = time.time()
+            runtime._llm_notice_pending = True
+            logger.warning("LLM at %s unreachable (%s: %s); answering on the backup model at %s "
+                           "until it is back", where, type(exc).__name__, str(exc)[:120], fb_where)
+        return await fb.chat(**kw), fb_where
+    if runtime.llm_degraded:
+        logger.info("LLM at %s is back; leaving the backup model", where)
+        runtime.llm_degraded = False
+        runtime.llm_degraded_since = None
+    return response, where
+
+
+def _with_llm_notice(runtime: "CameraAgentRuntime", reply: str) -> str:
+    """The once-per-episode spoken notice that the backup model answered."""
+    if getattr(runtime, "_llm_notice_pending", False) and getattr(runtime, "llm_degraded", False):
+        runtime._llm_notice_pending = False
+        return f"I'm on my slower backup model for now. {reply}".strip()
+    return reply
 
 
 async def _run_conversation_turn(
@@ -8199,7 +8293,7 @@ async def _conversation_turn_body(
     log("converse: TURN reply_source=%s grounded=%s forced=%s tools=%d "
         "issues=%s reply=%r", source, grounded, forced, tools_called,
         ",".join(degraded) or "none", reply[:90])
-    return reply
+    return _with_llm_notice(runtime, reply)
 
 
 # Hollow "acknowledgement" replies a small model emits instead of answering

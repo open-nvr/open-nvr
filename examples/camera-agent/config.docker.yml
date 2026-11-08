@@ -122,6 +122,12 @@ llm_model: ${LLM_MODEL}
 # turn then sends only the tool schemas the question is likely to need and
 # the newest history (prompt_budget.py). 0 = the runtime manages the window.
 llm_window_tokens: ${LLM_WINDOW_TOKENS}
+# When llm_provider is openai and that endpoint goes away (the NPU adapter
+# restarting, its model reloading): an Ollama to answer from meanwhile,
+# slower, with one spoken notice. Empty = no fallback. The qualcomm
+# flavour's start.sh fills it from OLLAMA_EXTERNAL_URL when .env has one.
+llm_fallback_url: ${LLM_FALLBACK_URL}
+llm_fallback_model: ${LLM_FALLBACK_MODEL}
 # Pre-set so that IF you switch OLLAMA_MODEL to a "thinking" model (e.g. a qwen3)
 # it stays snappy and non-verbose; a harmless no-op for the non-thinking qwen2.5
 # default.
