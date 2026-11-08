@@ -279,6 +279,17 @@ def _parse_clock(raw: str) -> int | None:
     raw = raw.strip().lower()
     if not raw:
         return None
+    # A full timestamp or HH:MM:SS is its time of day (the agent reads
+    # Gemma's "2026-11-08T22:00:00+0000" that way); midnight and noon too.
+    m = re.match(r"^\d{4}-\d{2}-\d{2}[t ](\d{1,2}):(\d{2})(?::\d{2})?", raw)
+    if m:
+        raw = f"{m.group(1)}:{m.group(2)}"
+    elif re.match(r"^\d{1,2}:\d{2}:\d{2}$", raw):
+        raw = raw[:5]
+    if raw == "midnight":
+        return 0
+    if raw in ("noon", "midday"):
+        return 720
     meridian = None
     if raw.endswith(("am", "pm")):
         meridian = raw[-2:]

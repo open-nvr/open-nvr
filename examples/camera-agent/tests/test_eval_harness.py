@@ -502,12 +502,15 @@ def test_time_matching_follows_the_agents_own_parser():
     readable: "after 6pm" as an ``after`` value arms an all-day alarm."""
     import camera_agent as ca
     for raw in ("6pm", "6:00 PM", "18:00", "18", "12am", "12:30pm", "6 pm.",
-                "18:00:00", "after 6pm", "25:00", "noon", ""):
+                "18:00:00", "2026-11-08T22:00:00+0000", "after 6pm", "25:00",
+                "noon", "midnight", ""):
         agent = ca._parse_hhmm(raw)
         harness = eh._parse_clock(raw)
         assert agent == harness, raw
     assert not eh.match_value("18:00", "after 6pm")
-    assert not eh.match_value("18:00", "18:00:00")
+    # A full timestamp is its time of day to the agent, so to the harness.
+    assert eh.match_value("18:00", "18:00:00")
+    assert eh.match_value("22:00", "2026-11-08T22:00:00+0000")
 
 
 def test_a_window_direction_must_agree():

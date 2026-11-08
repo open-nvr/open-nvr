@@ -234,7 +234,11 @@ def test_no_hint_where_tier0_said_the_model_must_decide():
     word for word; a detector hint there IS the wrong-tool iteration."""
     d = router.decide("watch the door and tell me if anyone comes", cameras=CAMS,
                       advertised=ALL, now=NOW)
-    assert d.tier == 2 and d.hint is None and "side effect" in d.reason
+    # A standing request gets the standing-verb hint, never a detector's.
+    assert d.tier == 1 and d.hint == "create_monitor"
+    d = router.decide("every morning summarize cam1", cameras=CAMS,
+                      advertised=ALL, now=NOW)
+    assert d.tier == 2 and d.hint is None and "side effect" in d.reason   # no report tool advertised
     d = router.decide("who is at the door", cameras=CAMS, advertised=ALL, now=NOW)
     assert d.tier == 2 and d.hint is None and "who" in d.reason
 
@@ -290,3 +294,49 @@ def test_small_talk_is_tier_0_with_no_tool(q):
 def test_one_real_word_makes_it_not_small_talk(q):
     d = _t0(q)
     assert d is None or not (d.routed and d.tool is None), q
+
+
+# ── standing requests: alarm or monitor, by the words ────────────────
+
+@pytest.mark.parametrize("q,tool", [
+    ("let me know when a car arrives at cam1", "create_monitor"),
+    ("notify me when a person shows up at cam1", "create_monitor"),
+    ("notify me when more than 3 people gather on cam1", "create_monitor"),
+    ("keep an eye on cam1 for a truck", "create_monitor"),
+    ("sound the siren if anyone is at cam1 before 6am", "create_alarm"),
+    ("set a silent alarm for a person at cam1 after 11pm", "create_alarm"),
+    ("ring an alarm if a person shows up there after 10pm", "create_alarm"),
+    ("wake me if someone comes to cam1", "create_alarm"),
+    ("stop watching for that", "stop_monitor"),
+    ("actually, cancel that alarm", "stop_alarm"),
+    ("turn off the siren", "stop_alarm"),
+])
+def test_standing_requests_are_hinted_by_their_words(q, tool):
+    """Measured on the NPU: 'let me know when a car arrives' went to
+    create_alarm with an invented midnight window, six times of six."""
+    d = router.decide(q, cameras=CAMS, advertised=ALL | {"stop_monitor"}, now=NOW)
+    assert d.tier == 1 and d.hint == tool, (q, d)
+
+
+def test_standing_hint_only_names_advertised_tools():
+    d = router.decide("let me know when a car arrives at cam1", cameras=CAMS,
+                      advertised={"describe_camera", "detect_objects"}, now=NOW)
+    assert d.tier == 2 and d.hint is None
+
+
+@pytest.mark.parametrize("q,window", [
+    ("alarm if a person is seen after 6pm", (1080, None, True)),
+    ("sound the siren if anyone is at cam1 before 6am", (None, 360, True)),
+    ("ring an alarm if a person shows up there after 10pm", (1320, None, True)),
+    ("set a silent alarm for a person after 11 pm", (1380, None, True)),
+    ("alarm between 10pm and 6am if anyone comes", (1320, 360, True)),
+    ("alarm from 22:30 to 05:00 for a person", (1350, 300, True)),
+    ("after 12:10 pm ring if a car comes", (730, None, True)),
+    ("alarm if a person comes after midnight", (None, None, True)),
+    ("let me know when a car arrives at cam1", (None, None, False)),
+    ("notify me when a person shows up tonight", (None, None, False)),
+    ("alarm if 3 people gather", (None, None, False)),
+])
+def test_clock_window_from_text(q, window):
+    assert router.clock_window_from_text(q) == window
+
