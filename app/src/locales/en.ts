@@ -730,7 +730,14 @@ export const translations: TranslationCatalog = {
   'search.needs.not-on-this-box': '“{{word}}” can’t be searched yet — this system doesn’t detect {{kind}}.',
   'search.needs.never-produced': '“{{word}}” can’t be searched yet — {{skill}} is installed but not turned on for any camera.',
   'search.needs.never-produced-app': '“{{word}}” can’t be searched yet — turn on {{skill}} for a camera in {{apps}} (App Catalog → Configure).',
-  'search.needs.captionsFallback': 'Scene descriptions may still mention it.',
+  'search.needs.people-off': '“{{word}}” can’t be searched yet — descriptions cover vehicles only; people descriptions are off (EVENTS_DESCRIPTOR_PEOPLE).',
+  // With a captioner the word is matched from the scene descriptions;
+  // the second sentence says what would make it an exact claim.
+  'search.needs.captioned': '“{{word}}” is matched from scene descriptions.',
+  'search.needs.not-on-this-box.exact': 'This system has no skill that records {{kind}} as a fact.',
+  'search.needs.never-produced.exact': 'For an exact match, turn on {{skill}} for a camera.',
+  'search.needs.never-produced-app.exact': 'For an exact match, turn on {{skill}} for a camera in {{apps}} (App Catalog → Configure).',
+  'search.needs.people-off.exact': 'For an exact match, turn on people descriptions (EVENTS_DESCRIPTOR_PEOPLE=true in .env); past visits are described too.',
   'search.needs.wantsPlate': 'Showing only vehicles with a readable number plate.',
   'search.pending.describing': 'Not described yet: {{missing}} of the matching visits — describing them now, {{eta}}.',
   'search.pending.describingSome': 'Not described yet: {{missing}} of the matching visits — describing the newest {{queued}} now, {{eta}}. Narrow the time window to reach the rest sooner.',
