@@ -79,6 +79,11 @@ def test_a_dispute_repeats_the_last_look_instead_of_agreeing():
     assert by == ["recheck"]
     out2 = asyncio.run(ca._run_conversation_turn(rt, [], "there are three chairs."))
     assert out2.startswith("Looking again:")
+    from router import is_dispute
+    for q in ("And why you were said that it was one?", "why did you say one", "are you sure?", "look again please"):
+        assert is_dispute(q), q
+    for q in ("what do you see", "how many chairs are there?", "thanks, that's all"):
+        assert not is_dispute(q), q
 
 
 # ── the reply against the tool result ─────────────────────────────────

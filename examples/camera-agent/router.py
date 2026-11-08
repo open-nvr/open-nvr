@@ -123,7 +123,8 @@ _DISPUTE_RE = re.compile(
     r"^\s*(?:no\b|nope\b|wrong\b|that'?s\s+(?:not\s+right|wrong|incorrect)|are\s+you\s+sure"
     r"|(?:please\s+)?(?:look|check|count|try)\s+again|recount|there\s+(?:should|must)\s+be"
     r"|(?:there\s+(?:are|is)\s+)?(?:more|less|fewer)\s+than\s+that|i\s+(?:can\s+)?see\s+(?:\w+\s+)?(?:more|three|four|five|two)"
-    r"|why\s+(?:did|do|are)\s+you\s+(?:say|think|saying)|there\s+(?:are|is)\s+(?:\w+)\s+\w+s?\s*[.!?]*\s*$)",
+    r"|(?:and\s+)?why\s+(?:(?:did|do|are|were|have)\s+you|you\s+(?:were|have|had)?\s*)\s*(?:say|said|think|saying|thought)"
+    r"|there\s+(?:are|is)\s+(?:\w+)\s+\w+s?\s*[.!?]*\s*$)",
     re.IGNORECASE)
 
 
