@@ -397,6 +397,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The camera agent no longer agrees with the user against its own
+  detector, invents actions, or answers garbled speech.** From the office
+  voice session of 2026-11-08: told "there are three chairs" it called the
+  detector, was told one, and said "I see three chairs" — a count the model
+  states against the detector's is now the detector's count, hedged ("I can
+  make out a chair; the detector can miss things that are partly hidden");
+  a reply that claims to have set, stopped or armed something when no tool
+  ran is replaced by a plain line; "there should be more than that", "are
+  you sure", "look again" repeat the last look and answer from it with no
+  model; "I don't want to talk more" and its kin get a goodbye with no
+  model; and a transcript the speech model hallucinated in another language,
+  or with no English word in it, is dropped as noise instead of triggering a
+  look at the camera.
+
 - **The camera agent no longer answers for the first camera when none
   was named.** With several cameras and no camera named or selected, a
   detection, count or history question now goes to every camera (and
