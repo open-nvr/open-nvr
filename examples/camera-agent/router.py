@@ -456,7 +456,7 @@ def _pick_camera(text: str, cameras: list[str], preferred: str | None = None) ->
 #: model's confirmation ("I'll watch the driveway and tell you…") is part
 #: of the product for these.
 _SIDE_EFFECT_RE = re.compile(
-    r"\b(notify|alert|alarm|siren|watch|keep\s+(an\s+)?eye|monitor|remind|"
+    r"\b(notify|alert|alarm|siren|watch|keep\s+(an\s+)?eye|monitor|remind|wake\s+me|"
     r"report|summar(y|ize|ise)|every\s+(morning|evening|hour|day|\d+)|"
     r"stop\b(?!\s+by)|cancel|disarm|arm|turn\s+(on|off)|mute|silence|schedule|"
     r"from\s+now\s+on|whenever|if\s+(you\s+)?(see|spot)|let\s+me\s+know|"
@@ -750,6 +750,110 @@ def hint_tier1(text: str, *, advertised: set[str], threshold: float = 0.6,
     return Decision(1, hint=tool, reason=f"resembles {tool} ({top:.2f})")
 
 
+# ── standing requests: which verb, by the words ───────────────────
+
+#: An alarm is asked for with alarm words. Measured on the NPU (Gemma 4
+#: E2B, 2026-11-08, 32-case eval): "let me know when a car arrives" and
+#: "notify me when a person shows up" went to create_alarm 6 times of 6,
+#: each with an invented "after midnight" window; "notify me when more
+#: than 3 people gather" went to create_monitor every time. The words
+#: decide here, the model fills the slots.
+_ALARM_WORDS_RE = re.compile(
+    r"\b(alarm|siren|ring|rings|loud|loudly|wake\s+me|alert\s+me\s+loud)", re.IGNORECASE)
+_STOP_WORDS_RE = re.compile(
+    r"\b(stop|cancel|disarm|silence|mute|turn\s+(it\s+)?off|remove|delete|clear)\b", re.IGNORECASE)
+_MONITOR_WORDS_RE = re.compile(
+    r"\b(notify|let\s+me\s+know|tell\s+me\s+(when|if)|watch|keep\s+(an\s+)?eye|monitor|"
+    r"count(ing)?|whenever|if\s+(you\s+)?(see|spot)|alert\s+me)\b", re.IGNORECASE)
+_REPORT_WORDS_RE = re.compile(
+    r"\b(report|summar(y|ize|ise)|digest|every\s+(morning|evening|day|hour|night)|daily|weekly)\b",
+    re.IGNORECASE)
+
+
+def hint_standing(text: str, *, advertised: set[str]) -> Decision | None:
+    """The tool a standing request most likely wants, from its words:
+    alarm words → create_alarm, otherwise notify/watch words →
+    create_monitor; a stop word turns either into its stop tool; report
+    words → create_report. Only tools that are advertised. The model
+    still decides and fills the arguments; this rides in the user turn
+    as a Tier-1 hint."""
+    t = text or ""
+    alarm = bool(_ALARM_WORDS_RE.search(t))
+    stop = bool(_STOP_WORDS_RE.search(t))
+    monitor = bool(_MONITOR_WORDS_RE.search(t))
+    report = bool(_REPORT_WORDS_RE.search(t))
+    if stop:
+        tool = "stop_alarm" if alarm else ("stop_report" if report and not monitor else "stop_monitor")
+    elif report and not alarm:
+        tool = "create_report"
+    elif alarm:
+        tool = "create_alarm"
+    elif monitor:
+        tool = "create_monitor"
+    else:
+        return None
+    if tool not in advertised:
+        return None
+    return Decision(1, hint=tool, reason=f"standing request, {'stop' if stop else 'set'}: {tool}")
+
+
+# ── the clock window a request names ──────────────────────────────
+
+_CLOCK_RE = (r"(?:(?P<h>\d{1,2})(?::(?P<m>\d{2}))?\s*(?P<ap>a\.?m\.?|p\.?m\.?)?"
+             r"|(?P<word>midnight|noon|midday))")
+_BETWEEN_RE = re.compile(
+    r"\b(?:between|from)\s+" + _CLOCK_RE.replace("(?P<", "(?P<a_") +
+    r"\s+(?:and|to|till|until|-)\s+" + _CLOCK_RE.replace("(?P<", "(?P<b_"), re.IGNORECASE)
+_AFTER_RE = re.compile(r"\b(?:after|past|from|later\s+than)\s+" + _CLOCK_RE, re.IGNORECASE)
+_BEFORE_RE = re.compile(r"\b(?:before|until|till|by|earlier\s+than)\s+" + _CLOCK_RE, re.IGNORECASE)
+
+
+def _clock_minutes(h, m, ap, word) -> int | None:
+    if word:
+        return {"midnight": 0, "noon": 720, "midday": 720}[word.lower()]
+    if h is None:
+        return None
+    hour, minute = int(h), int(m or 0)
+    ap = (ap or "").replace(".", "").lower()
+    if ap and not (1 <= hour <= 12):
+        return None
+    if not ap and (m is None) and not (0 <= hour <= 23):
+        return None
+    if ap == "am" and hour == 12:
+        hour = 0
+    elif ap == "pm" and hour < 12:
+        hour += 12
+    if not (0 <= hour < 24 and 0 <= minute < 60):
+        return None
+    return hour * 60 + minute
+
+
+def clock_window_from_text(text: str) -> tuple[int | None, int | None, bool]:
+    """(after_min, before_min, mentioned) from the clock words of a request:
+    "after 6pm" → (1080, None, True); "before 6am" → (None, 360, True);
+    "between 10pm and 6am" → (1320, 360, True); no clock words →
+    (None, None, False). Only a clock expression counts: "tonight" and
+    "at night" are not windows the agent can arm. A bare hour needs its
+    keyword ("after 6" is 06:00; "6" alone is nothing)."""
+    t = text or ""
+    m = _BETWEEN_RE.search(t)
+    if m:
+        a = _clock_minutes(m.group("a_h"), m.group("a_m"), m.group("a_ap"), m.group("a_word"))
+        b = _clock_minutes(m.group("b_h"), m.group("b_m"), m.group("b_ap"), m.group("b_word"))
+        if a is not None and b is not None:
+            return (a or None), (b or None), True
+    after = before = None
+    m = _AFTER_RE.search(t)
+    if m:
+        after = _clock_minutes(m.group("h"), m.group("m"), m.group("ap"), m.group("word"))
+    m = _BEFORE_RE.search(t)
+    if m:
+        before = _clock_minutes(m.group("h"), m.group("m"), m.group("ap"), m.group("word"))
+    mentioned = after is not None or before is not None
+    # Midnight as a bound is no bound: "after midnight" is any time.
+    return (after or None), (before or None), mentioned
+
+
 # ── the one call the turn makes ───────────────────────────────────
 
 def decide(text: str, *, cameras: list[str], advertised: set[str],
@@ -761,6 +865,11 @@ def decide(text: str, *, cameras: list[str], advertised: set[str],
         logger.info("router: tier=0 tool=%s args=%s (%s)", d.tool, d.args, d.reason)
         return d
     why = d.reason if d is not None else ("tier0 off" if not tier0 else "not routable")
+    if hints and d is not None and "side effect" in d.reason:
+        h = hint_standing(text, advertised=advertised)
+        if h is not None:
+            logger.info("router: tier=1 hint=%s (%s)", h.hint, h.reason)
+            return h
     if hints and (d is None or d.hintable):
         h = hint_tier1(text, advertised=advertised)
         if h is not None:

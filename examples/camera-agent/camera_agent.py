@@ -103,6 +103,7 @@ from tools import CameraTools, build_tool_definitions
 # second time. They keep their names in this namespace for the tests
 # and the forced-grounding path.
 import prompt_budget as _prompt_budget
+from router import clock_window_from_text
 from router import (  # noqa: F401 — re-exported
     _CAMERA_WORDS,
     _CAMERA_RE,
@@ -1683,6 +1684,17 @@ def _parse_hhmm(value: Any) -> int | None:
     if not value:
         return None
     raw = str(value).strip().lower()
+    # A full timestamp ("2026-11-08T22:00:00+0000", what Gemma wrote for
+    # "after 10pm" once it knew the date) is its time of day.
+    m = re.match(r"^\d{4}-\d{2}-\d{2}[t ](\d{1,2}):(\d{2})(?::\d{2})?", raw)
+    if m:
+        raw = f"{m.group(1)}:{m.group(2)}"
+    elif re.match(r"^\d{1,2}:\d{2}:\d{2}$", raw):
+        raw = raw[:5]
+    if raw in ("midnight",):
+        return 0
+    if raw in ("noon", "midday"):
+        return 720
     meridian = None
     if raw.endswith(("am", "pm")):
         meridian = raw[-2:]
@@ -4237,6 +4249,24 @@ class CameraAgentRuntime:
             return cams
         after_min = _parse_hhmm(args.get("after"))
         before_min = _parse_hhmm(args.get("before"))
+        # The question's own clock words win over the model's slots. Measured
+        # (NPU eval, 2026-11-08): "before 6am" arrived as after='06:00' three
+        # times of three, and requests with no time at all arrived with an
+        # invented "after midnight". An alarm armed for the wrong hours is
+        # worse than none, so when a turn's question is known: a window it
+        # names replaces the model's; no clock words means no window.
+        question = getattr(getattr(self, "tools", None), "current_question", None) or ""
+        if question.strip():
+            q_after, q_before, mentioned = clock_window_from_text(question)
+            if mentioned:
+                if (q_after, q_before) != (after_min, before_min):
+                    logger.info("create_alarm: window from the question %s/%s replaces the model's %s/%s",
+                                q_after, q_before, after_min, before_min)
+                after_min, before_min = q_after, q_before
+            elif after_min is not None or before_min is not None:
+                logger.info("create_alarm: the question names no time; dropping the model's window %s/%s",
+                            after_min, before_min)
+                after_min = before_min = None
         contact = self._emergency_contact_for(name, target)
         ring = str(args.get("ring") or "").strip().lower()
         if ring not in ("siren", "pulse", "chime", "silent"):

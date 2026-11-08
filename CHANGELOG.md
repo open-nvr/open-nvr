@@ -364,6 +364,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The camera agent no longer arms an alarm when asked for a notification,
+  nor at hours nobody named.** From the first 32-case eval of the agent on
+  the Ventuno Q's NPU (Gemma 4 E2B, 85 of 96 turns right): "let me know
+  when a car arrives" and "notify me when a person shows up" became alarms
+  with an invented "after midnight" window, and "before 6am" arrived as an
+  `after` time. Now a standing request is hinted by its words (alarm words
+  → `create_alarm`, notify/watch words → `create_monitor`, a stop word →
+  the matching stop tool, report words → `create_report`); the alarm
+  handler takes the window from the question's own clock words and drops a
+  window the question never named (a turn's question only: the UI's and
+  the API's arguments stay as given); and a full timestamp is read as its
+  time of day. "wake me if…" is a standing request, not a live look.
+
 - **Search no longer says a colour "can't be searched yet" when the
   scene description already holds it.** With a captioner on the box the
   notice is an info line that leads with the match ("blue" is matched
