@@ -63,5 +63,6 @@ Reports taken on real boards, every number from a run on that board:
   7 schemas plus eight turns of history).
 - [`ventuno-q-npu-agent-eval-2026-11-08.md`](ventuno-q-npu-agent-eval-2026-11-08.md) — the agent's 32-case
   live eval on the NPU against the CPU default, same box, same cases: 85 of 96 turns right at 2–4 s a
-  model turn (22 of 25 at 52–194 s on the CPU), the eleven misses traced to two deterministic fixes, and
-  the live look's 6 s found to be the RTSP grab, not the model.
+  model turn (22 of 25 at 52–194 s on the CPU), the eleven misses traced to two deterministic fixes, the
+  live look's 6 s found to be the RTSP grab, not the model — and the third run after the fixes: 96 of 96,
+  live looks 0.6–0.8 s, the whole 96 turns in under four minutes.
