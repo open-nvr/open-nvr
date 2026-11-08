@@ -248,3 +248,43 @@ def test_parse_inference_event_pulls_camera_from_source_block():
     assert record is not None
     assert record.camera_id == "front"
     assert "scene" in record.summary
+
+
+# ── Tier-0's newest frame ahead of our own grab ───────────────────────
+
+@pytest.mark.asyncio
+async def test_get_frame_prefers_the_pipelines_latest_frame():
+    """Measured on a Ventuno Q: the agent's own RTSP grab took 5.6–6.2 s a
+    look while the pipeline had the same scene decoded already."""
+    ctx = _make_ctx(ttl=0.0)
+    src = _StubFrameSource([b"rtsp-a", b"rtsp-b"])
+    ctx.register_frame_source("front-porch", src)
+    asked = []
+
+    async def latest(camera_id):
+        asked.append(camera_id)
+        return b"tier0-frame"
+    ctx.set_latest_frame_fetch(latest)
+    assert await ctx.get_frame("front-porch") == b"tier0-frame"
+    assert asked == ["front-porch"] and src.calls == 0
+    assert ctx.review_timestamps("front-porch")          # fed the review ring like a real fetch
+
+
+@pytest.mark.asyncio
+async def test_get_frame_falls_back_to_the_source_when_the_pipeline_has_nothing():
+    ctx = _make_ctx(ttl=0.0)
+    src = _StubFrameSource([b"rtsp-a"])
+    ctx.register_frame_source("front-porch", src)
+
+    async def nothing(camera_id):
+        return None
+    ctx.set_latest_frame_fetch(nothing)
+    assert await ctx.get_frame("front-porch") == b"rtsp-a" and src.calls == 1
+
+    async def broken(camera_id):
+        raise RuntimeError("pipeline down")
+    ctx2 = _make_ctx(ttl=0.0)
+    ctx2.register_frame_source("front-porch", _StubFrameSource([b"rtsp-x"]))
+    ctx2.set_latest_frame_fetch(broken)
+    assert await ctx2.get_frame("front-porch") == b"rtsp-x"
+

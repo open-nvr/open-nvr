@@ -30,7 +30,7 @@ import time
 from collections import deque
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any, Awaitable, Callable, Iterable
 
 from frame_sources import FrameSource, FrameSourceError
 
@@ -195,6 +195,11 @@ class CameraContext:
         }
         self._frame_sources: dict[str, FrameSource] = {}
         self._frame_cache: dict[str, _CachedFrame] = {}
+        # Tier-0's newest decoded frame, asked for ahead of the camera's own
+        # frame source: the pipeline decodes the stream all day, and a fresh
+        # RTSP session of our own cost 5.6–6.2 s a look on a Ventuno Q
+        # (the agent's 32-case eval, 2026-11-08). None → always the source.
+        self._latest_frame_fetch: Callable[[str], Awaitable[bytes | None]] | None = None
         self._cache_ttl = float(frame_cache_ttl_seconds)
         # Frames pinned by the operator ("ask about THIS frame") — served
         # by get_frame verbatim (conversation path only; autonomous pollers
@@ -304,6 +309,11 @@ class CameraContext:
             return None
         return self._cameras.get(camera_id)
 
+    def set_latest_frame_fetch(self, fetch: Callable[[str], Awaitable[bytes | None]] | None) -> None:
+        """A bound ``async fetch(camera_id) -> jpeg | None`` tried before the
+        camera's own frame source (the SDK's make_latest_frame_fetch)."""
+        self._latest_frame_fetch = fetch
+
     def register_frame_source(self, camera_id: str, source: FrameSource) -> None:
         """Called by camera_agent.py during startup so tests can
         inject fakes without standing up real HTTP."""
@@ -350,14 +360,24 @@ class CameraContext:
             if cached is not None and (now - cached.fetched_at) < self._cache_ttl:
                 return cached.bytes_
 
+            # Tier-0's newest decoded frame first: a memory read on the
+            # pipeline, fresh within its frame interval. None (no pipeline,
+            # a camera it does not decode, a stale stream) → our own grab.
+            frame = None
+            if self._latest_frame_fetch is not None:
+                try:
+                    frame = await self._latest_frame_fetch(camera_id)
+                except Exception:  # noqa: BLE001 — best-effort, the source is the fallback
+                    frame = None
             # The fetch (RTSP keyframe wait: seconds) runs under this
             # camera's lock — deliberate, so concurrent callers coalesce on
             # one fetch instead of hammering the camera. Other cameras
             # proceed in parallel on their own locks.
-            try:
-                frame = await asyncio.to_thread(source.fetch)
-            except FrameSourceError:
-                raise
+            if frame is None:
+                try:
+                    frame = await asyncio.to_thread(source.fetch)
+                except FrameSourceError:
+                    raise
             self._frame_cache[camera_id] = _CachedFrame(
                 bytes_=frame, fetched_at=now
             )

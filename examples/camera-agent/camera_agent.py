@@ -3366,6 +3366,13 @@ class CameraAgentRuntime:
             best_frame_fetch = make_best_frame_fetch(
                 cfg.bestframe_base_url, resolve_camera=_resolve_camera,
             )
+            # And the newest decoded frame for every live look (detect,
+            # describe with no active track, snapshots): the pipeline's
+            # /latest_frame instead of a fresh RTSP session of our own.
+            from opennvr_app_sdk import make_latest_frame_fetch
+            self.context.set_latest_frame_fetch(make_latest_frame_fetch(
+                cfg.bestframe_base_url, resolve_camera=_resolve_camera,
+            ))
 
         # Events store (the platform's memory, RFC-0001 C1): built whenever the
         # server API origin is configured — same origin + INTERNAL_API_KEY chain

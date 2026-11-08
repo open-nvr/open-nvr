@@ -596,9 +596,12 @@ def sample_process_metrics(registry: Metrics | None = None) -> None:
 
 
 def serve_metrics(port: int = 9109, *, registry: Metrics | None = None,
-                  best_frames=None, health_fn=None):  # pragma: no cover
+                  best_frames=None, health_fn=None, latest_frames=None):  # pragma: no cover
     """Start a background HTTP server exposing ``/metrics`` (and, when a
-    ``BestFrameStore`` is given, ``/best_frame?camera=&track=``). Best-effort."""
+    ``BestFrameStore`` is given, ``/best_frame?camera=&track=``; when a
+    ``LatestFrameStore`` is given, ``/latest_frame?camera=&max_age=`` — the
+    newest decoded frame as JPEG, 404 when none is fresher than ``max_age``
+    seconds, default 3). Best-effort."""
     import http.server
     import threading as _t
     from urllib.parse import parse_qs, urlparse
@@ -642,6 +645,25 @@ def serve_metrics(port: int = 9109, *, registry: Metrics | None = None,
                     self._send(404, b"no best frame")
                     return
                 self._send(200, jpeg, "image/jpeg")
+                return
+            if path == "/latest_frame" and latest_frames is not None:
+                q = parse_qs(parsed.query)
+                cam = (q.get("camera") or [""])[0]
+                try:
+                    max_age = float((q.get("max_age") or ["3"])[0])
+                except ValueError:
+                    max_age = 3.0
+                got = latest_frames.jpeg(cam, max_age) if cam else None
+                if got is None:
+                    self._send(404, b"no fresh frame")
+                    return
+                jpeg, age = got
+                self.send_response(200)
+                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Length", str(len(jpeg)))
+                self.send_header("X-Frame-Age-Seconds", f"{age:.2f}")
+                self.end_headers()
+                self.wfile.write(jpeg)
                 return
             self._send(404)
 

@@ -414,6 +414,20 @@ conversation is created per call and prefills in well under a second), so
 a changing tool list costs nothing here; leave `llm_window_tokens` at 0
 on an Ollama host, where it does.
 
+### The live look after the LLM moved (8 November 2026)
+
+With the model on the NPU the slow part of a live question is no longer
+the model. The 32-case eval on the Ventuno Q: `detect_objects` 5.6–5.8 s,
+`describe_camera` 8.0 s, of which the detector was 0.1 s, the caption
+1.7 s and the compose answer 0.5–0.9 s. The rest was the agent opening its
+own RTSP session for a fresh frame (connect, wait for a keyframe, decode:
+"live frame from cam23 … 6229 ms" in the system check), which it does
+whenever no Tier-0 track is active — a quiet room, every time. The
+pipeline decodes that stream all day, so it now serves its newest decoded
+frame at `/latest_frame` and the agent's frame cache asks for it first;
+the RTSP grab stays as the fallback for a camera the pipeline does not
+decode or a stream that went stale.
+
 ## What the installer suggests (hardware-aware defaults)
 
 The installer detects the machine that will RUN the LLM (host vs the

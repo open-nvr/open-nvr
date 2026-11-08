@@ -216,3 +216,52 @@ def test_encode_scene_stays_under_the_core_evidence_cap():
 
     jpeg = encode_scene_jpeg(_noise(1080, 1920), max_px=1920, quality=95)
     assert len(jpeg) < 2 * 1024 * 1024, f"{len(jpeg)} bytes at the clamp ceiling"
+
+
+# ── LatestFrameStore: the newest decoded frame, on demand ─────────────
+
+from detect_pipeline.bestframe import LatestFrameStore
+
+
+class _Frame:
+    def __init__(self, seq, data=b"yuv"):
+        self.seq, self.data, self.width, self.height = seq, data, 4, 2
+
+
+def _latest():
+    calls = {"bgr": 0, "enc": 0}
+
+    def to_bgr(data, w, h):
+        calls["bgr"] += 1
+        return ("bgr", data)
+
+    def enc(img, q):
+        calls["enc"] += 1
+        return b"JPEG:" + img[1]
+    clk = _Clock()
+    return LatestFrameStore(_clock=clk, _to_bgr=to_bgr, _encode=enc), clk, calls
+
+
+def test_latest_frame_is_encoded_once_and_reports_its_age():
+    s, clk, calls = _latest()
+    s.put("cam1", _Frame(1, b"a"))
+    assert calls["enc"] == 0                     # put is a reference, no work
+    clk.t = 0.5
+    jpeg, age = s.jpeg("cam1")
+    assert jpeg == b"JPEG:a" and age == 0.5 and calls["enc"] == 1
+    jpeg2, _ = s.jpeg("cam1")
+    assert jpeg2 == b"JPEG:a" and calls["enc"] == 1   # cached by frame
+
+
+def test_latest_frame_follows_the_newest_put_and_goes_stale():
+    s, clk, calls = _latest()
+    s.put("cam1", _Frame(1, b"a"))
+    s.put("cam1", _Frame(2, b"b"))
+    assert s.jpeg("cam1")[0] == b"JPEG:b" and calls["enc"] == 1
+    clk.t = 10.0
+    assert s.jpeg("cam1") is None                # older than max_age: the caller falls back
+    assert s.jpeg("cam1", max_age_s=60) is not None
+    assert s.jpeg("cam2") is None                # never seen
+    s.drop("cam1")
+    assert s.jpeg("cam1", max_age_s=60) is None
+

@@ -516,6 +516,11 @@ area rules, plus a blur veto, `DETECT_BEST_FRAME_BLUR_VETO`, that keeps a much
 blurrier frame from winning on score or area; the recording is asked for the
 best frame's moment, so the pick decides how sharp the main-stream evidence is)
 is fetchable at
+`GET :<DETECT_METRICS_PORT>/latest_frame?camera=<cam>&max_age=<s>` (JPEG, the newest
+frame the camera's worker decoded, `X-Frame-Age-Seconds` in the reply; 404 when none is
+fresher than `max_age`, default 3 s). The camera agent's live look reads this instead of
+opening its own RTSP session — 5.6–6.2 s a look on a Ventuno Q, now a memory read.
+
 `GET :<DETECT_METRICS_PORT>/best_frame?camera=<cam>&track=<id>` (JPEG; omit `&track=`
 for the camera's most-recent best). A consumer that needs to run a vision model
 should use this instead of grabbing an arbitrary live frame — more accurate, cheaper.
