@@ -95,12 +95,32 @@ active: the system check measures it at 6.2 s against 0.1 s for the detector. Op
 pipeline serve the frame it just decoded (`/latest_frame`) and the agent read that first; expected live
 look about 0.7 s for a count and 2.5 s for a description. To be re-measured.
 
+## The third run, after the fixes (04:25 UTC)
+
+Same box, same cases, the agent image with #821, #822 and #824 (the second run, at 03:53, had #821
+and #822 only: 90 of 96, live looks still 5.8 s — the agent was resolving the camera to its bare
+server id "23" for the pipeline's endpoints while the pipeline knows it as `cam23`, so every
+best-frame and latest-frame fetch was a 404; #824).
+
+| | run 1 (01:58) | run 3 (04:25) |
+|---|---|---|
+| turns right | 85 / 96 | **96 / 96** |
+| router decided / model hinted / model alone | 39/39 · — · 43/54 | 39/39 · 27/27 · 27/27 |
+| live look: detect_objects tool | 5.6–5.8 s | **0.11 s** (median; max 0.17) |
+| live look: describe_camera tool | 8.0 s | **2.2 s** (median; max 3.0) |
+| whole turn, median / p90 / max | — | 2.7 s / 4.0 s / 5.7 s |
+| LLM step (choose a tool, or compose), median / p90 | — | 1.2 s / 1.9 s |
+| the 96 turns | 20 min | **3.8 min** of agent time |
+
+Per case, the turn the user waits for (p50): the router-decided live looks 0.55–0.8 s (is anyone
+there, how many, any cars, anyone anywhere), descriptions 1.9–3.9 s, history questions 2.3–3.8 s,
+alarms and monitors 2.6–3.6 s, the two-turn stop follow-ups 4.6–5.3 s, the roster question 9 ms.
+
 ## Not measured here
 
 - Detector latency while the model answered: the room was empty and the detector ran few inferences
   (mean 42.7 ms over the run, no worse than idle); a walk with people in frame is the real test.
 - Answer quality beyond the tool choice and the stored state (the replies were read, not scored).
-- A second NPU run after #821 and #822: the expectation is 96 of 96 and live looks under 3 s.
 
 ## Reproduce
 
