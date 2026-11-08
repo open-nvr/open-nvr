@@ -8,6 +8,17 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **People descriptions come on with the NPU captioner.** On the qualcomm
+  flavour `start.sh` now also fills `EVENTS_DESCRIPTOR_PEOPLE=true` when
+  it puts the captioner on the Hexagon, the same way as captions and
+  vehicle descriptors: filled at the switch, an operator's own value never
+  touched, reset to false on leaving the flavour. A person visit then costs
+  two extra questions to the captioner (top clothing, carrying), a second
+  or two of NPU on an image it already holds, and "person in a blue kurta"
+  becomes an exact claim instead of only a caption word. On the CPU the
+  same questions are tens of seconds each, so the default there stays
+  false. `.env.example` says what it records and where.
+
 - **The camera agent's live look is a memory read, not an RTSP session.**
   detect-pipeline keeps the newest frame each camera's worker decoded and
   serves it at `/latest_frame?camera=&max_age=` (JPEG, `X-Frame-Age-Seconds`;

@@ -259,6 +259,17 @@ fill_qualcomm_captioner() {
             case "$(get_env_var EVENTS_CAPTION_ENRICHMENT)" in ""|false) set_env_var EVENTS_CAPTION_ENRICHMENT true ;; esac
             case "$(get_env_var EVENTS_DESCRIPTOR_ENRICHMENT)" in ""|false) set_env_var EVENTS_DESCRIPTOR_ENRICHMENT true ;; esac
             case "$(get_env_var EVENTS_ENRICHMENT_BACKFILL)" in ""|false) set_env_var EVENTS_ENRICHMENT_BACKFILL true ;; esac
+            # People too: with the captioner on the NPU the two extra
+            # questions a person visit costs (top clothing, carrying) are
+            # a second or two of NPU on an image it already holds, so
+            # "person in a blue kurta" becomes an exact claim and not only
+            # a caption word (Ventuno Q, 2026-11-08). On the CPU the same
+            # questions are tens of seconds each, so the installer's false
+            # stays there. The same rule as the three above: filled at the
+            # switch, an operator's own value never touched, reset on
+            # leaving the flavour. What it records: what each person wears
+            # and carries, per visit, on this box only.
+            case "$(get_env_var EVENTS_DESCRIPTOR_PEOPLE)" in ""|false) set_env_var EVENTS_DESCRIPTOR_PEOPLE true ;; esac
             return 0
         fi
     done
@@ -304,7 +315,8 @@ reset_stale_accel_fills() {
                 write_env_var CAPTION_ADAPTER moondream; write_env_var CAPTION_ADAPTER_TAG ""
                 # ...and the descriptions it switched on: a CPU captioner
                 # cannot keep up with every visit (#583).
-                write_env_var EVENTS_CAPTION_ENRICHMENT false; write_env_var EVENTS_DESCRIPTOR_ENRICHMENT false; write_env_var EVENTS_ENRICHMENT_BACKFILL false ;;
+                write_env_var EVENTS_CAPTION_ENRICHMENT false; write_env_var EVENTS_DESCRIPTOR_ENRICHMENT false; write_env_var EVENTS_ENRICHMENT_BACKFILL false
+                write_env_var EVENTS_DESCRIPTOR_PEOPLE false ;;
             # The agent's LLM on the NPU adapter: back to Ollama, the CPU
             # pre-warm off again, the window the runtime's own.
             qualcomm:LLM_BASE_URL:http://caption-adapter:9006)
