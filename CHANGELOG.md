@@ -385,6 +385,21 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The camera agent no longer answers for the first camera when none
+  was named.** With several cameras and no camera named or selected, a
+  detection, count or history question now goes to every camera (and
+  the answer says which camera each finding is on); a description goes
+  to every camera up to four and, above that, the agent asks which one,
+  by location, with no model or tool run. The forced grounding picks
+  "all" the same way. Prompt fixes from the review: Qwen's `/no_think`
+  switch is sent to Qwen only (granite and Gemma read it as text);
+  relative times are counted from the clock in the user turn, never
+  from memory; the operator block and the spoken rules no longer repeat
+  each other (first person, 1-2 sentences, never invent — each once);
+  "home security camera system" is "camera system"; and the voice-mode
+  "say what you are about to check" sentence no longer contradicts the
+  no-filler rule.
+
 - **The camera agent's live look now really reads the pipeline's frame.**
   The agent resolved a camera to its bare server id ("23") for Tier-0's
   endpoints and event ring, while the pipeline knows it as `cam23`, so

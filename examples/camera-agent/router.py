@@ -440,14 +440,29 @@ def _is_config_question(text: str) -> bool:
 def _pick_camera(text: str, cameras: list[str], preferred: str | None = None) -> str:
     """Which camera did the user mean — for forced grounding, which must
     always answer: the camera the utterance NAMES (``_names_camera``),
-    else the UI-selected ``preferred`` camera, else the first configured.
-    A bare digit is never a camera: "in the last 2 hours" is not cam2."""
+    else the UI-selected ``preferred`` camera, else the only camera there
+    is, else ALL of them (the first configured camera used to stand in for
+    the fleet, and answered for the wrong door). A bare digit is never a
+    camera: "in the last 2 hours" is not cam2."""
     named = _names_camera(text, cameras)
     if named is not None:
         return named
     if preferred and preferred in cameras:
         return preferred
-    return cameras[0]
+    if len(cameras) == 1:
+        return cameras[0]
+    return "all"
+
+
+def which_camera_question(cameras: list[str], roles: dict[str, str] | None) -> str:
+    """The question the agent asks when no camera was named and looking at
+    every one would be too dear: the cameras by their locations."""
+    names = [(roles or {}).get(c) or c for c in cameras]
+    names = [n for n in names if n]
+    if len(names) <= 1:
+        return "Which camera do you mean?"
+    listed = ", ".join(names[:-1]) + f" or {names[-1]}"
+    return f"Which camera do you mean: {listed}?"
 
 
 
@@ -500,6 +515,12 @@ _ALL_RE = re.compile(r"\b(all|every|each|any)\s+(of\s+the\s+)?(cameras?|cams?|fe
 _MAX_WORDS = 20
 
 
+#: A description of every camera is a caption per camera (1.7 s each on an
+#: NPU, far more on a CPU): up to this many cameras the router looks at
+#: all of them when none is named; above it, it asks which one.
+DESCRIBE_ALL_MAX = 4
+
+
 @dataclass
 class Decision:
     tier: int
@@ -507,6 +528,10 @@ class Decision:
     args: dict[str, Any] = field(default_factory=dict)
     hint: str | None = None
     reason: str = ""
+    #: A reply the agent gives as is, with no model and no tool: the router
+    #: asking which camera, when the question names none and looking at
+    #: every one would be too dear.
+    ask: str | None = None
     #: False when Tier 0 declined for a reason a Tier-1 hint would only
     #: make worse — a standing request, a WHO question, another tool's
     #: question: the model must decide those, unsteered.
@@ -624,7 +649,12 @@ def decide_tier0(text: str, *, cameras: list[str], advertised: set[str],
         return Decision(2, reason="no known ask")
 
     # Which camera. Named, or "all", or the one the UI is on, or the only
-    # one there is. Two cameras and no name is a guess — not Tier 0.
+    # one there is — or, with several cameras and no name, ALL of them:
+    # the first camera in the roster used to answer for the fleet, stated
+    # as if it were the whole picture (measured: wrong whenever the user
+    # meant another door). Detection, counting and history over every
+    # camera are cheap; a description is a caption per camera, so past
+    # DESCRIBE_ALL_MAX cameras the router asks which one instead.
     if _ALL_RE.search(t):
         cam = "all"
     else:
@@ -635,7 +665,11 @@ def decide_tier0(text: str, *, cameras: list[str], advertised: set[str],
             elif len(cameras) == 1:
                 cam = cameras[0]
             else:
-                return Decision(2, reason="camera ambiguous")
+                cam = "all"
+                probe, _ = _pick_forced_call(t, cam, advertised, now=now)
+                if probe == "describe_camera" and len(cameras) > DESCRIBE_ALL_MAX:
+                    return Decision(2, reason="camera ambiguous",
+                                    ask=which_camera_question(cameras, roles))
 
     tool, args = _pick_forced_call(t, cam, advertised, now=now)
     if past and tool not in ("search_history", "recent_events"):
@@ -863,6 +897,11 @@ def decide(text: str, *, cameras: list[str], advertised: set[str],
                      preferred=preferred, roles=roles, now=now) if tier0 else None
     if d is not None and d.routed:
         logger.info("router: tier=0 tool=%s args=%s (%s)", d.tool, d.args, d.reason)
+        return d
+    if d is not None and d.ask:
+        # The router's own question (which camera?) goes out as is: a hint
+        # to the model would make it guess a camera instead.
+        logger.info("router: ask (%s)", d.reason)
         return d
     why = d.reason if d is not None else ("tier0 off" if not tier0 else "not routable")
     if hints and d is not None and "side effect" in d.reason:

@@ -70,7 +70,7 @@ def test_two_builds_share_everything_before_the_clock():
     assert a == b, "byte-identical: the whole system+tools prefix stays cached"
     assert len(a) > 500
     assert rt.build_system_prompt().startswith(a), "with the clock in, only the tail differs"
-    rt2 = _runtime(); rt2.cfg.llm_think = False
+    rt2 = _runtime(); rt2.cfg.llm_think = False; rt2.cfg.llm_model = "qwen3:1.7b"
     tail = rt2.build_system_prompt().strip().split("\n\n")
     assert tail[-1] == "/no_think" and tail[-2].startswith("The current date and time is"), (
         "Qwen3's constant control switch may still follow the clock")
