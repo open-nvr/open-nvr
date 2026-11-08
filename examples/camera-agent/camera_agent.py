@@ -104,6 +104,8 @@ from tools import CameraTools, build_tool_definitions
 # and the forced-grounding path.
 import prompt_budget as _prompt_budget
 from router import clock_window_from_text
+from router import is_closing as _router_is_closing
+from router import is_dispute as _router_is_dispute
 from router import (  # noqa: F401 — re-exported
     _CAMERA_WORDS,
     _CAMERA_RE,
@@ -291,6 +293,13 @@ class AppConfig:
     # is likely to need and the newest history, so the prompt and the
     # answer fit (prompt_budget.py). 0 = the runtime manages the window.
     llm_window_tokens: int = 0
+    # When the LLM is an OpenAI-compatible endpoint that can go away (the
+    # NPU adapter restarting, its model reloading), an Ollama to answer
+    # from meanwhile: slower, but an answer. None = no fallback, the turn
+    # fails as before. The qualcomm fill points this at the host Ollama
+    # when .env names one (OLLAMA_EXTERNAL_URL).
+    llm_fallback_url: str | None = None
+    llm_fallback_model: str = "granite4:micro"
     # How long Ollama keeps the model resident (sent on every request so a
     # host-run Ollama stays warm even without OLLAMA_KEEP_ALIVE in its env).
     # -1 = forever (default). A duration string like "5m" frees RAM when idle.
@@ -480,9 +489,10 @@ class AppConfig:
 
 
 _DEFAULT_SYSTEM_PROMPT = (
-    "You are a concise voice assistant for a home security camera system. "
-    "You have NO knowledge of what any camera currently shows — the ONLY way "
-    "to know is to call a tool.\n\n"
+    "You are a concise voice assistant for a camera system. You have NO "
+    "knowledge of what any camera currently shows — the ONLY way to know is "
+    "to call a tool; if you have not called one this turn, you do not know, "
+    "and you never describe a camera from imagination.\n\n"
     "RULES:\n"
     "- For ANY question about what a camera sees, what is happening, who or "
     "what is present, or how many of something, you MUST call a tool BEFORE "
@@ -497,9 +507,6 @@ _DEFAULT_SYSTEM_PROMPT = (
     "'which cars entered today?', 'was a dog here yesterday?') call "
     "search_history — the NVR remembers every visit with a photo and can "
     "name recognised people.\n"
-    "- NEVER invent, guess, or describe what is on a camera from imagination. "
-    "If you have not called a tool this turn, you do not know.\n"
-    "- Base your answer ONLY on the tool result, in 1-2 short spoken sentences.\n"
     "- If a tool says a camera cannot be reached, tell the user that camera "
     "appears to be offline."
 )
@@ -828,6 +835,28 @@ _STT_NOISE_PHRASES = frozenset({
 })
 
 
+_ENGLISH_HINTS = frozenset("""
+the a an and or but if so is are was were be been am do does did have has had
+i you he she it we they me him her us them my your his its our their this that
+these those there here what which who whom whose when where why how can could
+will would shall should may might must not no yes please ok okay thanks thank
+to of in on at by for with from about into over under up down out off any some
+all many much more most few less now then today tonight yesterday tomorrow
+morning afternoon evening night last next again still just only also very
+see look show tell me check count find watch want know think say said
+one two three four five six seven eight nine ten
+""".split())
+
+
+def _english_hint(word: str) -> bool:
+    w = word.strip(".,!?;:\"'()[]").lower().replace("'", "")
+    if not w:
+        return False
+    if w in _ENGLISH_HINTS or w.rstrip("s") in _ENGLISH_HINTS:
+        return True
+    return bool(_CAMERA_RE.search(w) or _DETECTION_RE.search(w) or _DESCRIBE_RE.search(w))
+
+
 def looks_like_noise(transcript: str) -> bool:
     """True if a transcript is almost certainly a noise/silence hallucination
     rather than a real spoken question — so the voice loop can ignore it and
@@ -841,7 +870,16 @@ def looks_like_noise(transcript: str) -> bool:
     letters = [c for c in t if c.isalpha()]
     if len(letters) < 2:                       # punctuation / single letter
         return True
+    # Garbled: a multilingual STT model hallucinating another language from
+    # ambient or accented speech ("Que ela é mamadura? Oh!" in the office
+    # session of 2026-11-08, answered with a look at the camera). Letters
+    # outside ASCII in a fifth of the text, or three-plus words none of
+    # which is an English function word or a word the agent knows.
+    if sum(1 for c in letters if ord(c) > 127) > 0.2 * len(letters):
+        return True
     words = norm.split()
+    if len(words) >= 3 and not any(_english_hint(w) for w in words):
+        return True
     if len(words) <= 2 and all(w in _STT_NOISE_PHRASES for w in words):
         return True
     # Repetition hallucination: Whisper on sustained background noise loops a
@@ -3087,6 +3125,8 @@ def load_config(path: str | Path) -> AppConfig:
         llm_num_threads=(int(raw["llm_num_threads"]) if raw.get("llm_num_threads") else None),
         llm_num_ctx=int(raw.get("llm_num_ctx") or 4096),
         llm_window_tokens=int(raw.get("llm_window_tokens") or 0),
+        llm_fallback_url=(str(raw.get("llm_fallback_url")).strip() or None) if raw.get("llm_fallback_url") else None,
+        llm_fallback_model=_str("llm_fallback_model", "granite4:micro"),
         llm_keep_alive=(raw["llm_keep_alive"] if raw.get("llm_keep_alive") is not None else -1),
         llm_prewarm=_truthy(raw.get("llm_prewarm"), True),
         piper_url=_str("piper_url", "http://127.0.0.1:9001"),
@@ -3248,6 +3288,18 @@ class CameraAgentRuntime:
         # Set/cleared ONLY by the turn loop (real questions), never by
         # boot-time prewarm, whose transient failures are not a verdict.
         self.last_llm_error: str | None = None
+        # The fallback LLM (an Ollama) and whether we are on it: set when the
+        # primary refused a connection or had no model loaded, cleared when
+        # a probe of the primary answers again. The notice is spoken once
+        # per episode, at the start of the first reply the fallback gave.
+        self.llm_fallback = None
+        self.llm_degraded: bool = False
+        self.llm_degraded_since: float | None = None
+        self._llm_probe_at: float = 0.0
+        self._llm_notice_pending: bool = False
+        # The last detect/describe call a turn made (tool, args, at): a
+        # dispute of its answer repeats it instead of asking the model.
+        self.last_look: dict[str, Any] | None = None
 
         self.context = CameraContext(
             cameras=cfg.cameras,
@@ -3269,6 +3321,15 @@ class CameraAgentRuntime:
             )
             logger.info("LLM brain: OpenAI-compatible at %s (model=%s)",
                         cfg.llm_base_url or cfg.ollama_url, cfg.llm_model)
+            if cfg.llm_fallback_url:
+                _fb_think = False if "qwen3" in (cfg.llm_fallback_model or "").lower() else None
+                self.llm_fallback = OllamaClient(
+                    url=cfg.llm_fallback_url, token=cfg.ollama_token, model=cfg.llm_fallback_model,
+                    num_thread=cfg.llm_num_threads, num_ctx=cfg.llm_num_ctx,
+                    think=_fb_think, keep_alive=cfg.llm_keep_alive,
+                )
+                logger.info("LLM fallback: Ollama at %s (model=%s) when the brain is unreachable",
+                            cfg.llm_fallback_url, cfg.llm_fallback_model)
         else:
             # Auto-disable thinking for Qwen3 (a thinking model) unless the
             # operator set llm_think explicitly — on CPU, thinking burns the
@@ -4992,6 +5053,12 @@ class CameraAgentRuntime:
 
         async def check_llm():
             if self.cfg.llm_provider.strip().lower() == "openai":
+                if self.llm_degraded and self.llm_fallback is not None:
+                    since = self.llm_degraded_since
+                    ago = f" for {int(time.time() - since) // 60} min" if since else ""
+                    return DEGRADED, (f"the LLM at {self.cfg.llm_base_url or self.cfg.ollama_url} is "
+                                      f"unreachable{ago}; answering on the backup model "
+                                      f"{self.cfg.llm_fallback_model} at {self.cfg.llm_fallback_url} (slower)")
                 murl = getattr(self.ollama, "models_url", None)
                 if not murl:
                     return OK, "external OpenAI-compatible endpoint (not probed)"
@@ -5186,6 +5253,7 @@ class CameraAgentRuntime:
             },
             "llm_model": self.cfg.llm_model,
             "llm_error": getattr(self, "last_llm_error", None),
+            "llm_degraded": bool(getattr(self, "llm_degraded", False)),
             "vision_error": getattr(self.tools, "last_vision_error", None),
             # Which store has answered footage search since start-up.
             # This is here because a counter nobody can read is not
@@ -5556,9 +5624,11 @@ class CameraAgentRuntime:
         _now = _dt.now().astimezone()
         return (
             f"The current date and time is "
-            f"{_now.strftime('%A %Y-%m-%d %H:%M (UTC%z)')}. When a tool takes "
-            f"an ISO 8601 time window, compute it from THIS clock and include "
-            f"the timezone offset (e.g. {_now.strftime('%Y-%m-%dT%H:%M:00%z')})."
+            f"{_now.strftime('%A %Y-%m-%d %H:%M (UTC%z)')}. 'Yesterday', 'this "
+            f"morning', 'last night' and every other relative time are counted "
+            f"from THIS clock, never from memory. When a tool takes an ISO 8601 "
+            f"time window, compute it from this clock and include the timezone "
+            f"offset (e.g. {_now.strftime('%Y-%m-%dT%H:%M:00%z')})."
         )
 
     def build_compose_prompt(self) -> str:
@@ -5598,16 +5668,19 @@ class CameraAgentRuntime:
             f"Cameras available to you:\n{roster}\n\n"
             f"Always pass one of the camera_id values exactly as listed "
             f"when calling a tool.\n\n"
-            f"Your replies are SPOKEN ALOUD. Refer to each camera by its "
-            f"location (e.g. 'the front door'), never its raw id like "
-            f"'front_door'. Answer in 1-2 short, natural sentences a person "
-            f"would say out loud — no ids, colons, lists, or markdown.\n"
-            f"Give the ANSWER directly. Never reply with filler like 'I'll "
-            f"check', 'let me see', or 'one moment' — if you need to look, call "
-            f"the tool and then state what you found.\n\n"
+            f"Your replies are SPOKEN ALOUD and come ONLY from the tool result. "
+            f"Refer to each camera by its location (e.g. 'the front door'), "
+            f"never its raw id like 'front_door'. Answer in 1-2 short, natural "
+            f"sentences a person would say out loud — no ids, colons, lists, or "
+            f"markdown.\n"
+            f"Give the ANSWER directly. Never reply with filler INSTEAD of an "
+            f"answer ('I'll check', 'let me see', 'one moment') — if you need to "
+            f"look, call the tool and then state what you found.\n\n"
             f"You can look at ONE camera, SEVERAL, or 'all' of them — pass "
             f"camera_id='all' (or a camera_ids list) when the user asks about "
-            f"every camera or more than one."
+            f"every camera or more than one. If the user names NO camera and "
+            f"none is selected, look at all of them and say which camera each "
+            f"finding is on."
         )
         # Tool-specific guidance is emitted ONLY for tools the model can
         # actually call this turn. Teaching a small model a route to a tool
@@ -5673,15 +5746,19 @@ class CameraAgentRuntime:
             prompt += (
                 "\n\nWhen you call a tool, also write ONE short sentence (under twelve "
                 "words) telling the user what you are about to check — for example "
-                "'Let me look at the gate camera between two and three.' Never guess "
-                "the answer in that sentence."
+                "'Let me look at the gate camera between two and three.' That is the "
+                "one place such a sentence belongs: beside the tool call, never "
+                "instead of it. Never guess the answer in that sentence."
             )
         # Last of the prose when it is here at all (see the docstring). Only
         # Qwen3's ``/no_think`` switch may follow: a control token the model
         # wants at the very end, constant across turns.
         if clock:
             prompt += "\n\n" + clock_line
-        if self.cfg.llm_think is False:
+        # Qwen3's switch, and Qwen3's only: granite and Gemma read it as a
+        # stray line of text at the end of their instructions (the NPU
+        # prompt dump, 2026-11-07).
+        if self.cfg.llm_think is False and "qwen" in (self.cfg.llm_model or "").lower():
             prompt += "\n\n/no_think"
         return prompt
 
@@ -6253,6 +6330,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             # The last LLM failure from a real turn (None = answering).
             # Issue #344: the brain crash-looped for days behind a green dot.
             "llm_error": getattr(runtime, "last_llm_error", None),
+            "llm_degraded": bool(getattr(runtime, "llm_degraded", False)),
             "history": getattr(runtime, "events_client", None) is not None,
         }
 
@@ -7601,6 +7679,10 @@ async def _invoke_tool(runtime: "CameraAgentRuntime", call: dict[str, Any], *,
         name.startswith("create_") and result.rstrip().endswith("?"))
     _trace_tool(runtime, name, args, None, _tool_t0, by=by, asked=asked, hinted=hinted,
                 failed=failed)
+    # The last look, for a dispute ("there should be more than that"): the
+    # same call is made again and answered from its result, with no model.
+    if not failed and name in ("detect_objects", "describe_camera", "camera_snapshot"):
+        runtime.last_look = {"tool": name, "args": dict(args), "at": time.time()}
     if len(result) > 1200:
         result = result[:1200] + " …(truncated)"
     return name, result
@@ -7768,7 +7850,7 @@ async def _chat_or_explain(runtime: "CameraAgentRuntime", **kw: Any) -> dict[str
              if runtime.cfg.llm_provider.strip().lower() == "openai"
              else runtime.cfg.ollama_url)
     try:
-        response = await runtime.ollama.chat(**kw)
+        response, where = await _chat_with_fallback(runtime, where, **kw)
     except httpx.HTTPStatusError as exc:
         # The body is the diagnosis ("model X not found, try pulling it
         # first") — keep it. Cap it: error pages can be arbitrarily long.
@@ -7836,6 +7918,65 @@ async def _chat_within_window(
     raise AssertionError("unreachable")
 
 
+#: How often, while on the fallback, the primary LLM is tried again.
+LLM_PROBE_INTERVAL_S = 60.0
+
+
+def _is_llm_outage(exc: BaseException) -> bool:
+    """The failures that mean "the brain is not there", as opposed to a bad
+    request: no connection, a timeout, or a 5xx (the adapter answers 503
+    model_not_loaded while its engine comes up)."""
+    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.TimeoutException)):
+        return True
+    return isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code >= 500
+
+
+async def _chat_with_fallback(runtime: "CameraAgentRuntime", where: str, **kw: Any) -> tuple[dict[str, Any], str]:
+    """One LLM call on the primary, or on the fallback Ollama when the
+    primary is away: returns (response, the URL that answered).
+
+    The primary is tried first unless we are already on the fallback and
+    the last probe was under LLM_PROBE_INTERVAL_S ago — then the fallback
+    answers directly, and the primary is tried again on the next probe.
+    An outage on the primary (connection refused, timeout, 5xx) with a
+    fallback configured marks the episode (health DEGRADED, one spoken
+    notice) and the same request goes to the fallback; its errors, and
+    every non-outage error of the primary, propagate as before."""
+    fb = getattr(runtime, "llm_fallback", None)
+    if fb is None:
+        return await runtime.ollama.chat(**kw), where
+    now = time.monotonic()
+    fb_where = f"{runtime.cfg.llm_fallback_url} ({runtime.cfg.llm_fallback_model}, backup)"
+    if runtime.llm_degraded and now - runtime._llm_probe_at < LLM_PROBE_INTERVAL_S:
+        return await fb.chat(**kw), fb_where
+    try:
+        response = await runtime.ollama.chat(**kw)
+    except Exception as exc:  # noqa: BLE001 — classified below
+        if not _is_llm_outage(exc):
+            raise
+        runtime._llm_probe_at = now
+        if not runtime.llm_degraded:
+            runtime.llm_degraded = True
+            runtime.llm_degraded_since = time.time()
+            runtime._llm_notice_pending = True
+            logger.warning("LLM at %s unreachable (%s: %s); answering on the backup model at %s "
+                           "until it is back", where, type(exc).__name__, str(exc)[:120], fb_where)
+        return await fb.chat(**kw), fb_where
+    if runtime.llm_degraded:
+        logger.info("LLM at %s is back; leaving the backup model", where)
+        runtime.llm_degraded = False
+        runtime.llm_degraded_since = None
+    return response, where
+
+
+def _with_llm_notice(runtime: "CameraAgentRuntime", reply: str) -> str:
+    """The once-per-episode spoken notice that the backup model answered."""
+    if getattr(runtime, "_llm_notice_pending", False) and getattr(runtime, "llm_degraded", False):
+        runtime._llm_notice_pending = False
+        return f"I'm on my slower backup model for now. {reply}".strip()
+    return reply
+
+
 async def _run_conversation_turn(
     runtime: "CameraAgentRuntime",
     history: list[dict[str, str]],
@@ -7898,6 +8039,27 @@ async def _conversation_turn_body(
     if _is_config_question(user_text):
         trace.append({"step": "reply", "detail": "roster"})
         return _roster_answer(runtime.visible_cameras())
+    # The user is done: a goodbye, no model. ("I don't want to talk more"
+    # drew "Understood. I will stop monitoring now." from the model — an
+    # action it never took.)
+    if _router_is_closing(user_text):
+        trace.append({"step": "reply", "detail": "closing"})
+        return "Alright. I'll be here when you need me."
+    # The user doubts the last look: look again, the same way, and answer
+    # from what the look says — never from the user's number. (Told "there
+    # are three chairs", the model called the detector, was told one, and
+    # replied "I see three chairs".)
+    look = getattr(runtime, "last_look", None)
+    if look and _router_is_dispute(user_text) and time.time() - float(look.get("at") or 0) < LAST_LOOK_TTL_S:
+        call = {"id": "recheck-0", "type": "function",
+                "function": {"name": look["tool"], "arguments": dict(look["args"])}}
+        name, result = await _invoke_tool(runtime, call, by="recheck")
+        said = _humanize_for_speech(result, runtime.visible_cameras()).rstrip(".")
+        hedge = (" The detector can miss things that are partly hidden or overlapping."
+                 if name == "detect_objects" else "")
+        trace.append({"step": "reply", "detail": "recheck"})
+        logger.info("converse: RECHECK %s %s -> %s", name, look["args"], result[:120])
+        return f"Looking again: {said}.{hedge}"
 
     # No clock in the system prompt: Ollama renders the tool schemas right
     # after it, and a line that changes every minute in front of ~3.5k
@@ -7980,7 +8142,14 @@ async def _conversation_turn_body(
     )
     trace.append({"step": "route", "detail": f"tier{decision.tier}"
                   + (f" {decision.tool}" if decision.tool else "")
-                  + (f" hint={decision.hint}" if decision.hint else ""), "ms": 0})
+                  + (f" hint={decision.hint}" if decision.hint else "")
+                  + (" ask" if decision.ask else ""), "ms": 0})
+    if decision.ask:
+        # No camera named, several to choose from, and a description of
+        # every one would be a caption per camera: ask, with the cameras
+        # by their locations. No model, no tool.
+        trace.append({"step": "reply", "detail": "router"})
+        return decision.ask
     routed = decision.routed
     small_talk = routed and decision.tool is None
     reasked = False
@@ -8165,8 +8334,21 @@ async def _conversation_turn_body(
     # reasoning) but a tool ran, surface that result. Roster/config
     # questions never reach here: they are answered before the loop.
     cleaned = _clean_for_speech(final, runtime.visible_cameras())
+    extra_issues: list[str] = []
     if cleaned and not _is_deflection(cleaned):
         reply, source = cleaned, "llm"
+        # The reply must agree with the tool it rests on. A count the model
+        # states for a thing the detector just counted differently is the
+        # detector's count, hedged; an action the model claims when no tool
+        # ran did not happen.
+        corrected = _count_disagreement(cleaned, last_tool_result, runtime.visible_cameras())
+        if corrected:
+            reply, source = corrected, "tool_fallback"
+            extra_issues.append("count_mismatch")
+        elif tools_called == 0 and _claims_action(cleaned):
+            reply, source = ("Nothing has been changed. Say 'stop the monitor' or 'cancel the "
+                             "alarm' if that is what you want."), "none"
+            extra_issues.append("action_claim")
     elif last_tool_result:
         reply, source = _humanize_for_speech(last_tool_result, runtime.visible_cameras()), "tool_fallback"
     else:
@@ -8176,7 +8358,7 @@ async def _conversation_turn_body(
     # answer is diagnosable from the logs (camera offline, adapter down, the LLM
     # not calling tools, a deflection, etc.) without re-running.
     degraded = _degradation_reasons(last_tool_result, final, cleaned,
-                                    grounded, tools_called)
+                                    grounded, tools_called) + extra_issues
     # Where the answer came from. No "ms": it is a label, not a stage, so
     # the latency medians (fillers.record_stages) and the demo's flow line
     # leave it out.
@@ -8185,7 +8367,7 @@ async def _conversation_turn_body(
     log("converse: TURN reply_source=%s grounded=%s forced=%s tools=%d "
         "issues=%s reply=%r", source, grounded, forced, tools_called,
         ",".join(degraded) or "none", reply[:90])
-    return reply
+    return _with_llm_notice(runtime, reply)
 
 
 # Hollow "acknowledgement" replies a small model emits instead of answering
@@ -8199,6 +8381,71 @@ _DEFLECTION_RE = re.compile(
 def _is_deflection(text: str) -> bool:
     t = (text or "").strip().lower().lstrip(".… ")
     return bool(_DEFLECTION_RE.match(t)) and len(t) < 80
+
+
+#: How long a look stays "the last look" a dispute refers to.
+LAST_LOOK_TTL_S = 180.0
+
+_NUMBER_WORDS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+                 "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12}
+_COUNT_RE = re.compile(r"\b(\d+|an?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+([a-z][a-z-]*)")
+_ACTION_CLAIM_RE = re.compile(
+    r"\bI(?:'ll| will| have|'ve| am|'m)?\s+(?:now\s+|just\s+)?(?:stop(?:ped)?|cancel(?:l?ed)?|disarm(?:ed)?|"
+    r"silenced?|arm(?:ed)?|set(?:\s+up)?|creat(?:e|ed)|start(?:ed)?|turn(?:ed)?\s+(?:on|off)|"
+    r"(?:am|will be)\s+monitoring|monitor(?:ing)?)\b", re.IGNORECASE)
+_OFFER_RE = re.compile(r"\b(?:can|could|would|if you|say the word|let me know)\b", re.IGNORECASE)
+
+
+def _singular(label: str) -> str:
+    w = label.lower()
+    irregular = {"people": "person", "men": "man", "women": "woman", "children": "child", "buses": "bus"}
+    if w in irregular:
+        return irregular[w]
+    if w.endswith("ies"):
+        return w[:-3] + "y"
+    if w.endswith("es") and w[:-2].endswith(("s", "x", "ch", "sh")):
+        return w[:-2]
+    if w.endswith("s") and not w.endswith("ss"):
+        return w[:-1]
+    return w
+
+
+def _counts_in(text: str) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for num, label in _COUNT_RE.findall((text or "").lower()):
+        n = int(num) if num.isdigit() else _NUMBER_WORDS.get(num)
+        if n is None:
+            continue
+        out[_singular(label)] = n
+    return out
+
+
+def _count_disagreement(reply: str, tool_result: str, cameras=None) -> str | None:
+    """When the model's reply states a different count than the detector's
+    result for the same thing, the detector's count, hedged — else None.
+    Only detector results carry counts ("On cam23: 2 chairs."); a caption
+    ("several chairs") is prose and is left alone."""
+    if not tool_result or "no objects" in tool_result or not re.match(r"^(On |Across )", tool_result or ""):
+        return None
+    tool_counts = _counts_in(tool_result)
+    if not tool_counts:
+        return None
+    said = _counts_in(reply)
+    clash = [label for label, n in said.items() if label in tool_counts and tool_counts[label] != n]
+    if not clash:
+        return None
+    seen = _humanize_for_speech(tool_result, cameras).rstrip(".")
+    return (f"I can make out {seen[0].lower() + seen[1:]}. The detector can miss things that are "
+            f"partly hidden or overlapping, so there may be more.")
+
+
+def _claims_action(reply: str) -> bool:
+    """The reply says an alarm, monitor or report was set, stopped or
+    changed — as a statement, not an offer or a question."""
+    r = (reply or "").strip()
+    if not r or r.endswith("?") or _OFFER_RE.search(r):
+        return False
+    return bool(_ACTION_CLAIM_RE.search(r))
 
 
 def _degradation_reasons(last_tool_result: str, final: str, cleaned: str,

@@ -8,6 +8,29 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The camera agent keeps answering when its NPU brain is away.** With
+  `llm_provider: openai` and a `llm_fallback_url` (an Ollama), a connection
+  refused, a timeout or a 5xx from the endpoint (the adapter restarting, its
+  model reloading) sends the same request to the fallback model, slower,
+  with one spoken notice per episode ("I'm on my slower backup model for
+  now"); the primary is tried again every minute and taken back when it
+  answers; `/health` reports the episode (`llm_degraded`, and the LLM
+  check says which model is answering). A bad request is not an outage and
+  fails as before; with no fallback configured nothing changes. The
+  qualcomm fill points the fallback at the host Ollama when `.env` names
+  one (`LLM_FALLBACK_URL` from `OLLAMA_EXTERNAL_URL`, `LLM_FALLBACK_MODEL`).
+
+- **People descriptions come on with the NPU captioner.** On the qualcomm
+  flavour `start.sh` now also fills `EVENTS_DESCRIPTOR_PEOPLE=true` when
+  it puts the captioner on the Hexagon, the same way as captions and
+  vehicle descriptors: filled at the switch, an operator's own value never
+  touched, reset to false on leaving the flavour. A person visit then costs
+  two extra questions to the captioner (top clothing, carrying), a second
+  or two of NPU on an image it already holds, and "person in a blue kurta"
+  becomes an exact claim instead of only a caption word. On the CPU the
+  same questions are tens of seconds each, so the default there stays
+  false. `.env.example` says what it records and where.
+
 - **The camera agent's live look is a memory read, not an RTSP session.**
   detect-pipeline keeps the newest frame each camera's worker decoded and
   serves it at `/latest_frame?camera=&max_age=` (JPEG, `X-Frame-Age-Seconds`;
@@ -373,6 +396,35 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   timing matters.
 
 ### Fixed
+
+- **The camera agent no longer agrees with the user against its own
+  detector, invents actions, or answers garbled speech.** From the office
+  voice session of 2026-11-08: told "there are three chairs" it called the
+  detector, was told one, and said "I see three chairs" — a count the model
+  states against the detector's is now the detector's count, hedged ("I can
+  make out a chair; the detector can miss things that are partly hidden");
+  a reply that claims to have set, stopped or armed something when no tool
+  ran is replaced by a plain line; "there should be more than that", "are
+  you sure", "look again" repeat the last look and answer from it with no
+  model; "I don't want to talk more" and its kin get a goodbye with no
+  model; and a transcript the speech model hallucinated in another language,
+  or with no English word in it, is dropped as noise instead of triggering a
+  look at the camera.
+
+- **The camera agent no longer answers for the first camera when none
+  was named.** With several cameras and no camera named or selected, a
+  detection, count or history question now goes to every camera (and
+  the answer says which camera each finding is on); a description goes
+  to every camera up to four and, above that, the agent asks which one,
+  by location, with no model or tool run. The forced grounding picks
+  "all" the same way. Prompt fixes from the review: Qwen's `/no_think`
+  switch is sent to Qwen only (granite and Gemma read it as text);
+  relative times are counted from the clock in the user turn, never
+  from memory; the operator block and the spoken rules no longer repeat
+  each other (first person, 1-2 sentences, never invent — each once);
+  "home security camera system" is "camera system"; and the voice-mode
+  "say what you are about to check" sentence no longer contradicts the
+  no-filler rule.
 
 - **The camera agent's live look now really reads the pipeline's frame.**
   The agent resolved a camera to its bare server id ("23") for Tier-0's

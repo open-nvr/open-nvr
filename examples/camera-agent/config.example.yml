@@ -83,6 +83,10 @@ llm_max_tokens: 256
 # tool schemas the question is likely to need and the newest history, so
 # the prompt and the answer fit. 0 = the runtime manages the window.
 llm_window_tokens: 0
+# With llm_provider: openai, an Ollama to answer from when that endpoint is
+# unreachable (slower; one spoken notice per episode). Empty = no fallback.
+# llm_fallback_url: http://host.docker.internal:11434
+# llm_fallback_model: granite4:micro
 
 # ── Turn-taking ───────────────────────────────────────────────────
 # Silero VAD opens a turn; Smart Turn v3 (Pipecat's semantic end-of-turn
@@ -283,12 +287,11 @@ cameras:
 # short — the model sees it on every turn. Per-camera ``role``
 # fields above are appended automatically.
 system_prompt: |
-  You are a helpful, concise voice assistant for a home with security
-  cameras. The user asks questions about what's happening on those
-  cameras. Always use your tools to ground answers in live camera
-  data — don't guess. Respond in 1-2 short sentences because your
-  reply is spoken aloud. If the user's question can't be answered
-  from the cameras, say so briefly.
+  You are a helpful, concise voice assistant for a camera system. The
+  user asks questions about what's happening on those cameras. Always
+  use your tools to ground answers in live camera data — don't guess.
+  If the user's question can't be answered from the cameras, say so
+  briefly.
 
 # External notifications (see NOTIFICATIONS.md). Webhooks take a JSON POST
 # (Slack / Discord / Teams / Home Assistant / n8n); Apprise URLs cover

@@ -228,3 +228,21 @@ def test_eval_end_to_end_synthetic(spec, tool, expect):
     assert expect in reply.lower()
     # spoken-friendly: no raw id, no colon
     assert "front_door" not in reply and ":" not in reply
+
+
+def test_eval_the_router_asks_which_camera_without_a_model():
+    """Six cameras, a description asked for, none named: the agent asks,
+    and no model or tool runs (a caption per camera would be the cost)."""
+    cfg = AppConfig(kaic_url="http://k", kaic_api_key="x", system_prompt="t",
+                    text_mode=True, synthetic_detection=True,
+                    cameras=[CameraSpec(camera_id=f"cam{i}", frame_url="synth:people=0",
+                                        role=r) for i, r in enumerate(
+                        ("the front door", "the gate", "the yard", "the garage", "the hall", "the roof"), 1)])
+    rt = CameraAgentRuntime(cfg)
+    rt.ollama = _NoToolOllama("should not be asked")
+    out = asyncio.run(ca._run_conversation_turn(rt, [], "what is the person wearing?"))
+    assert out.startswith("Which camera do you mean: the front door")
+    assert rt.ollama.n == 0
+    steps = [s["step"] for s in rt.last_turn_trace]
+    assert steps == ["route", "reply"]
+

@@ -34,6 +34,12 @@ llm_model: ${LLM_MODEL}
 # turn then sends only the tool schemas the question is likely to need and
 # the newest history (prompt_budget.py). 0 = the runtime manages the window.
 llm_window_tokens: ${LLM_WINDOW_TOKENS}
+# When llm_provider is openai and that endpoint goes away (the NPU adapter
+# restarting, its model reloading): an Ollama to answer from meanwhile,
+# slower, with one spoken notice. Empty = no fallback. The qualcomm
+# flavour's start.sh fills it from OLLAMA_EXTERNAL_URL when .env has one.
+llm_fallback_url: ${LLM_FALLBACK_URL}
+llm_fallback_model: ${LLM_FALLBACK_MODEL}
 llm_think: false   # Qwen3 default: snappy non-thinking tool-calling
 llm_temperature: 0.3
 llm_max_tokens: 220
@@ -124,5 +130,4 @@ system_prompt: |
   minutes?" → recent_events (window_seconds = N*60); "did you see a person
   today / between 3 and 4?" → search_history; "what was that person
   doing?" about a found visit → describe_event with its [#id]; searching
-  by appearance ("did a red truck come by?") → search_footage. Keep
-  replies to 1-2 short sentences.
+  by appearance ("did a red truck come by?") → search_footage.
