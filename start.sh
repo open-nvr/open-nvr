@@ -287,6 +287,14 @@ fill_qualcomm_agent_llm() {
     # bundle's window is fixed at 4,096 tokens: LLM_WINDOW_TOKENS makes
     # the agent send each turn only the tool schemas the question needs.
     [[ "$(get_env_var CAPTION_ADAPTER)" == litertlm ]] || return 0
+    # A box this fill already put on the NPU adapter (its own URL, so no
+    # operator's endpoint is being touched) gains the fallback when .env
+    # names a host Ollama, even though the switch itself is past.
+    if [[ "$(get_env_var LLM_BASE_URL)" == "http://caption-adapter:9006" ]]; then
+        local ext0; ext0=$(get_env_var OLLAMA_EXTERNAL_URL)
+        [[ -n "$ext0" && -z "$(get_env_var LLM_FALLBACK_URL)" ]] && set_env_var LLM_FALLBACK_URL "$ext0"
+        return 0
+    fi
     case "$(get_env_var LLM_PROVIDER)" in ""|ollama) ;; *) return 0 ;; esac
     [[ -z "$(get_env_var LLM_BASE_URL)" ]] || return 0
     set_env_var LLM_PROVIDER openai
