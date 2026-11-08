@@ -8,6 +8,18 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The camera agent keeps answering when its NPU brain is away.** With
+  `llm_provider: openai` and a `llm_fallback_url` (an Ollama), a connection
+  refused, a timeout or a 5xx from the endpoint (the adapter restarting, its
+  model reloading) sends the same request to the fallback model, slower,
+  with one spoken notice per episode ("I'm on my slower backup model for
+  now"); the primary is tried again every minute and taken back when it
+  answers; `/health` reports the episode (`llm_degraded`, and the LLM
+  check says which model is answering). A bad request is not an outage and
+  fails as before; with no fallback configured nothing changes. The
+  qualcomm fill points the fallback at the host Ollama when `.env` names
+  one (`LLM_FALLBACK_URL` from `OLLAMA_EXTERNAL_URL`, `LLM_FALLBACK_MODEL`).
+
 - **People descriptions come on with the NPU captioner.** On the qualcomm
   flavour `start.sh` now also fills `EVENTS_DESCRIPTOR_PEOPLE=true` when
   it puts the captioner on the Hexagon, the same way as captions and
