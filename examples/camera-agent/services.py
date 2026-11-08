@@ -49,7 +49,14 @@ try:  # pragma: no cover — import-time only
         TTSAudioRawFrame,
         TTSStartedFrame,
         TTSStoppedFrame,
+        TTSTextFrame,
+        UserStartedSpeakingFrame,
+        UserStoppedSpeakingFrame,
+        InterruptionFrame,
+        OutputTransportMessageFrame,
+        OutputTransportMessageUrgentFrame,
     )
+    from pipecat.processors.frame_processor import FrameProcessor
     from pipecat.services.llm_service import LLMService
     from pipecat.services.stt_service import SegmentedSTTService, STTService
     from pipecat.services.tts_service import TTSService
@@ -70,6 +77,13 @@ except Exception:  # pragma: no cover
     TTSAudioRawFrame = object  # type: ignore
     TTSStartedFrame = object  # type: ignore
     TTSStoppedFrame = object  # type: ignore
+    TTSTextFrame = object  # type: ignore
+    UserStartedSpeakingFrame = object  # type: ignore
+    UserStoppedSpeakingFrame = object  # type: ignore
+    InterruptionFrame = object  # type: ignore
+    OutputTransportMessageFrame = object  # type: ignore
+    OutputTransportMessageUrgentFrame = object  # type: ignore
+    FrameProcessor = object  # type: ignore
     LLMService = object  # type: ignore
     STTService = object  # type: ignore
     SegmentedSTTService = object  # type: ignore
@@ -203,6 +217,52 @@ class OpenNvrWhisperSTT(SegmentedSTTService):
 # ── LLM: Ollama via OpenNVR adapter, with tool calling ─────────────
 
 
+def history_and_question(messages: list[dict[str, Any]]) -> tuple[list[dict[str, str]], str]:
+    """The agent's turn takes (history, the question): prior user and
+    assistant TEXT turns, and the last user message. System and tool
+    messages are the pipeline's business, not the turn's."""
+    turns = [m for m in messages
+             if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)]
+    if not turns or turns[-1].get("role") != "user":
+        return [{"role": m["role"], "content": m["content"]} for m in turns], ""
+    history = [{"role": m["role"], "content": m["content"]} for m in turns[:-1]]
+    return history, str(turns[-1]["content"]).strip()
+
+
+class StreamEvents(FrameProcessor):
+    """What the page needs to know besides the audio, as JSON messages on
+    the same WebSocket: the transcript of what was heard, each sentence as
+    it is spoken, when the user started and stopped, when the agent
+    started and stopped, and an interruption (so the page drops the audio
+    it has queued). Sits just before the transport's output; every frame
+    passes through untouched."""
+
+    _TEXT_TYPES: tuple = ()
+
+    async def process_frame(self, frame: "Frame", direction: Any) -> None:  # type: ignore[override]
+        await super().process_frame(frame, direction)
+        message = None
+        urgent = False
+        if isinstance(frame, TranscriptionFrame):
+            message = {"type": "transcript", "text": getattr(frame, "text", "")}
+        elif isinstance(frame, TTSTextFrame):
+            message = {"type": "reply", "text": getattr(frame, "text", "")}
+        elif isinstance(frame, UserStartedSpeakingFrame):
+            message = {"type": "user_started"}
+        elif isinstance(frame, UserStoppedSpeakingFrame):
+            message = {"type": "user_stopped"}
+        elif isinstance(frame, TTSStartedFrame):
+            message = {"type": "bot_started"}
+        elif isinstance(frame, TTSStoppedFrame):
+            message = {"type": "bot_stopped"}
+        elif isinstance(frame, InterruptionFrame):
+            message, urgent = {"type": "interrupted"}, True
+        if message is not None:
+            out = (OutputTransportMessageUrgentFrame if urgent else OutputTransportMessageFrame)(message=message)
+            await self.push_frame(out, direction)
+        await self.push_frame(frame, direction)
+
+
 def with_clock_in_user_turn(messages: list[dict[str, Any]],
                             clock_line: Callable[[], str] | None) -> list[dict[str, Any]]:
     """The per-turn clock, in front of the LAST user message — the one
@@ -247,10 +307,17 @@ class OpenNvrOllamaLLM(LLMService):
         max_tokens: int = 256,
         max_tool_iterations: int = 4,
         clock_line: Callable[[], str] | None = None,
+        turn_runner: Callable[..., Any] | None = None,
     ) -> None:
         super().__init__()
         self._client = client
         self._clock_line = clock_line
+        # The agent's own turn (router, forced grounding, the window fit,
+        # the backup model, the reply guards), ``async (history, text) ->
+        # reply``. With it the streaming path answers exactly as the
+        # request path does; without it (tests with bare fakes) the inline
+        # tool loop below runs.
+        self._turn_runner = turn_runner
         self._tools = list(tools)
         self._tool_handlers = dict(tool_handlers)
         self._temperature = temperature
@@ -277,7 +344,8 @@ class OpenNvrOllamaLLM(LLMService):
     async def _handle_context(self, context: LLMContext) -> None:
         # Snapshot the conversation messages; Pipecat's context
         # aggregator owns the canonical list.
-        messages = with_clock_in_user_turn(list(context.get_messages()), self._clock_line)
+        raw_messages = list(context.get_messages())
+        messages = with_clock_in_user_turn(raw_messages, self._clock_line)
         logger.info("LLM _handle_context fired with %d messages", len(messages))
 
         # Emit the "LLM is thinking" bracket so downstream TTS knows
@@ -285,6 +353,13 @@ class OpenNvrOllamaLLM(LLMService):
         await self.push_frame(LLMFullResponseStartFrame())
 
         try:
+            if self._turn_runner is not None:
+                history, text = history_and_question(raw_messages)
+                if text:
+                    reply = await self._turn_runner(history, text)
+                    if reply:
+                        await self.push_frame(LLMTextFrame(str(reply)))
+                return
             for iteration in range(self._max_tool_iterations):
                 response = await self._client.chat(
                     messages=messages,

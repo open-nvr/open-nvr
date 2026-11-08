@@ -35,6 +35,7 @@ the JS client.
 """
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Optional
 
@@ -47,8 +48,11 @@ try:  # pragma: no cover — import-time only
         OutputAudioRawFrame,
         StartFrame,
         TTSAudioRawFrame,
+        OutputTransportMessageFrame,
+        OutputTransportMessageUrgentFrame,
     )
     from pipecat.serializers.base_serializer import FrameSerializer
+    _MESSAGE_FRAMES: tuple = (OutputTransportMessageFrame, OutputTransportMessageUrgentFrame)
 except Exception:  # pragma: no cover
     # Test envs that haven't installed Pipecat get a no-op stub.
     Frame = object  # type: ignore
@@ -56,6 +60,7 @@ except Exception:  # pragma: no cover
     OutputAudioRawFrame = object  # type: ignore
     StartFrame = object  # type: ignore
     TTSAudioRawFrame = object  # type: ignore
+    _MESSAGE_FRAMES = ()
 
     class FrameSerializer:  # type: ignore
         def __init__(self, *a, **k):
@@ -101,16 +106,20 @@ class RawPcmSerializer(FrameSerializer):
         if isinstance(rate_out, int) and rate_out > 0:
             self._output_sample_rate = rate_out
 
-    async def serialize(self, frame: "Frame") -> Optional[bytes]:  # type: ignore[override]
-        # Only audio gets serialised onto the wire. Everything else
-        # (system frames, LLM text frames, control frames) is
-        # consumed entirely server-side — the demo browser doesn't
-        # render transcripts. A production UI would extend this.
+    async def serialize(self, frame: "Frame"):  # type: ignore[override]
         if isinstance(frame, (TTSAudioRawFrame, OutputAudioRawFrame)):
             audio = getattr(frame, "audio", None)
             if not isinstance(audio, (bytes, bytearray)) or not audio:
                 return None
             return bytes(audio)
+        # Audio goes out as bytes. Transport messages (services.StreamEvents:
+        # transcript, reply sentences, turn and speaking state, interruptions)
+        # go out as JSON TEXT frames; the page tells them apart by frame type.
+        if _MESSAGE_FRAMES and isinstance(frame, _MESSAGE_FRAMES):
+            try:
+                return json.dumps(getattr(frame, "message", None))
+            except (TypeError, ValueError):
+                return None
         return None
 
     async def deserialize(self, data) -> Optional["Frame"]:  # type: ignore[override]

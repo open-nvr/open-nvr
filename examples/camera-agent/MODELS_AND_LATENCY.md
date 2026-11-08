@@ -175,16 +175,22 @@ and (b) doesn't react to room noise.
 
 **Which path you are on matters.** The agent has two voice paths:
 
-* The **demo page's Talk mode** (`/demo`) records an utterance in the
-  browser and POSTs it to `/converse`. Turn-taking there is the browser's
-  own *energy* detector described below — there is no speech model on the
-  client. Smart Turn is **not** in this loop.
+* The **demo page's Talk mode** (`/demo`) now streams by default: the
+  microphone goes to `/ws` as 16 kHz PCM from an AudioWorklet, and the
+  page plays each sentence as it arrives and renders the transcript, the
+  reply and the turn state from JSON events the pipeline sends beside the
+  audio (`services.StreamEvents`). Its "turn by turn" setting is the old
+  path: record an utterance, wait 0.9 s of silence, POST it to
+  `/converse`, play the whole answer when every stage is done. Measured
+  on the Ventuno Q before the switch: 3–7 s of nothing after you stopped
+  talking, no interrupting (the office session of 2026-11-08).
 * The **streaming pipeline** (`/ws`, Pipecat 1.12) is where Silero VAD +
-  **Smart Turn v3** live: semantic end-of-turn, and — for clients that opt
-  in — model-backed interruptions (`MinWordsUserTurnStartStrategy`: a reply
-  is only cut when the interrupter has actually said a few words). The demo
-  page does not use `/ws` yet; a client that streams 16 kHz PCM over it
-  gets the semantic behaviour.
+  **Smart Turn v3** live: semantic end-of-turn (its silence fallback is
+  1.0 s, was 2.0), and model-backed interruptions (`turns.py`: a reply
+  is only cut when the interrupter has actually said a few words). Since
+  2026-11-08 it answers with the agent's own turn — the router, the forced
+  grounding, the window fit, the backup model and the reply guards — so
+  the two paths cannot drift apart.
 
 So if the demo page "stopped speaking when someone said a couple of random
 words", that was the client barge-in gate (now *firm* by default, see

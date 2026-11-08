@@ -100,7 +100,7 @@ vad_stop_secs: 0.2
 # Silence appended to each utterance before Whisper hears it, so the last
 # word is not clipped. A few percent of the transcription time; 0 = off.
 stt_trailing_silence_secs: 0.5
-turn_stop_secs: 2.0
+turn_stop_secs: 1.0
 # Smart Turn only ever looks at the last 8 s of a turn; buffering more is
 # pure cost.
 turn_max_secs: 8.0
