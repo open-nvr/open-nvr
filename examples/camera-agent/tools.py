@@ -163,6 +163,7 @@ class CameraTools:
         recognition_client: KaicAdapterClient,
         best_frame_fetch: Any = None,
         resolve_camera: Any = None,
+        pipeline_camera: Any = None,
         events_client: Any = None,
         timeline: Any = None,
     ) -> None:
@@ -175,6 +176,13 @@ class CameraTools:
         # best_frame_fetch, so camera_snapshot and describe_camera agree on which
         # camera they're reading. Identity by default.
         self._resolve_camera = resolve_camera or (lambda cid: cid)
+        # Tier-0 (detect-pipeline) knows a camera as ``cam<server id>`` — the
+        # id on its bus subjects, its metrics and its /best_frame and
+        # /latest_frame endpoints. The server-side id ``_resolve_camera``
+        # gives is for the platform's own endpoints. Measured on a Ventuno Q
+        # (2026-11-08): resolving to "23" made every /best_frame and
+        # /latest_frame fetch a 404 and every live look a 6 s RTSP grab.
+        self._pipeline_camera = pipeline_camera or (lambda cid: cid)
         # Optional async callable(camera_id) -> jpeg bytes | None. When set,
         # describe_camera runs the VLM on Tier-0's BEST frame (clean, representative)
         # instead of an arbitrary live grab — more accurate and cheaper. None (or a
@@ -282,7 +290,7 @@ class CameraTools:
         rule as camera_snapshot); when the scene is static, return None so the
         caller grabs a live frame.
         """
-        pipeline_cam = self._resolve_camera(camera_id)
+        pipeline_cam = self._pipeline_camera(camera_id)
         event = self._ctx.latest_inference(pipeline_cam, adapter="tier0")
         if event is None or (time.time() - event.received_at) > self._SNAPSHOT_MAX_AGE_S:
             return None
@@ -657,7 +665,7 @@ class CameraTools:
     def _snapshot_one(self, camera_id: str) -> str:
         # Resolve to the pipeline's camera id — the Tier-0 event ring is keyed by
         # the id on the bus subject, same id the best-frame path uses.
-        pipeline_cam = self._resolve_camera(camera_id)
+        pipeline_cam = self._pipeline_camera(camera_id)
         event = self._ctx.latest_inference(pipeline_cam, adapter="tier0")
         if event is None:
             # No Tier-0 stream for this camera (not analyzed, or bus not wired) —
@@ -721,7 +729,7 @@ class CameraTools:
             return "ERROR: window_seconds must be positive."
 
         camera_id: str | None
-        if camera_arg in (None, "", "__any__"):
+        if camera_arg in (None, "", "__any__", "all"):
             camera_id = None
         elif isinstance(camera_arg, str) and self._ctx.known_camera(camera_arg):
             camera_id = camera_arg
@@ -766,7 +774,7 @@ class CameraTools:
         window = min(window, 7 * 86400.0)
 
         camera_id: str | None
-        if camera_arg in (None, "", "__any__"):
+        if camera_arg in (None, "", "__any__", "all"):
             camera_id = None
         elif isinstance(camera_arg, str) and self._ctx.known_camera(camera_arg):
             camera_id = camera_arg
@@ -861,7 +869,7 @@ class CameraTools:
 
         camera_arg = args.get("camera_id")
         camera_id: str | None
-        if camera_arg in (None, "", "__any__"):
+        if camera_arg in (None, "", "__any__", "all"):
             camera_id = None
         elif isinstance(camera_arg, str) and self._ctx.known_camera(camera_arg):
             camera_id = camera_arg

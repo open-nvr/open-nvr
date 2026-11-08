@@ -49,7 +49,8 @@ def _build_tools(ctx: CameraContext, *,
                  detection_response=None,
                  recognition_response=None,
                  best_frame_fetch=None,
-                 resolve_camera=None) -> CameraTools:
+                 resolve_camera=None,
+                 pipeline_camera=None) -> CameraTools:
     caption = AsyncMock()
     caption.infer.return_value = caption_response or {
         "result": {"caption": "a box on a doormat"}
@@ -69,6 +70,7 @@ def _build_tools(ctx: CameraContext, *,
         recognition_client=recognise,
         best_frame_fetch=best_frame_fetch,
         resolve_camera=resolve_camera,
+        pipeline_camera=pipeline_camera,
     )
 
 
@@ -323,11 +325,13 @@ async def test_camera_snapshot_reports_when_no_tier0_data():
 
 @pytest.mark.asyncio
 async def test_camera_snapshot_resolves_agent_camera_to_pipeline_id():
-    # The Tier-0 ring is keyed by the pipeline camera id ("3"); the tool is called
-    # with the agent id ("front-porch"). Without the resolver they'd never match.
+    # The Tier-0 ring is keyed by the pipeline camera id ("cam3"); the tool is
+    # called with the agent id ("front-porch"). Without the pipeline resolver
+    # they'd never match — and the SERVER id resolver is the wrong one here
+    # (the pipeline says cam3, the platform says 3).
     ctx = _ctx_with_camera()
-    _record_tier0(ctx, "3", ["person"])                 # ring keyed by pipeline id
-    tools = _build_tools(ctx, resolve_camera=lambda c: "3")
+    _record_tier0(ctx, "cam3", ["person"])              # ring keyed by pipeline id
+    tools = _build_tools(ctx, resolve_camera=lambda c: "3", pipeline_camera=lambda c: "cam3")
     out = await tools.camera_snapshot({"camera_id": "front-porch"})
     assert "a person" in out
 

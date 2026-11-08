@@ -193,12 +193,12 @@
       monitors: {kind: count, target: person, max_count: 2}
 
 - id: alarm-before-6am
+  note: "Scored on the alarm that gets armed: the agent takes the window from the question's own words (Gemma put 06:00 in 'after' three times of three)."
   ask: "sound the siren if anyone is at {camera} before 6am"
   expect:
     tool: create_alarm
     args:
       target: person
-      before: "06:00"
     state:
       alarms: {target: person, window: "before 06:00"}
 

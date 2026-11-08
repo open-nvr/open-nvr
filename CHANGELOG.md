@@ -374,6 +374,18 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The camera agent's live look now really reads the pipeline's frame.**
+  The agent resolved a camera to its bare server id ("23") for Tier-0's
+  endpoints and event ring, while the pipeline knows it as `cam23`, so
+  every `/best_frame` and `/latest_frame` fetch was a 404 and every live
+  look a 6 s RTSP grab (the second NPU eval, 2026-11-08: still 5.8 s a
+  look after #822). A separate pipeline-id resolver (`cam<server id>`)
+  now serves the two fetches and the Tier-0 lookups; the platform's own
+  endpoints keep the server id. Also `recent_events` takes `all` for every
+  camera like the other tools (Gemma chose it three times of three and
+  was refused), and the `before` argument's description says plainly that
+  "before 6am" is `before='06:00'`.
+
 - **The camera agent no longer arms an alarm when asked for a notification,
   nor at hours nobody named.** From the first 32-case eval of the agent on
   the Ventuno Q's NPU (Gemma 4 E2B, 85 of 96 turns right): "let me know
