@@ -8,6 +8,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Core alarms when a camera records segments that hold no video.** On the
+  Ventuno Q (2026-11-09) a camera's RTP clock wrapped and the relay in front
+  of it clamped every timestamp, so MediaMTX closed a 50 MB segment every
+  seven minutes with 0.07 s of playable video in it — segments kept arriving,
+  the recording watchdog stayed quiet, and hours of footage were garbage. The
+  segment-complete hook now judges each closed segment by bytes against
+  duration (`services/segment_health.py`: an implied bitrate no camera can
+  produce, or a segment far shorter than configured yet heavy for its length)
+  and raises a `recording_degraded` camera event, cleared by the first healthy
+  segment; it is stored, published and shown exactly like `recording_stalled`
+  (Alerts view, toast, not an alarm on tour). Tails written at stop or
+  reconnect are too small to be judged and never alarm.
+
 - **The camera agent's demo talks over the streaming pipeline.** Talk
   mode now streams the microphone to `/ws` (16 kHz PCM from an
   AudioWorklet) and plays each sentence as it is synthesised, so the first
