@@ -454,3 +454,13 @@ def test_remove_it_means_the_thing_set_up_last(last, tool):
     # named kinds still win over the memory
     d = router.decide("remove the alarm", cameras=CAMS, advertised=ALL | {"stop_monitor"}, now=NOW, last_kind="monitor")
     assert d.hint == "stop_alarm"
+
+
+@pytest.mark.parametrize("q", ["Bye. Thank you.", "ok bye, thanks a lot", "goodbye and thanks", "bye bye. okay."])
+def test_a_goodbye_anywhere_in_pure_small_talk_is_a_closing(q):
+    assert router.is_closing(q), q
+
+
+@pytest.mark.parametrize("q", ["thanks a lot", "okay, hello there", "good morning"])
+def test_small_talk_without_a_goodbye_is_not_a_closing(q):
+    assert not router.is_closing(q), q

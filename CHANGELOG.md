@@ -529,6 +529,13 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The camera agent can actually schedule the reports its greeting
+  offers.** `create_report` / `stop_report` were missing from the Docker
+  config's `enabled_tools`, so "every ten minutes give me a report" could
+  only become a people-count watch (Ventuno Q, 2026-11-09). Also, a
+  goodbye anywhere in a pure small-talk utterance ("Bye. Thank you.") now
+  ends the session; before, only a goodbye at the end did.
+
 - **The detect-pipeline no longer reports a quiet camera as over
   capacity.** With adaptive decode idling on keyframes only, the `fps`
   filter fills the rate with copies of each keyframe, and they arrive in a

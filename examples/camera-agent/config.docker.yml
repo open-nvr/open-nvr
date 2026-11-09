@@ -99,6 +99,12 @@ enabled_tools:
   - stop_monitor
   - create_alarm
   - stop_alarm
+  # Scheduled reports ("every hour tell me what you see", "a 7am rundown").
+  # The agent's greeting has always offered them; without these two names
+  # the model could only answer such a request with a watch (Ventuno Q,
+  # 2026-11-09: "every ten minutes give me a report" became a people count).
+  - create_report
+  - stop_report
 
 # LLM tuning. granite4:micro is the docker-compose.camera-agent.yml default —
 # ~3 GB of RAM, Apache-2.0, NON-thinking (the right choice on CPU: a thinking
