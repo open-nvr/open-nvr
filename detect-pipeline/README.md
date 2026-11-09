@@ -622,7 +622,7 @@ show detect-pipeline CPU/RAM next to them): `tier0_process_cpu_percent`,
 **Operator health — "is it running and keeping up?"** (the capacity signal for a
 fixed box): `tier0_worker_up{camera}`, `tier0_processing_fps{camera}` vs
 `tier0_target_fps{camera}` (a ratio well under 1 = the box can't keep up with that
-camera), and `tier0_frames_dropped_total{camera}` (decoded frames detection never reached because it was still busy — near the camera's fps, the box cannot serve it at this budget; the worker WARNs), `tier0_worker_restarts_total{camera}` (repeated feed restarts = an
+camera), and `tier0_frames_dropped_total{camera}` (decoded frames detection never reached because it was still busy — near the camera's fps, the box cannot serve it at this budget; the worker WARNs). While a camera idles on keyframe-only decode the `fps` filter's fill copies of each keyframe arrive in a burst and the worker skips them; those are `tier0_frames_idle_duplicates_total{camera}`, not drops, and never the warning. `tier0_worker_restarts_total{camera}` (repeated feed restarts = an
 unhealthy camera; a reader whose ffmpeg is still running but has decoded nothing for
 60 s — timestamps that stopped advancing after an RTP clock wrap, no keyframes in a
 keyframe-only mode — is restarted and counted here instead of being left hanging

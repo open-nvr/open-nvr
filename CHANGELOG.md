@@ -529,6 +529,17 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The detect-pipeline no longer reports a quiet camera as over
+  capacity.** With adaptive decode idling on keyframes only, the `fps`
+  filter fills the rate with copies of each keyframe, and they arrive in a
+  burst when the next keyframe does; the worker takes the newest and the
+  copies are skipped. Those skips were counted as dropped frames and
+  raised "detection exceeds this box's capacity" — 28 % of frames in idle
+  minutes on the Ventuno Q (2026-11-09) — while the new per-frame split
+  showed 280 ms waiting for the next frame and 5 ms detecting. They are
+  now `tier0_frames_idle_duplicates_total{camera}`, apart from drops, and
+  never the warning.
+
 - **Core stops minting a stream token on every roster request.** The
   detect-pipeline and the camera agent each re-read the camera roster every
   30 s, and every call signed a fresh wildcard MediaMTX token and logged it

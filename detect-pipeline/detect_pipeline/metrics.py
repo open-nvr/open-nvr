@@ -532,6 +532,19 @@ def record_decode_config(
     metrics.gauge("tier0_decode_config", 1.0, labels)
 
 
+def record_frames_idle_duplicates(camera_id: str, n: int) -> None:
+    """Frames skipped while the camera idled on keyframe-only decode: the
+    ``fps`` filter fills the rate with COPIES of each keyframe, and they
+    arrive in a burst when the next keyframe does; the worker takes the
+    newest and the copies are overwritten. Nothing was lost — the same
+    picture ran — so these are counted apart from drops and never raise
+    the capacity warning. On the Ventuno Q (2026-11-09) they read as a
+    28 % drop rate in idle minutes while the loop spent 280 ms per frame
+    waiting for the next one."""
+    if n > 0:
+        metrics.inc("tier0_frames_idle_duplicates_total", {"camera": camera_id}, float(n))
+
+
 def record_frames_dropped(camera_id: str, n: int) -> None:
     """Decoded frames the detector never saw: the drain thread overwrote
     them because detection was still busy with an older one (#507). Exact,
