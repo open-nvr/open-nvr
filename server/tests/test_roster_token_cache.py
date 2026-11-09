@@ -136,9 +136,16 @@ def test_default_recording_path_is_announced_once(monkeypatch, tmp_path, caplog)
     monkeypatch.setattr(ss, "_announced_default_paths", set())
     real = logging.getLogger("test.storage")
     monkeypatch.setattr(ss, "storage_logger", real)
-    class _NoDb:                       # no stored setting: the lookup fails, the default wins
+    class _NoRow:                      # no stored storage setting: the default wins
+        def filter(self, *a, **k):
+            return self
+
+        def first(self):
+            return None
+
+    class _NoDb:
         def query(self, *a, **k):
-            raise RuntimeError("no database in this test")
+            return _NoRow()
 
     with caplog.at_level(logging.DEBUG, logger="test.storage"):
         for _ in range(4):
