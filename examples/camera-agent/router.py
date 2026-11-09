@@ -108,12 +108,20 @@ _SMALL_TALK_RE = re.compile(
 #: want to talk more" with "Understood. I will stop monitoring now" — an
 #: invented action — in the office session of 2026-11-08).
 _CLOSING_RE = re.compile(
-    r"^\s*(?:that'?s\s+enough|enough(?:\s+for\s+now)?|stop\s+talking|leave\s+it|never\s*mind"
-    r"|forget\s+it|we'?re\s+done|i'?m\s+done|that\s+will\s+be\s+all|that\s+is\s+enough)"
+    r"^\s*(?:(?:ok(?:ay)?|thanks|thank you|alright)[,.!]?\s*)*"
+    r"(?:that'?s\s+enough|enough(?:\s+for\s+now)?|stop\s+talking|leave\s+it|never\s*mind"
+    r"|forget\s+it|we'?re\s+done|i'?m\s+done|that\s+will\s+be\s+all|that\s+is\s+enough"
+    r"|good\s*bye|bye(?:\s*bye)?|see\s+you(?:\s+later|\s+tomorrow)?|talk\s+(?:to\s+you\s+)?later|good\s*night)"
     r"\s*[,.!?]*\s*$", re.IGNORECASE)
-#: Anywhere in the utterance (spoken turns stutter: "I I don't want to talk more").
+#: Anywhere in the utterance (spoken turns stutter and tack on thanks: "I I
+#: don't want to talk more", "thank you, end the conversation"). The office
+#: session of 2026-11-08: "thank you end the conversation" reached the model,
+#: which called stop_alarm and said "I have stopped any currently ringing
+#: alarms. Goodbye."
 _CLOSING_PHRASE_RE = re.compile(
-    r"\b(?:don'?t|do not|didn'?t)\s+want\s+to\s+(?:talk|chat|speak)(?:\s+(?:any\s*)?more|\s+anymore)?\b",
+    r"\b(?:don'?t|do not|didn'?t)\s+want\s+to\s+(?:talk|chat|speak)(?:\s+(?:any\s*)?more|\s+anymore)?\b"
+    r"|\b(?:end|stop|finish|close|terminate)\s+(?:the\s+|this\s+|our\s+)?(?:conversation|call|chat|session|talk)\b"
+    r"|\bgood\s*bye\b|\bbye\s*bye\b",
     re.IGNORECASE)
 
 #: The user doubts the last look ("there should be more than that", "are

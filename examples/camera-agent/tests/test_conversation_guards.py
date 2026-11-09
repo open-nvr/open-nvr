@@ -62,7 +62,7 @@ def test_a_closing_gets_a_goodbye_and_no_model():
     rt = _runtime()
     rt.ollama = _Says("Understood. I will stop monitoring now.")
     out = asyncio.run(ca._run_conversation_turn(rt, [], "I I don't want to talk more."))
-    assert out == "Alright. I'll be here when you need me." and rt.ollama.n == 0
+    assert out == "Alright, goodbye. I'll be here when you need me." and rt.ollama.n == 0
     assert [s["step"] for s in rt.last_turn_trace] == ["reply"]
 
 
@@ -129,3 +129,37 @@ def test_count_disagreement_parses_both_sides():
     assert ca._count_disagreement("I see three chairs.", "On front_door: no objects") is None
     assert ca._count_disagreement("I see three people.", "On front_door: 3 people, a chair.") is None
     assert ca._count_disagreement("I see one person.", "On front_door: 3 people.") is not None
+
+
+# ── goodbyes end the session, never a tool ────────────────────────────
+
+@pytest.mark.parametrize("q", [
+    "goodbye", "Bye!", "ok bye bye", "thank you, end the conversation", "thanks, goodbye",
+    "please stop the conversation", "I I don't want to talk more.", "see you later", "good night",
+])
+def test_goodbyes_are_closings(q):
+    from router import is_closing
+    assert is_closing(q), q
+
+
+@pytest.mark.parametrize("q", ["thanks, that's all", "what do you see", "stop the alarm", "is anyone at the door"])
+def test_not_every_thanks_or_stop_is_a_closing(q):
+    from router import is_closing
+    assert not is_closing(q), q
+
+
+def test_a_goodbye_marks_the_turn_and_the_endpoints_say_end():
+    from fastapi.testclient import TestClient
+    from camera_agent import build_app
+    rt = _runtime()
+    rt.ollama = _Says("I have stopped any currently ringing alarms. Goodbye.")
+    out = asyncio.run(ca._run_conversation_turn(rt, [], "thank you end the conversation"))
+    assert out.startswith("Alright, goodbye") and rt.last_turn_closed and rt.ollama.n == 0
+    out2 = asyncio.run(ca._run_conversation_turn(rt, [], "how many people are at the front door?"))
+    assert not rt.last_turn_closed, "the flag is per turn"
+    client = TestClient(build_app(rt))
+    body = client.post("/ask", json={"text": "goodbye"}).json()
+    assert body.get("end") is True and body["reply"].startswith("Alright, goodbye")
+    body = client.post("/ask", json={"text": "how many cameras are there"}).json()
+    assert body.get("end") is False
+

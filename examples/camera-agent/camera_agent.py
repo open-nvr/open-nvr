@@ -781,6 +781,38 @@ def _derive_skill_suggested_apps() -> dict[str, list[str]]:
 _SKILL_SUGGESTED_APPS: dict[str, list[str]] = _derive_skill_suggested_apps()
 
 
+#: ONNX Runtime provider (as the detector's backend gauge spells it) → device.
+_TIER0_PROVIDER_DEVICE = {
+    "QNNExecutionProvider": "Qualcomm Hexagon NPU",
+    "OpenVINOExecutionProvider:NPU": "Intel NPU",
+    "OpenVINOExecutionProvider:GPU": "Intel GPU",
+    "CUDAExecutionProvider": "NVIDIA GPU",
+    "TensorrtExecutionProvider": "NVIDIA GPU",
+    "CoreMLExecutionProvider": "Apple Neural Engine",
+}
+
+
+def accelerator_from_tier0(metrics_text: str) -> str | None:
+    """The device named by ``tier0_detector_backend{effective="…"} 1`` in
+    the pipeline's metrics, or None (CPU, or no gauge). The effective list
+    reads like ``QNNExecutionProvider, CPUExecutionProvider``: the first
+    entry is the device, the rest the fallback for unsupported nodes."""
+    for line in (metrics_text or "").splitlines():
+        if not line.startswith("tier0_detector_backend{") or not line.rstrip().endswith(" 1"):
+            continue
+        m = re.search(r'effective="([^"]*)"', line)
+        if not m:
+            continue
+        first = m.group(1).split(",")[0].strip()
+        if first.startswith("OpenVINOExecutionProvider"):
+            dev = first[len("OpenVINOExecutionProvider"):].strip(":() ").split(",")[0].upper() or "CPU"
+            return _TIER0_PROVIDER_DEVICE.get(f"OpenVINOExecutionProvider:{dev}")
+        for sep in (":", "("):
+            first = first.split(sep, 1)[0]
+        return _TIER0_PROVIDER_DEVICE.get(first.strip())
+    return None
+
+
 def _derive_skill_hardware() -> dict[str, list[dict[str, Any]]]:
     """The ``hardware`` blocks of every task backing each skill, from the
     bundled task registry — ``skill id -> [{task, label, adapters, min,
@@ -3300,6 +3332,9 @@ class CameraAgentRuntime:
         # The last detect/describe call a turn made (tool, args, at): a
         # dispute of its answer repeats it instead of asking the model.
         self.last_look: dict[str, Any] | None = None
+        # The last turn was a goodbye: the voice endpoints say so ("end")
+        # and the page leaves talk mode after the reply.
+        self.last_turn_closed: bool = False
 
         self.context = CameraContext(
             cameras=cfg.cameras,
@@ -4254,12 +4289,45 @@ class CameraAgentRuntime:
             "note": "Memory-bandwidth-bound on CPU: a smaller model is both "
                     "lighter AND faster.",
         })
+        # What actually runs on an accelerator here. The detector says so
+        # itself (its backend gauge on the pipeline's metrics port: the ONNX
+        # Runtime provider in use, the same truth the dashboard shows); the
+        # NPU captioner is an NPU-only adapter; the language model is on the
+        # NPU when it is the caption adapter's chat endpoint. Before this the
+        # panel read "Running on CPU only — a CUDA GPU would speed up…" on a
+        # box whose detector, captioner and model all ran on the Hexagon
+        # (Ventuno Q, 2026-11-09).
+        accel = self.detector_accelerator()
+        npu_captioner = str(self.cfg.caption_adapter or "").lower() in ("litertlm", "litertlm-gemma-npu")
+        llm_on_npu = (self.cfg.llm_provider.strip().lower() == "openai"
+                      and "caption-adapter" in str(self.cfg.llm_base_url or ""))
+        accelerated: list[str] = []
+        for row in rows:
+            task = str(row.get("task") or "")
+            on = ((accel is not None and task in ("object_detection", "detection"))
+                  or (npu_captioner and accel is not None and task in ("image_captioning", "visual_question_answering"))
+                  or (llm_on_npu and accel is not None and task == "llm"))
+            row["accelerated"] = bool(on)
+            if on:
+                row["recommended"] = ""
+                row["min"] = f"{accel}" + (" via the caption adapter" if task == "llm" else "")
+                accelerated.append(str(row["label"]))
+        if llm_on_npu:
+            for row in rows:
+                if row.get("task") == "llm":
+                    row["adapters"] = ["caption-adapter (OpenAI-compatible)"]
         gpu_map = self.kaic_capabilities.gpu_adapters
         if gpu_map is None:
             running_on = "unknown"
         else:
             running_on = "gpu" if any(gpu_map.values()) else "cpu"
-        if running_on == "gpu":
+        still_cpu = [lbl for lbl in gpu_labels if lbl not in accelerated]
+        if accelerated:
+            running_on = "npu" if "NPU" in (accel or "") or "Neural" in (accel or "") else "gpu"
+            summary = f"Running on the {accel}: {', '.join(accelerated)}."
+            if still_cpu:
+                summary += f" On the CPU: {', '.join(still_cpu[:3])}."
+        elif running_on == "gpu":
             on_gpu = sorted(a for a, g in (gpu_map or {}).items() if g)
             summary = f"Running on GPU ({', '.join(on_gpu)})."
         elif running_on == "cpu":
@@ -4270,20 +4338,43 @@ class CameraAgentRuntime:
             summary = "Adapter hardware not visible (KAI-C unreachable)"
             summary += (f" — a CUDA GPU is recommended for "
                         f"{', '.join(gpu_labels[:3])}." if gpu_labels else ".")
+        tips = ["Chat mode instead of voice skips Piper TTS — the measured "
+                "CPU hog (~4 cores while speaking)."]
+        if not llm_on_npu:
+            tips.append("On CPU the LLM is memory-bandwidth-bound: a smaller model "
+                        "is both lighter and faster.")
         return {
             "running_on": running_on,
+            "accelerator": accel,
             "gpu_adapters": sorted(a for a, g in (gpu_map or {}).items() if g),
-            "gpu_recommended": bool(gpu_labels),
+            "gpu_recommended": bool(still_cpu) and not accelerated or (bool(gpu_labels) and not accelerated),
             "summary": summary,
             "rows": rows,
             "turn": turn_hardware_profile(self.cfg),
-            "tips": [
-                "Chat mode instead of voice skips Piper TTS — the measured "
-                "CPU hog (~4 cores while speaking).",
-                "On CPU the LLM is memory-bandwidth-bound: a smaller model "
-                "is both lighter and faster.",
-            ],
+            "tips": tips,
         }
+
+    _ACCEL_PROBE_TTL_S = 60.0
+
+    def detector_accelerator(self) -> str | None:
+        """The accelerator the Tier-0 detector runs on, from its own backend
+        gauge on the pipeline's metrics port (``bestframe_base_url``), or
+        None when it runs on the CPU or cannot be asked. Cached a minute."""
+        now = time.monotonic()
+        cached = getattr(self, "_accel_probe", None)
+        if cached and now - cached[0] < self._ACCEL_PROBE_TTL_S:
+            return cached[1]
+        result: str | None = None
+        base = (self.cfg.bestframe_base_url or "").rstrip("/")
+        if base:
+            try:
+                import httpx
+                text = httpx.get(f"{base}/metrics", timeout=1.5, trust_env=False).text
+                result = accelerator_from_tier0(text)
+            except Exception:  # noqa: BLE001 — the panel is advisory
+                result = None
+        self._accel_probe = (now, result)
+        return result
 
     def restore_default_skills(self) -> int:
         """Clear every runtime skill toggle — the fresh-boot default is
@@ -5981,8 +6072,9 @@ def _streaming_turn_runner(runtime: CameraAgentRuntime):
     """``async (history, text) -> reply`` for the streaming LLM service:
     the agent's full turn, speaking its thinking-aloud lines as a voice
     turn does (they reach the page over /updates with audio)."""
-    async def run(history: list[dict[str, str]], text: str) -> str:
-        return await _run_conversation_turn(runtime, list(history), text, speak_progress="voice")
+    async def run(history: list[dict[str, str]], text: str):
+        reply = await _run_conversation_turn(runtime, list(history), text, speak_progress="voice")
+        return reply, {"end": bool(getattr(runtime, "last_turn_closed", False))}
     return run
 
 
@@ -7202,6 +7294,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             "frames": frames,
             "trace": list(turn_trace),
             "latency_ms": int((_t.perf_counter() - t0) * 1000),
+            "end": bool(getattr(runtime, "last_turn_closed", False)),
         })
 
     @app.post("/transcribe")
@@ -7424,6 +7517,8 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             "trace": list(turn_trace),
             "timings_ms": timings, "invoked": True, "armed": armed,
             "tts_error": tts_error,
+            # A goodbye: the page leaves talk mode once this reply has played.
+            "end": bool(getattr(runtime, "last_turn_closed", False)),
         })
 
     @app.post("/converse/cancel")
@@ -8053,6 +8148,7 @@ async def _conversation_turn_body(
     # tends to narrate a phantom tool. Short-circuit BEFORE the LLM loop so these
     # are instant: previously they ran the full tool loop (tens of seconds on a
     # CPU model) only to have the roster answer override the result at the end.
+    runtime.last_turn_closed = False
     if _is_config_question(user_text):
         trace.append({"step": "reply", "detail": "roster"})
         return _roster_answer(runtime.visible_cameras())
@@ -8061,7 +8157,8 @@ async def _conversation_turn_body(
     # action it never took.)
     if _router_is_closing(user_text):
         trace.append({"step": "reply", "detail": "closing"})
-        return "Alright. I'll be here when you need me."
+        runtime.last_turn_closed = True
+        return "Alright, goodbye. I'll be here when you need me."
     # The user doubts the last look: look again, the same way, and answer
     # from what the look says — never from the user's number. (Told "there
     # are three chairs", the model called the detector, was told one, and
