@@ -100,6 +100,13 @@ async def test_the_llm_service_answers_with_the_agents_turn_when_given_one():
     texts = [f.text for f in down if isinstance(f, LLMTextFrame)]
     assert texts == ["Nobody is at the door right now."]
     assert seen["text"] == "is anyone at the door?"
+    # The page cannot see the TranscriptionFrame (the aggregator eats it),
+    # so the service tells it what was heard, and when the turn is over —
+    # without these the page showed no user text and merged every answer
+    # into one bubble (2026-11-09).
+    from pipecat.frames.frames import OutputTransportMessageFrame
+    msgs = [f.message for f in down if isinstance(f, OutputTransportMessageFrame)]
+    assert msgs == [{"type": "transcript", "text": "is anyone at the door?"}, {"type": "turn_end"}]
     assert seen["history"] == [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi"}]
 
 
@@ -135,5 +142,8 @@ async def test_a_goodbye_over_the_stream_ends_the_session_after_the_reply():
     down, _ = await run_test(Pipeline([llm]), frames_to_send=[LLMContextFrame(context=context)], start_timeout=10.0)
     kinds = [(type(f).__name__, getattr(f, "text", None) or getattr(f, "message", None)) for f in down
              if isinstance(f, (LLMTextFrame, OutputTransportMessageFrame))]
-    assert kinds == [("LLMTextFrame", "Alright, goodbye."), ("OutputTransportMessageFrame", {"type": "session_end"})]
+    assert kinds == [("OutputTransportMessageFrame", {"type": "transcript", "text": "goodbye"}),
+                     ("LLMTextFrame", "Alright, goodbye."),
+                     ("OutputTransportMessageFrame", {"type": "turn_end"}),
+                     ("OutputTransportMessageFrame", {"type": "session_end"})]
 

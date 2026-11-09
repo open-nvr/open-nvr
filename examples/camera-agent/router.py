@@ -98,8 +98,14 @@ _SMALL_TALK_RE = re.compile(
     r"|thanks|thank you|thx|cheers|ok|okay|great|cool|nice|perfect|got it"
     r"|bye|goodbye|good ?bye|later|that'?s all|that is all|nothing else"
     r"|no thanks|no thank you|all good|who are you|what are you"
-    r"|what can you do|what do you do|how are you|how'?s it going|help"
-    r"|very much|a lot|so much|for now|again|there|then|and|so)"
+    r"|what can you do|what do you do|how are you(?: doing| today)?|how'?s it going"
+    r"|how do you do|help|do you hear me|can you hear me|are you there|testing"
+    r"|very much|a lot|so much|for now|again|there|then|and|so"
+    # spoken fillers and acknowledgements (Ventuno Q session, 2026-11-09:
+    # "Yeah, I'm good. Yeah. Um okay. Okay. Thank you. Bye." reached the
+    # model with tools and came back as a description of the room)
+    r"|um|uh|hmm|mm|yeah|yep|yes|sure|right|alright|fine|good|actually|no|nope"
+    r"|i'?m (?:good|fine|okay|ok|great))"
     r"\s*[,.!?]*)+\s*$",
     re.IGNORECASE,
 )
@@ -136,9 +142,25 @@ _DISPUTE_RE = re.compile(
     re.IGNORECASE)
 
 
+#: The last sentence of a spoken turn is a goodbye: "yeah, I'm good. okay.
+#: thank you. bye" — Smart Turn joins several short utterances into one
+#: turn, and only the tail says what the user wants (Ventuno Q, 2026-11-09:
+#: that turn reached the model with tools and came back as "I see an empty
+#: room with a wooden desk").
+_CLOSING_TAIL_RE = re.compile(
+    r"^\s*(?:(?:ok(?:ay)?|alright|yeah|well|and|that'?s\s+it|that'?s\s+all)[,\s]+)*(?:thanks?(?:\s+you)?[,\s]+)?"
+    r"(?:bye(?:\s*bye)?|goodbye|good\s?bye|see\s+you|good\s+night|talk\s+(?:to\s+you\s+)?later"
+    r"|catch\s+you\s+later|ciao)\s*[,.!]*\s*$", re.IGNORECASE)
+
+
 def is_closing(text: str) -> bool:
     t = text or ""
-    return bool(_CLOSING_RE.match(t) or (len(t.split()) <= 12 and _CLOSING_PHRASE_RE.search(t)))
+    if _CLOSING_RE.match(t) or (len(t.split()) <= 12 and _CLOSING_PHRASE_RE.search(t)):
+        return True
+    if len(t.split()) <= 20:
+        parts = [p.strip() for p in re.split(r"[.!?]+", t) if p.strip()]
+        return bool(parts) and bool(_CLOSING_TAIL_RE.match(parts[-1]))
+    return False
 
 
 def is_dispute(text: str) -> bool:
@@ -150,7 +172,8 @@ def is_dispute(text: str) -> bool:
 # ("I can watch the cameras for you"). "I see..." / "I see," is the filler
 # acknowledgement, not a sighting.
 _SIGHTING_RE = re.compile(
-    r"\b(?:i (?:can )?see\b(?!\s*(?:\.|,|!|…))|i notice|i spot|i observe|i'?m seeing"
+    r"\b(?:i (?:can )?see\b(?!\s*(?:\.|,|!|…|that\b|what\b|why\b|how\b|you\b|your\b))"
+    r"|(?:camera|cam)\s*\w*\s+(?:shows|is showing)|i notice|i spot|i observe|i'?m seeing"
     r"|there (?:is|are)|there'?s|is visible|are visible|no ?one is|nobody is"
     r"|it'?s (?:currently |now )?(?:dark|light|bright|empty|quiet|clear|raining))\b",
     re.IGNORECASE,
@@ -167,20 +190,25 @@ def _should_force_grounding(user_text: str, reply: str) -> bool:
     """Should the anti-fabrication guard force a look, given a turn where the
     model answered without calling a tool?
 
-    The question names the camera or the scene → yes. Otherwise the reply
-    decides: it mentions the camera or scene, which catches a question STT
-    garbled ("what's on hammer 2") that the model still answered about
-    "camera 2". After small talk, though, a reply mentioning cameras is
-    usually an offer ("happy to help you monitor the cameras"), so there
-    the reply must claim a sighting to trigger the look.
+    The question names the camera or the scene → yes. A standing request
+    (an alarm, a watch, a report, "remove it") → never: its answer is a
+    tool call or a question back, and a look there turned "remove the
+    alarms" into "I see two chairs" (Ventuno Q, 2026-11-09). Otherwise
+    the REPLY decides, and only when it claims a sighting: that catches a
+    question STT garbled ("what's on hammer 2") answered as "camera 2
+    shows a person", while a reply that merely mentions cameras — "I can
+    only access the camera feeds", "happy to help with your camera
+    system" — is an offer or a refusal, not a fabrication. The old rule
+    forced a look on any camera word in the reply, so a greeting and a
+    weather question both came back as a description of the office.
     """
+    if _SIDE_EFFECT_RE.search(user_text or ""):
+        return False
     if _looks_like_camera_question(user_text):
         return True
     if not _looks_like_camera_question(reply):
         return False
-    if _is_small_talk(user_text):
-        return bool(_SIGHTING_RE.search(reply or ""))
-    return True
+    return bool(_SIGHTING_RE.search(reply or ""))
 
 
 # "more than 3 people", "over five cars", "fewer than 2 guards" — the count a
@@ -515,6 +543,7 @@ _SIDE_EFFECT_RE = re.compile(
     r"\b(notify|alert|alarm|siren|watch|keep\s+(an\s+)?eye|monitor|remind|wake\s+me|"
     r"report|summar(y|ize|ise)|every\s+(morning|evening|hour|day|\d+)|"
     r"stop\b(?!\s+by)|cancel|disarm|arm|turn\s+(on|off)|mute|silence|schedule|"
+    r"remove|delete|get\s+rid|don'?t\s+need|no\s+longer|notifications?|notified|"
     r"from\s+now\s+on|whenever|if\s+(you\s+)?(see|spot)|let\s+me\s+know|"
     r"tell\s+me\s+(when|if))\b",
     re.IGNORECASE,
@@ -838,27 +867,37 @@ _ALARM_WORDS_RE = re.compile(
 _STOP_WORDS_RE = re.compile(
     r"\b(stop|cancel|disarm|silence|mute|turn\s+(it\s+)?off|remove|delete|clear)\b", re.IGNORECASE)
 _MONITOR_WORDS_RE = re.compile(
-    r"\b(notify|let\s+me\s+know|tell\s+me\s+(when|if)|watch|keep\s+(an\s+)?eye|monitor|"
+    r"\b(notify|notifications?|notified|let\s+me\s+know|tell\s+me\s+(when|if)|watch|keep\s+(an\s+)?eye|monitor|"
     r"count(ing)?|whenever|if\s+(you\s+)?(see|spot)|alert\s+me)\b", re.IGNORECASE)
 _REPORT_WORDS_RE = re.compile(
     r"\b(report|summar(y|ize|ise)|digest|every\s+(morning|evening|day|hour|night)|daily|weekly)\b",
     re.IGNORECASE)
 
 
-def hint_standing(text: str, *, advertised: set[str]) -> Decision | None:
+def hint_standing(text: str, *, advertised: set[str],
+                  last_kind: str | None = None) -> Decision | None:
     """The tool a standing request most likely wants, from its words:
     alarm words → create_alarm, otherwise notify/watch words →
     create_monitor; a stop word turns either into its stop tool; report
     words → create_report. Only tools that are advertised. The model
     still decides and fills the arguments; this rides in the user turn
-    as a Tier-1 hint."""
+    as a Tier-1 hint. ``last_kind`` ("alarm" | "monitor" | "report") is
+    what the agent set up most recently: "remove it", "cancel that" name
+    no kind, and mean that one."""
     t = text or ""
     alarm = bool(_ALARM_WORDS_RE.search(t))
     stop = bool(_STOP_WORDS_RE.search(t))
     monitor = bool(_MONITOR_WORDS_RE.search(t))
     report = bool(_REPORT_WORDS_RE.search(t))
     if stop:
-        tool = "stop_alarm" if alarm else ("stop_report" if report and not monitor else "stop_monitor")
+        if alarm:
+            tool = "stop_alarm"
+        elif report and not monitor:
+            tool = "stop_report"
+        elif monitor:
+            tool = "stop_monitor"
+        else:
+            tool = {"alarm": "stop_alarm", "report": "stop_report"}.get(last_kind or "", "stop_monitor")
     elif report and not alarm:
         tool = "create_report"
     elif alarm:
@@ -933,7 +972,8 @@ def clock_window_from_text(text: str) -> tuple[int | None, int | None, bool]:
 
 def decide(text: str, *, cameras: list[str], advertised: set[str],
            preferred: str | None = None, roles: dict[str, str] | None = None,
-           tier0: bool = True, hints: bool = True, now=None) -> Decision:
+           tier0: bool = True, hints: bool = True, now=None,
+           last_kind: str | None = None) -> Decision:
     d = decide_tier0(text, cameras=cameras, advertised=advertised,
                      preferred=preferred, roles=roles, now=now) if tier0 else None
     if d is not None and d.routed:
@@ -946,7 +986,7 @@ def decide(text: str, *, cameras: list[str], advertised: set[str],
         return d
     why = d.reason if d is not None else ("tier0 off" if not tier0 else "not routable")
     if hints and d is not None and "side effect" in d.reason:
-        h = hint_standing(text, advertised=advertised)
+        h = hint_standing(text, advertised=advertised, last_kind=last_kind)
         if h is not None:
             logger.info("router: tier=1 hint=%s (%s)", h.hint, h.reason)
             return h

@@ -52,3 +52,20 @@ def test_panel_on_a_cpu_box_reads_as_before(monkeypatch):
     assert hw["running_on"] in ("cpu", "unknown") and hw["accelerator"] is None
     assert not any(r.get("accelerated") for r in hw["rows"])
     assert any("smaller model" in t for t in hw["tips"])
+
+
+def test_the_npu_captioner_rows_are_accelerated_even_without_the_detector_gauge(monkeypatch):
+    """The panel read 'Visual Question Answering · moondream — faster with
+    an NVIDIA GPU' while Gemma on the Hexagon answered every visual
+    question (2026-11-09): the probe of the detector had failed, and the
+    caption rows were gated on it."""
+    rt = _runtime(caption_adapter="litertlm", llm_provider="openai",
+                  llm_base_url="http://caption-adapter:9006")
+    monkeypatch.setattr(rt, "detector_accelerator", lambda: None)
+    hw = rt.hardware_recommendation()
+    vision = [r for r in hw["rows"] if r["task"] in ("image_captioning", "vqa")]
+    assert vision, [r["task"] for r in hw["rows"]]
+    for r in vision:
+        assert r["accelerated"] is True and r["recommended"] == ""
+        assert r["adapters"] == ["litertlm"] and "NPU" in r["min"]
+    assert "Hexagon" in hw["summary"] and "NVIDIA" not in hw["summary"]

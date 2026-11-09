@@ -143,3 +143,12 @@ def test_report_endpoints(monkeypatch):
     assert client.delete(f"/reports/{rid}").status_code == 200
     assert client.post("/reports/9999/run").status_code == 404
     assert client.post("/reports", json={"name": "x"}).status_code == 400
+
+
+def test_a_what_you_see_report_becomes_a_scene_round_and_a_history_summary_does_not():
+    rt = _runtime()
+    q = ca.scene_report_query("every hour tell me what you see", rt)
+    assert q.startswith("Scene report.") and "describe_camera" in q and "cam1" in q
+    assert ca.scene_report_query("summarize overnight activity", rt) == "summarize overnight activity"
+    assert ca.scene_report_query("how many people came by", rt) == "how many people came by"
+    assert ca.scene_report_query("describe the view every hour", rt).startswith("Scene report.")
