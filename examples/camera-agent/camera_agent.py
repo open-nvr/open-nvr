@@ -77,6 +77,7 @@ from adapter_clients import (
     PiperClient,
     SkillsRegistryClient,
     SyntheticDetectionClient,
+    SystemStatusClient,
     WhisperClient,
 )
 from context import (
@@ -609,7 +610,13 @@ SKILL_TOOLS: dict[str, list[str]] = {
     "report": ["create_report", "stop_report"],
     "task": ["create_background_task"],
     "apps": ["list_apps", "app_status", "recent_app_alerts"],
+    "status": ["system_status"],
 }
+#: Tools that belong to no skill: always advertised (subject to
+#: ``enabled_tools``), read-only, and safe for every tier. list_standing
+#: reads the agent's own alarm / watch / report lists; show_camera only
+#: switches the page's view.
+ALWAYS_ON_TOOLS: tuple[str, ...] = ("list_standing", "show_camera")
 # id, icon, name, example question, requirement key ("" = always available)
 _SKILL_META: list[tuple[str, str, str, str, str]] = [
     ("see", "🎥", "See what's happening now",
@@ -632,6 +639,8 @@ _SKILL_META: list[tuple[str, str, str, str, str]] = [
      "Check every camera for anyone in a red shirt.", ""),
     ("apps", "🧩", "Query installed catalog apps",
      "What apps are running, and is the loitering detector healthy?", "apps"),
+    ("status", "🩺", "Check system health",
+     "Is every camera online and recording? How much disk is left?", "status"),
 ]
 # Which KAI-C task strings (``tasks_advertised``, aggregated live from
 # GET /api/v1/ai/capabilities) back each skill. Advisory display data
@@ -3041,6 +3050,98 @@ def _recent_app_alerts_tool() -> dict[str, Any]:
     }
 
 
+def _list_standing_tool() -> dict[str, Any]:
+    """Function schema for listing what the agent has standing: alarms,
+    watches (monitors) and scheduled reports — read-only."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "list_standing",
+            "description": (
+                "List what is currently set up in this agent: the armed "
+                "ALARMS, the standing WATCHES (monitors) and the scheduled "
+                "REPORTS, each with its number, what it watches for, which "
+                "cameras, and its schedule or time window. Use for 'what "
+                "alarms do I have?', 'what are you watching for?', 'which "
+                "reports are scheduled?', 'what have I set up?'. Read-only: "
+                "to change one, use the stop_* or create_* tools."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "enum": ["all", "alarm", "monitor", "report"],
+                        "description": "Which list; 'all' (default) for everything.",
+                    },
+                },
+            },
+        },
+    }
+
+
+def _system_status_tool() -> dict[str, Any]:
+    """Function schema for the system health read: core's view of each
+    camera's connectivity and recording, and the recording disk."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "system_status",
+            "description": (
+                "Check the SYSTEM, not the scene: which cameras are online "
+                "or offline, whether each is actually recording (recording, "
+                "stalled, never recorded, turned off), and how much space the "
+                "recording disk has left against its purge floor. Use for "
+                "'is everything okay?', 'is any camera offline?', 'is the "
+                "gate recording?', 'how much disk space is left?', 'are you "
+                "working?'. Read-only. For what a camera SEES use "
+                "describe_camera or detect_objects instead."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "camera_id": {
+                        "type": "string",
+                        "description": (
+                            "Optional: report on one camera only. Omit for "
+                            "the whole system."
+                        ),
+                    },
+                },
+            },
+        },
+    }
+
+
+def _show_camera_tool(camera_ids: list[str]) -> dict[str, Any]:
+    """Function schema for switching the page's live view to a camera."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "show_camera",
+            "description": (
+                "Put ONE camera's live view on the user's screen. Use when "
+                "the user asks to SEE a camera — 'show me the gate', 'open "
+                "the front door camera', 'switch to the yard' — and does NOT "
+                "ask what is in it. It only changes the view; it does not "
+                "look at the picture. For 'what do you see at the gate' use "
+                "describe_camera instead."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "camera_id": {
+                        "type": "string",
+                        "enum": [c for c in camera_ids if c != "all"],
+                        "description": "The camera to show.",
+                    },
+                },
+                "required": ["camera_id"],
+            },
+        },
+    }
+
+
 def load_config(path: str | Path) -> AppConfig:
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
@@ -3461,6 +3562,7 @@ class CameraAgentRuntime:
         # else kaic_api_key, else the INTERNAL_API_KEY env var.
         self.app_registry: AppRegistryClient | None = None
         self.skills_registry: SkillsRegistryClient | None = None
+        self.status_client: SystemStatusClient | None = None
         self._registry_key: str = ""
         if cfg.opennvr_api_url:
             import os
@@ -3479,6 +3581,11 @@ class CameraAgentRuntime:
             # Advisory like every registry client here: unreachable →
             # None → skills_payload falls back to the private derivation.
             self.skills_registry = SkillsRegistryClient(
+                base_url=cfg.opennvr_api_url, api_key=app_key,
+            )
+            # "Is everything okay?": core's own view of each camera's
+            # connectivity and recording state, and the recording disk.
+            self.status_client = SystemStatusClient(
                 base_url=cfg.opennvr_api_url, api_key=app_key,
             )
             # Kept for contract-parity self-registration (RFC-0002 gap 8).
@@ -3665,6 +3772,9 @@ class CameraAgentRuntime:
             "list_apps": self._handle_list_apps,
             "app_status": self._handle_app_status,
             "recent_app_alerts": self._handle_recent_app_alerts,
+            "list_standing": self._handle_list_standing,
+            "system_status": self._handle_system_status,
+            "show_camera": self._handle_show_camera,
         }
 
         # The trace of whichever conversation turn STARTED last, background
@@ -3724,6 +3834,8 @@ class CameraAgentRuntime:
         # advertised and degrades cleanly while core is unreachable.
         if not self.skill_requirement_met("footage"):
             excluded.update(SKILL_TOOLS["footage"])
+        if not self.skill_requirement_met("status"):
+            excluded.update(SKILL_TOOLS["status"])
         allow = None if self.cfg.enabled_tools is None else set(self.cfg.enabled_tools)
 
         def keep(defn: dict[str, Any]) -> bool:
@@ -3740,6 +3852,7 @@ class CameraAgentRuntime:
             _create_report_tool(), _stop_report_tool(),
             _enroll_face_tool(cam_all), _list_people_tool(), _forget_face_tool(),
             _list_apps_tool(), _app_status_tool(), _recent_app_alerts_tool(),
+            _list_standing_tool(), _system_status_tool(), _show_camera_tool(cam_all),
         ) if keep(t)]
         self.background_tool_definitions = base
         self.tool_definitions = base + control
@@ -3748,7 +3861,8 @@ class CameraAgentRuntime:
         # (arm alarms, create watches/tasks/reports, enroll/forget faces)
         # is operator+. Enforced at the TOOLSET so a viewer's chat can't
         # talk the agent into arming anything.
-        _viewer_safe = {"list_apps", "app_status", "recent_app_alerts", "list_people"}
+        _viewer_safe = {"list_apps", "app_status", "recent_app_alerts", "list_people",
+                        "list_standing", "system_status", "show_camera"}
         self.viewer_tool_definitions = base + [
             t for t in control if t["function"]["name"] in _viewer_safe]
         self._rewarm_if_prefix_changed()
@@ -4048,6 +4162,10 @@ class CameraAgentRuntime:
             # then the AppRegistryClient exists. Configuration presence is the
             # gate; a momentarily-unreachable registry degrades at call time.
             return getattr(self, "app_registry", None) is not None
+        if req == "status":
+            # Same door as the apps: core's internal status read exists
+            # wherever opennvr_api_url is configured.
+            return getattr(self, "status_client", None) is not None
         return True   # no external requirement
 
     def skills_payload(self) -> list[dict[str, Any]]:
@@ -4097,6 +4215,7 @@ class CameraAgentRuntime:
                        "opennvr_api_url (visit history) to enable."),
             "footage": "Set opennvr_api_url so the agent can search the event store.",
             "apps": "Set opennvr_api_url to read installed catalog apps.",
+            "status": "Set opennvr_api_url to read camera and storage health.",
         }
         out: list[dict[str, Any]] = []
         for sid, icon, name, example, req in _SKILL_META:
@@ -5030,6 +5149,175 @@ class CameraAgentRuntime:
             for a in alerts[:6]
         ]
         return "Recent app alerts:\n" + "\n".join(lines)
+
+    # ── list_standing / system_status / show_camera ──────────────────
+
+    @staticmethod
+    def _state_words(state: str | None) -> str | None:
+        """Core's recording_state as a spoken phrase; None when fine."""
+        return {
+            "recording": None,
+            "off": "recording is turned off",
+            "never": "has never recorded",
+            "stalled": "recording has stalled",
+            "not_recording": "is not recording right now",
+        }.get(str(state or ""), f"recording state {state}" if state else None)
+
+    def _spoken_name(self, camera_id: str | None, *, core_id: str | None = None,
+                     fallback: str | None = None) -> str:
+        """A camera as the user says it: the roster role, else the name."""
+        specs = self.visible_cameras()
+        for spec in specs:
+            if camera_id and spec.camera_id == camera_id:
+                return spec.role or spec.camera_id
+            if core_id and spec.opennvr_camera_id is not None and str(spec.opennvr_camera_id) == str(core_id):
+                return spec.role or spec.camera_id
+        return fallback or camera_id or "that camera"
+
+    async def _handle_list_standing(self, args: dict[str, Any]) -> str:
+        kind = str(args.get("kind") or "all").strip().lower()
+        if kind in ("watch", "watches", "monitors", "notification", "notifications"):
+            kind = "monitor"
+        if kind in ("alarms",):
+            kind = "alarm"
+        if kind in ("reports",):
+            kind = "report"
+        want = {"alarm", "monitor", "report"} if kind == "all" else {kind}
+        if not want <= {"alarm", "monitor", "report"}:
+            want = {"alarm", "monitor", "report"}
+
+        def cams(ids: Any) -> str:
+            ids = [str(i) for i in (ids or [])]
+            if not ids:
+                return "all cameras"
+            if set(ids) >= set(self._camera_ids) and len(self._camera_ids) > 1:
+                return "all cameras"
+            return ", ".join(self._spoken_name(i) for i in ids)
+
+        sections: list[str] = []
+        if "alarm" in want:
+            items = self.alarms.list()
+            if items:
+                lines = []
+                for a in items:
+                    bits = [f"alarm #{a['id']} '{a.get('name') or a.get('target')}'",
+                            f"{a.get('target')} on {cams(a.get('camera_ids'))}"]
+                    if a.get("window") and a["window"] not in ("", "any time", "always"):
+                        bits.append(str(a["window"]))
+                    if not a.get("active", True):
+                        bits.append("disarmed")
+                    if a.get("triggered"):
+                        bits.append("ringing now")
+                    lines.append(" — ".join(bits))
+                sections.append(f"{len(items)} alarm{'s' if len(items) != 1 else ''}: " + "; ".join(lines))
+            elif kind != "all":
+                sections.append("No alarms are set.")
+        if "monitor" in want:
+            items = self.monitors.list()
+            if items:
+                lines = []
+                for m in items:
+                    what = m.get("description") or m.get("target")
+                    bits = [f"watch #{m['id']} '{what}'", f"{m.get('kind')} {m.get('target')} on {cams(m.get('camera_ids'))}"]
+                    if m.get("max_count") is not None:
+                        bits.append(f"more than {m['max_count']}")
+                    if m.get("min_count") is not None:
+                        bits.append(f"fewer than {m['min_count']}")
+                    if not m.get("active", True):
+                        bits.append(str(m.get("status") or "stopped"))
+                    lines.append(" — ".join(bits))
+                sections.append(f"{len(items)} watch{'es' if len(items) != 1 else ''}: " + "; ".join(lines))
+            elif kind != "all":
+                sections.append("No watches are running.")
+        if "report" in want:
+            items = self.reports.list()
+            if items:
+                lines = [f"report #{r['id']} '{r.get('name')}' — {r.get('schedule')} — {r.get('query')}"
+                         for r in items]
+                sections.append(f"{len(items)} scheduled report{'s' if len(items) != 1 else ''}: " + "; ".join(lines))
+            elif kind != "all":
+                sections.append("No reports are scheduled.")
+        if not sections:
+            return "Nothing is set up: no alarms, no watches, no scheduled reports."
+        return "\n".join(sections)
+
+    _STATUS_UNREACHABLE = ("I couldn't reach the OpenNVR server to check the system, "
+                           "so I can't tell whether the cameras are recording.")
+
+    async def _handle_system_status(self, args: dict[str, Any]) -> str:
+        if self.status_client is None:
+            return "System health isn't configured on this agent (no OpenNVR server URL)."
+        data = await self.status_client.status()
+        if data is None:
+            return self._STATUS_UNREACHABLE
+        rows = [r for r in (data.get("cameras") or []) if isinstance(r, dict)]
+        only = args.get("camera_id")
+        if isinstance(only, str) and only.strip() and only.strip().lower() not in ("all", "every", "any", "*", ""):
+            cid = only.strip()
+            spec = next((c for c in self.visible_cameras() if c.camera_id == cid), None)
+            core_id = str(spec.opennvr_camera_id) if spec and spec.opennvr_camera_id is not None else None
+            rows = [r for r in rows if r.get("camera_id") == cid or
+                    (core_id and str(r.get("open_nvr_camera_id")) == core_id)]
+            if not rows:
+                return f"I have no system status for {self._spoken_name(cid)}."
+
+        def name(r: dict[str, Any]) -> str:
+            return self._spoken_name(str(r.get("camera_id") or ""), core_id=str(r.get("open_nvr_camera_id") or ""),
+                                     fallback=str(r.get("name") or r.get("camera_id") or "a camera"))
+
+        offline = [name(r) for r in rows if r.get("online") is False]
+        unknown = [name(r) for r in rows if r.get("online") is None]
+        problems = []
+        for r in rows:
+            words = self._state_words(r.get("recording_state"))
+            if words and r.get("recording_state") != "off":
+                problems.append(f"{name(r)} {words}")
+        off = [name(r) for r in rows if r.get("recording_state") == "off"]
+        parts: list[str] = []
+        n = len(rows)
+        if n == 0:
+            parts.append("No active cameras.")
+        elif not offline and not unknown:
+            parts.append(f"All {n} camera{'s are' if n != 1 else ' is'} online." if n != 1 else f"{name(rows[0]).capitalize()} is online.")
+        else:
+            parts.append(f"{n - len(offline) - len(unknown)} of {n} cameras online."
+                         + (f" Offline: {', '.join(offline)}." if offline else "")
+                         + (f" No signal yet from: {', '.join(unknown)}." if unknown else ""))
+        if problems:
+            parts.append("Recording problems: " + "; ".join(problems) + ".")
+        elif rows:
+            rec = [r for r in rows if r.get("recording_state") == "recording"]
+            if rec:
+                parts.append(("Recording is fine on all of them." if len(rec) == n
+                              else f"{len(rec)} of {n} recording."))
+        if off:
+            parts.append(f"Recording is turned off for {', '.join(off)}.")
+        st = data.get("storage") or {}
+        free, total, floor = st.get("free_gb"), st.get("total_gb"), st.get("min_free_gb")
+        if free is not None:
+            line = f"Disk: {free:g} GB free" + (f" of {total:g} GB" if total else "")
+            if floor is not None:
+                if free < floor:
+                    line += (f" — below the {floor:g} GB floor, so the oldest recordings "
+                             "are being deleted to make room")
+                elif free < 2 * floor:
+                    line += f" — close to the {floor:g} GB floor"
+                else:
+                    line += f" (floor {floor:g} GB)"
+            parts.append(line + ".")
+        else:
+            parts.append("I couldn't read the recording disk.")
+        return " ".join(parts)
+
+    async def _handle_show_camera(self, args: dict[str, Any]) -> str:
+        cams = self.tools._resolve_cameras(args)
+        if isinstance(cams, str):
+            return cams
+        if len(cams) != 1:
+            return "Which camera should I show? " + ", ".join(self._spoken_name(c) for c in self._camera_ids) + "."
+        cam = cams[0]
+        self.publish_update({"show_camera": cam})
+        return f"Switched the screen to {self._spoken_name(cam)}. (The view changed; nothing was analysed.)"
 
     def _relay_app_alert(self, alert: Any) -> None:
         """Notification bridge (app-door ALERT RELAY): a subscribed app

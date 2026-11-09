@@ -184,7 +184,14 @@ def test_who_questions_go_to_the_model(q):
 
 
 def test_a_config_question_is_not_the_routers_business():
-    assert _t0("how many cameras do you have") is None
+    """The roster in the prompt answers it — and no Tier-1 hint either:
+    "how many cameras do you have" resembles "how many people" word for
+    word, and a detect_objects hint sent the model to count people."""
+    d = _t0("how many cameras do you have")
+    assert d is not None and not d.routed and not d.hintable and "roster" in d.reason
+    full = router.decide("how many cameras do you have", cameras=CAMS, advertised=ALL,
+                         roles=ROLES, now=NOW)
+    assert full.tier == 2 and full.hint is None
 
 
 def test_two_questions_or_a_story_go_to_the_model():

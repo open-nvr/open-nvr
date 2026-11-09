@@ -286,6 +286,28 @@ healthy?", "any alerts from the loitering detector?". Strictly
 **read-only** — the agent reports on apps; enabling, disabling, or
 configuring one stays in the OpenNVR App Catalog UI.
 
+## The agent about itself, and the system
+
+Three read-only tools that need no model decision (the router answers
+them directly) and that every access tier may use:
+
+* **What is set up** — "What alarms do I have?", "Which reports are
+  scheduled?", "What are you watching for?" read back the armed alarms,
+  the standing watches and the scheduled reports with their numbers,
+  cameras and windows (`list_standing`). Before this, the words matched
+  a standing *request* and the agent armed another alarm.
+* **Is the system okay** — "Is everything okay?", "Is any camera
+  offline?", "Is the gate recording?", "How much disk space is left?"
+  read core's own view of each camera (online or not, and whether it is
+  actually writing segments: recording, stalled, never recorded, turned
+  off) and the recording disk against its purge floor (`system_status`;
+  needs `opennvr_api_url`, like the apps door). The cameras are named
+  by their roles. For what a camera *sees*, ask about the scene as usual.
+* **Show a camera** — "Show me the gate", "open the front door camera",
+  "switch to the yard" put that camera's live view on the demo page
+  (`show_camera`). It only changes the view; "show me what's happening
+  at the gate" is still a look.
+
 ## The agent in the App Catalog
 
 On boot the agent registers itself with the App Catalog the way every
@@ -385,6 +407,8 @@ Say it and it works, no configuration:
 * "Watch the driveway and tell me if more than 3 cars show up." (watch)
 * "Is the occupancy counter healthy?" · "Any occupancy alerts this
   morning?" (apps)
+* "What alarms do I have?" · "Is everything okay?" · "Is the gate
+  recording?" · "Show me the gate." (the agent about itself, the system)
 
 One config line away: background tasks, reports. One adapter away:
 faces, and the Fire / Smoke / Gas-leak alarm presets.

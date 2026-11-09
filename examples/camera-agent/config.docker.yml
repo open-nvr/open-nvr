@@ -81,6 +81,11 @@ enabled_tools:
   - list_apps
   - app_status
   - recent_app_alerts
+  # What is set up (alarms, watches, reports), whether every camera is
+  # online and recording, and "show me the gate" on the page.
+  - list_standing
+  - system_status
+  - show_camera
   # Voice parity with the chat demo: look back at recent events, watch a
   # camera over time, and arm/disarm alarms by voice ("alarm me if someone
   # is at the door after 10pm"). All ride the streams the standard stack

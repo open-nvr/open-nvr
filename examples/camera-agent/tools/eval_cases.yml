@@ -316,3 +316,102 @@
     tool: create_report
     args:
       every_minutes: 60
+
+# ── the agent about itself, and the system (2026-11-09) ──────────────
+# list_standing / system_status / show_camera are router-decided (Tier 0),
+# so these mostly check that the compose model SAYS what the tool found
+# and that nothing is armed by mistake.
+
+- id: what-alarms-do-i-have-is-a-listing
+  note: "Used to arm another alarm: the words matched a standing request."
+  turns:
+    - ask: "set an alarm if a person is seen on {camera} after 9pm"
+      expect:
+        tool: create_alarm
+        args: {target: person, after: "21:00"}
+    - ask: "what alarms do I have?"
+      expect:
+        tool: list_standing
+        args: {kind: alarm}
+        reply_contains: ["alarm", "9"]
+    - ask: "remove it"
+      expect:
+        tool: stop_alarm
+
+- id: nothing-set-up
+  ask: "what have I set up?"
+  expect:
+    tool: list_standing
+
+- id: which-reports-are-scheduled
+  ask: "which reports are scheduled?"
+  expect:
+    tool: list_standing
+    args: {kind: report}
+
+- id: is-everything-okay
+  ask: "is everything okay?"
+  expect:
+    tool: system_status
+    reply_contains: ["online", "camera", "recording", "reach"]
+
+- id: is-any-camera-offline
+  ask: "is any camera offline?"
+  expect:
+    tool: system_status
+
+- id: is-camera-recording
+  ask: "is {camera} recording?"
+  expect:
+    tool: system_status
+    args: {camera_id: "{camera}"}
+
+- id: disk-space
+  ask: "how much disk space is left?"
+  expect:
+    tool: system_status
+    reply_contains: ["GB", "disk", "space", "reach"]
+
+- id: are-you-working
+  ask: "are you working?"
+  expect:
+    tool: system_status
+
+- id: show-me-the-camera
+  note: "A view switch, not a look: no caption, nothing analysed."
+  ask: "show me {camera}"
+  expect:
+    tool: show_camera
+    args: {camera_id: "{camera}"}
+
+- id: show-me-whats-happening-is-a-look
+  ask: "show me what's happening on {camera}"
+  expect:
+    tool: describe_camera
+    args: {camera_id: "{camera}"}
+
+# ── router golden misses promoted to live cases ──────────────────────
+
+- id: how-many-cameras-is-a-roster-answer
+  note: "Was hinted to detect_objects: 'how many cameras' resembles 'how many people'."
+  ask: "how many cameras do you have?"
+  expect:
+    no_tool: true
+    reply_source: [roster, llm]
+
+- id: last-ten-minutes-spelled-out
+  ask: "what happened on {camera} in the last ten minutes?"
+  expect:
+    tool: [recent_events, search_history]
+
+- id: visitors-last-night
+  ask: "any visitors on {camera} last night?"
+  expect:
+    tool: [search_history, recent_events]
+    args: {label: person}
+
+- id: is-anyone-down-there-is-a-live-look
+  note: "'down' is a status word; 'anyone' makes it the scene."
+  ask: "is anyone down there on {camera}?"
+  expect:
+    tool: detect_objects

@@ -1233,6 +1233,57 @@ class OpennvrRecordingsClient(_ReusableClientMixin):
             return 502, {"error": "OpenNVR server unreachable"}
 
 
+class SystemStatusClient(_ReusableClientMixin):
+    """Read-only view of the system as core sees it, for the agent's
+    ``system_status`` tool: ``GET {base}/api/v1/internal/camera-agent/status``
+    with the same ``X-Internal-Api-Key`` the app door uses — each active
+    camera's live connectivity and observed recording state, and the
+    recording disk against its purge floor.
+
+    ADVISORY like :class:`AppRegistryClient`: :meth:`status` never raises.
+    The result (or the failure) is cached for ``ttl_seconds`` (default
+    10 s — a status question is answered live, but a user repeating it
+    twice in a breath should not cost core two reads). ``None`` = core
+    unreachable / errored; the tool says it could not check.
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str = "",
+        ttl_seconds: float = 10.0,
+        timeout_seconds: float = 5.0,
+    ) -> None:
+        self._base = base_url.rstrip("/")
+        self._api_key = api_key
+        self._ttl = ttl_seconds
+        self._timeout = timeout_seconds
+        self._value: dict[str, Any] | None = None
+        self._fetched_at: float | None = None
+
+    def _headers(self) -> dict[str, str]:
+        return {"X-Internal-Api-Key": self._api_key} if self._api_key else {}
+
+    async def status(self) -> dict[str, Any] | None:
+        now = time.monotonic()
+        if self._fetched_at is not None and now - self._fetched_at < self._ttl:
+            return self._value
+        self._fetched_at = now
+        try:
+            resp = await self._client().get(
+                f"{self._base}/api/v1/internal/camera-agent/status",
+                headers=self._headers(),
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            self._value = data if isinstance(data, dict) else None
+        except Exception as exc:
+            logger.debug("system status read failed (%s)", exc)
+            self._value = None
+        return self._value
+
+
 class SkillsRegistryClient(_ReusableClientMixin):
     """Cached view of the platform skills registry (RFC-0002 Phase 1).
 

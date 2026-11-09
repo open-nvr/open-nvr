@@ -33,7 +33,9 @@ from core.config import settings
 from core.database import get_db, release
 from models import (
     Camera,
+    CameraConfig,
     EventText,
+    Recording,
     SecuritySetting,
     TimelineEvent,
 )
@@ -1287,6 +1289,97 @@ def list_camera_agent_sources(
 
     return {"cameras": out}
 
+
+
+@router.get("/status")
+def camera_agent_system_status(
+    principal=Depends(_require_internal_key),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    """The system as the camera agent can speak it: each active camera's
+    live connectivity and observed recording state, and the recording
+    disk against its purge floor.
+
+    One read for "is everything okay?", "is any camera offline?", "is the
+    gate recording?", "how much space is left?". The same derivations the
+    operator's camera list and the retention service use, so the agent and
+    the UI never disagree (Ventuno Q, 2026-11-09: camera 23's recordings
+    froze for hours while the agent could only describe the live frame).
+    An app key sees its roster; the site key sees every camera.
+    """
+    import shutil
+    from pathlib import Path
+
+    from sqlalchemy import func
+
+    from routers.cameras import _derive_recording_state
+    from services.camera_status_service import get_camera_status_service
+    from services.retention_service import RetentionService
+    from services.storage_service import get_effective_recordings_base_path
+
+    roster = _app_roster(db, principal)
+    cameras = (
+        db.query(Camera)
+        .filter(Camera.is_active == True)  # noqa: E712 - SQLAlchemy expression
+        .order_by(Camera.id.asc())
+        .all()
+    )
+    if roster is not None:
+        cameras = [c for c in cameras if int(c.id) in roster]
+    ids = [int(c.id) for c in cameras]
+    svc = get_camera_status_service()
+    live = svc.snapshot(ids) if ids else {}
+    since = svc.online_since(ids) if ids else {}
+    latest: dict[int, datetime] = {}
+    rec_cfg: dict[int, bool] = {}
+    if ids:
+        latest = dict(
+            db.query(Recording.camera_id, func.max(Recording.start_time))
+            .filter(Recording.camera_id.in_(ids))
+            .group_by(Recording.camera_id)
+            .all()
+        )
+        rec_cfg = dict(
+            db.query(CameraConfig.camera_id, CameraConfig.recording_enabled)
+            .filter(CameraConfig.camera_id.in_(ids))
+            .all()
+        )
+    now = datetime.now(UTC)
+    out: list[dict[str, object]] = []
+    for cam in cameras:
+        last = latest.get(cam.id)
+        if last is not None and last.tzinfo is None:
+            last = last.replace(tzinfo=UTC)
+        enabled = bool(rec_cfg.get(cam.id, False))
+        online = live.get(cam.id)
+        up_since = since.get(cam.id)
+        out.append({
+            "camera_id": f"cam{cam.id}",
+            "open_nvr_camera_id": str(cam.id),
+            "name": cam.name,
+            "online": online,
+            "online_since": up_since.isoformat() if up_since else None,
+            "recording_enabled": enabled,
+            "recording_state": _derive_recording_state(cam, enabled, last, now, online, up_since),
+            "last_recording_at": last.isoformat() if last else None,
+        })
+    # The recording disk: free space against the retention floor. Never
+    # fails the read — a missing path or settings row leaves the fields
+    # null and the agent says it could not check the disk.
+    storage: dict[str, object] = {"path": None, "free_gb": None, "total_gb": None, "min_free_gb": None}
+    try:
+        base = Path(get_effective_recordings_base_path(db))
+        storage["path"] = str(base)
+        if base.exists():
+            usage = shutil.disk_usage(str(base))
+            storage["free_gb"] = round(usage.free / (1024 ** 3), 1)
+            storage["total_gb"] = round(usage.total / (1024 ** 3), 1)
+        floor = RetentionService.effective_min_free_gb(
+            RetentionService._get_retention_settings(db), base)
+        storage["min_free_gb"] = round(float(floor), 1) if floor is not None else None
+    except Exception:  # noqa: BLE001 - a status read must never raise
+        logger.debug("camera-agent status: storage read failed", exc_info=True)
+    return {"cameras": out, "storage": storage, "checked_at": now.isoformat()}
 
 
 @router.get("/recordings/frame")

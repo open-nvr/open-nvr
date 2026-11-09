@@ -44,7 +44,7 @@ DEFAULT_TOOL_MS: dict[str, int] = {
     "search_footage": 1500, "search_history": 800,
     "recent_events": 150, "recent_plates": 150,
     "list_apps": 200, "app_status": 400, "recent_app_alerts": 100,
-    "list_people": 100,
+    "list_people": 100, "list_standing": 50, "system_status": 300, "show_camera": 50,
 }
 DEFAULT_LLM_MS = 1500
 DEFAULT_TTS_MS = 600

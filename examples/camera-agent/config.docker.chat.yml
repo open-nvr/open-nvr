@@ -79,6 +79,11 @@ enabled_tools:
   - list_apps
   - app_status
   - recent_app_alerts
+  # What is set up (alarms, watches, reports), whether every camera is
+  # online and recording, and "show me the gate" on the page.
+  - list_standing
+  - system_status
+  - show_camera
 
 # 1.0 so the camera screen's 1 fps still refresh gets a new frame each
 # second (see config.docker.yml).
