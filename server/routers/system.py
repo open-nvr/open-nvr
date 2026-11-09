@@ -218,8 +218,9 @@ async def list_system_events(
     current_user=Depends(get_current_active_user),
 ):
     """System alert history, newest first. With ``include_camera_alerts``
-    (default), recent ``recording_stalled`` camera events are merged in (with
-    camera id/name) so the Alerts view gets both from one call."""
+    (default), recent ``recording_stalled`` and ``recording_degraded`` camera
+    events are merged in (with camera id/name) so the Alerts view gets both
+    from one call."""
     q = db.query(SystemEvent)
     if event_type:
         q = q.filter(SystemEvent.event_type == event_type)
@@ -243,7 +244,7 @@ async def list_system_events(
         cam_rows = (
             db.query(CameraEvent, Camera.name)
             .outerjoin(Camera, Camera.id == CameraEvent.camera_id)
-            .filter(CameraEvent.event_type == "recording_stalled")
+            .filter(CameraEvent.event_type.in_(["recording_stalled", "recording_degraded"]))
             .order_by(CameraEvent.id.desc())
             .limit(limit)
             .all()

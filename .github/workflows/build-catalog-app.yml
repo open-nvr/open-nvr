@@ -115,7 +115,9 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        # Reusable workflow: the caller's checkout has no .github/actions of
+        # ours, so the action is named by repository.
+        uses: open-nvr/open-nvr/.github/actions/install-cosign@main
         with:
           cosign-release: "v2.4.1"
 

@@ -721,3 +721,52 @@ def test_a_consumer_that_leaves_releases_a_blocked_drain():
     while drain_alive() and time.monotonic() < deadline:
         time.sleep(0.01)
     assert not drain_alive(), "the ffmpeg-stdout thread did not exit"
+
+
+def test_slot_take_times_out_as_a_stall_until_closed():
+    from detect_pipeline.frame_source import STALLED, _FrameSlot
+
+    slot = _FrameSlot()
+    assert slot.take(timeout=0.02) is STALLED      # open, empty, nothing came
+    slot.close()
+    assert slot.take(timeout=0.02) is None         # closed and empty: the end
+
+
+def test_a_live_but_silent_decoder_is_restarted_not_waited_on(caplog):
+    """A REAL child that stays alive and never writes a frame. That is what a
+    stream whose timestamps stopped advancing looks like (an RTP clock wrap
+    behind a relay, Ventuno Q 2026-11-09): packets keep coming, the fps
+    filter never sees time move, and the reader sat in stdout.read() for
+    hours while /health said stale. The source must end that session after
+    stall_seconds and respawn."""
+    import subprocess
+    import sys
+
+    spawns: list[int] = []
+
+    def spawn(argv):
+        spawns.append(1)
+        return subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+
+    src = FrameSource("rtsp://cam/frozen-clock", width=4, height=4, fps=5,
+                      spawn=spawn, stall_seconds=0.2, max_restarts=1,
+                      backoff_seconds=0, _sleep=lambda s: None)
+    t0 = time.monotonic()
+    with caplog.at_level("WARNING", logger="detect_pipeline.frame_source"):
+        frames = list(src.stream())
+    assert frames == []
+    assert len(spawns) == 2, "the stalled session was not ended and respawned"
+    assert time.monotonic() - t0 < 10.0
+    assert any("no decoded frame for" in r.getMessage() for r in caplog.records)
+
+
+def test_stall_watchdog_leaves_a_flowing_decoder_alone():
+    """Frames arriving well within stall_seconds never trip it."""
+    src = FrameSource("rtsp://cam/fine", width=W, height=H, fps=5,
+                      spawn=lambda cmd: _FakeProc(_synthetic(3)), stall_seconds=5.0,
+                      drop_late_frames=False,     # count exact frames
+                      max_restarts=0, backoff_seconds=0, _sleep=lambda s: None)
+    assert [f.seq for f in src.stream()] == [0, 1, 2]

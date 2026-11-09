@@ -8,6 +8,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Core alarms when a camera records segments that hold no video.** On the
+  Ventuno Q (2026-11-09) a camera's RTP clock wrapped and the relay in front
+  of it clamped every timestamp, so MediaMTX closed a 50 MB segment every
+  seven minutes with 0.07 s of playable video in it — segments kept arriving,
+  the recording watchdog stayed quiet, and hours of footage were garbage. The
+  segment-complete hook now judges each closed segment by bytes against
+  duration (`services/segment_health.py`: an implied bitrate no camera can
+  produce, or a segment far shorter than configured yet heavy for its length)
+  and raises a `recording_degraded` camera event, cleared by the first healthy
+  segment; it is stored, published and shown exactly like `recording_stalled`
+  (Alerts view, toast, not an alarm on tour). Tails written at stop or
+  reconnect are too small to be judged and never alarm.
+
 - **The camera agent's demo talks over the streaming pipeline.** Talk
   mode now streams the microphone to `/ws` (16 kHz PCM from an
   AudioWorklet) and plays each sentence as it is synthesised, so the first
@@ -418,6 +431,29 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   timing matters.
 
 ### Fixed
+
+- **CI signs images without depending on anonymous GitHub release
+  downloads.** On 2026-11-09 GitHub's anonymous release downloads returned
+  504 for hours and every image job that signs (detect-pipeline, core, the
+  agents, the apps) failed in `sigstore/cosign-installer`, which fetches
+  cosign from `github.com/…/releases/download`. A composite action
+  (`.github/actions/install-cosign`) now downloads the pinned release
+  through the GitHub API with the job's own token (three tries, the
+  anonymous URL as a last resort), verifies the pinned sha256, and installs
+  it; the four signing workflows use it.
+
+- **A detect-pipeline reader whose ffmpeg is alive but decodes nothing now
+  restarts itself.** The office camera on the Ventuno Q (2026-11-09) had
+  its RTP clock wrap after 13 h 15 min; the relay in front of it clamped
+  every timestamp to "previous + 1 tick", MediaMTX could no longer close a
+  60 s segment (50 MB files with a 0.07 s duration) and the pipeline's
+  substream reader — fed 15 packets a second that never advanced in time —
+  sat in a blocking read for hours while `/health` reported the camera
+  stale. The frame source now ends a session that has produced no frame
+  for 60 s (`stall_seconds`, `DEFAULT_STALL_SECONDS`) with a warning
+  naming the likely causes, and respawns it under the existing restart and
+  give-up rules, so the worker is resurrected with a fresh tap URL instead
+  of waiting for ffmpeg to die.
 
 - **Camera agent: a goodbye ends talk mode, Stop really stops, and the
   Hardware panel tells the truth.** From the morning test of 2026-11-09:
