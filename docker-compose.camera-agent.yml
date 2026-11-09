@@ -64,9 +64,10 @@ services:
   # Both serve the same §5.3 result on port 9003. Parakeet is newer
   # than adapter release 0.1.7, so it rides its own tag variable.
   # A third choice on Qualcomm boards: `whisper_qnn` (Whisper-Small w8a16
-  # as QNN context binaries on the Hexagon NPU; opt-in, start.sh fills
-  # the image/module/tag/provider below from it — the image name and the
-  # module name differ, hence the two derived variables).
+  # as QNN context binaries on the Hexagon NPU; the default there through
+  # STT_ADAPTER=auto — start.sh fills the image/module/tag/provider below
+  # from the word on every start; the image name and the module name
+  # differ, hence the two derived variables).
   whisper-adapter:
     profiles: [camera-agent]
     image: ghcr.io/open-nvr/${STT_ADAPTER_IMAGE:-${STT_ADAPTER:-parakeet}-adapter}:${STT_ADAPTER_TAG:-${ADAPTER_TAG:-latest}}

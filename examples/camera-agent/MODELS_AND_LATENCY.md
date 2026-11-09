@@ -340,7 +340,7 @@ itself — worth trying with your model; the template is the safe default.
 | Role | Default (snappy) | Upgrade (quality, slower) | Why |
 |------|------------------|---------------------------|-----|
 | LLM | sized by the installer: `granite4:micro` on a CPU with 4+ cores or a GPU, `qwen2.5:0.5b` where RAM or cores are short | `qwen3:1.7b` when seconds matter more than the Investigate step (about half the time a turn) | Must support tool-calling — see "Measured: which small LLM picks the right tool" below. The installer sizes this to the machine. `qwen2.5:0.5b` is the low-RAM floor. |
-| STT | Parakeet TDT 0.6B v3 (`STT_ADAPTER=parakeet`) | whisper `small.en` for translation or Hindi (`STT_ADAPTER=whisper`) | Measured on the agent's phrasings: WER 1.4 % at 0.31 s an utterance on four cores against whisper base.en's 3.3 % at 1.42 s. |
+| STT | `STT_ADAPTER=auto`: Parakeet TDT 0.6B v3 on the CPU; Whisper-Small w8a16 on the Hexagon NPU on Qualcomm boards (`whisper_qnn`) | whisper `small.en` for translation or Hindi (`STT_ADAPTER=whisper`) | Measured on the agent's phrasings: parakeet WER 1.4 % at 0.31 s an utterance on four x86 cores against whisper base.en's 3.3 % at 1.42 s. On a Ventuno Q the NPU adapter answers in 361 ms against parakeet's 774 ms on its ARM cores, same clean-speech accuracy, and its no-speech probability drops silence and noise (`bench/ventuno-q-stt-2026-11-09.md`). |
 | TTS | Piper `en_US-lessac-medium` (`PIPER_VOICE`) | `en_US-libritts-high` — 2-3x the compute | Piper is the CPU hog of the stack; the tier is the cost (rule 3). Pick the voice to match the persona gender. |
 | Detect | YOLO26n (`yolo26n.onnx`; yolov8n and yolo11n are drop-ins) | YOLO26s/m | n is the fastest (62 ms a frame on a 4-thread CPU); larger nets cost latency per frame and per poll. |
 | Caption | BLIP | — | Optional; `describe_camera` falls back to the detector if absent. |
@@ -889,6 +889,7 @@ plus twenty of the same kind) spoken by four macOS voices
 | **Parakeet TDT 0.6B v3** (onnx-asr, int8) — `STT_ADAPTER=parakeet` | **1.4 %** | **0.31 s / 0.50 s** | CC-BY-4.0 weights |
 | faster-whisper `base.en` int8 — the whisper adapter's default | 3.3 % | 1.42 s / 1.68 s | MIT |
 | faster-whisper `small.en` | 3.7 % | 2.67 s / 2.84 s | MIT |
+| **Whisper-Small w8a16 on the Hexagon NPU** (Qualcomm AI Hub context binaries) — `STT_ADAPTER=whisper_qnn`, the `auto` pick on Qualcomm boards | 0.03 on 5 Piper sentences (digits as words), parakeet 0.00 on the same box | **0.36 s** mean on a Ventuno Q, where parakeet took 0.77 s | model MIT; binaries under Qualcomm AI Hub terms |
 
 Half the errors at a fifth of the time, on the phrasings that matter.
 Parakeet's misses were "load and bay" and "camera too"; whisper's

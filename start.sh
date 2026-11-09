@@ -236,9 +236,11 @@ apply_accel_env() {
             # ADAPTER_TAG (or as latest-qualcomm before a release ships it).
             fill_qualcomm_captioner
             fill_qualcomm_agent_llm
-            fill_qualcomm_stt
             ;;
     esac
+    # Speech to text is resolved for EVERY flavour: STT_ADAPTER=auto is
+    # the NPU adapter on a Qualcomm board and parakeet everywhere else.
+    resolve_stt_adapter "$accel"
     write_env_var OPENNVR_ACCEL_RESOLVED "$accel"
 }
 fill_qualcomm_captioner() {
@@ -311,17 +313,41 @@ fill_qualcomm_agent_llm() {
     return 0
 }
 
-fill_qualcomm_stt() {
-    # Speech to text on the NPU — OPT-IN, not the default: Whisper-Small
-    # (w8a16) as Qualcomm's QNN context binaries for the Hexagon, serving
-    # the same result as parakeet on port 9003. The operator asks for it
-    # with STT_ADAPTER=whisper_qnn; this fill turns that one word into the
-    # four variables compose needs (the image name and the module name
-    # differ, the tag carries the flavour, the provider is the HTP). It
-    # becomes the default only once it is measured against parakeet on a
-    # Ventuno Q (bench/); until then nothing here changes a box that did
-    # not ask. Leaving the flavour puts parakeet back.
-    [[ "$(get_env_var STT_ADAPTER)" == whisper_qnn ]] || return 0
+# Speech to text for the camera agent. STT_ADAPTER in .env is one word:
+#   auto (default)  whisper_qnn on a Qualcomm board whose NPU image is
+#                   available, parakeet everywhere else
+#   parakeet        Parakeet TDT 0.6B v3 on the CPU
+#   whisper         faster-whisper on the CPU (Hindi, translation)
+#   whisper_qnn     Whisper-Small w8a16 on the Hexagon NPU (Qualcomm only)
+# Compose needs four values the word implies — the image, the uvicorn
+# module, the tag (the NPU image carries the flavour) and the ONNX
+# provider — so this turns the word into them on every start. "auto"
+# itself never reaches compose: the derived image and module always do.
+# Measured on a Ventuno Q (bench/ventuno-q-stt-2026-11-09.md): the NPU
+# adapter answers in 361 ms an utterance against parakeet's 774 ms on the
+# same box's CPU, with the same accuracy on clean speech, and it tells
+# silence and noise from speech, which parakeet cannot — hence the default.
+resolve_stt_adapter() {
+    local accel="$1" want; want=$(get_env_var STT_ADAPTER | tr '[:upper:]' '[:lower:]')
+    case "$want" in
+        whisper_qnn)
+            if [[ "$accel" == qualcomm ]] && fill_whisper_qnn; then return 0; fi
+            echo -e "${YELLOW}Accelerate:${NC} STT_ADAPTER=whisper_qnn, but this is not a Qualcomm board with the image ghcr.io/open-nvr/whisper-qnn-adapter:*-qualcomm available — speech to text stays on parakeet." >&2
+            set_env_var STT_ADAPTER parakeet
+            fill_stt_cpu parakeet ;;
+        ""|auto)
+            if [[ "$accel" == qualcomm ]] && fill_whisper_qnn; then return 0; fi
+            fill_stt_cpu parakeet ;;
+        parakeet|whisper)
+            # An explicit CPU pick: compose derives the image and module
+            # from the word itself; only a stale NPU fill is cleared.
+            fill_stt_cpu "$want" ;;
+        *)  ;;   # an operator's own image/module: leave every value alone
+    esac
+}
+# The NPU adapter's four values, when its image exists for this ADAPTER_TAG
+# (or as latest-qualcomm before a release ships it). Returns 1 otherwise.
+fill_whisper_qnn() {
     local tag img; tag=$(get_env_var ADAPTER_TAG)
     for tag in "${tag:-latest}-qualcomm" "latest-qualcomm"; do
         img="ghcr.io/open-nvr/whisper-qnn-adapter:${tag}"
@@ -333,9 +359,18 @@ fill_qualcomm_stt() {
             return 0
         fi
     done
-    echo -e "${YELLOW}Accelerate:${NC} STT_ADAPTER=whisper_qnn, but the image ghcr.io/open-nvr/whisper-qnn-adapter:*-qualcomm is not available (no registry access, or not published yet) — speech to text stays on parakeet." >&2
-    set_env_var STT_ADAPTER parakeet
-    set_env_var STT_ADAPTER_IMAGE ""; set_env_var STT_ADAPTER_MODULE ""; set_env_var STT_ONNX_PROVIDERS ""
+    return 1
+}
+# A CPU adapter's values: the image and module named outright (so
+# STT_ADAPTER=auto never reaches compose as "auto-adapter"), the NPU
+# provider cleared, and a tag the NPU fill wrote put back on ADAPTER_TAG.
+# A tag the operator pinned (no -qualcomm suffix) is kept.
+fill_stt_cpu() {
+    local name="$1"
+    set_env_var STT_ADAPTER_IMAGE "${name}-adapter"
+    set_env_var STT_ADAPTER_MODULE "adapters.${name}.main"
+    set_env_var STT_ONNX_PROVIDERS ""
+    case "$(get_env_var STT_ADAPTER_TAG)" in *-qualcomm) set_env_var STT_ADAPTER_TAG "" ;; esac
 }
 
 # The flavour changed since the last run (OPENNVR_ACCEL edited, or the disk
@@ -363,8 +398,10 @@ reset_stale_accel_fills() {
             qualcomm:LLM_BASE_URL:http://caption-adapter:9006)
                 write_env_var LLM_PROVIDER ""; write_env_var LLM_BASE_URL ""; write_env_var LLM_MODEL ""
                 write_env_var LLM_WINDOW_TOKENS ""; write_env_var LLM_PREWARM false; write_env_var LLM_FALLBACK_URL "" ;;
-            # Speech to text on the Hexagon has no CPU image: back to parakeet,
-            # riding ADAPTER_TAG again, the derived names cleared.
+            # Speech to text on the Hexagon has no CPU image: an explicit
+            # whisper_qnn goes back to parakeet (auto resolves itself on
+            # every start, see resolve_stt_adapter), riding ADAPTER_TAG
+            # again, the derived names cleared.
             qualcomm:STT_ADAPTER:whisper_qnn)
                 write_env_var STT_ADAPTER parakeet; write_env_var STT_ADAPTER_TAG ""
                 write_env_var STT_ADAPTER_IMAGE ""; write_env_var STT_ADAPTER_MODULE ""; write_env_var STT_ONNX_PROVIDERS "" ;;
