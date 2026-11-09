@@ -173,6 +173,24 @@ class _StderrTail:
         return scrub_secrets(" | ".join(self._lines))
 
 
+#: Returned by ``_FrameSlot.take(timeout)`` when the wait ran out with the
+#: slot still open and empty: the decoder is alive but has produced nothing.
+STALLED = object()
+
+#: How long a running ffmpeg may go without decoding a single frame before
+#: the source gives up on that session and respawns it. A stream can keep
+#: FLOWING while nothing decodes: the Ventuno Q's office camera (2026-11-09)
+#: had its RTP clock wrap after 13 h 15 min and the relay in front of it
+#: clamped every timestamp to "previous + 1 tick", so ffmpeg received 15
+#: packets a second, the fps filter never saw time advance, and the reader
+#: sat in a blocking read for hours — /health said "stale", nothing
+#: recovered. Keyframe-only decode of a stream without keyframes looks the
+#: same. 60 s is far above any GOP (keyframe-only idle decode yields a frame
+#: per GOP, 1–4 s) and the RTSP socket timeout (10 s), so it only ever fires
+#: when ffmpeg truly decodes nothing.
+DEFAULT_STALL_SECONDS = 60.0
+
+
 class _FrameSlot:
     """Single-slot handoff between the stdout drain thread and the detect loop.
 
@@ -221,12 +239,24 @@ class _FrameSlot:
             self._frame = frame
             self._cond.notify_all()
 
-    def take(self) -> Frame | None:
+    def take(self, timeout: float | None = None) -> "Frame | None | object":
         """The newest frame, blocking until one arrives; None once closed
-        and empty."""
+        and empty; ``STALLED`` when ``timeout`` seconds pass with neither.
+
+        The timeout is what lets the source notice a decoder that is alive
+        but silent. Without it the consumer parks here for as long as
+        ffmpeg lives, and a stream that keeps flowing without ever decoding
+        (see FrameSource.stall_seconds) keeps it parked for hours."""
         with self._cond:
+            deadline = None if timeout is None else time.monotonic() + timeout
             while self._frame is None and not self._closed:
-                self._cond.wait()
+                if deadline is None:
+                    self._cond.wait()
+                    continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not self._cond.wait(remaining):
+                    if self._frame is None and not self._closed:
+                        return STALLED
             frame, self._frame = self._frame, None
             self._cond.notify_all()
             return frame
@@ -298,6 +328,7 @@ class FrameSource:
         backoff_seconds: float = 1.0,
         max_backoff_seconds: float = 8.0,
         min_healthy_seconds: float = 5.0,
+        stall_seconds: float | None = DEFAULT_STALL_SECONDS,
         drop_late_frames: bool = True,
         _sleep: Callable[[float], None] | None = None,
         _rand: Callable[[], float] | None = None,
@@ -342,6 +373,10 @@ class FrameSource:
         # How long a session must last to count as "the stream works". Below
         # this, a restart is treated as fruitless (see stream()).
         self.min_healthy_seconds = min_healthy_seconds
+        # A session whose ffmpeg is alive but has decoded nothing for this
+        # long is ended and respawned (DEFAULT_STALL_SECONDS explains why a
+        # live process can be silent). None or <= 0 disables the watchdog.
+        self.stall_seconds = stall_seconds
         # Set by close(): ends the restart loop and interrupts the backoff
         # sleep, so a worker parked in backoff stops in milliseconds instead
         # of holding its caller's join() open for the full delay.
@@ -447,7 +482,12 @@ class FrameSource:
     def stream(self) -> Iterator[Frame]:
         """Yield frames until the source is unrecoverable.
 
-        Restarts ffmpeg on exit (camera/stream drops are normal). Ends the
+        Restarts ffmpeg on exit (camera/stream drops are normal) and on a
+        stall: a running ffmpeg that has decoded nothing for
+        ``stall_seconds`` is terminated and respawned, since a blocked read
+        would otherwise hold the session for as long as the process lives.
+        A stalled session counts like any other for the give-up rule
+        below (no frame in it = fruitless). Ends the
         stream after ``max_fruitless_restarts`` consecutive restarts that
         produced no frames at all — the signature of a dead credential (e.g.
         an expired signed tap URL), which no amount of restarting with the
@@ -489,9 +529,26 @@ class FrameSource:
                     kwargs={"deliberate": was_deliberate, "proc": proc},
                     name="ffmpeg-stdout", daemon=True,
                 ).start()
+                wait = (self.stall_seconds
+                        if self.stall_seconds and self.stall_seconds > 0 else None)
                 while True:
-                    frame = slot.take()
+                    frame = slot.take(timeout=wait)
                     if frame is None:
+                        break
+                    if frame is STALLED:
+                        if proc.poll() is not None:
+                            # ffmpeg has exited; the drain is about to see
+                            # EOF and close the slot. Let it end the session.
+                            continue
+                        log.warning(
+                            "frame source for %s: no decoded frame for %.0fs while "
+                            "ffmpeg is still running — the stream flows but nothing "
+                            "decodes (timestamps that stopped advancing, as after an "
+                            "RTP clock wrap, or no keyframes in a keyframe-only "
+                            "mode); restarting the reader%s",
+                            redact_url(self.rtsp_url), wait,
+                            f"; ffmpeg said: {stderr_tail.text()}" if stderr_tail.text() else "",
+                        )
                         break
                     got_frame = True
                     yield frame

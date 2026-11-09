@@ -411,6 +411,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A detect-pipeline reader whose ffmpeg is alive but decodes nothing now
+  restarts itself.** The office camera on the Ventuno Q (2026-11-09) had
+  its RTP clock wrap after 13 h 15 min; the relay in front of it clamped
+  every timestamp to "previous + 1 tick", MediaMTX could no longer close a
+  60 s segment (50 MB files with a 0.07 s duration) and the pipeline's
+  substream reader — fed 15 packets a second that never advanced in time —
+  sat in a blocking read for hours while `/health` reported the camera
+  stale. The frame source now ends a session that has produced no frame
+  for 60 s (`stall_seconds`, `DEFAULT_STALL_SECONDS`) with a warning
+  naming the likely causes, and respawns it under the existing restart and
+  give-up rules, so the worker is resurrected with a fresh tap URL instead
+  of waiting for ffmpeg to die.
+
 - **The camera agent no longer agrees with the user against its own
   detector, invents actions, or answers garbled speech.** From the office
   voice session of 2026-11-08: told "there are three chairs" it called the
