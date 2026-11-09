@@ -8,6 +8,27 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The camera agent knows about itself and the system: `list_standing`,
+  `system_status`, `show_camera`.** "What alarms do I have?" used to be
+  answered by arming another one (the words matched a standing request);
+  `list_standing` reads back the armed alarms, the standing watches and the
+  scheduled reports with their numbers, cameras and windows. "Is everything
+  okay?", "is the gate recording?", "how much disk is left?" used to get a
+  description of the live frame; `system_status` reads core's new
+  `GET /api/v1/internal/camera-agent/status` — each camera's connectivity
+  and observed recording state (the same derivation as the camera list's
+  badge) and the recording disk against its purge floor — and names the
+  offline or stalled cameras by their roles (Ventuno Q, 2026-11-09: camera
+  23's recordings froze for hours while the agent could only describe the
+  picture). "Show me the gate" switches the page's live view instead of
+  captioning it. All three are read-only, viewer-safe, routed without the
+  model (Tier 0), and in the stock Docker configs. The router also gained a
+  golden set (`tests/test_router_golden.py`, 60 phrasings with the decision
+  each must get) that found and fixed three misses: a roster question
+  ("how many cameras do you have") was hinted to the people counter, "what
+  happened in the last ten minutes" needed the number as a digit, and
+  "any visitors last night" was not a camera question.
+
 - **Attendly: classroom attendance as an OpenNVR application.** The
   attendance app that ran on AWS Rekognition and DynamoDB now runs beside
   OpenNVR the way the Camera Agent does — its own container

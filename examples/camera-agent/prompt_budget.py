@@ -64,6 +64,7 @@ PRIORITY: tuple[str, ...] = (
     "app_status", "recent_app_alerts", "describe_event",
     "create_background_task", "create_report", "stop_report",
     "list_people", "enroll_face", "forget_face",
+    "list_standing", "system_status", "show_camera",
 )
 
 #: What a question says → the tools it most likely needs. A boost in the
@@ -79,6 +80,14 @@ _BOOSTS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
      ("create_monitor", "stop_monitor")),
     (re.compile(r"\b(stop|cancel|disarm|turn (?:it )?off|mute|silence|remove)\b", re.I),
      ("stop_alarm", "stop_monitor", "stop_report")),
+    (re.compile(r"\b(what|which|list|any|do i have)\b.*\b(alarms?|watch(?:es)?|monitors?|reports?|"
+                r"notifications?|set up)\b", re.I),
+     ("list_standing",)),
+    (re.compile(r"\b(offline|online|disconnected|recording|disk|storage|space|healthy|health|"
+                r"status|everything (?:ok|okay|fine|alright)|working)\b", re.I),
+     ("system_status",)),
+    (re.compile(r"^\s*(show|open|switch to|pull up|bring up|display)\b", re.I),
+     ("show_camera", "describe_camera")),
     (re.compile(r"\b(apps?|plugins?|skills?|plates?|number ?plates?|licen[cs]e|"
                 r"registration|package|parcel|delivery)\b", re.I),
      ("list_apps", "app_status", "recent_app_alerts")),

@@ -42,7 +42,7 @@ def test_every_skill_entry_lists_all_its_tools():
     for sid in SKILL_TOOLS:
         entry = _entry(rt, sid)
         assert [t["name"] for t in entry["tools"]] == SKILL_TOOLS[sid]
-        if sid in ("footage", "apps"):
+        if sid in ("footage", "apps", "status"):
             # Honest even here: these backends aren't wired in this runtime
             # (no footage index / app registry), so their tools are NOT
             # advertised and the chips must say so.

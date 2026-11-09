@@ -71,7 +71,8 @@ _CAMERA_WORDS: tuple[str, ...] = (
     # scene locations
     "gate", "window", "fence", "entrance", "hallway", "room", "kitchen",
     "lot", "lobby", "stairs", "balcony",
-    "happening", "detect", "count", "package", "parcel", "delivery",
+    "happening", "happened", "happen", "detect", "count", "package", "parcel", "delivery",
+    "visitor", "visitors", "visit", "visited",
     "dog", "dogs", "cat", "cats", "animal", "car", "cars", "truck", "trucks",
     "vehicle", "bike", "people", "persons",
     # visual-attribute verbs ("what is he wearing/doing?") — these are why a
@@ -260,6 +261,7 @@ _DETECTION_WORDS: tuple[str, ...] = (
     "nobody", "man", "woman", "kid", "child", "face", "count", "many",
     "car", "cars", "truck", "vehicle", "bike", "bicycle", "motorcycle",
     "dog", "cat", "animal", "package", "parcel", "delivery",
+    "visitor", "visitors",
 )
 _DETECTION_RE = re.compile(r"\b(" + "|".join(_DETECTION_WORDS) + r")\b", re.IGNORECASE)
 
@@ -316,16 +318,38 @@ _PAST_RE = re.compile(
 )
 
 # "last/past 30 minutes", "last 2 hours" → a relative look-back in seconds.
+_QTY_WORDS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+              "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "fifteen": 15,
+              "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
+              "half an": 0, "half a": 0, "couple of": 2, "few": 5}
+_QTY = r"(\d+|" + "|".join(sorted(_QTY_WORDS, key=len, reverse=True)) + r")"
 _WINDOW_RE = re.compile(
-    r"\b(?:last|past)\s+(\d+)\s*(minutes?|mins?|min|hours?|hrs?|hr)\b"
-    r"|\b(\d+)\s*(minutes?|mins?|min|hours?|hrs?|hr)\s+ago\b",
+    r"\b(?:last|past)\s+" + _QTY + r"\s*(minutes?|mins?|min|hours?|hrs?|hr|hour)\b"
+    r"|\b" + _QTY + r"\s*(minutes?|mins?|min|hours?|hrs?|hr|hour)\s+ago\b",
     re.IGNORECASE,
 )
+
+
+def _qty(raw: str) -> float:
+    """"ten" → 10, "half an" → 0.5, "3" → 3 (speech to text writes both)."""
+    r = (raw or "").lower().strip()
+    if r.isdigit():
+        return int(r)
+    if r.startswith("half"):
+        return 0.5
+    return _QTY_WORDS.get(r, 1)
+
+#: "What happened", "anything", "any events": a look back at everything,
+#: not at one kind of thing.
+_GENERIC_PAST_RE = re.compile(
+    r"\b(what\s+happened|what\s+did\s+you\s+see|anything|any\s+(events?|activity|movement|motion)|"
+    r"what\s+went\s+on|any\s+alerts?)\b", re.IGNORECASE)
 
 # Detection noun → the events-store label search_history stores visits under.
 # Person-ish nouns collapse to "person"; unknown nouns fall back to "person"
 # (the store's own default) rather than guessing a label it never indexes.
 _HISTORY_LABELS: dict[str, str] = {
+    "visitor": "person", "visitors": "person",
     "car": "car", "cars": "car", "vehicle": "car", "truck": "truck",
     "bike": "bicycle", "bicycle": "bicycle", "motorcycle": "motorcycle",
     "dog": "dog", "cat": "cat",
@@ -429,9 +453,9 @@ def _window_from_text(text: str, now=None
                 max(60, int((now - start).total_seconds())))
     m = _WINDOW_RE.search(t)
     if m:
-        qty = int(m.group(1) or m.group(3))
+        qty = _qty(m.group(1) or m.group(3))
         unit = (m.group(2) or m.group(4) or "").lower()
-        secs = qty * (3600 if unit.startswith(("hour", "hr")) else 60)
+        secs = max(60, int(qty * (3600 if unit.startswith(("hour", "hr")) else 60)))
         return ((now - timedelta(seconds=secs)).isoformat(timespec="seconds"),
                 None, secs)
     lowered = t.lower()
@@ -683,6 +707,106 @@ def _looks_like_name(text: str, cameras: list[str], roles: dict[str, str] | None
     return False
 
 
+# ── the agent itself: what is set up, is the system okay, show a camera ──
+
+#: The things the agent keeps standing. A question ABOUT them is a
+#: listing, not a request to set one up or stop one.
+_STANDING_NOUN_RE = re.compile(
+    r"\b(alarms?|watch(?:es)?|monitors?|reports?|notifications?|reminders?|"
+    r"standing\s+requests?)\b", re.IGNORECASE)
+#: "what / which / list / do I have …" — the question is asking for a list.
+_LISTING_RE = re.compile(
+    r"\b(what|which|list|show|tell\s+me|do\s+i\s+have|have\s+i|are\s+there|any|"
+    r"how\s+many|is\s+there|read\s+(me\s+)?(back|out))\b", re.IGNORECASE)
+#: Words that make it a request to SET or STOP something instead.
+_SETTING_RE = re.compile(
+    r"\b(if|when|whenever|every|each|after|before|between|arm|create|add|make|"
+    r"schedule|start|stop|cancel|disarm|silence|mute|remove|delete|clear|turn|"
+    r"notify|alert\s+me|wake|let\s+me\s+know|tell\s+me\s+(when|if))\b", re.IGNORECASE)
+#: "What have I set up", "what are you watching for": every standing thing.
+_SETUP_RE = re.compile(
+    r"\b(what|which)\s+(have\s+i|did\s+i|do\s+i\s+have|is|are)\s+(set\s+up|running|active|"
+    r"scheduled|armed)\b|\bwhat\s+are\s+you\s+(watching|monitoring|looking)\s+(out\s+)?for\b|"
+    r"\bwhat('s|\s+is)\s+set\s+up\b", re.IGNORECASE)
+
+#: System words: the cameras' connection and recording, the disk.
+_STATUS_WORD_RE = re.compile(
+    r"\b(offline|online|disconnected|down|recording|recorded|disk|storage|space|"
+    r"healthy|health|status|working|okay|ok|fine|alright|all\s+good|problems?|"
+    r"issues?|wrong|connected|up\s+and\s+running)\b", re.IGNORECASE)
+_STATUS_LEAD_RE = re.compile(
+    r"^\s*(is|are|any|which|how\s+much|how\s+many|what|whats|what's|do|does|has|have|"
+    r"everything|all|anything)\b", re.IGNORECASE)
+#: Words that make a status-looking question about the SCENE or the PAST
+#: instead ("is anyone down there", "show me the recording of the gate").
+_NOT_STATUS_RE = re.compile(
+    r"\b(clip|footage|playback|play|history|events?|snapshot|photo|picture|"
+    r"show\s+me|yesterday|last\s+night|earlier|ago)\b", re.IGNORECASE)
+
+_SHOW_RE = re.compile(
+    r"^\s*(?:please\s+)?(?:can\s+you\s+|could\s+you\s+)?(show|open|switch\s+to|pull\s+up|"
+    r"bring\s+up|go\s+to|display|put\s+up)\s+(?P<rest>.+?)\s*[.!?]*\s*$", re.IGNORECASE)
+_SHOW_FILLER = {"me", "the", "my", "a", "camera", "cam", "feed", "view", "on", "screen",
+                "please", "now", "up", "live", "stream", "video", "to"}
+
+
+def _standing_kind(text: str) -> str:
+    kinds = set()
+    if re.search(r"\balarms?\b", text, re.IGNORECASE):
+        kinds.add("alarm")
+    if re.search(r"\b(watch(?:es)?|monitors?|notifications?|reminders?)\b", text, re.IGNORECASE):
+        kinds.add("monitor")
+    if re.search(r"\breports?\b", text, re.IGNORECASE):
+        kinds.add("report")
+    return kinds.pop() if len(kinds) == 1 else "all"
+
+
+def _route_agent_itself(t: str, cameras: list[str], roles: dict[str, str] | None,
+                        advertised: set[str], preferred: str | None) -> Decision | None:
+    """Tier 0 for questions about the agent and the system rather than
+    the scene: "show me the gate" (the page's view), "what alarms do I
+    have" (the standing lists), "is everything okay" / "is the gate
+    recording" / "how much disk is left" (core's status). Each only
+    when its tool is advertised; otherwise None and the picker goes on
+    as before."""
+    # "Show me the gate": the verb, then nothing but a camera's name.
+    m = _SHOW_RE.match(t)
+    if m and "show_camera" in advertised:
+        cam = _names_camera(t, cameras, roles)
+        if cam is not None:
+            rest = re.sub(r"[-_]", " ", m.group("rest").lower())
+            refs = [re.sub(r"[-_]", " ", cam.lower())]
+            role = (roles or {}).get(cam) or ""
+            if role:
+                refs.append(re.sub(r"^(the|a|an)\s+", "", role.strip().lower()))
+            refs.sort(key=len, reverse=True)
+            for r in refs:
+                rest = re.sub(rf"\b{re.escape(r)}\b", " ", rest)
+            rest = re.sub(r"\b(?:camera|cam)\s*\d+\b|\b(?:first|second|third|fourth|fifth)\b", " ", rest)
+            left = [w for w in re.findall(r"[a-z0-9']+", rest) if w not in _SHOW_FILLER]
+            if not left:
+                return Decision(0, tool="show_camera", args={"camera_id": cam},
+                                reason="show a camera", hintable=False)
+    # "What alarms do I have": a listing of the standing things.
+    if "list_standing" in advertised and not _SETTING_RE.search(t):
+        if _SETUP_RE.search(t):
+            return Decision(0, tool="list_standing", args={"kind": "all"},
+                            reason="what is set up", hintable=False)
+        if _STANDING_NOUN_RE.search(t) and _LISTING_RE.search(t):
+            return Decision(0, tool="list_standing", args={"kind": _standing_kind(t)},
+                            reason="lists standing requests", hintable=False)
+    # "Is everything okay", "is the gate recording", "how much disk is left".
+    if ("system_status" in advertised and _STATUS_LEAD_RE.match(t) and _STATUS_WORD_RE.search(t)
+            and not _NOT_STATUS_RE.search(t) and not _DETECTION_RE.search(t)
+            and not _SETTING_RE.search(t) and not _STANDING_NOUN_RE.search(t)):
+        args: dict[str, Any] = {}
+        cam = _names_camera(t, cameras, roles)
+        if cam is not None:
+            args["camera_id"] = cam
+        return Decision(0, tool="system_status", args=args, reason="system status", hintable=False)
+    return None
+
+
 def decide_tier0(text: str, *, cameras: list[str], advertised: set[str],
                  preferred: str | None = None, roles: dict[str, str] | None = None,
                  now=None) -> Decision | None:
@@ -705,8 +829,19 @@ def decide_tier0(text: str, *, cameras: list[str], advertised: set[str],
         return None
     if len(words) > _MAX_WORDS or t.count("?") > 1:
         return Decision(2, reason="too long or two questions", hintable=False)
+    # The agent and the system before the scene: "show me the gate", "what
+    # alarms do I have", "is every camera recording". Before the config
+    # check because "which cameras are online" is a status question, not
+    # a roster one.
+    d = _route_agent_itself(t, cameras, roles, advertised, preferred)
+    if d is not None:
+        return d
     if _is_config_question(t):
-        return None                                   # answered from the roster
+        # Answered from the roster in the prompt. hintable=False: "how many
+        # cameras do you have" resembles "how many people" word for word,
+        # and a detect_objects hint here sent the model to count people
+        # (golden set, 2026-11-09).
+        return Decision(2, reason="roster question", hintable=False)
     if _SIDE_EFFECT_RE.search(t):
         return Decision(2, reason="side effect or standing request", hintable=False)
     if _WHO_RE.search(t) or _looks_like_name(t, cameras, roles):
@@ -724,6 +859,19 @@ def decide_tier0(text: str, *, cameras: list[str], advertised: set[str],
     # for a class of thing. A question that names none of those is for
     # the model, not for its catch-all.
     if past and not nouns:
+        # "What happened in the last ten minutes": no thing named, so the
+        # history search (one label) is the wrong tool — the ring of recent
+        # events, every label, is the answer, when the window is explicit.
+        if _WINDOW_RE.search(t) and _GENERIC_PAST_RE.search(t) and "recent_events" in advertised:
+            _, _, window_secs = _window_from_text(t, now=now)
+            cam0 = _names_camera(t, cameras, roles) if not _ALL_RE.search(t) else None
+            if cam0 is None and preferred and preferred in cameras:
+                cam0 = preferred
+            if cam0 is None and len(cameras) == 1:
+                cam0 = cameras[0]
+            return Decision(0, tool="recent_events",
+                            args={"camera_id": cam0 or "__any__", "window_seconds": window_secs},
+                            reason="what happened, windowed")
         return Decision(2, reason="no object named")
     if not past and not (nouns or _DESCRIBE_RE.search(t) or _LIVE_ASK_RE.search(t)):
         return Decision(2, reason="no known ask")

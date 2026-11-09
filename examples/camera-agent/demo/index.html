@@ -2764,7 +2764,9 @@
         if(d.monitors) pollMonitors(d.monitors);
         if(d.reports) pollReports(d.reports);
         if(d.events) loadEvents(d.events);
-        if(d.alarms) pollAlarms(d.alarms); };
+        if(d.alarms) pollAlarms(d.alarms);
+        if(d.show_camera) openCamScreen(String(d.show_camera));   // the agent's show_camera tool
+      };
       ws.onclose=()=>{ _updWs=null; _updLive=false;
         _updBackoff=Math.min(_updBackoff*2,15000);
         setTimeout(connectUpdates,_updBackoff); };
