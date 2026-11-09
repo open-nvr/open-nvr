@@ -80,7 +80,7 @@ jobs:
 
       - name: Install cosign
         if: github.event_name != 'pull_request'
-        uses: sigstore/cosign-installer@v3
+        uses: ./.github/actions/install-cosign
         with:
           cosign-release: "v2.4.1"
 
@@ -187,7 +187,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
       - name: Install cosign
         if: github.event_name != 'pull_request'
-        uses: sigstore/cosign-installer@v3
+        uses: ./.github/actions/install-cosign
         with:
           cosign-release: "v2.4.1"
       - name: Log in to GHCR
@@ -299,7 +299,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
       - name: Install cosign
         if: github.event_name != 'pull_request'
-        uses: sigstore/cosign-installer@v3
+        uses: ./.github/actions/install-cosign
         with:
           cosign-release: "v2.4.1"
       - name: Log in to GHCR
