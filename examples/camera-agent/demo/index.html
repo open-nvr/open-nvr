@@ -2354,6 +2354,10 @@
     function cutFiller(){ if(_fillerSrc){ stopSpeaking(); _fillerSrc=null; speaking=false; } }
 
     async function onUtterance(){ const blob=new Blob(chunks,{type:recorder.mimeType||"audio/webm"});
+      // Stop pressed while recording: the recorder's onstop still fires, after
+      // the session ended — answering it left "Thinking…" on screen with a
+      // Talk button and a reply nobody waited for.
+      if(!sessionActive) return;
       if(blob.size<1200){ if(sessionActive){setAvatar("listening");setStatus("Listening… speak your question.","active");} return; }
       busy=true; const gen=++turnGen; inflightCtl=new AbortController();
       setAvatar("thinking"); setStatus("Thinking… tap Stop to cancel.","active");
@@ -2382,6 +2386,7 @@
           addMsg("🔇 Voice replies are unavailable — the speech (Piper) adapter isn't responding, so replies are text-only until it recovers. Check: docker logs opennvr_piper_adapter","sys"); }
         cutFiller();                                    // the answer outranks "let me check…"
         if(data.audio_b64 && gen===turnGen){ speaking=true; setAvatar("speaking"); await speak(data.audio_b64); speaking=false; }
+        if(data.end && gen===turnGen && sessionActive){ stopSession(); setStatus("Goodbye — tap Talk when you need me."); return; }
         if(sessionActive){ setAvatar("listening"); setStatus("Listening… ask a follow-up, or tap Stop.","active"); }
       }catch(err){ if(gen!==turnGen || err.name==="AbortError") return;  // user cancelled — not an error
         addMsg("Request failed: "+err.message,"sys"); if(sessionActive){setAvatar("listening");setStatus("Error: "+err.message,"error");} }
@@ -2816,7 +2821,7 @@
           endSession(); talkBtn.innerHTML=IC.mic+" Talk"; syncSegChat(); setStatus("Voice stream ended: "+why+".","error"); } };
       ws.onerror=()=>{ try{ ws.close(); }catch{} };
       return true; }
-    function stopStream(){ if(streamWs){ const w=streamWs; streamWs=null; try{ w.close(); }catch{} }
+    function stopStream(){ streamEndPending=false; if(streamWs){ const w=streamWs; streamWs=null; try{ w.close(); }catch{} }
       if(streamNode){ try{ streamNode.port.onmessage=null; streamNode.disconnect(); }catch{} streamNode=null; }
       if(streamSrc){ try{ streamSrc.disconnect(); }catch{} streamSrc=null; }
       if(streamMute){ try{ streamMute.disconnect(); }catch{} streamMute=null; }
@@ -2833,6 +2838,7 @@
       src.start(streamPlayhead); streamPlayhead+=ab.duration; streamSources.push(src);
       src.onended=()=>{ streamSources=streamSources.filter(x=>x!==src);
         if(!streamSources.length){ streamBotTalking=false; setMouth(0);
+          if(streamEndPending){ endStreamSession(); return; }
           if(sessionActive&&streamWs){ setAvatar("listening"); setStatus("Listening… just speak.","active"); } } };
       if(!streamBotTalking){ streamBotTalking=true; cutFiller(); setAvatar("speaking"); setStatus("Speaking…","active"); streamMouth(); } }
     function streamMouth(){ if(streamMouthRAF||!playbackAnalyser) return; const an=playbackAnalyser, abuf=new Float32Array(an.fftSize);
@@ -2848,7 +2854,10 @@
         case "reply": if(d.text){ if(streamReplyEl){ streamReplyEl.appendChild(document.createTextNode(" "+d.text)); logEl.scrollTop=logEl.scrollHeight; }
                         else { streamReplyEl=addMsg(d.text,"agent"); } } break;
         case "interrupted": flushStreamAudio(); streamReplyEl=null; setAvatar("listening"); setStatus("Listening…","active"); break;
+        case "session_end": streamEndPending=true; if(!streamBotTalking&&!streamSources.length) endStreamSession(); else setTimeout(()=>{ if(streamEndPending) endStreamSession(); },8000); break;
         default: break; } }
+    let streamEndPending=false;
+    function endStreamSession(){ if(!streamEndPending) return; streamEndPending=false; if(sessionActive){ stopSession(); setStatus("Goodbye — tap Talk when you need me."); } }
 
     // ── wiring ──
     silenceBtn.addEventListener("click", ackAlarms);
@@ -3241,7 +3250,8 @@
         d.querySelector(".hw-nm").textContent=r.label+(r.adapters&&r.adapters.length?" · "+r.adapters.join(", "):"");
         d.querySelector(".hw-min").textContent="Runs on: "+(r.min||"—");
         const rec=d.querySelector(".hw-rec");
-        if(r.recommended){ rec.textContent="Faster with: "+r.recommended; } else { rec.textContent="CPU is fine"; rec.classList.add("ok"); }
+        if(r.recommended){ rec.textContent="Faster with: "+r.recommended; }
+        else { rec.textContent=r.accelerated?"On the accelerator":"CPU is fine"; rec.classList.add("ok"); }
         d.querySelector(".hw-note").textContent=r.note||"";
         det.appendChild(d); }
       if(hw.tips&&hw.tips.length){ const t=document.createElement("div"); t.className="hwtips";

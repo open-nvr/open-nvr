@@ -356,9 +356,14 @@ class OpenNvrOllamaLLM(LLMService):
             if self._turn_runner is not None:
                 history, text = history_and_question(raw_messages)
                 if text:
-                    reply = await self._turn_runner(history, text)
+                    out = await self._turn_runner(history, text)
+                    reply, meta = (out if isinstance(out, tuple) else (out, {}))
                     if reply:
                         await self.push_frame(LLMTextFrame(str(reply)))
+                    if (meta or {}).get("end"):
+                        # After the goodbye: the page leaves talk mode once
+                        # the reply's audio has played.
+                        await self.push_frame(OutputTransportMessageFrame(message={"type": "session_end"}))
                 return
             for iteration in range(self._max_tool_iterations):
                 response = await self._client.chat(
