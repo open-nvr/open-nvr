@@ -434,6 +434,16 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **CI signs images without depending on anonymous GitHub release
+  downloads.** On 2026-11-09 GitHub's anonymous release downloads returned
+  504 for hours and every image job that signs (detect-pipeline, core, the
+  agents, the apps) failed in `sigstore/cosign-installer`, which fetches
+  cosign from `github.com/…/releases/download`. A composite action
+  (`.github/actions/install-cosign`) now downloads the pinned release
+  through the GitHub API with the job's own token (three tries, the
+  anonymous URL as a last resort), verifies the pinned sha256, and installs
+  it; the four signing workflows use it.
+
 - **A detect-pipeline reader whose ffmpeg is alive but decodes nothing now
   restarts itself.** The office camera on the Ventuno Q (2026-11-09) had
   its RTP clock wrap after 13 h 15 min; the relay in front of it clamped
