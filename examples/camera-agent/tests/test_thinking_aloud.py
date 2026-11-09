@@ -120,7 +120,7 @@ async def test_turn_publishes_a_working_line_before_the_slow_tool_and_only_for_i
     import camera_agent as ca
     from context import CameraSpec
 
-    cfg = ca.AppConfig(kaic_url="http://k", kaic_api_key="x", system_prompt="t",
+    cfg = ca.AppConfig(kaic_url="http://k", kaic_api_key="x", system_prompt="t", thinking_aloud=True,
                        cameras=[CameraSpec(camera_id="cam1", frame_url="http://x", role="front door")])
     rt = ca.CameraAgentRuntime(cfg)
     order: list[str] = []
@@ -185,7 +185,7 @@ def test_thinking_aloud_endpoint_and_page_wiring():
     import camera_agent as ca
     from context import CameraSpec
 
-    cfg = ca.AppConfig(kaic_url="http://k", kaic_api_key="x", system_prompt="t",
+    cfg = ca.AppConfig(kaic_url="http://k", kaic_api_key="x", system_prompt="t", thinking_aloud=True,
                        cameras=[CameraSpec(camera_id="c", frame_url="http://x", role="f")])
     body = TestClient(ca.build_app(ca.CameraAgentRuntime(cfg))).get("/thinking-aloud").json()
     assert body["enabled"] is True and body["min_ms"] == 1500 and body["source"] == "template"
@@ -205,5 +205,57 @@ def test_model_source_adds_the_prompt_hint_only_when_on():
     off = ca.CameraAgentRuntime(ca.AppConfig(kaic_url="http://k", kaic_api_key="x", system_prompt="t", cameras=cams))
     assert "what you are about to check" not in off.build_system_prompt()
     on = ca.CameraAgentRuntime(ca.AppConfig(kaic_url="http://k", kaic_api_key="x", system_prompt="t", cameras=cams,
-                                            filler_source="model"))
+                                            thinking_aloud=True, filler_source="model"))
     assert "what you are about to check" in on.build_system_prompt()
+    # model source without thinking_aloud on: still no hint (it is off by default)
+    quiet = ca.CameraAgentRuntime(ca.AppConfig(kaic_url="http://k", kaic_api_key="x", system_prompt="t", cameras=cams,
+                                               filler_source="model"))
+    assert "what you are about to check" not in quiet.build_system_prompt()
+
+
+@pytest.mark.asyncio
+async def test_off_by_default_a_turn_publishes_no_working_line():
+    """Default config: the tool runs, the answer comes, and nothing is said
+    or shown before it — no "Let me check the office camera" (2026-11-09)."""
+    import camera_agent as ca
+    from context import CameraSpec
+
+    cfg = ca.AppConfig(kaic_url="http://k", kaic_api_key="x", system_prompt="t",
+                       cameras=[CameraSpec(camera_id="cam1", frame_url="http://x", role="front door")])
+    assert cfg.thinking_aloud is False
+    rt = ca.CameraAgentRuntime(cfg)
+    assert rt.thinking.enabled is False
+
+    class _Ollama:
+        def __init__(self):
+            self.n = 0
+
+        async def chat(self, *, messages, tools, temperature, max_tokens):
+            self.n += 1
+            if self.n % 2 == 1:
+                return {"message": {"content": "", "tool_calls": [
+                    {"id": "c1", "function": {"name": "describe_camera",
+                                              "arguments": json.dumps({"camera_id": "cam1"})}}]}}
+            return {"message": {"content": "A parked car by the door."}}
+
+    spoken: list[str] = []
+
+    class _Piper:
+        async def synthesize(self, text):
+            spoken.append(text)
+            return b"RIFFfakewav"
+
+    async def describe(args):
+        await asyncio.sleep(0.05)
+        return "A parked car."
+
+    rt.ollama = _Ollama()
+    rt.piper = _Piper()
+    rt.tool_handlers = {"describe_camera": describe}
+    rt.tool_definitions = [{"type": "function", "function": {"name": "describe_camera", "parameters": {}}}]
+    inbox = rt.subscribe_updates()
+    reply = await ca._run_conversation_turn(rt, [], "what is at the door", speak_progress="voice")
+    await asyncio.sleep(0.1)
+    assert "parked car" in reply.lower()
+    assert inbox.empty() and spoken == []
+    rt.unsubscribe_updates(inbox)

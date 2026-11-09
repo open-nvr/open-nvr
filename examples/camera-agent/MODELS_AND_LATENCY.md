@@ -300,6 +300,12 @@ rarely adds to the wall clock.
 
 ## Thinking aloud (`fillers.py`)
 
+**Off by default since 2026-11-09** (`thinking_aloud: false`). It was built
+for the CPU-only box, where a tool turn took 5–10 s. On the Ventuno Q's NPU
+the answer lands in one or two seconds, and "Let me check the office
+camera" right before it read as an unexpected extra reply in the morning
+test of 2026-11-09. Everything below still applies when it is turned on.
+
 A person who has to look something up says what they are about to do,
 then goes quiet and does it. The agent knows *what it is about to do* the
 moment the first LLM pass returns a tool call — the tool and its

@@ -1,0 +1,50 @@
+name: Install cosign
+description: >
+  Install a pinned cosign release through the GitHub API with the job's own
+  token, verified against a pinned checksum. sigstore/cosign-installer fetches
+  the binary anonymously from github.com/…/releases/download; on 2026-11-09
+  GitHub's anonymous release downloads returned 504 for hours ("surge in
+  anonymous users") and every image job that signs — detect-pipeline, core,
+  the agents, the apps — failed in that step while the authenticated API kept
+  working. The API path is also what `gh` uses, so a token is all it needs.
+inputs:
+  cosign-release:
+    description: cosign release tag
+    required: false
+    default: "v2.4.1"
+  sha256:
+    description: sha256 of cosign-linux-amd64 for that release (from its cosign_checksums.txt)
+    required: false
+    default: "8b24b946dd5809c6bd93de08033bcf6bc0ed7d336b7785787c080f574b89249b"
+  token:
+    description: token for the GitHub API (the job's GITHUB_TOKEN reads public releases)
+    required: false
+    default: ${{ github.token }}
+runs:
+  using: composite
+  steps:
+    - name: Download, verify, install
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        COSIGN_RELEASE: ${{ inputs.cosign-release }}
+        COSIGN_SHA256: ${{ inputs.sha256 }}
+      run: |
+        set -euo pipefail
+        dir="$HOME/.cosign"; mkdir -p "$dir"
+        ok=0
+        # Authenticated API download (gh), three tries; then the anonymous
+        # URL as a last resort, for a runner with no gh.
+        for attempt in 1 2 3; do
+          if gh release download -R sigstore/cosign "$COSIGN_RELEASE" -p cosign-linux-amd64 -D "$dir" --clobber; then ok=1; break; fi
+          echo "cosign download attempt $attempt failed; retrying in 10s" >&2; sleep 10
+        done
+        if [ "$ok" != 1 ]; then
+          curl -fsSL --retry 3 --retry-delay 10 -o "$dir/cosign-linux-amd64" \
+            "https://github.com/sigstore/cosign/releases/download/${COSIGN_RELEASE}/cosign-linux-amd64"
+        fi
+        echo "${COSIGN_SHA256}  ${dir}/cosign-linux-amd64" | sha256sum -c -
+        mv "$dir/cosign-linux-amd64" "$dir/cosign"
+        chmod +x "$dir/cosign"
+        echo "$dir" >> "$GITHUB_PATH"
+        "$dir/cosign" version
