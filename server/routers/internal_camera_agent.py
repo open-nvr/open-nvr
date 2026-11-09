@@ -1039,6 +1039,39 @@ def _mint_mediamtx_jwt(camera_path: str = "~.*",
         return None
 
 
+#: How long the platform components' shared wildcard token is reused before
+#: a fresh one is minted. The token itself lives 60 minutes; the pipeline and
+#: the agent re-read the roster every 30 s and adopt whatever URL it carries
+#: on their next respawn, so a token handed out at most 30 minutes old is
+#: always at least 30 minutes from expiry.
+_PLATFORM_TOKEN_REUSE_S = 30 * 60
+
+
+def _platform_token_once(_cache: dict = {}) -> str | None:
+    """The shared wildcard read token for platform callers, minted at most
+    every _PLATFORM_TOKEN_REUSE_S instead of on every roster request.
+
+    Two pollers at 30 s each made this endpoint sign an RSA token 240 times
+    an hour on the Ventuno Q (2026-11-09) and log every one of them — pure
+    cost: every token was identical in scope and nothing ever used two at
+    once. A None from the minter (keys not configured) is never cached, so
+    the bare-URL fallback stays live. Keyed on the minter function itself so
+    a test that swaps ``_mint_mediamtx_jwt`` starts from an empty cache."""
+    import time as _time
+
+    minter = _mint_mediamtx_jwt
+    now = _time.monotonic()
+    if (_cache.get("token") and _cache.get("minter") is minter
+            and now < _cache.get("until", 0.0)):
+        return _cache["token"]
+    token = minter()
+    if token:
+        _cache.update(token=token, minter=minter, until=now + _PLATFORM_TOKEN_REUSE_S)
+    else:
+        _cache.clear()
+    return token
+
+
 @router.get("/cameras")
 def list_camera_agent_sources(
     principal=Depends(_require_internal_key),
@@ -1070,12 +1103,13 @@ def list_camera_agent_sources(
     # An app key gets its roster; the site key gets every camera.
     roster = _app_roster(db, principal)
     is_app = roster is not None
-    # Platform components share ONE wildcard token, minted once. An app
+    # Platform components share ONE wildcard token, minted once and reused
+    # across requests for half its life (_platform_token_once). An app
     # never gets it: apps sit on a shared network, and a "~.*" token would
     # read every camera in the building and undo the roster below. Each
     # app URL carries a token for exactly its own camera path instead.
     mediamtx_jwt: str | None = (
-        _mint_mediamtx_jwt() if settings.inference_use_mediamtx_tap and not is_app else None
+        _platform_token_once() if settings.inference_use_mediamtx_tap and not is_app else None
     )
 
     cameras = (
