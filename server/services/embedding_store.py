@@ -23,9 +23,23 @@ this camera, this window, this class — and the moment the vectors live
 somewhere else you are doing two queries and joining by id, with the
 filter applied on the wrong side of the network.
 
-So ``event_embeddings`` is keyed by ``event_id`` and nothing else, and the
-candidate set for a similarity search is produced by the SAME predicate
-the rest of search uses. One store, one scoping rule.
+So ``event_embeddings`` is keyed by ``event_id`` (and ``kind`` — see
+below) and nothing else, and the candidate set for a similarity search
+is produced by the SAME predicate the rest of search uses. One store,
+one scoping rule.
+
+TWO KINDS OF VECTOR, ONE TABLE
+------------------------------
+
+A visit can carry an ``image`` vector (its evidence frame through the
+model's image tower) and a ``caption`` vector (the words a captioner
+wrote about it, plus the projected attribute words, through the SAME
+model's text tower). The query is text, so it compares against either:
+image similarity finds what the frame shows, caption similarity finds
+what the description means ("in a hurry" against "running"), and search
+fuses both with the word match. They share a table and a ``model``
+column because a model change makes both stale at once, and one
+:func:`stale_rows` must say so for both.
 
 WHAT THIS IS NOT
 ----------------
@@ -98,6 +112,9 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "EMBED_TASK",
+    "KIND_CAPTION",
+    "KIND_IMAGE",
+    "KINDS",
     "VectorCapability",
     "capability",
     "normalise",
@@ -112,6 +129,12 @@ __all__ = [
 #: shows up in the skills registry, the adapter catalog and the agent's
 #: hardware panel without any of them learning a special case.
 EMBED_TASK = "embed"
+
+#: What a row's vector is OF. ``image``: the evidence frame. ``caption``:
+#: the caption and attribute words, through the model's text tower.
+KIND_IMAGE = "image"
+KIND_CAPTION = "caption"
+KINDS = (KIND_IMAGE, KIND_CAPTION)
 
 #: Most candidates a single scan will score, with and without NumPy.
 #:
@@ -197,26 +220,30 @@ def stale_rows(db, producer: str) -> int:
 
 
 def put_embedding(db, *, event_id: int, vector: Sequence[float],
-                  model: str | None = None) -> EventEmbedding | None:
-    """Store (or replace) one visit's vector.
+                  model: str | None = None,
+                  kind: str = KIND_IMAGE) -> EventEmbedding | None:
+    """Store (or replace) one visit's vector of one ``kind``.
 
-    Replaces rather than accumulates: a visit has one embedding at a
-    time, and re-running a better adapter over old footage should
-    improve the store rather than double it. Which adapter produced the
-    current one is recorded in ``model``, so a re-run can be targeted
-    and a mixed-model store can be spotted — see :func:`capability`.
+    Replaces rather than accumulates: a visit has one embedding of each
+    kind at a time, and re-running a better adapter over old footage
+    should improve the store rather than double it. Which adapter
+    produced the current one is recorded in ``model``, so a re-run can
+    be targeted and a mixed-model store can be spotted — see
+    :func:`capability`.
 
     Returns ``None`` for an empty vector instead of writing a row that
     can never match anything.
     """
+    if kind not in KINDS:
+        raise ValueError(f"unknown embedding kind {kind!r}")
     values = [float(v) for v in (vector or [])]
     if not values:
         return None
 
     blob = pack(values)
-    row = db.get(EventEmbedding, int(event_id))
+    row = db.get(EventEmbedding, (int(event_id), kind))
     if row is None:
-        row = EventEmbedding(event_id=int(event_id))
+        row = EventEmbedding(event_id=int(event_id), kind=kind)
         db.add(row)
     row.vector = blob
     row.dim = len(values)
@@ -257,6 +284,12 @@ class VectorCapability:
     ceiling: int
     #: One sentence, for an operator, about what is and is not switched on.
     note: str
+    #: ``rows`` split by what was embedded. Either may be zero while the
+    #: other is not: a site captioning without the per-camera ``embed``
+    #: skill has caption vectors and no image vectors, and search should
+    #: run the arm it has rather than none.
+    image_rows: int = 0
+    caption_rows: int = 0
 
     @property
     def mixed_models(self) -> bool:
@@ -295,9 +328,14 @@ def capability(db) -> VectorCapability:
     dims = [int(d) for (d,) in db.query(EventEmbedding.dim).distinct().all() if d]
     models = tuple(sorted(m for (m,) in db.query(EventEmbedding.model)
                           .distinct().all() if m))
+    by_kind = {str(k): int(n or 0) for k, n in
+               db.query(EventEmbedding.kind, _func.count(EventEmbedding.event_id))
+               .group_by(EventEmbedding.kind).all()}
+    image_rows = by_kind.get(KIND_IMAGE, 0)
+    caption_rows = by_kind.get(KIND_CAPTION, 0)
 
-    note = (f"Semantic ranking on, over {rows:,} embedded visits "
-            f"({accel} scan).")
+    note = (f"Semantic ranking on, over {image_rows:,} embedded frames and "
+            f"{caption_rows:,} embedded captions ({accel} scan).")
     if len(dims) > 1:
         # Vectors of different lengths cannot be compared at all. Say so
         # loudly; this is a misconfiguration, not a tuning question.
@@ -310,7 +348,8 @@ def capability(db) -> VectorCapability:
 
     return VectorCapability(
         available=True, mode="scan", dim=dims[0] if len(dims) == 1 else None,
-        rows=rows, models=models, accel=accel, ceiling=ceiling, note=note)
+        rows=rows, models=models, accel=accel, ceiling=ceiling, note=note,
+        image_rows=image_rows, caption_rows=caption_rows)
 
 
 # ── reading ──────────────────────────────────────────────────────────
@@ -337,8 +376,11 @@ class SimilarityResult:
 def rank_by_similarity(db, *, query_vector: Sequence[float],
                        candidate_ids: Iterable[int],
                        limit: int = 50,
-                       cap: "VectorCapability | None" = None) -> SimilarityResult:
-    """Rank ``candidate_ids`` by similarity to ``query_vector``.
+                       cap: "VectorCapability | None" = None,
+                       kind: str = KIND_IMAGE) -> SimilarityResult:
+    """Rank ``candidate_ids`` by similarity to ``query_vector``, over
+    their vectors of one ``kind`` (image by default; caption for the
+    text-vs-text arm).
 
     ``candidate_ids`` has already been narrowed by the shared event
     predicate — camera, window, class, plate, claims, and the caller's
@@ -374,6 +416,7 @@ def rank_by_similarity(db, *, query_vector: Sequence[float],
     rows = (
         db.query(EventEmbedding.event_id, EventEmbedding.vector, EventEmbedding.dim)
         .filter(EventEmbedding.event_id.in_(ids))
+        .filter(EventEmbedding.kind == kind)
         .all()
     )
     usable = [(int(eid), blob) for eid, blob, dim in rows

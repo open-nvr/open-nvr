@@ -8,6 +8,28 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Search compares the question with what each caption means, not only
+  with its words.** "Man in a blue kurta" found nothing when the captioner
+  had written "person wearing a light blue tunic": the word arm needs the
+  exact term and the frame arm sees pixels, not phrasing. With
+  `EVENTS_EMBED_ENRICHMENT` on, each caption (plus its projected attribute
+  words) is now put through the embedding model's text tower the moment it
+  lands — and from the backfill for captions written earlier — and stored
+  as the visit's `caption` vector beside its `image` vector
+  (`event_embeddings.kind`, migration `b3c9e5f7a1d2`; existing rows are
+  `image`). Search ranks the query vector against those caption vectors as
+  a third arm, floored by `SEARCH_CAPTION_MIN_SIMILARITY` (0.22, same
+  scale as the image floor), and fuses it with the word and frame arms by
+  the same RRF. The response's `semantic` block lists every arm that ran
+  with its count, `added_by_caption` says how many results only this arm
+  found, and `semantic.caption` carries the arm's own scan and floor
+  numbers. A visit with no caption vector is skipped by this arm, not
+  scored as zero; an empty caption is never embedded; a failed embedding
+  never costs the caption; a model change re-embeds caption vectors with
+  the frame vectors. The text tower is SigLIP's, trained to align with
+  images rather than with other sentences, so this is the cheap option
+  (no second model) and not a sentence encoder.
+
 - **The detect-pipeline says where a dropped frame's time went.** The
   capacity warning ("N of M decoded frames were never detected on") now
   ends with the window's per-frame split: waited for the next frame, in

@@ -7,6 +7,12 @@ case this guards: CLIP (512 wide) → SigLIP 2 (768 wide) behind the same
 ``clip`` adapter name, which search would otherwise skip row by row (a
 dimension mismatch is a non-match) for as long as the old vectors sat
 there.
+
+The second half of the file is the CAPTION vector: written by the
+captioner the moment a caption lands, through the same text tower the
+query uses, never for an empty caption, never in a way that can take
+the caption back — and replaced by the same model-change walk, because
+a stale caption vector is as wrong as a stale frame vector.
 """
 from __future__ import annotations
 
@@ -107,7 +113,7 @@ def test_a_vector_from_another_producer_is_replaced_and_the_same_one_is_kept(ses
 
     asyncio.run(emb.enrich_event_embedding(eid, evidence_jpeg=b"jpg"))
     db = session_local()
-    row = db.get(EventEmbedding, eid)
+    row = db.get(EventEmbedding, (eid, "image"))
     assert row.model == NEW and row.dim == 6 and calls == [f"event {eid}"]
     db.close()
 
@@ -161,3 +167,188 @@ def test_reset_for_reembed_starts_the_walk_over(session_local):
     assert state == {"reembed_for": NEW}
     assert bf.read_state(db) == {"reembed_for": NEW}
     db.close()
+
+
+# ── the caption vector ───────────────────────────────────────────────
+
+
+def _wire_captioner(monkeypatch, caption, calls: list):
+    """A captioner that answers ``caption`` for every frame, with the
+    caption flag on. Returns the module."""
+    import services.caption_enrichment as cap
+    from core.config import settings
+    monkeypatch.setattr(settings, "events_caption_enrichment", True, raising=False)
+
+    async def _adapter():
+        return "captioner"
+
+    async def _caption(jpeg, adapter, camera_handle, event_id=None, *, priority="live"):
+        calls.append(event_id)
+        return caption
+
+    monkeypatch.setattr(cap, "_resolve_caption_adapter", _adapter)
+    monkeypatch.setattr(cap, "_caption_jpeg", _caption)
+    return cap
+
+
+def _wire_text_embedder(monkeypatch, producer: str, vector: list[float],
+                        payloads: list, *, enabled: bool = True):
+    """Like ``_wire`` but records the PAYLOAD, so a test can see which
+    words went to the text tower."""
+    import services.embed_enrichment as emb
+    from core.config import settings
+    monkeypatch.setattr(settings, "events_embed_enrichment", enabled, raising=False)
+
+    async def _producer():
+        return "clip", producer
+
+    async def _infer(adapter, payload, *, what, **kw):
+        payloads.append(payload)
+        return list(vector)
+
+    monkeypatch.setattr(emb, "_resolve_embed_producer", _producer)
+    monkeypatch.setattr(emb, "_infer", _infer)
+    return emb
+
+
+def test_caption_text_is_the_caption_plus_attributes_and_empty_without_a_caption():
+    from services.embed_enrichment import caption_text
+    assert caption_text("a man at the gate", "blue kurta") == "a man at the gate blue kurta"
+    assert caption_text("  a man\n at the gate ", None) == "a man at the gate"
+    # Attributes alone are a filter, not a description: nothing to embed.
+    assert caption_text("", "blue kurta") == ""
+    assert caption_text(None, None) == ""
+
+
+def test_a_caption_that_lands_is_embedded_as_the_visits_caption_vector(session_local, monkeypatch):
+    """The producer. The captioner writes the words, then the same text
+    tower the query goes through turns them into the visit's ``caption``
+    vector — and only that: the frame is the image enricher's job."""
+    from models import EventText
+    payloads: list = []
+    _wire_text_embedder(monkeypatch, NEW, [0.0, 1.0, 0.0], payloads)
+    cap = _wire_captioner(monkeypatch, "a person wearing a light blue tunic", [])
+    db = session_local()
+    eid = _visit(db)
+    # A caption-less row with attributes, as the descriptor enricher
+    # leaves one (no caption source): the captioner fills it in.
+    db.add(EventText(event_id=eid, attributes="blue tunic")); db.commit()
+    db.close()
+
+    assert asyncio.run(cap.enrich_event_caption(eid, evidence_jpeg=b"jpg")) == "done"
+
+    db = session_local()
+    row = db.get(EventEmbedding, (eid, "caption"))
+    assert row is not None and row.model == NEW and row.dim == 3
+    assert db.get(EventEmbedding, (eid, "image")) is None, "the captioner embedded a frame"
+    assert db.get(EventText, eid).caption == "a person wearing a light blue tunic"
+    db.close()
+    assert payloads == [{"task": "embed",
+                         "text": "a person wearing a light blue tunic blue tunic"}], (
+        "the text tower did not get caption + attributes")
+
+
+def test_an_empty_caption_is_never_embedded(session_local, monkeypatch):
+    """"Looked and found nothing" is recorded on the visit, not in the
+    vector store: a vector of nothing would match nothing and make
+    "which visits still need a caption vector" wrong."""
+    payloads: list = []
+    emb = _wire_text_embedder(monkeypatch, NEW, [0.0, 1.0, 0.0], payloads)
+    cap = _wire_captioner(monkeypatch, "", [])
+    db = session_local(); eid = _visit(db); db.close()
+
+    assert asyncio.run(cap.enrich_event_caption(eid, evidence_jpeg=b"jpg")) == "done"
+    # And the producer asked directly, over a visit with no words:
+    assert asyncio.run(emb.enrich_event_caption_embedding(eid)) is None
+
+    db = session_local()
+    assert db.get(EventEmbedding, (eid, "caption")) is None
+    db.close()
+    assert payloads == [], "the text tower was called for an empty caption"
+
+
+def test_caption_vectors_are_behind_the_embed_flag(session_local, monkeypatch):
+    from models import EventText
+    payloads: list = []
+    _wire_text_embedder(monkeypatch, NEW, [0.0, 1.0, 0.0], payloads, enabled=False)
+    cap = _wire_captioner(monkeypatch, "a red truck", [])
+    db = session_local(); eid = _visit(db); db.close()
+
+    assert asyncio.run(cap.enrich_event_caption(eid, evidence_jpeg=b"jpg")) == "done"
+
+    db = session_local()
+    assert db.get(EventText, eid).caption == "a red truck", "the caption itself was lost"
+    assert db.get(EventEmbedding, (eid, "caption")) is None
+    db.close()
+    assert payloads == []
+
+
+def test_an_embedder_failure_never_costs_the_caption(session_local, monkeypatch):
+    """The caption is committed before its vector is attempted, and the
+    attempt swallows everything: a dead adapter leaves the words exactly
+    where the captioner put them and the task still reports done."""
+    import services.embed_enrichment as emb
+    from models import EventText
+    _wire_text_embedder(monkeypatch, NEW, [0.0, 1.0, 0.0], [])
+
+    async def _boom(adapter, payload, *, what, **kw):
+        raise RuntimeError("adapter on fire")
+    monkeypatch.setattr(emb, "_infer", _boom)
+    cap = _wire_captioner(monkeypatch, "a red truck", [])
+    db = session_local(); eid = _visit(db); db.close()
+
+    assert asyncio.run(cap.enrich_event_caption(eid, evidence_jpeg=b"jpg")) == "done"
+
+    db = session_local()
+    assert db.get(EventText, eid).caption == "a red truck"
+    assert db.get(EventEmbedding, (eid, "caption")) is None
+    db.close()
+
+
+def test_a_dropped_caption_embedding_is_reported_so_the_backfill_holds(session_local, monkeypatch):
+    import services.embed_enrichment as emb
+    from models import EventText
+    from services.enrichment_gate import DROPPED
+    _wire_text_embedder(monkeypatch, NEW, [0.0, 1.0, 0.0], [])
+
+    async def _dropped(adapter, payload, *, what, **kw):
+        return DROPPED
+    monkeypatch.setattr(emb, "_infer", _dropped)
+    db = session_local(); eid = _visit(db)
+    db.add(EventText(event_id=eid, caption="a red truck", source="t")); db.commit(); db.close()
+
+    assert asyncio.run(emb.enrich_event_caption_embedding(eid)) == "dropped"
+
+
+def test_a_model_change_re_embeds_caption_vectors_too(session_local, monkeypatch):
+    """The walk that replaces stale frame vectors must replace stale
+    caption vectors: a caption vector from the old model compared with
+    a query from the new one is a confident ordering of noise."""
+    from models import EventText
+    payloads: list = []
+    emb = _wire_text_embedder(monkeypatch, NEW, [0.0, 1.0, 0.0, 0.0, 0.0, 0.0], payloads)
+    db = session_local()
+    eid = _visit(db, vec=[0.0, 1.0, 0.0, 0.0, 0.0, 0.0], model=NEW)   # frame: current
+    db.add(EventText(event_id=eid, caption="a lorry at the loading bay", source="t"))
+    db.commit()
+    embedding_store.put_embedding(db, event_id=eid, vector=[1.0, 0.0, 0.0, 0.0],
+                                  model=OLD, kind="caption")              # caption: stale
+    assert embedding_store.stale_rows(db, NEW) == 1, "a stale caption vector was not counted"
+    db.close()
+
+    import services.enrichment_backfill as bf
+    assert asyncio.run(bf.reembed_due()) == (True, NEW), (
+        "a store whose only stale vector is a caption did not trigger the re-embed")
+
+    assert asyncio.run(emb.enrich_event_caption_embedding(eid)) == "done"
+    db = session_local()
+    row = db.get(EventEmbedding, (eid, "caption"))
+    assert row.model == NEW and row.dim == 6
+    assert embedding_store.stale_rows(db, NEW) == 0
+    assert db.query(EventEmbedding).filter_by(event_id=eid).count() == 2, (
+        "re-embedding the caption touched the frame vector")
+    db.close()
+
+    # Same producer again: nothing to do, nothing called.
+    assert asyncio.run(emb.enrich_event_caption_embedding(eid)) is None
+    assert len(payloads) == 1

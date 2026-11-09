@@ -566,6 +566,13 @@ class Settings(BaseSettings):
     # 0.25-0.29, off-topic ones 0.19-0.22, so 0.22 keeps the former and
     # drops the latter. 0 disables the floor (the old behaviour).
     search_vector_min_similarity: float = 0.22
+    # The same floor for search's CAPTION arm — the query vector against
+    # each visit's caption vector (caption + attribute words through the
+    # embedding model's text tower). Same cosine scale, so it starts at
+    # the image arm's value; text-vs-text typically scores higher than
+    # text-vs-frame, so an operator may raise it once they have seen
+    # `semantic.caption.best` on their own captions. 0 disables it.
+    search_caption_min_similarity: float = 0.22
     # Relearn the camera graph nightly from the journeys the site is
     # already certain about (same plate or same recognised face on two
     # cameras). ON by default, unlike the backfill above, because it
