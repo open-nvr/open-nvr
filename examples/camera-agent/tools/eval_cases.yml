@@ -311,11 +311,12 @@
         reply_contains: [removed, stopped, cancelled, "no longer", "turned off"]
 
 - id: hourly-what-you-see-is-a-scene-report
+  note: "Scored on the report that exists afterwards, not the model's slots: Gemma writes 'every_hour' into `at` and the handler reads the schedule from the words (#847)."
   ask: "every hour tell me what you see on {camera}"
   expect:
     tool: create_report
-    args:
-      every_minutes: 60
+    state:
+      reports: {schedule: "every 60 min"}
 
 # ── the agent about itself, and the system (2026-11-09) ──────────────
 # list_standing / system_status / show_camera are router-decided (Tier 0),
