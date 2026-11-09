@@ -266,3 +266,53 @@
         tool: detect_objects
         args: {camera_id: "{camera}"}
 
+# ── from the Ventuno Q voice session of 2026-11-09 ───────────────────
+# Every one of these was answered with a description of the office, or
+# with a request for an alarm number the model was never given.
+
+- id: greeting-check-in-no-look
+  ask: "Hey, how are you doing?"
+  expect:
+    no_tool: true
+    reply_source: llm
+
+- id: weather-is-not-a-camera-question
+  ask: "how is the weather today?"
+  expect:
+    no_tool: true
+    reply_source: llm
+
+- id: fillers-then-goodbye-closes
+  ask: "Yeah, I'm good. Yeah. Um okay. Okay. Thank you. Bye."
+  expect:
+    no_tool: true
+    reply_contains: goodbye
+
+- id: alarm-then-remove-it
+  turns:
+    - ask: "the alarm — when you see any car on {camera}"
+      expect:
+        tool: create_alarm
+        args:
+          target: car
+    - ask: "can you remove it?"
+      expect:
+        tool: stop_alarm
+        reply_contains: removed
+
+- id: remove-the-notification-is-not-a-detection
+  turns:
+    - ask: "let me know whenever you see a car on {camera}"
+      expect:
+        tool: create_monitor
+    - ask: "okay then remove it, I don't need any notification when a car arrives"
+      expect:
+        tool: stop_monitor
+        reply_contains: removed
+
+- id: hourly-what-you-see-is-a-scene-report
+  ask: "every hour tell me what you see on {camera}"
+  expect:
+    tool: create_report
+    args:
+      every_minutes: 60

@@ -356,10 +356,17 @@ class OpenNvrOllamaLLM(LLMService):
             if self._turn_runner is not None:
                 history, text = history_and_question(raw_messages)
                 if text:
+                    # The page never sees the TranscriptionFrame: the user
+                    # aggregator upstream consumes it. So the transcript goes
+                    # out from here, before the answer, and a turn_end after
+                    # it — without them the page showed no user text and
+                    # appended every answer to one bubble (2026-11-09).
+                    await self.push_frame(OutputTransportMessageFrame(message={"type": "transcript", "text": text}))
                     out = await self._turn_runner(history, text)
                     reply, meta = (out if isinstance(out, tuple) else (out, {}))
                     if reply:
                         await self.push_frame(LLMTextFrame(str(reply)))
+                    await self.push_frame(OutputTransportMessageFrame(message={"type": "turn_end"}))
                     if (meta or {}).get("end"):
                         # After the goodbye: the page leaves talk mode once
                         # the reply's audio has played.

@@ -1355,20 +1355,23 @@
         d.innerHTML=`<span class="who">${label}</span>`;
         d.querySelector(".who").appendChild(msgTime());
         d.appendChild(document.createTextNode(text));
-        // Show the frame(s) the agent actually looked at, inline in the bubble.
-        if(frames&&frames.length){ const fr=document.createElement("div"); fr.className="frames";
-          frames.forEach(f=>{ const wrap=document.createElement("div");
-            const im=document.createElement("img"); im.className="frame-thumb";
-            // caption wins over role: a remembered best-frame carries its own
-            // timestamp ("#38 · 16:25"), and showing a past photo under a bare
-            // camera name would read as the live view.
-            const lbl=f.caption||f.role||f.camera_id;
-            im.src="data:image/jpeg;base64,"+f.jpeg_b64; im.alt=im.title=lbl;
-            im.addEventListener("click",()=>openLightbox(im.src,lbl));
-            const cap=document.createElement("div"); cap.className="frame-cap"; cap.textContent=lbl;
-            wrap.appendChild(im); wrap.appendChild(cap); fr.appendChild(wrap); });
-          d.appendChild(fr); } }
+        appendFrames(d,frames); }
       logEl.appendChild(d); logEl.scrollTop=logEl.scrollHeight; return d; }
+    // Show the frame(s) the agent actually looked at, inline in a bubble —
+    // a text answer's and a streamed answer's alike.
+    function appendFrames(d,frames){ if(!frames||!frames.length) return;
+      const fr=document.createElement("div"); fr.className="frames";
+      frames.forEach(f=>{ const wrap=document.createElement("div");
+        const im=document.createElement("img"); im.className="frame-thumb";
+        // caption wins over role: a remembered best-frame carries its own
+        // timestamp ("#38 · 16:25"), and showing a past photo under a bare
+        // camera name would read as the live view.
+        const lbl=f.caption||f.role||f.camera_id;
+        im.src="data:image/jpeg;base64,"+f.jpeg_b64; im.alt=im.title=lbl;
+        im.addEventListener("click",()=>openLightbox(im.src,lbl));
+        const cap=document.createElement("div"); cap.className="frame-cap"; cap.textContent=lbl;
+        wrap.appendChild(im); wrap.appendChild(cap); fr.appendChild(wrap); });
+      d.appendChild(fr); logEl.scrollTop=logEl.scrollHeight; }
     function openLightbox(src,label){ let ov=document.getElementById("lightbox");
       if(!ov){ ov=document.createElement("div"); ov.id="lightbox"; ov.className="lightbox";
         ov.addEventListener("click",()=>ov.classList.remove("show")); document.body.appendChild(ov); }
@@ -2756,6 +2759,7 @@
         _updLive=true; _updBackoff=1500;
         if(d.tracks) onTracks(d.tracks);
         if(d.working) onWorking(d.working);
+        if(d.turn) onStreamTurn(d.turn);
         if(d.tasks) pollTasks(d.tasks);
         if(d.monitors) pollMonitors(d.monitors);
         if(d.reports) pollReports(d.reports);
@@ -2846,11 +2850,18 @@
         an.getFloatTimeDomainData(abuf); let s=0; for(let i=0;i<abuf.length;i++) s+=abuf[i]*abuf[i]; setMouth(Math.sqrt(s/abuf.length));
         streamMouthRAF=requestAnimationFrame(tick); };
       streamMouthRAF=requestAnimationFrame(tick); }
+    // A streamed turn's extras, over /updates: the frames it looked at go
+    // into the answer's bubble (or a bubble of their own if the words have
+    // not arrived yet), and the strip says which cameras were used.
+    function onStreamTurn(t){ if(!t||!streamWs) return;
+      if(t.frames&&t.frames.length){ const el=streamReplyEl||addMsg("","agent"); streamReplyEl=el; appendFrames(el,t.frames); }
+      if(t.cameras_used&&t.cameras_used.length) showWorking(t.cameras_used); }
     function onStreamEvent(d){ if(!d||!d.type) return;
       switch(d.type){
         case "user_started": lastActivity=performance.now(); if(!streamBotTalking){ setAvatar("listening"); setStatus("Listening…","active"); } break;
         case "user_stopped": lastActivity=performance.now(); if(!streamBotTalking){ setAvatar("thinking"); setStatus("Thinking…","active"); } break;
-        case "transcript": if(d.text){ addMsg(d.text,"user"); streamReplyEl=null; } break;
+        case "transcript": if(d.text){ addMsg(d.text,"user"); } streamReplyEl=null; break;
+        case "turn_end": streamReplyEl=null; break;
         case "reply": if(d.text){ if(streamReplyEl){ streamReplyEl.appendChild(document.createTextNode(" "+d.text)); logEl.scrollTop=logEl.scrollHeight; }
                         else { streamReplyEl=addMsg(d.text,"agent"); } } break;
         case "interrupted": flushStreamAudio(); streamReplyEl=null; setAvatar("listening"); setStatus("Listening…","active"); break;

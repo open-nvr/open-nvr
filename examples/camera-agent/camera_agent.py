@@ -1736,11 +1736,13 @@ def _stop_monitor_tool() -> dict[str, Any]:
         "type": "function",
         "function": {
             "name": "stop_monitor",
-            "description": "Stop a standing monitor by its numeric id.",
+            "description": ("Stop (remove) a standing watch. Give monitor_id when the user named a "
+                            "number; otherwise leave it out — the watch just set up, the only one, "
+                            "or all of them is understood."),
             "parameters": {
                 "type": "object",
-                "properties": {"monitor_id": {"type": "integer"}},
-                "required": ["monitor_id"],
+                "properties": {"monitor_id": {"type": "integer", "description": "Only when the user said a number."}},
+                "required": [],
             },
         },
     }
@@ -2357,15 +2359,17 @@ def _stop_alarm_tool() -> dict[str, Any]:
         "type": "function",
         "function": {
             "name": "stop_alarm",
-            "description": "Disarm an alarm by its numeric id, or acknowledge/silence a ringing one.",
+            "description": ("Disarm (remove) an alarm, or silence a ringing one. Give alarm_id when "
+                            "the user named a number; otherwise leave it out — the alarm just set "
+                            "up, the only one, or all of them ('remove the alarms') is understood."),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "alarm_id": {"type": "integer"},
+                    "alarm_id": {"type": "integer", "description": "Only when the user said a number."},
                     "action": {"type": "string", "enum": ["disarm", "silence"],
                                "description": "'silence' stops the current ring but keeps the alarm armed; 'disarm' removes it."},
                 },
-                "required": ["alarm_id"],
+                "required": [],
             },
         },
     }
@@ -2578,6 +2582,39 @@ class ReportSchedule:
         }
 
 
+def scene_report_query(query: str, runtime: Any) -> str:
+    """The question a scheduled report actually asks the agent.
+
+    "Every hour tell me what you see" means a look at every camera, not
+    the people count the history tools default to (Ventuno Q, 2026-11-09:
+    an hourly "what you see" report came back as person visits only). A
+    query that asks to see or describe and names no detectable thing is
+    turned into an explicit scene round: describe each camera now, then
+    the visits since the last run. Anything else runs as written.
+    """
+    import router as _router
+
+    q = (query or "").strip()
+    if not q:
+        return q
+    names_object = bool(_router._DETECTION_RE.search(q))
+    # Only an explicit ask to SEE the cameras ("what you see", "what's
+    # happening", "describe the view") — not any descriptive word:
+    # "summarize overnight activity" is a history summary and runs as is.
+    scene_words = bool(_router._GENERIC_SEE_RE.search(q)
+                       or re.search(r"\b(what (?:you|the cameras?) (?:can )?sees?|what you can see"
+                                    r"|what(?: is|'?s) (?:happening|going on)|what the cameras? shows?"
+                                    r"|describe (?:the |each |every )?(?:cameras?|scene|view|room|picture)"
+                                    r"|look at (?:the |each |every |all )?cameras?|the (?:scene|view) (?:on|from|of))\b", q, re.I))
+    if names_object or not scene_words:
+        return q
+    cams = [c.camera_id for c in runtime.visible_cameras()] if hasattr(runtime, "visible_cameras") else []
+    where = ", ".join(cams) if cams else "every camera"
+    return (f"Scene report. Look at each camera now ({where}) with describe_camera and say in one "
+            f"sentence per camera what it shows. Then, if any visits were recorded in the last hour, "
+            f"say how many and of what. Nothing else. The request was: {q}")
+
+
 class ReportScheduler:
     """Runs recurring reports. One background loop ticks every
     ``check_interval`` and runs any schedule that's due. Each report is a
@@ -2688,7 +2725,7 @@ class ReportScheduler:
         sched.run_count += 1
         try:
             result = await _run_conversation_turn(
-                self._runtime, [], sched.query,
+                self._runtime, [], scene_report_query(sched.query, self._runtime),
                 tool_definitions=self._runtime.background_tool_definitions,
             )
         except Exception as exc:  # pragma: no cover - defensive
@@ -2735,7 +2772,8 @@ def _create_report_tool() -> dict[str, Any]:
             "description": (
                 "Schedule a RECURRING summary report. Use for 'every morning "
                 "summarize overnight activity', 'give me a daily 7am rundown', "
-                "'every hour tell me how many people came by'. Provide a short "
+                "'every hour tell me how many people came by', 'every hour tell me "
+                "what you see' (a look at every camera). Provide a short "
                 "name and the query to summarize; set 'at' (HH:MM, daily) or "
                 "'every_minutes'."
             ),
@@ -2758,11 +2796,13 @@ def _stop_report_tool() -> dict[str, Any]:
         "type": "function",
         "function": {
             "name": "stop_report",
-            "description": "Cancel a scheduled report by its numeric id.",
+            "description": ("Cancel a scheduled report. Give report_id when the user named a number; "
+                            "otherwise leave it out — the report just set up, the only one, or all of "
+                            "them is understood."),
             "parameters": {
                 "type": "object",
-                "properties": {"report_id": {"type": "integer"}},
-                "required": ["report_id"],
+                "properties": {"report_id": {"type": "integer", "description": "Only when the user said a number."}},
+                "required": [],
             },
         },
     }
@@ -3594,6 +3634,12 @@ class CameraAgentRuntime:
             enabled=bool(getattr(cfg, "thinking_aloud", False)),
         )
         self._update_subscribers: set = set()
+        # The standing thing most recently set up — ("alarm" | "monitor" |
+        # "report", id). "Remove it" / "cancel that" name no id: the stop
+        # tools fall back to this, and the router's stop hint picks the
+        # matching tool (Ventuno Q, 2026-11-09: "can you remove it?" right
+        # after an alarm was armed got "I need an alarm number").
+        self.last_standing: tuple[str, int] | None = None
         self._configure_tools()
         self.tool_handlers = {
             "describe_camera": self.tools.describe_camera,
@@ -4308,15 +4354,29 @@ class CameraAgentRuntime:
         llm_on_npu = (self.cfg.llm_provider.strip().lower() == "openai"
                       and "caption-adapter" in str(self.cfg.llm_base_url or ""))
         accelerated: list[str] = []
+        # The NPU captioner has no CPU build, so its rows are accelerated
+        # whether or not the detector's gauge answered (the panel read
+        # "Visual Question Answering · moondream — faster with an NVIDIA
+        # GPU" on the Ventuno Q while Gemma on the Hexagon was answering
+        # every visual question, 2026-11-09): the probe only names the chip.
+        vision_tasks = ("image_captioning", "scene_caption", "vqa", "visual_question_answering")
+        npu_name = accel or "Qualcomm Hexagon NPU"
         for row in rows:
             task = str(row.get("task") or "")
             on = ((accel is not None and task in ("object_detection", "detection"))
-                  or (npu_captioner and accel is not None and task in ("image_captioning", "visual_question_answering"))
-                  or (llm_on_npu and accel is not None and task == "llm"))
+                  or (npu_captioner and task in vision_tasks)
+                  or (llm_on_npu and task == "llm"))
             row["accelerated"] = bool(on)
             if on:
                 row["recommended"] = ""
-                row["min"] = f"{accel}" + (" via the caption adapter" if task == "llm" else "")
+                if task in vision_tasks:
+                    row["adapters"] = [str(self.cfg.caption_adapter)]
+                    row["min"] = f"{npu_name} via the caption adapter"
+                    row["note"] = "Gemma on the NPU answers captions and visual questions alike."
+                elif task == "llm":
+                    row["min"] = f"{npu_name} via the caption adapter"
+                else:
+                    row["min"] = f"{accel}"
                 accelerated.append(str(row["label"]))
         if llm_on_npu:
             for row in rows:
@@ -4329,8 +4389,8 @@ class CameraAgentRuntime:
             running_on = "gpu" if any(gpu_map.values()) else "cpu"
         still_cpu = [lbl for lbl in gpu_labels if lbl not in accelerated]
         if accelerated:
-            running_on = "npu" if "NPU" in (accel or "") or "Neural" in (accel or "") else "gpu"
-            summary = f"Running on the {accel}: {', '.join(accelerated)}."
+            running_on = "npu" if "NPU" in npu_name or "Neural" in npu_name else "gpu"
+            summary = f"Running on the {npu_name if (npu_captioner or llm_on_npu) and accel is None else accel}: {', '.join(accelerated)}."
             if still_cpu:
                 summary += f" On the CPU: {', '.join(still_cpu[:3])}."
         elif running_on == "gpu":
@@ -4477,22 +4537,71 @@ class CameraAgentRuntime:
                  "pulse": "loud for a minute, then stands down",
                  "chime": "a single chime",
                  "silent": "silent — notifications only"}[alarm.ring]
+        self.last_standing = ("alarm", alarm.id)
         return (f"Armed alarm #{alarm.id} '{name}' ({style}) — I'll fire it "
                 f"if I see {target} on {where}{when}.{extra}")
 
-    async def _handle_stop_alarm(self, args: dict[str, Any]) -> str:
+    def _pick_standing(self, kind: str, raw_id: Any, items: list[dict[str, Any]],
+                       noun: str) -> tuple[list[int], str | None]:
+        """Which standing item(s) a stop request means: ``(ids, question)``.
+
+        An explicit id wins. Without one: "all" / "them" / the plural in
+        the question → every item; else the one set up most recently (if
+        it still exists); else the only one there is; else a question that
+        LISTS them by number, so the user can answer with one. The model
+        used to be left to guess an id it was never told (Ventuno Q,
+        2026-11-09: "I don't have an alarm ID to reference").
+        """
         try:
-            aid = int(args.get("alarm_id"))
+            if raw_id not in (None, "", "null"):
+                return [int(raw_id)], None
         except (TypeError, ValueError):
-            return "Which alarm? Tell me its number."
+            pass
+        if not items:
+            return [], f"There are no {noun}s set up right now."
+        q = (getattr(getattr(self, "tools", None), "current_question", None) or "").lower()
+        if len(items) > 1 and re.search(rf"\b(all|them|every|both|each|{noun}s)\b", q):
+            return [int(i["id"]) for i in items], None
+        last = self.last_standing
+        if last and last[0] == kind and any(int(i["id"]) == int(last[1]) for i in items):
+            return [int(last[1])], None
+        if len(items) == 1:
+            return [int(items[0]["id"])], None
+        listing = "; ".join(
+            f"#{i['id']} {i.get('name') or i.get('description') or i.get('target') or ''}".strip()
+            for i in items)
+        return [], f"Which {noun}? You have: {listing}. Say the number."
+
+    @staticmethod
+    def _describe_standing(item: dict[str, Any]) -> str:
+        name = item.get("name") or item.get("description") or ""
+        target = item.get("target") or ""
+        bits = [b for b in (f"'{name}'" if name else "", f"({target})" if target and target not in str(name) else "") if b]
+        return " ".join(bits)
+
+    async def _handle_stop_alarm(self, args: dict[str, Any]) -> str:
+        items = self.alarms.list()
+        ids, ask = self._pick_standing("alarm", args.get("alarm_id"), items, "alarm")
+        if ask:
+            return ask
         action = str(args.get("action") or "disarm").strip().lower()
         if action == "silence":
-            return ("Silenced." if self.alarms.acknowledge(aid)
-                    else f"Alarm #{aid} isn't currently ringing.")
-        ok = self.alarms.remove(aid)
+            done = [i for i in ids if self.alarms.acknowledge(i)]
+            return ("Silenced." if done else
+                    ("Alarm #%d isn't currently ringing." % ids[0] if len(ids) == 1
+                     else "No alarm is ringing right now."))
+        by_id = {int(i["id"]): i for i in items}
+        removed = [i for i in ids if self.alarms.remove(i)]
         self.persist()
-        return (f"Disarmed and removed alarm #{aid}." if ok
-                else f"I don't have an alarm #{aid}.")
+        if self.last_standing and self.last_standing[0] == "alarm" and self.last_standing[1] in removed:
+            self.last_standing = None
+        if not removed:
+            return f"I don't have an alarm #{ids[0]}." if len(ids) == 1 else "I don't have those alarms."
+        if len(removed) == 1:
+            i = removed[0]
+            return f"Disarmed and removed alarm #{i} {self._describe_standing(by_id.get(i, {}))}".rstrip() + "."
+        return ("Disarmed and removed %d alarms: " % len(removed)
+                + ", ".join(f"#{i} {self._describe_standing(by_id.get(i, {}))}".rstrip() for i in removed) + ".")
 
     async def _handle_create_report(self, args: dict[str, Any]) -> str:
         name = str(args.get("name") or "").strip() or "Report"
@@ -4513,19 +4622,25 @@ class CameraAgentRuntime:
             return (f"Report #{dup.id} '{dup.name}' already runs that exact "
                     f"query on that schedule; nothing new was added.")
         sched = self.reports.create(name=name, query=query, at_min=at_min, every_minutes=every)
+        self.last_standing = ("report", sched.id)
         self.persist()
         return (f"Scheduled report #{sched.id} '{name}' — {sched.schedule_label()}. "
                 f"I'll deliver it here (and to your alert channels) each time it runs.")
 
     async def _handle_stop_report(self, args: dict[str, Any]) -> str:
-        try:
-            rid = int(args.get("report_id"))
-        except (TypeError, ValueError):
-            return "Which report? Tell me its number."
-        ok = self.reports.remove(rid)
+        items = self.reports.list()
+        ids, ask = self._pick_standing("report", args.get("report_id"), items, "report")
+        if ask:
+            return ask
+        removed = [i for i in ids if self.reports.remove(i)]
         self.persist()
-        return (f"Cancelled and removed report #{rid}." if ok
-                else f"I don't have a report #{rid}.")
+        if self.last_standing and self.last_standing[0] == "report" and self.last_standing[1] in removed:
+            self.last_standing = None
+        if not removed:
+            return f"I don't have a report #{ids[0]}." if len(ids) == 1 else "I don't have those reports."
+        if len(removed) == 1:
+            return f"Cancelled and removed report #{removed[0]}."
+        return "Cancelled and removed %d reports: %s." % (len(removed), ", ".join(f"#{i}" for i in removed))
 
     async def _handle_enroll_face(self, args: dict[str, Any]) -> str:
         if not self.faces:
@@ -4728,6 +4843,7 @@ class CameraAgentRuntime:
                 max_count=thresholds.get("max_count"),
                 min_count=thresholds.get("min_count"),
             )
+            self.last_standing = ("monitor", mon.id)
         except ValueError as exc:
             # The SDK rule rejected the params (e.g. a degenerate line
             # whose two points coincide). Relay the reason so the LLM can
@@ -4768,14 +4884,22 @@ class CameraAgentRuntime:
                 f"you'll see a live tally in the panel.")
 
     async def _handle_stop_monitor(self, args: dict[str, Any]) -> str:
-        try:
-            mid = int(args.get("monitor_id"))
-        except (TypeError, ValueError):
-            return "Which watch should I stop? Tell me its number."
-        ok = self.monitors.remove(mid)
+        items = self.monitors.list()
+        ids, ask = self._pick_standing("monitor", args.get("monitor_id"), items, "watch")
+        if ask:
+            return ask
+        by_id = {int(i["id"]): i for i in items}
+        removed = [i for i in ids if self.monitors.remove(i)]
         self.persist()
-        return (f"Stopped and removed watch #{mid}." if ok
-                else f"I don't have a watch #{mid} running.")
+        if self.last_standing and self.last_standing[0] == "monitor" and self.last_standing[1] in removed:
+            self.last_standing = None
+        if not removed:
+            return f"I don't have a watch #{ids[0]} running." if len(ids) == 1 else "I don't have those watches."
+        if len(removed) == 1:
+            i = removed[0]
+            return f"Stopped and removed watch #{i} {self._describe_standing(by_id.get(i, {}))}".rstrip() + "."
+        return ("Stopped and removed %d watches: " % len(removed)
+                + ", ".join(f"#{i} {self._describe_standing(by_id.get(i, {}))}".rstrip() for i in removed) + ".")
 
     # ── App door handlers (read-only) ─────────────────────────────
     # Relay installed catalog apps + their state. NO enable/disable/config
@@ -5701,8 +5825,11 @@ class CameraAgentRuntime:
 
     IDENTITY_LINE = (
         "You are the OpenNVR Agent, this system's camera agent. Speak in "
-        "the FIRST person — say 'I see…', 'I'm watching…', not in the "
-        "third person. If asked your name, say you're the OpenNVR Agent."
+        "the FIRST person, never the third. When you have looked at a "
+        "camera, report it as 'I see…' or 'I'm watching…'. When you have "
+        "not looked — a greeting, a question you cannot answer, a request to "
+        "set or remove something — answer plainly and never begin with "
+        "'I see'. If asked your name, say you're the OpenNVR Agent."
     )
 
     def _roster_lines(self) -> str:
@@ -6080,6 +6207,17 @@ def _streaming_turn_runner(runtime: CameraAgentRuntime):
     turn does (they reach the page over /updates with audio)."""
     async def run(history: list[dict[str, str]], text: str):
         reply = await _run_conversation_turn(runtime, list(history), text, speak_progress="voice")
+        # What text mode returns in its HTTP response — the frames the
+        # tools looked at and which cameras — goes to the page over
+        # /updates here, so a streamed answer shows its evidence too.
+        try:
+            runtime.publish_update({"turn": {
+                "reply": reply,
+                "cameras_used": list(getattr(runtime.tools, "last_cameras_used", []) or []),
+                "frames": _frames_for(runtime),
+            }})
+        except Exception:  # noqa: BLE001 — the page's extras never cost the answer
+            logger.debug("streaming turn: could not publish the turn's frames", exc_info=True)
         return reply, {"end": bool(getattr(runtime, "last_turn_closed", False))}
     return run
 
@@ -8259,6 +8397,7 @@ async def _conversation_turn_body(
         roles={c.camera_id: c.role for c in runtime.visible_cameras()},
         tier0=bool(getattr(runtime.cfg, "router_tier0", True)),
         hints=bool(getattr(runtime.cfg, "router_hints", True)),
+        last_kind=(getattr(runtime, "last_standing", None) or (None, None))[0],
     )
     trace.append({"step": "route", "detail": f"tier{decision.tier}"
                   + (f" {decision.tool}" if decision.tool else "")
