@@ -5278,7 +5278,7 @@ class CameraAgentRuntime:
         if n == 0:
             parts.append("No active cameras.")
         elif not offline and not unknown:
-            parts.append(f"All {n} camera{'s are' if n != 1 else ' is'} online." if n != 1 else f"{name(rows[0]).capitalize()} is online.")
+            parts.append(f"All {n} cameras are online." if n != 1 else f"{name(rows[0])} is online.")
         else:
             parts.append(f"{n - len(offline) - len(unknown)} of {n} cameras online."
                          + (f" Offline: {', '.join(offline)}." if offline else "")
@@ -5294,19 +5294,29 @@ class CameraAgentRuntime:
             parts.append(f"Recording is turned off for {', '.join(off)}.")
         st = data.get("storage") or {}
         free, total, floor = st.get("free_gb"), st.get("total_gb"), st.get("min_free_gb")
+        warning = False
         if free is not None:
             line = f"Disk: {free:g} GB free" + (f" of {total:g} GB" if total else "")
             if floor is not None:
                 if free < floor:
-                    line += (f" — below the {floor:g} GB floor, so the oldest recordings "
+                    line += (f" — BELOW the {floor:g} GB floor, so the oldest recordings "
                              "are being deleted to make room")
+                    warning = True
                 elif free < 2 * floor:
-                    line += f" — close to the {floor:g} GB floor"
+                    line += f" — close to the {floor:g} GB floor; old recordings will be deleted soon"
+                    warning = True
                 else:
                     line += f" (floor {floor:g} GB)"
-            parts.append(line + ".")
+            line += "."
         else:
-            parts.append("I couldn't read the recording disk.")
+            line = "I couldn't read the recording disk."
+        # A disk warning goes FIRST: the compose model keeps the opening
+        # and drops the tail ("I see that everything is fine right now"
+        # with the disk 0.7 GB from the floor, Ventuno Q eval 2026-11-09).
+        if warning:
+            parts.insert(0, "WARNING, say this first: " + line)
+        else:
+            parts.append(line)
         return " ".join(parts)
 
     async def _handle_show_camera(self, args: dict[str, Any]) -> str:

@@ -107,9 +107,9 @@ def test_system_status_names_the_offline_and_stalled_cameras_by_role():
     out = asyncio.run(rt._handle_system_status({}))
     assert "1 of 2 cameras online. Offline: the gate." in out, out
     assert "Recording problems: the gate recording has stalled." in out
-    assert "close to the 2 GB floor" in out
+    assert out.startswith("WARNING, say this first: Disk: 2.3 GB free of 60 GB — close to the 2 GB floor"), out
     one = asyncio.run(rt._handle_system_status({"camera_id": "cam1"}))
-    assert one.startswith("The front door is online.")
+    assert "the front door is online." in one
     assert "the gate" not in one
 
 
@@ -118,7 +118,8 @@ def test_system_status_below_the_floor_says_recordings_are_being_deleted():
     data = dict(_FINE); data["storage"] = {"free_gb": 1.5, "total_gb": 60.0, "min_free_gb": 2.0}
     rt.status_client = _Status(data)
     out = asyncio.run(rt._handle_system_status({}))
-    assert "below the 2 GB floor" in out and "oldest recordings are being deleted" in out
+    assert out.startswith("WARNING, say this first: Disk: 1.5 GB free of 60 GB — BELOW the 2 GB floor")
+    assert "oldest recordings are being deleted" in out
 
 
 def test_system_status_when_core_is_unreachable_or_unconfigured():

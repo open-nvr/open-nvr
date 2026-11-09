@@ -26,7 +26,7 @@ IST = timezone(timedelta(hours=5, minutes=30))
 NOW = datetime(2026, 11, 9, 14, 30, 0, tzinfo=IST)
 CAMS = ["cam1", "cam2", "cam3"]
 ROLES = {"cam1": "the front door", "cam2": "the gate", "cam3": "the back yard"}
-ALL = {"describe_camera", "detect_objects", "search_history", "recent_events",
+ALL = {"describe_camera", "detect_objects", "search_history", "recent_events", "describe_window",
        "create_monitor", "stop_monitor", "create_alarm", "stop_alarm",
        "create_report", "stop_report", "list_standing", "system_status", "show_camera",
        "list_apps", "app_status", "recent_app_alerts", "recent_plates", "camera_snapshot"}
@@ -63,13 +63,20 @@ GOLDEN = [
     ("watch the back yard and tell me if more than 3 people show up", 1, "create_monitor", {}),
     ("every morning at 7 summarise overnight activity", 1, "create_report", {}),
     ("every hour tell me what you see", 1, "create_report", {}),
-    ("stop the alarm", 1, "stop_alarm", {}),
-    ("cancel the report", 1, "stop_report", {}),
-    ("stop watching the gate", 1, "stop_monitor", {}),
+    # bare stop requests: the stop tools pick the item, so the router runs them
+    ("stop the alarm", 0, "stop_alarm", {"action": "disarm"}),
+    ("silence the alarm", 0, "stop_alarm", {"action": "silence"}),
+    ("cancel the report", 0, "stop_report", {}),
+    ("stop watching the gate", 0, "stop_monitor", {}),
+    ("stop watching for that", 0, "stop_monitor", {}),
+    ("cancel alarm 2", 0, "stop_alarm", {"alarm_id": 2}),
     # "remove it" right after an alarm was armed means that alarm
-    ("can you remove it", 1, "stop_alarm", {"__last_kind": "alarm"}),
-    ("remove the notification", 1, "stop_monitor", {"__last_kind": "monitor"}),
-    ("cancel that", 1, "stop_report", {"__last_kind": "report"}),
+    ("can you remove it", 0, "stop_alarm", {"__last_kind": "alarm"}),
+    ("remove the notification", 0, "stop_monitor", {"__last_kind": "monitor"}),
+    ("cancel that", 0, "stop_report", {"__last_kind": "report"}),
+    ("stop talking", 2, None, {}),
+    # an absolute clock window with nothing named → the footage narration
+    ("what happened at the gate between 2pm and 3pm", 0, "describe_window", {"camera_id": "cam2"}),
     # ── NEW: what is set up → list_standing ──
     ("what alarms do I have", 0, "list_standing", {"kind": "alarm"}),
     ("do I have any alarms", 0, "list_standing", {"kind": "alarm"}),
