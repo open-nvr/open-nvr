@@ -1161,3 +1161,57 @@ def test_create_alarm_without_a_question_trusts_the_arguments():
 
     asyncio.run(go())
 
+
+# ── "remove it" without a number (2026-11-09) ─────────────────────────
+
+def test_stop_alarm_without_an_id_takes_the_one_just_armed():
+    rt = _runtime()
+    asyncio.run(rt._handle_create_alarm({"name": "Car Arrival", "target": "car", "camera_id": "cam1"}))
+    assert rt.last_standing == ("alarm", 1)
+    msg = asyncio.run(rt._handle_stop_alarm({}))
+    assert "removed alarm #1" in msg.lower() and "car arrival" in msg.lower()
+    assert rt.alarms.list() == [] and rt.last_standing is None
+
+
+def test_stop_alarm_without_an_id_and_nothing_armed_says_so():
+    rt = _runtime()
+    assert "no alarms" in asyncio.run(rt._handle_stop_alarm({})).lower()
+
+
+def test_stop_alarm_without_an_id_removes_all_when_asked_for_all():
+    rt = _runtime()
+    asyncio.run(rt._handle_create_alarm({"name": "Car", "target": "car", "camera_id": "cam1"}))
+    asyncio.run(rt._handle_create_alarm({"name": "Porch", "target": "person", "camera_id": "cam1"}))
+    rt.tools.current_question = "I'm asking you to remove the alarms, right?"
+    try:
+        msg = asyncio.run(rt._handle_stop_alarm({}))
+    finally:
+        rt.tools.current_question = None          # a context variable shared by every runtime in this thread
+    assert "removed 2 alarms" in msg.lower() and rt.alarms.list() == []
+
+
+def test_stop_alarm_without_an_id_lists_the_choices_when_ambiguous():
+    rt = _runtime()
+    asyncio.run(rt._handle_create_alarm({"name": "Car", "target": "car", "camera_id": "cam1"}))
+    asyncio.run(rt._handle_create_alarm({"name": "Porch", "target": "person", "camera_id": "cam1"}))
+    rt.last_standing = None                                  # a restart forgot which came last
+    rt.tools.current_question = "stop the alarm"
+    try:
+        msg = asyncio.run(rt._handle_stop_alarm({}))
+    finally:
+        rt.tools.current_question = None
+    assert "which alarm" in msg.lower() and "#1" in msg and "#2" in msg and len(rt.alarms.list()) == 2
+
+
+def test_an_explicit_id_still_wins():
+    rt = _runtime()
+    asyncio.run(rt._handle_create_alarm({"name": "Car", "target": "car", "camera_id": "cam1"}))
+    asyncio.run(rt._handle_create_alarm({"name": "Porch", "target": "person", "camera_id": "cam1"}))
+    msg = asyncio.run(rt._handle_stop_alarm({"alarm_id": 1}))
+    assert "removed alarm #1" in msg.lower() and [a["id"] for a in rt.alarms.list()] == [2]
+
+
+def test_the_stop_tools_no_longer_require_an_id():
+    import camera_agent as ca
+    for tool in (ca._stop_alarm_tool(), ca._stop_monitor_tool(), ca._stop_report_tool()):
+        assert tool["function"]["parameters"]["required"] == []

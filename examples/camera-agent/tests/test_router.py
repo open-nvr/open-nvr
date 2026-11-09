@@ -384,3 +384,73 @@ def test_decide_carries_the_which_camera_question_past_the_hints():
     d = router.decide("what is the person wearing?", cameras=SIX, advertised=ALL, roles=SIX_ROLES, now=NOW)
     assert d.tier == 2 and d.hint is None and d.ask.startswith("Which camera do you mean")
 
+
+# ── the office session of 2026-11-09 ─────────────────────────────────
+
+@pytest.mark.parametrize("q", [
+    "Hey, how are you doing?", "do you hear me?", "Yeah, I'm good. Yeah. Um okay. Okay. Thank you. Bye.",
+    "um okay", "yes", "alright, thanks",
+])
+def test_spoken_check_ins_and_fillers_are_small_talk(q):
+    """'Hey, how are you doing?' was routed to describe_camera and answered
+    by the VLM ("I'm doing well, thank you for asking!"); a tail of
+    fillers reached the model with tools and came back as the room."""
+    d = _t0(q)
+    assert d is not None and d.routed and d.tool is None and d.reason == "small talk", q
+
+
+@pytest.mark.parametrize("q, reply", [
+    ("how is the weather today?", "I am sorry, I cannot provide the weather. I can only access the camera feeds and history."),
+    ("Hey, do you hear me? Hi, how are you?", "I am the OpenNVR Agent. I am here to assist you with your camera system."),
+    ("remove the alarms", "I see that you are asking to remove alarms. I need an alarm ID."),
+    ("okay then remove it for person", "I don't have a watch number to stop."),
+])
+def test_a_reply_that_mentions_cameras_without_a_sighting_is_not_forced(q, reply):
+    """Every one of these was forced into describe_camera on the box: the
+    weather question came back as a description of the office, and
+    'remove the alarms' as 'I see two chairs'."""
+    assert not router._should_force_grounding(q, reply), (q, reply)
+
+
+@pytest.mark.parametrize("q, reply", [
+    ("what's on hammer 2", "Camera 2 shows a person at the door."),
+    ("hmm", "I see a dog in the yard."),
+    ("is anyone at the gate?", "No one is there."),
+])
+def test_a_claimed_sighting_or_a_camera_question_still_forces(q, reply):
+    assert router._should_force_grounding(q, reply), (q, reply)
+
+
+@pytest.mark.parametrize("q", [
+    "Thank you. Bye.", "Yeah, I'm good. Yeah. Um okay. Okay. Thank you. Bye.", "ok thanks bye bye",
+    "alright, see you", "that's it, good night!",
+])
+def test_a_turn_that_ends_in_a_goodbye_is_a_closing(q):
+    assert router.is_closing(q), q
+
+
+@pytest.mark.parametrize("q", ["bye the way, is anyone there?", "thanks, that's all", "good night camera 1 looks dark"])
+def test_a_goodbye_word_mid_sentence_is_not_a_closing(q):
+    assert not router.is_closing(q), q
+
+
+@pytest.mark.parametrize("q", [
+    "okay then remove it for person. I don't need any notification when that person arrives.",
+    "can you remove it for the car?", "I don't need that notification any more", "delete the watch",
+])
+def test_taking_a_standing_thing_down_is_a_side_effect_not_a_detection(q):
+    """'remove it for person…' was routed to detect_objects and answered
+    'two chairs and a toilet'."""
+    d = _t0(q)
+    assert d is not None and not d.routed and "side effect" in d.reason, q
+
+
+@pytest.mark.parametrize("last, tool", [("alarm", "stop_alarm"), ("report", "stop_report"),
+                                         ("monitor", "stop_monitor"), (None, "stop_monitor")])
+def test_remove_it_means_the_thing_set_up_last(last, tool):
+    d = router.decide("can you remove it?", cameras=CAMS, advertised=ALL | {"stop_monitor", "stop_report"},
+                      now=NOW, last_kind=last)
+    assert d.tier == 1 and d.hint == tool, (last, d)
+    # named kinds still win over the memory
+    d = router.decide("remove the alarm", cameras=CAMS, advertised=ALL | {"stop_monitor"}, now=NOW, last_kind="monitor")
+    assert d.hint == "stop_alarm"

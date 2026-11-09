@@ -540,6 +540,43 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   now `tier0_frames_idle_duplicates_total{camera}`, apart from drops, and
   never the warning.
 
+- **The camera agent stops describing the room when nobody asked.** From
+  the Ventuno Q session of 2026-11-09: a greeting, a weather question and
+  "remove the alarms" all came back as "I see a wooden desk and two black
+  office chairs". The anti-fabrication guard forced a look whenever the
+  model's reply mentioned a camera; now a standing request (alarm, watch,
+  report, "remove it") is never forced, and a reply to a non-camera
+  question is forced only when it claims a sighting. Spoken check-ins and
+  fillers ("how are you doing?", "do you hear me?", "um okay") are small
+  talk, so none of them reaches the describe tool; a turn that ends in a
+  goodbye ("yeah, I'm good. okay. thank you. bye") is a closing; taking a
+  standing thing down ("remove it for person, I don't need any
+  notification") is a standing request, not a detection. The identity
+  line no longer tells the model to open every answer with "I see…".
+- **"Remove it" works without an alarm number.** `stop_alarm`,
+  `stop_monitor` and `stop_report` no longer require an id: without one
+  they take the thing set up most recently, the only one there is, or all
+  of them when the question says so, and otherwise answer with a numbered
+  list to choose from. The router's stop hint picks the tool for the kind
+  set up last. The session had armed an alarm and then answered "can you
+  remove it?" with "I need an alarm number to stop it" three times.
+- **Talk mode shows what you said and keeps answers apart.** The page
+  never received the transcript over the stream (the user aggregator
+  consumes it upstream), so no user bubble appeared and every answer was
+  appended to the first one. The streaming service now sends the
+  transcript before the answer and a `turn_end` after it, and a streamed
+  turn publishes its frames and cameras the way a text turn returns them,
+  so the evidence image is back beside the answer.
+- **Hourly "what you see" reports look at the cameras.** A scheduled
+  report whose query asks to see or describe the cameras and names no
+  object runs as a scene round (describe each camera, then the hour's
+  visits) instead of the history tools' default people count.
+- **The Hardware panel no longer names moondream and advises a GPU for
+  visual questions on a box where Gemma answers them on the Hexagon.**
+  The caption and visual-question rows of an NPU captioner are marked
+  accelerated with the configured adapter named, whether or not the
+  detector's own gauge could be read.
+
 - **Core stops minting a stream token on every roster request.** The
   detect-pipeline and the camera agent each re-read the camera roster every
   30 s, and every call signed a fresh wildcard MediaMTX token and logged it
