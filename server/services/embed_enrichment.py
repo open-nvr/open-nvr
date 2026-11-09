@@ -50,6 +50,21 @@ what a joint image-text model gives you; an adapter that can only embed
 images will fail the text call and the vector arm simply will not run.
 It is asked for through the same contract, so an adapter that does both
 needs no special registration.
+
+CAPTIONS, EMBEDDED TOO
+----------------------
+
+:func:`enrich_event_caption_embedding` puts the visit's caption (and
+its projected attribute words) through the same text tower the QUERY
+goes through, and stores the result as the visit's ``caption`` vector
+beside its ``image`` one. Query-vs-caption is text-vs-text in a space
+the model was trained to align with images, not a sentence encoder —
+good enough to rank "person wearing a light blue tunic" near "man in a
+blue kurta", which plain word matching cannot, and honest about being
+the cheap option: no second model, no second adapter, one more call to
+the one already registered. Runs after a caption lands (the captioner
+calls it) and from the backfill; never embeds an empty caption; a
+failure here leaves the caption exactly where it was.
 """
 
 from __future__ import annotations
@@ -60,9 +75,10 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 __all__ = ["EMBED_SKILL", "EMBED_TASK", "EMBEDDABLE_LABELS",
-           "embed_text", "enrich_event_embedding", "wants_embedding"]
+           "caption_text", "embed_text", "enrich_event_caption_embedding",
+           "enrich_event_embedding", "wants_embedding"]
 
-from services.embedding_store import EMBED_TASK
+from services.embedding_store import EMBED_TASK, KIND_CAPTION, KIND_IMAGE
 from services.enrichment_gate import DROPPED
 
 #: Aliases an adapter might advertise instead of the canonical name.
@@ -299,7 +315,7 @@ async def enrich_event_embedding(event_id: int,
         # (the model changed behind the adapter: CLIP → SigLIP 2) is
         # replaced — that is what the backfill's re-walk is for; a retry
         # on the same producer still does nothing.
-        existing = db.get(EventEmbedding, row.id)
+        existing = db.get(EventEmbedding, (row.id, KIND_IMAGE))
         if existing is not None and existing.model == producer:
             return
         evidence_path = row.evidence_path
@@ -342,9 +358,95 @@ async def enrich_event_embedding(event_id: int,
         if db.get(TimelineEvent, int(event_id)) is None:
             # Retention deleted the visit while the adapter was thinking.
             return
-        put_embedding(db, event_id=int(event_id), vector=vector, model=producer)
+        put_embedding(db, event_id=int(event_id), vector=vector, model=producer,
+                      kind=KIND_IMAGE)
     except Exception:                              # noqa: BLE001
         logger.exception("embed enrichment: write failed for event %s", event_id)
         db.rollback()
+    finally:
+        db.close()
+
+
+def caption_text(caption: str | None, attributes: str | None) -> str:
+    """What gets embedded for a visit's ``caption`` vector: the caption
+    and the projected attribute words, space-joined, or ``""`` when
+    there is no caption. Attributes alone are not embedded — "red van"
+    is a filter, not a description, and the lexical arm already matches
+    it exactly."""
+    cap = " ".join((caption or "").split())
+    if not cap:
+        return ""
+    attrs = " ".join((attributes or "").split())
+    return f"{cap} {attrs}".strip() if attrs else cap
+
+
+async def enrich_event_caption_embedding(event_id: int) -> str | None:
+    """Background task: embed the visit's caption words, once per producer.
+
+    Same shape and the same three phases as :func:`enrich_event_embedding`,
+    and the same contract to the backfill: ``"dropped"`` when the gate
+    refused the call, ``"done"`` when a vector was written, None when
+    there was nothing to do (embedding off, no adapter, no caption, or
+    already embedded by this producer).
+
+    Gated by ``EVENTS_EMBED_ENRICHMENT`` and nothing else: the caption
+    already paid for its inference, the text tower is a fraction of the
+    image tower's cost, and a camera that was never assigned the
+    ``embed`` skill still gains a searchable caption vector. The
+    per-camera skill exists to keep a vision transformer off every
+    car; this is not that.
+    """
+    from core.config import settings
+
+    if not getattr(settings, "events_embed_enrichment", False):
+        return None
+
+    found = await _resolve_embed_producer()
+    if found is None:
+        return None
+    adapter, producer = found
+
+    # ── Phase 1: read, briefly ──────────────────────────────────────
+    from core.database import SessionLocal
+    from models import EventEmbedding, EventText, TimelineEvent
+
+    db = SessionLocal()
+    try:
+        if db.get(TimelineEvent, int(event_id)) is None:
+            return None
+        words = db.get(EventText, int(event_id))
+        text = caption_text(getattr(words, "caption", None),
+                            getattr(words, "attributes", None))
+        if not text:
+            return None
+        existing = db.get(EventEmbedding, (int(event_id), KIND_CAPTION))
+        if existing is not None and existing.model == producer:
+            return None
+    finally:
+        db.close()
+
+    # ── Phase 2: adapter call, no session held ──────────────────────
+    payload = {"task": EMBED_TASK, "text": text}
+    vector = await _infer(adapter, payload, what=f"caption of event {event_id}")
+    if vector is DROPPED:
+        return "dropped"
+    if not vector:
+        return None
+
+    # ── Phase 3: reopen and write ───────────────────────────────────
+    from services.embedding_store import put_embedding
+
+    db = SessionLocal()
+    try:
+        if db.get(TimelineEvent, int(event_id)) is None:
+            return None
+        put_embedding(db, event_id=int(event_id), vector=vector, model=producer,
+                      kind=KIND_CAPTION)
+        return "done"
+    except Exception:                              # noqa: BLE001
+        logger.exception("embed enrichment: caption vector write failed for event %s",
+                         event_id)
+        db.rollback()
+        return None
     finally:
         db.close()

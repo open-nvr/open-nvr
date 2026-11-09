@@ -19,6 +19,38 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and unit-tested but not yet measured against it on the Ventuno Q, and
   nothing here changes a box that did not ask.
 
+- **Search compares the question with what each caption means, not only
+  with its words.** "Man in a blue kurta" found nothing when the captioner
+  had written "person wearing a light blue tunic": the word arm needs the
+  exact term and the frame arm sees pixels, not phrasing. With
+  `EVENTS_EMBED_ENRICHMENT` on, each caption (plus its projected attribute
+  words) is now put through the embedding model's text tower the moment it
+  lands — and from the backfill for captions written earlier — and stored
+  as the visit's `caption` vector beside its `image` vector
+  (`event_embeddings.kind`, migration `b3c9e5f7a1d2`; existing rows are
+  `image`). Search ranks the query vector against those caption vectors as
+  a third arm, floored by `SEARCH_CAPTION_MIN_SIMILARITY` (0.22, same
+  scale as the image floor), and fuses it with the word and frame arms by
+  the same RRF. The response's `semantic` block lists every arm that ran
+  with its count, `added_by_caption` says how many results only this arm
+  found, and `semantic.caption` carries the arm's own scan and floor
+  numbers. A visit with no caption vector is skipped by this arm, not
+  scored as zero; an empty caption is never embedded; a failed embedding
+  never costs the caption; a model change re-embeds caption vectors with
+  the frame vectors. The text tower is SigLIP's, trained to align with
+  images rather than with other sentences, so this is the cheap option
+  (no second model) and not a sentence encoder.
+
+- **The detect-pipeline says where a dropped frame's time went.** The
+  capacity warning ("N of M decoded frames were never detected on") now
+  ends with the window's per-frame split: waited for the next frame, in
+  the detection stages, after them (publish, gate, evidence, stores). The
+  last two are exported as `tier0_stage_latency_seconds{stage="wait"|"post"}`
+  beside the existing stages. On the Ventuno Q (2026-11-09) camera 23
+  dropped a quarter of its frames in some minutes while its detector took
+  40 ms and the stage timers summed to 4 ms; nothing said where the other
+  200 ms per frame was.
+
 - **Core alarms when a camera records segments that hold no video.** On the
   Ventuno Q (2026-11-09) a camera's RTP clock wrapped and the relay in front
   of it clamped every timestamp, so MediaMTX closed a 50 MB segment every
@@ -365,6 +397,14 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The camera agent no longer says "Let me check the office camera"
+  before answering.** Thinking aloud (`thinking_aloud`, fillers.py) is off
+  by default. It was built for the CPU-only box, where a tool turn took
+  5–10 s and the silence needed filling; on the NPU the answer lands in a
+  second or two and the line arrived as an unexpected extra reply right
+  before the real one (morning test, 2026-11-09). The feature stays for
+  slow boxes: `thinking_aloud: true` in the agent config brings it back.
+
 - **Disk rotation instead of a purge that empties the box.** The free-space
   floor now defaults to 2 GB, or 2 % of the recordings volume if that is
   more (it used to be off, and installs that had set 10 GB on a small disk
@@ -434,6 +474,15 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   timing matters.
 
 ### Fixed
+
+- **Core stops minting a stream token on every roster request.** The
+  detect-pipeline and the camera agent each re-read the camera roster every
+  30 s, and every call signed a fresh wildcard MediaMTX token and logged it
+  — 240 identical tokens and log lines an hour on the Ventuno Q
+  (2026-11-09). Platform callers now share one token reused for half its
+  60-minute life; apps keep their per-camera tokens. The storage service's
+  "Using default recording path" line, written by the 15 s system monitor
+  on every tick, is now logged once per path.
 
 - **CI signs images without depending on anonymous GitHub release
   downloads.** On 2026-11-09 GitHub's anonymous release downloads returned

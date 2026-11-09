@@ -268,7 +268,13 @@ class AppConfig:
     # timings) is at least filler_min_ms. filler_source "model" asks the
     # LLM to write the line in the SAME first pass (a few extra output
     # tokens), template as fallback.
-    thinking_aloud: bool = True
+    #
+    # OFF by default since 2026-11-09. It was built for the CPU-only box,
+    # where a tool turn took 5–10 s and the silence needed filling. On the
+    # NPU the answer lands in one or two seconds, so "Let me check the
+    # office camera" arrives as an unexpected extra reply right before the
+    # real one (Varun, morning test 2026-11-09). Turn it on for a slow box.
+    thinking_aloud: bool = False
     # The router (router.py): decide simple camera questions before the
     # LLM sees them. router_tier0 — when every slot resolves (camera,
     # tool, label, window), call the tool now and ask the model only to
@@ -3183,7 +3189,7 @@ def load_config(path: str | Path) -> AppConfig:
         interrupt_min_words=_int("interrupt_min_words", 2),
         interrupt_addressee=(True if raw.get("interrupt_addressee") is None
                              else bool(raw.get("interrupt_addressee"))),
-        thinking_aloud=(True if raw.get("thinking_aloud") is None else bool(raw.get("thinking_aloud"))),
+        thinking_aloud=(False if raw.get("thinking_aloud") is None else bool(raw.get("thinking_aloud"))),
         router_tier0=(True if raw.get("router_tier0") is None else bool(raw.get("router_tier0"))),
         router_hints=(True if raw.get("router_hints") is None else bool(raw.get("router_hints"))),
         filler_min_ms=_float("filler_min_ms", 1500.0),
@@ -3585,7 +3591,7 @@ class CameraAgentRuntime:
         self.thinking = ThinkingAloud(
             min_ms=float(getattr(cfg, "filler_min_ms", 1500.0)),
             source=str(getattr(cfg, "filler_source", "template") or "template"),
-            enabled=bool(getattr(cfg, "thinking_aloud", True)),
+            enabled=bool(getattr(cfg, "thinking_aloud", False)),
         )
         self._update_subscribers: set = set()
         self._configure_tools()
@@ -5833,7 +5839,7 @@ class CameraAgentRuntime:
         # Disable Qwen3-style "thinking" for snappy tool-calling when the
         # operator opted out. Only appended when llm_think is explicitly False,
         # so non-thinking models (qwen2.5, llama3.2, …) are unaffected.
-        if getattr(self.cfg, "filler_source", "template") == "model" and getattr(self.cfg, "thinking_aloud", True):
+        if getattr(self.cfg, "filler_source", "template") == "model" and getattr(self.cfg, "thinking_aloud", False):
             prompt += (
                 "\n\nWhen you call a tool, also write ONE short sentence (under twelve "
                 "words) telling the user what you are about to check — for example "

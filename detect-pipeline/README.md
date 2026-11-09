@@ -627,8 +627,10 @@ unhealthy camera; a reader whose ffmpeg is still running but has decoded nothing
 60 s — timestamps that stopped advancing after an RTP clock wrap, no keyframes in a
 keyframe-only mode — is restarted and counted here instead of being left hanging
 until the process dies). Plus `tier0_stage_latency_seconds{camera,stage}` — per-stage time
-(`decode|motion|region|detect|track`) so you can see *where* a frame's time goes, not
-just the end-to-end total.
+(`decode|motion|region|detect|track`, plus `wait` — blocked until the next frame arrived —
+and `post` — everything after the detection stages: publish, gate, evidence, stores) so
+you can see *where* a frame's time goes, not just the end-to-end total. The capacity
+warning prints the same three-way split as per-frame averages for its window.
 
 **Model-benchmarking signals** (compare two detectors of the same kind on speed +
 output): `tier0_detector_latency_seconds{camera,model}` (pure detector inference

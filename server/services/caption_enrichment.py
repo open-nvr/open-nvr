@@ -380,6 +380,7 @@ async def enrich_event_caption(event_id: int,
 
     from models import EventText
 
+    written = False
     db = SessionLocal()
     try:
         row = db.get(TimelineEvent, int(event_id))
@@ -398,9 +399,31 @@ async def enrich_event_caption(event_id: int,
         existing.source = adapter[:60]
         existing.updated_at = datetime.now(UTC)
         db.commit()
-        return "done"
+        written = True
     except Exception:                              # noqa: BLE001
         logger.exception("caption enrichment: write failed for event %s", event_id)
         db.rollback()
     finally:
         db.close()
+    if not written:
+        return
+    # The caption is committed. Its vector is a separate, best-effort
+    # step AFTER the session is closed (an adapter call holds no
+    # session — the rule above), and nothing it does can take the
+    # caption back: it is off unless EVENTS_EMBED_ENRICHMENT is on, a
+    # no-op without an adapter, and any failure is a debug line.
+    await _embed_caption(event_id)
+    return "done"
+
+
+async def _embed_caption(event_id: int) -> None:
+    """Fold a freshly written caption into the vector store, so search
+    can rank the visit by what the caption MEANS and not only by the
+    words in it. Never raises."""
+    try:
+        from services.embed_enrichment import enrich_event_caption_embedding
+
+        await enrich_event_caption_embedding(int(event_id))
+    except Exception:                              # noqa: BLE001
+        logger.debug("caption enrichment: caption vector for %s not written",
+                     event_id, exc_info=True)

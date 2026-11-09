@@ -68,6 +68,16 @@ candidate set WITHOUT the text predicate. Restricting similarity to
 rows that already matched the words would make the second arm
 structurally incapable of finding anything the first one missed, which
 is the only reason to have a second arm.
+
+A third arm, ``caption``, is the same query vector against the visits'
+CAPTION vectors (``embedding_store.KIND_CAPTION``: the caption and
+attribute words through the embedding model's text tower). Words catch
+the exact term, the image arm catches what the frame shows, and the
+caption arm catches what the description MEANS — "man in a blue kurta"
+against "person wearing a light blue tunic", which neither of the other
+two can. It is fused like the others, over the same candidate set, with
+its own floor (``SEARCH_CAPTION_MIN_SIMILARITY``), and a visit with no
+caption vector simply does not score in it.
 """
 
 from __future__ import annotations
@@ -488,9 +498,14 @@ def search_page(
     limit: int = 50,
     skip: int = 0,
     min_similarity: float | None = None,
+    caption_min_similarity: float | None = None,
     **filters: Any,
 ) -> SearchPage:
-    """A page of results, with the vector arm fused in when there is one.
+    """A page of results, with the vector arms fused in when there are any.
+
+    ``min_similarity`` floors the image arm, ``caption_min_similarity``
+    the caption arm; both are cosine on the same scale, and ``None`` or
+    0 means no floor.
 
     This is what routes should call. :func:`search_events` remains the
     single-arm path and is unchanged, because plenty of callers want a
@@ -584,13 +599,20 @@ def search_page(
             db, filters=filters, labels=labels, camera_ids=camera_ids,
             text=text, attrs=attrs, limit=depth, ranked=_is_postgres(db))
 
-    # Arm 2 — vectors, over the structural set with no text predicate.
+    # Arms 2 and 3 — vectors, over the structural set with no text
+    # predicate. One candidate query serves both: the image arm scores
+    # each candidate's frame vector, the caption arm its caption vector,
+    # and a candidate missing either is skipped by that arm, not scored
+    # as zero (see rank_by_similarity).
     candidate_ids = _arm_ids(
         db, filters=filters, labels=labels, camera_ids=camera_ids,
         text="", attrs=attrs, limit=cap.ceiling + 1, ranked=False)
     sim = embedding_store.rank_by_similarity(
         db, query_vector=query_vector, candidate_ids=candidate_ids,
-        limit=depth, cap=cap)
+        limit=depth, cap=cap, kind=embedding_store.KIND_IMAGE)
+    csim = embedding_store.rank_by_similarity(
+        db, query_vector=query_vector, candidate_ids=candidate_ids,
+        limit=depth, cap=cap, kind=embedding_store.KIND_CAPTION)
 
     # THE FLOOR. rank_by_similarity returns its top-N whatever the
     # numbers are, so a query nothing resembles still produced a full
@@ -598,23 +620,33 @@ def search_page(
     # the answer. "A person in a red shirt" on a box that never saw one
     # returned fifty people at cosine 0.19. Below the floor a row is not
     # a result; how many were cut is reported so a reader can tell "the
-    # floor removed everything" from "nothing had a vector".
+    # floor removed everything" from "nothing had a vector". Each vector
+    # arm has its own floor: text-vs-text and text-vs-image similarities
+    # come off the same model but do not sit on the same scale.
     best = max(sim.scores) if sim.scores else None
-    vector_ids = list(sim.ids)
-    below_floor = 0
-    if min_similarity is not None and min_similarity > 0 and sim.scores:
-        vector_ids = [eid for eid, s in zip(sim.ids, sim.scores) if s >= min_similarity]
-        below_floor = len(sim.ids) - len(vector_ids)
+    vector_ids, below_floor = _apply_floor(sim, min_similarity)
+    caption_best = max(csim.scores) if csim.scores else None
+    caption_ids, caption_below_floor = _apply_floor(csim, caption_min_similarity)
 
     arms: dict[str, list[int]] = {"vector": vector_ids}
     if text_ids:
         arms["text"] = text_ids
+    if caption_ids:
+        arms["caption"] = caption_ids
+    caption_block = {
+        "considered": csim.considered, "truncated": csim.truncated,
+        "floor": caption_min_similarity, "below_floor": caption_below_floor,
+        "best": None if caption_best is None else round(float(caption_best), 4),
+    }
     scores, places = _rrf(arms)
     if not scores:
         return SearchPage(hits=[], total=total, semantic={
-            "used": True, "reason": "below-floor" if below_floor else "no-candidates",
+            "used": True,
+            "reason": ("below-floor" if (below_floor or caption_below_floor)
+                       else "no-candidates"),
             "considered": sim.considered, "truncated": sim.truncated,
             "floor": min_similarity, "below_floor": below_floor, "best": best,
+            "caption": caption_block,
             "arms": {k: 0 for k in arms}, "note": cap.note})
 
     # Ties are a real outcome — two rows placing symmetrically in the two
@@ -632,6 +664,8 @@ def search_page(
     _attach_claims(db, hits)
 
     vector_only = [eid for eid in ordered if places.get(eid, {}).get("text") is None]
+    caption_only = [eid for eid in vector_only
+                    if places.get(eid, {}).get("vector") is None]
     # WHAT `total` MEANS WHEN TWO ARMS RAN.
     #
     # The vector arm deliberately returns rows the text predicate does
@@ -662,9 +696,16 @@ def search_page(
         "truncated": sim.truncated,
         "ceiling": cap.ceiling,
         # Rows the words would never have returned. The honest measure of
-        # what the second arm is contributing — if this is always zero,
+        # what the vector arms are contributing — if this is always zero,
         # the embeddings are costing a scan and buying a reordering.
         "added_by_vector": len(vector_only),
+        # Of those, the rows ONLY the caption arm found: neither the
+        # words nor the frame matched, the description's meaning did.
+        "added_by_caption": len(caption_only),
+        # The caption arm's own scan and floor, kept apart from the
+        # image arm's: an operator tuning SEARCH_CAPTION_MIN_SIMILARITY
+        # needs this arm's `best` and `below_floor`, not a blend.
+        "caption": caption_block,
         # The floor and what it did, next to the best score the arm saw,
         # so an operator tuning SEARCH_VECTOR_MIN_SIMILARITY has the two
         # numbers that matter on the same line.
@@ -674,6 +715,16 @@ def search_page(
         "accel": cap.accel,
         "note": cap.note,
     })
+
+
+def _apply_floor(sim, floor: float | None) -> tuple[list[int], int]:
+    """The ids at or above ``floor``, and how many were cut. No floor
+    (``None`` or 0) keeps every id the scan returned."""
+    ids = list(sim.ids)
+    if floor is None or floor <= 0 or not sim.scores:
+        return ids, 0
+    kept = [eid for eid, s in zip(sim.ids, sim.scores) if s >= floor]
+    return kept, len(ids) - len(kept)
 
 
 def _arm_ids(db, *, filters, labels, camera_ids, text, attrs,
