@@ -499,3 +499,27 @@ def test_a_goodbye_anywhere_in_pure_small_talk_is_a_closing(q):
 @pytest.mark.parametrize("q", ["thanks a lot", "okay, hello there", "good morning"])
 def test_small_talk_without_a_goodbye_is_not_a_closing(q):
     assert not router.is_closing(q), q
+
+
+@pytest.mark.parametrize("q,at,every", [
+    ("every hour tell me what you see on cam1", None, 60),
+    ("every 15 minutes count the people", None, 15),
+    ("every two hours summarise the gate", None, 120),
+    ("every half hour tell me who came", None, 30),
+    ("hourly report of visitors", None, 60),
+    ("every morning at 7 summarise overnight activity", 7 * 60, None),
+    ("every evening tell me how many cars came", 18 * 60, None),
+    ("daily at 9pm give me a rundown", 21 * 60, None),
+    ("every morning summarise cam1", 8 * 60, None),
+    ("summarise the day", None, None),
+])
+def test_a_report_schedule_is_read_from_the_words(q, at, every):
+    assert router.schedule_from_text(q) == (at, every), q
+
+
+def test_a_long_stop_request_is_judged_by_its_first_clause():
+    d = router.decide("okay then remove it, I don't need any notification when a car arrives",
+                      cameras=CAMS, advertised=ALL | {"stop_monitor", "stop_report"}, now=NOW,
+                      last_kind="monitor")
+    assert d.tier == 0 and d.tool == "stop_monitor", d
+

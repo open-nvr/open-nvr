@@ -4733,6 +4733,14 @@ class CameraAgentRuntime:
             every = int(every) if every else None
         except (TypeError, ValueError):
             every = None
+        if at_min is None and every is None:
+            # The model named no schedule it could fill ("every hour tell
+            # me what you see" came back with at="every_minutes" and no
+            # minutes, 3 of 3 on the NPU): the words of the question
+            # decide, the same way the alarm takes its window from them.
+            import router as _router
+            q = getattr(getattr(self, "tools", None), "current_question", None) or ""
+            at_min, every = _router.schedule_from_text(q)
         # Mirror create's own default so dedup compares what will be stored.
         _at = at_min if (at_min is not None or every) else 8 * 60
         dup = self.reports.find_duplicate(query=query, at_min=_at,

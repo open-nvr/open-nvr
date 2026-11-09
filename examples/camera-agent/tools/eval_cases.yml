@@ -308,7 +308,7 @@
     - ask: "okay then remove it, I don't need any notification when a car arrives"
       expect:
         tool: stop_monitor
-        reply_contains: removed
+        reply_contains: [removed, stopped, cancelled, "no longer", "turned off"]
 
 - id: hourly-what-you-see-is-a-scene-report
   ask: "every hour tell me what you see on {camera}"

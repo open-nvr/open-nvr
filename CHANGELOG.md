@@ -561,6 +561,16 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Camera agent: the two misses of eval run 5 on the Ventuno Q (151 of
+  156, 2026-11-09).** A report whose schedule the model left blank ("every
+  hour tell me what you see" came back with the word `every_minutes` in
+  `at` and no minutes, 3 of 3) now takes its schedule from the question's
+  own words — every N minutes/hours, hourly, every morning/evening at X,
+  daily at X — the way an alarm takes its window. A long stop request
+  ("okay then remove it, I don't need any notification when a car
+  arrives") is judged by its first clause, so it runs the stop tool
+  directly instead of waiting on the hinted model (skipped 2 of 3).
+
 - **Camera agent: the three misses of the 52-case live eval on the Ventuno
   Q (149 of 156 turns, 2026-11-09).** A bare stop request ("stop watching
   for that", "cancel alarm 2", "remove it", "silence the alarm") is now
