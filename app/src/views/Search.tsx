@@ -602,26 +602,29 @@ export function Search() {
     })
   }
   for (const n of (interp?.needs ?? []).filter((x) => x.state !== 'available')) {
+    // The state's own line names what would make the word EXACT: an
+    // app to turn on, a setting (people descriptions), or nothing on
+    // this box. With a captioner the word is already matched from the
+    // scene descriptions — "blue kurta" in the caption was found while
+    // the old notice said blue could not be searched — so that case is
+    // an info note that leads with the match, not a warning.
+    const stateKey = n.state === 'never-produced' && (n.apps?.length ?? 0) > 0
+      ? 'search.needs.never-produced-app'
+      : `search.needs.${n.state}`
+    const vars = {
+      word: n.word,
+      kind: t(`search.kind.${n.kind}`),
+      skill: t(`search.skill.${n.skill}`),
+      apps: (n.apps ?? []).join(', '),
+    }
+    const captioned = n.fallback === 'captions'
     notices.push({
       key: `need:${n.kind}:${n.word}`,
-      tone: 'warn',
+      tone: captioned ? 'info' : 'warn',
       icon: <Sparkles size={13} />,
-      text: (
-        <>
-          {t(
-            n.state === 'never-produced' && (n.apps?.length ?? 0) > 0
-              ? 'search.needs.never-produced-app'
-              : `search.needs.${n.state}`,
-            {
-              word: n.word,
-              kind: t(`search.kind.${n.kind}`),
-              skill: t(`search.skill.${n.skill}`),
-              apps: (n.apps ?? []).join(', '),
-            },
-          )}
-          {n.fallback === 'captions' && <> {t('search.needs.captionsFallback')}</>}
-        </>
-      ),
+      text: captioned
+        ? <>{t('search.needs.captioned', vars)} {t(`${stateKey}.exact`, vars)}</>
+        : <>{t(stateKey, vars)}</>,
     })
   }
   if (interp?.wants_plate) {

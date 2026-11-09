@@ -389,6 +389,7 @@ class CameraWorker:
         model_size: int = 320,
         model_id: str | None = None,             # detector identity for benchmarking labels
         best_frames=None,                        # shared BestFrameStore (on-demand best frame)
+        latest_frames=None,                      # shared LatestFrameStore (the newest decoded frame)
         device: str = "/dev/dri/renderD128",
         hwaccel: str = "cpu",             # service-wide DETECT_HWACCEL default
         decode_skip: str = "none",               # ffmpeg -skip_frame (decode-side CPU dial)
@@ -454,6 +455,7 @@ class CameraWorker:
         self.model_size = model_size
         self.model_id = model_id
         self.best_frames = best_frames
+        self.latest_frames = latest_frames
         self.device = device
         self.hwaccel = hwaccel
         self.decode_skip = decode_skip
@@ -1063,10 +1065,20 @@ class CameraWorker:
         drop_t0 = time.monotonic()
         drop_n = 0
         drop_seen = 0
+        # Where a frame's wall time goes, per window: waiting for the next
+        # frame, the detection stages (pipe.process_frame — decode, motion,
+        # region, detect, track), and everything after them (publish, gate,
+        # evidence, stores, adaptive decode). The stage timers alone could
+        # not explain a 25 % drop rate on a camera whose detector took
+        # 40 ms (Ventuno Q, 2026-11-09): the time was outside them.
+        iter_end: float | None = None
+        win_wait = win_proc = win_post = 0.0
         try:
             for frame in src.stream():
                 if self._stop.is_set():
                     break
+                t_recv = time.monotonic()
+                wait_s = (t_recv - iter_end) if iter_end is not None else 0.0
                 # Frame.seq resets to 0 when the source (ffmpeg) restarts — a truthful
                 # restart signal without reaching into the source's internals.
                 seq = getattr(frame, "seq", None)
@@ -1106,15 +1118,23 @@ class CameraWorker:
                             "%d of %d decoded frames in the last %.0fs were never "
                             "detected on (detection ran on %d); the stream is "
                             "intact, the frames are not. %sFewer regions, a smaller "
-                            "input, a lower fps or more CPU.",
+                            "input, a lower fps or more CPU. Per frame this window: "
+                            "waited %.0f ms for the next frame, %.0f ms in the detection "
+                            "stages, %.0f ms after them (publish, gate, evidence, stores).",
                             self.spec.camera_id, drop_n, drop_n + drop_seen,
                             now - drop_t0, drop_seen,
                             (detector_backend_phrase() + ". ") if detector_backend_phrase() else "",
+                            1000.0 * win_wait / max(drop_seen, 1),
+                            1000.0 * win_proc / max(drop_seen, 1),
+                            1000.0 * win_post / max(drop_seen, 1),
                         )
                     drop_t0, drop_n, drop_seen = now, 0, 0
+                    win_wait = win_proc = win_post = 0.0
                 t0 = time.monotonic()
                 result = pipe.process_frame(frame)
                 frame_latency = time.monotonic() - t0
+                win_wait += wait_s
+                win_proc += frame_latency
                 # Spend fewer detector crops when we cannot finish a frame in
                 # its budget. Since #507 falling behind no longer stalls the
                 # decoder — the source's drain thread keeps ffmpeg moving and
@@ -1170,6 +1190,10 @@ class CameraWorker:
                 )
                 # Retain each track's best crop for on-demand fetch (best-frame
                 # store) — cheap: a reference, encoded lazily only if requested.
+                # The newest decoded frame, for /latest_frame: a reference
+                # per processed frame, encoded only if someone asks.
+                if self.latest_frames is not None:
+                    self.latest_frames.put(self.spec.camera_id, frame)
                 if self.best_frames is not None:
                     ts = getattr(frame, "ts", None)
                     for tr in result.tracks:
@@ -1244,6 +1268,17 @@ class CameraWorker:
                         self.spec.camera_id, adaptive.mode, adaptive.skip,
                     )
                     src.set_decode_skip(adaptive.skip)
+                # The rest of this iteration, after the detection stages:
+                # exported beside them as stages "post" and "wait", so a
+                # dashboard shows where a frame's time goes, not only how
+                # long the detector took.
+                iter_end = time.monotonic()
+                post_s = iter_end - (t0 + frame_latency)
+                win_post += post_s
+                _metrics.observe("tier0_stage_latency_seconds", wait_s,
+                                 {"camera": self.spec.camera_id, "stage": "wait"})
+                _metrics.observe("tier0_stage_latency_seconds", post_s,
+                                 {"camera": self.spec.camera_id, "stage": "post"})
         except Exception:
             log.exception("tier0 %s: worker loop crashed", self.spec.camera_id)
         finally:
@@ -1300,6 +1335,7 @@ class WorkerManager:
         model_size: int = 320,
         model_id: str | None = None,                      # detector identity (benchmark labels)
         best_frames=None,                                 # shared BestFrameStore (thread-safe)
+        latest_frames=None,                               # shared LatestFrameStore (thread-safe)
         device: str = "/dev/dri/renderD128",
         hwaccel: str = "cpu",                             # service-wide DETECT_HWACCEL
         decode_skip: str = "none",                        # ffmpeg -skip_frame (decode-side CPU dial)
@@ -1374,6 +1410,7 @@ class WorkerManager:
         self._model_size = model_size
         self._model_id = model_id
         self._best_frames = best_frames
+        self._latest_frames = latest_frames
         self._device = device
         self._hwaccel = hwaccel
         # Max window over which a batch of new workers opens its streams.
@@ -1444,7 +1481,8 @@ class WorkerManager:
             spec, sink,
             detector=self._shared_detector or self._detector_factory(),
             model_size=self._model_size, model_id=self._model_id,
-            best_frames=self._best_frames, device=self._device,
+            best_frames=self._best_frames, latest_frames=self._latest_frames,
+            device=self._device,
             hwaccel=self._hwaccel,
             decode_skip=self._decode_skip,
             decode_threads=self._decode_threads,

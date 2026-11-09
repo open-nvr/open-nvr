@@ -260,10 +260,14 @@ async def _enrich_items(items: list[dict[str, Any]], *, caption_on: bool,
 
     from services.caption_enrichment import enrich_event_caption
     from services.descriptor_enrichment import enrich_event_descriptors
-    from services.embed_enrichment import enrich_event_embedding
+    from services.embed_enrichment import (
+        enrich_event_caption_embedding,
+        enrich_event_embedding,
+    )
     from services.enrichment_governor import wait_for_backfill_slot
 
     out: dict[str, Any] = {"captioned": 0, "described": 0, "embedded": 0,
+                           "caption_embedded": 0,
                            "handled": [], "dropped_at": None}
     for item in items:
         event_id = int(item["event_id"])
@@ -306,6 +310,22 @@ async def _enrich_items(items: list[dict[str, Any]], *, caption_on: bool,
                     out["embedded"] += 1
             except Exception:  # noqa: BLE001
                 logger.warning("enrichment backfill: embedding failed for %s",
+                               event_id, exc_info=True)
+        if embed_on and not dropped:
+            # The caption's own vector. Offered to every visit, not only
+            # the ones the `embed` skill covers (see the enricher for
+            # why): it reads one row and returns when there is no
+            # caption or the vector is already this producer's, so a
+            # visit captioned by the live path before embeddings were
+            # switched on — or before a model change — is picked up here.
+            try:
+                outcome = await enrich_event_caption_embedding(event_id)
+                if outcome == "dropped":
+                    dropped = True
+                elif outcome == "done":
+                    out["caption_embedded"] += 1
+            except Exception:  # noqa: BLE001
+                logger.warning("enrichment backfill: caption embedding failed for %s",
                                event_id, exc_info=True)
         if dropped:
             out["dropped_at"] = event_id
@@ -397,6 +417,8 @@ async def catch_up_once(batch: int = DEFAULT_BATCH,
         state["captioned"] = int(state.get("captioned", 0)) + res["captioned"]
         state["described"] = int(state.get("described", 0)) + res["described"]
         state["embedded"] = int(state.get("embedded", 0)) + res["embedded"]
+        state["caption_embedded"] = (int(state.get("caption_embedded", 0))
+                                     + res["caption_embedded"])
         _write_state(db, state)
     except Exception:  # noqa: BLE001
         logger.exception("enrichment backfill: could not record catch-up progress")
@@ -469,6 +491,7 @@ async def backfill_once(batch: int = DEFAULT_BATCH,
                               descriptor_on=descriptor_on, embed_on=embed_on,
                               pause=pause)
     captioned, described, embedded = res["captioned"], res["described"], res["embedded"]
+    caption_embedded = res["caption_embedded"]
     dropped_at = res["dropped_at"]
 
     # ── Phase 2b: the free repair ───────────────────────────────────
@@ -524,6 +547,8 @@ async def backfill_once(batch: int = DEFAULT_BATCH,
         state["captioned"] = int(state.get("captioned", 0)) + captioned
         state["described"] = int(state.get("described", 0)) + described
         state["embedded"] = int(state.get("embedded", 0)) + embedded
+        state["caption_embedded"] = (int(state.get("caption_embedded", 0))
+                                     + caption_embedded)
         state["repaired"] = int(state.get("repaired", 0)) + repaired
         _write_state(db, state)
     except Exception:  # noqa: BLE001
@@ -534,8 +559,9 @@ async def backfill_once(batch: int = DEFAULT_BATCH,
 
     logger.info(
         "enrichment backfill: %s examined, %s captioned, %s described, "
-        "%s embedded, %s repaired, cursor now %s",
-        len(items), captioned, described, embedded, repaired, lowest,
+        "%s embedded, %s captions embedded, %s repaired, cursor now %s",
+        len(items), captioned, described, embedded, caption_embedded, repaired,
+        lowest,
     )
     return state
 

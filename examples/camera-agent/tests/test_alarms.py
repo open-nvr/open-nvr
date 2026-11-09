@@ -1104,3 +1104,60 @@ def test_alarm_event_carries_the_sighting_time_not_the_ring_time():
         assert alarm.last_triggered > seen_at + 5
 
     asyncio.run(go())
+
+
+# ── the question's window over the model's ───────────────────────────
+
+
+def test_create_alarm_accepts_an_iso_timestamp_as_the_time_of_day():
+    rt = _runtime()
+
+    async def go():
+        msg = await rt._handle_create_alarm(
+            {"name": "Late", "target": "person", "camera_id": "cam1", "after": "2026-11-08T22:00:00+0000"})
+        assert "armed alarm" in msg.lower()
+        assert rt.alarms.list()[0]["window"] == "after 22:00"
+
+    asyncio.run(go())
+
+
+def test_create_alarm_takes_the_window_from_the_question_when_the_model_got_it_wrong():
+    """Measured on the NPU: 'before 6am' arrived as after='06:00'."""
+    rt = _runtime()
+    rt.tools.current_question = "sound the siren if anyone is at cam1 before 6am"
+
+    async def go():
+        await rt._handle_create_alarm(
+            {"name": "Early", "target": "person", "camera_id": "cam1", "after": "06:00"})
+        assert rt.alarms.list()[0]["window"] == "before 06:00"
+
+    asyncio.run(go())
+
+
+def test_create_alarm_drops_a_window_the_question_never_asked_for():
+    """'notify me when a person shows up' came back with after=00:00 — an
+    invented window. No clock words in the question, no window."""
+    rt = _runtime()
+    rt.tools.current_question = "notify me when a person shows up at cam1"
+
+    async def go():
+        await rt._handle_create_alarm(
+            {"name": "Person", "target": "person", "camera_id": "cam1", "after": "00:00"})
+        assert rt.alarms.list()[0]["window"] == "any time"
+
+    asyncio.run(go())
+
+
+def test_create_alarm_without_a_question_trusts_the_arguments():
+    """The /alarms endpoint and the UI call the handler with no turn: the
+    arguments are the operator's own and stay as given."""
+    rt = _runtime()
+    rt.tools.current_question = None
+
+    async def go():
+        await rt._handle_create_alarm(
+            {"name": "UI", "target": "person", "camera_id": "cam1", "after": "18:00", "before": "06:00"})
+        assert rt.alarms.list()[0]["window"] == "after 18:00, before 06:00" or "18:00" in rt.alarms.list()[0]["window"]
+
+    asyncio.run(go())
+

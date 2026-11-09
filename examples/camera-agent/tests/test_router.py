@@ -54,7 +54,8 @@ def test_a_number_that_is_not_a_camera_is_not_a_camera():
     d = _t0("is anyone there in the last 2 hours", preferred="cam1")
     assert d.routed and d.args["camera_id"] == "cam1", "'2 hours' is not cam2"
     d = _t0("did a car come by between 2 and 4pm")
-    assert not d.routed and "ambiguous" in d.reason, "no camera named at all"
+    assert d.routed and d.tool == "search_history" and "camera_id" not in d.args, (
+        "no camera named: the history over every camera, and '2' is not cam2")
 
 
 def test_a_past_question_with_a_window_routes_to_history_with_iso_bounds():
@@ -106,6 +107,7 @@ def test_forced_grounding_picks_cameras_the_same_way():
     """_pick_camera is the always-answers version of _names_camera: the
     same words, then the UI's camera, then the first — never a digit."""
     assert router._pick_camera("did anyone stop by in the last 2 hours", CAMS, "cam1") == "cam1"
+    assert router._pick_camera("did anyone stop by in the last 2 hours", CAMS) == "all"
     assert router._pick_camera("is anyone on cam2", CAMS, "cam1") == "cam2"
 
 
@@ -136,9 +138,10 @@ def test_the_camera_the_ui_is_on_or_the_only_camera_counts_as_named():
 
 # ── Tier 0 refuses ────────────────────────────────────────────────────
 
-def test_two_cameras_and_no_name_is_a_guess_not_a_route():
+def test_two_cameras_and_no_name_looks_at_both():
+    """The first camera used to answer for the fleet; now none named means all."""
     d = _t0("what do you see")
-    assert d is not None and not d.routed and "ambiguous" in d.reason
+    assert d.routed and d.tool == "describe_camera" and d.args["camera_id"] == "all"
 
 
 @pytest.mark.parametrize("q", [
@@ -234,7 +237,11 @@ def test_no_hint_where_tier0_said_the_model_must_decide():
     word for word; a detector hint there IS the wrong-tool iteration."""
     d = router.decide("watch the door and tell me if anyone comes", cameras=CAMS,
                       advertised=ALL, now=NOW)
-    assert d.tier == 2 and d.hint is None and "side effect" in d.reason
+    # A standing request gets the standing-verb hint, never a detector's.
+    assert d.tier == 1 and d.hint == "create_monitor"
+    d = router.decide("every morning summarize cam1", cameras=CAMS,
+                      advertised=ALL, now=NOW)
+    assert d.tier == 2 and d.hint is None and "side effect" in d.reason   # no report tool advertised
     d = router.decide("who is at the door", cameras=CAMS, advertised=ALL, now=NOW)
     assert d.tier == 2 and d.hint is None and "who" in d.reason
 
@@ -245,7 +252,8 @@ def test_decide_prefers_tier0_then_hint_then_nothing():
     d = router.decide("what do you see on cam1", cameras=CAMS, advertised=ALL, now=NOW)
     assert d.tier == 0 and d.tool == "describe_camera"
     d = router.decide("is anybody at the door", cameras=CAMS, advertised=ALL, now=NOW)
-    assert d.tier == 1 and d.hint == "detect_objects", "two cameras: a hint, not a call"
+    assert d.tier == 0 and d.tool == "detect_objects" and d.args["camera_id"] == "all", (
+        "two cameras, none named: the detector over both")
     d = router.decide("tell me a joke", cameras=CAMS, advertised=ALL, now=NOW)
     assert d.tier == 2
     d = router.decide("what do you see on cam1", cameras=CAMS, advertised=ALL, tier0=False,
@@ -290,3 +298,89 @@ def test_small_talk_is_tier_0_with_no_tool(q):
 def test_one_real_word_makes_it_not_small_talk(q):
     d = _t0(q)
     assert d is None or not (d.routed and d.tool is None), q
+
+
+# ── standing requests: alarm or monitor, by the words ────────────────
+
+@pytest.mark.parametrize("q,tool", [
+    ("let me know when a car arrives at cam1", "create_monitor"),
+    ("notify me when a person shows up at cam1", "create_monitor"),
+    ("notify me when more than 3 people gather on cam1", "create_monitor"),
+    ("keep an eye on cam1 for a truck", "create_monitor"),
+    ("sound the siren if anyone is at cam1 before 6am", "create_alarm"),
+    ("set a silent alarm for a person at cam1 after 11pm", "create_alarm"),
+    ("ring an alarm if a person shows up there after 10pm", "create_alarm"),
+    ("wake me if someone comes to cam1", "create_alarm"),
+    ("stop watching for that", "stop_monitor"),
+    ("actually, cancel that alarm", "stop_alarm"),
+    ("turn off the siren", "stop_alarm"),
+])
+def test_standing_requests_are_hinted_by_their_words(q, tool):
+    """Measured on the NPU: 'let me know when a car arrives' went to
+    create_alarm with an invented midnight window, six times of six."""
+    d = router.decide(q, cameras=CAMS, advertised=ALL | {"stop_monitor"}, now=NOW)
+    assert d.tier == 1 and d.hint == tool, (q, d)
+
+
+def test_standing_hint_only_names_advertised_tools():
+    d = router.decide("let me know when a car arrives at cam1", cameras=CAMS,
+                      advertised={"describe_camera", "detect_objects"}, now=NOW)
+    assert d.tier == 2 and d.hint is None
+
+
+@pytest.mark.parametrize("q,window", [
+    ("alarm if a person is seen after 6pm", (1080, None, True)),
+    ("sound the siren if anyone is at cam1 before 6am", (None, 360, True)),
+    ("ring an alarm if a person shows up there after 10pm", (1320, None, True)),
+    ("set a silent alarm for a person after 11 pm", (1380, None, True)),
+    ("alarm between 10pm and 6am if anyone comes", (1320, 360, True)),
+    ("alarm from 22:30 to 05:00 for a person", (1350, 300, True)),
+    ("after 12:10 pm ring if a car comes", (730, None, True)),
+    ("alarm if a person comes after midnight", (None, None, True)),
+    ("let me know when a car arrives at cam1", (None, None, False)),
+    ("notify me when a person shows up tonight", (None, None, False)),
+    ("alarm if 3 people gather", (None, None, False)),
+])
+def test_clock_window_from_text(q, window):
+    assert router.clock_window_from_text(q) == window
+
+
+# ── no camera named ───────────────────────────────────────────────────
+
+SIX = [f"cam{i}" for i in range(1, 7)]
+SIX_ROLES = {"cam1": "the front door", "cam2": "the gate", "cam3": "the yard",
+             "cam4": "the garage", "cam5": "the hall", "cam6": "the roof"}
+
+
+def test_no_camera_named_looks_at_all_for_detection_and_history():
+    d = _t0("is anyone there?")                      # two cameras, no name, no selection
+    assert d.routed and d.tool == "detect_objects" and d.args["camera_id"] == "all"
+    d = _t0("how many people are there right now")
+    assert d.routed and d.tool == "detect_objects" and d.args["camera_id"] == "all"
+    d = _t0("did anyone come by this morning")
+    assert d.routed and d.tool == "search_history" and "camera_id" not in d.args
+
+
+def test_no_camera_named_describes_all_up_to_the_cap_then_asks():
+    d = _t0("what do you see?")                      # two cameras: describe them both
+    assert d.routed and d.tool == "describe_camera" and d.args["camera_id"] == "all"
+    d = _t0("what is the person wearing?", cameras=SIX, roles=SIX_ROLES)
+    assert not d.routed and d.ask is not None
+    assert d.ask.startswith("Which camera do you mean: the front door, the gate")
+    assert d.ask.endswith("or the roof?")
+    # counting six cameras is cheap: no question, every camera
+    d = _t0("is anyone there?", cameras=SIX, roles=SIX_ROLES)
+    assert d.routed and d.args["camera_id"] == "all"
+
+
+def test_a_selected_or_named_camera_still_wins():
+    d = _t0("what do you see?", preferred="cam2")
+    assert d.routed and d.args["camera_id"] == "cam2"
+    d = _t0("what do you see on the back yard", cameras=SIX, roles=SIX_ROLES | {"cam2": "back yard"})
+    assert d.routed and d.args["camera_id"] == "cam2"
+
+
+def test_decide_carries_the_which_camera_question_past_the_hints():
+    d = router.decide("what is the person wearing?", cameras=SIX, advertised=ALL, roles=SIX_ROLES, now=NOW)
+    assert d.tier == 2 and d.hint is None and d.ask.startswith("Which camera do you mean")
+

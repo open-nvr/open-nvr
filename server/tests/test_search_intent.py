@@ -91,9 +91,9 @@ def test_as_dict_carries_the_new_fields():
 # ── needs: what the words ask of the skills ───────────────────────────
 
 
-def _box(offered=(), claimed=(), captions=False):
+def _box(offered=(), claimed=(), captions=False, people=False):
     return BoxAbilities(offered_kinds=set(offered), claimed_kinds=set(claimed),
-                        captions=captions)
+                        captions=captions, people_descriptors=people)
 
 
 def test_a_red_shirt_needs_clothing_colour_and_says_when_the_box_cannot():
@@ -102,6 +102,24 @@ def test_a_red_shirt_needs_clothing_colour_and_says_when_the_box_cannot():
     assert [(n.word, n.kind, n.skill, n.state) for n in needs] == [
         ("red", "clothing_top", "vqa", STATE_MISSING)]
     assert needs[0].fallback == "captions"
+
+
+def test_a_person_kind_with_people_descriptions_off_names_the_setting():
+    """The box describes vehicles (colour claims exist) but not people:
+    "blue kurta" is a clothing kind the captioner is never asked about.
+    The state names the setting, not the app the skill came with — and
+    with captions on the box the need is advisory (the caption may well
+    say "blue kurta", as it did)."""
+    from services.search_intent import STATE_PEOPLE_OFF
+    box = _box(offered=["colour", "clothing_top", "carrying"], claimed=["colour", "vehicle_type"],
+               captions=True)
+    needs = resolve_needs(words=["blue", "kurta", "wearing"], labels=["person"], box=box)
+    assert [(n.kind, n.state, n.fallback) for n in needs] == [("clothing_top", STATE_PEOPLE_OFF, "captions")]
+    box.people_descriptors = True
+    assert resolve_needs(words=["blue", "wearing"], labels=["person"], box=box)[0].state == STATE_UNASSIGNED
+    # A vehicle colour never produced stays never-produced: the flag is about people.
+    assert resolve_needs(words=["red"], labels=["car"],
+                         box=_box(offered=["colour"], people=False))[0].state == STATE_UNASSIGNED
 
 
 def test_a_skill_offered_but_never_assigned_is_its_own_state():

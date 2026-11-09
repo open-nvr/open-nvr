@@ -671,6 +671,12 @@
                   <option value="eager">eager — first syllable</option>
                   <option value="off">off — let it finish</option>
                 </select></label>
+              <label class="wakeopt" id="talkModeOpt" title="Streaming (default): your voice streams to the agent as you speak, it decides when you have finished (a semantic end-of-turn model, not a silence timer), answers sentence by sentence as soon as the first one is ready, and you can talk over it. Turn by turn: the page records one utterance, waits for 0.9 s of silence, uploads it, and plays the whole answer when it is ready.">
+                talk mode:
+                <select id="talkMode" aria-label="Talk mode">
+                  <option value="stream">streaming — answers as it goes</option>
+                  <option value="turns">turn by turn — record, then answer</option>
+                </select></label>
               <div class="micdot" id="micdot" hidden>mic live</div>
             </div>
           </div>
@@ -1362,7 +1368,7 @@
             const cap=document.createElement("div"); cap.className="frame-cap"; cap.textContent=lbl;
             wrap.appendChild(im); wrap.appendChild(cap); fr.appendChild(wrap); });
           d.appendChild(fr); } }
-      logEl.appendChild(d); logEl.scrollTop=logEl.scrollHeight; }
+      logEl.appendChild(d); logEl.scrollTop=logEl.scrollHeight; return d; }
     function openLightbox(src,label){ let ov=document.getElementById("lightbox");
       if(!ov){ ov=document.createElement("div"); ov.id="lightbox"; ov.className="lightbox";
         ov.addEventListener("click",()=>ov.classList.remove("show")); document.body.appendChild(ov); }
@@ -2307,7 +2313,7 @@
     document.addEventListener("pointerdown",()=>{ if(_introAudio) playHeldIntro(); },{capture:true});
 
     // ── listening loop ──
-    function vadTick(){ if(!sessionActive||speaking||busy||alarmRinging)return;
+    function vadTick(){ if(!sessionActive||speaking||busy||alarmRinging||streamWs)return;
       const now=performance.now();
       if(!capturing && (now-lastActivity>IDLE_MS)){ pauseForIdle(); return; }
       const level=rms();
@@ -2340,7 +2346,7 @@
     // lands first. Typed turn: status line only. Ignored when no turn is in
     // flight (a late line after Stop) or while the agent is already speaking.
     let _fillerSrc=null, _askInFlight=false;
-    async function onWorking(w){ if(!w||!w.text||!(busy||_askInFlight)) return;
+    async function onWorking(w){ if(!w||!w.text||!(busy||_askInFlight||streamWs)) return;
       setStatus(w.text,"active");
       if(!w.audio_b64||!sessionActive||speaking) return;
       try{ speaking=true; setAvatar("speaking"); _fillerSrc=true; await speak(w.audio_b64); }
@@ -2348,6 +2354,10 @@
     function cutFiller(){ if(_fillerSrc){ stopSpeaking(); _fillerSrc=null; speaking=false; } }
 
     async function onUtterance(){ const blob=new Blob(chunks,{type:recorder.mimeType||"audio/webm"});
+      // Stop pressed while recording: the recorder's onstop still fires, after
+      // the session ended — answering it left "Thinking…" on screen with a
+      // Talk button and a reply nobody waited for.
+      if(!sessionActive) return;
       if(blob.size<1200){ if(sessionActive){setAvatar("listening");setStatus("Listening… speak your question.","active");} return; }
       busy=true; const gen=++turnGen; inflightCtl=new AbortController();
       setAvatar("thinking"); setStatus("Thinking… tap Stop to cancel.","active");
@@ -2376,6 +2386,7 @@
           addMsg("🔇 Voice replies are unavailable — the speech (Piper) adapter isn't responding, so replies are text-only until it recovers. Check: docker logs opennvr_piper_adapter","sys"); }
         cutFiller();                                    // the answer outranks "let me check…"
         if(data.audio_b64 && gen===turnGen){ speaking=true; setAvatar("speaking"); await speak(data.audio_b64); speaking=false; }
+        if(data.end && gen===turnGen && sessionActive){ stopSession(); setStatus("Goodbye — tap Talk when you need me."); return; }
         if(sessionActive){ setAvatar("listening"); setStatus("Listening… ask a follow-up, or tap Stop.","active"); }
       }catch(err){ if(gen!==turnGen || err.name==="AbortError") return;  // user cancelled — not an error
         addMsg("Request failed: "+err.message,"sys"); if(sessionActive){setAvatar("listening");setStatus("Error: "+err.message,"error");} }
@@ -2396,13 +2407,21 @@
       if(!introPlayed){ introPlayed=true; await playIntro(); }
       else if(_introAudio){ await playHeldIntro(); }   // page-open greeting the browser held back
       if(!sessionActive) return;
+      if(talkMode==="stream"){
+        const ok=await startStream();
+        if(ok){ micdotEl.hidden=false; setAvatar("listening"); setStatus("Connecting…","active");
+          if(!levelRAF) levelRAF=requestAnimationFrame(levelRing);
+          if(!pollTimer) pollTimer=setInterval(pollAllHttp,POLL_MS);
+          if(!alarmTimer) alarmTimer=setInterval(pollAlarmsHttp,2500);
+          return; }
+        if(!sessionActive) return; }
       micdotEl.hidden=false; setAvatar("listening"); setStatus("Listening… just speak.","active");
       if(!levelRAF) levelRAF=requestAnimationFrame(levelRing);
       if(!vadTimer) vadTimer=setInterval(vadTick,TICK_MS);
       if(!pollTimer) pollTimer=setInterval(pollAllHttp,POLL_MS);
       if(!alarmTimer) alarmTimer=setInterval(pollAlarmsHttp,2500);
     }
-    function endSession(){ sessionActive=false; if(vadTimer){clearInterval(vadTimer);vadTimer=null;} if(capturing)stopCapture();
+    function endSession(){ sessionActive=false; stopStream(); if(vadTimer){clearInterval(vadTimer);vadTimer=null;} if(capturing)stopCapture();
       if(levelRAF){cancelAnimationFrame(levelRAF);levelRAF=null;} talkBtn.style.boxShadow="";
       stopSpeaking(); micdotEl.hidden=true; talkBtn.classList.remove("listening"); setAvatar("idle");
       // Abandon any in-flight turn: drop its eventual reply client-side
@@ -2749,6 +2768,96 @@
     }
     function pollAllHttp(){ if(_updLive) return; pollTasks();pollMonitors();pollReports();loadEvents(); }
     function pollAlarmsHttp(){ if(_updLive) return; pollAlarms(); }
+
+    // ── streaming talk mode: mic → /ws as 16 kHz PCM; audio + JSON events back ──
+    // The request/response path above waits for 0.9 s of silence, uploads the
+    // clip and plays the whole answer when every stage is done — 3–7 s of
+    // nothing after you stop talking, and no interrupting. Over /ws the
+    // pipeline's own turn-taking (Silero VAD + Smart Turn v3) decides when you
+    // have finished, each sentence is spoken as soon as it is synthesised, and
+    // the server-side interruption gate lets you talk over it (turns.py).
+    const TALK_MODES={stream:1,turns:1};
+    let talkMode=(function(){ try{ const v=localStorage.getItem("agent_talk_mode"); return v in TALK_MODES?v:"stream"; }catch{ return "stream"; } })();
+    (function(){ const sel=$("talkMode"); if(!sel) return;
+      if(!window.AudioWorkletNode||!window.WebSocket){ talkMode="turns"; sel.value="turns"; sel.disabled=true;
+        sel.parentElement.title="Streaming needs AudioWorklet, which this browser lacks; turn by turn only."; return; }
+      sel.value=talkMode;
+      sel.addEventListener("change",()=>{ talkMode=sel.value in TALK_MODES?sel.value:"stream";
+        try{ localStorage.setItem("agent_talk_mode",talkMode); }catch{}
+        if(sessionActive){ stopSession(); } }); })();
+    const STREAM_OUT_RATE=22050;
+    let streamWs=null, streamNode=null, streamSrc=null, streamMute=null, streamPlayhead=0, streamSources=[],
+        streamReplyEl=null, streamBotTalking=false, streamMouthRAF=null, streamWorkletReady=false;
+    // Runs in the audio thread: averages the mic's samples down to 16 kHz
+    // (a box filter — good enough for speech, no aliasing whistle) and posts
+    // 20 ms Int16 frames (320 samples) to the page, which forwards them.
+    const PCM_WORKLET=`class PcmDownsampler extends AudioWorkletProcessor{
+      constructor(){ super(); this.ratio=sampleRate/16000; this.pos=0; this.sum=0; this.cnt=0; this.out=[]; }
+      process(inputs){ const ch=inputs[0]&&inputs[0][0]; if(!ch) return true;
+        for(let i=0;i<ch.length;i++){ this.sum+=ch[i]; this.cnt++; this.pos++;
+          if(this.pos>=this.ratio){ this.pos-=this.ratio; const v=Math.max(-1,Math.min(1,this.sum/this.cnt)); this.sum=0; this.cnt=0;
+            this.out.push(v<0?v*32768:v*32767); } }
+        while(this.out.length>=320){ const f=new Int16Array(this.out.splice(0,320)); this.port.postMessage(f.buffer,[f.buffer]); }
+        return true; } }
+      registerProcessor("pcm-downsampler",PcmDownsampler);`;
+    function streamUrl(){ const q=new URLSearchParams(); if(_token) q.set("token",_token); if(_device) q.set("device_token",_device);
+      return (location.protocol==="https:"?"wss://":"ws://")+location.host+"/ws"+(q.toString()?"?"+q.toString():""); }
+    async function startStream(){
+      await ensureMic(); ensureOutputAudio();
+      if(!streamWorkletReady){
+        try{ await audioCtx.audioWorklet.addModule(URL.createObjectURL(new Blob([PCM_WORKLET],{type:"application/javascript"}))); streamWorkletReady=true; }
+        catch(err){ addMsg("Streaming voice is unavailable in this browser ("+err+"); using turn by turn.","sys"); return false; } }
+      streamNode=new AudioWorkletNode(audioCtx,"pcm-downsampler");
+      streamSrc=audioCtx.createMediaStreamSource(mediaStream); streamSrc.connect(streamNode);
+      streamMute=audioCtx.createGain(); streamMute.gain.value=0; streamNode.connect(streamMute); streamMute.connect(audioCtx.destination);
+      const ws=new WebSocket(streamUrl()); ws.binaryType="arraybuffer"; streamWs=ws;
+      streamNode.port.onmessage=(e)=>{ if(streamWs===ws&&ws.readyState===1) ws.send(e.data); };
+      ws.onopen=()=>{ if(streamWs!==ws) return; setAvatar("listening"); setStatus("Listening… just speak.","active"); };
+      ws.onmessage=(ev)=>{ if(streamWs!==ws) return;
+        if(typeof ev.data==="string"){ let d; try{ d=JSON.parse(ev.data); }catch{ return; } onStreamEvent(d); return; }
+        playStreamChunk(ev.data); };
+      ws.onclose=(ev)=>{ if(streamWs!==ws) return; streamWs=null;
+        if(sessionActive){ const why=ev.code===4401?"login required":ev.code===4403?"this device is not approved":ev.code===1013?"the agent is restarting":"connection closed";
+          endSession(); talkBtn.innerHTML=IC.mic+" Talk"; syncSegChat(); setStatus("Voice stream ended: "+why+".","error"); } };
+      ws.onerror=()=>{ try{ ws.close(); }catch{} };
+      return true; }
+    function stopStream(){ streamEndPending=false; if(streamWs){ const w=streamWs; streamWs=null; try{ w.close(); }catch{} }
+      if(streamNode){ try{ streamNode.port.onmessage=null; streamNode.disconnect(); }catch{} streamNode=null; }
+      if(streamSrc){ try{ streamSrc.disconnect(); }catch{} streamSrc=null; }
+      if(streamMute){ try{ streamMute.disconnect(); }catch{} streamMute=null; }
+      flushStreamAudio(); streamReplyEl=null; }
+    function flushStreamAudio(){ streamSources.forEach(src=>{ try{ src.onended=null; src.stop(); }catch{} }); streamSources=[];
+      streamPlayhead=0; streamBotTalking=false; setMouth(0); }
+    function playStreamChunk(buf){ const i16=new Int16Array(buf); if(!i16.length) return;
+      const f32=new Float32Array(i16.length); for(let i=0;i<i16.length;i++) f32[i]=i16[i]/32768;
+      const ab=audioCtx.createBuffer(1,f32.length,STREAM_OUT_RATE); ab.copyToChannel(f32,0);
+      if(!playbackAnalyser){ playbackAnalyser=audioCtx.createAnalyser(); playbackAnalyser.fftSize=512; playbackAnalyser.connect(audioCtx.destination); }
+      const src=audioCtx.createBufferSource(); src.buffer=ab; src.connect(playbackAnalyser);
+      // Gapless: each chunk starts where the previous one ends, a hair ahead of now.
+      const now=audioCtx.currentTime; if(streamPlayhead<now+0.03) streamPlayhead=now+0.03;
+      src.start(streamPlayhead); streamPlayhead+=ab.duration; streamSources.push(src);
+      src.onended=()=>{ streamSources=streamSources.filter(x=>x!==src);
+        if(!streamSources.length){ streamBotTalking=false; setMouth(0);
+          if(streamEndPending){ endStreamSession(); return; }
+          if(sessionActive&&streamWs){ setAvatar("listening"); setStatus("Listening… just speak.","active"); } } };
+      if(!streamBotTalking){ streamBotTalking=true; cutFiller(); setAvatar("speaking"); setStatus("Speaking…","active"); streamMouth(); } }
+    function streamMouth(){ if(streamMouthRAF||!playbackAnalyser) return; const an=playbackAnalyser, abuf=new Float32Array(an.fftSize);
+      const tick=()=>{ if(!streamBotTalking){ streamMouthRAF=null; setMouth(0); return; }
+        an.getFloatTimeDomainData(abuf); let s=0; for(let i=0;i<abuf.length;i++) s+=abuf[i]*abuf[i]; setMouth(Math.sqrt(s/abuf.length));
+        streamMouthRAF=requestAnimationFrame(tick); };
+      streamMouthRAF=requestAnimationFrame(tick); }
+    function onStreamEvent(d){ if(!d||!d.type) return;
+      switch(d.type){
+        case "user_started": lastActivity=performance.now(); if(!streamBotTalking){ setAvatar("listening"); setStatus("Listening…","active"); } break;
+        case "user_stopped": lastActivity=performance.now(); if(!streamBotTalking){ setAvatar("thinking"); setStatus("Thinking…","active"); } break;
+        case "transcript": if(d.text){ addMsg(d.text,"user"); streamReplyEl=null; } break;
+        case "reply": if(d.text){ if(streamReplyEl){ streamReplyEl.appendChild(document.createTextNode(" "+d.text)); logEl.scrollTop=logEl.scrollHeight; }
+                        else { streamReplyEl=addMsg(d.text,"agent"); } } break;
+        case "interrupted": flushStreamAudio(); streamReplyEl=null; setAvatar("listening"); setStatus("Listening…","active"); break;
+        case "session_end": streamEndPending=true; if(!streamBotTalking&&!streamSources.length) endStreamSession(); else setTimeout(()=>{ if(streamEndPending) endStreamSession(); },8000); break;
+        default: break; } }
+    let streamEndPending=false;
+    function endStreamSession(){ if(!streamEndPending) return; streamEndPending=false; if(sessionActive){ stopSession(); setStatus("Goodbye — tap Talk when you need me."); } }
 
     // ── wiring ──
     silenceBtn.addEventListener("click", ackAlarms);
@@ -3141,7 +3250,8 @@
         d.querySelector(".hw-nm").textContent=r.label+(r.adapters&&r.adapters.length?" · "+r.adapters.join(", "):"");
         d.querySelector(".hw-min").textContent="Runs on: "+(r.min||"—");
         const rec=d.querySelector(".hw-rec");
-        if(r.recommended){ rec.textContent="Faster with: "+r.recommended; } else { rec.textContent="CPU is fine"; rec.classList.add("ok"); }
+        if(r.recommended){ rec.textContent="Faster with: "+r.recommended; }
+        else { rec.textContent=r.accelerated?"On the accelerator":"CPU is fine"; rec.classList.add("ok"); }
         d.querySelector(".hw-note").textContent=r.note||"";
         det.appendChild(d); }
       if(hw.tips&&hw.tips.length){ const t=document.createElement("div"); t.className="hwtips";

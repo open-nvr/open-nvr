@@ -326,9 +326,10 @@ async def _needs_for(db: Session, scope: set[int] | None, *, parsed: ParsedQuery
     ``services.search_intent``. Best-effort: an unreachable registry
     means every need reads as not-on-this-box, which is the honest
     answer at that moment, and never an error."""
+    from core.config import settings
     from services.enrichment_plan import compute_enrichment_plan
     from services.search_intent import BoxAbilities, resolve_needs
-    box = BoxAbilities()
+    box = BoxAbilities(people_descriptors=bool(getattr(settings, "events_descriptor_people", False)))
     try:
         plan = await compute_enrichment_plan(None)
         for s in plan.get("skills") or []:
@@ -503,6 +504,8 @@ async def search(
     query_vector, no_vector_reason = await _query_vector(db, words or "")
     from core.config import settings
     floor = float(getattr(settings, "search_vector_min_similarity", 0) or 0) or None
+    caption_floor = float(
+        getattr(settings, "search_caption_min_similarity", 0) or 0) or None
 
     # Counted FIRST, and timed on its own, because that timer is the
     # whole point of opennvr_search_count_seconds — the exact total is
@@ -516,7 +519,7 @@ async def search(
         page = search_page(
             db, labels=labels, camera_ids=cams, text=words or "", attrs=attrs,
             query_vector=query_vector, total=total, limit=limit, skip=skip,
-            min_similarity=floor, **filters,
+            min_similarity=floor, caption_min_similarity=caption_floor, **filters,
         )
     hits = page.hits
     # `text_total` is what the metric has always recorded — how many rows
@@ -579,7 +582,8 @@ async def search(
             page = search_page(
                 db, labels=labels, camera_ids=cams, text="", attrs=attrs,
                 query_vector=query_vector, total=without, limit=limit,
-                skip=skip, min_similarity=floor, **filters)
+                skip=skip, min_similarity=floor,
+                caption_min_similarity=caption_floor, **filters)
             hits = page.hits
             total = page.total
             # The interpretation reports what was APPLIED, so the words

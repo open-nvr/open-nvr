@@ -236,6 +236,7 @@ apply_accel_env() {
             # ADAPTER_TAG (or as latest-qualcomm before a release ships it).
             fill_qualcomm_captioner
             fill_qualcomm_agent_llm
+            fill_qualcomm_stt
             ;;
     esac
     write_env_var OPENNVR_ACCEL_RESOLVED "$accel"
@@ -259,6 +260,17 @@ fill_qualcomm_captioner() {
             case "$(get_env_var EVENTS_CAPTION_ENRICHMENT)" in ""|false) set_env_var EVENTS_CAPTION_ENRICHMENT true ;; esac
             case "$(get_env_var EVENTS_DESCRIPTOR_ENRICHMENT)" in ""|false) set_env_var EVENTS_DESCRIPTOR_ENRICHMENT true ;; esac
             case "$(get_env_var EVENTS_ENRICHMENT_BACKFILL)" in ""|false) set_env_var EVENTS_ENRICHMENT_BACKFILL true ;; esac
+            # People too: with the captioner on the NPU the two extra
+            # questions a person visit costs (top clothing, carrying) are
+            # a second or two of NPU on an image it already holds, so
+            # "person in a blue kurta" becomes an exact claim and not only
+            # a caption word (Ventuno Q, 2026-11-08). On the CPU the same
+            # questions are tens of seconds each, so the installer's false
+            # stays there. The same rule as the three above: filled at the
+            # switch, an operator's own value never touched, reset on
+            # leaving the flavour. What it records: what each person wears
+            # and carries, per visit, on this box only.
+            case "$(get_env_var EVENTS_DESCRIPTOR_PEOPLE)" in ""|false) set_env_var EVENTS_DESCRIPTOR_PEOPLE true ;; esac
             return 0
         fi
     done
@@ -276,6 +288,14 @@ fill_qualcomm_agent_llm() {
     # bundle's window is fixed at 4,096 tokens: LLM_WINDOW_TOKENS makes
     # the agent send each turn only the tool schemas the question needs.
     [[ "$(get_env_var CAPTION_ADAPTER)" == litertlm ]] || return 0
+    # A box this fill already put on the NPU adapter (its own URL, so no
+    # operator's endpoint is being touched) gains the fallback when .env
+    # names a host Ollama, even though the switch itself is past.
+    if [[ "$(get_env_var LLM_BASE_URL)" == "http://caption-adapter:9006" ]]; then
+        local ext0; ext0=$(get_env_var OLLAMA_EXTERNAL_URL)
+        [[ -n "$ext0" && -z "$(get_env_var LLM_FALLBACK_URL)" ]] && set_env_var LLM_FALLBACK_URL "$ext0"
+        return 0
+    fi
     case "$(get_env_var LLM_PROVIDER)" in ""|ollama) ;; *) return 0 ;; esac
     [[ -z "$(get_env_var LLM_BASE_URL)" ]] || return 0
     set_env_var LLM_PROVIDER openai
@@ -284,6 +304,38 @@ fill_qualcomm_agent_llm() {
     set_env_var LLM_WINDOW_TOKENS 4096
     # A pre-warm is seconds on the NPU; the installer turned it off for the CPU.
     case "$(get_env_var LLM_PREWARM)" in ""|false) set_env_var LLM_PREWARM true ;; esac
+    # A host Ollama, when .env names one, answers while the NPU adapter is
+    # away (restarting, reloading its model): slower, with a spoken notice.
+    local ext; ext=$(get_env_var OLLAMA_EXTERNAL_URL)
+    [[ -n "$ext" && -z "$(get_env_var LLM_FALLBACK_URL)" ]] && set_env_var LLM_FALLBACK_URL "$ext"
+    return 0
+}
+
+fill_qualcomm_stt() {
+    # Speech to text on the NPU — OPT-IN, not the default: Whisper-Small
+    # (w8a16) as Qualcomm's QNN context binaries for the Hexagon, serving
+    # the same result as parakeet on port 9003. The operator asks for it
+    # with STT_ADAPTER=whisper_qnn; this fill turns that one word into the
+    # four variables compose needs (the image name and the module name
+    # differ, the tag carries the flavour, the provider is the HTP). It
+    # becomes the default only once it is measured against parakeet on a
+    # Ventuno Q (bench/); until then nothing here changes a box that did
+    # not ask. Leaving the flavour puts parakeet back.
+    [[ "$(get_env_var STT_ADAPTER)" == whisper_qnn ]] || return 0
+    local tag img; tag=$(get_env_var ADAPTER_TAG)
+    for tag in "${tag:-latest}-qualcomm" "latest-qualcomm"; do
+        img="ghcr.io/open-nvr/whisper-qnn-adapter:${tag}"
+        if accel_image_available "$img"; then
+            set_env_var STT_ADAPTER_IMAGE whisper-qnn-adapter
+            set_env_var STT_ADAPTER_MODULE adapters.whisper_qnn.main
+            set_env_var STT_ADAPTER_TAG "$tag"
+            set_env_var STT_ONNX_PROVIDERS QNNExecutionProvider:htp
+            return 0
+        fi
+    done
+    echo -e "${YELLOW}Accelerate:${NC} STT_ADAPTER=whisper_qnn, but the image ghcr.io/open-nvr/whisper-qnn-adapter:*-qualcomm is not available (no registry access, or not published yet) — speech to text stays on parakeet." >&2
+    set_env_var STT_ADAPTER parakeet
+    set_env_var STT_ADAPTER_IMAGE ""; set_env_var STT_ADAPTER_MODULE ""; set_env_var STT_ONNX_PROVIDERS ""
 }
 
 # The flavour changed since the last run (OPENNVR_ACCEL edited, or the disk
@@ -294,7 +346,7 @@ reset_stale_accel_fills() {
     local now="$1" prev; prev=$(get_env_var OPENNVR_ACCEL_RESOLVED)
     [[ -z "$prev" || "$prev" == "$now" ]] && return 0
     local key val
-    for key in DETECT_HWACCEL DETECT_ONNX_BACKEND DETECT_ONNX_PROVIDERS YOLO_POSE_ONNX_PROVIDERS CAPTION_ADAPTER LLM_BASE_URL; do
+    for key in DETECT_HWACCEL DETECT_ONNX_BACKEND DETECT_ONNX_PROVIDERS YOLO_POSE_ONNX_PROVIDERS CAPTION_ADAPTER LLM_BASE_URL STT_ADAPTER; do
         val=$(get_env_var "$key")
         case "$prev:$key:$val" in
             intel:DETECT_HWACCEL:vaapi) write_env_var DETECT_HWACCEL cpu ;;
@@ -304,12 +356,18 @@ reset_stale_accel_fills() {
                 write_env_var CAPTION_ADAPTER moondream; write_env_var CAPTION_ADAPTER_TAG ""
                 # ...and the descriptions it switched on: a CPU captioner
                 # cannot keep up with every visit (#583).
-                write_env_var EVENTS_CAPTION_ENRICHMENT false; write_env_var EVENTS_DESCRIPTOR_ENRICHMENT false; write_env_var EVENTS_ENRICHMENT_BACKFILL false ;;
+                write_env_var EVENTS_CAPTION_ENRICHMENT false; write_env_var EVENTS_DESCRIPTOR_ENRICHMENT false; write_env_var EVENTS_ENRICHMENT_BACKFILL false
+                write_env_var EVENTS_DESCRIPTOR_PEOPLE false ;;
             # The agent's LLM on the NPU adapter: back to Ollama, the CPU
             # pre-warm off again, the window the runtime's own.
             qualcomm:LLM_BASE_URL:http://caption-adapter:9006)
                 write_env_var LLM_PROVIDER ""; write_env_var LLM_BASE_URL ""; write_env_var LLM_MODEL ""
-                write_env_var LLM_WINDOW_TOKENS ""; write_env_var LLM_PREWARM false ;;
+                write_env_var LLM_WINDOW_TOKENS ""; write_env_var LLM_PREWARM false; write_env_var LLM_FALLBACK_URL "" ;;
+            # Speech to text on the Hexagon has no CPU image: back to parakeet,
+            # riding ADAPTER_TAG again, the derived names cleared.
+            qualcomm:STT_ADAPTER:whisper_qnn)
+                write_env_var STT_ADAPTER parakeet; write_env_var STT_ADAPTER_TAG ""
+                write_env_var STT_ADAPTER_IMAGE ""; write_env_var STT_ADAPTER_MODULE ""; write_env_var STT_ONNX_PROVIDERS "" ;;
             intel:DETECT_ONNX_BACKEND:ort|qualcomm:DETECT_ONNX_BACKEND:ort) write_env_var DETECT_ONNX_BACKEND auto ;;
             intel:DETECT_ONNX_PROVIDERS:OpenVINOExecutionProvider:NPU|intel:DETECT_ONNX_PROVIDERS:OpenVINOExecutionProvider:GPU|qualcomm:DETECT_ONNX_PROVIDERS:QNNExecutionProvider:htp)
                 write_env_var DETECT_ONNX_PROVIDERS "" ;;

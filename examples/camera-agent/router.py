@@ -104,6 +104,47 @@ _SMALL_TALK_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: The user is done: a fixed goodbye, no model (the model answered "I don't
+#: want to talk more" with "Understood. I will stop monitoring now" — an
+#: invented action — in the office session of 2026-11-08).
+_CLOSING_RE = re.compile(
+    r"^\s*(?:(?:ok(?:ay)?|thanks|thank you|alright)[,.!]?\s*)*"
+    r"(?:that'?s\s+enough|enough(?:\s+for\s+now)?|stop\s+talking|leave\s+it|never\s*mind"
+    r"|forget\s+it|we'?re\s+done|i'?m\s+done|that\s+will\s+be\s+all|that\s+is\s+enough"
+    r"|good\s*bye|bye(?:\s*bye)?|see\s+you(?:\s+later|\s+tomorrow)?|talk\s+(?:to\s+you\s+)?later|good\s*night)"
+    r"\s*[,.!?]*\s*$", re.IGNORECASE)
+#: Anywhere in the utterance (spoken turns stutter and tack on thanks: "I I
+#: don't want to talk more", "thank you, end the conversation"). The office
+#: session of 2026-11-08: "thank you end the conversation" reached the model,
+#: which called stop_alarm and said "I have stopped any currently ringing
+#: alarms. Goodbye."
+_CLOSING_PHRASE_RE = re.compile(
+    r"\b(?:don'?t|do not|didn'?t)\s+want\s+to\s+(?:talk|chat|speak)(?:\s+(?:any\s*)?more|\s+anymore)?\b"
+    r"|\b(?:end|stop|finish|close|terminate)\s+(?:the\s+|this\s+|our\s+)?(?:conversation|call|chat|session|talk)\b"
+    r"|\bgood\s*bye\b|\bbye\s*bye\b",
+    re.IGNORECASE)
+
+#: The user doubts the last look ("there should be more than that", "are
+#: you sure", "look again", "there are three chairs") — the answer is a
+#: fresh look, not a model that agrees with the user against its own tool.
+_DISPUTE_RE = re.compile(
+    r"^\s*(?:no\b|nope\b|wrong\b|that'?s\s+(?:not\s+right|wrong|incorrect)|are\s+you\s+sure"
+    r"|(?:please\s+)?(?:look|check|count|try)\s+again|recount|there\s+(?:should|must)\s+be"
+    r"|(?:there\s+(?:are|is)\s+)?(?:more|less|fewer)\s+than\s+that|i\s+(?:can\s+)?see\s+(?:\w+\s+)?(?:more|three|four|five|two)"
+    r"|(?:and\s+)?why\s+(?:(?:did|do|are|were|have)\s+you|you\s+(?:were|have|had)?\s*)\s*(?:say|said|think|saying|thought)"
+    r"|there\s+(?:are|is)\s+(?:\w+)\s+\w+s?\s*[.!?]*\s*$)",
+    re.IGNORECASE)
+
+
+def is_closing(text: str) -> bool:
+    t = text or ""
+    return bool(_CLOSING_RE.match(t) or (len(t.split()) <= 12 and _CLOSING_PHRASE_RE.search(t)))
+
+
+def is_dispute(text: str) -> bool:
+    return bool(_DISPUTE_RE.match(text or ""))
+
+
 # The model's reply claims to have LOOKED ("I see the front door. It's dark
 # outside", "there's a person at the gate") — as opposed to offering to look
 # ("I can watch the cameras for you"). "I see..." / "I see," is the filler
@@ -440,14 +481,29 @@ def _is_config_question(text: str) -> bool:
 def _pick_camera(text: str, cameras: list[str], preferred: str | None = None) -> str:
     """Which camera did the user mean — for forced grounding, which must
     always answer: the camera the utterance NAMES (``_names_camera``),
-    else the UI-selected ``preferred`` camera, else the first configured.
-    A bare digit is never a camera: "in the last 2 hours" is not cam2."""
+    else the UI-selected ``preferred`` camera, else the only camera there
+    is, else ALL of them (the first configured camera used to stand in for
+    the fleet, and answered for the wrong door). A bare digit is never a
+    camera: "in the last 2 hours" is not cam2."""
     named = _names_camera(text, cameras)
     if named is not None:
         return named
     if preferred and preferred in cameras:
         return preferred
-    return cameras[0]
+    if len(cameras) == 1:
+        return cameras[0]
+    return "all"
+
+
+def which_camera_question(cameras: list[str], roles: dict[str, str] | None) -> str:
+    """The question the agent asks when no camera was named and looking at
+    every one would be too dear: the cameras by their locations."""
+    names = [(roles or {}).get(c) or c for c in cameras]
+    names = [n for n in names if n]
+    if len(names) <= 1:
+        return "Which camera do you mean?"
+    listed = ", ".join(names[:-1]) + f" or {names[-1]}"
+    return f"Which camera do you mean: {listed}?"
 
 
 
@@ -456,7 +512,7 @@ def _pick_camera(text: str, cameras: list[str], preferred: str | None = None) ->
 #: model's confirmation ("I'll watch the driveway and tell you…") is part
 #: of the product for these.
 _SIDE_EFFECT_RE = re.compile(
-    r"\b(notify|alert|alarm|siren|watch|keep\s+(an\s+)?eye|monitor|remind|"
+    r"\b(notify|alert|alarm|siren|watch|keep\s+(an\s+)?eye|monitor|remind|wake\s+me|"
     r"report|summar(y|ize|ise)|every\s+(morning|evening|hour|day|\d+)|"
     r"stop\b(?!\s+by)|cancel|disarm|arm|turn\s+(on|off)|mute|silence|schedule|"
     r"from\s+now\s+on|whenever|if\s+(you\s+)?(see|spot)|let\s+me\s+know|"
@@ -500,6 +556,12 @@ _ALL_RE = re.compile(r"\b(all|every|each|any)\s+(of\s+the\s+)?(cameras?|cams?|fe
 _MAX_WORDS = 20
 
 
+#: A description of every camera is a caption per camera (1.7 s each on an
+#: NPU, far more on a CPU): up to this many cameras the router looks at
+#: all of them when none is named; above it, it asks which one.
+DESCRIBE_ALL_MAX = 4
+
+
 @dataclass
 class Decision:
     tier: int
@@ -507,6 +569,10 @@ class Decision:
     args: dict[str, Any] = field(default_factory=dict)
     hint: str | None = None
     reason: str = ""
+    #: A reply the agent gives as is, with no model and no tool: the router
+    #: asking which camera, when the question names none and looking at
+    #: every one would be too dear.
+    ask: str | None = None
     #: False when Tier 0 declined for a reason a Tier-1 hint would only
     #: make worse — a standing request, a WHO question, another tool's
     #: question: the model must decide those, unsteered.
@@ -624,7 +690,12 @@ def decide_tier0(text: str, *, cameras: list[str], advertised: set[str],
         return Decision(2, reason="no known ask")
 
     # Which camera. Named, or "all", or the one the UI is on, or the only
-    # one there is. Two cameras and no name is a guess — not Tier 0.
+    # one there is — or, with several cameras and no name, ALL of them:
+    # the first camera in the roster used to answer for the fleet, stated
+    # as if it were the whole picture (measured: wrong whenever the user
+    # meant another door). Detection, counting and history over every
+    # camera are cheap; a description is a caption per camera, so past
+    # DESCRIBE_ALL_MAX cameras the router asks which one instead.
     if _ALL_RE.search(t):
         cam = "all"
     else:
@@ -635,7 +706,11 @@ def decide_tier0(text: str, *, cameras: list[str], advertised: set[str],
             elif len(cameras) == 1:
                 cam = cameras[0]
             else:
-                return Decision(2, reason="camera ambiguous")
+                cam = "all"
+                probe, _ = _pick_forced_call(t, cam, advertised, now=now)
+                if probe == "describe_camera" and len(cameras) > DESCRIBE_ALL_MAX:
+                    return Decision(2, reason="camera ambiguous",
+                                    ask=which_camera_question(cameras, roles))
 
     tool, args = _pick_forced_call(t, cam, advertised, now=now)
     if past and tool not in ("search_history", "recent_events"):
@@ -750,6 +825,110 @@ def hint_tier1(text: str, *, advertised: set[str], threshold: float = 0.6,
     return Decision(1, hint=tool, reason=f"resembles {tool} ({top:.2f})")
 
 
+# ── standing requests: which verb, by the words ───────────────────
+
+#: An alarm is asked for with alarm words. Measured on the NPU (Gemma 4
+#: E2B, 2026-11-08, 32-case eval): "let me know when a car arrives" and
+#: "notify me when a person shows up" went to create_alarm 6 times of 6,
+#: each with an invented "after midnight" window; "notify me when more
+#: than 3 people gather" went to create_monitor every time. The words
+#: decide here, the model fills the slots.
+_ALARM_WORDS_RE = re.compile(
+    r"\b(alarm|siren|ring|rings|loud|loudly|wake\s+me|alert\s+me\s+loud)", re.IGNORECASE)
+_STOP_WORDS_RE = re.compile(
+    r"\b(stop|cancel|disarm|silence|mute|turn\s+(it\s+)?off|remove|delete|clear)\b", re.IGNORECASE)
+_MONITOR_WORDS_RE = re.compile(
+    r"\b(notify|let\s+me\s+know|tell\s+me\s+(when|if)|watch|keep\s+(an\s+)?eye|monitor|"
+    r"count(ing)?|whenever|if\s+(you\s+)?(see|spot)|alert\s+me)\b", re.IGNORECASE)
+_REPORT_WORDS_RE = re.compile(
+    r"\b(report|summar(y|ize|ise)|digest|every\s+(morning|evening|day|hour|night)|daily|weekly)\b",
+    re.IGNORECASE)
+
+
+def hint_standing(text: str, *, advertised: set[str]) -> Decision | None:
+    """The tool a standing request most likely wants, from its words:
+    alarm words → create_alarm, otherwise notify/watch words →
+    create_monitor; a stop word turns either into its stop tool; report
+    words → create_report. Only tools that are advertised. The model
+    still decides and fills the arguments; this rides in the user turn
+    as a Tier-1 hint."""
+    t = text or ""
+    alarm = bool(_ALARM_WORDS_RE.search(t))
+    stop = bool(_STOP_WORDS_RE.search(t))
+    monitor = bool(_MONITOR_WORDS_RE.search(t))
+    report = bool(_REPORT_WORDS_RE.search(t))
+    if stop:
+        tool = "stop_alarm" if alarm else ("stop_report" if report and not monitor else "stop_monitor")
+    elif report and not alarm:
+        tool = "create_report"
+    elif alarm:
+        tool = "create_alarm"
+    elif monitor:
+        tool = "create_monitor"
+    else:
+        return None
+    if tool not in advertised:
+        return None
+    return Decision(1, hint=tool, reason=f"standing request, {'stop' if stop else 'set'}: {tool}")
+
+
+# ── the clock window a request names ──────────────────────────────
+
+_CLOCK_RE = (r"(?:(?P<h>\d{1,2})(?::(?P<m>\d{2}))?\s*(?P<ap>a\.?m\.?|p\.?m\.?)?"
+             r"|(?P<word>midnight|noon|midday))")
+_BETWEEN_RE = re.compile(
+    r"\b(?:between|from)\s+" + _CLOCK_RE.replace("(?P<", "(?P<a_") +
+    r"\s+(?:and|to|till|until|-)\s+" + _CLOCK_RE.replace("(?P<", "(?P<b_"), re.IGNORECASE)
+_AFTER_RE = re.compile(r"\b(?:after|past|from|later\s+than)\s+" + _CLOCK_RE, re.IGNORECASE)
+_BEFORE_RE = re.compile(r"\b(?:before|until|till|by|earlier\s+than)\s+" + _CLOCK_RE, re.IGNORECASE)
+
+
+def _clock_minutes(h, m, ap, word) -> int | None:
+    if word:
+        return {"midnight": 0, "noon": 720, "midday": 720}[word.lower()]
+    if h is None:
+        return None
+    hour, minute = int(h), int(m or 0)
+    ap = (ap or "").replace(".", "").lower()
+    if ap and not (1 <= hour <= 12):
+        return None
+    if not ap and (m is None) and not (0 <= hour <= 23):
+        return None
+    if ap == "am" and hour == 12:
+        hour = 0
+    elif ap == "pm" and hour < 12:
+        hour += 12
+    if not (0 <= hour < 24 and 0 <= minute < 60):
+        return None
+    return hour * 60 + minute
+
+
+def clock_window_from_text(text: str) -> tuple[int | None, int | None, bool]:
+    """(after_min, before_min, mentioned) from the clock words of a request:
+    "after 6pm" → (1080, None, True); "before 6am" → (None, 360, True);
+    "between 10pm and 6am" → (1320, 360, True); no clock words →
+    (None, None, False). Only a clock expression counts: "tonight" and
+    "at night" are not windows the agent can arm. A bare hour needs its
+    keyword ("after 6" is 06:00; "6" alone is nothing)."""
+    t = text or ""
+    m = _BETWEEN_RE.search(t)
+    if m:
+        a = _clock_minutes(m.group("a_h"), m.group("a_m"), m.group("a_ap"), m.group("a_word"))
+        b = _clock_minutes(m.group("b_h"), m.group("b_m"), m.group("b_ap"), m.group("b_word"))
+        if a is not None and b is not None:
+            return (a or None), (b or None), True
+    after = before = None
+    m = _AFTER_RE.search(t)
+    if m:
+        after = _clock_minutes(m.group("h"), m.group("m"), m.group("ap"), m.group("word"))
+    m = _BEFORE_RE.search(t)
+    if m:
+        before = _clock_minutes(m.group("h"), m.group("m"), m.group("ap"), m.group("word"))
+    mentioned = after is not None or before is not None
+    # Midnight as a bound is no bound: "after midnight" is any time.
+    return (after or None), (before or None), mentioned
+
+
 # ── the one call the turn makes ───────────────────────────────────
 
 def decide(text: str, *, cameras: list[str], advertised: set[str],
@@ -760,7 +939,17 @@ def decide(text: str, *, cameras: list[str], advertised: set[str],
     if d is not None and d.routed:
         logger.info("router: tier=0 tool=%s args=%s (%s)", d.tool, d.args, d.reason)
         return d
+    if d is not None and d.ask:
+        # The router's own question (which camera?) goes out as is: a hint
+        # to the model would make it guess a camera instead.
+        logger.info("router: ask (%s)", d.reason)
+        return d
     why = d.reason if d is not None else ("tier0 off" if not tier0 else "not routable")
+    if hints and d is not None and "side effect" in d.reason:
+        h = hint_standing(text, advertised=advertised)
+        if h is not None:
+            logger.info("router: tier=1 hint=%s (%s)", h.hint, h.reason)
+            return h
     if hints and (d is None or d.hintable):
         h = hint_tier1(text, advertised=advertised)
         if h is not None:

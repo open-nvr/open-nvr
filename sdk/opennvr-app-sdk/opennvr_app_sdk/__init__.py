@@ -120,6 +120,7 @@ from .tier0 import (
     is_tier0_subject,
     tier0_to_detections,
     make_best_frame_fetch,
+    make_latest_frame_fetch,
     snapshot_from_event,
 )
 
@@ -267,6 +268,7 @@ EVENTS: tuple[str, ...] = (
     "describe_counts",
     "BestFrameClient",
     "make_best_frame_fetch",
+    "make_latest_frame_fetch",
 )
 
 #: Low-level config helpers, for loaders that do their own parsing.

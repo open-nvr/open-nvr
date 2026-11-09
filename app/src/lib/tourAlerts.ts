@@ -37,7 +37,7 @@ export interface ActiveAlert {
 }
 
 /** Camera-event tasks that are housekeeping, not alarms. */
-const NOT_ALARMS = new Set(['recording_stalled', 'recording_resumed', 'connection'])
+const NOT_ALARMS = new Set(['recording_stalled', 'recording_resumed', 'recording_degraded', 'connection'])
 
 const words = (s: string) => {
   const w = s.replace(/[_.-]+/g, ' ').trim()

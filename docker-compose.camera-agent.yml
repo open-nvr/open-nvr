@@ -63,10 +63,14 @@ services:
   # (faster-whisper base.en, 3.3 % at 1.42 s; Hindi, translation).
   # Both serve the same §5.3 result on port 9003. Parakeet is newer
   # than adapter release 0.1.7, so it rides its own tag variable.
+  # A third choice on Qualcomm boards: `whisper_qnn` (Whisper-Small w8a16
+  # as QNN context binaries on the Hexagon NPU; opt-in, start.sh fills
+  # the image/module/tag/provider below from it — the image name and the
+  # module name differ, hence the two derived variables).
   whisper-adapter:
     profiles: [camera-agent]
-    image: ghcr.io/open-nvr/${STT_ADAPTER:-parakeet}-adapter:${STT_ADAPTER_TAG:-${ADAPTER_TAG:-latest}}
-    command: ["uvicorn", "adapters.${STT_ADAPTER:-parakeet}.main:app", "--host", "0.0.0.0", "--port", "9003"]
+    image: ghcr.io/open-nvr/${STT_ADAPTER_IMAGE:-${STT_ADAPTER:-parakeet}-adapter}:${STT_ADAPTER_TAG:-${ADAPTER_TAG:-latest}}
+    command: ["uvicorn", "${STT_ADAPTER_MODULE:-adapters.${STT_ADAPTER:-parakeet}.main}:app", "--host", "0.0.0.0", "--port", "9003"]
     container_name: opennvr_whisper_adapter
     logging: *svc-logs
     restart: unless-stopped
@@ -77,6 +81,9 @@ services:
       - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-base.en}
       # CTranslate2 threads on CPU; empty = all cores. Adapter 1.0.1+.
       - OPENNVR_WHISPER_CPU_THREADS=${WHISPER_CPU_THREADS:-}
+      # ONNX providers for an ONNX STT adapter; empty keeps the adapter's
+      # own default (parakeet: CPU; whisper_qnn: the Hexagon).
+      - ADAPTER_ONNX_PROVIDERS=${STT_ONNX_PROVIDERS:-}
     volumes:
       # Whisper's download cache; inert for parakeet (weights baked in).
       - opennvr_whisper_models:/app/model_weights/whisper
@@ -505,6 +512,8 @@ services:
         lburl=$$(sed_esc "$${LLM_BASE_URL}")
         lmodel=$$(sed_esc "$${LLM_MODEL:-$${OLLAMA_MODEL}}")
         lwin=$$(sed_esc "$${LLM_WINDOW_TOKENS:-0}")
+        lfurl=$$(sed_esc "$${LLM_FALLBACK_URL}")
+        lfmodel=$$(sed_esc "$${LLM_FALLBACK_MODEL:-granite4:micro}")
         # The NPU adapter's chat endpoint sits behind the stack's own
         # token; a cloud provider's key is LLM_API_KEY in .env.
         lkey="$${LLM_API_KEY}"
@@ -522,6 +531,8 @@ services:
             -e "s/[$$][{]LLM_API_KEY[}]/$$lkey/g" \
             -e "s/[$$][{]LLM_MODEL[}]/$$lmodel/g" \
             -e "s/[$$][{]LLM_WINDOW_TOKENS[}]/$$lwin/g" \
+            -e "s/[$$][{]LLM_FALLBACK_URL[}]/$$lfurl/g" \
+            -e "s/[$$][{]LLM_FALLBACK_MODEL[}]/$$lfmodel/g" \
             < /template/config.docker.yml > /generated/config.yml
         echo "Wrote /generated/config.yml (voice) from template."
     environment:
@@ -537,6 +548,8 @@ services:
       - LLM_API_KEY=${LLM_API_KEY:-}
       - LLM_MODEL=${LLM_MODEL:-}
       - LLM_WINDOW_TOKENS=${LLM_WINDOW_TOKENS:-0}
+      - LLM_FALLBACK_URL=${LLM_FALLBACK_URL:-}
+      - LLM_FALLBACK_MODEL=${LLM_FALLBACK_MODEL:-granite4:micro}
       # Where the agent reaches the LLM runtime. Default: the bundled
       # ollama container. Set OLLAMA_EXTERNAL_URL in .env (e.g.
       # http://host.docker.internal:11434 for native Ollama on the host
@@ -631,6 +644,8 @@ services:
         lburl=$$(sed_esc "$${LLM_BASE_URL}")
         lmodel=$$(sed_esc "$${LLM_MODEL:-$${OLLAMA_MODEL}}")
         lwin=$$(sed_esc "$${LLM_WINDOW_TOKENS:-0}")
+        lfurl=$$(sed_esc "$${LLM_FALLBACK_URL}")
+        lfmodel=$$(sed_esc "$${LLM_FALLBACK_MODEL:-granite4:micro}")
         # The NPU adapter's chat endpoint sits behind the stack's own
         # token; a cloud provider's key is LLM_API_KEY in .env.
         lkey="$${LLM_API_KEY}"
@@ -648,6 +663,8 @@ services:
             -e "s/[$$][{]LLM_API_KEY[}]/$$lkey/g" \
             -e "s/[$$][{]LLM_MODEL[}]/$$lmodel/g" \
             -e "s/[$$][{]LLM_WINDOW_TOKENS[}]/$$lwin/g" \
+            -e "s/[$$][{]LLM_FALLBACK_URL[}]/$$lfurl/g" \
+            -e "s/[$$][{]LLM_FALLBACK_MODEL[}]/$$lfmodel/g" \
             < /template/config.docker.chat.yml > /generated/config.yml
         echo "Wrote /generated/config.yml (chat) from template."
     environment:
@@ -663,6 +680,8 @@ services:
       - LLM_API_KEY=${LLM_API_KEY:-}
       - LLM_MODEL=${LLM_MODEL:-}
       - LLM_WINDOW_TOKENS=${LLM_WINDOW_TOKENS:-0}
+      - LLM_FALLBACK_URL=${LLM_FALLBACK_URL:-}
+      - LLM_FALLBACK_MODEL=${LLM_FALLBACK_MODEL:-granite4:micro}
       # See the voice config-init: bundled ollama by default, or the
       # operator's external runtime via OLLAMA_EXTERNAL_URL in .env.
       - OLLAMA_URL=${OLLAMA_EXTERNAL_URL:-http://ollama:11434}

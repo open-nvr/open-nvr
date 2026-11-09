@@ -62,6 +62,109 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   withdrawal that deletes the faces, and erasure. A Report page:
   student × class with totals and a rate, Excel and CSV.
 
+- **`STT_ADAPTER=whisper_qnn`: the camera agent's speech to text on the
+  Hexagon NPU (opt-in).** On a Qualcomm board the qualcomm flavour turns
+  that one word into the image, module, tag and provider the
+  `whisper-adapter` service needs for ai-adapter's new `whisper_qnn`
+  (Whisper-Small w8a16 as Qualcomm's QNN context binaries for the
+  QCS8275), lends it the DSP, groups and fastrpc libraries the detector
+  gets, and puts parakeet back when the flavour is left or the image is
+  not available. Parakeet stays the default: the NPU adapter is built
+  and unit-tested but not yet measured against it on the Ventuno Q, and
+  nothing here changes a box that did not ask.
+
+- **Search compares the question with what each caption means, not only
+  with its words.** "Man in a blue kurta" found nothing when the captioner
+  had written "person wearing a light blue tunic": the word arm needs the
+  exact term and the frame arm sees pixels, not phrasing. With
+  `EVENTS_EMBED_ENRICHMENT` on, each caption (plus its projected attribute
+  words) is now put through the embedding model's text tower the moment it
+  lands — and from the backfill for captions written earlier — and stored
+  as the visit's `caption` vector beside its `image` vector
+  (`event_embeddings.kind`, migration `b3c9e5f7a1d2`; existing rows are
+  `image`). Search ranks the query vector against those caption vectors as
+  a third arm, floored by `SEARCH_CAPTION_MIN_SIMILARITY` (0.22, same
+  scale as the image floor), and fuses it with the word and frame arms by
+  the same RRF. The response's `semantic` block lists every arm that ran
+  with its count, `added_by_caption` says how many results only this arm
+  found, and `semantic.caption` carries the arm's own scan and floor
+  numbers. A visit with no caption vector is skipped by this arm, not
+  scored as zero; an empty caption is never embedded; a failed embedding
+  never costs the caption; a model change re-embeds caption vectors with
+  the frame vectors. The text tower is SigLIP's, trained to align with
+  images rather than with other sentences, so this is the cheap option
+  (no second model) and not a sentence encoder.
+
+- **The detect-pipeline says where a dropped frame's time went.** The
+  capacity warning ("N of M decoded frames were never detected on") now
+  ends with the window's per-frame split: waited for the next frame, in
+  the detection stages, after them (publish, gate, evidence, stores). The
+  last two are exported as `tier0_stage_latency_seconds{stage="wait"|"post"}`
+  beside the existing stages. On the Ventuno Q (2026-11-09) camera 23
+  dropped a quarter of its frames in some minutes while its detector took
+  40 ms and the stage timers summed to 4 ms; nothing said where the other
+  200 ms per frame was.
+
+- **Core alarms when a camera records segments that hold no video.** On the
+  Ventuno Q (2026-11-09) a camera's RTP clock wrapped and the relay in front
+  of it clamped every timestamp, so MediaMTX closed a 50 MB segment every
+  seven minutes with 0.07 s of playable video in it — segments kept arriving,
+  the recording watchdog stayed quiet, and hours of footage were garbage. The
+  segment-complete hook now judges each closed segment by bytes against
+  duration (`services/segment_health.py`: an implied bitrate no camera can
+  produce, or a segment far shorter than configured yet heavy for its length)
+  and raises a `recording_degraded` camera event, cleared by the first healthy
+  segment; it is stored, published and shown exactly like `recording_stalled`
+  (Alerts view, toast, not an alarm on tour). Tails written at stop or
+  reconnect are too small to be judged and never alarm.
+
+- **The camera agent's demo talks over the streaming pipeline.** Talk
+  mode now streams the microphone to `/ws` (16 kHz PCM from an
+  AudioWorklet) and plays each sentence as it is synthesised, so the first
+  words come back while the rest of the answer is still being made and
+  you can talk over it; the pipeline's Silero VAD plus Smart Turn v3
+  decide when you have finished (silence fallback 1.0 s, was 2.0) instead
+  of the page's 0.9 s volume timer. The pipeline sends the transcript,
+  each spoken sentence, the turn state and interruptions as JSON beside
+  the audio (`StreamEvents`, `RawPcmSerializer`), and the streaming LLM
+  service answers with the agent's own turn — router, forced grounding,
+  window fit, backup model, reply guards — instead of a separate loop.
+  "Turn by turn" (record, then answer) stays as a setting and is the
+  fallback where AudioWorklet is missing.
+
+- **The camera agent keeps answering when its NPU brain is away.** With
+  `llm_provider: openai` and a `llm_fallback_url` (an Ollama), a connection
+  refused, a timeout or a 5xx from the endpoint (the adapter restarting, its
+  model reloading) sends the same request to the fallback model, slower,
+  with one spoken notice per episode ("I'm on my slower backup model for
+  now"); the primary is tried again every minute and taken back when it
+  answers; `/health` reports the episode (`llm_degraded`, and the LLM
+  check says which model is answering). A bad request is not an outage and
+  fails as before; with no fallback configured nothing changes. The
+  qualcomm fill points the fallback at the host Ollama when `.env` names
+  one (`LLM_FALLBACK_URL` from `OLLAMA_EXTERNAL_URL`, `LLM_FALLBACK_MODEL`).
+
+- **People descriptions come on with the NPU captioner.** On the qualcomm
+  flavour `start.sh` now also fills `EVENTS_DESCRIPTOR_PEOPLE=true` when
+  it puts the captioner on the Hexagon, the same way as captions and
+  vehicle descriptors: filled at the switch, an operator's own value never
+  touched, reset to false on leaving the flavour. A person visit then costs
+  two extra questions to the captioner (top clothing, carrying), a second
+  or two of NPU on an image it already holds, and "person in a blue kurta"
+  becomes an exact claim instead of only a caption word. On the CPU the
+  same questions are tens of seconds each, so the default there stays
+  false. `.env.example` says what it records and where.
+
+- **The camera agent's live look is a memory read, not an RTSP session.**
+  detect-pipeline keeps the newest frame each camera's worker decoded and
+  serves it at `/latest_frame?camera=&max_age=` (JPEG, `X-Frame-Age-Seconds`;
+  404 when nothing is fresher than `max_age`, default 3 s). The SDK gains
+  `make_latest_frame_fetch`, and the agent's frame cache asks it before the
+  camera's own frame source, falling back to that source when the pipeline
+  has nothing fresh. Measured on a Ventuno Q (the 32-case eval, 2026-11-08):
+  a live look cost 5.6–6.2 s, of which the RTSP grab was all but the
+  detector's 0.1 s and the answer's 0.5 s.
+
 - **The camera agent's LLM runs on the NPU on the qualcomm flavour.** The
   litertlm caption adapter answers `/v1/chat/completions` on the same
   Gemma engine (ai-adapter #83), and `start.sh` points the agent at it:
@@ -348,6 +451,14 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The camera agent no longer says "Let me check the office camera"
+  before answering.** Thinking aloud (`thinking_aloud`, fillers.py) is off
+  by default. It was built for the CPU-only box, where a tool turn took
+  5–10 s and the silence needed filling; on the NPU the answer lands in a
+  second or two and the line arrived as an unexpected extra reply right
+  before the real one (morning test, 2026-11-09). The feature stays for
+  slow boxes: `thinking_aloud: true` in the agent config brings it back.
+
 - **Disk rotation instead of a purge that empties the box.** The free-space
   floor now defaults to 2 GB, or 2 % of the recordings volume if that is
   more (it used to be off, and installs that had set 10 GB on a small disk
@@ -417,6 +528,124 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   timing matters.
 
 ### Fixed
+
+- **Core stops minting a stream token on every roster request.** The
+  detect-pipeline and the camera agent each re-read the camera roster every
+  30 s, and every call signed a fresh wildcard MediaMTX token and logged it
+  — 240 identical tokens and log lines an hour on the Ventuno Q
+  (2026-11-09). Platform callers now share one token reused for half its
+  60-minute life; apps keep their per-camera tokens. The storage service's
+  "Using default recording path" line, written by the 15 s system monitor
+  on every tick, is now logged once per path.
+
+- **CI signs images without depending on anonymous GitHub release
+  downloads.** On 2026-11-09 GitHub's anonymous release downloads returned
+  504 for hours and every image job that signs (detect-pipeline, core, the
+  agents, the apps) failed in `sigstore/cosign-installer`, which fetches
+  cosign from `github.com/…/releases/download`. A composite action
+  (`.github/actions/install-cosign`) now downloads the pinned release
+  through the GitHub API with the job's own token (three tries, the
+  anonymous URL as a last resort), verifies the pinned sha256, and installs
+  it; the four signing workflows use it.
+
+- **A detect-pipeline reader whose ffmpeg is alive but decodes nothing now
+  restarts itself.** The office camera on the Ventuno Q (2026-11-09) had
+  its RTP clock wrap after 13 h 15 min; the relay in front of it clamped
+  every timestamp to "previous + 1 tick", MediaMTX could no longer close a
+  60 s segment (50 MB files with a 0.07 s duration) and the pipeline's
+  substream reader — fed 15 packets a second that never advanced in time —
+  sat in a blocking read for hours while `/health` reported the camera
+  stale. The frame source now ends a session that has produced no frame
+  for 60 s (`stall_seconds`, `DEFAULT_STALL_SECONDS`) with a warning
+  naming the likely causes, and respawns it under the existing restart and
+  give-up rules, so the worker is resurrected with a fresh tap URL instead
+  of waiting for ffmpeg to die.
+
+- **Camera agent: a goodbye ends talk mode, Stop really stops, and the
+  Hardware panel tells the truth.** From the morning test of 2026-11-09:
+  "thank you, end the conversation" reached the model, which called
+  `stop_alarm` and said "I have stopped any currently ringing alarms.
+  Goodbye." — goodbyes ("bye", "end the conversation", "see you", "good
+  night", …) are now closings: a fixed goodbye, no tool, and the voice and
+  text endpoints say `end`, so the page leaves talk mode once the reply has
+  played (the streaming path sends `session_end`). Stop pressed while the
+  page was still recording left "Thinking…" on screen next to a Talk
+  button, because the recorder's last utterance was still answered after
+  the session ended; it is dropped now. The Hardware panel read "Running on
+  CPU only — a CUDA GPU would speed up…" on a box whose detector, captioner
+  and language model all run on the Hexagon: it now asks the detector which
+  accelerator it runs on (its own backend gauge), marks the detection,
+  caption and language-model rows as accelerated with no GPU advice, and
+  names the model's endpoint instead of "ollama".
+
+- **The camera agent no longer agrees with the user against its own
+  detector, invents actions, or answers garbled speech.** From the office
+  voice session of 2026-11-08: told "there are three chairs" it called the
+  detector, was told one, and said "I see three chairs" — a count the model
+  states against the detector's is now the detector's count, hedged ("I can
+  make out a chair; the detector can miss things that are partly hidden");
+  a reply that claims to have set, stopped or armed something when no tool
+  ran is replaced by a plain line; "there should be more than that", "are
+  you sure", "look again" repeat the last look and answer from it with no
+  model; "I don't want to talk more" and its kin get a goodbye with no
+  model; and a transcript the speech model hallucinated in another language,
+  or with no English word in it, is dropped as noise instead of triggering a
+  look at the camera.
+
+- **The camera agent no longer answers for the first camera when none
+  was named.** With several cameras and no camera named or selected, a
+  detection, count or history question now goes to every camera (and
+  the answer says which camera each finding is on); a description goes
+  to every camera up to four and, above that, the agent asks which one,
+  by location, with no model or tool run. The forced grounding picks
+  "all" the same way. Prompt fixes from the review: Qwen's `/no_think`
+  switch is sent to Qwen only (granite and Gemma read it as text);
+  relative times are counted from the clock in the user turn, never
+  from memory; the operator block and the spoken rules no longer repeat
+  each other (first person, 1-2 sentences, never invent — each once);
+  "home security camera system" is "camera system"; and the voice-mode
+  "say what you are about to check" sentence no longer contradicts the
+  no-filler rule.
+
+- **The camera agent's live look now really reads the pipeline's frame.**
+  The agent resolved a camera to its bare server id ("23") for Tier-0's
+  endpoints and event ring, while the pipeline knows it as `cam23`, so
+  every `/best_frame` and `/latest_frame` fetch was a 404 and every live
+  look a 6 s RTSP grab (the second NPU eval, 2026-11-08: still 5.8 s a
+  look after #822). A separate pipeline-id resolver (`cam<server id>`)
+  now serves the two fetches and the Tier-0 lookups; the platform's own
+  endpoints keep the server id. Also `recent_events` takes `all` for every
+  camera like the other tools (Gemma chose it three times of three and
+  was refused), and the `before` argument's description says plainly that
+  "before 6am" is `before='06:00'`.
+
+- **The camera agent no longer arms an alarm when asked for a notification,
+  nor at hours nobody named.** From the first 32-case eval of the agent on
+  the Ventuno Q's NPU (Gemma 4 E2B, 85 of 96 turns right): "let me know
+  when a car arrives" and "notify me when a person shows up" became alarms
+  with an invented "after midnight" window, and "before 6am" arrived as an
+  `after` time. Now a standing request is hinted by its words (alarm words
+  → `create_alarm`, notify/watch words → `create_monitor`, a stop word →
+  the matching stop tool, report words → `create_report`); the alarm
+  handler takes the window from the question's own clock words and drops a
+  window the question never named (a turn's question only: the UI's and
+  the API's arguments stay as given); and a full timestamp is read as its
+  time of day. "wake me if…" is a standing request, not a live look.
+
+- **Search no longer says a colour "can't be searched yet" when the
+  scene description already holds it.** With a captioner on the box the
+  notice is an info line that leads with the match ("blue" is matched
+  from scene descriptions) and then names what would make it exact. A
+  clothing colour on a box that describes vehicles only is its own state,
+  `people-off`, naming the setting (`EVENTS_DESCRIPTOR_PEOPLE`) instead of
+  sending the operator to turn on the Agent app's scene description that
+  was already on (Ventuno Q, 2026-11-07: "light blue kurta" in the
+  caption, found, and the notice saying blue could not be searched).
+
+- **The Vitals card with an NPU tile no longer puts one tile alone on a
+  second row.** Seven tiles fill one row when the card is wide, and 4+3
+  when it is narrow with the last tile spanning the gap, so no empty cell
+  shows the border colour (#813 added the tile, the grid still counted six).
 
 - **Search reads months, years and dates, and says when it searched all
   time.** "in January", "January or February", "last month", "this year",

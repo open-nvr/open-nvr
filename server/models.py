@@ -669,7 +669,14 @@ class EventEmbedding(Base):
     ``dim`` and ``model`` are stored rather than assumed: vectors from
     two different adapters are not comparable, and a half-migrated store
     should be diagnosable from the table rather than from the ranking
-    looking odd."""
+    looking odd.
+
+    ``kind`` says WHAT was embedded. ``image`` is the visit's evidence
+    frame; ``caption`` is the words a captioner wrote about it (plus the
+    projected attribute words), put through the same model's text tower.
+    Both live in one table, keyed ``(event_id, kind)``, because search
+    scopes them identically and a model change must re-embed both — a
+    second table would be a second ``stale_rows`` to forget."""
 
     __tablename__ = "event_embeddings"
     __table_args__ = (
@@ -681,6 +688,11 @@ class EventEmbedding(Base):
     event_id = Column(
         Integer, ForeignKey("events.id", ondelete="CASCADE"), primary_key=True
     )
+    #: ``image`` or ``caption`` — see embedding_store.KIND_IMAGE/KIND_CAPTION.
+    #: Defaults to ``image`` so every pre-existing row and every caller
+    #: written before captions were embedded keeps meaning what it meant.
+    kind = Column(String(16), primary_key=True, nullable=False,
+                  default="image", server_default="image")
     #: float32 little-endian, unit length. See embedding_store.pack().
     vector = Column(LargeBinary, nullable=False)
     #: Length of the vector. Stored because a mismatch is a

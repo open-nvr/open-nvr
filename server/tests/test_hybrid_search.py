@@ -79,7 +79,7 @@ def db():
 
 
 def _visit(db, *, cam=1, start_s=0, label="truck", caption=None, vec=None,
-           model="test-clip"):
+           model="test-clip", cvec=None):
     row = TimelineEvent(
         camera_id=cam, label=label, event_type="visit", source="tier0",
         started_at=T0 + timedelta(seconds=start_s),
@@ -92,6 +92,9 @@ def _visit(db, *, cam=1, start_s=0, label="truck", caption=None, vec=None,
         db.commit()
     if vec is not None:
         embedding_store.put_embedding(db, event_id=row.id, vector=vec, model=model)
+    if cvec is not None:
+        embedding_store.put_embedding(db, event_id=row.id, vector=cvec, model=model,
+                                      kind=embedding_store.KIND_CAPTION)
     return row
 
 
@@ -354,7 +357,7 @@ def test_mixed_producers_of_the_same_size_are_a_warning_not_an_error(db):
 def test_vectors_are_normalised_on_write_so_similarity_is_a_dot_product(db):
     row = _visit(db, caption="x", vec=[3.0, 4.0, 0, 0])
 
-    stored = embedding_store.unpack(db.get(EventEmbedding, row.id).vector)
+    stored = embedding_store.unpack(db.get(EventEmbedding, (row.id, "image")).vector)
 
     assert abs(sum(v * v for v in stored) - 1.0) < 1e-5
     assert abs(stored[0] - 0.6) < 1e-5
@@ -377,7 +380,7 @@ def test_an_empty_vector_writes_no_row(db):
     row = _visit(db, caption="x")
 
     assert embedding_store.put_embedding(db, event_id=row.id, vector=[]) is None
-    assert db.get(EventEmbedding, row.id) is None
+    assert db.get(EventEmbedding, (row.id, "image")) is None
 
 
 def test_a_zero_vector_is_stored_without_dividing_by_zero(db):
@@ -728,3 +731,159 @@ def test_the_answer_separates_word_matches_from_similar_only(db):
     assert answer["matched_words"] == 1
     assert answer["similar_only"] == 1
     assert lorry.id in {h.event.id for h in page.hits}
+
+
+# ── the third arm: the query against what the caption MEANS ──────────
+#
+# Words catch the exact term, the image arm catches what the frame
+# shows, and the caption arm catches a paraphrase: "man in a blue kurta"
+# against a caption that says "person wearing a light blue tunic". The
+# vectors below are fakes that SIMULATE that — a query vector near the
+# paraphrase's caption vector and far from its frame vector — because
+# the property under test is the fusion, not the model.
+
+#: The query "man in a blue kurta", as a fake vector.
+KURTA_Q = [1.0, 0, 0, 0]
+
+
+def test_image_and_caption_vectors_coexist_on_one_visit_and_scan_apart(db):
+    row = _visit(db, caption="x", vec=[1.0, 0, 0, 0], cvec=[0, 1.0, 0, 0])
+
+    assert db.query(EventEmbedding).filter_by(event_id=row.id).count() == 2
+    by_image = embedding_store.rank_by_similarity(
+        db, query_vector=[1.0, 0, 0, 0], candidate_ids=[row.id], kind="image")
+    by_caption = embedding_store.rank_by_similarity(
+        db, query_vector=[1.0, 0, 0, 0], candidate_ids=[row.id], kind="caption")
+    assert by_image.scores == [pytest.approx(1.0)]
+    assert by_caption.scores == [pytest.approx(0.0)], "the caption scan read the frame vector"
+
+    cap = embedding_store.capability(db)
+    assert (cap.rows, cap.image_rows, cap.caption_rows) == (2, 1, 1)
+
+
+def test_the_caption_arm_finds_a_paraphrase_neither_words_nor_frame_could(db):
+    """THE case for the arm. The caption never uses "kurta"; the frame
+    vector is nothing like the query; the caption vector is. Word search
+    returns nothing, the image arm is floored out, fusion returns it —
+    and says the caption arm alone did."""
+    tunic = _visit(db, label="person",
+                   caption="person wearing a light blue tunic",
+                   vec=[0, 0, 1.0, 0],            # the frame: unlike the query
+                   cvec=[0.95, 0.05, 0, 0])       # the words' meaning: like it
+    _visit(db, label="person", start_s=60, caption="a cyclist on the path",
+           vec=[0, 0, 0, 1.0], cvec=[0, 1.0, 0, 0])
+
+    assert search_page(db, text="kurta", scope=None).hits == [], "fixture: a word matched"
+
+    page = search_page(db, text="kurta", query_vector=KURTA_Q, scope=None,
+                       min_similarity=0.5, caption_min_similarity=0.5)
+
+    assert [h.event.id for h in page.hits] == [tunic.id]
+    assert page.hits[0].ranks == {"vector": None, "caption": 1}
+    assert page.semantic["arms"] == {"vector": 0, "caption": 1}
+    assert page.semantic["added_by_vector"] == 1
+    assert page.semantic["added_by_caption"] == 1
+    assert page.semantic["caption"]["considered"] == 2
+    assert page.semantic["caption"]["below_floor"] == 1
+    assert page.semantic["caption"]["best"] == pytest.approx(0.9986, abs=1e-3)
+
+
+def test_a_row_all_three_arms_found_outranks_a_row_two_found(db):
+    """Agreement wins, as it did with two arms. Both rows match the
+    word and the frame; only one also has a caption vector near the
+    query, and that third placing decides it even though the other row
+    is newer (first in the word arm on SQLite)."""
+    three = _visit(db, caption="a red truck", vec=[1.0, 0, 0, 0], cvec=[1.0, 0, 0, 0])
+    two = _visit(db, caption="a truck", start_s=60, vec=[0.99, 0.01, 0, 0])
+
+    page = search_page(db, text="truck", query_vector=[1.0, 0, 0, 0], scope=None)
+
+    assert [h.event.id for h in page.hits] == [three.id, two.id]
+    assert page.hits[0].ranks == {"vector": 1, "text": 2, "caption": 1}
+    assert page.hits[1].ranks == {"vector": 2, "text": 1, "caption": None}
+
+
+def test_a_visit_with_no_caption_vector_still_arrives_through_the_other_arms(db):
+    """Missing is not zero. A visit nobody has caption-embedded yet is
+    skipped by that arm and ranked by the two it does appear in."""
+    bare = _visit(db, caption="a red truck", vec=[1.0, 0, 0, 0])          # no cvec
+    lorry = _visit(db, caption="a lorry", start_s=60, vec=[0, 1.0, 0, 0],
+                   cvec=[1.0, 0, 0, 0])
+
+    page = search_page(db, text="truck", query_vector=[1.0, 0, 0, 0], scope=None)
+
+    ids = {h.event.id for h in page.hits}
+    assert ids == {bare.id, lorry.id}
+    by_id = {h.event.id: h for h in page.hits}
+    assert by_id[bare.id].ranks["caption"] is None
+    assert by_id[bare.id].ranks["text"] == 1 and by_id[bare.id].ranks["vector"] == 1
+    assert by_id[lorry.id].ranks["caption"] == 1
+    assert page.semantic["caption"]["considered"] == 1, (
+        "a visit with no caption vector was counted as scored")
+
+
+def test_the_semantic_block_lists_every_arm_that_ran_with_its_count(db):
+    _visit(db, caption="a red truck", vec=[1.0, 0, 0, 0], cvec=[1.0, 0, 0, 0])
+    _visit(db, caption="a lorry", start_s=60, vec=[0.9, 0.1, 0, 0], cvec=[0.9, 0.1, 0, 0])
+
+    page = search_page(db, text="truck", query_vector=[1.0, 0, 0, 0], scope=None)
+
+    assert set(page.semantic["arms"]) == {"text", "vector", "caption"}
+    assert page.semantic["arms"] == {"vector": 2, "text": 1, "caption": 2}
+    assert page.semantic["fusion"] == "rrf"
+
+
+def test_a_store_with_no_caption_vectors_runs_two_arms_and_says_so(db):
+    """The site that has never embedded a caption — every site before
+    this existed — gets the two-arm ranking it had, and the block says
+    the caption arm had nothing to look at rather than listing it."""
+    _visit(db, caption="a red truck", vec=[1.0, 0, 0, 0])
+
+    page = search_page(db, text="truck", query_vector=[1.0, 0, 0, 0], scope=None)
+
+    assert set(page.semantic["arms"]) == {"text", "vector"}
+    assert page.semantic["caption"]["considered"] == 0
+    assert page.semantic["added_by_caption"] == 0
+    assert page.hits[0].ranks == {"vector": 1, "text": 1}
+
+
+def test_the_caption_arm_has_its_own_floor(db):
+    """Text-vs-text and text-vs-frame come off the same model but do not
+    sit on the same scale, so the caption arm is floored on its own
+    setting and reports what that floor cut."""
+    near = _visit(db, caption="a lorry", vec=[0, 0, 1.0, 0], cvec=[1.0, 0, 0, 0])
+    far = _visit(db, caption="a cyclist", start_s=60, vec=[0, 0, 1.0, 0], cvec=[0, 1.0, 0, 0])
+
+    loose = search_page(db, text="", query_vector=[1.0, 0, 0, 0], scope=None,
+                        min_similarity=0.5)
+    assert {h.event.id for h in loose.hits} == {near.id, far.id}
+
+    tight = search_page(db, text="", query_vector=[1.0, 0, 0, 0], scope=None,
+                        min_similarity=0.5, caption_min_similarity=0.5)
+    assert [h.event.id for h in tight.hits] == [near.id]
+    assert tight.semantic["caption"]["floor"] == 0.5
+    assert tight.semantic["caption"]["below_floor"] == 1
+    # The image arm's own floor report is untouched by the caption arm's.
+    assert tight.semantic["below_floor"] == 2
+
+
+def test_everything_below_both_floors_is_an_empty_page_with_a_reason(db):
+    _visit(db, caption="a cyclist", vec=[0, 1.0, 0, 0], cvec=[0, 1.0, 0, 0])
+
+    page = search_page(db, text="", query_vector=[1.0, 0, 0, 0], scope=None,
+                       min_similarity=0.5, caption_min_similarity=0.5)
+
+    assert page.hits == []
+    assert page.semantic["reason"] == "below-floor"
+    assert page.semantic["caption"]["below_floor"] == 1
+
+
+def test_the_caption_arm_obeys_the_camera_scope(db):
+    """Same predicate as the other two: a caption vector on another
+    camera is not reachable by handing over a vector."""
+    _visit(db, cam=1, caption="mine", cvec=[1.0, 0, 0, 0])
+    theirs = _visit(db, cam=2, caption="theirs", start_s=60, cvec=[1.0, 0, 0, 0])
+
+    page = search_page(db, text="", query_vector=[1.0, 0, 0, 0], scope={1})
+
+    assert theirs.id not in [h.event.id for h in page.hits]

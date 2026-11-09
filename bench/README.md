@@ -61,3 +61,8 @@ Reports taken on real boards, every number from a run on that board:
   the camera agent's LLM: native tool calling, 10 of 10 tool choices right on the agent's evaluation questions
   at 0.8–2.0 s a turn (20–25 s on the CPU), and the exact fit of the 4,096-token window (13 of 14 schemas, or
   7 schemas plus eight turns of history).
+- [`ventuno-q-npu-agent-eval-2026-11-08.md`](ventuno-q-npu-agent-eval-2026-11-08.md) — the agent's 32-case
+  live eval on the NPU against the CPU default, same box, same cases: 85 of 96 turns right at 2–4 s a
+  model turn (22 of 25 at 52–194 s on the CPU), the eleven misses traced to two deterministic fixes, the
+  live look's 6 s found to be the RTSP grab, not the model — and the third run after the fixes: 96 of 96,
+  live looks 0.6–0.8 s, the whole 96 turns in under four minutes.

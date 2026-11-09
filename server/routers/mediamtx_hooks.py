@@ -318,9 +318,9 @@ async def hook_segment_complete(
             duration_sec = None
 
     recording_id: int | None = None
+    file_size: int | None = None
     if cam and identity_ok:
         try:
-            file_size = None
             mtime = None
             try:
                 st = os.stat(segment_path)
@@ -428,6 +428,31 @@ async def hook_segment_complete(
         except Exception as e:
             # Log error but don't fail the webhook
             faststart_logger.error(f"Error storing recording: {e}")
+            db.rollback()
+
+        # Is the segment video? Bytes against duration says: a fat file that
+        # covers almost no time is a stream whose timestamps stopped (RTP
+        # clock wrap behind a relay, Ventuno Q 2026-11-09). The recording
+        # watchdog cannot see this — segments keep arriving — so it is judged
+        # here, where both numbers are, and published like a stall is.
+        try:
+            from services.segment_health import note_segment
+
+            transition = note_segment(db, cam, duration_sec, file_size)
+            if transition:
+                from services.event_bus_service import publish_camera_event
+
+                await publish_camera_event(
+                    camera_id=cam.id,
+                    event_type=transition["event_type"],
+                    payload={
+                        "state": transition["event_state"],
+                        "description": transition["description"],
+                        "camera_name": transition.get("camera_name"),
+                    },
+                )
+        except Exception as e:
+            faststart_logger.warning(f"Segment health check failed: {e}")
             db.rollback()
 
     # Mirror to cloud recording server if configured (with BYOK TLS support)

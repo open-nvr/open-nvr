@@ -175,16 +175,22 @@ and (b) doesn't react to room noise.
 
 **Which path you are on matters.** The agent has two voice paths:
 
-* The **demo page's Talk mode** (`/demo`) records an utterance in the
-  browser and POSTs it to `/converse`. Turn-taking there is the browser's
-  own *energy* detector described below — there is no speech model on the
-  client. Smart Turn is **not** in this loop.
+* The **demo page's Talk mode** (`/demo`) now streams by default: the
+  microphone goes to `/ws` as 16 kHz PCM from an AudioWorklet, and the
+  page plays each sentence as it arrives and renders the transcript, the
+  reply and the turn state from JSON events the pipeline sends beside the
+  audio (`services.StreamEvents`). Its "turn by turn" setting is the old
+  path: record an utterance, wait 0.9 s of silence, POST it to
+  `/converse`, play the whole answer when every stage is done. Measured
+  on the Ventuno Q before the switch: 3–7 s of nothing after you stopped
+  talking, no interrupting (the office session of 2026-11-08).
 * The **streaming pipeline** (`/ws`, Pipecat 1.12) is where Silero VAD +
-  **Smart Turn v3** live: semantic end-of-turn, and — for clients that opt
-  in — model-backed interruptions (`MinWordsUserTurnStartStrategy`: a reply
-  is only cut when the interrupter has actually said a few words). The demo
-  page does not use `/ws` yet; a client that streams 16 kHz PCM over it
-  gets the semantic behaviour.
+  **Smart Turn v3** live: semantic end-of-turn (its silence fallback is
+  1.0 s, was 2.0), and model-backed interruptions (`turns.py`: a reply
+  is only cut when the interrupter has actually said a few words). Since
+  2026-11-08 it answers with the agent's own turn — the router, the forced
+  grounding, the window fit, the backup model and the reply guards — so
+  the two paths cannot drift apart.
 
 So if the demo page "stopped speaking when someone said a couple of random
 words", that was the client barge-in gate (now *firm* by default, see
@@ -293,6 +299,12 @@ transcript for the turn is usually still in flight at that point, so it
 rarely adds to the wall clock.
 
 ## Thinking aloud (`fillers.py`)
+
+**Off by default since 2026-11-09** (`thinking_aloud: false`). It was built
+for the CPU-only box, where a tool turn took 5–10 s. On the Ventuno Q's NPU
+the answer lands in one or two seconds, and "Let me check the office
+camera" right before it read as an unexpected extra reply in the morning
+test of 2026-11-09. Everything below still applies when it is turned on.
 
 A person who has to look something up says what they are about to do,
 then goes quiet and does it. The agent knows *what it is about to do* the
@@ -413,6 +425,20 @@ prefix cache that rules 1–4 above protect does not exist on this path (a
 conversation is created per call and prefills in well under a second), so
 a changing tool list costs nothing here; leave `llm_window_tokens` at 0
 on an Ollama host, where it does.
+
+### The live look after the LLM moved (8 November 2026)
+
+With the model on the NPU the slow part of a live question is no longer
+the model. The 32-case eval on the Ventuno Q: `detect_objects` 5.6–5.8 s,
+`describe_camera` 8.0 s, of which the detector was 0.1 s, the caption
+1.7 s and the compose answer 0.5–0.9 s. The rest was the agent opening its
+own RTSP session for a fresh frame (connect, wait for a keyframe, decode:
+"live frame from cam23 … 6229 ms" in the system check), which it does
+whenever no Tier-0 track is active — a quiet room, every time. The
+pipeline decodes that stream all day, so it now serves its newest decoded
+frame at `/latest_frame` and the agent's frame cache asks for it first;
+the RTSP grab stays as the fallback for a camera the pipeline does not
+decode or a stream that went stale.
 
 ## What the installer suggests (hardware-aware defaults)
 

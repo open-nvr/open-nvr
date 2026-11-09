@@ -598,6 +598,13 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
             # 256, so from camera 17 every put evicted someone.
             max_entries=cfg.bestframe_max_entries,
         )
+    # The newest decoded frame per camera, served at /latest_frame: the
+    # camera agent's live look reads it instead of opening its own RTSP
+    # session (5.6–6.2 s a look on a Ventuno Q; bestframe.LatestFrameStore).
+    latest_frames = None
+    if cfg.metrics_port:
+        from .bestframe import LatestFrameStore
+        latest_frames = LatestFrameStore()
     # Events store (RFC-0001 C1): post finished visits + best-frame evidence
     # to core. Best-effort by design — core down loses history, not detection.
     visit_poster = None
@@ -619,6 +626,7 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
         model_size=model_size,
         model_id=cfg.model_id,
         best_frames=best_frames,
+        latest_frames=latest_frames,
         device=cfg.device,
         hwaccel=cfg.hwaccel,
         decode_skip=cfg.decode_skip,
@@ -652,6 +660,7 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
         evidence_stamp_lead_s=cfg.evidence_stamp_lead_s,
     )
     manager.best_frames = best_frames            # expose so main() can serve it
+    manager.latest_frames = latest_frames
     # Same reason: main() wires this into /health. It is a LOCAL of this
     # function, so referring to it from main() is a NameError at startup.
     manager.visit_poster = visit_poster
@@ -875,7 +884,7 @@ def main() -> int:  # pragma: no cover - integration entrypoint
         cfg.gate_mode,
         cfg.dispatch_kaic_url or "off",
         cfg.nats_url or "unconfigured",
-        f":{cfg.metrics_port}/metrics,/health,/best_frame" if cfg.metrics_port else "off",
+        f":{cfg.metrics_port}/metrics,/health,/best_frame,/latest_frame" if cfg.metrics_port else "off",
         "on (events store)" if cfg.visits_enabled else "off",
         threads or "uncapped",
     )
@@ -885,9 +894,10 @@ def main() -> int:  # pragma: no cover - integration entrypoint
         serve_metrics(
             cfg.metrics_port,
             best_frames=getattr(manager, "best_frames", None),
+            latest_frames=getattr(manager, "latest_frames", None),
             health_fn=lambda: health_evaluate(hstate),
         )
-        log.info("tier0 metrics on :%d/metrics (+ /health, /best_frame)", cfg.metrics_port)
+        log.info("tier0 metrics on :%d/metrics (+ /health, /best_frame, /latest_frame)", cfg.metrics_port)
 
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())

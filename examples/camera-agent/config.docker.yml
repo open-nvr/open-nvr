@@ -122,6 +122,12 @@ llm_model: ${LLM_MODEL}
 # turn then sends only the tool schemas the question is likely to need and
 # the newest history (prompt_budget.py). 0 = the runtime manages the window.
 llm_window_tokens: ${LLM_WINDOW_TOKENS}
+# When llm_provider is openai and that endpoint goes away (the NPU adapter
+# restarting, its model reloading): an Ollama to answer from meanwhile,
+# slower, with one spoken notice. Empty = no fallback. The qualcomm
+# flavour's start.sh fills it from OLLAMA_EXTERNAL_URL when .env has one.
+llm_fallback_url: ${LLM_FALLBACK_URL}
+llm_fallback_model: ${LLM_FALLBACK_MODEL}
 # Pre-set so that IF you switch OLLAMA_MODEL to a "thinking" model (e.g. a qwen3)
 # it stays snappy and non-verbose; a harmless no-op for the non-thinking qwen2.5
 # default.
@@ -141,7 +147,7 @@ llm_max_tokens: 128
 vad_confidence: 0.55
 vad_start_secs: 0.15
 vad_stop_secs: 0.2
-turn_stop_secs: 2.0
+turn_stop_secs: 1.0
 # Smart Turn only ever looks at the last 8 s of a turn; buffering more is
 # pure cost.
 turn_max_secs: 8.0
@@ -173,7 +179,10 @@ interrupt_addressee: true
 # questions get the line as a status only. GET /thinking-aloud shows the
 # decisions. filler_source "model" asks the LLM to write the line in the
 # same first pass (a few extra tokens) with the template as fallback.
-thinking_aloud: true
+# Off by default: built for a CPU-only box where a tool turn took 5-10 s;
+# on an NPU the answer lands in a second or two and the line reads as an
+# unexpected extra reply. Set true on a slow box.
+thinking_aloud: false
 filler_min_ms: 1500
 filler_source: template
 # turn_cpu_threads: 1
@@ -253,9 +262,10 @@ port: 9100
 cameras: []
 
 system_prompt: |
-  You are a concise voice assistant for a home security camera system.
-  You have NO knowledge of what any camera currently shows — the ONLY
-  way to know is to call a tool.
+  You are a concise voice assistant for a camera system. You have NO
+  knowledge of what any camera currently shows — the ONLY way to know is
+  to call a tool; if you have not called one this turn, you do not know,
+  and you never describe a camera from imagination.
 
   RULES:
   - For questions about what a camera sees RIGHT NOW, what is happening,
@@ -272,8 +282,5 @@ system_prompt: |
       call describe_event with its [#id].
     - "did a red truck come by?" — searching by appearance/attributes →
       call search_footage with keywords.
-  - NEVER invent, guess, or describe what is on a camera from imagination.
-    If you have not called a tool this turn, you do not know.
-  - Base your answer ONLY on the tool result, in 1-2 short spoken sentences.
   - If a tool says a camera cannot be reached, tell the user that camera
     appears to be offline.
