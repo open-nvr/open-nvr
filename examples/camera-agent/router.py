@@ -153,9 +153,19 @@ _CLOSING_TAIL_RE = re.compile(
     r"|catch\s+you\s+later|ciao)\s*[,.!]*\s*$", re.IGNORECASE)
 
 
+#: A goodbye word anywhere in an utterance that is NOTHING but small talk
+#: ("Bye. Thank you.", "ok bye, thanks a lot"): the order of the pleasantries
+#: does not change what was meant. "Bye. Thank you." reached the model as
+#: small talk, got "You're welcome. Goodbye." back, and the session stayed
+#: open (2026-11-09).
+_GOODBYE_WORD_RE = re.compile(r"\b(?:bye|goodbye|good\s?bye|see\s+you|good\s+night|ciao)\b", re.IGNORECASE)
+
+
 def is_closing(text: str) -> bool:
     t = text or ""
     if _CLOSING_RE.match(t) or (len(t.split()) <= 12 and _CLOSING_PHRASE_RE.search(t)):
+        return True
+    if _is_small_talk(t) and _GOODBYE_WORD_RE.search(t):
         return True
     if len(t.split()) <= 20:
         parts = [p.strip() for p in re.split(r"[.!?]+", t) if p.strip()]
