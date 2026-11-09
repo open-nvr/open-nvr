@@ -132,7 +132,10 @@ interrupt_addressee: true
 # questions get the line as a status only. GET /thinking-aloud shows the
 # decisions. filler_source "model" asks the LLM to write the line in the
 # same first pass (a few extra tokens) with the template as fallback.
-thinking_aloud: true
+# Off by default: built for a CPU-only box where a tool turn took 5-10 s;
+# on an NPU the answer lands in a second or two and the line reads as an
+# unexpected extra reply. Set true on a slow box.
+thinking_aloud: false
 filler_min_ms: 1500
 filler_source: template
 # The router (router.py) decides simple camera questions BEFORE the LLM

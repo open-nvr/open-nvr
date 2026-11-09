@@ -239,6 +239,9 @@ def test_dropped_frames_are_counted_from_seq_gaps_and_warned_about(monkeypatch, 
         "seq back to 0 is a restart, never a drop")
     assert "exceeds this box's capacity" in caplog.text
     assert "3 of 4 decoded frames" in caplog.text
+    # The warning says where the frame's time went, not only that it was lost.
+    assert "Per frame this window: waited" in caplog.text
+    assert "in the detection stages" in caplog.text and "after them" in caplog.text
 
 
 def test_the_capacity_warning_is_a_share_of_what_was_decoded():
