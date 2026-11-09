@@ -546,8 +546,8 @@
   name: Attendly
   summary: Attendance by face on your cameras — classroom rosters from a weekly timetable, hostel and mess flap barriers (or in/out alerts without one), meal bookings, and staff check-in/out per department. A full application with its own web UI (opens in a new tab) and OpenNVR login.
   category: attendance
-  version: "1.0.0"
-  image: ghcr.io/open-nvr/attendly:latest
+  version: "1.1.0"
+  image: ghcr.io/open-nvr/attendly:1.1.0
   # First-party, closed source (docs/APP_LISTING_TERMS.md §1): no
   # build_context and no source — the image is built and signed by
   # OpenNVR's CI in a private open-nvr repository.
@@ -569,7 +569,7 @@
       services:
         attendly:
           profiles: [apps]
-          image: ${ATTENDLY_IMAGE:-ghcr.io/open-nvr/attendly:latest}
+          image: ${ATTENDLY_IMAGE:-ghcr.io/open-nvr/attendly:1.1.0}
           restart: unless-stopped
           environment:
             - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
