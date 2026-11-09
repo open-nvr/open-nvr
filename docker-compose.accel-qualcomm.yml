@@ -97,11 +97,13 @@ services:
       - ADAPTER_ONNX_PROVIDERS=${YOLO_POSE_ONNX_PROVIDERS:-${ADAPTER_ONNX_PROVIDERS:-QNNExecutionProvider:htp}}
       - ADAPTER_ONNX_PROVIDER_OPTIONS=${ADAPTER_ONNX_PROVIDER_OPTIONS:-}
   # Speech to text for the camera agent. The image is whatever STT_ADAPTER
-  # resolved to (docker-compose.camera-agent.yml): parakeet on the CPU by
-  # default, or — opt-in, STT_ADAPTER=whisper_qnn — Whisper-Small as QNN
-  # context binaries on the Hexagon. The device, groups and libraries are
-  # lent either way (parakeet never asks for QNN, so they are inert for
-  # it); only the providers variable start.sh fills decides.
+  # resolved to (docker-compose.camera-agent.yml): with the default `auto`
+  # that is Whisper-Small as QNN context binaries on the Hexagon here
+  # (whisper_qnn, 361 ms an utterance on a Ventuno Q against parakeet's
+  # 774 ms, bench/), parakeet only when the NPU image is not available or
+  # STT_ADAPTER names it. The device, groups and libraries are lent either
+  # way (parakeet never asks for QNN, so they are inert for it); only the
+  # providers variable start.sh fills decides.
   whisper-adapter:
     profiles: [camera-agent]
     devices:

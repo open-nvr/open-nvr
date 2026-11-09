@@ -472,6 +472,17 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`STT_ADAPTER=auto` is the default, and on a Qualcomm board it is the
+  NPU.** Measured on a Ventuno Q (`bench/ventuno-q-stt-2026-11-09.md`):
+  the `whisper_qnn` adapter answers in 361 ms an utterance against
+  parakeet's 774 ms on the same box's ARM cores, with the same accuracy on
+  clean speech and a no-speech probability that drops silence and noise
+  clips parakeet transcribes as words. `auto` resolves on every start —
+  whisper_qnn where the board is Qualcomm and the NPU image is available,
+  parakeet everywhere else — and start.sh now writes the derived image and
+  module for every flavour, so the word itself never reaches compose. An
+  explicit `STT_ADAPTER=parakeet` in an existing `.env` is kept as typed.
+
 - **The camera agent no longer says "Let me check the office camera"
   before answering.** Thinking aloud (`thinking_aloud`, fillers.py) is off
   by default. It was built for the CPU-only box, where a tool turn took
