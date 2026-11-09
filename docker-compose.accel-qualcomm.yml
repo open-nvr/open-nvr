@@ -96,6 +96,24 @@ services:
     environment:
       - ADAPTER_ONNX_PROVIDERS=${YOLO_POSE_ONNX_PROVIDERS:-${ADAPTER_ONNX_PROVIDERS:-QNNExecutionProvider:htp}}
       - ADAPTER_ONNX_PROVIDER_OPTIONS=${ADAPTER_ONNX_PROVIDER_OPTIONS:-}
+  # Speech to text for the camera agent. The image is whatever STT_ADAPTER
+  # resolved to (docker-compose.camera-agent.yml): parakeet on the CPU by
+  # default, or — opt-in, STT_ADAPTER=whisper_qnn — Whisper-Small as QNN
+  # context binaries on the Hexagon. The device, groups and libraries are
+  # lent either way (parakeet never asks for QNN, so they are inert for
+  # it); only the providers variable start.sh fills decides.
+  whisper-adapter:
+    profiles: [camera-agent]
+    devices:
+      - /dev/fastrpc-cdsp:/dev/fastrpc-cdsp
+      - /dev/dma_heap/system:/dev/dma_heap/system
+      - /dev/dma_heap/qcom,system:/dev/dma_heap/qcom,system
+    group_add:
+      - "${FASTRPC_GID:-125}"
+      - "${DMAHEAP_GID:-989}"
+    volumes:
+      - ${QCOM_LIB_DIR:-/usr/lib/aarch64-linux-gnu}/libcdsprpc.so.1.0.0:/usr/lib/aarch64-linux-gnu/libcdsprpc.so:ro
+      - ${QCOM_LIB_DIR:-/usr/lib/aarch64-linux-gnu}/libdmabufheap.so.0:/usr/lib/aarch64-linux-gnu/libdmabufheap.so.0:ro
   insightface-adapter:
     profiles: [apps, smart-doorbell]
     image: ghcr.io/open-nvr/insightface-adapter:${ADAPTER_TAG:-latest}-qualcomm

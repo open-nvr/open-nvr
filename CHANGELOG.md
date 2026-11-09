@@ -8,6 +8,17 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`STT_ADAPTER=whisper_qnn`: the camera agent's speech to text on the
+  Hexagon NPU (opt-in).** On a Qualcomm board the qualcomm flavour turns
+  that one word into the image, module, tag and provider the
+  `whisper-adapter` service needs for ai-adapter's new `whisper_qnn`
+  (Whisper-Small w8a16 as Qualcomm's QNN context binaries for the
+  QCS8275), lends it the DSP, groups and fastrpc libraries the detector
+  gets, and puts parakeet back when the flavour is left or the image is
+  not available. Parakeet stays the default: the NPU adapter is built
+  and unit-tested but not yet measured against it on the Ventuno Q, and
+  nothing here changes a box that did not ask.
+
 - **Search compares the question with what each caption means, not only
   with its words.** "Man in a blue kurta" found nothing when the captioner
   had written "person wearing a light blue tunic": the word arm needs the

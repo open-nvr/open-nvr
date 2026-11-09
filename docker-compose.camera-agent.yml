@@ -63,10 +63,14 @@ services:
   # (faster-whisper base.en, 3.3 % at 1.42 s; Hindi, translation).
   # Both serve the same §5.3 result on port 9003. Parakeet is newer
   # than adapter release 0.1.7, so it rides its own tag variable.
+  # A third choice on Qualcomm boards: `whisper_qnn` (Whisper-Small w8a16
+  # as QNN context binaries on the Hexagon NPU; opt-in, start.sh fills
+  # the image/module/tag/provider below from it — the image name and the
+  # module name differ, hence the two derived variables).
   whisper-adapter:
     profiles: [camera-agent]
-    image: ghcr.io/open-nvr/${STT_ADAPTER:-parakeet}-adapter:${STT_ADAPTER_TAG:-${ADAPTER_TAG:-latest}}
-    command: ["uvicorn", "adapters.${STT_ADAPTER:-parakeet}.main:app", "--host", "0.0.0.0", "--port", "9003"]
+    image: ghcr.io/open-nvr/${STT_ADAPTER_IMAGE:-${STT_ADAPTER:-parakeet}-adapter}:${STT_ADAPTER_TAG:-${ADAPTER_TAG:-latest}}
+    command: ["uvicorn", "${STT_ADAPTER_MODULE:-adapters.${STT_ADAPTER:-parakeet}.main}:app", "--host", "0.0.0.0", "--port", "9003"]
     container_name: opennvr_whisper_adapter
     logging: *svc-logs
     restart: unless-stopped
@@ -77,6 +81,9 @@ services:
       - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-base.en}
       # CTranslate2 threads on CPU; empty = all cores. Adapter 1.0.1+.
       - OPENNVR_WHISPER_CPU_THREADS=${WHISPER_CPU_THREADS:-}
+      # ONNX providers for an ONNX STT adapter; empty keeps the adapter's
+      # own default (parakeet: CPU; whisper_qnn: the Hexagon).
+      - ADAPTER_ONNX_PROVIDERS=${STT_ONNX_PROVIDERS:-}
     volumes:
       # Whisper's download cache; inert for parakeet (weights baked in).
       - opennvr_whisper_models:/app/model_weights/whisper
