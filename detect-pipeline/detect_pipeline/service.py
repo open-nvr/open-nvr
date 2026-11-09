@@ -49,6 +49,7 @@ from .metrics import (
     record_published,
     record_sink_error,
     record_frames_dropped,
+    record_frames_idle_duplicates,
     record_worker_restart,
     record_worker_state,
     record_worker_straggler,
@@ -1031,11 +1032,8 @@ class CameraWorker:
                 self.spec.camera_id, ", ".join(sorted(self.spec.extra_labels)),
             )
         log.info("tier0 %s: started (%dx%d)", self.spec.camera_id, w, h)
-        adaptive: AdaptiveDecode | None = None
-        if self.decode_idle and self._frame_source is None:
-            adaptive = AdaptiveDecode(
-                self.decode_idle, self.decode_skip, self.decode_idle_after
-            )
+        adaptive: AdaptiveDecode | None = self._make_adaptive()
+        if adaptive is not None:
             _metrics.gauge(
                 "tier0_decode_idle", 0.0, {"camera": self.spec.camera_id}
             )
@@ -1102,8 +1100,20 @@ class CameraWorker:
                     # accounting from the seq gap; a restart (seq back to 0)
                     # is handled above and never reads as a drop.
                     gap = seq - prev_seq - 1
-                    record_frames_dropped(self.spec.camera_id, gap)
-                    drop_n += gap
+                    if adaptive is not None and adaptive.mode == AdaptiveDecode.IDLE:
+                        # Idle = keyframes only, and the fps filter fills the
+                        # rate with COPIES of each keyframe that arrive in a
+                        # burst when the next keyframe does. The newest wins
+                        # and the copies are skipped: nothing was lost, so
+                        # they are not drops and never a capacity warning.
+                        # Measured on the Ventuno Q (2026-11-09): "86 of 305
+                        # decoded frames never detected on" in idle minutes
+                        # while the loop waited 280 ms per frame and spent
+                        # 5 ms detecting — the very split #837 added.
+                        record_frames_idle_duplicates(self.spec.camera_id, gap)
+                    else:
+                        record_frames_dropped(self.spec.camera_id, gap)
+                        drop_n += gap
                 prev_seq = seq
                 drop_seen += 1
                 now = time.monotonic()
@@ -1291,6 +1301,14 @@ class CameraWorker:
             if not self._superseded:
                 record_worker_state(self.spec.camera_id, False)
             log.info("tier0 %s: stopped", self.spec.camera_id)
+
+    def _make_adaptive(self) -> "AdaptiveDecode | None":
+        """The adaptive-decode state machine for this worker, or None when
+        adaptive decode is off or the frames come from an injected source
+        (no ffmpeg to flip). A seam: a test hands the loop an idle one."""
+        if self.decode_idle and self._frame_source is None:
+            return AdaptiveDecode(self.decode_idle, self.decode_skip, self.decode_idle_after)
+        return None
 
     def _run_gate(self, result, frame) -> None:
         """Gate the tracks (shadow by default) and publish the decisions (audit)."""

@@ -1128,3 +1128,49 @@ def test_manager_keeps_the_freshest_playback_url_per_camera_like_the_tap_urls():
     prov.specs = []
     mgr.reconcile()
     assert mgr.current_playback_url("a") is None
+
+
+def test_idle_keyframe_duplicates_are_not_drops_and_raise_no_warning(monkeypatch, caplog):
+    """Same gappy source, but the camera is idling on keyframe-only decode:
+    the gaps are the fps filter's fill copies the worker skipped, counted
+    apart from drops, and the capacity warning stays quiet. On the Ventuno
+    Q this read as a 28 % drop rate every idle minute (2026-11-09)."""
+    import logging
+
+    import detect_pipeline.motion as motion_mod
+    import detect_pipeline.service as svc
+    from detect_pipeline.metrics import metrics
+
+    real_detect = motion_mod.MotionDetector.detect
+
+    def fake_detect(self, luma):
+        real_detect(self, luma)
+        self.calibrating = False
+        return [(80, 60, 160, 200)]
+
+    monkeypatch.setattr(motion_mod.MotionDetector, "detect", fake_detect)
+    monkeypatch.setattr(svc, "DROP_REPORT_WINDOW_S", 0.0)
+
+    class _Idle:
+        mode = svc.AdaptiveDecode.IDLE
+        skip = "nokey"
+
+        def observe(self, result, now=None):
+            return False
+
+    cam = "cam-idle-gappy"
+    dropped_before = metrics.value("tier0_frames_dropped_total", {"camera": cam})
+    dups_before = metrics.value("tier0_frames_idle_duplicates_total", {"camera": cam})
+    sink = _FakeSink()
+    worker = CameraWorker(_spec(cam), sink, detector=_MotionAllDetector(), frame_source=_GappySource())
+    worker._make_adaptive = lambda: _Idle()
+    with caplog.at_level(logging.WARNING, logger="detect_pipeline.service"):
+        worker.start()
+        for _ in range(100):
+            if len(sink.events) >= 6:
+                break
+            time.sleep(0.02)
+        worker.stop()
+    assert metrics.value("tier0_frames_dropped_total", {"camera": cam}) - dropped_before == 0
+    assert metrics.value("tier0_frames_idle_duplicates_total", {"camera": cam}) - dups_before == 3
+    assert "exceeds this box's capacity" not in caplog.text
