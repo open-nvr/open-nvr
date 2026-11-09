@@ -75,6 +75,8 @@ GOLDEN = [
     ("remove the notification", 0, "stop_monitor", {"__last_kind": "monitor"}),
     ("cancel that", 0, "stop_report", {"__last_kind": "report"}),
     ("stop talking", 2, None, {}),
+    ("okay then remove it, I don't need any notification when a car arrives", 0, "stop_monitor",
+     {"__last_kind": "monitor"}),
     # an absolute clock window with nothing named → the footage narration
     ("what happened at the gate between 2pm and 3pm", 0, "describe_window", {"camera_id": "cam2"}),
     # ── NEW: what is set up → list_standing ──

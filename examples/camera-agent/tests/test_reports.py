@@ -104,6 +104,17 @@ def test_create_report_handler_parses_time_and_defaults(monkeypatch):
         # missing query → asks
         ask = await rt._handle_create_report({"name": "C"})
         assert ask.endswith("?")
+        # the model left the schedule blank (or put a word in `at`): the
+        # question's own words decide
+        rt.tools.current_question = "every hour tell me what you see on cam1"
+        try:
+            await rt._handle_create_report({"name": "Hourly", "query": "what you see", "at": "every_minutes"})
+            assert rt.reports.list()[2]["schedule"] == "every 60 min"
+            rt.tools.current_question = "every evening summarise the day"
+            await rt._handle_create_report({"name": "Eve", "query": "the day"})
+            assert rt.reports.list()[3]["schedule"] == "daily at 18:00"
+        finally:
+            rt.tools.current_question = ""
 
     asyncio.run(go())
 

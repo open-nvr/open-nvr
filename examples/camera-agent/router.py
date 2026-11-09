@@ -784,9 +784,15 @@ def _route_stop(t: str, advertised: set[str], last_kind: str | None) -> Decision
     (alarm words → stop_alarm, report words → stop_report, watch words →
     stop_monitor, else the kind set up last, else stop_monitor), with the
     number said as its id and silence/mute as the alarm's action."""
-    if not _STOP_REQUEST_RE.match(t) or _NOT_STOP_RE.search(t):
+    # The request is its first clause: "okay then remove it, I don't need
+    # any notification when a car arrives" (13 words, hinted, the model
+    # skipped the call 2 times in 3 — Ventuno Q eval run 5, 2026-11-09).
+    lead = re.match(r"^\s*(?:(?:ok(?:ay)?|actually|also|and|now|hey|so|well|no|yes|then|please)[,\s]+)*", t)
+    body = t[lead.end():] if lead else t
+    head = re.split(r"[,.;!?]|\b(?:because|since|as)\b", body, maxsplit=1)[0]
+    if not _STOP_REQUEST_RE.match(head) or _NOT_STOP_RE.search(t):
         return None
-    if len(re.findall(r"[A-Za-z']+", t)) > 8 or _is_past_question(t):
+    if len(re.findall(r"[A-Za-z']+", head)) > 8 or _is_past_question(head):
         return None
     alarm = bool(_ALARM_WORDS_RE.search(t))
     monitor = bool(_MONITOR_WORDS_RE.search(t)) or bool(re.search(r"\bwatching\b", t, re.IGNORECASE))
@@ -1197,6 +1203,53 @@ def clock_window_from_text(text: str) -> tuple[int | None, int | None, bool]:
     mentioned = after is not None or before is not None
     # Midnight as a bound is no bound: "after midnight" is any time.
     return (after or None), (before or None), mentioned
+
+
+_EVERY_RE = re.compile(
+    r"\bevery\s+" + _QTY + r"?\s*(minutes?|mins?|min|hours?|hrs?|hr|hour|half\s+(?:an\s+)?hour)\b"
+    r"|\b(hourly|half[-\s]hourly)\b", re.IGNORECASE)
+_DAILY_RE = re.compile(
+    r"\b(every\s+(morning|evening|night|day|afternoon)|daily|each\s+(morning|evening|night|day)|"
+    r"(?:in\s+the\s+)?mornings?)\b", re.IGNORECASE)
+_AT_RE = re.compile(r"\b(?:at|around|by)\s+" + _CLOCK_RE, re.IGNORECASE)
+_PART_OF_DAY_DEFAULT = {"morning": 8 * 60, "day": 8 * 60, "afternoon": 14 * 60,
+                        "evening": 18 * 60, "night": 22 * 60}
+
+
+def schedule_from_text(text: str) -> tuple[int | None, int | None]:
+    """(at_min, every_minutes) a report request asks for, from its words:
+    "every hour" → (None, 60); "every 15 minutes" → (None, 15); "every
+    morning at 7" → (420, None); "every evening" → (1080, None); "daily
+    at 9pm" → (1260, None); nothing said → (None, None). The model's
+    slots win when it fills them; this is for when it does not (Gemma
+    put the word "every_minutes" in `at` and left every_minutes empty,
+    3 of 3, Ventuno Q eval run 5)."""
+    t = text or ""
+    m = _EVERY_RE.search(t)
+    if m:
+        if m.group(3):                                    # hourly / half-hourly
+            return None, 30 if "half" in m.group(3).lower() else 60
+        unit = (m.group(2) or "").lower()
+        if unit.startswith("half"):
+            return None, 30
+        qty = _qty(m.group(1)) if m.group(1) else 1
+        mins = int(qty * (60 if unit.startswith(("hour", "hr")) else 1))
+        return None, max(1, mins)
+    at = None
+    m = _AT_RE.search(t)
+    if m:
+        at = _clock_minutes(m.group("h"), m.group("m"), m.group("ap"), m.group("word"))
+    d = _DAILY_RE.search(t)
+    if d:
+        if at is None:
+            part = (d.group(2) or d.group(3) or "morning").lower()
+            if "morning" in d.group(0).lower():
+                part = "morning"
+            at = _PART_OF_DAY_DEFAULT.get(part, 8 * 60)
+        return at, None
+    if at is not None:
+        return at, None
+    return None, None
 
 
 # ── the one call the turn makes ───────────────────────────────────
