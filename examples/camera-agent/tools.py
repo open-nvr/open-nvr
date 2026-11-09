@@ -149,6 +149,23 @@ def _as_bool(value: Any) -> bool | None:
     return None
 
 
+def _frames_alike(a: bytes, b: bytes, threshold: float = 8.0) -> bool:
+    """Do two JPEGs show the same scene? Mean absolute difference of their
+    32×18 grey thumbnails, below ``threshold``. Anything that is not a
+    decodable image (tests pass fixture bytes) is "different", so nothing
+    is ever skipped by mistake."""
+    try:
+        import io
+
+        from PIL import Image, ImageChops, ImageStat
+
+        ia = Image.open(io.BytesIO(a)).convert("L").resize((32, 18))
+        ib = Image.open(io.BytesIO(b)).convert("L").resize((32, 18))
+        return ImageStat.Stat(ImageChops.difference(ia, ib)).mean[0] < threshold
+    except Exception:  # noqa: BLE001 — not an image, or Pillow missing
+        return False
+
+
 class CameraTools:
     """Holds references to the context + KAI-C clients and exposes
     one coroutine per tool. Pipecat's LLM service calls these via
@@ -466,6 +483,12 @@ class CameraTools:
 
     # describe_window samples this many frames across the requested span.
     _WINDOW_SAMPLES = 5
+    #: Mean per-pixel difference (0–255, on a 32×18 grey thumbnail) below
+    #: which two sampled frames are the same scene and the second one
+    #: inherits the first one's caption instead of costing another VLM
+    #: call. An empty room drifts 1–3 over an hour of daylight; a person
+    #: in frame moves it past 10.
+    _WINDOW_SAME_SCENE = 8.0
 
     async def describe_window(self, args: dict[str, Any]) -> str:
         """Describe WHAT HAPPENED over a past window from the RECORDED FOOTAGE —
@@ -497,13 +520,25 @@ class CameraTools:
 
         n = self._WINDOW_SAMPLES
         step = (end - start).total_seconds() / max(1, n - 1)
+        instants = [start + _td(seconds=step * i) for i in range(n)]
+        # The frames together (each is one ffmpeg seek in core, ~0.75 s on
+        # the Ventuno Q), then one caption per CHANGE of scene: five
+        # frames of the same empty office cost five captions (12 s for a
+        # one-hour window, eval 2026-11-09); now they cost one.
+        frames = await asyncio.gather(
+            *(self._events.recording_frame(server_cam, ts.isoformat()) for ts in instants),
+            return_exceptions=True)
         observations: list[tuple[str, str]] = []
-        for i in range(n):
-            ts = start + _td(seconds=step * i)
-            frame = await self._events.recording_frame(server_cam, ts.isoformat())
-            if not frame:
+        last_frame: bytes | None = None
+        last_caption: str | None = None
+        for ts, frame in zip(instants, frames):
+            if not frame or isinstance(frame, BaseException):
                 continue
-            caption = await self._vlm_caption(frame, question)
+            if last_frame is not None and _frames_alike(last_frame, frame, self._WINDOW_SAME_SCENE):
+                caption = last_caption
+            else:
+                caption = await self._vlm_caption(frame, question)
+                last_frame, last_caption = frame, caption
             if caption:
                 observations.append((self._clock_phrase(ts.isoformat()), caption))
         if not observations:

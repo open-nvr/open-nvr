@@ -687,3 +687,61 @@ def test_a_connection_dropped_mid_response_is_no_answer(monkeypatch):
     status, body = eh.http_requester("http://agent", None, 5)("POST", "/ask", {"text": "x"})
     assert status == 0 and "IncompleteRead" in body["error"]
 
+
+
+# ── a 401 mid-run refreshes the token and retries once ─────────────────
+
+def test_requester_refreshes_the_token_on_401(monkeypatch):
+    import io
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    h = eh
+
+    calls = []
+
+    class _Resp(io.BytesIO):
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=0):
+        calls.append((req.full_url, req.get_header("Authorization"), req.data))
+        if req.full_url.endswith("/api/v1/auth/refresh"):
+            assert _json.loads(req.data) == {"refresh_token": "R1"}
+            return _Resp(_json.dumps({"access_token": "T2", "refresh_token": "R2"}).encode())
+        if req.get_header("Authorization") == "Bearer T1":
+            raise urllib.error.HTTPError(req.full_url, 401, "expired", {}, io.BytesIO(b'{"detail":"expired"}'))
+        return _Resp(b'{"ok": true}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    request = h.http_requester("http://agent:9100", "T1", 5.0, refresh_token="R1",
+                               auth_base="http://core:8000")
+    status, body = request("GET", "/health")
+    assert (status, body) == (200, {"ok": True})
+    assert [c[0] for c in calls] == ["http://agent:9100/health", "http://core:8000/api/v1/auth/refresh",
+                                     "http://agent:9100/health"]
+    assert calls[2][1] == "Bearer T2"
+    # the new token sticks for the next request, and a second 401 is not retried forever
+    status, _ = request("GET", "/state")
+    assert status == 200 and calls[-1][1] == "Bearer T2"
+
+
+def test_requester_without_a_refresh_token_reports_the_401(monkeypatch):
+    import io
+    import urllib.error
+    import urllib.request
+
+    h = eh
+
+    def fake_urlopen(req, timeout=0):
+        raise urllib.error.HTTPError(req.full_url, 401, "expired", {}, io.BytesIO(b'{"detail":"expired"}'))
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    status, body = h.http_requester("http://agent:9100", "T1", 5.0)("GET", "/health")
+    assert status == 401 and body == {"detail": "expired"}

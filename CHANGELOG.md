@@ -8,6 +8,21 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Camera agent: `GET /turn-stats`, and footage review that captions only
+  what changed.** `/turn-stats` reports what the last thousand turns cost
+  in this process — p50/p95 wall time, LLM time and tool time by router
+  tier, calls, failures and latency by tool, where answers came from, and
+  the last few turns — from the traces the agent already keeps, so
+  latency is readable without pulling an eval log off the box.
+  `describe_window` fetches its five sample frames together and captions
+  a frame only when the scene changed since the last captioned one (a
+  32×18 grey-thumbnail difference): a one-hour window of an empty office
+  cost five captions and 12 s on the Ventuno Q; it now costs one. The
+  eval harness takes `--refresh-token` and exchanges it on a 401 so a run
+  longer than the 30-minute access token finishes, and
+  `tools/box_eval.sh` runs the live eval on the box as deployed, with
+  `--cpu` to run it against the CPU brain and put the NPU settings back.
+
 - **The camera agent knows about itself and the system: `list_standing`,
   `system_status`, `show_camera`.** "What alarms do I have?" used to be
   answered by arming another one (the words matched a standing request);

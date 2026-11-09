@@ -500,16 +500,42 @@ Requester = Callable[[str, str, Any], tuple[int, Any]]
 
 
 def http_requester(base: str, token: str | None = None,
-                   timeout: float = 300.0) -> Requester:
+                   timeout: float = 300.0, refresh_token: str | None = None,
+                   auth_base: str | None = None) -> Requester:
+    """``refresh_token`` + ``auth_base`` (the OpenNVR server): a 401 mid-run
+    exchanges it for a new access token at ``{auth_base}/api/v1/auth/refresh``
+    and retries once. The access token lives 30 minutes; a CPU run of the
+    52 cases takes longer (the 2026-11-08 CPU run lost its last seven cases
+    to ``/reset answered 401``)."""
     base = base.rstrip("/")
+    state = {"token": token, "refresh": refresh_token}
 
-    def request(method: str, path: str, body: Any = None) -> tuple[int, Any]:
+    def _refresh() -> bool:
+        if not (state["refresh"] and auth_base):
+            return False
+        req = urllib.request.Request(
+            auth_base.rstrip("/") + "/api/v1/auth/refresh",
+            data=json.dumps({"refresh_token": state["refresh"]}).encode(), method="POST")
+        req.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                body = json.loads(r.read().decode() or "{}")
+        except Exception:  # noqa: BLE001 — the retry below reports the original 401
+            return False
+        if not body.get("access_token"):
+            return False
+        state["token"] = body["access_token"]
+        state["refresh"] = body.get("refresh_token") or state["refresh"]
+        print("token refreshed", file=sys.stderr)
+        return True
+
+    def request(method: str, path: str, body: Any = None, _retried: bool = False) -> tuple[int, Any]:
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(base + path, data=data, method=method)
         if data is not None:
             req.add_header("Content-Type", "application/json")
-        if token:
-            req.add_header("Authorization", f"Bearer {token}")
+        if state["token"]:
+            req.add_header("Authorization", f"Bearer {state['token']}")
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 raw = r.read()
@@ -519,6 +545,8 @@ def http_requester(base: str, token: str | None = None,
                 raw, status = exc.read(), exc.code
             except (http.client.HTTPException, OSError):
                 raw, status = b"", exc.code
+            if status == 401 and not _retried and _refresh():
+                return request(method, path, body, _retried=True)
         except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
             # (HTTPException: the connection dropped mid-response —
             # IncompleteRead, BadStatusLine — which is no answer either.)
@@ -816,6 +844,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--only", action="append", default=[],
                     help="run only this case id (repeatable)")
     ap.add_argument("--token", help="bearer token, when the agent runs auth_mode: opennvr")
+    ap.add_argument("--refresh-token", help="OpenNVR refresh token: a 401 mid-run gets a new "
+                    "access token and retries (runs longer than the 30-minute access token)")
+    ap.add_argument("--auth-base", default="http://opennvr-core:8000",
+                    help="the OpenNVR server that issued the token, for --refresh-token")
     ap.add_argument("--timeout", type=float, default=300.0, help="seconds per request")
     ap.add_argument("--out", help="write the full run (meta, raw turns, summary) as JSON")
     ap.add_argument("--throwaway", action="store_true",
@@ -846,7 +878,8 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         cases = fill_camera(cases, args.camera)
 
-    request = http_requester(args.url, args.token, args.timeout)
+    request = http_requester(args.url, args.token, args.timeout,
+                             refresh_token=args.refresh_token, auth_base=args.auth_base)
     status, health = request("GET", "/health", None)
     if status != 200 or not isinstance(health, dict):
         why = health.get("error") if isinstance(health, dict) else None
