@@ -432,6 +432,15 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Core stops minting a stream token on every roster request.** The
+  detect-pipeline and the camera agent each re-read the camera roster every
+  30 s, and every call signed a fresh wildcard MediaMTX token and logged it
+  — 240 identical tokens and log lines an hour on the Ventuno Q
+  (2026-11-09). Platform callers now share one token reused for half its
+  60-minute life; apps keep their per-camera tokens. The storage service's
+  "Using default recording path" line, written by the 15 s system monitor
+  on every tick, is now logged once per path.
+
 - **CI signs images without depending on anonymous GitHub release
   downloads.** On 2026-11-09 GitHub's anonymous release downloads returned
   504 for hours and every image job that signs (detect-pipeline, core, the
