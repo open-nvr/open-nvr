@@ -101,7 +101,7 @@ jobs:
 
       - name: Install cosign
         if: github.event_name != 'pull_request'
-        uses: sigstore/cosign-installer@v3
+        uses: ./.github/actions/install-cosign
         with:
           cosign-release: "v2.4.1"
 
@@ -328,7 +328,7 @@ jobs:
 
       - name: Install cosign
         if: github.event_name != 'pull_request'
-        uses: sigstore/cosign-installer@v3
+        uses: ./.github/actions/install-cosign
         with:
           cosign-release: "v2.4.1"
 
