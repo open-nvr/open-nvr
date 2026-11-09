@@ -117,3 +117,23 @@ def test_the_real_runtime_gets_a_turn_runner_and_a_bare_one_does_not():
     core, _ = ca.build_core_processors(bare)
     assert core[2]._turn_runner is None
     assert ca.AppConfig(kaic_url="http://k", kaic_api_key="x").turn_stop_secs == 1.0
+
+
+@pytest.mark.asyncio
+async def test_a_goodbye_over_the_stream_ends_the_session_after_the_reply():
+    from pipecat.frames.frames import LLMContextFrame, LLMTextFrame, OutputTransportMessageFrame
+    from pipecat.pipeline.pipeline import Pipeline
+    from pipecat.processors.aggregators.llm_context import LLMContext
+    from pipecat.tests.utils import run_test
+    from services import OpenNvrOllamaLLM
+
+    async def runner(history, text):
+        return "Alright, goodbye.", {"end": True}
+
+    llm = OpenNvrOllamaLLM(client=None, tools=[], tool_handlers={}, turn_runner=runner)
+    context = LLMContext(messages=[{"role": "user", "content": "goodbye"}])
+    down, _ = await run_test(Pipeline([llm]), frames_to_send=[LLMContextFrame(context=context)], start_timeout=10.0)
+    kinds = [(type(f).__name__, getattr(f, "text", None) or getattr(f, "message", None)) for f in down
+             if isinstance(f, (LLMTextFrame, OutputTransportMessageFrame))]
+    assert kinds == [("LLMTextFrame", "Alright, goodbye."), ("OutputTransportMessageFrame", {"type": "session_end"})]
+

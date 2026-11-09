@@ -411,6 +411,23 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Camera agent: a goodbye ends talk mode, Stop really stops, and the
+  Hardware panel tells the truth.** From the morning test of 2026-11-09:
+  "thank you, end the conversation" reached the model, which called
+  `stop_alarm` and said "I have stopped any currently ringing alarms.
+  Goodbye." — goodbyes ("bye", "end the conversation", "see you", "good
+  night", …) are now closings: a fixed goodbye, no tool, and the voice and
+  text endpoints say `end`, so the page leaves talk mode once the reply has
+  played (the streaming path sends `session_end`). Stop pressed while the
+  page was still recording left "Thinking…" on screen next to a Talk
+  button, because the recorder's last utterance was still answered after
+  the session ended; it is dropped now. The Hardware panel read "Running on
+  CPU only — a CUDA GPU would speed up…" on a box whose detector, captioner
+  and language model all run on the Hexagon: it now asks the detector which
+  accelerator it runs on (its own backend gauge), marks the detection,
+  caption and language-model rows as accelerated with no GPU advice, and
+  names the model's endpoint instead of "ollama".
+
 - **The camera agent no longer agrees with the user against its own
   detector, invents actions, or answers garbled speech.** From the office
   voice session of 2026-11-08: told "there are three chairs" it called the
