@@ -544,14 +544,16 @@
   category: attendance
   version: "1.0.0"
   image: ghcr.io/open-nvr/attendly:latest
-  build_context: examples/attendly
+  # First-party, closed source (docs/APP_LISTING_TERMS.md §1): no
+  # build_context and no source — the image is built and signed by
+  # OpenNVR's CI in a private open-nvr repository.
+  license: proprietary
   requires_tasks: [face_detection, face_recognition]
   requires_adapters: [insightface_attendly]
   emits: [hostel_in, hostel_out, gate_denied, mess_served]
-  docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/attendly/README.md
+  docs_url: https://github.com/open-nvr/open-nvr/blob/main/docs/apps/attendly.md
   author: OpenNVR
   contact: https://github.com/open-nvr/open-nvr/issues
-  source: https://github.com/open-nvr/open-nvr/tree/main/examples/attendly
   network_egress: []
   install:
     compose: |
@@ -563,7 +565,7 @@
       services:
         attendly:
           profiles: [apps]
-          image: ${ATTENDLY_IMAGE:-opennvr/attendly:local-build}
+          image: ${ATTENDLY_IMAGE:-ghcr.io/open-nvr/attendly:latest}
           restart: unless-stopped
           environment:
             - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}

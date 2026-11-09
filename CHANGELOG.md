@@ -11,8 +11,10 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Attendly: classroom attendance as an OpenNVR application.** The
   attendance app that ran on AWS Rekognition and DynamoDB now runs beside
   OpenNVR the way the Camera Agent does — its own container
-  (`examples/attendly`, a service in `docker-compose.apps.yml` and an App
-  Catalog entry, profile `attendly`, port 9300), its own web UI, OpenNVR login, and a card in the
+  (a signed image, `ghcr.io/open-nvr/attendly`; a first-party app whose
+  source is not published — docs in `docs/apps/attendly.md`; a service in
+  `docker-compose.apps.yml` and an App Catalog entry, profile `attendly`,
+  port 9300), its own web UI, OpenNVR login, and a card in the
   App Catalog whose "Open app" opens that UI in a new tab. Rooms are OpenNVR
   cameras; frames come from core's snapshot path; detection and recognition
   go through KAI-C to the InsightFace adapter, which the profile starts.

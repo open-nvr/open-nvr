@@ -1,5 +1,11 @@
 # Attendly on OpenNVR
 
+> Attendly is a first-party app from OpenNVR, distributed as a signed image
+> (`ghcr.io/open-nvr/attendly`). Its source is not published; see
+> [APP_LISTING_TERMS.md](../APP_LISTING_TERMS.md) for what that means for a
+> catalog listing. Everything it needs from your site (the InsightFace
+> adapter, the compose service, the catalog entry) is in this repository.
+
 Classroom attendance on your OpenNVR cameras. Students enrol their faces by
 photo or webcam; rooms are cameras; courses have sections; a weekly planner
 publishes classes; during each class the app takes recognition snapshots that
@@ -40,14 +46,19 @@ OpenNVR account. For a reverse proxy or public hostname set
 
 1. **Manage Rooms** — bind a classroom to one of OpenNVR's cameras.
 2. **Manage Courses** — course codes and their sections.
-3. **Image Register / Video Register** — enrol a student. Details and
+3. **Register** — enrol a student. Details and
    consent first; then the webcam takes the photos itself: a small frame
    is checked about once a second (face boxes only, nothing kept), the
    page says what to change — distance, the oval, which way to turn — and
    says it out loud when Voice is on, and takes each angle's photo once
    the face is steady. Each photo is checked against everyone already
-   enrolled, so a person registered twice is told at the first photo. A
+   enrolled, so a person registered twice is told at the first photo.
+   The set is one person: if any photo already matches somebody else,
+   none of the set is enrolled (a turned head can score under the
+   duplicate threshold where the straight-on photo did not). A
    picture is cut from the first photo and shown in Student Data.
+   (`/video-register`, the old page that streamed every webcam frame to
+   the server, now opens this page.)
    Withdrawing consent deletes the faces; *Erase* also blanks name and
    e-mail and keeps only the counts (DPDP/GDPR).
 4. **Manage Schedule** — the weekly timetable; *Publish Today* turns it into
@@ -115,7 +126,7 @@ camera's handle, with the student code in `plate_text` and the name in
 on `allow` over the wiring your site has: a GPIO dry contact, a Shelly-style
 IP relay, Modbus, an ONVIF door controller or MQTT. Start it with the
 `gate-controller` profile and list each barrier under its camera handle in
-`examples/gate-controller/config.docker.yml`; its HARDWARE.md is the wiring
+[`examples/gate-controller/config.docker.yml`](../../examples/gate-controller/config.docker.yml); its HARDWARE.md is the wiring
 guide. The licence-plate app drives vehicle barriers the same way, so one
 controller serves both.
 
@@ -156,9 +167,10 @@ departments and re-finalises classes.
 | `ATTENDLY_FACES_URL` | `http://insightface-attendly-adapter:9005` | the adapter's `/faces/*` (enrol, list, delete) |
 | `ATTENDLY_DET_SIZE` | `1280` | the adapter's detector input (back rows in a 1080p frame); an adapter older than ai-adapter#81 ignores it |
 | `ATTENDLY_IDENTIFY_MARGIN` | `0.05` | with `face_identify`, a match this close to the runner-up is ambiguous, not a hit |
-| `ATTENDLY_MIN_FACE_PX` / `ATTENDLY_MAX_FACES` | `20` / `60` | faces smaller than this are ignored; a frame holds at most this many |
+| `ATTENDLY_MIN_FACE_PX` / `ATTENDLY_MAX_FACES` | `20` / `60` | the webcam guidance ignores faces smaller than this ("come closer"); a frame holds at most this many |
+| `ATTENDLY_RECOGNITION_MIN_FACE_PX` | `60` | the smallest face a camera frame is named from (attendance, gates, staff). Smaller faces are counted as too small and logged, not matched: a wrong name is worse than none. Lower it only after measuring |
 | `ATTENDLY_RECOGNITION_THRESHOLD` | `0.5` | cosine similarity to count a match |
-| `ATTENDLY_DUPLICATE_THRESHOLD` | `0.65` | similarity that flags a duplicate at enrolment |
+| `ATTENDLY_DUPLICATE_THRESHOLD` | `0.6` | similarity at which an enrolment photo is somebody already enrolled; refuses the whole set |
 
 | `ATTENDLY_GATE_RECOGNITION_THRESHOLD` | `0` (= recognition threshold) | a stricter match for admitting people |
 | `ATTENDLY_GATE_POLL_SECONDS` / `ATTENDLY_GATE_COOLDOWN_SECONDS` | `1` / `8` | how often a gate camera is looked at; how long the same person is not re-decided |
@@ -186,37 +198,3 @@ raise it if strangers are matched. Changes take effect on restart.
 | `ATTENDLY_MIN_COVERAGE_RATIO` | `0.5` | a class watched in fewer of its slots is flagged; its automatic marks are Not watched |
 | `ATTENDLY_KEEP_EVIDENCE_FRAMES` | `true` | one frame per slot with a recognition goes to core's evidence store |
 | `ATTENDLY_SAVE_DEBUG_FRAMES` | `false` | keep attempt frames and face crops under the data dir |
-
-## Development
-
-```bash
-cd examples/attendly
-uv sync --extra dev
-uv run pytest -q                      # 41 tests, no OpenNVR needed
-ATTENDLY_AUTH_MODE=none ATTENDLY_LISTEN_HOST=127.0.0.1 uv run python attendly_app.py --port 9300
-cd web && npm ci && npm run dev       # Vite on 5173 against the app on 9300 (see .env.example)
-```
-
-The image builds the React app in a node stage and installs exactly what
-`uv.lock` says: `docker build -f examples/attendly/Dockerfile .` from the repo
-root. There is no node on the dev box, so that build is the frontend's type
-check.
-
-## How it is wired
-
-```
-browser ──► attendly :9300 ──► /api/auth/*  ──► core /api/v1/auth/{login-json,refresh,me}
-                      │ ──► /cameras, snapshots ──► core /api/v1/internal/…  (site key)
-                      │ ──► detect / recognise  ──► KAI-C /api/v1/infer/insightface
-                      │ ──► enrol / list / delete ──► insightface-adapter /faces/*
-                      └──► SQLite on /data (students, rooms, courses, planner, snapshots, rosters)
-core ──► attendly /health, /manifest, /state   (the catalog card; self-registered on boot)
-```
-
-Student codes (`AT00001`…) are the adapter's `person_id`; every entry attendly
-writes carries `category=attendly_student`, which keeps it apart from the
-Smart Doorbell's household in the deployment's one shared face database.
-Names, courses and sections live in attendly's SQLite.
-
-See `IMPLEMENTATION_PLAN.md` for what was replaced from the AWS version and
-the testing plan.

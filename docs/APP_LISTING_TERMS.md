@@ -11,6 +11,17 @@ repository under the `open-nvr` GitHub organisation, are built from their
 tagged source by OpenNVR's CI, digest-pinned, and reviewed before they
 are listed. They are the only apps the platform installs.
 
+*One exception: OpenNVR's own apps.* An app whose author is OpenNVR
+itself may be closed source (`license: proprietary` in the index). Its
+source lives in a private repository under the `open-nvr` organisation;
+the platform installs the image that OpenNVR's CI builds and signs there,
+digest-pinned like any other. Everything else here still applies: it
+names its contact, declares its network egress, runs on the isolated
+apps network, and its user documentation is public (`docs/apps/`). The
+card says "closed source · by OpenNVR", so an operator knows before
+installing. The exception is not open to third parties: a third-party
+app is a catalog app (open source) or an external listing.
+
 **External apps** (`kind: external`) are links to software distributed
 elsewhere, in any licence. The platform never installs them, shows them
 with a "not reviewed by OpenNVR" mark, and takes no position on what they

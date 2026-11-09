@@ -61,6 +61,12 @@ def _linked_in_readme() -> set[str]:
     return set(re.findall(r"\(examples/([a-z0-9-]+)[)/]", _README))
 
 
+def _docs_linked_in_readme() -> set[str]:
+    """First-party closed-source apps (docs/APP_LISTING_TERMS.md §1) have
+    no example directory; the README links their page under docs/apps/."""
+    return set(re.findall(r"\(docs/apps/([a-z0-9-]+)\.md\)", _README))
+
+
 def _catalog_ids() -> set[str]:
     text = _APPS_INDEX.read_text(encoding="utf-8")
     return set(re.findall(r"(?m)^\s*-?\s*id:\s*([a-z0-9-]+)", text))
@@ -92,7 +98,7 @@ def test_every_shipped_application_is_mentioned_in_the_readme():
 def test_every_catalog_app_is_mentioned_in_the_readme():
     """An app a user can install in one click from the UI, and cannot
     read about on the front page, is a strange thing to ship."""
-    missing = sorted(_catalog_ids() - _linked_in_readme())
+    missing = sorted(_catalog_ids() - _linked_in_readme() - _docs_linked_in_readme())
 
     assert not missing, (
         "installable from the App Catalog but absent from the README: "

@@ -183,7 +183,6 @@ jobs:
         example:
           - abandoned-object
           - alert-notifier
-          - attendly
           - camera-tamper
           - alerts-subscriber
           - camera-agent
@@ -213,10 +212,9 @@ jobs:
         working-directory: examples/${{ matrix.example }}
         run: uv run pytest -q
       # What a listing reviewer checks, on every example, every PR
-      # (the camera-agent is an agent and attendly a full application with
-      # its own UI, not catalog apps — no manifest module to validate).
+      # (the camera-agent is an agent, not a catalog app — no manifest).
       - name: opennvr-app validate
-        if: matrix.example != 'camera-agent' && matrix.example != 'attendly'
+        if: matrix.example != 'camera-agent'
         working-directory: examples/${{ matrix.example }}
         run: uv run opennvr-app validate .
 

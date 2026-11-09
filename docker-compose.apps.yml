@@ -1652,7 +1652,9 @@ services:
 
   # ──────────────────────────────────────────────────────────────
   # Attendly — classroom, hostel-gate, mess and staff attendance by
-  # face (examples/attendly). A full application with its own web UI,
+  # face. A first-party app whose source is not published: it is
+  # pulled as a signed image (ghcr.io/open-nvr/attendly), never built
+  # from this checkout. A full application with its own web UI,
   # so unlike the other catalog apps it publishes a host port (:9300)
   # the way the Camera Agent does; the App Catalog card's "Open app"
   # opens that UI in a new tab. Frames come from core's snapshot
@@ -1662,12 +1664,14 @@ services:
   # ──────────────────────────────────────────────────────────────
   attendly:
     profiles: [apps, attendly]
-    build:
-      context: .
-      dockerfile: examples/attendly/Dockerfile
-    # Digest pin slot — see docs/APPS_INSTALL.md → Digest pinning.
-    image: ${ATTENDLY_IMAGE:-opennvr/attendly:local-build}
-    pull_policy: ${APPS_PULL_POLICY:-build}
+    # No build: section — there is no source here to build. Digest pin
+    # slot as for every app (docs/APPS_INSTALL.md → Digest pinning); to
+    # run an image built from the private repo, set
+    # ATTENDLY_IMAGE=opennvr/attendly:local-build in .env.
+    image: ${ATTENDLY_IMAGE:-ghcr.io/open-nvr/attendly:latest}
+    # Not ${APPS_PULL_POLICY:-build}: `build` with no build section is a
+    # compose error. `missing` pulls once, then keeps the local image.
+    pull_policy: missing
     container_name: opennvr_attendly
     # The hostname the app registers with the catalog = the service name
     # other containers resolve (core probes /health and /state on it).

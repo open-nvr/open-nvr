@@ -77,7 +77,6 @@ jobs:
         include:
           - { app: abandoned-object,           title: Abandoned Object }
           - { app: alert-notifier,             title: Alert Notifier }
-          - { app: attendly,                   title: Attendly }
           - { app: footage-search,             title: Footage Search }
           - { app: gate-controller,            title: Gate Controller }
           - { app: garbage-dumping,            title: Garbage Dumping }
