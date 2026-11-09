@@ -743,6 +743,24 @@ _NOT_STATUS_RE = re.compile(
     r"\b(clip|footage|playback|play|history|events?|snapshot|photo|picture|"
     r"show\s+me|yesterday|last\s+night|earlier|ago)\b", re.IGNORECASE)
 
+#: "Stop watching for that", "cancel the alarm", "remove it", "turn it
+#: off": a stop request with nothing for the model to fill. The stop tools
+#: pick the item themselves (a number said, else the last one set up, else
+#: the only one, else they ask), so the router runs them directly. The
+#: model, hinted, still answered "stop watching for that" without a call 1
+#: time in 3 (Ventuno Q eval, 2026-11-09).
+_STOP_REQUEST_RE = re.compile(
+    r"^\s*(?:(?:ok(?:ay)?|actually|also|and|now|hey|so|well|no|yes|then|please)[,\s]+)*"
+    r"(?:please\s+)?(?:can\s+you\s+|could\s+you\s+|would\s+you\s+)?"
+    r"(?:stop|cancel|disarm|silence|mute|remove|delete|clear|turn\s+(?:it\s+|that\s+|them\s+|the\s+\w+\s+)?off)\b",
+    re.IGNORECASE)
+#: A "stop" that is about the conversation or the recording, not a
+#: standing request.
+_NOT_STOP_RE = re.compile(
+    r"\b(talk|talking|listen|listening|conversation|speak|speaking|recording|"
+    r"record|video|stream|streaming|playing|playback)\b", re.IGNORECASE)
+_SILENCE_RE = re.compile(r"\b(silence|mute|quiet|hush|shut\s+up)\b", re.IGNORECASE)
+
 _SHOW_RE = re.compile(
     r"^\s*(?:please\s+)?(?:can\s+you\s+|could\s+you\s+)?(show|open|switch\s+to|pull\s+up|"
     r"bring\s+up|go\s+to|display|put\s+up)\s+(?P<rest>.+?)\s*[.!?]*\s*$", re.IGNORECASE)
@@ -761,8 +779,41 @@ def _standing_kind(text: str) -> str:
     return kinds.pop() if len(kinds) == 1 else "all"
 
 
+def _route_stop(t: str, advertised: set[str], last_kind: str | None) -> Decision | None:
+    """Tier 0 for a bare stop request: which stop tool, from the words
+    (alarm words → stop_alarm, report words → stop_report, watch words →
+    stop_monitor, else the kind set up last, else stop_monitor), with the
+    number said as its id and silence/mute as the alarm's action."""
+    if not _STOP_REQUEST_RE.match(t) or _NOT_STOP_RE.search(t):
+        return None
+    if len(re.findall(r"[A-Za-z']+", t)) > 8 or _is_past_question(t):
+        return None
+    alarm = bool(_ALARM_WORDS_RE.search(t))
+    monitor = bool(_MONITOR_WORDS_RE.search(t)) or bool(re.search(r"\bwatching\b", t, re.IGNORECASE))
+    report = bool(_REPORT_WORDS_RE.search(t))
+    if alarm:
+        tool, key = "stop_alarm", "alarm_id"
+    elif report and not monitor:
+        tool, key = "stop_report", "report_id"
+    elif monitor:
+        tool, key = "stop_monitor", "monitor_id"
+    else:
+        tool = {"alarm": "stop_alarm", "report": "stop_report"}.get(last_kind or "", "stop_monitor")
+        key = {"stop_alarm": "alarm_id", "stop_report": "report_id"}.get(tool, "monitor_id")
+    if tool not in advertised:
+        return None
+    args: dict[str, Any] = {}
+    m = re.search(r"(?:#|\bnumber\s+)?\b(\d{1,3})\b", t)
+    if m:
+        args[key] = int(m.group(1))
+    if tool == "stop_alarm":
+        args["action"] = "silence" if _SILENCE_RE.search(t) else "disarm"
+    return Decision(0, tool=tool, args=args, reason=f"stop request: {tool}", hintable=False)
+
+
 def _route_agent_itself(t: str, cameras: list[str], roles: dict[str, str] | None,
-                        advertised: set[str], preferred: str | None) -> Decision | None:
+                        advertised: set[str], preferred: str | None,
+                        last_kind: str | None = None) -> Decision | None:
     """Tier 0 for questions about the agent and the system rather than
     the scene: "show me the gate" (the page's view), "what alarms do I
     have" (the standing lists), "is everything okay" / "is the gate
@@ -787,6 +838,10 @@ def _route_agent_itself(t: str, cameras: list[str], roles: dict[str, str] | None
             if not left:
                 return Decision(0, tool="show_camera", args={"camera_id": cam},
                                 reason="show a camera", hintable=False)
+    # "Stop watching for that", "remove it", "cancel alarm 2".
+    d = _route_stop(t, advertised, last_kind)
+    if d is not None:
+        return d
     # "What alarms do I have": a listing of the standing things.
     if "list_standing" in advertised and not _SETTING_RE.search(t):
         if _SETUP_RE.search(t):
@@ -808,6 +863,7 @@ def _route_agent_itself(t: str, cameras: list[str], roles: dict[str, str] | None
 
 
 def decide_tier0(text: str, *, cameras: list[str], advertised: set[str],
+                 last_kind: str | None = None,
                  preferred: str | None = None, roles: dict[str, str] | None = None,
                  now=None) -> Decision | None:
     """A tool call the agent can make without asking the model, or None."""
@@ -833,7 +889,7 @@ def decide_tier0(text: str, *, cameras: list[str], advertised: set[str],
     # alarms do I have", "is every camera recording". Before the config
     # check because "which cameras are online" is a status question, not
     # a roster one.
-    d = _route_agent_itself(t, cameras, roles, advertised, preferred)
+    d = _route_agent_itself(t, cameras, roles, advertised, preferred, last_kind)
     if d is not None:
         return d
     if _is_config_question(t):
@@ -859,6 +915,21 @@ def decide_tier0(text: str, *, cameras: list[str], advertised: set[str],
     # for a class of thing. A question that names none of those is for
     # the model, not for its catch-all.
     if past and not nouns:
+        # "What happened between 2pm and 3pm": no thing named, an absolute
+        # window — the footage narration for that window is the answer
+        # (the hinted model called recent_events with a start_time it does
+        # not take, 3 of 3, Ventuno Q eval 2026-11-09).
+        if _CLOCK_RANGE_RE.search(t) and _GENERIC_PAST_RE.search(t) and "describe_window" in advertised:
+            start_iso, end_iso, _ = _window_from_text(t, now=now)
+            cam0 = _names_camera(t, cameras, roles) if not _ALL_RE.search(t) else None
+            if cam0 is None and preferred and preferred in cameras:
+                cam0 = preferred
+            if cam0 is None and len(cameras) == 1:
+                cam0 = cameras[0]
+            if cam0 is not None and start_iso and end_iso:
+                return Decision(0, tool="describe_window",
+                                args={"camera_id": cam0, "start_time": start_iso, "end_time": end_iso},
+                                reason="what happened, clock window")
         # "What happened in the last ten minutes": no thing named, so the
         # history search (one label) is the wrong tool — the ring of recent
         # events, every label, is the answer, when the window is explicit.
@@ -1043,6 +1114,8 @@ def hint_standing(text: str, *, advertised: set[str],
     what the agent set up most recently: "remove it", "cancel that" name
     no kind, and mean that one."""
     t = text or ""
+    if _NOT_STOP_RE.search(t) and _STOP_WORDS_RE.search(t):
+        return None                     # "stop talking": not a standing request
     alarm = bool(_ALARM_WORDS_RE.search(t))
     stop = bool(_STOP_WORDS_RE.search(t))
     monitor = bool(_MONITOR_WORDS_RE.search(t))
@@ -1133,7 +1206,8 @@ def decide(text: str, *, cameras: list[str], advertised: set[str],
            tier0: bool = True, hints: bool = True, now=None,
            last_kind: str | None = None) -> Decision:
     d = decide_tier0(text, cameras=cameras, advertised=advertised,
-                     preferred=preferred, roles=roles, now=now) if tier0 else None
+                     preferred=preferred, roles=roles, now=now,
+                     last_kind=last_kind) if tier0 else None
     if d is not None and d.routed:
         logger.info("router: tier=0 tool=%s args=%s (%s)", d.tool, d.args, d.reason)
         return d

@@ -721,6 +721,16 @@ class CameraTools:
 
     async def recent_events(self, args: dict[str, Any]) -> str:
         camera_arg = args.get("camera_id")
+        if not args.get("window_seconds") and args.get("start_time"):
+            # The model sometimes hands this tool a start_time (describe_window's
+            # shape). Take it as "since then" rather than failing the call.
+            try:
+                from datetime import datetime as _dt
+                start = _dt.fromisoformat(str(args["start_time"]).replace("Z", "+00:00"))
+                now = _dt.now(start.tzinfo) if start.tzinfo else _dt.now()
+                args = {**args, "window_seconds": max(60.0, (now - start).total_seconds())}
+            except (TypeError, ValueError):
+                pass
         try:
             window = float(args.get("window_seconds", 0))
         except (TypeError, ValueError):

@@ -148,7 +148,6 @@ def test_two_cameras_and_no_name_looks_at_both():
     "alarm me if someone is at cam1 after 10pm",
     "watch cam1 and tell me if a car shows up",
     "notify me when you see a person on cam2",
-    "stop the alarm on cam1",
     "every morning summarize cam1",
     "let me know if anyone comes to cam1",
 ])
@@ -318,15 +317,40 @@ def test_one_real_word_makes_it_not_small_talk(q):
     ("set a silent alarm for a person at cam1 after 11pm", "create_alarm"),
     ("ring an alarm if a person shows up there after 10pm", "create_alarm"),
     ("wake me if someone comes to cam1", "create_alarm"),
-    ("stop watching for that", "stop_monitor"),
-    ("actually, cancel that alarm", "stop_alarm"),
-    ("turn off the siren", "stop_alarm"),
 ])
 def test_standing_requests_are_hinted_by_their_words(q, tool):
     """Measured on the NPU: 'let me know when a car arrives' went to
     create_alarm with an invented midnight window, six times of six."""
     d = router.decide(q, cameras=CAMS, advertised=ALL | {"stop_monitor"}, now=NOW)
     assert d.tier == 1 and d.hint == tool, (q, d)
+
+
+@pytest.mark.parametrize("q,tool,args", [
+    ("stop watching for that", "stop_monitor", {}),
+    ("actually, cancel that alarm", "stop_alarm", {"action": "disarm"}),
+    ("turn off the siren", "stop_alarm", {"action": "disarm"}),
+    ("silence the alarm", "stop_alarm", {"action": "silence"}),
+    ("stop the alarm on cam1", "stop_alarm", {"action": "disarm"}),
+    ("cancel alarm 2", "stop_alarm", {"alarm_id": 2}),
+    ("delete report 3", "stop_report", {"report_id": 3}),
+    ("stop monitor number 4", "stop_monitor", {"monitor_id": 4}),
+])
+def test_a_bare_stop_request_runs_the_stop_tool_without_the_model(q, tool, args):
+    """The stop tools pick the item themselves (the number said, the last
+    one set up, the only one, or they ask), so there is nothing for the
+    model to fill — and hinted, it still skipped the call 1 time in 3
+    (Ventuno Q eval, 2026-11-09)."""
+    d = router.decide(q, cameras=CAMS, advertised=ALL | {"stop_monitor", "stop_report"}, now=NOW)
+    assert d.tier == 0 and d.tool == tool, (q, d)
+    for k, v in args.items():
+        assert d.args.get(k) == v, (q, d.args)
+
+
+@pytest.mark.parametrize("q", ["stop talking", "stop listening", "stop the recording",
+                               "please stop the conversation"])
+def test_a_stop_about_the_conversation_or_recording_is_not_a_stop_tool(q):
+    d = router.decide(q, cameras=CAMS, advertised=ALL | {"stop_monitor", "stop_report"}, now=NOW)
+    assert d.tool is None, (q, d)
 
 
 def test_standing_hint_only_names_advertised_tools():
@@ -457,10 +481,14 @@ def test_taking_a_standing_thing_down_is_a_side_effect_not_a_detection(q):
 def test_remove_it_means_the_thing_set_up_last(last, tool):
     d = router.decide("can you remove it?", cameras=CAMS, advertised=ALL | {"stop_monitor", "stop_report"},
                       now=NOW, last_kind=last)
-    assert d.tier == 1 and d.hint == tool, (last, d)
+    assert d.tier == 0 and d.tool == tool, (last, d)
     # named kinds still win over the memory
     d = router.decide("remove the alarm", cameras=CAMS, advertised=ALL | {"stop_monitor"}, now=NOW, last_kind="monitor")
-    assert d.hint == "stop_alarm"
+    assert d.tool == "stop_alarm"
+    # with the stop tools not advertised, the hint path is what remains
+    d = router.decide("can you remove it?", cameras=CAMS, advertised=ALL - {"stop_alarm"} | {"stop_monitor"},
+                      now=NOW, last_kind="alarm")
+    assert d.tool is None and d.hint is None
 
 
 @pytest.mark.parametrize("q", ["Bye. Thank you.", "ok bye, thanks a lot", "goodbye and thanks", "bye bye. okay."])

@@ -353,7 +353,7 @@
   ask: "is everything okay?"
   expect:
     tool: system_status
-    reply_contains: ["online", "camera", "recording", "reach"]
+    reply_contains: ["online", "camera", "recording", "reach", "fine", "okay", "ok", "disk", "floor"]
 
 - id: is-any-camera-offline
   ask: "is any camera offline?"

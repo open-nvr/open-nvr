@@ -561,6 +561,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Camera agent: the three misses of the 52-case live eval on the Ventuno
+  Q (149 of 156 turns, 2026-11-09).** A bare stop request ("stop watching
+  for that", "cancel alarm 2", "remove it", "silence the alarm") is now
+  routed straight to its stop tool, the number said as the id and
+  silence/mute as the alarm's action — the stop tools already pick the item
+  themselves, and the hinted model still skipped the call 1 time in 3;
+  "stop talking" and "stop the recording" are left alone. "What happened
+  between 2pm and 3pm" with nothing named goes to `describe_window` for that
+  window (the hinted model called `recent_events` with a `start_time` it did
+  not take, 3 of 3; `recent_events` now also accepts one as "since then").
+  `system_status` says a disk warning first, since the compose model kept
+  the opening and dropped the tail: "everything is fine" with the disk
+  0.7 GB from the purge floor.
+
 - **The camera agent can actually schedule the reports its greeting
   offers.** `create_report` / `stop_report` were missing from the Docker
   config's `enabled_tools`, so "every ten minutes give me a report" could
