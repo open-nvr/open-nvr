@@ -54,6 +54,23 @@ LISTED_WITHOUT_A_SERVICE = {
 }
 
 
+#: A second instance of an adapter that one app owns outright: its own
+#: data volume, registered with KAI-C under its own name, and called by
+#: that app BY NAME, never resolved by task. The duplicate check below
+#: exists because task routing makes two answerers ambiguous; a
+#: name-routed instance is not in that race. An entry here must say
+#: which app calls it, by which name, and why sharing would be wrong.
+DEDICATED_INSTANCES = {
+    "docker-compose.apps.yml:insightface-attendly-adapter":
+        "Attendly's own gallery (students and staff), registered as "
+        "insightface_attendly and called by that name via "
+        "ATTENDLY_RECOGNITION_ADAPTER. The doorbell calls insightface by "
+        "name. Core never resolves face_recognition by task (it refuses "
+        "to write face_id), so neither app can be handed the other's "
+        "gallery, and a classroom frame never queues behind the door.",
+}
+
+
 def _repo(image: str) -> str:
     """``ghcr.io/open-nvr/clip-adapter:${ADAPTER_TAG:-latest}`` → the repo.
 
@@ -201,6 +218,8 @@ def test_no_task_is_answered_by_two_adapters_in_one_profile():
     """
     claimed: dict[tuple[str, str], list[str]] = {}
     for fname, svc_name, svc in _adapter_services():
+        if f"{fname}:{svc_name}" in DEDICATED_INSTANCES:
+            continue
         for profile in (svc.get("profiles") or []):
             for task in svc["_entry"].get("tasks_advertised") or []:
                 claimed.setdefault((profile, task), []).append(
@@ -209,6 +228,17 @@ def test_no_task_is_answered_by_two_adapters_in_one_profile():
     assert not doubled, (
         "these profiles start two adapters for the same task: "
         f"{ {f'{p}/{t}': v for (p, t), v in doubled.items()} }"
+    )
+
+
+def test_dedicated_instances_are_real_adapter_services():
+    """A stale exemption silently re-opens the duplicate check for
+    whatever later takes that name."""
+    present = {f"{f}:{s}" for f, s, _svc in _adapter_services()}
+    stale = sorted(set(DEDICATED_INSTANCES) - present)
+    assert not stale, (
+        f"DEDICATED_INSTANCES names services that are not adapter "
+        f"services in any compose file: {stale}"
     )
 
 

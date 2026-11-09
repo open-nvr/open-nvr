@@ -176,7 +176,8 @@ function LicenceRequiredBadge({ entitlement }: { entitlement?: string }) {
   )
 }
 
-/** Every catalog app is open source, built from source and reviewed;
+/** Every catalog app is reviewed, and open source unless it is a
+ * first-party app marked closed source;
  * this badge means MORE than that: the OpenNVR maintainers run this app
  * in production and vouch for it. Set by reviewers in the index. */
 function VerifiedBadge({ verified, author }: { verified?: boolean; author?: string }) {
@@ -200,6 +201,10 @@ function ProvenanceLine({ app, hideEgress = false }: { app: IndexApp; hideEgress
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--text-dim)]">
       {external ? (
         <span title="Distributed by its author; OpenNVR has not reviewed it and never installs it">not reviewed by OpenNVR</span>
+      ) : app.license === 'proprietary' ? (
+        <span title="A first-party app from OpenNVR: the image is built and signed by OpenNVR's CI; its source is not published">
+          closed source · by OpenNVR
+        </span>
       ) : app.source ? (
         <a href={app.source} target="_blank" rel="noreferrer" className="hover:text-[var(--text)]"
            title="Open source — the catalog image is built from this repository">
@@ -319,6 +324,9 @@ type IndexApp = {
   // Catalog policy: where the open source lives, who maintains it, and
   // every host it talks to outside the stack ([] = never leaves the site).
   source?: string | null
+  // 'proprietary' = a first-party app whose source is not published
+  // (an image built and signed by OpenNVR's CI); absent = open source.
+  license?: string | null
   contact?: string | null
   network_egress?: string[]
   // Who the one-click installer expects to have signed the image

@@ -184,6 +184,8 @@ The three-tier model, the wire contracts and the offline-first design are in [`d
 
 Seventeen of the twenty shipped examples are listed above; [`inference-listener`](examples/inference-listener) and [`alerts-subscriber`](examples/alerts-subscriber) are minimal subscriber templates, and [`home-assistant-relay`](examples/home-assistant-relay) is kept only as a NATS-to-MQTT bridge example now that Home Assistant support is [built in](docs/HOME_ASSISTANT_USER_GUIDE.md). Every app is a copy-as-template starting point. Replace the predicate and you have a purpose-built NVR for your domain. Gallery and roadmap: [`examples/README.md`](examples/README.md), [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
+OpenNVR also ships first-party apps whose source is not published, installed from the same App Catalog as a signed image: [Attendly](docs/apps/attendly.md), attendance by face (classroom rosters, hostel and mess barriers, meal bookings, staff check-in). See [`docs/APP_LISTING_TERMS.md`](docs/APP_LISTING_TERMS.md) for how they are listed.
+
 ## Works with Home Assistant
 
 Turn on MQTT discovery and OpenNVR appears in Home Assistant's own MQTT integration, with nothing to install there: one device for the server, one per camera, one per zone, and one per app that declares entities. You get motion, detection and recording switches, last object and last plate, object counts, PTZ buttons, the site mode as an alarm panel, and an event entity that fires on every detection and alert, ready for automations.

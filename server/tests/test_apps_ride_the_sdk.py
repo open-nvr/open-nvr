@@ -342,8 +342,25 @@ def _catalog_ghcr_apps() -> set[str]:
                           text, re.MULTILINE))
 
 
+def _proprietary_images() -> set[str]:
+    """Images of first-party closed-source entries (``license:
+    proprietary``, docs/APP_LISTING_TERMS.md §1). Their source and their
+    publish workflow live in a private open-nvr repository, so this
+    repository's matrix has no row for them by design."""
+    import yaml
+
+    index = yaml.safe_load(APPS_INDEX.read_text(encoding="utf-8"))
+    entries = index["apps"] if isinstance(index, dict) else index
+    return {
+        e["image"].split("ghcr.io/open-nvr/", 1)[1].split(":", 1)[0].split("@", 1)[0]
+        for e in entries
+        if e.get("license") == "proprietary"
+        and str(e.get("image", "")).startswith("ghcr.io/open-nvr/")
+    }
+
+
 def test_every_catalog_image_has_a_publish_row():
-    missing = sorted(_catalog_ghcr_apps() - _publish_matrix_apps())
+    missing = sorted(_catalog_ghcr_apps() - _publish_matrix_apps() - _proprietary_images())
     assert not missing, (
         f"{missing} are listed in apps_index.yml with a ghcr.io/open-nvr "
         "image that no workflow publishes, so installing them from the "

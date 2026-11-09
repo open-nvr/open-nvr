@@ -61,6 +61,12 @@ def _linked_in_readme() -> set[str]:
     return set(re.findall(r"\(examples/([a-z0-9-]+)[)/]", _README))
 
 
+def _docs_linked_in_readme() -> set[str]:
+    """First-party closed-source apps (docs/APP_LISTING_TERMS.md §1) have
+    no example directory; the README links their page under docs/apps/."""
+    return set(re.findall(r"\(docs/apps/([a-z0-9-]+)\.md\)", _README))
+
+
 def _catalog_ids() -> set[str]:
     text = _APPS_INDEX.read_text(encoding="utf-8")
     return set(re.findall(r"(?m)^\s*-?\s*id:\s*([a-z0-9-]+)", text))
@@ -92,7 +98,7 @@ def test_every_shipped_application_is_mentioned_in_the_readme():
 def test_every_catalog_app_is_mentioned_in_the_readme():
     """An app a user can install in one click from the UI, and cannot
     read about on the front page, is a strange thing to ship."""
-    missing = sorted(_catalog_ids() - _linked_in_readme())
+    missing = sorted(_catalog_ids() - _linked_in_readme() - _docs_linked_in_readme())
 
     assert not missing, (
         "installable from the App Catalog but absent from the README: "
@@ -117,7 +123,7 @@ def test_the_stated_count_matches_the_table():
     test does not need editing every time an app is added — only when
     the sentence stops being true.
     """
-    m = re.search(r"([A-Za-z]+) of the ([a-z]+) shipped examples are "
+    m = re.search(r"([A-Za-z]+) of the ([a-z-]+) shipped examples are "
                   r"listed above", _README)
     assert m, ("the sentence stating how many examples are listed has "
                "been reworded — update this test, or drop the count "
@@ -125,7 +131,8 @@ def test_the_stated_count_matches_the_table():
 
     words = {"ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
              "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17,
-             "eighteen": 18, "nineteen": 19, "twenty": 20}
+             "eighteen": 18, "nineteen": 19, "twenty": 20, "twenty-one": 21,
+             "twenty-two": 22, "twenty-three": 23, "twenty-four": 24}
     listed_claim = words[m.group(1).lower()]
     total_claim = words[m.group(2).lower()]
 

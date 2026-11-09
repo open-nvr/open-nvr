@@ -202,6 +202,7 @@ _EXPECTED_IDS = {
     "gate-watch",
     "garbage-dumping",
     "ppe-check",
+    "attendly",
 }
 
 
@@ -287,6 +288,7 @@ def test_index_response_shape_matches_contract(client):
         "screenshots",
         "featured",
         "source",
+        "license",
         "contact",
         "network_egress",
         "signed_by",

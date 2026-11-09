@@ -150,6 +150,11 @@ class IndexEntry(BaseModel):
     source: str | None = None
     contact: str | None = None
     network_egress: list[str] = []
+    # The one exception to the open-source rule: a first-party app
+    # (author OpenNVR) may be ``proprietary`` — an image built and signed
+    # by the org's CI, with no ``source``. Absent = open source. The card
+    # says which; scripts/validate_apps_index.py enforces who may.
+    license: str | None = None
     # Who signs the image (scripts/app-installer/signing.py). Absent for
     # ghcr.io/open-nvr images — the org's CI signs those; declared
     # ({identity: <regexp>, issuer}) for an image built elsewhere.
@@ -893,6 +898,7 @@ async def get_apps_index(
                 "popularity": entry.popularity,
                 "screenshots": entry.screenshots,
                 "source": entry.source,
+                "license": entry.license,
                 "contact": entry.contact,
                 "network_egress": entry.network_egress,
                 # Signed: the one-click installer verifies a Sigstore

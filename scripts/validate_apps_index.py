@@ -89,6 +89,11 @@ APPS_OVERLAY = REPO_ROOT / "docker-compose.apps.yml"
 SCREENSHOT_ROOT = REPO_ROOT / "app" / "public"
 SCREENSHOT_DIR = "app-screenshots"
 
+# Closed source is a first-party privilege (docs/APP_LISTING_TERMS.md §1):
+# ``license: proprietary`` is accepted only on an entry by this author.
+PROPRIETARY = "proprietary"
+FIRST_PARTY_AUTHOR = "OpenNVR"
+
 # Required top-level fields, mirroring the IndexEntry pydantic model in
 # server/routers/apps.py (build_context / emits / image_digest are optional).
 REQUIRED_FIELDS = (
@@ -382,12 +387,36 @@ def validate_entry(
         errors.append(f"{label}: a verified listing must name its author")
     # Catalog policy (docs/APP_LISTING_TERMS.md): an installable app is
     # open source under the open-nvr organisation, names its maintainer,
-    # gives a way to reach them, and declares its network egress.
+    # gives a way to reach them, and declares its network egress — with
+    # ONE exception: a first-party app (author OpenNVR) may be closed
+    # source, declared as ``license: proprietary``, and is then an image
+    # built and signed by the org's CI with no source and no build.
+    lic = entry.get("license")
+    if lic is not None and lic != PROPRIETARY:
+        errors.append(
+            f"{label}: 'license' is either absent (open source, the default) "
+            f"or '{PROPRIETARY}' (got {lic!r})")
     if not external:
         if not str(entry.get("author") or "").strip():
             errors.append(f"{label}: catalog apps must name their author")
         src = str(entry.get("source") or "")
-        if not src.startswith("https://github.com/open-nvr/"):
+        if lic == PROPRIETARY:
+            if entry.get("author") != FIRST_PARTY_AUTHOR:
+                errors.append(
+                    f"{label}: only first-party apps (author "
+                    f"'{FIRST_PARTY_AUTHOR}') may be closed source — a "
+                    "third-party catalog app is open source, or an external listing")
+            if src:
+                errors.append(f"{label}: a proprietary app has no public 'source' to link")
+            if entry.get("build_context"):
+                errors.append(
+                    f"{label}: a proprietary app has no 'build_context' — its "
+                    "source is not in this repository")
+            if not str(entry.get("image") or "").startswith("ghcr.io/open-nvr/"):
+                errors.append(
+                    f"{label}: a proprietary app's image must be a "
+                    "ghcr.io/open-nvr/ image (built and signed by the org's CI)")
+        elif not src.startswith("https://github.com/open-nvr/"):
             errors.append(
                 f"{label}: catalog apps are open source under the open-nvr "
                 "organisation — 'source' must be a https://github.com/open-nvr/... URL")

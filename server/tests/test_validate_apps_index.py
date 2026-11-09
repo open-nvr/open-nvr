@@ -451,6 +451,31 @@ def test_catalog_apps_must_be_open_source_under_the_org(tmp_path, monkeypatch):
     assert any("network_egress" in x for x in validator.validate_index(_write(tmp_path, [ext]))[0])
 
 
+def test_only_first_party_apps_may_be_closed_source(tmp_path, monkeypatch):
+    """docs/APP_LISTING_TERMS.md §1: OpenNVR's own apps may ship as an
+    org-signed image with no published source; nobody else's may."""
+    monkeypatch.setattr(validator, "_load_overlay_services", lambda overlay=None: {"sample-app"})
+    def errs(**over):
+        e = dict(_GOOD_ENTRY, **over)
+        for k, v in list(over.items()):
+            if v is None:
+                e.pop(k, None)
+        return validator.validate_index(_write(tmp_path, [e]))[0]
+    first_party = dict(license="proprietary", author="OpenNVR", source=None)
+    assert errs(**first_party) == []
+    # Third-party closed source stays out: open source, or an external listing.
+    assert any("only first-party" in x for x in errs(**dict(first_party, author="Sample Co.")))
+    # Closed means closed: no source link, nothing to build here, org image only.
+    assert any("no public 'source'" in x
+               for x in errs(**dict(first_party, source="https://github.com/open-nvr/x")))
+    assert any("no 'build_context'" in x
+               for x in errs(**dict(first_party, build_context="examples/sample-app")))
+    assert any("ghcr.io/open-nvr/ image" in x
+               for x in errs(**dict(first_party, image="docker.io/acme/sample-app:1")))
+    # The field has two states, not free text.
+    assert any("'license' is either absent" in x for x in errs(license="MIT"))
+
+
 def test_images_outside_the_org_must_declare_their_signer(tmp_path, monkeypatch):
     """The installer verifies a Sigstore signature before a pinned
     install: org images are signed by the org's CI, anything else has
