@@ -113,7 +113,7 @@ type Camera = {
   recording_enabled?: boolean | null
   // Observed recording health, derived server-side from the newest indexed
   // segment. Absent (undefined) means the endpoint didn't compute it.
-  recording_state?: 'recording' | 'not_recording' | 'stalled' | 'never' | 'off' | null
+  recording_state?: 'recording' | 'not_recording' | 'stalled' | 'degraded' | 'never' | 'off' | null
   last_recording_at?: string | null
   // Set while recording is deliberately paused; resume_at null = until resumed.
   recording_pause?: { since: string; resume_at: string | null; by: string; reason: string | null } | null
@@ -396,6 +396,18 @@ export function Cameras() {
           title: seenAt ? `${seenAt} — nothing written since` : undefined,
         }
       }
+      case 'degraded':
+        // Segments keep landing, so the recorder looks alive, but they hold
+        // no playable video: the stream's timestamps stopped advancing
+        // (camera clock wrap behind a relay). The segment-health check
+        // raised recording_degraded; this is that alarm on the badge.
+        return {
+          variant: 'destructive',
+          label: 'Degraded',
+          title: seenAt
+            ? `${seenAt} — segments arrive but hold no playable video; restart the camera stream`
+            : 'Segments arrive but hold no playable video; restart the camera stream',
+        }
       case 'never':
         return { variant: 'warning', label: 'No data', title: 'No recording has ever been indexed for this camera' }
       case 'off':
