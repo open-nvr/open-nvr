@@ -8,6 +8,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The camera agent's demo talks over the streaming pipeline.** Talk
+  mode now streams the microphone to `/ws` (16 kHz PCM from an
+  AudioWorklet) and plays each sentence as it is synthesised, so the first
+  words come back while the rest of the answer is still being made and
+  you can talk over it; the pipeline's Silero VAD plus Smart Turn v3
+  decide when you have finished (silence fallback 1.0 s, was 2.0) instead
+  of the page's 0.9 s volume timer. The pipeline sends the transcript,
+  each spoken sentence, the turn state and interruptions as JSON beside
+  the audio (`StreamEvents`, `RawPcmSerializer`), and the streaming LLM
+  service answers with the agent's own turn — router, forced grounding,
+  window fit, backup model, reply guards — instead of a separate loop.
+  "Turn by turn" (record, then answer) stays as a setting and is the
+  fallback where AudioWorklet is missing.
+
 - **The camera agent keeps answering when its NPU brain is away.** With
   `llm_provider: openai` and a `llm_fallback_url` (an Ollama), a connection
   refused, a timeout or a 5xx from the endpoint (the adapter restarting, its

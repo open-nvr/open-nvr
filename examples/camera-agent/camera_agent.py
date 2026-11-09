@@ -233,7 +233,7 @@ class AppConfig:
     # segmented STT, since 1.10). Half a second on a three-second clip is
     # a few percent of the transcription; 0 disables it.
     stt_trailing_silence_secs: float = 0.5
-    turn_stop_secs: float = 2.0
+    turn_stop_secs: float = 1.0
     # Smart Turn v3 only ever looks at the LAST 8 s of a turn (it pads or
     # truncates to the model window), so buffering more is pure cost.
     turn_max_secs: float = 8.0
@@ -3140,7 +3140,7 @@ def load_config(path: str | Path) -> AppConfig:
         vad_stop_secs=_float("vad_stop_secs", 0.2),
         vad_min_volume=_float("vad_min_volume", 0.08),
         stt_trailing_silence_secs=_float("stt_trailing_silence_secs", 0.5),
-        turn_stop_secs=_float("turn_stop_secs", 2.0),
+        turn_stop_secs=_float("turn_stop_secs", 1.0),
         turn_max_secs=_float("turn_max_secs", 8.0),
         turn_stop_timeout_secs=_float("turn_stop_timeout_secs", 6.0),
         turn_detector=_str("turn_detector", "auto"),
@@ -5958,6 +5958,11 @@ def build_core_processors(runtime: CameraAgentRuntime, *, user_params: Any = Non
         temperature=runtime.cfg.llm_temperature,
         max_tokens=runtime.cfg.llm_max_tokens,
         clock_line=getattr(runtime, "_clock_line", None),
+        # The real runtime answers a streamed turn with the same turn the
+        # request path runs (router, forced grounding, the window fit,
+        # the backup model, the reply guards); a bare test runtime keeps
+        # the service's inline loop.
+        turn_runner=_streaming_turn_runner(runtime) if isinstance(runtime, CameraAgentRuntime) else None,
     )
     tts = OpenNvrPiperTTS(client=runtime.piper)
 
@@ -5970,6 +5975,15 @@ def build_core_processors(runtime: CameraAgentRuntime, *, user_params: Any = Non
         context, user_params=user_params or build_user_turn_params(runtime.cfg, runtime),
     )
     return [stt, aggregators.user(), llm, tts, aggregators.assistant()], context
+
+
+def _streaming_turn_runner(runtime: CameraAgentRuntime):
+    """``async (history, text) -> reply`` for the streaming LLM service:
+    the agent's full turn, speaking its thinking-aloud lines as a voice
+    turn does (they reach the page over /updates with audio)."""
+    async def run(history: list[dict[str, str]], text: str) -> str:
+        return await _run_conversation_turn(runtime, list(history), text, speak_progress="voice")
+    return run
 
 
 def build_pipeline_task(runtime: CameraAgentRuntime, transport: Any) -> Any:
@@ -5988,6 +6002,8 @@ def build_pipeline_task(runtime: CameraAgentRuntime, transport: Any) -> Any:
     from pipecat.pipeline.pipeline import Pipeline
     from pipecat.pipeline.task import PipelineParams, PipelineTask
 
+    from services import StreamEvents
+
     core, _context = build_core_processors(runtime)
     stt, user_agg, llm, tts, assistant_agg = core
     pipeline = Pipeline([
@@ -5996,6 +6012,7 @@ def build_pipeline_task(runtime: CameraAgentRuntime, transport: Any) -> Any:
         user_agg,
         llm,
         tts,
+        StreamEvents(),          # transcript / sentences / turn state as JSON beside the audio
         transport.output(),
         assistant_agg,
     ])

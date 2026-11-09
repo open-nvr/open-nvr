@@ -147,7 +147,7 @@ llm_max_tokens: 128
 vad_confidence: 0.55
 vad_start_secs: 0.15
 vad_stop_secs: 0.2
-turn_stop_secs: 2.0
+turn_stop_secs: 1.0
 # Smart Turn only ever looks at the last 8 s of a turn; buffering more is
 # pure cost.
 turn_max_secs: 8.0
