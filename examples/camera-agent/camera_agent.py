@@ -2773,6 +2773,12 @@ class ReportScheduler:
             logger.exception("report scheduler loop crashed")
 
 
+#: Example phrasings in the create_report schema. A small model copies
+#: one as the query ("what the cameras saw overnight" for "every hour tell
+#: me what you see"); the handler then uses the question instead.
+_SCHEMA_EXAMPLE_QUERIES = frozenset({"what the cameras saw overnight", "overnight activity"})
+
+
 def _create_report_tool() -> dict[str, Any]:
     return {
         "type": "function",
@@ -4736,14 +4742,23 @@ class CameraAgentRuntime:
             every = int(every) if every else None
         except (TypeError, ValueError):
             every = None
-        if at_min is None and every is None:
-            # The model named no schedule it could fill ("every hour tell
-            # me what you see" came back with at="every_minutes" and no
-            # minutes, 3 of 3 on the NPU): the words of the question
-            # decide, the same way the alarm takes its window from them.
-            import router as _router
-            q = getattr(getattr(self, "tools", None), "current_question", None) or ""
-            at_min, every = _router.schedule_from_text(q)
+        import router as _router
+        q = getattr(getattr(self, "tools", None), "current_question", None) or ""
+        w_at, w_every = _router.schedule_from_text(q)
+        if every is None and w_every is not None:
+            # The question names an interval ("every hour"); a clock time
+            # the model put in `at` instead is not what was asked —
+            # granite wrote at="03:00" for "every hour tell me what you
+            # see" (Ventuno Q CPU eval, 2026-11-10), Gemma left both
+            # slots empty (NPU, 11-09). The words decide, the same way the
+            # alarm takes its window from them.
+            every, at_min = w_every, None
+        elif at_min is None and every is None:
+            at_min, every = w_at, w_every
+        if query.strip().lower().rstrip(".") in _SCHEMA_EXAMPLE_QUERIES and q.strip():
+            # The schema's example copied as the query: the question itself
+            # is what the report should answer.
+            query = q.strip()
         # Mirror create's own default so dedup compares what will be stored.
         _at = at_min if (at_min is not None or every) else 8 * 60
         dup = self.reports.find_duplicate(query=query, at_min=_at,
@@ -8734,6 +8749,7 @@ async def _conversation_turn_body(
         return decision.ask
     routed = decision.routed
     small_talk = routed and decision.tool is None
+    direct_tool_reply = False
     reasked = False
     if small_talk:
         # Small talk (router): the loop as usual, with NO tools, so the
@@ -8754,26 +8770,36 @@ async def _conversation_turn_body(
         grounded = True
         tools_called += 1
         last_tool_result = result or last_tool_result
-        _llm_t0 = time.perf_counter()
-        response = await _chat_or_explain(
-            runtime,
-            messages=[
-                {"role": "system", "content": runtime.build_compose_prompt()},
-                *history,
-                {"role": "user", "content": user_text},
-                {"role": "assistant", "content": "", "tool_calls": [call]},
-                {"role": "tool", "tool_call_id": "route-0", "name": name, "content": result},
-            ],
-            tools=None,
-            temperature=runtime.cfg.llm_temperature,
-            max_tokens=runtime.cfg.llm_max_tokens,
-        )
-        # Its own step name: fillers.py takes the median of "llm" to size
-        # the thinking-aloud wait, and a 1 s compose must not make a 17 s
-        # tool-calling iteration look short.
-        trace.append({"step": "compose", "detail": "tier0",
-                      "ms": int((time.perf_counter() - _llm_t0) * 1000)})
-        final = ((response.get("message") or {}).get("content") or "").strip()
+        if name in _DIRECT_SPEECH_TOOLS and result and not result.startswith("ERROR"):
+            # The tool already answered in a sentence ("Stopped and removed
+            # watch #1 'cars'."). Asking a model to restate it is only a
+            # chance to say the opposite — granite4:micro answered "I'm
+            # watching for cars" to that very result (Ventuno Q CPU eval,
+            # 2026-11-10), and cost 19 s doing it.
+            direct_tool_reply = True
+            final = result
+            trace.append({"step": "compose", "detail": "tier0 direct", "ms": 0})
+        else:
+            _llm_t0 = time.perf_counter()
+            response = await _chat_or_explain(
+                runtime,
+                messages=[
+                    {"role": "system", "content": runtime.build_compose_prompt()},
+                    *history,
+                    {"role": "user", "content": user_text},
+                    {"role": "assistant", "content": "", "tool_calls": [call]},
+                    {"role": "tool", "tool_call_id": "route-0", "name": name, "content": result},
+                ],
+                tools=None,
+                temperature=runtime.cfg.llm_temperature,
+                max_tokens=runtime.cfg.llm_max_tokens,
+            )
+            # Its own step name: fillers.py takes the median of "llm" to size
+            # the thinking-aloud wait, and a 1 s compose must not make a 17 s
+            # tool-calling iteration look short.
+            trace.append({"step": "compose", "detail": "tier0",
+                          "ms": int((time.perf_counter() - _llm_t0) * 1000)})
+            final = ((response.get("message") or {}).get("content") or "").strip()
     elif decision.hint:
         # In the user turn, next to the clock — the one message rendered
         # last. Not a system message: Ollama would hoist it into the
@@ -8917,7 +8943,10 @@ async def _conversation_turn_body(
     # questions never reach here: they are answered before the loop.
     cleaned = _clean_for_speech(final, runtime.visible_cameras())
     extra_issues: list[str] = []
-    if cleaned and not _is_deflection(cleaned):
+    if direct_tool_reply:
+        # A stop or a view switch: the tool's own sentence, spoken as is.
+        reply, source = _humanize_for_speech(final, runtime.visible_cameras()), "tool"
+    elif cleaned and not _is_deflection(cleaned):
         reply, source = cleaned, "llm"
         # The reply must agree with the tool it rests on. A count the model
         # states for a thing the detector just counted differently is the
@@ -8951,6 +8980,10 @@ async def _conversation_turn_body(
         ",".join(degraded) or "none", reply[:90])
     return _with_llm_notice(runtime, reply)
 
+
+#: Routed tools whose result is already the spoken answer: no compose
+#: model in between (see the routed branch of the turn).
+_DIRECT_SPEECH_TOOLS = frozenset({"stop_alarm", "stop_monitor", "stop_report", "show_camera"})
 
 # Hollow "acknowledgement" replies a small model emits instead of answering
 # ("I see… I'll check the camera.") — treat as no-answer so we ground/fallback.

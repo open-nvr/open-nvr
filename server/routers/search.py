@@ -300,6 +300,17 @@ def search_people(
     }
 
 
+def _search_vocabulary() -> set[str]:
+    """The description words this box can act on — colours, vehicle
+    types, carried things, headwear, clothing cues — so a typo of one of
+    them is read as the word (search_query.correct_word) instead of
+    falling through to the caption text, where it matches nothing."""
+    from services import search_intent as si
+
+    return set(si.COLOUR_WORDS) | set(si.VEHICLE_TYPE_WORDS) | set(si.CARRYING_WORDS) \
+        | set(si.GENDER_WORDS) | set(si.HEADWEAR_WORDS) | set(si.CLOTHING_CUES)
+
+
 def _known_people(db: Session, scope: set[int] | None) -> list[str]:
     """The ``face_id`` values visits in scope carry — the vocabulary a
     typed name is matched against (the same list ``/search/people``
@@ -393,6 +404,12 @@ async def search(
                     "are the whole query (how a UI driving from edited chips "
                     "clears a filter the sentence implied).",
     ),
+    correct: bool = Query(
+        True,
+        description="Read a word one letter off the box's vocabulary as that "
+                    "word (said in interpretation.corrections); false searches "
+                    "the letters as typed.",
+    ),
     describe: bool = Query(
         True,
         description="When the question needs a caption or a claim the matching "
@@ -420,7 +437,8 @@ async def search(
     """
     scope = visible_camera_ids(db, current_user)
     cameras = _visible_cameras(db, scope)
-    parsed = (parse_query(q, cameras=cameras, people=_known_people(db, scope))
+    parsed = (parse_query(q, cameras=cameras, people=_known_people(db, scope),
+                          vocab=_search_vocabulary(), correct=correct)
               if parse else ParsedQuery())
 
     # Explicit parameters beat the parse, field by field, so a caller can

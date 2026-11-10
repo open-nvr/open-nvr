@@ -265,10 +265,19 @@ def _events_query(
     if source:
         q = q.filter(TimelineEvent.source == source)
     if plate:
-        # Normalized like the writer (uppercase, no spaces); substring match
-        # so "1234" finds KA01AB1234 — how people actually recall plates.
-        norm = "".join(plate.split()).upper()
-        q = q.filter(TimelineEvent.plate_text.ilike(f"%{norm}%"))
+        # Normalized like the writer (uppercase, no spaces) and matched as a
+        # substring, so "1234" finds KA01AB1234 — how people actually recall
+        # plates — and by OCR-equivalence class on both sides
+        # (services.search_query.plate_class): a plate typed from memory
+        # with an 8 for a B or an O for a 0 still finds the read, and a read
+        # that mistook one for the other is still found.
+        from services.search_query import plate_class, plate_class_sql
+
+        norm_class = plate_class(plate)
+        if norm_class:
+            q = q.filter(plate_class_sql(TimelineEvent.plate_text).like(f"%{norm_class}%"))
+        else:
+            q = q.filter(TimelineEvent.plate_text.ilike(f"%{''.join(plate.split()).upper()}%"))
     elif has_plate:
         # The Vehicles page: every row must BE a plate read (a plate
         # filter implies this already).

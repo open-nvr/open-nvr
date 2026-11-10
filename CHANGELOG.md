@@ -22,6 +22,21 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   skill remains the operator's gate. This is what makes the frame arm
   and the caption-embedding arm of search (both already built) actually
   run on a Qualcomm box, where no embedder existed before.
+- **Search reads a typo as the word it is one letter from, and says so.**
+  "persn at the dok" used to fall through to the caption text and match
+  nothing, silently. A word that is none of the box's own vocabulary — the
+  class synonyms, the camera names, the people it knows, the colours and
+  kinds its description skills write — and one letter off one of them is
+  now read as that word (`difflib` over a few hundred words, no model, no
+  database extension): `interpretation.corrections` carries
+  `{"persn": "person"}`, the page shows "Read persn as person" with a
+  *Search as typed* button, and `correct=false` searches the letters.
+  Short words need a near-identical match and two equally close words are
+  never guessed between. **Number plates match by OCR-equivalence class**:
+  a plate typed from memory with an 8 for a B, an O for a 0, an I for a 1
+  still finds the read, and a read that confused one of them is still
+  found (O/Q/D→0, I/L→1, Z→2, S→5, G→6, B→8, on both sides). Still a
+  substring match, so "1234" finds KA01AB1234.
 
 - **Camera agent: `GET /turn-stats`, and footage review that captions only
   what changed.** `/turn-stats` reports what the last thousand turns cost
@@ -590,6 +605,15 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   timing matters.
 
 ### Fixed
+
+- **Camera agent: the two misses of the CPU-brain eval on the Ventuno Q
+  (granite4:micro, 50 of 52, `bench/ventuno-q-eval-cpu-vs-npu-2026-11-10.md`).**
+  A routed stop or view switch now speaks the tool's own sentence with no
+  compose call: granite restated "Stopped and removed watch 'cars'" as
+  "I'm watching for cars" (19 s to say the opposite). A report request
+  that names an interval ("every hour") keeps that interval even when the
+  model put a clock time in `at` (granite wrote 03:00), and a query the
+  model copied from the schema's example is replaced by the question.
 
 - **Every recording segment was indexed with no size and no codec.** The
   segment-complete hook stat'ed MTX_SEGMENT_PATH as MediaMTX spells it
