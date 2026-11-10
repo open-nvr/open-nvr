@@ -13,29 +13,43 @@
 # --cpu: run against the CPU brain instead of whatever .env points the agent
 # at (on a Qualcomm board that is the NPU adapter): the LLM variables are
 # switched to Ollama on the host for the run and put back afterwards, the
-# agent container recreated both times — and ONLY the agent (--no-deps):
-# a bare `compose up camera-agent` also recreated core as its dependency,
-# and Compose 2.24 then left core off the database network, so every
-# login and every segment index 500'd until ./start.sh re-attached it
-# (Ventuno Q, 2026-11-10 01:33). Nothing else on the box changes.
+# agent container recreated both times — the config-init container that
+# renders the agent's config.yml from .env, then the agent, and ONLY
+# those two (--no-deps): a bare `compose up camera-agent` also recreated
+# core as its dependency, and Compose 2.24 then left core off the
+# database network, so every login and every segment index 500'd until
+# ./start.sh re-attached it (Ventuno Q, 2026-11-10 01:33); recreating
+# the agent alone kept the OLD rendered config, and the "CPU" run was
+# the NPU again (01:43). The script checks the model the agent reports
+# before it runs. Nothing else on the box changes.
 set -euo pipefail
 label=${1:?label, e.g. npu or cpu}; repeat=${2:-3}; mode=${3:-}
 cd "$(dirname "$0")/../../.."       # the checkout
 cam=${EVAL_CAMERA:-cam23}
 
+recreate_agent() {
+    # The init container renders /app/config.yml from .env; it must run
+    # again or the agent comes back with the previous settings.
+    docker compose up --no-deps --force-recreate camera-agent-config-init >/dev/null 2>&1 || true
+    docker compose up -d --no-deps --force-recreate camera-agent >/dev/null
+}
+agent_model() {
+    docker exec opennvr_camera_agent python -c 'import urllib.request,ssl,json;ssl._create_default_https_context=ssl._create_unverified_context;print(json.load(urllib.request.urlopen("https://127.0.0.1:9100/health",timeout=3)).get("llm_model") or "")' 2>/dev/null
+}
 restore() {
     if [[ -f /tmp/env.before-cpu-eval ]]; then
         echo "restoring the LLM settings and recreating the agent…"
         cp /tmp/env.before-cpu-eval .env && rm -f /tmp/env.before-cpu-eval
-        docker compose up -d --no-deps --force-recreate camera-agent >/dev/null
+        recreate_agent
     fi
 }
 if [[ "$mode" == "--cpu" ]]; then
     cp .env /tmp/env.before-cpu-eval
     trap restore EXIT
     sed -i -E 's/^LLM_PROVIDER=.*/LLM_PROVIDER=ollama/; s/^LLM_BASE_URL=.*/LLM_BASE_URL=/; s/^LLM_MODEL=.*/LLM_MODEL=/; s/^LLM_PREWARM=.*/LLM_PREWARM=false/' .env
-    echo "agent on the CPU brain (Ollama on the host, $(grep -E '^OLLAMA_MODEL=' .env | cut -d= -f2)) for this run…"
-    docker compose up -d --no-deps --force-recreate camera-agent >/dev/null
+    cpu_model=$(grep -E '^OLLAMA_MODEL=' .env | cut -d= -f2)
+    echo "agent on the CPU brain (Ollama on the host, ${cpu_model}) for this run…"
+    recreate_agent
 fi
 # Wait for the agent to answer, and for core to answer a DATABASE-backed
 # request (the login is one): a core that is up but off its database
@@ -55,6 +69,12 @@ urllib.request.urlopen(r,timeout=5)' 2>/dev/null; then core_ok=1; break; fi
 done
 if [[ -z "$core_ok" ]]; then
     echo "core is not answering database-backed requests (off its database network? run ./start.sh, which re-attaches it) — not asking for a login." >&2
+    exit 1
+fi
+model=$(agent_model)
+echo "agent reports LLM model: ${model:-?}"
+if [[ "$mode" == "--cpu" && "$model" != "$cpu_model" ]]; then
+    echo "the agent is not on the CPU brain (${model:-?} instead of ${cpu_model}) — not running." >&2
     exit 1
 fi
 
@@ -94,7 +114,7 @@ docker exec opennvr_camera_agent sh -c '
   sed -i "s/^import urllib.request$/import urllib.request\nimport ssl as _ssl\n_ssl._create_default_https_context = _ssl._create_unverified_context/" /tmp/eval/eval_harness.py
   sed -i "s/^            req.add_header(\"Authorization\", f\"Bearer {state\[.token.\]}\")$/&\n        import os\n        if os.environ.get(\"DEVTOK\"):\n            req.add_header(\"X-Device-Token\", os.environ[\"DEVTOK\"])/" /tmp/eval/eval_harness.py
   grep -q _create_unverified_context /tmp/eval/eval_harness.py && grep -q X-Device-Token /tmp/eval/eval_harness.py'
-echo "running $label x$repeat against https://127.0.0.1:9100 (camera $cam)…"
+echo "running $label x$repeat against https://127.0.0.1:9100 (camera $cam, model ${model:-?})…"
 docker exec -e TOK="$tok" -e RTOK="$rtok" -e DEVTOK="$devtok" opennvr_camera_agent sh -c \
   'python /tmp/eval/eval_harness.py --url https://127.0.0.1:9100 --cases /tmp/eval/eval_cases.yml \
      --camera '"$cam"' --repeat '"$repeat"' --throwaway --token "$TOK" ${RTOK:+--refresh-token "$RTOK"} \
