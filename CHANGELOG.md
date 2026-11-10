@@ -8,6 +8,15 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Search's caption floor, measured against the labelled eval: 0.65.**
+  The 0.75 set earlier today came from queries phrased the way the
+  captioner writes; the relevance eval's operator phrasing scores lower
+  ("hooded sweatshirt" 0.63, "light blue kurta" 0.67), and at 0.75 the
+  caption arm sat out of a quarter of the cases. A sweep of the arm
+  alone over the labelled pool gives hit@5 0.82 at 0.65 against 0.64 at
+  0.75, and 0.65 still cuts what nobody saw. `SEARCH_CAPTION_MIN_SIMILARITY`
+  default 0.65; a box on the fallback text tower should set 0.75.
+  (`bench/ventuno-q-text-embed-2026-11-10.md`)
 - **Search's vector arms hear the whole question, and typos are read
   against the captions' own words.** The relevance eval on the Ventuno Q
   (`tools/search_eval.py`, baseline 2026-11-10) showed two gaps. A query

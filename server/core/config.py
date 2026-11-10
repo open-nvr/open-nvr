@@ -588,15 +588,20 @@ class Settings(BaseSettings):
     # The floor for search's CAPTION arm — the query against each visit's
     # caption vector (caption + attribute words). With a `text_embed`
     # adapter registered (bge-small, the sentence encoder) both go
-    # through it. Measured on the Ventuno Q's 805 captions
-    # (bench/ventuno-q-text-embed-2026-11-10.md): a caption that answers
-    # the query scores 0.75–0.83, the best unrelated one 0.57–0.74, so
-    # 0.75 keeps the hits and cuts the rest. Without a text_embed adapter
-    # the arm uses the embed adapter's text tower, where SigLIP2's
-    # relevant pairs score 0.76–0.87 and irrelevant ones up to 0.75 —
-    # the same line, by luck. 0 disables it; `semantic.caption.best` in
-    # a search's answer shows the scale a box is seeing.
-    search_caption_min_similarity: float = 0.75
+    # through it. Measured twice on the Ventuno Q
+    # (bench/ventuno-q-text-embed-2026-11-10.md): queries phrased like
+    # the captioner put hits at 0.75–0.83 and noise under 0.75, but the
+    # labelled eval's operator phrasing ("hooded sweatshirt", "light blue
+    # kurta") puts hits as low as 0.63–0.69, and at 0.75 the arm sat out
+    # of a quarter of the cases. The sweep over the labelled pool: the
+    # arm alone scores hit@5 0.82 at 0.65 against 0.64 at 0.75, while
+    # 0.65 still cuts what nobody saw ("a cat on the roof" 0.57, "a dog"
+    # 0.64). Fusion ranks by agreement, so a looser floor costs little.
+    # Without a text_embed adapter the arm uses the embed adapter's text
+    # tower, where SigLIP2's irrelevant pairs reach 0.75 — raise it
+    # there. 0 disables it; `semantic.caption.best` in a search's answer
+    # shows the scale a box is seeing.
+    search_caption_min_similarity: float = 0.65
     # Relearn the camera graph nightly from the journeys the site is
     # already certain about (same plate or same recognised face on two
     # cameras). ON by default, unlike the backfill above, because it
