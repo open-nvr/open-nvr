@@ -1832,3 +1832,74 @@ def test_month_and_year_phrases_become_windows():
     may = _p("may")                                        # a month word that is also a verb: still a month
     assert may.from_ == datetime(2026, 5, 1, tzinfo=UTC)
     assert _p("car with plate KA01AB1234").from_ is None, "no time means all time"
+
+
+# ── typos against the box's own vocabulary ──────────────────────────────
+
+
+def test_a_word_one_letter_off_a_known_word_is_read_as_that_word():
+    parsed = parse_query("persn at the dok", cameras={1: "Dock"}, now=NOW)
+    assert parsed.labels == ["person"]
+    assert parsed.camera_ids == [1]
+    assert parsed.corrections == {"persn": "person", "dok": "dock"}
+    assert parsed.matched["corrected"] == "persn → person, dok → dock"
+    assert parsed.text == ""
+
+
+def test_corrections_can_be_refused_and_never_touch_known_words_numbers_or_plates():
+    literal = parse_query("persn at the dok", cameras={1: "Dock"}, now=NOW, correct=False)
+    assert literal.labels == [] and literal.text == "persn dok" and literal.corrections == {}
+    plain = parse_query("person at the dock gate14 KA01AB1234", cameras={1: "Dock"}, now=NOW)
+    assert plain.corrections == {}
+    assert plain.plate == "KA01AB1234"
+
+
+def test_a_short_or_ambiguous_word_is_left_alone():
+    from services.search_query import correct_word
+
+    vocab = {"car", "cars", "cart", "truck", "person", "dock", "deck"}
+    assert correct_word("van", vocab) is None, "a three-letter word only takes a near-identical match"
+    assert correct_word("dok", vocab) == "dock"
+    assert correct_word("cart", vocab - {"cart"}) is None, "'cart' is not 'car' (lengths differ)"
+    assert correct_word("trcuk", vocab) == "truck"
+    assert correct_word("dack", vocab) is None, "dock and deck are equally close: do not guess"
+    assert correct_word("gate14", vocab) is None
+
+
+def test_vocabulary_words_from_the_description_skills_are_corrected_too():
+    parsed = parse_query("blu shrit", vocab={"blue", "shirt", "red"}, now=NOW)
+    assert parsed.corrections == {"blu": "blue", "shrit": "shirt"}
+    assert parsed.text == "blue shirt"
+
+
+def test_the_api_says_what_it_corrected_and_correct_false_searches_the_letters(client, db):
+    _camera(db, 1, "Dock")
+    _visit(db, label="person", caption="a person walking")
+    body = client.get("/api/v1/search", params={"q": "persn"}).json()
+    assert body["interpretation"]["labels"] == ["person"]
+    assert body["interpretation"]["corrections"] == {"persn": "person"}
+    assert body["total"] == 1
+    literal = client.get("/api/v1/search", params={"q": "persn", "correct": "false"}).json()
+    assert literal["interpretation"]["corrections"] == {}
+    assert literal["interpretation"]["labels"] == []
+
+
+# ── plates match by OCR-equivalence class ──────────────────────────────
+
+
+def test_plate_class_folds_the_letters_a_reader_confuses():
+    from services.search_query import plate_class
+
+    assert plate_class("KA-01 AB 1234") == "KA01A81234"
+    assert plate_class("ka01ab1234") == plate_class("KA01A81234") == plate_class("KAO1AB1234")
+    assert plate_class("") == ""
+
+
+def test_a_plate_typed_with_a_confused_letter_still_finds_the_read(db):
+    _camera(db, 1, "Dock")
+    hit = _visit(db, label="car", plate="KA01AB1234")
+    _visit(db, label="car", plate="MH12CD5678")
+    for typed in ("KA01A81234", "KAO1AB1234", "ka01ab1234", "AB1234", "A81234"):
+        hits = search_events(db, labels=None, camera_ids=None, text="", plate=typed, limit=10, skip=0)
+        assert [h.event.id for h in hits] == [hit.id], typed
+    assert search_events(db, labels=None, camera_ids=None, text="", plate="ZZ99", limit=10, skip=0) == []
