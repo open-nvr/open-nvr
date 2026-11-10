@@ -8,6 +8,14 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The embedders are not skipped while KAI-C has yet to probe them.**
+  KAI-C reports an adapter's health as "unknown" from registration until
+  its next poll, and after a core restart every adapter re-registers at
+  once; the embed producer resolution skipped any adapter not reported
+  "ok", so for those minutes search ran words-only and said so only in
+  its `semantic` block (a whole eval run on the Ventuno Q, 2026-11-10).
+  Only a REPORTED failure skips an adapter now; one nobody has asked yet
+  is tried. (`server/services/embed_enrichment.py`)
 - **Search's caption floor, measured against the labelled eval: 0.65.**
   The 0.75 set earlier today came from queries phrased the way the
   captioner writes; the relevance eval's operator phrasing scores lower
