@@ -69,3 +69,6 @@ Reports taken on real boards, every number from a run on that board:
 - [`ventuno-q-stt-2026-11-09.md`](ventuno-q-stt-2026-11-09.md) — speech to text on the Hexagon
   (Whisper-Small w8a16, `whisper_qnn`) against parakeet on the ARM cores: 361 ms vs 774 ms an
   utterance, equal clean-speech accuracy, a working no-speech gate; why `STT_ADAPTER=auto` picks it.
+- [`ventuno-q-eval-cpu-vs-npu-2026-11-10.md`](ventuno-q-eval-cpu-vs-npu-2026-11-10.md) — the 52-case live eval on
+  granite4:micro (CPU) against Gemma on the NPU, same box, same cases: 50 of 52 vs 52 of 52, but 16 s / 195 s /
+  218 s a turn by tier against 0.6 / 3.1 / 3.2 s; the router carries granite, the ARM cores do not.
