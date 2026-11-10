@@ -267,6 +267,10 @@ class ParsedQuery:
     #: "3 people", "two men together", "a group": at least this many people
     #: in frame with the visit. None = not asked.
     min_people: int | None = None
+    #: Typed word → the vocabulary word it was read as ("persn" →
+    #: "person", "dok" → "dock"). Shown, never silent, and the caller can
+    #: turn it off (``correct=false``) to search the letters as typed.
+    corrections: dict[str, str] = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return {
@@ -281,7 +285,92 @@ class ParsedQuery:
             "matched": self.matched,
             "ignored": self.ignored,
             "min_people": self.min_people,
+            "corrections": self.corrections,
         }
+
+
+# ── typos against the box's own vocabulary ─────────────────────────────
+#
+# The words a search can mean are a few hundred: the class synonyms, the
+# camera names, the people the box knows, the colours and kinds the
+# description skills write. A word that is none of them and one letter
+# away from one of them is that word mistyped — "persn", "trcuk", "dok" —
+# and used to fall through to the caption text, where it matched nothing,
+# silently. difflib on a vocabulary this size is microseconds; no model,
+# no database extension. Rules: never touch a word the parser already
+# knows, a stop word, a number or a plate; a four-letter word needs a
+# closer match than a longer one ("cart" is not "car"); the best candidate
+# must stand clear of the second.
+
+def _ratio(a: str, b: str) -> float:
+    import difflib
+    return difflib.SequenceMatcher(None, a, b).ratio()
+
+
+def correct_word(word: str, vocab: set[str]) -> str | None:
+    """The vocabulary word ``word`` is most likely a typo of, or None."""
+    if len(word) < 3 or word in vocab or word.isdigit() or word in _STOP:
+        return None
+    if any(ch.isdigit() for ch in word):
+        return None                              # gate14, a plate, a time
+    # Shorter words need a closer match and a candidate of nearly the same
+    # length: "dok" is "dock" and "blu" is "blue", but "van" is not "can"
+    # and "cart" is not "car".
+    if len(word) == 3:
+        floor, span = 0.85, 1
+    elif len(word) == 4:
+        floor, span = 0.86, 1
+    else:
+        floor, span = 0.8, 2
+    scored = sorted(
+        ((_ratio(word, v), v) for v in vocab if abs(len(v) - len(word)) <= span and len(v) >= 3),
+        reverse=True)
+    if not scored or scored[0][0] < floor:
+        return None
+    if len(scored) > 1 and scored[1][0] >= scored[0][0] - 0.02 and scored[1][1] != scored[0][1]:
+        return None                              # two words equally close: do not guess
+    return scored[0][1]
+
+
+def correct_words(words: list[str], vocab: set[str]) -> tuple[list[str], dict[str, str]]:
+    """Each word corrected where :func:`correct_word` is sure; the map of
+    what changed."""
+    out: list[str] = []
+    changed: dict[str, str] = {}
+    for w in words:
+        fixed = correct_word(w, vocab)
+        if fixed:
+            changed[w] = fixed
+            out.append(fixed)
+        else:
+            out.append(w)
+    return out, changed
+
+
+#: Characters a plate reader confuses, folded to one class each so a
+#: plate typed from memory still finds the read: O/Q/D read as 0, I/L
+#: as 1, Z as 2, S as 5, G as 6, B as 8 (Genetec's "OCR equivalence").
+PLATE_CLASS_MAP = str.maketrans({"O": "0", "Q": "0", "D": "0", "I": "1", "L": "1",
+                                 "Z": "2", "S": "5", "G": "6", "B": "8"})
+
+
+def plate_class(text: str) -> str:
+    """``text`` as its OCR-equivalence class: upper, no separators, the
+    confusable letters folded (KA-01 AB 1234 → KA01A81234)."""
+    s = "".join(ch for ch in (text or "").upper() if ch.isalnum())
+    return s.translate(PLATE_CLASS_MAP)
+
+
+def plate_class_sql(column):
+    """The same folding as :func:`plate_class`, as a SQL expression over
+    ``column`` — nested ``replace`` so it runs on Postgres and SQLite alike."""
+    from sqlalchemy import func
+
+    expr = func.upper(column)
+    for a, b in (("O", "0"), ("Q", "0"), ("D", "0"), ("I", "1"), ("L", "1"),
+                 ("Z", "2"), ("S", "5"), ("G", "6"), ("B", "8"), ("-", ""), (" ", "")):
+        expr = func.replace(expr, a, b)
+    return expr
 
 
 def _day_bounds(day: datetime) -> tuple[datetime, datetime]:
@@ -507,12 +596,17 @@ def parse_query(
     cameras: dict[int, str] | None = None,
     people: Iterable[str] | None = None,
     now: datetime | None = None,
+    vocab: Iterable[str] | None = None,
+    correct: bool = True,
 ) -> ParsedQuery:
     """Parse ``q`` into filters. ``cameras`` is {id: name} for the
     caller's visible cameras — scope decides what "the dock" can mean.
     ``people`` are the ``face_id`` values visits in scope have been
     bound to (what ``/search/people`` lists): a name among the words
-    becomes an attr filter instead of a caption word that cannot match."""
+    becomes an attr filter instead of a caption word that cannot match.
+    ``vocab`` are further words the box can act on (the colours and kinds
+    its description skills write); with ``correct`` a word one letter off
+    any of these is read as that word, and ``corrections`` says so."""
     out = ParsedQuery()
     text = (q or "").strip().lower()
     if not text:
@@ -524,6 +618,16 @@ def parse_query(
         out.matched["when"] = when
 
     words = [w for w in re.split(r"[^a-z0-9\-:]+", text) if w]
+    if correct:
+        known: set[str] = set(LABEL_SYNONYMS) | set(_GROUP_WORDS) | set(_NUMBER_WORDS) | set(_PLATE_CUES)
+        for name in (cameras or {}).values():
+            known |= {w for w in re.split(r"[^a-z0-9]+", str(name).lower()) if len(w) >= 3}
+        for name in people or ():
+            known |= {w for w in re.split(r"[^a-z0-9]+", str(name).lower()) if len(w) >= 3}
+        known |= {str(w).lower() for w in (vocab or ()) if w}
+        words, out.corrections = correct_words(words, known)
+        if out.corrections:
+            out.matched["corrected"] = ", ".join(f"{a} → {b}" for a, b in out.corrections.items())
 
     if cameras:
         cam_ids, cam_words = _match_cameras(words, cameras)

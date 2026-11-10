@@ -8,6 +8,22 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Search reads a typo as the word it is one letter from, and says so.**
+  "persn at the dok" used to fall through to the caption text and match
+  nothing, silently. A word that is none of the box's own vocabulary — the
+  class synonyms, the camera names, the people it knows, the colours and
+  kinds its description skills write — and one letter off one of them is
+  now read as that word (`difflib` over a few hundred words, no model, no
+  database extension): `interpretation.corrections` carries
+  `{"persn": "person"}`, the page shows "Read persn as person" with a
+  *Search as typed* button, and `correct=false` searches the letters.
+  Short words need a near-identical match and two equally close words are
+  never guessed between. **Number plates match by OCR-equivalence class**:
+  a plate typed from memory with an 8 for a B, an O for a 0, an I for a 1
+  still finds the read, and a read that confused one of them is still
+  found (O/Q/D→0, I/L→1, Z→2, S→5, G→6, B→8, on both sides). Still a
+  substring match, so "1234" finds KA01AB1234.
+
 - **Camera agent: `GET /turn-stats`, and footage review that captions only
   what changed.** `/turn-stats` reports what the last thousand turns cost
   in this process — p50/p95 wall time, LLM time and tool time by router

@@ -77,6 +77,8 @@ type Interpretation = {
   attrs: string[]
   matched: Record<string, string>
   ignored: string[]
+  /** Typed word → the vocabulary word it was read as ("persn" → "person"). */
+  corrections?: Record<string, string>
   min_people?: number | null
   source: 'parsed' | 'explicit' | string
   overridden: string[]
@@ -265,11 +267,16 @@ export function Search() {
   // Typing a new sentence puts the page back under the parser's control;
   // editing chips takes it away. That is the whole state machine.
   const editing = filters !== null
+  // "Search the letters as typed": the parser read a word as a typo of one
+  // it knows; the operator can refuse the correction for this sentence.
+  const [literal, setLiteral] = useState(false)
+  useEffect(() => { setLiteral(false) }, [sentence])
 
   const request = useMemo(() => {
     const qs = new URLSearchParams()
     qs.set('limit', String(pageSize))
     qs.set('skip', String(page * pageSize))
+    if (literal && !editing) qs.set('correct', 'false')
     if (editing) {
       qs.set('parse', 'false')
       for (const l of filters!.labels) qs.append('label', l)
@@ -284,7 +291,7 @@ export function Search() {
       qs.set('q', sentence)
     }
     return qs
-  }, [editing, filters, sentence, page, pageSize])
+  }, [editing, filters, sentence, page, pageSize, literal])
 
   // Names for the camera chip: "Loading dock" says what "1 camera"
   // cannot, and the id alone tells an operator nothing.
@@ -659,6 +666,23 @@ export function Search() {
           <Button variant="outline" size="sm" onClick={() => narrow(7)}>7 days</Button>
           <Button variant="outline" size="sm" onClick={() => narrow(30)}>30 days</Button>
         </span>
+      ),
+    })
+  }
+  // A word read as a typo of one the box knows: said, with the way back.
+  const corrections = Object.entries(interp?.corrections ?? {})
+  if (corrections.length > 0 && !editing) {
+    notices.push({
+      key: 'corrected',
+      tone: 'info',
+      icon: <Info size={13} />,
+      text: <>Read {corrections.map(([from, to], i) => (
+        <span key={from}>{i > 0 ? ', ' : ''}<b>{from}</b> as <b>{to}</b></span>
+      ))}.</>,
+      action: (
+        <Button variant="outline" size="sm" onClick={() => setLiteral(true)}>
+          Search as typed
+        </Button>
       ),
     })
   }
