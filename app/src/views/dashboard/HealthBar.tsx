@@ -100,7 +100,7 @@ export function HealthBar({ actions }: { actions?: ReactNode }) {
 
   const list = cams.data?.cameras ?? []
   const recording = list.filter((c) => c.recording_state === 'recording').length
-  const stalled = list.filter((c) => c.recording_state === 'stalled').length
+  const stalled = list.filter((c) => c.recording_state === 'stalled' || c.recording_state === 'degraded').length
   const recLevel: Level = !cams.data ? 'unknown' : stalled > 0 ? 'warn' : 'ok'
 
   const disk = res.data?.disk

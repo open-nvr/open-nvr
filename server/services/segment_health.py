@@ -111,6 +111,31 @@ def _alarm_active(db, camera_id: int) -> bool:
     return last is not None and last.event_state == "active"
 
 
+def degraded_cameras(db, camera_ids) -> set[int]:
+    """The cameras whose latest recording_degraded event is still active:
+    their segments arrive but hold no playable video. One query for a
+    page of cameras, for the list's recording badge and the agent's
+    status read."""
+    ids = [int(c) for c in camera_ids]
+    if not ids:
+        return set()
+    from sqlalchemy import func
+
+    latest = (
+        db.query(CameraEvent.camera_id, func.max(CameraEvent.id).label("mid"))
+        .filter(CameraEvent.camera_id.in_(ids), CameraEvent.event_type == EVENT_TYPE)
+        .group_by(CameraEvent.camera_id)
+        .subquery()
+    )
+    rows = (
+        db.query(CameraEvent.camera_id)
+        .join(latest, CameraEvent.id == latest.c.mid)
+        .filter(CameraEvent.event_state == "active")
+        .all()
+    )
+    return {int(r[0]) for r in rows}
+
+
 def note_segment(
     db,
     camera,

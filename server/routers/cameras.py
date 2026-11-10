@@ -95,8 +95,15 @@ def _derive_recording_state(
     now: datetime,
     live_online: bool | None = None,
     online_since: datetime | None = None,
+    degraded: bool = False,
 ) -> str:
     """Observed recording health for one camera.
+
+    ``degraded``: the segment-health check (services.segment_health) has an
+    active ``recording_degraded`` alarm on this camera — segments keep
+    landing, so every rule below says "recording", but they hold no
+    playable video. That outranks "recording" and nothing else: a dead
+    stream is still "not_recording" / "stalled".
 
     ``recording_enabled`` only says recording is configured — on an NVR that
     is true for everything provisioned and cannot be turned off, so it can sit
@@ -169,7 +176,7 @@ def _derive_recording_state(
         # which is exactly what the watchdog alarms on. "never" stays "never":
         # nothing was ever written, and saying so is more use than "stalled".
         return "stalled" if latest_recording is not None else "never"
-    return "recording"
+    return "degraded" if degraded else "recording"
 
 
 def _log_camera_creation_start(
@@ -809,6 +816,13 @@ def get_cameras(
     from services import recording_pause
 
     pauses = recording_pause.paused(db) if camera_ids else {}
+    # One query for the page: whose segments arrive but hold no video.
+    try:
+        from services.segment_health import degraded_cameras
+
+        degraded_ids = degraded_cameras(db, camera_ids) if camera_ids else set()
+    except Exception:  # noqa: BLE001 - a badge must never cost the list
+        degraded_ids = set()
     # One evaluation for the page: which cameras have a proposal or a
     # decision about detecting on the main stream (cached a minute).
     try:
@@ -845,7 +859,7 @@ def get_cameras(
         # recording, however recently the last segment landed.
         c_resp.recording_state = _derive_recording_state(
             c, c_resp.recording_enabled, latest, now, c_resp.live_online,
-            online_since.get(c.id),
+            online_since.get(c.id), degraded=c.id in degraded_ids,
         )
         c_resp.recording_pause = pauses.get(str(c.id))
         c_resp.escalation = escalations.get(c.id)
