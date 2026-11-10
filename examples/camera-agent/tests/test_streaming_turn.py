@@ -8,6 +8,8 @@ import importlib
 import json
 import types
 
+import asyncio
+
 import pytest
 
 
@@ -147,3 +149,86 @@ async def test_a_goodbye_over_the_stream_ends_the_session_after_the_reply():
                      ("OutputTransportMessageFrame", {"type": "turn_end"}),
                      ("OutputTransportMessageFrame", {"type": "session_end"})]
 
+
+
+# ── a sentence cut by a pause is answered once, whole ──────────────────
+
+def test_unfinished_transcripts_are_recognised():
+    from services import join_transcripts, looks_unfinished
+
+    assert looks_unfinished("I remove that alarm for")
+    assert looks_unfinished("Okay, you can remove the")
+    assert looks_unfinished("Yeah, that's okay, but I see that")
+    assert looks_unfinished("Remove")               # a lone verb needs its object
+    assert not looks_unfinished("Yeah.")             # a lone answer stands
+    assert not looks_unfinished("Thanks")
+    assert not looks_unfinished("I remove that alarm for cam 24 person.")
+    assert not looks_unfinished("is anyone at the door?")
+    assert not looks_unfinished("")
+    assert join_transcripts("I remove that alarm.", "For cam 24 person.") == "I remove that alarm for cam 24 person."
+    assert join_transcripts("Okay, you can remove the", "alarm for person") == "Okay, you can remove the alarm for person"
+    assert join_transcripts("show me", "CTPL camera") == "show me CTPL camera", "an acronym keeps its capitals"
+
+
+def _llm_with_runner():
+    from services import OpenNvrOllamaLLM
+    calls: list[str] = []
+    pushed: list = []
+
+    async def runner(history, text):
+        calls.append(text)
+        return f"done: {text}"
+
+    llm = OpenNvrOllamaLLM(client=None, tools=[], tool_handlers={}, turn_runner=runner)
+
+    async def push(frame, direction=None):
+        pushed.append(frame)
+    llm.push_frame = push  # type: ignore[assignment]
+    return llm, calls, pushed
+
+
+def _ctx(*user_texts):
+    from pipecat.processors.aggregators.llm_context import LLMContext
+    msgs = [{"role": "system", "content": "sys"}]
+    for i, t in enumerate(user_texts):
+        msgs.append({"role": "user", "content": t})
+        if i < len(user_texts) - 1:
+            msgs.append({"role": "assistant", "content": "…"})
+    return LLMContext(messages=msgs)
+
+
+@pytest.mark.asyncio
+async def test_a_pause_mid_sentence_joins_the_two_halves_into_one_turn():
+    """"I remove that alarm." then "for cam 24 person." 1.2 s later were
+    two turns, the first answered before the second arrived (Ventuno Q,
+    2026-11-10). The first half is held; the second joins it."""
+    from pipecat.frames.frames import LLMTextFrame, OutputTransportMessageFrame
+    llm, calls, pushed = _llm_with_runner()
+    llm.continue_secs = 5.0
+    await llm._handle_context(_ctx("Okay, you can remove the"))
+    assert calls == [], "held: the sentence is not over"
+    await llm._handle_context(_ctx("Okay, you can remove the", "alarm for person"))
+    assert calls == ["Okay, you can remove the alarm for person"]
+    msgs = [f.message for f in pushed if isinstance(f, OutputTransportMessageFrame)]
+    assert msgs == [{"type": "transcript", "text": "Okay, you can remove the alarm for person"}, {"type": "turn_end"}]
+    assert [f.text for f in pushed if isinstance(f, LLMTextFrame)] == ["done: Okay, you can remove the alarm for person"]
+    assert llm._pending is None
+
+
+@pytest.mark.asyncio
+async def test_an_unfinished_sentence_is_answered_as_it_stands_after_the_wait():
+    llm, calls, pushed = _llm_with_runner()
+    llm.continue_secs = 0.15
+    await llm._handle_context(_ctx("show me the"))
+    assert calls == []
+    await asyncio.sleep(0.4)
+    assert calls == ["show me the"]
+    assert llm._pending is None and llm._pending_timer is None
+
+
+@pytest.mark.asyncio
+async def test_a_complete_sentence_is_answered_at_once():
+    llm, calls, _ = _llm_with_runner()
+    llm.continue_secs = 5.0
+    await llm._handle_context(_ctx("is anyone at the door?"))
+    assert calls == ["is anyone at the door?"]
