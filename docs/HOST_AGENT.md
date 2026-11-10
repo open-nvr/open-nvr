@@ -26,6 +26,11 @@ host's own CPU, memory, disk and temperature readings anywhere.
   - It streams the ones assigned to cameras into OpenNVR (ffmpeg, H.264, RTSPS to MediaMTX on `127.0.0.1:8322`).
   - It restarts a stream that drops.
   - See [WEBCAM.md](WEBCAM.md).
+- **Finds ONVIF cameras with multicast.** Every minute, and at once when someone opens Add Camera → Discover, it sends a WS-Discovery probe to `239.255.255.250:3702` on each of the host's LAN interfaces.
+  - Every camera on that network answers within a few seconds with its address, name and model. No subnet has to be configured.
+  - OpenNVR can't do this from inside Docker, where multicast never reaches the LAN; without the agent it can only sweep a subnet address by address.
+  - Multicast doesn't cross routers, so the dialog still runs that sweep beside it, for camera networks behind a router, and merges the two lists.
+  - Printers and other devices that answer probes are left out: only answers that declare ONVIF video or serve an ONVIF device service count.
 - **Reports host metrics:** CPU, memory, every disk, the free space where recordings are stored, and temperatures where the OS allows.
   - The dashboard's Host Resources widget then shows **host** instead of **container**.
   - CPU and memory alerts then use the machine's numbers.
@@ -38,6 +43,9 @@ The agent is built to be a narrow, one-way bridge:
 - **It opens no port.** Every 5 seconds it calls OpenNVR's core directly on
   `http://127.0.0.1:8000` (`POST /api/v1/host-agent/sync`). It reports what it
   sees and gets back which webcam feeds which camera. Nothing can connect to it.
+  The only socket it binds is the one a discovery round uses: a short-lived
+  UDP port for the ~3 seconds the cameras' replies take. Windows Firewall's
+  default rule lets replies to a multicast in during that window.
 - **Core can't make it run anything.** The answer is data, not commands, and the agent acts only on webcams it found itself. ffmpeg is started with fixed arguments and no shell.
 - **Its key works only on this machine.**
   - The key file is readable only by the user the agent runs as, and no container mounts it. Core gets only its SHA-256.
