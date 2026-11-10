@@ -606,6 +606,16 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The accelerator overlay lost every override of an app-file service.**
+  `start.sh` appended `docker-compose.accel-*.yml` before
+  `docker-compose.apps.yml`, and Compose lets the last definition of a
+  service win, so on a Qualcomm box the NPU images the overlay names for
+  the embedder, insightface, the plate reader and package detection were
+  replaced by their CPU images (Ventuno Q, 2026-11-10: `clip-adapter:main`
+  came up where `siglip-qnn-adapter` was asked for). The overlay is now
+  the last file in the set; the detector, captioner and speech adapters
+  it overrides from the base and example files were never affected.
+
 - **Camera agent: the two misses of the CPU-brain eval on the Ventuno Q
   (granite4:micro, 50 of 52, `bench/ventuno-q-eval-cpu-vs-npu-2026-11-10.md`).**
   A routed stop or view switch now speaks the tool's own sentence with no
