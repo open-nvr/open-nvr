@@ -1,0 +1,445 @@
+# Copyright (c) 2026 OpenNVR
+# Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0)
+"""Webcam cameras: a camera whose MediaMTX path is fed by a publisher.
+
+A browser publishes over WHIP, or the host agent pushes a USB webcam over
+RTSPS, into ``cam-<id>``; everything downstream reads the path as for any
+camera. What these tests pin is everything that differs: the schema (no
+address, URL or credentials; a placeholder IP), provisioning (``source:
+publisher``, no substream, no transport policy), the IP-camera chores that
+must be skipped (SSRF guard, duplicate check, ONVIF drivers), the
+watchdog's view of an idle webcam, CSV export/import, and the two
+WHIP route.
+
+Run with:
+    cd server && pytest tests/test_webcam_cameras.py -v
+"""
+from __future__ import annotations
+
+import datetime as _dt
+
+if not hasattr(_dt, "UTC"):
+    _dt.UTC = _dt.timezone.utc  # noqa: UP017
+
+import asyncio
+import json
+import os
+import secrets
+import sys
+import types as _types
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT / "server"))
+
+from cryptography.fernet import Fernet  # noqa: E402
+
+os.environ.setdefault("DATABASE_URL", "postgresql://u:p@localhost/x")
+os.environ.setdefault("SECRET_KEY", secrets.token_urlsafe(48))
+os.environ.setdefault("MEDIAMTX_SECRET", secrets.token_hex(32))
+os.environ.setdefault("INTERNAL_API_KEY", secrets.token_urlsafe(48))
+os.environ.setdefault("CREDENTIAL_ENCRYPTION_KEY", Fernet.generate_key().decode())
+
+_lm = _types.ModuleType("core.logging_config")
+
+
+class _L:
+    def __getattr__(self, _n):
+        return lambda *a, **k: None
+
+
+_lm.__getattr__ = lambda _n: _L()
+_lm.setup_logging = lambda *a, **k: None
+sys.modules["core.logging_config"] = _lm
+
+from fastapi import FastAPI  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+from pydantic import ValidationError  # noqa: E402
+from sqlalchemy import create_engine  # noqa: E402
+from sqlalchemy.orm import sessionmaker  # noqa: E402
+from sqlalchemy.pool import StaticPool  # noqa: E402
+
+import core.auth as core_auth  # noqa: E402
+from core.camera_source import PUBLISH_TOKEN_MINUTES, PUBLISHER_IP_SENTINEL  # noqa: E402
+from core.database import Base, get_db  # noqa: E402
+from models import Camera, CameraConfig, Permission, Role, RolePermission, User  # noqa: E402
+from schemas import CameraCreate, CameraResponse  # noqa: E402
+
+WEBCAM = {"name": "Front desk webcam", "source_type": "publisher"}
+
+
+# ── Schema ──────────────────────────────────────────────────────────────
+
+
+def test_a_webcam_gets_the_placeholder_address():
+    c = CameraCreate(**WEBCAM)
+    assert c.source_type == "publisher"
+    assert c.ip_address == PUBLISHER_IP_SENTINEL
+    assert c.rtsp_url is None
+
+
+@pytest.mark.parametrize("extra", [
+    {"ip_address": "192.168.1.20"},
+    {"rtsp_url": "rtsp://192.168.1.20/s"},
+    {"substream_url": "rtsp://192.168.1.20/sub"},
+    {"username": "admin"},
+    {"password": "secret"},
+])
+def test_a_webcam_refuses_anything_that_makes_it_an_ip_camera(extra):
+    with pytest.raises(ValidationError) as exc:
+        CameraCreate(**WEBCAM, **extra)
+    assert next(iter(extra)) in str(exc.value)
+
+
+def test_an_ip_camera_is_unchanged():
+    c = CameraCreate(name="Gate", ip_address="10.0.0.7", rtsp_url="rtsp://10.0.0.7/s")
+    assert c.source_type == "rtsp"
+    with pytest.raises(ValidationError):
+        CameraCreate(name="Gate")          # still needs an address
+
+
+def test_a_camera_from_before_the_column_reads_as_rtsp():
+    row = SimpleNamespace(
+        id=1, name="Old", description=None, ip_address="10.0.0.7", port=554,
+        username=None, rtsp_url="rtsp://10.0.0.7/s", substream_url=None,
+        display_aspect_ratio=None, location=None, vlan=None, status="ok",
+        manufacturer=None, model=None, firmware_version=None, serial_number=None,
+        hardware_id=None, source_type=None, owner_id=1, is_active=True,
+        created_at=datetime.now(UTC),
+    )
+    assert CameraResponse.model_validate(row).source_type == "rtsp"
+
+
+# ── Provisioning payload ────────────────────────────────────────────────
+
+
+def test_map_conf_for_a_webcam_is_a_publisher_path():
+    from services.mediamtx_admin_service import MediaMtxAdminService
+
+    conf = MediaMtxAdminService._map_conf({
+        "source_type": "publisher",
+        # Stray keys a generic caller might pass must not leak through.
+        "source_url": "rtsp://10.0.0.7/s",
+        "rtsp_transport": "tcp",
+        "recording": {"enabled": True, "path": "/rec/%path/%Y-%m-%d/%H/%M-%S-%f",
+                      "segment_seconds": 60},
+    })
+    assert conf["source"] == "publisher"
+    assert "rtspTransport" not in conf
+    assert conf["record"] is True
+    assert conf["recordSegmentDuration"] == "60s"
+
+
+def test_build_provision_config_for_a_webcam():
+    from services.mediamtx_startup_service import MediaMtxStartupService
+
+    cam = SimpleNamespace(source_type="publisher", rtsp_url=None, substream_url=None)
+    cfg = SimpleNamespace(rtsp_transport="tcp", recording_enabled=False)
+    out = MediaMtxStartupService.build_provision_config(cam, cfg, None)
+    assert out["source_type"] == "publisher"
+    assert "source_url" not in out
+    assert out["recording"] == {"enabled": False}
+
+
+def test_push_publisher_path_never_provisions_a_substream(monkeypatch):
+    from services import mediamtx_admin_service as m
+
+    sent = {}
+
+    async def _upsert(camera_id, camera_ip, config, *, transport_security=None):
+        sent.update(config=config, transport_security=transport_security)
+        return {"status": "ok", "path": f"cam-{camera_id}"}
+
+    monkeypatch.setattr(m.MediaMtxAdminService, "upsert_path", staticmethod(_upsert))
+    res = asyncio.run(m.MediaMtxAdminService.push_publisher_path(
+        7, PUBLISHER_IP_SENTINEL, enable_recording=True, recording_path="/rec/%path"))
+    assert res["status"] == "ok"
+    assert sent["config"]["source_type"] == "publisher"
+    assert sent["config"]["recording"]["enabled"] is True
+    assert sent["transport_security"] is None
+    # The substream helper derives from the main source; a webcam has none.
+    from services.camera_source_resolver import derive_substream_url
+
+    assert derive_substream_url(sent["config"].get("source_url")) is None
+
+
+# ── IP-camera chores that must be skipped ───────────────────────────────
+
+
+def test_the_ssrf_guard_lets_a_webcam_through():
+    """0.0.0.0 is refused as a host, so the guard must not see the
+    placeholder as one — and nothing dials it."""
+    from routers.cameras import _reject_external_camera_hosts
+
+    _reject_external_camera_hosts(CameraCreate(**WEBCAM))   # must not raise
+
+
+def test_a_webcam_never_resolves_a_camera_driver():
+    from fastapi import HTTPException
+
+    from services.camera_drivers import registry
+
+    class _Q:
+        def filter(self, *a):
+            return self
+
+        def first(self):
+            return SimpleNamespace(id=3, source_type="publisher",
+                                   ip_address=PUBLISHER_IP_SENTINEL)
+
+    db = SimpleNamespace(query=lambda *_: _Q())
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(registry.get_driver_for_camera(db, 3))
+    assert exc.value.status_code == 409
+
+
+def test_edit_form_resubmits_are_dropped_and_real_values_refused():
+    from fastapi import HTTPException
+
+    from routers.cameras import _strip_webcam_stream_fields
+
+    cam = SimpleNamespace(ip_address=PUBLISHER_IP_SENTINEL, port=554, username=None,
+                          password=None, rtsp_url=None, substream_url=None)
+    fields = {"name": "New name", "ip_address": PUBLISHER_IP_SENTINEL, "port": 554,
+              "rtsp_url": "", "substream_url": None, "username": ""}
+    _strip_webcam_stream_fields(cam, fields)
+    # "" against the stored NULL would read as "source removed" and tear
+    # the path down: it must be gone, not passed on.
+    assert fields == {"name": "New name"}
+
+    with pytest.raises(HTTPException) as exc:
+        _strip_webcam_stream_fields(cam, {"rtsp_url": "rtsp://10.0.0.9/s"})
+    assert exc.value.status_code == 422
+
+
+def test_inference_reads_a_webcam_through_the_tap_even_when_the_tap_is_off(monkeypatch):
+    from core.config import settings
+    from services.kai_c_service import KaiCService
+
+    monkeypatch.setattr(settings, "inference_use_mediamtx_tap", False)
+    monkeypatch.setattr(settings, "mediamtx_rtsp_url", "rtsp://mediamtx:8554")
+    monkeypatch.setattr(settings, "mediamtx_path_mode", "id")
+    svc = KaiCService.__new__(KaiCService)
+    monkeypatch.setattr(svc, "_get_inference_mediamtx_jwt", lambda: "tok", raising=False)
+    assert svc._resolve_inference_rtsp_url(5, "").startswith("rtsp://mediamtx:8554/cam-5")
+    # An IP camera keeps its own URL while the tap is off.
+    assert svc._resolve_inference_rtsp_url(5, "rtsp://10.0.0.7/s") == "rtsp://10.0.0.7/s"
+
+
+# ── Watchdog ────────────────────────────────────────────────────────────
+
+
+def test_watchdog_judges_a_webcam_only_once_its_publisher_has_been_up(monkeypatch):
+    from services import camera_status_service as css
+    from services.recording_watchdog import STALL_THRESHOLD_SECONDS, _webcam_publishing_ids
+
+    now = datetime.now(UTC)
+    online = {1: True, 2: True, 3: False}
+    since = {1: now - timedelta(seconds=STALL_THRESHOLD_SECONDS + 5),
+             2: now - timedelta(seconds=30), 3: None}
+    fake = SimpleNamespace(snapshot=lambda ids: {i: online.get(i) for i in ids},
+                           online_since=lambda ids: {i: since.get(i) for i in ids})
+    monkeypatch.setattr(css, "get_camera_status_service", lambda: fake)
+    cams = [SimpleNamespace(id=i, source_type="publisher") for i in (1, 2, 3)]
+    cams.append(SimpleNamespace(id=4, source_type=None))
+    # 1: publishing long enough. 2: just connected (no segment closed yet).
+    # 3: nobody publishing. 4: an IP camera — not this helper's business.
+    assert _webcam_publishing_ids(cams, now) == {1}
+
+
+# ── CSV export / import ────────────────────────────────────────────────
+
+
+def test_export_leaves_webcams_out_and_import_never_matches_one():
+    from services import camera_io
+
+    ip_cam = SimpleNamespace(name="Gate", location=None, ip_address="10.0.0.7", port=554,
+                             username=None, password=None, rtsp_url="rtsp://10.0.0.7/s",
+                             substream_url=None, description=None, vlan=None,
+                             is_active=True, source_type="rtsp")
+    webcam = SimpleNamespace(name="Desk", location=None, ip_address=PUBLISHER_IP_SENTINEL,
+                             port=554, username=None, password=None, rtsp_url=None,
+                             substream_url=None, description=None, vlan=None,
+                             is_active=True, source_type="publisher", id=9)
+    rows = camera_io.export_rows([ip_cam, webcam], include_passwords=False)
+    assert [r[0] for r in rows] == ["Gate"]
+
+    planned = camera_io.plan_rows([(2, {"name": "Desk", "ip_address": PUBLISHER_IP_SENTINEL})])
+    camera_io.match_existing(planned, [webcam], None)
+    assert all(p.status != "update" for p in planned)
+
+
+# ── Routes ──────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def env(monkeypatch):
+    from routers import cameras as cameras_router
+    from routers import streams as streams_router
+    from services import audit_service
+    from services import camera_service as cs
+    from services import mediamtx_jwt_service as jwt_mod
+
+    monkeypatch.setattr(core_auth, "auth_logger", _L(), raising=False)
+    monkeypatch.setattr(cameras_router, "camera_logger", _L(), raising=False)
+    monkeypatch.setattr(cs, "camera_logger", _L(), raising=False)
+    monkeypatch.setattr(cameras_router, "audit_request", lambda *a, **k: None)
+    monkeypatch.setattr(audit_service, "audit_request", lambda *a, **k: None)
+    monkeypatch.setattr(cameras_router, "_record_audit_log", lambda *a, **k: None)
+
+    provisioned: list[dict] = []
+
+    async def _push_publisher_path(**kw):
+        provisioned.append(kw)
+        return {"status": "ok", "path": f"cam-{kw['camera_id']}"}
+
+    monkeypatch.setattr(cs.MediaMtxAdminService, "push_publisher_path",
+                        staticmethod(_push_publisher_path))
+
+    async def _no_rtsp(**kw):  # an RTSP provision here would be the bug
+        raise AssertionError("a webcam must not be provisioned as an RTSP stream")
+
+    monkeypatch.setattr(cs.MediaMtxAdminService, "push_rtsp_stream", staticmethod(_no_rtsp))
+    import services.camera_identity as ci
+    import services.skill_assignments as sa
+
+    monkeypatch.setattr(ci, "protect_camera_dir", lambda *a, **k: "fresh")
+    monkeypatch.setattr(sa, "adopt_new_camera", lambda *a, **k: False)
+
+    def _token(camera_id, camera_path, expiry_minutes=1440):
+        # Stand-in for the RSA-signed JWT: the claims the real one carries.
+        return json.dumps({"perm": [{"action": "publish", "path": camera_path}],
+                           "camera_id": camera_id, "minutes": expiry_minutes})
+
+    monkeypatch.setattr(jwt_mod.MediaMtxJwtService, "create_publish_token",
+                        classmethod(lambda cls, **kw: _token(**kw)))
+
+    async def _no_ice(*a, **k):
+        return None
+
+    monkeypatch.setattr(streams_router, "_learn_ice_host", _no_ice)
+
+    eng = create_engine("sqlite://", connect_args={"check_same_thread": False},
+                        poolclass=StaticPool)
+    Base.metadata.create_all(eng)
+    SessionLocal = sessionmaker(bind=eng, expire_on_commit=False)
+    db = SessionLocal()
+    manage = Permission(name="cameras.manage", description="")
+    viewer_role = Role(name="viewer", description="")
+    operator_role = Role(name="operator", description="")
+    db.add_all([manage, viewer_role, operator_role])
+    db.flush()
+    db.add(RolePermission(role_id=operator_role.id, permission_id=manage.id))
+    users = {}
+    for name, role in (("viewer", viewer_role), ("operator", operator_role)):
+        u = User(username=name, email=f"{name}@x", hashed_password="x", is_active=True,
+                 is_superuser=False, password_set=True, role_id=role.id)
+        db.add(u)
+        db.flush()
+        users[name] = u
+    db.commit()
+    for u in users.values():
+        db.refresh(u)
+        _ = [p.name for p in (u.role.permissions or [])]
+        db.expunge(u)
+    db.close()
+
+    app = FastAPI()
+    app.include_router(cameras_router.router, prefix="/api/v1")
+    app.include_router(streams_router.router, prefix="/api/v1")
+
+    def _db():
+        s = SessionLocal()
+        try:
+            yield s
+        finally:
+            s.close()
+
+    current = {"user": users["operator"]}
+    app.dependency_overrides[get_db] = _db
+    app.dependency_overrides[core_auth.get_current_active_user] = lambda: current["user"]
+    with TestClient(app) as tc:
+        yield SimpleNamespace(tc=tc, current=current, users=users,
+                              SessionLocal=SessionLocal, provisioned=provisioned)
+
+
+def _add_webcam(env, name="Desk"):
+    r = env.tc.post("/api/v1/cameras/", json={**WEBCAM, "name": name})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_creating_a_webcam_provisions_a_publisher_path(env):
+    body = _add_webcam(env)
+    assert body["source_type"] == "publisher"
+    assert body["ip_address"] == PUBLISHER_IP_SENTINEL
+    assert body["mediamtx_provisioned"] is True
+    assert env.provisioned[0]["enable_recording"] is True
+    s = env.SessionLocal()
+    cfg = s.query(CameraConfig).filter(CameraConfig.camera_id == body["id"]).one()
+    assert cfg.recording_enabled is True and cfg.source_url is None
+    s.close()
+
+
+def test_a_second_webcam_is_not_a_duplicate(env):
+    """Every webcam shares the placeholder IP; the IP duplicate check would
+    otherwise answer 409 for the second one."""
+    _add_webcam(env, "Desk")
+    _add_webcam(env, "Lobby")
+
+
+def test_editing_a_webcam_with_the_form_keeps_its_path(env):
+    cam = _add_webcam(env)
+    r = env.tc.put(f"/api/v1/cameras/{cam['id']}", json={
+        "name": "Desk (renamed)", "ip_address": PUBLISHER_IP_SENTINEL, "port": 554,
+        "rtsp_url": "", "substream_url": "", "username": "", "is_active": True,
+    })
+    assert r.status_code == 200, r.text
+    assert r.json()["name"] == "Desk (renamed)"
+    assert r.json()["stream_action"] in (None, "none")
+
+
+def test_whip_session_is_a_short_publish_only_token_for_this_path(env):
+    cam = _add_webcam(env)
+    r = env.tc.post(f"/api/v1/streams/{cam['id']}/whip")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["whip_url"].endswith(f"/cam-{cam['id']}/whip")
+    claims = json.loads(body["token"])
+    assert claims["perm"] == [{"action": "publish", "path": f"cam-{cam['id']}"}]
+    assert claims["minutes"] == PUBLISH_TOKEN_MINUTES
+
+
+def test_whip_needs_cameras_manage_and_a_webcam(env):
+    cam = _add_webcam(env)
+    env.current["user"] = env.users["viewer"]
+    assert env.tc.post(f"/api/v1/streams/{cam['id']}/whip").status_code == 403
+
+    env.current["user"] = env.users["operator"]
+    s = env.SessionLocal()
+    ip = Camera(name="Gate", ip_address="10.0.0.7", port=554, rtsp_url="rtsp://10.0.0.7/s",
+                owner_id=env.users["operator"].id, is_active=True)
+    s.add(ip)
+    s.commit()
+    ip_id = ip.id
+    s.close()
+    assert env.tc.post(f"/api/v1/streams/{ip_id}/whip").status_code == 404
+
+
+def test_startup_reconcile_includes_webcams(env):
+    """A webcam has no URL, but its path must still exist after a restart
+    or nothing can publish into it."""
+    from services.mediamtx_startup_service import MediaMtxStartupService
+
+    cam = _add_webcam(env)
+    s = env.SessionLocal()
+    s.add(Camera(name="No source", ip_address="10.0.0.8", port=554,
+                 owner_id=env.users["operator"].id, is_active=True))
+    s.commit()
+    ids = [c.id for c, _ in MediaMtxStartupService._get_provisionable_cameras(s)]
+    s.close()
+    assert ids == [cam["id"]]

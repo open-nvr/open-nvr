@@ -975,6 +975,14 @@ Detect-Platform
 Check-Prerequisites
 Prepare-Environment
 Pull-AndBuild
+# The host agent (docs\HOST_AGENT.md): USB webcams on this machine and its own
+# CPU/memory/disk readings. `up` installs it when HOST_AGENT=on.
+$haDefault = (Get-EnvValue 'HOST_AGENT') -ne 'off'
+if (Ask-YesNo 'Install the OpenNVR host agent (USB webcams on this PC, its real CPU/memory/disk readings)?' $haDefault) {
+    Set-EnvValue 'HOST_AGENT' 'on'; Ok 'Host agent: installed when OpenNVR starts'
+} else {
+    Set-EnvValue 'HOST_AGENT' 'off'; Info 'Host agent: off (later: .\start.ps1 host-agent install)'
+}
 Write-Host ''; Info 'Configuration and images are ready. Starting OpenNVR...'; Write-Host ''
 if ($script:Platform -eq 'Windows') { & (Join-Path $ProjectRoot 'start.ps1') up; exit $LASTEXITCODE }
 & bash (Join-Path $ProjectRoot 'start.sh') up

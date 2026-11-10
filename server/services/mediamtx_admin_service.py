@@ -483,12 +483,19 @@ class MediaMtxAdminService:
     def _map_conf(config: dict[str, Any]) -> dict[str, Any]:
         """Map our CameraConfig dict to MediaMTX PathConf schema (flat fields)."""
         conf: dict[str, Any] = {}
-        source_url = config.get("source_url") or config.get("source")
-        if source_url:
-            conf["source"] = source_url
-        rtsp_transport = config.get("rtsp_transport") or config.get("rtspTransport")
-        if rtsp_transport:
-            conf["rtspTransport"] = rtsp_transport
+        if config.get("source_type") == "publisher":
+            # A webcam publishes INTO the path (browser WHIP, host helper):
+            # MediaMTX pulls nothing, so no source URL and no RTSP transport.
+            # Said explicitly rather than left to pathDefaults, so a replace
+            # of a path that once had a URL source really drops it.
+            conf["source"] = "publisher"
+        else:
+            source_url = config.get("source_url") or config.get("source")
+            if source_url:
+                conf["source"] = source_url
+            rtsp_transport = config.get("rtsp_transport") or config.get("rtspTransport")
+            if rtsp_transport:
+                conf["rtspTransport"] = rtsp_transport
         # Recording
         recording_enabled = None
         record_path_value = None
@@ -1014,33 +1021,14 @@ class MediaMtxAdminService:
         and so ``enable_recording`` keeps meaning what it says. Callers that
         provision a real camera (routers, CameraService) pass True.
         """
-        name = _build_stream_name(settings.mediamtx_stream_prefix, camera_id, camera_ip)
-
         # First provision the path with RTSP source
         config = {
             "source_url": rtsp_url,
             "rtsp_transport": rtsp_transport,
+            "recording": MediaMtxAdminService._recording_block(
+                enable_recording, recording_path, recording_segment_seconds
+            ),
         }
-
-        if enable_recording:
-            # Use custom recording path if provided, otherwise use default
-            if recording_path:
-                # Use the custom path provided by user
-                final_recording_path = recording_path
-            else:
-                # Get user-configured recording path and convert to container path
-                host_path = get_effective_recordings_base_path()
-                container_path = get_mediamtx_recording_path(host_path)
-                final_recording_path = f"{container_path}/%path/%Y-%m-%d/%H/%M-%S-%f"
-
-            config["recording"] = {
-                "enabled": True,
-                "path": final_recording_path,
-                "segment_seconds": recording_segment_seconds,
-                "format": "fmp4",  # Ensure format is fmp4
-            }
-        else:
-            config["recording"] = {"enabled": False}
 
         result = await MediaMtxAdminService.upsert_path(
             camera_id, camera_ip, config, transport_security=transport_security
@@ -1054,6 +1042,57 @@ class MediaMtxAdminService:
             result["rtsp_transport"] = rtsp_transport
             result["recording_segment_seconds"] = recording_segment_seconds
 
+        return result
+
+    @staticmethod
+    def _recording_block(
+        enable_recording: bool,
+        recording_path: str | None,
+        recording_segment_seconds: int,
+    ) -> dict[str, Any]:
+        """The ``recording`` part of a path config, shared by both sources."""
+        if not enable_recording:
+            return {"enabled": False}
+        if recording_path:
+            final_recording_path = recording_path
+        else:
+            # User-configured recordings root, as MediaMTX sees it.
+            host_path = get_effective_recordings_base_path()
+            container_path = get_mediamtx_recording_path(host_path)
+            final_recording_path = f"{container_path}/%path/%Y-%m-%d/%H/%M-%S-%f"
+        return {
+            "enabled": True,
+            "path": final_recording_path,
+            "segment_seconds": recording_segment_seconds,
+            "format": "fmp4",
+        }
+
+    @staticmethod
+    async def push_publisher_path(
+        camera_id: int,
+        camera_ip: str,
+        enable_recording: bool = False,
+        recording_segment_seconds: int = settings.recording_segment_seconds,
+        recording_path: str | None = None,
+    ) -> dict[str, Any]:
+        """Provision a webcam camera's path: ``source: publisher``.
+
+        The path waits for a browser (WHIP) or the host helper (RTSP) to
+        publish into it; recording, hooks and readers work as for any camera.
+        No transport policy (there is no source URL to check) and no substream
+        (``_provision_substream`` finds no source to derive one from).
+        """
+        config = {
+            "source_type": "publisher",
+            "recording": MediaMtxAdminService._recording_block(
+                enable_recording, recording_path, recording_segment_seconds
+            ),
+        }
+        result = await MediaMtxAdminService.upsert_path(camera_id, camera_ip, config)
+        if result.get("status") == "ok":
+            result.setdefault("action", "publisher_path_pushed")
+            result["recording_enabled"] = enable_recording
+            result["recording_segment_seconds"] = recording_segment_seconds
         return result
 
     # === ORIGINAL METHODS ===

@@ -28,6 +28,34 @@ RUN npm run build
 
 
 # ==========================================
+# STAGE 1b: Host agent (Go), for every host OS
+# ==========================================
+# The host agent (host-agent/, docs/HOST_AGENT.md) runs on the HOST, not in a
+# container: start.ps1 / start.sh copy the binary for the host's OS out of
+# this image (`docker cp`). Shipping it inside the core image means it is
+# signed, pinned by digest, offline-bundled and updated with core, with no
+# separate release asset. Cross-compiled on the builder's own architecture
+# (static, CGO off), like the frontend stage above: no QEMU.
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS host-agent-builder
+WORKDIR /src
+COPY host-agent/go.mod host-agent/go.sum ./
+RUN go mod download
+COPY host-agent/ ./
+COPY server/main.py /tmp/core-main.py
+# Stamped with the build core reports (services/host_agent.core_build):
+# "<version>+<commit>", or "<version>" for a local build without a commit.
+# An agent whose build differs from core's is replaced on the next `up`.
+# The loop is host-agent/build.sh (Windows builds are -H windowsgui: no
+# console window when the logon task starts the agent).
+ARG GIT_COMMIT=""
+# The Go build cache persists between builds (BuildKit cache mount), so a
+# rebuild compiles only what changed: six targets from scratch take minutes.
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    VERSION=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' /tmp/core-main.py) && \
+    sh ./build.sh "$VERSION" "$GIT_COMMIT"
+
+
+# ==========================================
 # STAGE 2: Python Dependencies Builder
 # ==========================================
 FROM python:3.11-slim AS python-builder
@@ -123,6 +151,8 @@ COPY kai-c/ ./kai-c/
 
 # Copy built frontend assets from Stage 1
 COPY --from=frontend-builder /app-src/dist ./app/dist
+# Host agent binaries, copied out to the host by start.ps1 / start.sh.
+COPY --from=host-agent-builder /out /opt/opennvr-host
 
 # Copy Supervisor Configuration
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf

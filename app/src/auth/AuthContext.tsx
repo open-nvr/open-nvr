@@ -19,6 +19,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import { api, setAuthToken as apiSetToken, setDeviceToken } from '../lib/api'
 import { apiService } from '../lib/apiService'
+import { stopAllSessions } from '../lib/webcamSessions'
 
 type User = {
   id: number
@@ -193,6 +194,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [login])
 
   const logout = useCallback(() => {
+    // A webcam this tab is publishing stops with the session that started it.
+    stopAllSessions()
     setToken(null, null)
     setState({ user: null, token: null, loading: false, error: null, setupRequired: false, setupUsername: null })
   }, [setToken])

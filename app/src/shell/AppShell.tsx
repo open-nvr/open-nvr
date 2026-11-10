@@ -34,6 +34,7 @@ import { ErrorBoundary } from '../components/ErrorBoundary'
 import { CameraStatusProvider } from '../hooks/useCameraStatus'
 import { SystemAlertBanner } from '../components/SystemAlertBanner'
 import { AlertBell } from '../components/AlertBell'
+import { WebcamPublishingIndicator } from '../components/WebcamPublishingIndicator'
 import { useTranslation, useDateFormat, type DateFormatters } from '../i18n'
 import { Logo } from '../components/Logo'
 
@@ -365,6 +366,7 @@ export function AppShell() {
         <LiveClock />
 
         <div className="flex items-center justify-self-end gap-1">
+          <WebcamPublishingIndicator />
           <AlertBell />
           {canView('/live') && (
             <Link to="/live" className={`${TOP_ICON} max-sm:hidden`} title={t('header.openLiveView')} aria-label={t('header.openLiveView')}>

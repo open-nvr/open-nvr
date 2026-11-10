@@ -1437,6 +1437,16 @@ main() {
     check_prerequisites
     prepare_environment
     pull_and_build
+    # The host agent (docs/HOST_AGENT.md): USB webcams on this machine and its
+    # own CPU/memory/disk/temperature readings. `up` installs it when
+    # HOST_AGENT=on (on Linux it asks for sudo once, for the systemd unit).
+    local ha_default=y
+    [[ "$(env_get HOST_AGENT)" == "off" ]] && ha_default=n
+    if ask_yes_no "Install the OpenNVR host agent (USB webcams on this machine, its real CPU/memory/disk readings)?" "$ha_default"; then
+        env_set HOST_AGENT on; ok "Host agent: installed when OpenNVR starts"
+    else
+        env_set HOST_AGENT off; info "Host agent: off (later: ./start.sh host-agent install)"
+    fi
     printf '\n  Configuration and images are ready. Starting OpenNVR...\n\n'
     # Last word before exec — after this, compose owns the terminal and a
     # notice printed 200 lines ago is gone.

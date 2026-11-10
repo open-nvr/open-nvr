@@ -249,6 +249,15 @@ class Camera(Base):
     # table of known anamorphic encoder modes. Nullable so the additive column
     # self-heal can add it to old create_all databases.
     display_aspect_ratio = Column(String(16), nullable=True)
+    # Where the video comes from (core/camera_source.py): "rtsp" (MediaMTX
+    # pulls rtsp_url) or "publisher" (a webcam publishes into the path —
+    # browser WHIP or the host helper). NULL = "rtsp", for every camera from
+    # before the column; nullable so the additive self-heal can add it.
+    source_type = Column(String(16), nullable=True, default="rtsp")
+    # For a webcam fed by the host agent (services/host_agent.py): the
+    # agent's stable id of the USB webcam on the OpenNVR machine. NULL for a
+    # browser webcam and for every IP camera.
+    source_device = Column(String(300), nullable=True)
     is_active = Column(Boolean, default=True)
     # Tombstone for irreversible soft delete. NULL = live (active or paused);
     # set = camera is in the bin: hidden from every normal list, not editable,

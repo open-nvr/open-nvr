@@ -43,6 +43,7 @@ import { useTourAlerts } from '../hooks/useTourAlerts'
 import { VideoPlayer } from '../components/VideoPlayer'
 import { detectionsPreferred } from '../lib/detectionFeed'
 import { cameraState, STATE_INK } from './dashboard/WidgetFrame'
+import { webcamOfflineLabel } from '../lib/hostAgent'
 
 /** The bar hides after this long without the mouse moving. */
 const BAR_HIDE_MS = 3_000
@@ -731,6 +732,7 @@ function TourTile({ cameraId, cam, pausedCamera, playing, spotlit, cover, labelC
           muted
           displayAspectOverride={cam?.display_aspect_ratio}
           showDetections={detectionsPreferred()}
+          offlineLabel={webcamOfflineLabel(cam as any)}
           cameraId={cameraId}
           cover={cover}
           className="w-full h-full !bg-black"

@@ -26,8 +26,10 @@ NOTE: All public methods are async — callers must await them.
 import asyncio
 from typing import Any
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
+from core.camera_source import SOURCE_PUBLISHER, is_publisher
 from core.config import settings
 from core.database import SessionLocal
 from core.logging_config import mediamtx_logger
@@ -211,14 +213,20 @@ class MediaMtxStartupService:
             .outerjoin(CameraConfig, Camera.id == CameraConfig.camera_id)
             .filter(Camera.is_active == True)
             .filter(Camera.deleted_at.is_(None))
-            .filter(Camera.rtsp_url.isnot(None))
-            .filter(Camera.rtsp_url != "")
+            .filter(
+                or_(
+                    (Camera.rtsp_url.isnot(None)) & (Camera.rtsp_url != ""),
+                    # A webcam has no URL; its path still has to exist for
+                    # anything to publish into it.
+                    Camera.source_type == SOURCE_PUBLISHER,
+                )
+            )
         )
 
         cameras = []
         for camera, config in query.all():
             # Skip cameras without basic info
-            if not camera.rtsp_url:
+            if not camera.rtsp_url and not is_publisher(camera):
                 continue
 
             cameras.append((camera, config))
@@ -435,11 +443,15 @@ class MediaMtxStartupService:
         through ``provision_camera_by_id``, which opens a session of its own.
         Reads live off the Camera row, so it always carries the freshest URLs.
         """
-        provision_config = {
-            "source_url": camera.rtsp_url,
-            "substream_url": camera.substream_url,
-            "rtsp_transport": "tcp",  # Default transport
-        }
+        if is_publisher(camera):
+            # A webcam: the path waits for a publisher (see _map_conf).
+            provision_config: dict[str, Any] = {"source_type": SOURCE_PUBLISHER}
+        else:
+            provision_config = {
+                "source_url": camera.rtsp_url,
+                "substream_url": camera.substream_url,
+                "rtsp_transport": "tcp",  # Default transport
+            }
 
         if config:
             # Use configuration values if available
@@ -524,7 +536,7 @@ class MediaMtxStartupService:
             if not camera:
                 return {"status": "error", "error": "Camera not found or inactive"}
 
-            if not camera.rtsp_url:
+            if not camera.rtsp_url and not is_publisher(camera):
                 return {"status": "error", "error": "Camera has no RTSP URL configured"}
 
             config = (
