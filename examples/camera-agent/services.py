@@ -27,6 +27,10 @@ each ``run_*`` method should still be portable since it's just an
 """
 from __future__ import annotations
 
+import re
+
+import asyncio
+
 import json
 import logging
 from typing import Callable, Any, AsyncGenerator
@@ -277,6 +281,46 @@ def with_clock_in_user_turn(messages: list[dict[str, Any]],
     return messages[:-1] + [last]
 
 
+#: A transcript that stopped mid-sentence: it ends on a word that needs
+#: what comes next ("remove the", "alarm for", "I see that"), or it is a
+#: lone word that is not an answer in itself. Smart Turn cuts at a pause
+#: of turn_stop_secs; a person who pauses to think mid-sentence gets cut
+#: ("I remove that alarm." / "for cam 24 person." — Ventuno Q, 2026-11-10,
+#: two turns, the first answered before the second arrived).
+_UNFINISHED_TAIL_RE = re.compile(
+    r"\b(a|an|the|my|your|our|this|that|these|those|to|for|of|in|on|at|with|and|but|or|"
+    r"from|by|about|is|are|was|were|if|when|whenever|every|each|please|can|could|"
+    r"will|would|should|let|i|you|we|it)[\s.,!?]*$", re.IGNORECASE)
+_STANDALONE_WORDS = frozenset({
+    "yes", "yeah", "yep", "no", "nope", "ok", "okay", "thanks", "thank", "bye", "goodbye",
+    "hello", "hi", "hey", "stop", "cancel", "wait", "perfect", "great", "good", "fine", "sure",
+})
+#: How long an unfinished transcript waits for its continuation before it
+#: is answered as it stands.
+DEFAULT_CONTINUE_SECS = 2.5
+
+
+def looks_unfinished(text: str) -> bool:
+    """True when ``text`` reads as the first half of a sentence."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    words = re.findall(r"[A-Za-z']+", t)
+    if len(words) == 1 and words[0].lower() not in _STANDALONE_WORDS:
+        return True
+    return bool(_UNFINISHED_TAIL_RE.search(t))
+
+
+def join_transcripts(first: str, second: str) -> str:
+    """"I remove that alarm." + "for cam 24 person." → one sentence: the
+    first part's closing punctuation (Whisper's, not the speaker's) goes."""
+    a = (first or "").strip().rstrip(".,;:!?")
+    b = (second or "").strip()
+    if b[:1].isupper() and not (len(b) > 1 and b[1:2].isupper()):
+        b = b[0].lower() + b[1:]
+    return (a + " " + b).strip()
+
+
 class OpenNvrOllamaLLM(LLMService):
     """Bridges Pipecat's LLM contract to the Ollama adapter's
     OpenAI-style chat_completion task.
@@ -318,6 +362,11 @@ class OpenNvrOllamaLLM(LLMService):
         # request path does; without it (tests with bare fakes) the inline
         # tool loop below runs.
         self._turn_runner = turn_runner
+        # An unfinished transcript waiting for the rest of its sentence:
+        # (history, text, the timer that answers it as it stands).
+        self._pending: tuple[list[dict[str, str]], str] | None = None
+        self._pending_timer: asyncio.Task | None = None
+        self.continue_secs: float = DEFAULT_CONTINUE_SECS
         self._tools = list(tools)
         self._tool_handlers = dict(tool_handlers)
         self._temperature = temperature
@@ -341,6 +390,46 @@ class OpenNvrOllamaLLM(LLMService):
         else:
             await self.push_frame(frame, direction)
 
+    def _cancel_pending(self) -> None:
+        if self._pending_timer is not None and not self._pending_timer.done():
+            self._pending_timer.cancel()
+        self._pending_timer = None
+        self._pending = None
+
+    async def _answer_pending_later(self) -> None:
+        try:
+            await asyncio.sleep(self.continue_secs)
+        except asyncio.CancelledError:
+            return
+        pending, self._pending, self._pending_timer = self._pending, None, None
+        if pending is None:
+            return
+        history, text = pending
+        await self.push_frame(LLMFullResponseStartFrame())
+        try:
+            await self._answer(history, text)
+        finally:
+            await self.push_frame(LLMFullResponseEndFrame())
+
+    async def _answer(self, history: list[dict[str, str]], text: str) -> None:
+        """One turn over the agent's own runner: the transcript to the page
+        first, the reply, turn_end, and session_end after a goodbye."""
+        # The page never sees the TranscriptionFrame: the user aggregator
+        # upstream consumes it. So the transcript goes out from here,
+        # before the answer, and a turn_end after it — without them the
+        # page showed no user text and appended every answer to one
+        # bubble (2026-11-09).
+        await self.push_frame(OutputTransportMessageFrame(message={"type": "transcript", "text": text}))
+        out = await self._turn_runner(history, text)
+        reply, meta = (out if isinstance(out, tuple) else (out, {}))
+        if reply:
+            await self.push_frame(LLMTextFrame(str(reply)))
+        await self.push_frame(OutputTransportMessageFrame(message={"type": "turn_end"}))
+        if (meta or {}).get("end"):
+            # After the goodbye: the page leaves talk mode once the
+            # reply's audio has played.
+            await self.push_frame(OutputTransportMessageFrame(message={"type": "session_end"}))
+
     async def _handle_context(self, context: LLMContext) -> None:
         # Snapshot the conversation messages; Pipecat's context
         # aggregator owns the canonical list.
@@ -356,21 +445,19 @@ class OpenNvrOllamaLLM(LLMService):
             if self._turn_runner is not None:
                 history, text = history_and_question(raw_messages)
                 if text:
-                    # The page never sees the TranscriptionFrame: the user
-                    # aggregator upstream consumes it. So the transcript goes
-                    # out from here, before the answer, and a turn_end after
-                    # it — without them the page showed no user text and
-                    # appended every answer to one bubble (2026-11-09).
-                    await self.push_frame(OutputTransportMessageFrame(message={"type": "transcript", "text": text}))
-                    out = await self._turn_runner(history, text)
-                    reply, meta = (out if isinstance(out, tuple) else (out, {}))
-                    if reply:
-                        await self.push_frame(LLMTextFrame(str(reply)))
-                    await self.push_frame(OutputTransportMessageFrame(message={"type": "turn_end"}))
-                    if (meta or {}).get("end"):
-                        # After the goodbye: the page leaves talk mode once
-                        # the reply's audio has played.
-                        await self.push_frame(OutputTransportMessageFrame(message={"type": "session_end"}))
+                    # A continuation of a sentence held below joins it;
+                    # an unfinished sentence waits continue_secs for its
+                    # rest before it is answered as it stands.
+                    if self._pending is not None:
+                        prev_history, prev_text = self._pending
+                        self._cancel_pending()
+                        history, text = prev_history, join_transcripts(prev_text, text)
+                    if looks_unfinished(text) and self.continue_secs > 0:
+                        self._pending = (history, text)
+                        self._pending_timer = asyncio.get_running_loop().create_task(self._answer_pending_later())
+                        await self.push_frame(LLMFullResponseEndFrame())
+                        return
+                    await self._answer(history, text)
                 return
             for iteration in range(self._max_tool_iterations):
                 response = await self._client.chat(

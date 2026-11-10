@@ -103,6 +103,49 @@ def backfill_idle_s() -> float:
     return max(0.0, float(getattr(_settings(), "events_enrichment_backfill_idle_s", 120)))
 
 
+def backfill_share() -> float:
+    """The share of wall time the backfill may spend in the adapters,
+    (0, 1]; see events_enrichment_backfill_share."""
+    try:
+        v = float(getattr(_settings(), "events_enrichment_backfill_share", 0.5))
+    except (TypeError, ValueError):
+        v = 0.5
+    return min(1.0, max(0.05, v))
+
+
+def interactive_hold_s() -> float:
+    return max(0.0, float(getattr(_settings(), "events_enrichment_backfill_interactive_hold_s", 90)))
+
+
+def pace_sleep(spent_s: float, *, share: float | None = None, floor_s: float = 0.0) -> float:
+    """How long the backfill rests after a visit that spent ``spent_s``
+    in the adapters, so its share of the wall clock stays at
+    ``share``: at 0.5 it rests as long as it worked; at 1 it rests only
+    the fixed ``floor_s``."""
+    share = backfill_share() if share is None else min(1.0, max(0.05, float(share)))
+    rest = float(spent_s) * (1.0 - share) / share if spent_s > 0 else 0.0
+    return max(float(floor_s), rest)
+
+
+#: When a person last used the box (a search, a camera-agent turn),
+#: monotonic. The backfill stands aside for interactive_hold_s after it.
+_last_interactive: float = 0.0
+_last_interactive_source: str = ""
+
+
+def note_interactive(source: str = "") -> None:
+    """A person is using the box: a search ran, the camera agent took a
+    turn. The backfill holds for interactive_hold_s from now."""
+    global _last_interactive, _last_interactive_source
+    _last_interactive = _now()
+    _last_interactive_source = source or ""
+
+
+def interactive_recently() -> bool:
+    hold = interactive_hold_s()
+    return bool(hold) and _last_interactive > 0 and (_now() - _last_interactive) < hold
+
+
 # ── the signals ───────────────────────────────────────────────────
 
 def host_cpu_percent() -> float | None:
@@ -264,8 +307,9 @@ def governor() -> Governor:
 
 
 def _reset_for_tests() -> None:
-    global _governor
+    global _governor, _last_interactive, _last_interactive_source
     _governor = None
+    _last_interactive, _last_interactive_source = 0.0, ""
 
 
 # ── what the enrichers ask ────────────────────────────────────────
@@ -372,6 +416,8 @@ def backfill_allowed(g: Governor | None = None, *, starting: bool = False) -> bo
         return False
     if not gate_mod.all_idle():
         return False
+    if interactive_recently():
+        return False
     return in_window(parse_window(window_text()))
 
 
@@ -388,7 +434,8 @@ async def wait_for_backfill_slot(*, starting: bool = False, poll_s: float = 1.0)
             g = governor()
             why = (g.reason or g.state.value) if g.state is not State.NORMAL else (
                 "outside the backfill window" if not in_window(parse_window(window_text()))
-                else "waiting for the box to stay idle")
+                else (f"someone is using the box ({_last_interactive_source or 'interactive'})"
+                      if interactive_recently() else "waiting for the box to stay idle"))
             logger.info("enrichment backfill: holding — %s", why)
             said = True
         await asyncio.sleep(poll_s)

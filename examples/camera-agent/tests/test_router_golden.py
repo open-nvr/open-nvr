@@ -75,6 +75,11 @@ GOLDEN = [
     ("remove the notification", 0, "stop_monitor", {"__last_kind": "monitor"}),
     ("cancel that", 0, "stop_report", {"__last_kind": "report"}),
     ("stop talking", 2, None, {}),
+    # first-person phrasings of a stop, as spoken (Ventuno Q, 2026-11-10)
+    ("I remove that alarm for cam 24 person", 0, "stop_alarm", {"action": "disarm"}),
+    ("I want to remove this", 0, "stop_alarm", {"__last_kind": "alarm"}),
+    ("let me remove it", 0, "stop_alarm", {"__last_kind": "alarm"}),
+    ("I'd like to cancel the report", 0, "stop_report", {}),
     ("okay then remove it, I don't need any notification when a car arrives", 0, "stop_monitor",
      {"__last_kind": "monitor"}),
     # an absolute clock window with nothing named → the footage narration

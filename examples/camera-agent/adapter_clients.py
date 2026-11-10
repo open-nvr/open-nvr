@@ -1265,6 +1265,26 @@ class SystemStatusClient(_ReusableClientMixin):
     def _headers(self) -> dict[str, str]:
         return {"X-Internal-Api-Key": self._api_key} if self._api_key else {}
 
+    async def beacon(self, source: str = "camera-agent", *, every_s: float = 20.0) -> bool:
+        """Tell core a person is talking to the agent (POST
+        /api/v1/internal/camera-agent/interactive), so the enrichment
+        backfill stands aside. Sent at most once per ``every_s``; never
+        raises; True when a request went out."""
+        now = time.monotonic()
+        last = getattr(self, "_beacon_at", None)
+        if last is not None and now - last < every_s:
+            return False
+        self._beacon_at = now
+        try:
+            resp = await self._client().post(
+                f"{self._base}/api/v1/internal/camera-agent/interactive",
+                json={"source": source}, headers=self._headers(),
+            )
+            return resp.status_code in (200, 204)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("interactive beacon failed (%s)", exc)
+            return False
+
     async def status(self) -> dict[str, Any] | None:
         now = time.monotonic()
         if self._fetched_at is not None and now - self._fetched_at < self._ttl:

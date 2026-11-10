@@ -517,6 +517,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The enrichment backfill is opportunistic, not a batch job.** The
+  morning embeddings came on the Ventuno Q it swept history at full tilt
+  — captions, descriptions and vectors for 14,000 old visits — and held
+  the NPU at 100 % while the operator was talking to the camera agent and
+  searching. Two things changed. After each visit the backfill now rests
+  for as long as that visit cost in the adapters (times
+  `(1-share)/share`; `EVENTS_ENRICHMENT_BACKFILL_SHARE`, default 0.5, so
+  history takes at most half the clock), and it stands aside for people:
+  a search, or a camera-agent turn (the agent now tells core, one beacon
+  per turn, through a new internal route), holds it for
+  `EVENTS_ENRICHMENT_BACKFILL_INTERACTIVE_HOLD_S` (default 90 s) after the
+  last one. The CPU, slow-call, breaker and clock-window rules are
+  unchanged; "holding — someone is using the box" is the new log line.
+
 - **`STT_ADAPTER=auto` is the default, and on a Qualcomm board it is the
   NPU.** Measured on a Ventuno Q (`bench/ventuno-q-stt-2026-11-09.md`):
   the `whisper_qnn` adapter answers in 361 ms an utterance against
@@ -625,6 +639,17 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   image-text model's text tower overlap for relevant and irrelevant
   queries, so no floor separates them, and a text-embedding model is the
   next step for that arm.
+
+- **Camera agent voice: a sentence paused mid-way is answered once, whole.**
+  Smart Turn cuts an utterance at a pause of `turn_stop_secs`; a speaker
+  who pauses to think ("I remove that alarm." … "for cam 24 person.",
+  Ventuno Q 2026-11-10) got two turns, the first answered before the second
+  arrived. A transcript that reads as half a sentence — it ends on a word
+  that needs the next one, or is a lone word that is not an answer — is now
+  held up to 2.5 s for its continuation, which joins it; a complete sentence
+  is answered at once. First-person stop requests ("I remove that alarm",
+  "I want to remove this", "let me cancel it") are routed straight to the
+  stop tool like the imperative ones.
 
 - **The accelerator overlay lost every override of an app-file service.**
   `start.sh` appended `docker-compose.accel-*.yml` before
