@@ -536,10 +536,18 @@ compose_args() {
     local p
     for p in ${example_profile//,/ }; do args="$args --profile $p"; done
     # Hardware flavour overlay (OpenNVR Accelerate) — see detect_accel above.
+    # Resolved here so a missing overlay fails the command early, but
+    # APPENDED LAST (below the apps file): Compose merges files in order
+    # and the last definition of a service wins, so an overlay placed
+    # before docker-compose.apps.yml lost every override of a service that
+    # file defines — the NPU embedder, insightface, the plate reader and
+    # package detection all came up on their CPU images on a Qualcomm box
+    # (Ventuno Q, 2026-11-10: clip-adapter:main where siglip-qnn-adapter
+    # was asked for). The overlay's own overrides of docker-compose.yml
+    # and the example files are unaffected by the move.
     local accel accel_overlay
     accel=$(detect_accel)
     accel_overlay=$(accel_args "$accel") || return 1
-    [[ -n "$accel_overlay" ]] && args="$args $accel_overlay"
     # Default-on apps: occupancy-counting + footage-search ride the always-on
     # Tier-0 stream and need no extra adapter, model, or GPU, so a stock
     # install runs them (profile ``default-apps`` in docker-compose.apps.yml).
@@ -554,6 +562,7 @@ compose_args() {
             args="$args --profile default-apps"
             ;;
     esac
+    [[ -n "$accel_overlay" ]] && args="$args $accel_overlay"
     # Opt-in host-side debug ports for mediamtx. Off by default because
     # Docker's publishing is all-or-nothing per container — see the header
     # of docker-compose.debug-ports.yml and #298.
