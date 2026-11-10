@@ -13,7 +13,11 @@
 # --cpu: run against the CPU brain instead of whatever .env points the agent
 # at (on a Qualcomm board that is the NPU adapter): the LLM variables are
 # switched to Ollama on the host for the run and put back afterwards, the
-# agent container recreated both times. Nothing else on the box changes.
+# agent container recreated both times — and ONLY the agent (--no-deps):
+# a bare `compose up camera-agent` also recreated core as its dependency,
+# and Compose 2.24 then left core off the database network, so every
+# login and every segment index 500'd until ./start.sh re-attached it
+# (Ventuno Q, 2026-11-10 01:33). Nothing else on the box changes.
 set -euo pipefail
 label=${1:?label, e.g. npu or cpu}; repeat=${2:-3}; mode=${3:-}
 cd "$(dirname "$0")/../../.."       # the checkout
@@ -23,7 +27,7 @@ restore() {
     if [[ -f /tmp/env.before-cpu-eval ]]; then
         echo "restoring the LLM settings and recreating the agent…"
         cp /tmp/env.before-cpu-eval .env && rm -f /tmp/env.before-cpu-eval
-        docker compose up -d camera-agent >/dev/null
+        docker compose up -d --no-deps --force-recreate camera-agent >/dev/null
     fi
 }
 if [[ "$mode" == "--cpu" ]]; then
@@ -31,13 +35,28 @@ if [[ "$mode" == "--cpu" ]]; then
     trap restore EXIT
     sed -i -E 's/^LLM_PROVIDER=.*/LLM_PROVIDER=ollama/; s/^LLM_BASE_URL=.*/LLM_BASE_URL=/; s/^LLM_MODEL=.*/LLM_MODEL=/; s/^LLM_PREWARM=.*/LLM_PREWARM=false/' .env
     echo "agent on the CPU brain (Ollama on the host, $(grep -E '^OLLAMA_MODEL=' .env | cut -d= -f2)) for this run…"
-    docker compose up -d camera-agent >/dev/null
+    docker compose up -d --no-deps --force-recreate camera-agent >/dev/null
 fi
-# Wait for the agent to answer.
+# Wait for the agent to answer, and for core to answer a DATABASE-backed
+# request (the login is one): a core that is up but off its database
+# network answers /health and 500s the login, and a used MFA code cannot
+# be retried.
+echo "waiting for the agent and core…"
 for _ in $(seq 1 60); do
     if docker exec opennvr_camera_agent python -c 'import urllib.request,ssl;ssl._create_default_https_context=ssl._create_unverified_context;urllib.request.urlopen("https://127.0.0.1:9100/health",timeout=3)' 2>/dev/null; then break; fi
     sleep 2
 done
+core_ok=""
+for _ in $(seq 1 30); do
+    if docker exec opennvr_core python3 -c 'import os,urllib.request
+r=urllib.request.Request("http://127.0.0.1:8000/api/v1/internal/camera-agent/status",headers={"X-Internal-Api-Key":os.environ["INTERNAL_API_KEY"]})
+urllib.request.urlopen(r,timeout=5)' 2>/dev/null; then core_ok=1; break; fi
+    sleep 2
+done
+if [[ -z "$core_ok" ]]; then
+    echo "core is not answering database-backed requests (off its database network? run ./start.sh, which re-attaches it) — not asking for a login." >&2
+    exit 1
+fi
 
 read -rp "OpenNVR username: " U
 read -rsp "OpenNVR password: " P; echo
