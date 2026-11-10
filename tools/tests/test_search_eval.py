@@ -13,7 +13,7 @@ _spec.loader.exec_module(se)
 
 
 def _answer(ids, **extra):
-    body = {"hits": [{"id": i} for i in ids], "total": len(ids)}
+    body = {"results": [{"id": i} for i in ids], "total": len(ids)}
     body.update(extra)
     return body
 
@@ -38,7 +38,8 @@ def test_a_miss_is_a_zero_not_an_error():
 def test_a_negative_passes_on_nothing_relaxed_or_below_the_floor_only():
     neg = {"query": "a dog", "relevant": []}
     assert se.score_case(neg, _answer([]))["passed"] is True
-    assert se.score_case(neg, _answer([4, 5], relaxed={"dropped": "a dog"}))["passed"] is True
+    assert se.score_case(neg, _answer([4, 5], relax=[{"dropped": "a dog"}]))["passed"] is True
+    assert se.score_case(neg, _answer([4, 5], relax=[]))["passed"] is False
     assert se.score_case(neg, _answer([4], semantic={"used": True, "reason": "below-floor"}))["passed"] is True
     r = se.score_case(neg, _answer([4, 5, 6], semantic={"used": True, "arms": {"vector": 3}}))
     assert r["passed"] is False and r["top"] == [4, 5, 6]
@@ -66,3 +67,32 @@ def test_the_summary_averages_positives_by_kind_and_counts_negatives():
     assert s["hit@5"] == 0.5 and s["recall@10"] == 1.0
     assert s["negatives_passed"] == 1
     assert s["by_kind"]["caption"]["n"] == 1 and s["by_kind"]["typo"]["mrr"] == round(1 / 6, 3)
+
+
+def test_the_shipped_case_files_parse_and_are_well_formed():
+    """The Ventuno Q case file failed to parse on the box (a note that
+    began with a double quote, 2026-11-10); every shipped case file is
+    loaded here so that cannot happen again."""
+    import yaml
+
+    bench = Path(__file__).resolve().parents[2] / "bench"
+    files = sorted(bench.glob("search-eval-cases-*.yml"))
+    assert files, "no case files under bench/"
+    for f in files:
+        spec = yaml.safe_load(f.read_text(encoding="utf-8"))
+        assert spec.get("cases"), f.name
+        for c in spec["cases"]:
+            assert isinstance(c.get("query"), str) and c["query"].strip(), (f.name, c)
+            assert isinstance(c.get("relevant"), list), (f.name, c["query"])
+            assert all(isinstance(i, int) for i in c["relevant"]), (f.name, c["query"])
+            assert c.get("kind") in {"caption", "paraphrase", "attribute", "typo", "negative"}, (f.name, c["query"])
+            assert (c["kind"] == "negative") == (not c["relevant"]), (f.name, c["query"])
+
+
+def test_the_route_answers_results_and_the_scorer_reads_them():
+    """The first baseline run scored every case 0 because the route's
+    list is ``results`` (and ``relax``), not ``hits``/``relaxed``."""
+    r = se.score_case({"query": "q", "relevant": [7]}, {"results": [{"id": 7}], "total": 1, "relax": []})
+    assert r["first_rank"] == 1 and r["returned"] == 1 and r["relaxed"] is False
+    r = se.score_case({"query": "q", "relevant": [7]}, {"hits": [{"id": 7}], "total": 1})
+    assert r["first_rank"] == 1

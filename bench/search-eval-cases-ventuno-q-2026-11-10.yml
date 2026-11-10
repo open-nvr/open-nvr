@@ -86,7 +86,7 @@ cases:
     relevant: [18141, 18103]
   - query: man with glasses and a black t-shirt
     kind: attribute
-    note: "dark t-shirt" with glasses counts as black
+    note: a "dark t-shirt" with glasses counts as black
     relevant: [17885, 17877, 17784, 17783, 17769, 17768, 17765, 17893, 17878, 17809, 17804, 17803, 17786, 17773, 17787, 17814]
   - query: person wearing a striped shirt
     kind: attribute
