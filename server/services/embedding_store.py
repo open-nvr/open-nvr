@@ -205,7 +205,7 @@ def unpack(blob: bytes) -> list[float]:
 # ── writing ──────────────────────────────────────────────────────────
 
 
-def stale_rows(db, producer: str) -> int:
+def stale_rows(db, producer: str, kind: str | None = None) -> int:
     """Vectors from any producer but ``producer``: what a model change
     leaves behind. ``producer`` is the adapter and its model
     (``clip:open_clip/ViT-B-16-SigLIP2-256/webli``), so a new model
@@ -213,10 +213,16 @@ def stale_rows(db, producer: str) -> int:
     the embedder moved from 512-wide CLIP to 768-wide SigLIP 2 and a
     store of old vectors would have been silently skipped by search
     (a dimension mismatch is a non-match) until something re-embedded
-    it. The backfill does, when this is non-zero."""
+    it. The backfill does, when this is non-zero. ``kind`` narrows the
+    count to one kind: the frame and caption vectors may come from two
+    producers (the embed adapter and the sentence encoder), and each
+    kind is stale against its own."""
     from sqlalchemy import or_
-    return int(db.query(EventEmbedding).filter(
-        or_(EventEmbedding.model.is_(None), EventEmbedding.model != producer)).count())
+    q = db.query(EventEmbedding).filter(
+        or_(EventEmbedding.model.is_(None), EventEmbedding.model != producer))
+    if kind is not None:
+        q = q.filter(EventEmbedding.kind == kind)
+    return int(q.count())
 
 
 def put_embedding(db, *, event_id: int, vector: Sequence[float],
@@ -269,14 +275,14 @@ class VectorCapability:
     available: bool
     #: ``"scan"`` (filter first, score in process) or ``"none"``.
     mode: str
-    #: Dimensionality of the stored vectors, when they agree.
+    #: Dimensionality of the stored FRAME vectors, when they agree.
     dim: int | None
     #: How many visits carry one.
     rows: int
-    #: Distinct producers in the store. More than one is worth surfacing:
-    #: vectors from different models are NOT comparable, and a store that
-    #: has been re-enriched halfway will rank incoherently until the
-    #: backfill finishes.
+    #: Distinct producers of the FRAME vectors. More than one is worth
+    #: surfacing: vectors from different models are NOT comparable, and a
+    #: store that has been re-enriched halfway will rank incoherently
+    #: until the backfill finishes.
     models: tuple[str, ...]
     #: ``"numpy"`` or ``"python"`` — which inner loop, hence which ceiling.
     accel: str
@@ -290,10 +296,20 @@ class VectorCapability:
     #: run the arm it has rather than none.
     image_rows: int = 0
     caption_rows: int = 0
+    #: The caption vectors' own size and producers. They are a separate
+    #: space from the frame vectors — a sentence encoder (384-d) beside
+    #: an image-text model (768-d) is the intended arrangement, not a
+    #: mixed store — so each kind is judged against itself.
+    caption_dim: int | None = None
+    caption_models: tuple[str, ...] = ()
 
     @property
     def mixed_models(self) -> bool:
         return len(self.models) > 1
+
+    @property
+    def mixed_caption_models(self) -> bool:
+        return len(self.caption_models) > 1
 
 
 def capability(db) -> VectorCapability:
@@ -325,31 +341,53 @@ def capability(db) -> VectorCapability:
                   "only. Register an adapter advertising the "
                   f"'{EMBED_TASK}' task to add semantic ranking."))
 
-    dims = [int(d) for (d,) in db.query(EventEmbedding.dim).distinct().all() if d]
-    models = tuple(sorted(m for (m,) in db.query(EventEmbedding.model)
-                          .distinct().all() if m))
+    # Per kind: the frame vectors and the caption vectors are two spaces
+    # (an image-text model's and a sentence encoder's), so sizes and
+    # producers are only compared within a kind.
+    dims: dict[str, set[int]] = {}
+    models: dict[str, set[str]] = {}
+    for k, d, m in db.query(EventEmbedding.kind, EventEmbedding.dim,
+                            EventEmbedding.model).distinct().all():
+        k = str(k)
+        if d:
+            dims.setdefault(k, set()).add(int(d))
+        if m:
+            models.setdefault(k, set()).add(str(m))
     by_kind = {str(k): int(n or 0) for k, n in
                db.query(EventEmbedding.kind, _func.count(EventEmbedding.event_id))
                .group_by(EventEmbedding.kind).all()}
     image_rows = by_kind.get(KIND_IMAGE, 0)
     caption_rows = by_kind.get(KIND_CAPTION, 0)
+    image_dims = sorted(dims.get(KIND_IMAGE, ()))
+    caption_dims = sorted(dims.get(KIND_CAPTION, ()))
+    image_models = tuple(sorted(models.get(KIND_IMAGE, ())))
+    caption_models = tuple(sorted(models.get(KIND_CAPTION, ())))
 
     note = (f"Semantic ranking on, over {image_rows:,} embedded frames and "
             f"{caption_rows:,} embedded captions ({accel} scan).")
-    if len(dims) > 1:
+    sizes = [(name, d) for name, d in (("frame", image_dims), ("caption", caption_dims))
+             if len(d) > 1]
+    mixed = [(name, m) for name, m in (("frame", image_models), ("caption", caption_models))
+             if len(m) > 1]
+    if sizes:
         # Vectors of different lengths cannot be compared at all. Say so
         # loudly; this is a misconfiguration, not a tuning question.
-        note = (f"Embedding store holds {len(dims)} different vector sizes "
-                f"({', '.join(str(d) for d in sorted(dims))}) — these are "
-                f"not comparable. Re-run the backfill with one adapter.")
-    elif len(models) > 1:
-        note += (f" Mixed producers ({', '.join(models)}) — ranking is only "
-                 f"coherent once one adapter has covered the store.")
+        note = ("Embedding store holds "
+                + " and ".join(f"{len(d)} different {name} vector sizes "
+                               f"({', '.join(str(x) for x in d)})" for name, d in sizes)
+                + " — these are not comparable. Re-run the backfill with one adapter.")
+    elif mixed:
+        note += (" Mixed producers ("
+                 + "; ".join(f"{name}: {', '.join(m)}" for name, m in mixed)
+                 + ") — ranking is only coherent once one adapter has covered the store.")
 
     return VectorCapability(
-        available=True, mode="scan", dim=dims[0] if len(dims) == 1 else None,
-        rows=rows, models=models, accel=accel, ceiling=ceiling, note=note,
-        image_rows=image_rows, caption_rows=caption_rows)
+        available=True, mode="scan",
+        dim=image_dims[0] if len(image_dims) == 1 else None,
+        rows=rows, models=image_models, accel=accel, ceiling=ceiling, note=note,
+        image_rows=image_rows, caption_rows=caption_rows,
+        caption_dim=caption_dims[0] if len(caption_dims) == 1 else None,
+        caption_models=caption_models)
 
 
 # ── reading ──────────────────────────────────────────────────────────

@@ -887,3 +887,27 @@ def test_the_caption_arm_obeys_the_camera_scope(db):
     page = search_page(db, text="", query_vector=[1.0, 0, 0, 0], scope={1})
 
     assert theirs.id not in [h.event.id for h in page.hits]
+
+
+# ── a caption query vector of its own ────────────────────────────────
+
+
+def test_the_caption_arm_scores_its_own_query_vector(db):
+    """The frame arm's query is the image-text model's; the caption
+    arm's is the sentence encoder's, a different size. Passing both,
+    each arm scores the vectors it can."""
+    a = _visit(db, caption="a lorry", vec=[1.0, 0, 0, 0], cvec=[0.0, 1.0])
+    b = _visit(db, caption="a van", start_s=60, vec=[0, 1.0, 0, 0], cvec=[1.0, 0.0])
+    page = search_page(db, query_vector=[1.0, 0, 0, 0], caption_query_vector=[1.0, 0.0])
+    assert page.semantic["used"] is True
+    assert page.semantic["arms"]["vector"] == 2 and page.semantic["arms"]["caption"] == 2
+    # a wins the frame arm, b the caption arm: a tie broken towards the newer
+    assert [h.event.id for h in page.hits] == [b.id, a.id]
+    # The caption vector alone (no frame embedder answered) still runs the arm.
+    page = search_page(db, caption_query_vector=[1.0, 0.0])
+    assert page.semantic["used"] is True and page.semantic["arms"]["vector"] == 0
+    assert page.semantic["arms"]["caption"] == 2 and page.hits[0].event.id == b.id
+    # No caption vector of its own: the caption arm scores the frame
+    # vector, which here is the wrong size and so matches nothing.
+    page = search_page(db, query_vector=[1.0, 0, 0, 0])
+    assert page.semantic["arms"].get("caption", 0) == 0

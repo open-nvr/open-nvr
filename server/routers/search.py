@@ -524,7 +524,7 @@ async def search(
     # visit embedded yet, an adapter that only does images, KAI-C
     # unreachable — and every one of them lands here as None, which is
     # the word search this route has always been.
-    query_vector, no_vector_reason = await _query_vector(db, words or "")
+    query_vector, caption_query_vector, no_vector_reason = await _query_vectors(db, words or "")
     from core.config import settings
     floor = float(getattr(settings, "search_vector_min_similarity", 0) or 0) or None
     caption_floor = float(
@@ -541,7 +541,8 @@ async def search(
     with metrics.Timer() as page_timer:
         page = search_page(
             db, labels=labels, camera_ids=cams, text=words or "", attrs=attrs,
-            query_vector=query_vector, total=total, limit=limit, skip=skip,
+            query_vector=query_vector, caption_query_vector=caption_query_vector,
+            total=total, limit=limit, skip=skip,
             min_similarity=floor, caption_min_similarity=caption_floor, **filters,
         )
     hits = page.hits
@@ -604,7 +605,8 @@ async def search(
             relaxed = {"dropped": words, "matched": 0, "without": without}
             page = search_page(
                 db, labels=labels, camera_ids=cams, text="", attrs=attrs,
-                query_vector=query_vector, total=without, limit=limit,
+                query_vector=query_vector, caption_query_vector=caption_query_vector,
+                total=without, limit=limit,
                 skip=skip, min_similarity=floor,
                 caption_min_similarity=caption_floor, **filters)
             hits = page.hits
@@ -758,6 +760,43 @@ def _semantic_block(page, no_vector_reason: str | None) -> dict:
                      "words only until the embedding adapter is reachable."),
         }}
     return {}
+
+
+async def _query_vectors(
+    db, words: str,
+) -> tuple[list[float] | None, list[float] | None, str | None]:
+    """The query through BOTH arms' models: ``(frame vector, caption
+    vector, reason)``. The frame vector is :func:`_query_vector`'s; the
+    caption vector comes from the sentence encoder where one is
+    registered (else it is the same vector, answered once). Either may
+    be None on its own — a site with caption vectors and no frame
+    embedder still gets its caption arm — and the reason is the frame
+    arm's, as before, or ``embedder-unreachable`` when neither answered
+    over a store that has vectors."""
+    words = (words or "").strip()
+    if not words:
+        return None, None, None
+    frame, reason = await _query_vector(db, words)
+    if reason == "no-embeddings":
+        return None, None, reason
+    try:
+        from services.embed_enrichment import embed_caption_query
+
+        adapter = None
+        if frame:
+            # embed_text's adapter name is not kept by _query_vector; the
+            # caption resolver answers the same vector when it is the
+            # same adapter, so ask it with the frame in hand.
+            from services.embed_enrichment import _resolve_embed_adapter
+
+            adapter = await _resolve_embed_adapter()
+        caption, _ = await embed_caption_query(words, frame=(frame, adapter))
+    except Exception as exc:                       # noqa: BLE001
+        logger.debug("search: caption query embedding unavailable (%s)", exc)
+        caption = None
+    if frame is None and caption is None:
+        return None, None, reason or "embedder-unreachable"
+    return frame, caption, (None if frame else reason)
 
 
 async def _query_vector(db, words: str) -> tuple[list[float] | None, str | None]:

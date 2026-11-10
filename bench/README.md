@@ -75,3 +75,6 @@ Reports taken on real boards, every number from a run on that board:
 - [`ventuno-q-npu-embedder-2026-11-10.md`](ventuno-q-npu-embedder-2026-11-10.md) — search's embedder on the
   Hexagon (SigLIP2 w8a16): both graphs compiled in 11 s, text 4–6 ms and frames 6–8 ms, the ranking right on five
   of five queries — and the frame-arm floor that had to drop from 0.22 to 0.08 to let any match through.
+- [`ventuno-q-text-embed-2026-11-10.md`](ventuno-q-text-embed-2026-11-10.md) — search's caption arm on a
+  sentence encoder (bge-small, CPU): 37.6 ms a caption on two ARM cores, and against the box's 805 captions a
+  caption that answers the query scores 0.75–0.83 where the best unrelated one scores 0.57–0.74 — the 0.75 floor.
