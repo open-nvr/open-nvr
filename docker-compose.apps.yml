@@ -2441,7 +2441,10 @@ services:
   # adapter's text tower, as before.
   text-embed-adapter:
     profiles: [enrichment, embeddings]
-    image: ghcr.io/open-nvr/text-embed-adapter:${ADAPTER_TAG:-latest}
+    # Its own tag variable, for the reason open-vocab-adapter spells
+    # out: the image is newer than the adapter release an operator's
+    # .env pins, and ADAPTER_TAG would name a tag that never existed.
+    image: ghcr.io/open-nvr/text-embed-adapter:${TEXT_EMBED_ADAPTER_TAG:-main}
     container_name: opennvr_text_embed_adapter
     logging: *svc-logs
     restart: unless-stopped
