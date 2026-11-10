@@ -8598,6 +8598,14 @@ async def _run_conversation_turn(
     runtime.last_turn_trace = trace
     token = _TURN_TRACE.set(trace)
     _turn_t0 = time.perf_counter()
+    if speak_progress is not None and getattr(runtime, "status_client", None) is not None:
+        # A person is talking: core holds its enrichment backfill so the
+        # answer never queues behind history on the shared adapters (and
+        # the one NPU). Fire and forget; rate-limited in the client.
+        try:
+            asyncio.get_running_loop().create_task(runtime.status_client.beacon())
+        except RuntimeError:
+            pass
     try:
         return await _conversation_turn_body(
             runtime, history, user_text, trace,

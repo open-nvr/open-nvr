@@ -169,3 +169,36 @@ def test_a_routed_stop_speaks_the_tools_own_sentence_without_the_model():
     assert steps["compose"]["detail"] == "tier0 direct"
     assert steps["reply"]["detail"] == "tool"
     assert rt.monitors.list() == [] or not rt.monitors.list()[0]["active"]
+
+
+class _BeaconClient:
+    def __init__(self):
+        self.beacons = 0
+
+    async def beacon(self, source="camera-agent", *, every_s=20.0):
+        self.beacons += 1
+        return True
+
+    async def status(self):
+        return None
+
+
+def test_an_interactive_turn_beacons_core_and_a_background_one_does_not():
+    import camera_agent as ca
+
+    rt = _runtime(opennvr_api_url="http://core")
+    rt.cfg.text_mode = True
+    rt.ollama = _ContraryOllama()
+    rt.status_client = _BeaconClient()
+    asyncio.run(ca._run_conversation_turn(rt, [], "hello", speak_progress="text"))
+    assert rt.status_client.beacons == 1
+    asyncio.run(ca._run_conversation_turn(rt, [], "hello"))          # a report / task: no beacon
+    assert rt.status_client.beacons == 1
+
+
+def test_the_beacon_is_rate_limited_and_never_raises():
+    from adapter_clients import SystemStatusClient
+
+    c = SystemStatusClient(base_url="http://127.0.0.1:9", api_key="k")   # nothing listens
+    assert asyncio.run(c.beacon()) is False, "unreachable: False, no exception"
+    assert asyncio.run(c.beacon()) is False, "within every_s: not even attempted"

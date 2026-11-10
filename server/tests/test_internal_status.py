@@ -149,3 +149,13 @@ def test_a_camera_with_an_active_degraded_alarm_reads_degraded(client):
     cams = {c["camera_id"]: c for c in body["cameras"]}
     assert cams["cam1"]["recording_state"] == "degraded"
     assert cams["cam2"]["recording_state"] == "stalled", "untouched by the other camera's alarm"
+
+
+def test_the_agents_interactive_beacon_holds_the_backfill(client, monkeypatch):
+    from services import enrichment_governor as gov
+
+    gov._reset_for_tests()
+    r = client.post("/internal/camera-agent/interactive", json={"source": "camera-agent"})
+    assert r.status_code == 204
+    assert gov.interactive_recently()
+    assert gov._last_interactive_source == "camera-agent"
