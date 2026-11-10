@@ -8,6 +8,31 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Search's caption arm has its own model.** The caption arm compares a
+  query with each visit's caption, text against text, and it was using
+  the frame embedder's text tower for both — an image-text model that is
+  a poor judge of that pair: on the Ventuno Q SigLIP2's text-to-text
+  cosines for relevant and irrelevant caption/query pairs overlap
+  (0.76–0.87 against 0.59–0.75, 2026-11-10), so no floor could separate a
+  hit from noise. Core now looks for an adapter advertising `text_embed`
+  (ai-adapter's new `text-embed` container: `BAAI/bge-small-en-v1.5`,
+  384-d, MIT, CPU, a few milliseconds a caption — same compose profiles
+  as the embedder) and sends caption vectors and the caption arm's query
+  through it; the frame arm keeps the embed adapter. Without one, the
+  embed adapter's text tower carries on as before. The store judges each
+  kind against its own producer and size (a 384-d caption space beside a
+  768-d frame space is the intended arrangement, not a "mixed store"),
+  the re-embed walk counts stale rows per kind, the search routes pass a
+  caption query vector of its own (`caption_query_vector` in
+  `search_page`), and `SEARCH_CAPTION_MIN_SIMILARITY` now reaches the
+  core container — at a default of 0.75, measured on the Ventuno Q's 805
+  captions through the new adapter (a matching caption 0.75–0.83, the
+  best unrelated one 0.57–0.74; `bench/ventuno-q-text-embed-2026-11-10.md`;
+  37.6 ms a caption batched, 10 ms a query, on two ARM cores). A box
+  with the old 0.22 written in `.env` must change it. (`server/services/embed_enrichment.py`,
+  `embedding_store.py`, `search_service.py`, `routers/search.py`,
+  `routers/app_platform.py`, `enrichment_backfill.py`,
+  `docker-compose.apps.yml`, `config/tasks.yml`, `config/adapters_index.yml`)
 - **Sweeping older visits is a switch in the Footage Search app, off by
   default.** Enrichment describes and embeds *new* visits as they happen;
   the backfill — the sweep of everything recorded before — used to be

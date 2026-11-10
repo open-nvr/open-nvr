@@ -773,11 +773,12 @@ async def app_search(
     # words-only rule. An app and a person asking the same question have
     # to be answered by the same ranking, or the app is a second source
     # of truth again by a subtler route than a private index.
-    from routers.search import _query_vector
+    from routers.search import _query_vectors
 
+    frame_vector, caption_vector, _reason = await _query_vectors(db, text or "")
     page = search_page(
         db, labels=labels, camera_ids=cams, text=text or "", attrs=attrs,
-        query_vector=(await _query_vector(db, text or ""))[0],
+        query_vector=frame_vector, caption_query_vector=caption_vector,
         limit=limit, skip=skip, **filters)
     hits, total = page.hits, page.total
 

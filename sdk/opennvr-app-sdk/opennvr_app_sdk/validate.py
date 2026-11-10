@@ -63,7 +63,7 @@ KNOWN_TASKS = frozenset({
     "object_detection", "face_recognition", "image_captioning", "vqa", "face_detection",
     "person_detection", "license_plate_recognition", "multi_object_tracking",
     "speech_to_text", "text_to_speech", "pose_estimation", "package_detection",
-    "embed", "open_vocab_detection",
+    "embed", "open_vocab_detection", "text_embed",
 })
 KNOWN_PARAM_TYPES = frozenset({"str", "int", "float", "bool", "list", "dict", "json",
                                "geometry.polygon", "geometry.tripwire", "image", "time_range"})

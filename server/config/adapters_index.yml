@@ -178,6 +178,35 @@
   source: https://github.com/open-nvr/ai-adapter/tree/main/adapters/clip
   contact: https://github.com/open-nvr/ai-adapter/issues
 
+- id: text-embed
+  name: Text Embeddings
+  summary: >-
+    The caption arm of semantic search. A sentence encoder (bge-small,
+    384-d, MIT) that turns a visit's caption — and a search in words — into
+    vectors made to be compared with each other, where the frame embedder's
+    text tower is not. Without it search falls back to that text tower.
+  version: "1.0.0"
+  tier: first_party
+  image: ghcr.io/open-nvr/text-embed-adapter:latest
+  tasks_advertised: [text_embed]
+  model:
+    framework: onnxruntime
+    modalities_in: [text]
+    modalities_out: [embedding]
+    fingerprinted: true
+  permissions:
+    gpu: false
+    network_egress: []
+    host_filesystem: []
+  scheduling: { max_inflight: 2, fair_queuing: none }
+  supports_stream: false
+  license: AGPL-3.0
+  vendor: open-nvr
+  model_card_url: https://huggingface.co/BAAI/bge-small-en-v1.5
+  docs_url: https://github.com/open-nvr/ai-adapter/blob/main/adapters/text_embed/README.md
+  source: https://github.com/open-nvr/ai-adapter/tree/main/adapters/text_embed
+  contact: https://github.com/open-nvr/ai-adapter/issues
+
 - id: whisper-asr
   name: Whisper ASR
   summary: Speech to text, with translation. Weights download on first boot into the adapter's volume; pre-populate it for an air-gapped site.

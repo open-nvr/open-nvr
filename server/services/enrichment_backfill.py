@@ -667,21 +667,33 @@ async def reembed_due() -> tuple[bool, str | None]:
     from core.config import settings
     if not bool(getattr(settings, "events_embed_enrichment", False)):
         return False, None
-    from services.embed_enrichment import _resolve_embed_producer
+    from services.embed_enrichment import (
+        _resolve_caption_producer,
+        _resolve_embed_producer,
+    )
     try:
         found = await _resolve_embed_producer()
+        caption = await _resolve_caption_producer()
     except Exception:  # noqa: BLE001
         return False, None
-    if found is None:
+    if found is None and caption is None:
         return False, None
+    # Each kind against its own producer: the frame vectors are the
+    # embed adapter's, the caption vectors the sentence encoder's where
+    # one is registered (else the same adapter's text tower).
     from core.database import SessionLocal
     from services import embedding_store
     db = SessionLocal()
     try:
-        stale = embedding_store.stale_rows(db, found[1])
+        stale = 0
+        if found is not None:
+            stale += embedding_store.stale_rows(db, found[1], kind=embedding_store.KIND_IMAGE)
+        if caption is not None:
+            stale += embedding_store.stale_rows(db, caption[1], kind=embedding_store.KIND_CAPTION)
     finally:
         db.close()
-    return (stale > 0), found[1]
+    producer = found[1] if found is not None else caption[1]
+    return (stale > 0), producer
 
 
 def reset_for_reembed(db, producer: str) -> dict[str, Any]:

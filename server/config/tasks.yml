@@ -147,6 +147,28 @@
     ram_gb: 4
     gpu: recommended
 
+- task: text_embed
+  label: Text Embedding
+  summary: Turns a sentence — a visit's caption, or a search in words — into a vector, so search can match a question against captions by meaning.
+  categories: [language, search]
+  tags: [embedding, sentence, bge, semantic, search, vector, caption]
+  # A vector for the search index, not a description of anything: the
+  # same reason `embed` backs no agent skill.
+  agent_skill: null
+  aliases: [text_embedding, sentence_embedding]
+  suggested_adapters: [text-embed]
+  hardware:
+    min: 2-core CPU, ~1 GB RAM
+    recommended: any CPU
+    note: >-
+      Optional. Without it, the caption arm of search uses the embedding
+      adapter's own text tower, which is a weaker judge of text against text.
+      A sentence encoder costs a few milliseconds a caption on the CPU, so
+      there is no accelerator to choose.
+    cores: 2
+    ram_gb: 1
+    gpu: none
+
 - task: vqa
   label: Visual Question Answering
   summary: Answers arbitrary natural-language questions about a frame.

@@ -494,6 +494,7 @@ def search_page(
     text: str = "",
     attrs: list[tuple[str, str]] | None = None,
     query_vector: Sequence[float] | None = None,
+    caption_query_vector: Sequence[float] | None = None,
     total: int | None = None,
     limit: int = 50,
     skip: int = 0,
@@ -504,8 +505,14 @@ def search_page(
     """A page of results, with the vector arms fused in when there are any.
 
     ``min_similarity`` floors the image arm, ``caption_min_similarity``
-    the caption arm; both are cosine on the same scale, and ``None`` or
-    0 means no floor.
+    the caption arm; each is a cosine on its own model's scale, and
+    ``None`` or 0 means no floor.
+
+    ``caption_query_vector`` is the query through the CAPTION arm's model
+    (the sentence encoder, where one is registered); left ``None`` the
+    caption arm scores ``query_vector``, which is right when one model
+    serves both arms and a silent non-match (a dimension mismatch is
+    skipped) when it does not — so callers that have both pass both.
 
     This is what routes should call. :func:`search_events` remains the
     single-arm path and is unchanged, because plenty of callers want a
@@ -550,11 +557,12 @@ def search_page(
             db, labels=labels, camera_ids=camera_ids, text=text, attrs=attrs,
             **filters)
 
-    if not query_vector:
+    if not query_vector and not caption_query_vector:
         hits = search_events(
             db, labels=labels, camera_ids=camera_ids, text=text, attrs=attrs,
             limit=limit, skip=skip, **filters)
         return SearchPage(hits=hits, total=total, semantic=None)
+    caption_vector = caption_query_vector if caption_query_vector else query_vector
 
     from services import embedding_store
 
@@ -607,12 +615,13 @@ def search_page(
     candidate_ids = _arm_ids(
         db, filters=filters, labels=labels, camera_ids=camera_ids,
         text="", attrs=attrs, limit=cap.ceiling + 1, ranked=False)
+    empty = embedding_store.SimilarityResult(ids=[], scores=[], considered=0, truncated=False)
     sim = embedding_store.rank_by_similarity(
         db, query_vector=query_vector, candidate_ids=candidate_ids,
-        limit=depth, cap=cap, kind=embedding_store.KIND_IMAGE)
+        limit=depth, cap=cap, kind=embedding_store.KIND_IMAGE) if query_vector else empty
     csim = embedding_store.rank_by_similarity(
-        db, query_vector=query_vector, candidate_ids=candidate_ids,
-        limit=depth, cap=cap, kind=embedding_store.KIND_CAPTION)
+        db, query_vector=caption_vector, candidate_ids=candidate_ids,
+        limit=depth, cap=cap, kind=embedding_store.KIND_CAPTION) if caption_vector else empty
 
     # THE FLOOR. rank_by_similarity returns its top-N whatever the
     # numbers are, so a query nothing resembles still produced a full

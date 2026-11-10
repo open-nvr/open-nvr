@@ -352,3 +352,144 @@ def test_a_model_change_re_embeds_caption_vectors_too(session_local, monkeypatch
     # Same producer again: nothing to do, nothing called.
     assert asyncio.run(emb.enrich_event_caption_embedding(eid)) is None
     assert len(payloads) == 1
+
+
+# ── the caption arm's own model (text_embed) ────────────────────────
+
+TEXT_PRODUCER = "text-embed:BAAI/bge-small-en-v1.5/cls-onnx"
+
+
+def _wire_two_models(monkeypatch, *, text_producer, frame_producer=NEW,
+                     frame_vector=(0.0, 1.0, 0.0), text_vector=(1.0, 0.0),
+                     payloads: list):
+    """A frame embedder AND a sentence encoder, each answering its own
+    vector; ``text_producer=None`` means no text_embed adapter is
+    registered and the caption path must fall back to the frame one."""
+    import services.embed_enrichment as emb
+    from core.config import settings
+    monkeypatch.setattr(settings, "events_embed_enrichment", True, raising=False)
+
+    async def _frame():
+        return "clip", frame_producer
+
+    async def _text():
+        return None if text_producer is None else ("text-embed", text_producer)
+
+    async def _infer(adapter, payload, *, what, **kw):
+        payloads.append((adapter, payload))
+        return list(text_vector if adapter == "text-embed" else frame_vector)
+
+    monkeypatch.setattr(emb, "_resolve_embed_producer", _frame)
+    monkeypatch.setattr(emb, "_resolve_text_embed_producer", _text)
+    monkeypatch.setattr(emb, "_infer", _infer)
+    return emb
+
+
+def test_caption_vectors_go_through_the_sentence_encoder_when_one_is_registered(session_local, monkeypatch):
+    """With a text_embed adapter the caption vector is ITS vector, under
+    ITS producer, asked as a document — the frame embedder's text tower
+    is never asked for a caption."""
+    from models import EventText
+    payloads: list = []
+    emb = _wire_two_models(monkeypatch, text_producer=TEXT_PRODUCER, payloads=payloads)
+    db = session_local()
+    eid = _visit(db)
+    db.add(EventText(event_id=eid, caption="a lorry at the loading bay", source="t")); db.commit()
+    db.close()
+
+    assert asyncio.run(emb.enrich_event_caption_embedding(eid)) == "done"
+
+    db = session_local()
+    row = db.get(EventEmbedding, (eid, "caption"))
+    assert row.model == TEXT_PRODUCER and row.dim == 2
+    db.close()
+    assert payloads == [("text-embed", {"task": "text_embed", "kind": "document",
+                                        "text": "a lorry at the loading bay"})]
+    # Same producer again: nothing to do.
+    assert asyncio.run(emb.enrich_event_caption_embedding(eid)) is None
+    assert len(payloads) == 1
+
+
+def test_without_a_sentence_encoder_the_caption_path_is_the_frame_embedders_text_tower(session_local, monkeypatch):
+    from models import EventText
+    payloads: list = []
+    emb = _wire_two_models(monkeypatch, text_producer=None, payloads=payloads)
+    db = session_local()
+    eid = _visit(db)
+    db.add(EventText(event_id=eid, caption="a lorry", source="t")); db.commit()
+    db.close()
+    assert asyncio.run(emb.enrich_event_caption_embedding(eid)) == "done"
+    assert payloads == [("clip", {"task": "embed", "text": "a lorry"})], (
+        "the fallback must send the embed adapters the bare shape they always had")
+    db = session_local()
+    assert db.get(EventEmbedding, (eid, "caption")).model == NEW
+    db.close()
+
+
+def test_the_caption_query_reuses_the_frame_vector_only_when_it_is_the_same_adapter(monkeypatch):
+    payloads: list = []
+    emb = _wire_two_models(monkeypatch, text_producer=TEXT_PRODUCER, payloads=payloads)
+    vec, adapter = asyncio.run(emb.embed_caption_query("red lorry", frame=([0.0, 1.0, 0.0], "clip")))
+    assert (vec, adapter) == ([1.0, 0.0], "text-embed")
+    assert payloads == [("text-embed", {"task": "text_embed", "kind": "query", "text": "red lorry"})]
+
+    payloads.clear()
+    emb = _wire_two_models(monkeypatch, text_producer=None, payloads=payloads)
+    vec, adapter = asyncio.run(emb.embed_caption_query("red lorry", frame=([0.0, 1.0, 0.0], "clip")))
+    assert (vec, adapter) == ([0.0, 1.0, 0.0], "clip") and payloads == [], (
+        "one adapter serving both arms must not be asked the same words twice")
+    vec, adapter = asyncio.run(emb.embed_caption_query("red lorry"))
+    assert adapter == "clip" and payloads == [("clip", {"task": "embed", "text": "red lorry"})]
+    assert asyncio.run(emb.embed_caption_query("   ")) == (None, None)
+
+
+def test_a_caption_space_beside_a_frame_space_is_not_a_mixed_store(session_local):
+    """384-d captions next to 768-d frames is the intended arrangement:
+    each kind is judged against itself, and the capability says which
+    size and producer each kind has."""
+    db = session_local()
+    eid = _visit(db, vec=[0.0, 1.0, 0.0, 0.0], model=NEW)
+    embedding_store.put_embedding(db, event_id=eid, vector=[1.0, 0.0], model=TEXT_PRODUCER, kind="caption")
+    cap = embedding_store.capability(db)
+    assert cap.available and cap.dim == 4 and cap.caption_dim == 2
+    assert cap.models == (NEW,) and cap.caption_models == (TEXT_PRODUCER,)
+    assert not cap.mixed_models and not cap.mixed_caption_models
+    assert "not comparable" not in cap.note and "Mixed" not in cap.note
+
+    # Two producers WITHIN the caption kind is the mixed case.
+    eid2 = _visit(db)
+    embedding_store.put_embedding(db, event_id=eid2, vector=[0.0, 1.0], model=NEW, kind="caption")
+    cap = embedding_store.capability(db)
+    assert cap.mixed_caption_models and not cap.mixed_models
+    assert "Mixed producers (caption:" in cap.note
+    # Two SIZES within one kind is the incoherent one.
+    embedding_store.put_embedding(db, event_id=eid2, vector=[0.0, 1.0, 0.0], model=NEW, kind="caption")
+    cap = embedding_store.capability(db)
+    assert cap.caption_dim is None and "2 different caption vector sizes" in cap.note
+    db.close()
+
+
+def test_stale_rows_counts_per_kind_and_reembed_is_due_for_either(session_local, monkeypatch):
+    """Frames stale against the frame producer, captions against the
+    sentence encoder: a caption row the old text tower wrote is stale
+    once a text_embed adapter is registered, and the walk runs."""
+    import services.enrichment_backfill as bf
+    payloads: list = []
+    _wire_two_models(monkeypatch, text_producer=TEXT_PRODUCER, payloads=payloads)
+    db = session_local()
+    eid = _visit(db, vec=[0.0, 1.0, 0.0], model=NEW)                    # frame: current
+    embedding_store.put_embedding(db, event_id=eid, vector=[0.0, 1.0, 0.0], model=NEW,
+                                  kind="caption")                        # caption: the old tower's
+    assert embedding_store.stale_rows(db, NEW, kind="image") == 0
+    assert embedding_store.stale_rows(db, TEXT_PRODUCER, kind="caption") == 1
+    assert embedding_store.stale_rows(db, NEW) == 0, (
+        "the all-kinds count cannot see it: the caption row carries the frame "
+        "producer, which is exactly what the per-kind count is for")
+    db.close()
+    assert asyncio.run(bf.reembed_due()) == (True, NEW)
+
+    db = session_local()
+    embedding_store.put_embedding(db, event_id=eid, vector=[1.0, 0.0], model=TEXT_PRODUCER,
+                                  kind="caption")
+    db.close()
+    assert asyncio.run(bf.reembed_due()) == (False, NEW)

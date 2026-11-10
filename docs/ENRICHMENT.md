@@ -8,7 +8,7 @@ ingest path, in the background, best-effort.
 |---|---|---|---|---|
 | **Descriptors** | colour / type claims (`visit_descriptors`) | the plate reader and/or a VLM registered | `EVENTS_DESCRIPTOR_ENRICHMENT` | *(plan-driven; none)* |
 | **Captions** | a sentence per visit (`event_text`) | a captioner advertising `scene_caption` (BLIP, Moondream, or `ollamavlm`) | `EVENTS_CAPTION_ENRICHMENT` | `image_captioning` |
-| **Embeddings** | one vector per visit (`event_embeddings`; 768-d from SigLIP 2, 512-d from the earlier CLIP) | the embedding adapter (`embed` task; the `clip` container) | `EVENTS_EMBED_ENRICHMENT` | `embed` |
+| **Embeddings** | one frame vector per visit (`event_embeddings`, kind `image`; 768-d from SigLIP 2, 512-d from the earlier CLIP) and one caption vector (kind `caption`; 384-d from bge-small where the `text-embed` container runs, else the embedder's text tower) | the embedding adapter (`embed` task; the `clip` container) and the sentence encoder (`text_embed` task; the `text-embed` container, same profile) | `EVENTS_EMBED_ENRICHMENT` | `embed` (frames); captions follow the caption |
 
 ## The gate: skills follow apps
 
@@ -139,11 +139,32 @@ camera without the skill costs nothing. No adapter registered is a silent
 no-op, not an error: search matches labels and plates, which is what a stock
 install does today.
 
+## Two arms, two models
+
+Search's **frame arm** compares the query with each visit's frame vector:
+one image-text model (`embed` — SigLIP 2 on the clip or siglip-qnn
+container) embeds the frame at enrichment and the words at search time,
+and the two land in one space. Its **caption arm** compares the query
+with each visit's caption vector, text against text — and an image-text
+model's text tower is a poor judge of that: on the Ventuno Q SigLIP2's
+text-to-text cosines for relevant and irrelevant caption/query pairs
+overlap (0.76–0.87 against 0.59–0.75, 2026-11-10), so no floor separates
+a hit from noise. The caption arm therefore has its own model: the
+`text-embed` container (`text_embed` task; `BAAI/bge-small-en-v1.5`,
+384-d, MIT, CPU, a few milliseconds a caption), in the same compose
+profile as the embedder. Caption vectors and the caption arm's query both
+go through it; where none is registered, the embed adapter's text tower
+carries on as before. `event_embeddings.kind` keeps the two apart
+(`image` / `caption`), each kind is judged against its own producer, and
+`SEARCH_CAPTION_MIN_SIMILARITY` is that arm's floor on that model's
+scale.
+
 ## Changing the embedding model
 
 `event_embeddings.model` records the **producer**: the adapter and the
 model behind it, name and version as its `/capabilities` report them
-(`clip:open_clip/ViT-B-16-SigLIP2-256/webli`). Vectors
+(`clip:open_clip/ViT-B-16-SigLIP2-256/webli`; `text-embed:BAAI/bge-small-en-v1.5/cls-onnx`
+for caption vectors). Vectors
 from two models are not comparable, and search already treats a
 dimension mismatch as a non-match, so a store of old vectors would go
 quietly dark under a new model. Two things stop that:
@@ -152,9 +173,12 @@ quietly dark under a new model. Two things stop that:
   treating the visit as already embedded (a retry on the same producer
   still does nothing);
 - the backfill, once history is done, checks on every catch-up pass
-  whether the store holds another producer's vectors and, if so, walks
-  history again from the top. `GET /search`'s `semantic.note` says
-  "Mixed producers" while that runs, and settles once the walk is over.
+  whether the store holds another producer's vectors (each kind against
+  its own producer) and, if so, walks history again from the top.
+  `GET /search`'s `semantic.note` says "Mixed producers" while that runs,
+  and settles once the walk is over. The walk is the backfill's, so it
+  runs under the same switch (Footage Search → Configure → Backfill
+  history): with it off, only new captions get the new model's vector.
 
 The October 2026 move from CLIP ViT-B/32 (512-d) to SigLIP 2 B/16
 (768-d) is what this was written for; it costs one walk of history at

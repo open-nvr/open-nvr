@@ -88,6 +88,18 @@ from services.enrichment_gate import DROPPED
 #: says why.
 EMBED_TASK_NAMES = {EMBED_TASK, "embedding", "image_embedding", "clip"}
 
+#: The CAPTION arm's own model. ``embed`` puts a frame and a query in one
+#: space, which is what the frame arm needs; its text tower is a poor
+#: judge of text against text (SigLIP2 on the Ventuno Q, 2026-11-10:
+#: relevant and irrelevant caption/query pairs overlap, 0.76–0.87 against
+#: 0.59–0.75, so no floor separates them). An adapter advertising
+#: ``text_embed`` is a sentence encoder trained for exactly that pair,
+#: and where one is registered the caption vectors and the caption arm's
+#: query come from it. Where none is, the embed adapter's text tower
+#: carries on as before.
+TEXT_EMBED_TASK = "text_embed"
+TEXT_EMBED_TASK_NAMES = {TEXT_EMBED_TASK, "text_embedding", "sentence_embedding"}
+
 #: The skill an operator assigns to a camera to turn this on, same name
 #: as the task. No assignment, no embedding, no cost — the gate the
 #: captioner and the plate reader both grew after a thirty-camera site
@@ -173,6 +185,43 @@ async def _resolve_embed_adapter() -> str | None:
 async def _resolve_embed_producer() -> tuple[str, str] | None:
     """``(adapter name, producer identity)`` for the adapter
     :func:`_resolve_embed_adapter` would pick, or None."""
+    return await _resolve_producer_for(EMBED_TASK_NAMES)
+
+
+async def _resolve_text_embed_producer() -> tuple[str, str] | None:
+    """The sentence encoder (``text_embed``), or None where none is
+    registered. Its own function so a test can wire it apart from the
+    frame embedder."""
+    return await _resolve_producer_for(TEXT_EMBED_TASK_NAMES)
+
+
+async def _resolve_caption_producer() -> tuple[str, str, str] | None:
+    """``(adapter, producer, task)`` for caption vectors and the caption
+    arm's query: the ``text_embed`` adapter where one is registered, else
+    the ``embed`` adapter's text tower (``task`` says which, so the
+    payload fits the adapter it goes to). None with neither."""
+    found = await _resolve_text_embed_producer()
+    if found is not None:
+        return found[0], found[1], TEXT_EMBED_TASK
+    found = await _resolve_embed_producer()
+    if found is not None:
+        return found[0], found[1], EMBED_TASK
+    return None
+
+
+def _text_payload(task: str, text: str, kind: str) -> dict:
+    """The request for one piece of text. ``kind`` (query / document) is
+    the sentence encoder's; the embed adapters take the bare shape they
+    always have."""
+    payload = {"task": task, "text": text}
+    if task == TEXT_EMBED_TASK:
+        payload["kind"] = kind
+    return payload
+
+
+async def _resolve_producer_for(task_names: set[str]) -> tuple[str, str] | None:
+    """``(adapter name, producer identity)`` of the first registered,
+    healthy adapter advertising one of ``task_names``, or None."""
     try:
         from routers.skills import _kai_c_view
 
@@ -197,7 +246,7 @@ async def _resolve_embed_producer() -> tuple[str, str] | None:
         caps_entry = (entry or {}).get("capabilities") if isinstance(entry, dict) else None
         tasks = caps_entry.get("tasks_advertised") if isinstance(caps_entry, dict) else None
         if not (isinstance(tasks, list) and any(
-                isinstance(t, str) and t.lower() in EMBED_TASK_NAMES
+                isinstance(t, str) and t.lower() in task_names
                 for t in tasks)):
             continue
         # Health unknown → try anyway. A failed call is cheaper than
@@ -273,6 +322,34 @@ async def embed_text(text: str) -> tuple[list[float] | None, str | None]:
     # A person is waiting on this one: it takes its turn at the adapter
     # but is never refused for load — that is background work's job.
     vector = await _infer(adapter, payload, what="a text query", interactive=True)
+    if vector is DROPPED:
+        vector = None
+    return vector, (adapter if vector else None)
+
+
+async def embed_caption_query(
+    text: str, *, frame: tuple[list[float] | None, str | None] = (None, None),
+) -> tuple[list[float] | None, str | None]:
+    """Embed a QUERY for the caption arm — through the sentence encoder
+    where one is registered, else the embed adapter's text tower.
+
+    ``frame`` is what :func:`embed_text` just answered for the same words:
+    when the caption producer IS that adapter, the vector is the same and
+    the adapter is not asked twice. Returns ``(vector, adapter_name)``,
+    ``(None, None)`` for no adapter or no answer — the arm is skipped.
+    """
+    text = (text or "").strip()
+    if not text:
+        return None, None
+    found = await _resolve_caption_producer()
+    if found is None:
+        return None, None
+    adapter, _producer, task = found
+    frame_vector, frame_adapter = frame
+    if task == EMBED_TASK and frame_vector and frame_adapter == adapter:
+        return list(frame_vector), adapter
+    vector = await _infer(adapter, _text_payload(task, text, "query"),
+                          what="a caption query", interactive=True)
     if vector is DROPPED:
         vector = None
     return vector, (adapter if vector else None)
@@ -401,10 +478,10 @@ async def enrich_event_caption_embedding(event_id: int) -> str | None:
     if not getattr(settings, "events_embed_enrichment", False):
         return None
 
-    found = await _resolve_embed_producer()
+    found = await _resolve_caption_producer()
     if found is None:
         return None
-    adapter, producer = found
+    adapter, producer, task = found
 
     # ── Phase 1: read, briefly ──────────────────────────────────────
     from core.database import SessionLocal
@@ -426,7 +503,7 @@ async def enrich_event_caption_embedding(event_id: int) -> str | None:
         db.close()
 
     # ── Phase 2: adapter call, no session held ──────────────────────
-    payload = {"task": EMBED_TASK, "text": text}
+    payload = _text_payload(task, text, "document")
     vector = await _infer(adapter, payload, what=f"caption of event {event_id}")
     if vector is DROPPED:
         return "dropped"

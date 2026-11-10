@@ -2431,6 +2431,46 @@ services:
       - ADAPTER_NAME=clip
       - ADAPTER_URL=http://clip-adapter:9011
 
+  # The caption arm's own model — the `text_embed` task. The clip /
+  # siglip adapter puts a frame and a query in one space (the frame
+  # arm); its text tower is a poor judge of text against text, so the
+  # caption vectors and the caption arm's query go through a sentence
+  # encoder instead (bge-small, 384-d, MIT, CPU — a caption costs a few
+  # milliseconds). Same profiles as the embedder: wherever frames are
+  # embedded, captions are too. Without it core falls back to the embed
+  # adapter's text tower, as before.
+  text-embed-adapter:
+    profiles: [enrichment, embeddings]
+    image: ghcr.io/open-nvr/text-embed-adapter:${ADAPTER_TAG:-latest}
+    container_name: opennvr_text_embed_adapter
+    logging: *svc-logs
+    restart: unless-stopped
+    environment:
+      - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
+      - TEXT_EMBED_THREADS=${TEXT_EMBED_THREADS:-2}
+    networks:
+      - opennvr_internal
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx, sys; sys.exit(0 if httpx.get('http://127.0.0.1:9013/health', timeout=2).status_code == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 90s
+      retries: 20
+
+  text-embed-register:
+    <<: *adapter-register
+    profiles: [enrichment, embeddings]
+    container_name: opennvr_text_embed_register
+    depends_on:
+      opennvr-core:
+        condition: service_healthy
+      text-embed-adapter:
+        condition: service_healthy
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      - ADAPTER_NAME=text-embed
+      - ADAPTER_URL=http://text-embed-adapter:9013
+
   # ──────────────────────────────────────────────────────────────
   # OPEN-VOCABULARY DETECTION (opt-in, profile `open-vocab`)
   #
