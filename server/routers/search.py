@@ -435,6 +435,11 @@ async def search(
     against is the same set — so "the dock" cannot even name a camera
     somebody else owns.
     """
+    try:
+        from services.enrichment_governor import note_interactive
+        note_interactive("search")                 # the backfill stands aside
+    except Exception:  # noqa: BLE001 - never fail a search over bookkeeping
+        pass
     scope = visible_camera_ids(db, current_user)
     cameras = _visible_cameras(db, scope)
     parsed = (parse_query(q, cameras=cameras, people=_known_people(db, scope),

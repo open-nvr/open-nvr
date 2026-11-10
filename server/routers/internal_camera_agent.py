@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from urllib.parse import quote as urlquote
 
 from fastapi import (
+    Body,
     APIRouter,
     BackgroundTasks,
     Depends,
@@ -1289,6 +1290,20 @@ def list_camera_agent_sources(
 
     return {"cameras": out}
 
+
+
+@router.post("/interactive", status_code=204)
+def camera_agent_interactive(
+    principal=Depends(_require_internal_key),
+    source: str = Body("camera-agent", embed=True),
+) -> None:
+    """The camera agent is in a conversation: hold the enrichment
+    backfill (services.enrichment_governor.note_interactive) so a person
+    talking to the box never queues behind history on the adapters.
+    The agent sends one of these per turn, rate-limited on its side."""
+    from services.enrichment_governor import note_interactive
+
+    note_interactive(str(source or "camera-agent")[:40])
 
 
 @router.get("/status")

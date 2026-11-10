@@ -517,6 +517,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The enrichment backfill is opportunistic, not a batch job.** The
+  morning embeddings came on the Ventuno Q it swept history at full tilt
+  — captions, descriptions and vectors for 14,000 old visits — and held
+  the NPU at 100 % while the operator was talking to the camera agent and
+  searching. Two things changed. After each visit the backfill now rests
+  for as long as that visit cost in the adapters (times
+  `(1-share)/share`; `EVENTS_ENRICHMENT_BACKFILL_SHARE`, default 0.5, so
+  history takes at most half the clock), and it stands aside for people:
+  a search, or a camera-agent turn (the agent now tells core, one beacon
+  per turn, through a new internal route), holds it for
+  `EVENTS_ENRICHMENT_BACKFILL_INTERACTIVE_HOLD_S` (default 90 s) after the
+  last one. The CPU, slow-call, breaker and clock-window rules are
+  unchanged; "holding — someone is using the box" is the new log line.
+
 - **`STT_ADAPTER=auto` is the default, and on a Qualcomm board it is the
   NPU.** Measured on a Ventuno Q (`bench/ventuno-q-stt-2026-11-09.md`):
   the `whisper_qnn` adapter answers in 361 ms an utterance against
