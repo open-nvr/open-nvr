@@ -145,7 +145,9 @@ class Searcher:
 
 
 def score_case(case: dict, answer: dict) -> dict:
-    hits = [int(h["id"]) for h in answer.get("hits") or []]
+    # The route answers ``results`` (and ``relax`` for the words it
+    # dropped); ``hits``/``relaxed`` are accepted for an older shape.
+    hits = [int(h["id"]) for h in (answer.get("results") or answer.get("hits") or [])]
     relevant = {int(i) for i in case.get("relevant") or []}
     sem = answer.get("semantic") or {}
     out: dict[str, Any] = {
@@ -153,7 +155,7 @@ def score_case(case: dict, answer: dict) -> dict:
         "returned": len(hits), "total": answer.get("total"),
         "relevant": len(relevant),
         "corrections": (answer.get("interpretation") or {}).get("corrections"),
-        "relaxed": bool(answer.get("relaxed")),
+        "relaxed": bool(answer.get("relax") or answer.get("relaxed")),
         "semantic": {k: sem.get(k) for k in ("used", "reason", "arms", "added_by_vector",
                                              "added_by_caption", "best", "floor")} if sem else None,
         "caption_best": ((sem.get("caption") or {}).get("best") if sem else None),
@@ -161,7 +163,7 @@ def score_case(case: dict, answer: dict) -> dict:
     if not relevant:
         # A negative: nothing should come back as a confident answer.
         empty = not hits
-        relaxed = bool(answer.get("relaxed"))
+        relaxed = bool(answer.get("relax") or answer.get("relaxed"))
         below = sem.get("reason") == "below-floor"
         out.update(passed=(empty or relaxed or below), top=hits[:5])
         return out
