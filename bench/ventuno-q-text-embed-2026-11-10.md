@@ -106,6 +106,40 @@ caption floor costs little precision and buys the arm back for a quarter of
 the cases: **the default moved to 0.65** (the 0.75 above stood for one
 afternoon). A box running the fallback text tower should raise it to 0.75.
 
+## The eval after the floor and the parser fix (17:35 UTC)
+
+Core at the merge of #864, #866 (the vector arms embed the whole corrected
+question; typos corrected against the captions' own words) and #867 (floor
+0.65), every caption row on the bge producer, all three arms on:
+
+| | baseline (SigLIP text tower, 0.22) | bge, 0.75 | words only, #866 | all arms, 0.65, #866 |
+|---|---|---|---|---|
+| MRR | 0.462 | 0.508 | 0.594 | **0.711** |
+| hit@5 | 0.571 | 0.607 | 0.679 | **0.821** |
+| P@5 | 0.234 | 0.302 | **0.575** | 0.441 |
+| recall@10 | 0.446 | 0.467 | 0.508 | **0.510** |
+| negatives passed | 2/5 | 2/5 | 3/5 | 3/5 |
+| attribute MRR | 0.439 | 0.535 | 0.609 | **0.843** |
+| caption MRR | 0.614 | 0.659 | **0.727** | 0.712 |
+| paraphrase MRR | 0.400 | 0.400 | 0.400 | **0.500** |
+| typo MRR | 0.074 | 0.056 | 0.389 | **0.667** |
+| median latency | 287 ms | 300 ms | 118 ms | 342 ms |
+
+The "words only" column was an accident worth keeping: that run happened
+in the minutes after core was recreated, while KAI-C had not yet probed
+the re-registered adapters healthy, so every search ran the word arm alone
+(`embedder-unreachable`). It shows what #866 alone buys (typos 0.07 → 0.39,
+"pink car" found) and that the vector arms, as fused today, cost top-5
+precision (0.575 → 0.441) while buying rank and recall: the frame arm at its
+0.08 floor admits fifty rows for most queries, and reciprocal-rank fusion
+rewards any row two arms agree on. Weighting the arms, or a tighter frame
+floor, is the next measured change.
+
+Also noted: for the first minutes after a core restart the embedders are
+skipped because their health is not yet "ok" in KAI-C's registry, and
+semantic search quietly runs words-only. The eval's `arms` column is what
+made that visible.
+
 ## What changed because of this
 
 - `SEARCH_CAPTION_MIN_SIMILARITY` default 0.22 → 0.75 → 0.65 (the first value
