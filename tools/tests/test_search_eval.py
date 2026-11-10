@@ -66,3 +66,23 @@ def test_the_summary_averages_positives_by_kind_and_counts_negatives():
     assert s["hit@5"] == 0.5 and s["recall@10"] == 1.0
     assert s["negatives_passed"] == 1
     assert s["by_kind"]["caption"]["n"] == 1 and s["by_kind"]["typo"]["mrr"] == round(1 / 6, 3)
+
+
+def test_the_shipped_case_files_parse_and_are_well_formed():
+    """The Ventuno Q case file failed to parse on the box (a note that
+    began with a double quote, 2026-11-10); every shipped case file is
+    loaded here so that cannot happen again."""
+    import yaml
+
+    bench = Path(__file__).resolve().parents[2] / "bench"
+    files = sorted(bench.glob("search-eval-cases-*.yml"))
+    assert files, "no case files under bench/"
+    for f in files:
+        spec = yaml.safe_load(f.read_text(encoding="utf-8"))
+        assert spec.get("cases"), f.name
+        for c in spec["cases"]:
+            assert isinstance(c.get("query"), str) and c["query"].strip(), (f.name, c)
+            assert isinstance(c.get("relevant"), list), (f.name, c["query"])
+            assert all(isinstance(i, int) for i in c["relevant"]), (f.name, c["query"])
+            assert c.get("kind") in {"caption", "paraphrase", "attribute", "typo", "negative"}, (f.name, c["query"])
+            assert (c["kind"] == "negative") == (not c["relevant"]), (f.name, c["query"])
