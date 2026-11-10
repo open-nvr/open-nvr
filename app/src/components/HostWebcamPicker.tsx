@@ -11,6 +11,7 @@
 import { useEffect, useState } from 'react'
 import { AlertTriangle, CheckCircle, Loader2, Usb } from 'lucide-react'
 import { apiService } from '../lib/apiService'
+import { useDateFormat } from '../i18n'
 import { ffmpegInstallCommand, hostAgentInstallCommand, type HostAgentInfo } from '../lib/hostAgent'
 
 const POLL_MS = 5000
@@ -52,6 +53,9 @@ export function HostWebcamPicker({
   ownCameraId?: number
 }) {
   const { info, error } = useHostAgent()
+  // Dates through the user's formatters, never toLocaleString directly
+  // (tests/test_ui_date_localisation.py).
+  const fmt = useDateFormat()
 
   if (!info && !error) {
     return <div className="flex items-center gap-2 text-sm text-[var(--text-dim)]"><Loader2 size={14} className="animate-spin" /> Looking for the host agent…</div>
@@ -70,7 +74,7 @@ export function HostWebcamPicker({
         </div>
         <Code>{hostAgentInstallCommand(info.os)}</Code>
         {info.installed && info.last_seen && (
-          <div className="text-xs text-[var(--text-dim)]">Last seen {new Date(info.last_seen * 1000).toLocaleString()}.</div>
+          <div className="text-xs text-[var(--text-dim)]">Last seen {fmt.dateTime(info.last_seen * 1000)}.</div>
         )}
       </div>
     )
