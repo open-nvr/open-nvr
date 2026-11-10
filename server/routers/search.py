@@ -44,7 +44,7 @@ from sqlalchemy.orm import Session
 from core.auth import get_current_active_user
 from core.database import get_db
 from core.permissions import user_has_permission
-from models import AppAlert, Camera, CameraZone, TimelineEvent, User, VisitDescriptor
+from models import AppAlert, Camera, CameraZone, EventText, TimelineEvent, User, VisitDescriptor
 
 # The internal door is defined once, next to the pipeline's write routes;
 # the metrics scrape is the same door and should not grow a second lock.
@@ -300,15 +300,55 @@ def search_people(
     }
 
 
-def _search_vocabulary() -> set[str]:
+def _search_vocabulary(db: Session | None = None) -> set[str]:
     """The description words this box can act on — colours, vehicle
-    types, carried things, headwear, clothing cues — so a typo of one of
-    them is read as the word (search_query.correct_word) instead of
-    falling through to the caption text, where it matches nothing."""
+    types, carried things, headwear, clothing cues — plus the words its
+    own captions use, so a typo of one of them is read as the word
+    (search_query.correct_word) instead of falling through to the
+    caption text, where it matches nothing. "camoflage" and "pikup" got
+    nothing on the Ventuno Q (2026-11-10) because neither word is a
+    filter; both are all over its captions."""
     from services import search_intent as si
 
-    return set(si.COLOUR_WORDS) | set(si.VEHICLE_TYPE_WORDS) | set(si.CARRYING_WORDS) \
+    words = set(si.COLOUR_WORDS) | set(si.VEHICLE_TYPE_WORDS) | set(si.CARRYING_WORDS) \
         | set(si.GENDER_WORDS) | set(si.HEADWEAR_WORDS) | set(si.CLOTHING_CUES)
+    if db is not None:
+        words |= _caption_vocabulary(db)
+    return words
+
+
+#: The captions' own words, read at most every ten minutes from the
+#: newest few thousand captions: a few milliseconds of Python over text
+#: the database hands back in one round trip. Words of four letters and
+#: more that occur at least twice — one-offs are as likely to be the
+#: captioner's own typos as vocabulary.
+CAPTION_VOCAB_TTL_S = 600.0
+CAPTION_VOCAB_CAPTIONS = 4000
+CAPTION_VOCAB_MIN_COUNT = 2
+_caption_vocab_cache: tuple[float, frozenset[str]] | None = None
+
+
+def _caption_vocabulary(db: Session, now: float | None = None) -> frozenset[str]:
+    global _caption_vocab_cache
+    import re as _re
+    import time as _time
+    from collections import Counter
+
+    now = _time.monotonic() if now is None else now
+    if _caption_vocab_cache is not None and now - _caption_vocab_cache[0] < CAPTION_VOCAB_TTL_S:
+        return _caption_vocab_cache[1]
+    try:
+        rows = (db.query(EventText.caption).filter(EventText.caption.isnot(None))
+                .order_by(EventText.event_id.desc()).limit(CAPTION_VOCAB_CAPTIONS).all())
+        counts: Counter[str] = Counter()
+        for (cap,) in rows:
+            counts.update(w for w in _re.split(r"[^a-z]+", str(cap).lower()) if len(w) >= 4)
+        vocab = frozenset(w for w, n in counts.items() if n >= CAPTION_VOCAB_MIN_COUNT)
+    except Exception:  # noqa: BLE001 — a vocabulary must never break a search
+        logger.debug("search: caption vocabulary unavailable", exc_info=True)
+        vocab = _caption_vocab_cache[1] if _caption_vocab_cache is not None else frozenset()
+    _caption_vocab_cache = (now, vocab)
+    return vocab
 
 
 def _known_people(db: Session, scope: set[int] | None) -> list[str]:
@@ -443,7 +483,7 @@ async def search(
     scope = visible_camera_ids(db, current_user)
     cameras = _visible_cameras(db, scope)
     parsed = (parse_query(q, cameras=cameras, people=_known_people(db, scope),
-                          vocab=_search_vocabulary(), correct=correct)
+                          vocab=_search_vocabulary(db), correct=correct)
               if parse else ParsedQuery())
 
     # Explicit parameters beat the parse, field by field, so a caller can
@@ -524,7 +564,12 @@ async def search(
     # visit embedded yet, an adapter that only does images, KAI-C
     # unreachable — and every one of them lands here as None, which is
     # the word search this route has always been.
-    query_vector, caption_query_vector, no_vector_reason = await _query_vectors(db, words or "")
+    # The vector arms hear the whole corrected question (class words,
+    # colours and counts included), not the residue the word arm gets:
+    # "pink car" leaves no residue and used to run no semantic arm at
+    # all. Explicit text= is embedded as given, like everything else.
+    embed_words = (parsed.question or words or "") if text is None else (words or "")
+    query_vector, caption_query_vector, no_vector_reason = await _query_vectors(db, embed_words)
     from core.config import settings
     floor = float(getattr(settings, "search_vector_min_similarity", 0) or 0) or None
     caption_floor = float(

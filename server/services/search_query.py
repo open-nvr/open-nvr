@@ -271,6 +271,13 @@ class ParsedQuery:
     #: "person", "dok" → "dock"). Shown, never silent, and the caller can
     #: turn it off (``correct=false``) to search the letters as typed.
     corrections: dict[str, str] = field(default_factory=dict)
+    #: The question as the VECTOR arms should hear it: corrected, with
+    #: the time phrase and the camera names taken out, and everything
+    #: else kept — the class words, the colours, the counts. ``text`` is
+    #: what is left for the WORD arm after the parser has turned those
+    #: into filters, and for "pink car" or "three people together" that
+    #: is nothing, which used to mean no semantic arm ran at all.
+    question: str = ""
 
     def as_dict(self) -> dict:
         return {
@@ -286,6 +293,7 @@ class ParsedQuery:
             "ignored": self.ignored,
             "min_people": self.min_people,
             "corrections": self.corrections,
+            "question": self.question,
         }
 
 
@@ -635,6 +643,7 @@ def parse_query(
             out.camera_ids = cam_ids
             out.matched["camera"] = " ".join(dict.fromkeys(cam_words))
             words = [w for w in words if w not in set(cam_words)]
+    out.question = " ".join(words)
 
     # Counts and groups, before the labels pass takes the people word.
     count_words: list[str] = []

@@ -1903,3 +1903,67 @@ def test_a_plate_typed_with_a_confused_letter_still_finds_the_read(db):
         hits = search_events(db, labels=None, camera_ids=None, text="", plate=typed, limit=10, skip=0)
         assert [h.event.id for h in hits] == [hit.id], typed
     assert search_events(db, labels=None, camera_ids=None, text="", plate="ZZ99", limit=10, skip=0) == []
+
+
+# ── the vector arms hear the whole question ────────────────────────────
+
+
+def test_the_parser_keeps_the_whole_corrected_question_for_the_vector_arms():
+    """``text`` is the word arm's residue; ``question`` is the sentence
+    the embedders get — corrected, without the time phrase and the
+    camera names, with the class words, colours and counts kept."""
+    parsed = parse_query("pink car at the dock yesterday", cameras={1: "Dock"}, now=NOW)
+    assert parsed.labels == ["car"] and parsed.camera_ids == [1]
+    assert parsed.question == "pink car at the"
+    parsed = parse_query("three people together", now=NOW)
+    assert parsed.min_people == 3 and parsed.text == ""
+    assert parsed.question == "three people together"
+    parsed = parse_query("persn in a blu shrit", vocab={"blue", "shirt"}, now=NOW)
+    assert parsed.question == "person in a blue shirt"
+    assert parse_query("", now=NOW).question == ""
+    assert "question" in parsed.as_dict()
+
+
+def test_the_route_embeds_the_question_not_the_residue(client, db, monkeypatch):
+    """"pink car" leaves no residue for the word arm and used to run no
+    semantic arm at all; the embedders now get the question itself.
+    Explicit text= is embedded as given."""
+    import routers.search as sr
+    _camera(db, 1, "Dock")
+    _visit(db, label="car", caption="a pink car")
+    heard: list[str] = []
+
+    async def _vectors(_db, words):
+        heard.append(words)
+        return None, None, "no-embeddings"
+
+    monkeypatch.setattr(sr, "_query_vectors", _vectors)
+    body = client.get("/api/v1/search", params={"q": "pink car"}).json()
+    assert body["interpretation"]["labels"] == ["car"]
+    assert body["interpretation"]["question"] == "pink car"
+    client.get("/api/v1/search", params={"q": "pink car", "text": "lorry"})
+    client.get("/api/v1/search", params={"q": "three people together at the dock"})
+    assert heard == ["pink car", "lorry", "three people together at the"]
+
+
+def test_the_captions_own_words_are_part_of_the_typo_vocabulary(client, db, monkeypatch):
+    """"camoflage" is no filter word, so it fell through to the caption
+    text and matched nothing; the captions say "camouflage" all day."""
+    import routers.search as sr
+    _camera(db, 1, "Dock")
+    _visit(db, label="person", caption="a person in a camouflage uniform")
+    _visit(db, label="person", caption="a person wearing camouflage", minutes_ago=7)
+    _visit(db, label="person", caption="a person holding a kurta", minutes_ago=9)   # once: not vocabulary
+    monkeypatch.setattr(sr, "_caption_vocab_cache", None)
+    vocab = sr._caption_vocabulary(db)
+    assert "camouflage" in vocab and "person" in vocab
+    assert "kurta" not in vocab, "a one-off word is as likely a typo as vocabulary"
+    assert "uniform" not in vocab
+    body = client.get("/api/v1/search", params={"q": "camoflage"}).json()
+    assert body["interpretation"]["corrections"] == {"camoflage": "camouflage"}
+    assert body["total"] == 2
+    # Cached: a new caption is not seen until the TTL passes.
+    _visit(db, label="person", caption="a zebra and another zebra", minutes_ago=11)
+    assert "zebra" not in sr._caption_vocabulary(db)
+    monkeypatch.setattr(sr, "_caption_vocab_cache", None)
+    assert "zebra" in sr._caption_vocabulary(db)

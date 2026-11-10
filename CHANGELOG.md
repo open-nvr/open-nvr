@@ -6,6 +6,24 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Search's vector arms hear the whole question, and typos are read
+  against the captions' own words.** The relevance eval on the Ventuno Q
+  (`tools/search_eval.py`, baseline 2026-11-10) showed two gaps. A query
+  whose every word the parser turns into a filter — "pink car", "a bus",
+  "three people together" — left nothing for the word arm, and the
+  embedders were handed that same nothing, so no semantic arm ran at all.
+  The parser now also keeps `question`: the corrected sentence with the
+  time phrase and camera names removed and everything else kept, and the
+  route embeds that (explicit `text=` is embedded as given). And a typo
+  of a word that is neither a filter nor a skill's vocabulary — "camoflage",
+  "pikup" on a site whose captions say camouflage and pickup all day —
+  was never corrected; the correction vocabulary now includes the words
+  the box's newest four thousand captions use at least twice, read at
+  most every ten minutes. (`server/services/search_query.py`,
+  `server/routers/search.py`)
+
 ### Added
 
 - **Search's caption arm has its own model.** The caption arm compares a
