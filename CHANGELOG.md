@@ -606,6 +606,14 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **detect-pipeline memory grew with every evidence fetch.** The main
+  `opennvr-tier0` process went from 256 MiB to 932 MiB over a morning of
+  ~200 evidence fetches on the Ventuno Q with every buffer bounded and no
+  track live: each fetch decodes a 1080p main-stream clip in a worker
+  thread, and glibc's per-thread malloc arenas keep what they grew to.
+  The image now sets `MALLOC_ARENA_MAX=2`, the standard cap for threaded
+  numpy work; the growth becomes a plateau.
+
 - **Search's frame arm rejected every match.** `SEARCH_VECTOR_MIN_SIMILARITY`
   defaulted to 0.22, a floor never measured against real vectors. With
   SigLIP2 on the Ventuno Q a query that describes a visit scores

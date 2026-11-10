@@ -60,6 +60,14 @@ ENV OPENNVR_ACCEL_FLAVOUR=${ACCEL}
 
 # On by default; set DETECT_PIPELINE_ENABLED=false to disable without redeploy.
 ENV DETECT_PIPELINE_ENABLED=true
+# glibc gives every thread that mallocs its own arena (up to 8 x cores)
+# and arenas never shrink: the evidence path decodes 1080p main-stream
+# clips in worker threads, and each fetch left the process ~1 MiB larger
+# for good — 256 MiB to 932 MiB over 200 fetches on the Ventuno Q
+# (2026-11-10) with every buffer in the code bounded and no tracks live.
+# Two arenas keep the fragmentation to a plateau; numpy's big buffers go
+# through mmap anyway, so throughput is unaffected.
+ENV MALLOC_ARENA_MAX=2
 
 # The service holds no ports open — it consumes MediaMTX and publishes to NATS.
 CMD ["opennvr-tier0"]
