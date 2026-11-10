@@ -140,3 +140,32 @@ def test_show_camera_pushes_the_view_to_the_page():
     ask = asyncio.run(rt._handle_show_camera({"camera_id": "all"}))
     assert ask.startswith("Which camera should I show?")
     assert q.empty()
+
+
+class _ContraryOllama:
+    """Would restate a stop as its opposite, as granite4:micro did."""
+    def __init__(self):
+        self.n = 0
+
+    async def chat(self, **kw):
+        self.n += 1
+        return {"message": {"content": "I'm watching for cars on the gate.", "tool_calls": []}}
+
+    async def aclose(self):
+        return None
+
+
+def test_a_routed_stop_speaks_the_tools_own_sentence_without_the_model():
+    import camera_agent as ca
+
+    rt = _runtime()
+    rt.cfg.text_mode = True
+    rt.ollama = _ContraryOllama()
+    asyncio.run(rt._handle_create_monitor({"kind": "notify", "target": "car", "camera_id": "cam2"}))
+    reply = asyncio.run(ca._run_conversation_turn(rt, [], "stop watching for that"))
+    assert "stopped and removed" in reply.lower(), reply
+    assert rt.ollama.n == 0, "no compose call: the model could only contradict the tool"
+    steps = {s["step"]: s for s in rt.last_turn_trace}
+    assert steps["compose"]["detail"] == "tier0 direct"
+    assert steps["reply"]["detail"] == "tool"
+    assert rt.monitors.list() == [] or not rt.monitors.list()[0]["active"]

@@ -592,6 +592,15 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Camera agent: the two misses of the CPU-brain eval on the Ventuno Q
+  (granite4:micro, 50 of 52, `bench/ventuno-q-eval-cpu-vs-npu-2026-11-10.md`).**
+  A routed stop or view switch now speaks the tool's own sentence with no
+  compose call: granite restated "Stopped and removed watch 'cars'" as
+  "I'm watching for cars" (19 s to say the opposite). A report request
+  that names an interval ("every hour") keeps that interval even when the
+  model put a clock time in `at` (granite wrote 03:00), and a query the
+  model copied from the schema's example is replaced by the question.
+
 - **Every recording segment was indexed with no size and no codec.** The
   segment-complete hook stat'ed MTX_SEGMENT_PATH as MediaMTX spells it
   (relative to its own working directory, `./app/recordings/…`), resolved
