@@ -239,6 +239,11 @@ export function useSegmentsForCameras(
 export type SystemResourcesResp = {
   sampled_at?: string
   scope?: string
+  /** "host-agent": the machine's own numbers (services/host_agent.py);
+   *  "core": core's container — on Docker Desktop, Docker's VM. */
+  measured_by?: 'host-agent' | 'core'
+  temperatures?: { label: string; celsius: number }[]
+  host_disks?: { mount: string; total_bytes: number; free_bytes: number }[]
   monitoring_available?: boolean
   cpu_percent?: number | null
   load_avg?: number[] | null

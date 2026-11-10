@@ -14,6 +14,7 @@ import { useCameraStatus } from '../../../hooks/useCameraStatus'
 import { usePageVisible } from '../../../hooks/usePageVisible'
 import { VideoPlayer } from '../../../components/VideoPlayer'
 import { WidgetFrame, MiniSegment, cameraState, shortAge, STATE_INK, type CamState } from '../WidgetFrame'
+import { webcamOfflineLabel } from '../../../lib/hostAgent'
 
 const TOUR_MS = 15_000
 const SLOT_OPTIONS = [1, 4, 6, 9] as const
@@ -113,6 +114,7 @@ function LiveTile({ cam, spotlit, onSpotlight, playing }: {
           autoPlay
           muted
           displayAspectOverride={cam.display_aspect_ratio}
+          offlineLabel={webcamOfflineLabel(cam as any)}
           cameraId={cam.id}
           className="w-full h-full !bg-black"
         />

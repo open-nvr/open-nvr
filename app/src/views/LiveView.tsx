@@ -51,6 +51,7 @@ import { MiniSegment, STATE_INK, type CamState } from './dashboard/WidgetFrame'
 import { clsx } from 'clsx'
 import { PREDEFINED_LAYOUTS, type LayoutDefinition } from '../lib/liveLayouts'
 import { ToursMenu } from '../components/live/ToursMenu'
+import { webcamOfflineLabel } from '../lib/hostAgent'
 
 /** The dashboard wall's still-tile background, for tiles with no picture. */
 const NO_PICTURE_BG = 'repeating-linear-gradient(135deg, #07090d 0 10px, #0b0f16 10px 20px)'
@@ -757,6 +758,7 @@ function Tile({
             muted
             onSnapshot={handleSnapshot}
             displayAspectOverride={assignedCamera?.display_aspect_ratio}
+            offlineLabel={webcamOfflineLabel(assignedCamera as any)}
             cameraId={cameraId}
             showDetections={showDetections}
             onTogglePtz={() => setPtzOpen((s) => !s)}

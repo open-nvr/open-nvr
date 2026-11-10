@@ -27,8 +27,16 @@ from datetime import datetime
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, EmailStr, Field, field_serializer, field_validator
+from pydantic import (
+    BaseModel,
+    EmailStr,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
+from core.camera_source import PUBLISHER_IP_SENTINEL, SOURCE_PUBLISHER
 from core.config import settings
 
 
@@ -101,6 +109,18 @@ class CameraBase(BaseModel):
     firmware_version: str | None = Field(None, max_length=100)
     serial_number: str | None = Field(None, max_length=100)
     hardware_id: str | None = Field(None, max_length=100)
+    # Where the video comes from (core/camera_source.py): "rtsp" pulls
+    # rtsp_url; "publisher" is a webcam that publishes into the camera's
+    # MediaMTX path. Fixed at creation.
+    source_type: Literal["rtsp", "publisher"] = "rtsp"
+    # For a webcam on the OpenNVR machine: the host agent's id of the USB
+    # webcam that feeds it (services/host_agent.py). None = a browser webcam.
+    source_device: str | None = Field(None, max_length=300)
+
+    @field_validator("source_type", mode="before")
+    @classmethod
+    def _null_source_means_rtsp(cls, v: str | None) -> str:
+        return v or "rtsp"
 
     @field_validator(
         "name",
@@ -238,6 +258,36 @@ class CameraCreate(CameraBase):
     """Schema for creating a new camera."""
 
     password: str | None = Field(None, max_length=255)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _publisher_has_no_address(cls, data: Any) -> Any:
+        """A webcam has no address or stream URL of its own.
+
+        ``ip_address`` is filled with the sentinel (the column is NOT NULL);
+        anything that would make it look like an IP camera is refused rather
+        than silently dropped, so a client mixing the two finds out.
+        """
+        if not isinstance(data, dict):
+            return data
+        if data.get("source_type") != SOURCE_PUBLISHER:
+            if data.get("source_device"):
+                raise ValueError("source_device is only for a webcam camera (source_type 'publisher')")
+            return data
+        stray = [
+            k
+            for k in ("rtsp_url", "substream_url", "username", "password")
+            if data.get(k)
+        ]
+        ip = data.get("ip_address")
+        if ip and ip != PUBLISHER_IP_SENTINEL:
+            stray.insert(0, "ip_address")
+        if stray:
+            raise ValueError(
+                "A webcam camera takes no address, stream URL or credentials "
+                f"(got: {', '.join(stray)})"
+            )
+        return {**data, "ip_address": PUBLISHER_IP_SENTINEL}
 
 
 class RecordingCreate(RecordingBase):
@@ -497,6 +547,9 @@ class CameraUpdate(BaseModel):
     # Why, for the audit log only (e.g. the Home Assistant automation that
     # asked). Never stored on the camera.
     reason: str | None = Field(None, max_length=200)
+    # A webcam on the OpenNVR machine: switch it to another USB webcam, or
+    # "" / null for none (the router refuses it on any other camera).
+    source_device: str | None = Field(None, max_length=300)
     # Per-camera capability assignment (see CameraAssignment). Send the FULL
     # list each time — this replaces, it does not merge. [] clears.
     assignments: list[CameraAssignment] | None = None

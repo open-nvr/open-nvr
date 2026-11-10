@@ -21,6 +21,7 @@
 #   ./start.sh token        # re-print the first-time setup token
 #   ./start.sh update       # update to the latest release (scripts/update-host.sh)
 #   ./start.sh auto-update enable|disable|status   # the runner for in-app updates
+#   ./start.sh host-agent install|uninstall|status|logs   # USB webcams + host monitoring
 # ============================================================
 
 set -e
@@ -2022,6 +2023,10 @@ run_up() {
     print_security_posture
     print_first_time_setup_token "$ARGS"
     check_edge_reachable
+    # An installed host agent follows the core it talks to (scripts/host-agent.sh).
+    # shellcheck source=scripts/host-agent.sh
+    . "$(dirname "$0")/scripts/host-agent.sh"
+    run_host_agent_refresh || true
 }
 
 # Image tags from earlier releases, and dangling layers. An upgrade pulls the
@@ -2275,9 +2280,16 @@ case "$COMMAND" in
     run_auto_update "${2:-status}"
     ;;
 
+  host-agent)
+    # The agent on this machine: USB webcams and host monitoring.
+    # shellcheck source=scripts/host-agent.sh
+    . "$(dirname "$0")/scripts/host-agent.sh"
+    run_host_agent "${2:-status}"
+    ;;
+
   *)
     echo -e "${RED}Unknown command: $COMMAND${NC}"
-    echo "Usage: ./start.sh [start|restart|up|build|down|logs|status|validate|prune|token|refresh-net|install|reconfigure|refresh-certs|update|auto-update]"
+    echo "Usage: ./start.sh [start|restart|up|build|down|logs|status|validate|prune|token|refresh-net|install|reconfigure|refresh-certs|update|auto-update|host-agent]"
     exit 1
     ;;
 esac

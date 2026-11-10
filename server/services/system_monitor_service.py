@@ -112,6 +112,10 @@ class SystemMonitorService:
             "sampled_at": now.isoformat(),
             "ts": now.timestamp(),
             "scope": "host",
+            # Who measured CPU and memory: "host-agent" (the host itself,
+            # services/host_agent.py) or "core" (psutil in this container —
+            # on Docker Desktop that is Docker's VM, not the machine).
+            "measured_by": "core",
             "cpu_percent": None,
             "load_avg": None,
             "memory": None,
@@ -143,6 +147,8 @@ class SystemMonitorService:
             except Exception as e:
                 main_logger.warning(f"psutil sampling failed: {e}")
 
+        self._apply_host_agent_metrics(out)
+
         try:
             from core.config import settings as _settings
             out["accelerators"] = self._accel.update(
@@ -167,6 +173,47 @@ class SystemMonitorService:
         except Exception as e:
             out["disk_error"] = str(e)
         return out
+
+    @staticmethod
+    def _apply_host_agent_metrics(out: dict[str, Any]) -> None:
+        """Prefer the host agent's own measurements when they are fresh.
+
+        Only CPU, memory and load are replaced, plus the extras only the host
+        can see (every disk, temperatures, the recordings folder's host
+        volume). ``disk`` stays core's own reading of the recordings mount:
+        retention and the disk-low alert act on what core can write to.
+        """
+        try:
+            from services.host_agent import fresh_metrics
+
+            m = fresh_metrics()
+        except Exception:  # noqa: BLE001 - the agent is optional
+            m = None
+        if not m:
+            return
+        cpu = m.get("cpu_percent")
+        total = m.get("memory_total_bytes")
+        used = m.get("memory_used_bytes")
+        if cpu is None and not total:
+            return
+        out["measured_by"] = "host-agent"
+        if cpu is not None:
+            out["cpu_percent"] = round(float(cpu), 1)
+        if total:
+            used = int(used or 0)
+            out["memory"] = {
+                "total": int(total),
+                "used": used,
+                "percent": round(used / int(total) * 100, 1),
+            }
+        if m.get("load_avg"):
+            out["load_avg"] = list(m["load_avg"])
+        if m.get("cpu_count"):
+            out["cpu_count"] = int(m["cpu_count"])
+        out["host_disks"] = m.get("disks") or []
+        out["temperatures"] = m.get("temperatures") or []
+        if m.get("recordings_disk"):
+            out["host_recordings_disk"] = m["recordings_disk"]
 
     # ----------------------------------------------------------------- history
 

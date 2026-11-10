@@ -83,6 +83,7 @@ const SyncPlayback = lazy(() => importSyncPlayback().then((m) => ({ default: m.S
 const TourView = lazy(reloadOnStale(() => import('./views/TourView').then((m) => ({ default: m.TourView }))))
 const TourEditor = lazy(reloadOnStale(() => import('./views/TourEditor').then((m) => ({ default: m.TourEditor }))))
 const Cameras = lazy(reloadOnStale(() => import('./views/Cameras').then((m) => ({ default: m.Cameras }))))
+const WebcamPublisher = lazy(reloadOnStale(() => import('./views/WebcamPublisher').then((m) => ({ default: m.WebcamPublisher }))))
 const Vehicles = lazy(reloadOnStale(() => import('./views/Vehicles').then((m) => ({ default: m.Vehicles }))))
 const Occupancy = lazy(reloadOnStale(() => import('./views/Occupancy').then((m) => ({ default: m.Occupancy }))))
 const People = lazy(reloadOnStale(() => import('./views/People').then((m) => ({ default: m.People }))))
@@ -181,6 +182,7 @@ const router = createBrowserRouter([
           { path: 'playback/sync', element: <SyncPlayback /> },
           { path: 'search', element: <Search /> },
           { path: 'cameras', element: <Cameras /> },
+          { path: 'cameras/:cameraId/publish', element: <WebcamPublisher /> },
           { path: 'vehicles', element: <Vehicles /> },
           { path: 'occupancy', element: <Occupancy /> },
           { path: 'people', element: <People /> },
