@@ -236,6 +236,7 @@ apply_accel_env() {
             # ADAPTER_TAG (or as latest-qualcomm before a release ships it).
             fill_qualcomm_captioner
             fill_qualcomm_agent_llm
+            fill_qualcomm_embedder
             ;;
     esac
     # Speech to text is resolved for EVERY flavour: STT_ADAPTER=auto is
@@ -313,6 +314,32 @@ fill_qualcomm_agent_llm() {
     return 0
 }
 
+# The search embedder on the NPU: SigLIP2 through ai-adapter's siglip_qnn
+# (docker-compose.accel-qualcomm.yml replaces the CPU clip image for the
+# `embeddings` profile). Filled only when the image exists for this
+# ADAPTER_TAG (or as latest-qualcomm): EVENTS_EMBED_ENRICHMENT on, the
+# `embeddings` profile added to OPENNVR_EXAMPLE_PROFILE so the adapter
+# starts and registers — the same rule as the captioner's fill: an
+# operator's own value is never touched, leaving the flavour resets both.
+# The per-camera `embed` skill assignment stays the operator's gate: the
+# flag and the adapter do nothing for a camera without it.
+fill_qualcomm_embedder() {
+    local tag img; tag=$(get_env_var ADAPTER_TAG)
+    for tag in "${tag:-latest}-qualcomm" "latest-qualcomm"; do
+        img="ghcr.io/open-nvr/siglip-qnn-adapter:${tag}"
+        if accel_image_available "$img"; then
+            case "$(get_env_var EVENTS_EMBED_ENRICHMENT)" in ""|false) set_env_var EVENTS_EMBED_ENRICHMENT true ;; esac
+            local profiles; profiles=$(get_env_var OPENNVR_EXAMPLE_PROFILE)
+            case ",${profiles}," in
+                *,embeddings,*|*,enrichment,*) ;;
+                *) set_env_var OPENNVR_EXAMPLE_PROFILE "${profiles:+$profiles,}embeddings" ;;
+            esac
+            return 0
+        fi
+    done
+    echo -e "${YELLOW}Accelerate:${NC} the NPU embedder image ghcr.io/open-nvr/siglip-qnn-adapter:*-qualcomm is not available (no registry access, or not published yet) — search keeps matching words only." >&2
+}
+
 # Speech to text for the camera agent. STT_ADAPTER in .env is one word:
 #   auto (default)  whisper_qnn on a Qualcomm board whose NPU image is
 #                   available, parakeet everywhere else
@@ -381,7 +408,7 @@ reset_stale_accel_fills() {
     local now="$1" prev; prev=$(get_env_var OPENNVR_ACCEL_RESOLVED)
     [[ -z "$prev" || "$prev" == "$now" ]] && return 0
     local key val
-    for key in DETECT_HWACCEL DETECT_ONNX_BACKEND DETECT_ONNX_PROVIDERS YOLO_POSE_ONNX_PROVIDERS CAPTION_ADAPTER LLM_BASE_URL STT_ADAPTER; do
+    for key in DETECT_HWACCEL DETECT_ONNX_BACKEND DETECT_ONNX_PROVIDERS YOLO_POSE_ONNX_PROVIDERS CAPTION_ADAPTER LLM_BASE_URL STT_ADAPTER EVENTS_EMBED_ENRICHMENT; do
         val=$(get_env_var "$key")
         case "$prev:$key:$val" in
             intel:DETECT_HWACCEL:vaapi) write_env_var DETECT_HWACCEL cpu ;;
@@ -405,6 +432,14 @@ reset_stale_accel_fills() {
             qualcomm:STT_ADAPTER:whisper_qnn)
                 write_env_var STT_ADAPTER parakeet; write_env_var STT_ADAPTER_TAG ""
                 write_env_var STT_ADAPTER_IMAGE ""; write_env_var STT_ADAPTER_MODULE ""; write_env_var STT_ONNX_PROVIDERS "" ;;
+            # The NPU embedder has no CPU image here: the flag the fill set
+            # goes back off and the profile it added is removed (an
+            # `enrichment` profile the operator chose is kept).
+            qualcomm:EVENTS_EMBED_ENRICHMENT:true)
+                write_env_var EVENTS_EMBED_ENRICHMENT false
+                local _p; _p=$(get_env_var OPENNVR_EXAMPLE_PROFILE)
+                _p=$(printf '%s' ",${_p}," | sed -e 's/,embeddings,/,/g' -e 's/^,//' -e 's/,$//')
+                write_env_var OPENNVR_EXAMPLE_PROFILE "$_p" ;;
             intel:DETECT_ONNX_BACKEND:ort|qualcomm:DETECT_ONNX_BACKEND:ort) write_env_var DETECT_ONNX_BACKEND auto ;;
             intel:DETECT_ONNX_PROVIDERS:OpenVINOExecutionProvider:NPU|intel:DETECT_ONNX_PROVIDERS:OpenVINOExecutionProvider:GPU|qualcomm:DETECT_ONNX_PROVIDERS:QNNExecutionProvider:htp)
                 write_env_var DETECT_ONNX_PROVIDERS "" ;;

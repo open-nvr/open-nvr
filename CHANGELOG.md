@@ -8,6 +8,21 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Search's embedding lane on the Qualcomm NPU.** On the qualcomm
+  flavour the `embeddings` profile now runs SigLIP2 (`google/siglip2-
+  base-patch16-224`, Apache-2.0, Qualcomm AI Hub's w8a16 export) on the
+  Hexagon through ai-adapter's new `siglip_qnn` image in place of the CPU
+  clip adapter — the same 768-dimensional image + text space, the same
+  `embed` request and answer, the same port, so nothing else changes.
+  `./start.sh` turns `EVENTS_EMBED_ENRICHMENT` on and adds the profile
+  when the image exists (and puts both back on leaving the flavour); the
+  compiled HTP graphs live in a volume so a recreate does not compile
+  again; `SIGLIP_QNN_TEXT_PROVIDERS=CPUExecutionProvider` keeps the text
+  tower on the CPU where its HTP build is too slow. The per-camera `embed`
+  skill remains the operator's gate. This is what makes the frame arm
+  and the caption-embedding arm of search (both already built) actually
+  run on a Qualcomm box, where no embedder existed before.
+
 - **Camera agent: `GET /turn-stats`, and footage review that captions only
   what changed.** `/turn-stats` reports what the last thousand turns cost
   in this process — p50/p95 wall time, LLM time and tool time by router
