@@ -584,7 +584,12 @@ class Settings(BaseSettings):
     # trained with a sigmoid loss whose scale and bias make 0.13 a
     # confident match; the 0.22 this was before (never measured against
     # real vectors) rejected every frame.
-    search_vector_min_similarity: float = 0.08
+    # 0.08 let every true match through (0.11–0.14 on the probe) and
+    # fifty near-misses with it; the labelled eval's fusion sweep
+    # (bench/ventuno-q-text-embed-2026-11-10.md) put 0.12 ahead on every
+    # metric — the rows between 0.08 and 0.12 were the ones outvoting
+    # the words.
+    search_vector_min_similarity: float = 0.12
     # The floor for search's CAPTION arm — the query against each visit's
     # caption vector (caption + attribute words). With a `text_embed`
     # adapter registered (bge-small, the sentence encoder) both go
@@ -602,6 +607,14 @@ class Settings(BaseSettings):
     # there. 0 disables it; `semantic.caption.best` in a search's answer
     # shows the scale a box is seeing.
     search_caption_min_similarity: float = 0.65
+    # How much each arm's vote counts in the fusion (reciprocal rank,
+    # k=60): the words 1, the frame vectors 1, the caption vectors 0.5.
+    # Measured on the labelled eval: with the caption arm at a full vote
+    # two vector arms agreeing on a near-miss outvoted the words that
+    # named the thing (MRR 0.755 → 0.815 with these, frame floor 0.12).
+    search_text_arm_weight: float = 1.0
+    search_vector_arm_weight: float = 1.0
+    search_caption_arm_weight: float = 0.5
     # Relearn the camera graph nightly from the journeys the site is
     # already certain about (same plate or same recognised face on two
     # cameras). ON by default, unlike the backfill above, because it

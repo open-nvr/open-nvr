@@ -776,10 +776,16 @@ async def app_search(
     from routers.search import _query_vectors
 
     frame_vector, caption_vector, _reason = await _query_vectors(db, text or "")
+    from core.config import settings
+    from routers.search import _arm_weights
+
     page = search_page(
         db, labels=labels, camera_ids=cams, text=text or "", attrs=attrs,
         query_vector=frame_vector, caption_query_vector=caption_vector,
-        limit=limit, skip=skip, **filters)
+        limit=limit, skip=skip,
+        min_similarity=float(getattr(settings, "search_vector_min_similarity", 0) or 0) or None,
+        caption_min_similarity=float(getattr(settings, "search_caption_min_similarity", 0) or 0) or None,
+        arm_weights=_arm_weights(settings), **filters)
     hits, total = page.hits, page.total
 
     # Names for the rows being returned, not for the site: a scoped

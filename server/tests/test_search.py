@@ -1967,3 +1967,12 @@ def test_the_captions_own_words_are_part_of_the_typo_vocabulary(client, db, monk
     assert "zebra" not in sr._caption_vocabulary(db)
     monkeypatch.setattr(sr, "_caption_vocab_cache", None)
     assert "zebra" in sr._caption_vocabulary(db)
+
+
+def test_the_fusion_weights_come_from_the_settings_and_fall_back_to_one(monkeypatch):
+    import routers.search as sr
+    from core.config import settings
+    assert sr._arm_weights(settings) == {"text": 1.0, "vector": 1.0, "caption": 0.5}
+    monkeypatch.setattr(settings, "search_caption_arm_weight", "garbage", raising=False)
+    monkeypatch.setattr(settings, "search_vector_arm_weight", 0.25, raising=False)
+    assert sr._arm_weights(settings) == {"text": 1.0, "vector": 0.25, "caption": 1.0}

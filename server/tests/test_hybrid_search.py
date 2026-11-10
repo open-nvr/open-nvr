@@ -911,3 +911,32 @@ def test_the_caption_arm_scores_its_own_query_vector(db):
     # vector, which here is the wrong size and so matches nothing.
     page = search_page(db, query_vector=[1.0, 0, 0, 0])
     assert page.semantic["arms"].get("caption", 0) == 0
+
+
+# ── weighted fusion ──────────────────────────────────────────────────
+
+
+def test_rrf_weights_scale_an_arms_vote_and_default_to_one():
+    from services.search_service import RRF_K, _rrf
+
+    scores, _ = _rrf({"text": [1, 2], "caption": [2, 1]}, {"caption": 0.5})
+    assert scores[1] == pytest.approx(1 / (RRF_K + 1) + 0.5 / (RRF_K + 2))
+    assert scores[2] == pytest.approx(1 / (RRF_K + 2) + 0.5 / (RRF_K + 1))
+    assert scores[1] > scores[2], "the words' first place outweighs the half-vote caption first place"
+    equal, _ = _rrf({"text": [1, 2], "caption": [2, 1]})
+    assert equal[1] == pytest.approx(equal[2])
+    unnamed, _ = _rrf({"text": [1]}, {"caption": 0.5})
+    assert unnamed[1] == pytest.approx(1 / (RRF_K + 1))
+
+
+def test_search_page_takes_arm_weights(db):
+    """Two visits, each first in one vector arm: equal votes tie (newer
+    first); with the caption arm at half a vote the frame arm's pick
+    wins."""
+    a = _visit(db, caption="a lorry", vec=[1.0, 0, 0, 0], cvec=[0.0, 1.0])
+    b = _visit(db, caption="a van", start_s=60, vec=[0, 1.0, 0, 0], cvec=[1.0, 0.0])
+    equal = search_page(db, query_vector=[1.0, 0, 0, 0], caption_query_vector=[1.0, 0.0])
+    assert [h.event.id for h in equal.hits] == [b.id, a.id]
+    weighted = search_page(db, query_vector=[1.0, 0, 0, 0], caption_query_vector=[1.0, 0.0],
+                           arm_weights={"caption": 0.5})
+    assert [h.event.id for h in weighted.hits] == [a.id, b.id]
