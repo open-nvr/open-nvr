@@ -577,7 +577,14 @@ class Settings(BaseSettings):
     # Measured on CLIP ViT-B/32 text→frame: on-topic best matches score
     # 0.25-0.29, off-topic ones 0.19-0.22, so 0.22 keeps the former and
     # drops the latter. 0 disables the floor (the old behaviour).
-    search_vector_min_similarity: float = 0.22
+    # Measured on the Ventuno Q with SigLIP2 (2026-11-10, 103 visits,
+    # bench/ventuno-q-npu-embedder-2026-11-10.md): a query that describes
+    # a visit scores 0.11–0.14 against its frame, one that describes
+    # nothing on the site tops out at 0.056. SigLIP-family models are
+    # trained with a sigmoid loss whose scale and bias make 0.13 a
+    # confident match; the 0.22 this was before (never measured against
+    # real vectors) rejected every frame.
+    search_vector_min_similarity: float = 0.08
     # The same floor for search's CAPTION arm — the query vector against
     # each visit's caption vector (caption + attribute words through the
     # embedding model's text tower). Same cosine scale, so it starts at

@@ -751,7 +751,8 @@ _NOT_STATUS_RE = re.compile(
 #: time in 3 (Ventuno Q eval, 2026-11-09).
 _STOP_REQUEST_RE = re.compile(
     r"^\s*(?:(?:ok(?:ay)?|actually|also|and|now|hey|so|well|no|yes|then|please)[,\s]+)*"
-    r"(?:please\s+)?(?:can\s+you\s+|could\s+you\s+|would\s+you\s+)?"
+    r"(?:please\s+)?(?:can\s+you\s+|could\s+you\s+|would\s+you\s+|let\s+me\s+|let'?s\s+|"
+    r"i(?:\s+want\s+to|\s+need\s+to|\s+would\s+like\s+to|'d\s+like\s+to|\s+will|'ll)?\s+)?"
     r"(?:stop|cancel|disarm|silence|mute|remove|delete|clear|turn\s+(?:it\s+|that\s+|them\s+|the\s+\w+\s+)?off)\b",
     re.IGNORECASE)
 #: A "stop" that is about the conversation or the recording, not a

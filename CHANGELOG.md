@@ -620,6 +620,29 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Search's frame arm rejected every match.** `SEARCH_VECTOR_MIN_SIMILARITY`
+  defaulted to 0.22, a floor never measured against real vectors. With
+  SigLIP2 on the Ventuno Q a query that describes a visit scores
+  0.11–0.14 against its frame and one that describes nothing on the site
+  tops out at 0.056 (`bench/ventuno-q-npu-embedder-2026-11-10.md`): the
+  SigLIP family's sigmoid training makes 0.13 a confident match. The
+  default is 0.08; a box with the old value written in `.env` must change
+  it. The caption arm's floor is left alone: text-to-text cosines from an
+  image-text model's text tower overlap for relevant and irrelevant
+  queries, so no floor separates them, and a text-embedding model is the
+  next step for that arm.
+
+- **Camera agent voice: a sentence paused mid-way is answered once, whole.**
+  Smart Turn cuts an utterance at a pause of `turn_stop_secs`; a speaker
+  who pauses to think ("I remove that alarm." … "for cam 24 person.",
+  Ventuno Q 2026-11-10) got two turns, the first answered before the second
+  arrived. A transcript that reads as half a sentence — it ends on a word
+  that needs the next one, or is a lone word that is not an answer — is now
+  held up to 2.5 s for its continuation, which joins it; a complete sentence
+  is answered at once. First-person stop requests ("I remove that alarm",
+  "I want to remove this", "let me cancel it") are routed straight to the
+  stop tool like the imperative ones.
+
 - **The accelerator overlay lost every override of an app-file service.**
   `start.sh` appended `docker-compose.accel-*.yml` before
   `docker-compose.apps.yml`, and Compose lets the last definition of a

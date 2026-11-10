@@ -72,3 +72,6 @@ Reports taken on real boards, every number from a run on that board:
 - [`ventuno-q-eval-cpu-vs-npu-2026-11-10.md`](ventuno-q-eval-cpu-vs-npu-2026-11-10.md) — the 52-case live eval on
   granite4:micro (CPU) against Gemma on the NPU, same box, same cases: 50 of 52 vs 52 of 52, but 16 s / 195 s /
   218 s a turn by tier against 0.6 / 3.1 / 3.2 s; the router carries granite, the ARM cores do not.
+- [`ventuno-q-npu-embedder-2026-11-10.md`](ventuno-q-npu-embedder-2026-11-10.md) — search's embedder on the
+  Hexagon (SigLIP2 w8a16): both graphs compiled in 11 s, text 4–6 ms and frames 6–8 ms, the ranking right on five
+  of five queries — and the frame-arm floor that had to drop from 0.22 to 0.08 to let any match through.
