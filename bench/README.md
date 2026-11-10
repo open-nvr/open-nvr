@@ -77,4 +77,6 @@ Reports taken on real boards, every number from a run on that board:
   of five queries — and the frame-arm floor that had to drop from 0.22 to 0.08 to let any match through.
 - [`ventuno-q-text-embed-2026-11-10.md`](ventuno-q-text-embed-2026-11-10.md) — search's caption arm on a
   sentence encoder (bge-small, CPU): 37.6 ms a caption on two ARM cores, and against the box's 805 captions a
-  caption that answers the query scores 0.75–0.83 where the best unrelated one scores 0.57–0.74 — the 0.75 floor.
+  caption that answers the query scores 0.75–0.83 where the best unrelated one scores 0.57–0.74; then the
+  labelled eval (`tools/search_eval.py`, 33 cases) before and after: MRR 0.46 → 0.71, hit@5 0.57 → 0.82, typos
+  0.07 → 0.67, and the floor settled at 0.65 by a sweep over the labelled pool.
