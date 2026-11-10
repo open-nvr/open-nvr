@@ -66,10 +66,51 @@ By luck the same 0.75 is where SigLIP2's text tower put the top of ITS noise
 floor from the same default; its hits (0.76–0.87) sit above it, with less
 margin.
 
+## The floor against the labelled eval (added the same evening)
+
+The fifteen probe queries above are phrased the way the captioner writes.
+The relevance-labelled eval (`bench/search-eval-cases-ventuno-q-2026-11-10.yml`,
+33 cases from the same captions, operator phrasing) was run before and after
+the caption arm moved to this adapter, all 1,076 caption rows re-embedded:
+
+| | SigLIP text tower, floor 0.22 | bge-small, floor 0.75 |
+|---|---|---|
+| MRR | 0.462 | 0.508 |
+| hit@5 | 0.571 | 0.607 |
+| P@5 | 0.234 | 0.302 |
+| recall@10 | 0.446 | 0.467 |
+| attribute / caption / paraphrase / typo MRR | 0.44 / 0.61 / 0.40 / 0.07 | 0.54 / 0.66 / 0.40 / 0.06 |
+
+A gain, but at 0.75 the caption arm admitted one or two rows a query — the
+eval's phrasing scores lower than the probe's ("hooded sweatshirt" best
+relevant 0.63, "light blue kurta" 0.67, "person wearing a striped shirt"
+0.69). A sweep of the caption arm ALONE over the labelled pool (646 bge
+caption vectors, the arm's own ranking, no fusion):
+
+| floor | MRR | hit@5 | cases with the arm on | wrong rows in the top 5, summed |
+|---|---|---|---|---|
+| 0.55 | 0.81 | 0.93 | 28/28 | 72 |
+| 0.60 | 0.79 | 0.89 | 28/28 | 69 |
+| 0.65 | 0.74 | 0.82 | 26/28 | 61 |
+| 0.68 | 0.70 | 0.79 | 24/28 | 54 |
+| 0.70 | 0.68 | 0.75 | 24/28 | 52 |
+| 0.72 | 0.64 | 0.71 | 22/28 | 46 |
+| 0.75 | 0.60 | 0.64 | 21/28 | 32 |
+
+"Wrong" here is strict — the other white cars under "white car parked in
+front of a building" count as wrong — so the rightmost column overstates
+the noise. Against the probe's nonsense queries ("a cat on the roof" 0.57,
+"a dog" 0.64, "snow on the ground" 0.68), 0.65 cuts the first two and lets
+the third through. Fusion ranks by agreement between arms, so a looser
+caption floor costs little precision and buys the arm back for a quarter of
+the cases: **the default moved to 0.65** (the 0.75 above stood for one
+afternoon). A box running the fallback text tower should raise it to 0.75.
+
 ## What changed because of this
 
-- `SEARCH_CAPTION_MIN_SIMILARITY` default 0.22 → 0.75 (the earlier value was
-  never measured against real vectors).
+- `SEARCH_CAPTION_MIN_SIMILARITY` default 0.22 → 0.75 → 0.65 (the first value
+  was never measured against real vectors; the second was measured against
+  the captioner's phrasing; the third against operators').
 - The caption arm's query and the caption vectors go through `text_embed`
   where an adapter advertises it; the frame arm keeps SigLIP2 on the NPU.
 
