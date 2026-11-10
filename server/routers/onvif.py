@@ -285,6 +285,41 @@ async def _await_scan_or_disconnect(scan: asyncio.Task, request: Request):
             )
 
 
+@router.get("/discover/agent")
+async def discover_via_host_agent(
+    refresh: bool = Query(True, description="Ask the agent for a fresh probe and wait for it (a few seconds)."),
+    current_user=Depends(get_current_superuser),
+):
+    """ONVIF cameras found by the host agent's WS-Discovery (multicast).
+
+    The agent runs on the host's own network, where multicast works: one
+    probe, every camera on that segment answers within a few seconds, and no
+    subnet has to be configured. Core cannot do this itself from a Docker
+    bridge. It does not cross routers, so the unicast sweep (GET /discover)
+    still covers routed camera networks; the dialog runs both and merges.
+
+    ``available: false`` when no agent is connected (the dialog then relies
+    on the sweep alone). Devices have the same shape as GET /discover's,
+    with ``source: "multicast"``, ``name`` and ``hardware`` added; connecting
+    to one still goes through the Camera LAN checks of /connect.
+    """
+    from services import host_agent
+
+    if not host_agent.state.connected():
+        return {"available": False, "devices": [], "scanned_at": None}
+    if refresh:
+        asked = host_agent.request_discovery()
+        # The agent hears the request at its next sync (every few seconds),
+        # probes for ~3 s and reports at once; give it up to 12 s.
+        for _ in range(48):
+            _, scanned_at = host_agent.onvif_scan()
+            if scanned_at and scanned_at >= asked:
+                break
+            await asyncio.sleep(0.25)
+    devices, scanned_at = host_agent.onvif_scan()
+    return {"available": True, "devices": devices, "scanned_at": scanned_at}
+
+
 @router.get("/discover")
 async def discover(
     request: Request,

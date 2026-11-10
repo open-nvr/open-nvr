@@ -138,11 +138,131 @@ class _AgentState:
             return self.report, self.last_seen
 
     def reset(self) -> None:  # tests
+        global _discovery_requested_at
         with self._lock:
             self.report, self.last_seen, self._persisted = None, None, None
+        _discovery_requested_at = 0.0
 
 
 state = _AgentState()
+
+
+# ── ONVIF discovery from the host (WS-Discovery multicast) ─────────────
+#
+# The agent probes the host's LAN every minute and reports what answered.
+# Add Camera → Discover asks for a fresh round (request_discovery); the next
+# sync tells the agent (discovery_pending), and its answer arrives a few
+# seconds later in a report.
+
+_discovery_requested_at: float = 0.0
+
+
+def request_discovery() -> float:
+    """Ask the agent for a probe now; returns the request time."""
+    global _discovery_requested_at
+    _discovery_requested_at = time.time()
+    return _discovery_requested_at
+
+
+def _scan() -> dict[str, Any] | None:
+    report, _ = state.snapshot()
+    scan = (report or {}).get("onvif")
+    return scan if isinstance(scan, dict) else None
+
+
+def discovery_pending() -> bool:
+    scan = _scan()
+    scanned_at = float((scan or {}).get("scanned_at") or 0)
+    return _discovery_requested_at > scanned_at
+
+
+MAX_ONVIF_DEVICES = 256
+_TEXT_MAX = 200
+_URL_MAX = 300
+
+
+def _text(v: Any) -> str | None:
+    if not isinstance(v, str):
+        return None
+    v = "".join(ch for ch in v if ch >= " " and ch != "\x7f").strip()
+    return v[:_TEXT_MAX] or None
+
+
+def clean_onvif_devices(raw: Any) -> list[dict[str, Any]]:
+    """What a discovery report may put in front of a user: private IPv4
+    cameras only, each URL on that very address (http/https, a valid port),
+    text printable and bounded, at most MAX_ONVIF_DEVICES. Anything else is
+    dropped, never an error (see routers/host_agent.OnvifScan)."""
+    import ipaddress
+    from urllib.parse import urlsplit
+
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for d in raw if isinstance(raw, list) else []:
+        if len(out) >= MAX_ONVIF_DEVICES:
+            break
+        if not isinstance(d, dict):
+            continue
+        try:
+            ip = ipaddress.ip_address(str(d.get("ip")))
+        except ValueError:
+            continue
+        if ip.version != 4 or not ip.is_private or ip.is_loopback or ip.is_link_local or str(ip) in seen:
+            continue
+        urls: list[str] = []
+        for x in d.get("xaddrs") or []:
+            if not isinstance(x, str) or len(x) > _URL_MAX:
+                continue
+            try:
+                u = urlsplit(x)
+                port = u.port
+            except ValueError:
+                continue
+            # The same host, exactly: "192.168.1.6" must not match ".64".
+            if u.scheme in ("http", "https") and u.hostname == str(ip) and (port is None or 0 < port < 65536):
+                urls.append(x)
+            if len(urls) >= 4:
+                break
+        scheme = d.get("scheme") if d.get("scheme") in ("http", "https") else "http"
+        try:
+            port = int(d.get("port") or 80)
+        except (TypeError, ValueError):
+            port = 80
+        if not 0 < port < 65536:
+            port = 80
+        seen.add(str(ip))
+        out.append({
+            "ip": str(ip),
+            "port": port,
+            "scheme": scheme,
+            "xaddrs": urls,
+            "name": _text(d.get("name")),
+            "hardware": _text(d.get("hardware")),
+            "location": _text(d.get("location")),
+        })
+    return out
+
+
+def onvif_scan() -> tuple[list[dict[str, Any]], float | None]:
+    """The agent's last discovery, in the shape GET /discover returns.
+    ``scanned_at`` None = never scanned. The devices were cleaned on the
+    way in (clean_onvif_devices)."""
+    scan = _scan()
+    if not scan:
+        return [], None
+    out = [
+        {
+            "ip": d["ip"],
+            "port": d["port"],
+            "scheme": d["scheme"],
+            "service_urls": d["xaddrs"] or [f"{d['scheme']}://{d['ip']}:{d['port']}/onvif/device_service"],
+            "name": d.get("name"),
+            "hardware": d.get("hardware"),
+            "source": "multicast",
+        }
+        for d in clean_onvif_devices(scan.get("devices"))
+    ]
+    return out, float(scan.get("scanned_at") or 0) or None
 
 
 #: Cap on remembered webcam names (see _persistable).

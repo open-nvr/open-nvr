@@ -32,7 +32,32 @@ import { WebcamAddPanel } from './WebcamAddPanel'
 import { useTranslation } from '../i18n'
 import { extractApiError } from '../lib/apiError'
 
-type DiscoveredCamera = { ip: string; scheme?: string; service_urls?: string[] }
+type DiscoveredCamera = {
+  ip: string
+  scheme?: string
+  service_urls?: string[]
+  /** From the camera's own WS-Discovery answer (host agent), when it gave one. */
+  name?: string | null
+  hardware?: string | null
+}
+
+function ipKey(ip: string): number {
+  const p = ip.split('.').map(Number)
+  return p.length === 4 && p.every((n) => n >= 0 && n <= 255) ? ((p[0] * 256 + p[1]) * 256 + p[2]) * 256 + p[3] : Number.MAX_SAFE_INTEGER
+}
+
+// Results arrive from two places (the host agent's multicast probe within
+// seconds, the subnet sweep later): merge by address, keep the name and
+// model whichever brought them, and keep the list in address order so it
+// does not reshuffle as the sweep lands.
+function mergeCameras(prev: DiscoveredCamera[], next: DiscoveredCamera[]): DiscoveredCamera[] {
+  const by = new Map(prev.map((c) => [c.ip, c]))
+  for (const c of next) {
+    const old = by.get(c.ip)
+    by.set(c.ip, old ? { ...c, ...old, name: old.name ?? c.name, hardware: old.hardware ?? c.hardware } : c)
+  }
+  return [...by.values()].sort((a, b) => ipKey(a.ip) - ipKey(b.ip))
+}
 
 // The device's ONVIF port lives inside its service URL. The server sends
 // {ip, scheme, service_urls}; both the subtitle and the connect call need
@@ -244,6 +269,18 @@ export function AddCameraDialog({
     // Show the target range while the scan is still running.
     if (overrideCidr) setScanInfo({ cidrs: [overrideCidr], source: 'override' })
 
+    // The host agent's multicast probe, beside the sweep: cameras on the
+    // OpenNVR machine's own network show up within seconds. No agent (or an
+    // agent that found nothing) just leaves the sweep to it.
+    void apiService.onvifDiscoverAgent().then(
+      (r: any) => {
+        const d = r?.data
+        if (seq !== scanSeqRef.current || !d?.available || !d.devices?.length) return
+        setDiscoveredCameras((prev) => mergeCameras(prev, d.devices))
+      },
+      () => {},
+    )
+
     try {
       const response = await apiService.onvifDiscover(
         overrideCidr ? { cidr: overrideCidr } : undefined,
@@ -258,11 +295,11 @@ export function AddCameraDialog({
       }
       setHostCidrs(prev => Array.from(new Set([...prev, ...(data.suggested_cidrs || [])])))
       if (data.client_cidr) setClientCidr(data.client_cidr)
-      setDiscoveredCameras(devices.map((d: any) => ({
+      setDiscoveredCameras((prev) => mergeCameras(prev, devices.map((d: any) => ({
         ip: d.ip || d.host || d.address,
         scheme: d.scheme || 'http',
         service_urls: d.service_urls || [],
-      })))
+      }))))
     } catch (e: any) {
       if (seq !== scanSeqRef.current || e?.name === 'AbortError') return
       setError(extractApiError(e, 'Discovery failed. Try manual entry.'))
@@ -401,7 +438,8 @@ export function AddCameraDialog({
     setError(null)
     setLanPrompt(null)
     setLanPromptError(null)
-    setCameraName('') // Reset camera name for user input
+    // The name the camera announced (multicast discovery), else empty.
+    setCameraName(camera.name || '')
   }
 
   // Leave the connect step back to the results list (results are kept).
@@ -1064,9 +1102,12 @@ export function AddCameraDialog({
                     <div className="min-w-0">
                       <div className="text-sm font-medium flex items-center gap-2">
                         <span className="font-mono">{camera.ip}</span>
+                        {camera.name && <span className="truncate font-normal">{camera.name}</span>}
                         {addedByIp.has(camera.ip) && <Badge variant="info">{t('cameraDialog.alreadyAdded')}</Badge>}
                       </div>
-                      <div className="text-xs text-[var(--text-dim)]">{deviceSubtitle(camera)}</div>
+                      <div className="text-xs text-[var(--text-dim)]">
+                        {deviceSubtitle(camera)}{camera.hardware ? ` · ${camera.hardware}` : ''}
+                      </div>
                     </div>
                   </div>
                   <ChevronDown size={16} className="text-[var(--text-dim)] -rotate-90 shrink-0" />

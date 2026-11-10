@@ -14,12 +14,14 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/open-nvr/open-nvr/host-agent/internal/buildinfo"
 	"github.com/open-nvr/open-nvr/host-agent/internal/core"
 	"github.com/open-nvr/open-nvr/host-agent/internal/ffmpeg"
 	"github.com/open-nvr/open-nvr/host-agent/internal/metrics"
+	"github.com/open-nvr/open-nvr/host-agent/internal/onvifdisc"
 	"github.com/open-nvr/open-nvr/host-agent/internal/publisher"
 	"github.com/open-nvr/open-nvr/host-agent/internal/webcams"
 )
@@ -68,6 +70,12 @@ func Run(ctx context.Context, o Options) int {
 	)
 	backoff := []time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second}
 
+	// ONVIF discovery runs beside the loop: a WS-Discovery round takes a few
+	// seconds and must not hold up a sync. A round every minute keeps a list
+	// ready; core can ask for one now (Discover opened), and the loop syncs
+	// as soon as it is done so the answer reaches the dialog at once.
+	disc := newDiscoverer(ctx)
+
 	for {
 		wait := 5 * time.Second
 
@@ -115,6 +123,7 @@ func Run(ctx context.Context, o Options) int {
 			Webcams:    reportWebcams(present, mgr.InUse()),
 			Publishers: mgr.States(),
 			Metrics:    metrics.Collect(recordings),
+			Onvif:      disc.latest(),
 		}
 		resp, err := client.Sync(ctx, report)
 		switch {
@@ -148,6 +157,9 @@ func Run(ctx context.Context, o Options) int {
 				lastEnum = time.Time{} // enumerate now, then reconcile
 				wait = 0
 			}
+			if resp.DiscoverOnvif {
+				disc.request()
+			}
 			if resp.PollAfterS >= 2 && resp.PollAfterS <= 60 {
 				wait = min(wait, time.Duration(resp.PollAfterS)*time.Second)
 				if wait == 0 {
@@ -155,10 +167,64 @@ func Run(ctx context.Context, o Options) int {
 				}
 			}
 		}
-		if !sleep(ctx, wait) {
+		// Wake early when a discovery round finishes, so its result is
+		// reported now, not at the next poll.
+		select {
+		case <-ctx.Done():
 			return 0
+		case <-disc.done:
+		case <-time.After(wait):
 		}
 	}
+}
+
+// discoverer runs WS-Discovery rounds in the background.
+type discoverer struct {
+	mu     sync.Mutex
+	scan   *core.OnvifScan
+	wakeup chan struct{}
+	done   chan struct{}
+}
+
+const (
+	discoverEvery = time.Minute
+	discoverWait  = 3 * time.Second
+)
+
+func newDiscoverer(ctx context.Context) *discoverer {
+	d := &discoverer{wakeup: make(chan struct{}, 1), done: make(chan struct{}, 1)}
+	go func() {
+		for {
+			devs := onvifdisc.Probe(ctx, discoverWait)
+			d.mu.Lock()
+			d.scan = &core.OnvifScan{ScannedAt: float64(time.Now().UnixNano()) / 1e9, Devices: devs}
+			d.mu.Unlock()
+			select {
+			case d.done <- struct{}{}:
+			default:
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-d.wakeup:
+			case <-time.After(discoverEvery):
+			}
+		}
+	}()
+	return d
+}
+
+func (d *discoverer) request() {
+	select {
+	case d.wakeup <- struct{}{}:
+	default:
+	}
+}
+
+func (d *discoverer) latest() *core.OnvifScan {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.scan
 }
 
 // reportWebcams is the enumeration plus the webcams being streamed, which
