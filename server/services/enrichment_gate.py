@@ -354,8 +354,8 @@ class AdapterGate:
         if total == 1 or total % 100 == 0:
             logger.warning(
                 "enrichment gate: %s dropped a visit (%s) — %d dropped so far; "
-                "backfill (EVENTS_ENRICHMENT_BACKFILL=true) describes them "
-                "later, when the box is idle",
+                "the backfill (Footage Search → Configure → Backfill history) "
+                "describes them later, when the box is idle",
                 self.adapter, why, total)
 
 

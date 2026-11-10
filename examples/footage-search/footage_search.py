@@ -96,6 +96,11 @@ MANIFEST = AppManifest(
     enrich_tasks=["image_captioning", "embed"],
     subscribes=None,     # no stream at all — see ContractApp
     params=[
+        Param("backfill_history", bool, default=False,
+              description=("Also describe and embed the visits recorded BEFORE this was turned on, "
+                           "in the gaps when the box is idle (newest first; captions, descriptions "
+                           "and search vectors). Off: only new visits are described as they happen. "
+                           "Takes effect on save.")),
         Param("extra_labels", list, default=[],
               description="Extra label vocabulary for the query parser."),
         Param("camera_aliases", dict, default={},

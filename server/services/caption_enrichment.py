@@ -216,7 +216,8 @@ def _note_unassigned(camera_id: int | None) -> None:
             "— %d qualifying visit(s) skipped with no caption. Assign the skill "
             "(camera settings → Skills, or PUT /api/v1/cameras/{id} with "
             "assignments=[{\"skill\": %r}]) to start captioning; nothing "
-            "recorded so far is captioned until EVENTS_ENRICHMENT_BACKFILL=true.",
+            "recorded so far is captioned unless Footage Search → Configure → "
+            "Backfill history is on.",
             camera_id if camera_id is not None else "?", CAPTION_SKILL,
             _unassigned_skipped, CAPTION_SKILL,
         )

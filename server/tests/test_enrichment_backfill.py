@@ -393,11 +393,36 @@ def test_an_enricher_switched_off_is_not_called(session_local, calls, monkeypatc
     assert site_settings.get_json(db, bf.STATE_KEY)["cursor"] == 1
 
 
+def _footage_search(db, *, on: bool, enabled: bool = True):
+    """The Footage Search app's registration row, with its switch."""
+    from models import InstalledApp
+
+    row = db.query(InstalledApp).filter(InstalledApp.id == bf.FOOTAGE_APP_ID).first()
+    if row is None:
+        row = InstalledApp(id=bf.FOOTAGE_APP_ID, name="Footage Search", version="1",
+                           url="http://footage-search:9200", manifest_json={})
+        db.add(row)
+    row.config_json = {bf.SWITCH_PARAM: on}
+    row.enabled = enabled
+    db.commit()
+    bf.forget_backfill_switch()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_switch():
+    bf.forget_backfill_switch()
+    yield
+    bf.forget_backfill_switch()
+
+
 def test_the_loop_is_off_unless_an_operator_turns_it_on(session_local, calls,
                                                         monkeypatch):
     """The only enrichment path that defaults off: upgrading a running
     site must never quietly start working through its back catalogue on
-    the GPU the live cameras are using."""
+    the accelerator the live cameras are using. The switch is the Footage
+    Search app's "Backfill history"; until it is on (and saved) the loop
+    WAITS — it does not return, because the switch may be turned on later
+    in the life of the process."""
     db = session_local
     _camera(db, 1, ["image_captioning"])
     _visit(db, event_id=1, camera_id=1, label="car")
@@ -405,13 +430,107 @@ def test_the_loop_is_off_unless_an_operator_turns_it_on(session_local, calls,
     from core.config import settings
 
     assert settings.events_enrichment_backfill is False
-    _run(bf.run_backfill_loop(batch=10, pause=0, interval=0, catch_up=False))
+    assert bf.backfill_wanted() == (False, "Footage Search: backfill history off")
+    with pytest.raises(asyncio.TimeoutError):
+        _run(asyncio.wait_for(
+            bf.run_backfill_loop(batch=10, pause=0, interval=0, catch_up=False), 0.3))
     assert calls["caption"] == []
+
+    _footage_search(db, on=True)
+    assert bf.backfill_wanted() == (True, "Footage Search: backfill history on")
+    _run(asyncio.wait_for(
+        bf.run_backfill_loop(batch=10, pause=0, interval=0, catch_up=False), 10))
+    assert calls["caption"] == [1]
+
+
+def test_the_env_flag_forces_the_sweep_on(session_local, calls, monkeypatch):
+    """A headless install has no app page to click: the flag wins."""
+    db = session_local
+    _camera(db, 1, ["image_captioning"])
+    _visit(db, event_id=1, camera_id=1, label="car")
+    _footage_search(db, on=False)
+
+    from core.config import settings
 
     monkeypatch.setattr(settings, "events_enrichment_backfill", True,
                         raising=False)
-    _run(bf.run_backfill_loop(batch=10, pause=0, interval=0, catch_up=False))
+    assert bf.backfill_wanted() == (True, "EVENTS_ENRICHMENT_BACKFILL=true")
+    _run(asyncio.wait_for(
+        bf.run_backfill_loop(batch=10, pause=0, interval=0, catch_up=False), 10))
     assert calls["caption"] == [1]
+
+
+def test_a_disabled_app_or_no_app_means_off(session_local):
+    db = session_local
+    assert bf.backfill_wanted()[0] is False          # never installed
+    _footage_search(db, on=True, enabled=False)
+    assert bf.backfill_wanted()[0] is False          # installed, disabled
+
+
+def test_saving_the_app_config_applies_at_once(session_local, monkeypatch):
+    """The switch is read at most every 30 s — except that a save drops
+    the cache, so what the operator just clicked is what the next pass
+    sees. A read that fails keeps the last good answer."""
+    db = session_local
+    _footage_search(db, on=False)
+    assert bf.backfill_wanted(now=1000.0)[0] is False
+
+    # Flip the row WITHOUT the forget the apps router does: cached.
+    from models import InstalledApp
+    row = db.get(InstalledApp, bf.FOOTAGE_APP_ID)
+    row.config_json = {bf.SWITCH_PARAM: True}
+    db.commit()
+    assert bf.backfill_wanted(now=1010.0)[0] is False     # inside the TTL
+    assert bf.backfill_wanted(now=1031.0)[0] is True      # TTL over
+
+    row.config_json = {bf.SWITCH_PARAM: False}
+    db.commit()
+    bf.forget_backfill_switch()                           # what the PUT does
+    assert bf.backfill_wanted(now=1032.0)[0] is False
+
+    import unittest.mock as um
+
+    def _db_away():
+        raise RuntimeError("db away")
+
+    bf.forget_backfill_switch()
+    with um.patch.object(bf, "_read_app_switch", _db_away):
+        assert bf.backfill_wanted(now=2000.0)[0] is False  # nothing cached: off
+    _footage_search(db, on=True)                           # (drops the cache)
+    assert bf.backfill_wanted(now=3000.0)[0] is True
+    with um.patch.object(bf, "_read_app_switch", _db_away):
+        assert bf.backfill_wanted(now=3100.0)[0] is True   # last good answer
+
+
+def test_turning_the_switch_off_stops_the_sweep_at_the_next_pass(session_local, calls):
+    """Off is honoured between passes, and the cursor is kept, so turning
+    it back on later resumes rather than restarting."""
+    db = session_local
+    _camera(db, 1, ["image_captioning"])
+    for i in (1, 2, 3):
+        _visit(db, event_id=i, camera_id=1, label="car")
+    _footage_search(db, on=True)
+
+    real_once = bf.backfill_once
+
+    async def _once(**kw):
+        state = await real_once(**kw)
+        _footage_search(db, on=False)                     # the operator clicks
+        return state
+
+    import unittest.mock as um
+    with um.patch.object(bf, "backfill_once", _once):
+        with pytest.raises(asyncio.TimeoutError):
+            _run(asyncio.wait_for(
+                bf.run_backfill_loop(batch=1, pause=0, interval=0, catch_up=False), 0.5))
+    assert calls["caption"] == [3]
+    from services import site_settings
+    assert site_settings.get_json(db, bf.STATE_KEY)["cursor"] == 3
+
+    _footage_search(db, on=True)
+    _run(asyncio.wait_for(
+        bf.run_backfill_loop(batch=1, pause=0, interval=0, catch_up=False), 10))
+    assert calls["caption"] == [3, 2, 1]
 
 
 def test_the_loop_returns_when_history_is_done(session_local, calls, monkeypatch):

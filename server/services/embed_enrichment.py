@@ -140,8 +140,8 @@ def _note_unassigned(camera_id: int | None) -> None:
             "%d qualifying visit(s) skipped with no vector; semantic search "
             "cannot rank them. Assign the skill (camera settings → Skills, or "
             "PUT /api/v1/cameras/{id} with assignments=[{\"skill\": %r}]); "
-            "nothing recorded so far is embedded until "
-            "EVENTS_ENRICHMENT_BACKFILL=true.",
+            "nothing recorded so far is embedded unless Footage Search → "
+            "Configure → Backfill history is on.",
             camera_id if camera_id is not None else "?", EMBED_SKILL,
             _unassigned_skipped, EMBED_SKILL,
         )

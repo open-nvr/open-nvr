@@ -256,13 +256,15 @@ fill_qualcomm_captioner() {
             # The NPU captioner keeps up with every visit (1.7 s a photo on
             # a Ventuno Q; measured with the detector live, bench/), so the
             # visit descriptions the CPU installer switched off come on
-            # with it: captions, colour/type questions, and the catch-up on
-            # visits already recorded. Filled only at this moment — the
+            # with it: captions and colour/type questions (the sweep of
+            # visits already recorded stays the operator's choice, below).
+            # Filled only at this moment — the
             # switch from a CPU captioner — so a value the operator set
             # since is never touched; leaving the flavour resets them.
             case "$(get_env_var EVENTS_CAPTION_ENRICHMENT)" in ""|false) set_env_var EVENTS_CAPTION_ENRICHMENT true ;; esac
             case "$(get_env_var EVENTS_DESCRIPTOR_ENRICHMENT)" in ""|false) set_env_var EVENTS_DESCRIPTOR_ENRICHMENT true ;; esac
-            case "$(get_env_var EVENTS_ENRICHMENT_BACKFILL)" in ""|false) set_env_var EVENTS_ENRICHMENT_BACKFILL true ;; esac
+            # The sweep of older visits is the operator's choice (Footage
+            # Search → Configure → Backfill history), not the flavour's.
             # People too: with the captioner on the NPU the two extra
             # questions a person visit costs (top clothing, carrying) are
             # a second or two of NPU on an image it already holds, so
@@ -418,7 +420,7 @@ reset_stale_accel_fills() {
                 write_env_var CAPTION_ADAPTER moondream; write_env_var CAPTION_ADAPTER_TAG ""
                 # ...and the descriptions it switched on: a CPU captioner
                 # cannot keep up with every visit (#583).
-                write_env_var EVENTS_CAPTION_ENRICHMENT false; write_env_var EVENTS_DESCRIPTOR_ENRICHMENT false; write_env_var EVENTS_ENRICHMENT_BACKFILL false
+                write_env_var EVENTS_CAPTION_ENRICHMENT false; write_env_var EVENTS_DESCRIPTOR_ENRICHMENT false
                 write_env_var EVENTS_DESCRIPTOR_PEOPLE false ;;
             # The agent's LLM on the NPU adapter: back to Ollama, the CPU
             # pre-warm off again, the window the runtime's own.

@@ -724,6 +724,27 @@ def test_config_materializes_manifest_defaults(client):
     assert client.get("/apps").json()[0]["config"] == config
 
 
+def test_config_save_drops_the_backfill_switch_cache(client, monkeypatch):
+    """Footage Search's "Backfill history" is read by the enrichment
+    backfill through a 30 s cache; a save must apply at once, so the PUT
+    drops that cache."""
+    import routers.apps as apps_router
+    dropped = []
+    monkeypatch.setattr(apps_router, "forget_backfill_switch", lambda: dropped.append(1))
+    _register(client)                                     # some other app
+    resp = client.put("/apps/loitering-detection/config", json={"threshold_s": 12.5})
+    assert resp.status_code == 200
+    assert dropped == []                                  # not its switch
+    _register(client, url="http://footage-search:9200", id="footage-search",
+              name="Footage Search", params=[{
+                  "name": "backfill_history", "required": False, "type": "bool",
+                  "default": False, "per_camera": False, "description": ""}])
+    resp = client.put("/apps/footage-search/config", json={"backfill_history": True})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["config"] == {"backfill_history": True}
+    assert dropped == [1]
+
+
 def test_config_per_camera_param_must_be_dict(client):
     """zones is per_camera — a bare polygon (not keyed by camera) is 400."""
     _register(client)

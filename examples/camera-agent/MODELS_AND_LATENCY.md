@@ -497,8 +497,9 @@ visit in the background (`EVENTS_CAPTION_ENRICHMENT`,
 `ollamavlm` on a CUDA Ollama, asked and defaulting off for every CPU
 captioner — including the in-container `moondream` a CUDA box falls
 back to when RAM is short. Visits recorded while it is off can be
-described later by setting both flags back to true together with
-`EVENTS_ENRICHMENT_BACKFILL=true` (the backfill honours the same flags).
+described later by setting both flags back to true and turning on
+Footage Search → Configure → Backfill history (the backfill honours the
+same flags).
 
 Detection failing sizes DOWN, never up: an unknown machine is treated as
 a small one, because the cost of guessing high is an install that does
