@@ -55,6 +55,7 @@ from core.auth import get_current_active_user, get_current_superuser, verify_tok
 from core.database import get_db
 from core.permissions import RequirePermission
 from models import AppInstallIntent, InstalledApp, User
+from services.enrichment_backfill import FOOTAGE_APP_ID, forget_backfill_switch
 from services.app_keys import (
     AppPrincipal, issue_key, looks_like_app_key,
     resolve_app_key, revoke_key,
@@ -1440,6 +1441,10 @@ async def update_app_config(
         from services.plate_policy import forget_cached_config
 
         forget_cached_config()
+    elif app_id == FOOTAGE_APP_ID:
+        # The enrichment backfill reads this row's "Backfill history"
+        # switch (cached briefly); a save should apply to the next pass.
+        forget_backfill_switch()
 
     write_audit_log(
         db,

@@ -365,3 +365,15 @@ def test_a_hit_with_no_camera_name_still_renders():
     rendered = format_results([hit])
     assert "camera 4" in rendered
     assert "event #1" in rendered
+
+
+def test_the_manifest_offers_the_backfill_switch_off_by_default():
+    """Core's enrichment backfill (the sweep of visits recorded before
+    enrichment was on) is governed by THIS app's "backfill_history"
+    param — a bool, off, so an install never starts chewing through the
+    back catalogue on its own."""
+    from footage_search import MANIFEST
+    params = {p["name"]: p for p in MANIFEST.to_dict()["params"]}
+    assert params["backfill_history"]["type"] == "bool"
+    assert params["backfill_history"]["default"] is False
+    assert params["backfill_history"]["required"] is False

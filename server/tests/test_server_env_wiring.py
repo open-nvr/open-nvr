@@ -17,7 +17,8 @@ happened there, to every single one of them. None of
     EVENTS_CAPTION_ENRICHMENT    (default true)
     EVENTS_DESCRIPTOR_ENRICHMENT (default true)
     EVENTS_DESCRIPTOR_PEOPLE     (default false)
-    EVENTS_ENRICHMENT_BACKFILL   (default false)
+    EVENTS_ENRICHMENT_BACKFILL   (default false; forces the sweep on —
+                                  the normal switch is the Footage Search app)
 
 reached ``opennvr-core``. So on a compose install — which is every
 install — the three defaulting true could not be turned OFF by an

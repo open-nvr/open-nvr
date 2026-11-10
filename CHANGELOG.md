@@ -8,6 +8,23 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Sweeping older visits is a switch in the Footage Search app, off by
+  default.** Enrichment describes and embeds *new* visits as they happen;
+  the backfill — the sweep of everything recorded before — used to be
+  `EVENTS_ENRICHMENT_BACKFILL=true` in `.env`, and `./start.sh` turned it
+  on by itself on the qualcomm flavour, so the Ventuno Q spent its first
+  morning with embeddings on chewing through months of history nobody had
+  asked for. Now the choice is **Apps → Footage Search → Configure →
+  Backfill history**: on and saved, core sweeps older visits newest-first
+  in the gaps when the box is idle (the same governor as before, #583);
+  off, only new visits are described, and turning it off stops the sweep
+  at the next pass with its place kept. The save applies at once (the
+  config PUT drops the 30 s cache). The env flag remains as a force-on
+  for headless installs; `./start.sh` no longer writes it. Operator
+  messages that said "set EVENTS_ENRICHMENT_BACKFILL=true" now point at
+  the switch. (`examples/footage-search`, `server/services/
+  enrichment_backfill.py`, `server/routers/apps.py`, `start.sh`,
+  `docs/ENRICHMENT.md`)
 - **Search's embedding lane on the Qualcomm NPU.** On the qualcomm
   flavour the `embeddings` profile now runs SigLIP2 (`google/siglip2-
   base-patch16-224`, Apache-2.0, Qualcomm AI Hub's w8a16 export) on the

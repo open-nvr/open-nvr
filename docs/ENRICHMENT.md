@@ -50,12 +50,16 @@ enricher picks the change up on its next visit.
 4. **Select the cameras** in the app that brings the skill (Footage Search for captions + embeddings; the Agent covers every camera) — see *The gate* above.
 5. **Back-fill history.** The enrichers run on *new* visits only. Every visit
    recorded before is a row with no words and no vector, so the first search
-   an operator runs — against yesterday — returns nothing. Set
-   `EVENTS_ENRICHMENT_BACKFILL=true`; the sweep walks history newest-first
-   when the box is idle (see *When the box cannot keep up*), hands each
-   qualifying visit to the same enricher, and — once history is done —
-   keeps catching up on live visits the gate dropped under load. Leave it
-   on on a box that drops; turn it off on one that never does.
+   an operator runs — against yesterday — returns nothing. Sweeping history
+   is a choice, off by default: **Apps → Footage Search → Configure →
+   Backfill history**, then Save. From then on the sweep walks history
+   newest-first when the box is idle (see *When the box cannot keep up*),
+   hands each qualifying visit to the same enricher, and — once history is
+   done — keeps catching up on live visits the gate dropped under load.
+   Turning the switch off stops it at the next pass; the cursor is kept,
+   so turning it back on resumes where it stopped. Off, only new visits
+   are described as they happen. `EVENTS_ENRICHMENT_BACKFILL=true` in
+   `.env` forces the sweep on regardless of the app (a headless install).
 
 ## When the box cannot keep up
 

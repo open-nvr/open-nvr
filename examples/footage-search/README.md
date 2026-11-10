@@ -119,6 +119,17 @@ Everything is in [`config.example.yml`](config.example.yml):
 `opennvr_url` (required — the store *is* the app), `extra_labels`,
 `camera_aliases`, and the optional `ollama` block.
 
+One switch lives in the catalog rather than the file: **Backfill
+history** (Apps → Footage Search → Configure, off by default). Core's
+enrichment describes and embeds *new* visits as they happen; every
+visit recorded before that has no words and no vector, so a search
+against last week finds nothing. Turn the switch on and save, and core
+sweeps those older visits newest-first in the gaps when the box is idle
+(the same captions, descriptions and search vectors as live visits).
+Off, nothing is touched; turning it off again stops the sweep at the
+next pass and keeps its place. The app itself does not read this value
+— core does (`docs/ENRICHMENT.md`, *Back-fill history*).
+
 ## What it does NOT do (yet)
 
 - **No bounding-box/colour grounding.** "Red" matches caption text and

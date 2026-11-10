@@ -835,7 +835,9 @@ async def lifespan(app: FastAPI):
     spawn_background(background_transition_learning(),
                      name="camera-graph-learning")
 
-    # Back catalogue (events_enrichment_backfill, off by default): the two
+    # Back catalogue (off by default; the switch is Footage Search →
+    # Configure → Backfill history, EVENTS_ENRICHMENT_BACKFILL=true forces
+    # it on; the loop below waits until one of them says so): the two
     # enrichers run off the INGEST path, so every visit recorded before
     # they shipped has a row in events and nothing in event_text or
     # visit_descriptors — and the first search an operator runs after

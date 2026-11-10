@@ -65,6 +65,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
+import time
 from typing import Any
 
 logger = logging.getLogger("enrichment_backfill")
@@ -73,6 +75,89 @@ logger = logging.getLogger("enrichment_backfill")
 #: needs no migration and an operator can read it straight out of the DB.
 #: Key length is capped at 50 characters there.
 STATE_KEY = "enrichment_backfill"
+
+# ── whether to sweep history at all ──────────────────────────────────
+#
+# The operator's switch is in the Footage Search app (Configure →
+# "Backfill history", off by default): turning it on and saving starts the
+# sweep of visits recorded before enrichment was on; off, only new visits
+# are described as they happen. EVENTS_ENRICHMENT_BACKFILL=true in .env
+# forces it on for a headless install. The morning embeddings came on the
+# Ventuno Q the sweep had started by itself (2026-11-10) — history should
+# be a choice.
+FOOTAGE_APP_ID = "footage-search"
+SWITCH_PARAM = "backfill_history"
+_SWITCH_TTL_S = 30.0
+_switch_cache: tuple[float, bool] | None = None
+_switch_lock = threading.Lock()
+
+
+def _read_app_switch() -> bool:
+    from core.database import SessionLocal
+    from models import InstalledApp
+
+    db = SessionLocal()
+    try:
+        row = db.query(InstalledApp).filter(InstalledApp.id == FOOTAGE_APP_ID).first()
+        if row is None or not row.enabled:
+            return False
+        cfg = row.config_json if isinstance(row.config_json, dict) else {}
+        return bool(cfg.get(SWITCH_PARAM, False))
+    finally:
+        db.close()
+
+
+def forget_backfill_switch() -> None:
+    """Drop the cached switch (the app config PUT calls this, so a save
+    applies to the next pass, not thirty seconds later)."""
+    global _switch_cache
+    with _switch_lock:
+        _switch_cache = None
+
+
+def backfill_wanted(now: float | None = None) -> tuple[bool, str]:
+    """(wanted, why): the env flag forces it; otherwise the Footage Search
+    app's "Backfill history" switch, cached 30 s; a failed read answers
+    the last good value, or off."""
+    global _switch_cache
+    from core.config import settings
+
+    if getattr(settings, "events_enrichment_backfill", False):
+        return True, "EVENTS_ENRICHMENT_BACKFILL=true"
+    now = time.monotonic() if now is None else now
+    with _switch_lock:
+        if _switch_cache is not None and now - _switch_cache[0] < _SWITCH_TTL_S:
+            on = _switch_cache[1]
+            return on, _why(on)
+    try:
+        on = _read_app_switch()
+    except Exception:  # the loop must never die on a read
+        logger.debug("enrichment backfill: could not read the Footage Search switch", exc_info=True)
+        with _switch_lock:
+            on = _switch_cache[1] if _switch_cache is not None else False
+    with _switch_lock:
+        _switch_cache = (now, on)
+    return on, _why(on)
+
+
+def _why(on: bool) -> str:
+    return "Footage Search: backfill history " + ("on" if on else "off")
+
+
+async def wait_until_wanted(poll_s: float = 60.0) -> None:
+    """Block until the sweep is wanted (the switch or the env flag)."""
+    said = False
+    while True:
+        on, why = backfill_wanted()
+        if on:
+            if said:
+                logger.info("enrichment backfill: on — %s", why)
+            return
+        if not said:
+            logger.info("enrichment backfill: off — %s (Footage Search → Configure → "
+                        "Backfill history sweeps older visits)", why)
+            said = True
+        await asyncio.sleep(poll_s)
 
 #: Rows examined per pass. Small on purpose: a pass holds a session only
 #: long enough to read the batch, and a crash costs at most this many
@@ -616,10 +701,11 @@ async def run_backfill_loop(batch: int = DEFAULT_BATCH,
     ``catch_up=False`` the loop returns when history is done, as it did
     before the gate existed.
     """
-    from core.config import settings
-
-    if not getattr(settings, "events_enrichment_backfill", False):
-        return
+    # The switch (Footage Search → Configure → Backfill history) or the
+    # env flag: until one of them says so, this waits — and every pass
+    # checks again, so turning the switch off stops the sweep at the
+    # next pass.
+    await wait_until_wanted()
     # No early return when both enrichers are off. The sweep also
     # repairs projections and plate claims from data already stored,
     # which spends no inference and does not depend on either setting —
@@ -634,7 +720,9 @@ async def run_backfill_loop(batch: int = DEFAULT_BATCH,
         # A pass begins only once the governor has seen the box NORMAL
         # for the idle period (and inside the operator's window, if
         # any): history is swept when the box finds the resources, never
-        # while it is busy with today (#583).
+        # while it is busy with today (#583) — and only while the switch
+        # is on.
+        await wait_until_wanted()
         await wait_for_backfill_slot(starting=True)
         state = await backfill_once(batch=batch, pause=pause)
         if state.get("done"):
