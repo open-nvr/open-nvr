@@ -534,6 +534,18 @@ class Settings(BaseSettings):
     # time (may wrap midnight: "22:00-06:00"). Empty = whenever idle.
     # Malformed = ignored with one warning, never silently off.
     events_enrichment_backfill_window: str = ""
+    # The backfill is opportunistic, not a batch job: after each visit it
+    # sleeps long enough that its own inference time is at most this
+    # share of the wall clock (0.5 = half the adapters' time, measured
+    # per visit, so a 5 s visit is followed by a 5 s pause). It took the
+    # whole NPU on the Ventuno Q the morning embeddings came on
+    # (2026-11-10) and the camera agent had to queue behind it. 1 = no
+    # pacing beyond the fixed pause; 0.1 = a tenth.
+    events_enrichment_backfill_share: float = 0.5
+    # And it stands aside for people: a search or a camera-agent turn
+    # holds the backfill for this many seconds after the last one, so a
+    # conversation never queues behind history. 0 = off.
+    events_enrichment_backfill_interactive_hold_s: int = 90
     # The requested lane (services/enrichment_requests.py): a search whose
     # question needs a caption or a claim the matching visits do not have
     # yet queues up to this many of them, newest first, and says so in

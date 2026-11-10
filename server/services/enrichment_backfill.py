@@ -349,13 +349,15 @@ async def _enrich_items(items: list[dict[str, Any]], *, caption_on: bool,
         enrich_event_caption_embedding,
         enrich_event_embedding,
     )
-    from services.enrichment_governor import wait_for_backfill_slot
+    import time as _time
+    from services.enrichment_governor import pace_sleep, wait_for_backfill_slot
 
     out: dict[str, Any] = {"captioned": 0, "described": 0, "embedded": 0,
                            "caption_embedded": 0,
                            "handled": [], "dropped_at": None}
     for item in items:
         event_id = int(item["event_id"])
+        _t_item = _time.monotonic()
         # Live always wins, and "wins" means more than yielding between
         # items: nothing from the back catalogue goes to an adapter while
         # a live visit is in flight or waiting, while a breaker is
@@ -418,11 +420,15 @@ async def _enrich_items(items: list[dict[str, Any]], *, caption_on: bool,
                         "holding here, retrying next pass", event_id)
             break
         out["handled"].append(event_id)
-        if pause > 0:
-            # Live ingest shares these adapters. Yielding between items is
-            # what keeps a sweep of the back catalogue from delaying the
-            # caption of somebody at the door now.
-            await asyncio.sleep(pause)
+        # Live ingest and the camera agent share these adapters (and, on
+        # a Qualcomm box, one NPU). The rest after each visit is sized
+        # to what the visit cost, so the sweep takes at most its share
+        # of the clock (events_enrichment_backfill_share) — history is
+        # swept in the gaps, never at full tilt (Ventuno Q, 2026-11-10:
+        # 100 % NPU for the morning the embedder came on).
+        rest = pace_sleep(_time.monotonic() - _t_item, floor_s=pause)
+        if rest > 0:
+            await asyncio.sleep(rest)
     return out
 
 

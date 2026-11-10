@@ -353,3 +353,35 @@ def test_a_requested_visit_keeps_the_full_line_in_live_only_but_not_paused(signa
             "PAUSED refuses the requested lane too — the box is losing")
 
     _run(scenario())
+
+
+# ── opportunistic: a share of the clock, and people first ───────────────
+
+def test_pace_sleep_keeps_the_backfill_to_its_share(monkeypatch):
+    from core.config import settings
+    monkeypatch.setattr(settings, "events_enrichment_backfill_share", 0.5, raising=False)
+    assert gov.pace_sleep(5.0) == 5.0, "half the clock: rest as long as it worked"
+    assert gov.pace_sleep(5.0, share=0.25) == 15.0
+    assert gov.pace_sleep(5.0, share=1.0) == 0.0, "no pacing"
+    assert gov.pace_sleep(5.0, share=1.0, floor_s=0.5) == 0.5, "the fixed pause still applies"
+    assert gov.pace_sleep(0.0) == 0.0
+    assert gov.pace_sleep(2.0, share=0.001) == gov.pace_sleep(2.0, share=0.05), "clamped"
+
+
+def test_a_person_using_the_box_holds_the_backfill(signals, clock, monkeypatch):
+    from core.config import settings
+    monkeypatch.setattr(settings, "events_enrichment_backfill_idle_s", 0, raising=False)
+    monkeypatch.setattr(settings, "events_enrichment_backfill_interactive_hold_s", 90, raising=False)
+    gov._reset_for_tests()
+    g = gov.governor()
+    assert gov.backfill_allowed(g, starting=True)
+    gov.note_interactive("camera-agent")
+    assert not gov.backfill_allowed(g), "held for a conversation"
+    assert gov.interactive_recently()
+    clock["t"] += 89
+    assert not gov.backfill_allowed(g)
+    clock["t"] += 2
+    assert gov.backfill_allowed(g), "the hold passed"
+    gov.note_interactive("search")
+    monkeypatch.setattr(settings, "events_enrichment_backfill_interactive_hold_s", 0, raising=False)
+    assert gov.backfill_allowed(g), "0 = off"

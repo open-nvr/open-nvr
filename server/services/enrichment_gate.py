@@ -440,6 +440,9 @@ async def infer_through_gate(adapter: str, body: dict[str, Any], *,
     from services.enrichment_governor import admit_live
 
     gate = gate_for(adapter)
+    if interactive:
+        from services.enrichment_governor import note_interactive
+        note_interactive("search")
     admitted = (await gate.admit() if interactive
                 else await admit_live(gate, kind, priority))
     if not admitted:
