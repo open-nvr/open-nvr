@@ -493,3 +493,36 @@ def test_stale_rows_counts_per_kind_and_reembed_is_due_for_either(session_local,
                                   kind="caption")
     db.close()
     assert asyncio.run(bf.reembed_due()) == (False, NEW)
+
+
+# ── an adapter nobody has probed yet is tried, not skipped ──────────────
+
+
+def _kai_c(monkeypatch, caps: dict, health: dict | None):
+    import routers.skills as skills
+
+    async def _view():
+        return health, caps
+
+    monkeypatch.setattr(skills, "_kai_c_view", _view)
+
+
+def test_an_adapter_with_unpolled_health_is_tried_and_a_failing_one_is_skipped(monkeypatch):
+    """After a core restart every adapter re-registers and KAI-C says
+    "unknown" for each until its next poll. Skipping them meant the
+    embedders were off for those minutes and search ran words-only
+    without saying so. Only a REPORTED failure skips an adapter."""
+    import services.embed_enrichment as emb
+    caps = {"clip": {"capabilities": {"tasks_advertised": ["embed"], "model": {"name": "m", "version": "v"}}},
+            "text-embed": {"capabilities": {"tasks_advertised": ["text_embed"], "model": {"name": "bge", "version": "cls"}}}}
+    _kai_c(monkeypatch, caps, {"clip": {"status": "unknown", "reason": "health not polled yet"},
+                               "text-embed": {"status": "unknown"}})
+    assert asyncio.run(emb._resolve_embed_producer()) == ("clip", "clip:m/v")
+    assert asyncio.run(emb._resolve_text_embed_producer()) == ("text-embed", "text-embed:bge/cls")
+    _kai_c(monkeypatch, caps, {"clip": {"status": "error"}, "text-embed": {"status": "ok"}})
+    assert asyncio.run(emb._resolve_embed_producer()) is None
+    assert asyncio.run(emb._resolve_text_embed_producer()) == ("text-embed", "text-embed:bge/cls")
+    _kai_c(monkeypatch, caps, None)                       # no health block at all: try
+    assert asyncio.run(emb._resolve_embed_producer()) == ("clip", "clip:m/v")
+    _kai_c(monkeypatch, caps, {})                         # a health block that names nobody: try
+    assert asyncio.run(emb._resolve_embed_producer()) == ("clip", "clip:m/v")

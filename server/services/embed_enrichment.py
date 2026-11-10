@@ -232,10 +232,17 @@ async def _resolve_producer_for(task_names: set[str]) -> tuple[str, str] | None:
 
     if not isinstance(caps, dict):
         return None
-    healthy = {
+    # KAI-C's per-adapter status is "unknown" ("health not polled yet")
+    # from registration until its next 60 s poll — and after a core
+    # restart every adapter re-registers at once, so for those minutes
+    # the embedders were skipped and search ran words-only, quietly
+    # (the Ventuno Q, 2026-11-10: a whole eval run with no vector arm).
+    # An adapter that REPORTS a failure is skipped; one nobody has asked
+    # yet is tried, which is the same bet a None health block makes.
+    skipped = {
         name for name, entry in (health or {}).items()
-        if isinstance(entry, dict) and entry.get("status") == "ok"
-    } if isinstance(health, dict) else None
+        if isinstance(entry, dict) and entry.get("status") not in (None, "ok", "unknown")
+    } if isinstance(health, dict) else set()
 
     # Deterministic: sorted, so the same box embeds with the same adapter
     # every time. This matters more here than for captions — a store
@@ -251,7 +258,7 @@ async def _resolve_producer_for(task_names: set[str]) -> tuple[str, str] | None:
             continue
         # Health unknown → try anyway. A failed call is cheaper than
         # refusing to embed because a probe was unavailable.
-        if healthy is not None and name not in healthy:
+        if name in skipped:
             continue
         return name, producer_identity(name, caps_entry)
     return None
