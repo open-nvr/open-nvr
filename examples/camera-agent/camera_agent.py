@@ -3783,6 +3783,9 @@ class CameraAgentRuntime:
         # that answers a person may read this, since a concurrent turn can
         # replace it at any await.
         self.last_turn_trace: list[dict[str, Any]] = []
+        # Every turn's cost by tier and tool, for GET /turn-stats.
+        from turn_stats import TurnStats
+        self.turn_stats = TurnStats()
 
         self.agent_name = agent_name_for(cfg.agent_name)
         self.faces = FaceClient(url=cfg.faces_url, token=cfg.faces_token) if cfg.faces_url else None
@@ -7576,6 +7579,13 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         runtime.persist()
         return JSONResponse({"stopped": ok, "already_gone": not ok})
 
+    @app.get("/turn-stats")
+    async def _turn_stats(recent: int = 20) -> dict[str, Any]:
+        """What turns cost, by tier and by tool, over the last ~1000 turns
+        in this process — p50/p95 wall time, LLM time, tool time, how
+        often each tool ran and failed, and the last few turns."""
+        return runtime.turn_stats.summary(recent=max(0, min(int(recent), 200)))
+
     @app.get("/reports")
     async def _reports() -> dict[str, Any]:
         """Scheduled reports + recently generated report results."""
@@ -8572,6 +8582,7 @@ async def _run_conversation_turn(
         trace = []
     runtime.last_turn_trace = trace
     token = _TURN_TRACE.set(trace)
+    _turn_t0 = time.perf_counter()
     try:
         return await _conversation_turn_body(
             runtime, history, user_text, trace,
@@ -8579,6 +8590,12 @@ async def _run_conversation_turn(
             tool_definitions=tool_definitions, speak_progress=speak_progress)
     finally:
         _TURN_TRACE.reset(token)
+        stats = getattr(runtime, "turn_stats", None)
+        if stats is not None:
+            try:
+                stats.record(trace, int((time.perf_counter() - _turn_t0) * 1000), speak_progress)
+            except Exception:  # noqa: BLE001 — bookkeeping never fails a turn
+                logger.debug("turn stats: record failed", exc_info=True)
 
 
 async def _conversation_turn_body(

@@ -100,3 +100,60 @@ def test_unknown_camera_rejected():
 def test_describe_window_advertised():
     names = [d["function"]["name"] for d in build_tool_definitions(["cam1"])]
     assert "describe_window" in names
+
+
+# ── one caption per CHANGE of scene ────────────────────────────────────
+
+def _jpeg(fill, box=None):
+    """A small real JPEG: a flat grey frame, optionally with a bright block."""
+    import io
+
+    from PIL import Image, ImageDraw
+
+    im = Image.new("L", (160, 90), fill)
+    if box:
+        ImageDraw.Draw(im).rectangle(box, fill=255)
+    out = io.BytesIO()
+    im.save(out, format="JPEG", quality=85)
+    return out.getvalue()
+
+
+def test_identical_scenes_are_captioned_once():
+    """Five frames of the same empty office cost one VLM call, not five
+    (12 s for a one-hour window on the Ventuno Q, eval 2026-11-09)."""
+    same = _jpeg(90)
+    ev = _FakeEvents(frame=same)
+    cap = _Captioner(["an empty office"])
+    out = asyncio.run(_tools(ev, cap).describe_window(dict(WIN)))
+    assert len(ev.calls) == 5, "every instant is still fetched"
+    assert len(cap.frames) == 1, "but the scene was captioned once"
+    assert out == "Reviewing the footage: 15:12, an empty office." or out.startswith("Reviewing the footage: ")
+    assert out.count("an empty office") == 1
+
+
+def test_a_changed_scene_gets_its_own_caption_and_the_drift_back_is_not_recaptioned():
+    empty = _jpeg(90)
+    person = _jpeg(90, box=(40, 10, 120, 80))
+    ev = _FakeEvents(frames_by_call=[empty, empty, person, person, empty])
+    cap = _Captioner(["an empty office", "a person at the desk", "an empty office"])
+    out = asyncio.run(_tools(ev, cap).describe_window(dict(WIN)))
+    # empty (caption 1) → same (inherits) → person (caption 2) → same (inherits)
+    # → empty again, which differs from the LAST CAPTIONED frame (person) → caption 3
+    assert len(cap.frames) == 3
+    assert "a person at the desk" in out and out.count("an empty office") == 2
+
+
+def test_fixture_bytes_that_are_not_images_are_never_treated_as_alike():
+    """Nothing is skipped by mistake: undecodable frames are 'different'."""
+    ev = _FakeEvents(frame=b"F")
+    cap = _Captioner(["a", "b", "c", "d", "e"])
+    asyncio.run(_tools(ev, cap).describe_window(dict(WIN)))
+    assert len(cap.frames) == 5
+
+
+def test_frames_alike_threshold():
+    from tools import _frames_alike
+
+    assert _frames_alike(_jpeg(90), _jpeg(92)) is True
+    assert _frames_alike(_jpeg(90), _jpeg(90, box=(40, 10, 120, 80))) is False
+    assert _frames_alike(b"not", b"images") is False

@@ -103,6 +103,7 @@ COPY examples/camera-agent/turns.py           ./turns.py
 COPY examples/camera-agent/fillers.py         ./fillers.py
 COPY examples/camera-agent/router.py          ./router.py
 COPY examples/camera-agent/prompt_budget.py   ./prompt_budget.py
+COPY examples/camera-agent/turn_stats.py      ./turn_stats.py
 COPY examples/camera-agent/monitor_host.py    ./monitor_host.py
 COPY examples/camera-agent/system_check.py    ./system_check.py
 # The count/crossing conversational monitors instantiate the SAME SDK rule
