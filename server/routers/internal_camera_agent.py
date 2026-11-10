@@ -1314,6 +1314,7 @@ def camera_agent_system_status(
 
     from routers.cameras import _derive_recording_state
     from services.camera_status_service import get_camera_status_service
+    from services.segment_health import degraded_cameras
     from services.retention_service import RetentionService
     from services.storage_service import get_effective_recordings_base_path
 
@@ -1344,6 +1345,10 @@ def camera_agent_system_status(
             .filter(CameraConfig.camera_id.in_(ids))
             .all()
         )
+    try:
+        degraded_ids = degraded_cameras(db, ids) if ids else set()
+    except Exception:  # noqa: BLE001 - a status read must never raise
+        degraded_ids = set()
     now = datetime.now(UTC)
     out: list[dict[str, object]] = []
     for cam in cameras:
@@ -1360,7 +1365,8 @@ def camera_agent_system_status(
             "online": online,
             "online_since": up_since.isoformat() if up_since else None,
             "recording_enabled": enabled,
-            "recording_state": _derive_recording_state(cam, enabled, last, now, online, up_since),
+            "recording_state": _derive_recording_state(
+                cam, enabled, last, now, online, up_since, degraded=cam.id in degraded_ids),
             "last_recording_at": last.isoformat() if last else None,
         })
     # The recording disk: free space against the retention floor. Never

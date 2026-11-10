@@ -34,7 +34,7 @@ export function CameraStatusWidget({ editing, onRemove }: { editing?: boolean; o
 
   const rows = useMemo(() => {
     const list = [...(cams.data?.cameras ?? [])]
-    const recRank = (s?: string | null) => (s === 'stalled' ? 0 : s === 'recording' ? 2 : 1)
+    const recRank = (s?: string | null) => (s === 'stalled' || s === 'degraded' ? 0 : s === 'recording' ? 2 : 1)
     list.sort((a, b) =>
       STATE_RANK[cameraState(a)] - STATE_RANK[cameraState(b)] ||
       recRank(a.recording_state) - recRank(b.recording_state) ||
@@ -51,10 +51,14 @@ export function CameraStatusWidget({ editing, onRemove }: { editing?: boolean; o
   const recLabel = (s?: string | null) =>
     s === 'recording' ? t('dashboard.recShort')
       : s === 'stalled' ? capitalise(t('dashboard.stalled'))
-        : s === 'never' ? t('dashboard.recNever')
-          : t('dashboard.recOff')
+        : s === 'degraded' ? t('dashboard.statusDegraded')
+          : s === 'never' ? t('dashboard.recNever')
+            : t('dashboard.recOff')
   const recInk = (s?: string | null) =>
-    s === 'recording' ? 'var(--ok)' : s === 'stalled' ? 'var(--warn)' : 'var(--text-dim)'
+    s === 'recording' ? 'var(--ok)'
+      : s === 'stalled' ? 'var(--warn)'
+        : s === 'degraded' ? 'var(--danger)'
+          : 'var(--text-dim)'
 
   return (
     <WidgetFrame

@@ -47,7 +47,7 @@ from sqlalchemy.orm import sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from core.database import Base, get_db  # noqa: E402
-from models import Camera, CameraConfig, CameraMask, Recording, Role, User  # noqa: E402
+from models import Camera, CameraConfig, CameraEvent, CameraMask, Recording, Role, User  # noqa: E402
 from routers import internal_camera_agent as internal_router  # noqa: E402
 from services import camera_status_service, storage_service  # noqa: E402
 from services.retention_service import RetentionService  # noqa: E402
@@ -61,7 +61,8 @@ def client(monkeypatch, tmp_path):
                            poolclass=StaticPool)
     Base.metadata.create_all(engine, tables=[Camera.__table__, CameraMask.__table__,
                                              User.__table__, Role.__table__,
-                                             Recording.__table__, CameraConfig.__table__])
+                                             Recording.__table__, CameraConfig.__table__,
+                                             CameraEvent.__table__])
     factory = sessionmaker(bind=engine)
     s = factory()
     s.add(Role(id=1, name="admin"))
@@ -130,3 +131,21 @@ def test_a_storage_failure_leaves_the_camera_rows_intact(client, monkeypatch):
     body = client.get("/internal/camera-agent/status").json()
     assert len(body["cameras"]) == 2
     assert body["storage"]["free_gb"] is None
+
+
+def test_a_camera_with_an_active_degraded_alarm_reads_degraded(client):
+    """Segments keep landing (so the age rule says recording) but the
+    segment-health check has an active recording_degraded alarm: the
+    agent's status read says degraded, like the list's badge."""
+    from routers import internal_camera_agent as mod
+
+    # Reach the test DB through the same dependency the app uses.
+    gen = client.app.dependency_overrides[mod.get_db]()
+    db = next(gen)
+    db.add(CameraEvent(camera_id=1, event_type="recording_degraded", event_state="active",
+                       description="frozen", occurred_at=NOW))
+    db.commit()
+    body = client.get("/internal/camera-agent/status").json()
+    cams = {c["camera_id"]: c for c in body["cameras"]}
+    assert cams["cam1"]["recording_state"] == "degraded"
+    assert cams["cam2"]["recording_state"] == "stalled", "untouched by the other camera's alarm"

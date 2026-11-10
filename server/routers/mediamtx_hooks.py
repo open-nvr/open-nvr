@@ -280,9 +280,17 @@ async def hook_segment_complete(
     if not _verify_hook_token(request):
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    # SECURITY FIX: Validate path for directory traversal
+    # SECURITY FIX: Validate path for directory traversal — then the path
+    # as THIS process can open it. MediaMTX spells MTX_SEGMENT_PATH as the
+    # shipped recordPath does, relative to its own cwd (/): resolved from
+    # core's /app it was /app/app/recordings/…, so os.stat failed and
+    # every row landed with no file_size and no codec (the reconciler
+    # back-filled them 15 min later, too late for the segment-health
+    # check, which needs the size at the moment the segment closes —
+    # Ventuno Q, 2026-11-09: 9,400 rows, all NULL at insert).
     if segment_path:
-        segment_path = validate_segment_path(segment_path)
+        validate_segment_path(segment_path)
+        segment_path = absolute_segment_path(segment_path)
 
     from models import Recording
 

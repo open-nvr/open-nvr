@@ -145,3 +145,23 @@ def test_healthy_segments_with_no_alarm_write_nothing(db):
     assert note_segment(db, _Cam(), 60.0, int(7.5 * MB)) is None
     assert note_segment(db, _Cam(), 2.0, int(0.2 * MB)) is None
     assert _events(db) == []
+
+
+def test_degraded_cameras_is_the_set_whose_latest_event_is_active(db):
+    """The list's badge and the agent's status read ask one question per
+    page: whose segments arrive but hold no video right now."""
+    from services.segment_health import degraded_cameras
+
+    def ev(cam, state, when):
+        db.add(CameraEvent(camera_id=cam, event_type=EVENT_TYPE, event_state=state,
+                           description="x", occurred_at=when))
+        db.commit()
+
+    t0 = datetime(2026, 11, 9, 7, 0, tzinfo=UTC)
+    ev(1, "active", t0)                      # camera 1: degraded, never recovered
+    ev(2, "active", t0)                      # camera 2: degraded, then recovered
+    ev(2, "inactive", t0.replace(hour=8))
+    ev(3, "inactive", t0)                    # camera 3: only ever a recovery
+    assert degraded_cameras(db, [1, 2, 3, 4]) == {1}
+    assert degraded_cameras(db, []) == set()
+    assert degraded_cameras(db, [4]) == set()

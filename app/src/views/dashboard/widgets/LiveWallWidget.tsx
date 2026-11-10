@@ -152,6 +152,8 @@ function LiveTile({ cam, spotlit, onSpotlight, playing }: {
             </span>
           ) : rec === 'stalled' ? (
             <span className="text-[9px] font-bold tracking-[0.15em] text-[var(--on-video-warn)] [text-shadow:0_1px_2px_rgba(0,0,0,0.9)]">{t('dashboard.stalled').toUpperCase()}</span>
+          ) : rec === 'degraded' ? (
+            <span className="text-[9px] font-bold tracking-[0.15em] text-[var(--on-video-danger)] [text-shadow:0_1px_2px_rgba(0,0,0,0.9)]">{t('dashboard.statusDegraded').toUpperCase()}</span>
           ) : null}
         </span>
       </div>

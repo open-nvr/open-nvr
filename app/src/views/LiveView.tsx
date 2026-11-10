@@ -846,6 +846,8 @@ function Tile({
                 </span>
               ) : rec === 'stalled' ? (
                 <span className="text-[var(--on-video-warn)]">{t('dashboard.stalled').toUpperCase()}</span>
+              ) : rec === 'degraded' ? (
+                <span className="text-[var(--on-video-danger)]">{t('dashboard.statusDegraded').toUpperCase()}</span>
               ) : null}
             </span>
           </div>

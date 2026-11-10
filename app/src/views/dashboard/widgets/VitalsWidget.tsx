@@ -118,7 +118,7 @@ export function VitalsWidget({ editing, onRemove }: { editing?: boolean; onRemov
     return agg
   }, [list])
   const recording = list.filter((c) => c.recording_state === 'recording').length
-  const stalled = list.filter((c) => c.recording_state === 'stalled').length
+  const stalled = list.filter((c) => c.recording_state === 'stalled' || c.recording_state === 'degraded').length
   const recOff = list.length - recording - stalled
 
   const cpu = res.data?.cpu_percent

@@ -561,6 +561,21 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Every recording segment was indexed with no size and no codec.** The
+  segment-complete hook stat'ed MTX_SEGMENT_PATH as MediaMTX spells it
+  (relative to its own working directory, `./app/recordings/…`), resolved
+  from core's `/app` — a path that does not exist — so `file_size` and
+  `codec` landed NULL on every row (9,400 of 9,400 on the Ventuno Q,
+  2026-11-09) and the reconciler back-filled them fifteen minutes later,
+  too late for the segment-health check, which judges a segment by its
+  size at the moment it closes. The hook now opens the path the way the
+  record-start hook already did. **The recording badge shows "Degraded".**
+  When that check has an active `recording_degraded` alarm — segments keep
+  landing but hold no playable video — the camera list, the dashboard
+  widgets, the live wall and the agent's `system_status` now say
+  *Degraded* instead of *Recording*; the badge refreshes live off the
+  event the UI already listens for.
+
 - **Camera agent: the two misses of eval run 5 on the Ventuno Q (151 of
   156, 2026-11-09).** A report whose schedule the model left blank ("every
   hour tell me what you see" came back with the word `every_minutes` in
