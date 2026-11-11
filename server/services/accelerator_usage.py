@@ -11,7 +11,18 @@ camera, and KAI-C's client-observed latency per proxied adapter. Summed over
 a sample interval and divided by the wall time that is the share of the
 device's time spent computing: one device, requests serialised, so 100 %
 means it never idled. That is what the dashboard shows, labelled as what it
-is: an inference-time share, not a hardware counter. Where the kernel does
+is: an inference-time share, not a hardware counter.
+
+The share is honest only while the producers take turns. Client-observed
+latency includes the wait for whoever holds the device, so when the detector,
+the plate reader and the captioner call at once each one's share counts the
+others' time too and the sum runs past 100 — measured on a Ventuno Q
+(2026-11-11): a plate burst on one camera put the detector at 117 %, the plate
+reader at 72 % and the captioner at 74 % of wall time while every one of them
+ran five to ten times slower than alone. Summed latency over wall time is, by
+Little's law, the mean number of requests in flight on the device, so the
+entry also carries ``inflight``: 1.0 is a device that never idled, 2.6 is one
+with requests queued behind each other. The dashboard says "queued" above 1. Where the kernel does
 export a busy counter (Intel's NPU driver: ``npu_busy_time_us``) that number
 is used instead and labelled so.
 
@@ -155,7 +166,7 @@ class AcceleratorUsage:
         kind, name = now.device
         if prev is None or now.at <= prev.at:
             return [{"kind": kind, "name": name, "busy_percent": None, "users": [],
-                     "source": "inference-time"}]
+                     "source": "inference-time", "inflight": None}]
         dt = now.at - prev.at
         users: list[dict[str, Any]] = []
         det = max(0.0, now.detector - prev.detector) / dt * 100.0
@@ -166,13 +177,18 @@ class AcceleratorUsage:
                     share = max(0.0, total - prev.adapters.get(adapter, 0.0)) / dt * 100.0
                     if share > 0:
                         users.append({"name": adapter, "percent": round(share, 1)})
-        busy = min(100.0, sum(u["percent"] for u in users))
+        total = sum(u["percent"] for u in users)
+        busy = min(100.0, total)
+        # Mean requests in flight on the device over the window (Little's
+        # law: summed latency / wall time). Above 1 the producers are
+        # waiting on each other, which the capped share cannot say.
+        inflight = round(total / 100.0, 2)
         source = "inference-time"
         if now.intel_busy_us is not None and prev.intel_busy_us is not None and kind == "npu":
             busy = min(100.0, max(0.0, now.intel_busy_us - prev.intel_busy_us) / (dt * 1e6) * 100.0)
             source = "sysfs"
         return [{"kind": kind, "name": name, "busy_percent": round(busy, 1),
-                 "users": users, "source": source}]
+                 "users": users, "source": source, "inflight": inflight}]
 
 
 def fetch_text(url: str, timeout: float = 2.0) -> str | None:

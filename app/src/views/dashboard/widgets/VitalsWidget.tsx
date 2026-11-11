@@ -208,8 +208,14 @@ export function VitalsWidget({ editing, onRemove }: { editing?: boolean; onRemov
             label="NPU"
             value={pct(npu.busy_percent)}
             unit="%"
-            tone={level(npu.busy_percent, 90)}
-            sub={npu.users.length ? npu.users.map((u) => `${u.name} ${Math.round(u.percent)}%`).join(' · ') : npu.name}
+            tone={(npu.inflight ?? 0) > 1.05 ? 'crit' : level(npu.busy_percent, 90)}
+            sub={[
+              // The share is inference time over wall time and caps at 100.
+              // Above one request in flight the producers are queued behind
+              // each other, which the capped number cannot show.
+              ...((npu.inflight ?? 0) > 1.05 ? [t('dashboard.npuQueued', { n: npu.inflight!.toFixed(1) })] : []),
+              ...(npu.users.length ? npu.users.map((u) => `${u.name} ${Math.round(Math.min(u.percent, 100))}%`) : [npu.name]),
+            ].join(' · ')}
           >
             <div className="text-[var(--accent)]"><Sparkline points={npuPts} height={16} /></div>
           </Tile>
