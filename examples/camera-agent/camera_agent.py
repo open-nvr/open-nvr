@@ -3756,6 +3756,7 @@ class CameraAgentRuntime:
         # OpenNVR Mirror: at most one live narration at a time (the model
         # is the bottleneck; two pages share one loop by camera).
         self.mirror = None
+        self.mirror_user_token: str | None = None
         # The standing thing most recently set up — ("alarm" | "monitor" |
         # "report", id). "Remove it" / "cancel that" name no id: the stop
         # tools fall back to this, and the router's stop hint picks the
@@ -4015,18 +4016,26 @@ class CameraAgentRuntime:
         self.publish_update({"tracks": {"camera": cam, **frame}})
 
     async def mirror_start(self, camera_id: str, *, voice: bool = True,
-                           scene_every_s: float | None = None):
+                           scene_every_s: float | None = None,
+                           user_token: str | None = None):
         """Start (or re-point) the Mirror narration for ``camera_id``. One
-        loop at a time: starting on another camera stops the first."""
+        loop at a time: starting on another camera stops the first.
+        ``user_token`` is the page's OpenNVR login: with it the loop reads
+        the camera's full-resolution frame from core's capture pool (the
+        same snapshot the Live view's camera menu offers), which is what a
+        person's card is cut from."""
         from mirror import MirrorSession, SCENE_EVERY_S
 
         if self.mirror is not None and self.mirror.running \
                 and self.mirror.camera_id == camera_id:
             self.mirror.voice = voice
             self.mirror.heartbeat()
+            if user_token:
+                self.mirror_user_token = user_token
             return self.mirror
         if self.mirror is not None:
             await self.mirror.stop()
+        self.mirror_user_token = user_token
 
         async def _frame(cam: str) -> bytes | None:
             try:
@@ -4044,10 +4053,30 @@ class CameraAgentRuntime:
         async def _speech(text: str) -> bytes | None:
             return await self.piper.synthesize(text)
 
+        spec = self.context.get_camera(camera_id)
+        oid = getattr(spec, "opennvr_camera_id", None) if spec is not None else None
+        api = (getattr(self.cfg, "opennvr_api_url", "") or "").rstrip("/")
+        hires = None
+        if oid is not None and api and user_token:
+            async def _hires(cam: str) -> bytes | None:
+                tok = self.mirror_user_token
+                if not tok:
+                    return None
+                try:
+                    async with httpx.AsyncClient(timeout=8.0, trust_env=False) as client:
+                        r = await client.get(f"{api}/api/v1/cameras/{oid}/snapshot",
+                                             headers={"Authorization": f"Bearer {tok}"})
+                    if r.status_code == 200 and r.content[:2] == b"\xff\xd8":
+                        return r.content
+                except Exception:  # noqa: BLE001 — the loop falls back to the detector's frame
+                    pass
+                return None
+            hires = _hires
+
         self.mirror = MirrorSession(
             camera_id, frame=_frame, crop=_crop if crops is not None else None,
             vision=self.tools._vlm_caption, speech=_speech,
-            publish=self.publish_update, voice=voice,
+            publish=self.publish_update, voice=voice, hires=hires,
             scene_every_s=scene_every_s or getattr(self.cfg, "mirror_scene_every_s", None) or SCENE_EVERY_S)
         self.mirror.start()
         return self.mirror
@@ -7057,7 +7086,8 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         every = (body or {}).get("scene_every_s")
         m = await runtime.mirror_start(
             cam, voice=voice,
-            scene_every_s=float(every) if every not in (None, "") else None)
+            scene_every_s=float(every) if every not in (None, "") else None,
+            user_token=_bearer_of(request) or None)
         return JSONResponse({"mirror": m.to_wire()})
 
     @app.post("/mirror/stop")
@@ -7078,6 +7108,9 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             body = {}
         if isinstance(body, dict) and "voice" in body:
             m.voice = bool(body["voice"])
+        tok = _bearer_of(request)
+        if tok:
+            runtime.mirror_user_token = tok     # the page's token, kept fresh
         m.heartbeat()
         return {"running": True, "voice": m.voice}
 

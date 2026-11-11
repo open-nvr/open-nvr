@@ -10,8 +10,8 @@ import asyncio
 import pytest
 
 from mirror import (
-    PERSON_PROMPT, SCENE_PROMPT, SCENE_PROMPT_EMPTY, MirrorSession, parse_person_fields,
-    person_summary, same_sentence, scene_prompt,
+    PERSON_PROMPT, SCENE_PROMPT, SCENE_PROMPT_EMPTY, MirrorSession, consensus, crop_person,
+    normalise_fields, parse_person_fields, person_summary, same_sentence, scene_prompt,
 )
 
 
@@ -59,6 +59,8 @@ def test_scene_prompt_is_grounded_in_the_tracks():
     p = scene_prompt([{"label": "person"}, {"label": "person"}, {"label": "car"}, {"label": "cell_phone"}])
     assert "currently sees: 2 people, 1 car, 1 cell phone" in p and "Never invent a person" in p
     assert scene_prompt([{"label": "person"}]).count("1 person") == 1
+    cars = scene_prompt([{"label": "car"}, {"label": "car"}])
+    assert "sees: 2 cars" in cars and "Do not mention people" in cars and "Never invent" not in cars
 
 
 # ── the loop's policy ───────────────────────────────────────────────
@@ -134,7 +136,15 @@ async def test_a_person_in_frame_long_enough_is_described_before_the_scene_refre
     card = s.cards[7]
     assert card.summary == "man, 30s, red shirt" and card.described_at is not None
     m = fake.published[-1]["mirror"]
-    assert m["card"]["track_id"] == 7 and m["greeting"].startswith("Hello! I see a man, 30s")
+    assert m["card"]["track_id"] == 7 and m["card"]["confirmed"] is False and "greeting" not in m
+    assert not any(x.startswith("Hello") for x in fake.spoken), "one look is not spoken: it must be confirmed first"
+    # Still in frame 2.5 s later: the second look, and the two agree.
+    for _ in range(2):
+        fake.now += 1.5; s.observe_tracks(_person_frame(7))
+    assert s.next_person() is card
+    await s.step()
+    m = fake.published[-1]["mirror"]
+    assert m["card"]["confirmed"] is True and m["greeting"].startswith("Hello! I see a man, 30s, red shirt")
     assert fake.spoken[-1] == m["greeting"]
 
 
@@ -154,9 +164,14 @@ async def test_described_people_are_refreshed_only_after_a_while_and_never_re_gr
     fake = Fake(); s = _session(fake)
     await s.step(); fake.now += 1.0
     s.observe_tracks(_person_frame(7)); fake.now += 1.0; s.observe_tracks(_person_frame(7))
-    await s.step()                                               # described + greeted
+    await s.step()                                               # first look
     assert s.cards[7].described_at is not None
+    for _ in range(2):
+        fake.now += 1.5; s.observe_tracks(_person_frame(7))
+    await s.step()                                               # second look: confirmed + greeted
+    assert s.cards[7].confirmed
     greeted_once = len([p for p in fake.published if p["mirror"].get("greeting")])
+    assert greeted_once == 1
     for _ in range(3):                                           # still in frame, 6 s on
         fake.now += 2.0; s.observe_tracks(_person_frame(7))
     assert s.next_person() is None                               # fresh enough
@@ -164,7 +179,7 @@ async def test_described_people_are_refreshed_only_after_a_while_and_never_re_gr
         fake.now += 2.0; s.observe_tracks(_person_frame(7))
     assert s.next_person() is s.cards[7]
     await s.step()
-    assert fake.asked.count("person") == 2
+    assert fake.asked.count("person") == 3
     assert len([p for p in fake.published if p["mirror"].get("greeting")]) == greeted_once
 
 
@@ -343,4 +358,59 @@ async def test_the_scene_prompt_names_what_is_tracked():
                                  {"id": 2, "label": "car", "score": .8, "box": [.5, .5, .3, .3]}]})
     await s.step()
     assert "currently sees: 1 person, 1 car" in fake.prompts[-1]
+
+
+# ── vocabulary, consensus, crops ────────────────────────────────────
+
+def test_normalise_folds_into_the_vocabulary_and_drops_the_rest():
+    f = normalise_fields({"gender": "Male", "age": "30-40", "top": "dark navy jacket", "bottom": "jeans",
+                          "headwear": "baseball cap", "glasses": "yes", "carrying": "a mobile phone",
+                          "expression": "grinning", "posture": "stands near the desk", "summary": "x"})
+    assert f == {"gender": "man", "age": "30s", "top": "blue jacket", "bottom": "denim", "headwear": "cap",
+                 "glasses": "yes", "carrying": "phone", "expression": "smiling", "posture": "standing"}
+    assert normalise_fields({"gender": "robot", "age": "unknown", "top": "none", "carrying": "a strange device"}) == {}
+    assert normalise_fields({"age": "65", "top": "red"}) == {"age": "60+", "top": "red"}
+    assert normalise_fields({"age": "late teens", "glasses": "no"}) == {"age": "teen"}
+
+
+def test_consensus_keeps_what_two_looks_agree_on():
+    a = {"gender": "man", "age": "30s", "top": "blue jacket", "carrying": "phone", "expression": "smiling"}
+    b = {"gender": "man", "age": "40s", "top": "blue", "carrying": "phone", "expression": "neutral"}
+    assert consensus(a, b) == {"gender": "man", "top": "blue jacket", "carrying": "phone"}
+    assert consensus({"top": "red shirt"}, {"top": "blue shirt"}) == {}, "a colour clash drops the garment too"
+    assert consensus({"top": "shirt"}, {"top": "red shirt"}) == {"top": "red shirt"}
+    assert person_summary({"gender": "woman", "top": "green coat", "posture": "waving"}) == "woman, green coat, waving"
+
+
+def test_crop_person_cuts_the_box_with_a_margin_or_declines_a_tiny_one():
+    import io
+    from PIL import Image
+    im = Image.new("RGB", (1920, 1080), (10, 20, 30)); buf = io.BytesIO(); im.save(buf, format="JPEG")
+    jpeg = buf.getvalue()
+    cut = crop_person(jpeg, [0.4, 0.2, 0.1, 0.5])            # 192 × 540 px box
+    w, h = Image.open(io.BytesIO(cut)).size
+    assert 270 <= w <= 300 and 790 <= h <= 820                 # 25 % margin each side
+    assert crop_person(jpeg, [0.5, 0.5, 0.02, 0.05]) is None   # 38 × 54 px: too small
+    assert crop_person(b"not a jpeg", [0, 0, 1, 1]) is None
+
+
+@pytest.mark.asyncio
+async def test_a_person_is_cut_from_the_full_resolution_frame_when_there_is_one():
+    import io
+    from PIL import Image
+    im = Image.new("RGB", (1920, 1080), (200, 30, 30)); buf = io.BytesIO(); im.save(buf, format="JPEG")
+    fake = Fake(); seen = []
+
+    async def hires(cam):
+        return buf.getvalue()
+
+    async def vision(image, question):
+        seen.append(len(image)); fake.now += 1.0
+        return fake.person_text if question == PERSON_PROMPT else fake.caption_text
+    s = MirrorSession("cam1", frame=fake.frame, crop=fake.crop, vision=vision, speech=None,
+                      publish=fake.publish, clock=fake.clock, hires=hires)
+    s.observe_tracks(_person_frame(3)); fake.now += 1.0; s.observe_tracks(_person_frame(3))
+    await s.step()
+    assert fake.crops == [], "the hi-res crop replaced Tier-0's best crop"
+    assert 0 < seen[-1] < len(buf.getvalue()), "a crop, not the whole frame"
 
