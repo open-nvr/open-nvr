@@ -241,11 +241,22 @@
     if (stillTimer) { clearInterval(stillTimer); stillTimer = null; }
     const v = $("v"); if (v.srcObject) { v.srcObject = null; } v.hidden = true; $("still").style.display = "none";
   }
+  // Core advertises the stream at the host it was configured with; the
+  // browser reaches the box by whatever name it typed (a LAN address, a
+  // Tailscale one). Same path and port, this page's host — what the main
+  // UI does too. A WHEP server that cannot be reached must fail fast, or
+  // the page sits on "connecting" instead of showing stills.
+  function rebaseHost(url) { try { const u = new URL(url); u.hostname = location.hostname; return u.href; } catch { return url; } }
+  async function withTimeout(promise, ms, what) {
+    let t; const timeout = new Promise((_, rej) => { t = setTimeout(() => rej(new Error(what + " timed out")), ms); });
+    try { return await Promise.race([promise, timeout]); } finally { clearTimeout(t); }
+  }
   async function startVideo(cam) {
     stopVideo();
     let d = null;
     try { const r = await api("/streams/" + encodeURIComponent(cam) + "/live"); if (r.ok) d = await r.json(); } catch {}
     if (d && d.whep_url) {
+      d.whep_url = rebaseHost(d.whep_url);
       try {
         const p = new RTCPeerConnection({iceServers: [{urls: ["stun:stun.l.google.com:19302"]}]});
         pc = p;
@@ -255,10 +266,13 @@
         const got = new Promise((res) => { p.ontrack = (ev) => { const [s] = ev.streams; const v = $("v");
           if (s) { v.srcObject = s; v.muted = true; v.hidden = false; $("still").style.display = "none"; v.play().catch(() => {}); res(true); } }; });
         const offer = await p.createOffer(); await p.setLocalDescription(offer);
-        const resp = await raw(d.whep_url, {method: "POST", headers: {"Content-Type": "application/sdp"}, body: offer.sdp || ""});
+        const ac = new AbortController(); const abortT = setTimeout(() => ac.abort(), 6000);
+        let resp;
+        try { resp = await raw(d.whep_url, {method: "POST", headers: {"Content-Type": "application/sdp"}, body: offer.sdp || "", signal: ac.signal}); }
+        finally { clearTimeout(abortT); }
         if (!(resp.status === 200 || resp.status === 201)) throw new Error("WHEP " + resp.status);
         const loc = resp.headers.get("Location"); whepResource = loc ? new URL(loc, d.whep_url).href : null;
-        await p.setRemoteDescription({type: "answer", sdp: await resp.text()});
+        await withTimeout(p.setRemoteDescription({type: "answer", sdp: await resp.text()}), 5000, "answer");
         const ok = await Promise.race([got, new Promise((r) => setTimeout(() => r(false), 6000))]);
         if (ok) { setLive(true, "live · webrtc"); return; }
       } catch (e) { console.warn("webrtc failed", e); }

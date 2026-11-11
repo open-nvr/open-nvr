@@ -10,8 +10,8 @@ import asyncio
 import pytest
 
 from mirror import (
-    PERSON_PROMPT, SCENE_PROMPT, MirrorSession, parse_person_fields,
-    person_summary, same_sentence,
+    PERSON_PROMPT, SCENE_PROMPT, SCENE_PROMPT_EMPTY, MirrorSession, parse_person_fields,
+    person_summary, same_sentence, scene_prompt,
 )
 
 
@@ -53,6 +53,14 @@ def test_same_sentence_is_a_rephrase_not_news():
     assert same_sentence("", "")
 
 
+def test_scene_prompt_is_grounded_in_the_tracks():
+    assert scene_prompt([]) == SCENE_PROMPT_EMPTY
+    assert "Do not mention people" in SCENE_PROMPT_EMPTY
+    p = scene_prompt([{"label": "person"}, {"label": "person"}, {"label": "car"}, {"label": "cell_phone"}])
+    assert "currently sees: 2 people, 1 car, 1 cell phone" in p and "Never invent a person" in p
+    assert scene_prompt([{"label": "person"}]).count("1 person") == 1
+
+
 # ── the loop's policy ───────────────────────────────────────────────
 
 class Fake:
@@ -81,6 +89,7 @@ class Fake:
 
     async def vision(self, image, question):
         self.asked.append("person" if question == PERSON_PROMPT else "scene")
+        self.prompts = getattr(self, "prompts", []); self.prompts.append(question)
         self.now += 2.0                       # the model takes two seconds
         return self.person_text if question == PERSON_PROMPT else self.caption_text
 
@@ -163,9 +172,12 @@ async def test_described_people_are_refreshed_only_after_a_while_and_never_re_gr
 async def test_the_same_sentence_is_not_spoken_twice_and_voice_off_is_silent():
     fake = Fake(); s = _session(fake)
     await s.step()
+    assert fake.prompts[-1] == SCENE_PROMPT_EMPTY, "no tracks: the model is told nobody is there"
     fake.now += 20.0                                 # past the speaking floor and the cadence
+    fake.caption_text = "One man wearing a red shirt is waving at the camera."
     await s.step()
     assert fake.asked == ["scene", "scene"] and len(fake.spoken) == 1, "a rephrase is not news"
+    assert s.caption == "One man wearing a red shirt is waving at the camera.", "after the hold it may replace the text"
     fake.caption_text = "Two women in green jackets carry a large box across the hall."
     fake.now += 20.0
     await s.step()
@@ -306,3 +318,29 @@ def test_relayed_tracks_reach_the_running_mirror():
         rt._relay_tracks(4, {"tracks": [{"id": 6, "label": "person", "score": .9, "box": [.1, .1, .4, .6]}]})
         assert 6 not in rt.mirror.cards, "another core camera is not this mirror's"
         client.post("/mirror/stop")
+
+
+@pytest.mark.asyncio
+async def test_a_rephrase_inside_the_hold_keeps_the_subtitle():
+    fake = Fake(); s = _session(fake)
+    await s.step()
+    first = s.caption
+    fake.now += 13.0                                 # empty view: the 12 s cadence
+    fake.caption_text = "One man in a red shirt waves at the camera."
+    assert await s.step() is True
+    assert s.caption == first and s.stats.captions == 1
+    assert fake.published[-1]["mirror"].get("same") is True
+    fake.now += 13.0
+    fake.caption_text = "Two women in green jackets carry a large box across the hall."
+    await s.step()
+    assert s.caption.startswith("Two women") and s.stats.captions == 2
+
+
+@pytest.mark.asyncio
+async def test_the_scene_prompt_names_what_is_tracked():
+    fake = Fake(); s = _session(fake)
+    s.observe_tracks({"tracks": [{"id": 1, "label": "person", "score": .9, "box": [.1, .1, .3, .6]},
+                                 {"id": 2, "label": "car", "score": .8, "box": [.5, .5, .3, .3]}]})
+    await s.step()
+    assert "currently sees: 1 person, 1 car" in fake.prompts[-1]
+
