@@ -1215,3 +1215,47 @@ def test_the_stop_tools_no_longer_require_an_id():
     import camera_agent as ca
     for tool in (ca._stop_alarm_tool(), ca._stop_monitor_tool(), ca._stop_report_tool()):
         assert tool["function"]["parameters"]["required"] == []
+
+
+# ── "remove that alarm" when the thing standing is a watch (2026-11-10) ──
+
+def test_stop_alarm_with_no_alarm_stops_the_one_watch_that_is_standing():
+    rt = _runtime()
+    asyncio.run(rt._handle_create_monitor({"kind": "notify", "target": "person", "camera_id": "cam1"}))
+    assert len(rt.monitors.list()) == 1 and rt.alarms.list() == []
+    msg = asyncio.run(rt._handle_stop_alarm({}))
+    low = msg.lower()
+    assert "no alarm" in low and "watch #1" in low and "stopped and removed watch #1" in low
+    assert rt.monitors.list() == [], "the watch the operator meant is gone"
+
+
+def test_stop_watch_with_no_watch_stops_the_one_report_or_alarm_standing():
+    rt = _runtime()
+    asyncio.run(rt._handle_create_report({"name": "morning", "query": "summarise overnight", "at": "08:00"}))
+    msg = asyncio.run(rt._handle_stop_monitor({}))
+    assert "no watch" in msg.lower() and "report #1" in msg.lower() and rt.reports.list() == []
+    asyncio.run(rt._handle_create_alarm({"name": "Car Arrival", "target": "car", "camera_id": "cam1"}))
+    msg = asyncio.run(rt._handle_stop_report({}))
+    assert "no report" in msg.lower() and "alarm #1" in msg.lower() and rt.alarms.list() == []
+
+
+def test_stop_alarm_with_no_alarm_and_several_things_standing_lists_them():
+    rt = _runtime()
+    asyncio.run(rt._handle_create_monitor({"kind": "notify", "target": "person", "camera_id": "cam1"}))
+    asyncio.run(rt._handle_create_report({"name": "morning", "query": "summarise overnight", "at": "08:00"}))
+    msg = asyncio.run(rt._handle_stop_alarm({}))
+    low = msg.lower()
+    assert "no alarm" in low and "watch #1" in low and "report #1" in low and "say which" in low
+    assert len(rt.monitors.list()) == 1 and len(rt.reports.list()) == 1, "nothing stopped on a guess"
+
+
+def test_silencing_with_no_alarm_never_stops_a_watch():
+    rt = _runtime()
+    asyncio.run(rt._handle_create_monitor({"kind": "notify", "target": "person", "camera_id": "cam1"}))
+    msg = asyncio.run(rt._handle_stop_alarm({"action": "silence"}))
+    assert "no alarms" in msg.lower() and len(rt.monitors.list()) == 1
+
+
+def test_stop_alarm_with_nothing_standing_at_all_still_says_no_alarms():
+    rt = _runtime()
+    assert "no alarms" in asyncio.run(rt._handle_stop_alarm({})).lower()

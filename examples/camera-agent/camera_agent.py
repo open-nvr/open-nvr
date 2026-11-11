@@ -4700,6 +4700,40 @@ class CameraAgentRuntime:
             for i in items)
         return [], f"Which {noun}? You have: {listing}. Say the number."
 
+    _STANDING_NOUNS = {"alarm": "alarm", "monitor": "watch", "report": "report"}
+
+    def _standing_items(self, kind: str) -> list[dict[str, Any]]:
+        store = {"alarm": self.alarms, "monitor": self.monitors, "report": self.reports}[kind]
+        return list(store.list())
+
+    async def _stop_other_kind(self, asked: str) -> str | None:
+        """The asked kind has nothing standing. People call a watch an
+        alarm and an alarm a reminder ("I remove that alarm" for a watch
+        on a person at cam 24 — Ventuno Q, 2026-11-10 — left the watch
+        running and the operator removing it by hand). If exactly ONE
+        thing of any kind is standing, that is what they mean: stop it and
+        say so. Several: list them by kind and number. Nothing at all:
+        None, and the caller keeps its own sentence."""
+        others = [(k, i) for k in ("alarm", "monitor", "report") if k != asked
+                  for i in self._standing_items(k)]
+        if not others:
+            return None
+        noun = self._STANDING_NOUNS[asked]
+        if len(others) == 1:
+            kind, item = others[0]
+            handler = {"alarm": self._handle_stop_alarm, "monitor": self._handle_stop_monitor,
+                       "report": self._handle_stop_report}[kind]
+            key = {"alarm": "alarm_id", "monitor": "monitor_id", "report": "report_id"}[kind]
+            done = await handler({key: int(item["id"])})
+            return (f"There's no {noun} set up — the one thing standing is "
+                    f"{self._STANDING_NOUNS[kind]} #{item['id']} "
+                    f"{self._describe_standing(item)}".rstrip() + f". {done}")
+        listing = "; ".join(
+            f"{self._STANDING_NOUNS[k]} #{i['id']} {self._describe_standing(i)}".rstrip()
+            for k, i in others)
+        return (f"There's no {noun} set up right now. Standing: {listing}. "
+                f"Say which one to stop.")
+
     @staticmethod
     def _describe_standing(item: dict[str, Any]) -> str:
         name = item.get("name") or item.get("description") or ""
@@ -4710,9 +4744,16 @@ class CameraAgentRuntime:
     async def _handle_stop_alarm(self, args: dict[str, Any]) -> str:
         items = self.alarms.list()
         ids, ask = self._pick_standing("alarm", args.get("alarm_id"), items, "alarm")
+        action = str(args.get("action") or "disarm").strip().lower()
+        if ask and not items and action != "silence":
+            # "silence" means a ringing alarm; stopping a watch for it
+            # would be wrong. A disarm/remove with no alarm standing may
+            # mean the watch or report that is.
+            other = await self._stop_other_kind("alarm")
+            if other:
+                return other
         if ask:
             return ask
-        action = str(args.get("action") or "disarm").strip().lower()
         if action == "silence":
             done = [i for i in ids if self.alarms.acknowledge(i)]
             return ("Silenced." if done else
@@ -4775,6 +4816,10 @@ class CameraAgentRuntime:
     async def _handle_stop_report(self, args: dict[str, Any]) -> str:
         items = self.reports.list()
         ids, ask = self._pick_standing("report", args.get("report_id"), items, "report")
+        if ask and not items:
+            other = await self._stop_other_kind("report")
+            if other:
+                return other
         if ask:
             return ask
         removed = [i for i in ids if self.reports.remove(i)]
@@ -5031,6 +5076,10 @@ class CameraAgentRuntime:
     async def _handle_stop_monitor(self, args: dict[str, Any]) -> str:
         items = self.monitors.list()
         ids, ask = self._pick_standing("monitor", args.get("monitor_id"), items, "watch")
+        if ask and not items:
+            other = await self._stop_other_kind("monitor")
+            if other:
+                return other
         if ask:
             return ask
         by_id = {int(i["id"]): i for i in items}
