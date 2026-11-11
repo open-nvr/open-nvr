@@ -2089,3 +2089,34 @@ def test_the_route_makes_parsed_labels_soft_and_chip_labels_hard(client, db, mon
     assert seen[0] is True, "parsed class: soft"
     assert seen[1] is False, "a label= chip: a wall"
     assert seen[2] is False, "no class word: nothing to soften"
+
+
+def test_a_class_nobody_detected_is_said_when_the_vectors_answer_anyway(client, db, monkeypatch):
+    """"a dog" on a site with no dog detections now returns the visits
+    that look like one (#873). That is the honest best answer only when
+    it is said: the response carries `lookalike`, and not when the class
+    WAS detected, nor on a later page."""
+    import routers.search as sr
+    from services import search_service
+    _camera(db, 1, "Dock")
+    car = _visit(db, label="car", caption="a brown car that looks like a dog from behind")
+
+    async def _vectors(_db, words):
+        return [1.0], None, None
+    monkeypatch.setattr(sr, "_query_vectors", _vectors)
+    real = search_service.search_page
+
+    def _page(*args, **kw):
+        page = real(*args, **kw)
+        from services.search_service import SearchHit
+        if not page.hits:
+            page = type(page)(hits=[SearchHit(event=db.get(TimelineEvent, car.id), caption="x", attributes=None, score=0.5)],
+                              total=1, semantic={"used": True, "labels_soft": True, "arms": {"vector": 1}})
+        return page
+    monkeypatch.setattr(sr, "search_page", _page)
+    body = client.get("/api/v1/search", params={"q": "a dog"}).json()
+    assert body["lookalike"] == {"classes": ["dog"], "what": "dog"}
+    body = client.get("/api/v1/search", params={"q": "a car"}).json()
+    assert "lookalike" not in body, "the class was detected: nothing to say"
+    body = client.get("/api/v1/search", params={"q": "a dog", "label": "dog"}).json()
+    assert "lookalike" not in body, "a label= chip is a wall, not a softening"

@@ -144,6 +144,9 @@ type SearchResponse = {
   relaxed?: { dropped: string; without: number }
   /** No time in the question: how far back the whole-index search went. */
   scope?: { all_time: boolean; oldest: string; days: number; total: number } | null
+  /** The class word was never detected in this window; the rows are the
+   *  visits whose frames or captions look most like it. */
+  lookalike?: { classes: string[]; what: string } | null
   /** Why the ranking looks the way it does, when a second arm took part
    *  — or why it could not. Absent on a deployment that has never
    *  embedded anything, which is most of them. */
@@ -806,6 +809,36 @@ export function Search() {
       tone: 'info',
       icon: <Info size={13} />,
       text: <>Skipped: {interp.ignored.join(', ')}</>,
+    })
+  }
+  // The class word was never detected; these rows LOOK like it (frames and
+  // captions). Said as a warning, with the strict search one click away.
+  if (data?.lookalike && results.length > 0 && !editing) {
+    const classes = data.lookalike.classes
+    notices.push({
+      key: 'lookalike',
+      tone: 'warn',
+      icon: <Sparkles size={13} />,
+      text: (
+        <>
+          No <b>{data.lookalike.what}</b> was detected in this window. These visits are the ones whose
+          frames or captions look most like one.
+        </>
+      ),
+      action: (
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            const base = asFilters()
+            base.labels = classes
+            setFilters(base)
+            setPage(0)
+          }}
+        >
+          Only detected {data.lookalike.what}
+        </Button>
+      ),
     })
   }
   // THESE ARE NOT THE SEARCH THAT WAS TYPED. The server drops a leftover
