@@ -13,6 +13,7 @@ import { rebaseToCurrentOrigin } from '../../../lib/streamUrl'
 import { useCameraStatus } from '../../../hooks/useCameraStatus'
 import { usePageVisible } from '../../../hooks/usePageVisible'
 import { VideoPlayer } from '../../../components/VideoPlayer'
+import { detectionsPreferred } from '../../../lib/detectionFeed'
 import { WidgetFrame, MiniSegment, cameraState, shortAge, STATE_INK, type CamState } from '../WidgetFrame'
 
 const TOUR_MS = 15_000
@@ -115,6 +116,7 @@ function LiveTile({ cam, spotlit, onSpotlight, playing }: {
           displayAspectOverride={cam.display_aspect_ratio}
           cameraId={cam.id}
           className="w-full h-full !bg-black"
+          showDetections={detectionsPreferred()}
         />
         </div>
       ) : (

@@ -8,6 +8,18 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Detections are drawn on every live picture, under one switch.** The
+  dashboard's live wall, the camera peek and the tour now carry the same
+  box overlay as the Live view, following the Live view's per-browser
+  preference (on unless turned off there).
+
+### Fixed
+
+- **Camera agent: the app-alert subscriber no longer trips over itself on
+  a clean stop.** Its stop path unsubscribed a plate subscription that
+  only the inference subscriber holds; the `NameError` was logged as an
+  error and the subscriber reconnected for nothing.
+
 - **The live detection overlay moves with the object, and is on by
   default.** Tier-0 publishes about five frames a second; the boxes used
   to jump between them. Each track's box now glides toward its latest
