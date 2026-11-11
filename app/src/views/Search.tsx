@@ -385,44 +385,113 @@ export function Search() {
   // /search/transcribe (the box's own STT adapter through KAI-C) and the
   // words land in the box as if typed, with what the read-back changed
   // ("twenty three" → 23) shown once under the field.
+  //
+  // The state is made unmistakable the way Google's 2025 voice search
+  // does it: while listening the whole field glows, live level bars
+  // replace the search icon, the placeholder says so, the words appear
+  // in the field as they are heard (an interim transcription every two
+  // seconds, grey until final), and the one button on the right becomes
+  // a large accent "Search". It ends on that click, on Escape, or by
+  // itself after 1.8 s of silence once something was said — the
+  // end-pointing phones use — with a 20 s cap.
   const [voice, setVoice] = useState<'idle' | 'listening' | 'transcribing'>('idle')
   const [voiceNote, setVoiceNote] = useState<string | null>(null)
+  const [voiceLevel, setVoiceLevel] = useState(0)
+  const [interim, setInterim] = useState<string | null>(null)
   const captureRef = useRef<VoiceCapture | null>(null)
+  const voiceRef = useRef(voice)
+  voiceRef.current = voice
+  const interimBusy = useRef(false)
   const voiceOk = voiceCaptureAvailable()
-  const toggleVoice = async () => {
-    if (voice === 'transcribing') return
-    if (voice === 'listening') {
-      const cap = captureRef.current
-      captureRef.current = null
-      setVoice('transcribing')
-      try {
-        const { wav, seconds } = cap ? await cap.stop() : { wav: null, seconds: 0 }
-        if (!wav || seconds < 0.3) { setVoiceNote(t('search.voice.nothing')); return }
-        const audio_b64 = await blobToBase64(wav)
-        const { data } = await api.post('/api/v1/search/transcribe', { audio_b64 })
-        const query: string = data?.query ?? ''
-        const changes: string[] = Array.isArray(data?.changes) ? data.changes : []
-        if (!query) { setVoiceNote(t('search.voice.nothing')); return }
-        setVoiceNote(changes.length ? `${t('search.voice.heard')} “${data.transcript}” · ${changes.join(' · ')}` : null)
-        run(query)
-      } catch (err: unknown) {
-        const detail = (err as { data?: { detail?: { reason?: string } } })?.data?.detail
-        setVoiceNote(detail?.reason === 'no-stt' ? t('search.voice.noStt') : t('search.voice.failed'))
-      } finally {
-        setVoice('idle')
-      }
+
+  const transcribeClip = async (wav: Blob): Promise<{ query: string; transcript: string; changes: string[] } | null> => {
+    const audio_b64 = await blobToBase64(wav)
+    const { data } = await api.post('/api/v1/search/transcribe', { audio_b64 })
+    const query: string = data?.query ?? ''
+    const transcript: string = data?.transcript ?? ''
+    const changes: string[] = Array.isArray(data?.changes) ? data.changes : []
+    return query ? { query, transcript, changes } : null
+  }
+
+  const finishVoice = async (cancel = false) => {
+    const cap = captureRef.current
+    captureRef.current = null
+    if (!cap) { setVoice('idle'); return }
+    if (cancel) {
+      await cap.stop().catch(() => undefined)
+      setInterim(null)
+      setVoice('idle')
       return
     }
+    setVoice('transcribing')
+    try {
+      const { wav, seconds } = await cap.stop()
+      if (seconds < 0.3 || !cap.heardSpeech) { setVoiceNote(t('search.voice.nothing')); setInterim(null); return }
+      const got = await transcribeClip(wav)
+      if (!got) { setVoiceNote(t('search.voice.nothing')); setInterim(null); return }
+      setInterim(null)
+      setVoiceNote(got.changes.length ? `${t('search.voice.heard')} “${got.transcript}” · ${got.changes.join(' · ')}` : null)
+      run(got.query)
+    } catch (err: unknown) {
+      const detail = (err as { data?: { detail?: { reason?: string } } })?.data?.detail
+      setVoiceNote(detail?.reason === 'no-stt' ? t('search.voice.noStt') : t('search.voice.failed'))
+      setInterim(null)
+    } finally {
+      setVoice('idle')
+    }
+  }
+
+  const startVoice = async () => {
     setVoiceNote(null)
+    setInterim(null)
     const cap = new VoiceCapture()
     try {
       await cap.start()
-      captureRef.current = cap
-      setVoice('listening')
     } catch {
       setVoiceNote(t('search.voice.micDenied'))
+      return
     }
+    captureRef.current = cap
+    setVoice('listening')
+    const startedAt = performance.now()
+    let lastInterimAt = startedAt
+    const tick = window.setInterval(() => {
+      if (captureRef.current !== cap || voiceRef.current !== 'listening') { window.clearInterval(tick); return }
+      setVoiceLevel(cap.level)
+      const now = performance.now()
+      // End by itself: something was said, then 1.8 s of quiet; or 20 s in all.
+      if ((cap.heardSpeech && now - cap.lastSpeechAt > 1800) || now - startedAt > 20000) {
+        window.clearInterval(tick)
+        void finishVoice()
+        return
+      }
+      // The words as they are heard: the whole clip so far, every two
+      // seconds, one request in flight at a time.
+      if (cap.heardSpeech && now - lastInterimAt > 2000 && !interimBusy.current) {
+        lastInterimAt = now
+        interimBusy.current = true
+        const { wav } = cap.snapshot()
+        transcribeClip(wav)
+          .then((got) => { if (captureRef.current === cap && got) setInterim(got.transcript) })
+          .catch(() => undefined)
+          .finally(() => { interimBusy.current = false })
+      }
+    }, 100)
   }
+
+  const toggleVoice = async () => {
+    if (voice === 'transcribing') return
+    if (voice === 'listening') { await finishVoice(); return }
+    await startVoice()
+  }
+
+  useEffect(() => {
+    if (voice !== 'listening') return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); void finishVoice(true) } }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [voice])
 
   const run = (text: string) => {
     setSentence(text)
@@ -914,37 +983,68 @@ export function Search() {
             onSubmit={(e) => { e.preventDefault(); run(draft.trim()) }}
           >
             <div className="relative min-w-0 flex-1">
-              <SearchIcon
-                size={15}
-                className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--text-dim)]"
-              />
+              {voice === 'listening' ? (
+                <span
+                  aria-hidden
+                  className="pointer-events-none absolute left-3 top-1/2 flex h-4 -translate-y-1/2 items-end gap-[2px]"
+                >
+                  {[0.55, 0.85, 1, 0.7, 0.45].map((k, i) => (
+                    <span
+                      key={i}
+                      className="w-[3px] rounded-sm bg-[var(--accent)] transition-[height] duration-100"
+                      style={{ height: `${Math.max(3, Math.min(16, 3 + voiceLevel * 40 * k))}px` }}
+                    />
+                  ))}
+                </span>
+              ) : (
+                <SearchIcon
+                  size={15}
+                  className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--text-dim)]"
+                />
+              )}
               <input
                 ref={boxRef}
-                value={draft}
+                value={voice === 'listening' ? (interim ?? '') : draft}
+                readOnly={voice === 'listening'}
                 onChange={(e) => setDraft(e.target.value)}
-                placeholder={t('search.placeholder')}
+                placeholder={voice === 'listening' ? (interim ? '' : t('search.voice.listening')) : voice === 'transcribing' ? t('search.voice.transcribing') : t('search.placeholder')}
                 aria-label={t('search.title')}
-                className="h-9 w-full border border-[var(--border)] bg-[var(--bg-2)] pl-9 pr-16 text-[13px] outline-none transition-colors placeholder:text-[color-mix(in_oklab,var(--text-dim)_50%,transparent)] focus:border-[var(--accent)] focus:placeholder:text-[color-mix(in_oklab,var(--text-dim)_20%,transparent)]"
+                aria-live={voice === 'listening' ? 'polite' : undefined}
+                className={`h-9 w-full border bg-[var(--bg-2)] pl-9 text-[13px] outline-none transition-[border-color,box-shadow] placeholder:text-[color-mix(in_oklab,var(--text-dim)_50%,transparent)] focus:border-[var(--accent)] focus:placeholder:text-[color-mix(in_oklab,var(--text-dim)_20%,transparent)] ${
+                  voice === 'listening'
+                    ? 'border-[var(--accent)] pr-28 text-[var(--text-dim)] shadow-[0_0_0_3px_color-mix(in_oklab,var(--accent)_30%,transparent)] placeholder:text-[var(--accent)]'
+                    : 'border-[var(--border)] pr-16'
+                }`}
               />
               <span className="absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-0.5">
-                <button
-                  type="button"
-                  onClick={() => { void toggleVoice() }}
-                  disabled={!voiceOk || voice === 'transcribing'}
-                  title={!voiceOk ? t('search.voice.insecure') : voice === 'listening' ? t('search.voice.stop') : voice === 'transcribing' ? t('search.voice.transcribing') : t('search.voice.start')}
-                  aria-label={voice === 'listening' ? t('search.voice.stop') : t('search.voice.start')}
-                  aria-pressed={voice === 'listening'}
-                  className={`grid h-6 w-6 place-items-center transition-colors disabled:opacity-40 ${
-                    voice === 'listening'
-                      ? 'animate-pulse bg-[var(--danger)] text-white'
-                      : voice === 'transcribing'
-                        ? 'text-[var(--accent)]'
+                {voice === 'listening' ? (
+                  <button
+                    type="button"
+                    onClick={() => { void finishVoice() }}
+                    title={t('search.voice.searchNow')}
+                    aria-label={t('search.voice.searchNow')}
+                    className="flex h-7 items-center gap-1.5 bg-[var(--accent)] px-3 text-[12px] font-medium text-white hover:brightness-110"
+                  >
+                    <SearchIcon size={13} />
+                    {t('search.voice.searchNow')}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => { void toggleVoice() }}
+                    disabled={!voiceOk || voice === 'transcribing'}
+                    title={!voiceOk ? t('search.voice.insecure') : voice === 'transcribing' ? t('search.voice.transcribing') : t('search.voice.start')}
+                    aria-label={t('search.voice.start')}
+                    className={`grid h-6 w-6 place-items-center transition-colors disabled:opacity-40 ${
+                      voice === 'transcribing'
+                        ? 'animate-pulse text-[var(--accent)]'
                         : 'text-[var(--text-dim)] hover:bg-[var(--panel)] hover:text-[var(--text)]'
-                  }`}
-                >
-                  <Mic size={14} />
-                </button>
-                {draft && (
+                    }`}
+                  >
+                    <Mic size={14} />
+                  </button>
+                )}
+                {voice !== 'listening' && draft && (
                   <button
                     type="button"
                     onClick={() => { setDraft(''); run('') }}
@@ -955,7 +1055,7 @@ export function Search() {
                     <X size={14} />
                   </button>
                 )}
-                <button
+                {voice !== 'listening' && <button
                   type="submit"
                   title="Search (Enter)"
                   aria-label="Search"
@@ -966,7 +1066,7 @@ export function Search() {
                   }`}
                 >
                   <CornerDownLeft size={13} />
-                </button>
+                </button>}
               </span>
             </div>
           </form>

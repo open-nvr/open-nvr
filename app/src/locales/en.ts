@@ -715,6 +715,8 @@ export const translations: TranslationCatalog = {
   'search.placeholder': 'Search by object, colour, plate, camera or time',
   'search.voice.start': 'Speak your search (transcribed on this box)',
   'search.voice.stop': 'Stop and search',
+  'search.voice.listening': 'Listening… speak your search',
+  'search.voice.searchNow': 'Search',
   'search.voice.transcribing': 'Transcribing…',
   'search.voice.insecure': 'The microphone needs HTTPS or localhost',
   'search.voice.micDenied': 'Microphone access was refused',

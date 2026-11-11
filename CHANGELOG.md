@@ -6,6 +6,21 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Voice search looks and behaves like voice search.** The first cut was
+  a small pulsing icon, which read as nothing happening. Now, while
+  listening, the whole field glows in the accent colour, live level bars
+  driven by the microphone replace the search icon, the placeholder
+  says "Listening…", the words appear in the field as they are heard
+  (an interim transcription of the clip so far every two seconds, grey
+  until final) and the one button on the right becomes a large accent
+  **Search**. Listening ends on that click, on Escape (cancel), or by
+  itself after 1.8 s of quiet once something was said (the end-pointing
+  phones use), with a 20 s cap; then the read-back query runs and the
+  button returns to the microphone. (`app/src/views/Search.tsx`,
+  `app/src/lib/voiceCapture.ts`)
+
 ### Fixed
 
 - **Search finds what the detector misnamed, and "two men" no longer
