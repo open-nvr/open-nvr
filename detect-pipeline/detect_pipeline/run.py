@@ -402,6 +402,33 @@ def _gate_factory(cfg: ServiceConfig):
     return lambda: Gate(gcfg)
 
 
+def _build_dispatch(cfg):
+    """(dispatcher, base router) for the gate mode, or (None, None).
+
+    No KAI-C URL: nothing (the default install). Enforce: the default
+    routes (caption) on every escalation, as before. Any other mode: the
+    dispatcher exists but the base router is EMPTY, so only the opt-in
+    per-camera routes that answer to their claim rather than the mode
+    (the face route) can run; every other camera dispatches nothing,
+    exactly as before. A gate mode of ``off`` builds no gate, so nothing
+    escalates and nothing runs."""
+    if not cfg.dispatch_kaic_url:
+        return None, None
+    from .dispatch import DispatchRouter, KaicDispatcher
+
+    dispatcher = KaicDispatcher(
+        cfg.dispatch_kaic_url, api_key=cfg.api_key, task=cfg.dispatch_task,
+        max_inflight=cfg.dispatch_max_inflight,
+    )
+    if (cfg.gate_mode or "").lower() == "enforce":
+        log.info("tier1 dispatch enabled -> %s (task=%s)", cfg.dispatch_kaic_url, cfg.dispatch_task)
+        return dispatcher, DispatchRouter()
+    log.info("tier1 dispatch -> %s: gate mode=%s, so only claimed per-camera "
+             "routes (faces) run; default routes wait for enforce",
+             cfg.dispatch_kaic_url, cfg.gate_mode)
+    return dispatcher, DispatchRouter(routes={})
+
+
 def _resolve_onnx_backend(configured: str, family_default: str, providers=None) -> str:
     """DETECT_ONNX_BACKEND: '' / 'auto' resolve per detector family — cvdnn
     for the YOLO head (runs everywhere, zero deps), ort for the DETR head
@@ -568,21 +595,8 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
         cfg.onnx_input if cfg.detector in ("onnx", "rfdetr") else cfg.model_size
     )
     # #10 Tier-1 dispatch: built only when a KAI-C URL is configured (off by
-    # default). It still only fires on enforce escalations (shadow/off = nothing).
-    dispatcher = router = None
-    if cfg.dispatch_kaic_url and (cfg.gate_mode or "").lower() == "enforce":
-        from .dispatch import DispatchRouter, KaicDispatcher
-        dispatcher = KaicDispatcher(
-            cfg.dispatch_kaic_url, api_key=cfg.api_key, task=cfg.dispatch_task,
-            max_inflight=cfg.dispatch_max_inflight,
-        )
-        router = DispatchRouter()
-        log.info("tier1 dispatch enabled -> %s (task=%s)", cfg.dispatch_kaic_url, cfg.dispatch_task)
-    elif cfg.dispatch_kaic_url:
-        # URL set but gate isn't enforcing -> dispatch would never fire; don't spin
-        # up an idle pool. (shadow measures; only enforce dispatches.)
-        log.info("tier1 dispatch URL set but gate mode=%s (not enforce); dispatch inactive",
-                 cfg.gate_mode)
+    # default); see _build_dispatch for what runs in which gate mode.
+    dispatcher, router = _build_dispatch(cfg)
     # Best-frame store: retains each track's best crop for on-demand fetch (served
     # on the metrics port at /best_frame). Only built when there's a metrics port to
     # serve it on — no point doing per-frame store work nothing can ever read.
@@ -923,17 +937,7 @@ def main() -> int:  # pragma: no cover - integration entrypoint
             return
         log.info("tier0 gate mode change (managed): %s -> %s", effective_mode, override)
         cfg = replace(cfg, gate_mode=override)
-        dispatcher = router = None
-        if override == "enforce" and cfg.dispatch_kaic_url:
-            from .dispatch import DispatchRouter, KaicDispatcher
-
-            dispatcher = KaicDispatcher(
-                cfg.dispatch_kaic_url, api_key=cfg.api_key, task=cfg.dispatch_task,
-                max_inflight=cfg.dispatch_max_inflight,
-            )
-            router = DispatchRouter()
-            log.info("tier1 dispatch enabled -> %s (task=%s)",
-                     cfg.dispatch_kaic_url, cfg.dispatch_task)
+        dispatcher, router = _build_dispatch(cfg)
         manager.apply_gate_change(_gate_factory(cfg), dispatcher=dispatcher, router=router)
         effective_mode = override
 
