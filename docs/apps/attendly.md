@@ -14,9 +14,31 @@ finalise into a PRESENT/ABSENT roster you can export.
 Attendly runs beside OpenNVR the way the Camera Agent does: its own
 container, its own web UI on port 9300, a card in the App Catalog whose
 **Open app** button opens that UI in a new tab, and sign-in with your OpenNVR
-account. OpenNVR does the lower layer: frames come from core's snapshot path,
-detection and recognition go through KAI-C to the InsightFace adapter, which
-the `attendly` compose profile starts.
+account. OpenNVR does the lower layer: detection and recognition go through
+KAI-C to the InsightFace adapter, which the `attendly` compose profile starts.
+
+### Where the faces come from
+
+Gates and staff departments use OpenNVR's **face route**
+(`docs/design/face-recognition-route.md`): the detect pipeline follows each
+person on the camera, sends their best crop to Attendly's adapter through
+KAI-C, and publishes the answer as `face.recognized.v1`; Attendly decides
+from those events and takes no frames of its own. Saving a gate or a
+department claims the `face_recognition` skill on its camera, naming
+Attendly's adapter, with the saving admin's own login (core checks they may
+configure that camera, and audits it); a camera nothing uses any more is
+released. A gate or department falls back to taking its own snapshot every
+second when its camera carries no claim, when AI detection is switched off
+for that camera, or while the event bus is down. The Gates and Staff pages
+show which source each one uses.
+
+Classes still take scheduled snapshots of the room's camera: seated students
+are poorly found by person detection, so classrooms wait for a whole-frame
+face pass on the platform (the design doc's P7).
+
+Enrolment can use the browser's webcam, uploaded photos, or an **OpenNVR
+camera** (the gate's or the classroom's): enrolling with the camera that
+will recognise the student is the most accurate.
 
 ## Run it
 
@@ -173,6 +195,8 @@ departments and re-finalises classes.
 | `ATTENDLY_DUPLICATE_THRESHOLD` | `0.6` | similarity at which an enrolment photo is somebody already enrolled; refuses the whole set |
 
 | `ATTENDLY_GATE_RECOGNITION_THRESHOLD` | `0` (= recognition threshold) | a stricter match for admitting people |
+| `ATTENDLY_FACE_ROUTE` | `true` | gates and departments take faces from OpenNVR's face route (`face.recognized.v1`); `false` = every one takes its own snapshots |
+| `ATTENDLY_FACE_UNKNOWN_WINDOW_SECONDS` | `2` | an unknown face at a gate waits this long for a better crop of the same person before it is logged as unknown |
 | `ATTENDLY_GATE_POLL_SECONDS` / `ATTENDLY_GATE_COOLDOWN_SECONDS` | `1` / `8` | how often a gate camera is looked at; how long the same person is not re-decided |
 | `ATTENDLY_MEAL_WINDOWS` | `breakfast=07:00-09:30,lunch=12:00-14:30,dinner=19:00-21:30` | when the mess serves; a gate may override |
 | `ATTENDLY_STAFF_POLL_SECONDS` | `60` | how often a department camera is looked at |

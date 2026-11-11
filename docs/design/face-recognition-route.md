@@ -121,6 +121,6 @@ camera → detect-pipeline: motion → person detection → tracking → best cr
 | P2 KAI-C track + normaliser + contract | done | ded90981 |
 | P3 server scope + skills + compose | done | claim params.adapters projected; DETECT_FACE_KAIC_URL (face route only, default on); scope needed no change |
 | P4 SDK helper | done | FaceRecognized typed payload |
-| P5 Attendly consumer | gates done | private repo `attendly-face-route` 5170cc2; staff attendance next |
-| P6 end-to-end + upgrade test | todo | |
+| P5 Attendly consumer | done | private repo `attendly-face-route`: gates 5170cc2, detection-off fallback fe816c6, staff 3790692; enrol with an OpenNVR camera 5b661d7 |
+| P6 end-to-end + upgrade test | done (local) | webcam gate: pipeline -> KAI-C -> event -> decision verified 2026-11-11; DB unchanged (no migration); cameras without a claim dispatch nothing |
 | P7 classroom census | waiting | needs 1 min of real 3 MP classroom footage |
