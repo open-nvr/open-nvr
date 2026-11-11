@@ -976,7 +976,6 @@ async def run_app_alert_subscriber(
                 )
             else:
                 await sub.unsubscribe()
-                await plate_sub.unsubscribe()
         except Exception:
             logger.exception(
                 "app-alert subscriber: error in run loop; reconnecting"
