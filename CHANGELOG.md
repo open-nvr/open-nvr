@@ -6,6 +6,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **OpenNVR Mirror: the booth page.** The camera agent serves `/mirror`,
+  a kiosk page for a show floor: live video full screen, Tier-0 boxes with
+  label and confidence, one sentence about the scene every few seconds
+  from the vision model, spoken through Piper, and a card per person
+  (clothing, what they carry, an apparent age range) that follows their
+  box. All on the box; nothing stored. The loop behind it (`mirror.py`)
+  makes one model call at a time — a person nobody has described yet
+  before a scene refresh, a scene refresh before re-describing someone —
+  speaks only what is new, greets a newcomer, and stops itself when no
+  page has been heard from for 45 s. Reuses the agent's WebRTC stream,
+  `/updates` socket, vision path and voice, behind the same login.
+
 ### Fixed
 
 - **Search says when a class was never detected and the page is
