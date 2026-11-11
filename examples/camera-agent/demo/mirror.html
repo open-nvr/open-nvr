@@ -151,6 +151,7 @@
       <div id="loginRows" hidden>
         <div class="row"><input type="text" id="user" placeholder="OpenNVR username" autocomplete="username"></div>
         <div class="row"><input type="password" id="pass" placeholder="password" autocomplete="current-password"></div>
+        <div class="row" id="totpRow" hidden><input type="text" id="totp" placeholder="one-time code (authenticator app)" inputmode="numeric" autocomplete="one-time-code"></div>
       </div>
       <div class="row">
         <label><span>Camera</span><select id="camSel0" style="flex:1;background:transparent;border:0;color:inherit;font:inherit;outline:none"></select></label>
@@ -198,11 +199,26 @@
     if (r.status === 401 && authMode === "opennvr" && await tryRefresh()) r = await send();
     return r;
   }
+  // The agent passes OpenNVR's login answer through verbatim: a string
+  // `detail`, an object `detail` ({message, error}), or `error`. MFA and
+  // the device firewall arrive the same way and get their own words.
+  function errText(d, status) {
+    const dt = d && d.detail;
+    let t = (dt && typeof dt === "object") ? (dt.message || dt.error || JSON.stringify(dt)) : (dt || (d && (d.error || d.message)));
+    if (typeof t === "object") t = JSON.stringify(t);
+    t = t || ("sign-in failed (HTTP " + status + ")");
+    if (/mfa|totp|one.time|2fa/i.test(t)) { $("totpRow").hidden = false; return "This account needs a one-time code: enter it below and start again."; }
+    if (/device_not_approved|not approved|device/i.test(t) && status === 403) return "This browser is not yet approved: OpenNVR → Settings → Firewall, approve the device, then start again.";
+    return t;
+  }
   async function login(user, pass) {
+    if (!user || !pass) throw new Error("username and password are required");
+    const body = {username: user, password: pass};
+    const totp = ($("totp").value || "").trim(); if (totp) body.totp_code = totp;
     const r = await raw("/auth/login", {method: "POST", headers: {"Content-Type": "application/json", ...(device ? {"X-Device-Token": device} : {})},
-      body: JSON.stringify({username: user, password: pass})});
+      body: JSON.stringify(body)});
     const d = await r.json().catch(() => ({}));
-    if (!r.ok || !d.access_token) throw new Error(d.error || d.detail || ("login failed (" + r.status + ")"));
+    if (!r.ok || !d.access_token) throw new Error(errText(d, r.status));
     token = d.access_token; sessionStorage.setItem("agent_token", token);
     if (d.refresh_token) { refreshTok = d.refresh_token; sessionStorage.setItem("agent_refresh", refreshTok); }
     if (d.device_token) { device = d.device_token; localStorage.setItem("agent_device_token", device); }
@@ -412,7 +428,7 @@
       if (!(await start())) return;
       $("ov").hidden = true; document.body.classList.add("active"); setTimeout(() => document.body.classList.remove("active"), 4000);
       connect(); startVideo(camera);
-    } catch (e) { $("err").textContent = e.message || String(e); $("loginRows").hidden = false; }
+    } catch (e) { $("err").textContent = (e && e.message) ? e.message : String(e); $("loginRows").hidden = false; }
     finally { $("go").disabled = false; }
   }
 
