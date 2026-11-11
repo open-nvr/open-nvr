@@ -230,6 +230,47 @@ def test_sweep_folds_duplicate_and_spends_one_call(db, monkeypatch):
         "identity established — every further OCR call is waste")
 
 
+def test_fast_mode_fold_leaves_the_row_its_photo(db, monkeypatch):
+    """Fast mode: the bus consumer does not defer to the sweep, so the echo
+    of the sweep's own read lands on the row AFTER the sweep folded it — a
+    number with no picture (the 'no read frame' rows in the register). The
+    fold stores the crop and frame on the row, paths only, so the number
+    that may follow has its proof. Accurate mode stores nothing: there the
+    consumer defers and the sweep writes text and evidence together."""
+    import services.plate_policy as pp
+    SessionLocal, cam_id, (row_id, other) = db
+    stored = []
+
+    def fake_store(jpeg, box):
+        stored.append((jpeg, box))
+        return "plates/crop.jpg", "plates/frame.jpg"
+    monkeypatch.setattr(pe, "store_plate_images", fake_store)
+    fast = pp.PlatePolicy(mode="fast", configured="fast", min_agreeing=1, max_looks=2,
+                          dedup_window_s=8.0, reason="test")
+    monkeypatch.setattr(pp, "policy_for", lambda *a, **k: fast)
+    note_sighting(cam_id, "UP12AZ6408")
+    monkeypatch.setattr(pe, "_ocr_jpeg", _ScriptedOcr([_accepted("UP12AZ6408")]))
+    asyncio.run(pe.enrich_event_plate(row_id, [b"a", b"b"]))
+    s = SessionLocal()
+    try:
+        row = s.get(models.TimelineEvent, row_id)
+        assert row.plate_text is None, "the fold still writes no number"
+        assert row.plate_evidence_path == "plates/crop.jpg"
+        assert row.plate_frame_path == "plates/frame.jpg"
+        assert "plate_source" not in (row.payload or {}), "paths only: no writer claim"
+    finally:
+        s.close()
+    assert stored and stored[0][0] == b"a"
+    # Accurate mode: the same fold, nothing stored.
+    stored.clear()
+    accurate = pp.PlatePolicy(mode="accurate", configured="accurate", min_agreeing=2, max_looks=4,
+                              dedup_window_s=30.0, reason="test")
+    monkeypatch.setattr(pp, "policy_for", lambda *a, **k: accurate)
+    monkeypatch.setattr(pe, "_ocr_jpeg", _ScriptedOcr([_accepted("UP12AZ6408")]))
+    asyncio.run(pe.enrich_event_plate(other, [b"c"]))
+    assert stored == [] and _plate_of(SessionLocal, other) is None
+
+
 def test_sweep_write_arms_the_window_for_the_next_fragment(db, monkeypatch):
     SessionLocal, cam_id, (first, second) = db
     monkeypatch.setattr(pe, "_ocr_jpeg", _ScriptedOcr([_accepted("N894JV")]))

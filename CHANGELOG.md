@@ -6,6 +6,17 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A plate read in fast mode no longer arrives without its photo.** In
+  fast scan mode the bus consumer does not defer to the sweep, so the
+  echo of the sweep's own read could land on a visit after the sweep had
+  folded it as a duplicate sighting and thrown its crop away: a number
+  with "no read frame" in the register (every such row on the test box
+  was one of these). The fold now leaves the row its crop and frame,
+  paths only; the number that may follow has its proof. Accurate mode
+  is unchanged.
+
 ### Changed
 
 - **Camera agent: the chat is the conversation; events stay in Activity.**
