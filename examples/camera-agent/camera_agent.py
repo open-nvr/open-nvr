@@ -3639,6 +3639,7 @@ class CameraAgentRuntime:
         # Best-frame fetch (optional): describe_camera runs the VLM on Tier-0's best
         # frame when the detect-pipeline origin is configured.
         best_frame_fetch = None
+        self.mirror_crops = None
         if cfg.bestframe_base_url:
             from tools import make_best_frame_fetch
             best_frame_fetch = make_best_frame_fetch(
@@ -3651,6 +3652,11 @@ class CameraAgentRuntime:
             self.context.set_latest_frame_fetch(make_latest_frame_fetch(
                 cfg.bestframe_base_url, resolve_camera=_pipeline_camera,
             ))
+            # Mirror cards describe a PERSON from Tier-0's best crop of that
+            # track — a tight, sharp picture of them, not the whole scene.
+            from opennvr_app_sdk.tier0 import BestFrameClient
+            self.mirror_crops = BestFrameClient(
+                cfg.bestframe_base_url, resolve_camera=_pipeline_camera)
 
         # Events store (the platform's memory, RFC-0001 C1): built whenever the
         # server API origin is configured — same origin + INTERNAL_API_KEY chain
@@ -3747,6 +3753,9 @@ class CameraAgentRuntime:
             enabled=bool(getattr(cfg, "thinking_aloud", False)),
         )
         self._update_subscribers: set = set()
+        # OpenNVR Mirror: at most one live narration at a time (the model
+        # is the bottleneck; two pages share one loop by camera).
+        self.mirror = None
         # The standing thing most recently set up — ("alarm" | "monitor" |
         # "report", id). "Remove it" / "cancel that" name no id: the stop
         # tools fall back to this, and the router's stop hint picks the
@@ -4000,7 +4009,48 @@ class CameraAgentRuntime:
                     if getattr(c, "opennvr_camera_id", None) == core_camera_id), None)
         if cam is None:
             return
+        mirror = self.mirror
+        if mirror is not None and mirror.camera_id == cam:
+            mirror.observe_tracks(frame)
         self.publish_update({"tracks": {"camera": cam, **frame}})
+
+    async def mirror_start(self, camera_id: str, *, voice: bool = True,
+                           scene_every_s: float | None = None):
+        """Start (or re-point) the Mirror narration for ``camera_id``. One
+        loop at a time: starting on another camera stops the first."""
+        from mirror import MirrorSession, SCENE_EVERY_S
+
+        if self.mirror is not None and self.mirror.running \
+                and self.mirror.camera_id == camera_id:
+            self.mirror.voice = voice
+            self.mirror.heartbeat()
+            return self.mirror
+        if self.mirror is not None:
+            await self.mirror.stop()
+
+        async def _frame(cam: str) -> bytes | None:
+            try:
+                return await self.context.get_frame(cam, allow_pinned=False)
+            except Exception:  # noqa: BLE001 — offline camera: the loop idles
+                return None
+
+        crops = self.mirror_crops
+
+        async def _crop(cam: str, track_id: Any) -> bytes | None:
+            if crops is None:
+                return None
+            return await crops.fetch(cam, track_id)
+
+        async def _speech(text: str) -> bytes | None:
+            return await self.piper.synthesize(text)
+
+        self.mirror = MirrorSession(
+            camera_id, frame=_frame, crop=_crop if crops is not None else None,
+            vision=self.tools._vlm_caption, speech=_speech,
+            publish=self.publish_update, voice=voice,
+            scene_every_s=scene_every_s or getattr(self.cfg, "mirror_scene_every_s", None) or SCENE_EVERY_S)
+        self.mirror.start()
+        return self.mirror
 
     def publish_update(self, payload: dict[str, Any]) -> None:
         for q in list(self._update_subscribers):
@@ -6817,7 +6867,8 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         if runtime.cfg.auth_mode != "opennvr":
             return await call_next(request)
         path = request.url.path
-        if path in _OPEN_PATHS or path == "/demo" or path.startswith("/demo/"):
+        if path in _OPEN_PATHS or path == "/demo" or path.startswith("/demo/") \
+                or path == "/mirror":
             return await call_next(request)
         # Device firewall first (mirrors the server's device-before-auth
         # order, so a blocked browser can't probe credential validity).
@@ -6976,6 +7027,76 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
     @app.get("/demo", response_class=HTMLResponse)
     async def _demo() -> HTMLResponse:
         return HTMLResponse(_load_demo_html())
+
+    # ── OpenNVR Mirror: the booth page ─────────────────────────────
+    # The page is public like /demo (it logs in itself); every call below
+    # is behind the same gate and camera scope as the rest of the agent.
+
+    @app.get("/mirror", response_class=HTMLResponse)
+    async def _mirror_page() -> HTMLResponse:
+        return HTMLResponse(_load_mirror_html())
+
+    @app.get("/mirror/state")
+    async def _mirror_state() -> dict[str, Any]:
+        m = runtime.mirror
+        return {"mirror": m.to_wire() if m is not None else None,
+                "cameras": [c.camera_id for c in runtime.visible_cameras()]}
+
+    @app.post("/mirror/start")
+    async def _mirror_start(request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        cam = str((body or {}).get("camera") or "").strip()
+        if not cam or not runtime.context.known_camera(cam):
+            return JSONResponse({"error": "unknown camera"}, status_code=404)
+        if not camera_in_scope(cam):
+            return JSONResponse({"error": "camera not in scope"}, status_code=403)
+        voice = bool((body or {}).get("voice", True))
+        every = (body or {}).get("scene_every_s")
+        m = await runtime.mirror_start(
+            cam, voice=voice,
+            scene_every_s=float(every) if every not in (None, "") else None)
+        return JSONResponse({"mirror": m.to_wire()})
+
+    @app.post("/mirror/stop")
+    async def _mirror_stop() -> dict[str, Any]:
+        m = runtime.mirror
+        if m is not None:
+            await m.stop()
+        return {"stopped": m is not None}
+
+    @app.post("/mirror/heartbeat")
+    async def _mirror_heartbeat(request: Request) -> dict[str, Any]:
+        m = runtime.mirror
+        if m is None or not m.running:
+            return {"running": False}
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if isinstance(body, dict) and "voice" in body:
+            m.voice = bool(body["voice"])
+        m.heartbeat()
+        return {"running": True, "voice": m.voice}
+
+    @app.get("/mirror/crop/{camera_id}/{track_id}")
+    async def _mirror_crop(camera_id: str, track_id: str) -> Response:
+        """Tier-0's best crop of one track — the card's picture."""
+        if not runtime.context.known_camera(camera_id) or not camera_in_scope(camera_id):
+            return Response(status_code=404)
+        crops = runtime.mirror_crops
+        if crops is None:
+            return Response(status_code=404)
+        try:
+            jpeg = await crops.fetch(camera_id, track_id)
+        except Exception:  # noqa: BLE001
+            jpeg = None
+        if not jpeg:
+            return Response(status_code=404)
+        return Response(content=jpeg, media_type="image/jpeg",
+                        headers={"Cache-Control": "no-store"})
 
     @app.get("/system-check")
     async def _system_check() -> dict:
@@ -9163,6 +9284,14 @@ def _load_demo_html() -> str:
     path = Path(__file__).parent / "demo" / "index.html"
     if not path.is_file():
         return "<h1>demo/index.html missing</h1>"
+    return path.read_text(encoding="utf-8")
+
+
+def _load_mirror_html() -> str:
+    """The Mirror page (demo/mirror.html), same arrangement as the demo."""
+    path = Path(__file__).parent / "demo" / "mirror.html"
+    if not path.is_file():
+        return "<h1>demo/mirror.html missing</h1>"
     return path.read_text(encoding="utf-8")
 
 

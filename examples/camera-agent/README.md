@@ -241,6 +241,29 @@ python camera_agent.py --config config.yml
 # 6. Open https://localhost:9100/demo — type, tap the mic to dictate, or tap Talk.
 ```
 
+## OpenNVR Mirror — the booth page
+
+`https://<host>:9100/mirror` is a kiosk page for a show floor: the camera's
+live video full screen, a box with a label and a confidence on everything
+Tier-0 tracks, one sentence about the scene every few seconds from the
+vision model, spoken through the speaker, and a card per person — what
+they wear, what they carry, an apparent age range — that follows their
+box. Everything runs on the box; nothing is stored, nothing leaves.
+
+It is the agent's own pieces arranged for a visitor: the same WebRTC
+stream the Live view plays, the same `/updates` socket that carries the
+boxes, the same vision model (`describe_camera`'s path: Gemma on the
+Hexagon NPU on the qualcomm flavour) and the same Piper voice. The loop
+behind it (`mirror.py`) makes one model call at a time and chooses what to
+ask: a person nobody has described yet first, then a scene refresh, then a
+person seen a while ago. A sentence is spoken only when it says something
+new; a newcomer is greeted.
+
+Open the page, log in once (the demo's login), pick the camera, choose
+whether it speaks, and start. `?camera=cam1&autostart=1` skips the start
+card for a kiosk that boots into it. The loop stops itself when no page has
+been heard from for 45 s, so a closed tab does not keep the model busy.
+
 ## Try these
 
 * "What's on the front porch?"

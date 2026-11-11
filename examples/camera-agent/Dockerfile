@@ -99,6 +99,7 @@ COPY examples/camera-agent/frame_sources.py   ./frame_sources.py
 COPY examples/camera-agent/serializer.py      ./serializer.py
 COPY examples/camera-agent/services.py        ./services.py
 COPY examples/camera-agent/tools.py           ./tools.py
+COPY examples/camera-agent/mirror.py          ./mirror.py
 COPY examples/camera-agent/turns.py           ./turns.py
 COPY examples/camera-agent/fillers.py         ./fillers.py
 COPY examples/camera-agent/router.py          ./router.py
