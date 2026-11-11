@@ -66,13 +66,46 @@ SPEAK_SAME_THRESHOLD = 0.5
 #: never stacks on a slow Piper.
 SPEAK_MIN_GAP_S = 1.0
 
-SCENE_PROMPT = (
+# The scene prompt is GROUNDED in what the detector tracks right now. Asked
+# "how many people, what do they wear" on an empty room, Gemma answers with
+# three people in a blue shirt, a white top and a dark jacket — every time
+# (measured on the Ventuno Q, 2026-11-11). Told that nobody is there, it
+# describes the room; told "2 people, 1 car", it describes those.
+SCENE_PROMPT_PEOPLE = (
     "You are OpenNVR Mirror at a technology show, describing a live camera to "
-    "the people in front of it. ONE concrete sentence, at most 25 words: how "
-    "many people, the colour and kind of their clothes, what each holds or does "
-    "(waving, phone, bag, laptop), notable objects. Name colours. Do not use "
-    "'casual attire', 'setting', 'suggesting', 'appears', 'seemingly'. No "
-    "preamble, no quotes.")
+    "the people in front of it. The object detector currently sees: {seen}. "
+    "Describe ONLY what is actually visible, in ONE concrete sentence of at "
+    "most 25 words: the people (keep the detector's count unless clearly "
+    "wrong), the colour and kind of their clothes, what each holds or does "
+    "(waving, phone, bag, laptop), notable objects. Never invent a person. "
+    "Name colours. Do not use 'casual attire', 'setting', 'suggesting', "
+    "'appears', 'seemingly'. No preamble, no quotes.")
+SCENE_PROMPT_EMPTY = (
+    "You are OpenNVR Mirror at a technology show. Nobody is in front of the "
+    "camera right now. In ONE sentence of at most 20 words describe the place "
+    "and its notable objects, naming colours. Do not mention people at all. "
+    "No preamble, no quotes.")
+#: Kept for callers and tests that only need "a scene prompt".
+SCENE_PROMPT = SCENE_PROMPT_PEOPLE
+#: A rephrase of the sentence on screen is not shown again for this long.
+CAPTION_HOLD_S = 20.0
+
+
+def scene_prompt(tracks: list[dict[str, Any]]) -> str:
+    """The scene question for what Tier-0 tracks at this moment."""
+    counts: dict[str, int] = {}
+    for t in tracks or []:
+        label = str(t.get("label") or "object").replace("_", " ")
+        counts[label] = counts.get(label, 0) + 1
+    if not counts:
+        return SCENE_PROMPT_EMPTY
+    parts = []
+    for label, n in sorted(counts.items(), key=lambda kv: (kv[0] != "person", -kv[1], kv[0])):
+        plural = label if n == 1 else (label + ("s" if not label.endswith("s") else ""))
+        if label == "person" and n > 1:
+            plural = "people"
+        parts.append(f"{n} {plural}")
+    return SCENE_PROMPT_PEOPLE.format(seen=", ".join(parts))
 PERSON_PROMPT = (
     "Look at the person in this image. Answer on ONE line as key=value pairs "
     "separated by ';' with exactly these keys: gender (man/woman/child/unknown); "
@@ -241,6 +274,7 @@ class MirrorSession:
         self.tracks_at: float | None = None
         self.caption: str = ""
         self.caption_at: float | None = None
+        self.caption_changed_at: float | None = None
         self.stats = MirrorStats()
         self.last_heartbeat = self._clock()
         self.last_spoken: str = ""
@@ -425,13 +459,23 @@ class MirrorSession:
             self._publish({"mirror": {"caption": "", "no_frame": True}})
             return
         t0 = self._clock()
-        text = (await self._vision(image, SCENE_PROMPT) or "").strip().strip('"')
+        live = self.tracks if (self.tracks_at is not None and self._clock() - self.tracks_at < 3.0) else []
+        text = (await self._vision(image, scene_prompt(live)) or "").strip().strip('"')
         ms = (self._clock() - t0) * 1000.0
         self.stats.note_vlm(ms)
         self.caption_at = self._clock()
         if not text:
             return
+        # A rephrase of what is on screen stays off it: the subtitle changes
+        # when the view does, not every time the model finds new words.
+        if self.caption and same_sentence(text, self.caption) \
+                and self.caption_changed_at is not None \
+                and self._clock() - self.caption_changed_at < CAPTION_HOLD_S:
+            self._publish({"mirror": {"vlm_ms": round(ms), "stats": self.stats.to_wire(),
+                                      "same": True}})
+            return
         self.caption = text
+        self.caption_changed_at = self._clock()
         self.stats.captions += 1
         payload: dict[str, Any] = {"caption": text, "vlm_ms": round(ms),
                                    "people": sum(1 for t in self.tracks if t.get("label") == "person"),
