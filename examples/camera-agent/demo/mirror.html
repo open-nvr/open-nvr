@@ -31,9 +31,12 @@
     /* ── top bar ── */
     .top{position:fixed;top:0;left:0;right:0;display:flex;align-items:center;gap:18px;padding:18px 26px;z-index:5}
     .brand{display:flex;align-items:center;gap:12px;font-weight:700;font-size:22px;letter-spacing:.2px}
-    .brand .logo{width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,var(--accent),var(--accent2));
-      display:grid;place-items:center;box-shadow:0 0 24px rgba(79,209,255,.45)}
-    .brand .logo svg{width:20px;height:20px}
+    .brand .logo{width:40px;height:40px;border-radius:10px;overflow:hidden;box-shadow:0 0 24px rgba(94,179,246,.4);flex:none}
+    .brand .logo svg{width:40px;height:40px;display:block}
+    .brand .word{display:flex;flex-direction:column;line-height:1.1}
+    .brand .nvr{color:#5eb3f6}
+    .brand .site{font-size:12px;font-weight:500;color:var(--dim);letter-spacing:.3px;text-decoration:none;margin-top:3px}
+    .brand .site:hover{color:var(--text)}
     .live{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--dim);font-weight:600;text-transform:uppercase;letter-spacing:1px}
     .live .dot{width:9px;height:9px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 0 rgba(67,224,138,.7);animation:pulse 1.6s infinite}
     .live.off .dot{background:var(--warn);animation:none}
@@ -117,9 +120,11 @@
   </div>
 
   <div class="top">
-    <div class="brand"><span class="logo" aria-hidden="true">
-      <svg viewBox="0 0 24 24" fill="none" stroke="#041018" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7l9-4 9 4v10l-9 4-9-4z"/><path d="M12 11l9-4M12 11L3 7M12 11v10"/></svg>
-    </span>OpenNVR Mirror</div>
+    <div class="brand">
+      <!-- The OpenNVR mark and wordmark (app/public/opennvr-icon.svg, Logo.tsx), inline. -->
+      <span class="logo" aria-hidden="true"><svg viewBox="0 0 64 64"><rect width="64" height="64" fill="#1e3a5f" rx="10"/><text x="32" y="45" font-family="Arial, sans-serif" font-weight="bold" font-size="28" text-anchor="middle" fill="#ffffff"><tspan fill="#5eb3f6">O</tspan>N</text></svg></span>
+      <span class="word"><span class="name">Open<span class="nvr">NVR</span> Mirror</span><a class="site" href="https://www.opennvr.org" target="_blank" rel="noopener">www.opennvr.org</a></span>
+    </div>
     <div class="live off" id="live"><span class="dot"></span><span id="liveTxt">connecting</span></div>
     <div class="chips">
       <div class="chip"><span>people</span><b id="cPeople">0</b></div>
