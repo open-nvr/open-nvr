@@ -34,10 +34,12 @@ camera scoping, no evidence, and no way to open the clip.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -789,6 +791,63 @@ async def search(
 
 
 # ── Home Assistant (HA-116/HA-502): zones by name, and period summaries ──
+
+
+class TranscribeBody(BaseModel):
+    """A spoken search: a short WAV (or anything the STT adapter decodes),
+    base64, at most ``MAX_VOICE_BYTES`` decoded."""
+
+    audio_b64: str = Field(..., min_length=16)
+    language: str = Field("en", max_length=8)
+
+
+MAX_VOICE_BYTES = 2 * 1024 * 1024
+
+
+@router.post("/search/transcribe")
+async def transcribe_search(
+    body: TranscribeBody,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """A spoken question → the words to search for.
+
+    The clip goes to the box's own speech-to-text adapter (the agent's
+    whisper on the NPU, or Parakeet on the CPU) through KAI-C — nothing
+    leaves the box — and the transcript is read back as a typed query:
+    number words to digits, spelled-out plates to one token, the "show
+    me" of a spoken request dropped. ``changes`` says what was altered
+    and ``transcript`` is the untouched text, so the operator can see
+    both; the caller then searches ``query`` exactly as if typed.
+
+    503 with ``no-stt`` when no adapter advertises speech to text: voice
+    search is only as available as the adapter behind it.
+    """
+    import base64
+    import binascii
+
+    from services.search_voice import spoken_to_text, transcribe
+
+    try:
+        audio = base64.b64decode(body.audio_b64, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=400, detail="audio_b64 is not base64") from None
+    if not audio:
+        raise HTTPException(status_code=400, detail="empty audio")
+    if len(audio) > MAX_VOICE_BYTES:
+        raise HTTPException(status_code=413, detail=f"audio over {MAX_VOICE_BYTES} bytes")
+    with contextlib.suppress(Exception):           # a person is waiting; never fail over bookkeeping
+        from services.enrichment_governor import note_interactive
+
+        note_interactive("search")
+    transcript, adapter = await transcribe(audio, language=body.language)
+    if adapter is None:
+        raise HTTPException(status_code=503, detail={
+            "reason": "no-stt",
+            "message": "No speech-to-text adapter is registered on this box; "
+                       "the camera agent's whisper or parakeet adapter provides one."})
+    spoken = spoken_to_text(transcript or "")
+    return {"transcript": transcript or "", "adapter": adapter, **spoken.as_dict()}
 
 
 def _arm_weights(settings) -> dict[str, float]:

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import secrets
 import sys
@@ -1976,3 +1977,42 @@ def test_the_fusion_weights_come_from_the_settings_and_fall_back_to_one(monkeypa
     monkeypatch.setattr(settings, "search_caption_arm_weight", "garbage", raising=False)
     monkeypatch.setattr(settings, "search_vector_arm_weight", 0.25, raising=False)
     assert sr._arm_weights(settings) == {"text": 1.0, "vector": 0.25, "caption": 1.0}
+
+
+# ── voice search ───────────────────────────────────────────────────────
+
+
+def test_a_spoken_search_is_transcribed_on_the_box_and_read_back_as_a_query(client, db, monkeypatch):
+    import services.search_voice as sv
+    _camera(db, 1, "Dock")
+    heard: list[tuple[bytes, str]] = []
+
+    async def _transcribe(audio, *, language="en"):
+        heard.append((audio, language))
+        return "show me the white car at cam twenty three", "whisper"
+
+    monkeypatch.setattr(sv, "transcribe", _transcribe)
+    wav = base64.b64encode(b"RIFF" + b"\x00" * 64).decode()
+    r = client.post("/api/v1/search/transcribe", json={"audio_b64": wav})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["transcript"] == "show me the white car at cam twenty three"
+    assert body["query"] == "the white car at cam 23"
+    assert body["changes"] == ["dropped “show me”", "“twenty three” → 23"]
+    assert body["adapter"] == "whisper" and heard[0][1] == "en"
+    assert heard[0][0].startswith(b"RIFF")
+
+
+def test_a_spoken_search_without_an_stt_adapter_is_a_503_that_says_so(client, db, monkeypatch):
+    import services.search_voice as sv
+
+    async def _none(audio, *, language="en"):
+        return None, None
+
+    monkeypatch.setattr(sv, "transcribe", _none)
+    wav = base64.b64encode(b"RIFF" + b"\x00" * 64).decode()
+    r = client.post("/api/v1/search/transcribe", json={"audio_b64": wav})
+    assert r.status_code == 503 and r.json()["detail"]["reason"] == "no-stt"
+    assert client.post("/api/v1/search/transcribe", json={"audio_b64": "@@@@not-base64@@@@"}).status_code == 400
+    big = base64.b64encode(b"\x00" * (2 * 1024 * 1024 + 1)).decode()
+    assert client.post("/api/v1/search/transcribe", json={"audio_b64": big}).status_code == 413
