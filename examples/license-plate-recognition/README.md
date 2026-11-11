@@ -56,9 +56,10 @@ inference cost, and two plate-consuming apps cost the same as one.
   app's compose overlay), and either core's plate enrichment on
   vehicle visits (default-on) or Tier-1 dispatch on cameras selected
   for this app (gate `enforce` + dispatch URL, off by default).
-* **Dedup is per-plate-per-camera, time-windowed**, exactly as before:
-  a plate re-read within `dedup_window_seconds` fires once; a
-  one-character misread is a different plate (no fuzzy matching).
+* **Dedup is per-plate-per-camera, time-windowed**: a plate re-read
+  within `dedup_window_seconds` fires once. Watchlist and registry
+  matching tolerates `fuzzy_max_distance` character substitutions
+  (default 1); a fuzzy match never opens a barrier.
 * **Regional tuning** lives in the adapter (`OPENNVR_LPR_MODEL`), not
   here — this app never sees a pixel. For Indian sites set
   `OPENNVR_LPR_MODEL=indian-plates-v1` in `.env`: a model fine-tuned on
@@ -136,7 +137,8 @@ examples/license-plate-recognition/
 ├── pyproject.toml                One dependency: the app SDK
 ├── README.md                     you are here
 └── tests/
-    └── test_license_plate_recognition.py (16 tests)
+    ├── test_license_plate_recognition.py (73 tests)
+    └── test_observed_at_forwarding.py (4 tests)
 ```
 
 ## Tests
