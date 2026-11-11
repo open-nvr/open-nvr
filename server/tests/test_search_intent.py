@@ -175,3 +175,25 @@ def test_typed_attribute_words_become_claims_where_the_box_holds_them():
     assert promote_words_to_claims(p, BoxAbilities(claimed_kinds={"colour"})) == []
     p = _p("red van")
     assert promote_words_to_claims(p, BoxAbilities()) == [] and p.text == "red"
+
+
+# ── a typed synonym filters by the STORED value ────────────────────────
+
+
+def test_a_typed_shade_is_promoted_as_the_colour_the_store_holds():
+    """The descriptor writer stores "grey" for a VLM's "gray" and "blue"
+    for its "navy"; the filter must ask for the same word, or a typed
+    synonym matches nothing, silently."""
+    from services.search_query import parse_query
+    from services.search_intent import BoxAbilities, promote_words_to_claims, canonical_value
+    box = BoxAbilities(claimed_kinds={"colour", "vehicle_type", "clothing_top"})
+    p = parse_query("gray car")
+    assert promote_words_to_claims(p, box) == [("colour", "grey")]
+    p = parse_query("navy van")                      # "van" is a class word (truck), the shade a claim
+    assert p.labels == ["truck"] and promote_words_to_claims(p, box) == [("colour", "blue")]
+    p = parse_query("man in a crimson kurta")
+    assert promote_words_to_claims(p, box) == [("clothing_top", "red")]
+    assert p.text == "", "the garment word is a cue, not caption text; the preposition a stop word"
+    assert canonical_value("vehicle_type", "jeep") == "suv"
+    assert canonical_value("vehicle_type", "auto") == "rickshaw"
+    assert canonical_value("colour", "red") == "red"

@@ -19,6 +19,25 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   <class>" one click away (a `label=` chip, which is a wall). Not raised
   when the class was detected, when the chip was explicit, or past the
   first page. (`server/routers/search.py`, `app/src/views/Search.tsx`)
+- **A typed synonym filters by the value the store holds, and the
+  vocabularies know the words operators here use.** "gray car" promoted
+  to a `colour:gray` claim, and the store says `grey` — the writer
+  canonicalises a VLM's "gray" to "grey", the filter did not — so a
+  typed synonym matched nothing, silently; the promoted claim now carries
+  the canonical value. The colour maps gain the shades people type (navy,
+  crimson, tan, khaki, cream, charcoal, golden, violet, olive…), the
+  vehicle kinds gain `rickshaw` with auto / tuk-tuk / scooty / jeep /
+  tempo as synonyms, the garments that make a colour clothing gain
+  kurta, saree, salwar, kameez, sherwani, dhoti, hooded, sweatshirt, tee,
+  and the class words gain cop, police, guard, watchman, courier,
+  worker, toddler, elderly (people), scooty and moped (motorcycle), an
+  auto or rickshaw (a car or a motorcycle to the detector), jeep / suv /
+  sedan / taxi (car), pickup (truck or car) — and "bike" now means a
+  bicycle or a motorcycle, which on most roads here it does. Words of
+  three or four letters that the typo corrector would read real words
+  into (baby for bay, cab for cam) were deliberately left out.
+  (`server/services/search_intent.py`, `server/services/search_query.py`,
+  `server/services/descriptor_enrichment.py`)
 
 ### Changed
 
