@@ -183,3 +183,16 @@ export function subscribeDetections(cameraId: number, fn: Listener): () => void 
 
 /** Test seam: feed a raw WS event through the same parser the socket uses. */
 export const _parseForTests = toFrame
+
+/** The per-browser "draw detections" preference the Live view keeps
+ *  (`liveview-detections`): on unless the operator turned it off. The
+ *  dashboard's live wall, the peek and the tour follow the same switch, so
+ *  one choice governs every live picture. */
+export function detectionsPreferred(): boolean {
+  try {
+    return localStorage.getItem('liveview-detections') !== 'off'
+  } catch {
+    return true
+  }
+}
+

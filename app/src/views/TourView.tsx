@@ -41,6 +41,7 @@ import { usePageVisible } from '../hooks/usePageVisible'
 import { usePermissions } from '../hooks/usePermissions'
 import { useTourAlerts } from '../hooks/useTourAlerts'
 import { VideoPlayer } from '../components/VideoPlayer'
+import { detectionsPreferred } from '../lib/detectionFeed'
 import { cameraState, STATE_INK } from './dashboard/WidgetFrame'
 
 /** The bar hides after this long without the mouse moving. */
@@ -729,6 +730,7 @@ function TourTile({ cameraId, cam, pausedCamera, playing, spotlit, cover, labelC
           autoPlay
           muted
           displayAspectOverride={cam?.display_aspect_ratio}
+          showDetections={detectionsPreferred()}
           cameraId={cameraId}
           cover={cover}
           className="w-full h-full !bg-black"
