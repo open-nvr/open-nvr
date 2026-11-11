@@ -24,6 +24,17 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`server/services/search_service.py`, `server/services/timeline_service.py`,
   `server/routers/search.py`)
 
+- **Camera agent: "remove that alarm" stops the watch that is standing.**
+  People call a watch an alarm and an alarm a reminder; "I remove that
+  alarm" for a watch on a person at camera 24 left the watch running and
+  the operator removing it by hand (Ventuno Q, 2026-11-10). When the kind
+  a stop request names has nothing standing and exactly one thing of any
+  kind does, the agent stops that and says so ("There's no alarm set up —
+  the one thing standing is watch #1 … Stopped and removed watch #1");
+  with several standing it lists them by kind and number and asks;
+  "silence" still means a ringing alarm and never touches a watch.
+  (`examples/camera-agent/camera_agent.py`)
+
 ### Added
 
 - **A bounded LLM re-rank of the first page, off by default.** The
