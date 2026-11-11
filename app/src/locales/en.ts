@@ -216,6 +216,7 @@ export const translations: TranslationCatalog = {
   'dashboard.idsUnavailable': 'Network IDS is not deployed on this system',
   'dashboard.lastFootage': 'last footage',
   'dashboard.load': 'load',
+  'dashboard.npuQueued': 'queued ×{{n}}',
   'dashboard.lowSeverityOnly': 'Low severity only',
   'dashboard.manage': 'Manage',
   'dashboard.monitoringOff': 'Monitoring unavailable',

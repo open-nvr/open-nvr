@@ -25,13 +25,30 @@ def test_busy_share_is_inference_seconds_over_wall_seconds():
     u = AcceleratorUsage()
     first = u.update(_fill(DETECT, det=10.0), _fill(KAIC, cap=5.0, stt=2.0), at=1000.0)
     assert first == [{"kind": "npu", "name": "Qualcomm Hexagon NPU", "busy_percent": None,
-                      "users": [], "source": "inference-time"}], "no window yet"
+                      "users": [], "source": "inference-time", "inflight": None}], "no window yet"
     # 15 s later: the detector computed 1.5 s, the captioner 3 s, whisper (CPU) 4 s
     out = u.update(_fill(DETECT, det=11.5), _fill(KAIC, cap=8.0, stt=6.0), at=1015.0)
     assert len(out) == 1 and out[0]["kind"] == "npu"
     assert out[0]["busy_percent"] == 30.0
     assert out[0]["users"] == [{"name": "detector", "percent": 10.0}, {"name": "litertlm", "percent": 20.0}]
     assert all(u_["name"] != "whisper" for u_ in out[0]["users"]), "a CPU adapter is not charged to the NPU"
+    assert out[0]["inflight"] == 0.3, "0.3 requests in flight on average: the device idled 70 % of the time"
+
+
+def test_concurrent_producers_show_as_queued_not_as_a_share_past_100():
+    """Client-observed latency counts the wait for whoever holds the device,
+    so three producers calling at once sum past 100 % (Ventuno Q, 2026-11-11:
+    detector 117 %, plate reader 72 %, captioner 74 % during a plate burst).
+    The share is capped; the in-flight count says how deep the queue was."""
+    kaic = KAIC + 'kaic_proxy_infer_latency_seconds_sum{adapter="fast_plate_ocr"} {lpr}\n'
+    u = AcceleratorUsage()
+    u.update(_fill(DETECT, det=10.0), _fill(kaic, cap=5.0, stt=0.0, lpr=1.0), at=1000.0)
+    # 10 s later: detector 11.7 s, captioner 7.4 s, plate reader 7.2 s of client latency
+    out = u.update(_fill(DETECT, det=21.7), _fill(kaic, cap=12.4, stt=0.0, lpr=8.2), at=1010.0)
+    assert out[0]["busy_percent"] == 100.0
+    assert out[0]["inflight"] == 2.63
+    assert {u_["name"]: u_["percent"] for u_ in out[0]["users"]} == {
+        "detector": 117.0, "litertlm": 74.0, "fast_plate_ocr": 72.0}
 
 
 def test_nothing_on_an_accelerator_means_no_entry():
