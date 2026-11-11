@@ -129,13 +129,14 @@ export function LiveView() {
 
   // Detection overlay: boxes + label + score from Tier-0, drawn over every
   // live tile. Per-browser preference like the grid mode — an operator at
-  // the wall wants a clean picture; the one debugging a zone wants boxes.
-  // Off by default: the picture is the product, the boxes are a tool.
+  // the wall who wants a clean picture turns it off once and it stays
+  // off. On by default: the boxes are what shows the AI is working, and a
+  // first look at the Live view should show it.
   const [showDetections, setShowDetections] = useState<boolean>(() => {
     try {
-      return localStorage.getItem('liveview-detections') === 'on'
+      return localStorage.getItem('liveview-detections') !== 'off'
     } catch {
-      return false
+      return true
     }
   })
   const toggleDetections = () => setShowDetections(prev => {
