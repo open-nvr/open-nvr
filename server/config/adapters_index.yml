@@ -96,8 +96,12 @@
 
 - id: fast-plate-ocr
   name: Fast Plate OCR
-  summary: Reads a number plate from a cropped plate image. ~30 MB on top of the SDK, CPU-only — the plate reader the LPR app expects.
-  version: "1.0.0"
+  summary: >-
+    Localises the number plate in a vehicle crop and reads it — the plate
+    reader the LPR app expects. Runs on the CPU, on Intel through OpenVINO,
+    or on the Hexagon NPU on the qualcomm flavour (79 ms a plate there
+    against 276 ms on the CPU).
+  version: "1.1.0"
   tier: first_party
   image: ghcr.io/open-nvr/fast-plate-ocr-adapter:latest
   tasks_advertised: [license_plate_recognition]

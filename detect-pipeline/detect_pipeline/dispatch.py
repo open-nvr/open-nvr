@@ -53,7 +53,7 @@ ADAPTER_TASKS: dict[str, str] = {
 # the OCR adapter. Not a default: plates are privacy-sensitive, so the
 # route exists only where an operator (or an app's claim) assigned it.
 PLATE_SKILL = "license_plate_recognition"
-PLATE_ROUTE_LABELS: tuple[str, ...] = ("bicycle", "bus", "car",
+PLATE_ROUTE_LABELS: tuple[str, ...] = ("bus", "car",
                                        "motorcycle", "truck")
 PLATE_ADAPTER = "fast_plate_ocr"
 

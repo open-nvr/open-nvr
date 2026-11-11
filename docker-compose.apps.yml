@@ -582,18 +582,6 @@ services:
     networks:
       - opennvr_apps
 
-  # ──────────────────────────────────────────────────────────────
-  # fast-plate-ocr adapter — the OCR half of the LPR chain. Shipped
-  # WITH the app (RFC-0002 decision 7 / Phase 3 fast-track): before
-  # this, `--profile apps up license-plate-recognition` succeeded and
-  # produced an app that could never work — nothing ran or registered
-  # its OCR dependency, so every plate read 404'd at KAI-C. An app's
-  # required adapters install with the app; an already-present adapter
-  # is reused, never duplicated.
-  # Weights (~3 MB) download on first load() into /root/.cache; the
-  # volume keeps that across container recreates (and can be pre-warmed
-  # for air-gapped installs — see the adapter's Dockerfile notes).
-  # ──────────────────────────────────────────────────────────────
   # Body keypoints. Rules about what a person is DOING — a hand
   # scanner sweeping an arm, a fall, a gesture — need joints, not
   # boxes, and no adapter in the default stack produced them.
@@ -688,18 +676,6 @@ services:
     networks:
       - opennvr_apps
 
-  # ──────────────────────────────────────────────────────────────
-  # fast-plate-ocr adapter — the OCR half of the LPR chain. Shipped
-  # WITH the app (RFC-0002 decision 7 / Phase 3 fast-track): before
-  # this, `--profile apps up license-plate-recognition` succeeded and
-  # produced an app that could never work — nothing ran or registered
-  # its OCR dependency, so every plate read 404'd at KAI-C. An app's
-  # required adapters install with the app; an already-present adapter
-  # is reused, never duplicated.
-  # Weights (~3 MB) download on first load() into /root/.cache; the
-  # volume keeps that across container recreates (and can be pre-warmed
-  # for air-gapped installs — see the adapter's Dockerfile notes).
-  # ──────────────────────────────────────────────────────────────
   # Body keypoints. Rules about what a person is DOING — a hand
   # scanner sweeping an arm, a fall, a gesture — need joints, not
   # boxes, and no adapter in the default stack produced them.
@@ -794,18 +770,6 @@ services:
     networks:
       - opennvr_apps
 
-  # ──────────────────────────────────────────────────────────────
-  # fast-plate-ocr adapter — the OCR half of the LPR chain. Shipped
-  # WITH the app (RFC-0002 decision 7 / Phase 3 fast-track): before
-  # this, `--profile apps up license-plate-recognition` succeeded and
-  # produced an app that could never work — nothing ran or registered
-  # its OCR dependency, so every plate read 404'd at KAI-C. An app's
-  # required adapters install with the app; an already-present adapter
-  # is reused, never duplicated.
-  # Weights (~3 MB) download on first load() into /root/.cache; the
-  # volume keeps that across container recreates (and can be pre-warmed
-  # for air-gapped installs — see the adapter's Dockerfile notes).
-  # ──────────────────────────────────────────────────────────────
   # Body keypoints. Rules about what a person is DOING — a hand
   # scanner sweeping an arm, a fall, a gesture — need joints, not
   # boxes, and no adapter in the default stack produced them.
@@ -982,18 +946,6 @@ services:
     networks:
       - opennvr_apps
 
-  # ──────────────────────────────────────────────────────────────
-  # fast-plate-ocr adapter — the OCR half of the LPR chain. Shipped
-  # WITH the app (RFC-0002 decision 7 / Phase 3 fast-track): before
-  # this, `--profile apps up license-plate-recognition` succeeded and
-  # produced an app that could never work — nothing ran or registered
-  # its OCR dependency, so every plate read 404'd at KAI-C. An app's
-  # required adapters install with the app; an already-present adapter
-  # is reused, never duplicated.
-  # Weights (~3 MB) download on first load() into /root/.cache; the
-  # volume keeps that across container recreates (and can be pre-warmed
-  # for air-gapped installs — see the adapter's Dockerfile notes).
-  # ──────────────────────────────────────────────────────────────
   # Body keypoints. Rules about what a person is DOING — a hand
   # scanner sweeping an arm, a fall, a gesture — need joints, not
   # boxes, and no adapter in the default stack produced them.
@@ -1232,9 +1184,11 @@ services:
 
 
   # ──────────────────────────────────────────────────────────────
-  # License plate recognition — YOLOv8 → crop → fast-plate-ocr chain
-  # via KAI-C, with allow/deny watchlist severity routing. Contract
-  # surface on :9205.
+  # License plate recognition — core sweeps each vehicle visit's best
+  # frames to fast-plate-ocr via KAI-C (the reader localises the plate
+  # in the vehicle crop itself and reads it); this app consumes the
+  # plate.recognized events, with allow/deny watchlist severity routing.
+  # Contract surface on :9205.
   # ──────────────────────────────────────────────────────────────
   license-plate-recognition-config-init:
     profiles: [apps, license-plate-recognition]
