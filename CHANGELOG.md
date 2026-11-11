@@ -6,6 +6,23 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Search's fusion is weighted, and the frame floor is 0.12.** The
+  labelled eval's sweep over the Ventuno Q's visits (bench/ventuno-q-
+  text-embed-2026-11-10.md) found the frame arm at its 0.08 floor was
+  the arm costing precision, and that two vector arms with a full vote
+  each could agree on a near-miss and outvote the words that named the
+  thing. Reciprocal-rank fusion now takes a vote per arm
+  (`SEARCH_TEXT_ARM_WEIGHT` 1, `SEARCH_VECTOR_ARM_WEIGHT` 1,
+  `SEARCH_CAPTION_ARM_WEIGHT` 0.5) and `SEARCH_VECTOR_MIN_SIMILARITY`
+  defaults to 0.12 (the bottom of the measured match band): MRR 0.755 →
+  0.815, hit@5 0.857 → 0.893, P@5 0.486 → 0.536 offline. The app
+  platform's search now applies the same floors and votes as the
+  operator route. A box with 0.08 written in `.env` should change it.
+  (`server/services/search_service.py`, `server/routers/search.py`,
+  `server/routers/app_platform.py`, `server/core/config.py`)
+
 ### Fixed
 
 - **The embedders are not skipped while KAI-C has yet to probe them.**

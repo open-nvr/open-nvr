@@ -460,26 +460,34 @@ def count_search_events(
 # ── two arms, fused ──────────────────────────────────────────────────
 
 
-def _rrf(arms: dict[str, list[int]]) -> tuple[dict[int, float],
-                                              dict[int, dict[str, int | None]]]:
+def _rrf(arms: dict[str, list[int]],
+         weights: dict[str, float] | None = None) -> tuple[dict[int, float],
+                                                           dict[int, dict[str, int | None]]]:
     """Reciprocal Rank Fusion over ``{arm_name: [ids, best first]}``.
 
     Returns the fused score per id and, per id, its 1-based place in
     each arm (``None`` where an arm did not return it at all).
 
     The arithmetic is the whole algorithm and it is four lines, which is
-    the argument for it: no weights, no normalisation, no per-deployment
-    constant. A row both arms liked beats a row one arm loved, and that
-    is the behaviour worth having when the arms disagree about what
-    "similar" means.
+    the argument for it: no normalisation, no per-deployment constant. A
+    row both arms liked beats a row one arm loved, and that is the
+    behaviour worth having when the arms disagree about what "similar"
+    means. ``weights`` scales an arm's vote (``{"caption": 0.5}``; an
+    arm not named weighs 1): the labelled eval on the Ventuno Q
+    (bench/ventuno-q-text-embed-2026-11-10.md) found the caption arm at
+    half weight and the frame floor at 0.12 lift every metric over equal
+    votes, because two vector arms that agree on a near-miss outvoted
+    the words that named the thing.
     """
     scores: dict[int, float] = {}
     places: dict[int, dict[str, int | None]] = {}
     names = list(arms)
+    weights = weights or {}
     for name, ids in arms.items():
+        w = float(weights.get(name, 1.0))
         for i, eid in enumerate(ids):
             rank = i + 1
-            scores[eid] = scores.get(eid, 0.0) + 1.0 / (RRF_K + rank)
+            scores[eid] = scores.get(eid, 0.0) + w / (RRF_K + rank)
             places.setdefault(eid, {n: None for n in names})[name] = rank
     for eid in scores:
         places.setdefault(eid, {n: None for n in names})
@@ -500,6 +508,7 @@ def search_page(
     skip: int = 0,
     min_similarity: float | None = None,
     caption_min_similarity: float | None = None,
+    arm_weights: dict[str, float] | None = None,
     **filters: Any,
 ) -> SearchPage:
     """A page of results, with the vector arms fused in when there are any.
@@ -647,7 +656,7 @@ def search_page(
         "floor": caption_min_similarity, "below_floor": caption_below_floor,
         "best": None if caption_best is None else round(float(caption_best), 4),
     }
-    scores, places = _rrf(arms)
+    scores, places = _rrf(arms, arm_weights)
     if not scores:
         return SearchPage(hits=[], total=total, semantic={
             "used": True,

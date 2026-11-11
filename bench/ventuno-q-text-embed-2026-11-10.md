@@ -140,11 +140,43 @@ skipped because their health is not yet "ok" in KAI-C's registry, and
 semantic search quietly runs words-only. The eval's `arms` column is what
 made that visible.
 
+## The fusion, swept (17:50 UTC)
+
+With the three arms' rankings pulled from core's own functions over the
+labelled pool (28 positive cases; text arm present for 24, frame for 26,
+caption for 26), fused offline with per-arm weights and floors:
+
+| setting | MRR | hit@5 | P@5 | recall@10 |
+|---|---|---|---|---|
+| as deployed: frame 0.08, caption 0.65, votes 1/1/1 | 0.755 | 0.857 | 0.486 | 0.626 |
+| words only | 0.750 | 0.786 | 0.414 | 0.529 |
+| words + caption (0.65) | 0.758 | 0.857 | 0.514 | 0.628 |
+| words + frame (0.08) | 0.697 | 0.857 | 0.457 | 0.648 |
+| **frame 0.12, caption 0.65, caption at half a vote** | **0.815** | **0.893** | **0.536** | **0.676** |
+| frame 0.14, caption 0.60–0.65, caption half | 0.815 | 0.893 | 0.536 | 0.663 |
+| frame 0.12, caption 0.60, votes 1/1/1 | 0.792 | 0.893 | 0.529 | 0.668 |
+| frame 0.10, caption 0.60–0.65, caption half | 0.807 | 0.893 | 0.500 | 0.653 |
+
+(Offline numbers run a little above the API's because the offline text
+arm takes the parser's output directly; the comparisons are what matter.)
+
+Two things the table says. The frame arm at 0.08 was the arm costing
+precision: words + caption beat words + frame on MRR and P@5, and raising
+the frame floor to 0.12 — the bottom of the measured match band, 0.11–0.14
+— is worth more than any weight. And with two vector arms, a full vote
+each let them agree on a near-miss and outvote the words that named the
+thing; the caption arm at half a vote keeps its recall and gives the words
+their say. **Deployed defaults: frame floor 0.12, caption floor 0.65, votes
+text 1 / frame 1 / caption 0.5** (`SEARCH_*_ARM_WEIGHT`).
+
 ## What changed because of this
 
 - `SEARCH_CAPTION_MIN_SIMILARITY` default 0.22 → 0.75 → 0.65 (the first value
   was never measured against real vectors; the second was measured against
   the captioner's phrasing; the third against operators').
+- `SEARCH_VECTOR_MIN_SIMILARITY` 0.08 → 0.12 and the fusion's per-arm votes
+  (`SEARCH_TEXT_ARM_WEIGHT` 1, `SEARCH_VECTOR_ARM_WEIGHT` 1,
+  `SEARCH_CAPTION_ARM_WEIGHT` 0.5), from the sweep above.
 - The caption arm's query and the caption vectors go through `text_embed`
   where an adapter advertises it; the frame arm keeps SigLIP2 on the NPU.
 

@@ -574,6 +574,7 @@ async def search(
     floor = float(getattr(settings, "search_vector_min_similarity", 0) or 0) or None
     caption_floor = float(
         getattr(settings, "search_caption_min_similarity", 0) or 0) or None
+    arm_weights = _arm_weights(settings)
 
     # Counted FIRST, and timed on its own, because that timer is the
     # whole point of opennvr_search_count_seconds — the exact total is
@@ -588,7 +589,8 @@ async def search(
             db, labels=labels, camera_ids=cams, text=words or "", attrs=attrs,
             query_vector=query_vector, caption_query_vector=caption_query_vector,
             total=total, limit=limit, skip=skip,
-            min_similarity=floor, caption_min_similarity=caption_floor, **filters,
+            min_similarity=floor, caption_min_similarity=caption_floor,
+            arm_weights=arm_weights, **filters,
         )
     hits = page.hits
     # `text_total` is what the metric has always recorded — how many rows
@@ -653,7 +655,8 @@ async def search(
                 query_vector=query_vector, caption_query_vector=caption_query_vector,
                 total=without, limit=limit,
                 skip=skip, min_similarity=floor,
-                caption_min_similarity=caption_floor, **filters)
+                caption_min_similarity=caption_floor,
+                arm_weights=arm_weights, **filters)
             hits = page.hits
             total = page.total
             # The interpretation reports what was APPLIED, so the words
@@ -786,6 +789,19 @@ async def search(
 
 
 # ── Home Assistant (HA-116/HA-502): zones by name, and period summaries ──
+
+
+def _arm_weights(settings) -> dict[str, float]:
+    """The fusion's per-arm votes from the settings (text / vector /
+    caption), each defaulting to 1 when unset or unreadable."""
+    out: dict[str, float] = {}
+    for arm, key in (("text", "search_text_arm_weight"), ("vector", "search_vector_arm_weight"),
+                     ("caption", "search_caption_arm_weight")):
+        try:
+            out[arm] = float(getattr(settings, key, 1.0))
+        except (TypeError, ValueError):
+            out[arm] = 1.0
+    return out
 
 
 def _semantic_block(page, no_vector_reason: str | None) -> dict:

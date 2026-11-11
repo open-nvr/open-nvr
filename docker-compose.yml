@@ -739,6 +739,9 @@ services:
       - ALERTS_INBOX_RETENTION_DAYS=${ALERTS_INBOX_RETENTION_DAYS:-}
       - SEARCH_VECTOR_MIN_SIMILARITY=${SEARCH_VECTOR_MIN_SIMILARITY:-}
       - SEARCH_CAPTION_MIN_SIMILARITY=${SEARCH_CAPTION_MIN_SIMILARITY:-}
+      - SEARCH_TEXT_ARM_WEIGHT=${SEARCH_TEXT_ARM_WEIGHT:-}
+      - SEARCH_VECTOR_ARM_WEIGHT=${SEARCH_VECTOR_ARM_WEIGHT:-}
+      - SEARCH_CAPTION_ARM_WEIGHT=${SEARCH_CAPTION_ARM_WEIGHT:-}
       # Apps allowed to run on every camera without a pick (the agent).
       - ALL_CAMERAS_APPS=${ALL_CAMERAS_APPS:-}
       # KAI-C (same container) applies the clipped / weak / unlocalised
