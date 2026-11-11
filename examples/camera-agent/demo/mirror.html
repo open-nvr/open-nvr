@@ -31,9 +31,12 @@
     /* ── top bar ── */
     .top{position:fixed;top:0;left:0;right:0;display:flex;align-items:center;gap:18px;padding:18px 26px;z-index:5}
     .brand{display:flex;align-items:center;gap:12px;font-weight:700;font-size:22px;letter-spacing:.2px}
-    .brand .logo{width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,var(--accent),var(--accent2));
-      display:grid;place-items:center;box-shadow:0 0 24px rgba(79,209,255,.45)}
-    .brand .logo svg{width:20px;height:20px}
+    .brand .logo{width:40px;height:40px;border-radius:10px;overflow:hidden;box-shadow:0 0 24px rgba(94,179,246,.4);flex:none}
+    .brand .logo svg{width:40px;height:40px;display:block}
+    .brand .word{display:flex;flex-direction:column;line-height:1.1}
+    .brand .nvr{color:#5eb3f6}
+    .brand .site{font-size:12px;font-weight:500;color:var(--dim);letter-spacing:.3px;text-decoration:none;margin-top:3px}
+    .brand .site:hover{color:var(--text)}
     .live{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--dim);font-weight:600;text-transform:uppercase;letter-spacing:1px}
     .live .dot{width:9px;height:9px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 0 rgba(67,224,138,.7);animation:pulse 1.6s infinite}
     .live.off .dot{background:var(--warn);animation:none}
@@ -50,6 +53,7 @@
     .card{background:var(--panel2);border:1px solid var(--border);border-radius:16px;padding:12px;display:flex;gap:12px;
       backdrop-filter:blur(12px);box-shadow:0 10px 30px rgba(0,0,0,.35);animation:rise .35s ease-out;transition:opacity .4s}
     .card.gone{opacity:.25}
+    .card.tentative .tags{opacity:.6}
     @keyframes rise{from{transform:translateY(14px);opacity:0}to{transform:none;opacity:1}}
     .card .pic{width:84px;height:104px;border-radius:12px;background:#0b1326;flex:none;overflow:hidden;border:1px solid var(--border);display:grid;place-items:center;color:var(--dim)}
     .card .pic img{width:100%;height:100%;object-fit:cover}
@@ -116,12 +120,15 @@
   </div>
 
   <div class="top">
-    <div class="brand"><span class="logo" aria-hidden="true">
-      <svg viewBox="0 0 24 24" fill="none" stroke="#041018" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7l9-4 9 4v10l-9 4-9-4z"/><path d="M12 11l9-4M12 11L3 7M12 11v10"/></svg>
-    </span>OpenNVR Mirror</div>
+    <div class="brand">
+      <!-- The OpenNVR mark and wordmark (app/public/opennvr-icon.svg, Logo.tsx), inline. -->
+      <span class="logo" aria-hidden="true"><svg viewBox="0 0 64 64"><rect width="64" height="64" fill="#1e3a5f" rx="10"/><text x="32" y="45" font-family="Arial, sans-serif" font-weight="bold" font-size="28" text-anchor="middle" fill="#ffffff"><tspan fill="#5eb3f6">O</tspan>N</text></svg></span>
+      <span class="word"><span class="name">Open<span class="nvr">NVR</span> Mirror</span><a class="site" href="https://www.opennvr.org" target="_blank" rel="noopener">www.opennvr.org</a></span>
+    </div>
     <div class="live off" id="live"><span class="dot"></span><span id="liveTxt">connecting</span></div>
     <div class="chips">
       <div class="chip"><span>people</span><b id="cPeople">0</b></div>
+      <div class="chip"><span>objects</span><b id="cObjects">0</b></div>
       <div class="chip"><span>descriptions</span><b id="cCaps">0</b></div>
       <div class="chip npu"><span>vision model</span><b id="cVlm">–</b><span>on-device</span></div>
     </div>
@@ -229,7 +236,7 @@
   let voice = (qs.get("voice") || localStorage.getItem("mirror.voice") || "on") !== "off";
   let boxesOn = (qs.get("boxes") || localStorage.getItem("mirror.boxes") || "on") !== "off";
   let lastTracks = null, raf = null, cards = new Map(), ws = null, wsBackoff = 1000, hb = null;
-  let pc = null, whepResource = null, stillTimer = null, audioCtx = null, playing = 0;
+  let pc = null, whepResource = null, stillTimer = null, stillGen = 0, audioCtx = null, playing = 0;
   const BOX_STALE_MS = 2500;
   const HUES = {person: 200, car: 30, truck: 45, bus: 45, motorcycle: 15, bicycle: 160, dog: 290, cat: 290, backpack: 120, handbag: 120, suitcase: 120, umbrella: 60, cell_phone: 330, "cell phone": 330, bottle: 180, laptop: 260, cup: 180, chair: 100};
   const hue = (l) => { if (l in HUES) return HUES[l]; let h = 0; for (const c of l) h = (h * 31 + c.charCodeAt(0)) % 360; return h; };
@@ -238,7 +245,7 @@
   function stopVideo() {
     if (pc) { try { pc.close(); } catch {} pc = null; }
     if (whepResource) { raw(whepResource, {method: "DELETE"}).catch(() => {}); whepResource = null; }
-    if (stillTimer) { clearInterval(stillTimer); stillTimer = null; }
+    stillGen++; if (stillTimer) { clearTimeout(stillTimer); stillTimer = null; }
     const v = $("v"); if (v.srcObject) { v.srcObject = null; } v.hidden = true; $("still").style.display = "none";
   }
   // Core advertises the stream at the host it was configured with; the
@@ -253,6 +260,7 @@
   }
   async function startVideo(cam) {
     stopVideo();
+    setLive(false, "connecting video");
     let d = null;
     try { const r = await api("/streams/" + encodeURIComponent(cam) + "/live"); if (r.ok) d = await r.json(); } catch {}
     if (d && d.whep_url) {
@@ -268,7 +276,9 @@
         const offer = await p.createOffer(); await p.setLocalDescription(offer);
         const ac = new AbortController(); const abortT = setTimeout(() => ac.abort(), 6000);
         let resp;
-        try { resp = await raw(d.whep_url, {method: "POST", headers: {"Content-Type": "application/sdp"}, body: offer.sdp || "", signal: ac.signal}); }
+        const whepHeaders = {"Content-Type": "application/sdp"};
+        try { const jwt = new URL(d.whep_url).searchParams.get("jwt"); if (jwt) whepHeaders["Authorization"] = "Bearer " + jwt; } catch {}
+        try { resp = await raw(d.whep_url, {method: "POST", headers: whepHeaders, body: offer.sdp || "", signal: ac.signal}); }
         finally { clearTimeout(abortT); }
         if (!(resp.status === 200 || resp.status === 201)) throw new Error("WHEP " + resp.status);
         const loc = resp.headers.get("Location"); whepResource = loc ? new URL(loc, d.whep_url).href : null;
@@ -282,10 +292,17 @@
   function startStills(cam) {
     if (pc) { try { pc.close(); } catch {} pc = null; }
     const v = $("v"); v.hidden = true; const img = $("still"); img.style.display = "block";
-    const tick = async () => { try { const r = await api("/frame/" + encodeURIComponent(cam)); if (!r.ok) return;
-      const b = await r.blob(); const u = URL.createObjectURL(b); const old = img.dataset.u; img.src = u; img.dataset.u = u; if (old) URL.revokeObjectURL(old); } catch {} };
-    if (stillTimer) clearInterval(stillTimer);
-    stillTimer = setInterval(tick, 700); tick();
+    // One request at a time: a slow frame (the agent grabbing RTSP itself
+    // when the pipeline has nothing fresh) must not stack requests behind it.
+    const gen = ++stillGen;
+    const tick = async () => {
+      if (gen !== stillGen) return;
+      try { const r = await api("/frame/" + encodeURIComponent(cam)); if (r.ok) {
+        const b = await r.blob(); const u = URL.createObjectURL(b); const old = img.dataset.u; img.src = u; img.dataset.u = u; if (old) URL.revokeObjectURL(old); } } catch {}
+      if (gen === stillGen) stillTimer = setTimeout(tick, 1000);
+    };
+    if (stillTimer) clearTimeout(stillTimer);
+    tick();
     setLive(true, "live · stills");
   }
   function setLive(on, txt) { const el = $("live"); el.classList.toggle("off", !on); $("liveTxt").textContent = txt; }
@@ -314,7 +331,7 @@
       x.lineWidth = lw; x.strokeStyle = `hsla(${h},90%,62%,.95)`; roundRect(x, bx, by, bw, bh, 10 * dpr); x.stroke();
       x.shadowBlur = 0;
       const pct = Math.round((tr.score || 0) * 100);
-      const main = (card && card.summary) ? card.summary : (tr.label || "object").replace("_", " ");
+      const main = (card && card.summary && card.confirmed) ? card.summary : (tr.label || "object").replace("_", " ");
       const txt = `${main}  ${pct}%`;
       const px = Math.round(fpx * .55), py = Math.round(fpx * .3), tw = x.measureText(txt).width, cwid = Math.min(tw + px * 2, W - 8), chh = fpx + py * 2;
       const cx = Math.min(Math.max(4, bx), W - cwid - 4), cy = by - chh - 6 * dpr >= 0 ? by - chh - 6 * dpr : by + 6 * dpr;
@@ -335,7 +352,10 @@
       if (!el) { el = document.createElement("div"); el.className = "card"; el.dataset.id = id;
         el.innerHTML = `<div class="pic"><span>👤</span></div><div class="body"><div class="who"></div><div class="tags"></div></div>`; rail.prepend(el); }
       el.classList.toggle("gone", !c.visible);
-      el.querySelector(".who").innerHTML = c.summary ? `${esc(c.summary)}<span class="id">#${esc(id)}</span>` : `<span class="wait"><i></i>looking…</span>`;
+      el.querySelector(".who").innerHTML = c.summary
+        ? `${esc(c.summary)}<span class="id">#${esc(id)}${c.confirmed ? "" : " · confirming"}</span>`
+        : (c.confirmed ? `<span class="wait">person #${esc(id)}</span>` : `<span class="wait"><i></i>looking…</span>`);
+      el.classList.toggle("tentative", !c.confirmed);
       const tags = el.querySelector(".tags"); tags.innerHTML = "";
       for (const k of ["gender", "age", "top", "bottom", "headwear", "glasses", "carrying", "expression"]) {
         if (!c.fields || !c.fields[k]) continue;
@@ -364,14 +384,17 @@
     }
     for (const [id, c] of cards) { if (!seen.has(id)) { c.visible = false; if (Date.now() - (c.lastSeen || 0) > 4500) cards.delete(id); } }
     $("cPeople").textContent = String(seen.size);
+    $("cObjects").textContent = String((t.tracks || []).length);
     $("hint").classList.toggle("on", seen.size === 0 && !(t.tracks || []).length);
     renderCards(); requestDraw();
   }
+  let restartT = null;
+  function restartSoon() { if (restartT) return; restartT = setTimeout(() => { restartT = null; if (!$("ov").hidden) return; start(); }, 1500); }
   function onMirror(m) {
-    if (m.state === "stopped" && m.reason === "no viewer") { start(); return; }
+    if (m.state === "stopped") { restartSoon(); return; }
     if (m.card) {
       const id = String(m.card.track_id); const c = cards.get(id) || {visible: true, lastSeen: Date.now()};
-      c.summary = m.card.summary || ""; c.fields = m.card.fields || {}; c.describedAt = Date.now(); cards.set(id, c); renderCards(); requestDraw();
+      c.summary = m.card.summary || ""; c.fields = m.card.fields || {}; c.confirmed = !!m.card.confirmed; c.describedAt = Date.now(); cards.set(id, c); renderCards(); requestDraw();
     }
     if (typeof m.caption === "string" && m.caption) {
       const el = $("cap"); el.textContent = m.caption; el.classList.remove("fresh"); void el.offsetWidth; el.classList.add("fresh");
@@ -386,6 +409,7 @@
     const q = new URLSearchParams(); if (token) q.set("token", token); if (device) q.set("device_token", device);
     let s; try { s = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/updates?" + q.toString()); } catch { setTimeout(connect, wsBackoff); return; }
     ws = s;
+    s.onopen = () => { if ($("ov").hidden) restartSoon(); };   // an agent restart: the loop is gone, the page is not
     s.onmessage = (ev) => { let d; try { d = JSON.parse(ev.data); } catch { return; } wsBackoff = 1000;
       if (d.tracks) onTracks(d.tracks); if (d.mirror) onMirror(d.mirror); };
     s.onclose = async (ev) => { ws = null; if (ev.code === 4401 && authMode === "opennvr") { if (!(await tryRefresh())) { showOverlay(true); return; } }
