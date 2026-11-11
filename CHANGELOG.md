@@ -6,6 +6,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The live detection overlay moves with the object, and is on by
+  default.** Tier-0 publishes about five frames a second; the boxes used
+  to jump between them. Each track's box now glides toward its latest
+  position on the display's frame clock (90 ms time constant), a new
+  track fades in, a lost one fades out instead of vanishing, and a moving
+  track draws its last 1.5 s of path. The box is corner brackets with a
+  faint outline and tint rather than a solid rectangle, so the subject
+  stays visible; the label pill carries the class, the track id and the
+  score as a number and a bar. A small badge in the corner counts the
+  objects and the detector's publishing rate. Detections are on by
+  default in the Live view; the toggle still turns them off per browser.
+
 ### Added
 
 - **OpenNVR Mirror: the booth page.** The camera agent serves `/mirror`,
