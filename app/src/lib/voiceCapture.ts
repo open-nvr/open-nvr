@@ -9,6 +9,8 @@
 // button says why instead of failing on click.
 
 export const TARGET_RATE = 16000
+/** Below this the callback is room noise; above it, someone is talking. */
+export const SPEECH_FLOOR = 0.06
 
 export function voiceCaptureAvailable(): boolean {
   return typeof navigator !== 'undefined'
@@ -24,6 +26,14 @@ export class VoiceCapture {
   private node: ScriptProcessorNode | null = null
   private chunks: Float32Array[] = []
   private sampleRate = 48000
+  /** Loudness of the last callback's audio, 0..1 (RMS, scaled so speech
+   *  at a normal distance reads around 0.3–0.6). Read by the listening
+   *  state's bars and by the silence end-pointing. */
+  level = 0
+  /** True once anything louder than room noise has been heard. */
+  heardSpeech = false
+  /** Monotonic ms of the last callback that was above the speech floor. */
+  lastSpeechAt = 0
 
   async start(): Promise<void> {
     this.stream = await navigator.mediaDevices.getUserMedia({
@@ -37,10 +47,31 @@ export class VoiceCapture {
     this.node = this.ctx.createScriptProcessor(4096, 1, 1)
     this.chunks = []
     this.node.onaudioprocess = (e) => {
-      this.chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)))
+      const data = e.inputBuffer.getChannelData(0)
+      this.chunks.push(new Float32Array(data))
+      let sum = 0
+      for (let i = 0; i < data.length; i++) sum += data[i] * data[i]
+      const rms = Math.sqrt(sum / Math.max(1, data.length))
+      this.level = Math.min(1, rms * 8)
+      if (this.level > SPEECH_FLOOR) {
+        this.heardSpeech = true
+        this.lastSpeechAt = performance.now()
+      }
     }
     source.connect(this.node)
     this.node.connect(this.ctx.destination)
+  }
+
+  /** Everything heard so far, as a 16 kHz mono WAV, without stopping:
+   *  what the interim transcription sends while the operator is still
+   *  speaking. */
+  snapshot(): { wav: Blob; seconds: number } {
+    const total = this.chunks.reduce((n, c) => n + c.length, 0)
+    const pcm = new Float32Array(total)
+    let off = 0
+    for (const c of this.chunks) { pcm.set(c, off); off += c.length }
+    const down = downsample(pcm, this.sampleRate, TARGET_RATE)
+    return { wav: toWav(down, TARGET_RATE), seconds: down.length / TARGET_RATE }
   }
 
   /** Stops the microphone and answers the clip as a 16 kHz mono WAV. */

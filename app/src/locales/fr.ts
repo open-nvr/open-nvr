@@ -694,6 +694,8 @@ export const translations: TranslationCatalog = {
   'search.placeholder': 'Rechercher par objet, couleur, plaque, caméra ou heure',
   'search.voice.start': 'Dictez votre recherche (transcrite sur ce boîtier)',
   'search.voice.stop': 'Arrêter et rechercher',
+  'search.voice.listening': 'À l’écoute… dictez votre recherche',
+  'search.voice.searchNow': 'Rechercher',
   'search.voice.transcribing': 'Transcription…',
   'search.voice.insecure': 'Le micro nécessite HTTPS ou localhost',
   'search.voice.micDenied': 'Accès au micro refusé',
