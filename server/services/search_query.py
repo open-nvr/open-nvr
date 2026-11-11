@@ -77,15 +77,33 @@ LABEL_SYNONYMS: dict[str, tuple[str, ...]] = {
     "visitor": ("person",), "visitors": ("person",), "intruder": ("person",),
     "stranger": ("person",), "human": ("person",), "humans": ("person",),
     "individual": ("person",), "individuals": ("person",),
+    # the people an operator names by what they do or are
+    "cop": ("person",), "cops": ("person",), "police": ("person",),
+    "policeman": ("person",), "policemen": ("person",), "officer": ("person",),
+    "guard": ("person",), "guards": ("person",), "watchman": ("person",),
+    "security": ("person",), "courier": ("person",), "deliveryman": ("person",),
+    "worker": ("person",), "workers": ("person",), "labourer": ("person",),
+    # (not "baby", "teen", "cab": three or four letters that the typo
+    # corrector would read "bay", "tee", "cam" as)
+    "toddler": ("person",), "infant": ("person",),
+    "teenager": ("person",), "elderly": ("person",),
     "car": ("car",), "cars": ("car",), "vehicle": ("car", "truck", "bus", "motorcycle"),
     "vehicles": ("car", "truck", "bus", "motorcycle"),
     "truck": ("truck",), "trucks": ("truck",), "lorry": ("truck",),
     "lorries": ("truck",), "van": ("truck",), "vans": ("truck",),
     "bus": ("bus",), "buses": ("bus",), "coach": ("bus",),
-    "bike": ("bicycle",), "bikes": ("bicycle",), "bicycle": ("bicycle",),
-    "cycle": ("bicycle",), "cyclist": ("bicycle",),
+    # "bike" is a motorcycle on most roads here and a bicycle on others:
+    # both, and the vectors sort it out.
+    "bike": ("bicycle", "motorcycle"), "bikes": ("bicycle", "motorcycle"),
+    "bicycle": ("bicycle",), "cycle": ("bicycle",), "cyclist": ("bicycle",),
     "motorbike": ("motorcycle",), "motorcycle": ("motorcycle",),
-    "scooter": ("motorcycle",),
+    "scooter": ("motorcycle",), "scooty": ("motorcycle",), "moped": ("motorcycle",),
+    # an auto-rickshaw is read by the detector as a car or a motorcycle
+    "auto": ("car", "motorcycle"), "rickshaw": ("car", "motorcycle"),
+    "autorickshaw": ("car", "motorcycle"),
+    "jeep": ("car",), "suv": ("car",), "sedan": ("car",), "hatchback": ("car",),
+    "taxi": ("car",), "pickup": ("truck", "car"),
+    "tempo": ("truck",), "minivan": ("truck",),
     "bag": ("backpack", "handbag", "suitcase"), "bags": ("backpack", "handbag", "suitcase"),
     "luggage": ("backpack", "handbag", "suitcase"), "case": ("suitcase",),
     "suitcase": ("suitcase",), "backpack": ("backpack",), "rucksack": ("backpack",),

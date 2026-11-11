@@ -100,7 +100,8 @@ def test_the_parser_reads_class_words_through_synonyms():
 
 def test_several_classes_mean_or_and_the_parse_says_so():
     parsed = _p("car or bike")
-    assert set(parsed.labels) == {"car", "bicycle"}
+    # "bike" is a motorcycle on most roads here and a bicycle on others
+    assert set(parsed.labels) == {"car", "bicycle", "motorcycle"}
     assert "car" in parsed.matched["what"] and "bike" in parsed.matched["what"]
 
 
@@ -2085,7 +2086,7 @@ def test_the_route_makes_parsed_labels_soft_and_chip_labels_hard(client, db, mon
     monkeypatch.setattr(sr, "_query_vectors", _vectors)
     client.get("/api/v1/search", params={"q": "pickup truck"})
     client.get("/api/v1/search", params={"q": "pickup truck", "label": "truck"})
-    client.get("/api/v1/search", params={"q": "pickup"})
+    client.get("/api/v1/search", params={"q": "tarpaulin"})
     assert seen[0] is True, "parsed class: soft"
     assert seen[1] is False, "a label= chip: a wall"
     assert seen[2] is False, "no class word: nothing to soften"
@@ -2120,3 +2121,18 @@ def test_a_class_nobody_detected_is_said_when_the_vectors_answer_anyway(client, 
     assert "lookalike" not in body, "the class was detected: nothing to say"
     body = client.get("/api/v1/search", params={"q": "a dog", "label": "dog"}).json()
     assert "lookalike" not in body, "a label= chip is a wall, not a softening"
+
+
+def test_the_people_and_vehicles_an_operator_names_are_classes():
+    """cop, guard, courier, toddler are people to the detector; a bike is
+    a motorcycle on most roads here and a bicycle on others; an auto is
+    read as a car or a motorcycle."""
+    assert parse_query("a cop at the gate", now=NOW).labels == ["person"]
+    assert parse_query("security guard", now=NOW).labels == ["person"]
+    assert parse_query("the courier", now=NOW).labels == ["person"]
+    assert parse_query("a toddler", now=NOW).labels == ["person"]
+    assert parse_query("bike", now=NOW).labels == ["bicycle", "motorcycle"]
+    assert parse_query("scooty", now=NOW).labels == ["motorcycle"]
+    assert parse_query("an auto", now=NOW).labels == ["car", "motorcycle"]
+    assert parse_query("jeep", now=NOW).labels == ["car"]
+    assert parse_query("pickup", now=NOW).labels == ["truck", "car"]

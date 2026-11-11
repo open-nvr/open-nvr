@@ -70,6 +70,13 @@ KIND_SKILL: dict[str, str] = {
 }
 
 
+def canonical_value(kind: str, word: str) -> str:
+    """The stored spelling of a typed attribute word: the kind's synonym
+    map ("gray" → "grey", "navy" → "blue"), else the word itself."""
+    spec = KIND_QUESTIONS.get(kind) or {}
+    return str((spec.get("synonyms") or {}).get(word, word))
+
+
 def _vocab(kind: str) -> set[str]:
     spec = KIND_QUESTIONS.get(kind) or {}
     words = set(spec.get("vocabulary") or [])
@@ -85,9 +92,13 @@ HEADWEAR_WORDS = _vocab("headwear")
 #: Words that say the colour is about what a PERSON wears, whatever the
 #: class words said: "red shirt" is clothing even when no class was named.
 CLOTHING_CUES = frozenset({
-    "shirt", "tshirt", "t-shirt", "top", "jacket", "coat", "hoodie",
-    "hood", "sweater", "jumper", "dress", "uniform", "vest", "wearing",
+    "shirt", "tshirt", "t-shirt", "tee", "top", "jacket", "coat", "hoodie",
+    "hooded", "hood", "sweater", "sweatshirt", "pullover", "cardigan",
+    "blazer", "jumper", "dress", "uniform", "vest", "wearing",
     "dressed", "clothes", "clothing", "blouse", "suit",
+    # the garments people here actually wear and type
+    "kurta", "kurti", "saree", "sari", "salwar", "kameez", "sherwani",
+    "dupatta", "lungi", "dhoti", "abaya", "burqa",
 })
 
 
@@ -237,8 +248,13 @@ def promote_words_to_claims(parsed, box: "BoxAbilities") -> list[tuple[str, str]
             kind = "headwear"
         elif w in GENDER_WORDS and person:
             kind = "gender"
-        if kind and kind in box.claimed_kinds and (kind, w) not in parsed.attrs:
-            promoted.append((kind, w))
+        if kind and kind in box.claimed_kinds:
+            # The claim is stored canonical ("grey", "blue"); the operator
+            # typed "gray", "navy". Filter by what is stored, or a typed
+            # synonym matches nothing — silently.
+            value = canonical_value(kind, w)
+            if (kind, value) not in parsed.attrs:
+                promoted.append((kind, value))
         elif w not in CLOTHING_CUES or not promoted:
             rest.append(w)
     if promoted:

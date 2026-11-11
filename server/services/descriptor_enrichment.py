@@ -159,7 +159,13 @@ KIND_QUESTIONS: dict[str, dict[str, Any]] = {
             "maroon", "purple", "pink",
         ],
         # Answers arriving as a synonym we would otherwise drop.
-        "synonyms": {"gray": "grey", "dark grey": "grey", "light grey": "grey"},
+        "synonyms": {"gray": "grey", "dark grey": "grey", "light grey": "grey",
+                     "charcoal": "grey", "navy": "blue", "dark blue": "blue",
+                     "light blue": "blue", "sky blue": "blue", "crimson": "red",
+                     "scarlet": "red", "tan": "brown", "khaki": "beige",
+                     "cream": "white", "off-white": "white", "off white": "white",
+                     "golden": "gold", "violet": "purple", "lavender": "purple",
+                     "magenta": "pink", "olive": "green"},
     },
     "vehicle_type": {
         "question": (
@@ -169,9 +175,15 @@ KIND_QUESTIONS: dict[str, dict[str, Any]] = {
         "vocabulary": [
             "car", "van", "truck", "bus", "motorcycle", "pickup", "suv",
             "lorry", "taxi", "bicycle", "scooter", "tractor", "ambulance",
+            "rickshaw",
         ],
         "synonyms": {"lorry": "truck", "minivan": "van", "sedan": "car",
-                     "hatchback": "car", "estate": "car"},
+                     "hatchback": "car", "estate": "car", "jeep": "suv",
+                     "mpv": "van", "tempo": "van", "auto": "rickshaw",
+                     "autorickshaw": "rickshaw", "auto rickshaw": "rickshaw",
+                     "auto-rickshaw": "rickshaw", "tuk tuk": "rickshaw",
+                     "tuk-tuk": "rickshaw", "scooty": "scooter", "moped": "scooter",
+                     "cab": "taxi"},
     },
     "clothing_top": {
         # Defined narrowly, as the COLOUR of the upper garment, because
@@ -189,7 +201,13 @@ KIND_QUESTIONS: dict[str, dict[str, Any]] = {
             "green", "yellow", "orange", "brown", "beige", "gold",
             "maroon", "purple", "pink",
         ],
-        "synonyms": {"gray": "grey", "dark grey": "grey", "light grey": "grey"},
+        "synonyms": {"gray": "grey", "dark grey": "grey", "light grey": "grey",
+                     "charcoal": "grey", "navy": "blue", "dark blue": "blue",
+                     "light blue": "blue", "sky blue": "blue", "crimson": "red",
+                     "scarlet": "red", "tan": "brown", "khaki": "beige",
+                     "cream": "white", "off-white": "white", "off white": "white",
+                     "golden": "gold", "violet": "purple", "lavender": "purple",
+                     "magenta": "pink", "olive": "green"},
     },
     "carrying": {
         "question": (
