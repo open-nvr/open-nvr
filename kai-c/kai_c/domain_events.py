@@ -219,9 +219,64 @@ def _normalise_fast_plate_ocr(
     )
 
 
+def _normalise_face_recognition(
+    result: Dict[str, Any],
+    *,
+    adapter_name: str,
+    camera_id: str,
+    correlation_id: Optional[str],
+    track_id: Optional[int] = None,
+    label: Optional[str] = None,
+    observed_at: Optional[str] = None,
+    **_: Any,
+) -> Normalised:
+    """``face_recognition`` result → ``face.recognized.v1``.
+
+    Only for the platform's face route (a Tier-1 dispatch names the
+    track): an app's own identification calls (enrolment checks, its
+    own frames) are the app's business and publish nothing here. A crop
+    with no face says nothing either. An unknown face IS published
+    (``person_id`` null): "someone not enrolled is at the gate" is what
+    a gate needs to know. Faces are PII: the subject is scope-guarded
+    (``events:face.recognized``), never on by default."""
+    if track_id is None or result.get("face_bbox") in (None, []):
+        return None
+    recognized = bool(result.get("recognized") and result.get("person_id"))
+    payload: Dict[str, Any] = {
+        "adapter": adapter_name,
+        "track_id": track_id,
+        "label": label,
+        "recognized": recognized,
+        "person_id": str(result["person_id"]) if recognized else None,
+        "category": result.get("category") if recognized else None,
+        "similarity": float(result["similarity"])
+        if isinstance(result.get("similarity"), (int, float)) else None,
+        "threshold": float(result["threshold"])
+        if isinstance(result.get("threshold"), (int, float)) else None,
+        "face_box": list(result["face_bbox"])
+        if isinstance(result.get("face_bbox"), (list, tuple)) else None,
+    }
+    if observed_at:
+        payload["observed_at"] = observed_at
+    subject = f"opennvr.events.face.recognized.v1.{camera_id}"
+    return subject, _envelope(
+        "face.recognized.v1",
+        camera_id=camera_id,
+        correlation_id=correlation_id,
+        payload=payload,
+    )
+
+
 #: adapter name → normaliser. Mirrors the table in EVENT_CONTRACTS.md.
 NORMALISERS: Dict[str, Callable[..., Normalised]] = {
     "fast_plate_ocr": _normalise_fast_plate_ocr,
+}
+
+#: result ``task`` → normaliser, for tasks any adapter may serve: face
+#: apps run their own face adapters (each with its own gallery), so the
+#: face event cannot be keyed on one adapter name.
+TASK_NORMALISERS: Dict[str, Callable[..., Normalised]] = {
+    "face_recognition": _normalise_face_recognition,
 }
 
 
@@ -233,6 +288,8 @@ def normalise_completion(
     correlation_id: Optional[str] = None,
     event_id: Optional[int] = None,
     observed_at: Optional[str] = None,
+    track_id: Optional[int] = None,
+    label: Optional[str] = None,
 ) -> Normalised:
     """Domain event for one successful completion, or None.
 
@@ -242,6 +299,10 @@ def normalise_completion(
     not domain-worthy (e.g. a rejected OCR read). Never raises.
     """
     fn = NORMALISERS.get(adapter_name)
+    by_task = False
+    if fn is None and isinstance(result, dict):
+        fn = TASK_NORMALISERS.get(str(result.get("task") or ""))
+        by_task = fn is not None
     if fn is None:
         return None
     if not camera_id:
@@ -253,6 +314,16 @@ def normalise_completion(
     if not isinstance(result, dict):
         return None
     try:
+        if by_task:
+            return fn(
+                result,
+                adapter_name=adapter_name,
+                camera_id=camera_id,
+                correlation_id=correlation_id,
+                track_id=track_id,
+                label=label,
+                observed_at=observed_at,
+            )
         return fn(
             result,
             camera_id=camera_id,
