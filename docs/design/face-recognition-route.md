@@ -33,15 +33,19 @@ camera → detect-pipeline: motion → person detection → tracking → best cr
    dispatch runs **only for cameras whose skills include
    `face_recognition`** (a face app picked them); caption routes and every
    other camera stay exactly as today. Live sites upgrade in place.
-2. **Classrooms use the same route plus a periodic re-check.** Seated
-   students barely move, so for cameras with the attendance skill the gate
-   does not suppress stationary people and re-escalates each tracked person
-   every N seconds (per-track cooldown) — the existing `heartbeat_s` /
-   `escalate_cooldown_s` / `stationary_suppress` knobs, set per camera.
-   Before committing, measure on real classroom footage how many seated
-   students the person detector misses (desks hide bodies); if it is too many
-   we come back to this decision (alternatives considered: a platform
-   whole-frame "census" skill, or keeping classrooms app-driven).
+2. **Classrooms: a platform face census, not the person route** (revised
+   2026-11-11 after measuring). On real classroom CCTV (front-high camera,
+   ~16 seated students, 360p upload) the person detector found ~25% of the
+   students on the whole frame and ~50% on zoomed tiles; a student never
+   detected as a person is never escalated, and would be marked absent with
+   a visible face. Gates do not have this problem (one person, close).
+   Classroom cameras therefore get a **scheduled whole-frame face pass run by
+   the platform** (no person step) that publishes the same
+   `face.recognized.v1` event; apps consume one event type for both. Design
+   of the census waits for one minute of real 3 MP footage. Also measured:
+   0 faces found in 11 s of that footage — students look down at books — so
+   classroom recognition depends on looking repeatedly through the period,
+   whatever the design.
 
 ## Work, by component
 
@@ -58,8 +62,6 @@ camera → detect-pipeline: motion → person detection → tracking → best cr
   enforce/shadow is global). Default KAI-C URL is set in compose so a stock
   install with a face app works without hand edits; with no face app picked
   nothing is dispatched.
-- Per-camera gate profile for attendance cameras: `stationary_suppress=false`,
-  `escalate_cooldown_s` = re-check period, `heartbeat_s` as needed.
 - `DETECT_SKIP_UNASSIGNED`: a camera picked only by a face app must not be
   skipped (`face_recognition` joins `DETECTION_SHAPED_SKILLS`).
 - Tests: routing table, retry/cap, per-camera enforcement, no change for
@@ -93,14 +95,17 @@ camera → detect-pipeline: motion → person detection → tracking → best cr
 - Gates and staff attendance: subscribe instead of polling; per track, decide
   on the best result within a short window (best-of-N, threshold unchanged);
   cooldown per person as today.
-- Classes: marks from face events of the room's camera during the class
-  window; slot logic unchanged (a student seen in a slot is present).
+- Classes: later, from the census (P7); until then the class worker stays
+  as it is.
 - Gallery enrolment stays as is (Attendly → KAI-C → its adapter).
 - Fallback: the snapshot loop stays only for a camera the pipeline does not
   serve, and says so in the UI.
 
+### P7 — classroom face census (after real footage)
+- Platform skill for classroom cameras: whole-frame face pass at intervals
+  through a class window, same `face.recognized.v1` event.
+
 ### P6 — verification and rollout
-- Measure classroom detection miss rate (decision 2) before P5's classroom part.
 - End-to-end on the local stack: webcam gate, a classroom fake camera.
 - Upgrade test as an in-place migration of the existing test stack
   (live clients): cameras without a face app must behave exactly as before;
@@ -111,10 +116,11 @@ camera → detect-pipeline: motion → person detection → tracking → best cr
 | Step | State | Notes |
 |---|---|---|
 | Plan | done | this file |
-| P6a classroom miss-rate measurement | todo | decides decision 2 |
+| Classroom miss-rate measurement | done | person route unfit for classes; see decision 2 |
 | P1 detect-pipeline face route | todo | |
 | P2 KAI-C track + normaliser + contract | todo | |
 | P3 server scope + skills + compose | todo | |
 | P4 SDK helper | todo | |
 | P5 Attendly consumer | todo | private repo |
 | P6 end-to-end + upgrade test | todo | |
+| P7 classroom census | waiting | needs 1 min of real 3 MP classroom footage |
