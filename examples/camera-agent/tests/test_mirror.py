@@ -59,6 +59,8 @@ def test_scene_prompt_is_grounded_in_the_tracks():
     p = scene_prompt([{"label": "person"}, {"label": "person"}, {"label": "car"}, {"label": "cell_phone"}])
     assert "currently sees: 2 people, 1 car, 1 cell phone" in p and "Never invent a person" in p
     assert scene_prompt([{"label": "person"}]).count("1 person") == 1
+    cars = scene_prompt([{"label": "car"}, {"label": "car"}])
+    assert "sees: 2 cars" in cars and "Do not mention people" in cars and "Never invent" not in cars
 
 
 # ── the loop's policy ───────────────────────────────────────────────

@@ -80,6 +80,11 @@ SCENE_PROMPT_PEOPLE = (
     "(waving, phone, bag, laptop), notable objects. Never invent a person. "
     "Name colours. Do not use 'casual attire', 'setting', 'suggesting', "
     "'appears', 'seemingly'. No preamble, no quotes.")
+SCENE_PROMPT_OBJECTS = (
+    "You are OpenNVR Mirror at a technology show. Nobody is in front of the "
+    "camera right now; the object detector sees: {seen}. In ONE sentence of at "
+    "most 20 words describe those and the place, naming colours. Do not "
+    "mention people at all. No preamble, no quotes.")
 SCENE_PROMPT_EMPTY = (
     "You are OpenNVR Mirror at a technology show. Nobody is in front of the "
     "camera right now. In ONE sentence of at most 20 words describe the place "
@@ -100,11 +105,14 @@ def scene_prompt(tracks: list[dict[str, Any]]) -> str:
     if not counts:
         return SCENE_PROMPT_EMPTY
     parts = []
+    people = counts.get("person", 0)
     for label, n in sorted(counts.items(), key=lambda kv: (kv[0] != "person", -kv[1], kv[0])):
         plural = label if n == 1 else (label + ("s" if not label.endswith("s") else ""))
         if label == "person" and n > 1:
             plural = "people"
         parts.append(f"{n} {plural}")
+    if not people:
+        return SCENE_PROMPT_OBJECTS.format(seen=", ".join(parts))
     return SCENE_PROMPT_PEOPLE.format(seen=", ".join(parts))
 PERSON_PROMPT = (
     "Look at the person in this image. Answer on ONE line as key=value pairs "
