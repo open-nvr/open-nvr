@@ -37,11 +37,12 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import {
-  Camera as CameraIcon, CarFront, Clock, CornerDownLeft, ImageOff, Info, LayoutGrid, List, Play, Route,
+  Camera as CameraIcon, CarFront, Clock, CornerDownLeft, ImageOff, Info, LayoutGrid, List, Mic, Play, Route,
   Search as SearchIcon, Sparkles, Tag, Type, UserRound, X,
   Users,
 } from 'lucide-react'
 import { api } from '../lib/api'
+import { VoiceCapture, blobToBase64, voiceCaptureAvailable } from '../lib/voiceCapture'
 import { apiService } from '../lib/apiService'
 import { PageTitleBar, TITLE_PANEL_BODY_CLASS } from '../components/ui/layout'
 import SearchAnswer, { type SearchAnswerData } from '../components/SearchAnswer'
@@ -378,6 +379,50 @@ export function Search() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sentence])
+
+  // ── Voice: push to talk, transcribed on the box ──
+  // Click starts the microphone, click again stops it; the clip goes to
+  // /search/transcribe (the box's own STT adapter through KAI-C) and the
+  // words land in the box as if typed, with what the read-back changed
+  // ("twenty three" → 23) shown once under the field.
+  const [voice, setVoice] = useState<'idle' | 'listening' | 'transcribing'>('idle')
+  const [voiceNote, setVoiceNote] = useState<string | null>(null)
+  const captureRef = useRef<VoiceCapture | null>(null)
+  const voiceOk = voiceCaptureAvailable()
+  const toggleVoice = async () => {
+    if (voice === 'transcribing') return
+    if (voice === 'listening') {
+      const cap = captureRef.current
+      captureRef.current = null
+      setVoice('transcribing')
+      try {
+        const { wav, seconds } = cap ? await cap.stop() : { wav: null, seconds: 0 }
+        if (!wav || seconds < 0.3) { setVoiceNote(t('search.voice.nothing')); return }
+        const audio_b64 = await blobToBase64(wav)
+        const { data } = await api.post('/api/v1/search/transcribe', { audio_b64 })
+        const query: string = data?.query ?? ''
+        const changes: string[] = Array.isArray(data?.changes) ? data.changes : []
+        if (!query) { setVoiceNote(t('search.voice.nothing')); return }
+        setVoiceNote(changes.length ? `${t('search.voice.heard')} “${data.transcript}” · ${changes.join(' · ')}` : null)
+        run(query)
+      } catch (err: unknown) {
+        const detail = (err as { data?: { detail?: { reason?: string } } })?.data?.detail
+        setVoiceNote(detail?.reason === 'no-stt' ? t('search.voice.noStt') : t('search.voice.failed'))
+      } finally {
+        setVoice('idle')
+      }
+      return
+    }
+    setVoiceNote(null)
+    const cap = new VoiceCapture()
+    try {
+      await cap.start()
+      captureRef.current = cap
+      setVoice('listening')
+    } catch {
+      setVoiceNote(t('search.voice.micDenied'))
+    }
+  }
 
   const run = (text: string) => {
     setSentence(text)
@@ -882,6 +927,23 @@ export function Search() {
                 className="h-9 w-full border border-[var(--border)] bg-[var(--bg-2)] pl-9 pr-16 text-[13px] outline-none transition-colors placeholder:text-[color-mix(in_oklab,var(--text-dim)_50%,transparent)] focus:border-[var(--accent)] focus:placeholder:text-[color-mix(in_oklab,var(--text-dim)_20%,transparent)]"
               />
               <span className="absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-0.5">
+                <button
+                  type="button"
+                  onClick={() => { void toggleVoice() }}
+                  disabled={!voiceOk || voice === 'transcribing'}
+                  title={!voiceOk ? t('search.voice.insecure') : voice === 'listening' ? t('search.voice.stop') : voice === 'transcribing' ? t('search.voice.transcribing') : t('search.voice.start')}
+                  aria-label={voice === 'listening' ? t('search.voice.stop') : t('search.voice.start')}
+                  aria-pressed={voice === 'listening'}
+                  className={`grid h-6 w-6 place-items-center transition-colors disabled:opacity-40 ${
+                    voice === 'listening'
+                      ? 'animate-pulse bg-[var(--danger)] text-white'
+                      : voice === 'transcribing'
+                        ? 'text-[var(--accent)]'
+                        : 'text-[var(--text-dim)] hover:bg-[var(--panel)] hover:text-[var(--text)]'
+                  }`}
+                >
+                  <Mic size={14} />
+                </button>
                 {draft && (
                   <button
                     type="button"
@@ -908,6 +970,15 @@ export function Search() {
               </span>
             </div>
           </form>
+          {voiceNote && (
+            <div className="flex items-center gap-2 text-[12px] text-[var(--text-dim)]">
+              <Mic size={12} className="shrink-0" />
+              <span className="min-w-0 truncate">{voiceNote}</span>
+              <button type="button" onClick={() => setVoiceNote(null)} aria-label="Dismiss" className="ml-auto grid h-5 w-5 shrink-0 place-items-center hover:text-[var(--text)]">
+                <X size={12} />
+              </button>
+            </div>
+          )}
 
           {/* What it understood — each chip removable, which is the way out
               of a wrong guess — and the person picker on the same line. */}

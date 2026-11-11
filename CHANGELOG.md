@@ -6,6 +6,24 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Voice search.** A microphone button in the search box: click, speak,
+  click again, and the clip is transcribed on the box by the same
+  speech-to-text adapter the camera agent uses (whisper on the Hexagon,
+  Parakeet on the CPU), reached through KAI-C — nothing leaves the box,
+  and the browser's own cloud speech recognition is not used. The
+  transcript is read back as a typed query — number words to digits
+  ("cam twenty three" → cam 23), spelled-out plates to one token
+  ("k a zero one a b one two three four" → KA01AB1234), the "show me" of
+  a spoken request dropped — and the box says what it changed under the
+  field before searching exactly as if typed. `POST /api/v1/search/transcribe`
+  (`audio_b64`, a short 16 kHz WAV the browser packs itself; 503
+  `no-stt` with no adapter). The microphone needs a secure context
+  (localhost or the HTTPS front); on plain http the button says so.
+  (`server/services/search_voice.py`, `server/routers/search.py`,
+  `app/src/lib/voiceCapture.ts`, `app/src/views/Search.tsx`)
+
 ### Changed
 
 - **Search's fusion is weighted, and the frame floor is 0.12.** The
