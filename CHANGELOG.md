@@ -8,6 +8,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A bounded LLM re-rank of the first page, off by default.** The
+  captioner's model (Gemma on the Hexagon, through the litertlm adapter's
+  OpenAI-shaped chat) reads the first N captions in one call and says
+  which show what was asked; those move to the front in their fused
+  order, nothing is dropped. One call, a few tokens, a hard timeout, one
+  in flight at a time. Measured on the labelled eval (Ventuno Q,
+  2026-11-11, N=10): the first prompt made it worse (MRR 0.762 → 0.731,
+  the model said yes to nearly everything); the strict prompt shipped
+  here gains a little (0.762 → 0.775, P@5 0.450 → 0.457) for a median
+  234 ms a search — so `SEARCH_RERANK_TOP` defaults to 0 and a caller
+  can ask per request with `?rerank=N`. `semantic.rerank` reports what
+  was asked, kept and how long it took. (`server/services/search_rerank.py`,
+  `server/routers/search.py`)
 - **Voice search.** A microphone button in the search box: click, speak,
   click again, and the clip is transcribed on the box by the same
   speech-to-text adapter the camera agent uses (whisper on the Hexagon,

@@ -462,6 +462,10 @@ async def search(
     ),
     skip: int = Query(0, ge=0, le=100_000),
     limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    rerank: int | None = Query(
+        None, ge=0, le=20,
+        description="Re-rank the first N results with the box's own language model "
+                    "(matching captions first); unset = SEARCH_RERANK_TOP; 0 = off."),
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db),
 ):
@@ -670,6 +674,23 @@ async def search(
     _record_search(shape, parsed, page_timer, count_timer, text_total, parse=parse,
                    overridden=bool(label or camera_id or text or plate or from_
                                    or to or source or attr))
+
+    # ── A bounded yes/no re-rank of the first page by the box's own LLM ──
+    # Fusion cannot read; the captioner's model can read ten captions and
+    # say which show what was asked. Those move to the front in their
+    # fused order; the rest keep theirs. Off unless asked for (per request
+    # or SEARCH_RERANK_TOP), and only for the first page of a worded
+    # question whose vector arms ran — nothing to judge otherwise.
+    top = rerank if rerank is not None else int(getattr(settings, "search_rerank_top", 0) or 0)
+    if top > 0 and skip == 0 and hits and (words or parsed.question) and page.semantic and page.semantic.get("used"):
+        from services.search_rerank import apply as _apply_rerank, rerank as _rerank
+        head = hits[:top]
+        yes, info = await _rerank(
+            parsed.question or words or "", [h.caption or "" for h in head],
+            timeout_s=float(getattr(settings, "search_rerank_timeout_s", 8.0) or 8.0))
+        if yes is not None:
+            hits = _apply_rerank(head, yes) + hits[top:]
+        page.semantic["rerank"] = info
 
     interpretation = parsed.as_dict()
     interpretation.update({

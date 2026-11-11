@@ -169,6 +169,29 @@ thing; the caption arm at half a vote keeps its recall and gives the words
 their say. **Deployed defaults: frame floor 0.12, caption floor 0.65, votes
 text 1 / frame 1 / caption 0.5** (`SEARCH_*_ARM_WEIGHT`).
 
+## The LLM re-rank, measured (2026-11-11 03:30 UTC)
+
+Each labelled case's live first ten results, re-ranked by Gemma (the
+litertlm captioner's chat, on the Hexagon) exactly as
+`services/search_rerank.py` does, scored before and after:
+
+| prompt | MRR | hit@5 | P@5 | chat median / p90 |
+|---|---|---|---|---|
+| none (as deployed) | 0.762 | 0.821 | 0.450 | — |
+| "a caption matches when it shows what the search asks for" | 0.731 | 0.786 | 0.443 | 378 / 524 ms |
+| strict: every part of the search, when unsure not a match | 0.775 | 0.821 | 0.457 | 234 / 455 ms |
+| rank the best three, best first | 0.777 | 0.821 | 0.464 | 256 / 374 ms |
+
+The first prompt had the model say yes to nearly every caption (ten of
+ten for "person in camouflage") and moved a right answer from first to
+seventh ("man sitting on the floor with a laptop"). The strict prompt
+gains a little and never loses a first place. The paraphrase cases it
+was meant for ("two men looking at a laptop", MRR 0) did not move:
+the right caption was not in the first ten, and a re-rank cannot find
+what fusion did not bring. **Shipped off by default** (`SEARCH_RERANK_TOP=0`,
+`?rerank=N` per request); the next lever for paraphrases is recall, not
+re-ranking.
+
 ## What changed because of this
 
 - `SEARCH_CAPTION_MIN_SIMILARITY` default 0.22 → 0.75 → 0.65 (the first value
