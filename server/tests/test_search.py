@@ -1754,8 +1754,13 @@ def test_min_people_filters_on_the_pipelines_count(db):
     db.commit()
     assert trio.payload["people"] == 3 and "people" not in (old.payload or {})
     base = dict(from_=None, to=None, plate=None, source=None, scope=None, zone_id=None, has_plate=False)
+    # The one counted alone is out; the trio is in; the visit with NO count
+    # is unknown, not alone, and stays in for the captions and vectors to
+    # judge (every two-men visit on the Ventuno Q predated the count).
     assert count_search_events(db, labels=["person"], camera_ids=None, text="", attrs=None,
-                               min_people=2, **base) == 1
+                               min_people=2, **base) == 2
+    assert count_search_events(db, labels=["person"], camera_ids=None, text="", attrs=None,
+                               min_people=4, **base) == 1, "only the uncounted one passes a bar the trio misses"
     assert count_search_events(db, labels=["person"], camera_ids=None, text="", attrs=None,
                                min_people=None, **base) == 3
 
@@ -2059,3 +2064,28 @@ def test_the_rerank_is_off_by_default_and_moves_the_models_yes_rows_first(client
     got = [r["caption"] for r in body["results"]]
     assert got[0] == shown[1] and got[1:] == [c for c in shown if c != shown[1]]
     assert {a.id, b.id, c.id} == {r["id"] for r in body["results"]}
+
+
+
+def test_the_route_makes_parsed_labels_soft_and_chip_labels_hard(client, db, monkeypatch):
+    import routers.search as sr
+    _camera(db, 1, "Dock")
+    _visit(db, label="car", caption="a white pickup truck")
+    seen: list[bool] = []
+    from services import search_service
+    real = search_service.search_page
+
+    def _page(*args, **kw):
+        seen.append(bool(kw.get("labels_soft")))
+        return real(*args, **kw)
+    monkeypatch.setattr(sr, "search_page", _page)
+
+    async def _vectors(_db, words):
+        return [1.0], [1.0], None
+    monkeypatch.setattr(sr, "_query_vectors", _vectors)
+    client.get("/api/v1/search", params={"q": "pickup truck"})
+    client.get("/api/v1/search", params={"q": "pickup truck", "label": "truck"})
+    client.get("/api/v1/search", params={"q": "pickup"})
+    assert seen[0] is True, "parsed class: soft"
+    assert seen[1] is False, "a label= chip: a wall"
+    assert seen[2] is False, "no class word: nothing to soften"

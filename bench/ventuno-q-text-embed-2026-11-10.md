@@ -192,6 +192,30 @@ what fusion did not bring. **Shipped off by default** (`SEARCH_RERANK_TOP=0`,
 `?rerank=N` per request); the next lever for paraphrases is recall, not
 re-ranking.
 
+## Two walls (2026-11-11 04:30 UTC)
+
+Where the paraphrase cases lost their visits was not ranking. "two men
+looking at a laptop" parses to class `person` + at least two people; the
+people-count filter demanded `payload.people >= 2`, and every two-men visit
+on the box predates the count, so none was a candidate for any arm.
+"pickup truck" parses to class `truck`; the detector labelled the pickups
+`car`, so the class wall left zero candidates — the caption that says
+pickup and the frame that looks like one were never scored. Offline over
+the labelled pool, today's floors and votes:
+
+| candidate set | MRR | hit@5 | P@5 | recall@10 |
+|---|---|---|---|---|
+| as deployed (class wall, strict count) | 0.786 | 0.857 | 0.493 | 0.655 |
+| an unknown count passes | 0.804 | 0.893 | 0.529 | 0.676 |
+| **+ parsed class words no wall for the vector arms** | **0.911** | **1.000** | **0.586** | **0.790** |
+| + word arm drops the class when it leaves nothing | 0.863 | 1.000 | 0.586 | 0.790 |
+
+The third row is what shipped: "pickup truck", "a bus" and "two men looking
+at a laptop" go from nothing to first; nothing else moves. The fourth row
+is worse because the word arm without its class matches "pickup" in
+captions of cars the pickup is parked beside; the vector arms are the
+better judge of what a thing is.
+
 ## What changed because of this
 
 - `SEARCH_CAPTION_MIN_SIMILARITY` default 0.22 → 0.75 → 0.65 (the first value

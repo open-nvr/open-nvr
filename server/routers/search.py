@@ -581,6 +581,9 @@ async def search(
     caption_floor = float(
         getattr(settings, "search_caption_min_similarity", 0) or 0) or None
     arm_weights = _arm_weights(settings)
+    # Class words the PARSER produced are a hint to the word arm and no
+    # wall for the vector arms (search_page); a label= chip stays a wall.
+    labels_soft = not label and bool(parsed.labels)
 
     # Counted FIRST, and timed on its own, because that timer is the
     # whole point of opennvr_search_count_seconds — the exact total is
@@ -596,7 +599,7 @@ async def search(
             query_vector=query_vector, caption_query_vector=caption_query_vector,
             total=total, limit=limit, skip=skip,
             min_similarity=floor, caption_min_similarity=caption_floor,
-            arm_weights=arm_weights, **filters,
+            arm_weights=arm_weights, labels_soft=labels_soft, **filters,
         )
     hits = page.hits
     # `text_total` is what the metric has always recorded — how many rows
@@ -662,7 +665,7 @@ async def search(
                 total=without, limit=limit,
                 skip=skip, min_similarity=floor,
                 caption_min_similarity=caption_floor,
-                arm_weights=arm_weights, **filters)
+                arm_weights=arm_weights, labels_soft=labels_soft, **filters)
             hits = page.hits
             total = page.total
             # The interpretation reports what was APPLIED, so the words

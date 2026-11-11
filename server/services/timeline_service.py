@@ -259,9 +259,15 @@ def _events_query(
         )
     if min_people and int(min_people) > 1:
         # "Three people together": the pipeline's count of people in frame
-        # with the visit at its fullest (payload["people"]); a visit from
-        # before the count existed has none and cannot be a group.
-        q = q.filter(TimelineEvent.payload["people"].as_integer() >= int(min_people))
+        # with the visit at its fullest (payload["people"]). A visit with
+        # no count — recorded before the count existed, or one the
+        # pipeline never counted — is UNKNOWN, not alone: it passes, and
+        # the captions and vectors say whether it was a group. Filtering
+        # it out made "two men looking at a laptop" find nothing on the
+        # Ventuno Q (every two-men visit predates the count; labelled
+        # eval 2026-11-11, MRR 0.786 → 0.804 with this alone).
+        people = TimelineEvent.payload["people"].as_integer()
+        q = q.filter(or_(people.is_(None), people >= int(min_people)))
     if source:
         q = q.filter(TimelineEvent.source == source)
     if plate:

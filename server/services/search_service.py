@@ -509,6 +509,7 @@ def search_page(
     min_similarity: float | None = None,
     caption_min_similarity: float | None = None,
     arm_weights: dict[str, float] | None = None,
+    labels_soft: bool = False,
     **filters: Any,
 ) -> SearchPage:
     """A page of results, with the vector arms fused in when there are any.
@@ -516,6 +517,15 @@ def search_page(
     ``min_similarity`` floors the image arm, ``caption_min_similarity``
     the caption arm; each is a cosine on its own model's scale, and
     ``None`` or 0 means no floor.
+
+    ``labels_soft`` says the class words came from the parser, not from a
+    chip: the word arm keeps them, the vector arms do not. "pickup
+    truck" parses to class ``truck``, and a detector that called the
+    pickup a ``car`` walled it off from every arm — the caption that
+    says pickup, the frame that looks like one. With the parsed class as
+    a hint to the words and no wall for the vectors, the labelled eval
+    on the Ventuno Q went MRR 0.804 → 0.911 and hit@5 to 1.0
+    (2026-11-11). An explicit ``label=`` stays a wall.
 
     ``caption_query_vector`` is the query through the CAPTION arm's model
     (the sentence encoder, where one is registered); left ``None`` the
@@ -622,8 +632,8 @@ def search_page(
     # and a candidate missing either is skipped by that arm, not scored
     # as zero (see rank_by_similarity).
     candidate_ids = _arm_ids(
-        db, filters=filters, labels=labels, camera_ids=camera_ids,
-        text="", attrs=attrs, limit=cap.ceiling + 1, ranked=False)
+        db, filters=filters, labels=(None if labels_soft else labels),
+        camera_ids=camera_ids, text="", attrs=attrs, limit=cap.ceiling + 1, ranked=False)
     empty = embedding_store.SimilarityResult(ids=[], scores=[], considered=0, truncated=False)
     sim = embedding_store.rank_by_similarity(
         db, query_vector=query_vector, candidate_ids=candidate_ids,
@@ -646,6 +656,7 @@ def search_page(
     caption_best = max(csim.scores) if csim.scores else None
     caption_ids, caption_below_floor = _apply_floor(csim, caption_min_similarity)
 
+    semantic_extra = {"labels_soft": True} if (labels_soft and labels) else {}
     arms: dict[str, list[int]] = {"vector": vector_ids}
     if text_ids:
         arms["text"] = text_ids
@@ -653,13 +664,14 @@ def search_page(
         arms["caption"] = caption_ids
     caption_block = {
         "considered": csim.considered, "truncated": csim.truncated,
+        "labels_soft": bool(labels_soft and labels),
         "floor": caption_min_similarity, "below_floor": caption_below_floor,
         "best": None if caption_best is None else round(float(caption_best), 4),
     }
     scores, places = _rrf(arms, arm_weights)
     if not scores:
         return SearchPage(hits=[], total=total, semantic={
-            "used": True,
+            "used": True, **semantic_extra,
             "reason": ("below-floor" if (below_floor or caption_below_floor)
                        else "no-candidates"),
             "considered": sim.considered, "truncated": sim.truncated,
@@ -696,7 +708,7 @@ def search_page(
     # count is still reported, under `text_total`, because the drop from
     # one to the other is how a reader sees the second arm working.
     return SearchPage(hits=hits, total=len(ordered), semantic={
-        "used": True,
+        "used": True, **semantic_extra,
         "fusion": "rrf",
         "k": RRF_K,
         "text_total": total,

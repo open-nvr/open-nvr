@@ -940,3 +940,24 @@ def test_search_page_takes_arm_weights(db):
     weighted = search_page(db, query_vector=[1.0, 0, 0, 0], caption_query_vector=[1.0, 0.0],
                            arm_weights={"caption": 0.5})
     assert [h.event.id for h in weighted.hits] == [a.id, b.id]
+
+
+
+# ── parsed class words do not wall off the vector arms ───────────────
+
+
+def test_soft_labels_let_the_vector_arms_find_what_the_detector_misnamed(db):
+    """The detector called the pickup a car; the caption says pickup and
+    the frame looks like one. With the parsed class as a wall nothing is
+    found; soft, the vector arms find it and the word arm keeps the class."""
+    pickup = _visit(db, label="car", caption="a white pickup truck", vec=[1.0, 0, 0, 0], cvec=[1.0, 0.0])
+    _visit(db, label="truck", caption="a lorry", start_s=60, vec=[0, 1.0, 0, 0], cvec=[0.0, 1.0])
+    strict = search_page(db, labels=["truck"], query_vector=[1.0, 0, 0, 0], caption_query_vector=[1.0, 0.0])
+    assert pickup.id not in [h.event.id for h in strict.hits]
+    assert "labels_soft" not in strict.semantic
+    soft = search_page(db, labels=["truck"], query_vector=[1.0, 0, 0, 0], caption_query_vector=[1.0, 0.0],
+                       labels_soft=True)
+    assert [h.event.id for h in soft.hits][0] == pickup.id
+    assert soft.semantic["labels_soft"] is True and soft.semantic["caption"]["labels_soft"] is True
+    # no labels at all: the flag is not raised
+    assert "labels_soft" not in search_page(db, query_vector=[1.0, 0, 0, 0], labels_soft=True).semantic
