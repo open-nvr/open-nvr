@@ -2016,3 +2016,46 @@ def test_a_spoken_search_without_an_stt_adapter_is_a_503_that_says_so(client, db
     assert client.post("/api/v1/search/transcribe", json={"audio_b64": "@@@@not-base64@@@@"}).status_code == 400
     big = base64.b64encode(b"\x00" * (2 * 1024 * 1024 + 1)).decode()
     assert client.post("/api/v1/search/transcribe", json={"audio_b64": big}).status_code == 413
+
+
+# ── the LLM re-rank, when asked for ────────────────────────────────────
+
+
+def test_the_rerank_is_off_by_default_and_moves_the_models_yes_rows_first(client, db, monkeypatch):
+    import routers.search as sr
+    import services.search_rerank as rr
+    _camera(db, 1, "Dock")
+    a = _visit(db, label="person", caption="a man with a laptop", minutes_ago=3)
+    b = _visit(db, label="person", caption="two men looking at a laptop", minutes_ago=6)
+    c = _visit(db, label="person", caption="a laptop on a desk", minutes_ago=9)
+
+    async def _vectors(_db, words):
+        return [1.0], None, None
+    monkeypatch.setattr(sr, "_query_vectors", _vectors)
+    from services import search_service
+    real = search_service.search_page
+
+    def _page(*args, **kw):
+        page = real(*args, **kw)
+        page.semantic = {"used": True, "arms": {"text": 3}}
+        return page
+    monkeypatch.setattr(sr, "search_page", _page)
+    asked: list = []
+
+    async def _rerank(query, captions, *, timeout_s=8.0):
+        asked.append((query, list(captions)))
+        return [2], {"asked": len(captions), "kept": 1, "ms": 12}
+    monkeypatch.setattr(rr, "rerank", _rerank)
+
+    body = client.get("/api/v1/search", params={"q": "laptop"}).json()
+    assert asked == [], "off unless asked"
+    assert "rerank" not in (body.get("semantic") or {})
+
+    body = client.get("/api/v1/search", params={"q": "laptop", "rerank": 3}).json()
+    assert asked and asked[0][0] == "laptop"
+    assert body["semantic"]["rerank"] == {"asked": len(asked[0][1]), "kept": 1, "ms": 12}
+    # the second caption the model was shown is now first; the rest keep their order
+    shown = asked[0][1]
+    got = [r["caption"] for r in body["results"]]
+    assert got[0] == shown[1] and got[1:] == [c for c in shown if c != shown[1]]
+    assert {a.id, b.id, c.id} == {r["id"] for r in body["results"]}

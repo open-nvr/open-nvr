@@ -159,6 +159,7 @@ def score_case(case: dict, answer: dict) -> dict:
         "semantic": {k: sem.get(k) for k in ("used", "reason", "arms", "added_by_vector",
                                              "added_by_caption", "best", "floor")} if sem else None,
         "caption_best": ((sem.get("caption") or {}).get("best") if sem else None),
+        "rerank": (sem.get("rerank") if sem else None),
     }
     if not relevant:
         # A negative: nothing should come back as a confident answer.
@@ -242,6 +243,8 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=25, help="hits to ask for per query")
     ap.add_argument("--out", help="write the full results as JSON here")
     ap.add_argument("--only", help="run only the cases whose query contains this text")
+    ap.add_argument("--param", action="append", default=[], metavar="K=V",
+                    help="an extra query parameter for every search (repeatable), e.g. rerank=10")
     args = ap.parse_args()
 
     if yaml is None:
@@ -267,9 +270,11 @@ def main() -> int:
 
     searcher = Searcher(args.base, tokens, args.token_file, args.limit)
     window = spec.get("window") or {}
+    extra = dict(p.split("=", 1) for p in args.param if "=" in p)
     results, latencies = [], []
     for case in cases:
-        answer, ms = searcher.search(case["query"], case.get("window") or window, case.get("params"))
+        params = {**extra, **(case.get("params") or {})}
+        answer, ms = searcher.search(case["query"], case.get("window") or window, params)
         latencies.append(ms)
         r = score_case(case, answer)
         r["ms"] = round(ms)

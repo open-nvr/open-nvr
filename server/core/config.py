@@ -612,6 +612,13 @@ class Settings(BaseSettings):
     # Measured on the labelled eval: with the caption arm at a full vote
     # two vector arms agreeing on a near-miss outvoted the words that
     # named the thing (MRR 0.755 → 0.815 with these, frame floor 0.12).
+    # A bounded yes/no re-rank of the first page by the box's own language
+    # model (the litertlm captioner's chat on the NPU): the top N captions
+    # in one call, the ones it says match moved to the front. 0 = off
+    # (every search pays its latency); a caller may ask per request with
+    # ?rerank=N. See services/search_rerank.py and the bench report.
+    search_rerank_top: int = 0
+    search_rerank_timeout_s: float = 8.0
     search_text_arm_weight: float = 1.0
     search_vector_arm_weight: float = 1.0
     search_caption_arm_weight: float = 0.5
