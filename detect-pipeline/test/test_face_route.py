@@ -205,11 +205,16 @@ def test_provider_reads_the_claimed_adapters_into_the_spec():
 def test_build_dispatch_per_gate_mode():
     from detect_pipeline.run import _build_dispatch
 
-    def cfg(url, mode):
+    def cfg(url, mode, face=""):
         return SimpleNamespace(dispatch_kaic_url=url, gate_mode=mode, api_key=None,
-                               dispatch_task="caption", dispatch_max_inflight=2)
+                               dispatch_task="caption", dispatch_max_inflight=2, face_kaic_url=face)
 
     assert _build_dispatch(cfg("", "enforce")) == (None, None)
+    # The face URL alone: the face route only, even in enforce (no caption
+    # suddenly appearing on a site that was already enforcing).
+    df, rf = _build_dispatch(cfg("", "enforce", face="http://opennvr-core:8100"))
+    assert df is not None and rf.route("person") == [] and rf.route("car") == []
+    df.close()
     d, r = _build_dispatch(cfg("http://kai-c:8100", "shadow"))
     assert d is not None and r.route("person") == [] and r.route("car") == []
     d2, r2 = _build_dispatch(cfg("http://kai-c:8100", "enforce"))

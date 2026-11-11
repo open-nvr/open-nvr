@@ -117,9 +117,9 @@ camera → detect-pipeline: motion → person detection → tracking → best cr
 |---|---|---|
 | Plan | done | this file |
 | Classroom miss-rate measurement | done | person route unfit for classes; see decision 2 |
-| P1 detect-pipeline face route | todo | |
-| P2 KAI-C track + normaliser + contract | todo | |
-| P3 server scope + skills + compose | todo | |
+| P1 detect-pipeline face route | done | baec2020 |
+| P2 KAI-C track + normaliser + contract | done | ded90981 |
+| P3 server scope + skills + compose | done | claim params.adapters projected; DETECT_FACE_KAIC_URL (face route only, default on); scope needed no change |
 | P4 SDK helper | todo | |
 | P5 Attendly consumer | todo | private repo |
 | P6 end-to-end + upgrade test | todo | |

@@ -116,6 +116,12 @@ class ServiceConfig:
     # kites/bananas endlessly; each becomes a standing track. 0.4 keeps real
     # people/vehicles (typically >0.6) while starving the phantom supply.
     detect_conf: float = 0.4
+    # The face route's KAI-C (dispatch.FACE_SKILL), apart from
+    # dispatch_kaic_url on purpose: setting it runs ONLY the per-camera
+    # face route (cameras a face app claimed), never the default routes,
+    # whatever the gate mode, so shipping it on changes nothing for a
+    # site without a face app, nor for one whose gate is in enforce.
+    face_kaic_url: str = ""
     rtsp_timeout_s: float = DEFAULT_RTSP_TIMEOUT_S
     bestframe_per_camera: int = 16
     detector_pool: int = 0
@@ -323,6 +329,7 @@ def config_from_env(env: dict) -> ServiceConfig:
         metrics_port=_env_int(env, "DETECT_METRICS_PORT", 9109),
         dispatch_kaic_url=_env_url(env, "DETECT_DISPATCH_KAIC_URL"),
         dispatch_task=env.get("DETECT_DISPATCH_TASK", "caption"),
+        face_kaic_url=_env_url(env, "DETECT_FACE_KAIC_URL"),
         detect_conf=_env_float(env, "DETECT_CONF", 0.4),
     )
 
@@ -411,10 +418,20 @@ def _build_dispatch(cfg):
     per-camera routes that answer to their claim rather than the mode
     (the face route) can run; every other camera dispatches nothing,
     exactly as before. A gate mode of ``off`` builds no gate, so nothing
-    escalates and nothing runs."""
-    if not cfg.dispatch_kaic_url:
-        return None, None
+    escalates and nothing runs.
+
+    No dispatch URL but a face URL (DETECT_FACE_KAIC_URL): the face route
+    only, in every mode."""
     from .dispatch import DispatchRouter, KaicDispatcher
+
+    if not cfg.dispatch_kaic_url:
+        face_url = getattr(cfg, "face_kaic_url", "")
+        if not face_url:
+            return None, None
+        log.info("tier1 face route -> %s (cameras a face app claimed; nothing else)", face_url)
+        return (KaicDispatcher(face_url, api_key=cfg.api_key, task=cfg.dispatch_task,
+                               max_inflight=cfg.dispatch_max_inflight),
+                DispatchRouter(routes={}))
 
     dispatcher = KaicDispatcher(
         cfg.dispatch_kaic_url, api_key=cfg.api_key, task=cfg.dispatch_task,
