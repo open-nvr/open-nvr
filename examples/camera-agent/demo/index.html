@@ -2643,9 +2643,14 @@
 
     // ── monitors ──
     async function pollMonitors(data){ if(!authReady())return; if(!data) try{ data=await (await fetch("/monitors")).json(); }catch{ return; }
-      for(const n of (data.notifications||[])){ if(!seenNotes[n.id]){ seenNotes[n.id]=true; addMsg(n.text,"agent"); playChime("notify");
+      // A notification (a watch hit, an app alert) is an EVENT, not a turn
+      // of the conversation: it already lands in the Activity feed with its
+      // camera and time. Here it only chimes and, under the site's policy,
+      // is spoken — the transcript stays what was said between the operator
+      // and the agent.
+      for(const n of (data.notifications||[])){ if(!seenNotes[n.id]){ seenNotes[n.id]=true; playChime("notify"); loadEvents();
           // App alerts carry announce=false under the site's "important
-          // only" / "never" policy: shown + chimed, not narrated.
+          // only" / "never" policy: chimed, not narrated.
           if(n.announce!==false) await announce(n.text); } }
       renderMonitors(data.monitors||[]); }
     function renderMonitors(monitors){ const active=monitors.filter(m=>m.active);

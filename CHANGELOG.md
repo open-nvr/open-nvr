@@ -8,6 +8,14 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Camera agent: the chat is the conversation; events stay in Activity.**
+  A watch hit or an app alert (a plate read, an occupancy change) used to be
+  posted into the transcript as an agent message as well as listed in the
+  Activity feed. It now chimes, is spoken under the site's policy, and
+  appears once, in Activity, with its camera and time.
+
+### Changed
+
 - **Detections are drawn on every live picture, under one switch.** The
   dashboard's live wall, the camera peek and the tour now carry the same
   box overlay as the Live view, following the Live view's per-browser
