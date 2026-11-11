@@ -6,6 +6,24 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Search finds what the detector misnamed, and "two men" no longer
+  means "counted as two".** Two walls the labelled eval exposed. A class
+  word the parser produced ("pickup truck" → `truck`) restricted every
+  arm, so a pickup the detector had called a `car` was unreachable even
+  though its caption says pickup and its frame looks like one; parsed
+  class words are now a hint for the word arm and no wall for the vector
+  arms (`labels_soft`; an explicit `label=` chip stays a wall, and the
+  `semantic` block says when the softening applied). And "two men",
+  "three people together" became a people-count filter that excluded
+  every visit with no count — all of them, before the pipeline counted —
+  so "two men looking at a laptop" found nothing; an unknown count now
+  passes and the captions and vectors decide. Offline over the labelled
+  pool: MRR 0.786 → 0.911, hit@5 0.857 → 1.0, P@5 0.493 → 0.586.
+  (`server/services/search_service.py`, `server/services/timeline_service.py`,
+  `server/routers/search.py`)
+
 ### Added
 
 - **A bounded LLM re-rank of the first page, off by default.** The
