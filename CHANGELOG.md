@@ -67,6 +67,15 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The server can start on a read-only source tree.** The logs
+  directory is resolved from the source-tree location and created at
+  import time, so an install that cannot create a `logs/` directory
+  next to its sources (e.g. a NixOS package) died on `mkdir` before the
+  app could start. Setting `OPENNVR_LOGS_DIR` to a writable
+  directory moves the log file there; the default stays
+  `<repo>/logs/`, so Docker and bare-metal dev installs are
+  unchanged.
+
 - **Search says when a class was never detected and the page is
   lookalikes.** Since #873 a parsed class word no longer walls off the
   vector arms, so "a dog" on a site with no dog detections returns the
