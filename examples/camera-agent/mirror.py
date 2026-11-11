@@ -114,7 +114,188 @@ PERSON_PROMPT = (
     "(yes/no); carrying (none or what); expression (one word). "
     "Use unknown when you cannot tell. No other text.")
 PERSON_KEYS = ("gender", "age", "top", "bottom", "headwear", "glasses",
-               "carrying", "expression")
+               "carrying", "expression", "posture")
+PERSON_PROMPT = PERSON_PROMPT.replace(
+    "expression (one word). ",
+    "expression (one word); posture (standing/sitting/walking/waving/pointing). ")
+
+# ── What the model may say about a person ────────────────────────────
+# The same discipline as the search pipeline's descriptor_enrichment: a
+# fixed vocabulary per attribute, synonyms folded, anything else dropped.
+# A card that says less is better than a card that says something wrong
+# to the person standing in front of it.
+_COLOURS = ("white", "black", "silver", "grey", "red", "blue", "green", "yellow",
+            "orange", "brown", "beige", "gold", "maroon", "purple", "pink", "denim")
+_COLOUR_SYNONYMS = {"gray": "grey", "dark grey": "grey", "light grey": "grey", "charcoal": "grey",
+                    "navy": "blue", "dark blue": "blue", "light blue": "blue", "sky blue": "blue",
+                    "teal": "blue", "turquoise": "blue", "crimson": "red", "scarlet": "red",
+                    "burgundy": "maroon", "wine": "maroon", "tan": "brown", "khaki": "beige",
+                    "cream": "white", "off-white": "white", "off white": "white", "ivory": "white",
+                    "golden": "gold", "violet": "purple", "lavender": "purple", "magenta": "pink",
+                    "olive": "green", "lime": "green", "jeans": "denim", "mustard": "yellow"}
+VOCAB: dict[str, tuple[str, ...]] = {
+    "gender": ("man", "woman", "child"),
+    "age": ("child", "teen", "20s", "30s", "40s", "50s", "60+"),
+    "headwear": ("cap", "hat", "turban", "helmet", "hijab", "hood", "scarf", "headband", "beanie"),
+    "glasses": ("yes",),
+    "carrying": ("backpack", "bag", "suitcase", "box", "umbrella", "trolley", "phone",
+                 "parcel", "basket", "laptop", "bottle", "cup", "camera", "folder", "badge"),
+    "expression": ("smiling", "neutral", "serious", "laughing", "surprised", "focused"),
+    "posture": ("standing", "sitting", "walking", "waving", "pointing"),
+}
+_SYNONYMS: dict[str, dict[str, str]] = {
+    "gender": {"male": "man", "female": "woman", "boy": "child", "girl": "child", "lady": "woman",
+               "gentleman": "man", "guy": "man", "kid": "child", "men": "man", "women": "woman",
+               "young man": "man", "young woman": "woman", "adult male": "man", "adult female": "woman"},
+    "headwear": {"baseball cap": "cap", "sun hat": "hat", "cowboy hat": "hat", "hard hat": "helmet",
+                 "head scarf": "scarf", "headscarf": "scarf", "dupatta": "scarf", "hoodie": "hood"},
+    "carrying": {"rucksack": "backpack", "handbag": "bag", "purse": "bag", "tote": "bag", "holdall": "bag",
+                 "shopping bag": "bag", "sling bag": "bag", "messenger bag": "bag", "package": "parcel",
+                 "luggage": "suitcase", "cart": "trolley", "mobile": "phone", "cell phone": "phone",
+                 "smartphone": "phone", "mobile phone": "phone", "notebook": "laptop", "water bottle": "bottle",
+                 "coffee": "cup", "coffee cup": "cup", "lanyard": "badge", "id card": "badge", "papers": "folder"},
+    "expression": {"smile": "smiling", "happy": "smiling", "grin": "smiling", "grinning": "smiling",
+                   "laugh": "laughing", "calm": "neutral", "relaxed": "neutral", "stern": "serious",
+                   "frowning": "serious", "concentrating": "focused", "attentive": "focused"},
+    "posture": {"stands": "standing", "stand": "standing", "sits": "sitting", "seated": "sitting",
+                "walks": "walking", "walk": "walking", "waves": "waving", "wave": "waving",
+                "points": "pointing", "point": "pointing"},
+}
+_NOTHING = ("none", "nothing", "no", "unknown", "n/a", "not visible", "unclear", "nil", "-", "")
+
+
+def _colour_of(value: str) -> str | None:
+    """The first colour word in a phrase, folded: 'dark navy jacket' → blue."""
+    v = value.lower()
+    for phrase, canon in sorted(_COLOUR_SYNONYMS.items(), key=lambda kv: -len(kv[0])):
+        if phrase in v:
+            return canon
+    for c in _COLOURS:
+        if re.search(r"\b" + c + r"\b", v):
+            return c
+    return None
+
+
+_GARMENTS = ("t-shirt", "tshirt", "t shirt", "shirt", "polo", "kurta", "jacket", "hoodie", "sweater",
+             "jumper", "blazer", "coat", "top", "dress", "saree", "sari", "suit", "vest", "blouse",
+             "jersey", "cardigan", "trousers", "jeans", "shorts", "skirt", "pants", "chinos", "dhoti")
+
+
+def _garment_of(value: str) -> str | None:
+    v = value.lower()
+    for g in _GARMENTS:
+        if g in v:
+            return {"tshirt": "t-shirt", "t shirt": "t-shirt", "sari": "saree", "pants": "trousers"}.get(g, g)
+    return None
+
+
+def normalise_fields(fields: dict[str, str]) -> dict[str, str]:
+    """Fold a parsed answer into the vocabulary. Clothing keeps 'colour
+    garment' with both parts folded ('dark navy jacket' → 'blue jacket');
+    a colour alone is kept; a garment alone is kept. Everything the
+    vocabulary does not know is dropped, as is nothing/unknown."""
+    out: dict[str, str] = {}
+    for key, raw in (fields or {}).items():
+        v = (raw or "").strip().lower().strip(".")
+        if key == "summary":
+            continue
+        if v in _NOTHING:
+            continue
+        if key in ("top", "bottom"):
+            colour, garment = _colour_of(v), _garment_of(v)
+            if colour == "denim" and garment in ("jeans", "denim"):
+                garment = None                       # 'denim jeans' says it twice
+            if colour and garment:
+                out[key] = f"{colour} {garment}"
+            elif colour:
+                out[key] = colour
+            elif garment:
+                out[key] = garment
+            continue
+        if key == "age":
+            m = re.search(r"(\d{2})\s*(?:s|'s|-|to|–)?\s*(\d{2})?", v)
+            if "child" in v or "kid" in v:
+                out[key] = "child"
+            elif "teen" in v:
+                out[key] = "teen"
+            elif m:
+                lo = int(m.group(1))
+                out[key] = "60+" if lo >= 60 else ("teen" if lo < 20 else f"{lo // 10 * 10}s")
+            continue
+        if key == "glasses":
+            if v.startswith("y") or "glasses" in v and not v.startswith("no"):
+                out[key] = "yes"
+            continue
+        vocab = VOCAB.get(key)
+        if not vocab:
+            continue
+        syn = _SYNONYMS.get(key, {})
+        v = syn.get(v, v)
+        if v in vocab:
+            out[key] = v
+            continue
+        # a phrase that contains a vocabulary word or a synonym of one:
+        # "wearing a cap" → cap, "stands near the desk" → standing
+        for word in vocab:
+            if re.search(r"\b" + re.escape(word) + r"\b", v):
+                out[key] = word
+                break
+        else:
+            for phrase, canon in sorted(syn.items(), key=lambda kv: -len(kv[0])):
+                if re.search(r"\b" + re.escape(phrase) + r"\b", v):
+                    out[key] = canon
+                    break
+    return out
+
+
+def consensus(a: dict[str, str], b: dict[str, str]) -> dict[str, str]:
+    """The fields two looks agree on. For clothing the colour must agree;
+    the garment is kept when either look named one and they do not clash."""
+    out: dict[str, str] = {}
+    for key in set(a) & set(b):
+        if key in ("top", "bottom"):
+            ca, ga = (a[key].split(" ", 1) + [""])[:2]
+            cb, gb = (b[key].split(" ", 1) + [""])[:2]
+            ca_c, cb_c = (ca if ca in _COLOURS else ""), (cb if cb in _COLOURS else "")
+            if ca_c and cb_c and ca_c != cb_c:
+                continue
+            colour = ca_c or cb_c
+            garment = ga or gb if (not ga or not gb or ga == gb) else ""
+            if colour or garment:
+                out[key] = " ".join(x for x in (colour, garment) if x)
+        elif a[key] == b[key]:
+            out[key] = a[key]
+    return out
+
+
+def crop_person(jpeg: bytes, box: list[float], *, margin: float = 0.25,
+                min_side: int = 96) -> bytes | None:
+    """Cut the person's box (normalized x, y, w, h) out of a frame with a
+    margin, as JPEG. None when the crop would be too small to describe
+    or the image cannot be read."""
+    try:
+        import io
+        from PIL import Image
+
+        im = Image.open(io.BytesIO(jpeg))
+        im.load()
+        W, H = im.size
+        x, y, w, h = box
+        mx, my = w * margin, h * margin
+        left, top = max(0, int((x - mx) * W)), max(0, int((y - my) * H))
+        right, bottom = min(W, int((x + w + mx) * W)), min(H, int((y + h + my) * H))
+        if right - left < min_side or bottom - top < min_side:
+            return None
+        out = io.BytesIO()
+        im.crop((left, top, right, bottom)).convert("RGB").save(out, format="JPEG", quality=92)
+        return out.getvalue()
+    except Exception:  # noqa: BLE001 — a bad frame is "no crop", never a crash
+        return None
+
+
+#: Second look at a person this long after the first; fields that agree
+#: are the card, and only those are spoken.
+CONFIRM_GAP_S = 2.5
 
 
 # ── parsing the person answer ───────────────────────────────────────
@@ -156,7 +337,7 @@ def person_summary(fields: dict[str, str]) -> str:
     if "summary" in fields and len(fields) == 1:
         return fields["summary"]
     bits: list[str] = []
-    for key in ("gender", "age", "top", "headwear", "glasses", "carrying"):
+    for key in ("gender", "age", "top", "headwear", "glasses", "carrying", "posture"):
         v = fields.get(key)
         if not v:
             continue
@@ -216,12 +397,15 @@ class PersonCard:
     summary: str = ""
     greeted: bool = False
     asking: bool = False
+    looks: list[dict[str, str]] = field(default_factory=list)
+    confirmed: bool = False
 
     def to_wire(self) -> dict[str, Any]:
         return {"track_id": self.track_id, "box": self.box, "score": round(self.score, 3),
                 "fields": self.fields, "summary": self.summary,
                 "seen_s": round(max(0.0, self.last_seen - self.first_seen), 1),
-                "described": self.described_at is not None}
+                "described": self.described_at is not None,
+                "confirmed": self.confirmed, "looks": len(self.looks)}
 
 
 @dataclass
@@ -259,10 +443,16 @@ class MirrorSession:
     def __init__(self, camera_id: str, *, frame: Frame, crop: Crop | None,
                  vision: Vision, speech: Speech | None, publish: Publish,
                  voice: bool = True, clock: Callable[[], float] = time.monotonic,
-                 scene_every_s: float = SCENE_EVERY_S) -> None:
+                 scene_every_s: float = SCENE_EVERY_S, hires: Frame | None = None) -> None:
         self.camera_id = camera_id
         self._frame = frame
         self._crop = crop
+        # The main stream's full-resolution frame (core's capture pool,
+        # ~0.15 s warm). A person is cut out of THIS, with a margin: the
+        # detector's sub-stream frame is 704×576 here, and the search
+        # pipeline's captions come from full-resolution crops — that is
+        # the difference in fineness the Mirror had.
+        self._hires = hires
         self._vision = vision
         self._speech = speech
         self._publish = publish
@@ -361,6 +551,10 @@ class MirrorSession:
         fresh = [c for c in eligible if c.described_at is None]
         if fresh:
             return min(fresh, key=lambda c: c.first_seen)
+        confirming = [c for c in eligible if not c.confirmed and len(c.looks) == 1
+                      and now - (c.described_at or 0) >= CONFIRM_GAP_S]
+        if confirming:
+            return min(confirming, key=lambda c: c.described_at or 0)
         stale = [c for c in eligible if now - (c.described_at or 0) >= PERSON_REFRESH_S]
         if stale:
             return min(stale, key=lambda c: c.described_at or 0)
@@ -415,17 +609,32 @@ class MirrorSession:
             return True
         return False
 
+    async def _person_image(self, card: PersonCard) -> bytes | None:
+        """The sharpest picture of this person available now: the full-
+        resolution frame cut to their box, else Tier-0's best crop of the
+        track, else the detector's frame."""
+        if self._hires is not None:
+            try:
+                full = await self._hires(self.camera_id)
+            except Exception:  # noqa: BLE001 — the hi-res path is a nicety
+                full = None
+            if full:
+                cut = crop_person(full, card.box)
+                if cut:
+                    return cut
+        if self._crop is not None:
+            try:
+                cut = await self._crop(self.camera_id, card.track_id)
+                if cut:
+                    return cut
+            except Exception:  # noqa: BLE001
+                pass
+        return await self._frame(self.camera_id)
+
     async def _describe_person(self, card: PersonCard) -> None:
         card.asking = True
         try:
-            image = None
-            if self._crop is not None:
-                try:
-                    image = await self._crop(self.camera_id, card.track_id)
-                except Exception:  # noqa: BLE001 — the crop is a nicety
-                    image = None
-            if image is None:
-                image = await self._frame(self.camera_id)
+            image = await self._person_image(card)
             if image is None:
                 card.described_at = self._clock()   # do not spin on a dead camera
                 return
@@ -436,14 +645,24 @@ class MirrorSession:
             card.described_at = self._clock()
             if card.track_id not in self.cards:
                 return                              # gone while we looked
-            fields = parse_person_fields(answer or "")
-            if fields:
-                card.fields = fields
-                card.summary = person_summary(fields)
-                self.stats.cards += 1
+            look = normalise_fields(parse_person_fields(answer or ""))
+            card.looks.append(look)
+            if len(card.looks) == 1:
+                # First look: shown, marked unconfirmed, not spoken.
+                card.fields = look
+                card.summary = person_summary(look)
+            else:
+                agreed = consensus(card.looks[-2], card.looks[-1])
+                card.fields = agreed
+                card.summary = person_summary(agreed)
+                card.confirmed = True
+                if agreed:
+                    self.stats.cards += 1
             payload: dict[str, Any] = {"card": card.to_wire(), "vlm_ms": round(ms),
                                        "stats": self.stats.to_wire()}
-            if card.summary and not card.greeted:
+            # Spoken only once the two looks agree on at least two things:
+            # a greeting that is wrong is worse than none.
+            if card.confirmed and len(card.fields) >= 2 and card.summary and not card.greeted:
                 card.greeted = True
                 greeting = f"Hello! I see {_article(card.summary)}."
                 payload["greeting"] = greeting
@@ -453,7 +672,14 @@ class MirrorSession:
             card.asking = False
 
     async def _describe_scene(self) -> None:
-        image = await self._frame(self.camera_id)
+        image = None
+        if self._hires is not None:
+            try:
+                image = await self._hires(self.camera_id)
+            except Exception:  # noqa: BLE001
+                image = None
+        if image is None:
+            image = await self._frame(self.camera_id)
         self.caption_at = self._clock()
         if image is None:
             self._publish({"mirror": {"caption": "", "no_frame": True}})
