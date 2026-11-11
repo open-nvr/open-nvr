@@ -52,8 +52,9 @@ The current release. Everything below is in main and runnable today.
 - `loitering-detection` — dwell-time state machine on NATS subscriber.
 - `inference-listener` — minimal NATS subscriber template.
 - `alerts-subscriber` — fan-out alerts to webhooks / SIEM / chat.
-- `license-plate-recognition` — two-stage YOLOv8 + fast-plate-ocr
-  chain with allow / deny watchlists.
+- `license-plate-recognition` — plate reads from core's vehicle visits
+  (fast-plate-ocr localises and reads the plate) with allow / deny
+  watchlists, a registry and overstay alerts.
 - `smart-doorbell` — InsightFace recognition with severity routing,
   REST-based enrollment.
 - `package-delivery` — per-track state machine for arrival / linger /

@@ -166,6 +166,12 @@ services:
       # (single crop per call). The QNN GPU backend hung at load.
       - ADAPTER_ONNX_PROVIDERS=${FAST_PLATE_OCR_ONNX_PROVIDERS:-${ADAPTER_ONNX_PROVIDERS:-QNNExecutionProvider:htp}}
       - ADAPTER_ONNX_PROVIDER_OPTIONS=${ADAPTER_ONNX_PROVIDER_OPTIONS:-}
+      # The compiled HTP graphs go on the cache volume. Without this the
+      # SDK writes them beside each model: the plate detector's lands in
+      # /root/.cache (the volume) but the baked OCR model's lands inside
+      # the image's own path and is compiled again on every recreate
+      # (Ventuno Q, 2026-11-11).
+      - ADAPTER_ACCEL_CACHE_DIR=/root/.cache/opennvr-accel
   # ── The captioner: Gemma on the Hexagon NPU through LiteRT-LM ──
   # start.sh fills CAPTION_ADAPTER=litertlm and CAPTION_ADAPTER_TAG=
   # <tag>-qualcomm on this flavour (only when .env still held a CPU

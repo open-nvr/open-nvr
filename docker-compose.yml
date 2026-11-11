@@ -682,6 +682,12 @@ services:
       # A finished sweep keeps its row closed to forwarded single reads
       # for this long (KAI-C's late echo of its own last attempt).
       - OPENNVR_PLATE_SWEEP_ECHO_GRACE_S=${OPENNVR_PLATE_SWEEP_ECHO_GRACE_S:-}
+      # The scan-mode knobs (plate_policy.py reads them from the
+      # environment): fast mode's re-sighting window, and the backlog at
+      # which auto flips to fast. Documented in .env.example since 0.1.6
+      # and never passed through until now.
+      - OPENNVR_PLATE_FAST_DEDUP_WINDOW_S=${OPENNVR_PLATE_FAST_DEDUP_WINDOW_S:-}
+      - OPENNVR_PLATE_AUTO_BACKLOG=${OPENNVR_PLATE_AUTO_BACKLOG:-}
       # ── What gets asked about a visit after it finishes ──────────
       #
       # Every one of these was read by the code and documented, and NONE

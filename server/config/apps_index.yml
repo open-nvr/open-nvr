@@ -414,9 +414,13 @@
   # ("Vehicles (ANPR)") so the app and the surface it lights up read as
   # one thing. The id is unchanged — it is a key, not a label.
   name: ANPR — License Plate Recognition
-  summary: Reads license plates via a YOLOv8 to crop to fast-plate-ocr chain and routes severity through allow/deny watchlists.
+  summary: >-
+    Reads the number plates of the vehicles the cameras you pick see — the
+    plate reader localises the plate in each vehicle crop and reads it, on
+    the CPU or the NPU — and routes severity through allow/deny watchlists,
+    monitors, a registry and overstay alerts.
   category: vehicle
-  version: "1.0.0"
+  version: "2.5.0"
   image: ghcr.io/open-nvr/license-plate-recognition:latest
   build_context: examples/license-plate-recognition
   requires_tasks: [object_detection, license_plate_recognition]
@@ -425,7 +429,7 @@
   # register sidecar; the one-click reconciler ups it alongside the app
   # and refcounts it across apps on uninstall. yolov8 = standard stack.
   requires_adapters: [fast_plate_ocr]
-  emits: [plate_read, plate_expected, plate_watchlist]
+  emits: [plate_read, plate_expected, plate_watchlist, vehicle_overstay, plate_unknown]
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/license-plate-recognition/README.md
   author: OpenNVR
   contact: https://github.com/open-nvr/open-nvr/issues

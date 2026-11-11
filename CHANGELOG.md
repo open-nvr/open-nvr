@@ -38,6 +38,24 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   into (baby for bay, cab for cam) were deliberately left out.
   (`server/services/search_intent.py`, `server/services/search_query.py`,
   `server/services/descriptor_enrichment.py`)
+- **ANPR on a Qualcomm box: the plate reader's compiled graphs survive a
+  recreate, and two scan-mode knobs reach core.** On the Ventuno Q the
+  plate reader's HTP graph for the baked `indian-plates-v1` model was
+  written inside the image's own path and compiled again on every
+  recreate (the detector's landed on the cache volume by luck of its
+  download path); the qualcomm overlay now points `ADAPTER_ACCEL_CACHE_DIR`
+  at the cache volume. `OPENNVR_PLATE_FAST_DEDUP_WINDOW_S` and
+  `OPENNVR_PLATE_AUTO_BACKLOG`, documented since 0.1.6, never reached
+  the core container; they do now. The dispatch route no longer offers
+  bicycles to the plate reader. And the catalogue and docs stop
+  describing a "YOLOv8 → crop → fast-plate-ocr chain" that does not
+  exist: the reader localises the plate in the vehicle crop itself; the
+  app entry says version 2.5.0 and lists all five alert types, the
+  adapter entry says 1.1.0 and where it runs, the app's README counts
+  its 77 tests and describes the fuzzy matching it has.
+  (`docker-compose.accel-qualcomm.yml`, `docker-compose.yml`,
+  `server/config/apps_index.yml`, `server/config/adapters_index.yml`,
+  `detect-pipeline/detect_pipeline/dispatch.py`, docs)
 
 ### Changed
 
