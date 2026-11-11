@@ -120,7 +120,7 @@ camera → detect-pipeline: motion → person detection → tracking → best cr
 | P1 detect-pipeline face route | done | baec2020 |
 | P2 KAI-C track + normaliser + contract | done | ded90981 |
 | P3 server scope + skills + compose | done | claim params.adapters projected; DETECT_FACE_KAIC_URL (face route only, default on); scope needed no change |
-| P4 SDK helper | todo | |
+| P4 SDK helper | done | FaceRecognized typed payload |
 | P5 Attendly consumer | todo | private repo |
 | P6 end-to-end + upgrade test | todo | |
 | P7 classroom census | waiting | needs 1 min of real 3 MP classroom footage |
