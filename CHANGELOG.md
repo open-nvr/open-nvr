@@ -6,6 +6,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Search says when a class was never detected and the page is
+  lookalikes.** Since #873 a parsed class word no longer walls off the
+  vector arms, so "a dog" on a site with no dog detections returns the
+  visits whose frames or captions look most like one — the honest best
+  answer, but a page of cars under "a dog" with no word reads as a wrong
+  one. The response now carries `lookalike` (`classes`, `what`) when the
+  class had zero detections in the window and the vectors answered
+  anyway, and the Search page shows it as a warning with "Only detected
+  <class>" one click away (a `label=` chip, which is a wall). Not raised
+  when the class was detected, when the chip was explicit, or past the
+  first page. (`server/routers/search.py`, `app/src/views/Search.tsx`)
+
 ### Changed
 
 - **Voice search looks and behaves like voice search.** The first cut was

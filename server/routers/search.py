@@ -695,6 +695,23 @@ async def search(
             hits = _apply_rerank(head, yes) + hits[top:]
         page.semantic["rerank"] = info
 
+    # THE CLASS WAS NEVER DETECTED, and the page is full anyway. With
+    # parsed class words soft, "a dog" on a site with no dog detections
+    # returns the visits whose frames or captions look most like one
+    # (#873). That is the honest best answer, but only if it is SAID:
+    # a page of cars under "a dog" with no word reads as a wrong answer.
+    lookalike: dict | None = None
+    if labels_soft and hits and labels and skip == 0:
+        try:
+            detected = count_search_events(
+                db, labels=labels, camera_ids=cams, text="", attrs=None, **filters)
+        except Exception:  # noqa: BLE001 — a notice must never fail a search
+            logger.debug("lookalike count failed", exc_info=True)
+            detected = None
+        if detected == 0:
+            lookalike = {"classes": list(labels),
+                         "what": parsed.matched.get("what") or " or ".join(labels)}
+
     interpretation = parsed.as_dict()
     interpretation.update({
         # Whether these filters came from the sentence or from the caller.
@@ -799,6 +816,10 @@ async def search(
         # The UI owes the operator a visible undo — these results are
         # NOT the search they typed.
         **({"relaxed": relaxed} if relaxed else {}),
+        # The class word was never detected in this window; these are the
+        # visits that LOOK like it. Said, with the strict search one click
+        # away (label= is a wall).
+        **({"lookalike": lookalike} if lookalike else {}),
         "relax": (
             _why_empty(db, labels=labels, cams=cams, words=words,
                        attrs=attrs, filters=filters)
