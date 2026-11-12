@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thank you. The programme is described in [docs/HARDWARE.md](../blob/main/docs/HARDWARE.md#lend-us-hardware-we-publish-what-we-measure) and on [opennvr.org/hardware-program](https://www.opennvr.org/hardware-program/). The short version: we put the whole stack on your hardware, measure every role with the public protocol, and publish every number, good or bad, with your name on the report. If you would rather not do this in public, write to contact@opennvr.org instead.
+        Thank you. The programme is described in [docs/HARDWARE.md](https://github.com/open-nvr/open-nvr/blob/main/docs/HARDWARE.md#lend-us-hardware-we-publish-what-we-measure) and on [opennvr.org/hardware-program](https://www.opennvr.org/hardware-program/). The short version: we put the whole stack on your hardware, measure every role with the public protocol, and publish every number, good or bad, with your name on the report. If you would rather not do this in public, write to contact@opennvr.org instead.
   - type: input
     id: device
     attributes:
