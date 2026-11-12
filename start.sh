@@ -2150,6 +2150,10 @@ run_up() {
     # shellcheck source=scripts/host-agent.sh
     . "$(dirname "$0")/scripts/host-agent.sh"
     run_host_agent_refresh || true
+    # The runner behind OpenNVR Updates in the app (scripts/update-host.sh).
+    # shellcheck source=scripts/update-host.sh
+    . "$(dirname "$0")/scripts/update-host.sh"
+    run_update_runner_refresh || true
 }
 
 # Image tags from earlier releases, and dangling layers. An upgrade pulls the

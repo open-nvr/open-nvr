@@ -811,6 +811,9 @@ function Invoke-Up {
     # An installed host agent follows the core it talks to (scripts\host-agent.ps1).
     . (Join-Path $PSScriptRoot "scripts\host-agent.ps1")
     Update-HostAgent
+    # The runner behind OpenNVR Updates in the app (scripts\update-host.ps1).
+    . (Join-Path $PSScriptRoot "scripts\update-host.ps1")
+    Update-UpdateRunner
 }
 
 function Invoke-Build {

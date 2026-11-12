@@ -6,7 +6,42 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The update runner is installed with OpenNVR.** Configuration → OpenNVR
+  Updates did nothing until someone ran `auto-update enable` on the host,
+  which few did. Now `up` installs the runner unless `UPDATE_RUNNER=off` in
+  `.env`, on a fresh install and on an existing site alike: on Linux it asks
+  for sudo once at a terminal, on macOS it needs nothing, on Windows it
+  needs an administrator PowerShell (a non-admin task would flash a console
+  every minute). The update policy still starts off: until it is changed in
+  the app the runner only checks in and fetches nothing.
+  `auto-update disable` turns it off and keeps it off.
+
+
+- **USB webcams are on by default on Linux (#904).** `.env.example` ships
+  `WEBCAMS=on` and the installer's question defaults to yes; an `.env` that
+  says `off` keeps it. MediaMTX then runs the `-ffmpeg` image with the
+  host's video devices (only video4linux, major 81) and the `video` group.
+  `start.sh` leaves the overlay out on a kernel with no video4linux yet,
+  where Docker could not mount `/sys/class/video4linux` and core would not
+  start, and says so.
+- **Add Camera → Manual is one row of tabs: IP camera, Browser webcam,
+  Server webcam.** It was a Webcam tab with a second row of sub-tabs
+  inside it. Each webcam tab says in one line what that kind is; the steps
+  are numbered (pick the webcam, name it, picture and sound); webcam names
+  drop the USB ids; the preview says it is not recording yet and what Add
+  will do. The three webcam lists (this browser, the server's Linux
+  webcams, the host agent's) share one row design.
+
 ### Fixed
+
+- **`auto-update enable` works on Linux.** The command the app and the
+  script showed was `sudo ./start.sh auto-update enable`, which start.sh
+  refuses (it never runs under sudo), and without sudo the script refused
+  too. It now runs as the normal user and writes only the systemd unit
+  through sudo, like the host agent.
+
 
 - **Add Camera no longer prints a SOAP fault, and a camera whose clock is
   off can still be added.** When a camera refused the ONVIF login the
@@ -60,23 +95,6 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `$(compose_args)`, a subshell, so it never left; it is now written to
   `.env` with the other host values. Hosts whose `video` group is not 44
   could not open the webcam.
-
-### Changed
-
-- **USB webcams are on by default on Linux (#904).** `.env.example` ships
-  `WEBCAMS=on` and the installer's question defaults to yes; an `.env` that
-  says `off` keeps it. MediaMTX then runs the `-ffmpeg` image with the
-  host's video devices (only video4linux, major 81) and the `video` group.
-  `start.sh` leaves the overlay out on a kernel with no video4linux yet,
-  where Docker could not mount `/sys/class/video4linux` and core would not
-  start, and says so.
-- **Add Camera → Manual is one row of tabs: IP camera, Browser webcam,
-  Server webcam.** It was a Webcam tab with a second row of sub-tabs
-  inside it. Each webcam tab says in one line what that kind is; the steps
-  are numbered (pick the webcam, name it, picture and sound); webcam names
-  drop the USB ids; the preview says it is not recording yet and what Add
-  will do. The three webcam lists (this browser, the server's Linux
-  webcams, the host agent's) share one row design.
 
 ## [0.1.11] — 2026-11-12
 
