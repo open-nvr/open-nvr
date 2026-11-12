@@ -8,6 +8,29 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A fresh Linux install could not start: the discovery prober's build
+  failed.** `docker-compose.lan-discovery.yml` builds the multicast prober
+  from an inline Dockerfile that named `${CORE_IMAGE}` and `${TARGETARCH}`
+  for Docker to expand; Compose interpolated them first, to blanks, and the
+  build died at `FROM  AS core` ("FROM requires either one or three
+  arguments"). The installer never builds that service (it pulls the base
+  set), so the failure arrived at `./start.sh up` and took every service
+  with it; LAN_DISCOVERY is on by default on Linux since 0.1.11's main. The
+  two are now `$${...}`, which Compose passes through. And since the prober
+  copies the host-agent binary out of the core image, which only 0.1.11
+  and newer carry, `start.sh` leaves the overlay out with a notice when
+  CORE_TAG pins an older release instead of failing the whole start.
+  Found by a fresh install on a Ventuno Q (2026-11-12).
+
+- **A plain Qualcomm install said captions were on when nothing captioned.**
+  The qualcomm flavour switched EVENTS_CAPTION_ENRICHMENT and the descriptor
+  flags on whenever the NPU captioner image existed, but the captioner
+  service is defined by `docker-compose.camera-agent.yml`; an install
+  without the Camera Agent had the flags on and no captioner, so search by
+  caption silently had nothing to search. The flags now turn on only when
+  that file is in the install; otherwise `start.sh` says the captioner is
+  available and how to get it. The adapter pick and tag are still filled.
+
 - **A fresh install on a Qualcomm board could not start.** The qualcomm
   overlay overrode the captioner and the speech adapter, which only
   `docker-compose.camera-agent.yml` defines, so a plain install (no camera
