@@ -6,6 +6,31 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A fresh install on a Qualcomm board could not start.** The qualcomm
+  overlay overrode the captioner and the speech adapter, which only
+  `docker-compose.camera-agent.yml` defines, so a plain install (no camera
+  agent) handed Compose two services with no image and Compose 2.24, the
+  package on the board's Ubuntu, rejected the whole project; newer Compose
+  skips a service whose profile is off, which is how it passed every test.
+  Each flavour overlay now overrides only services of `docker-compose.yml`,
+  and its overrides of other files' services are fragments beside it
+  (`-apps.yml`, `-agent.yml`) that `start.sh` appends only when that file is
+  in the set. The intel overlay is split the same way for the same rule
+  (its adapters live in `docker-compose.apps.yml`; they carried an image,
+  so it did not fail, but it defined services no file in the set had). The
+  merged configuration is byte-for-byte what the single overlays produced
+  (Compose 2.22, every profile on), and a test holds every overlay to the
+  rule.
+
+- **The NPU embedder asked for an image that did not exist.** `start.sh`
+  found `siglip-qnn-adapter:latest-qualcomm` when the pinned release had no
+  such image, but never wrote the tag it found; the overlay then requested
+  `<ADAPTER_TAG>-qualcomm`, which was not on the registry, and Compose
+  cancelled every other pull of the project. The fill now writes
+  `EMBED_ADAPTER_TAG` and the overlay uses it; leaving the flavour clears it.
+
 ### Changed
 
 - **Detection boxes are on by default on every live picture.** The Live

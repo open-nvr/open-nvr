@@ -1,0 +1,45 @@
+# OpenNVR Accelerate — Intel flavour, the adapters of docker-compose.apps.yml
+# on their ``-intel`` images. start.sh appends this fragment after
+# docker-compose.accel-intel.yml whenever docker-compose.apps.yml is in the
+# compose set. Every service here overrides one that file defines and KEEPS
+# ITS PROFILES, so the flavour never activates an adapter the operator did
+# not enable; an override of a service no file in the set defines has no
+# image, and Compose 2.24 rejects the project for it — hence the split.
+#
+# The iGPU rather than the NPU for adapters: it takes dynamic shapes (plate
+# OCR batches) and leaves the NPU to the always-on Tier-0 detector.
+# ADAPTER_ONNX_PROVIDERS in .env overrides for all of them. Each adapter
+# follows its own <NAME>_ONNX_PROVIDERS, then the shared ADAPTER_ONNX_PROVIDERS,
+# then a default that is only an accelerator where that model is PROVEN on
+# Intel (docs/HARDWARE.md "What runs where"): the pose adapter on the NPU
+# (set by docker-compose.accel-intel-npu-apps.yml); InsightFace, plate OCR
+# and package detection on CPU until proven.
+services:
+  yolo-pose-adapter:
+    profiles: [apps, guard-scan-compliance]
+    image: ghcr.io/open-nvr/yolo-pose-adapter:${YOLO_POSE_ADAPTER_TAG:-latest}-intel
+    devices:
+      - /dev/dri:/dev/dri
+    environment:
+      - ADAPTER_ONNX_PROVIDERS=${YOLO_POSE_ONNX_PROVIDERS:-${ADAPTER_ONNX_PROVIDERS:-CPUExecutionProvider}}
+  fast-plate-ocr-adapter:
+    profiles: [apps, license-plate-recognition]
+    image: ghcr.io/open-nvr/fast-plate-ocr-adapter:${ADAPTER_TAG:-latest}-intel
+    devices:
+      - /dev/dri:/dev/dri
+    environment:
+      - ADAPTER_ONNX_PROVIDERS=${FAST_PLATE_OCR_ONNX_PROVIDERS:-${ADAPTER_ONNX_PROVIDERS:-CPUExecutionProvider}}
+  insightface-adapter:
+    profiles: [apps, smart-doorbell]
+    image: ghcr.io/open-nvr/insightface-adapter:${ADAPTER_TAG:-latest}-intel
+    devices:
+      - /dev/dri:/dev/dri
+    environment:
+      - ADAPTER_ONNX_PROVIDERS=${INSIGHTFACE_ONNX_PROVIDERS:-${ADAPTER_ONNX_PROVIDERS:-CPUExecutionProvider}}
+  package-detection-adapter:
+    profiles: [apps, package-delivery]
+    image: ghcr.io/open-nvr/package-detection-adapter:${ADAPTER_TAG:-latest}-intel
+    devices:
+      - /dev/dri:/dev/dri
+    environment:
+      - ADAPTER_ONNX_PROVIDERS=${PACKAGE_DETECTION_ONNX_PROVIDERS:-${ADAPTER_ONNX_PROVIDERS:-CPUExecutionProvider}}

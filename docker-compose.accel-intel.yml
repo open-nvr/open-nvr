@@ -6,6 +6,12 @@
 # for their ``-intel`` images (same code; carry the Intel VA-API, OpenCL and
 # NPU user-space), passes the devices through, and sets the device defaults.
 #
+# THIS FILE OVERRIDES ONLY SERVICES OF docker-compose.yml. The adapters that
+# docker-compose.apps.yml defines (pose, plates, faces, packages) are in
+# docker-compose.accel-intel-apps.yml, which start.sh appends only when that
+# file is in the set: an override of a service no file defines has no
+# image, and Compose 2.24 rejects the whole project for it.
+#
 # Running compose by hand instead of start.sh? Export the three DETECT_*
 # values below (or set them in .env) — an .env that still says
 # DETECT_HWACCEL=cpu wins over the defaults here, by compose's rules.
@@ -32,50 +38,15 @@ services:
   opennvr-core:
     environment:
       - DETECT_HWACCEL=${DETECT_HWACCEL:-vaapi}
-  # ── ONNX adapters (ai-adapter -intel flavours): OpenVINO on the iGPU ──
-  # The iGPU rather than the NPU for adapters: it takes dynamic shapes
-  # (plate OCR batches) and leaves the NPU to the always-on Tier-0
-  # detector. ADAPTER_ONNX_PROVIDERS in .env overrides for all of them.
-  # Each keeps the profiles of the service it overrides, so this overlay
-  # never activates an adapter the operator did not enable.
-  # Each adapter follows its own <NAME>_ONNX_PROVIDERS, then the shared
-  # ADAPTER_ONNX_PROVIDERS, then a default that is only an accelerator where
-  # that model is PROVEN on Intel (docs/HARDWARE.md "What runs where"):
-  # yolov8 on the iGPU; the pose adapter on the NPU (set by the NPU overlay);
-  # InsightFace, plate OCR and package detection on CPU until proven. An
-  # accelerator that cannot start falls back to CPU inside the adapter and
-  # /hardware/evaluation says so — a wrong value here never crashes a service.
+  # ── The always-on object-detection adapter (ai-adapter -intel flavour):
+  # OpenVINO on the iGPU. It follows YOLOV8_ONNX_PROVIDERS, then the shared
+  # ADAPTER_ONNX_PROVIDERS, then the iGPU (proven; docs/HARDWARE.md "What
+  # runs where"). An accelerator that cannot start falls back to CPU inside
+  # the adapter and /hardware/evaluation says so — a wrong value here never
+  # crashes a service. The other adapters: docker-compose.accel-intel-apps.yml.
   yolov8-adapter:
     image: ghcr.io/open-nvr/yolov8-adapter:${ADAPTER_TAG:-latest}-intel
     devices:
       - /dev/dri:/dev/dri
     environment:
       - ADAPTER_ONNX_PROVIDERS=${YOLOV8_ONNX_PROVIDERS:-${ADAPTER_ONNX_PROVIDERS:-OpenVINOExecutionProvider:GPU}}
-  yolo-pose-adapter:
-    profiles: [apps, guard-scan-compliance]
-    image: ghcr.io/open-nvr/yolo-pose-adapter:${YOLO_POSE_ADAPTER_TAG:-latest}-intel
-    devices:
-      - /dev/dri:/dev/dri
-    environment:
-      - ADAPTER_ONNX_PROVIDERS=${YOLO_POSE_ONNX_PROVIDERS:-${ADAPTER_ONNX_PROVIDERS:-CPUExecutionProvider}}
-  fast-plate-ocr-adapter:
-    profiles: [apps, license-plate-recognition]
-    image: ghcr.io/open-nvr/fast-plate-ocr-adapter:${ADAPTER_TAG:-latest}-intel
-    devices:
-      - /dev/dri:/dev/dri
-    environment:
-      - ADAPTER_ONNX_PROVIDERS=${FAST_PLATE_OCR_ONNX_PROVIDERS:-${ADAPTER_ONNX_PROVIDERS:-CPUExecutionProvider}}
-  insightface-adapter:
-    profiles: [apps, smart-doorbell]
-    image: ghcr.io/open-nvr/insightface-adapter:${ADAPTER_TAG:-latest}-intel
-    devices:
-      - /dev/dri:/dev/dri
-    environment:
-      - ADAPTER_ONNX_PROVIDERS=${INSIGHTFACE_ONNX_PROVIDERS:-${ADAPTER_ONNX_PROVIDERS:-CPUExecutionProvider}}
-  package-detection-adapter:
-    profiles: [apps, package-delivery]
-    image: ghcr.io/open-nvr/package-detection-adapter:${ADAPTER_TAG:-latest}-intel
-    devices:
-      - /dev/dri:/dev/dri
-    environment:
-      - ADAPTER_ONNX_PROVIDERS=${PACKAGE_DETECTION_ONNX_PROVIDERS:-${ADAPTER_ONNX_PROVIDERS:-CPUExecutionProvider}}
