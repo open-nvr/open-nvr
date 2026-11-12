@@ -523,6 +523,38 @@ def test_a_second_webcam_is_not_a_duplicate(env):
     _add_webcam(env, "Lobby")
 
 
+HOST_DEVICE = "dshow:@device_pnp_usb_vid_0c45"
+
+
+def test_one_server_webcam_feeds_one_camera(env):
+    """A second camera on the same device would be a second capture that
+    fails "device busy" for ever. Refused, whatever ``force`` says."""
+    first = env.tc.post("/api/v1/cameras/", json={**WEBCAM, "name": "Desk", "source_device": HOST_DEVICE})
+    assert first.status_code == 200, first.text
+    for q in ("", "?force=true"):
+        r = env.tc.post(f"/api/v1/cameras/{q}", json={**WEBCAM, "name": "Desk 2", "source_device": HOST_DEVICE})
+        assert r.status_code == 409, r.text
+        assert "Desk" in r.json()["detail"]
+
+
+def test_a_binned_cameras_webcam_is_free_again(env):
+    first = env.tc.post("/api/v1/cameras/", json={**WEBCAM, "name": "Desk", "source_device": HOST_DEVICE}).json()
+    assert env.tc.delete(f"/api/v1/cameras/{first['id']}").status_code in (200, 204)
+    r = env.tc.post("/api/v1/cameras/", json={**WEBCAM, "name": "Desk again", "source_device": HOST_DEVICE})
+    assert r.status_code == 200, r.text
+
+
+def test_switching_a_camera_to_a_webcam_in_use_is_refused(env):
+    env.tc.post("/api/v1/cameras/", json={**WEBCAM, "name": "Desk", "source_device": HOST_DEVICE})
+    other = env.tc.post("/api/v1/cameras/", json={**WEBCAM, "name": "Lobby",
+                                                 "source_device": "dshow:@device_pnp_usb_vid_30c9"}).json()
+    r = env.tc.put(f"/api/v1/cameras/{other['id']}", json={"source_device": HOST_DEVICE})
+    assert r.status_code == 409, r.text
+    # Its own webcam is not "in use" by itself.
+    r = env.tc.put(f"/api/v1/cameras/{other['id']}", json={"source_device": "dshow:@device_pnp_usb_vid_30c9"})
+    assert r.status_code == 200, r.text
+
+
 def test_editing_a_webcam_with_the_form_keeps_its_path(env):
     cam = _add_webcam(env)
     r = env.tc.put(f"/api/v1/cameras/{cam['id']}", json={

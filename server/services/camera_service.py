@@ -25,7 +25,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
-from core.camera_source import is_publisher
+from core.camera_source import SOURCE_PUBLISHER, is_publisher
 from core.config import settings
 import logging
 
@@ -409,6 +409,30 @@ class CameraService:
                 },
                 exc_info=True,
             )
+
+    @staticmethod
+    def webcam_device_owner(
+        db: Session, source_device: str | None, exclude_camera_id: int | None = None
+    ) -> Camera | None:
+        """The camera a webcam device on the OpenNVR machine already feeds.
+
+        One device, one camera: its capture (the host agent's ffmpeg, or
+        MediaMTX's own on Linux) opens the device, and a webcam serves one
+        capture at a time — a second camera on it would fail "device busy"
+        and retry forever. A paused camera still holds its device (it gets it
+        back on reactivation); one in the bin does not. Every camera counts,
+        whoever owns it: the device is physical.
+        """
+        if not source_device:
+            return None
+        q = db.query(Camera).filter(
+            Camera.source_type == SOURCE_PUBLISHER,
+            Camera.source_device == source_device,
+            Camera.deleted_at.is_(None),
+        )
+        if exclude_camera_id is not None:
+            q = q.filter(Camera.id != exclude_camera_id)
+        return q.first()
 
     @staticmethod
     def get_camera_by_id(db: Session, camera_id: int, user_id: int) -> Camera | None:

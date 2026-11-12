@@ -19,6 +19,28 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   startup reconcile, and core's boot loop. The last two also stop a core
   restart from replacing a Linux USB webcam's path without its capture
   command.
+- **One webcam feeds one camera.** A server webcam already feeding a camera
+  is refused with a 409 on create and on edit, whatever `force` says (a
+  second capture of the device fails "device busy" for ever); the Linux
+  webcam list now says which camera a webcam feeds, as the host agent's
+  did, and needs `cameras.manage`. In the browser, a camera this tab
+  already publishes is shown "in use" and cannot be added or started for
+  a second camera.
+- **Deleting a browser webcam lets the webcam go.** Its publishing session
+  kept retrying against the deleted camera, holding the webcam open with
+  its light on, until the tab closed. Deleting stops it, and a session
+  whose camera is gone (deleted in another tab or on another device) ends
+  instead of retrying.
+
+### Changed
+
+- **Add Camera → Manual is one row of tabs: IP camera, Browser webcam,
+  Server webcam.** It was a Webcam tab with a second row of sub-tabs
+  inside it. Each webcam tab says in one line what that kind is; the steps
+  are numbered (pick the webcam, name it, picture and sound); webcam names
+  drop the USB ids; the preview says it is not recording yet and what Add
+  will do. The three webcam lists (this browser, the server's Linux
+  webcams, the host agent's) share one row design.
 
 ## [0.1.11] — 2026-11-12
 

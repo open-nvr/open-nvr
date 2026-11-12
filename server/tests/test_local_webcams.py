@@ -99,3 +99,33 @@ def test_camera_source_predicates():
     assert is_local_webcam(Cam("/dev/v4l/by-id/usb-a-video-index0")) and not is_host_webcam(Cam("/dev/v4l/by-id/usb-a-video-index0"))
     assert is_host_webcam(Cam("USB Camera (046d:0825)")) and not is_local_webcam(Cam("USB Camera (046d:0825)"))
     assert not is_host_webcam(Cam(None)) and not is_local_webcam(Cam(None))
+
+
+def test_the_local_list_says_which_camera_a_webcam_feeds(monkeypatch):
+    """GET /webcams/local marks a webcam already feeding a camera, so the
+    dialog shows it as taken (one webcam, one camera)."""
+    from types import SimpleNamespace
+
+    from routers import webcams as r
+
+    dev = "/dev/v4l/by-id/usb-a-video-index0"
+    monkeypatch.setattr(r, "available", lambda: True)
+    monkeypatch.setattr(r, "list_local_webcams", lambda: [
+        lw.LocalWebcam(id=dev, name="C920", node="video0"),
+        lw.LocalWebcam(id="/dev/v4l/by-id/usb-b-video-index0", name="Other", node="video2"),
+    ])
+    cams = [SimpleNamespace(id=4, name="Desk", source_device=dev),
+            SimpleNamespace(id=5, name="Agent cam", source_device="USB Camera (046d:0825)")]
+
+    class _Q:
+        def filter(self, *a):
+            return self
+
+        def all(self):
+            return cams
+
+    out = r.local_webcams(db=SimpleNamespace(query=lambda *_: _Q()), _user=None)
+    assert out["available"] is True
+    by_id = {w["id"]: w for w in out["webcams"]}
+    assert by_id[dev]["assigned_camera_id"] == 4 and by_id[dev]["assigned_camera_name"] == "Desk"
+    assert by_id["/dev/v4l/by-id/usb-b-video-index0"]["assigned_camera_id"] is None

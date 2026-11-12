@@ -9,10 +9,11 @@
  */
 
 import { useEffect, useState } from 'react'
-import { AlertTriangle, CheckCircle, Loader2, Usb } from 'lucide-react'
+import { AlertTriangle, Loader2, Usb } from 'lucide-react'
 import { apiService } from '../lib/apiService'
 import { useDateFormat } from '../i18n'
 import { ffmpegInstallCommand, hostAgentInstallCommand, type HostAgentInfo } from '../lib/hostAgent'
+import { WebcamList, WebcamOption, webcamLabel } from './WebcamOption'
 
 const POLL_MS = 5000
 
@@ -95,31 +96,23 @@ export function HostWebcamPicker({
           <Usb size={14} /> No webcam is plugged into {info.hostname || 'the OpenNVR server'}. Plug one in; it appears here within a few seconds.
         </div>
       ) : (
-        <div className="space-y-1" role="radiogroup" aria-label="Webcam">
-          {info.webcams.map((w) => {
-            const takenBy = w.assigned_camera_id !== null && w.assigned_camera_id !== ownCameraId
-              ? w.assigned_camera_name || `camera ${w.assigned_camera_id}` : null
-            const selected = value === w.id
-            return (
-              <button
-                key={w.id}
-                type="button"
-                role="radio"
-                aria-checked={selected}
-                disabled={!!takenBy}
-                onClick={() => onChange(w.id, w.name)}
-                className={`w-full text-left px-3 py-2 border flex items-center gap-2 text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${selected ? 'border-[var(--accent)] bg-[var(--accent)]/10' : 'border-[var(--border)] hover:border-[var(--accent)]'}`}
-              >
-                {selected ? <CheckCircle size={14} className="text-[var(--accent)]" /> : <Usb size={14} className="text-[var(--text-dim)]" />}
-                <span className="flex-1 truncate">{w.name}</span>
-                {takenBy && <span className="text-xs text-[var(--text-dim)]">used by {takenBy}</span>}
-              </button>
-            )
-          })}
-        </div>
+        <WebcamList>
+          {info.webcams.map((w) => (
+            <WebcamOption
+              key={w.id}
+              icon={<Usb size={14} />}
+              name={webcamLabel(w.name)}
+              subtitle={`USB · on ${info.hostname || 'the OpenNVR server'}`}
+              selected={value === w.id}
+              takenBy={w.assigned_camera_id !== null && w.assigned_camera_id !== ownCameraId
+                ? w.assigned_camera_name || `camera ${w.assigned_camera_id}` : null}
+              onSelect={() => onChange(w.id, webcamLabel(w.name))}
+            />
+          ))}
+        </WebcamList>
       )}
-      <div className="text-xs text-[var(--text-dim)]">
-        Webcams on {info.hostname || 'the OpenNVR server'}, found by the host agent{info.version ? ` ${info.version}` : ''}.
+      <div className="text-[11px] text-[var(--text-dim)]">
+        Plugged into {info.hostname || 'the OpenNVR server'}. A webcam plugged in now appears here within a few seconds.
       </div>
     </div>
   )

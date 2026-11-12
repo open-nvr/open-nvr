@@ -26,8 +26,8 @@ import type { IdentityField } from '../lib/cameraIdentity'
 import { Modal } from './Modal'
 import { Badge, Button, EmptyState } from './ui'
 import { Field, Input } from './ui/form'
-import { SegmentedControl } from './ui/SegmentedControl'
-import { Camera, ChevronDown, CheckCircle, Loader2, Plus, RefreshCw, Search, SearchX, Video, Webcam, X } from 'lucide-react'
+import { Tabs } from './ui/Tabs'
+import { Camera, ChevronDown, CheckCircle, Loader2, Monitor, Plus, RefreshCw, Search, SearchX, Server, Video, X } from 'lucide-react'
 import { WebcamAddPanel } from './WebcamAddPanel'
 import { useTranslation } from '../i18n'
 import { extractApiError } from '../lib/apiError'
@@ -127,7 +127,9 @@ export function AddCameraDialog({
   // Manual has two kinds of camera: an IP camera (address / RTSP URL) and a
   // webcam (this browser's, or a USB one on the OpenNVR server), which has
   // its own guided flow (WebcamAddPanel) with its own Add and Done.
-  const [manualKind, setManualKind] = useState<'ip' | 'webcam'>('ip')
+  // One row of tabs under Manual: an IP camera, or a webcam in this browser
+  // or on the OpenNVR server (one level, not a webcam tab with its own sub-tabs).
+  const [manualKind, setManualKind] = useState<'ip' | 'browser' | 'server'>('ip')
   // The webcam panel's Add / Done, shown in the footer like every other tab's.
   const [webcamAction, setWebcamAction] = useState<{ label: string; onClick: () => void; disabled: boolean } | null>(null)
   const [loading, setLoading] = useState(false)
@@ -725,7 +727,7 @@ export function AddCameraDialog({
   // Single primary footer action per screen state, so the CTA never jumps
   // between body and footer.
   const primaryAction =
-    mode === 'manual' && manualKind === 'webcam'
+    mode === 'manual' && manualKind !== 'ip'
       ? webcamAction
       : mode === 'manual'
       ? {
@@ -1307,17 +1309,17 @@ export function AddCameraDialog({
         {/* MANUAL MODE — an IP camera by address/URL, or a webcam. */}
         {mode === 'manual' && (
           <div className="flex flex-col gap-4">
-            <SegmentedControl
-              label="Kind of camera"
-              options={[
-                { value: 'ip', label: <span className="inline-flex items-center gap-1.5 px-1"><Video size={13} /> IP camera</span> },
-                { value: 'webcam', label: <span className="inline-flex items-center gap-1.5 px-1"><Webcam size={13} /> Webcam</span> },
+            <Tabs
+              tabs={[
+                { key: 'ip', label: <span className="inline-flex items-center gap-1.5"><Video size={14} /> IP camera</span> },
+                { key: 'browser', label: <span className="inline-flex items-center gap-1.5"><Monitor size={14} /> Browser webcam</span> },
+                { key: 'server', label: <span className="inline-flex items-center gap-1.5"><Server size={14} /> Server webcam</span> },
               ]}
-              value={manualKind}
-              onChange={(v) => { setManualKind(v); setError(null) }}
+              active={manualKind}
+              onChange={(k) => { setManualKind(k as 'ip' | 'browser' | 'server'); setError(null) }}
             />
-            {manualKind === 'webcam' ? (
-              <WebcamAddPanel onDone={(id) => onCameraAdded(id)} onError={setError} onAction={setWebcamAction} />
+            {manualKind !== 'ip' ? (
+              <WebcamAddPanel key={manualKind} source={manualKind} onDone={(id) => onCameraAdded(id)} onError={setError} onAction={setWebcamAction} />
             ) : (
               <div className="grid grid-cols-6 gap-3">
                 <Field label={t('cameraDialog.cameraName')} required className="col-span-6">

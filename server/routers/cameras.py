@@ -479,6 +479,12 @@ async def create_camera_checked(
                     detail="USB webcams are not enabled on this server (WEBCAMS=on in .env, Linux only).")
             if find_local_webcam(str(_dev)) is None:
                 raise HTTPException(status_code=422, detail="That webcam is not plugged into this server.")
+        # One webcam, one camera: a second capture of the same device fails
+        # "device busy" for ever. Not bypassed by ``force`` or the import's
+        # duplicate_check=False: those are about addresses, this is hardware.
+        _owner = CameraService.webcam_device_owner(db, _dev)
+        if _owner is not None:
+            raise HTTPException(status_code=409, detail=_webcam_taken_detail(_owner))
 
     # SSRF guard, mirroring routers/onvif.py:83, which has always had it —
     # camera-create did not. It runs FIRST, before any branch, because
@@ -1341,6 +1347,14 @@ _WEBCAM_ABSENT_FIELDS = (
 )
 
 
+def _webcam_taken_detail(owner: Camera) -> str:
+    """The 409 for a webcam that already feeds another camera."""
+    return (
+        f"That webcam already feeds the camera “{owner.name}”. "
+        "A webcam can feed only one camera: use that one, or pick another webcam."
+    )
+
+
 def _strip_webcam_stream_fields(camera: Camera, update_fields: dict) -> None:
     """Drop the address/stream fields an edit form re-sends for a webcam.
 
@@ -1429,6 +1443,13 @@ async def update_camera(
             _strip_webcam_stream_fields(camera, update_fields)
             if "source_device" in update_fields:
                 update_fields["source_device"] = update_fields["source_device"] or None
+                # Switching to a webcam another camera already uses: refused,
+                # as on create (one webcam, one camera).
+                _owner = CameraService.webcam_device_owner(
+                    db, update_fields["source_device"], exclude_camera_id=camera.id
+                )
+                if _owner is not None:
+                    raise HTTPException(status_code=409, detail=_webcam_taken_detail(_owner))
         elif update_fields.get("source_device"):
             raise HTTPException(
                 status_code=422,
