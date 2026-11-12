@@ -9,7 +9,7 @@ import json
 import pytest
 
 from opennvr_app_sdk import (
-    EVENT_TYPES, AccessDecided, DetectionObserved, OccupancyChanged, OccupancyFootfall,
+    EVENT_TYPES, AccessDecided, DetectionObserved, FaceRecognized, OccupancyChanged, OccupancyFootfall,
     OccupancyHeatmap, OverlayBoxes, PlateRecognized, ScreeningCompleted, VisitRecorded,
     typed_payload,
 )
@@ -26,6 +26,9 @@ def test_every_v1_contract_is_typed_and_round_trips():
         PlateRecognized: {"plate_text": "R197GB", "confidence": 0.93, "vehicle_label": "car",
                           "event_id": 9, "plate_box": [10, 10, 80, 30], "plate_box_confidence": 0.88,
                           "plate_box_image": [320, 120]},
+        FaceRecognized: {"adapter": "insightface_school", "track_id": 17, "label": "person",
+                         "recognized": True, "person_id": "S1", "category": "student",
+                         "similarity": 0.71, "threshold": 0.5, "face_box": [10, 12, 60, 70]},
         AccessDecided: {"plate_text": "R197GB", "decision": "allow", "reason": "registered",
                         "owner": "Flat 3", "unit": "3", "confidence": 0.93},
         OccupancyChanged: {"count": 4, "level": "over", "max_occupancy": 3, "min_occupancy": None},
@@ -106,3 +109,19 @@ def test_domain_event_typed_and_publish_typed():
     assert env["payload"] == {"count": 2, "level": "normal", "max_occupancy": None, "min_occupancy": None}
     with pytest.raises(TypeError):
         pub.publish_typed({"count": 2}, camera_id="lobby")      # a dict is not typed
+
+
+def test_face_recognized_round_trip():
+    from opennvr_app_sdk import EVENT_TYPES, FaceRecognized, typed_payload
+
+    assert EVENT_TYPES["face.recognized.v1"] is FaceRecognized
+    payload = {"adapter": "insightface_school", "track_id": 17, "label": "person",
+               "recognized": True, "person_id": "S1", "category": "student",
+               "similarity": 0.71, "threshold": 0.5, "face_box": [10, 12, 60, 70]}
+    face = typed_payload("face.recognized.v1", payload)
+    assert isinstance(face, FaceRecognized)
+    assert face.person_id == "S1" and face.track_id == 17 and face.recognized
+    assert face.to_payload() == payload            # observed_at absent stays absent
+    unknown = typed_payload("face.recognized.v1", {**payload, "recognized": False, "person_id": None})
+    assert unknown.person_id is None and not unknown.recognized
+    assert typed_payload("face.recognized.v1", {"adapter": "x"}) is None   # off-contract

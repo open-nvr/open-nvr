@@ -28,6 +28,8 @@ runs, free to consume.
 
 ::: opennvr_app_sdk.PlateRecognized
 
+::: opennvr_app_sdk.FaceRecognized
+
 ::: opennvr_app_sdk.AccessDecided
 
 ::: opennvr_app_sdk.OccupancyChanged

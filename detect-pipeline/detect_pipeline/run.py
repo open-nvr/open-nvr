@@ -116,6 +116,12 @@ class ServiceConfig:
     # kites/bananas endlessly; each becomes a standing track. 0.4 keeps real
     # people/vehicles (typically >0.6) while starving the phantom supply.
     detect_conf: float = 0.4
+    # The face route's KAI-C (dispatch.FACE_SKILL), apart from
+    # dispatch_kaic_url on purpose: setting it runs ONLY the per-camera
+    # face route (cameras a face app claimed), never the default routes,
+    # whatever the gate mode, so shipping it on changes nothing for a
+    # site without a face app, nor for one whose gate is in enforce.
+    face_kaic_url: str = ""
     rtsp_timeout_s: float = DEFAULT_RTSP_TIMEOUT_S
     bestframe_per_camera: int = 16
     detector_pool: int = 0
@@ -323,6 +329,7 @@ def config_from_env(env: dict) -> ServiceConfig:
         metrics_port=_env_int(env, "DETECT_METRICS_PORT", 9109),
         dispatch_kaic_url=_env_url(env, "DETECT_DISPATCH_KAIC_URL"),
         dispatch_task=env.get("DETECT_DISPATCH_TASK", "caption"),
+        face_kaic_url=_env_url(env, "DETECT_FACE_KAIC_URL"),
         detect_conf=_env_float(env, "DETECT_CONF", 0.4),
     )
 
@@ -400,6 +407,43 @@ def _gate_factory(cfg: ServiceConfig):
         escalate_cooldown_s=cfg.gate_cooldown_s,
     )
     return lambda: Gate(gcfg)
+
+
+def _build_dispatch(cfg):
+    """(dispatcher, base router) for the gate mode, or (None, None).
+
+    No KAI-C URL: nothing (the default install). Enforce: the default
+    routes (caption) on every escalation, as before. Any other mode: the
+    dispatcher exists but the base router is EMPTY, so only the opt-in
+    per-camera routes that answer to their claim rather than the mode
+    (the face route) can run; every other camera dispatches nothing,
+    exactly as before. A gate mode of ``off`` builds no gate, so nothing
+    escalates and nothing runs.
+
+    No dispatch URL but a face URL (DETECT_FACE_KAIC_URL): the face route
+    only, in every mode."""
+    from .dispatch import DispatchRouter, KaicDispatcher
+
+    if not cfg.dispatch_kaic_url:
+        face_url = getattr(cfg, "face_kaic_url", "")
+        if not face_url:
+            return None, None
+        log.info("tier1 face route -> %s (cameras a face app claimed; nothing else)", face_url)
+        return (KaicDispatcher(face_url, api_key=cfg.api_key, task=cfg.dispatch_task,
+                               max_inflight=cfg.dispatch_max_inflight),
+                DispatchRouter(routes={}))
+
+    dispatcher = KaicDispatcher(
+        cfg.dispatch_kaic_url, api_key=cfg.api_key, task=cfg.dispatch_task,
+        max_inflight=cfg.dispatch_max_inflight,
+    )
+    if (cfg.gate_mode or "").lower() == "enforce":
+        log.info("tier1 dispatch enabled -> %s (task=%s)", cfg.dispatch_kaic_url, cfg.dispatch_task)
+        return dispatcher, DispatchRouter()
+    log.info("tier1 dispatch -> %s: gate mode=%s, so only claimed per-camera "
+             "routes (faces) run; default routes wait for enforce",
+             cfg.dispatch_kaic_url, cfg.gate_mode)
+    return dispatcher, DispatchRouter(routes={})
 
 
 def _resolve_onnx_backend(configured: str, family_default: str, providers=None) -> str:
@@ -568,21 +612,8 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
         cfg.onnx_input if cfg.detector in ("onnx", "rfdetr") else cfg.model_size
     )
     # #10 Tier-1 dispatch: built only when a KAI-C URL is configured (off by
-    # default). It still only fires on enforce escalations (shadow/off = nothing).
-    dispatcher = router = None
-    if cfg.dispatch_kaic_url and (cfg.gate_mode or "").lower() == "enforce":
-        from .dispatch import DispatchRouter, KaicDispatcher
-        dispatcher = KaicDispatcher(
-            cfg.dispatch_kaic_url, api_key=cfg.api_key, task=cfg.dispatch_task,
-            max_inflight=cfg.dispatch_max_inflight,
-        )
-        router = DispatchRouter()
-        log.info("tier1 dispatch enabled -> %s (task=%s)", cfg.dispatch_kaic_url, cfg.dispatch_task)
-    elif cfg.dispatch_kaic_url:
-        # URL set but gate isn't enforcing -> dispatch would never fire; don't spin
-        # up an idle pool. (shadow measures; only enforce dispatches.)
-        log.info("tier1 dispatch URL set but gate mode=%s (not enforce); dispatch inactive",
-                 cfg.gate_mode)
+    # default); see _build_dispatch for what runs in which gate mode.
+    dispatcher, router = _build_dispatch(cfg)
     # Best-frame store: retains each track's best crop for on-demand fetch (served
     # on the metrics port at /best_frame). Only built when there's a metrics port to
     # serve it on — no point doing per-frame store work nothing can ever read.
@@ -923,17 +954,7 @@ def main() -> int:  # pragma: no cover - integration entrypoint
             return
         log.info("tier0 gate mode change (managed): %s -> %s", effective_mode, override)
         cfg = replace(cfg, gate_mode=override)
-        dispatcher = router = None
-        if override == "enforce" and cfg.dispatch_kaic_url:
-            from .dispatch import DispatchRouter, KaicDispatcher
-
-            dispatcher = KaicDispatcher(
-                cfg.dispatch_kaic_url, api_key=cfg.api_key, task=cfg.dispatch_task,
-                max_inflight=cfg.dispatch_max_inflight,
-            )
-            router = DispatchRouter()
-            log.info("tier1 dispatch enabled -> %s (task=%s)",
-                     cfg.dispatch_kaic_url, cfg.dispatch_task)
+        dispatcher, router = _build_dispatch(cfg)
         manager.apply_gate_change(_gate_factory(cfg), dispatcher=dispatcher, router=router)
         effective_mode = override
 

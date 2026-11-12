@@ -1318,6 +1318,8 @@ async def _publish_inference_completed(
     body: Dict[str, Any],
     event_id: Optional[int] = None,
     observed_at: Optional[str] = None,
+    track_id: Optional[int] = None,
+    label: Optional[str] = None,
 ) -> None:
     """Build an ``InferenceCompletedEvent`` from the response body the
     adapter returned and publish it on NATS. Shared by HTTP and WS
@@ -1363,6 +1365,8 @@ async def _publish_inference_completed(
             adapter=adapter_name,
             adapter_version=adapter_version,
             camera_id=camera_id,
+            track_id=track_id,
+            label=label,
             model_name=model_name,
             model_version=model_version,
             model_fingerprint=fingerprint,
@@ -1391,6 +1395,8 @@ async def _publish_inference_completed(
         correlation_id=correlation_id,
         event_id=event_id,
         observed_at=observed_at,
+        track_id=track_id,
+        label=label,
     )
     if normalised is not None:
         subject, envelope = normalised
@@ -1532,6 +1538,11 @@ async def v1_infer(
         raw_observed_at = (
             payload.get("observed_at") if isinstance(payload, dict) else None
         )
+        # ``track_id`` / ``label``: Tier-1 dispatch names the Tier-0 track
+        # the crop came from. Plucked and echoed like event_id, so the
+        # result can be joined back to the person being followed.
+        raw_track = payload.get("track_id") if isinstance(payload, dict) else None
+        raw_label = payload.get("label") if isinstance(payload, dict) else None
         asyncio.create_task(_publish_inference_completed(
             adapter_name=adapter_name,
             adapter=adapter,
@@ -1539,6 +1550,9 @@ async def v1_infer(
             correlation_id=correlation_id,
             latency_ms=latency_ms,
             body=body,
+            track_id=raw_track
+            if isinstance(raw_track, int) and not isinstance(raw_track, bool) else None,
+            label=raw_label if isinstance(raw_label, str) else None,
             event_id=raw_event_id
             if isinstance(raw_event_id, int) and not isinstance(raw_event_id, bool)
             else None,

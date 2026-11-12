@@ -490,3 +490,35 @@ def test_migration_sweep_matches_the_query_filter(db):
 
     left = s.query(models.SkillAssignment).all()
     assert [(r.skill, r.camera_id) for r in left] == [(LPR, gate)]
+
+
+# -- A claim names its adapter (the face route) ------------------------------
+#
+# Each face app keeps its own gallery, so a face_recognition claim says
+# which adapter answers for it on that camera; Tier-0 routes people there.
+
+
+def test_a_claim_can_name_its_adapter_and_names_merge(db):
+    s, (gate, yard) = db
+    svc.declare(s, skill="face_recognition", camera_id=gate,
+                consumer="app:attendly", params={"adapters": ["insightface_attendly"]})
+    s.commit()
+    assert _assignments_of(s, gate) == [
+        {"skill": "face_recognition", "adapters": ["insightface_attendly"]},
+    ]
+    svc.declare(s, skill="face_recognition", camera_id=gate,
+                consumer="app:doorbell", params={"adapters": ["insightface", " "]})
+    s.commit()
+    assert _assignments_of(s, gate) == [
+        {"skill": "face_recognition", "adapters": ["insightface", "insightface_attendly"]},
+    ]
+    # Releasing one app's claim drops its adapter with it.
+    svc.release(s, skill="face_recognition", camera_id=gate, consumer="app:doorbell")
+    s.commit()
+    assert _assignments_of(s, gate) == [
+        {"skill": "face_recognition", "adapters": ["insightface_attendly"]},
+    ]
+    # Entries naming no adapter stay exactly as before.
+    svc.declare(s, skill=LPR, camera_id=yard, consumer="operator")
+    s.commit()
+    assert _assignments_of(s, yard) == [{"skill": LPR}]

@@ -32,7 +32,7 @@ from typing import Protocol
 
 from .detector import DetectorAdapter, DetectorPool, StubDetector
 from .frame_source import FrameSource, probe_stream, redact_url
-from .dispatch import dispatch_escalations
+from .dispatch import dispatch_escalations, follow_up_faces
 from .gate import Gate
 from .ffmpeg_presets import DEFAULT_RTSP_TIMEOUT_S, HwAccel, resolve_hwaccel
 from .metrics import (
@@ -172,6 +172,10 @@ class CameraSpec:
     # nothing declared. In _baked, so an assignment change restarts the
     # worker on the next reconcile tick like a label change does.
     skills: frozenset[str] | None = None
+    # ``(skill, adapter)`` pairs the camera's claims name (the face route
+    # asks the claiming app's adapter). Baked like skills: a claim change
+    # restarts the worker with the new route.
+    skill_adapters: frozenset[tuple[str, str]] | None = None
     # Labels the camera's app picks ADD to its tracked set (from each
     # app's manifest ``tier0_labels``, projected onto the pick's entry by
     # core). Kept apart from ``labels`` because that field's None means
@@ -474,9 +478,11 @@ class CameraWorker:
         # Per-camera routing: the shared base router plus whatever routes
         # this camera's assigned skills activate (identity when none —
         # unassigned cameras share the base). RFC-0002 Phase 4.
-        from .dispatch import OncePerTrack, router_for_skills
-        self.router = router_for_skills(spec.skills, base=router)
+        from .dispatch import FaceFollowUp, OncePerTrack, router_for_skills
+        self.router = router_for_skills(spec.skills, base=router,
+                                        skill_adapters=spec.skill_adapters)
         self._dispatch_once = OncePerTrack()
+        self._face_follow = FaceFollowUp()
         self.visit_poster = visit_poster
         self.attempt_poster = attempt_poster
         self._stop = threading.Event()
@@ -1325,7 +1331,12 @@ class CameraWorker:
                 dispatch_escalations(
                     self.spec.camera_id, result.tracks, gres, self.router,
                     self.dispatcher, once=self._dispatch_once,
+                    follow=self._face_follow,
                 )
+                # The face route keeps asking about people it started on
+                # while their crop improves (none on other cameras).
+                follow_up_faces(self.spec.camera_id, result.tracks, self.router,
+                                self.dispatcher, self._face_follow)
         except Exception:
             log.debug("tier0 %s: gate error", self.spec.camera_id, exc_info=True)
 

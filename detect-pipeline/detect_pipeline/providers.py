@@ -126,6 +126,8 @@ DETECTION_SHAPED_SKILLS: frozenset[str] = frozenset({
     "line_crossing", "intrusion_detection", "loitering_detection",
     "abandoned_object", "package_delivery", "smart_doorbell",
     "footage_search", "motion_detection",
+    # The face route starts from Tier-0's person tracks.
+    "face_recognition",
 })
 
 
@@ -200,6 +202,31 @@ def _assignment_view(
     return labels, analyze, (frozenset(skills) or None), (frozenset(extra) or None)
 
 
+def _skill_adapters(c: dict) -> frozenset[tuple[str, str]] | None:
+    """``(skill, adapter)`` pairs a camera's assignment entries name.
+
+    A claim may say which adapter serves its skill on this camera
+    (``{"skill": "face_recognition", "adapters": ["insightface_x"]}``):
+    face apps each keep their own gallery, so the platform cannot pick
+    one. None when no entry names an adapter."""
+    assignments = c.get("assignments")
+    if not isinstance(assignments, list):
+        return None
+    pairs: set[tuple[str, str]] = set()
+    for a in assignments:
+        if not isinstance(a, dict):
+            continue
+        skill = str(a.get("skill", "")).strip().lower()
+        adapters = a.get("adapters")
+        if not skill or not isinstance(adapters, (list, tuple)):
+            continue
+        for ad in adapters:
+            name = str(ad).strip()
+            if name:
+                pairs.add((skill, name))
+    return frozenset(pairs) or None
+
+
 # Cameras already warned about a missing/garbled open_nvr_camera_id — the
 # provider re-fetches every reconcile tick, so warn once per handle, not
 # once per 30 seconds.
@@ -242,6 +269,7 @@ def _to_spec(c: dict) -> CameraSpec:
         labels=labels,
         extra_labels=extra_labels,
         skills=skills,
+        skill_adapters=_skill_adapters(c),
         # Core offers the main tap beside a sub tap so evidence can be cut
         # at full resolution (evidence.py). Absent on older cores and on
         # cameras whose frame_url already IS the main stream.

@@ -292,3 +292,52 @@ def test_junk_observed_at_is_dropped_not_published(junk):
     )
     assert out is not None
     assert "observed_at" not in out[1]["payload"]
+
+
+# ── face.recognized.v1 (the platform face route) ──────────────────────
+
+def _face(**kw):
+    base = {"task": "face_recognition", "recognized": True, "person_id": "S1", "category": "student",
+            "similarity": 0.71, "face_bbox": [10, 12, 60, 70], "threshold": 0.5}
+    base.update(kw)
+    return base
+
+
+def test_face_route_result_becomes_face_recognized():
+    from kai_c.domain_events import normalise_completion
+    out = normalise_completion("insightface_school", _face(), camera_id="cam4",
+                               correlation_id="c1", track_id=17, label="person",
+                               observed_at="2026-11-11T10:00:00+00:00")
+    assert out is not None
+    subject, env = out
+    assert subject == "opennvr.events.face.recognized.v1.cam4"
+    assert env["schema"] == "face.recognized.v1" and env["camera_id"] == "cam4"
+    p = env["payload"]
+    assert p == {"adapter": "insightface_school", "track_id": 17, "label": "person", "recognized": True,
+                 "person_id": "S1", "category": "student", "similarity": 0.71, "threshold": 0.5,
+                 "face_box": [10, 12, 60, 70], "observed_at": "2026-11-11T10:00:00+00:00"}
+
+
+def test_an_unknown_face_is_published_without_a_person():
+    from kai_c.domain_events import normalise_completion
+    _, env = normalise_completion("insightface_school", _face(recognized=False, person_id=None, similarity=None),
+                                  camera_id="cam4", track_id=3)
+    assert env["payload"]["recognized"] is False and env["payload"]["person_id"] is None
+
+
+def test_no_event_without_a_track_or_a_face():
+    from kai_c.domain_events import normalise_completion
+    # An app's own call (no track) is the app's business.
+    assert normalise_completion("insightface_school", _face(), camera_id="cam4") is None
+    # A crop with no face says nothing.
+    assert normalise_completion("insightface_school", _face(recognized=False, face_bbox=None),
+                                camera_id="cam4", track_id=3) is None
+    # No camera, no contract.
+    assert normalise_completion("insightface_school", _face(), camera_id=None, track_id=3) is None
+
+
+def test_completion_event_echoes_the_track():
+    from kai_c.events import InferenceCompletedEvent
+    e = InferenceCompletedEvent(correlation_id="c", adapter="a", model_name="m", model_version="v",
+                                inference_ms=1, result={}, track_id=5, label="person")
+    assert e.track_id == 5 and e.label == "person"
