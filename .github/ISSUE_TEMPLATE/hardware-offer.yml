@@ -1,0 +1,64 @@
+name: Hardware offer
+description: Lend OpenNVR a board, an accelerator or a camera, or give us remote access to one, and we port, benchmark and publish the results.
+title: "Hardware offer: <board or device>"
+labels: ["hardware", "benchmark"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you. The programme is described in [docs/HARDWARE.md](https://github.com/open-nvr/open-nvr/blob/main/docs/HARDWARE.md#lend-us-hardware-we-publish-what-we-measure) and on [opennvr.org/hardware-program](https://www.opennvr.org/hardware-program/). The short version: we put the whole stack on your hardware, measure every role with the public protocol, and publish every number, good or bad, with your name on the report. If you would rather not do this in public, write to contact@opennvr.org instead.
+  - type: input
+    id: device
+    attributes:
+      label: Board, accelerator or device
+      description: Exact product name and the SoC or accelerator in it.
+      placeholder: "Arduino Ventuno Q (Qualcomm Dragonwing IQ-8275, Hexagon NPU)"
+    validations:
+      required: true
+  - type: dropdown
+    id: how
+    attributes:
+      label: How can we get at it?
+      options:
+        - Remote access (SSH over a VPN to the device on your bench)
+        - Loan (you ship it, we return it)
+        - Donation (you ship it, we keep it)
+        - Not sure yet
+    validations:
+      required: true
+  - type: input
+    id: window
+    attributes:
+      label: For how long, and from when?
+      placeholder: "Four weeks from December"
+    validations:
+      required: true
+  - type: textarea
+    id: software
+    attributes:
+      label: Operating system, runtimes and documentation
+      description: What the device runs, which inference runtime or SDK its accelerator has (ONNX Runtime provider, vendor runtime, compiled-model zoo), and links to the docs. Say if a runtime cannot be redistributed.
+    validations:
+      required: true
+  - type: dropdown
+    id: publish
+    attributes:
+      label: May we publish your organisation's name and the device's name with the results?
+      options:
+        - "Yes, both"
+        - "The device's name, not ours"
+        - "Not until the product is announced; we will say when"
+    validations:
+      required: true
+  - type: input
+    id: contact
+    attributes:
+      label: An engineer we can ask questions
+      description: A name and how to reach them (email or a handle here). Not published.
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: What you would most like measured, known limitations, or a use case you have in mind.
