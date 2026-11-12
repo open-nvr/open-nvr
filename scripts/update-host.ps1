@@ -395,6 +395,29 @@ function Invoke-UpdateQueue {
     if ($due -eq 0) { Invoke-Update -UpdateArgs @("--to", (Get-UpdKV "$UpdDir\plan.env" TO_VERSION), "--yes") }
 }
 
+# Called by `up`. The runner is on unless .env says UPDATE_RUNNER=off, so a
+# fresh install and an existing site that upgrades both get it. On its own
+# it only leaves a heartbeat: nothing is checked or installed until the
+# update policy in the app says so (off by default, plan D6).
+#
+# Only from an administrator PowerShell: without admin rights the task can
+# only run as a logged-on task, which flashes a console window every
+# minute, and that is not something to switch on unasked.
+function Update-UpdateRunner {
+    if ((Get-EnvVar "UPDATE_RUNNER") -eq "off") { return }
+    if (Get-ScheduledTask -TaskName "OpenNVR update runner" -ErrorAction SilentlyContinue) { return }
+    $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+    if ($admin) {
+        Write-UpdSay "Installing the update runner, so OpenNVR Updates in the app can work"
+        Write-UpdSay "(it does nothing until an update policy is chosen there; opt out: .\start.ps1 auto-update disable)."
+        try { Set-AutoUpdate "enable" }
+        catch { Write-UpdWarn "The update runner is not installed: $($_.Exception.Message)" }
+    } else {
+        Write-UpdWarn "The update runner is not installed. From an administrator PowerShell: .\start.ps1 auto-update enable"
+    }
+}
+
 # .\start.ps1 auto-update enable|disable|status: the Scheduled Task that runs the tick.
 function Set-AutoUpdate([string]$Action) {
     $name = "OpenNVR update runner"
@@ -423,8 +446,11 @@ function Set-AutoUpdate([string]$Action) {
                 Write-UpdOk "The update runner checks in every minute while you are logged on."
                 Write-UpdSay "(Run this from an administrator PowerShell to let it run in the background instead.)"
             }
+            if (Test-Path ".env") { Set-DotEnvVar "UPDATE_RUNNER" "on" }
         }
         "disable" {
+            # The flag first: the next `up` must not put it back.
+            if (Test-Path ".env") { Set-DotEnvVar "UPDATE_RUNNER" "off" }
             Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction SilentlyContinue
             Write-UpdOk "The update runner is off. Updates can still be run by hand: .\start.ps1 update"
         }

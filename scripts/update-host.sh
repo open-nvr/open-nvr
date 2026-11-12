@@ -22,7 +22,9 @@
 #   ./start.sh update --restore DIR   put a backup back (the escape hatch)
 #   ./start.sh update --from-queue    one tick of the runner (the timer runs it)
 #   ./start.sh update --list-images   this site's images (for make-offline-bundle.py)
-#   sudo ./start.sh auto-update enable|disable|status   that timer
+#   ./start.sh auto-update enable|disable|status   that timer (asks for sudo
+#                                     on Linux; `up` installs it unless
+#                                     UPDATE_RUNNER=off in .env)
 #
 # Files: data/updates/ (plan, state, the installed and candidate manifests)
 # and backups/<time>-<version>/ (database dump, two volumes, .env); both
@@ -390,15 +392,47 @@ upd_queue() {
     fi
 }
 
+UPD_UNIT=/etc/systemd/system/opennvr-update
+UPD_PLIST="$HOME/Library/LaunchAgents/org.opennvr.update.plist"
+
+# Root only for the systemd files; start.sh itself refuses to run under sudo.
+upd_root() { if [ "$(id -u)" = 0 ]; then "$@"; else sudo "$@"; fi; }
+
+upd_runner_registered() {
+    case "$(uname -s)" in
+        Linux)  [ -f "$UPD_UNIT.timer" ] ;;
+        Darwin) [ -f "$UPD_PLIST" ] ;;
+        *)      return 1 ;;
+    esac
+}
+
+# Called by `up`. The runner is on unless .env says UPDATE_RUNNER=off, so a
+# fresh install and an existing site that upgrades both get it. On its own
+# it only leaves a heartbeat: nothing is checked or installed until the
+# update policy in the app says so (off by default, plan D6). On Linux the
+# timer needs sudo once, so it is installed only at a terminal.
+run_update_runner_refresh() {
+    [ "$(get_env_var UPDATE_RUNNER)" != off ] || return 0
+    case "$(uname -s)" in Linux|Darwin) ;; *) return 0 ;; esac
+    upd_runner_registered && return 0
+    if [ "$(uname -s)" = Darwin ] || { [ -t 0 ] && [ "${KEEP_ORPHANS:-}" != 1 ]; }; then
+        upd_say "Installing the update runner, so OpenNVR Updates in the app can work"
+        upd_say "(it does nothing until an update policy is chosen there; opt out: ./start.sh auto-update disable)."
+        ( run_auto_update enable ) || upd_warn "The update runner is not installed. Install it with: ./start.sh auto-update enable"
+    else
+        upd_warn "The update runner is not installed. Install it with: ./start.sh auto-update enable"
+    fi
+}
+
 # ./start.sh auto-update enable|disable|status: the timer that runs the tick.
 run_auto_update() {
-    local unit=/etc/systemd/system/opennvr-update
-    local plist="$HOME/Library/LaunchAgents/org.opennvr.update.plist"
+    local unit="$UPD_UNIT" plist="$UPD_PLIST"
     case "${1:-status}:$(uname -s)" in
         enable:Linux)
-            [ "$(id -u)" = 0 ] || { upd_fail "Run this with sudo: it installs a systemd timer."; exit 1; }
             local run_as="${SUDO_USER:-$(id -un)}"
-            cat > "$unit.service" <<EOF
+            local tmp
+            tmp=$(mktemp -d) || exit 1
+            cat > "$tmp/service" <<EOF
 [Unit]
 Description=OpenNVR update runner (one tick)
 After=docker.service
@@ -409,7 +443,7 @@ User=$run_as
 WorkingDirectory=$PWD
 ExecStart=$PWD/start.sh update --from-queue
 EOF
-            cat > "$unit.timer" <<EOF
+            cat > "$tmp/timer" <<EOF
 [Unit]
 Description=OpenNVR update runner, every minute
 
@@ -420,13 +454,24 @@ OnUnitActiveSec=1min
 [Install]
 WantedBy=timers.target
 EOF
-            systemctl daemon-reload && systemctl enable --now opennvr-update.timer || exit 1
+            [ "$(id -u)" = 0 ] || upd_say "Installing the systemd timer needs sudo once:"
+            if ! upd_root install -m 644 "$tmp/service" "$unit.service" \
+               || ! upd_root install -m 644 "$tmp/timer" "$unit.timer"; then
+                rm -rf "$tmp"; upd_fail "Could not write the systemd timer."; exit 1
+            fi
+            rm -rf "$tmp"
+            upd_root systemctl daemon-reload && upd_root systemctl enable --now opennvr-update.timer || exit 1
+            write_env_var UPDATE_RUNNER on
             upd_ok "The update runner checks in every minute, as $run_as. The update policy is set in the app."
             ;;
         disable:Linux)
-            [ "$(id -u)" = 0 ] || { upd_fail "Run this with sudo."; exit 1; }
-            systemctl disable --now opennvr-update.timer 2>/dev/null || true
-            rm -f "$unit.service" "$unit.timer"; systemctl daemon-reload
+            # The flag first: the next `up` must not put it back.
+            write_env_var UPDATE_RUNNER off
+            if [ -f "$unit.timer" ] || [ -f "$unit.service" ]; then
+                [ "$(id -u)" = 0 ] || upd_say "Removing the systemd timer needs sudo:"
+                upd_root systemctl disable --now opennvr-update.timer 2>/dev/null || true
+                upd_root rm -f "$unit.service" "$unit.timer"; upd_root systemctl daemon-reload
+            fi
             upd_ok "The update runner is off. Updates can still be run by hand: ./start.sh update"
             ;;
         enable:Darwin)
@@ -445,9 +490,11 @@ EOF
 EOF
             launchctl unload "$plist" 2>/dev/null || true
             launchctl load -w "$plist" || exit 1
+            write_env_var UPDATE_RUNNER on
             upd_ok "The update runner checks in every minute. The update policy is set in the app."
             ;;
         disable:Darwin)
+            write_env_var UPDATE_RUNNER off
             launchctl unload -w "$plist" 2>/dev/null || true
             rm -f "$plist"
             upd_ok "The update runner is off. Updates can still be run by hand: ./start.sh update"
@@ -456,7 +503,8 @@ EOF
             local seen
             seen=$(upd_kv "$UPD_DIR/runner.env" LAST_SEEN)
             if [ -n "$seen" ]; then upd_say "The update runner last checked in at $seen (UTC)."
-            else upd_say "The update runner has never run here. Turn it on with: sudo ./start.sh auto-update enable"; fi
+            elif upd_runner_registered; then upd_say "The update runner is installed but has not checked in yet."
+            else upd_say "The update runner is not installed. Turn it on with: ./start.sh auto-update enable"; fi
             ;;
         *) upd_fail "usage: ./start.sh auto-update enable|disable|status (Linux and macOS)"; exit 1 ;;
     esac

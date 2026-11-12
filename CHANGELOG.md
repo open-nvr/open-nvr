@@ -6,6 +6,26 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The update runner is installed with OpenNVR.** Configuration → OpenNVR
+  Updates did nothing until someone ran `auto-update enable` on the host,
+  which few did. Now `up` installs the runner unless `UPDATE_RUNNER=off` in
+  `.env`, on a fresh install and on an existing site alike: on Linux it asks
+  for sudo once at a terminal, on macOS it needs nothing, on Windows it
+  needs an administrator PowerShell (a non-admin task would flash a console
+  every minute). The update policy still starts off: until it is changed in
+  the app the runner only checks in and fetches nothing.
+  `auto-update disable` turns it off and keeps it off.
+
+### Fixed
+
+- **`auto-update enable` works on Linux.** The command the app and the
+  script showed was `sudo ./start.sh auto-update enable`, which start.sh
+  refuses (it never runs under sudo), and without sudo the script refused
+  too. It now runs as the normal user and writes only the systemd unit
+  through sudo, like the host agent.
+
 ## [0.1.11] — 2026-11-12
 
 The Qualcomm NPU release. On the qualcomm flavour the detector, the captions (Gemma), the camera agent's LLM, the search embeddings (SigLIP 2 and a sentence model), speech to text (Whisper) and the plate reader all run on the Hexagon HTP, and a fresh install on a Dragonwing board starts with one setting: the flavour overlays are split per compose file so Compose 2.24 accepts a plain install, the tag the embedder fill finds is the tag asked for, and the discovery prober's Dockerfile reaches Docker intact. Detection boxes are on by default on every live picture. Search gained weighted fusion, synonyms and typo reading, a caption arm with its own model, voice search and a bounded re-rank, off by default. The workflow engine runs workflows and has an API. ANPR on a Qualcomm box: plate candidates at full resolution, consensus across looks, per-camera scan policy. USB webcams are cameras, served by MediaMTX on Linux; Add Camera finds ONVIF cameras by multicast. The camera agent serves OpenNVR Mirror. The dashboard shows the NPU and GPU beside CPU, memory and disk, and says when requests are queued. Adapter pins at `0.1.11` (`text_embed` on its own tag). App SDK stays 0.11.0.

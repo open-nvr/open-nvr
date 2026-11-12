@@ -983,6 +983,19 @@ if (Ask-YesNo 'Install the OpenNVR host agent (USB webcams on this PC, its real 
 } else {
     Set-EnvValue 'HOST_AGENT' 'off'; Info 'Host agent: off (later: .\start.ps1 host-agent install)'
 }
+# The runner behind OpenNVR Updates in the app: `up` installs it. It only
+# checks in until an update policy is chosen in the app, and the policy
+# starts off, so nothing is fetched unasked.
+if ((Get-EnvValue 'UPDATE_RUNNER') -eq 'off') {
+    Info 'Update runner: off (later: .\start.ps1 auto-update enable)'
+} else {
+    Set-EnvValue 'UPDATE_RUNNER' 'on'
+    if ($script:Platform -eq 'Windows') {
+        Ok 'Update runner: installed when OpenNVR starts (needs an administrator PowerShell); choose an update policy in Configuration > OpenNVR Updates'
+    } else {
+        Ok 'Update runner: installed when OpenNVR starts; choose an update policy in Configuration > OpenNVR Updates'
+    }
+}
 Write-Host ''; Info 'Configuration and images are ready. Starting OpenNVR...'; Write-Host ''
 if ($script:Platform -eq 'Windows') { & (Join-Path $ProjectRoot 'start.ps1') up; exit $LASTEXITCODE }
 & bash (Join-Path $ProjectRoot 'start.sh') up
