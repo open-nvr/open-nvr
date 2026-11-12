@@ -8,6 +8,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Add Camera no longer prints a SOAP fault, and a camera whose clock is
+  off can still be added.** When a camera refused the ONVIF login the
+  dialog showed the raw `<s:Envelope … ter:NotAuthorized …>` text. A camera
+  answers the same fault to a correct password when its clock is more than
+  a few minutes from ours (WS-Security checks the `Created` timestamp), so
+  core now reads the camera's clock with the unauthenticated
+  GetSystemDateAndTime after both schemes refuse, retries once with the
+  timestamp in the camera's time when the clock is off, remembers the
+  offset for that camera, and otherwise answers a 401 that says what to
+  check: the ONVIF account (often separate from the web login, or ONVIF
+  turned off) and, when measured, the clock skew in minutes. The dialog
+  shows that sentence; any other camera error is reduced to its fault code.
+
 - **A USB webcam on a Docker Desktop machine goes live (#900).** The host
   agent's ffmpeg publishes the camera's path and its `-sub` from one
   capture, but core only created the sub path for a webcam MediaMTX serves
