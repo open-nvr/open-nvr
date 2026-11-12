@@ -19,7 +19,8 @@ import { AlertTriangle, Camera as CameraIcon, Loader2, Mic, MicOff, Play, Square
 import { apiService } from '../lib/apiService'
 import { extractApiError } from '../lib/apiError'
 import type { PublisherState } from '../lib/whipPublisher'
-import { startSession, stopSession, useWebcamSessions } from '../lib/webcamSessions'
+import { sessionOnDevice, startSession, stopSession, streamDevice, useWebcamSessions } from '../lib/webcamSessions'
+import { webcamLabel } from '../components/WebcamOption'
 import { Badge, Button, Card, CardContent, EmptyState, PageHeader } from '../components/ui'
 
 const RESOLUTIONS = [
@@ -54,7 +55,8 @@ export function WebcamPublisher() {
 
   // A session already running for this camera (started earlier, then the
   // user browsed away and came back) is shown, not restarted.
-  const session = useWebcamSessions().find((s) => s.cameraId === cameraId)
+  const sessions = useWebcamSessions()
+  const session = sessions.find((s) => s.cameraId === cameraId)
   const sessionRef = useRef(session)
   sessionRef.current = session
 
@@ -70,8 +72,11 @@ export function WebcamPublisher() {
   // session, which owns it from then on.
   const previewRef = useRef<MediaStream | null>(null)
   const [hasPicture, setHasPicture] = useState(false)
-
+  // The camera the picture really comes from ("Default camera" resolves).
+  const [shownDevice, setShownDevice] = useState('')
+  // One webcam feeds one camera: this tab may already stream it elsewhere.
   const running = !!session && state.kind !== 'error'
+  const takenBy = running ? undefined : sessionOnDevice(sessions, shownDevice, cameraId)
 
   const secure = typeof window !== 'undefined' && window.isSecureContext
   const hasMedia = typeof navigator !== 'undefined' && !!navigator.mediaDevices?.getUserMedia
@@ -87,6 +92,7 @@ export function WebcamPublisher() {
 
   const show = (stream: MediaStream | null) => {
     setHasPicture(!!stream)
+    setShownDevice(streamDevice(stream))
     if (videoRef.current) {
       videoRef.current.srcObject = stream
       if (stream) videoRef.current.play().catch(() => {})
@@ -246,6 +252,15 @@ export function WebcamPublisher() {
             )}
           </div>
           {mediaError && <div className="text-sm text-[var(--danger)]">{mediaError}</div>}
+          {takenBy && (
+            <div className="flex items-start gap-2 text-sm text-[var(--warn)]">
+              <AlertTriangle size={16} className="shrink-0 mt-0.5" />
+              <span>
+                This tab already streams this camera to “{takenBy.cameraName}”. A webcam can feed one
+                camera: pick another one, or stop “{takenBy.cameraName}” first.
+              </span>
+            </div>
+          )}
           {state.kind === 'error' && <div className="text-sm text-[var(--danger)]">{state.reason}</div>}
           {state.kind === 'retrying' && (
             <div className="text-xs text-[var(--text-dim)]">{state.reason}</div>
@@ -261,7 +276,14 @@ export function WebcamPublisher() {
               >
                 <option value="">Default camera</option>
                 {devices.map((d, i) => (
-                  <option key={d.deviceId || i} value={d.deviceId}>{d.label || `Camera ${i + 1}`}</option>
+                  (() => {
+                    const other = sessionOnDevice(sessions, d.deviceId, cameraId)
+                    return (
+                      <option key={d.deviceId || i} value={d.deviceId} disabled={!!other}>
+                        {webcamLabel(d.label) || `Camera ${i + 1}`}{other ? ` (in use · ${other.cameraName})` : ''}
+                      </option>
+                    )
+                  })()
                 ))}
               </select>
             </label>
@@ -286,7 +308,7 @@ export function WebcamPublisher() {
               {running ? (
                 <Button variant="danger" onClick={() => void stop()}><Square size={14} /> Stop</Button>
               ) : (
-                <Button variant="primary" onClick={() => void start()} disabled={!!mediaError && !hasPicture}>
+                <Button variant="primary" onClick={() => void start()} disabled={(!!mediaError && !hasPicture) || !!takenBy}>
                   <Play size={14} /> Start publishing
                 </Button>
               )}

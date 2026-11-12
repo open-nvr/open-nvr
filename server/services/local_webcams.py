@@ -7,7 +7,7 @@ On Linux the webcam's device node is passed into the MediaMTX container
 video4linux major, the ``video`` group) and MediaMTX runs ffmpeg for the
 camera's path through ``runOnInit``, restarting it when the camera is
 unplugged and plugged back. No host install, no sudo, nothing outside
-Docker — the arrangement Frigate and Home Assistant use for webcams.
+Docker.
 Docker Desktop on macOS and Windows cannot see USB; there the host agent
 (``services/host_agent.py``) does the same job from the host.
 
@@ -81,11 +81,35 @@ def sysfs_dir() -> str:
     return os.environ.get(SYSFS_DIR_ENV, "").strip() or DEFAULT_SYSFS_DIR
 
 
+#: Set to ``on`` by docker-compose.webcams.yml on core (#904).
+LOCAL_WEBCAMS_ENV = "OPENNVR_LOCAL_WEBCAMS"
+#: The host's OS as the launchers write it (start.sh / start.ps1).
+HOST_OS_ENV = "OPENNVR_HOST_OS"
+_HOST_OSES = ("linux", "darwin", "windows")
+
+
 def available() -> bool:
-    """Is the overlay in place — does this container see the host's device
-    names at all? False on macOS/Windows and on a Linux install without
-    ``WEBCAMS=on``; the Add Camera dialog then offers the host agent."""
+    """Is the overlay in place? False on macOS/Windows and on a Linux
+    install without ``WEBCAMS=on``; the Add Camera dialog then says how to
+    turn it on (Linux) or offers the host agent (Docker Desktop).
+
+    The overlay's own flag decides. ``/dev/v4l/by-id`` cannot on its own:
+    udev creates it only while a webcam is plugged in, so with the overlay
+    in place and nothing plugged in the dialog offered the host agent
+    instead of "plug one in" (#904). The directory still counts, for a core
+    started by an overlay older than the flag."""
+    if os.environ.get(LOCAL_WEBCAMS_ENV, "").strip().lower() == "on":
+        return True
     return os.path.isdir(by_id_dir())
+
+
+def host_os() -> str | None:
+    """``linux``/``darwin``/``windows`` when a launcher said so, else None.
+    Core runs in a Linux container everywhere, so it cannot read this off
+    itself; the dialog needs it to name the server's own commands rather
+    than guess from the browser's OS (#904)."""
+    value = os.environ.get(HOST_OS_ENV, "").strip().lower()
+    return value if value in _HOST_OSES else None
 
 
 def _pretty_from_id(entry: str) -> str:
@@ -201,20 +225,29 @@ def substream_marker(sub_path: str, *, rtsp_base: str = "rtsp://mediamtx:8554") 
 
 
 def provisioning_for(camera: Any) -> dict[str, Any]:
-    """``{"run_on_init": …, "substream": True}`` for a webcam MediaMTX serves
-    itself, ``{}`` for any other camera. Mints the publish token for the two
-    paths; the token lives inside MediaMTX's path config and reaches only
-    its own listener on localhost. Long-lived on purpose: MediaMTX restarts
-    the command on its own (``runOnInitRestart``) for as long as the path
-    exists, and a token that expired between core restarts would strand the
-    webcam; every core start re-provisions and re-mints anyway."""
+    """The extra path config a webcam camera needs.
+
+    * A webcam MediaMTX serves itself: ``{"run_on_init": …, "substream":
+      True}``. Mints the publish token for the two paths; the token lives
+      inside MediaMTX's path config and reaches only its own listener on
+      localhost. Long-lived on purpose: MediaMTX restarts the command on its
+      own (``runOnInitRestart``) for as long as the path exists, and a token
+      that expired between core restarts would strand the webcam; every core
+      start re-provisions and re-mints anyway.
+    * A webcam the host agent streams: ``{"substream": True}``. The agent's
+      ffmpeg publishes the main path and ``<path>-sub`` from one capture, so
+      both paths must exist; without the sub, MediaMTX refuses that output
+      and ffmpeg exits, taking the main stream with it (issue #900).
+    * Any other camera (a browser webcam publishes the main path only):
+      ``{}``."""
+    from core.camera_source import is_host_webcam
     from core.config import settings
     from services.mediamtx_jwt_service import MediaMtxJwtService
     from services.stream_service import _build_stream_name, substream_name
 
     device = getattr(camera, "source_device", None)
     if not is_local_device(device):
-        return {}
+        return {"substream": True} if is_host_webcam(camera) else {}
     name = _build_stream_name(settings.mediamtx_stream_prefix, camera.id, camera.ip_address)
     sub = substream_name(name)
     token = MediaMtxJwtService.create_publish_token(
