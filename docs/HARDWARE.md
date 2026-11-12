@@ -189,7 +189,7 @@ next step on this platform, not a requirement.
 
 > The Ventuno Q boards behind every Qualcomm number in this document and in
 > [`bench/`](../bench/README.md) were lent, set up and supported by
-> **Indus Technologies** (+91 63618 86642, <https://www.industechno.com>),
+> **Indus Technologies** (<https://www.industechno.com>),
 > who ran OpenNVR on the board before we had written a line for it and took
 > on our findings about its video decoder. The port exists because of them.
 
