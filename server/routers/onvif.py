@@ -311,9 +311,9 @@ async def discover_via_host_agent(
         asked = host_agent.request_discovery()
         # The agent hears the request at its next sync (every few seconds),
         # probes for ~3 s and reports at once; give it up to 12 s.
+        # The wait reads one field per tick; the device list is read once, below.
         for _ in range(48):
-            _, scanned_at = host_agent.onvif_scan()
-            if scanned_at and scanned_at >= asked:
+            if host_agent.discovery_answered(asked):
                 break
             await asyncio.sleep(0.25)
     devices, scanned_at = host_agent.onvif_scan()

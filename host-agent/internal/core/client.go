@@ -86,7 +86,10 @@ type Report struct {
 // OnvifScan is one WS-Discovery round: when, and what answered.
 type OnvifScan struct {
 	ScannedAt float64            `json:"scanned_at"`
-	Devices   []onvifdisc.Device `json:"devices"`
+	// The request this round answered (0 for a background round): core
+	// matches it against the sequence it asked for, so no shared clock.
+	Seq     int                `json:"seq"`
+	Devices []onvifdisc.Device `json:"devices"`
 }
 
 // Desired is one camera the agent should feed, and from which webcam.
@@ -110,6 +113,8 @@ type SyncResponse struct {
 	// Someone opened Add Camera → Discover: probe for cameras now rather
 	// than at the next background round.
 	DiscoverOnvif bool `json:"discover_onvif,omitempty"`
+	// The request to answer; reported back as OnvifScan.Seq.
+	DiscoverSeq int `json:"discover_seq,omitempty"`
 }
 
 // Client calls core with the agent key.

@@ -80,6 +80,8 @@ class OnvifScan(BaseModel):
     """
 
     scanned_at: float
+    #: The request this round answered (0 for a background round).
+    seq: int = Field(0, ge=0)
     devices: list[dict] = Field(default_factory=list)
 
     @field_validator("devices", mode="before")
@@ -162,6 +164,9 @@ def sync(report: SyncReport, request: Request, db: Session = Depends(get_db)):
         "desired": host_agent.desired_state(db),
         "poll_after_s": host_agent.POLL_AFTER_S,
         "discover_onvif": host_agent.discovery_pending(),
+        # The request to answer: the agent runs a round and reports it with
+        # this number, so the wait on core needs no shared clock.
+        "discover_seq": host_agent.discovery_requested_seq(),
     }
 
 

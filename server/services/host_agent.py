@@ -138,10 +138,10 @@ class _AgentState:
             return self.report, self.last_seen
 
     def reset(self) -> None:  # tests
-        global _discovery_requested_at
+        global _discovery_requested_seq
         with self._lock:
             self.report, self.last_seen, self._persisted = None, None, None
-        _discovery_requested_at = 0.0
+        _discovery_requested_seq = 0
 
 
 state = _AgentState()
@@ -151,17 +151,26 @@ state = _AgentState()
 #
 # The agent probes the host's LAN every minute and reports what answered.
 # Add Camera → Discover asks for a fresh round (request_discovery); the next
-# sync tells the agent (discovery_pending), and its answer arrives a few
-# seconds later in a report.
+# sync tells the agent (discover_seq), and its answer arrives a few seconds
+# later in a report that names the sequence it ran for.
+#
+# A SEQUENCE, not a timestamp: the first cut compared core's clock with the
+# agent's ``scanned_at``, and a host clock a minute behind the container
+# (Docker Desktop after sleep) made a request that was never answered — a
+# round on every sync forever, and the route always waiting its full 12 s.
 
-_discovery_requested_at: float = 0.0
+_discovery_requested_seq: int = 0
 
 
-def request_discovery() -> float:
-    """Ask the agent for a probe now; returns the request time."""
-    global _discovery_requested_at
-    _discovery_requested_at = time.time()
-    return _discovery_requested_at
+def request_discovery() -> int:
+    """Ask the agent for a probe now; returns the request's sequence number."""
+    global _discovery_requested_seq
+    _discovery_requested_seq += 1
+    return _discovery_requested_seq
+
+
+def discovery_requested_seq() -> int:
+    return _discovery_requested_seq
 
 
 def _scan() -> dict[str, Any] | None:
@@ -170,10 +179,23 @@ def _scan() -> dict[str, Any] | None:
     return scan if isinstance(scan, dict) else None
 
 
+def discovery_reported_seq() -> int:
+    """The sequence of the last round the agent ran for a request (0 when
+    its rounds were all background ones, or there is no report)."""
+    try:
+        return int((_scan() or {}).get("seq") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def discovery_pending() -> bool:
-    scan = _scan()
-    scanned_at = float((scan or {}).get("scanned_at") or 0)
-    return _discovery_requested_at > scanned_at
+    return _discovery_requested_seq > discovery_reported_seq()
+
+
+def discovery_answered(seq: int) -> bool:
+    """Has the agent reported a round run for request ``seq`` (or later)?
+    Cheap: reads one field, so a wait loop may poll it."""
+    return discovery_reported_seq() >= seq
 
 
 MAX_ONVIF_DEVICES = 256

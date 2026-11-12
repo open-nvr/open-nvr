@@ -218,19 +218,16 @@ func scope(s string) (string, string) {
 // private (a camera LAN), and not an obviously virtual adapter (Hyper-V/WSL,
 // Docker, VirtualBox), where nothing would answer.
 func Interfaces() []net.IP {
-	ifs, err := net.Interfaces()
+	ifcs, err := net.Interfaces()
 	if err != nil {
 		return nil
 	}
 	var out []net.IP
-	for _, ifc := range ifs {
+	for _, ifc := range ifcs {
 		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 || ifc.Flags&net.FlagMulticast == 0 {
 			continue
 		}
-		n := strings.ToLower(ifc.Name)
-		if strings.Contains(n, "vethernet") || strings.HasPrefix(n, "docker") || strings.HasPrefix(n, "br-") ||
-			strings.HasPrefix(n, "veth") || strings.HasPrefix(n, "virbr") || strings.Contains(n, "virtualbox") ||
-			strings.Contains(n, "vmware") {
+		if virtualInterface(ifc.Name) {
 			continue
 		}
 		addrs, _ := ifc.Addrs()
@@ -240,7 +237,11 @@ func Interfaces() []net.IP {
 				continue
 			}
 			ip := ipn.IP.To4()
-			if ip == nil || !ip.IsPrivate() {
+			// Every IPv4 the host has, private or not: a camera LAN on
+			// 100.64/10 or on public internal numbering is still a LAN.
+			// Core's Camera LAN check decides what is offered; the first
+			// cut probed RFC 1918 only and silently skipped such sites.
+			if ip == nil || ip.IsLinkLocalUnicast() {
 				continue
 			}
 			out = append(out, ip)
@@ -260,13 +261,19 @@ func Probe(ctx context.Context, wait time.Duration) []Device {
 		wg.Add(1)
 		go func(local net.IP) {
 			defer wg.Done()
-			// Bound to the interface's own address, so the multicast goes
-			// out of that interface and the replies come back to it.
+			// Bound to the interface's own address, so the replies come back
+			// to it — and the multicast EGRESS set explicitly: binding alone
+			// does not choose it on Linux, where the probe would leave by
+			// the default route (WiFi) and never reach cameras on the wired
+			// segment. IP_MULTICAST_IF per interface is what does.
 			conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: local, Port: 0})
 			if err != nil {
 				return
 			}
 			defer conn.Close()
+			if err := setMulticastInterface(conn, local); err != nil {
+				_ = err // best effort: Windows and macOS honour the bind
+			}
 			for _, t := range probeTypes {
 				msg := ProbeMessage(t)
 				_, _ = conn.WriteToUDP(msg, multicastAddr)
@@ -313,6 +320,18 @@ func ipLess(a, b string) bool {
 	for i := range x {
 		if x[i] != y[i] {
 			return x[i] < y[i]
+		}
+	}
+	return false
+}
+
+
+// virtualInterface: docker bridges, VPN tunnels and the like carry no
+// cameras; probing them only costs replies that core would drop.
+func virtualInterface(name string) bool {
+	for _, p := range []string{"docker", "br-", "veth", "virbr", "vmnet", "vboxnet", "utun", "tun", "tap", "tailscale", "wg", "zt", "lo"} {
+		if strings.HasPrefix(name, p) {
+			return true
 		}
 	}
 	return false

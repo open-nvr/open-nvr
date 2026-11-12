@@ -16,6 +16,12 @@ dashboard says its numbers are the container's.
 
 ## What it does
 
+**Discovery on Linux needs no agent either:** `LAN_DISCOVERY=on` (the
+installer's default on Linux) runs the agent's discovery code as the
+`lan-probe` container on the host's network (`docker-compose.lan-discovery.yml`),
+so Add Camera → Discover finds every ONVIF camera on the LAN by multicast
+within seconds, with nothing installed on the host.
+
 On Linux you do not need it for webcams: MediaMTX serves a USB webcam
 itself when `WEBCAMS=on` (see [WEBCAM.md](WEBCAM.md)). The agent is for
 Docker Desktop on macOS and Windows, which cannot see USB, and for the

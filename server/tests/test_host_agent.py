@@ -360,12 +360,21 @@ def discover_app(env):
 
 
 def test_discovery_is_asked_for_and_then_answered(env):
-    host_agent.request_discovery()
+    """A request is a sequence number the agent echoes back with the round
+    it ran; the clocks of the two machines never enter into it."""
+    from services import host_agent
+    env.tc.post("/api/v1/host-agent/sync", json=REPORT, headers=H)
+    asked = host_agent.request_discovery()
     first = env.tc.post("/api/v1/host-agent/sync", json=REPORT, headers=H).json()
-    assert first["discover_onvif"] is True
-    answered = {**REPORT, "onvif": {**SCAN, "scanned_at": time.time() + 1}}
+    assert first["discover_onvif"] is True and first["discover_seq"] == asked
+    # A background round (seq 0) does not answer it, whatever its clock says
+    bg = {**REPORT, "onvif": {**SCAN, "scanned_at": time.time() + 3600}}
+    assert env.tc.post("/api/v1/host-agent/sync", json=bg, headers=H).json()["discover_onvif"] is True
+    # The round run for the request answers it, even with a clock far behind
+    answered = {**REPORT, "onvif": {**SCAN, "seq": asked, "scanned_at": time.time() - 3600}}
     second = env.tc.post("/api/v1/host-agent/sync", json=answered, headers=H).json()
     assert second["discover_onvif"] is False
+    assert host_agent.discovery_answered(asked)
 
 
 def test_agent_discovery_lists_only_camera_lan_devices(env, discover_app):

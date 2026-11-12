@@ -8,6 +8,22 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Add Camera → Discover finds ONVIF cameras by multicast.** Core runs on
+  a Docker bridge, where WS-Discovery never reaches the LAN, so Discover
+  could only sweep subnets address by address. The probe now runs where
+  multicast works: on Linux a small `lan-probe` container on the host's
+  network (`LAN_DISCOVERY=on`, the installer's default), with nothing to
+  install; on Docker Desktop the host agent. One probe, every camera on the
+  segment answers within seconds, with its name and model, and no subnet
+  has to be configured; the sweep still covers routed subnets and the two
+  merge by address. Replies are unauthenticated UDP and are treated so:
+  bounded, cleaned, and never able to list a camera under another host.
+  The request/answer handshake is a sequence number, not a comparison of
+  two machines' clocks; the probe sets its multicast egress per interface
+  and probes every up interface, letting the Camera LAN check decide.
+
+### Added
+
 - **USB webcams as cameras.** Add Camera → Manual → Webcam, two sources:
   this browser (WHIP, while the tab is open) and the OpenNVR server. On
   Linux the server path needs no install: `WEBCAMS=on` adds

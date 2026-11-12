@@ -244,7 +244,7 @@ export const cameraService = {
   onvifDiscoverPlan: () => api.get('/api/v1/discover/plan'),
   // ONVIF cameras found by the host agent's WS-Discovery (multicast) on the
   // OpenNVR machine's own network: -> { available, devices, scanned_at }
-  onvifDiscoverAgent: () => api.get('/api/v1/discover/agent'),
+  onvifDiscoverAgent: (signal?: AbortSignal) => api.get('/api/v1/discover/agent', { signal }),
   onvifConnect: (
     ip: string,
     params: { username: string; password: string; port?: number }
