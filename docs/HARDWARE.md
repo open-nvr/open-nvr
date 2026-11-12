@@ -189,7 +189,7 @@ next step on this platform, not a requirement.
 
 > The Ventuno Q boards behind every Qualcomm number in this document and in
 > [`bench/`](../bench/README.md) were lent, set up and supported by
-> **Indus Technologies** (+91 63618 86642, <https://www.industechno.com>),
+> **Indus Technologies** (<https://www.industechno.com>),
 > who ran OpenNVR on the board before we had written a line for it and took
 > on our findings about its video decoder. The port exists because of them.
 
@@ -359,6 +359,50 @@ What the numbers say:
   `OpenVINOExecutionProvider:CPU` the same way. Move an Intel Core Ultra
   host to the HWE kernel (`linux-generic-hwe-24.04`) regardless — it is the
   stack Intel validates Arrow Lake on — and keep the GA kernel as fallback.
+
+## Lend us hardware; we publish what we measure
+
+Every row in the support matrix above exists because someone put the
+hardware in front of us: the Ventuno Q came from Indus Technologies over a
+VPN and never left their building. If you make, sell or have a board, an
+accelerator, a camera or a mini PC that is not in that table, lend it to us
+or give us remote access and we will do the rest:
+
+- **Port, if needed** — an image flavour for the accelerator, wired into
+  `OPENNVR_ACCEL=auto`, so it is one setting for your customers.
+- **Measure every role** with the protocol below: the Tier-0 detector under a
+  growing camera count, the ONNX adapters, captions, the agent's LLM, speech
+  to text, search embeddings, plate reading, decode, and the whole stack
+  under a real camera for at least half an hour; CPU baseline on the same
+  machine, always.
+- **Publish all of it** — a report per role in [`bench/`](../bench/README.md)
+  with the commands that produced it, a row above, a blog post when it is
+  worth one. Unflattering numbers are published with the reason.
+- **File what we find** upstream or with your engineers, with logs.
+
+What we need: SSH over a VPN to the device with Docker and a sudo account,
+or the device itself (returned or kept, as you prefer); two to four weeks;
+one engineer we may ask questions; the SDK, runtime libraries and their
+licence terms; and permission to publish your name, the device's name and
+the numbers (pre-release products stay unpublished until you say so).
+
+The rules: numbers are as measured and never taken from a datasheet as
+ours; you see the draft and can correct facts about your product, you do
+not edit a measurement or the verdict; a loan or a sponsorship is credited
+in the report and changes nothing in it; on a remote device we run only
+OpenNVR, its fake-camera rig and public clips, and tell you what we
+installed; everything we build goes into the public repositories.
+
+Offer hardware with the
+[hardware-offer issue template](https://github.com/open-nvr/open-nvr/issues/new?template=hardware-offer.yml)
+or by mail to <contact@opennvr.org>. Funding a named piece of this work
+(a flavour, hardware decode on a platform, an adapter on an accelerator, a
+benchmark round) is the other way to sponsor it:
+<https://www.opennvr.org/sponsors/>. Most wanted next: NVIDIA Jetson Orin
+Nano Super / Orin NX / Thor, Raspberry Pi 5 with the AI HAT+ (Hailo-8L,
+Hailo-8) and Hailo-10H, Rockchip RK3588 boards, other Qualcomm Dragonwing
+boards (IQ9, QCS6490, Rubik Pi), Intel Core Ultra 200V and AMD Ryzen AI
+mini PCs, and industrial, PTZ and thermal IP cameras.
 
 ## Roadmap
 
