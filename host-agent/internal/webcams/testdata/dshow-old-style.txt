@@ -1,0 +1,7 @@
+[dshow @ 0000020f] DirectShow video devices (some may be both video and audio devices)
+[dshow @ 0000020f]  "Integrated Webcam"
+[dshow @ 0000020f]     Alternative name "@device_pnp_\\?\usb#vid_0bda&pid_58f4&mi_00#6&1a2b3c&0&0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\global"
+[dshow @ 0000020f] DirectShow audio devices
+[dshow @ 0000020f]  "Microphone (Realtek Audio)"
+[dshow @ 0000020f]     Alternative name "@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\wave_{1}"
+dummy: Immediate exit requested

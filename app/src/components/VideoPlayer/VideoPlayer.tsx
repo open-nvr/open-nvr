@@ -102,6 +102,10 @@ export interface VideoPlayerProps {
       (a tour wall's "Fill"). Off by default: every other surface keeps the
       stream's own shape. */
   cover?: boolean
+  /** Shown instead of "No signal" while the path has no stream — e.g. a
+      webcam that is still starting, or a browser webcam nobody is
+      publishing. The player keeps retrying either way. */
+  offlineLabel?: string
 }
 
 export interface VideoPlayerHandle {
@@ -140,6 +144,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       showDetections = false,
       chrome = 'full',
       cover = false,
+      offlineLabel,
     },
     ref
   ) {
@@ -1130,7 +1135,9 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         {compact && error && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-[#07090d] text-white/60">
             <AlertCircle size={16} className="opacity-70" />
-            <div className="text-[10px] font-mono uppercase tracking-[0.2em]">{t('video.noSignalShort')}</div>
+            <div className="text-[10px] font-mono uppercase tracking-[0.2em] text-center px-2">
+              {error === 'Camera offline' && offlineLabel ? offlineLabel : t('video.noSignalShort')}
+            </div>
             {!bare && (
               <button
                 type="button"
@@ -1178,7 +1185,9 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
             {/* Error content */}
             <div className="relative z-10 flex flex-col items-center">
               <AlertCircle size={48} className="text-blue-200 mb-3" />
-              <div className="text-lg font-medium text-white mb-1">{error}</div>
+              <div className="text-lg font-medium text-white mb-1">
+                {error === 'Camera offline' && offlineLabel ? offlineLabel : error}
+              </div>
               <div className="text-xs text-blue-200 mb-4">{t('video.noSignal')}</div>
               <button
                 onClick={handleRefresh}

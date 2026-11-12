@@ -25,6 +25,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
+from core.camera_source import is_publisher
 from core.config import settings
 import logging
 
@@ -121,6 +122,8 @@ class CameraService:
                     firmware_version=camera_create.firmware_version,
                     serial_number=camera_create.serial_number,
                     hardware_id=camera_create.hardware_id,
+                    source_type=camera_create.source_type,
+                    source_device=camera_create.source_device or None,
                 )
 
                 db.add(db_camera)
@@ -183,8 +186,10 @@ class CameraService:
                     exc_info=True,
                 )
 
+            if is_publisher(db_camera):
+                await CameraService._provision_publisher(db, db_camera, owner_id)
             # Auto-provision if RTSP URL is present
-            if db_camera.rtsp_url:
+            elif db_camera.rtsp_url:
                 try:
                     # Default settings for auto-provisioning.
                     # This is a Network Video RECORDER: recording is always on by
@@ -329,6 +334,80 @@ class CameraService:
                 exc_info=True,
             )
             raise
+
+    @staticmethod
+    async def _provision_publisher(db: Session, db_camera: Camera, owner_id: int) -> None:
+        """Provision a new webcam camera's path and its CameraConfig.
+
+        Like the RTSP branch, minus everything that needs a source URL (the
+        RTSPS probe, transport policy, substream). Recording is on, as for
+        every camera on an NVR. A failure leaves the camera row in place: the
+        startup reconcile and ``provision-mediamtx`` retry it.
+        """
+        from models import CameraConfig
+
+        from services.local_webcams import provisioning_for, substream_marker
+        extra = provisioning_for(db_camera)
+        if extra:
+            # The row says it has a sub stream; the detect tap reads the
+            # small path and evidence the large one, as for an IP camera.
+            from services.stream_service import _build_stream_name, substream_name
+            name = _build_stream_name(settings.mediamtx_stream_prefix, db_camera.id, db_camera.ip_address)
+            db_camera.substream_url = substream_marker(substream_name(name))
+        try:
+            result = await MediaMtxAdminService.push_publisher_path(
+                camera_id=db_camera.id,
+                camera_ip=db_camera.ip_address,
+                enable_recording=True,
+                recording_segment_seconds=settings.recording_segment_seconds,
+                run_on_init=extra.get("run_on_init"),
+                substream=bool(extra.get("substream")),
+            )
+            if result.get("status") != "ok":
+                camera_logger.log_action(
+                    "camera.auto_provision_failed",
+                    message=f"Auto-provisioning failed for webcam camera {db_camera.id}",
+                    user_id=owner_id,
+                    camera_id=db_camera.id,
+                    extra_data=result,
+                )
+                return
+            db_camera.status = "provisioned"
+            if not (
+                db.query(CameraConfig)
+                .filter(CameraConfig.camera_id == db_camera.id)
+                .first()
+            ):
+                db.add(
+                    CameraConfig(
+                        camera_id=db_camera.id,
+                        source_url=None,
+                        recording_enabled=True,
+                        recording_segment_seconds=settings.recording_segment_seconds,
+                        last_provisioned_at=func.now(),
+                    )
+                )
+            db.commit()
+            db.refresh(db_camera)
+            camera_logger.log_action(
+                "camera.auto_provision_success",
+                message=f"Webcam camera {db_camera.id} provisioned; waiting for a publisher",
+                user_id=owner_id,
+                camera_id=db_camera.id,
+                extra_data=result,
+            )
+        except Exception as e:
+            db.rollback()
+            camera_logger.error(
+                f"Exception during auto-provisioning for webcam camera {db_camera.id}",
+                extra={
+                    "user_id": owner_id,
+                    "camera_id": db_camera.id,
+                    "error_type": type(e).__name__,
+                    "action": "camera.auto_provision_exception",
+                },
+                exc_info=True,
+            )
 
     @staticmethod
     def get_camera_by_id(db: Session, camera_id: int, user_id: int) -> Camera | None:

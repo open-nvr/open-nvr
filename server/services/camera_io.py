@@ -32,6 +32,8 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
+from core.camera_source import is_publisher
+
 #: Columns in export and template order. ``channels`` and ``vendor`` are
 #: blank on an export (one row per camera) and are there so an exported file
 #: and the template read the same way.
@@ -417,6 +419,10 @@ def match_existing(planned: list[PlannedCamera], cameras: list[Any], manageable:
     by_url: dict[str, list[Any]] = {}
     by_ip: dict[str, list[Any]] = {}
     for cam in cameras:
+        # A webcam is not in any file (export leaves it out) and must never
+        # be matched by its placeholder address and turned into an IP camera.
+        if is_publisher(cam):
+            continue
         if cam.rtsp_url:
             by_url.setdefault(stream_key(cam.rtsp_url), []).append(cam)
         by_ip.setdefault((cam.ip_address or "").lower(), []).append(cam)
@@ -505,9 +511,13 @@ def preview_row(p: PlannedCamera) -> dict[str, Any]:
 
 def export_rows(cameras: list[Any], include_passwords: bool) -> list[list[Any]]:
     """One row per camera in COLUMNS order. Without passwords, logins are
-    taken out of the RTSP URLs too: the stored URL carries them."""
+    taken out of the RTSP URLs too: the stored URL carries them. Webcams
+    are left out: they have no address or URL, so a row for one could not
+    be imported back."""
     out = []
     for c in cameras:
+        if is_publisher(c):
+            continue
         rtsp = c.rtsp_url if include_passwords else strip_userinfo(c.rtsp_url)
         sub = c.substream_url if include_passwords else strip_userinfo(c.substream_url)
         out.append([

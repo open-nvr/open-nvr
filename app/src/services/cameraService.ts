@@ -94,6 +94,16 @@ export const cameraService = {
   getStreamInfo: (cameraId: number) => api.get(`/api/v1/streams/${cameraId}/info`),
   getStreamUrls: (cameraId: number) => api.get(`/api/v1/streams/${cameraId}/info`), // Alias
 
+  // Webcam cameras (source_type "publisher"): the browser publisher page
+  // asks for a short-lived WHIP session on every (re)connect.
+  // -> { whip_url, token, stream_name, expires_in_seconds }
+  getWhipSession: (cameraId: number) => api.post(`/api/v1/streams/${cameraId}/whip`),
+  // The host agent on the OpenNVR machine (USB webcams, host metrics):
+  // -> HostAgentInfo (lib/hostAgent.ts)
+  getHostAgent: () => api.get('/api/v1/host-agent'),
+  // USB webcams MediaMTX serves itself (Linux, WEBCAMS=on): available=false elsewhere.
+  getLocalWebcams: () => api.get('/api/v1/webcams/local'),
+
   // Camera Management
   // With a `limit`, one page, for callers that page themselves (the Cameras
   // table). Without one, EVERY camera: the endpoint pages at 100 by default,

@@ -35,6 +35,7 @@ from pathlib import Path
 
 from sqlalchemy import func
 
+from core.camera_source import is_publisher
 from core.database import SessionLocal
 from core.logging_config import recording_logger
 from models import Camera, CameraEvent, Recording
@@ -70,6 +71,32 @@ def _still_stalled_on_disk(
     return fs_latest is None or fs_latest[1] < threshold
 
 
+def _webcam_publishing_ids(cameras, now: datetime) -> set[int]:
+    """Webcams that have had a publisher for at least the stall threshold.
+
+    A webcam records only while something publishes into its path, and a
+    closed browser tab is a normal state, not a recording failure: status
+    already shows it offline. So a webcam is judged only once its publisher
+    has been up long enough for a segment to have closed.
+    """
+    ids = [c.id for c in cameras if is_publisher(c)]
+    if not ids:
+        return set()
+    from services.camera_status_service import get_camera_status_service
+
+    svc = get_camera_status_service()
+    live = svc.snapshot(ids)
+    since = svc.online_since(ids)
+    out: set[int] = set()
+    for cid in ids:
+        up = since.get(cid)
+        if up is not None and up.tzinfo is None:
+            up = up.replace(tzinfo=UTC)
+        if live.get(cid) and up is not None and (now - up).total_seconds() >= STALL_THRESHOLD_SECONDS:
+            out.add(cid)
+    return out
+
+
 def check_recording_health() -> dict:
     """One watchdog pass. Runs in a worker thread (own DB session).
 
@@ -99,6 +126,8 @@ def check_recording_health() -> dict:
             .group_by(Recording.camera_id)
             .all()
         )
+
+        webcams_publishing = _webcam_publishing_ids(cameras, now)
 
         for cam in cameras:
             cfg = getattr(cam, "config", None)
@@ -130,6 +159,27 @@ def check_recording_health() -> dict:
                 .first()
             )
             alarm_active = last_event is not None and last_event.event_state == "active"
+
+            if is_publisher(cam) and cam.id not in webcams_publishing:
+                # Nobody is publishing: not a stall. Close an alarm raised
+                # while it was publishing, rather than leave it open forever.
+                if alarm_active:
+                    db.add(
+                        CameraEvent(
+                            camera_id=cam.id,
+                            event_type=EVENT_TYPE,
+                            event_state="inactive",
+                            description="Webcam stopped publishing",
+                            occurred_at=now,
+                        )
+                    )
+                    transitions.append({
+                        "camera_id": cam.id,
+                        "camera_name": cam.name,
+                        "event_state": "inactive",
+                        "description": "Webcam stopped publishing",
+                    })
+                continue
 
             if is_stalled and not alarm_active:
                 last_str = latest.isoformat() if latest else "never"

@@ -19,6 +19,7 @@
 #   .\start.ps1 token        # re-print the first-time setup token
 #   .\start.ps1 update       # update to the latest release (scripts\update-host.ps1)
 #   .\start.ps1 auto-update enable|disable|status   # the runner for in-app updates
+#   .\start.ps1 host-agent install|uninstall|status|logs   # USB webcams + host monitoring
 # ============================================================
 
 param(
@@ -801,6 +802,9 @@ function Invoke-Up {
     Show-RunningInfo
     Show-FirstTimeSetupToken -ComposeArgs $ca
     Test-EdgeReachable
+    # An installed host agent follows the core it talks to (scripts\host-agent.ps1).
+    . (Join-Path $PSScriptRoot "scripts\host-agent.ps1")
+    Update-HostAgent
 }
 
 function Invoke-Build {
@@ -950,9 +954,16 @@ switch ($Command) {
         Set-AutoUpdate $action
     }
 
+    "host-agent" {
+        # The agent on this machine: USB webcams and host monitoring.
+        . (Join-Path $PSScriptRoot "scripts\host-agent.ps1")
+        $action = if ($Rest.Count -gt 0) { $Rest[0] } else { "status" }
+        Invoke-HostAgent $action
+    }
+
     default {
         Write-Color "Unknown command: $Command" Red
-        Write-Color "Usage: .\start.ps1 [start|restart|up|build|down|logs|status|validate|token|refresh-net|install|reconfigure|update|auto-update]"
+        Write-Color "Usage: .\start.ps1 [start|restart|up|build|down|logs|status|validate|token|refresh-net|install|reconfigure|update|auto-update|host-agent]"
         exit 1
     }
 }

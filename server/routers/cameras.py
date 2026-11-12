@@ -45,6 +45,7 @@ from core.auth import get_current_active_user, get_current_superuser
 from core.client_ip import get_client_ip
 from urllib.parse import urlparse
 
+from core.camera_source import SOURCE_PUBLISHER, is_publisher
 from core.config import _host_is_internal, settings
 from core.database import get_db
 from core.logging_config import camera_logger
@@ -317,7 +318,12 @@ def _reject_external_camera_hosts(camera_create) -> None:
     """403 unless every host this create would dial is on the operator's
     own network. Covers ``ip_address`` and the host inside ``rtsp_url``,
     which are separate caller-controlled inputs reached by different code
-    paths."""
+    paths.
+
+    A webcam has no host: CameraCreate refuses an address or URL for one
+    and stores the placeholder, which is never dialled."""
+    if getattr(camera_create, "source_type", None) == SOURCE_PUBLISHER:
+        return
     hosts: list[tuple[str, str]] = []
     if camera_create.ip_address:
         hosts.append(("ip_address", str(camera_create.ip_address)))
@@ -445,6 +451,34 @@ async def create_camera_checked(
     the first, as they all share its address.
     """
     _log_camera_creation_start(current_user.id, camera_create, request)
+
+    # A webcam (core/camera_source.py) has no address: nothing below dials
+    # anything for it (the schema refused credentials and URLs), and every
+    # webcam shares the placeholder IP, so the IP-based duplicate checks
+    # would only ever match other webcams.
+    webcam = camera_create.source_type == SOURCE_PUBLISHER
+    if webcam:
+        if (settings.mediamtx_path_mode or "id").lower() == "ip":
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Webcam cameras need MediaMTX paths named by camera id "
+                    "(MEDIAMTX_PATH_MODE=id); this server names them by IP."
+                ),
+            )
+        duplicate_check = False
+        # A USB webcam MediaMTX serves itself names its device by the stable
+        # /dev/v4l/by-id entry; it has to be one this machine shows right
+        # now, or the path would run a capture of nothing forever.
+        from services.local_webcams import available as _webcams_available, find_local_webcam, is_local_device
+        _dev = getattr(camera_create, "source_device", None)
+        if is_local_device(_dev):
+            if not _webcams_available():
+                raise HTTPException(
+                    status_code=422,
+                    detail="USB webcams are not enabled on this server (WEBCAMS=on in .env, Linux only).")
+            if find_local_webcam(str(_dev)) is None:
+                raise HTTPException(status_code=422, detail="That webcam is not plugged into this server.")
 
     # SSRF guard, mirroring routers/onvif.py:83, which has always had it —
     # camera-create did not. It runs FIRST, before any branch, because
@@ -651,7 +685,8 @@ async def create_camera_checked(
 
         _log_camera_creation_success(current_user.id, cam, request)
         _record_audit_log(db, current_user.id, cam, request)
-        _check_duplicate_ips(db, current_user.id, cam)
+        if not webcam:
+            _check_duplicate_ips(db, current_user.id, cam)
 
         # Helper to construct response with computed fields
         # Ideally this should be in a schema converter or helper
@@ -673,6 +708,8 @@ async def create_camera_checked(
             "owner_id": cam.owner_id,
             "mediamtx_provisioned": cam.status == "provisioned",
             "recording_enabled": False,
+            "source_type": cam.source_type,
+            "source_device": cam.source_device,
         }
 
         return CameraResponse(**response_data)
@@ -1298,6 +1335,40 @@ def get_camera(
         raise
 
 
+#: Fields that describe where an IP camera is. A webcam has none of them.
+_WEBCAM_ABSENT_FIELDS = (
+    "ip_address", "port", "username", "password", "rtsp_url", "substream_url",
+)
+
+
+def _strip_webcam_stream_fields(camera: Camera, update_fields: dict) -> None:
+    """Drop the address/stream fields an edit form re-sends for a webcam.
+
+    Empty or unchanged values are dropped silently, which matters: the form
+    sends ``rtsp_url: ""``, and "" against the stored NULL would read as
+    "source removed" below and tear the webcam's path down. A real value is
+    refused, since a webcam cannot become an IP camera by edit.
+    """
+    from core.camera_source import PUBLISHER_IP_SENTINEL
+
+    refused = []
+    for field in _WEBCAM_ABSENT_FIELDS:
+        if field not in update_fields:
+            continue
+        value = update_fields.pop(field)
+        if value in (None, "", PUBLISHER_IP_SENTINEL) or value == getattr(camera, field, None):
+            continue
+        refused.append(field)
+    if refused:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "A webcam camera has no address, stream URL or credentials "
+                f"to change (got: {', '.join(refused)})"
+            ),
+        )
+
+
 @router.put("/{camera_id}", response_model=CameraResponse)
 async def update_camera(
     camera_id: int,
@@ -1354,6 +1425,17 @@ async def update_camera(
         update_fields = camera_update.model_dump(exclude_unset=True)
         # Audit-only, never a camera column: take it out before setattr.
         reason = update_fields.pop("reason", None)
+        if is_publisher(camera):
+            _strip_webcam_stream_fields(camera, update_fields)
+            if "source_device" in update_fields:
+                update_fields["source_device"] = update_fields["source_device"] or None
+        elif update_fields.get("source_device"):
+            raise HTTPException(
+                status_code=422,
+                detail="source_device is only for a webcam camera",
+            )
+        else:
+            update_fields.pop("source_device", None)
         from services import api_tokens
 
         if api_tokens.is_token_principal(current_user):
@@ -2301,6 +2383,26 @@ async def provision_camera_mediamtx(
         if not camera:
             raise HTTPException(status_code=404, detail="Camera not found")
 
+        if is_publisher(camera):
+            # A webcam: a path for a publisher, no source to pull.
+            result = await MediaMtxAdminService.push_publisher_path(
+                camera_id=camera.id,
+                camera_ip=camera.ip_address,
+                enable_recording=enable_recording,
+                recording_segment_seconds=recording_segment_seconds,
+                recording_path=recording_path,
+            )
+            if result.get("status") == "ok":
+                camera.status = "provisioned"
+                db.commit()
+            _log_provision_result(current_user.id, camera_id, result, enable_recording)
+            return {
+                "camera_id": camera_id,
+                "mediamtx_result": result,
+                "recording_enabled": enable_recording,
+                "recording_path": recording_path,
+            }
+
         if not camera.rtsp_url:
             raise HTTPException(
                 status_code=400, detail="Camera has no RTSP URL configured"
@@ -2852,7 +2954,11 @@ async def probe_camera_transport(
     if not camera.rtsp_url:
         raise HTTPException(
             status_code=400,
-            detail="Camera has no RTSP URL configured; cannot probe",
+            detail=(
+                "A webcam has no RTSP source to probe"
+                if is_publisher(camera)
+                else "Camera has no RTSP URL configured; cannot probe"
+            ),
         )
 
     config = (
@@ -3022,14 +3128,15 @@ async def get_camera_snapshot(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Camera not found"
         )
-    if not camera.rtsp_url:
+    if not camera.rtsp_url and not is_publisher(camera):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Camera has no stream URL configured",
         )
 
+    # A webcam has no URL; "" makes the capture read its MediaMTX path.
     jpeg = await get_kai_c_service().capture_frame_bytes(
-        camera.rtsp_url, camera.id
+        camera.rtsp_url or "", camera.id
     )
     if not jpeg:
         raise HTTPException(

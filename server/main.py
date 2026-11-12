@@ -110,6 +110,8 @@ from routers import (
     device_firewall,
     workflows as workflows_router,
     approvals as approvals_router,
+    host_agent as host_agent_router,
+    webcams as webcams_router,
 )
 from scripts.init_db import create_initial_data
 from services.mediamtx_admin_service import MediaMtxAdminService as _MtxAdmin
@@ -401,6 +403,8 @@ async def lifespan(app: FastAPI):
                             # fallback lets this loop self-heal rows that drifted
                             # before the edit path started syncing it — no migration.
                             "source_url": cam.rtsp_url or cfg.source_url,
+                            # A webcam's path waits for a publisher.
+                            "source_type": cam.source_type,
                             # Without this key _provision_substream falls back to
                             # deriving the sub URL from vendor convention, silently
                             # discarding an operator-stored one on every restart.
@@ -1122,6 +1126,8 @@ app.include_router(timeline_events.router, prefix=settings.api_prefix)
 app.include_router(search.router, prefix=settings.api_prefix)
 app.include_router(alerts_inbox.router, prefix=settings.api_prefix)
 app.include_router(streams.router, prefix=settings.api_prefix)
+app.include_router(host_agent_router.router, prefix=settings.api_prefix)
+app.include_router(webcams_router.router, prefix=settings.api_prefix)
 app.include_router(camera_config.router, prefix=settings.api_prefix)
 app.include_router(roles.router, prefix=settings.api_prefix)
 app.include_router(permissions.router, prefix=settings.api_prefix)

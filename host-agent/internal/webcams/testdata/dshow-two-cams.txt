@@ -1,0 +1,7 @@
+[dshow @ 00000237461ced40] "HP HD Camera" (video)
+[dshow @ 00000237461ced40]   Alternative name "@device_pnp_\\?\usb#vid_30c9&pid_0011&mi_00#6&2dbb3531&0&0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\global"
+[dshow @ 00000237461ced40] "USB Camera" (video)
+[dshow @ 00000237461ced40]   Alternative name "@device_pnp_\\?\usb#vid_0c45&pid_6366&mi_00#6&183af011&0&0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\global"
+[dshow @ 00000237461ced40] "Microphone Array (Intel® Smart Sound Technology for Digital Microphones)" (audio)
+[dshow @ 00000237461ced40]   Alternative name "@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\wave_{6017376C-6D44-4830-A9CC-6E440EA8BA4E}"
+Error opening input file dummy.

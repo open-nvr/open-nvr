@@ -27,7 +27,7 @@ import { useCameraStatusConnected } from '../hooks/useCameraStatus'
 import { extractApiError } from '../lib/apiError'
 import { useSnackbar } from '../components/Snackbar'
 import { usePermissions } from '../hooks/usePermissions'
-import { Camera as CameraIcon, CameraOff, Download, LayoutGrid, List, PauseCircle, Pencil, Play, PlayCircle, Plus, Search as SearchIcon, Trash2, Unplug, Upload, Video } from 'lucide-react'
+import { Camera as CameraIcon, CameraOff, Download, LayoutGrid, List, PauseCircle, Pencil, Play, PlayCircle, Plus, Search as SearchIcon, Trash2, Unplug, Upload, Video, Webcam } from 'lucide-react'
 import { Badge, Button, EmptyState, Skeleton, Table, THead, TBody, TR, TH, TD } from '../components/ui'
 import { Checkbox, Field, Input, Select } from '../components/ui/form'
 import { IconButton, PageTitleBar, TITLE_ACTION_CLASS, TITLE_PANEL_BODY_CLASS } from '../components/ui/layout'
@@ -46,6 +46,8 @@ import { parseRtspUrl, rtspPortFromUrl, syncCameraIdentity } from '../lib/camera
 import type { IdentityField } from '../lib/cameraIdentity'
 import { formatDuration } from '../lib/time'
 import { Modal } from '../components/Modal'
+import { HostWebcamPicker, useHostAgent } from '../components/HostWebcamPicker'
+import { describeStream } from '../lib/hostAgent'
 
 // Per-camera capability assignment ("camera 1 does LPR") — slice 1 of
 // docs/design/per-camera-assignment.md. Written only here (the camera
@@ -92,6 +94,11 @@ type Camera = {
   password?: string | null
   rtsp_url?: string | null
   substream_url?: string | null
+  /** "publisher" = a webcam: its video is pushed into the path (browser or
+   *  host helper), so it has no address, URL or credentials. */
+  source_type?: string | null
+  /** For a USB webcam on the OpenNVR server: the host agent's device id. */
+  source_device?: string | null
   /** Display-only aspect override; null = auto-detect. See lib/aspect.ts. */
   display_aspect_ratio?: string | null
   location?: string | null
@@ -147,6 +154,8 @@ function aspectValueOf(form: CameraForm): string | null {
 
 type CameraForm = {
   name: string
+  /** A USB webcam camera's device (host agent id). */
+  source_device?: string
   description?: string
   ip_address: string
   port: number
@@ -241,6 +250,10 @@ export function Cameras() {
     [camsQuery.data],
   )
   const total = camsQuery.data?.total ?? 0
+  // USB webcams are streamed by the host agent: its view names their
+  // webcam and says how each stream is doing. Asked only when needed.
+  const hasUsbWebcams = cameras.some((c) => c.source_type === 'publisher' && !!c.source_device)
+  const { info: hostAgent } = useHostAgent(hasUsbWebcams && canManageCameras)
   const counts = camsQuery.data?.counts
 
   const mtxQuery = useMediaMtxHealth()
@@ -422,6 +435,16 @@ export function Cameras() {
   // One camera's buttons, shared by the table row and the grid card.
   const cameraActions = (c: Camera) => (
     <>
+      {canManageCameras && c.source_type === 'publisher' && !c.source_device && (
+        <IconButton
+          variant="outline"
+          onClick={() => navigate(`/cameras/${c.id}/publish`)}
+          title="Publish a webcam to this camera"
+          label={`Publish a webcam to ${c.name}`}
+        >
+          <Webcam size={15} />
+        </IconButton>
+      )}
       {canManageCameras && (
         <IconButton variant="outline" onClick={() => startEdit(c)} title={t('camera.edit')} label={`${t('camera.edit')} ${c.name}`}>
           <Pencil size={15} />
@@ -798,6 +821,14 @@ export function Cameras() {
         is_active: form.is_active,
         detection_enabled: form.detection_enabled !== false,
       }
+      if (editing.source_type === 'publisher') {
+        // A webcam has none of these; sending the empty form values would
+        // only ask the server to strip them again.
+        for (const k of ['ip_address', 'port', 'username', 'password', 'rtsp_url', 'substream_url']) delete payload[k]
+        // A USB webcam picked (or switched) in the form; a browser webcam
+        // stays one until a webcam is picked.
+        if (form.source_device) payload.source_device = form.source_device
+      }
       Object.keys(payload).forEach((k) => payload[k] === undefined && delete payload[k])
       const { data } = await apiService.updateCamera(editing.id, payload)
       setShowEditDialog(false)
@@ -1031,6 +1062,7 @@ export function Cameras() {
       status: c.status || 'unknown',
       is_active: c.is_active,
       detection_enabled: c.detection_enabled !== false,
+      source_device: c.source_device || '',
     })
     setShowEditDialog(true)
   }
@@ -1410,9 +1442,26 @@ export function Cameras() {
                     {c.location?.trim() ? c.location : <span className="text-[var(--text-dim)]">—</span>}
                   </TD>
                   <TD>{activeBadge(c)}</TD>
-                  <TD className="whitespace-nowrap truncate" title={`${c.ip_address}:${c.port}`}>
-                    {c.ip_address}<span className="text-[var(--text-dim)]">:{c.port}</span>
-                  </TD>
+                  {c.source_type === 'publisher' ? (
+                    c.source_device ? (() => {
+                      const cam = hostAgent?.webcams.find((w) => w.id === c.source_device)
+                      const st = hostAgent?.connected ? hostAgent.streams.find((s) => s.camera_id === c.id) : undefined
+                      const label = hostAgent && !hostAgent.connected ? 'Host agent not running' : describeStream(st)
+                      return (
+                        <TD className="whitespace-nowrap truncate" title={`Webcam on the OpenNVR server${cam ? ` (${cam.name})` : ''}: ${label}`}>
+                          <span className="inline-flex items-center gap-1 text-[var(--text-dim)]"><Webcam size={13} /> Server · {cam?.name ?? 'webcam'}</span>
+                        </TD>
+                      )
+                    })() : (
+                      <TD className="whitespace-nowrap truncate" title="A webcam published from a browser tab">
+                        <span className="inline-flex items-center gap-1 text-[var(--text-dim)]"><Webcam size={13} /> Browser webcam</span>
+                      </TD>
+                    )
+                  ) : (
+                    <TD className="whitespace-nowrap truncate" title={`${c.ip_address}:${c.port}`}>
+                      {c.ip_address}<span className="text-[var(--text-dim)]">:{c.port}</span>
+                    </TD>
+                  )}
                   <TD>
                     <Badge variant={stream.variant} title={stream.title}>
                       {stream.icon && <Unplug size={12} />}
@@ -1486,6 +1535,7 @@ export function Cameras() {
               <Field label="Name">
                 <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required />
               </Field>
+              {editing.source_type !== 'publisher' && (<>
               <Field label="IP address">
                 <Input value={form.ip_address} onChange={(e) => setForm({ ...form, ip_address: e.target.value })} onBlur={() => syncIdentity('ip_address')} required />
               </Field>
@@ -1510,6 +1560,7 @@ export function Cameras() {
               <Field label="Password">
                 <Input type="password" value={form.password || ''} onChange={(e) => setForm({ ...form, password: e.target.value })} onBlur={() => syncIdentity('password')} placeholder="Leave blank to keep existing" />
               </Field>
+              </>)}
               <Field label="Location">
                 <Input value={form.location || ''} onChange={(e) => setForm({ ...form, location: e.target.value })} />
               </Field>
@@ -1521,6 +1572,30 @@ export function Cameras() {
               </Field>
             </div>
 
+            {editing.source_type === 'publisher' ? (
+              editing.source_device ? (
+                <Field label="Webcam on the OpenNVR server">
+                  <HostWebcamPicker
+                    value={form.source_device || null}
+                    ownCameraId={editing.id}
+                    onChange={(id) => setForm({ ...form, source_device: id })}
+                  />
+                </Field>
+              ) : (
+                <div className="space-y-2">
+                  <p className="text-xs text-[var(--text-dim)]">
+                    A webcam has no address or stream URL: its video is published
+                    from a browser tab (the Webcam button on its row). To feed it
+                    from a USB webcam on the OpenNVR server instead, pick one:
+                  </p>
+                  <HostWebcamPicker
+                    value={form.source_device || null}
+                    ownCameraId={editing.id}
+                    onChange={(id) => setForm({ ...form, source_device: id })}
+                  />
+                </div>
+              )
+            ) : (<>
             <Field label="RTSP URL">
               {(id, describedBy) => (
                 <div className="flex gap-2">
@@ -1543,6 +1618,7 @@ export function Cameras() {
             <Field label="Substream URL">
               <Input value={form.substream_url || ''} onChange={(e) => setForm({ ...form, substream_url: e.target.value })} placeholder="Optional low-res feed for the camera agent's live view" />
             </Field>
+            </>)}
 
             {/* Display only — it never re-encodes and never re-provisions the
                 stream. Auto covers encoders that squash the picture and signal
