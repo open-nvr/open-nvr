@@ -394,16 +394,27 @@ async def lifespan(app: FastAPI):
                     provisioned_count = 0
                     failed_count = 0
 
-                    from services.mediamtx_startup_service import (
-                        MediaMtxStartupService as _MtxStartup,
-                    )
-
                     for cfg, cam in rows:
+                        payload = {
+                            # The camera row wins over the config row. cfg.source_url
+                            # is a snapshot taken when the camera was first
+                            # provisioned; reading it here is what used to revert an
+                            # edited RTSP URL on every restart. Keeping it as the
+                            # fallback lets this loop self-heal rows that drifted
+                            # before the edit path started syncing it — no migration.
+                            "source_url": cam.rtsp_url or cfg.source_url,
+                            # A webcam's path waits for a publisher.
+                            "source_type": cam.source_type,
+                            # Without this key _provision_substream falls back to
+                            # deriving the sub URL from vendor convention, silently
+                            # discarding an operator-stored one on every restart.
+                            "substream_url": cam.substream_url,
+                            "rtsp_transport": cfg.rtsp_transport,
+                            "recording_enabled": cfg.recording_enabled,
+                            "recording_path": cfg.recording_path,
+                            "recording_segment_seconds": cfg.recording_segment_seconds,
+                        }
                         try:
-                            # Inside the try: a webcam's config mints a publish
-                            # token, and one camera's failure must not stop the
-                            # rest from being provisioned.
-                            payload = _MtxStartup.boot_path_config(cam, cfg)
                             # upsert, not add: when MediaMTX outlives a server
                             # restart every path already exists, and a plain add
                             # leaves each one on whatever config it had.

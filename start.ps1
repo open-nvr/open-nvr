@@ -663,12 +663,6 @@ function Get-LanIPs {
 }
 
 function Set-HostIpEnv {
-    # The host's OS for core (docker-compose.yml OPENNVR_HOST_OS): Add Camera
-    # → Webcam then names the right install command for THIS machine (#904).
-    # $IsMacOS/$IsLinux exist only in PowerShell 7; on 5.1 they are $null.
-    if ([string]::IsNullOrWhiteSpace((Get-EnvVar "OPENNVR_HOST_OS"))) {
-        $env:OPENNVR_HOST_OS = if ($IsMacOS) { 'darwin' } elseif ($IsLinux) { 'linux' } else { 'windows' }
-    }
     $hostIpSet = -not [string]::IsNullOrWhiteSpace($env:OPENNVR_HOST_IP) -or
                  -not [string]::IsNullOrWhiteSpace((Get-EnvVar "OPENNVR_HOST_IP"))
     $lanIpsSet = -not [string]::IsNullOrWhiteSpace($env:OPENNVR_LAN_IPS) -or

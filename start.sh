@@ -171,45 +171,6 @@ accel_args() {
     esac
     echo "$args"
 }
-
-# ── USB webcams on this machine (docs/WEBCAM.md) ───────────
-# WEBCAMS=on (the .env.example default) adds docker-compose.webcams.yml,
-# where MediaMTX captures the webcam itself. Linux only: Docker Desktop
-# cannot see USB, and there the host agent does the job. The overlay also
-# bind-mounts /sys/class/video4linux into core, and Docker cannot create a
-# missing path under /sys ("mkdir ... operation not permitted"), so on a
-# kernel that has not loaded video4linux yet (no webcam ever plugged in, a
-# cloud VM) the overlay would stop core from starting at all. Then it is
-# left out until the next `up` after a webcam appears.
-webcams_usable() {
-    [[ "$(get_env_var WEBCAMS)" == "on" && "$(uname -s)" == "Linux" \
-        && -d /sys/class/video4linux && -f docker-compose.webcams.yml ]]
-}
-
-# What core needs to know about the host, persisted to .env for the same
-# reason as apply_accel_env's values (every compose entry point must see
-# them). Runs in the PARENT shell: compose_args is a subshell.
-#   OPENNVR_HOST_OS  linux|darwin, so Add Camera → Webcam can say what to do
-#                    on THIS server (a browser on Windows looking at a Linux
-#                    server must not be told to run start.ps1).
-#   VIDEO_GID        the host's `video` group, which MediaMTX joins to open
-#                    /dev/video* (the overlay's default is Debian's 44).
-apply_host_env() {
-    local host_os=""
-    case "$(uname -s)" in Linux*) host_os=linux ;; Darwin*) host_os=darwin ;; esac
-    [[ -n "$host_os" && "$(get_env_var OPENNVR_HOST_OS)" != "$host_os" ]] && set_env_var OPENNVR_HOST_OS "$host_os"
-    [[ "$(get_env_var WEBCAMS)" == "on" && "$host_os" == linux ]] || return 0
-    if [[ ! -f docker-compose.webcams.yml ]]; then
-        echo -e "${YELLOW}Webcams:${NC} WEBCAMS=on but docker-compose.webcams.yml is missing — USB webcams stay off." >&2
-    elif [[ ! -d /sys/class/video4linux ]]; then
-        echo -e "${YELLOW}Webcams:${NC} this kernel has no video4linux yet (/sys/class/video4linux) — USB webcams stay off. Plug a webcam in, then run ./start.sh up again." >&2
-    else
-        local vgid; vgid=$(getent group video 2>/dev/null | cut -d: -f3)
-        [[ -n "$vgid" && "$(get_env_var VIDEO_GID)" != "$vgid" ]] && set_env_var VIDEO_GID "$vgid"
-    fi
-    return 0
-}
-
 # The flavour's DETECT_* defaults go into the environment compose reads
 # (shell wins over .env). This must run in the PARENT shell — compose_args
 # is used as $(compose_args), and an export inside that subshell is lost —
@@ -588,9 +549,15 @@ compose_args() {
             echo -e "${YELLOW}Discovery:${NC} LAN_DISCOVERY=on needs core $LAN_DISCOVERY_MIN_CORE or newer (the prober is built from the core image's host-agent binary); CORE_TAG=$(get_env_var CORE_TAG) has none. Multicast discovery is left out until the pin moves." >&2
         fi
     fi
-    # USB webcams: see webcams_usable and apply_host_env (which says why when
-    # WEBCAMS=on cannot be honoured; this runs in a subshell, so it stays quiet).
-    webcams_usable && args="$args -f docker-compose.webcams.yml"
+    if [[ "$(get_env_var WEBCAMS)" == "on" && "$(uname -s)" == "Linux" ]]; then
+        if [[ -f docker-compose.webcams.yml ]]; then
+            args="$args -f docker-compose.webcams.yml"
+            local vgid; vgid=$(getent group video 2>/dev/null | cut -d: -f3)
+            [[ -n "$vgid" ]] && export VIDEO_GID="$vgid"
+        else
+            echo "WEBCAMS=on but docker-compose.webcams.yml is missing" >&2
+        fi
+    fi
     local example_compose example_profile
     example_compose=$(get_env_var "OPENNVR_EXAMPLE_COMPOSE")
     example_profile=$(get_env_var "OPENNVR_EXAMPLE_PROFILE")
@@ -2111,7 +2078,7 @@ run_up() {
     fi
     print_banner
     run_validate || exit 1
-    apply_accel_env; apply_host_env; ARGS=$(compose_args)
+    apply_accel_env; ARGS=$(compose_args)
     persist_compose_set "$ARGS"
     configure_nginx_bind_host || exit 1
     configure_webrtc_ice_port || exit 1
@@ -2193,7 +2160,7 @@ run_build() {
     fi
     print_banner
     run_validate || exit 1
-    apply_accel_env; apply_host_env; ARGS=$(compose_args)
+    apply_accel_env; ARGS=$(compose_args)
     persist_compose_set "$ARGS"
     configure_nginx_bind_host || exit 1
     configure_webrtc_ice_port || exit 1
@@ -2276,7 +2243,7 @@ case "$COMMAND" in
     #
     # Stopping first also frees the ports, so the probe can return to the
     # preferred ICE port when a previous run had to fall back.
-    apply_accel_env; apply_host_env; ARGS=$(compose_args) || exit 1
+    apply_accel_env; ARGS=$(compose_args) || exit 1
     accel_summary
     echo -e "  ${YELLOW}Stopping all services ...${NC}"
     docker compose $ARGS stop

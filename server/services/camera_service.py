@@ -25,7 +25,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
-from core.camera_source import SOURCE_PUBLISHER, is_publisher
+from core.camera_source import is_publisher
 from core.config import settings
 import logging
 
@@ -348,10 +348,9 @@ class CameraService:
 
         from services.local_webcams import provisioning_for, substream_marker
         extra = provisioning_for(db_camera)
-        if extra.get("substream"):
-            # The row says it has a sub stream (a Linux USB webcam, or one
-            # the host agent streams); the detect tap reads the small path
-            # and evidence the large one, as for an IP camera.
+        if extra:
+            # The row says it has a sub stream; the detect tap reads the
+            # small path and evidence the large one, as for an IP camera.
             from services.stream_service import _build_stream_name, substream_name
             name = _build_stream_name(settings.mediamtx_stream_prefix, db_camera.id, db_camera.ip_address)
             db_camera.substream_url = substream_marker(substream_name(name))
@@ -409,30 +408,6 @@ class CameraService:
                 },
                 exc_info=True,
             )
-
-    @staticmethod
-    def webcam_device_owner(
-        db: Session, source_device: str | None, exclude_camera_id: int | None = None
-    ) -> Camera | None:
-        """The camera a webcam device on the OpenNVR machine already feeds.
-
-        One device, one camera: its capture (the host agent's ffmpeg, or
-        MediaMTX's own on Linux) opens the device, and a webcam serves one
-        capture at a time — a second camera on it would fail "device busy"
-        and retry forever. A paused camera still holds its device (it gets it
-        back on reactivation); one in the bin does not. Every camera counts,
-        whoever owns it: the device is physical.
-        """
-        if not source_device:
-            return None
-        q = db.query(Camera).filter(
-            Camera.source_type == SOURCE_PUBLISHER,
-            Camera.source_device == source_device,
-            Camera.deleted_at.is_(None),
-        )
-        if exclude_camera_id is not None:
-            q = q.filter(Camera.id != exclude_camera_id)
-        return q.first()
 
     @staticmethod
     def get_camera_by_id(db: Session, camera_id: int, user_id: int) -> Camera | None:

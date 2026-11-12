@@ -32,15 +32,10 @@ export type HostAgentInfo = {
   streams: HostAgentStream[]
 }
 
-/** The command(s) that install the agent, for the machine OpenNVR runs on.
- *  ``os`` is the agent's report, else the launcher's (GET /host-agent fills
- *  it from OPENNVR_HOST_OS). Unknown → both commands. Never a guess from
- *  the browser's OS: a Windows PC looking at a Linux server was told to run
- *  start.ps1, which that server does not have (#904). */
-export function hostAgentInstallCommands(os: string | null | undefined): string[] {
-  if (os === 'windows') return ['.\\start.ps1 host-agent install']
-  if (os === 'linux' || os === 'darwin') return ['./start.sh host-agent install']
-  return ['./start.sh host-agent install', '.\\start.ps1 host-agent install']
+/** The command that installs the agent, for the machine OpenNVR runs on. */
+export function hostAgentInstallCommand(os: string | null | undefined): string {
+  const guess = os || (typeof navigator !== 'undefined' && /windows/i.test(navigator.userAgent) ? 'windows' : 'linux')
+  return guess === 'windows' ? '.\\start.ps1 host-agent install' : './start.sh host-agent install'
 }
 
 /** How to install ffmpeg, which the agent needs to capture. */

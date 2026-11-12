@@ -45,7 +45,6 @@ import { ASPECT_OPTIONS, isCustomAspect } from '../lib/aspect'
 import { parseRtspUrl, rtspPortFromUrl, syncCameraIdentity } from '../lib/cameraIdentity'
 import type { IdentityField } from '../lib/cameraIdentity'
 import { formatDuration } from '../lib/time'
-import { stopSession } from '../lib/webcamSessions'
 import { Modal } from '../components/Modal'
 import { HostWebcamPicker, useHostAgent } from '../components/HostWebcamPicker'
 import { describeStream } from '../lib/hostAgent'
@@ -865,8 +864,6 @@ export function Cameras() {
     try {
       setMutating(true)
       await apiService.deleteCamera(c.id)
-      // A browser webcam this tab publishes: stop it and let the webcam go.
-      stopSession(c.id)
       await refreshCameras()
       showSuccess('Camera deleted')
     } catch (e: any) {
@@ -891,7 +888,7 @@ export function Cameras() {
       // "completed" regardless; count them and say which way it went.
       let failed = 0
       for (const id of ids) {
-        try { await apiService.deleteCamera(id); stopSession(id) } catch { failed++ }
+        try { await apiService.deleteCamera(id) } catch { failed++ }
       }
       await refreshCameras()
       clearSelection()

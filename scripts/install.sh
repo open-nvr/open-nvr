@@ -1443,10 +1443,8 @@ main() {
     if [[ "$(uname -s)" == "Linux" ]]; then
         # On Linux a webcam needs no host install: MediaMTX serves it with the
         # device passed into its container (docker-compose.webcams.yml).
-        # Yes by default (#904): a webcam plugged in later just works. Only an
-        # .env that already says off keeps no as its answer.
-        local wc_default=y
-        [[ "$(env_get WEBCAMS)" == "off" ]] && wc_default=n
+        local wc_default=n
+        [[ "$(env_get WEBCAMS)" == "on" ]] && wc_default=y
         if ask_yes_no "Use USB webcams plugged into this machine as cameras?" "$wc_default"; then
             env_set WEBCAMS on; ok "USB webcams: on (Add Camera → Webcam lists them)"
         else

@@ -16,7 +16,7 @@
 import { useSyncExternalStore } from 'react'
 import { apiService } from './apiService'
 import { extractApiError } from './apiError'
-import { CameraGoneError, SessionExpiredError, WhipPublisher, type PublisherState, type WhipSession } from './whipPublisher'
+import { SessionExpiredError, WhipPublisher, type PublisherState, type WhipSession } from './whipPublisher'
 
 export type WebcamSettings = { deviceId: string; resolution: string; audio: boolean }
 
@@ -25,25 +25,7 @@ export type WebcamSession = {
   cameraName: string
   stream: MediaStream
   settings: WebcamSettings
-  /** The physical camera the stream really comes from (settings.deviceId
-   *  may be '' for "Default camera"). */
-  device: string
   state: PublisherState
-}
-
-/** The device a stream's video comes from, as the browser names it. */
-export function streamDevice(stream: MediaStream | null | undefined): string {
-  return stream?.getVideoTracks()[0]?.getSettings().deviceId ?? ''
-}
-
-/** The session in this tab already publishing `device`, other than
- *  `exceptCameraId`'s own. One webcam feeds one camera: a second camera on
- *  it is the same picture recorded twice. */
-export function sessionOnDevice(
-  sessions: WebcamSession[], device: string, exceptCameraId?: number,
-): WebcamSession | undefined {
-  if (!device) return undefined
-  return sessions.find((s) => s.device === device && s.cameraId !== exceptCameraId)
 }
 
 type Internal = WebcamSession & { publisher: WhipPublisher }
@@ -116,18 +98,11 @@ export function startSession(cameraId: number, cameraName: string, stream: Media
       return data
     } catch (e: any) {
       if (e?.status === 401 || e?.status === 403) throw new SessionExpiredError()
-      if (e?.status === 404) {
-        // Deleted (in another tab, on another device): a session retrying
-        // for ever would keep the webcam open, its light on, for nothing.
-        window.setTimeout(() => stopSession(cameraId), 0)
-        throw new CameraGoneError()
-      }
       throw new Error(extractApiError(e, 'Could not reach OpenNVR'))
     }
   }
   const s: Internal = {
     cameraId, cameraName, stream, settings,
-    device: streamDevice(stream) || settings.deviceId,
     state: { kind: 'connecting', attempt: 0 },
     publisher: null as unknown as WhipPublisher,
   }

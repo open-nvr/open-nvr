@@ -41,10 +41,6 @@ export class NoH264Error extends Error {
 /** Raised by getSession when the user's own session is gone (401/403). */
 export class SessionExpiredError extends Error {}
 
-/** Raised by getSession when the camera no longer exists (404): it was
- *  deleted, here or anywhere else. Publishing ends instead of retrying. */
-export class CameraGoneError extends Error {}
-
 /**
  * Put H.264 first (packetization-mode=1 variants ahead of the rest) and
  * drop everything else, so the browser cannot fall back to VP8: recording
@@ -151,11 +147,6 @@ export class WhipPublisher {
       if (e instanceof SessionExpiredError) {
         this.stopped = true
         this.onState({ kind: 'error', reason: 'Sign in again to keep publishing.' })
-        return
-      }
-      if (e instanceof CameraGoneError) {
-        this.stopped = true
-        this.onState({ kind: 'error', reason: 'This camera was deleted.' })
         return
       }
       this.scheduleRetry(e?.message || 'Could not reach OpenNVR')

@@ -57,17 +57,12 @@ cameras can publish.
 On Linux the webcam's device is passed into the MediaMTX container and
 MediaMTX runs the capture itself (`runOnInit`, restarted when the camera is
 unplugged and plugged back). No host agent, no sudo, nothing outside Docker.
+This is how Frigate and Home Assistant serve webcams too.
 
-1. Nothing to switch on: `WEBCAMS=on` is the default in `.env` (an older
-   `.env` that says `off` keeps it; change it and run `./start.sh up`).
-   `./start.sh` adds `docker-compose.webcams.yml`: MediaMTX gets the host's
-   video devices and an ffmpeg, core gets the stable device names
-   (`/dev/v4l/by-id`) to list them. `VIDEO_GID` is filled in from the
-   host's `video` group. On a kernel that has not loaded video4linux yet
-   (no `/sys/class/video4linux`: no webcam ever plugged in, a cloud VM),
-   `start.sh` leaves the overlay out and says so, since Docker cannot mount
-   a missing `/sys` path and core would not start. Plug the webcam in and
-   run `./start.sh up` again.
+1. `WEBCAMS=on` in `.env` (the installer asks), then `./start.sh up`. This
+   adds `docker-compose.webcams.yml`: MediaMTX gets the host's video devices
+   and an ffmpeg, core gets the stable device names (`/dev/v4l/by-id`) to
+   list them. `VIDEO_GID` is filled in from the host's `video` group.
 2. **Add Camera → Manual → Webcam**, source **OpenNVR server**. The webcams
    plugged into the machine are listed by name. Pick one, name the camera,
    click **Add webcam**. It is live within a few seconds.
@@ -79,10 +74,8 @@ Like an IP camera with a substream, the webcam gets two paths: `cam-<id>`
 encoder after measuring it. A webcam is named by its `/dev/v4l/by-id`
 entry, which does not change when it moves to another USB port.
 
-What the overlay changes: the MediaMTX image becomes the `-ffmpeg` variant,
-built as its own image (`opennvr/mediamtx-webcams:local-build`), while
-`WEBCAMS=off` keeps the default image, which has no shell and no ffmpeg on
-purpose. `/dev` is
+What the overlay changes: the MediaMTX image becomes the `-ffmpeg` variant
+(the default image has no shell and no ffmpeg on purpose), `/dev` is
 bind-mounted with a cgroup rule that admits only video devices, and the
 container joins the host's `video` group. Docker Desktop on macOS and
 Windows cannot pass USB devices; there the host agent below does the job.

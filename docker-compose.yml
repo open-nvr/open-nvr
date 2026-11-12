@@ -780,9 +780,6 @@ services:
       - OPENNVR_HOST_IP=${OPENNVR_HOST_IP:-}
       - OPENNVR_LAN_IPS=${OPENNVR_LAN_IPS:-}
       - OPENNVR_DOCKER_SUBNET=${OPENNVR_DOCKER_SUBNET:-172.28.0.0/16}
-      # The host's OS (linux|darwin|windows), written by start.sh/start.ps1:
-      # Add Camera → Webcam says what to do on the server, not on the browser's OS.
-      - OPENNVR_HOST_OS=${OPENNVR_HOST_OS:-}
       - RECORDINGS_HOST_BASE=${RECORDINGS_PATH:-./recordings}
       - RECORDINGS_CONTAINER_BASE=/app/recordings
       - RECORDINGS_BASE_PATH=/app/recordings

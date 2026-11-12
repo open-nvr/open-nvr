@@ -33,7 +33,6 @@ from sqlalchemy.orm import Session
 from core.camera_source import PUBLISH_TOKEN_MINUTES, SOURCE_PUBLISHER
 from core.config import settings
 from models import Camera
-from services import local_webcams
 
 KEY_HASH_FILE_ENV = "OPENNVR_HOST_AGENT_KEY_HASH_FILE"
 DEFAULT_KEY_HASH_FILE = "/app/host-agent/agent.key.sha256"
@@ -474,10 +473,7 @@ def public_view(db: Session) -> dict[str, Any]:
         "connected": connected,
         "last_seen": last_seen,
         "version": base.get("version"),
-        # The agent's own report wins; before an agent ever connected, the
-        # launcher's word for the host, so the install command shown is
-        # this server's and not a guess from the browser's OS (#904).
-        "os": base.get("os") or local_webcams.host_os(),
+        "os": base.get("os"),
         "arch": base.get("arch"),
         "hostname": base.get("hostname"),
         "ffmpeg": base.get("ffmpeg") or {"found": False},
