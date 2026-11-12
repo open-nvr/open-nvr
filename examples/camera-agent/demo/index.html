@@ -1780,8 +1780,10 @@
     // Same design as OpenNVR's Live View overlay: boxes arrive as data
     // (Tier-0 tracks, relayed by the agent over /updates), drawn on a
     // canvas over the video, never burned into the stream. Per-browser
-    // toggle, OFF by default — the picture is the product.
-    let _boxesOn=false; try{ _boxesOn=localStorage.getItem("agent.boxes")==="on"; }catch{}
+    // toggle, ON by default — the boxes are what shows the AI at work on
+    // every live picture (Live view, dashboard, tour, this page alike); a
+    // viewer who wants the clean picture turns them off once.
+    let _boxesOn=true; try{ _boxesOn=localStorage.getItem("agent.boxes")!=="off"; }catch{}
     let _lastTracks=null, _boxRaf=null;
     const BOX_STALE_MS=2000;
     const LABEL_HUES={person:205,car:30,truck:45,bus:45,motorcycle:15,bicycle:160,dog:290,cat:290,bird:120,license_plate:60,plate:60,face:330};

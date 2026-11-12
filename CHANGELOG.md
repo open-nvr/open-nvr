@@ -6,6 +6,15 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Detection boxes are on by default on every live picture.** The Live
+  view, the dashboard's live wall, the camera peek, the tour, the guard-scan
+  panel, the camera agent's camera screen and the Mirror all draw boxes
+  unless the viewer turns them off; the Live view's toggle governs the web
+  app's pages, the agent page keeps its own switch. A page without a live
+  player (the ANPR register shows the read's photo) is unchanged.
+
 ### Added
 
 - **Add Camera → Discover finds ONVIF cameras by multicast.** Core runs on
