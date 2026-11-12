@@ -6,62 +6,9 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Fixed
+## [0.1.11] — 2026-11-12
 
-- **A fresh Linux install could not start: the discovery prober's build
-  failed.** `docker-compose.lan-discovery.yml` builds the multicast prober
-  from an inline Dockerfile that named `${CORE_IMAGE}` and `${TARGETARCH}`
-  for Docker to expand; Compose interpolated them first, to blanks, and the
-  build died at `FROM  AS core` ("FROM requires either one or three
-  arguments"). The installer never builds that service (it pulls the base
-  set), so the failure arrived at `./start.sh up` and took every service
-  with it; LAN_DISCOVERY is on by default on Linux since 0.1.11's main. The
-  two are now `$${...}`, which Compose passes through. And since the prober
-  copies the host-agent binary out of the core image, which only 0.1.11
-  and newer carry, `start.sh` leaves the overlay out with a notice when
-  CORE_TAG pins an older release instead of failing the whole start.
-  Found by a fresh install on a Ventuno Q (2026-11-12).
-
-- **A plain Qualcomm install said captions were on when nothing captioned.**
-  The qualcomm flavour switched EVENTS_CAPTION_ENRICHMENT and the descriptor
-  flags on whenever the NPU captioner image existed, but the captioner
-  service is defined by `docker-compose.camera-agent.yml`; an install
-  without the Camera Agent had the flags on and no captioner, so search by
-  caption silently had nothing to search. The flags now turn on only when
-  that file is in the install; otherwise `start.sh` says the captioner is
-  available and how to get it. The adapter pick and tag are still filled.
-
-- **A fresh install on a Qualcomm board could not start.** The qualcomm
-  overlay overrode the captioner and the speech adapter, which only
-  `docker-compose.camera-agent.yml` defines, so a plain install (no camera
-  agent) handed Compose two services with no image and Compose 2.24, the
-  package on the board's Ubuntu, rejected the whole project; newer Compose
-  skips a service whose profile is off, which is how it passed every test.
-  Each flavour overlay now overrides only services of `docker-compose.yml`,
-  and its overrides of other files' services are fragments beside it
-  (`-apps.yml`, `-agent.yml`) that `start.sh` appends only when that file is
-  in the set. The intel overlay is split the same way for the same rule
-  (its adapters live in `docker-compose.apps.yml`; they carried an image,
-  so it did not fail, but it defined services no file in the set had). The
-  merged configuration is byte-for-byte what the single overlays produced
-  (Compose 2.22, every profile on), and a test holds every overlay to the
-  rule.
-
-- **The NPU embedder asked for an image that did not exist.** `start.sh`
-  found `siglip-qnn-adapter:latest-qualcomm` when the pinned release had no
-  such image, but never wrote the tag it found; the overlay then requested
-  `<ADAPTER_TAG>-qualcomm`, which was not on the registry, and Compose
-  cancelled every other pull of the project. The fill now writes
-  `EMBED_ADAPTER_TAG` and the overlay uses it; leaving the flavour clears it.
-
-### Changed
-
-- **Detection boxes are on by default on every live picture.** The Live
-  view, the dashboard's live wall, the camera peek, the tour, the guard-scan
-  panel, the camera agent's camera screen and the Mirror all draw boxes
-  unless the viewer turns them off; the Live view's toggle governs the web
-  app's pages, the agent page keeps its own switch. A page without a live
-  player (the ANPR register shows the read's photo) is unchanged.
+The Qualcomm NPU release. On the qualcomm flavour the detector, the captions (Gemma), the camera agent's LLM, the search embeddings (SigLIP 2 and a sentence model), speech to text (Whisper) and the plate reader all run on the Hexagon HTP, and a fresh install on a Dragonwing board starts with one setting: the flavour overlays are split per compose file so Compose 2.24 accepts a plain install, the tag the embedder fill finds is the tag asked for, and the discovery prober's Dockerfile reaches Docker intact. Detection boxes are on by default on every live picture. Search gained weighted fusion, synonyms and typo reading, a caption arm with its own model, voice search and a bounded re-rank, off by default. The workflow engine runs workflows and has an API. ANPR on a Qualcomm box: plate candidates at full resolution, consensus across looks, per-camera scan policy. USB webcams are cameras, served by MediaMTX on Linux; Add Camera finds ONVIF cameras by multicast. The camera agent serves OpenNVR Mirror. The dashboard shows the NPU and GPU beside CPU, memory and disk, and says when requests are queued. Adapter pins at `0.1.11` (`text_embed` on its own tag). App SDK stays 0.11.0.
 
 ### Added
 
@@ -79,8 +26,6 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   two machines' clocks; the probe sets its multicast egress per interface
   and probes every up interface, letting the Camera LAN check decide.
 
-### Added
-
 - **USB webcams as cameras.** Add Camera → Manual → Webcam, two sources:
   this browser (WHIP, while the tab is open) and the OpenNVR server. On
   Linux the server path needs no install: `WEBCAMS=on` adds
@@ -93,53 +38,6 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `source_type = publisher`: recording, live view, playback, snapshots and
   detection read its path as for any camera. See docs/WEBCAM.md.
 
-### Fixed
-
-- **A plate read in fast mode no longer arrives without its photo.** In
-  fast scan mode the bus consumer does not defer to the sweep, so the
-  echo of the sweep's own read could land on a visit after the sweep had
-  folded it as a duplicate sighting and thrown its crop away: a number
-  with "no read frame" in the register (every such row on the test box
-  was one of these). The fold now leaves the row its crop and frame,
-  paths only; the number that may follow has its proof. Accurate mode
-  is unchanged.
-
-### Changed
-
-- **Camera agent: the chat is the conversation; events stay in Activity.**
-  A watch hit or an app alert (a plate read, an occupancy change) used to be
-  posted into the transcript as an agent message as well as listed in the
-  Activity feed. It now chimes, is spoken under the site's policy, and
-  appears once, in Activity, with its camera and time.
-
-### Changed
-
-- **Detections are drawn on every live picture, under one switch.** The
-  dashboard's live wall, the camera peek and the tour now carry the same
-  box overlay as the Live view, following the Live view's per-browser
-  preference (on unless turned off there).
-
-### Fixed
-
-- **Camera agent: the app-alert subscriber no longer trips over itself on
-  a clean stop.** Its stop path unsubscribed a plate subscription that
-  only the inference subscriber holds; the `NameError` was logged as an
-  error and the subscriber reconnected for nothing.
-
-- **The live detection overlay moves with the object, and is on by
-  default.** Tier-0 publishes about five frames a second; the boxes used
-  to jump between them. Each track's box now glides toward its latest
-  position on the display's frame clock (90 ms time constant), a new
-  track fades in, a lost one fades out instead of vanishing, and a moving
-  track draws its last 1.5 s of path. The box is corner brackets with a
-  faint outline and tint rather than a solid rectangle, so the subject
-  stays visible; the label pill carries the class, the track id and the
-  score as a number and a bar. A small badge in the corner counts the
-  objects and the detector's publishing rate. Detections are on by
-  default in the Live view; the toggle still turns them off per browser.
-
-### Added
-
 - **OpenNVR Mirror: the booth page.** The camera agent serves `/mirror`,
   a kiosk page for a show floor: live video full screen, Tier-0 boxes with
   label and confidence, one sentence about the scene every few seconds
@@ -151,112 +49,6 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   speaks only what is new, greets a newcomer, and stops itself when no
   page has been heard from for 45 s. Reuses the agent's WebRTC stream,
   `/updates` socket, vision path and voice, behind the same login.
-
-### Fixed
-
-- **The server can start on a read-only source tree.** The logs
-  directory is resolved from the source-tree location and created at
-  import time, so an install that cannot create a `logs/` directory
-  next to its sources (e.g. a NixOS package) died on `mkdir` before the
-  app could start. Setting `OPENNVR_LOGS_DIR` to a writable
-  directory moves the log file there; the default stays
-  `<repo>/logs/`, so Docker and bare-metal dev installs are
-  unchanged.
-
-- **Search says when a class was never detected and the page is
-  lookalikes.** Since #873 a parsed class word no longer walls off the
-  vector arms, so "a dog" on a site with no dog detections returns the
-  visits whose frames or captions look most like one — the honest best
-  answer, but a page of cars under "a dog" with no word reads as a wrong
-  one. The response now carries `lookalike` (`classes`, `what`) when the
-  class had zero detections in the window and the vectors answered
-  anyway, and the Search page shows it as a warning with "Only detected
-  <class>" one click away (a `label=` chip, which is a wall). Not raised
-  when the class was detected, when the chip was explicit, or past the
-  first page. (`server/routers/search.py`, `app/src/views/Search.tsx`)
-- **A typed synonym filters by the value the store holds, and the
-  vocabularies know the words operators here use.** "gray car" promoted
-  to a `colour:gray` claim, and the store says `grey` — the writer
-  canonicalises a VLM's "gray" to "grey", the filter did not — so a
-  typed synonym matched nothing, silently; the promoted claim now carries
-  the canonical value. The colour maps gain the shades people type (navy,
-  crimson, tan, khaki, cream, charcoal, golden, violet, olive…), the
-  vehicle kinds gain `rickshaw` with auto / tuk-tuk / scooty / jeep /
-  tempo as synonyms, the garments that make a colour clothing gain
-  kurta, saree, salwar, kameez, sherwani, dhoti, hooded, sweatshirt, tee,
-  and the class words gain cop, police, guard, watchman, courier,
-  worker, toddler, elderly (people), scooty and moped (motorcycle), an
-  auto or rickshaw (a car or a motorcycle to the detector), jeep / suv /
-  sedan / taxi (car), pickup (truck or car) — and "bike" now means a
-  bicycle or a motorcycle, which on most roads here it does. Words of
-  three or four letters that the typo corrector would read real words
-  into (baby for bay, cab for cam) were deliberately left out.
-  (`server/services/search_intent.py`, `server/services/search_query.py`,
-  `server/services/descriptor_enrichment.py`)
-- **ANPR on a Qualcomm box: the plate reader's compiled graphs survive a
-  recreate, and two scan-mode knobs reach core.** On the Ventuno Q the
-  plate reader's HTP graph for the baked `indian-plates-v1` model was
-  written inside the image's own path and compiled again on every
-  recreate (the detector's landed on the cache volume by luck of its
-  download path); the qualcomm overlay now points `ADAPTER_ACCEL_CACHE_DIR`
-  at the cache volume. `OPENNVR_PLATE_FAST_DEDUP_WINDOW_S` and
-  `OPENNVR_PLATE_AUTO_BACKLOG`, documented since 0.1.6, never reached
-  the core container; they do now. The dispatch route no longer offers
-  bicycles to the plate reader. And the catalogue and docs stop
-  describing a "YOLOv8 → crop → fast-plate-ocr chain" that does not
-  exist: the reader localises the plate in the vehicle crop itself; the
-  app entry says version 2.5.0 and lists all five alert types, the
-  adapter entry says 1.1.0 and where it runs, the app's README counts
-  its 77 tests and describes the fuzzy matching it has.
-  (`docker-compose.accel-qualcomm.yml`, `docker-compose.yml`,
-  `server/config/apps_index.yml`, `server/config/adapters_index.yml`,
-  `detect-pipeline/detect_pipeline/dispatch.py`, docs)
-
-### Changed
-
-- **Voice search looks and behaves like voice search.** The first cut was
-  a small pulsing icon, which read as nothing happening. Now, while
-  listening, the whole field glows in the accent colour, live level bars
-  driven by the microphone replace the search icon, the placeholder
-  says "Listening…", the words appear in the field as they are heard
-  (an interim transcription of the clip so far every two seconds, grey
-  until final) and the one button on the right becomes a large accent
-  **Search**. Listening ends on that click, on Escape (cancel), or by
-  itself after 1.8 s of quiet once something was said (the end-pointing
-  phones use), with a 20 s cap; then the read-back query runs and the
-  button returns to the microphone. (`app/src/views/Search.tsx`,
-  `app/src/lib/voiceCapture.ts`)
-
-### Fixed
-
-- **Search finds what the detector misnamed, and "two men" no longer
-  means "counted as two".** Two walls the labelled eval exposed. A class
-  word the parser produced ("pickup truck" → `truck`) restricted every
-  arm, so a pickup the detector had called a `car` was unreachable even
-  though its caption says pickup and its frame looks like one; parsed
-  class words are now a hint for the word arm and no wall for the vector
-  arms (`labels_soft`; an explicit `label=` chip stays a wall, and the
-  `semantic` block says when the softening applied). And "two men",
-  "three people together" became a people-count filter that excluded
-  every visit with no count — all of them, before the pipeline counted —
-  so "two men looking at a laptop" found nothing; an unknown count now
-  passes and the captions and vectors decide. Offline over the labelled
-  pool: MRR 0.786 → 0.911, hit@5 0.857 → 1.0, P@5 0.493 → 0.586.
-  (`server/services/search_service.py`, `server/services/timeline_service.py`,
-  `server/routers/search.py`)
-
-- **Camera agent: "remove that alarm" stops the watch that is standing.**
-  People call a watch an alarm and an alarm a reminder; "I remove that
-  alarm" for a watch on a person at camera 24 left the watch running and
-  the operator removing it by hand (Ventuno Q, 2026-11-10). When the kind
-  a stop request names has nothing standing and exactly one thing of any
-  kind does, the agent stops that and says so ("There's no alarm set up —
-  the one thing standing is watch #1 … Stopped and removed watch #1");
-  with several standing it lists them by kind and number and asks;
-  "silence" still means a ringing alarm and never touches a watch.
-  (`examples/camera-agent/camera_agent.py`)
-
-### Added
 
 - **A bounded LLM re-rank of the first page, off by default.** The
   captioner's model (Gemma on the Hexagon, through the litertlm adapter's
@@ -271,6 +63,7 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   can ask per request with `?rerank=N`. `semantic.rerank` reports what
   was asked, kept and how long it took. (`server/services/search_rerank.py`,
   `server/routers/search.py`)
+
 - **Voice search.** A microphone button in the search box: click, speak,
   click again, and the clip is transcribed on the box by the same
   speech-to-text adapter the camera agent uses (whisper on the Hexagon,
@@ -286,60 +79,6 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (localhost or the HTTPS front); on plain http the button says so.
   (`server/services/search_voice.py`, `server/routers/search.py`,
   `app/src/lib/voiceCapture.ts`, `app/src/views/Search.tsx`)
-
-### Changed
-
-- **Search's fusion is weighted, and the frame floor is 0.12.** The
-  labelled eval's sweep over the Ventuno Q's visits (bench/ventuno-q-
-  text-embed-2026-11-10.md) found the frame arm at its 0.08 floor was
-  the arm costing precision, and that two vector arms with a full vote
-  each could agree on a near-miss and outvote the words that named the
-  thing. Reciprocal-rank fusion now takes a vote per arm
-  (`SEARCH_TEXT_ARM_WEIGHT` 1, `SEARCH_VECTOR_ARM_WEIGHT` 1,
-  `SEARCH_CAPTION_ARM_WEIGHT` 0.5) and `SEARCH_VECTOR_MIN_SIMILARITY`
-  defaults to 0.12 (the bottom of the measured match band): MRR 0.755 →
-  0.815, hit@5 0.857 → 0.893, P@5 0.486 → 0.536 offline. The app
-  platform's search now applies the same floors and votes as the
-  operator route. A box with 0.08 written in `.env` should change it.
-  (`server/services/search_service.py`, `server/routers/search.py`,
-  `server/routers/app_platform.py`, `server/core/config.py`)
-
-### Fixed
-
-- **The embedders are not skipped while KAI-C has yet to probe them.**
-  KAI-C reports an adapter's health as "unknown" from registration until
-  its next poll, and after a core restart every adapter re-registers at
-  once; the embed producer resolution skipped any adapter not reported
-  "ok", so for those minutes search ran words-only and said so only in
-  its `semantic` block (a whole eval run on the Ventuno Q, 2026-11-10).
-  Only a REPORTED failure skips an adapter now; one nobody has asked yet
-  is tried. (`server/services/embed_enrichment.py`)
-- **Search's caption floor, measured against the labelled eval: 0.65.**
-  The 0.75 set earlier today came from queries phrased the way the
-  captioner writes; the relevance eval's operator phrasing scores lower
-  ("hooded sweatshirt" 0.63, "light blue kurta" 0.67), and at 0.75 the
-  caption arm sat out of a quarter of the cases. A sweep of the arm
-  alone over the labelled pool gives hit@5 0.82 at 0.65 against 0.64 at
-  0.75, and 0.65 still cuts what nobody saw. `SEARCH_CAPTION_MIN_SIMILARITY`
-  default 0.65; a box on the fallback text tower should set 0.75.
-  (`bench/ventuno-q-text-embed-2026-11-10.md`)
-- **Search's vector arms hear the whole question, and typos are read
-  against the captions' own words.** The relevance eval on the Ventuno Q
-  (`tools/search_eval.py`, baseline 2026-11-10) showed two gaps. A query
-  whose every word the parser turns into a filter — "pink car", "a bus",
-  "three people together" — left nothing for the word arm, and the
-  embedders were handed that same nothing, so no semantic arm ran at all.
-  The parser now also keeps `question`: the corrected sentence with the
-  time phrase and camera names removed and everything else kept, and the
-  route embeds that (explicit `text=` is embedded as given). And a typo
-  of a word that is neither a filter nor a skill's vocabulary — "camoflage",
-  "pikup" on a site whose captions say camouflage and pickup all day —
-  was never corrected; the correction vocabulary now includes the words
-  the box's newest four thousand captions use at least twice, read at
-  most every ten minutes. (`server/services/search_query.py`,
-  `server/routers/search.py`)
-
-### Added
 
 - **Search's caption arm has its own model.** The caption arm compares a
   query with each visit's caption, text against text, and it was using
@@ -366,6 +105,7 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `embedding_store.py`, `search_service.py`, `routers/search.py`,
   `routers/app_platform.py`, `enrichment_backfill.py`,
   `docker-compose.apps.yml`, `config/tasks.yml`, `config/adapters_index.yml`)
+
 - **Sweeping older visits is a switch in the Footage Search app, off by
   default.** Enrichment describes and embeds *new* visits as they happen;
   the backfill — the sweep of everything recorded before — used to be
@@ -383,6 +123,7 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the switch. (`examples/footage-search`, `server/services/
   enrichment_backfill.py`, `server/routers/apps.py`, `start.sh`,
   `docs/ENRICHMENT.md`)
+
 - **Search's embedding lane on the Qualcomm NPU.** On the qualcomm
   flavour the `embeddings` profile now runs SigLIP2 (`google/siglip2-
   base-patch16-224`, Apache-2.0, Qualcomm AI Hub's w8a16 export) on the
@@ -397,6 +138,7 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   skill remains the operator's gate. This is what makes the frame arm
   and the caption-embedding arm of search (both already built) actually
   run on a Qualcomm box, where no embedder existed before.
+
 - **Search reads a typo as the word it is one letter from, and says so.**
   "persn at the dok" used to fall through to the caption text and match
   nothing, silently. A word that is none of the box's own vocabulary — the
@@ -649,6 +391,7 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   default. The `app` action calls an installed app's action as the person
   who answered, audited as the workflow's (the Gate concierge's
   `open_now`), and `notify` puts a message in the inbox for `who`.
+
 - **The workflow engine runs workflows.** An app's alert starts every
   On or Test workflow it triggers (`when: alert`), after the file's `if:`
   guards and its limits (cooldown, one at a time, per hour, AI per hour);
@@ -710,6 +453,7 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   no longer wins on score or area alone. The recording is asked for the best
   frame's moment, so the pick decides how sharp the evidence is.
   `tier0_best_frame_blur_vetoes_total` counts refusals.
+
 - **Plate candidates at full resolution.** A plate candidate cut at the
   moment the recording was asked for takes that result's full-resolution
   pixels (same frame, same score, same order), so the OCR looks come from
@@ -763,6 +507,7 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   AI-decided critical alerts, catches YAML's unquoted `Yes`, requires
   cameras by role, and resolves skills, apps, webhooks and lists against
   the site when given. `Report.needs` lists what a file uses.
+
 - **Acceptance suites** (`tools/acceptance.py`, docs/ACCEPTANCE.md): scored,
   on-demand, customer-runnable checks for a new box (`hardware`: detector
   backend really accelerated, detector latency as cameras-at-DETECT_FPS,
@@ -791,6 +536,7 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as `detection` in the sources listing, picked up on the next reconcile
   tick; `tier0_object_filtered_total{camera}` counts what the filters
   dropped.
+
 - **Keyframe-only main-stream evidence** (`DETECT_EVIDENCE_DECODE=nokey`).
   With detection on the substream, the main decode while something is in
   front of the camera was the remaining cost on a CPU-only box. The new
@@ -800,6 +546,7 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the skew window is widened to at least 2 s so lookups still hit, and the
   `fps` filter is left out so a keyframe is never duplicated and stamped
   as fresh. Default stays `full`.
+
 - **Keyframe evidence guarded against the wrong moment and the wrong
   place.** A crop cut from a main-stream keyframe can be up to a GOP old,
   and on a long-GOP camera a walking person has left the box by then —
@@ -814,6 +561,7 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `tier0_evidence_gop_seconds` / `tier0_evidence_keyframes_only`; core's
   tier0 metrics carry a per-camera `evidence` block and the AI Adapters
   page flags a camera whose evidence is going low-res.
+
 - **Motion masks and object masks per camera** (Settings → Camera-Config →
   Masks). A motion mask is a polygon under which nothing counts as motion
   — a clock burned into the picture, a tree in the wind, a road at the
@@ -828,16 +576,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   camera-agent sources listing as `motion_masks` / `object_masks`, and
   picked up on the next reconcile tick. `tier0_object_masked_total{camera}`
   counts what the object masks dropped. Recording is never affected.
+
 - **`./start.sh prune`** removes image tags from earlier releases (every tag
   of the release in `.env` is kept, in every flavour, plus the weights images
   and anything a container still references) and dangling layers. An upgrade
   pulled the new tags next to the old and nothing removed the old; a 55 GB
   eMMC held 23 GB of images, nine of them unreachable.
+
 - **Disk-space preflight in `start.sh`.** Below 8 GB free where the images
   land is a warning, below 2 GB an error, both naming `prune`. A full disk
   was the failure that left half a stack behind: a model pull died with "no
   space left on device", four containers stayed in Created, and every health
   check read green around the hole.
+
 - **A Detection chip on the dashboard's health bar.** The detect-pipeline
   sat in Created for an hour on a test box while every chip read green,
   and later ran on CPU after being rebuilt without its NPU while the bar
@@ -847,6 +598,7 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   healthy pipeline reads `16/16 · NPU`. The scrape (`/ai-models/tier0-metrics`)
   gains a `backend` block with the request, the effective providers and
   `fallback`.
+
 - **Detect on the substream, keep the evidence from the main stream.**
   Tier-0 already detects on a camera's low-res substream when one is
   stored (the ~5-10x decode saving), at the price of every crop, scene,
@@ -865,6 +617,7 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The fake-camera rig can publish a `<name>-sub` substream per clip
   (`FAKECAM_SUBSTREAM=360`), which `register_fake_cameras.py` stores as the
   camera's `substream_url`, so the whole path is testable without a camera.
+
 - **A camera's substream is found and verified when the camera is added.**
   Tier-0 only detects on a STORED substream, and a camera added with its
   main URL had none unless somebody typed it. On creation core now tries
@@ -891,6 +644,52 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   768 px first when Pillow is installed. For the next SDK release.
 
 ### Changed
+
+- **Detection boxes are on by default on every live picture.** The Live
+  view, the dashboard's live wall, the camera peek, the tour, the guard-scan
+  panel, the camera agent's camera screen and the Mirror all draw boxes
+  unless the viewer turns them off; the Live view's toggle governs the web
+  app's pages, the agent page keeps its own switch. A page without a live
+  player (the ANPR register shows the read's photo) is unchanged.
+
+- **Camera agent: the chat is the conversation; events stay in Activity.**
+  A watch hit or an app alert (a plate read, an occupancy change) used to be
+  posted into the transcript as an agent message as well as listed in the
+  Activity feed. It now chimes, is spoken under the site's policy, and
+  appears once, in Activity, with its camera and time.
+
+- **Detections are drawn on every live picture, under one switch.** The
+  dashboard's live wall, the camera peek and the tour now carry the same
+  box overlay as the Live view, following the Live view's per-browser
+  preference (on unless turned off there).
+
+- **Voice search looks and behaves like voice search.** The first cut was
+  a small pulsing icon, which read as nothing happening. Now, while
+  listening, the whole field glows in the accent colour, live level bars
+  driven by the microphone replace the search icon, the placeholder
+  says "Listening…", the words appear in the field as they are heard
+  (an interim transcription of the clip so far every two seconds, grey
+  until final) and the one button on the right becomes a large accent
+  **Search**. Listening ends on that click, on Escape (cancel), or by
+  itself after 1.8 s of quiet once something was said (the end-pointing
+  phones use), with a 20 s cap; then the read-back query runs and the
+  button returns to the microphone. (`app/src/views/Search.tsx`,
+  `app/src/lib/voiceCapture.ts`)
+
+- **Search's fusion is weighted, and the frame floor is 0.12.** The
+  labelled eval's sweep over the Ventuno Q's visits (bench/ventuno-q-
+  text-embed-2026-11-10.md) found the frame arm at its 0.08 floor was
+  the arm costing precision, and that two vector arms with a full vote
+  each could agree on a near-miss and outvote the words that named the
+  thing. Reciprocal-rank fusion now takes a vote per arm
+  (`SEARCH_TEXT_ARM_WEIGHT` 1, `SEARCH_VECTOR_ARM_WEIGHT` 1,
+  `SEARCH_CAPTION_ARM_WEIGHT` 0.5) and `SEARCH_VECTOR_MIN_SIMILARITY`
+  defaults to 0.12 (the bottom of the measured match band): MRR 0.755 →
+  0.815, hit@5 0.857 → 0.893, P@5 0.486 → 0.536 offline. The app
+  platform's search now applies the same floors and votes as the
+  operator route. A box with 0.08 written in `.env` should change it.
+  (`server/services/search_service.py`, `server/routers/search.py`,
+  `server/routers/app_platform.py`, `server/core/config.py`)
 
 - **The enrichment backfill is opportunistic, not a batch job.** The
   morning embeddings came on the Ventuno Q it swept history at full tilt
@@ -994,6 +793,200 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   timing matters.
 
 ### Fixed
+
+- **A fresh Linux install could not start: the discovery prober's build
+  failed.** `docker-compose.lan-discovery.yml` builds the multicast prober
+  from an inline Dockerfile that named `${CORE_IMAGE}` and `${TARGETARCH}`
+  for Docker to expand; Compose interpolated them first, to blanks, and the
+  build died at `FROM  AS core` ("FROM requires either one or three
+  arguments"). The installer never builds that service (it pulls the base
+  set), so the failure arrived at `./start.sh up` and took every service
+  with it; LAN_DISCOVERY is on by default on Linux since 0.1.11's main. The
+  two are now `$${...}`, which Compose passes through. And since the prober
+  copies the host-agent binary out of the core image, which only 0.1.11
+  and newer carry, `start.sh` leaves the overlay out with a notice when
+  CORE_TAG pins an older release instead of failing the whole start.
+  Found by a fresh install on a Ventuno Q (2026-11-12).
+
+- **A plain Qualcomm install said captions were on when nothing captioned.**
+  The qualcomm flavour switched EVENTS_CAPTION_ENRICHMENT and the descriptor
+  flags on whenever the NPU captioner image existed, but the captioner
+  service is defined by `docker-compose.camera-agent.yml`; an install
+  without the Camera Agent had the flags on and no captioner, so search by
+  caption silently had nothing to search. The flags now turn on only when
+  that file is in the install; otherwise `start.sh` says the captioner is
+  available and how to get it. The adapter pick and tag are still filled.
+
+- **A fresh install on a Qualcomm board could not start.** The qualcomm
+  overlay overrode the captioner and the speech adapter, which only
+  `docker-compose.camera-agent.yml` defines, so a plain install (no camera
+  agent) handed Compose two services with no image and Compose 2.24, the
+  package on the board's Ubuntu, rejected the whole project; newer Compose
+  skips a service whose profile is off, which is how it passed every test.
+  Each flavour overlay now overrides only services of `docker-compose.yml`,
+  and its overrides of other files' services are fragments beside it
+  (`-apps.yml`, `-agent.yml`) that `start.sh` appends only when that file is
+  in the set. The intel overlay is split the same way for the same rule
+  (its adapters live in `docker-compose.apps.yml`; they carried an image,
+  so it did not fail, but it defined services no file in the set had). The
+  merged configuration is byte-for-byte what the single overlays produced
+  (Compose 2.22, every profile on), and a test holds every overlay to the
+  rule.
+
+- **The NPU embedder asked for an image that did not exist.** `start.sh`
+  found `siglip-qnn-adapter:latest-qualcomm` when the pinned release had no
+  such image, but never wrote the tag it found; the overlay then requested
+  `<ADAPTER_TAG>-qualcomm`, which was not on the registry, and Compose
+  cancelled every other pull of the project. The fill now writes
+  `EMBED_ADAPTER_TAG` and the overlay uses it; leaving the flavour clears it.
+
+- **A plate read in fast mode no longer arrives without its photo.** In
+  fast scan mode the bus consumer does not defer to the sweep, so the
+  echo of the sweep's own read could land on a visit after the sweep had
+  folded it as a duplicate sighting and thrown its crop away: a number
+  with "no read frame" in the register (every such row on the test box
+  was one of these). The fold now leaves the row its crop and frame,
+  paths only; the number that may follow has its proof. Accurate mode
+  is unchanged.
+
+- **Camera agent: the app-alert subscriber no longer trips over itself on
+  a clean stop.** Its stop path unsubscribed a plate subscription that
+  only the inference subscriber holds; the `NameError` was logged as an
+  error and the subscriber reconnected for nothing.
+
+- **The live detection overlay moves with the object, and is on by
+  default.** Tier-0 publishes about five frames a second; the boxes used
+  to jump between them. Each track's box now glides toward its latest
+  position on the display's frame clock (90 ms time constant), a new
+  track fades in, a lost one fades out instead of vanishing, and a moving
+  track draws its last 1.5 s of path. The box is corner brackets with a
+  faint outline and tint rather than a solid rectangle, so the subject
+  stays visible; the label pill carries the class, the track id and the
+  score as a number and a bar. A small badge in the corner counts the
+  objects and the detector's publishing rate. Detections are on by
+  default in the Live view; the toggle still turns them off per browser.
+
+- **The server can start on a read-only source tree.** The logs
+  directory is resolved from the source-tree location and created at
+  import time, so an install that cannot create a `logs/` directory
+  next to its sources (e.g. a NixOS package) died on `mkdir` before the
+  app could start. Setting `OPENNVR_LOGS_DIR` to a writable
+  directory moves the log file there; the default stays
+  `<repo>/logs/`, so Docker and bare-metal dev installs are
+  unchanged.
+
+- **Search says when a class was never detected and the page is
+  lookalikes.** Since #873 a parsed class word no longer walls off the
+  vector arms, so "a dog" on a site with no dog detections returns the
+  visits whose frames or captions look most like one — the honest best
+  answer, but a page of cars under "a dog" with no word reads as a wrong
+  one. The response now carries `lookalike` (`classes`, `what`) when the
+  class had zero detections in the window and the vectors answered
+  anyway, and the Search page shows it as a warning with "Only detected
+  <class>" one click away (a `label=` chip, which is a wall). Not raised
+  when the class was detected, when the chip was explicit, or past the
+  first page. (`server/routers/search.py`, `app/src/views/Search.tsx`)
+
+- **A typed synonym filters by the value the store holds, and the
+  vocabularies know the words operators here use.** "gray car" promoted
+  to a `colour:gray` claim, and the store says `grey` — the writer
+  canonicalises a VLM's "gray" to "grey", the filter did not — so a
+  typed synonym matched nothing, silently; the promoted claim now carries
+  the canonical value. The colour maps gain the shades people type (navy,
+  crimson, tan, khaki, cream, charcoal, golden, violet, olive…), the
+  vehicle kinds gain `rickshaw` with auto / tuk-tuk / scooty / jeep /
+  tempo as synonyms, the garments that make a colour clothing gain
+  kurta, saree, salwar, kameez, sherwani, dhoti, hooded, sweatshirt, tee,
+  and the class words gain cop, police, guard, watchman, courier,
+  worker, toddler, elderly (people), scooty and moped (motorcycle), an
+  auto or rickshaw (a car or a motorcycle to the detector), jeep / suv /
+  sedan / taxi (car), pickup (truck or car) — and "bike" now means a
+  bicycle or a motorcycle, which on most roads here it does. Words of
+  three or four letters that the typo corrector would read real words
+  into (baby for bay, cab for cam) were deliberately left out.
+  (`server/services/search_intent.py`, `server/services/search_query.py`,
+  `server/services/descriptor_enrichment.py`)
+
+- **ANPR on a Qualcomm box: the plate reader's compiled graphs survive a
+  recreate, and two scan-mode knobs reach core.** On the Ventuno Q the
+  plate reader's HTP graph for the baked `indian-plates-v1` model was
+  written inside the image's own path and compiled again on every
+  recreate (the detector's landed on the cache volume by luck of its
+  download path); the qualcomm overlay now points `ADAPTER_ACCEL_CACHE_DIR`
+  at the cache volume. `OPENNVR_PLATE_FAST_DEDUP_WINDOW_S` and
+  `OPENNVR_PLATE_AUTO_BACKLOG`, documented since 0.1.6, never reached
+  the core container; they do now. The dispatch route no longer offers
+  bicycles to the plate reader. And the catalogue and docs stop
+  describing a "YOLOv8 → crop → fast-plate-ocr chain" that does not
+  exist: the reader localises the plate in the vehicle crop itself; the
+  app entry says version 2.5.0 and lists all five alert types, the
+  adapter entry says 1.1.0 and where it runs, the app's README counts
+  its 77 tests and describes the fuzzy matching it has.
+  (`docker-compose.accel-qualcomm.yml`, `docker-compose.yml`,
+  `server/config/apps_index.yml`, `server/config/adapters_index.yml`,
+  `detect-pipeline/detect_pipeline/dispatch.py`, docs)
+
+- **Search finds what the detector misnamed, and "two men" no longer
+  means "counted as two".** Two walls the labelled eval exposed. A class
+  word the parser produced ("pickup truck" → `truck`) restricted every
+  arm, so a pickup the detector had called a `car` was unreachable even
+  though its caption says pickup and its frame looks like one; parsed
+  class words are now a hint for the word arm and no wall for the vector
+  arms (`labels_soft`; an explicit `label=` chip stays a wall, and the
+  `semantic` block says when the softening applied). And "two men",
+  "three people together" became a people-count filter that excluded
+  every visit with no count — all of them, before the pipeline counted —
+  so "two men looking at a laptop" found nothing; an unknown count now
+  passes and the captions and vectors decide. Offline over the labelled
+  pool: MRR 0.786 → 0.911, hit@5 0.857 → 1.0, P@5 0.493 → 0.586.
+  (`server/services/search_service.py`, `server/services/timeline_service.py`,
+  `server/routers/search.py`)
+
+- **Camera agent: "remove that alarm" stops the watch that is standing.**
+  People call a watch an alarm and an alarm a reminder; "I remove that
+  alarm" for a watch on a person at camera 24 left the watch running and
+  the operator removing it by hand (Ventuno Q, 2026-11-10). When the kind
+  a stop request names has nothing standing and exactly one thing of any
+  kind does, the agent stops that and says so ("There's no alarm set up —
+  the one thing standing is watch #1 … Stopped and removed watch #1");
+  with several standing it lists them by kind and number and asks;
+  "silence" still means a ringing alarm and never touches a watch.
+  (`examples/camera-agent/camera_agent.py`)
+
+- **The embedders are not skipped while KAI-C has yet to probe them.**
+  KAI-C reports an adapter's health as "unknown" from registration until
+  its next poll, and after a core restart every adapter re-registers at
+  once; the embed producer resolution skipped any adapter not reported
+  "ok", so for those minutes search ran words-only and said so only in
+  its `semantic` block (a whole eval run on the Ventuno Q, 2026-11-10).
+  Only a REPORTED failure skips an adapter now; one nobody has asked yet
+  is tried. (`server/services/embed_enrichment.py`)
+
+- **Search's caption floor, measured against the labelled eval: 0.65.**
+  The 0.75 set earlier today came from queries phrased the way the
+  captioner writes; the relevance eval's operator phrasing scores lower
+  ("hooded sweatshirt" 0.63, "light blue kurta" 0.67), and at 0.75 the
+  caption arm sat out of a quarter of the cases. A sweep of the arm
+  alone over the labelled pool gives hit@5 0.82 at 0.65 against 0.64 at
+  0.75, and 0.65 still cuts what nobody saw. `SEARCH_CAPTION_MIN_SIMILARITY`
+  default 0.65; a box on the fallback text tower should set 0.75.
+  (`bench/ventuno-q-text-embed-2026-11-10.md`)
+
+- **Search's vector arms hear the whole question, and typos are read
+  against the captions' own words.** The relevance eval on the Ventuno Q
+  (`tools/search_eval.py`, baseline 2026-11-10) showed two gaps. A query
+  whose every word the parser turns into a filter — "pink car", "a bus",
+  "three people together" — left nothing for the word arm, and the
+  embedders were handed that same nothing, so no semantic arm ran at all.
+  The parser now also keeps `question`: the corrected sentence with the
+  time phrase and camera names removed and everything else kept, and the
+  route embeds that (explicit `text=` is embedded as given). And a typo
+  of a word that is neither a filter nor a skill's vocabulary — "camoflage",
+  "pikup" on a site whose captions say camouflage and pickup all day —
+  was never corrected; the correction vocabulary now includes the words
+  the box's newest four thousand captions use at least twice, read at
+  most every ten minutes. (`server/services/search_query.py`,
+  `server/routers/search.py`)
 
 - **detect-pipeline memory grew with every evidence fetch.** The main
   `opennvr-tier0` process went from 256 MiB to 932 MiB over a morning of
@@ -1115,6 +1108,7 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   standing thing down ("remove it for person, I don't need any
   notification") is a standing request, not a detection. The identity
   line no longer tells the model to open every answer with "I see…".
+
 - **"Remove it" works without an alarm number.** `stop_alarm`,
   `stop_monitor` and `stop_report` no longer require an id: without one
   they take the thing set up most recently, the only one there is, or all
@@ -1122,6 +1116,7 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   list to choose from. The router's stop hint picks the tool for the kind
   set up last. The session had armed an alarm and then answered "can you
   remove it?" with "I need an alarm number to stop it" three times.
+
 - **Talk mode shows what you said and keeps answers apart.** The page
   never received the transcript over the stream (the user aggregator
   consumes it upstream), so no user bubble appeared and every answer was
@@ -1129,10 +1124,12 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   transcript before the answer and a `turn_end` after it, and a streamed
   turn publishes its frames and cameras the way a text turn returns them,
   so the evidence image is back beside the answer.
+
 - **Hourly "what you see" reports look at the cameras.** A scheduled
   report whose query asks to see or describe the cameras and names no
   object runs as a scene round (describe each camera, then the hour's
   visits) instead of the history tools' default people count.
+
 - **The Hardware panel no longer names moondream and advises a GPU for
   visual questions on a box where Gemma answers them on the Hexagon.**
   The caption and visual-question rows of an NPU captioner are marked
@@ -1340,6 +1337,7 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stamped and left alone by the on-demand lane for
   `EVENTS_CAPTION_RETRY_COOLDOWN_S` (default 10 min) — not recorded as
   "looked and found nothing", so later passes still get to it.
+
 - **Groups of people no longer post two or three visits per person.** Five
   changes to the tracker and the visit lifecycle, measured by replaying
   the recordings of three walk-throughs with three people through the
@@ -1431,9 +1429,11 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   had loaded the app before. Server paths (`/api/`, `/webrtc/`, `/hls/`,
   `/playback/get|list`, `/healthz`) are now left to the network. A browser
   picks this up after one reload following the upgrade.
+
 - **Saving the single sign-on settings no longer shows "Something went
   wrong".** The save worked, but its answer lacked the role list the page
   redraws from; it now returns the same settings and roles as loading them.
+
 - **Single sign-on roles from Zitadel and Keycloak are applied.** A role
   claim was read only as a flat list or a single value, so Zitadel's
   (`urn:zitadel:iam:org:project:roles`, a map keyed by role) and Keycloak's
@@ -1473,6 +1473,7 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   replace. The decode command now pins `-fps_mode passthrough` whenever
   the rate filter is out, so exactly one frame per keyframe crosses the
   pipe; a real-ffmpeg test counts them.
+
 - **`start.sh` refuses to run under `sudo`.** A `sudo ./start.sh` left
   `.env` (0600, root) and parts of the checkout owned by root, and every
   later `./start.sh` as the normal user failed with `.env: Permission
@@ -1481,6 +1482,7 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it, and prints the two repair commands (join the docker group, chown the
   checkout back). A plain root login is unaffected; `OPENNVR_ALLOW_SUDO=1`
   skips the check.
+
 - **`start.sh`'s network re-attach now carries the service's DNS names.**
   On Docker Compose 2.24 (Ubuntu 24.04) a recreate can drop a container's
   secondary network; `start.sh` re-attaches it, but a bare `docker network
@@ -1490,6 +1492,7 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the recording path for ten minutes on a test box. The re-attach now
   passes `--alias` for the service name, the container name and any
   aliases declared in the compose file.
+
 - **MediaMTX no longer restarts its RTSP listener on every camera change.**
   The shipped MediaMTX templates set the deprecated `rtspUDPReadBufferSize: 0`.
   In MediaMTX 1.15 that key is a pointer field; the config clone MediaMTX
@@ -1503,6 +1506,7 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `mediamtx.docker.yml`, `mediamtx.yml` and `mediamtx.local.yml`; a test
   keeps it out. Existing installs pick the fix up with `git pull` and a
   MediaMTX restart (`./start.sh up` or `docker compose restart mediamtx`).
+
 - **A deleted camera no longer counts as a down detection worker.** The
   detect-pipeline dropped a removed camera's metric series and *then*
   stopped its worker, whose teardown wrote `tier0_worker_up=0` back, so the
@@ -1510,6 +1514,7 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (the dashboard showed "Detection 1/2 — Degraded" on a box with one
   camera). Removed workers are now marked superseded before they are
   stopped and their series are dropped after the stop.
+
 - **Storing a substream URL on an existing camera now creates its `-sub`
   MediaMTX path at once.** The update took the "main path unchanged" branch
   of the provisioner, which skipped the substream entirely, while the
@@ -1517,10 +1522,12 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that camera's detection died with "path not configured" every tick
   until the next core restart. The unchanged branch now refreshes the sub
   path like the replace branch does.
+
 - **A detect-pipeline worker whose substream tap cannot be opened detects
   on the main stream instead of going dark.** With the main URL in hand
   (core's `evidence_url`) it probes that, warns that it is decoding full
   resolution, and runs no evidence source; without one it fails as before.
+
 - **The detect-pipeline refuses QNN on the HTP, out loud, when the DSP node
   is not in its container.** ORT's QNN plugin lists an HTP device on any
   Qualcomm host and compiles the graph without opening it, so a pipeline
@@ -1532,6 +1539,7 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the missing file and the overlay. The startup line now carries
   `flavour=` and `providers=`, and the capacity warning says what the
   detector runs on.
+
 - **A plain `docker compose up -d <service>` no longer drops the hardware
   flavour.** `start.sh` resolved `OPENNVR_ACCEL=auto` into overlays and
   `DETECT_*` values that lived only in its own environment, so any compose
@@ -1543,6 +1551,7 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   flavour filled is reset when the flavour changes, and an operator's own
   value is never overwritten. Passing `-f` by hand still replaces the set
   (README and `docs/HARDWARE.md` say so).
+
 - **Camera agent: a selected camera no longer breaks the LLM's cached
   prompt prefix.** The UI's selected camera went in as a second system
   message; Ollama collates system messages ahead of the tool schemas, so
@@ -1554,6 +1563,7 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that changes the prefix re-warms it; the voice pipeline keeps the clock
   out of the system prompt too. A caller whose camera scope differs from
   the full roster still misses, and the warning now says so.
+
 - **Smart Doorbell no longer announces a known person as a stranger first.**
   Every polled frame used to be judged alone, so the side-on, blurred first
   frame of an approach fired `unknown_visitor` and the clean frame a second
@@ -6093,7 +6103,8 @@ address in the README.
 
 ---
 
-[Unreleased]: https://github.com/open-nvr/open-nvr/compare/v0.1.10...HEAD
+[Unreleased]: https://github.com/open-nvr/open-nvr/compare/v0.1.11...HEAD
+[0.1.11]: https://github.com/open-nvr/open-nvr/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/open-nvr/open-nvr/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/open-nvr/open-nvr/compare/v0.1.8...v0.1.9
 [0.1.4]: https://github.com/open-nvr/open-nvr/compare/v0.1.3...v0.1.4
