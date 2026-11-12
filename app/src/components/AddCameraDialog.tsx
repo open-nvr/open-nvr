@@ -25,11 +25,53 @@ import { syncCameraIdentity } from '../lib/cameraIdentity'
 import type { IdentityField } from '../lib/cameraIdentity'
 import { Modal } from './Modal'
 import { Badge, Button, EmptyState } from './ui'
-import { Camera, ChevronDown, CheckCircle, Loader2, Plus, RefreshCw, Search, SearchX, Video, X } from 'lucide-react'
+import { Field, Input } from './ui/form'
+import { SegmentedControl } from './ui/SegmentedControl'
+import { Camera, ChevronDown, CheckCircle, Loader2, Plus, RefreshCw, Search, SearchX, Video, Webcam, X } from 'lucide-react'
+import { WebcamAddPanel } from './WebcamAddPanel'
 import { useTranslation } from '../i18n'
 import { extractApiError } from '../lib/apiError'
 
-type DiscoveredCamera = { ip: string; scheme?: string; service_urls?: string[] }
+type DiscoveredCamera = {
+  ip: string
+  scheme?: string
+  service_urls?: string[]
+  /** From the camera's own WS-Discovery answer (host agent), when it gave one. */
+  name?: string | null
+  hardware?: string | null
+}
+
+function ipKey(ip: unknown): number {
+  if (typeof ip !== 'string') return Number.MAX_SAFE_INTEGER
+  const p = ip.split('.')
+  if (p.length !== 4) return Number.MAX_SAFE_INTEGER
+  const n = p.map((s) => (/^\d{1,3}$/.test(s) ? Number(s) : -1))
+  return n.every((v) => v >= 0 && v <= 255) ? ((n[0] * 256 + n[1]) * 256 + n[2]) * 256 + n[3] : Number.MAX_SAFE_INTEGER
+}
+
+// Results arrive from two places (the multicast probe within seconds, the
+// subnet sweep later): merge by address and keep the list in address order
+// so it does not reshuffle as the sweep lands. The probe's row contributes
+// the name and model the camera announced; the sweep's row contributes the
+// service URL and port it MEASURED, which beat the probe's guess of
+// http://ip:80 — the first cut let the guess win and Connect went to the
+// wrong port on a camera the sweep alone would have connected.
+function mergeCameras(prev: DiscoveredCamera[], next: DiscoveredCamera[], from: 'probe' | 'sweep'): DiscoveredCamera[] {
+  const by = new Map(prev.filter((c) => typeof c.ip === 'string').map((c) => [c.ip, c]))
+  for (const c of next) {
+    if (typeof c.ip !== 'string') continue
+    const old = by.get(c.ip)
+    if (!old) { by.set(c.ip, c); continue }
+    const measured = from === 'sweep' ? c : old
+    const announced = from === 'sweep' ? old : c
+    by.set(c.ip, {
+      ...announced, ...measured,
+      name: announced.name ?? measured.name ?? null,
+      hardware: announced.hardware ?? measured.hardware ?? null,
+    })
+  }
+  return [...by.values()].sort((a, b) => ipKey(a.ip) - ipKey(b.ip))
+}
 
 // The device's ONVIF port lives inside its service URL. The server sends
 // {ip, scheme, service_urls}; both the subtitle and the connect call need
@@ -82,6 +124,12 @@ export function AddCameraDialog({
   const { t } = useTranslation()
   const localizedTitle = title === 'Add Camera to Tile' ? t('cameraDialog.title') : title
   const [mode, setMode] = useState<'discover' | 'select' | 'manual'>('discover')
+  // Manual has two kinds of camera: an IP camera (address / RTSP URL) and a
+  // webcam (this browser's, or a USB one on the OpenNVR server), which has
+  // its own guided flow (WebcamAddPanel) with its own Add and Done.
+  const [manualKind, setManualKind] = useState<'ip' | 'webcam'>('ip')
+  // The webcam panel's Add / Done, shown in the footer like every other tab's.
+  const [webcamAction, setWebcamAction] = useState<{ label: string; onClick: () => void; disabled: boolean } | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
@@ -235,11 +283,28 @@ export function AddCameraDialog({
     // Show the target range while the scan is still running.
     if (overrideCidr) setScanInfo({ cidrs: [overrideCidr], source: 'override' })
 
+    // The multicast probe (the LAN prober on Linux, the host agent on Docker
+    // Desktop), beside the sweep: cameras on the OpenNVR machine's own
+    // network show up within seconds. It is part of THIS scan: awaited with
+    // the sweep, cancelled with it, counted in "Found N". No prober (or one
+    // that found nothing) just leaves the sweep to it.
+    const probe = apiService.onvifDiscoverAgent(abort.signal).then(
+      (r: any) => {
+        const d = r?.data
+        if (seq !== scanSeqRef.current || !d?.available || !d.devices?.length) return
+        setDiscoveredCameras((prev) => mergeCameras(prev, d.devices, 'probe'))
+      },
+      () => {},
+    )
+
     try {
-      const response = await apiService.onvifDiscover(
-        overrideCidr ? { cidr: overrideCidr } : undefined,
-        abort.signal,
-      )
+      const [response] = await Promise.all([
+        apiService.onvifDiscover(
+          overrideCidr ? { cidr: overrideCidr } : undefined,
+          abort.signal,
+        ),
+        probe,
+      ])
       if (seq !== scanSeqRef.current) return
       const data = response?.data || {}
       const devices = data.devices || []
@@ -249,11 +314,11 @@ export function AddCameraDialog({
       }
       setHostCidrs(prev => Array.from(new Set([...prev, ...(data.suggested_cidrs || [])])))
       if (data.client_cidr) setClientCidr(data.client_cidr)
-      setDiscoveredCameras(devices.map((d: any) => ({
+      setDiscoveredCameras((prev) => mergeCameras(prev, devices.map((d: any) => ({
         ip: d.ip || d.host || d.address,
         scheme: d.scheme || 'http',
         service_urls: d.service_urls || [],
-      })))
+      })), 'sweep'))
     } catch (e: any) {
       if (seq !== scanSeqRef.current || e?.name === 'AbortError') return
       setError(extractApiError(e, 'Discovery failed. Try manual entry.'))
@@ -392,7 +457,8 @@ export function AddCameraDialog({
     setError(null)
     setLanPrompt(null)
     setLanPromptError(null)
-    setCameraName('') // Reset camera name for user input
+    // The name the camera announced (multicast discovery), else empty.
+    setCameraName(camera.name || '')
   }
 
   // Leave the connect step back to the results list (results are kept).
@@ -659,7 +725,9 @@ export function AddCameraDialog({
   // Single primary footer action per screen state, so the CTA never jumps
   // between body and footer.
   const primaryAction =
-    mode === 'manual'
+    mode === 'manual' && manualKind === 'webcam'
+      ? webcamAction
+      : mode === 'manual'
       ? {
             label: loading ? t('cameraDialog.adding') : t('cameraDialog.title'),
           onClick: handleAddManualCamera,
@@ -769,7 +837,9 @@ export function AddCameraDialog({
       </div>
 
       {/* Content */}
-      <div className="p-4 flex-1 min-h-0">
+      {/* One fixed height for every tab (and the connect step), so switching
+          tabs never resizes the dialog; taller content scrolls inside it. */}
+      <div className="p-4 h-[min(500px,62vh)] overflow-y-auto thin-scroll">
         {error && (
           <div className="mb-4 p-2 bg-[color-mix(in_oklab,var(--danger)_14%,transparent)] border border-[color-mix(in_oklab,var(--danger)_45%,var(--border))] text-[var(--danger)] text-sm">
             {error}
@@ -781,7 +851,7 @@ export function AddCameraDialog({
             and the results as the full-width single scroller. Controls never
             move between states. */}
         {mode === 'discover' && !selectedCamera && (
-          <div className="flex flex-col gap-2 md:h-[420px]">
+          <div className="flex flex-col gap-2 h-full">
             {/* Scan bar — identical in every state. */}
             <div className="shrink-0">
               <div className="flex gap-2">
@@ -1051,9 +1121,12 @@ export function AddCameraDialog({
                     <div className="min-w-0">
                       <div className="text-sm font-medium flex items-center gap-2">
                         <span className="font-mono">{camera.ip}</span>
+                        {camera.name && <span className="truncate font-normal">{camera.name}</span>}
                         {addedByIp.has(camera.ip) && <Badge variant="info">{t('cameraDialog.alreadyAdded')}</Badge>}
                       </div>
-                      <div className="text-xs text-[var(--text-dim)]">{deviceSubtitle(camera)}</div>
+                      <div className="text-xs text-[var(--text-dim)]">
+                        {deviceSubtitle(camera)}{camera.hardware ? ` · ${camera.hardware}` : ''}
+                      </div>
                     </div>
                   </div>
                   <ChevronDown size={16} className="text-[var(--text-dim)] -rotate-90 shrink-0" />
@@ -1231,93 +1304,87 @@ export function AddCameraDialog({
           </div>
         )}
 
-        {/* MANUAL MODE */}
+        {/* MANUAL MODE — an IP camera by address/URL, or a webcam. */}
         {mode === 'manual' && (
-          <div className="space-y-4">
-            <div className="grid grid-cols-2 gap-3">
-              <label className="flex flex-col gap-1">
-                <span className="text-xs text-[var(--text-dim)]">{t('cameraDialog.cameraName')} *</span>
-                <input
-                  type="text"
-                  className="bg-[var(--bg-2)] border border-[var(--border)] px-3 py-2 text-sm"
-                  placeholder="e.g., Front Door"
-                  value={form.name}
-                  onChange={(e) => setForm(f => ({ ...f, name: e.target.value }))}
-                />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span className="text-xs text-[var(--text-dim)]">{t('cameraDialog.ipAddress')} *</span>
-                <input
-                  type="text"
-                  className="bg-[var(--bg-2)] border border-[var(--border)] px-3 py-2 text-sm"
-                  placeholder="192.168.1.100"
-                  value={form.ip_address}
-                  onChange={(e) => setForm(f => ({ ...f, ip_address: e.target.value }))}
-                  onBlur={() => syncIdentity('ip_address')}
-                />
-              </label>
-            </div>
-
-            <div className="grid grid-cols-3 gap-3">
-              <label className="flex flex-col gap-1">
-                <span className="text-xs text-[var(--text-dim)]">{t('cameraDialog.port')}</span>
-                <input
-                  type="number"
-                  className="bg-[var(--bg-2)] border border-[var(--border)] px-3 py-2 text-sm"
-                  value={form.port}
-                  onChange={(e) => setForm(f => ({ ...f, port: parseInt(e.target.value) || 554 }))}
-                  onBlur={() => syncIdentity('port')}
-                />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span className="text-xs text-[var(--text-dim)]">{t('cameraDialog.username')}</span>
-                <input
-                  type="text"
-                  className="bg-[var(--bg-2)] border border-[var(--border)] px-3 py-2 text-sm"
-                  placeholder="admin"
-                  value={form.username}
-                  onChange={(e) => setForm(f => ({ ...f, username: e.target.value }))}
-                  onBlur={() => syncIdentity('username')}
-                />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span className="text-xs text-[var(--text-dim)]">{t('cameraDialog.password')}</span>
-                <input
-                  type="password"
-                  className="bg-[var(--bg-2)] border border-[var(--border)] px-3 py-2 text-sm"
-                  value={form.password}
-                  onChange={(e) => setForm(f => ({ ...f, password: e.target.value }))}
-                  onBlur={() => syncIdentity('password')}
-                />
-              </label>
-            </div>
-
-            <label className="flex flex-col gap-1">
-              <span className="text-xs text-[var(--text-dim)]">{t('cameraDialog.rtspUrl')}</span>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  className="flex-1 bg-[var(--bg-2)] border border-[var(--border)] px-3 py-2 text-sm font-mono text-xs"
-                  placeholder="rtsp://192.168.1.100:554/stream1"
-                  value={form.rtsp_url}
-                  onChange={(e) => setForm(f => ({ ...f, rtsp_url: e.target.value }))}
-                  onBlur={() => syncIdentity('rtsp_url')}
-                />
-                <button
-                  type="button"
-                  className="px-3 py-2 border border-[var(--border)] bg-[var(--panel-2)] text-xs whitespace-nowrap"
-                  onClick={() => setScanQr(true)}
-                  title="Scan the QR from the OpenNVR Cam app"
+          <div className="flex flex-col gap-4">
+            <SegmentedControl
+              label="Kind of camera"
+              options={[
+                { value: 'ip', label: <span className="inline-flex items-center gap-1.5 px-1"><Video size={13} /> IP camera</span> },
+                { value: 'webcam', label: <span className="inline-flex items-center gap-1.5 px-1"><Webcam size={13} /> Webcam</span> },
+              ]}
+              value={manualKind}
+              onChange={(v) => { setManualKind(v); setError(null) }}
+            />
+            {manualKind === 'webcam' ? (
+              <WebcamAddPanel onDone={(id) => onCameraAdded(id)} onError={setError} onAction={setWebcamAction} />
+            ) : (
+              <div className="grid grid-cols-6 gap-3">
+                <Field label={t('cameraDialog.cameraName')} required className="col-span-6">
+                  <Input
+                    placeholder="e.g., Front Door"
+                    value={form.name}
+                    onChange={(e) => setForm(f => ({ ...f, name: e.target.value }))}
+                  />
+                </Field>
+                <Field label={t('cameraDialog.ipAddress')} required className="col-span-4">
+                  <Input
+                    placeholder="192.168.1.100"
+                    value={form.ip_address}
+                    onChange={(e) => setForm(f => ({ ...f, ip_address: e.target.value }))}
+                    onBlur={() => syncIdentity('ip_address')}
+                  />
+                </Field>
+                <Field label={t('cameraDialog.port')} className="col-span-2">
+                  <Input
+                    type="number"
+                    value={form.port}
+                    onChange={(e) => setForm(f => ({ ...f, port: parseInt(e.target.value) || 554 }))}
+                    onBlur={() => syncIdentity('port')}
+                  />
+                </Field>
+                <Field label={t('cameraDialog.username')} className="col-span-3">
+                  <Input
+                    placeholder="admin"
+                    autoComplete="off"
+                    value={form.username}
+                    onChange={(e) => setForm(f => ({ ...f, username: e.target.value }))}
+                    onBlur={() => syncIdentity('username')}
+                  />
+                </Field>
+                <Field label={t('cameraDialog.password')} className="col-span-3">
+                  <Input
+                    type="password"
+                    autoComplete="new-password"
+                    value={form.password}
+                    onChange={(e) => setForm(f => ({ ...f, password: e.target.value }))}
+                    onBlur={() => syncIdentity('password')}
+                  />
+                </Field>
+                <Field
+                  label={`${t('cameraDialog.rtspUrl')} (optional)`}
+                  hint="Left blank, it is found from the IP address and login. The login is added to it for you."
+                  className="col-span-6"
                 >
-                  Scan QR
-                </button>
+                  {(id, describedBy) => (
+                    <div className="flex gap-2">
+                      <Input
+                        id={id}
+                        aria-describedby={describedBy}
+                        className="flex-1 font-mono text-xs"
+                        placeholder="rtsp://192.168.1.100:554/stream1"
+                        value={form.rtsp_url}
+                        onChange={(e) => setForm(f => ({ ...f, rtsp_url: e.target.value }))}
+                        onBlur={() => syncIdentity('rtsp_url')}
+                      />
+                      <Button variant="outline" onClick={() => setScanQr(true)} title="Scan the QR from the OpenNVR Cam app">
+                        Scan QR
+                      </Button>
+                    </div>
+                  )}
+                </Field>
               </div>
-              <span className="text-[10px] text-[var(--text-dim)]">
-                Optional. No need to put credentials in the URL — the
-                Username/Password above are added automatically. Leave blank to
-                build the URL from the IP + credentials.
-              </span>
-            </label>
+            )}
           </div>
         )}
 

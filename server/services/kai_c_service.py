@@ -481,7 +481,9 @@ class KaiCService:
         # KaiCService's import graph at module import time.
         from core.config import settings
 
-        if not settings.inference_use_mediamtx_tap:
+        # A camera with no URL of its own (a webcam publishing into its
+        # path) can only be read through the tap, whatever the setting.
+        if not settings.inference_use_mediamtx_tap and fallback_url:
             return fallback_url
 
         base = settings.mediamtx_rtsp_url

@@ -34,6 +34,7 @@ from pydantic import AliasChoices, BaseModel, Field, field_validator
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from core.camera_source import is_publisher
 from core.database import get_db, release
 from core.permissions import RequirePermission
 from models import Camera, CameraTour, User
@@ -391,9 +392,10 @@ async def camera_thumbnail(
     cam = db.query(Camera).filter(Camera.id == camera_id, Camera.deleted_at.is_(None)).first()
     if cam is None or not can_view_camera(db, current_user, camera_id):
         raise HTTPException(status_code=404, detail="Camera not found")
-    if not cam.is_active or not cam.rtsp_url:
+    if not cam.is_active or not (cam.rtsp_url or is_publisher(cam)):
         raise HTTPException(status_code=503, detail="Camera is not streaming")
-    cam_id, rtsp_url = cam.id, cam.rtsp_url
+    # A webcam has no URL: "" makes the grab read its MediaMTX path.
+    cam_id, rtsp_url = cam.id, cam.rtsp_url or ""
     # The grab can take seconds; never hold a pooled connection across it.
     release(db)
     jpeg = await camera_thumbnail_service.get_thumbnail(cam_id, rtsp_url)

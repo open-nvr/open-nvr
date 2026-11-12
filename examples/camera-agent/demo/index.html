@@ -1780,8 +1780,10 @@
     // Same design as OpenNVR's Live View overlay: boxes arrive as data
     // (Tier-0 tracks, relayed by the agent over /updates), drawn on a
     // canvas over the video, never burned into the stream. Per-browser
-    // toggle, OFF by default — the picture is the product.
-    let _boxesOn=false; try{ _boxesOn=localStorage.getItem("agent.boxes")==="on"; }catch{}
+    // toggle, ON by default — the boxes are what shows the AI at work on
+    // every live picture (Live view, dashboard, tour, this page alike); a
+    // viewer who wants the clean picture turns them off once.
+    let _boxesOn=true; try{ _boxesOn=localStorage.getItem("agent.boxes")!=="off"; }catch{}
     let _lastTracks=null, _boxRaf=null;
     const BOX_STALE_MS=2000;
     const LABEL_HUES={person:205,car:30,truck:45,bus:45,motorcycle:15,bicycle:160,dog:290,cat:290,bird:120,license_plate:60,plate:60,face:330};
@@ -2643,9 +2645,14 @@
 
     // ── monitors ──
     async function pollMonitors(data){ if(!authReady())return; if(!data) try{ data=await (await fetch("/monitors")).json(); }catch{ return; }
-      for(const n of (data.notifications||[])){ if(!seenNotes[n.id]){ seenNotes[n.id]=true; addMsg(n.text,"agent"); playChime("notify");
+      // A notification (a watch hit, an app alert) is an EVENT, not a turn
+      // of the conversation: it already lands in the Activity feed with its
+      // camera and time. Here it only chimes and, under the site's policy,
+      // is spoken — the transcript stays what was said between the operator
+      // and the agent.
+      for(const n of (data.notifications||[])){ if(!seenNotes[n.id]){ seenNotes[n.id]=true; playChime("notify"); loadEvents();
           // App alerts carry announce=false under the site's "important
-          // only" / "never" policy: shown + chimed, not narrated.
+          // only" / "never" policy: chimed, not narrated.
           if(n.announce!==false) await announce(n.text); } }
       renderMonitors(data.monitors||[]); }
     function renderMonitors(monitors){ const active=monitors.filter(m=>m.active);

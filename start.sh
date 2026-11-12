@@ -21,6 +21,7 @@
 #   ./start.sh token        # re-print the first-time setup token
 #   ./start.sh update       # update to the latest release (scripts/update-host.sh)
 #   ./start.sh auto-update enable|disable|status   # the runner for in-app updates
+#   ./start.sh host-agent install|uninstall|status|logs   # USB webcams + host monitoring
 # ============================================================
 
 set -e
@@ -498,6 +499,26 @@ accel_summary() {
 # ── Build Docker Compose profile args ─────────────────────
 compose_args() {
     local args="-f $COMPOSE_FILE"
+    # USB webcams served by MediaMTX (docker-compose.webcams.yml): Linux
+    # only — the overlay passes the host's video devices into the container,
+    # which Docker Desktop cannot do. VIDEO_GID is the host's `video` group,
+    # so the container (1000:1000) may open /dev/video*.
+    if [[ "$(get_env_var LAN_DISCOVERY)" == "on" && "$(uname -s)" == "Linux" ]]; then
+        if [[ -f docker-compose.lan-discovery.yml ]]; then
+            args="$args -f docker-compose.lan-discovery.yml"
+        else
+            echo "LAN_DISCOVERY=on but docker-compose.lan-discovery.yml is missing" >&2
+        fi
+    fi
+    if [[ "$(get_env_var WEBCAMS)" == "on" && "$(uname -s)" == "Linux" ]]; then
+        if [[ -f docker-compose.webcams.yml ]]; then
+            args="$args -f docker-compose.webcams.yml"
+            local vgid; vgid=$(getent group video 2>/dev/null | cut -d: -f3)
+            [[ -n "$vgid" ]] && export VIDEO_GID="$vgid"
+        else
+            echo "WEBCAMS=on but docker-compose.webcams.yml is missing" >&2
+        fi
+    fi
     local example_compose example_profile
     example_compose=$(get_env_var "OPENNVR_EXAMPLE_COMPOSE")
     example_profile=$(get_env_var "OPENNVR_EXAMPLE_PROFILE")
@@ -2007,9 +2028,17 @@ run_up() {
     # too, with KEEP_ORPHANS=1 (containers from overlays this run was not
     # told about are not removed) and UP_BUILD=1 (images the release
     # builds from its own files are rebuilt from the new checkout).
-    # The updater's hand-off folders, bind-mounted into core: made here as
-    # this user, or Docker would create them root-owned on Linux.
-    mkdir -p data/updates data/update-requests
+    # The updater's hand-off folders and the host agent's key-hash folder,
+    # bind-mounted into core: made here as this user, or Docker would create
+    # them root-owned on Linux and the agent's key hash could never be written.
+    mkdir -p data/updates data/update-requests data/host-agent
+    # The LAN prober (docker-compose.lan-discovery.yml) is the host agent's
+    # code in a container: it needs the agent key, and core its hash.
+    if [[ "$(get_env_var LAN_DISCOVERY)" == "on" && "$(uname -s)" == "Linux" ]]; then
+        # shellcheck source=scripts/host-agent.sh
+        . "$(dirname "$0")/scripts/host-agent.sh"
+        ha_init_key
+    fi
     local up_flags="--remove-orphans"
     [ "${KEEP_ORPHANS:-}" = 1 ] && up_flags=""
     [ "${UP_BUILD:-}" = 1 ] && up_flags="$up_flags --build"
@@ -2022,6 +2051,10 @@ run_up() {
     print_security_posture
     print_first_time_setup_token "$ARGS"
     check_edge_reachable
+    # An installed host agent follows the core it talks to (scripts/host-agent.sh).
+    # shellcheck source=scripts/host-agent.sh
+    . "$(dirname "$0")/scripts/host-agent.sh"
+    run_host_agent_refresh || true
 }
 
 # Image tags from earlier releases, and dangling layers. An upgrade pulls the
@@ -2275,9 +2308,16 @@ case "$COMMAND" in
     run_auto_update "${2:-status}"
     ;;
 
+  host-agent)
+    # The agent on this machine: USB webcams and host monitoring.
+    # shellcheck source=scripts/host-agent.sh
+    . "$(dirname "$0")/scripts/host-agent.sh"
+    run_host_agent "${2:-status}"
+    ;;
+
   *)
     echo -e "${RED}Unknown command: $COMMAND${NC}"
-    echo "Usage: ./start.sh [start|restart|up|build|down|logs|status|validate|prune|token|refresh-net|install|reconfigure|refresh-certs|update|auto-update]"
+    echo "Usage: ./start.sh [start|restart|up|build|down|logs|status|validate|prune|token|refresh-net|install|reconfigure|refresh-certs|update|auto-update|host-agent]"
     exit 1
     ;;
 esac

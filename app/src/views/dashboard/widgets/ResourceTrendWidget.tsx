@@ -25,6 +25,8 @@ export function ResourceTrendWidget({ editing, onRemove }: { editing?: boolean; 
   const hist = useSystemResourcesHistory(range)
   const res = useSystemResources()
   const cpuThr = res.data?.thresholds?.cpu_percent_threshold
+  const temps = res.data?.temperatures ?? []
+  const hottest = temps.length ? Math.max(...temps.map((x) => x.celsius)) : null
 
   const data = useMemo(
     () => (hist.data ?? []).map((p) => ({
@@ -84,6 +86,19 @@ export function ResourceTrendWidget({ editing, onRemove }: { editing?: boolean; 
             <span className="font-mono tabular-nums text-[var(--text)]">{last?.[s.key] != null ? `${Math.round(last[s.key] as number)}%` : '—'}</span>
           </span>
         ))}
+        {/* Who measured: the host agent sees the machine; without it, core
+            sees its container — on Windows/macOS that is Docker's VM. */}
+        {res.data?.measured_by && (
+          <span
+            className="ml-auto inline-flex items-center gap-1.5 text-[var(--text-dim)]"
+            title={res.data.measured_by === 'host-agent'
+              ? 'Measured on the OpenNVR machine by the host agent'
+              : 'Measured inside OpenNVR’s container. On Windows and macOS this is Docker’s VM, not the whole machine; install the host agent for the machine’s own numbers.'}
+          >
+            {hottest != null && <span className="font-mono tabular-nums text-[var(--text)]">{Math.round(hottest)}°C</span>}
+            {res.data.measured_by === 'host-agent' ? 'host' : 'container'}
+          </span>
+        )}
       </div>
       <div className="flex-1 min-h-0 px-1 pb-1">
         {hist.isPending ? (

@@ -1321,8 +1321,29 @@ async def enrich_event_plate(
             logger.info(
                 "plate dedup: event %s reads %s — seen on cam %s within "
                 "%.0fs, sighting folded (no plate written)",
-                event_id, plate, camera_id, dedup_window_s(),
+                event_id, plate, camera_id, dedup_window,
             )
+            if policy.first_read_wins:
+                # Fast mode: the bus consumer does not defer to the sweep,
+                # so the echo of THIS very read can land on the row after
+                # the fold — a number with no picture (every "no read
+                # frame" in the register on 2026-11-11 was one of these).
+                # The sweep holds the bytes; leave the row its proof now,
+                # paths only. A row that never gets the number keeps two
+                # small files nobody looks at; a row that does has its
+                # photo.
+                crop_rel, frame_rel = await _asyncio.to_thread(
+                    store_plate_images, jpeg_of.get(id(winner)), winner.get("box"))
+                if crop_rel or frame_rel:
+                    db = SessionLocal()
+                    try:
+                        row = db.query(TimelineEvent).filter(
+                            TimelineEvent.id == event_id).first()
+                        if row is not None and not row.plate_evidence_path:
+                            stamp_plate_evidence(row, crop_rel, frame_path=frame_rel)
+                            db.commit()
+                    finally:
+                        db.close()
             return
         # Off the event loop: the crop decodes a full frame through cv2
         # (~15ms on a 1080x720 attempt, measured) and then writes a file.

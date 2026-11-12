@@ -8,6 +8,7 @@ import { apiService } from '../../lib/apiService'
 import { rebaseToCurrentOrigin } from '../../lib/streamUrl'
 import { Modal } from '../Modal'
 import { VideoPlayer } from '../VideoPlayer'
+import { detectionsPreferred } from '../../lib/detectionFeed'
 
 type PeekCamera = {
   name: string
@@ -53,6 +54,7 @@ export function LivePeek({ cameraId, cam, onClose, footer }: {
             displayAspectOverride={cam?.display_aspect_ratio}
             cameraId={cameraId}
             className="w-full h-full"
+            showDetections={detectionsPreferred()}
           />
         ) : (
           <div className="w-full h-full flex items-center justify-center text-sm text-white/60">

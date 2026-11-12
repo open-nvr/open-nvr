@@ -1,0 +1,37 @@
+# ONVIF camera discovery by multicast — Linux only (docs/HOST_AGENT.md,
+# "Discovery").
+#
+# `./start.sh` adds this overlay when LAN_DISCOVERY=on in .env (the
+# installer turns it on for Linux installs). Core runs on a Docker bridge,
+# where WS-Discovery multicast never reaches the LAN, so Add Camera →
+# Discover could only sweep subnets address by address. This runs the host
+# agent's discovery code as a container on the HOST's network stack — one
+# probe, every camera on the segment answers within seconds, no subnet to
+# configure — and syncs to core on 127.0.0.1:8000 exactly as the host agent
+# does. No host install, no sudo. Docker Desktop (macOS, Windows) has no
+# host networking that reaches the LAN; there the host agent probes.
+#
+# The binary is the one the core image ships for the host agent; the key is
+# the host agent's (start.sh creates it, core knows only its hash).
+services:
+  lan-probe:
+    build:
+      context: .
+      dockerfile_inline: |
+        ARG CORE_IMAGE
+        FROM ${CORE_IMAGE} AS core
+        FROM alpine:3.20
+        ARG TARGETARCH
+        COPY --from=core /opt/opennvr-host/linux-${TARGETARCH}/opennvr-host /opennvr-host
+        ENTRYPOINT ["/opennvr-host", "-discovery-only", "-core", "http://127.0.0.1:8000", "-key-file", "/key/agent.key", "-log-file", "-"]
+      args:
+        CORE_IMAGE: ${CORE_IMAGE:-ghcr.io/open-nvr/core}:${CORE_TAG:-latest}
+    container_name: opennvr_lan_probe
+    network_mode: host
+    restart: unless-stopped
+    read_only: true
+    volumes:
+      - ./data/host-agent-key:/key:ro
+    depends_on:
+      opennvr-core:
+        condition: service_started

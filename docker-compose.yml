@@ -616,6 +616,9 @@ services:
       # updater's state and writes requests for it; it never runs Docker.
       - ./data/updates:/app/update-state:ro
       - ./data/update-requests:/app/update-requests
+      # The host agent (services/host_agent.py): only the sha256 of its key.
+      # The key itself is in ./data/host-agent-key, which no container mounts.
+      - ./data/host-agent:/app/host-agent:ro
     environment:
       # Must match the mediamtx service's TZ — recording directories are
       # named in local time and parsed with the same zone.

@@ -22,6 +22,7 @@ Provides comprehensive logging setup with file rotation and structured formattin
 import json
 import logging
 import logging.handlers
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -29,8 +30,13 @@ from typing import Any
 # Create logs directory if it doesn't exist
 # Go up 2 levels from server/core/logging_config.py -> server/core -> server
 # Then up 1 more level to project root
-LOGS_DIR = Path(__file__).resolve().parents[2] / "logs"
-LOGS_DIR.mkdir(exist_ok=True)
+# Installs that cannot write next to the sources (a read-only source tree,
+# e.g. a NixOS install) point OPENNVR_LOGS_DIR at a writable directory; an
+# empty value behaves as unset.
+LOGS_DIR = Path(
+    os.environ.get("OPENNVR_LOGS_DIR") or (Path(__file__).resolve().parents[2] / "logs")
+)
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Define log file path
 LOG_FILE = LOGS_DIR / "server.log"

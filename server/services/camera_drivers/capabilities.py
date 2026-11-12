@@ -31,6 +31,7 @@ from datetime import UTC, datetime
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from core.camera_source import is_publisher
 from core.logging_config import camera_logger
 from models import Camera, CameraCapability
 
@@ -58,6 +59,20 @@ async def probe_and_store(db: Session, camera_id: int) -> CameraCapability:
         raise HTTPException(status_code=404, detail="Camera not found")
 
     row = _get_or_create_row(db, camera_id)
+    if is_publisher(camera):
+        # A webcam: nothing to probe and nothing to control. Stored as a
+        # clean "ok" with no areas, so the UI shows no settings rather than
+        # an "unreachable, refresh" prompt that could never succeed.
+        row.driver_name = "webcam"
+        row.onvif_endpoints = {}
+        row.supported_areas = {}
+        row.capabilities = {}
+        row.probe_result = "ok"
+        row.probe_error = None
+        row.probed_at = datetime.now(UTC)
+        db.commit()
+        db.refresh(row)
+        return row
     try:
         driver = await get_driver_for_camera(db, camera_id, force=True)
         info = await driver.get_info()

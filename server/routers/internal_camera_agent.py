@@ -30,6 +30,7 @@ from fastapi import (
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from core.camera_source import is_publisher
 from core.config import settings
 from core.database import get_db, release
 from models import (
@@ -1111,10 +1112,6 @@ def list_camera_agent_sources(
     # never gets it: apps sit on a shared network, and a "~.*" token would
     # read every camera in the building and undo the roster below. Each
     # app URL carries a token for exactly its own camera path instead.
-    mediamtx_jwt: str | None = (
-        _platform_token_once() if settings.inference_use_mediamtx_tap and not is_app else None
-    )
-
     cameras = (
         db.query(Camera)
         .filter(Camera.is_active == True)  # noqa: E712 - SQLAlchemy expression
@@ -1127,6 +1124,14 @@ def list_camera_agent_sources(
     # here, where the frames are actually handed out.
     if is_app:
         cameras = [c for c in cameras if int(c.id) in roster]
+    # A webcam has no URL of its own, so it is served through the tap
+    # even when the tap is switched off for IP cameras.
+    any_webcam = any(is_publisher(c) for c in cameras)
+    mediamtx_jwt: str | None = (
+        _platform_token_once()
+        if (settings.inference_use_mediamtx_tap or any_webcam) and not is_app
+        else None
+    )
     # The operator's masks (services.masks), one query for the fleet: what
     # the detect-pipeline's motion gate and object filter must ignore.
     from services.detection_settings import normalize as normalize_detection
@@ -1142,7 +1147,7 @@ def list_camera_agent_sources(
             int(cam.id),
             str(cam.ip_address or ""),
         )
-        if settings.inference_use_mediamtx_tap:
+        if settings.inference_use_mediamtx_tap or is_publisher(cam):
             base = (settings.mediamtx_rtsp_url or "rtsp://mediamtx:8554").rstrip("/")
             # Serve the LOW-RES SUBSTREAM tap when this camera has a sub
             # source (stored substream_url or a derivable vendor path —

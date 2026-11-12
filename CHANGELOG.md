@@ -8,6 +8,76 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Detection boxes are on by default on every live picture.** The Live
+  view, the dashboard's live wall, the camera peek, the tour, the guard-scan
+  panel, the camera agent's camera screen and the Mirror all draw boxes
+  unless the viewer turns them off; the Live view's toggle governs the web
+  app's pages, the agent page keeps its own switch. A page without a live
+  player (the ANPR register shows the read's photo) is unchanged.
+
+### Added
+
+- **Add Camera → Discover finds ONVIF cameras by multicast.** Core runs on
+  a Docker bridge, where WS-Discovery never reaches the LAN, so Discover
+  could only sweep subnets address by address. The probe now runs where
+  multicast works: on Linux a small `lan-probe` container on the host's
+  network (`LAN_DISCOVERY=on`, the installer's default), with nothing to
+  install; on Docker Desktop the host agent. One probe, every camera on the
+  segment answers within seconds, with its name and model, and no subnet
+  has to be configured; the sweep still covers routed subnets and the two
+  merge by address. Replies are unauthenticated UDP and are treated so:
+  bounded, cleaned, and never able to list a camera under another host.
+  The request/answer handshake is a sequence number, not a comparison of
+  two machines' clocks; the probe sets its multicast egress per interface
+  and probes every up interface, letting the Camera LAN check decide.
+
+### Added
+
+- **USB webcams as cameras.** Add Camera → Manual → Webcam, two sources:
+  this browser (WHIP, while the tab is open) and the OpenNVR server. On
+  Linux the server path needs no install: `WEBCAMS=on` adds
+  `docker-compose.webcams.yml`, MediaMTX gets the host's video devices and
+  an ffmpeg, and a webcam camera's path runs its own capture (`runOnInit`,
+  restarted on unplug/replug), with a `-sub` stream for detection like an
+  IP camera. On macOS and Windows, where Docker Desktop cannot see USB, a
+  small host agent (`./start.sh host-agent install`) streams the webcam and
+  reports the machine's own CPU, memory, disk and temperatures. A webcam is
+  `source_type = publisher`: recording, live view, playback, snapshots and
+  detection read its path as for any camera. See docs/WEBCAM.md.
+
+### Fixed
+
+- **A plate read in fast mode no longer arrives without its photo.** In
+  fast scan mode the bus consumer does not defer to the sweep, so the
+  echo of the sweep's own read could land on a visit after the sweep had
+  folded it as a duplicate sighting and thrown its crop away: a number
+  with "no read frame" in the register (every such row on the test box
+  was one of these). The fold now leaves the row its crop and frame,
+  paths only; the number that may follow has its proof. Accurate mode
+  is unchanged.
+
+### Changed
+
+- **Camera agent: the chat is the conversation; events stay in Activity.**
+  A watch hit or an app alert (a plate read, an occupancy change) used to be
+  posted into the transcript as an agent message as well as listed in the
+  Activity feed. It now chimes, is spoken under the site's policy, and
+  appears once, in Activity, with its camera and time.
+
+### Changed
+
+- **Detections are drawn on every live picture, under one switch.** The
+  dashboard's live wall, the camera peek and the tour now carry the same
+  box overlay as the Live view, following the Live view's per-browser
+  preference (on unless turned off there).
+
+### Fixed
+
+- **Camera agent: the app-alert subscriber no longer trips over itself on
+  a clean stop.** Its stop path unsubscribed a plate subscription that
+  only the inference subscriber holds; the `NameError` was logged as an
+  error and the subscriber reconnected for nothing.
+
 - **The live detection overlay moves with the object, and is on by
   default.** Tier-0 publishes about five frames a second; the boxes used
   to jump between them. Each track's box now glides toward its latest
@@ -35,6 +105,15 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `/updates` socket, vision path and voice, behind the same login.
 
 ### Fixed
+
+- **The server can start on a read-only source tree.** The logs
+  directory is resolved from the source-tree location and created at
+  import time, so an install that cannot create a `logs/` directory
+  next to its sources (e.g. a NixOS package) died on `mkdir` before the
+  app could start. Setting `OPENNVR_LOGS_DIR` to a writable
+  directory moves the log file there; the default stays
+  `<repo>/logs/`, so Docker and bare-metal dev installs are
+  unchanged.
 
 - **Search says when a class was never detected and the page is
   lookalikes.** Since #873 a parsed class word no longer walls off the
