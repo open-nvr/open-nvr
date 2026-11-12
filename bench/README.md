@@ -50,8 +50,8 @@ network parts need a running detector / backend.
 ## Measured on hardware
 
 Reports taken on real boards, every number from a run on that board. The Arduino Ventuno Q
-in every report below was lent and supported by Indus Technologies (+91 63618 86642,
-<https://www.industechno.com>); the summary for readers is on the blog:
+in every report below was lent and supported by Indus Technologies
+(<https://www.industechno.com>); the summary for readers is on the blog:
 [the announcement](https://www.opennvr.org/blog/opennvr-on-the-arduino-ventuno-q) and
 [the benchmark post](https://www.opennvr.org/blog/ventuno-q-npu-benchmarks).
 
