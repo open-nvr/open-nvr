@@ -2384,13 +2384,20 @@ async def provision_camera_mediamtx(
             raise HTTPException(status_code=404, detail="Camera not found")
 
         if is_publisher(camera):
-            # A webcam: a path for a publisher, no source to pull.
+            # A webcam: a path for a publisher, no source to pull — plus the
+            # capture command and sub path its kind needs, as camera create
+            # and the startup reconcile provision it (#900).
+            from services.local_webcams import provisioning_for
+
+            extra = provisioning_for(camera)
             result = await MediaMtxAdminService.push_publisher_path(
                 camera_id=camera.id,
                 camera_ip=camera.ip_address,
                 enable_recording=enable_recording,
                 recording_segment_seconds=recording_segment_seconds,
                 recording_path=recording_path,
+                run_on_init=extra.get("run_on_init"),
+                substream=bool(extra.get("substream")),
             )
             if result.get("status") == "ok":
                 camera.status = "provisioned"

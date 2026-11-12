@@ -201,20 +201,29 @@ def substream_marker(sub_path: str, *, rtsp_base: str = "rtsp://mediamtx:8554") 
 
 
 def provisioning_for(camera: Any) -> dict[str, Any]:
-    """``{"run_on_init": …, "substream": True}`` for a webcam MediaMTX serves
-    itself, ``{}`` for any other camera. Mints the publish token for the two
-    paths; the token lives inside MediaMTX's path config and reaches only
-    its own listener on localhost. Long-lived on purpose: MediaMTX restarts
-    the command on its own (``runOnInitRestart``) for as long as the path
-    exists, and a token that expired between core restarts would strand the
-    webcam; every core start re-provisions and re-mints anyway."""
+    """The extra path config a webcam camera needs.
+
+    * A webcam MediaMTX serves itself: ``{"run_on_init": …, "substream":
+      True}``. Mints the publish token for the two paths; the token lives
+      inside MediaMTX's path config and reaches only its own listener on
+      localhost. Long-lived on purpose: MediaMTX restarts the command on its
+      own (``runOnInitRestart``) for as long as the path exists, and a token
+      that expired between core restarts would strand the webcam; every core
+      start re-provisions and re-mints anyway.
+    * A webcam the host agent streams: ``{"substream": True}``. The agent's
+      ffmpeg publishes the main path and ``<path>-sub`` from one capture, so
+      both paths must exist; without the sub, MediaMTX refuses that output
+      and ffmpeg exits, taking the main stream with it (issue #900).
+    * Any other camera (a browser webcam publishes the main path only):
+      ``{}``."""
+    from core.camera_source import is_host_webcam
     from core.config import settings
     from services.mediamtx_jwt_service import MediaMtxJwtService
     from services.stream_service import _build_stream_name, substream_name
 
     device = getattr(camera, "source_device", None)
     if not is_local_device(device):
-        return {}
+        return {"substream": True} if is_host_webcam(camera) else {}
     name = _build_stream_name(settings.mediamtx_stream_prefix, camera.id, camera.ip_address)
     sub = substream_name(name)
     token = MediaMtxJwtService.create_publish_token(

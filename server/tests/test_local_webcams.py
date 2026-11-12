@@ -65,10 +65,21 @@ def test_is_local_device_and_marker():
     assert lw.substream_marker("cam-7-sub") == "rtsp://mediamtx:8554/cam-7-sub"
 
 
-def test_provisioning_for_only_touches_local_webcams():
-    class Cam:
-        id = 7; ip_address = "0.0.0.0"; source_type = "publisher"; source_device = "USB Camera (046d:0825)"
-    assert lw.provisioning_for(Cam()) == {}
+def _cam(source_type: str, source_device: str | None):
+    from types import SimpleNamespace
+    return SimpleNamespace(id=7, ip_address="0.0.0.0", source_type=source_type,
+                           source_device=source_device)
+
+
+def test_provisioning_for_mints_a_capture_command_only_for_local_webcams():
+    # A host-agent webcam: no capture command (the agent runs ffmpeg), but
+    # its ffmpeg publishes <path>-sub too, so the sub path is asked for (#900).
+    assert lw.provisioning_for(_cam("publisher", "USB Camera (046d:0825)")) == {"substream": True}
+
+
+def test_provisioning_for_asks_nothing_for_a_browser_webcam_or_an_ip_camera():
+    assert lw.provisioning_for(_cam("publisher", None)) == {}
+    assert lw.provisioning_for(_cam("rtsp", None)) == {}
 
 
 def test_map_conf_carries_run_on_init_for_a_publisher_path():

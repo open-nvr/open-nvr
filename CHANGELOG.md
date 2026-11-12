@@ -6,6 +6,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A USB webcam on a Docker Desktop machine goes live (#900).** The host
+  agent's ffmpeg publishes the camera's path and its `-sub` from one
+  capture, but core only created the sub path for a webcam MediaMTX serves
+  itself on Linux. MediaMTX refused the sub, ffmpeg exited a second after
+  starting, and the camera stayed "Disconnected", retrying every minute.
+  Every provisioner now asks `local_webcams.provisioning_for` what a webcam
+  needs and creates the sub through the one place that makes sub paths:
+  camera create and edit, `POST /cameras/{id}/provision-mediamtx`, the
+  startup reconcile, and core's boot loop. The last two also stop a core
+  restart from replacing a Linux USB webcam's path without its capture
+  command.
+
 ## [0.1.11] — 2026-11-12
 
 The Qualcomm NPU release. On the qualcomm flavour the detector, the captions (Gemma), the camera agent's LLM, the search embeddings (SigLIP 2 and a sentence model), speech to text (Whisper) and the plate reader all run on the Hexagon HTP, and a fresh install on a Dragonwing board starts with one setting: the flavour overlays are split per compose file so Compose 2.24 accepts a plain install, the tag the embedder fill finds is the tag asked for, and the discovery prober's Dockerfile reaches Docker intact. Detection boxes are on by default on every live picture. Search gained weighted fusion, synonyms and typo reading, a caption arm with its own model, voice search and a bounded re-rank, off by default. The workflow engine runs workflows and has an API. ANPR on a Qualcomm box: plate candidates at full resolution, consensus across looks, per-camera scan policy. USB webcams are cameras, served by MediaMTX on Linux; Add Camera finds ONVIF cameras by multicast. The camera agent serves OpenNVR Mirror. The dashboard shows the NPU and GPU beside CPU, memory and disk, and says when requests are queued. Adapter pins at `0.1.11` (`text_embed` on its own tag). App SDK stays 0.11.0.

@@ -348,9 +348,10 @@ class CameraService:
 
         from services.local_webcams import provisioning_for, substream_marker
         extra = provisioning_for(db_camera)
-        if extra:
-            # The row says it has a sub stream; the detect tap reads the
-            # small path and evidence the large one, as for an IP camera.
+        if extra.get("substream"):
+            # The row says it has a sub stream (a Linux USB webcam, or one
+            # the host agent streams); the detect tap reads the small path
+            # and evidence the large one, as for an IP camera.
             from services.stream_service import _build_stream_name, substream_name
             name = _build_stream_name(settings.mediamtx_stream_prefix, db_camera.id, db_camera.ip_address)
             db_camera.substream_url = substream_marker(substream_name(name))
