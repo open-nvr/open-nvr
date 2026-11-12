@@ -6,6 +6,65 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A USB webcam on a Docker Desktop machine goes live (#900).** The host
+  agent's ffmpeg publishes the camera's path and its `-sub` from one
+  capture, but core only created the sub path for a webcam MediaMTX serves
+  itself on Linux. MediaMTX refused the sub, ffmpeg exited a second after
+  starting, and the camera stayed "Disconnected", retrying every minute.
+  Every provisioner now asks `local_webcams.provisioning_for` what a webcam
+  needs and creates the sub through the one place that makes sub paths:
+  camera create and edit, `POST /cameras/{id}/provision-mediamtx`, the
+  startup reconcile, and core's boot loop. The last two also stop a core
+  restart from replacing a Linux USB webcam's path without its capture
+  command.
+- **One webcam feeds one camera.** A server webcam already feeding a camera
+  is refused with a 409 on create and on edit, whatever `force` says (a
+  second capture of the device fails "device busy" for ever); the Linux
+  webcam list now says which camera a webcam feeds, as the host agent's
+  did, and needs `cameras.manage`. In the browser, a camera this tab
+  already publishes is shown "in use" and cannot be added or started for
+  a second camera.
+- **Deleting a browser webcam lets the webcam go.** Its publishing session
+  kept retrying against the deleted camera, holding the webcam open with
+  its light on, until the tab closed. Deleting stops it, and a session
+  whose camera is gone (deleted in another tab or on another device) ends
+  instead of retrying.
+- **Turning USB webcams on on Linux actually gives MediaMTX ffmpeg (#904).**
+  The webcam overlay's MediaMTX built under the same image name as the
+  default one, so `WEBCAMS=on` reused the image already on disk and every
+  webcam path failed with `exec: "ffmpeg": executable file not found`. It
+  is now its own image, `opennvr/mediamtx-webcams:local-build`.
+- **Add Camera → Webcam → OpenNVR server says what to do on that server
+  (#904).** A Linux server with webcams off was told to install the host
+  agent with `.\start.ps1`, guessed from the browser's OS. It now says to set
+  `WEBCAMS=on`; on Docker Desktop the agent's install command is the
+  server's own (`OPENNVR_HOST_OS`, written by the launchers), or both when
+  unknown. With the overlay in place and no webcam plugged in, the dialog
+  says "plug one in" instead of offering the agent.
+- **`VIDEO_GID` reaches Compose.** `start.sh` exported it from inside
+  `$(compose_args)`, a subshell, so it never left; it is now written to
+  `.env` with the other host values. Hosts whose `video` group is not 44
+  could not open the webcam.
+
+### Changed
+
+- **USB webcams are on by default on Linux (#904).** `.env.example` ships
+  `WEBCAMS=on` and the installer's question defaults to yes; an `.env` that
+  says `off` keeps it. MediaMTX then runs the `-ffmpeg` image with the
+  host's video devices (only video4linux, major 81) and the `video` group.
+  `start.sh` leaves the overlay out on a kernel with no video4linux yet,
+  where Docker could not mount `/sys/class/video4linux` and core would not
+  start, and says so.
+- **Add Camera → Manual is one row of tabs: IP camera, Browser webcam,
+  Server webcam.** It was a Webcam tab with a second row of sub-tabs
+  inside it. Each webcam tab says in one line what that kind is; the steps
+  are numbered (pick the webcam, name it, picture and sound); webcam names
+  drop the USB ids; the preview says it is not recording yet and what Add
+  will do. The three webcam lists (this browser, the server's Linux
+  webcams, the host agent's) share one row design.
+
 ## [0.1.11] — 2026-11-12
 
 The Qualcomm NPU release. On the qualcomm flavour the detector, the captions (Gemma), the camera agent's LLM, the search embeddings (SigLIP 2 and a sentence model), speech to text (Whisper) and the plate reader all run on the Hexagon HTP, and a fresh install on a Dragonwing board starts with one setting: the flavour overlays are split per compose file so Compose 2.24 accepts a plain install, the tag the embedder fill finds is the tag asked for, and the discovery prober's Dockerfile reaches Docker intact. Detection boxes are on by default on every live picture. Search gained weighted fusion, synonyms and typo reading, a caption arm with its own model, voice search and a bounded re-rank, off by default. The workflow engine runs workflows and has an API. ANPR on a Qualcomm box: plate candidates at full resolution, consensus across looks, per-camera scan policy. USB webcams are cameras, served by MediaMTX on Linux; Add Camera finds ONVIF cameras by multicast. The camera agent serves OpenNVR Mirror. The dashboard shows the NPU and GPU beside CPU, memory and disk, and says when requests are queued. Adapter pins at `0.1.11` (`text_embed` on its own tag). App SDK stays 0.11.0.

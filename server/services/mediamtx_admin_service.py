@@ -1087,14 +1087,15 @@ class MediaMtxAdminService:
 
         ``run_on_init`` is the capture command for a webcam MediaMTX serves
         itself; ``substream`` also provisions ``<path>-sub`` as a publisher
-        path (the same ffmpeg feeds both), with no recording.
+        path (the same ffmpeg feeds both: MediaMTX's own, or the host
+        agent's), with no recording. Both come from
+        ``local_webcams.provisioning_for``.
 
-        The path waits for a browser (WHIP) or the host helper (RTSP) to
+        The path waits for a browser (WHIP) or the host agent (RTSP) to
         publish into it; recording, hooks and readers work as for any camera.
-        No transport policy (there is no source URL to check) and no substream
-        (``_provision_substream`` finds no source to derive one from).
+        No transport policy (there is no source URL to check).
         """
-        config = {
+        config: dict[str, Any] = {
             "source_type": "publisher",
             "recording": MediaMtxAdminService._recording_block(
                 enable_recording, recording_path, recording_segment_seconds
@@ -1102,9 +1103,11 @@ class MediaMtxAdminService:
         }
         if run_on_init:
             config["run_on_init"] = run_on_init
+        if substream:
+            # provision_path / replace_path create the sub through
+            # _provision_substream, as they do for every other caller.
+            config["substream"] = True
         result = await MediaMtxAdminService.upsert_path(camera_id, camera_ip, config)
-        if result.get("status") == "ok" and substream:
-            await MediaMtxAdminService._push_publisher_substream(camera_id, camera_ip)
         if result.get("status") == "ok":
             result.setdefault("action", "publisher_path_pushed")
             result["recording_enabled"] = enable_recording
@@ -1113,9 +1116,10 @@ class MediaMtxAdminService:
 
     @staticmethod
     async def _push_publisher_substream(camera_id: int, camera_ip: str) -> None:
-        """``<path>-sub`` for a webcam MediaMTX serves itself: a publisher
-        path the webcam's own ffmpeg feeds, no recording (a view-and-detect
-        tap, like an IP camera's sub). Add, or replace in place."""
+        """``<path>-sub`` for a webcam whose ffmpeg also publishes a sub
+        (MediaMTX's own for a Linux USB webcam, the host agent's on Docker
+        Desktop): a publisher path, no recording (a view-and-detect tap, like
+        an IP camera's sub). Add, or replace in place."""
         from services.stream_service import substream_name
         name = _build_stream_name(settings.mediamtx_stream_prefix, camera_id, camera_ip)
         sub = substream_name(name)
@@ -1516,9 +1520,24 @@ class MediaMtxAdminService:
         """Add the low-res substream path ({main}-sub) for the agent live view.
         Source-on-demand: MediaMTX only pulls the sub from the camera while
         someone (the agent's WHEP) is actually watching it, so an idle camera
-        adds zero extra load. No recording on the sub — it's a view-only tap."""
+        adds zero extra load. No recording on the sub — it's a view-only tap.
+
+        A webcam (``source_type: publisher``) has no source to pull a sub
+        from: its sub is a second publisher path that the webcam's own
+        ffmpeg feeds, created when the config asks for it (``substream``,
+        from ``local_webcams.provisioning_for``). Handled here, the one place
+        every provisioner reaches — create, edit, the provision route, the
+        startup reconcile and core's boot loop — so none of them can leave
+        the sub out (#900). Never derived from ``substream_url``: a webcam's
+        row holds a marker naming its own sub path, and pulling from it
+        would point the sub at itself."""
         from services.camera_source_resolver import derive_substream_url
         from services.stream_service import substream_name
+
+        if isinstance(config, dict) and config.get("source_type") == "publisher":
+            if config.get("substream"):
+                await MediaMtxAdminService._push_publisher_substream(camera_id, camera_ip)
+            return
 
         main_source = (
             (config.get("source_url") or config.get("source"))

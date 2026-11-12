@@ -432,6 +432,42 @@ class MediaMtxStartupService:
         return camera_result
 
     @staticmethod
+    def boot_path_config(camera: Camera, config: CameraConfig) -> dict[str, Any]:
+        """The path config core's own boot loop (``main.py``) upserts for
+        every active camera when it starts.
+
+        A webcam also gets what its kind needs from
+        ``local_webcams.provisioning_for``: the capture command for one
+        MediaMTX serves itself, and the sub path for one whose ffmpeg also
+        publishes ``<path>-sub``. This loop used to leave both out, so every
+        core restart replaced a Linux webcam's path without its capture
+        command and never created a host-agent webcam's sub (#900).
+        """
+        payload: dict[str, Any] = {
+            # The camera row wins over the config row. config.source_url
+            # is a snapshot taken when the camera was first provisioned;
+            # reading it here is what used to revert an edited RTSP URL on
+            # every restart. Keeping it as the fallback lets this loop
+            # self-heal rows that drifted before the edit path started
+            # syncing it — no migration.
+            "source_url": camera.rtsp_url or config.source_url,
+            # A webcam's path waits for a publisher.
+            "source_type": camera.source_type,
+            # Without this key _provision_substream falls back to deriving
+            # the sub URL from vendor convention, silently discarding an
+            # operator-stored one on every restart.
+            "substream_url": camera.substream_url,
+            "rtsp_transport": config.rtsp_transport,
+            "recording_enabled": config.recording_enabled,
+            "recording_path": config.recording_path,
+            "recording_segment_seconds": config.recording_segment_seconds,
+        }
+        if is_publisher(camera):
+            from services.local_webcams import provisioning_for
+            payload.update(provisioning_for(camera))
+        return payload
+
+    @staticmethod
     def build_provision_config(
         camera: Camera, config: CameraConfig | None, db: Session = None
     ) -> dict[str, Any]:
