@@ -1,0 +1,132 @@
+# OpenNVR Accelerate — Qualcomm flavour, the adapters of docker-compose.apps.yml
+# on the Hexagon NPU. start.sh appends this fragment after
+# docker-compose.accel-qualcomm.yml whenever docker-compose.apps.yml is in
+# the compose set (the default-apps profile puts it there on a stock
+# install; OPENNVR_DEFAULT_APPS=off without an apps pick leaves it out, and
+# then this fragment is left out too). Every service here overrides one
+# that file defines and KEEPS ITS PROFILES, so the flavour never activates
+# an adapter the operator did not enable. An override of a service no file
+# in the set defines has no image, and Compose 2.24 rejects the project
+# for it — which is why these do not sit in the main overlay.
+#
+# Each adapter follows <NAME>_ONNX_PROVIDERS, then the shared
+# ADAPTER_ONNX_PROVIDERS, then a default that is the NPU only where the
+# model is measured on it (docs/HARDWARE.md, 'what runs where'). The HTP is
+# one device shared by everything on it; the Tier-0 detector has first
+# claim. Same host bits as docker-compose.accel-qualcomm.yml.
+services:
+  yolo-pose-adapter:
+    profiles: [apps, guard-scan-compliance]
+    image: ghcr.io/open-nvr/yolo-pose-adapter:${YOLO_POSE_ADAPTER_TAG:-latest}-qualcomm
+    devices:
+      - /dev/fastrpc-cdsp:/dev/fastrpc-cdsp
+      - /dev/dma_heap/system:/dev/dma_heap/system
+      - /dev/dma_heap/qcom,system:/dev/dma_heap/qcom,system
+    group_add:
+      - "${FASTRPC_GID:-125}"
+      - "${DMAHEAP_GID:-989}"
+    volumes:
+      - ${QCOM_LIB_DIR:-/usr/lib/aarch64-linux-gnu}/libcdsprpc.so.1.0.0:/usr/lib/aarch64-linux-gnu/libcdsprpc.so:ro
+      - ${QCOM_LIB_DIR:-/usr/lib/aarch64-linux-gnu}/libdmabufheap.so.0:/usr/lib/aarch64-linux-gnu/libdmabufheap.so.0:ro
+    environment:
+      - ADAPTER_ONNX_PROVIDERS=${YOLO_POSE_ONNX_PROVIDERS:-${ADAPTER_ONNX_PROVIDERS:-QNNExecutionProvider:htp}}
+      - ADAPTER_ONNX_PROVIDER_OPTIONS=${ADAPTER_ONNX_PROVIDER_OPTIONS:-}
+  insightface-adapter:
+    profiles: [apps, smart-doorbell]
+    image: ghcr.io/open-nvr/insightface-adapter:${ADAPTER_TAG:-latest}-qualcomm
+    devices:
+      - /dev/fastrpc-cdsp:/dev/fastrpc-cdsp
+      - /dev/dma_heap/system:/dev/dma_heap/system
+      - /dev/dma_heap/qcom,system:/dev/dma_heap/qcom,system
+    group_add:
+      - "${FASTRPC_GID:-125}"
+      - "${DMAHEAP_GID:-989}"
+    volumes:
+      - ${QCOM_LIB_DIR:-/usr/lib/aarch64-linux-gnu}/libcdsprpc.so.1.0.0:/usr/lib/aarch64-linux-gnu/libcdsprpc.so:ro
+      - ${QCOM_LIB_DIR:-/usr/lib/aarch64-linux-gnu}/libdmabufheap.so.0:/usr/lib/aarch64-linux-gnu/libdmabufheap.so.0:ro
+    environment:
+      - ADAPTER_ONNX_PROVIDERS=${INSIGHTFACE_ONNX_PROVIDERS:-${ADAPTER_ONNX_PROVIDERS:-QNNExecutionProvider:htp}}
+      - ADAPTER_ONNX_PROVIDER_OPTIONS=${ADAPTER_ONNX_PROVIDER_OPTIONS:-}
+  package-detection-adapter:
+    profiles: [apps, package-delivery]
+    image: ghcr.io/open-nvr/package-detection-adapter:${ADAPTER_TAG:-latest}-qualcomm
+    devices:
+      - /dev/fastrpc-cdsp:/dev/fastrpc-cdsp
+      - /dev/dma_heap/system:/dev/dma_heap/system
+      - /dev/dma_heap/qcom,system:/dev/dma_heap/qcom,system
+    group_add:
+      - "${FASTRPC_GID:-125}"
+      - "${DMAHEAP_GID:-989}"
+    volumes:
+      - ${QCOM_LIB_DIR:-/usr/lib/aarch64-linux-gnu}/libcdsprpc.so.1.0.0:/usr/lib/aarch64-linux-gnu/libcdsprpc.so:ro
+      - ${QCOM_LIB_DIR:-/usr/lib/aarch64-linux-gnu}/libdmabufheap.so.0:/usr/lib/aarch64-linux-gnu/libdmabufheap.so.0:ro
+    environment:
+      - ADAPTER_ONNX_PROVIDERS=${PACKAGE_DETECTION_ONNX_PROVIDERS:-${ADAPTER_ONNX_PROVIDERS:-QNNExecutionProvider:htp}}
+      - ADAPTER_ONNX_PROVIDER_OPTIONS=${ADAPTER_ONNX_PROVIDER_OPTIONS:-}
+  fast-plate-ocr-adapter:
+    profiles: [apps, license-plate-recognition]
+    image: ghcr.io/open-nvr/fast-plate-ocr-adapter:${ADAPTER_TAG:-latest}-qualcomm
+    devices:
+      - /dev/fastrpc-cdsp:/dev/fastrpc-cdsp
+      - /dev/dma_heap/system:/dev/dma_heap/system
+      - /dev/dma_heap/qcom,system:/dev/dma_heap/qcom,system
+    group_add:
+      - "${FASTRPC_GID:-125}"
+      - "${DMAHEAP_GID:-989}"
+    volumes:
+      - ${QCOM_LIB_DIR:-/usr/lib/aarch64-linux-gnu}/libcdsprpc.so.1.0.0:/usr/lib/aarch64-linux-gnu/libcdsprpc.so:ro
+      - ${QCOM_LIB_DIR:-/usr/lib/aarch64-linux-gnu}/libdmabufheap.so.0:/usr/lib/aarch64-linux-gnu/libdmabufheap.so.0:ro
+    environment:
+      # Measured on the HTP: 79 ms a plate end-to-end vs 276 ms on CPU
+      # (single crop per call). The QNN GPU backend hung at load.
+      - ADAPTER_ONNX_PROVIDERS=${FAST_PLATE_OCR_ONNX_PROVIDERS:-${ADAPTER_ONNX_PROVIDERS:-QNNExecutionProvider:htp}}
+      - ADAPTER_ONNX_PROVIDER_OPTIONS=${ADAPTER_ONNX_PROVIDER_OPTIONS:-}
+      # The compiled HTP graphs go on the cache volume. Without this the
+      # SDK writes them beside each model: the plate detector's lands in
+      # /root/.cache (the volume) but the baked OCR model's lands inside
+      # the image's own path and is compiled again on every recreate
+      # (Ventuno Q, 2026-11-11).
+      - ADAPTER_ACCEL_CACHE_DIR=/root/.cache/opennvr-accel
+  # The embedder for search (profile `embeddings` / `enrichment`,
+  # docker-compose.apps.yml): on this flavour the CPU clip image is
+  # replaced by SigLIP2 on the Hexagon (ai-adapter siglip_qnn — the same
+  # 768-dimensional image + text space, the same `embed` request and
+  # answer, the same port, so clip-register needs no change). The graphs
+  # are compiled for the HTP at the first start (minutes); the compiled
+  # contexts live in a volume so a recreate does not compile again.
+  # SIGLIP_QNN_TEXT_PROVIDERS=CPUExecutionProvider in .env keeps the text
+  # tower (the 1.1 GB Gemma vocabulary) on the CPU if its HTP build is
+  # too slow on a board; the image tower stays on the NPU either way.
+  # The tag is the one start.sh FOUND on the registry (EMBED_ADAPTER_TAG:
+  # <ADAPTER_TAG>-qualcomm when that release ships the image, else
+  # latest-qualcomm). Asking for <ADAPTER_TAG>-qualcomm outright requested
+  # an image that did not exist for a release older than the embedder, and
+  # one missing image cancels every other pull (reported 2026-11-12).
+  clip-adapter:
+    profiles: [enrichment, embeddings]
+    image: ghcr.io/open-nvr/siglip-qnn-adapter:${EMBED_ADAPTER_TAG:-${ADAPTER_TAG:-latest}-qualcomm}
+    devices:
+      - /dev/fastrpc-cdsp:/dev/fastrpc-cdsp
+      - /dev/dma_heap/system:/dev/dma_heap/system
+      - /dev/dma_heap/qcom,system:/dev/dma_heap/qcom,system
+    group_add:
+      - "${FASTRPC_GID:-125}"
+      - "${DMAHEAP_GID:-989}"
+    volumes:
+      - ${QCOM_LIB_DIR:-/usr/lib/aarch64-linux-gnu}/libcdsprpc.so.1.0.0:/usr/lib/aarch64-linux-gnu/libcdsprpc.so:ro
+      - ${QCOM_LIB_DIR:-/usr/lib/aarch64-linux-gnu}/libdmabufheap.so.0:/usr/lib/aarch64-linux-gnu/libdmabufheap.so.0:ro
+      - opennvr_siglip_qnn_cache:/app/model_weights/siglip2-qnn/.opennvr-accel
+    environment:
+      - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
+      - ADAPTER_ONNX_PROVIDERS=${EMBED_ONNX_PROVIDERS:-QNNExecutionProvider:htp}
+      - SIGLIP_QNN_TEXT_PROVIDERS=${SIGLIP_QNN_TEXT_PROVIDERS:-}
+    healthcheck:
+      # The first start compiles two graphs for the HTP.
+      test: ["CMD", "python", "-c", "import httpx, sys; sys.exit(0 if httpx.get('http://127.0.0.1:9011/health', timeout=2).status_code == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 900s
+      retries: 20
+
+volumes:
+  opennvr_siglip_qnn_cache:

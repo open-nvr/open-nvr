@@ -52,6 +52,19 @@ the macOS and Windows Docker VMs expose no devices. The intel choice:
   exists, else `:GPU`.
   An explicit operator value (`qsv`, a pinned `:NPU`) always wins.
 
+Every overlay overrides only services of `docker-compose.yml`. Its
+overrides of services that other files define travel as fragments beside
+it, one per file, which `start.sh` appends only when that file is in the
+set: `docker-compose.accel-<flavour>-apps.yml` for the adapters of
+`docker-compose.apps.yml` (pose, faces, plates, packages, the embedder)
+and `docker-compose.accel-<flavour>-agent.yml` for the camera agent's
+captioner and speech to text. An override of a service no file in the set
+defines is a service with no image, and Compose 2.24 (the package on the
+Ventuno Q's Ubuntu) rejects the whole project for it; newer Compose only
+skips the service, which is how a single-file overlay passed every test
+and failed a plain install (2026-11-12). Running compose by hand, add the
+fragments that match the files you pass.
+
 `start.sh` prints the decision on every start:
 
 ```
@@ -167,7 +180,7 @@ under the benchmark findings — that one is driver-level.)
 | Flavour | Base | Inference wheel | Vendor user-space | Arch |
 |---|---|---|---|---|
 | `cpu` | `python:3.11-slim` | `onnxruntime` | Intel VA-API driver (iHD) for decode | amd64, arm64 |
-| `qualcomm` | same | plain `onnxruntime` **plus** `onnxruntime-qnn` 2.x — a *plugin* execution provider (bundles the Qualcomm AI Runtime: `libQnnHtp`, the HTP v68–v81 skels) that the service and the adapter SDK register at startup (the same wheel builds the `-qualcomm` adapter flavours in ai-adapter) | none in the image; the host lends `/dev/fastrpc-cdsp`, the two `/dev/dma_heap` nodes, `libcdsprpc.so` and `libdmabufheap.so.0` through `docker-compose.accel-qualcomm.yml` | arm64 |
+| `qualcomm` | same | plain `onnxruntime` **plus** `onnxruntime-qnn` 2.x — a *plugin* execution provider (bundles the Qualcomm AI Runtime: `libQnnHtp`, the HTP v68–v81 skels) that the service and the adapter SDK register at startup (the same wheel builds the `-qualcomm` adapter flavours in ai-adapter) | none in the image; the host lends `/dev/fastrpc-cdsp`, the two `/dev/dma_heap` nodes, `libcdsprpc.so` and `libdmabufheap.so.0` through `docker-compose.accel-qualcomm.yml` and its `-apps` / `-agent` fragments | arm64 |
 | `intel` | same | `onnxruntime-openvino` (bundles OpenVINO) | + Intel OpenCL compute runtime and graphics compiler, Level Zero loader, NPU driver and compiler — pinned in `detect-pipeline/scripts/install-intel-runtime.sh` (the same script builds the adapter flavours in ai-adapter) | amd64 |
 
 The NPU **firmware** is the host's job (`linux-firmware`, loaded by the `ivpu`

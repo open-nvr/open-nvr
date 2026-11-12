@@ -331,6 +331,12 @@ fill_qualcomm_embedder() {
     for tag in "${tag:-latest}-qualcomm" "latest-qualcomm"; do
         img="ghcr.io/open-nvr/siglip-qnn-adapter:${tag}"
         if accel_image_available "$img"; then
+            # The tag that EXISTS is the one the overlay must ask for. Found
+            # as latest-qualcomm but left unsaid, the overlay requested
+            # <ADAPTER_TAG>-qualcomm — no such image for a release older
+            # than the embedder — and one missing image cancelled every
+            # other pull of the project (fresh install, 2026-11-12).
+            set_env_var EMBED_ADAPTER_TAG "$tag"
             case "$(get_env_var EVENTS_EMBED_ENRICHMENT)" in ""|false) set_env_var EVENTS_EMBED_ENRICHMENT true ;; esac
             local profiles; profiles=$(get_env_var OPENNVR_EXAMPLE_PROFILE)
             case ",${profiles}," in
@@ -411,7 +417,7 @@ reset_stale_accel_fills() {
     local now="$1" prev; prev=$(get_env_var OPENNVR_ACCEL_RESOLVED)
     [[ -z "$prev" || "$prev" == "$now" ]] && return 0
     local key val
-    for key in DETECT_HWACCEL DETECT_ONNX_BACKEND DETECT_ONNX_PROVIDERS YOLO_POSE_ONNX_PROVIDERS CAPTION_ADAPTER LLM_BASE_URL STT_ADAPTER EVENTS_EMBED_ENRICHMENT; do
+    for key in DETECT_HWACCEL DETECT_ONNX_BACKEND DETECT_ONNX_PROVIDERS YOLO_POSE_ONNX_PROVIDERS CAPTION_ADAPTER LLM_BASE_URL STT_ADAPTER EVENTS_EMBED_ENRICHMENT EMBED_ADAPTER_TAG; do
         val=$(get_env_var "$key")
         case "$prev:$key:$val" in
             intel:DETECT_HWACCEL:vaapi) write_env_var DETECT_HWACCEL cpu ;;
@@ -443,6 +449,9 @@ reset_stale_accel_fills() {
                 local _p; _p=$(get_env_var OPENNVR_EXAMPLE_PROFILE)
                 _p=$(printf '%s' ",${_p}," | sed -e 's/,embeddings,/,/g' -e 's/^,//' -e 's/,$//')
                 write_env_var OPENNVR_EXAMPLE_PROFILE "$_p" ;;
+            # The embedder tag the fill found on the registry: nothing to
+            # ride on a CPU flavour (the clip image follows ADAPTER_TAG).
+            qualcomm:EMBED_ADAPTER_TAG:*-qualcomm) write_env_var EMBED_ADAPTER_TAG "" ;;
             intel:DETECT_ONNX_BACKEND:ort|qualcomm:DETECT_ONNX_BACKEND:ort) write_env_var DETECT_ONNX_BACKEND auto ;;
             intel:DETECT_ONNX_PROVIDERS:OpenVINOExecutionProvider:NPU|intel:DETECT_ONNX_PROVIDERS:OpenVINOExecutionProvider:GPU|qualcomm:DETECT_ONNX_PROVIDERS:QNNExecutionProvider:htp)
                 write_env_var DETECT_ONNX_PROVIDERS "" ;;
@@ -586,6 +595,29 @@ compose_args() {
             ;;
     esac
     [[ -n "$accel_overlay" ]] && args="$args $accel_overlay"
+    # A flavour overlay overrides only services of docker-compose.yml. Its
+    # overrides of services that OTHER files define travel as fragments
+    # beside it — <overlay>-apps.yml for docker-compose.apps.yml (pose,
+    # faces, plates, packages, the embedder), <overlay>-agent.yml for
+    # docker-compose.camera-agent.yml (the captioner, speech to text) —
+    # and each is appended only when its file is in the set. An override
+    # of a service no file defines is a service with no image, and Compose
+    # 2.24 (the board's distro package) rejected the whole project for it:
+    # a fresh plain install on a Ventuno Q could not start at all
+    # (2026-11-12). Newer Compose skips services whose profile is off,
+    # which is how the single-file overlay went unnoticed. Order is kept:
+    # the fragments of an earlier overlay precede a later overlay's (the
+    # Intel NPU file's pose bit lands after the Intel apps fragment).
+    if [[ -n "$accel_overlay" ]]; then
+        local ov frag
+        for ov in $accel_overlay; do
+            [[ "$ov" == -f ]] && continue
+            frag="${ov%.yml}-apps.yml"
+            [[ -f "$frag" && " $args " == *" docker-compose.apps.yml "* ]] && args="$args -f $frag"
+            frag="${ov%.yml}-agent.yml"
+            [[ -f "$frag" && " $args " == *" docker-compose.camera-agent.yml "* ]] && args="$args -f $frag"
+        done
+    fi
     # Opt-in host-side debug ports for mediamtx. Off by default because
     # Docker's publishing is all-or-nothing per container — see the header
     # of docker-compose.debug-ports.yml and #298.
