@@ -87,6 +87,25 @@ def _labels_of(params: Optional[dict]) -> Optional[list[str]]:
     return cleaned or None
 
 
+#: Longest adapter name a claim may carry (KAI-C registry names are short).
+MAX_ADAPTER_LEN = 64
+
+
+def _adapters_of(params: Optional[dict]) -> list[str]:
+    """The adapters a claim names for its skill (``params.adapters``).
+
+    A face app claims ``face_recognition`` and names ITS face adapter: each
+    face app keeps its own gallery, so the platform cannot choose one
+    (docs/design/face-recognition-route.md). Names only, deduplicated."""
+    if not isinstance(params, dict):
+        return []
+    raw = params.get("adapters")
+    if not isinstance(raw, list):
+        return []
+    return sorted({str(a).strip() for a in raw
+                   if str(a).strip() and len(str(a).strip()) <= MAX_ADAPTER_LEN})
+
+
 def disabled_app_consumers(db: Session) -> frozenset[str]:
     """The consumer strings of every installed app that is switched OFF.
 
@@ -172,6 +191,10 @@ def project_camera(db: Session, camera: Camera, *,
         .all()
     )
     merged: dict[str, Optional[set[str]]] = {}
+    # skill -> adapters its claims name (union). Projected as an additive
+    # ``adapters`` key, only when some claim names one, so every entry
+    # without adapters stays byte-identical to what readers know.
+    adapters: dict[str, set[str]] = {}
 
     def _merge(skill: str, labels: Optional[list[str]]) -> None:
         if skill not in merged:
@@ -187,6 +210,9 @@ def project_camera(db: Session, camera: Camera, *,
         if row.consumer in disabled_consumers:
             continue
         _merge(row.skill, _labels_of(row.params))
+        named = _adapters_of(row.params)
+        if named:
+            adapters.setdefault(row.skill, set()).update(named)
         if row.consumer.startswith(APP_CONSUMER_PREFIX):
             app_ids.append(row.consumer[len(APP_CONSUMER_PREFIX):])
     # Skills follow apps: each enabled pick brings the tasks its manifest
@@ -203,6 +229,8 @@ def project_camera(db: Session, camera: Camera, *,
         entry: dict[str, Any] = {"skill": skill}
         if merged[skill] is not None:
             entry["labels"] = sorted(merged[skill])
+        if adapters.get(skill):
+            entry["adapters"] = sorted(adapters[skill])
         projection.append(entry)
     new_value = projection or None
     if (camera.assignments or None) != new_value:

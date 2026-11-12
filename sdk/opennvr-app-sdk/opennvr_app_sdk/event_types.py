@@ -148,6 +148,35 @@ class PlateRecognized(TypedPayload):
 
 
 @dataclass(frozen=True)
+class FaceRecognized(TypedPayload):
+    """``face.recognized.v1`` — the platform face route's answer for one
+    tracked person: recognised (``person_id``) or an unknown face.
+
+    Several arrive per ``track_id`` while the pipeline retries a person's
+    improving crop; decide over a short window per track. Subscribing
+    needs the ``events:face.recognized`` scope (faces are PII)."""
+
+    SCHEMA: ClassVar[str] = "face.recognized.v1"
+    REQUIRED: ClassVar[tuple[str, ...]] = ("adapter", "track_id", "recognized")
+    adapter: str = ""
+    track_id: int = 0
+    recognized: bool = False
+    label: str | None = None
+    person_id: str | None = None
+    category: str | None = None
+    similarity: float | None = None
+    threshold: float | None = None
+    face_box: list[float] | None = None
+    observed_at: str | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        out = super().to_payload()
+        if out.get("observed_at") is None:
+            out.pop("observed_at", None)
+        return out
+
+
+@dataclass(frozen=True)
 class AccessDecided(TypedPayload):
     """``access.decided.v1`` — an admission decision for a plate at a gate.
     Consumers actuate only on ``decision == "allow"``; anything else,
@@ -272,7 +301,7 @@ class ScreeningCompleted(TypedPayload):
 #: schema → typed payload class, for every contract this SDK knows.
 EVENT_TYPES: dict[str, type[TypedPayload]] = {
     cls.SCHEMA: cls for cls in (
-        DetectionObserved, VisitRecorded, PlateRecognized, AccessDecided,
+        DetectionObserved, VisitRecorded, PlateRecognized, FaceRecognized, AccessDecided,
         OccupancyChanged, OccupancyHeatmap, OccupancyFootfall, OverlayBoxes,
         ScreeningCompleted,
     )

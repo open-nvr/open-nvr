@@ -94,6 +94,12 @@ The map lives in KAI-C beside the publisher, is part of this contract
 | Adapter | Domain event emitted |
 |---|---|
 | `fast_plate_ocr` | `plate.recognized.v1` |
+| any adapter whose result `task` is `face_recognition`, when Tier-1 dispatch named the track | `face.recognized.v1` |
+
+Face apps each run their own face adapter (each holds its own gallery),
+so the face row is keyed on the result's task rather than one adapter
+name. It fires only for the platform's face route: an app's own
+identification calls carry no track and publish nothing here.
 
 ## Contracted events (v1)
 
@@ -221,6 +227,43 @@ Tier-1 dispatch (per escalated track, best-frame). Convergence:
 
 Accept: a subscriber consumes plates without knowing which producer
 fired them.
+
+### `face.recognized.v1`
+
+Subject: `opennvr.events.face.recognized.v1.<camera_id>`
+Producer: the KAI-C normaliser, for results of the Tier-1 **face route**
+(`person` → the face adapter a face app claimed for this camera; see
+`docs/design/face-recognition-route.md`).
+
+One event per face-route reply that found a face — recognised **or
+not**: an unknown face at a gate is news. A crop with no face fires
+nothing. The pipeline re-sends a person while their crop improves until
+one reply recognises them (or a few attempts), so a consumer sees
+several events per `track_id`, the last of them usually the recognised
+one; deciding over a short window per track is the intended use.
+
+**Faces are personal data.** Subscribing needs the
+`events:face.recognized` scope, granted at install (RFC-0002 decision 6);
+the route itself exists only on cameras a face app claimed.
+
+`payload`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `adapter` | string | The face adapter that answered (the claiming app's). |
+| `track_id` | int | The Tier-0 track the crop came from: the person being followed on this camera. |
+| `label` | string \| null | The track's class (`person`). |
+| `recognized` | bool | The adapter matched an enrolled face above its threshold. |
+| `person_id` | string \| null | Who, in that adapter's gallery; null when not recognised. |
+| `category` | string \| null | The gallery's category for that person, when recognised. |
+| `similarity` | number \| null | The match's similarity (0..1), when the adapter reports one. |
+| `threshold` | number \| null | The threshold the adapter applied. |
+| `face_box` | `[x1,y1,x2,y2]` \| null | The face, in pixels of the crop the adapter was given. |
+| `observed_at` | string \| absent | Optional, as in `plate.recognized.v1`. |
+
+The crop itself is not in the event: a consumer that keeps evidence
+fetches the track's best frame from the pipeline
+(`/best_frame?camera=<id>&track=<track_id>`) while it is fresh.
 
 ### `alert.fired.v1`
 
