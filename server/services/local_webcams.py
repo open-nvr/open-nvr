@@ -7,7 +7,7 @@ On Linux the webcam's device node is passed into the MediaMTX container
 video4linux major, the ``video`` group) and MediaMTX runs ffmpeg for the
 camera's path through ``runOnInit``, restarting it when the camera is
 unplugged and plugged back. No host install, no sudo, nothing outside
-Docker — the arrangement Frigate and Home Assistant use for webcams.
+Docker.
 Docker Desktop on macOS and Windows cannot see USB; there the host agent
 (``services/host_agent.py``) does the same job from the host.
 

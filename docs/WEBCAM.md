@@ -57,7 +57,6 @@ cameras can publish.
 On Linux the webcam's device is passed into the MediaMTX container and
 MediaMTX runs the capture itself (`runOnInit`, restarted when the camera is
 unplugged and plugged back). No host agent, no sudo, nothing outside Docker.
-This is how Frigate and Home Assistant serve webcams too.
 
 1. `WEBCAMS=on` in `.env` (the installer asks), then `./start.sh up`. This
    adds `docker-compose.webcams.yml`: MediaMTX gets the host's video devices
