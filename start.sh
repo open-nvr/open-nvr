@@ -262,6 +262,17 @@ fill_qualcomm_captioner() {
             # Filled only at this moment — the
             # switch from a CPU captioner — so a value the operator set
             # since is never touched; leaving the flavour resets them.
+            # Only where the captioner will actually run: the service is
+            # defined by docker-compose.camera-agent.yml, so an install
+            # without that file (a plain install, no app picked) has no
+            # captioner, and flags switched on there describe nothing and
+            # tell the operator search by caption works when it cannot
+            # (fresh install, 2026-11-12). The adapter and tag are still
+            # filled, so picking the Camera Agent later is one `up` away.
+            if [[ ",$(get_env_var OPENNVR_EXAMPLE_COMPOSE)," != *,docker-compose.camera-agent.yml,* ]]; then
+                echo -e "${YELLOW}Accelerate:${NC} the NPU captioner (litertlm) is available but nothing in this install runs it. Pick the Camera Agent (./start.sh install) to describe visits and search them by caption." >&2
+                return 0
+            fi
             case "$(get_env_var EVENTS_CAPTION_ENRICHMENT)" in ""|false) set_env_var EVENTS_CAPTION_ENRICHMENT true ;; esac
             case "$(get_env_var EVENTS_DESCRIPTOR_ENRICHMENT)" in ""|false) set_env_var EVENTS_DESCRIPTOR_ENRICHMENT true ;; esac
             # The sweep of older visits is the operator's choice (Footage
@@ -505,6 +516,23 @@ accel_summary() {
     esac
 }
 
+# The multicast prober (docker-compose.lan-discovery.yml) is built FROM the
+# core image, copying /opt/opennvr-host/linux-<arch>/opennvr-host out of it.
+# Releases before 0.1.11 do not carry that directory, and a build that
+# fails takes the whole `up` with it: a checkout of main with the installer's
+# release pin (CORE_TAG=0.1.10) could not start at all (Ventuno Q,
+# 2026-11-12). A pin that is not a release number (main, latest, edge, a
+# commit) is taken as current.
+LAN_DISCOVERY_MIN_CORE="0.1.11"
+lan_discovery_core_ok() {
+    local tag; tag=$(get_env_var CORE_TAG)
+    case "$tag" in
+        ""|main|latest|edge) return 0 ;;
+    esac
+    [[ "$tag" =~ ^[0-9]+(\.[0-9]+){1,3}$ ]] || return 0
+    version_ge "$tag" "$LAN_DISCOVERY_MIN_CORE"
+}
+
 # ── Build Docker Compose profile args ─────────────────────
 compose_args() {
     local args="-f $COMPOSE_FILE"
@@ -513,10 +541,12 @@ compose_args() {
     # which Docker Desktop cannot do. VIDEO_GID is the host's `video` group,
     # so the container (1000:1000) may open /dev/video*.
     if [[ "$(get_env_var LAN_DISCOVERY)" == "on" && "$(uname -s)" == "Linux" ]]; then
-        if [[ -f docker-compose.lan-discovery.yml ]]; then
+        if [[ ! -f docker-compose.lan-discovery.yml ]]; then
+            echo "LAN_DISCOVERY=on but docker-compose.lan-discovery.yml is missing" >&2
+        elif lan_discovery_core_ok; then
             args="$args -f docker-compose.lan-discovery.yml"
         else
-            echo "LAN_DISCOVERY=on but docker-compose.lan-discovery.yml is missing" >&2
+            echo -e "${YELLOW}Discovery:${NC} LAN_DISCOVERY=on needs core $LAN_DISCOVERY_MIN_CORE or newer (the prober is built from the core image's host-agent binary); CORE_TAG=$(get_env_var CORE_TAG) has none. Multicast discovery is left out until the pin moves." >&2
         fi
     fi
     if [[ "$(get_env_var WEBCAMS)" == "on" && "$(uname -s)" == "Linux" ]]; then

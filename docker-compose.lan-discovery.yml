@@ -17,12 +17,21 @@ services:
   lan-probe:
     build:
       context: .
+      # Compose interpolates ${...} inside dockerfile_inline exactly as it does
+      # anywhere else in this file, BEFORE Docker sees the Dockerfile. Both
+      # ARGs below are Docker's to expand (CORE_IMAGE from `args`, TARGETARCH
+      # from BuildKit), so they are written $${...}: Compose turns that into a
+      # literal ${...}. Written plain, Compose substituted blanks and every
+      # fresh Linux install died at `FROM  AS core` ("FROM requires either
+      # one or three arguments") on a Ventuno Q, 2026-11-12. The core image
+      # must be 0.1.11 or newer (the first that carries /opt/opennvr-host);
+      # start.sh leaves this overlay out, with a notice, for an older pin.
       dockerfile_inline: |
         ARG CORE_IMAGE
-        FROM ${CORE_IMAGE} AS core
+        FROM $${CORE_IMAGE} AS core
         FROM alpine:3.20
         ARG TARGETARCH
-        COPY --from=core /opt/opennvr-host/linux-${TARGETARCH}/opennvr-host /opennvr-host
+        COPY --from=core /opt/opennvr-host/linux-$${TARGETARCH}/opennvr-host /opennvr-host
         ENTRYPOINT ["/opennvr-host", "-discovery-only", "-core", "http://127.0.0.1:8000", "-key-file", "/key/agent.key", "-log-file", "-"]
       args:
         CORE_IMAGE: ${CORE_IMAGE:-ghcr.io/open-nvr/core}:${CORE_TAG:-latest}
