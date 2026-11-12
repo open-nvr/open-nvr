@@ -83,12 +83,26 @@ def _is_digest(call: dict) -> bool:
     return isinstance(call.get("auth"), httpx.DigestAuth) and not _is_wsse(call)
 
 
+def _system_time(when, prefix: str = "tt:") -> str:
+    """A GetSystemDateAndTime answer whose UTCDateTime is ``when``."""
+    p = prefix
+    return (
+        "<s:Envelope><s:Body><tds:GetSystemDateAndTimeResponse><tds:SystemDateAndTime>"
+        f"<{p}UTCDateTime><{p}Time><{p}Hour>{when.hour}</{p}Hour><{p}Minute>{when.minute}</{p}Minute>"
+        f"<{p}Second>{when.second}</{p}Second></{p}Time><{p}Date><{p}Year>{when.year}</{p}Year>"
+        f"<{p}Month>{when.month}</{p}Month><{p}Day>{when.day}</{p}Day></{p}Date></{p}UTCDateTime>"
+        "</tds:SystemDateAndTime></tds:GetSystemDateAndTimeResponse></s:Body></s:Envelope>"
+    )
+
+
 class WsseFallbackTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         _Client.responses = []
         _Client.calls = []
         ods._WSSE_PREFERRED_HOSTS.clear()
+        ods._CLOCK_OFFSETS.clear()
         self.addCleanup(ods._WSSE_PREFERRED_HOSTS.clear)
+        self.addCleanup(ods._CLOCK_OFFSETS.clear)
         self.client_patch = patch.object(ods.httpx, "AsyncClient", _Client)
         self.client_patch.start()
         self.addCleanup(self.client_patch.stop)
@@ -170,20 +184,107 @@ class WsseFallbackTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(_Client.calls), 1)
                 self.assertEqual(ods._WSSE_PREFERRED_HOSTS, set())
 
-    async def test_second_auth_fault_is_returned_as_is_and_host_not_remembered(self):
-        """Both schemes refused: at most two requests, the second fault
-        goes back to the caller, and the host is NOT marked as
-        WS-Security-preferring (it accepted neither)."""
+    async def test_second_auth_fault_becomes_a_401_the_operator_can_read(self):
+        """Both schemes refused and the camera clock agrees with ours: the
+        caller gets a 401 whose detail names the ONVIF account, never the
+        SOAP fault (the Add Camera dialog printed ``<s:Envelope …
+        ter:NotAuthorized`` to an operator, 2026-11-12). Three requests:
+        Digest, WS-Security, the unauthenticated clock probe; no fourth,
+        because the clock was fine. The host is NOT remembered."""
         _Client.responses = [
             httpx.Response(500, text=AUTH_FAULT),
             httpx.Response(500, text=AUTH_FAULT),
+            httpx.Response(200, text=_system_time(ods.datetime.now(ods.UTC))),
         ]
 
-        result = await ods._onvif_request(URL, "<r/>", "admin", "wrong")
+        with self.assertRaises(ods.HTTPException) as ctx:
+            await ods._onvif_request(URL, "<r/>", "admin", "wrong")
 
-        self.assertEqual(result, (500, AUTH_FAULT))
-        self.assertEqual(len(_Client.calls), 2)
+        self.assertEqual(ctx.exception.status_code, 401)
+        self.assertIn("rejected the ONVIF username or password", ctx.exception.detail)
+        self.assertIn("ONVIF account", ctx.exception.detail)
+        self.assertNotIn("<", ctx.exception.detail)
+        self.assertEqual(len(_Client.calls), 3)
+        self.assertFalse(_is_wsse(_Client.calls[2]))
+        self.assertIn("GetSystemDateAndTime", _Client.calls[2]["content"])
         self.assertEqual(ods._WSSE_PREFERRED_HOSTS, set())
+        self.assertEqual(ods._CLOCK_OFFSETS, {})
+
+    async def test_skewed_camera_clock_gets_one_retry_stamped_in_its_time(self):
+        """The camera is ten minutes ahead: Digest and WS-Security refuse,
+        the clock probe says so, and a WS-Security retry whose Created is
+        in the camera's time succeeds. The offset is remembered, so the
+        next request to that host starts with WS-Security at its time."""
+        camera_now = ods.datetime.now(ods.UTC) + ods.timedelta(minutes=10)
+        _Client.responses = [
+            httpx.Response(500, text=AUTH_FAULT),
+            httpx.Response(500, text=AUTH_FAULT),
+            httpx.Response(200, text=_system_time(camera_now)),
+            httpx.Response(200, text="ok"),
+        ]
+
+        result = await ods._onvif_request(URL, "<r/>", "admin", "secret")
+
+        self.assertEqual(result, (200, "ok"))
+        self.assertEqual(len(_Client.calls), 4)
+        self.assertTrue(_is_wsse(_Client.calls[3]))
+        created = re.search(r"<wsu:Created>([^<]+)</wsu:Created>", _Client.calls[3]["content"]).group(1)
+        stamped = ods.datetime.strptime(created, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=ods.UTC)
+        self.assertLess(abs((stamped - camera_now).total_seconds()), 5)
+        self.assertIn("http://camera", ods._WSSE_PREFERRED_HOSTS)
+        self.assertAlmostEqual(ods._CLOCK_OFFSETS["http://camera"], 600, delta=5)
+
+        _Client.responses = [httpx.Response(200, text="ok")]
+        _Client.calls = []
+        await ods._onvif_request(URL, "<r/>", "admin", "secret")
+        created = re.search(r"<wsu:Created>([^<]+)</wsu:Created>", _Client.calls[0]["content"]).group(1)
+        stamped = ods.datetime.strptime(created, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=ods.UTC)
+        self.assertLess(abs((stamped - camera_now).total_seconds()), 5)
+
+    async def test_skewed_clock_and_a_wrong_password_say_both(self):
+        """Clock off AND refused at the camera's time: the 401 names the
+        skew in minutes so the operator fixes the real thing first."""
+        camera_now = ods.datetime.now(ods.UTC) - ods.timedelta(minutes=7)
+        _Client.responses = [
+            httpx.Response(500, text=AUTH_FAULT),
+            httpx.Response(500, text=AUTH_FAULT),
+            httpx.Response(200, text=_system_time(camera_now)),
+            httpx.Response(500, text=AUTH_FAULT),
+        ]
+
+        with self.assertRaises(ods.HTTPException) as ctx:
+            await ods._onvif_request(URL, "<r/>", "admin", "wrong")
+
+        self.assertEqual(ctx.exception.status_code, 401)
+        self.assertIn("7 min behind", ctx.exception.detail)
+        self.assertEqual(len(_Client.calls), 4)
+        self.assertEqual(ods._CLOCK_OFFSETS, {})
+
+    async def test_unreadable_camera_clock_is_said_so(self):
+        """A camera that does not answer GetSystemDateAndTime (or answers
+        without a UTC time) still gets a readable 401, with the clock
+        named as a thing to check."""
+        _Client.responses = [
+            httpx.Response(500, text=AUTH_FAULT),
+            httpx.Response(500, text=AUTH_FAULT),
+            httpx.Response(200, text="<s:Envelope><s:Body/></s:Envelope>"),
+        ]
+
+        with self.assertRaises(ods.HTTPException) as ctx:
+            await ods._onvif_request(URL, "<r/>", "admin", "wrong")
+
+        self.assertEqual(ctx.exception.status_code, 401)
+        self.assertIn("clock could not be read", ctx.exception.detail)
+        self.assertEqual(len(_Client.calls), 3)
+
+    def test_parse_utc_datetime_is_prefix_agnostic(self):
+        for prefix in ("tt:", "", "tds:"):
+            with self.subTest(prefix=prefix or "none"):
+                text = _system_time(ods.datetime(2026, 11, 12, 9, 5, 7, tzinfo=ods.UTC), prefix)
+                self.assertEqual(
+                    ods._parse_utc_datetime(text), ods.datetime(2026, 11, 12, 9, 5, 7, tzinfo=ods.UTC)
+                )
+        self.assertIsNone(ods._parse_utc_datetime("<s:Envelope/>"))
 
     async def test_host_that_accepted_wsse_gets_wsse_first_next_time(self):
         """The PTZ case: after one successful fallback, later calls to any

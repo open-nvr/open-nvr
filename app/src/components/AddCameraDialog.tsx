@@ -100,6 +100,22 @@ function subnet24(ip: string): string | null {
 // The /connect 403 for an IP outside the configured Camera LAN. The other
 // /connect 403 ("non-internal address") deliberately doesn't match — that
 // one isn't fixable from here.
+/**
+ * A server detail an operator can read, or ''. A camera's raw SOAP fault
+ * ("GetProfiles failed: <?xml … ter:NotAuthorized …") is reduced to its
+ * fault code; nothing with markup reaches the red box.
+ */
+const humanServerDetail = (detail: string): string => {
+  if (!detail) return ''
+  if (!detail.includes('<')) return detail.length <= 400 ? detail : detail.slice(0, 397) + '…'
+  const code = detail.match(/ter:([A-Za-z]+)/)?.[1] || detail.match(/wsse:([A-Za-z]+)/)?.[1]
+  const prefix = detail.split('<')[0].replace(/[:\s]+$/, '')
+  if (code === 'NotAuthorized' || code === 'FailedAuthentication') {
+    return 'The camera rejected the ONVIF username or password. Some cameras keep an ONVIF account separate from the web login, or need ONVIF turned on.'
+  }
+  return `${prefix || 'The camera returned an error'}${code ? ` (${code})` : ''}.`
+}
+
 function parseLanBlock(e: any): { configured: string[] } | null {
   if (e?.status !== 403) return null
   const detail = typeof e?.data?.detail === 'string' ? e.data.detail : e?.message || ''
@@ -541,11 +557,11 @@ export function AddCameraDialog({
         // Fixable in place: offer to extend the Camera LAN with this subnet.
         setLanPrompt({ ip: selectedCamera.ip, subnet, configured: lanBlock.configured })
       } else if (e?.status === 401 || detail.includes('401') || detail.toLowerCase().includes('authentication')) {
-        setError('Authentication failed. Check username and password.')
+        setError(humanServerDetail(detail) || 'Authentication failed. Check username and password.')
       } else if (detail.includes('timeout') || detail.includes('connect')) {
           setError(t('cameraDialog.connectError'))
       } else {
-        setError(detail || 'Connection failed. Check credentials and network.')
+        setError(humanServerDetail(detail) || 'Connection failed. Check credentials and network.')
       }
     } finally {
       setAuthenticating(false)
