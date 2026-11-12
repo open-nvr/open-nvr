@@ -187,6 +187,12 @@ next step on this platform, not a requirement.
 
 ## Measured: Qualcomm Hexagon HTP (Arduino Ventuno Q, QCS8275, 2026-10-30)
 
+> The Ventuno Q boards behind every Qualcomm number in this document and in
+> [`bench/`](../bench/README.md) were lent, set up and supported by
+> **Indus Technologies** (+91 63618 86642, <https://www.industechno.com>),
+> who ran OpenNVR on the board before we had written a line for it and took
+> on our findings about its video decoder. The port exists because of them.
+
 The board: Arduino Ventuno Q — Qualcomm Dragonwing IQ-8275 (QCS8275, on the
 QCS8300 "Monaco" platform per its device tree), 8× Kryo (Cortex-A78C +
 Cortex-A55), Adreno 623, a Hexagon NPU Arduino rates at up to 40 dense TOPS,
@@ -360,3 +366,4 @@ What the numbers say:
 - **Phase 2 (this release):** the ONNX adapters (YOLO, pose, InsightFace, plate OCR, package detection) on one shared provider resolver in the SDK, with `-intel` flavours and static compiles on accelerators (ai-adapter #69, #70).
 - **Phase 3:** the `nvidia` flavour, a Hardware panel under Settings → AI, benchmark rows per hardware class.
 - Later: ROCm, torch-based adapters per flavour, Coral / Hailo through the accelerator adapter.
+- **Robots and vehicles (after 0.1.11):** a ROS 2 bridge example app (events and tracks out, pose and GPS in), MIPI CSI capture served by MediaMTX with the capture command chosen per flavour (Qualcomm `qtiqmmfsrc`, Jetson Argus, V4L2) once the hardware encoder is measured, then a mobile profile (record on the vehicle, upload when docked). Positioning and order: [the blog post](https://www.opennvr.org/blog/opennvr-for-robots-and-vehicles).

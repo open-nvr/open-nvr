@@ -49,7 +49,11 @@ network parts need a running detector / backend.
 
 ## Measured on hardware
 
-Reports taken on real boards, every number from a run on that board:
+Reports taken on real boards, every number from a run on that board. The Arduino Ventuno Q
+in every report below was lent and supported by Indus Technologies (+91 63618 86642,
+<https://www.industechno.com>); the summary for readers is on the blog:
+[the announcement](https://www.opennvr.org/blog/opennvr-on-the-arduino-ventuno-q) and
+[the benchmark post](https://www.opennvr.org/blog/ventuno-q-npu-benchmarks).
 
 - [`ventuno-q-benchmark-2026-10-30.md`](ventuno-q-benchmark-2026-10-30.md) — the Tier-0 detector on the
   Hexagon NPU of an Arduino Ventuno Q (QCS8275) against the CPU: 8.6 ms an inference on the HTP, sixteen
