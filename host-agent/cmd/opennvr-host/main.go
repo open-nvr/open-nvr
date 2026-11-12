@@ -44,6 +44,7 @@ func main() {
 	keyFile := flag.String("key-file", "", "agent key (default <repo>/data/host-agent-key/agent.key)")
 	logFile := flag.String("log-file", "", "log file (default next to the key; '-' = stderr only)")
 	ffmpegPath := flag.String("ffmpeg", "", "ffmpeg to use (default: look for it)")
+	discoveryOnly := flag.Bool("discovery-only", false, "LAN prober: ONVIF discovery and nothing else (the Linux container)")
 	flag.Parse()
 
 	keyDir := filepath.Join(*repo, "data", "host-agent-key")
@@ -97,6 +98,7 @@ func main() {
 		KeyFile: *keyFile,
 		Repo:    *repo,
 		FFmpeg:  *ffmpegPath,
+		DiscoveryOnly: *discoveryOnly,
 		Logf:    log.Printf,
 	})
 	log.Printf("OpenNVR host agent stopped")

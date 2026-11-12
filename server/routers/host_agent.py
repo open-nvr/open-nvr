@@ -16,7 +16,7 @@ import time
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from core.database import get_db
@@ -70,6 +70,26 @@ class Metrics(BaseModel):
     recordings_disk: Disk | None = None
 
 
+class OnvifScan(BaseModel):
+    """The agent's last WS-Discovery round.
+
+    Its devices came from unauthenticated UDP replies on the LAN, so they are
+    cleaned (bad entries dropped, fields clamped, at most 256 kept) rather
+    than validated: a strict schema would let any device on the network make
+    core refuse the agent's whole sync — webcams and metrics with it.
+    """
+
+    scanned_at: float
+    #: The request this round answered (0 for a background round).
+    seq: int = Field(0, ge=0)
+    devices: list[dict] = Field(default_factory=list)
+
+    @field_validator("devices", mode="before")
+    @classmethod
+    def _clean(cls, v):
+        return host_agent.clean_onvif_devices(v)
+
+
 class SyncReport(BaseModel):
     version: str = Field(..., max_length=100)
     role: Literal["user", "system"] = "user"
@@ -80,6 +100,7 @@ class SyncReport(BaseModel):
     webcams: list[Webcam] = Field(default_factory=list, max_length=64)
     publishers: list[PublisherState] = Field(default_factory=list, max_length=64)
     metrics: Metrics | None = None
+    onvif: OnvifScan | None = None
 
 
 # ── Agent auth ─────────────────────────────────────────────────────────
@@ -142,6 +163,10 @@ def sync(report: SyncReport, request: Request, db: Session = Depends(get_db)):
         "core_build": host_agent.core_build(),
         "desired": host_agent.desired_state(db),
         "poll_after_s": host_agent.POLL_AFTER_S,
+        "discover_onvif": host_agent.discovery_pending(),
+        # The request to answer: the agent runs a round and reports it with
+        # this number, so the wait on core needs no shared clock.
+        "discover_seq": host_agent.discovery_requested_seq(),
     }
 
 

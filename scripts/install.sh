@@ -1451,6 +1451,9 @@ main() {
             env_set WEBCAMS off; info "USB webcams: off (later: WEBCAMS=on in .env, then ./start.sh up)"
         fi
         env_set HOST_AGENT off
+        # Discovery by multicast needs the host's network; a small container
+        # on it does that on Linux with nothing to install.
+        env_set LAN_DISCOVERY on; ok "Camera discovery by multicast: on (a prober on the host's network)"
     else
         # Docker Desktop cannot see USB: the host agent streams webcams from
         # the host and reports the machine's own CPU/memory/disk readings.

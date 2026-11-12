@@ -32,7 +32,46 @@ import { WebcamAddPanel } from './WebcamAddPanel'
 import { useTranslation } from '../i18n'
 import { extractApiError } from '../lib/apiError'
 
-type DiscoveredCamera = { ip: string; scheme?: string; service_urls?: string[] }
+type DiscoveredCamera = {
+  ip: string
+  scheme?: string
+  service_urls?: string[]
+  /** From the camera's own WS-Discovery answer (host agent), when it gave one. */
+  name?: string | null
+  hardware?: string | null
+}
+
+function ipKey(ip: unknown): number {
+  if (typeof ip !== 'string') return Number.MAX_SAFE_INTEGER
+  const p = ip.split('.')
+  if (p.length !== 4) return Number.MAX_SAFE_INTEGER
+  const n = p.map((s) => (/^\d{1,3}$/.test(s) ? Number(s) : -1))
+  return n.every((v) => v >= 0 && v <= 255) ? ((n[0] * 256 + n[1]) * 256 + n[2]) * 256 + n[3] : Number.MAX_SAFE_INTEGER
+}
+
+// Results arrive from two places (the multicast probe within seconds, the
+// subnet sweep later): merge by address and keep the list in address order
+// so it does not reshuffle as the sweep lands. The probe's row contributes
+// the name and model the camera announced; the sweep's row contributes the
+// service URL and port it MEASURED, which beat the probe's guess of
+// http://ip:80 — the first cut let the guess win and Connect went to the
+// wrong port on a camera the sweep alone would have connected.
+function mergeCameras(prev: DiscoveredCamera[], next: DiscoveredCamera[], from: 'probe' | 'sweep'): DiscoveredCamera[] {
+  const by = new Map(prev.filter((c) => typeof c.ip === 'string').map((c) => [c.ip, c]))
+  for (const c of next) {
+    if (typeof c.ip !== 'string') continue
+    const old = by.get(c.ip)
+    if (!old) { by.set(c.ip, c); continue }
+    const measured = from === 'sweep' ? c : old
+    const announced = from === 'sweep' ? old : c
+    by.set(c.ip, {
+      ...announced, ...measured,
+      name: announced.name ?? measured.name ?? null,
+      hardware: announced.hardware ?? measured.hardware ?? null,
+    })
+  }
+  return [...by.values()].sort((a, b) => ipKey(a.ip) - ipKey(b.ip))
+}
 
 // The device's ONVIF port lives inside its service URL. The server sends
 // {ip, scheme, service_urls}; both the subtitle and the connect call need
@@ -244,11 +283,28 @@ export function AddCameraDialog({
     // Show the target range while the scan is still running.
     if (overrideCidr) setScanInfo({ cidrs: [overrideCidr], source: 'override' })
 
+    // The multicast probe (the LAN prober on Linux, the host agent on Docker
+    // Desktop), beside the sweep: cameras on the OpenNVR machine's own
+    // network show up within seconds. It is part of THIS scan: awaited with
+    // the sweep, cancelled with it, counted in "Found N". No prober (or one
+    // that found nothing) just leaves the sweep to it.
+    const probe = apiService.onvifDiscoverAgent(abort.signal).then(
+      (r: any) => {
+        const d = r?.data
+        if (seq !== scanSeqRef.current || !d?.available || !d.devices?.length) return
+        setDiscoveredCameras((prev) => mergeCameras(prev, d.devices, 'probe'))
+      },
+      () => {},
+    )
+
     try {
-      const response = await apiService.onvifDiscover(
-        overrideCidr ? { cidr: overrideCidr } : undefined,
-        abort.signal,
-      )
+      const [response] = await Promise.all([
+        apiService.onvifDiscover(
+          overrideCidr ? { cidr: overrideCidr } : undefined,
+          abort.signal,
+        ),
+        probe,
+      ])
       if (seq !== scanSeqRef.current) return
       const data = response?.data || {}
       const devices = data.devices || []
@@ -258,11 +314,11 @@ export function AddCameraDialog({
       }
       setHostCidrs(prev => Array.from(new Set([...prev, ...(data.suggested_cidrs || [])])))
       if (data.client_cidr) setClientCidr(data.client_cidr)
-      setDiscoveredCameras(devices.map((d: any) => ({
+      setDiscoveredCameras((prev) => mergeCameras(prev, devices.map((d: any) => ({
         ip: d.ip || d.host || d.address,
         scheme: d.scheme || 'http',
         service_urls: d.service_urls || [],
-      })))
+      })), 'sweep'))
     } catch (e: any) {
       if (seq !== scanSeqRef.current || e?.name === 'AbortError') return
       setError(extractApiError(e, 'Discovery failed. Try manual entry.'))
@@ -401,7 +457,8 @@ export function AddCameraDialog({
     setError(null)
     setLanPrompt(null)
     setLanPromptError(null)
-    setCameraName('') // Reset camera name for user input
+    // The name the camera announced (multicast discovery), else empty.
+    setCameraName(camera.name || '')
   }
 
   // Leave the connect step back to the results list (results are kept).
@@ -1064,9 +1121,12 @@ export function AddCameraDialog({
                     <div className="min-w-0">
                       <div className="text-sm font-medium flex items-center gap-2">
                         <span className="font-mono">{camera.ip}</span>
+                        {camera.name && <span className="truncate font-normal">{camera.name}</span>}
                         {addedByIp.has(camera.ip) && <Badge variant="info">{t('cameraDialog.alreadyAdded')}</Badge>}
                       </div>
-                      <div className="text-xs text-[var(--text-dim)]">{deviceSubtitle(camera)}</div>
+                      <div className="text-xs text-[var(--text-dim)]">
+                        {deviceSubtitle(camera)}{camera.hardware ? ` · ${camera.hardware}` : ''}
+                      </div>
                     </div>
                   </div>
                   <ChevronDown size={16} className="text-[var(--text-dim)] -rotate-90 shrink-0" />

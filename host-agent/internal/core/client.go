@@ -15,6 +15,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/open-nvr/open-nvr/host-agent/internal/onvifdisc"
 )
 
 // ErrRejected is core's single answer to a wrong key, a proxied request or a
@@ -77,6 +79,17 @@ type Report struct {
 	Webcams    []Webcam         `json:"webcams"`
 	Publishers []PublisherState `json:"publishers"`
 	Metrics    *Metrics         `json:"metrics,omitempty"`
+	// The last multicast ONVIF discovery from this host (onvifdisc).
+	Onvif *OnvifScan `json:"onvif,omitempty"`
+}
+
+// OnvifScan is one WS-Discovery round: when, and what answered.
+type OnvifScan struct {
+	ScannedAt float64            `json:"scanned_at"`
+	// The request this round answered (0 for a background round): core
+	// matches it against the sequence it asked for, so no shared clock.
+	Seq     int                `json:"seq"`
+	Devices []onvifdisc.Device `json:"devices"`
 }
 
 // Desired is one camera the agent should feed, and from which webcam.
@@ -97,6 +110,11 @@ type SyncResponse struct {
 	CoreBuild  string    `json:"core_build"`
 	Desired    []Desired `json:"desired"`
 	PollAfterS int       `json:"poll_after_s"`
+	// Someone opened Add Camera → Discover: probe for cameras now rather
+	// than at the next background round.
+	DiscoverOnvif bool `json:"discover_onvif,omitempty"`
+	// The request to answer; reported back as OnvifScan.Seq.
+	DiscoverSeq int `json:"discover_seq,omitempty"`
 }
 
 // Client calls core with the agent key.

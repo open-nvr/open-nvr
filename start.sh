@@ -503,6 +503,13 @@ compose_args() {
     # only — the overlay passes the host's video devices into the container,
     # which Docker Desktop cannot do. VIDEO_GID is the host's `video` group,
     # so the container (1000:1000) may open /dev/video*.
+    if [[ "$(get_env_var LAN_DISCOVERY)" == "on" && "$(uname -s)" == "Linux" ]]; then
+        if [[ -f docker-compose.lan-discovery.yml ]]; then
+            args="$args -f docker-compose.lan-discovery.yml"
+        else
+            echo "LAN_DISCOVERY=on but docker-compose.lan-discovery.yml is missing" >&2
+        fi
+    fi
     if [[ "$(get_env_var WEBCAMS)" == "on" && "$(uname -s)" == "Linux" ]]; then
         if [[ -f docker-compose.webcams.yml ]]; then
             args="$args -f docker-compose.webcams.yml"
@@ -2025,6 +2032,13 @@ run_up() {
     # bind-mounted into core: made here as this user, or Docker would create
     # them root-owned on Linux and the agent's key hash could never be written.
     mkdir -p data/updates data/update-requests data/host-agent
+    # The LAN prober (docker-compose.lan-discovery.yml) is the host agent's
+    # code in a container: it needs the agent key, and core its hash.
+    if [[ "$(get_env_var LAN_DISCOVERY)" == "on" && "$(uname -s)" == "Linux" ]]; then
+        # shellcheck source=scripts/host-agent.sh
+        . "$(dirname "$0")/scripts/host-agent.sh"
+        ha_init_key
+    fi
     local up_flags="--remove-orphans"
     [ "${KEEP_ORPHANS:-}" = 1 ] && up_flags=""
     [ "${UP_BUILD:-}" = 1 ] && up_flags="$up_flags --build"

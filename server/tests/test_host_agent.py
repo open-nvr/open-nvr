@@ -332,3 +332,86 @@ def test_a_webcam_moved_to_another_port_keeps_its_name(env):
     body = env.tc.post("/api/v1/host-agent/sync", json=moved, headers=H).json()
     assert body["desired"][0]["device_id"] == "dshow:hp"
     assert body["desired"][0]["device_name"] == "HP HD Camera"
+
+
+# ── ONVIF discovery from the host (WS-Discovery) ──────────────────────
+
+
+SCAN = {"scanned_at": 0.0, "devices": [
+    {"ip": "192.168.31.155", "port": 80, "scheme": "http",
+     "xaddrs": ["http://192.168.31.155/onvif/device_service"],
+     "name": "CPPLUS", "hardware": "CP-UVR-1601E1-IC"},
+    # Not a camera LAN address: never offered.
+    {"ip": "8.8.8.8", "port": 80, "scheme": "http", "xaddrs": []},
+    {"ip": "169.254.10.1", "port": 80, "scheme": "http", "xaddrs": []},
+]}
+
+
+@pytest.fixture
+def discover_app(env):
+    import core.auth as auth
+    from routers import onvif as onvif_router
+
+    app = FastAPI()
+    app.include_router(onvif_router.router, prefix="/api/v1")
+    app.dependency_overrides[auth.get_current_superuser] = lambda: env.users["operator"]
+    with TestClient(app) as tc:
+        yield tc
+
+
+def test_discovery_is_asked_for_and_then_answered(env):
+    """A request is a sequence number the agent echoes back with the round
+    it ran; the clocks of the two machines never enter into it."""
+    from services import host_agent
+    env.tc.post("/api/v1/host-agent/sync", json=REPORT, headers=H)
+    asked = host_agent.request_discovery()
+    first = env.tc.post("/api/v1/host-agent/sync", json=REPORT, headers=H).json()
+    assert first["discover_onvif"] is True and first["discover_seq"] == asked
+    # A background round (seq 0) does not answer it, whatever its clock says
+    bg = {**REPORT, "onvif": {**SCAN, "scanned_at": time.time() + 3600}}
+    assert env.tc.post("/api/v1/host-agent/sync", json=bg, headers=H).json()["discover_onvif"] is True
+    # The round run for the request answers it, even with a clock far behind
+    answered = {**REPORT, "onvif": {**SCAN, "seq": asked, "scanned_at": time.time() - 3600}}
+    second = env.tc.post("/api/v1/host-agent/sync", json=answered, headers=H).json()
+    assert second["discover_onvif"] is False
+    assert host_agent.discovery_answered(asked)
+
+
+def test_agent_discovery_lists_only_camera_lan_devices(env, discover_app):
+    env.tc.post("/api/v1/host-agent/sync", json={**REPORT, "onvif": {**SCAN, "scanned_at": time.time()}}, headers=H)
+    body = discover_app.get("/api/v1/discover/agent", params={"refresh": "false"}).json()
+    assert body["available"] is True
+    assert [d["ip"] for d in body["devices"]] == ["192.168.31.155"]
+    d = body["devices"][0]
+    assert d["source"] == "multicast" and d["name"] == "CPPLUS"
+    assert d["service_urls"] == ["http://192.168.31.155/onvif/device_service"]
+
+
+def test_without_an_agent_discovery_says_so(env, discover_app):
+    host_agent.state.reset()
+    body = discover_app.get("/api/v1/discover/agent", params={"refresh": "false"}).json()
+    assert body == {"available": False, "devices": [], "scanned_at": None}
+
+
+def test_a_hostile_discovery_never_breaks_the_sync(env, discover_app):
+    """Discovery comes from anyone's UDP on the LAN. A flood, oversized or
+    malformed entries must be cleaned, not make core refuse the agent's
+    whole sync (its webcams and metrics would stop with it)."""
+    devices = [{"ip": f"10.0.{i // 250}.{i % 250 + 1}"} for i in range(300)]
+    devices[0] = {"ip": "10.0.0.1", "port": 99999, "scheme": "ftp", "name": "A" * 5000 + "\x07",
+                  "xaddrs": ["http://10.0.0.1:8080/onvif/device_service",
+                             "http://10.0.0.10/onvif/device_service",
+                             "x" * 1000] + ["http://10.0.0.1/onvif"] * 10}
+    devices[1] = "not a device"
+    flood = {**REPORT, "onvif": {"scanned_at": time.time(), "devices": devices}}
+    r = env.tc.post("/api/v1/host-agent/sync", json=flood, headers=H)
+    assert r.status_code == 200, r.text
+
+    listed = discover_app.get("/api/v1/discover/agent", params={"refresh": "false"}).json()["devices"]
+    assert len(listed) == host_agent.MAX_ONVIF_DEVICES
+    first = listed[0]
+    assert first["ip"] == "10.0.0.1" and first["port"] == 80 and first["scheme"] == "http"
+    assert len(first["name"]) == 200 and "\x07" not in first["name"]
+    # Only URLs on that very host, at most four; ".10" is not ".1".
+    assert "http://10.0.0.10/onvif/device_service" not in first["service_urls"]
+    assert len(first["service_urls"]) == 4

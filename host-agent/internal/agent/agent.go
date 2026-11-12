@@ -14,12 +14,14 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/open-nvr/open-nvr/host-agent/internal/buildinfo"
 	"github.com/open-nvr/open-nvr/host-agent/internal/core"
 	"github.com/open-nvr/open-nvr/host-agent/internal/ffmpeg"
 	"github.com/open-nvr/open-nvr/host-agent/internal/metrics"
+	"github.com/open-nvr/open-nvr/host-agent/internal/onvifdisc"
 	"github.com/open-nvr/open-nvr/host-agent/internal/publisher"
 	"github.com/open-nvr/open-nvr/host-agent/internal/webcams"
 )
@@ -35,7 +37,11 @@ type Options struct {
 	KeyFile string
 	Repo    string // the OpenNVR folder (for .env and ./recordings)
 	FFmpeg  string // explicit ffmpeg path, or "" to look for one
-	Logf    func(format string, args ...any)
+	// DiscoveryOnly: the LAN prober — a container on the host's network on
+	// Linux (docker-compose.lan-discovery.yml). No webcams, no ffmpeg, no
+	// publishers; it probes for ONVIF cameras and reports them.
+	DiscoveryOnly bool
+	Logf          func(format string, args ...any)
 }
 
 // Run runs until ctx ends (exit 0) or the agent was replaced (ExitReplaced).
@@ -46,12 +52,19 @@ func Run(ctx context.Context, o Options) int {
 	hostname, _ := os.Hostname()
 	recordings := recordingsDir(o.Repo)
 
-	ff := ffmpeg.Find(o.FFmpeg)
-	ffVersion := ffmpeg.Version(ff)
-	if ff == "" {
-		logf("ffmpeg not found: webcams cannot be streamed until it is installed")
-	} else {
-		logf("ffmpeg %s at %s", ffVersion, ff)
+	ff, ffVersion := "", ""
+	if !o.DiscoveryOnly {
+		ff = ffmpeg.Find(o.FFmpeg)
+		ffVersion = ffmpeg.Version(ff)
+		if ff == "" {
+			logf("ffmpeg not found: webcams cannot be streamed until it is installed")
+		} else {
+			logf("ffmpeg %s at %s", ffVersion, ff)
+		}
+	}
+	role := "user"
+	if o.DiscoveryOnly {
+		role = "lan-probe"
 	}
 
 	client := core.New(o.Core, "")
@@ -71,6 +84,12 @@ func Run(ctx context.Context, o Options) int {
 	)
 	backoff := []time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second}
 
+	// ONVIF discovery runs beside the loop: a WS-Discovery round takes a few
+	// seconds and must not hold up a sync. A round every minute keeps a list
+	// ready; core can ask for one now (Discover opened), and the loop syncs
+	// as soon as it is done so the answer reaches the dialog at once.
+	disc := newDiscoverer(ctx)
+
 	for {
 		wait := 5 * time.Second
 
@@ -87,7 +106,7 @@ func Run(ctx context.Context, o Options) int {
 		client.Key = key
 
 		// ffmpeg installed while we run: pick it up without a restart.
-		if ff == "" && time.Since(lastFFCheck) > time.Minute {
+		if !o.DiscoveryOnly && ff == "" && time.Since(lastFFCheck) > time.Minute {
 			lastFFCheck = time.Now()
 			if ff = ffmpeg.Find(o.FFmpeg); ff != "" {
 				ffVersion = ffmpeg.Version(ff)
@@ -98,7 +117,7 @@ func Run(ctx context.Context, o Options) int {
 		}
 
 		// Plugged or unplugged webcams show up within one enumeration.
-		if time.Since(lastEnum) >= 10*time.Second {
+		if !o.DiscoveryOnly && time.Since(lastEnum) >= 10*time.Second {
 			if devs, err := webcams.Enumerate(ff); err == nil {
 				present = devs
 			} else {
@@ -110,7 +129,7 @@ func Run(ctx context.Context, o Options) int {
 
 		report := core.Report{
 			Version:    buildinfo.Build,
-			Role:       "user",
+			Role:       role,
 			OS:         runtime.GOOS,
 			Arch:       runtime.GOARCH,
 			Hostname:   hostname,
@@ -118,6 +137,7 @@ func Run(ctx context.Context, o Options) int {
 			Webcams:    reportWebcams(present, mgr.InUse()),
 			Publishers: mgr.States(),
 			Metrics:    metrics.Collect(recordings),
+			Onvif:      disc.latest(),
 		}
 		resp, err := client.Sync(ctx, report)
 		switch {
@@ -151,6 +171,9 @@ func Run(ctx context.Context, o Options) int {
 				lastEnum = time.Time{} // enumerate now, then reconcile
 				wait = 0
 			}
+			if resp.DiscoverOnvif && resp.DiscoverSeq > 0 {
+				disc.request(resp.DiscoverSeq)
+			}
 			if resp.PollAfterS >= 2 && resp.PollAfterS <= 60 {
 				wait = min(wait, time.Duration(resp.PollAfterS)*time.Second)
 				if wait == 0 {
@@ -158,10 +181,80 @@ func Run(ctx context.Context, o Options) int {
 				}
 			}
 		}
-		if !sleep(ctx, wait) {
+		// Wake early when a REQUESTED discovery round finishes, so its result
+		// reaches the dialog now, not at the next poll. Background rounds do
+		// not wake the loop: they must not cut short the refused-key wait or
+		// the unreachable backoff.
+		select {
+		case <-ctx.Done():
 			return 0
+		case <-disc.done:
+		case <-time.After(wait):
 		}
 	}
+}
+
+// discoverer runs WS-Discovery rounds in the background.
+type discoverer struct {
+	mu     sync.Mutex
+	scan   *core.OnvifScan
+	seq    int // the request the next round answers (0: background)
+	wakeup chan struct{}
+	done   chan struct{}
+}
+
+const (
+	discoverEvery = time.Minute
+	discoverWait  = 3 * time.Second
+)
+
+func newDiscoverer(ctx context.Context) *discoverer {
+	d := &discoverer{wakeup: make(chan struct{}, 1), done: make(chan struct{}, 1)}
+	go func() {
+		for {
+			d.mu.Lock()
+			seq := d.seq
+			d.mu.Unlock()
+			devs := onvifdisc.Probe(ctx, discoverWait)
+			d.mu.Lock()
+			d.scan = &core.OnvifScan{ScannedAt: float64(time.Now().UnixNano()) / 1e9, Seq: seq, Devices: devs}
+			d.mu.Unlock()
+			if seq > 0 {
+				select {
+				case d.done <- struct{}{}:
+				default:
+				}
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-d.wakeup:
+			case <-time.After(discoverEvery):
+			}
+		}
+	}()
+	return d
+}
+
+// request asks for a round answering core's request seq. A newer request
+// supersedes an older one still waiting; a round already running keeps the
+// sequence it started with, and the next one answers the newer.
+func (d *discoverer) request(seq int) {
+	d.mu.Lock()
+	if seq > d.seq {
+		d.seq = seq
+	}
+	d.mu.Unlock()
+	select {
+	case d.wakeup <- struct{}{}:
+	default:
+	}
+}
+
+func (d *discoverer) latest() *core.OnvifScan {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.scan
 }
 
 // reportWebcams is the enumeration plus the webcams being streamed, which
