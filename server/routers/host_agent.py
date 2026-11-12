@@ -110,12 +110,17 @@ def _require_agent(
     x_host_agent_key: str | None = Header(None),
 ) -> None:
     peer = request.client.host if request.client else "?"
-    if _rate_limited(peer):
-        raise HTTPException(status_code=429, detail="Too many requests; slow down")
     if host_agent.came_through_proxy(request.headers) or not host_agent.verify_key(
         x_host_agent_key
     ):
+        # An unauthenticated caller only ever sees a 404 — the limit below
+        # must not reveal the route on the 61st try. Key guessing is bounded
+        # by the hash check's cost and the 404 itself, not by a counter.
         raise HTTPException(status_code=404, detail="Not Found")
+    # Per peer AND per route: a burst of publish-token retries (ten webcams
+    # whose ffmpeg keeps exiting) must not spend the sync's budget.
+    if _rate_limited(f"{peer}:{request.url.path.rsplit('/', 1)[-1][:16]}"):
+        raise HTTPException(status_code=429, detail="Too many requests; slow down")
 
 
 # ── Routes ─────────────────────────────────────────────────────────────
@@ -147,7 +152,7 @@ def publish_token(camera_id: int, db: Session = Depends(get_db)):
     camera = host_agent.camera_is_desired(db, camera_id)
     if camera is None:
         raise HTTPException(status_code=404, detail="Not Found")
-    stream_name, token = host_agent.publish_token(camera)
+    stream_name, token = host_agent.publish_token(camera, include_sub=True)
     return {"camera_id": camera_id, "stream_name": stream_name, "token": token}
 
 

@@ -52,6 +52,36 @@ cameras can publish.
 
 ## On the OpenNVR server (USB webcam)
 
+### Linux: MediaMTX serves it, nothing to install
+
+On Linux the webcam's device is passed into the MediaMTX container and
+MediaMTX runs the capture itself (`runOnInit`, restarted when the camera is
+unplugged and plugged back). No host agent, no sudo, nothing outside Docker.
+This is how Frigate and Home Assistant serve webcams too.
+
+1. `WEBCAMS=on` in `.env` (the installer asks), then `./start.sh up`. This
+   adds `docker-compose.webcams.yml`: MediaMTX gets the host's video devices
+   and an ffmpeg, core gets the stable device names (`/dev/v4l/by-id`) to
+   list them. `VIDEO_GID` is filled in from the host's `video` group.
+2. **Add Camera → Manual → Webcam**, source **OpenNVR server**. The webcams
+   plugged into the machine are listed by name. Pick one, name the camera,
+   click **Add webcam**. It is live within a few seconds.
+
+Like an IP camera with a substream, the webcam gets two paths: `cam-<id>`
+(the capture, up to 720p) for recording and evidence, and `cam-<id>-sub`
+(640 wide, 10 fps) for detection, both from one ffmpeg. The encoder is
+`libx264`; set `WEBCAM_ENCODER=h264_v4l2m2m` on a board with a V4L2
+encoder after measuring it. A webcam is named by its `/dev/v4l/by-id`
+entry, which does not change when it moves to another USB port.
+
+What the overlay changes: the MediaMTX image becomes the `-ffmpeg` variant
+(the default image has no shell and no ffmpeg on purpose), `/dev` is
+bind-mounted with a cgroup rule that admits only video devices, and the
+container joins the host's `video` group. Docker Desktop on macOS and
+Windows cannot pass USB devices; there the host agent below does the job.
+
+### macOS and Windows: the host agent
+
 1. Once per machine, install the [host agent](HOST_AGENT.md) in the OpenNVR
    folder:
 

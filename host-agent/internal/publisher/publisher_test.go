@@ -117,6 +117,8 @@ func TestArgsBuildTheStreamWeRecord(t *testing.T) {
 	for _, want := range []string{
 		"-f dshow -i video=hp", "-an", "fps=15,scale=-2:'min(720,ih)'", "-c:v libx264",
 		"-bf 0", "-g 30", "-f rtsp -rtsp_transport tcp", "rtsps://127.0.0.1:8322/cam-6?jwt=T",
+		// the sub stream for detection, from the same capture, same token
+		"split=2[m][s];[s]scale=640:-2,fps=10[sub]", "-map [sub]", "-g 20", "rtsps://127.0.0.1:8322/cam-6-sub?jwt=T",
 	} {
 		if !strings.Contains(a, want) {
 			t.Errorf("args missing %q:\n%s", want, a)

@@ -444,8 +444,11 @@ class MediaMtxStartupService:
         Reads live off the Camera row, so it always carries the freshest URLs.
         """
         if is_publisher(camera):
-            # A webcam: the path waits for a publisher (see _map_conf).
-            provision_config: dict[str, Any] = {"source_type": SOURCE_PUBLISHER}
+            # A webcam: the path waits for a publisher (see _map_conf) — or,
+            # for a USB webcam MediaMTX serves itself, runs the capture.
+            from services.local_webcams import provisioning_for
+            provision_config: dict[str, Any] = {"source_type": SOURCE_PUBLISHER,
+                                                **provisioning_for(camera)}
         else:
             provision_config = {
                 "source_url": camera.rtsp_url,

@@ -467,6 +467,18 @@ async def create_camera_checked(
                 ),
             )
         duplicate_check = False
+        # A USB webcam MediaMTX serves itself names its device by the stable
+        # /dev/v4l/by-id entry; it has to be one this machine shows right
+        # now, or the path would run a capture of nothing forever.
+        from services.local_webcams import available as _webcams_available, find_local_webcam, is_local_device
+        _dev = getattr(camera_create, "source_device", None)
+        if is_local_device(_dev):
+            if not _webcams_available():
+                raise HTTPException(
+                    status_code=422,
+                    detail="USB webcams are not enabled on this server (WEBCAMS=on in .env, Linux only).")
+            if find_local_webcam(str(_dev)) is None:
+                raise HTTPException(status_code=422, detail="That webcam is not plugged into this server.")
 
     # SSRF guard, mirroring routers/onvif.py:83, which has always had it —
     # camera-create did not. It runs FIRST, before any branch, because

@@ -489,6 +489,12 @@ class MediaMtxAdminService:
             # Said explicitly rather than left to pathDefaults, so a replace
             # of a path that once had a URL source really drops it.
             conf["source"] = "publisher"
+            # A USB webcam MediaMTX serves itself (services/local_webcams):
+            # it runs the capture and restarts it when the camera is
+            # unplugged and plugged back.
+            if config.get("run_on_init"):
+                conf["runOnInit"] = str(config["run_on_init"])
+                conf["runOnInitRestart"] = True
         else:
             source_url = config.get("source_url") or config.get("source")
             if source_url:
@@ -1074,8 +1080,14 @@ class MediaMtxAdminService:
         enable_recording: bool = False,
         recording_segment_seconds: int = settings.recording_segment_seconds,
         recording_path: str | None = None,
+        run_on_init: str | None = None,
+        substream: bool = False,
     ) -> dict[str, Any]:
         """Provision a webcam camera's path: ``source: publisher``.
+
+        ``run_on_init`` is the capture command for a webcam MediaMTX serves
+        itself; ``substream`` also provisions ``<path>-sub`` as a publisher
+        path (the same ffmpeg feeds both), with no recording.
 
         The path waits for a browser (WHIP) or the host helper (RTSP) to
         publish into it; recording, hooks and readers work as for any camera.
@@ -1088,12 +1100,38 @@ class MediaMtxAdminService:
                 enable_recording, recording_path, recording_segment_seconds
             ),
         }
+        if run_on_init:
+            config["run_on_init"] = run_on_init
         result = await MediaMtxAdminService.upsert_path(camera_id, camera_ip, config)
+        if result.get("status") == "ok" and substream:
+            await MediaMtxAdminService._push_publisher_substream(camera_id, camera_ip)
         if result.get("status") == "ok":
             result.setdefault("action", "publisher_path_pushed")
             result["recording_enabled"] = enable_recording
             result["recording_segment_seconds"] = recording_segment_seconds
         return result
+
+    @staticmethod
+    async def _push_publisher_substream(camera_id: int, camera_ip: str) -> None:
+        """``<path>-sub`` for a webcam MediaMTX serves itself: a publisher
+        path the webcam's own ffmpeg feeds, no recording (a view-and-detect
+        tap, like an IP camera's sub). Add, or replace in place."""
+        from services.stream_service import substream_name
+        name = _build_stream_name(settings.mediamtx_stream_prefix, camera_id, camera_ip)
+        sub = substream_name(name)
+        payload = {"source": "publisher", "record": False}
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await client.post(
+                MediaMtxAdminService._base() + f"/config/paths/add/{sub}",
+                json=payload, headers=MediaMtxAdminService._headers())
+            if not resp.is_success and "already exists" in resp.text:
+                resp = await client.post(
+                    MediaMtxAdminService._base() + f"/config/paths/replace/{sub}",
+                    json=payload, headers=MediaMtxAdminService._headers())
+        mediamtx_logger.log_action(
+            "mediamtx.substream_provisioned", camera_id=camera_id,
+            message=f"Provisioned webcam substream path {sub}",
+            extra_data={"path": sub, "http_status": resp.status_code, "source": "publisher"})
 
     # === ORIGINAL METHODS ===
 

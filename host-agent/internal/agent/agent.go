@@ -56,7 +56,10 @@ func Run(ctx context.Context, o Options) int {
 
 	client := core.New(o.Core, "")
 	mgr := publisher.NewManager(publisher.Config{FFmpeg: ff, RTSPS: o.RTSPS, Logf: logf}, client)
-	defer mgr.StopAll()
+	// Deferred through the variable, not its first value: when ffmpeg is
+	// found later a NEW manager owns the children, and that is the one a
+	// clean exit must stop (on macOS nothing else kills them).
+	defer func() { mgr.StopAll() }()
 
 	var (
 		present     []webcams.Device

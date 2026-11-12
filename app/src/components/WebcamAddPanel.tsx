@@ -47,6 +47,61 @@ const SOURCE_HINT: Record<Source, string> = {
   server: 'A USB webcam plugged into the computer OpenNVR runs on. Records around the clock.',
 }
 
+type LocalWebcam = { id: string; name: string; node: string }
+
+/** GET /api/v1/webcams/local, polled while the picker is open so a webcam
+ *  plugged in during the dialog shows up. */
+function useLocalWebcams(enabled: boolean): { loading: boolean; available: boolean; webcams: LocalWebcam[] } {
+  const [state, setState] = useState<{ loading: boolean; available: boolean; webcams: LocalWebcam[] }>({ loading: true, available: false, webcams: [] })
+  useEffect(() => {
+    if (!enabled) return
+    let stop = false
+    const tick = async () => {
+      try {
+        const { data } = await apiService.getLocalWebcams()
+        if (!stop) setState({ loading: false, available: !!data?.available, webcams: data?.webcams ?? [] })
+      } catch {
+        if (!stop) setState({ loading: false, available: false, webcams: [] })
+      }
+    }
+    tick()
+    const t = setInterval(tick, 4000)
+    return () => { stop = true; clearInterval(t) }
+  }, [enabled])
+  return state
+}
+
+function LocalWebcamPicker({ webcams, value, onChange }: { webcams: LocalWebcam[]; value: string | null; onChange: (id: string, name: string) => void }) {
+  if (webcams.length === 0) {
+    return (
+      <div className="text-sm text-[var(--text-dim)]">
+        No USB webcam is plugged into the OpenNVR server right now. Plug one in; it appears here within a few seconds.
+      </div>
+    )
+  }
+  return (
+    <div className="space-y-1" role="radiogroup" aria-label="Webcam">
+      {webcams.map((w) => {
+        const selected = value === w.id
+        return (
+          <button
+            key={w.id}
+            type="button"
+            role="radio"
+            aria-checked={selected}
+            onClick={() => onChange(w.id, w.name)}
+            className={`w-full text-left px-3 py-2 border flex items-center gap-2 text-sm ${selected ? 'border-[var(--accent)] bg-[var(--accent)]/10' : 'border-[var(--border)] hover:border-[var(--accent)]'}`}
+          >
+            {selected ? <CheckCircle size={14} className="text-[var(--accent)]" /> : <Webcam size={14} className="text-[var(--text-dim)]" />}
+            <span className="truncate">{w.name}</span>
+            <span className="ml-auto text-xs text-[var(--text-dim)] font-mono">{w.node}</span>
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
 function SourceSwitch({ value, onChange }: { value: Source; onChange: (s: Source) => void }) {
   return (
     <div className="flex flex-wrap items-center gap-3">
@@ -122,9 +177,15 @@ export function WebcamAddPanel({ onDone, onError, onAction }: {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const handedOver = useRef(false)
 
-  // Server source
+  // Server source. Two ways a webcam on the OpenNVR machine streams: on
+  // Linux MediaMTX serves it itself (the device is passed into its
+  // container; GET /webcams/local lists them), elsewhere the host agent
+  // does. The local list wins when it is available; the agent is the
+  // fallback, and the only option on Docker Desktop.
   const [serverDevice, setServerDevice] = useState<string | null>(null)
-  const { info: agent } = useHostAgent(source === 'server' || created?.source === 'server')
+  const local = useLocalWebcams(source === 'server' && !created)
+  const useAgent = !local.loading && !local.available
+  const { info: agent } = useHostAgent(useAgent && (source === 'server' || created?.source === 'server'))
 
   const sessions = useWebcamSessions()
   const secure = typeof window !== 'undefined' && window.isSecureContext
@@ -181,7 +242,8 @@ export function WebcamAddPanel({ onDone, onError, onAction }: {
   useEffect(() => () => stopPreview(), [])
 
   const canAdd = !busy && !created && name.trim() !== '' &&
-    (source === 'browser' ? previewReady && !mediaError : !!serverDevice && !!agent?.connected)
+    (source === 'browser' ? previewReady && !mediaError
+      : !!serverDevice && (local.available ? true : !!agent?.connected))
 
   const add = async () => {
     setBusy(true)
@@ -236,6 +298,7 @@ export function WebcamAddPanel({ onDone, onError, onAction }: {
       ? 'Live and recording.'
       : created.source === 'browser'
         ? session?.state.kind === 'error' ? session.state.reason : 'Starting the stream from this browser…'
+        : local.available ? 'The OpenNVR server is starting the webcam — usually a few seconds; the preview shows it.'
         : agent && !agent.connected ? 'The host agent on the OpenNVR server is not running.'
         : agentStream ? `${describeStream(agentStream)} — usually a few seconds.` : 'The OpenNVR server is picking the webcam up — usually a few seconds.'
     return (
@@ -287,6 +350,10 @@ export function WebcamAddPanel({ onDone, onError, onAction }: {
                 })}
               </div>
             )
+          ) : local.loading ? (
+            <div className="text-sm text-[var(--text-dim)]">Looking for webcams on the server…</div>
+          ) : local.available ? (
+            <LocalWebcamPicker webcams={local.webcams} value={serverDevice} onChange={(id, n) => { setServerDevice(id); suggestName(n) }} />
           ) : (
             <HostWebcamPicker value={serverDevice} onChange={(id, n) => { setServerDevice(id); suggestName(n) }} />
           )}

@@ -101,6 +101,8 @@ export const cameraService = {
   // The host agent on the OpenNVR machine (USB webcams, host metrics):
   // -> HostAgentInfo (lib/hostAgent.ts)
   getHostAgent: () => api.get('/api/v1/host-agent'),
+  // USB webcams MediaMTX serves itself (Linux, WEBCAMS=on): available=false elsewhere.
+  getLocalWebcams: () => api.get('/api/v1/webcams/local'),
 
   // Camera Management
   // With a `limit`, one page, for callers that page themselves (the Cameras

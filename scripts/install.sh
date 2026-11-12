@@ -1440,12 +1440,27 @@ main() {
     # The host agent (docs/HOST_AGENT.md): USB webcams on this machine and its
     # own CPU/memory/disk/temperature readings. `up` installs it when
     # HOST_AGENT=on (on Linux it asks for sudo once, for the systemd unit).
-    local ha_default=y
-    [[ "$(env_get HOST_AGENT)" == "off" ]] && ha_default=n
-    if ask_yes_no "Install the OpenNVR host agent (USB webcams on this machine, its real CPU/memory/disk readings)?" "$ha_default"; then
-        env_set HOST_AGENT on; ok "Host agent: installed when OpenNVR starts"
+    if [[ "$(uname -s)" == "Linux" ]]; then
+        # On Linux a webcam needs no host install: MediaMTX serves it with the
+        # device passed into its container (docker-compose.webcams.yml).
+        local wc_default=n
+        [[ "$(env_get WEBCAMS)" == "on" ]] && wc_default=y
+        if ask_yes_no "Use USB webcams plugged into this machine as cameras?" "$wc_default"; then
+            env_set WEBCAMS on; ok "USB webcams: on (Add Camera → Webcam lists them)"
+        else
+            env_set WEBCAMS off; info "USB webcams: off (later: WEBCAMS=on in .env, then ./start.sh up)"
+        fi
+        env_set HOST_AGENT off
     else
-        env_set HOST_AGENT off; info "Host agent: off (later: ./start.sh host-agent install)"
+        # Docker Desktop cannot see USB: the host agent streams webcams from
+        # the host and reports the machine's own CPU/memory/disk readings.
+        local ha_default=y
+        [[ "$(env_get HOST_AGENT)" == "off" ]] && ha_default=n
+        if ask_yes_no "Install the OpenNVR host agent (USB webcams on this machine, its real CPU/memory/disk readings)?" "$ha_default"; then
+            env_set HOST_AGENT on; ok "Host agent: installed when OpenNVR starts"
+        else
+            env_set HOST_AGENT off; info "Host agent: off (later: ./start.sh host-agent install)"
+        fi
     fi
     printf '\n  Configuration and images are ready. Starting OpenNVR...\n\n'
     # Last word before exec — after this, compose owns the terminal and a

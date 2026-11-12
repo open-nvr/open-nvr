@@ -6,6 +6,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **USB webcams as cameras.** Add Camera → Manual → Webcam, two sources:
+  this browser (WHIP, while the tab is open) and the OpenNVR server. On
+  Linux the server path needs no install: `WEBCAMS=on` adds
+  `docker-compose.webcams.yml`, MediaMTX gets the host's video devices and
+  an ffmpeg, and a webcam camera's path runs its own capture (`runOnInit`,
+  restarted on unplug/replug), with a `-sub` stream for detection like an
+  IP camera. On macOS and Windows, where Docker Desktop cannot see USB, a
+  small host agent (`./start.sh host-agent install`) streams the webcam and
+  reports the machine's own CPU, memory, disk and temperatures. A webcam is
+  `source_type = publisher`: recording, live view, playback, snapshots and
+  detection read its path as for any camera. See docs/WEBCAM.md.
+
 ### Fixed
 
 - **A plate read in fast mode no longer arrives without its photo.** In

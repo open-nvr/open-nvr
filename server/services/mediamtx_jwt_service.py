@@ -390,6 +390,7 @@ class MediaMtxJwtService:
         camera_id: int,
         camera_path: str,
         expiry_minutes: int = 1440,  # 24 hours for cameras
+        extra_paths: list[str] | None = None,
     ) -> str:
         """
         Create a JWT token for camera publishing.
@@ -416,7 +417,10 @@ class MediaMtxJwtService:
             "iat": int(now.timestamp()),
             "exp": int(expiry.timestamp()),
             "jti": f"cam-{camera_id}-{int(now.timestamp())}",
-            "mediamtx_permissions": [{"action": "publish", "path": camera_path}],
+            # One publisher may feed more than one path: a webcam's ffmpeg
+            # publishes the main path and its -sub in one process.
+            "mediamtx_permissions": [{"action": "publish", "path": p}
+                                     for p in [camera_path, *(extra_paths or [])]],
             "camera_id": camera_id,
             "type": "camera_publish",
         }

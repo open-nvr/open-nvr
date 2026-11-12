@@ -111,6 +111,7 @@ from routers import (
     workflows as workflows_router,
     approvals as approvals_router,
     host_agent as host_agent_router,
+    webcams as webcams_router,
 )
 from scripts.init_db import create_initial_data
 from services.mediamtx_admin_service import MediaMtxAdminService as _MtxAdmin
@@ -1126,6 +1127,7 @@ app.include_router(search.router, prefix=settings.api_prefix)
 app.include_router(alerts_inbox.router, prefix=settings.api_prefix)
 app.include_router(streams.router, prefix=settings.api_prefix)
 app.include_router(host_agent_router.router, prefix=settings.api_prefix)
+app.include_router(webcams_router.router, prefix=settings.api_prefix)
 app.include_router(camera_config.router, prefix=settings.api_prefix)
 app.include_router(roles.router, prefix=settings.api_prefix)
 app.include_router(permissions.router, prefix=settings.api_prefix)

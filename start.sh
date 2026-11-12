@@ -499,6 +499,19 @@ accel_summary() {
 # ── Build Docker Compose profile args ─────────────────────
 compose_args() {
     local args="-f $COMPOSE_FILE"
+    # USB webcams served by MediaMTX (docker-compose.webcams.yml): Linux
+    # only — the overlay passes the host's video devices into the container,
+    # which Docker Desktop cannot do. VIDEO_GID is the host's `video` group,
+    # so the container (1000:1000) may open /dev/video*.
+    if [[ "$(get_env_var WEBCAMS)" == "on" && "$(uname -s)" == "Linux" ]]; then
+        if [[ -f docker-compose.webcams.yml ]]; then
+            args="$args -f docker-compose.webcams.yml"
+            local vgid; vgid=$(getent group video 2>/dev/null | cut -d: -f3)
+            [[ -n "$vgid" ]] && export VIDEO_GID="$vgid"
+        else
+            echo "WEBCAMS=on but docker-compose.webcams.yml is missing" >&2
+        fi
+    fi
     local example_compose example_profile
     example_compose=$(get_env_var "OPENNVR_EXAMPLE_COMPOSE")
     example_profile=$(get_env_var "OPENNVR_EXAMPLE_PROFILE")
@@ -2008,9 +2021,10 @@ run_up() {
     # too, with KEEP_ORPHANS=1 (containers from overlays this run was not
     # told about are not removed) and UP_BUILD=1 (images the release
     # builds from its own files are rebuilt from the new checkout).
-    # The updater's hand-off folders, bind-mounted into core: made here as
-    # this user, or Docker would create them root-owned on Linux.
-    mkdir -p data/updates data/update-requests
+    # The updater's hand-off folders and the host agent's key-hash folder,
+    # bind-mounted into core: made here as this user, or Docker would create
+    # them root-owned on Linux and the agent's key hash could never be written.
+    mkdir -p data/updates data/update-requests data/host-agent
     local up_flags="--remove-orphans"
     [ "${KEEP_ORPHANS:-}" = 1 ] && up_flags=""
     [ "${UP_BUILD:-}" = 1 ] && up_flags="$up_flags --build"

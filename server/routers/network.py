@@ -252,9 +252,10 @@ async def get_camera_lan(
         db.query(Camera).join(CameraConfig, Camera.id == CameraConfig.camera_id).all()
     )
     # A webcam has no address of its own (a placeholder; core/camera_source).
+    from core.camera_source import is_publisher
     whitelist = sorted({
         c.ip_address for c in cam_rows
-        if c.ip_address and c.source_type != "publisher"
+        if c.ip_address and not is_publisher(c)
     })
     return {"settings": val, "whitelisted_ips": whitelist}
 

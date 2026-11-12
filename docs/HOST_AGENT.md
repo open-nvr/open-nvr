@@ -16,6 +16,11 @@ dashboard says its numbers are the container's.
 
 ## What it does
 
+On Linux you do not need it for webcams: MediaMTX serves a USB webcam
+itself when `WEBCAMS=on` (see [WEBCAM.md](WEBCAM.md)). The agent is for
+Docker Desktop on macOS and Windows, which cannot see USB, and for the
+host's own CPU, memory, disk and temperature readings anywhere.
+
 - **Streams USB webcams.**
   - It finds the webcams plugged into the machine, every 10 seconds, so plugging and unplugging is noticed.
   - It streams the ones assigned to cameras into OpenNVR (ffmpeg, H.264, RTSPS to MediaMTX on `127.0.0.1:8322`).

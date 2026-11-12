@@ -34,13 +34,30 @@ def is_publisher(camera: Any) -> bool:
     return getattr(camera, "source_type", None) == SOURCE_PUBLISHER
 
 
-def is_host_webcam(camera: Any) -> bool:
-    """A webcam fed by the host agent: a USB webcam on the OpenNVR machine.
+#: A USB webcam served by MediaMTX itself (Linux, the device passed into
+#: its container): ``source_device`` is its stable ``/dev/v4l/by-id`` name.
+#: The host agent's device ids (dshow, avfoundation, v4l2 names) never
+#: start with this. Kept here, not in services, so model-level checks need
+#: no service import.
+LOCAL_WEBCAM_PREFIX = "/dev/v4l/by-id/"
 
-    The other kind of webcam (``source_device`` NULL) is published from a
-    browser tab.
+
+def is_local_webcam(camera: Any) -> bool:
+    """A USB webcam on the OpenNVR machine that MediaMTX serves through
+    ``runOnInit`` (services/local_webcams.py). No agent is involved."""
+    dev = getattr(camera, "source_device", None)
+    return is_publisher(camera) and bool(dev) and str(dev).startswith(LOCAL_WEBCAM_PREFIX)
+
+
+def is_host_webcam(camera: Any) -> bool:
+    """A webcam fed by the host agent: a USB webcam on the OpenNVR machine
+    where a container cannot see USB (Docker Desktop).
+
+    The other kinds of webcam: ``source_device`` NULL is published from a
+    browser tab; a ``/dev/v4l/by-id`` device is served by MediaMTX itself.
     """
-    return is_publisher(camera) and bool(getattr(camera, "source_device", None))
+    return (is_publisher(camera) and bool(getattr(camera, "source_device", None))
+            and not is_local_webcam(camera))
 
 
 #: Lifetime of a MediaMTX publish token for a webcam. MediaMTX checks the

@@ -338,16 +338,31 @@ func Args(dev webcams.Device, d core.Desired, rtsps, path, token string) []strin
 		height = 720
 	}
 	gop := fmt.Sprint(2 * fps)
+	// Two outputs from one capture, like an IP camera with a substream: the
+	// main path at up to 720 lines, and <path>-sub at 640 wide, 10 fps, for
+	// detection. The token covers both paths (core mints it that way).
+	const subFPS = 10
+	subGop := fmt.Sprint(2 * subFPS)
+	base := strings.TrimRight(rtsps, "/") + "/"
 	args := []string{"-hide_banner", "-loglevel", "warning", "-nostdin"}
 	args = append(args, dev.Input...)
 	args = append(args,
 		"-an",
-		"-vf", fmt.Sprintf("fps=%d,scale=-2:'min(%d,ih)'", fps, height),
+		"-filter_complex", fmt.Sprintf(
+			"[0:v]fps=%d,scale=-2:'min(%d,ih)',split=2[m][s];[s]scale=640:-2,fps=%d[sub]",
+			fps, height, subFPS),
+		"-map", "[m]",
 		"-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
 		"-pix_fmt", "yuv420p", "-bf", "0", "-g", gop, "-keyint_min", gop,
 		"-b:v", "2500k", "-maxrate", "3000k", "-bufsize", "3000k",
 		"-f", "rtsp", "-rtsp_transport", "tcp",
-		strings.TrimRight(rtsps, "/")+"/"+path+"?jwt="+token,
+		base+path+"?jwt="+token,
+		"-map", "[sub]",
+		"-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+		"-pix_fmt", "yuv420p", "-bf", "0", "-g", subGop, "-keyint_min", subGop,
+		"-b:v", "600k", "-maxrate", "800k", "-bufsize", "800k",
+		"-f", "rtsp", "-rtsp_transport", "tcp",
+		base+path+"-sub?jwt="+token,
 	)
 	return args
 }

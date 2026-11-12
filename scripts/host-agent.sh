@@ -258,9 +258,14 @@ run_host_agent_uninstall() {
         sudo rm -f "/etc/systemd/system/$HA_UNIT" && sudo systemctl daemon-reload
         ha_ok "Removed the service $HA_UNIT."
     fi
-    rm -f "$HA_EXE" "$HA_BUILD"
-    rm -rf "$HA_KEY_DIR" "$HA_HASH_DIR"
+    # The flag first: if anything below fails under set -e, the next `up`
+    # must not reinstall what the user just removed. The hash directory is
+    # bind-mounted into the running core container, so it cannot be removed
+    # (EBUSY) — empty it; the key directory is ours alone.
     ha_set_env_flag off
+    rm -f "$HA_EXE" "$HA_BUILD"
+    rm -f "$HA_HASH" 2>/dev/null || true
+    rm -rf "$HA_KEY_DIR"
     ha_ok "Host agent removed. USB webcam cameras stop streaming; browser webcams are not affected."
 }
 

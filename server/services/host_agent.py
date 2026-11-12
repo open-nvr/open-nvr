@@ -159,6 +159,9 @@ def _persistable(report: dict[str, Any], known: dict[str, str]) -> dict[str, Any
     lets the agent find it again (desired_state's ``device_name``)."""
     for w in report.get("webcams") or []:
         if isinstance(w, dict) and w.get("id"):
+            # Re-insert so a webcam seen now is the LAST to be evicted: the
+            # dict keeps insertion order, and the cap pops from the front.
+            known.pop(w["id"], None)
             known[w["id"]] = w.get("name") or ""
     while len(known) > _MAX_KNOWN_NAMES:
         known.pop(next(iter(known)))
@@ -247,19 +250,27 @@ def camera_is_desired(db: Session, camera_id: int) -> Camera | None:
     return _host_webcam_query(db).filter(Camera.id == camera_id).first()
 
 
-def publish_token(camera: Camera) -> tuple[str, str]:
+def publish_token(camera: Camera, *, include_sub: bool = False) -> tuple[str, str]:
     """A short publish-only token for one webcam camera's path: ``(path,
-    token)``. Shared by the browser publisher (WHIP) and the host agent."""
+    token)``. Shared by the browser publisher (WHIP) and the host agent;
+    only the agent's ffmpeg also publishes the ``-sub`` path, so only it
+    asks for ``include_sub``."""
     from services.mediamtx_jwt_service import MediaMtxJwtService
     from services.stream_service import _build_stream_name
 
     stream_name = _build_stream_name(
         settings.mediamtx_stream_prefix, camera.id, camera.ip_address
     )
+    kwargs: dict = {}
+    if include_sub:
+        # The agent's ffmpeg publishes the main path and its -sub in one go.
+        from services.stream_service import substream_name
+        kwargs["extra_paths"] = [substream_name(stream_name)]
     token = MediaMtxJwtService.create_publish_token(
         camera_id=camera.id,
         camera_path=stream_name,
         expiry_minutes=PUBLISH_TOKEN_MINUTES,
+        **kwargs,
     )
     return stream_name, token
 
