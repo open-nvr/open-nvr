@@ -42,8 +42,27 @@ def test_the_service_pulls_the_signed_image_and_never_builds():
     install, and so would the build pull policy the other apps default to."""
     svc = _service()
     assert "build" not in svc
-    assert svc["image"] == "${ATTENDLY_IMAGE:-ghcr.io/open-nvr/attendly:latest}"
     assert svc["pull_policy"] == "missing"
+    # A version, never :latest: `missing` keeps whatever :latest a site has
+    # cached, so an upgrade would never get the image this file expects.
+    assert svc["image"] == "${ATTENDLY_IMAGE:-ghcr.io/open-nvr/attendly:" + _entry()["version"] + "}"
+    assert _entry()["image"] == "ghcr.io/open-nvr/attendly:" + _entry()["version"]
+
+
+def test_browsers_get_https_so_the_webcam_works():
+    """A browser allows the camera only on https:// (or localhost), and
+    registration is done from the webcam: the host port goes to the
+    HTTPS listener, which serves OpenNVR's own certificate. Plain HTTP
+    stays inside the network for core's probes and the healthcheck."""
+    svc = _service()
+    assert any(str(p).endswith(":9300:9301") for p in svc["ports"])
+    env = svc["environment"]
+    assert "ATTENDLY_TLS_CERT_FILE=/certs/server.crt" in env
+    assert "ATTENDLY_TLS_KEY_FILE=/certs/server.key" in env
+    assert "ATTENDLY_TLS_PORT=9301" in env
+    assert "./nginx-certs:/certs:ro" in svc["volumes"]
+    assert svc["depends_on"]["nginx-certs-init"]["condition"] == "service_completed_successfully"
+    assert "127.0.0.1:9300/health" in " ".join(svc["healthcheck"]["test"])
 
 
 def test_the_catalog_entry_is_first_party_closed_source():

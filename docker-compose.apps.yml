@@ -1622,7 +1622,12 @@ services:
     # slot as for every app (docs/APPS_INSTALL.md → Digest pinning); to
     # run an image built from the private repo, set
     # ATTENDLY_IMAGE=opennvr/attendly:local-build in .env.
-    image: ${ATTENDLY_IMAGE:-ghcr.io/open-nvr/attendly:latest}
+    #
+    # A version, not :latest: with `pull_policy: missing` a site that has
+    # any :latest cached keeps it for ever. Naming the version is what
+    # makes an upgrade pull the image this file was written for (1.1.0
+    # brings the HTTPS listener the port mapping below points at).
+    image: ${ATTENDLY_IMAGE:-ghcr.io/open-nvr/attendly:1.1.0}
     # Not ${APPS_PULL_POLICY:-build}: `build` with no build section is a
     # compose error. `missing` pulls once, then keeps the local image.
     pull_policy: missing
@@ -1643,9 +1648,16 @@ services:
         condition: service_healthy
       insightface-attendly-register:
         condition: service_completed_successfully
+      # The certificate the HTTPS listener serves: OpenNVR's own.
+      nginx-certs-init:
+        condition: service_completed_successfully
     ports:
       # LAN edge — bind host follows nginx; auth: OpenNVR login.
-      - "${NGINX_BIND_HOST:-0.0.0.0}:9300:9300"
+      # HTTPS (container :9301): a browser lets a page use the webcam only
+      # on https://, and registration is done from the webcam. Plain HTTP
+      # stays on container :9300 for core's probes and the healthcheck,
+      # inside the Docker network only.
+      - "${NGINX_BIND_HOST:-0.0.0.0}:9300:9301"
     environment:
       # Class windows and meal hours are local times of day; must match
       # core's TZ. Default Asia/Kolkata; set TZ in .env for another site.
@@ -1659,10 +1671,15 @@ services:
       # proxy /faces/*); its token is the site key.
       - ATTENDLY_FACES_URL=http://insightface-attendly-adapter:9005
       - ATTENDLY_RECOGNITION_ADAPTER=insightface_attendly
-      # Where the browser opens the app. Blank = the catalog's {host}
-      # placeholder on :9300; set for a reverse proxy / public hostname,
+      # Where the browser opens the app. Blank = https://{host}:9300/ (the
+      # catalog fills {host}); set for a reverse proxy / public hostname,
       # e.g. ATTENDLY_PUBLIC_URL=https://attendance.school.example
       - ATTENDLY_PUBLIC_URL=${ATTENDLY_PUBLIC_URL:-}
+      # OpenNVR's certificate (nginx-certs-init), so the browser trusts
+      # this page exactly as far as it trusts OpenNVR's own.
+      - ATTENDLY_TLS_CERT_FILE=/certs/server.crt
+      - ATTENDLY_TLS_KEY_FILE=/certs/server.key
+      - ATTENDLY_TLS_PORT=9301
       - ATTENDLY_AUTH_MODE=opennvr
       - ATTENDLY_LOG_LEVEL=${ATTENDLY_LOG_LEVEL:-INFO}
       # Egress: apps sit on the internal opennvr_apps network; the only
@@ -1672,6 +1689,7 @@ services:
       - NO_PROXY=opennvr-core,nats,nats-apps,egress-proxy,mediamtx,detect-pipeline,ollama,insightface-attendly-adapter,localhost,127.0.0.1
     volumes:
       - opennvr_attendly_data:/data
+      - ./nginx-certs:/certs:ro
     networks:
       - opennvr_internal
       - opennvr_apps

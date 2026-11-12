@@ -59,17 +59,23 @@ OPENNVR_EXAMPLE_COMPOSE=docker-compose.apps.yml
 OPENNVR_EXAMPLE_PROFILE=attendly
 ```
 
-Then open **http://\<host\>:9300/** — or the Attendly card in the App Catalog,
-whose **Open app** button opens the same page in a new tab. Sign in with your
-OpenNVR account. For a reverse proxy or public hostname set
-`ATTENDLY_PUBLIC_URL`; the card and the manifest carry that address.
+Then open **https://\<host\>:9300/** — or the Attendly card in the App
+Catalog, whose **Open app** button opens the same page in a new tab. Sign in
+with your OpenNVR account. The page is HTTPS because a browser lets a page use
+the webcam only over https:// (or on localhost), and registration uses the
+webcam. It serves OpenNVR's own certificate, so the browser warns about it
+exactly as it does for OpenNVR's web UI, until that certificate is trusted.
+For a reverse proxy or public hostname set `ATTENDLY_PUBLIC_URL`; the card and
+the manifest carry that address.
 
 ## What you do in it
 
 1. **Manage Rooms** — bind a classroom to one of OpenNVR's cameras.
 2. **Manage Courses** — course codes and their sections.
-3. **Register** — enrol a student. Details and
-   consent first; then the webcam takes the photos itself: a small frame
+3. **Register** — enrol a student, or find one already registered to see
+   the photos they are enrolled with, remove a blurred one, or add more.
+   Details and consent first; then either photos chosen on the computer
+   (phone photos are fine) or the webcam, which takes the photos itself: a small frame
    is checked about once a second (face boxes only, nothing kept), the
    page says what to change — distance, the oval, which way to turn — and
    says it out loud when Voice is on, and takes each angle's photo once
@@ -82,7 +88,9 @@ OpenNVR account. For a reverse proxy or public hostname set
    (`/video-register`, the old page that streamed every webcam frame to
    the server, now opens this page.)
    Withdrawing consent deletes the faces; *Erase* also blanks name and
-   e-mail and keeps only the counts (DPDP/GDPR).
+   e-mail and keeps only the counts (DPDP/GDPR). Faces are deleted first:
+   if the face service cannot confirm it, nothing is removed and the page
+   says so, so no face is ever left behind a record nobody can see.
 4. **Manage Schedule** — the weekly timetable; *Publish Today* turns it into
    concrete class windows on each room.
 5. **Attendance** — the day's classes (scheduled, running, decided,
@@ -211,7 +219,9 @@ older adapter. The adapter is given each person's code, never their name.
 Both thresholds are starting points. Tune them against real enrolments on
 your cameras: lower the match threshold if known students go unrecognised,
 raise it if strangers are matched. Changes take effect on restart.
-| `ATTENDLY_PUBLIC_URL` | — | browser-reachable URL; blank = `http://{host}:9300/` |
+| `ATTENDLY_PUBLIC_URL` | — | browser-reachable URL; blank = `https://{host}:9300/` |
+| `ATTENDLY_TLS_CERT_FILE` / `ATTENDLY_TLS_KEY_FILE` | OpenNVR's (overlay) | the HTTPS listener's certificate; unset = plain HTTP only, and the webcam then works only on localhost |
+| `ATTENDLY_TLS_PORT` | `9301` | the HTTPS listener inside the container (the overlay publishes it as host 9300) |
 | `ATTENDLY_AUTH_MODE` | `opennvr` | `none` opens every endpoint (loopback development only) |
 | `ATTENDLY_DATABASE_URL` | `sqlite:////data/attendly.db` (image) | the app's own SQLite |
 | `ATTENDLY_TIMEZONE` | `Asia/Kolkata` (the overlay follows `$TZ` when set) | class windows and meal hours are local times |
