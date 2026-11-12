@@ -31,9 +31,32 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   its light on, until the tab closed. Deleting stops it, and a session
   whose camera is gone (deleted in another tab or on another device) ends
   instead of retrying.
+- **Turning USB webcams on on Linux actually gives MediaMTX ffmpeg (#904).**
+  The webcam overlay's MediaMTX built under the same image name as the
+  default one, so `WEBCAMS=on` reused the image already on disk and every
+  webcam path failed with `exec: "ffmpeg": executable file not found`. It
+  is now its own image, `opennvr/mediamtx-webcams:local-build`.
+- **Add Camera → Webcam → OpenNVR server says what to do on that server
+  (#904).** A Linux server with webcams off was told to install the host
+  agent with `.\start.ps1`, guessed from the browser's OS. It now says to set
+  `WEBCAMS=on`; on Docker Desktop the agent's install command is the
+  server's own (`OPENNVR_HOST_OS`, written by the launchers), or both when
+  unknown. With the overlay in place and no webcam plugged in, the dialog
+  says "plug one in" instead of offering the agent.
+- **`VIDEO_GID` reaches Compose.** `start.sh` exported it from inside
+  `$(compose_args)`, a subshell, so it never left; it is now written to
+  `.env` with the other host values. Hosts whose `video` group is not 44
+  could not open the webcam.
 
 ### Changed
 
+- **USB webcams are on by default on Linux (#904).** `.env.example` ships
+  `WEBCAMS=on` and the installer's question defaults to yes; an `.env` that
+  says `off` keeps it. MediaMTX then runs the `-ffmpeg` image with the
+  host's video devices (only video4linux, major 81) and the `video` group.
+  `start.sh` leaves the overlay out on a kernel with no video4linux yet,
+  where Docker could not mount `/sys/class/video4linux` and core would not
+  start, and says so.
 - **Add Camera → Manual is one row of tabs: IP camera, Browser webcam,
   Server webcam.** It was a Webcam tab with a second row of sub-tabs
   inside it. Each webcam tab says in one line what that kind is; the steps

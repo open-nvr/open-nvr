@@ -4,7 +4,9 @@
 
 ``GET /api/v1/webcams/local`` answers ``available: false`` on an install
 where MediaMTX cannot see USB (macOS, Windows, a Linux install without
-``WEBCAMS=on``); the dialog then offers the host agent instead.
+``WEBCAMS=on``). ``host_os`` (the launcher's, or null) tells the dialog
+which of its two answers fits: on Linux, how to turn ``WEBCAMS`` on; on
+Docker Desktop, the host agent, with that OS's install command (#904).
 
 Each webcam says which camera it already feeds, if any: one webcam feeds
 one camera (``CameraService.webcam_device_owner``), so the dialog shows it
@@ -19,7 +21,7 @@ from core.camera_source import SOURCE_PUBLISHER
 from core.database import get_db
 from core.permissions import RequirePermission
 from models import Camera
-from services.local_webcams import available, is_local_device, list_local_webcams
+from services.local_webcams import available, host_os, is_local_device, list_local_webcams
 
 router = APIRouter(prefix="/webcams", tags=["webcams"])
 
@@ -29,7 +31,7 @@ _require_cameras_manage = RequirePermission("cameras.manage")
 @router.get("/local")
 def local_webcams(db: Session = Depends(get_db), _user=Depends(_require_cameras_manage)) -> dict:
     if not available():
-        return {"available": False, "webcams": []}
+        return {"available": False, "webcams": [], "host_os": host_os()}
     assigned = {
         cam.source_device: cam
         for cam in (
@@ -49,4 +51,4 @@ def local_webcams(db: Session = Depends(get_db), _user=Depends(_require_cameras_
             "assigned_camera_id": cam.id if cam else None,
             "assigned_camera_name": cam.name if cam else None,
         })
-    return {"available": True, "webcams": webcams}
+    return {"available": True, "webcams": webcams, "host_os": host_os()}

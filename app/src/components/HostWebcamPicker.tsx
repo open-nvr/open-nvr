@@ -12,7 +12,7 @@ import { useEffect, useState } from 'react'
 import { AlertTriangle, Loader2, Usb } from 'lucide-react'
 import { apiService } from '../lib/apiService'
 import { useDateFormat } from '../i18n'
-import { ffmpegInstallCommand, hostAgentInstallCommand, type HostAgentInfo } from '../lib/hostAgent'
+import { ffmpegInstallCommand, hostAgentInstallCommands, type HostAgentInfo } from '../lib/hostAgent'
 import { WebcamList, WebcamOption, webcamLabel } from './WebcamOption'
 
 const POLL_MS = 5000
@@ -73,7 +73,7 @@ export function HostWebcamPicker({
         <div className="text-[var(--text-dim)]">
           It finds the webcams plugged into that machine and streams them. Install it once, in the OpenNVR folder there:
         </div>
-        <Code>{hostAgentInstallCommand(info.os)}</Code>
+        {hostAgentInstallCommands(info.os).map((c) => <Code key={c}>{c}</Code>)}
         {info.installed && info.last_seen && (
           <div className="text-xs text-[var(--text-dim)]">Last seen {fmt.dateTime(info.last_seen * 1000)}.</div>
         )}

@@ -63,17 +63,23 @@ type LocalWebcam = {
 
 /** GET /api/v1/webcams/local, polled while the picker is open so a webcam
  *  plugged in during the dialog shows up. */
-function useLocalWebcams(enabled: boolean): { loading: boolean; available: boolean; webcams: LocalWebcam[] } {
-  const [state, setState] = useState<{ loading: boolean; available: boolean; webcams: LocalWebcam[] }>({ loading: true, available: false, webcams: [] })
+type LocalWebcams = {
+  loading: boolean; available: boolean; webcams: LocalWebcam[]
+  /** The server's OS as its launcher wrote it (linux/darwin/windows), or null. */
+  hostOs: string | null
+}
+
+function useLocalWebcams(enabled: boolean): LocalWebcams {
+  const [state, setState] = useState<LocalWebcams>({ loading: true, available: false, webcams: [], hostOs: null })
   useEffect(() => {
     if (!enabled) return
     let stop = false
     const tick = async () => {
       try {
         const { data } = await apiService.getLocalWebcams()
-        if (!stop) setState({ loading: false, available: !!data?.available, webcams: data?.webcams ?? [] })
+        if (!stop) setState({ loading: false, available: !!data?.available, webcams: data?.webcams ?? [], hostOs: data?.host_os ?? null })
       } catch {
-        if (!stop) setState({ loading: false, available: false, webcams: [] })
+        if (!stop) setState({ loading: false, available: false, webcams: [], hostOs: null })
       }
     }
     tick()
@@ -81,6 +87,27 @@ function useLocalWebcams(enabled: boolean): { loading: boolean; available: boole
     return () => { stop = true; clearInterval(t) }
   }, [enabled])
   return state
+}
+
+/** A Linux server with USB webcams switched off (WEBCAMS=off, or a kernel
+ *  with no video4linux yet). The host agent is not the answer there —
+ *  MediaMTX serves the webcam once WEBCAMS is on (#904). */
+function WebcamsOffNotice() {
+  return (
+    <div className="p-3 border border-[var(--warn)] bg-[color-mix(in_oklab,var(--warn)_10%,transparent)] text-sm space-y-1">
+      <div className="flex items-center gap-2 font-medium"><AlertTriangle size={14} className="text-[var(--warn)]" />
+        USB webcams are off on the OpenNVR server
+      </div>
+      <div className="text-[var(--text-dim)]">
+        Turn them on in the OpenNVR folder there: set this in <code className="font-mono">.env</code>, then run the second line.
+      </div>
+      <code className="block mt-1 px-2 py-1 text-xs font-mono bg-[var(--bg-2)] border border-[var(--border)] select-all break-all">WEBCAMS=on</code>
+      <code className="block mt-1 px-2 py-1 text-xs font-mono bg-[var(--bg-2)] border border-[var(--border)] select-all break-all">./start.sh up</code>
+      <div className="text-xs text-[var(--text-dim)]">
+        Already on? The server's kernel had no video4linux when OpenNVR started: plug the webcam in, then run <code className="font-mono">./start.sh up</code> again.
+      </div>
+    </div>
+  )
 }
 
 function LocalWebcamPicker({ webcams, value, onChange }: { webcams: LocalWebcam[]; value: string | null; onChange: (id: string, name: string) => void }) {
@@ -186,10 +213,11 @@ export function WebcamAddPanel({ source, onDone, onError, onAction }: {
   // Linux MediaMTX serves it itself (the device is passed into its
   // container; GET /webcams/local lists them), elsewhere the host agent
   // does. The local list wins when it is available; the agent is the
-  // fallback, and the only option on Docker Desktop.
+  // fallback, and the only option on Docker Desktop. A Linux server never
+  // falls back to the agent: there the answer is WEBCAMS=on (#904).
   const [serverDevice, setServerDevice] = useState<string | null>(null)
   const local = useLocalWebcams(source === 'server' && !created)
-  const useAgent = !local.loading && !local.available
+  const useAgent = !local.loading && !local.available && local.hostOs !== 'linux'
   const { info: agent } = useHostAgent(useAgent && (source === 'server' || created?.source === 'server'))
 
   const sessions = useWebcamSessions()
@@ -368,6 +396,8 @@ export function WebcamAddPanel({ source, onDone, onError, onAction }: {
               <div className="text-sm text-[var(--text-dim)]">Looking for webcams on the server…</div>
             ) : local.available ? (
               <LocalWebcamPicker webcams={local.webcams} value={serverDevice} onChange={(id, n) => { setServerDevice(id); suggestName(n) }} />
+            ) : local.hostOs === 'linux' ? (
+              <WebcamsOffNotice />
             ) : (
               <HostWebcamPicker value={serverDevice} onChange={(id, n) => { setServerDevice(id); suggestName(n) }} />
             )}

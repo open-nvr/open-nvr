@@ -81,11 +81,35 @@ def sysfs_dir() -> str:
     return os.environ.get(SYSFS_DIR_ENV, "").strip() or DEFAULT_SYSFS_DIR
 
 
+#: Set to ``on`` by docker-compose.webcams.yml on core (#904).
+LOCAL_WEBCAMS_ENV = "OPENNVR_LOCAL_WEBCAMS"
+#: The host's OS as the launchers write it (start.sh / start.ps1).
+HOST_OS_ENV = "OPENNVR_HOST_OS"
+_HOST_OSES = ("linux", "darwin", "windows")
+
+
 def available() -> bool:
-    """Is the overlay in place — does this container see the host's device
-    names at all? False on macOS/Windows and on a Linux install without
-    ``WEBCAMS=on``; the Add Camera dialog then offers the host agent."""
+    """Is the overlay in place? False on macOS/Windows and on a Linux
+    install without ``WEBCAMS=on``; the Add Camera dialog then says how to
+    turn it on (Linux) or offers the host agent (Docker Desktop).
+
+    The overlay's own flag decides. ``/dev/v4l/by-id`` cannot on its own:
+    udev creates it only while a webcam is plugged in, so with the overlay
+    in place and nothing plugged in the dialog offered the host agent
+    instead of "plug one in" (#904). The directory still counts, for a core
+    started by an overlay older than the flag."""
+    if os.environ.get(LOCAL_WEBCAMS_ENV, "").strip().lower() == "on":
+        return True
     return os.path.isdir(by_id_dir())
+
+
+def host_os() -> str | None:
+    """``linux``/``darwin``/``windows`` when a launcher said so, else None.
+    Core runs in a Linux container everywhere, so it cannot read this off
+    itself; the dialog needs it to name the server's own commands rather
+    than guess from the browser's OS (#904)."""
+    value = os.environ.get(HOST_OS_ENV, "").strip().lower()
+    return value if value in _HOST_OSES else None
 
 
 def _pretty_from_id(entry: str) -> str:

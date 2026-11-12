@@ -38,6 +38,7 @@ def test_lists_capture_nodes_with_sysfs_names(fake_devices):
 
 
 def test_nothing_without_the_overlay(monkeypatch, tmp_path):
+    monkeypatch.delenv(lw.LOCAL_WEBCAMS_ENV, raising=False)
     monkeypatch.setenv(lw.BY_ID_DIR_ENV, str(tmp_path / "absent"))
     assert lw.available() is False and lw.list_local_webcams() == []
 
@@ -129,3 +130,71 @@ def test_the_local_list_says_which_camera_a_webcam_feeds(monkeypatch):
     by_id = {w["id"]: w for w in out["webcams"]}
     assert by_id[dev]["assigned_camera_id"] == 4 and by_id[dev]["assigned_camera_name"] == "Desk"
     assert by_id["/dev/v4l/by-id/usb-b-video-index0"]["assigned_camera_id"] is None
+
+
+# ── #904: the overlay's own flag, and the server's OS ───────────────
+
+
+def test_the_overlay_flag_counts_with_no_webcam_plugged_in(monkeypatch, tmp_path):
+    """udev creates /dev/v4l/by-id only while a webcam is plugged in. With
+    the overlay in place and nothing plugged in, the dialog must say "plug
+    one in", not fall back to the host agent."""
+    monkeypatch.setenv(lw.BY_ID_DIR_ENV, str(tmp_path / "absent"))
+    monkeypatch.setenv(lw.LOCAL_WEBCAMS_ENV, "on")
+    assert lw.available() is True
+    assert lw.list_local_webcams() == []
+    monkeypatch.setenv(lw.LOCAL_WEBCAMS_ENV, "off")
+    assert lw.available() is False
+
+
+@pytest.mark.parametrize("raw, want", [
+    ("linux", "linux"), (" Windows ", "windows"), ("darwin", "darwin"),
+    ("", None), ("freebsd", None),
+])
+def test_host_os_takes_only_the_three_known_values(monkeypatch, raw, want):
+    monkeypatch.setenv(lw.HOST_OS_ENV, raw)
+    assert lw.host_os() == want
+
+
+def test_host_os_unset_is_none(monkeypatch):
+    monkeypatch.delenv(lw.HOST_OS_ENV, raising=False)
+    assert lw.host_os() is None
+
+
+def test_the_local_list_says_which_os_the_server_runs(monkeypatch):
+    """The dialog decides between "turn WEBCAMS on" (Linux) and the host
+    agent (Docker Desktop) from this, never from the browser's OS."""
+    from types import SimpleNamespace
+
+    from routers import webcams as r
+
+    monkeypatch.setenv(lw.HOST_OS_ENV, "linux")
+    monkeypatch.setattr(r, "available", lambda: False)
+    out = r.local_webcams(db=SimpleNamespace(), _user=None)
+    assert out == {"available": False, "webcams": [], "host_os": "linux"}
+
+
+def test_the_agent_view_falls_back_to_the_launchers_os(monkeypatch):
+    """Before any agent has connected, its OS is the launcher's, so the
+    install command shown is this server's (a Windows browser looking at a
+    Linux server was told to run start.ps1)."""
+    from services import host_agent as ha
+
+    monkeypatch.setenv(lw.HOST_OS_ENV, "linux")
+    monkeypatch.setattr(ha.state, "snapshot", lambda: (None, None))
+    monkeypatch.setattr(ha.state, "connected", lambda: False)
+    monkeypatch.setattr(ha, "_stored_report", lambda db: None)
+
+    class _Q:
+        def filter(self, *a):
+            return self
+
+        def all(self):
+            return []
+
+    from types import SimpleNamespace
+    view = ha.public_view(SimpleNamespace(query=lambda *_: _Q()))
+    assert view["os"] == "linux"
+
+    monkeypatch.setattr(ha.state, "snapshot", lambda: ({"os": "windows"}, 1.0))
+    assert ha.public_view(SimpleNamespace(query=lambda *_: _Q()))["os"] == "windows",         "the agent's own report wins"
