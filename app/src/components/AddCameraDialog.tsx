@@ -26,8 +26,8 @@ import type { IdentityField } from '../lib/cameraIdentity'
 import { Modal } from './Modal'
 import { Badge, Button, EmptyState } from './ui'
 import { Field, Input } from './ui/form'
-import { SegmentedControl } from './ui/SegmentedControl'
-import { Camera, ChevronDown, CheckCircle, Loader2, Plus, RefreshCw, Search, SearchX, Video, Webcam, X } from 'lucide-react'
+import { Tabs } from './ui/Tabs'
+import { Camera, ChevronDown, CheckCircle, Loader2, Monitor, Plus, RefreshCw, Search, SearchX, Server, Video, X } from 'lucide-react'
 import { WebcamAddPanel } from './WebcamAddPanel'
 import { useTranslation } from '../i18n'
 import { extractApiError } from '../lib/apiError'
@@ -100,6 +100,22 @@ function subnet24(ip: string): string | null {
 // The /connect 403 for an IP outside the configured Camera LAN. The other
 // /connect 403 ("non-internal address") deliberately doesn't match — that
 // one isn't fixable from here.
+/**
+ * A server detail an operator can read, or ''. A camera's raw SOAP fault
+ * ("GetProfiles failed: <?xml … ter:NotAuthorized …") is reduced to its
+ * fault code; nothing with markup reaches the red box.
+ */
+const humanServerDetail = (detail: string): string => {
+  if (!detail) return ''
+  if (!detail.includes('<')) return detail.length <= 400 ? detail : detail.slice(0, 397) + '…'
+  const code = detail.match(/ter:([A-Za-z]+)/)?.[1] || detail.match(/wsse:([A-Za-z]+)/)?.[1]
+  const prefix = detail.split('<')[0].replace(/[:\s]+$/, '')
+  if (code === 'NotAuthorized' || code === 'FailedAuthentication') {
+    return 'The camera rejected the ONVIF username or password. Some cameras keep an ONVIF account separate from the web login, or need ONVIF turned on.'
+  }
+  return `${prefix || 'The camera returned an error'}${code ? ` (${code})` : ''}.`
+}
+
 function parseLanBlock(e: any): { configured: string[] } | null {
   if (e?.status !== 403) return null
   const detail = typeof e?.data?.detail === 'string' ? e.data.detail : e?.message || ''
@@ -127,7 +143,9 @@ export function AddCameraDialog({
   // Manual has two kinds of camera: an IP camera (address / RTSP URL) and a
   // webcam (this browser's, or a USB one on the OpenNVR server), which has
   // its own guided flow (WebcamAddPanel) with its own Add and Done.
-  const [manualKind, setManualKind] = useState<'ip' | 'webcam'>('ip')
+  // One row of tabs under Manual: an IP camera, or a webcam in this browser
+  // or on the OpenNVR server (one level, not a webcam tab with its own sub-tabs).
+  const [manualKind, setManualKind] = useState<'ip' | 'browser' | 'server'>('ip')
   // The webcam panel's Add / Done, shown in the footer like every other tab's.
   const [webcamAction, setWebcamAction] = useState<{ label: string; onClick: () => void; disabled: boolean } | null>(null)
   const [loading, setLoading] = useState(false)
@@ -541,11 +559,11 @@ export function AddCameraDialog({
         // Fixable in place: offer to extend the Camera LAN with this subnet.
         setLanPrompt({ ip: selectedCamera.ip, subnet, configured: lanBlock.configured })
       } else if (e?.status === 401 || detail.includes('401') || detail.toLowerCase().includes('authentication')) {
-        setError('Authentication failed. Check username and password.')
+        setError(humanServerDetail(detail) || 'Authentication failed. Check username and password.')
       } else if (detail.includes('timeout') || detail.includes('connect')) {
           setError(t('cameraDialog.connectError'))
       } else {
-        setError(detail || 'Connection failed. Check credentials and network.')
+        setError(humanServerDetail(detail) || 'Connection failed. Check credentials and network.')
       }
     } finally {
       setAuthenticating(false)
@@ -725,7 +743,7 @@ export function AddCameraDialog({
   // Single primary footer action per screen state, so the CTA never jumps
   // between body and footer.
   const primaryAction =
-    mode === 'manual' && manualKind === 'webcam'
+    mode === 'manual' && manualKind !== 'ip'
       ? webcamAction
       : mode === 'manual'
       ? {
@@ -1307,17 +1325,17 @@ export function AddCameraDialog({
         {/* MANUAL MODE — an IP camera by address/URL, or a webcam. */}
         {mode === 'manual' && (
           <div className="flex flex-col gap-4">
-            <SegmentedControl
-              label="Kind of camera"
-              options={[
-                { value: 'ip', label: <span className="inline-flex items-center gap-1.5 px-1"><Video size={13} /> IP camera</span> },
-                { value: 'webcam', label: <span className="inline-flex items-center gap-1.5 px-1"><Webcam size={13} /> Webcam</span> },
+            <Tabs
+              tabs={[
+                { key: 'ip', label: <span className="inline-flex items-center gap-1.5"><Video size={14} /> IP camera</span> },
+                { key: 'browser', label: <span className="inline-flex items-center gap-1.5"><Monitor size={14} /> Browser webcam</span> },
+                { key: 'server', label: <span className="inline-flex items-center gap-1.5"><Server size={14} /> Server webcam</span> },
               ]}
-              value={manualKind}
-              onChange={(v) => { setManualKind(v); setError(null) }}
+              active={manualKind}
+              onChange={(k) => { setManualKind(k as 'ip' | 'browser' | 'server'); setError(null) }}
             />
-            {manualKind === 'webcam' ? (
-              <WebcamAddPanel onDone={(id) => onCameraAdded(id)} onError={setError} onAction={setWebcamAction} />
+            {manualKind !== 'ip' ? (
+              <WebcamAddPanel key={manualKind} source={manualKind} onDone={(id) => onCameraAdded(id)} onError={setError} onAction={setWebcamAction} />
             ) : (
               <div className="grid grid-cols-6 gap-3">
                 <Field label={t('cameraDialog.cameraName')} required className="col-span-6">

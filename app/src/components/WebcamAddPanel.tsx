@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 /**
- * Add Camera → Manual → Webcam: one flow for both kinds of webcam.
+ * Add Camera → Manual → Browser webcam / Server webcam: one flow for both
+ * kinds of webcam (the dialog's tab says which, as ``source``).
  *
- *   1. Source: this browser, or the OpenNVR server (a USB webcam the host
- *      agent streams).
+ *   1. Source: this browser, or the OpenNVR server (a USB webcam MediaMTX
+ *      or the host agent streams).
  *   2. Pick a webcam from the list — the browser's own cameras, or the ones
  *      the agent found — with a preview in a fixed-height box.
  *   3. Name it, Add.
@@ -17,18 +18,19 @@
  * more: the host agent picks the camera up on its next sync.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { CheckCircle, Loader2, Mic, MicOff, Monitor, Server, Webcam } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { AlertTriangle, CheckCircle, Loader2, Usb, Webcam } from 'lucide-react'
 import { apiService } from '../lib/apiService'
 import { extractApiError } from '../lib/apiError'
 import { rebaseToCurrentOrigin } from '../lib/streamUrl'
 import { describeStream } from '../lib/hostAgent'
-import { startSession, useWebcamSessions } from '../lib/webcamSessions'
+import { sessionOnDevice, startSession, streamDevice, useWebcamSessions } from '../lib/webcamSessions'
 import { HostWebcamPicker, useHostAgent } from './HostWebcamPicker'
 import { VideoPlayer } from './VideoPlayer'
-import { Button } from './ui'
-import { Field, Input } from './ui/form'
-import { SegmentedControl } from './ui/SegmentedControl'
+import { WebcamList, WebcamOption, webcamLabel } from './WebcamOption'
+import { Badge } from './ui'
+import { Input, Select } from './ui/form'
+import { Switch } from './ui/Switch'
 
 const RESOLUTIONS = [
   { label: '480p', width: 854, height: 480 },
@@ -42,26 +44,42 @@ const PREVIEW_BOX = 'relative w-full h-[min(240px,32vh)] bg-black border border-
 
 type Source = 'browser' | 'server'
 
-const SOURCE_HINT: Record<Source, string> = {
-  browser: 'The camera of the device you are using now. Records while this browser tab stays open.',
-  server: 'A USB webcam plugged into the computer OpenNVR runs on. Records around the clock.',
+/** What each kind of webcam is, said once above the steps. */
+const SOURCE_TEXT: Record<Source, string> = {
+  browser: 'A camera on the device you are using now. It records while this browser tab is open.',
+  server: 'A USB webcam plugged into the OpenNVR server. It records around the clock.',
 }
 
-type LocalWebcam = { id: string; name: string; node: string }
+/** What Add does, said next to the preview so nobody has to guess. */
+const AFTER_ADD: Record<Source, string> = {
+  browser: 'After you add it, this tab streams the webcam to OpenNVR, which records it. Keep the tab open; you can use the rest of OpenNVR meanwhile.',
+  server: 'After you add it, the server streams the webcam at 25 fps and records it around the clock, also after restarts and re-plugging.',
+}
+
+type LocalWebcam = {
+  id: string; name: string; node: string
+  assigned_camera_id?: number | null; assigned_camera_name?: string | null
+}
 
 /** GET /api/v1/webcams/local, polled while the picker is open so a webcam
  *  plugged in during the dialog shows up. */
-function useLocalWebcams(enabled: boolean): { loading: boolean; available: boolean; webcams: LocalWebcam[] } {
-  const [state, setState] = useState<{ loading: boolean; available: boolean; webcams: LocalWebcam[] }>({ loading: true, available: false, webcams: [] })
+type LocalWebcams = {
+  loading: boolean; available: boolean; webcams: LocalWebcam[]
+  /** The server's OS as its launcher wrote it (linux/darwin/windows), or null. */
+  hostOs: string | null
+}
+
+function useLocalWebcams(enabled: boolean): LocalWebcams {
+  const [state, setState] = useState<LocalWebcams>({ loading: true, available: false, webcams: [], hostOs: null })
   useEffect(() => {
     if (!enabled) return
     let stop = false
     const tick = async () => {
       try {
         const { data } = await apiService.getLocalWebcams()
-        if (!stop) setState({ loading: false, available: !!data?.available, webcams: data?.webcams ?? [] })
+        if (!stop) setState({ loading: false, available: !!data?.available, webcams: data?.webcams ?? [], hostOs: data?.host_os ?? null })
       } catch {
-        if (!stop) setState({ loading: false, available: false, webcams: [] })
+        if (!stop) setState({ loading: false, available: false, webcams: [], hostOs: null })
       }
     }
     tick()
@@ -69,6 +87,27 @@ function useLocalWebcams(enabled: boolean): { loading: boolean; available: boole
     return () => { stop = true; clearInterval(t) }
   }, [enabled])
   return state
+}
+
+/** A Linux server with USB webcams switched off (WEBCAMS=off, or a kernel
+ *  with no video4linux yet). The host agent is not the answer there —
+ *  MediaMTX serves the webcam once WEBCAMS is on (#904). */
+function WebcamsOffNotice() {
+  return (
+    <div className="p-3 border border-[var(--warn)] bg-[color-mix(in_oklab,var(--warn)_10%,transparent)] text-sm space-y-1">
+      <div className="flex items-center gap-2 font-medium"><AlertTriangle size={14} className="text-[var(--warn)]" />
+        USB webcams are off on the OpenNVR server
+      </div>
+      <div className="text-[var(--text-dim)]">
+        Turn them on in the OpenNVR folder there: set this in <code className="font-mono">.env</code>, then run the second line.
+      </div>
+      <code className="block mt-1 px-2 py-1 text-xs font-mono bg-[var(--bg-2)] border border-[var(--border)] select-all break-all">WEBCAMS=on</code>
+      <code className="block mt-1 px-2 py-1 text-xs font-mono bg-[var(--bg-2)] border border-[var(--border)] select-all break-all">./start.sh up</code>
+      <div className="text-xs text-[var(--text-dim)]">
+        Already on? The server's kernel had no video4linux when OpenNVR started: plug the webcam in, then run <code className="font-mono">./start.sh up</code> again.
+      </div>
+    </div>
+  )
 }
 
 function LocalWebcamPicker({ webcams, value, onChange }: { webcams: LocalWebcam[]; value: string | null; onChange: (id: string, name: string) => void }) {
@@ -80,41 +119,31 @@ function LocalWebcamPicker({ webcams, value, onChange }: { webcams: LocalWebcam[
     )
   }
   return (
-    <div className="space-y-1" role="radiogroup" aria-label="Webcam">
-      {webcams.map((w) => {
-        const selected = value === w.id
-        return (
-          <button
-            key={w.id}
-            type="button"
-            role="radio"
-            aria-checked={selected}
-            onClick={() => onChange(w.id, w.name)}
-            className={`w-full text-left px-3 py-2 border flex items-center gap-2 text-sm ${selected ? 'border-[var(--accent)] bg-[var(--accent)]/10' : 'border-[var(--border)] hover:border-[var(--accent)]'}`}
-          >
-            {selected ? <CheckCircle size={14} className="text-[var(--accent)]" /> : <Webcam size={14} className="text-[var(--text-dim)]" />}
-            <span className="truncate">{w.name}</span>
-            <span className="ml-auto text-xs text-[var(--text-dim)] font-mono">{w.node}</span>
-          </button>
-        )
-      })}
-    </div>
+    <WebcamList>
+      {webcams.map((w) => (
+        <WebcamOption
+          key={w.id}
+          icon={<Usb size={14} />}
+          name={w.name}
+          subtitle={`USB · ${w.node}`}
+          selected={value === w.id}
+          takenBy={w.assigned_camera_id ? w.assigned_camera_name || `camera ${w.assigned_camera_id}` : null}
+          onSelect={() => onChange(w.id, w.name)}
+        />
+      ))}
+    </WebcamList>
   )
 }
 
-function SourceSwitch({ value, onChange }: { value: Source; onChange: (s: Source) => void }) {
+/** A numbered step: what to do here, in a few words. */
+function Step({ n, title, children }: { n: number; title: string; children: ReactNode }) {
   return (
-    <div className="flex flex-wrap items-center gap-3">
-      <SegmentedControl
-        label="Where is the webcam?"
-        options={[
-          { value: 'browser' as Source, label: <span className="inline-flex items-center gap-1.5 px-1"><Monitor size={13} /> This browser</span> },
-          { value: 'server' as Source, label: <span className="inline-flex items-center gap-1.5 px-1"><Server size={13} /> OpenNVR server</span> },
-        ]}
-        value={value}
-        onChange={onChange}
-      />
-      <span className="text-xs text-[var(--text-dim)] min-w-0 flex-1">{SOURCE_HINT[value]}</span>
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-2 text-xs font-medium text-[var(--text-dim)]">
+        <span className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-[var(--border)] text-[10px]">{n}</span>
+        {title}
+      </div>
+      {children}
     </div>
   )
 }
@@ -154,13 +183,14 @@ function LivePreview({ cameraId, offlineLabel, version }: { cameraId: number; of
 
 export type WebcamAction = { label: string; onClick: () => void; disabled: boolean }
 
-export function WebcamAddPanel({ onDone, onError, onAction }: {
+export function WebcamAddPanel({ source, onDone, onError, onAction }: {
+  /** Which kind of webcam: the dialog's Browser webcam / Server webcam tab. */
+  source: Source
   onDone: (cameraId: number) => void
   onError: (msg: string | null) => void
   /** The panel's Add / Done, for the dialog to show in its footer. */
   onAction: (action: WebcamAction | null) => void
 }) {
-  const [source, setSource] = useState<Source>('browser')
   const [name, setName] = useState('')
   const [nameTouched, setNameTouched] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -174,6 +204,8 @@ export function WebcamAddPanel({ onDone, onError, onAction }: {
   const [mediaError, setMediaError] = useState<string | null>(null)
   const previewRef = useRef<MediaStream | null>(null)
   const [previewReady, setPreviewReady] = useState(false)
+  // The camera the preview really opened ("Default camera" resolves to one).
+  const [previewDevice, setPreviewDevice] = useState('')
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const handedOver = useRef(false)
 
@@ -181,10 +213,11 @@ export function WebcamAddPanel({ onDone, onError, onAction }: {
   // Linux MediaMTX serves it itself (the device is passed into its
   // container; GET /webcams/local lists them), elsewhere the host agent
   // does. The local list wins when it is available; the agent is the
-  // fallback, and the only option on Docker Desktop.
+  // fallback, and the only option on Docker Desktop. A Linux server never
+  // falls back to the agent: there the answer is WEBCAMS=on (#904).
   const [serverDevice, setServerDevice] = useState<string | null>(null)
   const local = useLocalWebcams(source === 'server' && !created)
-  const useAgent = !local.loading && !local.available
+  const useAgent = !local.loading && !local.available && local.hostOs !== 'linux'
   const { info: agent } = useHostAgent(useAgent && (source === 'server' || created?.source === 'server'))
 
   const sessions = useWebcamSessions()
@@ -197,6 +230,7 @@ export function WebcamAddPanel({ onDone, onError, onAction }: {
     if (!handedOver.current) previewRef.current?.getTracks().forEach((t) => t.stop())
     previewRef.current = null
     setPreviewReady(false)
+    setPreviewDevice('')
   }
 
   // The browser preview: (re)open the chosen camera with the chosen settings.
@@ -217,11 +251,12 @@ export function WebcamAddPanel({ onDone, onError, onAction }: {
       stopPreview()
       previewRef.current = stream
       setPreviewReady(true)
+      setPreviewDevice(streamDevice(stream))
       if (videoRef.current) { videoRef.current.srcObject = stream; videoRef.current.play().catch(() => {}) }
       const list = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput')
       setDevices(list)
       const label = stream.getVideoTracks()[0]?.label
-      if (label) suggestName(label.replace(/\s*\([0-9a-f]{4}:[0-9a-f]{4}\)\s*$/i, ''))
+      if (label) suggestName(webcamLabel(label))
     }, (e: any) => {
       if (cancelled) return
       setMediaError(
@@ -241,8 +276,12 @@ export function WebcamAddPanel({ onDone, onError, onAction }: {
   useEffect(() => { if (source !== 'browser') stopPreview() }, [source])
   useEffect(() => () => stopPreview(), [])
 
+  // This tab already publishes the previewed camera to another OpenNVR
+  // camera: one webcam feeds one camera.
+  const browserTakenBy = source === 'browser' ? sessionOnDevice(sessions, previewDevice) : undefined
+
   const canAdd = !busy && !created && name.trim() !== '' &&
-    (source === 'browser' ? previewReady && !mediaError
+    (source === 'browser' ? previewReady && !mediaError && !browserTakenBy
       : !!serverDevice && (local.available ? true : !!agent?.connected))
 
   const add = async () => {
@@ -320,71 +359,93 @@ export function WebcamAddPanel({ onDone, onError, onAction }: {
   }
 
   // ── Before Add ──
+  // Three steps on the left (which webcam, its name, picture and sound),
+  // the preview and what Add does on the right; the source on top says
+  // which kind of webcam this is.
+  const browserRows = devices.length ? devices : [{ deviceId: '', label: 'Default camera' } as MediaDeviceInfo]
+  const shownDevice = deviceId || previewDevice
   return (
     <div className="space-y-3">
-      <SourceSwitch value={source} onChange={(s) => { if (!busy) { setSource(s); onError(null) } }} />
+      <p className="text-xs leading-snug text-[var(--text-dim)]">{SOURCE_TEXT[source]}</p>
 
-      <div className="grid sm:grid-cols-2 gap-3">
-        <div className="space-y-2 min-w-0">
-          <div className="text-xs text-[var(--text-dim)]">Webcam</div>
-          {source === 'browser' ? (
-            !secure || !hasMedia ? (
-              <div className="text-sm text-[var(--danger)]">The browser opens cameras only on a secure page: use OpenNVR’s https:// address.</div>
+      <div className="grid sm:grid-cols-2 gap-4">
+        <div className="space-y-3 min-w-0">
+          <Step n={1} title={source === 'browser' ? 'Pick a camera on this device' : 'Pick a webcam on the server'}>
+            {source === 'browser' ? (
+              !secure || !hasMedia ? (
+                <div className="text-sm text-[var(--danger)]">The browser opens cameras only on a secure page: use OpenNVR’s https:// address.</div>
+              ) : (
+                <WebcamList>
+                  {browserRows.map((d, i) => {
+                    const taken = sessionOnDevice(sessions, d.deviceId)
+                    return (
+                      <WebcamOption
+                        key={d.deviceId || i}
+                        icon={<Webcam size={14} />}
+                        name={webcamLabel(d.label) || `Camera ${i + 1}`}
+                        subtitle="On this device"
+                        selected={shownDevice ? d.deviceId === shownDevice : i === 0}
+                        takenBy={taken?.cameraName}
+                        onSelect={() => setDeviceId(d.deviceId)}
+                      />
+                    )
+                  })}
+                </WebcamList>
+              )
+            ) : local.loading ? (
+              <div className="text-sm text-[var(--text-dim)]">Looking for webcams on the server…</div>
+            ) : local.available ? (
+              <LocalWebcamPicker webcams={local.webcams} value={serverDevice} onChange={(id, n) => { setServerDevice(id); suggestName(n) }} />
+            ) : local.hostOs === 'linux' ? (
+              <WebcamsOffNotice />
             ) : (
-              <div className="space-y-1" role="radiogroup" aria-label="Webcam">
-                {(devices.length ? devices : [{ deviceId: '', label: 'Default camera' } as MediaDeviceInfo]).map((d, i) => {
-                  const selected = deviceId ? d.deviceId === deviceId : i === 0
-                  return (
-                    <button
-                      key={d.deviceId || i}
-                      type="button"
-                      role="radio"
-                      aria-checked={selected}
-                      onClick={() => setDeviceId(d.deviceId)}
-                      className={`w-full text-left px-3 py-2 border flex items-center gap-2 text-sm ${selected ? 'border-[var(--accent)] bg-[var(--accent)]/10' : 'border-[var(--border)] hover:border-[var(--accent)]'}`}
-                    >
-                      {selected ? <CheckCircle size={14} className="text-[var(--accent)]" /> : <Webcam size={14} className="text-[var(--text-dim)]" />}
-                      <span className="truncate">{d.label || `Camera ${i + 1}`}</span>
-                    </button>
-                  )
-                })}
+              <HostWebcamPicker value={serverDevice} onChange={(id, n) => { setServerDevice(id); suggestName(n) }} />
+            )}
+            {browserTakenBy && (
+              <div className="flex items-start gap-2 text-xs text-[var(--warn)]">
+                <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+                <span>
+                  This tab already streams this camera to “{browserTakenBy.cameraName}”. A webcam can feed one
+                  camera: pick another one, or use “{browserTakenBy.cameraName}”.
+                </span>
               </div>
-            )
-          ) : local.loading ? (
-            <div className="text-sm text-[var(--text-dim)]">Looking for webcams on the server…</div>
-          ) : local.available ? (
-            <LocalWebcamPicker webcams={local.webcams} value={serverDevice} onChange={(id, n) => { setServerDevice(id); suggestName(n) }} />
-          ) : (
-            <HostWebcamPicker value={serverDevice} onChange={(id, n) => { setServerDevice(id); suggestName(n) }} />
-          )}
+            )}
+          </Step>
 
-          <Field label="Camera name" required className="pt-1">
+          <Step n={2} title="Name the camera">
             <Input
+              aria-label="Camera name"
               placeholder="e.g., Reception desk"
               value={name}
               onChange={(e) => { setName(e.target.value); setNameTouched(true) }}
             />
-          </Field>
+          </Step>
 
           {source === 'browser' && (
-            <div className="flex items-center gap-2">
-              <select
-                aria-label="Quality"
-                className="bg-[var(--bg-2)] border border-[var(--border)] px-2 py-1.5 text-sm"
-                value={resolution}
-                onChange={(e) => setResolution(e.target.value)}
-              >
-                {RESOLUTIONS.map((r) => <option key={r.label} value={r.label}>{r.label} · {BROWSER_FPS} fps</option>)}
-              </select>
-              <Button size="sm" onClick={() => setAudio((a) => !a)} aria-pressed={audio} title={audio ? 'The microphone is recorded' : 'The microphone is off'}>
-                {audio ? <Mic size={14} /> : <MicOff size={14} />} {audio ? 'Sound on' : 'Sound off'}
-              </Button>
-            </div>
+            <Step n={3} title="Picture and sound">
+              <div className="flex items-center gap-4">
+                <Select
+                  aria-label="Picture quality"
+                  className="!w-40 shrink-0"
+                  value={resolution}
+                  onChange={(e) => setResolution(e.target.value)}
+                >
+                  {RESOLUTIONS.map((r) => <option key={r.label} value={r.label}>{r.label} · {BROWSER_FPS} fps</option>)}
+                </Select>
+                <label className="flex items-center gap-2 text-sm whitespace-nowrap">
+                  <Switch checked={audio} onChange={setAudio} label="Record sound" />
+                  Record sound
+                </label>
+              </div>
+            </Step>
           )}
         </div>
 
-        <div className="space-y-1 min-w-0">
-          <div className="text-xs text-[var(--text-dim)]">Preview</div>
+        <div className="space-y-1.5 min-w-0">
+          <div className="flex items-center justify-between text-xs font-medium text-[var(--text-dim)]">
+            <span>Preview</span>
+            <Badge>Not recording yet</Badge>
+          </div>
           <div className={PREVIEW_BOX}>
             {source === 'browser' ? (
               <>
@@ -393,18 +454,13 @@ export function WebcamAddPanel({ onDone, onError, onAction }: {
               </>
             ) : (
               <div className="absolute inset-0 flex items-center justify-center p-3 text-center text-xs text-white/60">
-                The server webcam’s picture appears here once it is added and starts streaming.
+                The server webcam’s picture appears here once you add it.
               </div>
             )}
           </div>
-          <div className="text-[11px] text-[var(--text-dim)]">
-            {source === 'browser'
-              ? 'Records only while this tab stays open; you can keep using OpenNVR in it.'
-              : 'Streams at 25 fps, around the clock, also after restarts and re-plugging.'}
-          </div>
+          <div className="text-xs text-[var(--text-dim)]">{AFTER_ADD[source]}</div>
         </div>
       </div>
-
     </div>
   )
 }

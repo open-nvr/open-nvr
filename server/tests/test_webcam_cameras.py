@@ -165,6 +165,137 @@ def test_push_publisher_path_never_provisions_a_substream(monkeypatch):
     from services.camera_source_resolver import derive_substream_url
 
     assert derive_substream_url(sent["config"].get("source_url")) is None
+    assert "substream" not in sent["config"]
+
+
+def test_push_publisher_path_asks_for_the_sub_when_told(monkeypatch):
+    from services import mediamtx_admin_service as m
+
+    sent = {}
+
+    async def _upsert(camera_id, camera_ip, config, *, transport_security=None):
+        sent.update(config=config)
+        return {"status": "ok", "path": f"cam-{camera_id}"}
+
+    monkeypatch.setattr(m.MediaMtxAdminService, "upsert_path", staticmethod(_upsert))
+    asyncio.run(m.MediaMtxAdminService.push_publisher_path(7, PUBLISHER_IP_SENTINEL, substream=True))
+    assert sent["config"]["substream"] is True
+
+
+def _capture_substream_calls(monkeypatch):
+    """Run _provision_substream with both of its outcomes stubbed: the
+    publisher sub helper and the HTTP client a pulled sub would use."""
+    from services import mediamtx_admin_service as m
+
+    calls = {"publisher_sub": [], "http": 0}
+
+    async def _push(camera_id, camera_ip):
+        calls["publisher_sub"].append(camera_id)
+
+    class _NoHttp:
+        def __init__(self, *a, **k):
+            calls["http"] += 1
+            raise AssertionError("a webcam's sub is never pulled from a source")
+
+    monkeypatch.setattr(m.MediaMtxAdminService, "_push_publisher_substream", staticmethod(_push))
+    monkeypatch.setattr(m.httpx, "AsyncClient", _NoHttp)
+    return m.MediaMtxAdminService, calls
+
+
+@pytest.mark.parametrize("extra", [{"substream": True}, {}])
+def test_every_provisioner_creates_a_webcam_sub_when_asked(monkeypatch, extra):
+    """#900: provision_path and replace_path (so create, edit, the
+    provision route and the startup reconcile alike) reach the sub through
+    _provision_substream. For a webcam it is a publisher path, made only
+    when the config asks for it, and never derived from a source — not even
+    from the row's substream_url marker, which names the sub itself."""
+    svc, calls = _capture_substream_calls(monkeypatch)
+    config = {"source_type": "publisher",
+              "substream_url": "rtsp://mediamtx:8554/cam-7-sub", **extra}
+    asyncio.run(svc._provision_substream(7, PUBLISHER_IP_SENTINEL, config))
+    assert calls["publisher_sub"] == ([7] if extra else [])
+    assert calls["http"] == 0
+
+
+def test_the_provision_route_keeps_a_webcams_sub(monkeypatch):
+    """POST /cameras/{id}/provision-mediamtx used to push a bare publisher
+    path: no capture command, no sub (#900)."""
+    from routers import cameras as r
+    from services import mediamtx_admin_service as m
+
+    cam = SimpleNamespace(id=7, ip_address=PUBLISHER_IP_SENTINEL, source_type="publisher",
+                          source_device="USB Camera (046d:0825)", status="pending")
+    sent = {}
+
+    async def _push(**kwargs):
+        sent.update(kwargs)
+        return {"status": "ok"}
+
+    monkeypatch.setattr(r.CameraService, "get_camera_by_id", staticmethod(lambda **_: cam))
+    monkeypatch.setattr(m.MediaMtxAdminService, "push_publisher_path", staticmethod(_push))
+    monkeypatch.setattr(r, "_log_provision_start", lambda *a, **k: None)
+    monkeypatch.setattr(r, "_log_provision_result", lambda *a, **k: None)
+    db = SimpleNamespace(commit=lambda: None)
+    asyncio.run(r.provision_camera_mediamtx(
+        7, db=db, current_user=SimpleNamespace(id=1), request=None))
+    assert sent["substream"] is True
+    assert sent["run_on_init"] is None
+
+
+def _boot_cfg():
+    return SimpleNamespace(source_url=None, rtsp_transport="tcp", recording_enabled=True,
+                           recording_path=None, recording_segment_seconds=60)
+
+
+def test_cores_boot_loop_asks_for_a_host_agent_webcams_sub():
+    """main.py upserts every camera's path at each core start, from
+    boot_path_config. It used to send a bare publisher path (#900)."""
+    from services.mediamtx_startup_service import MediaMtxStartupService
+
+    cam = SimpleNamespace(id=7, ip_address=PUBLISHER_IP_SENTINEL, source_type="publisher",
+                          source_device="USB Camera (046d:0825)", rtsp_url=None,
+                          substream_url="rtsp://mediamtx:8554/cam-7-sub")
+    out = MediaMtxStartupService.boot_path_config(cam, _boot_cfg())
+    assert out["source_type"] == "publisher"
+    assert out["substream"] is True
+    assert "run_on_init" not in out
+
+
+def test_cores_boot_loop_keeps_a_linux_webcams_capture_command(monkeypatch):
+    from services import local_webcams as lw
+    from services.mediamtx_startup_service import MediaMtxStartupService
+
+    monkeypatch.setattr(lw, "provisioning_for",
+                        lambda cam: {"run_on_init": "ffmpeg …", "substream": True})
+    cam = SimpleNamespace(id=7, ip_address=PUBLISHER_IP_SENTINEL, source_type="publisher",
+                          source_device="/dev/v4l/by-id/usb-a-video-index0", rtsp_url=None,
+                          substream_url=None)
+    out = MediaMtxStartupService.boot_path_config(cam, _boot_cfg())
+    assert out["run_on_init"] == "ffmpeg …" and out["substream"] is True
+
+
+def test_cores_boot_loop_config_for_an_ip_camera_is_unchanged():
+    from services.mediamtx_startup_service import MediaMtxStartupService
+
+    cam = SimpleNamespace(id=9, ip_address="192.168.1.10", source_type="rtsp", source_device=None,
+                          rtsp_url="rtsp://cam/main", substream_url=None)
+    assert MediaMtxStartupService.boot_path_config(cam, _boot_cfg()) == {
+        "source_url": "rtsp://cam/main", "source_type": "rtsp", "substream_url": None,
+        "rtsp_transport": "tcp", "recording_enabled": True, "recording_path": None,
+        "recording_segment_seconds": 60,
+    }
+
+
+def test_the_startup_reconcile_asks_for_a_host_agent_webcams_sub():
+    from services.mediamtx_startup_service import MediaMtxStartupService
+
+    cam = SimpleNamespace(id=7, ip_address=PUBLISHER_IP_SENTINEL, source_type="publisher",
+                          source_device="USB Camera (046d:0825)", rtsp_url=None, substream_url=None)
+    cfg = SimpleNamespace(rtsp_transport="tcp", recording_enabled=False)
+    out = MediaMtxStartupService.build_provision_config(cam, cfg, None)
+    assert out["source_type"] == "publisher"
+    assert out["substream"] is True
+    assert "run_on_init" not in out
 
 
 # ── IP-camera chores that must be skipped ───────────────────────────────
@@ -390,6 +521,38 @@ def test_a_second_webcam_is_not_a_duplicate(env):
     otherwise answer 409 for the second one."""
     _add_webcam(env, "Desk")
     _add_webcam(env, "Lobby")
+
+
+HOST_DEVICE = "dshow:@device_pnp_usb_vid_0c45"
+
+
+def test_one_server_webcam_feeds_one_camera(env):
+    """A second camera on the same device would be a second capture that
+    fails "device busy" for ever. Refused, whatever ``force`` says."""
+    first = env.tc.post("/api/v1/cameras/", json={**WEBCAM, "name": "Desk", "source_device": HOST_DEVICE})
+    assert first.status_code == 200, first.text
+    for q in ("", "?force=true"):
+        r = env.tc.post(f"/api/v1/cameras/{q}", json={**WEBCAM, "name": "Desk 2", "source_device": HOST_DEVICE})
+        assert r.status_code == 409, r.text
+        assert "Desk" in r.json()["detail"]
+
+
+def test_a_binned_cameras_webcam_is_free_again(env):
+    first = env.tc.post("/api/v1/cameras/", json={**WEBCAM, "name": "Desk", "source_device": HOST_DEVICE}).json()
+    assert env.tc.delete(f"/api/v1/cameras/{first['id']}").status_code in (200, 204)
+    r = env.tc.post("/api/v1/cameras/", json={**WEBCAM, "name": "Desk again", "source_device": HOST_DEVICE})
+    assert r.status_code == 200, r.text
+
+
+def test_switching_a_camera_to_a_webcam_in_use_is_refused(env):
+    env.tc.post("/api/v1/cameras/", json={**WEBCAM, "name": "Desk", "source_device": HOST_DEVICE})
+    other = env.tc.post("/api/v1/cameras/", json={**WEBCAM, "name": "Lobby",
+                                                 "source_device": "dshow:@device_pnp_usb_vid_30c9"}).json()
+    r = env.tc.put(f"/api/v1/cameras/{other['id']}", json={"source_device": HOST_DEVICE})
+    assert r.status_code == 409, r.text
+    # Its own webcam is not "in use" by itself.
+    r = env.tc.put(f"/api/v1/cameras/{other['id']}", json={"source_device": "dshow:@device_pnp_usb_vid_30c9"})
+    assert r.status_code == 200, r.text
 
 
 def test_editing_a_webcam_with_the_form_keeps_its_path(env):

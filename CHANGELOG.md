@@ -18,6 +18,22 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the app the runner only checks in and fetches nothing.
   `auto-update disable` turns it off and keeps it off.
 
+
+- **USB webcams are on by default on Linux (#904).** `.env.example` ships
+  `WEBCAMS=on` and the installer's question defaults to yes; an `.env` that
+  says `off` keeps it. MediaMTX then runs the `-ffmpeg` image with the
+  host's video devices (only video4linux, major 81) and the `video` group.
+  `start.sh` leaves the overlay out on a kernel with no video4linux yet,
+  where Docker could not mount `/sys/class/video4linux` and core would not
+  start, and says so.
+- **Add Camera → Manual is one row of tabs: IP camera, Browser webcam,
+  Server webcam.** It was a Webcam tab with a second row of sub-tabs
+  inside it. Each webcam tab says in one line what that kind is; the steps
+  are numbered (pick the webcam, name it, picture and sound); webcam names
+  drop the USB ids; the preview says it is not recording yet and what Add
+  will do. The three webcam lists (this browser, the server's Linux
+  webcams, the host agent's) share one row design.
+
 ### Fixed
 
 - **`auto-update enable` works on Linux.** The command the app and the
@@ -25,6 +41,60 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   refuses (it never runs under sudo), and without sudo the script refused
   too. It now runs as the normal user and writes only the systemd unit
   through sudo, like the host agent.
+
+
+- **Add Camera no longer prints a SOAP fault, and a camera whose clock is
+  off can still be added.** When a camera refused the ONVIF login the
+  dialog showed the raw `<s:Envelope … ter:NotAuthorized …>` text. A camera
+  answers the same fault to a correct password when its clock is more than
+  a few minutes from ours (WS-Security checks the `Created` timestamp), so
+  core now reads the camera's clock with the unauthenticated
+  GetSystemDateAndTime after both schemes refuse, retries once with the
+  timestamp in the camera's time when the clock is off, remembers the
+  offset for that camera, and otherwise answers a 401 that says what to
+  check: the ONVIF account (often separate from the web login, or ONVIF
+  turned off) and, when measured, the clock skew in minutes. The dialog
+  shows that sentence; any other camera error is reduced to its fault code.
+
+- **A USB webcam on a Docker Desktop machine goes live (#900).** The host
+  agent's ffmpeg publishes the camera's path and its `-sub` from one
+  capture, but core only created the sub path for a webcam MediaMTX serves
+  itself on Linux. MediaMTX refused the sub, ffmpeg exited a second after
+  starting, and the camera stayed "Disconnected", retrying every minute.
+  Every provisioner now asks `local_webcams.provisioning_for` what a webcam
+  needs and creates the sub through the one place that makes sub paths:
+  camera create and edit, `POST /cameras/{id}/provision-mediamtx`, the
+  startup reconcile, and core's boot loop. The last two also stop a core
+  restart from replacing a Linux USB webcam's path without its capture
+  command.
+- **One webcam feeds one camera.** A server webcam already feeding a camera
+  is refused with a 409 on create and on edit, whatever `force` says (a
+  second capture of the device fails "device busy" for ever); the Linux
+  webcam list now says which camera a webcam feeds, as the host agent's
+  did, and needs `cameras.manage`. In the browser, a camera this tab
+  already publishes is shown "in use" and cannot be added or started for
+  a second camera.
+- **Deleting a browser webcam lets the webcam go.** Its publishing session
+  kept retrying against the deleted camera, holding the webcam open with
+  its light on, until the tab closed. Deleting stops it, and a session
+  whose camera is gone (deleted in another tab or on another device) ends
+  instead of retrying.
+- **Turning USB webcams on on Linux actually gives MediaMTX ffmpeg (#904).**
+  The webcam overlay's MediaMTX built under the same image name as the
+  default one, so `WEBCAMS=on` reused the image already on disk and every
+  webcam path failed with `exec: "ffmpeg": executable file not found`. It
+  is now its own image, `opennvr/mediamtx-webcams:local-build`.
+- **Add Camera → Webcam → OpenNVR server says what to do on that server
+  (#904).** A Linux server with webcams off was told to install the host
+  agent with `.\start.ps1`, guessed from the browser's OS. It now says to set
+  `WEBCAMS=on`; on Docker Desktop the agent's install command is the
+  server's own (`OPENNVR_HOST_OS`, written by the launchers), or both when
+  unknown. With the overlay in place and no webcam plugged in, the dialog
+  says "plug one in" instead of offering the agent.
+- **`VIDEO_GID` reaches Compose.** `start.sh` exported it from inside
+  `$(compose_args)`, a subshell, so it never left; it is now written to
+  `.env` with the other host values. Hosts whose `video` group is not 44
+  could not open the webcam.
 
 ## [0.1.11] — 2026-11-12
 

@@ -36,7 +36,7 @@ import hashlib
 import html
 import re
 import secrets
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
 
@@ -84,11 +84,21 @@ def _soap_envelope(body: str) -> str:
 </soap:Envelope>'''
 
 
-def _soap_envelope_wsse(body: str, username: str, password: str) -> str:
-    """Wrap a request in a WS-Security UsernameToken PasswordDigest header."""
+def _soap_envelope_wsse(
+    body: str, username: str, password: str, clock_offset_s: float = 0.0
+) -> str:
+    """Wrap a request in a WS-Security UsernameToken PasswordDigest header.
+
+    ``clock_offset_s`` is the camera's clock minus ours: the ``Created``
+    timestamp is stamped in the camera's time, because a camera checks it
+    against its own clock (typically within ±5 min) and answers
+    ``NotAuthorized`` otherwise — indistinguishable from a wrong password.
+    """
     nonce_raw = secrets.token_bytes(20)
     nonce = base64.b64encode(nonce_raw).decode("ascii")
-    created = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    created = (datetime.now(UTC) + timedelta(seconds=clock_offset_s)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
     password_digest = base64.b64encode(
         hashlib.sha1(
             nonce_raw + created.encode("utf-8") + password.encode("utf-8")
@@ -133,6 +143,82 @@ _WSSE_PREFERRED_HOSTS: set[str] = set()
 def _auth_key(url: str) -> str:
     parsed = urlparse(url)
     return f"{parsed.scheme}://{parsed.netloc}"
+
+
+#: Camera clock minus this host's clock, in seconds, per ``_auth_key`` host:
+#: learned when a WS-Security login succeeded only once stamped in the
+#: camera's time, so later requests to that camera start from it. Process
+#: local, like ``_WSSE_PREFERRED_HOSTS``; a stale value costs one retry.
+_CLOCK_OFFSETS: dict[str, float] = {}
+
+#: A camera clock within this many seconds of ours is not a reason to
+#: retry: every firmware tolerates it, and a retry would only add a round
+#: trip to a plain wrong password.
+CLOCK_SKEW_TOLERANCE_S = 60.0
+
+_GET_SYSTEM_DATE_AND_TIME = "<tds:GetSystemDateAndTime/>"
+_UTC_DATETIME_RE = re.compile(r"UTCDateTime>(.*?)</[^>]*UTCDateTime>", re.S)
+
+
+def _parse_utc_datetime(text: str) -> datetime | None:
+    """The ``UTCDateTime`` of a GetSystemDateAndTime answer, or None. Prefix
+    agnostic (``tt:``, ``tds:``, none), tolerant of whitespace."""
+    m = _UTC_DATETIME_RE.search(text)
+    if not m:
+        return None
+    block = m.group(1)
+
+    def field(tag: str) -> int | None:
+        mm = re.search(rf"<(?:\w+:)?{tag}>\s*(\d+)\s*<", block)
+        return int(mm.group(1)) if mm else None
+
+    parts = [field(t) for t in ("Year", "Month", "Day", "Hour", "Minute", "Second")]
+    if any(v is None for v in parts):
+        return None
+    try:
+        return datetime(*parts, tzinfo=UTC)  # type: ignore[arg-type]
+    except ValueError:
+        return None
+
+
+async def _camera_clock_offset(client, url: str, headers: dict) -> float | None:
+    """Camera clock minus ours, in seconds, from an unauthenticated
+    GetSystemDateAndTime on the device service of ``url``'s host (the one
+    ONVIF call every camera answers without credentials). None when the
+    camera does not answer it or the answer has no UTC time."""
+    try:
+        resp = await client.post(
+            f"{_auth_key(url)}/onvif/device_service",
+            content=_soap_envelope(_GET_SYSTEM_DATE_AND_TIME),
+            headers=headers,
+        )
+        camera_now = _parse_utc_datetime(resp.text)
+    except Exception:  # noqa: BLE001 - a diagnostic probe never turns into an error of its own
+        return None
+    if camera_now is None:
+        return None
+    return (camera_now - datetime.now(UTC)).total_seconds()
+
+
+def _auth_refused_detail(offset_s: float | None) -> str:
+    """What the operator reads when both schemes refused the credentials."""
+    text = (
+        "The camera rejected the ONVIF username or password (NotAuthorized). "
+        "Some cameras keep an ONVIF account separate from the web login, or "
+        "need ONVIF turned on in the camera's integration settings."
+    )
+    if offset_s is None:
+        text += (
+            " The camera's clock could not be read; a clock more than a few "
+            "minutes off also makes a camera refuse a correct password."
+        )
+    elif abs(offset_s) > CLOCK_SKEW_TOLERANCE_S:
+        minutes = abs(offset_s) / 60
+        text += (
+            f" Its clock is {minutes:.0f} min {'ahead of' if offset_s > 0 else 'behind'} "
+            "this server; the login was also tried at the camera's time."
+        )
+    return text
 
 
 _SOAP_FAULT_RE = re.compile(r"<(?:[\w.-]+:)?Fault\b", re.IGNORECASE)
@@ -199,9 +285,11 @@ async def _onvif_request(
             "auth": httpx.DigestAuth(username, password) if has_credentials else None,
         }
 
-    def _wsse_request():
+    def _wsse_request(clock_offset_s: float | None = None):
+        if clock_offset_s is None:
+            clock_offset_s = _CLOCK_OFFSETS.get(auth_key, 0.0)
         return {
-            "content": _soap_envelope_wsse(body_xml, username, password),
+            "content": _soap_envelope_wsse(body_xml, username, password, clock_offset_s),
             "headers": headers,
         }
 
@@ -230,20 +318,36 @@ async def _onvif_request(
                 if not _is_auth_fault(response.text):
                     _WSSE_PREFERRED_HOSTS.add(auth_key)
 
-            if _is_auth_fault(response.text):
-                # Both schemes refused the same credentials. A WS-Security
-                # PasswordDigest also fails when the camera clock is outside
-                # its tolerance window (typically ±5 min), which looks
-                # exactly like a wrong password to the operator.
-                main_logger.warning(
-                    "ONVIF authentication failed for %s with both HTTP Digest and "
-                    "WS-Security: check the credentials, then the camera clock "
-                    "(the ONVIF camera time endpoint, or POST .../time/sync) — "
-                    "WS-Security rejects a Created timestamp outside the "
-                    "device's tolerance window",
-                    auth_key,
+            if not _is_auth_fault(response.text):
+                return response.status_code, response.text
+
+            # Both schemes refused the same credentials. A WS-Security
+            # PasswordDigest also fails when the camera clock is outside its
+            # tolerance window (typically ±5 min), which looks exactly like
+            # a wrong password to the operator (an Add Camera dialog showed
+            # the raw ``ter:NotAuthorized`` fault, 2026-11-12). So: read the
+            # camera's clock, and if it is off, try once more with Created
+            # stamped in the camera's time. A camera that still refuses is
+            # a wrong password, reported as one — never the SOAP fault.
+            offset = await _camera_clock_offset(client, url, headers)
+            if offset is not None and abs(offset) > CLOCK_SKEW_TOLERANCE_S:
+                main_logger.info(
+                    "ONVIF camera %s clock is %+.0f s from ours; retrying WS-Security at its time",
+                    auth_key, offset,
                 )
-            return response.status_code, response.text
+                response = await client.post(url, **_wsse_request(offset))
+                if not _is_auth_fault(response.text):
+                    _CLOCK_OFFSETS[auth_key] = offset
+                    _WSSE_PREFERRED_HOSTS.add(auth_key)
+                    return response.status_code, response.text
+            main_logger.warning(
+                "ONVIF authentication failed for %s with HTTP Digest and WS-Security "
+                "(camera clock offset: %s)",
+                auth_key, "unknown" if offset is None else f"{offset:+.0f} s",
+            )
+            raise HTTPException(status_code=401, detail=_auth_refused_detail(offset))
+        except HTTPException:
+            raise   # the 401 above, not an "ONVIF request failed" 500
         except httpx.TimeoutException as e:
             raise HTTPException(
                 status_code=504, detail=f"ONVIF request timeout to {url}"
