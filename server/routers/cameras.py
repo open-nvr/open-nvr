@@ -479,6 +479,12 @@ async def create_camera_checked(
                     detail="USB webcams are not enabled on this server (WEBCAMS=on in .env, Linux only).")
             if find_local_webcam(str(_dev)) is None:
                 raise HTTPException(status_code=422, detail="That webcam is not plugged into this server.")
+        # One webcam, one camera: a second capture of the same device fails
+        # "device busy" for ever. Not bypassed by ``force`` or the import's
+        # duplicate_check=False: those are about addresses, this is hardware.
+        _owner = CameraService.webcam_device_owner(db, _dev)
+        if _owner is not None:
+            raise HTTPException(status_code=409, detail=_webcam_taken_detail(_owner))
 
     # SSRF guard, mirroring routers/onvif.py:83, which has always had it —
     # camera-create did not. It runs FIRST, before any branch, because
@@ -1341,6 +1347,14 @@ _WEBCAM_ABSENT_FIELDS = (
 )
 
 
+def _webcam_taken_detail(owner: Camera) -> str:
+    """The 409 for a webcam that already feeds another camera."""
+    return (
+        f"That webcam already feeds the camera “{owner.name}”. "
+        "A webcam can feed only one camera: use that one, or pick another webcam."
+    )
+
+
 def _strip_webcam_stream_fields(camera: Camera, update_fields: dict) -> None:
     """Drop the address/stream fields an edit form re-sends for a webcam.
 
@@ -1429,6 +1443,13 @@ async def update_camera(
             _strip_webcam_stream_fields(camera, update_fields)
             if "source_device" in update_fields:
                 update_fields["source_device"] = update_fields["source_device"] or None
+                # Switching to a webcam another camera already uses: refused,
+                # as on create (one webcam, one camera).
+                _owner = CameraService.webcam_device_owner(
+                    db, update_fields["source_device"], exclude_camera_id=camera.id
+                )
+                if _owner is not None:
+                    raise HTTPException(status_code=409, detail=_webcam_taken_detail(_owner))
         elif update_fields.get("source_device"):
             raise HTTPException(
                 status_code=422,
@@ -2384,13 +2405,20 @@ async def provision_camera_mediamtx(
             raise HTTPException(status_code=404, detail="Camera not found")
 
         if is_publisher(camera):
-            # A webcam: a path for a publisher, no source to pull.
+            # A webcam: a path for a publisher, no source to pull — plus the
+            # capture command and sub path its kind needs, as camera create
+            # and the startup reconcile provision it (#900).
+            from services.local_webcams import provisioning_for
+
+            extra = provisioning_for(camera)
             result = await MediaMtxAdminService.push_publisher_path(
                 camera_id=camera.id,
                 camera_ip=camera.ip_address,
                 enable_recording=enable_recording,
                 recording_segment_seconds=recording_segment_seconds,
                 recording_path=recording_path,
+                run_on_init=extra.get("run_on_init"),
+                substream=bool(extra.get("substream")),
             )
             if result.get("status") == "ok":
                 camera.status = "provisioned"
