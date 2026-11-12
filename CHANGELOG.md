@@ -27,6 +27,22 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   detector's latency, its floor and the ratio, so the operator reads
   "detector 67 ms a frame, 2.7× its 25 ms floor" rather than a tile at 100 %.
 
+
+- **USB webcams are on by default on Linux (#904).** `.env.example` ships
+  `WEBCAMS=on` and the installer's question defaults to yes; an `.env` that
+  says `off` keeps it. MediaMTX then runs the `-ffmpeg` image with the
+  host's video devices (only video4linux, major 81) and the `video` group.
+  `start.sh` leaves the overlay out on a kernel with no video4linux yet,
+  where Docker could not mount `/sys/class/video4linux` and core would not
+  start, and says so.
+- **Add Camera → Manual is one row of tabs: IP camera, Browser webcam,
+  Server webcam.** It was a Webcam tab with a second row of sub-tabs
+  inside it. Each webcam tab says in one line what that kind is; the steps
+  are numbered (pick the webcam, name it, picture and sound); webcam names
+  drop the USB ids; the preview says it is not recording yet and what Add
+  will do. The three webcam lists (this browser, the server's Linux
+  webcams, the host agent's) share one row design.
+
 ### Fixed
 
 - **A USB webcam on a Docker Desktop machine goes live (#900).** The host
@@ -68,23 +84,6 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `$(compose_args)`, a subshell, so it never left; it is now written to
   `.env` with the other host values. Hosts whose `video` group is not 44
   could not open the webcam.
-
-### Changed
-
-- **USB webcams are on by default on Linux (#904).** `.env.example` ships
-  `WEBCAMS=on` and the installer's question defaults to yes; an `.env` that
-  says `off` keeps it. MediaMTX then runs the `-ffmpeg` image with the
-  host's video devices (only video4linux, major 81) and the `video` group.
-  `start.sh` leaves the overlay out on a kernel with no video4linux yet,
-  where Docker could not mount `/sys/class/video4linux` and core would not
-  start, and says so.
-- **Add Camera → Manual is one row of tabs: IP camera, Browser webcam,
-  Server webcam.** It was a Webcam tab with a second row of sub-tabs
-  inside it. Each webcam tab says in one line what that kind is; the steps
-  are numbered (pick the webcam, name it, picture and sound); webcam names
-  drop the USB ids; the preview says it is not recording yet and what Add
-  will do. The three webcam lists (this browser, the server's Linux
-  webcams, the host agent's) share one row design.
 
 ## [0.1.11] — 2026-11-12
 
