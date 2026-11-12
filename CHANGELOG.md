@@ -6,6 +6,27 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Enrichment yields to the detector on a shared accelerator.** On the
+  Ventuno Q the per-visit description questions (one for a vehicle, up to
+  five for a person, about 2 s each on Gemma) held the Hexagon 70 % of the
+  time during a busy hour, and the always-on detector, which needs 9 ms of
+  the device per frame, waited behind them: 67–119 ms a frame against a
+  25 ms floor, with the host CPU looking fine, so the CPU-shaped governor
+  never moved. The monitor's accelerator sample now carries the detector's
+  per-window mean latency and its floor (the lowest window seen, drifting
+  slowly so a lasting change re-baselines), and the governor reads the
+  ratio: at `EVENTS_ENRICHMENT_DETECTOR_SLOW_FACTOR` (2×) the live path
+  goes LIVE-ONLY in its accelerator form — embeddings as before, captions
+  at most one per `EVENTS_ENRICHMENT_PRESSURE_GAP_S` (6 s), descriptor
+  questions dropped — and at `EVENTS_ENRICHMENT_DETECTOR_PAUSE_FACTOR`
+  (4×) nothing is sent; it steps back after the usual calm period. A
+  dropped visit keeps no caption row, which is what the backfill looks for.
+  The governor's snapshot and each `enrichment_throttled` event say the
+  detector's latency, its floor and the ratio, so the operator reads
+  "detector 67 ms a frame, 2.7× its 25 ms floor" rather than a tile at 100 %.
+
 ## [0.1.11] — 2026-11-12
 
 The Qualcomm NPU release. On the qualcomm flavour the detector, the captions (Gemma), the camera agent's LLM, the search embeddings (SigLIP 2 and a sentence model), speech to text (Whisper) and the plate reader all run on the Hexagon HTP, and a fresh install on a Dragonwing board starts with one setting: the flavour overlays are split per compose file so Compose 2.24 accepts a plain install, the tag the embedder fill finds is the tag asked for, and the discovery prober's Dockerfile reaches Docker intact. Detection boxes are on by default on every live picture. Search gained weighted fusion, synonyms and typo reading, a caption arm with its own model, voice search and a bounded re-rank, off by default. The workflow engine runs workflows and has an API. ANPR on a Qualcomm box: plate candidates at full resolution, consensus across looks, per-camera scan policy. USB webcams are cameras, served by MediaMTX on Linux; Add Camera finds ONVIF cameras by multicast. The camera agent serves OpenNVR Mirror. The dashboard shows the NPU and GPU beside CPU, memory and disk, and says when requests are queued. Adapter pins at `0.1.11` (`text_embed` on its own tag). App SDK stays 0.11.0.

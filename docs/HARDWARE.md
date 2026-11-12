@@ -107,7 +107,14 @@ in `OPENNVR_EXAMPLE_COMPOSE` / `OPENNVR_EXAMPLE_PROFILE` and run `./start.sh up`
 Same rule: the NPU only where the model is proven on it; the rest on CPU
 until measured. One device (the HTP) is shared by everything on it and the
 Tier-0 detector has first claim, so a busy site may prefer to keep one of
-the adapters on CPU. Each line is one `.env` variable; `ADAPTER_ONNX_PROVIDERS`
+the adapters on CPU. The enrichment governor enforces that claim: it reads
+the detector's latency against its own floor from the monitor's accelerator
+sample and, when the detector runs at twice its floor, paces captions and
+drops the per-visit description questions until it recovers
+(`EVENTS_ENRICHMENT_DETECTOR_SLOW_FACTOR`, `..._PAUSE_FACTOR`,
+`EVENTS_ENRICHMENT_PRESSURE_GAP_S`; measured on a Ventuno Q, 2026-11-12:
+the questions held the HTP 70 % of a busy hour and the detector ran
+67–119 ms a frame against 25 ms). Each line is one `.env` variable; `ADAPTER_ONNX_PROVIDERS`
 moves all five adapters at once. `QNNExecutionProvider:gpu` is the Adreno GPU
 through QNN, a second target for dynamic-shape graphs.
 
