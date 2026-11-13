@@ -94,9 +94,22 @@ def box(monkeypatch):
     return db, state
 
 
-def test_a_fresh_described_visit_answers_without_a_call(box):
+def test_a_live_question_gets_the_whole_frame_not_the_last_crop(box):
+    """A visit's caption is one object's crop; "what do you see" is the
+    frame. By default the answer is a (shared) look at the current frame
+    even when a described visit is fresh."""
     db, state = box
     out = _run(cd.describe(23, max_age_s=30))
+    assert out["source"] == "fresh" and out["model_called"] and out["text"] == "A fresh look."
+    assert state["captions"] == 1 and state["frames"] == 1
+    # the next asker within the window shares it
+    out = _run(cd.describe(23, max_age_s=30))
+    assert out["source"] == "fresh" and not out["model_called"] and state["captions"] == 1
+
+
+def test_a_fresh_described_visit_answers_without_a_call_when_the_store_is_preferred(box):
+    db, state = box
+    out = _run(cd.describe(23, max_age_s=30, prefer_store=True))
     assert out["source"] == "visit" and out["event_id"] == 100 and not out["model_called"]
     assert out["text"].startswith("A man in a red shirt") and out["attributes"] == {"clothing_top": "red"}
     assert 9 <= out["age_s"] <= 12 and state["captions"] == 0 and state["frames"] == 0
@@ -106,18 +119,18 @@ def test_an_old_visit_or_a_newer_track_means_one_look(box):
     from models import TimelineEvent
 
     db, state = box
-    # too old for the asker
-    out = _run(cd.describe(23, max_age_s=5))
+    # the store is preferred but the visit is too old for the asker
+    out = _run(cd.describe(23, max_age_s=5, prefer_store=True))
     assert out["source"] == "fresh" and out["model_called"] and out["text"] == "A fresh look."
     assert state["captions"] == 1
     # the same asker again within the window: the look is reused
-    out = _run(cd.describe(23, max_age_s=5))
+    out = _run(cd.describe(23, max_age_s=5, prefer_store=True))
     assert out["source"] == "fresh" and not out["model_called"] and state["captions"] == 1
     # a new visit started on the camera: the fresh look is superseded
     db.add(TimelineEvent(id=101, camera_id=23, source="tier0", event_type="track", label="car",
                          started_at=datetime.now(UTC), evidence_path="cd/cde.jpg"))
     db.commit()
-    out = _run(cd.describe(23, max_age_s=60))
+    out = _run(cd.describe(23, max_age_s=60, prefer_store=True))
     assert out["model_called"] and state["captions"] == 2
 
 
@@ -178,7 +191,9 @@ def test_the_internal_route_serves_it(box, monkeypatch):
     app.dependency_overrides[internal_router._require_internal_key] = lambda: None
     app.dependency_overrides[get_db] = lambda: db
     with TestClient(app) as c:
-        r = c.get("/internal/camera-agent/cameras/23/description", params={"max_age_s": 30})
-    assert r.status_code == 200
-    body = r.json()
-    assert body["source"] == "visit" and body["camera_id"] == 23 and state["captions"] == 0
+        r = c.get("/internal/camera-agent/cameras/23/description",
+                  params={"max_age_s": 30, "prefer_store": "true"})
+        r2 = c.get("/internal/camera-agent/cameras/23/description", params={"max_age_s": 30})
+    assert r.status_code == 200 and r2.status_code == 200
+    assert r.json()["source"] == "visit" and r.json()["camera_id"] == 23
+    assert r2.json()["source"] == "fresh" and r2.json()["model_called"] and state["captions"] == 1
