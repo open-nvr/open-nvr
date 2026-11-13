@@ -67,6 +67,7 @@ from routers import (
     apps,
     audit_logs,
     auth,
+    mfa as mfa_router,
     camera_config,
     camera_settings,
     cameras,
@@ -1102,6 +1103,7 @@ async def get_jwks():
 
 # Include routers
 app.include_router(auth.router, prefix=settings.api_prefix)
+app.include_router(mfa_router.router, prefix=settings.api_prefix)
 app.include_router(sso.router, prefix=settings.api_prefix)
 app.include_router(auth_settings.router, prefix=settings.api_prefix)
 app.include_router(users.router, prefix=settings.api_prefix)

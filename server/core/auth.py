@@ -171,12 +171,13 @@ def verify_token(token: str) -> TokenData | None:
 
 
 # What a password-only session of a local account that has not enrolled a
-# second factor may reach: itself, and the enrolment calls. Matched against
-# the route template FastAPI resolved, never the raw URL.
+# second factor may reach: itself, and the enrolment calls (everything under
+# /auth/mfa/). Matched against the route template FastAPI resolved, never the
+# raw URL.
 _ENROLMENT_ROUTES = frozenset({
-    "/auth/me", "/auth/logout", "/auth/mfa/setup", "/auth/mfa/verify",
-    "/users/me", "/users/me/permissions",
+    "/auth/me", "/auth/logout", "/users/me", "/users/me/permissions",
 })
+_ENROLMENT_PREFIX = "/auth/mfa/"
 
 
 def mfa_enrolment_pending(user: User) -> bool:
@@ -199,6 +200,8 @@ def _refuse_until_enrolled(request: Request, user: User) -> None:
     if path.startswith(prefix):
         path = path[len(prefix):]
     if path in _ENROLMENT_ROUTES and request.method in ("GET", "POST"):
+        return
+    if path.startswith(_ENROLMENT_PREFIX):
         return
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,

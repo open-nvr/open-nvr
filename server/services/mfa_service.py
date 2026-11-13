@@ -14,32 +14,274 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
 
-"""Two-factor sign-in: the one place that changes an account's second factor.
+"""Two-factor sign-in: the one place that reads or changes second factors.
 
-Today an account has a single TOTP secret on its row; ``reset_mfa`` is what
-both the administrator's "Reset 2FA" action and ``scripts/disable_mfa.py``
-call, so the two can never drift apart.
+An account holds zero or more factors (``models.UserMfaFactor``), today
+authenticator apps (TOTP). A factor is *active* once confirmed (a code from
+it was verified) and while enabled; only active factors verify codes.
+
+Invariants every write here keeps (``_sync``):
+
+- ``users.mfa_enabled`` is true exactly when the account has an active
+  factor. The SPA's enrolment screen and the API's enrolment wall
+  (``core.auth``) read it.
+- ``users.encrypted_mfa_secret`` holds the oldest active factor's ciphertext,
+  or NULL. Nothing here verifies against it; it is there so an older core
+  started on this database (rollback) checks the right authenticator.
+
+A secret found in that column with no factor rows at all (a row written by
+an older core or a script) is adopted as the account's first factor the
+first time it is needed, so nothing is ever lost between versions.
 """
 
 from __future__ import annotations
 
+import hmac
+import time
+from datetime import UTC, datetime, timedelta
+
+import pyotp
 from sqlalchemy.orm import Session
 
-from models import User
+from models import User, UserMfaFactor
+
+DEFAULT_LABEL = "Authenticator"
+PENDING_TTL = timedelta(minutes=15)
+_STEP = 30
 
 
 class MfaResetRefused(ValueError):
     """The account has no second factor here to reset."""
 
 
+class MfaChangeRefused(ValueError):
+    """A change that would leave the account without a working factor, or
+    that names a factor the account does not have."""
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _aware(dt: datetime | None) -> datetime | None:
+    if dt is not None and dt.tzinfo is None:    # a backend that drops the zone (SQLite)
+        return dt.replace(tzinfo=UTC)
+    return dt
+
+
 def is_sso_account(user: User) -> bool:
     return (user.auth_provider or "local") == "oidc"
 
 
-def reset_mfa(db: Session, target: User) -> dict:
-    """Remove the account's second factor so it enrols afresh at next sign-in.
+# ── reading ───────────────────────────────────────────────────────────
 
-    - The secret and the flag go; the next password sign-in lands on the
+def _rows(db: Session, user: User) -> list[UserMfaFactor]:
+    return (db.query(UserMfaFactor).filter(UserMfaFactor.user_id == user.id)
+            .order_by(UserMfaFactor.id).all())
+
+
+def _adopt_legacy(db: Session, user: User) -> None:
+    """A secret in the old column and no factor rows: make it the first factor."""
+    if not user.encrypted_mfa_secret or not user.mfa_enabled:
+        return
+    if db.query(UserMfaFactor.id).filter(UserMfaFactor.user_id == user.id).first():
+        return
+    db.add(UserMfaFactor(user_id=user.id, kind="totp", label=DEFAULT_LABEL,
+                         encrypted_secret=user.encrypted_mfa_secret, enabled=True,
+                         confirmed_at=_now()))
+    db.flush()
+
+
+def factors(db: Session, user: User, *, include_pending: bool = False) -> list[UserMfaFactor]:
+    _adopt_legacy(db, user)
+    rows = _rows(db, user)
+    return rows if include_pending else [f for f in rows if f.confirmed_at is not None]
+
+
+def active_factors(db: Session, user: User) -> list[UserMfaFactor]:
+    return [f for f in factors(db, user) if f.enabled]
+
+
+def has_active_factor(db: Session, user: User) -> bool:
+    return bool(active_factors(db, user))
+
+
+def _sync(db: Session, user: User) -> None:
+    active = [f for f in _rows(db, user) if f.confirmed_at is not None and f.enabled]
+    user.mfa_enabled = bool(active)
+    user.encrypted_mfa_secret = active[0].encrypted_secret if active else None
+    db.add(user)
+
+
+# ── verifying codes ───────────────────────────────────────────────────
+
+def _matching_step(secret: str, code: str, now: float | None = None) -> int | None:
+    """The TOTP time step ``code`` belongs to (now ±1 step), or None."""
+    code = (code or "").strip().replace(" ", "")
+    if not code.isdigit():
+        return None
+    totp = pyotp.TOTP(secret)
+    current = int((time.time() if now is None else now) // _STEP)
+    for step in (current, current - 1, current + 1):
+        if hmac.compare_digest(totp.at(step * _STEP), code):
+            return step
+    return None
+
+
+def verify_login_code(db: Session, user: User, code: str | None) -> bool:
+    """A sign-in code from any active factor. A code is accepted for one sign-in
+    only (per factor, the step must move forward). Commits on success."""
+    if not code:
+        return False
+    for f in active_factors(db, user):
+        step = _matching_step(f.secret, code)
+        if step is None:
+            continue
+        if f.last_used_step is not None and step <= f.last_used_step:
+            return False                     # replayed, or an older code after a newer one
+        f.last_used_step, f.last_used_at = step, _now()
+        db.commit()
+        return True
+    return False
+
+
+def verify_step_up(db: Session, user: User, code: str | None) -> bool:
+    """A code from any active factor confirming a sensitive action. The same
+    code may confirm several actions inside its 30 s window (deleting two
+    cameras in a row), so there is no replay check here."""
+    if not code:
+        return False
+    for f in active_factors(db, user):
+        if _matching_step(f.secret, code) is not None:
+            f.last_used_at = _now()
+            db.flush()
+            return True
+    return False
+
+
+# ── enrolment ─────────────────────────────────────────────────────────
+
+def _clean_label(label: str | None) -> str:
+    label = " ".join((label or "").split())[:64]
+    return label or DEFAULT_LABEL
+
+
+def begin_totp(db: Session, user: User, label: str | None = None) -> tuple[UserMfaFactor, str]:
+    """Start enrolling an authenticator app; returns (pending factor, secret).
+
+    While an unexpired enrolment is pending it is returned again instead of a
+    new one: reloading the enrolment screen shows the same QR code, so a code
+    the user already scanned keeps working. Commits."""
+    _adopt_legacy(db, user)
+    pending = [f for f in _rows(db, user) if f.confirmed_at is None]
+    keep = None
+    for f in pending:
+        created = _aware(f.created_at) or _now()
+        if keep is None and _now() - created < PENDING_TTL:
+            keep = f
+        else:
+            db.delete(f)
+    if keep is None:
+        keep = UserMfaFactor(user_id=user.id, kind="totp", label=_clean_label(label),
+                             encrypted_secret=_encrypt(pyotp.random_base32()),
+                             enabled=False, confirmed_at=None)
+        db.add(keep)
+    elif label:
+        keep.label = _clean_label(label)
+    db.commit()
+    db.refresh(keep)
+    return keep, keep.secret
+
+
+def confirm_totp(db: Session, user: User, code: str, *, factor_id: int | None = None,
+                 label: str | None = None) -> UserMfaFactor | None:
+    """Verify a code from a pending enrolment and make it an active factor.
+    ``factor_id`` None means the newest pending one. None when the code does
+    not match (or nothing is pending). Commits on success."""
+    pending = [f for f in _rows(db, user) if f.confirmed_at is None
+               and (factor_id is None or f.id == factor_id)]
+    if not pending:
+        return None
+    f = pending[-1]
+    step = _matching_step(f.secret, code)
+    if step is None:
+        return None
+    f.confirmed_at, f.enabled, f.last_used_step = _now(), True, step
+    if label:
+        f.label = _clean_label(label)
+    _sync(db, user)
+    db.commit()
+    return f
+
+
+def enrol_confirmed(db: Session, user: User, secret: str, label: str | None = None) -> UserMfaFactor:
+    """First-time setup: the administrator's factor, confirmed at once (they
+    scan the QR and then sign in with a code from it). Flushes; the caller
+    commits."""
+    f = UserMfaFactor(user_id=user.id, kind="totp", label=_clean_label(label),
+                      encrypted_secret=_encrypt(secret), enabled=True, confirmed_at=_now())
+    db.add(f)
+    db.flush()
+    _sync(db, user)
+    return f
+
+
+def _encrypt(secret: str) -> str:
+    from utils.encryption import encrypt_value
+
+    return encrypt_value(secret)
+
+
+# ── the account owner's changes ───────────────────────────────────────
+
+def get_factor(db: Session, user: User, factor_id: int) -> UserMfaFactor:
+    f = next((x for x in factors(db, user, include_pending=True) if x.id == factor_id), None)
+    if f is None:
+        raise MfaChangeRefused("No such authenticator on this account.")
+    return f
+
+
+def _others_active(db: Session, user: User, factor: UserMfaFactor) -> bool:
+    return any(x.id != factor.id for x in active_factors(db, user))
+
+
+def rename(db: Session, user: User, factor_id: int, label: str) -> UserMfaFactor:
+    f = get_factor(db, user, factor_id)
+    f.label = _clean_label(label)
+    db.commit()
+    return f
+
+
+def set_enabled(db: Session, user: User, factor_id: int, enabled: bool) -> UserMfaFactor:
+    f = get_factor(db, user, factor_id)
+    if f.confirmed_at is None:
+        raise MfaChangeRefused("Finish setting up this authenticator first.")
+    if not enabled and f.enabled and not _others_active(db, user, f):
+        raise MfaChangeRefused(
+            "This is your only working authenticator. Add another one before turning it off.")
+    f.enabled = bool(enabled)
+    _sync(db, user)
+    db.commit()
+    return f
+
+
+def remove(db: Session, user: User, factor_id: int) -> None:
+    f = get_factor(db, user, factor_id)
+    if f.confirmed_at is not None and f.enabled and not _others_active(db, user, f):
+        raise MfaChangeRefused(
+            "This is your only working authenticator. Add another one before removing it.")
+    db.delete(f)
+    db.flush()
+    _sync(db, user)
+    db.commit()
+
+
+# ── an administrator's changes ────────────────────────────────────────
+
+def reset_mfa(db: Session, target: User) -> dict:
+    """Remove every second factor so the account enrols afresh at next sign-in.
+
+    - Factors and the legacy column go; the next password sign-in lands on the
       enrolment screen, and until it enrols the session reaches nothing else
       (``core.auth._refuse_until_enrolled``).
     - ``token_version`` is bumped, ending every browser session and refresh
@@ -52,20 +294,56 @@ def reset_mfa(db: Session, target: User) -> dict:
 
     Commits. Returns what changed, for the audit entry.
     """
-    if is_sso_account(target) and not target.mfa_enabled and not target.mfa_secret:
+    rows = factors(db, target, include_pending=True)
+    had = bool([f for f in rows if f.confirmed_at is not None and f.enabled])
+    if is_sso_account(target) and not had and not target.mfa_enabled:
         raise MfaResetRefused(
             "This account signs in through single sign-on; its identity provider owns two-factor sign-in."
         )
     details = {
         "username": target.username,
-        "had_mfa": bool(target.mfa_enabled and target.mfa_secret),
+        "had_mfa": had,
+        "factors_removed": len([f for f in rows if f.confirmed_at is not None]),
         "converted_to_local": is_sso_account(target),
     }
+    for f in rows:
+        db.delete(f)
+    db.flush()
     if is_sso_account(target):
         target.auth_provider = None
-    target.mfa_secret = None
+    _sync(db, target)
     target.mfa_enabled = False
     target.token_version = int(target.token_version or 0) + 1
     db.add(target)
     db.commit()
     return details
+
+
+def admin_set_enabled(db: Session, target: User, factor_id: int, enabled: bool) -> dict:
+    """Turn one of another user's factors off or on. Turning off their last
+    working one is a reset (sessions end) rather than a quiet lock-out-free
+    state. Commits; returns what happened, for the audit entry."""
+    f = get_factor(db, target, factor_id)
+    if f.confirmed_at is None:
+        raise MfaChangeRefused("That authenticator was never set up.")
+    if not enabled and f.enabled and not _others_active(db, target, f):
+        return {**reset_mfa(db, target), "via": "last_factor_disabled", "factor": f"{factor_id}"}
+    f.enabled = bool(enabled)
+    _sync(db, target)
+    db.commit()
+    return {"username": target.username, "factor_id": factor_id, "label": f.label,
+            "enabled": bool(enabled)}
+
+
+def admin_remove(db: Session, target: User, factor_id: int) -> dict:
+    """Remove one of another user's factors; removing the last working one is
+    a reset. Commits; returns what happened, for the audit entry."""
+    f = get_factor(db, target, factor_id)
+    if f.confirmed_at is not None and f.enabled and not _others_active(db, target, f):
+        return {**reset_mfa(db, target), "via": "last_factor_removed", "factor": f"{factor_id}"}
+    label = f.label
+    db.delete(f)
+    db.flush()
+    _sync(db, target)
+    db.commit()
+    return {"username": target.username, "factor_id": factor_id, "label": label, "removed": True}

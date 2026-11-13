@@ -33,6 +33,11 @@ export const userService = {
   activateUser: (userId: number, mfaCode: string) => api.post(`/api/v1/users/${userId}/activate`, undefined, { headers: { 'X-MFA-Code': mfaCode } }),
   // Remove another user's second factor: they enrol a new authenticator at next sign-in.
   resetUserMfa: (userId: number, mfaCode: string) => api.post(`/api/v1/users/${userId}/mfa/reset`, undefined, { headers: { 'X-MFA-Code': mfaCode } }),
+  userMfaFactors: (userId: number) => api.get(`/api/v1/users/${userId}/mfa/factors`),
+  setUserMfaFactor: (userId: number, factorId: number, enabled: boolean, mfaCode: string) =>
+    api.patch(`/api/v1/users/${userId}/mfa/factors/${factorId}`, { enabled }, { headers: { 'X-MFA-Code': mfaCode } }),
+  removeUserMfaFactor: (userId: number, factorId: number, mfaCode: string) =>
+    api.delete(`/api/v1/users/${userId}/mfa/factors/${factorId}`, { headers: { 'X-MFA-Code': mfaCode } }),
   
   // Roles
   getRoles: () => api.get('/api/v1/roles/'),

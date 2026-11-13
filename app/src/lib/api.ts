@@ -282,7 +282,8 @@ export const api = {
   post: (url: string, data?: any, options?: RequestOptions) => request('POST', url, data, options),
   put: (url: string, data?: any, options?: RequestOptions) => request('PUT', url, data, options),
   patch: (url: string, data?: any, options?: RequestOptions) => request('PATCH', url, data, options),
-  delete: (url: string, options?: RequestOptions) => request('DELETE', url, undefined, options),
+  // A body is rare on DELETE but allowed; used where a password must not travel in a header.
+  delete: (url: string, options?: RequestOptions, data?: any) => request('DELETE', url, data, options),
   setToken: setAuthToken,
 }
 
