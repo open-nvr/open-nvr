@@ -444,6 +444,12 @@ class Settings(BaseSettings):
     # answer. Measured on a Ventuno Q (2026-11-13): 91 % of a day's
     # captioner calls on a looping test input, none on a real camera.
     events_enrichment_reuse_same_frame: bool = True
+    # After this many consecutive visits whose evidence frame is one
+    # already seen, the camera's picture is declared frozen (a per-camera
+    # alarm like the recording watchdog's; the agent's status says so).
+    # A live camera never repeats a frame; a frozen stream, a stuck relay
+    # or a looping file does nothing else. 0 disables.
+    events_frozen_picture_repeats: int = 5
     # Ask an adapter advertising `embed` for a vector of the visit's best
     # frame and store it in event_embeddings, so search can rank by
     # meaning as well as by words (services/search_service.py fuses the

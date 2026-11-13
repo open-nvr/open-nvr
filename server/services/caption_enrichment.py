@@ -343,12 +343,26 @@ async def enrich_event_caption(event_id: int,
             reused = enrichment_reuse.reuse_caption(db, row, twin)
             enrichment_reuse.reuse_descriptors(db, row, twin)
             db.commit()
+        # The same signal, read the other way: visit after visit from a
+        # frame already seen is a camera whose picture has stopped
+        # changing (services/frame_health.py).
+        try:
+            from services import frame_health
+
+            frozen_transition = frame_health.note(db, row, twin)
+        except Exception:                          # noqa: BLE001
+            logger.debug("caption enrichment: frame health note failed", exc_info=True)
+            frozen_transition = None
         evidence_path = row.evidence_path
         # Same derivation plate_enrichment uses (f"cam{camera_id}") — the
         # adapter-facing handle convention, not a DB column.
         camera_handle = f"cam{row.camera_id}"
     finally:
         db.close()
+    if frozen_transition:
+        from services import frame_health
+
+        await frame_health.publish(frozen_transition)
     if reused:
         # The caption is committed; its vector is the same best-effort
         # step as after a fresh caption, and so is the bus.
