@@ -85,9 +85,12 @@ def require_mfa_code(current_user: User, mfa_code: str | None) -> None:
 
 
 def require_reauth(current_user: User, mfa_code: str | None, *,
-                   password: str | None = None, need_password: bool = False) -> None:
+                   password: str | None = None, need_password: bool = False,
+                   allow_recovery: bool = False) -> None:
     """A current code from one of the caller's authenticators, and with
-    ``need_password`` their account password as well."""
+    ``need_password`` their account password as well. ``allow_recovery`` also
+    takes (and uses up) a recovery code: only for the account's own
+    two-factor settings, never for destructive actions."""
     db = _session_of(current_user)
     if db is None or not mfa_service.has_active_factor(db, current_user):
         raise HTTPException(
@@ -102,9 +105,10 @@ def require_reauth(current_user: User, mfa_code: str | None, *,
             detail="Your password and a current MFA code are required."
             if need_password else "Invalid or missing MFA code.",
         )
-    ok = mfa_service.verify_step_up(db, current_user, mfa_code.strip())
-    if ok and need_password:
-        ok = verify_password(password, current_user.hashed_password)
+    ok = (not need_password) or verify_password(password, current_user.hashed_password)
+    # Password first: a wrong password must not use up a recovery code.
+    ok = ok and mfa_service.verify_step_up(db, current_user, mfa_code.strip(),
+                                           allow_recovery=allow_recovery)
     if ok:
         _clear_failures(db, current_user)
         return

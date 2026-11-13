@@ -102,6 +102,21 @@ class UserMfaFactor(Base):
         return decrypt_value(self.encrypted_secret)
 
 
+class UserRecoveryCode(Base):
+    """A one-time recovery code: signs its account in once when no
+    authenticator app is at hand. Only a hash is stored; the codes are shown
+    once, when generated. A new set replaces the old one."""
+
+    __tablename__ = "user_recovery_codes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"),
+                     nullable=False, index=True)
+    code_hash = Column(String(64), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    used_at = Column(DateTime(timezone=True), nullable=True)
+
+
 class User(Base):
     """User model for authentication and user management."""
 

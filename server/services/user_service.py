@@ -30,7 +30,7 @@ from schemas import UserCreate, UserUpdate
 
 # Rows that belong to the account itself (its second factors): removed with
 # the account rather than blocking its permanent deletion.
-ACCOUNT_OWNED_TABLES = ("user_mfa_factors",)
+ACCOUNT_OWNED_TABLES = ("user_mfa_factors", "user_recovery_codes")
 
 
 class UserService:

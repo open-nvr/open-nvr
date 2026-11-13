@@ -686,6 +686,8 @@ class MfaFactorOut(BaseModel):
 
 class MfaFactorList(BaseModel):
     factors: list[MfaFactorOut]
+    # Unused recovery codes (only on the account's own listing).
+    recovery_codes_remaining: int | None = None
 
 
 class MfaBeginRequest(BaseModel):
@@ -698,6 +700,19 @@ class MfaBeginResponse(BaseModel):
     factor_id: int
     otpauth_url: str
     secret: str
+
+
+class MfaConfirmResponse(MfaFactorOut):
+    # Set when this was the account's first authenticator: shown once.
+    recovery_codes: list[str] | None = None
+
+
+class MfaRecoveryCodesRequest(BaseModel):
+    current_password: str | None = None
+
+
+class MfaRecoveryCodesResponse(BaseModel):
+    recovery_codes: list[str]
 
 
 class MfaConfirmRequest(BaseModel):

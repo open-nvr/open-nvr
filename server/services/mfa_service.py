@@ -36,16 +36,22 @@ first time it is needed, so nothing is ever lost between versions.
 
 from __future__ import annotations
 
+import hashlib
 import hmac
+import secrets
 import time
 from datetime import UTC, datetime, timedelta
 
 import pyotp
 from sqlalchemy.orm import Session
 
-from models import User, UserMfaFactor
+from models import User, UserMfaFactor, UserRecoveryCode
 
 DEFAULT_LABEL = "Authenticator"
+RECOVERY_CODE_COUNT = 10
+_B32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+# What people mistype for base32: digits that look like letters.
+_LOOKALIKE = str.maketrans({"0": "O", "1": "I", "8": "B"})
 PENDING_TTL = timedelta(minutes=15)
 _STEP = 30
 
@@ -128,27 +134,37 @@ def _matching_step(secret: str, code: str, now: float | None = None) -> int | No
     return None
 
 
-def verify_login_code(db: Session, user: User, code: str | None) -> bool:
-    """A sign-in code from any active factor. A code is accepted for one sign-in
-    only (per factor, the step must move forward). Commits on success."""
+def verify_login_code(db: Session, user: User, code: str | None) -> str | None:
+    """A sign-in code: from any active factor ("totp"), or an unused recovery
+    code ("recovery", used up by this). None when neither matches. A TOTP code
+    is accepted for one sign-in only (per factor, the step must move forward).
+    Commits on success."""
     if not code:
-        return False
+        return None
+    if _use_recovery_code(db, user, code):
+        db.commit()
+        return "recovery"
     for f in active_factors(db, user):
         step = _matching_step(f.secret, code)
         if step is None:
             continue
         if f.last_used_step is not None and step <= f.last_used_step:
-            return False                     # replayed, or an older code after a newer one
+            return None                      # replayed, or an older code after a newer one
         f.last_used_step, f.last_used_at = step, _now()
         db.commit()
-        return True
-    return False
+        return "totp"
+    return None
 
 
-def verify_step_up(db: Session, user: User, code: str | None) -> bool:
+def verify_step_up(db: Session, user: User, code: str | None, *, allow_recovery: bool = False) -> bool:
     """A code from any active factor confirming a sensitive action. The same
     code may confirm several actions inside its 30 s window (deleting two
-    cameras in a row), so there is no replay check here."""
+    cameras in a row), so there is no replay check here.
+
+    ``allow_recovery`` also accepts (and uses up) a recovery code. Only the
+    account's own two-factor settings pass it: someone who signed in with a
+    recovery code because the phone is gone must be able to add a new app,
+    but a recovery code never confirms deleting cameras or users."""
     if not code:
         return False
     for f in active_factors(db, user):
@@ -156,7 +172,54 @@ def verify_step_up(db: Session, user: User, code: str | None) -> bool:
             f.last_used_at = _now()
             db.flush()
             return True
+    return allow_recovery and _use_recovery_code(db, user, code)
+
+
+# ── recovery codes ────────────────────────────────────────────────────
+
+def normalize_recovery_code(code: str | None) -> str | None:
+    """The 16 base32 characters of a recovery code as typed (any case, with
+    or without dashes and spaces, 0/1/8 for O/I/B), or None if it isn't one."""
+    raw = "".join((code or "").split()).replace("-", "").upper().translate(_LOOKALIKE)
+    return raw if len(raw) == 16 and all(c in _B32 for c in raw) else None
+
+
+def _hash_code(normalized: str) -> str:
+    return hashlib.sha256(normalized.encode()).hexdigest()
+
+
+def _use_recovery_code(db: Session, user: User, code: str) -> bool:
+    norm = normalize_recovery_code(code)
+    if norm is None:
+        return False
+    digest = _hash_code(norm)
+    for rc in (db.query(UserRecoveryCode)
+               .filter(UserRecoveryCode.user_id == user.id, UserRecoveryCode.used_at.is_(None)).all()):
+        if hmac.compare_digest(rc.code_hash, digest):
+            rc.used_at = _now()
+            db.flush()
+            return True
     return False
+
+
+def recovery_codes_remaining(db: Session, user: User) -> int:
+    return (db.query(UserRecoveryCode.id)
+            .filter(UserRecoveryCode.user_id == user.id, UserRecoveryCode.used_at.is_(None))
+            .count())
+
+
+def generate_recovery_codes(db: Session, user: User) -> list[str]:
+    """A fresh set of recovery codes, replacing any earlier set. Returned once,
+    formatted XXXX-XXXX-XXXX-XXXX; only hashes are kept. Commits."""
+    db.query(UserRecoveryCode).filter(UserRecoveryCode.user_id == user.id).delete(
+        synchronize_session=False)
+    codes = []
+    for _ in range(RECOVERY_CODE_COUNT):
+        raw = "".join(secrets.choice(_B32) for _ in range(16))
+        db.add(UserRecoveryCode(user_id=user.id, code_hash=_hash_code(raw)))
+        codes.append("-".join(raw[i:i + 4] for i in range(0, 16, 4)))
+    db.commit()
+    return codes
 
 
 # ── enrolment ─────────────────────────────────────────────────────────
@@ -304,10 +367,13 @@ def reset_mfa(db: Session, target: User) -> dict:
         "username": target.username,
         "had_mfa": had,
         "factors_removed": len([f for f in rows if f.confirmed_at is not None]),
+        "recovery_codes_removed": recovery_codes_remaining(db, target),
         "converted_to_local": is_sso_account(target),
     }
     for f in rows:
         db.delete(f)
+    db.query(UserRecoveryCode).filter(UserRecoveryCode.user_id == target.id).delete(
+        synchronize_session=False)
     db.flush()
     if is_sso_account(target):
         target.auth_provider = None
