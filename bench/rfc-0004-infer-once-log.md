@@ -167,6 +167,27 @@ prompt does. The prompt revision ships; the flag can go on for the
 traffic windows. The default flips only after window B and the 33-case
 search eval.
 
+**Measured — traffic window A, flag off (2026-11-13 02:09–02:19 UTC, 9.7 min).**
+`tools/rfc0004_window.sh` at both ends, `tools/rfc0004_window_diff.py` for
+the difference. Box state: core image from 2026-11-11 (before #909), the
+plate clip looping on cam26, the office camera cam23 idle (night: 0
+detector inferences), agent on, people questions on, plate reader in
+accurate mode. The 15-minute load still carried the paired run that
+ended at 02:07.
+
+| Measurement | Window A (flag off) |
+|---|---|
+| visits | 94 |
+| captions written | 94 |
+| descriptor rows written | 202 (2.15 a visit) |
+| captioner calls | 327: 94 captions + 233 questions (3.48 a visit; the agent's own questions are in the 233) |
+| captioner time | 327 s = **56 % of the window** (captions 116 s at 1234 ms; questions 211 s at 905 ms) |
+| detector cam26 | 829 inferences, mean **107 ms** (floor 25 ms) |
+
+Expected for window B from the paired numbers: 94 structured calls at
+1.8 s ≈ 170 s plus the agent's questions ≈ 40 s, about 36 % of the
+window against 56 %. To be measured, not assumed.
+
 **Done.** 2026-11-13, branch `feat/rfc-0004-single-call`:
 - `server/services/structured_enrichment.py` — prompt (caption + the
   kinds' questions with their vocabularies, JSON-only answer, `unknown`
@@ -189,8 +210,8 @@ search eval.
   the eight enrichment suites pass (178).
 - Not done: the box measurement; the default stays off until it is in.
 - 2026-11-13, branch `bench/rfc-0004-paired-compare`: `tools/rfc0004_paired_compare.py`
-  (the paired comparison above), `tools/rfc0004_window.sh` (one counter
-  snapshot for a traffic window), and the prompt revision from run 1
+  (the paired comparison above), `tools/rfc0004_window.sh` and `tools/rfc0004_window_diff.py` (one counter
+  snapshot for a traffic window, and the difference between two), and the prompt revision from run 1
   (attributes first, subject named, caption asked for with the plain
   prompt's detail). Raw per-frame answers of both runs kept off the repo
   (they describe people in the office).
