@@ -464,6 +464,27 @@ one call — measured next.
    rows; the eval on the restored pool reads MRR 0.541, hit@5 0.643,
    recall@10 0.457 — the baseline's 0.527 / 0.607 / 0.457 within the
    pool's drift), and the box's flag is off again (05:45 UTC).
+**Measured — run 5b, the five extended person kinds (05:48–05:55 UTC,
+the 30 person frames):** five single questions 3,670 ms against one
+attributes-only call 2,173 ms; per visit with the plain caption 5,172 ms
+→ 3,675 ms (**−29 %**, two calls instead of six). Agreement: gender
+30/30, clothing_top 30/30, carrying 27/30, clothing_bottom 22/30 with
+the batched call saying "unknown" on the other 8 (legs cut by the crop),
+and **headwear 9/30 — where the single question is the one that is
+wrong**: it answered "cap" on 20 of 30 office frames whose people wear
+nothing on their heads (the frames looked at earlier: a red shirt at a
+laptop, two people at a desk), the batched call said "nothing". The
+single question's "Answer with one word, such as cap, …" leads the
+model; asked among other questions with "nothing" and "unknown" offered,
+it does not. The per-question path has had this bias wherever
+EVENTS_DESCRIPTOR_PEOPLE_EXTENDED is on.
+
+**Decision:** batch the descriptor questions into one attributes-only
+call when a visit has three or more kinds to ask (the extended person
+set); two kinds stay as they are (run 5: no saving). The caption call is
+untouched, so search is untouched. Code next, measured on the box when
+the extended questions are turned on there.
+
 5. The accuracy-free wins of RFC-0004 are steps 2–4 (publish once; the
    agent and the Mirror as subscribers instead of callers), and the
    brake's effectiveness check. That is where the work goes next.
