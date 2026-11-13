@@ -8,6 +8,17 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **A camera whose picture has stopped changing is said so.** The
+  enrichment tier knows per visit whether the evidence frame is one it has
+  seen before (the store is content-addressed); a live camera never
+  repeats a frame, a frozen stream, a stuck relay or a looping file does
+  nothing else. After `EVENTS_FROZEN_PICTURE_REPEATS` (5) such visits in a
+  row the camera gets a `picture_frozen` alarm like the recording
+  watchdog's, cleared by the first new frame; the agent's status read
+  carries `picture: frozen` and says "the picture has not changed on the
+  gate camera". Camera 23 fed the same frame for hours on 2026-11-09 and
+  nothing said so.
+
 - **The same frame is not described twice.** The evidence store is
   content-addressed, so two visits with the same evidence path are the
   same pixels; the later one now takes the earlier one's caption and

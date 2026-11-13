@@ -438,6 +438,12 @@ class Settings(BaseSettings):
     # answer. Measured on a Ventuno Q (2026-11-13): 91 % of a day's
     # captioner calls on a looping test input, none on a real camera.
     events_enrichment_reuse_same_frame: bool = True
+    # After this many consecutive visits whose evidence frame is one
+    # already seen, the camera's picture is declared frozen (a per-camera
+    # alarm like the recording watchdog's; the agent's status says so).
+    # A live camera never repeats a frame; a frozen stream, a stuck relay
+    # or a looping file does nothing else. 0 disables.
+    events_frozen_picture_repeats: int = 5
     # RFC-0004 step 1: ask the captioner ONCE per visit for the sentence
     # and the descriptor answers together, as one JSON object, instead of
     # a caption call and then one call per kind on the same frame (three
