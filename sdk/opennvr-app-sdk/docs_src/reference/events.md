@@ -26,6 +26,8 @@ runs, free to consume.
 
 ::: opennvr_app_sdk.VisitRecorded
 
+::: opennvr_app_sdk.VisitEnriched
+
 ::: opennvr_app_sdk.PlateRecognized
 
 ::: opennvr_app_sdk.FaceRecognized
