@@ -23,6 +23,7 @@ import { extractApiError } from '../../lib/apiError'
 import { useAuth } from '../../auth/AuthContext'
 import { useTranslation } from '../../i18n'
 import { Modal } from '../../components/Modal'
+import { UserMfaDialog } from './UserMfaDialog'
 
 type User = {
   id: number
@@ -34,6 +35,7 @@ type User = {
   is_superuser: boolean
   role_id: number
   mfa_enabled?: boolean
+  mfa_factor_count?: number
   auth_provider?: string | null
 }
 
@@ -75,6 +77,8 @@ export function UsersManager() {
   // Permanent deletion and reactivation require the admin's TOTP code.
   const [confirmAction, setConfirmAction] = useState<{ kind: 'delete' | 'permanent-delete' | 'activate' | 'reset-mfa'; user: User } | null>(null)
   const [mfaCode, setMfaCode] = useState('')
+  // Another user's authenticator apps (admin view).
+  const [mfaUser, setMfaUser] = useState<User | null>(null)
 
   const [form, setForm] = useState<UserForm>({ username: '', email: '', password: '', role_id: 1, first_name: '', last_name: '', is_superuser: false })
   // TOTP code for the MFA-gated writes inside the create/edit dialogs
@@ -446,6 +450,19 @@ export function UsersManager() {
         </Modal>
       )}
 
+      {mfaUser && (
+        <UserMfaDialog
+          user={mfaUser}
+          onClose={() => setMfaUser(null)}
+          onReset={() => { const u = mfaUser; setMfaUser(null); setConfirmAction({ kind: 'reset-mfa', user: u }); setMfaCode(''); setError(null) }}
+          onChanged={async () => {
+            const { data } = await apiService.getUsers({ skip, limit, active_only: false, is_active: isActiveView })
+            setUsers(data.users)
+            setTotal(data.total ?? 0)
+          }}
+        />
+      )}
+
       <div className="overflow-auto border border-[var(--border)]">
         <table className="w-full text-sm">
           <thead className="bg-[var(--panel-2)] text-left">
@@ -471,7 +488,7 @@ export function UsersManager() {
                   </span>
                 </td>
                 <td className="p-2">{u.is_superuser ? t('common.yes') : t('common.no')}</td>
-                <td className="p-2 text-xs">{isSsoOnly(u) ? <span className="text-[var(--text-dim)]">SSO</span> : u.mfa_enabled ? 'Enrolled' : <span className="text-[var(--text-dim)]">Not set up</span>}</td>
+                <td className="p-2 text-xs">{isSsoOnly(u) ? <span className="text-[var(--text-dim)]">SSO</span> : u.mfa_enabled ? `Enrolled${(u.mfa_factor_count ?? 0) > 1 ? ` · ${u.mfa_factor_count} apps` : ''}` : <span className="text-[var(--text-dim)]">Not set up</span>}</td>
                 <td className="p-2 space-x-2">
                   <button className="px-2 py-1 border border-[var(--border)] bg-[var(--panel-2)]" onClick={() => startEdit(u)}>{t('admin.edit')}</button>
                   {isActiveView ? (
@@ -482,7 +499,7 @@ export function UsersManager() {
                     <button className="px-2 py-1 border border-[color-mix(in_oklab,var(--ok)_45%,var(--border))] bg-[color-mix(in_oklab,var(--ok)_14%,transparent)] text-[var(--ok)]" onClick={() => { setConfirmAction({ kind: 'activate', user: u }); setMfaCode(''); setError(null) }}>{t('admin.activateUser')}</button>
                   )}
                   {me?.id !== u.id && u.mfa_enabled && !isSsoOnly(u) && (
-                    <button className="px-2 py-1 border border-[var(--border)] bg-[var(--panel-2)]" title="Remove their authenticator; they set up a new one at next sign-in" onClick={() => { setConfirmAction({ kind: 'reset-mfa', user: u }); setMfaCode(''); setError(null) }}>Reset 2FA</button>
+                    <button className="px-2 py-1 border border-[var(--border)] bg-[var(--panel-2)]" title="Their authenticator apps: turn one off, remove it, or reset all" onClick={() => { setMfaUser(u); setError(null) }}>2FA…</button>
                   )}
                   {!isActiveView && me?.id !== u.id && (
                     <button className="px-2 py-1 border border-[color-mix(in_oklab,var(--danger)_45%,var(--border))] text-[var(--danger)]" onClick={() => { setConfirmAction({ kind: 'permanent-delete', user: u }); setMfaCode(''); setError(null) }}>Delete permanently</button>
