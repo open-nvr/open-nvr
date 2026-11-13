@@ -8,6 +8,18 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **One shared "what is on this camera now".** Core answers
+  `GET /internal/camera-agent/cameras/{id}/description?max_age_s=N` from
+  one path (RFC-0004, step 3): the newest described visit when it is
+  younger than N seconds and no visit has started since; else one caption
+  of the pipeline's current frame through the enrichment gate at the
+  requested priority, shared by every asker that arrives while it runs;
+  else the newest thing known, stamped with its age and the reason no
+  fresh look was made. The camera agent's live look and the Mirror's
+  scene line move onto it next, so a quiet camera costs no model call per
+  question and a busy one costs one call per interval rather than one per
+  asker.
+
 - **Visits and their enrichment are on the bus.** `visit.recorded.v1` has
   been in the contracts and the SDK since RFC-0002 with core as its
   producer, and nothing published it; it goes out now the moment a visit

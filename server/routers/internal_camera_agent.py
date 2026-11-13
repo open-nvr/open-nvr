@@ -1311,6 +1311,28 @@ def camera_agent_interactive(
     note_interactive(str(source or "camera-agent")[:40])
 
 
+@router.get("/cameras/{camera_id}/description")
+async def camera_description(
+    camera_id: int,
+    max_age_s: float = 30.0,
+    principal=Depends(_require_internal_key),
+) -> dict[str, object]:
+    """What is on this camera now, from one shared path (RFC-0004 step 3,
+    ``services/camera_description.py``): the newest described visit when
+    it is younger than ``max_age_s`` and nothing newer has started; else
+    one gated caption of the pipeline's current frame, shared by every
+    asker while it runs; else the newest thing known, stamped stale with
+    a reason. The agent's live look and the Mirror's scene line ask here
+    instead of the caption model, so a quiet camera costs no call per
+    question and a busy one costs one call per interval, not one per
+    asker.
+    """
+    from services.camera_description import describe
+
+    max_age_s = max(0.0, min(3600.0, float(max_age_s)))
+    return await describe(int(camera_id), max_age_s)
+
+
 @router.get("/status")
 def camera_agent_system_status(
     principal=Depends(_require_internal_key),

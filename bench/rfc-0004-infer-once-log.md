@@ -14,7 +14,7 @@ or an estimate.
 | 0 | this ledger | — | written 2026-11-13 |
 | 1 | one structured call per best frame (caption + attributes in one answer; per-question fallback) | #909, #910 | measured 2026-11-13 (paired frames, windows A/B/C); flag on on the Ventuno Q; default flips after the search eval |
 | 2 | do not infer twice for the same frame (exact-frame reuse; near-repeat reuse measured and declined); `visit.enriched.v1` on the bus | reuse PR + bus PR | measured and built 2026-11-13; box measurement after deploy |
-| 3 | description channel: live tracks + freshest result; one shared gated call on a new track or a stale result | — | planned |
+| 3 | description channel: live tracks + freshest result; one shared gated call on a new track or a stale result | its PR | built 2026-11-13; measured with step 4 |
 | 4 | agent live look and Mirror onto 2 and 3; direct adapter calls removed | — | planned |
 | 5 | SDK frame-consumer rule (credits, latest frame wins, measured cadence, tracker continuity, skipped counter); KAI-C stream proxy adopts it | — | planned |
 | 6 | KAI-C capability tokens (RFC-0001): adapters accept only platform-minted calls | — | planned |
@@ -97,6 +97,20 @@ nothing changes. **To measure after deploy:** messages per visit on the
 box (expect 1 recorded + 1–2 enriched), and the captioner's calls per
 visit on the clip camera (expect ≈ 0.1) against the office camera
 (expect unchanged).
+
+## Step 3 — one shared live description per camera
+
+**Built 2026-11-13** (`services/camera_description.py`, route
+`GET /internal/camera-agent/cameras/{id}/description?max_age_s=N`):
+the newest described visit answers when it is younger than N and no
+visit started since; else the last fresh look under the same rule; else
+one gated caption of the pipeline's current frame, shared by every asker
+while it runs (single-flight); else the newest thing known, stamped
+stale with a reason. Counters per path. **To measure after the agent and
+the Mirror move onto it (step 4):** the Mirror's and the agent's own
+captioner calls (expect 0 outside the Mirror's new-person confirmation
+look), and the endpoint's path counts over an hour — how often the store
+answered, how often a look was shared.
 
 ## Step 1 — one structured call
 
