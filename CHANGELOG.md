@@ -21,8 +21,13 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   goes LIVE-ONLY in its accelerator form — embeddings as before, captions
   at most one per `EVENTS_ENRICHMENT_PRESSURE_GAP_S` (6 s), descriptor
   questions dropped — and at `EVENTS_ENRICHMENT_DETECTOR_PAUSE_FACTOR`
-  (4×) nothing is sent; it steps back after the usual calm period. A
-  dropped visit keeps no caption row, which is what the backfill looks for.
+  (4×) nothing is sent; it steps back after the usual calm period. The
+  device's own busy share is the second trigger: at
+  `EVENTS_ENRICHMENT_DEVICE_BUSY_PERCENT` (60, where the detector alone
+  measured 10–37 % and the questions pushed the sum to 85–100 %) no new
+  background call starts, since a running inference cannot be pre-empted
+  on an NPU and the only lever is not to start the next one. A dropped
+  visit keeps no caption row, which is what the backfill looks for.
   The governor's snapshot and each `enrichment_throttled` event say the
   detector's latency, its floor and the ratio, so the operator reads
   "detector 67 ms a frame, 2.7× its 25 ms floor" rather than a tile at 100 %.

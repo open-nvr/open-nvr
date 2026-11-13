@@ -9,6 +9,11 @@ already computes:
 
 * the host monitor's last CPU sample and its ``cpu_high`` alert
   (``system_monitor_service``, sampled every 15 s for the UI anyway);
+* the **accelerator's busy share** from the same sample: above
+  ``EVENTS_ENRICHMENT_DEVICE_BUSY_PERCENT`` the device has no room, and
+  background enrichment does not start a new call (a running inference
+  cannot be pre-empted on an NPU, so "pre-emptive" means at the call
+  boundary: do not start, keep units short, order by value);
 * the **detector's latency against its own floor**, from the same
   monitor's accelerator sample (``accelerator_usage``): on a board where
   the detector shares one NPU with the captioner, a detector running at
@@ -131,6 +136,17 @@ def pressure_gap_s() -> float:
 
 #: A monitor sample older than this says nothing about the device now.
 PRESSURE_SAMPLE_TTL_S = 60.0
+
+
+def device_busy_percent() -> float:
+    """The accelerator busy share above which background enrichment does not
+    START a new call (the device signal; the detector's latency is the
+    other). Measured on a Ventuno Q, 2026-11-12: the detector alone took
+    10–37 % of the Hexagon across quiet and busy hours, and the description
+    questions pushed the sum to 85–100 %; 60 separates the two cleanly and
+    leaves a sixteen-camera detector (24 inferences/s × 25 ms = 60 %) at
+    the line, which is a device that genuinely has no room."""
+    return min(100.0, max(10.0, float(getattr(_settings(), "events_enrichment_device_busy_percent", 60.0))))
 #: Below this floor the ratio is noise (a CPU detector at 150 ms has a
 #: real floor; a stub at 0.1 ms does not).
 PRESSURE_MIN_FLOOR_MS = 5.0
@@ -223,6 +239,33 @@ def detector_pressure() -> tuple[float, float, float] | None:
     return worst
 
 
+def device_busy() -> tuple[float, str] | None:
+    """(busy_percent, device_name) of the accelerator the detector runs on
+    over the monitor's last window, or None: none in use, no window yet,
+    or a stale sample. An inference-time share counts waiting as well as
+    computing, so above ~100 it says "queued", which is busier still."""
+    try:
+        from services.system_monitor_service import get_system_monitor
+
+        sample = get_system_monitor().latest_sample() or {}
+    except Exception:                              # noqa: BLE001
+        return None
+    ts = sample.get("ts")
+    if ts is not None and time.time() - float(ts) > PRESSURE_SAMPLE_TTL_S:
+        return None
+    worst: tuple[float, str] | None = None
+    for acc in sample.get("accelerators") or []:
+        busy = acc.get("busy_percent")
+        if busy is None:
+            continue
+        inflight = acc.get("inflight")
+        # The capped share hides the queue; the in-flight count carries it.
+        share = max(float(busy), float(inflight) * 100.0 if inflight is not None else 0.0)
+        if worst is None or share > worst[0]:
+            worst = (share, str(acc.get("name") or acc.get("kind") or "accelerator"))
+    return worst
+
+
 def host_cpu_high() -> bool:
     try:
         from services.system_monitor_service import ALERT_CPU_HIGH, get_system_monitor
@@ -295,6 +338,16 @@ class Governor:
                 self._wanted_pressure = True
                 return State.LIVE_ONLY, (f"detector {ms:.0f} ms a frame, {slowdown:.1f}× its "
                                          f"{floor:.0f} ms floor: the accelerator is contended")
+        busy = device_busy()
+        if busy and busy[0] >= device_busy_percent():
+            # The device has no room: do not START background work. Same
+            # yield order as the latency trigger (questions dropped,
+            # captions paced, embeddings through); the latency trigger
+            # above still decides a full pause, because a share figure
+            # that counts waiting cannot tell how long the detector waits.
+            self._wanted_pressure = True
+            return State.LIVE_ONLY, (f"{busy[1]} {busy[0]:.0f}% busy ≥ {device_busy_percent():.0f}%: "
+                                     "no room for background enrichment")
         cpu = host_cpu_percent()
         soft = soft_cpu_percent()
         if cpu is not None and cpu >= soft:
@@ -367,9 +420,12 @@ class Governor:
         advances it. A status endpoint polling this must not be what
         moves the governor or records system events."""
         pressure = detector_pressure()
+        busy = device_busy()
         return {"state": self.state.value, "reason": self.reason,
                 "stable_for_s": round(self.stable_for(), 1),
                 "pressure": self.pressure,
+                "device_busy_percent": None if busy is None else round(busy[0], 1),
+                "device_busy_line": device_busy_percent(),
                 "detector_slowdown": None if pressure is None else round(pressure[0], 2),
                 "detector_ms": None if pressure is None else round(pressure[1], 1),
                 "detector_floor_ms": None if pressure is None else round(pressure[2], 1),

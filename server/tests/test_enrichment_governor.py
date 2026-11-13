@@ -34,10 +34,11 @@ def _run(coro):
 @pytest.fixture()
 def signals(monkeypatch):
     """The governor's inputs, under the test's control."""
-    s = {"cpu": None, "cpu_high": False, "pressure": None, "edges": []}
+    s = {"cpu": None, "cpu_high": False, "pressure": None, "device": None, "edges": []}
     monkeypatch.setattr(gov, "host_cpu_percent", lambda: s["cpu"])
     monkeypatch.setattr(gov, "host_cpu_high", lambda: s["cpu_high"])
     monkeypatch.setattr(gov, "detector_pressure", lambda: s["pressure"])
+    monkeypatch.setattr(gov, "device_busy", lambda: s["device"])
     monkeypatch.setattr(eg, "notify_edge",
                         lambda t, *, active, description, data: s["edges"].append((t, active, data.get("state"))))
     monkeypatch.setattr(eg, "_notify", lambda gate, *, active: None)
@@ -208,6 +209,68 @@ def test_cpu_throttling_keeps_the_cpu_shaped_ranking(signals):
     gate = eg.gate_for("litertlm")
     assert _run(gov.admit_live(gate, "vqa")) is True
     gate.release("ok", elapsed_s=2.0)
+
+
+def test_a_busy_device_stops_new_background_calls_before_the_detector_slows(signals, clock):
+    """The device-side trigger: the NPU share is over the line while the
+    detector's latency is still fine (the first second of a burst). No
+    new question starts, captions are paced, embeddings go through; the
+    reason names the device and the line."""
+    from core.config import settings
+    settings.events_enrichment_device_busy_percent = 60.0
+    settings.events_enrichment_pressure_gap_s = 6.0
+    signals["cpu"] = 20.0
+    signals["pressure"] = (1.1, 27.0, 25.0)
+    signals["device"] = (85.0, "Qualcomm Hexagon NPU")
+    g = gov.governor()
+    assert g.evaluate() is State.LIVE_ONLY and g.pressure
+    assert "85% busy" in g.reason and "60%" in g.reason
+    gate = eg.gate_for("litertlm")
+    assert _run(gov.admit_live(gate, "vqa")) is False
+    assert _run(gov.admit_live(gate, "caption")) is True
+    gate.release("ok", elapsed_s=1.7)
+    embed = eg.gate_for("clip")
+    assert _run(gov.admit_live(embed, "embed")) is True
+    embed.release("ok", elapsed_s=0.008)
+    # a queued device (in-flight above 1) counts as busier than its capped share
+    signals["device"] = (100.0, "Qualcomm Hexagon NPU")
+    assert g.evaluate() is State.LIVE_ONLY
+    # room again: back to normal after the calm period
+    signals["device"] = (30.0, "Qualcomm Hexagon NPU")
+    clock["t"] += gov.STABLE_S + 1
+    assert g.evaluate() is State.NORMAL and not g.pressure
+
+
+def test_the_latency_trigger_outranks_the_device_share_for_a_pause(signals):
+    """A share figure cannot say how long the detector waits; the latency
+    ratio can, and it is what pauses everything."""
+    signals["device"] = (100.0, "Qualcomm Hexagon NPU")
+    signals["pressure"] = (4.5, 112.0, 25.0)
+    g = gov.governor()
+    assert g.evaluate() is State.PAUSED
+    assert "112 ms" in g.reason
+
+
+def test_device_busy_reads_share_and_inflight_from_a_fresh_sample(monkeypatch):
+    import time as _time
+    from services import system_monitor_service as sms
+
+    class _Mon:
+        def __init__(self, sample): self._s = sample
+        def latest_sample(self): return self._s
+
+    fresh = {"ts": _time.time(), "accelerators": [
+        {"kind": "npu", "name": "Qualcomm Hexagon NPU", "busy_percent": 100.0, "inflight": 2.6}]}
+    monkeypatch.setattr(sms, "get_system_monitor", lambda: _Mon(fresh))
+    assert gov.device_busy() == (260.0, "Qualcomm Hexagon NPU"), "queued ×2.6 reads as 260 %"
+    calm = {"ts": _time.time(), "accelerators": [{"kind": "npu", "name": "NPU", "busy_percent": 12.0, "inflight": 0.12}]}
+    monkeypatch.setattr(sms, "get_system_monitor", lambda: _Mon(calm))
+    assert gov.device_busy() == (12.0, "NPU")
+    stale = dict(fresh, ts=_time.time() - gov.PRESSURE_SAMPLE_TTL_S - 5)
+    monkeypatch.setattr(sms, "get_system_monitor", lambda: _Mon(stale))
+    assert gov.device_busy() is None
+    monkeypatch.setattr(sms, "get_system_monitor", lambda: _Mon({"ts": _time.time(), "accelerators": [{"busy_percent": None}]}))
+    assert gov.device_busy() is None
 
 
 def test_detector_pressure_reads_the_monitors_fresh_sample_only(monkeypatch):
