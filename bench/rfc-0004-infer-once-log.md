@@ -66,8 +66,61 @@ carry it, and asks as before for a visit that already has its caption.
   against per-question on the same hour of traffic.
 - JSON failure rate of the structured answer.
 
-**Measured.** _pending — the box runs the flag off until the two
-ten-minute windows below are taken._
+**Measured — paired frame comparison, run 1 (2026-11-13 01:47–01:56 UTC).**
+`tools/rfc0004_paired_compare.py` on the box, as a one-off container from
+the merged core image, calls sequential, through KAI-C's infer route like
+core itself. 70 evidence frames from the last 24 h: 27 car, 13 truck
+(all cam26, the plate clip), 30 person (11 cam23 office, 19 cam26).
+Arm A = plain caption call, B = one question per kind (2 per frame),
+C = the one structured call. The box was under its normal load (agent on,
+plate reader in accurate mode), so absolute times are a busy box's.
+
+| Measurement | Vehicle frames (40) | Person frames (30) |
+|---|---|---|
+| A, plain caption (adapter inference_ms, mean) | 1069 ms | 1418 ms |
+| B, two questions together | 1446 ms (723 each) | 1446 ms |
+| Old path A + B | 2515 ms, 3 calls | 2864 ms, 3 calls |
+| C, one structured call | 1782 ms | 1813 ms |
+| Saving per visit | 29 % of Gemma time, 2 calls fewer | 37 %, 2 calls fewer |
+
+Over all 70 frames: old 2665 ms, new 1796 ms, ratio 1.48. JSON parsed on
+70 of 70 (Gemma wraps it in a code fence; the parser takes that). No reply
+hit the 96-token cap (mean reply 120 characters). No call failed.
+
+| Kind | Frames | Agree | Differ | B only | C only | Neither |
+|---|---|---|---|---|---|---|
+| colour | 40 | 34 | 6 | 0 | 0 | 0 |
+| vehicle_type | 40 | 31 | 9 | 0 | 0 | 0 |
+| clothing_top | 30 | 30 | 0 | 0 | 0 | 0 |
+| carrying | 30 | 26 | 1 | 3 | 0 | 0 |
+
+Looked at the disputed frames: all six colour disagreements are one
+scene, a white van in front of a yellow ambulance, where B said white
+(right) and C said yellow; the type disagreements are a goods carrier
+(B truck, right; C bus), a white crossover (B suv, C van) and a black
+Maruti SUV the detector had labelled truck (B truck, C pickup, both
+wrong). The three "B only" carrying answers are C saying "unknown" where
+B said "nothing" — conservative, not wrong. Pattern: C's answers drift
+to the whole scene. The cause is order: the caption is generated first,
+and every attribute value is conditioned on it ("A yellow and white
+vehicle…" → colour yellow).
+
+Captions: A averages 17 words with a preamble ("A security camera view
+shows…"), C 9.7 words and terser — in one office frame A said "a man in
+a red shirt sitting in a chair", C said "a man is sitting at a desk with
+a laptop", losing the colour search would want.
+
+**Decision from run 1:** cost saving real but smaller than the call
+count suggests (1.5×, not 3×: a question is 0.7 s, a caption 1.1–1.4 s,
+the structured reply 1.8 s). Accuracy: attributes 90 % agreement on
+vehicles, 97 % on people, and where they differ the per-question answer
+is the right one. Not good enough to flip the default. Run 2 changes the
+prompt only: attribute keys first and caption last (so the answers are
+conditioned on the image, not on the caption), the subject named ("the
+main vehicle, the largest or nearest"), and the caption asked for with
+the plain prompt's instruction (who or what, what they wear, what they
+do) so search loses no words.
+
 
 Method for the measurement, so it is the same both times:
 1. Same traffic shape as the baseline: cam23 (office) + cam26 (plate clip
@@ -82,6 +135,37 @@ Method for the measurement, so it is the same both times:
    claims, captions).
 4. Search eval (33 cases) after an hour on each setting, operator login
    needed on the box.
+
+**Measured — paired frame comparison, run 2 (2026-11-13 01:58–02:07 UTC),
+same 70 frames, prompt revised as decided above.** The per-question arm
+answered identically in both runs (140 of 140), so the model is
+deterministic and the difference is the prompt.
+
+| Kind | Frames | Agree run 1 → run 2 | Differ | B only | What the differences are |
+|---|---|---|---|---|---|
+| colour | 40 | 34 → **40** | 0 | 0 | — |
+| vehicle_type | 40 | 31 → **36** | 4 | 0 | one white crossover, four frames: B suv, C van (toss-up on the frame) |
+| clothing_top | 30 | 30 → 29 | 1 | 0 | two people in the crop: B red (the one behind), C white (the nearer, as asked) |
+| carrying | 30 | 26 → 27 | 2 | 1 | a bag on the chair, not carried: B backpack, C nothing; B nothing, C unknown |
+
+Cost unchanged: A 1223 ms, a question 718 ms, C 1789 ms; old 2659 ms vs
+new 1789 ms, ratio 1.49; 70 of 70 JSON, none cut by the token cap.
+
+Captions, run 2: 10.8 words against A's 17, but A spends its words on a
+preamble ("A security camera view shows…", "The image is a blurry,
+low-resolution shot of…"). What search wants is there more often: a
+colour word in **70 of 70** C captions against 45 of 70 A captions (run 1's
+terse prompt: 59). The red-shirt frame now reads "A man wearing a red
+shirt is sitting in a chair and looking at a laptop"; the van-and-ambulance
+frame "A white van is parked on a dirt road".
+
+**Decision from run 2:** attributes match the per-question path on 132 of
+140 answers, and none of the 8 differences is a case where the
+per-question answer is clearly right and the structured one wrong. The
+caption carries the words search filters on more often than the plain
+prompt does. The prompt revision ships; the flag can go on for the
+traffic windows. The default flips only after window B and the 33-case
+search eval.
 
 **Done.** 2026-11-13, branch `feat/rfc-0004-single-call`:
 - `server/services/structured_enrichment.py` — prompt (caption + the
@@ -104,3 +188,9 @@ Method for the measurement, so it is the same both times:
   CHANGELOG entry, 16 tests in `server/tests/test_structured_enrichment.py`;
   the eight enrichment suites pass (178).
 - Not done: the box measurement; the default stays off until it is in.
+- 2026-11-13, branch `bench/rfc-0004-paired-compare`: `tools/rfc0004_paired_compare.py`
+  (the paired comparison above), `tools/rfc0004_window.sh` (one counter
+  snapshot for a traffic window), and the prompt revision from run 1
+  (attributes first, subject named, caption asked for with the plain
+  prompt's detail). Raw per-frame answers of both runs kept off the repo
+  (they describe people in the office).
