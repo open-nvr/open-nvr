@@ -196,7 +196,11 @@ with an env dial and a metric (never a silent cap):
   budget is `1/DETECT_FPS` seconds. Configure more than the host sustains
   and the budget controller sheds regions at runtime ("detector regions
   cut to N" warnings) — coverage then rotates across frames, and a fast
-  object can cross the frame while its patch isn't scanned. A pinned
+  object can cross the frame while its patch isn't scanned. The same
+  arithmetic holds on an NPU: on a Qualcomm Hexagon a crop is ~15 ms, and
+  two busy cameras at 5 fps with 8 crops each (~80 inferences/s) pinned
+  the device at 100 % by themselves (Ventuno Q, 2026-11-13); 3 crops at
+  4 fps fitted beside the plate reader and the captioner. A pinned
   count the hardware actually delivers gives every frame the same
   complete coverage; `4` is the CPU-only sweet spot (laptops,
   macOS/Windows Docker VMs). With `DETECT_HWACCEL` and/or
