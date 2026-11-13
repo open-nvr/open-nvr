@@ -257,8 +257,10 @@ def test_superuser_without_mfa_cannot_delete(env):
         f"/api/v1/users/{env.victim.id}/permanent",
         headers={**_auth("admin2"), "X-MFA-Code": "123456"},
     )
-    assert resp.status_code == 400
-    assert "MFA" in resp.json()["detail"]
+    # An account with no second factor is held at the enrolment wall: the
+    # API refuses it before the endpoint's own MFA check is reached.
+    assert resp.status_code == 403
+    assert resp.json()["detail"]["error"] == "mfa_enrollment_required"
 
 
 def test_self_deactivation_via_update_is_blocked(env):

@@ -351,9 +351,9 @@ def enrol_mfa(client, username: str, password: str) -> str:
     "the viewer sees no navigation at all" -- which is true, and nothing to do
     with permissions.
 
-    The API layer does not care, which is why the API RBAC tests never needed
-    this: ``login-json`` issues a token to an un-enrolled user quite happily.
-    The gate is the SPA's.
+    The API enforces the same wall: an un-enrolled session reaches only the
+    enrolment routes (``/auth/me``, ``/auth/mfa/*``) and gets 403
+    ``mfa_enrollment_required`` everywhere else, so API tests need this too.
 
     Enrolment is the same three calls the UI makes: log in (no code -- MFA is
     not on yet), ask for a secret, then prove possession of it.

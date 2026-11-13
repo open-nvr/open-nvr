@@ -170,6 +170,45 @@ def verify_token(token: str) -> TokenData | None:
         return None
 
 
+# What a password-only session of a local account that has not enrolled a
+# second factor may reach: itself, and the enrolment calls. Matched against
+# the route template FastAPI resolved, never the raw URL.
+_ENROLMENT_ROUTES = frozenset({
+    "/auth/me", "/auth/logout", "/auth/mfa/setup", "/auth/mfa/verify",
+    "/users/me", "/users/me/permissions",
+})
+
+
+def mfa_enrolment_pending(user: User) -> bool:
+    """A local account without an enrolled second factor. Single sign-on
+    accounts are exempt: their identity provider owns MFA."""
+    return (user.auth_provider or "local") != "oidc" and not user.mfa_enabled
+
+
+def _refuse_until_enrolled(request: Request, user: User) -> None:
+    """Server-side half of the MFA wall: until the account enrols, its session
+    reaches only the routes above. The SPA routes such a session to the
+    enrolment screen anyway; this stops the API being used around it. The
+    check reads the database on every request, so a reset bites at once and
+    no token can carry a stale "enrolled" claim."""
+    if not mfa_enrolment_pending(user):
+        return
+    route = request.scope.get("route")
+    path = getattr(route, "path", None) or request.url.path
+    prefix = settings.api_prefix.rstrip("/")
+    if path.startswith(prefix):
+        path = path[len(prefix):]
+    if path in _ENROLMENT_ROUTES and request.method in ("GET", "POST"):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={
+            "error": "mfa_enrollment_required",
+            "message": "Set up two-factor sign-in before using OpenNVR.",
+        },
+    )
+
+
 def get_current_user(
     request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(security),
@@ -232,6 +271,7 @@ def get_current_user(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Inactive user"
         )
+    _refuse_until_enrolled(request, user)
 
     auth_logger.log_action(
         "auth.user_auth_success",

@@ -31,6 +31,8 @@ export const userService = {
   deleteUser: (userId: number) => api.delete(`/api/v1/users/${userId}`),
   permanentlyDeleteUser: (userId: number, mfaCode: string) => api.delete(`/api/v1/users/${userId}/permanent`, { headers: { 'X-MFA-Code': mfaCode } }),
   activateUser: (userId: number, mfaCode: string) => api.post(`/api/v1/users/${userId}/activate`, undefined, { headers: { 'X-MFA-Code': mfaCode } }),
+  // Remove another user's second factor: they enrol a new authenticator at next sign-in.
+  resetUserMfa: (userId: number, mfaCode: string) => api.post(`/api/v1/users/${userId}/mfa/reset`, undefined, { headers: { 'X-MFA-Code': mfaCode } }),
   
   // Roles
   getRoles: () => api.get('/api/v1/roles/'),
