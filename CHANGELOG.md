@@ -8,7 +8,39 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Live view from anywhere (#925): a tile tries real-time video (WebRTC) and
+  falls back to low-latency HLS by itself when no media path answers, within
+  about eight seconds and with the spinner up, never an error. The browser
+  remembers the fallback for the session so later tiles start on HLS at once,
+  probes WebRTC again every fifteen minutes and when the network comes back,
+  and shows a small "HLS" badge saying why. The player also adds the address
+  it opened the page on as a candidate, so a LAN viewer works whatever address
+  the launcher recorded at install, including `localhost`.
+- Settings → WebRTC: a public address (IP or DNS name) and a public media
+  port, and the list of addresses the media server advertises with where each
+  came from. Core finds the public IP with the configured STUN server itself
+  and refreshes it every ten minutes; `GET /api/v1/webrtc/advertised` (admin)
+  and the extra fields on `GET /api/v1/webrtc/rtc-config`.
+
 ### Changed
+
+- Live HLS is served as low-latency HLS (`hlsVariant: lowLatency`, 200 ms
+  parts, nginx no longer buffers `/hls/`), which brings a fallen-back tile
+  from several seconds behind to one or two.
+- The browser sends its own ICE candidates with the WHEP offer (it used to
+  post the offer before gathering any), and no STUN server is built into the
+  web app: ICE servers come from Settings alone. STUN is sent to MediaMTX as
+  client-only, since its single-port listener cannot use a STUN-discovered
+  candidate; TURN stays shared.
+- MediaMTX no longer advertises its own container addresses
+  (`webrtcIPsFromInterfaces: no`); the reachable ones come from core.
+- The "learned hosts" mechanism (`X-Server-Addr`) is gone: on the compose
+  bridge it never learned anything. An existing `webrtc_ice_hosts` row is
+  moved into the public address setting once.
+- Publishing a browser webcam from a network where the media port is blocked
+  now says so (naming the port) after two failed connections instead of
+  retrying for ever with the webcam light on; the same address-bar candidates
+  are added to its answer.
 
 ### Fixed
 

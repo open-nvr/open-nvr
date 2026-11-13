@@ -78,7 +78,7 @@ isn't, delete the devices in Home Assistant by hand.
 |---|---|---|---|
 | API, events WebSocket, signed media | `https://<host>/api/v1/...` | open on all interfaces (`NGINX_BIND_HOST=0.0.0.0`) | nothing to do |
 | Live video (WebRTC over WHEP) signalling | `https://<host>/webrtc/...` | through nginx | nothing to do |
-| Live video media (ICE) | UDP/TCP `8189` | published on all interfaces | set `MEDIAMTX_WEBRTC_HOSTS` (below) |
+| Live video media (ICE) | UDP/TCP `8189` | published on all interfaces | the LAN address from `MEDIAMTX_WEBRTC_HOSTS` (below); from the internet, forward the port and let Settings → WebRTC advertise the public address |
 | RTSPS stream for HA's `stream` component (optional) | `rtsps://<host>:8322/...` | **loopback only** | set `RTSPS_BIND_HOST` (below) |
 | Discovery (optional) | mDNS `_opennvr._tcp` | off | `COMPOSE_PROFILES=mdns`, Linux only |
 
@@ -96,6 +96,14 @@ MEDIAMTX_WEBRTC_HOSTS=192.168.1.100
 
 `start.sh` / `start.ps1` fill this from the detected LAN address. Set it by
 hand only if detection picked the wrong interface.
+
+Home Assistant on another network needs the public address as well. OpenNVR
+adds it by itself: core asks the STUN server configured under Settings →
+WebRTC for the public IP and advertises it, refreshed every ten minutes; a
+fixed IP or a DNS name entered there as the public address takes precedence.
+The router must forward UDP/TCP `8189` to this host for the media to arrive.
+Home Assistant plays over WebRTC only, so unlike the web UI it has no HLS to
+fall back to.
 
 ### `RTSPS_BIND_HOST`: RTSPS for Home Assistant's stream component (optional)
 Home Assistant plays cameras over WebRTC and needs nothing else. RTSPS is only

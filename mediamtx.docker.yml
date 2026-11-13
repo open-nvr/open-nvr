@@ -224,7 +224,11 @@ hlsServerCert: /etc/mediamtx-certs/server.crt
 hlsAllowOrigins: ['*']
 hlsTrustedProxies: []
 hlsAlwaysRemux: no
-hlsVariant: fmp4
+# Low-latency HLS: the live player's fallback when WebRTC cannot connect
+# (issue #925). Parts of hlsPartDuration are served as they are produced, so
+# a tile sits one or two seconds behind instead of several. Playlists are
+# fetched with blocking reloads: nginx must not buffer /hls/ (nginx/opennvr.conf).
+hlsVariant: lowLatency
 hlsSegmentCount: 7
 hlsSegmentDuration: 1s
 hlsPartDuration: 200ms
@@ -256,9 +260,13 @@ webrtcTrustedProxies: []
 # Listen on all interfaces for WebRTC ICE
 webrtcLocalTCPAddress: :8189
 webrtcLocalUDPAddress: :8189
-# HOST MODE: Allow WebRTC to discover and advertise host's network interfaces
-# This is required for WHEP streaming to work from other machines on the LAN
-webrtcIPsFromInterfaces: yes
+# The container's own interfaces are 127.0.0.1 and the Docker bridge: no
+# browser on another machine can reach either, and a browser on this machine
+# reaches MediaMTX through the published ICE port, which the web UI adds as
+# a candidate itself. Advertising them only leaks the bridge address and
+# wastes ICE checks. The reachable addresses come from webrtcAdditionalHosts,
+# which core pushes at runtime (services/webrtc_ice_host_service.py).
+webrtcIPsFromInterfaces: no
 webrtcIPsFromInterfacesList: []
 # Additional hosts to advertise (localhost always included)
 webrtcAdditionalHosts: []

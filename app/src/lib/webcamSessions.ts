@@ -17,6 +17,16 @@ import { useSyncExternalStore } from 'react'
 import { apiService } from './apiService'
 import { extractApiError } from './apiError'
 import { CameraGoneError, SessionExpiredError, WhipPublisher, type PublisherState, type WhipSession } from './whipPublisher'
+import {
+  DEFAULT_EXTRAS,
+  addressBarHost,
+  candidateLines,
+  hostCandidates,
+  insertCandidates,
+  pagePortOf,
+  parseExtras,
+  type RtcExtras,
+} from './liveTransport'
 
 export type WebcamSettings = { deviceId: string; resolution: string; audio: boolean }
 
@@ -58,20 +68,35 @@ function emit() {
   listeners.forEach((l) => l())
 }
 
+// The ICE port and the server's address list from the last rtc-config read
+// (lib/liveTransport); shared by every session in the tab.
+let rtcExtras: RtcExtras = DEFAULT_EXTRAS
+
 async function iceConfig(): Promise<RTCConfiguration> {
-  // Same source as the WHEP player: Settings → WebRTC, with a public STUN
-  // fallback if that read fails.
+  // Same source as the WHEP player: Settings → WebRTC, and nothing else.
+  // MediaMTX's advertised addresses plus the address-bar host (below) are
+  // what connect; a STUN server is contacted only if the admin set one.
   try {
     const { data } = await apiService.getWebRTCClientConfig()
+    rtcExtras = parseExtras(data)
     return {
-      iceServers: Array.isArray(data?.iceServers) && data.iceServers.length
-        ? data.iceServers
-        : [{ urls: ['stun:stun.l.google.com:19302'] }],
+      iceServers: Array.isArray(data?.iceServers) ? data.iceServers : [],
       ...(data?.iceTransportPolicy ? { iceTransportPolicy: data.iceTransportPolicy } : {}),
     }
   } catch {
-    return { iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }] }
+    return { iceServers: [] }
   }
+}
+
+// The same address-bar candidates the WHEP player adds: the page loaded
+// from that address, so MediaMTX is reachable there from this browser.
+const publisherExtras = {
+  augmentAnswer: (sdp: string) => insertCandidates(sdp, candidateLines(hostCandidates({
+    pageHost: addressBarHost(window.location.hostname),
+    pagePort: pagePortOf(window.location),
+    extras: rtcExtras,
+  }))),
+  mediaPort: () => rtcExtras.publicIcePort ?? rtcExtras.icePort,
 }
 
 // A wake lock keeps a laptop from sleeping mid-recording. One for all
@@ -135,7 +160,7 @@ export function startSession(cameraId: number, cameraName: string, stream: Media
     if (sessions.get(cameraId) !== s) return
     s.state = state
     emit()
-  })
+  }, publisherExtras)
   sessions.set(cameraId, s)
   s.publisher.start(stream)
   emit()

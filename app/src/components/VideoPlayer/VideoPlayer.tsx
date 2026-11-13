@@ -29,6 +29,23 @@ import { apiService } from '../../lib/apiService'
 import type Hls from 'hls.js'
 import { loadHls } from '../../lib/loadHls'
 import { resolveWhepSessionUrl } from '../../lib/streamUrl'
+import {
+  DEFAULT_EXTRAS,
+  GATHER_WAIT_MS,
+  ICE_GIVE_UP_MS,
+  addressBarHost,
+  candidateLines,
+  clearMemory,
+  forgetProbe,
+  hostCandidates,
+  initialTransport,
+  insertCandidates,
+  pagePortOf,
+  parseExtras,
+  rememberHls,
+  shouldDeleteSession,
+  type RtcExtras,
+} from '../../lib/liveTransport'
 import { displayAspect, isStretched, snapshotSize } from '../../lib/aspect'
 import type { AspectOverride } from '../../lib/aspect'
 import { useVideoSize } from '../../hooks/useVideoAspect'
@@ -39,6 +56,46 @@ import { useTranslation } from '../../i18n'
 
 export type VideoPlayerMode = 'live' | 'playback'
 export type StreamType = 'webrtc' | 'hls' | 'mp4'
+
+/** Where the session remembers that WebRTC could not connect from this
+ *  network (lib/liveTransport). Per origin, so the LAN address and the
+ *  public one keep separate answers. Unavailable storage just means the
+ *  tiles forget between mounts. */
+function transportMemory(): Storage | null {
+  try {
+    return typeof window !== 'undefined' ? window.sessionStorage : null
+  } catch {
+    return null
+  }
+}
+
+/** Wait for the browser's own ICE candidates, so the offer carries them:
+ *  MediaMTX takes candidates in the offer only (no trickle), and without
+ *  them it can never send a check back to the viewer. */
+function waitForIceGathering(pc: RTCPeerConnection, timeoutMs: number): Promise<void> {
+  if (pc.iceGatheringState === 'complete') return Promise.resolve()
+  return new Promise((resolve) => {
+    const done = () => {
+      pc.removeEventListener('icegatheringstatechange', check)
+      window.clearTimeout(timer)
+      resolve()
+    }
+    const check = () => {
+      if (pc.iceGatheringState === 'complete') done()
+    }
+    const timer = window.setTimeout(done, timeoutMs)
+    pc.addEventListener('icegatheringstatechange', check)
+  })
+}
+
+// A network change is the one event that makes an earlier "WebRTC can't
+// connect from here" answer stale: the next tile to mount probes again.
+let onlineHookInstalled = false
+function installOnlineHook() {
+  if (onlineHookInstalled || typeof window === 'undefined') return
+  onlineHookInstalled = true
+  window.addEventListener('online', () => forgetProbe(transportMemory()))
+}
 
 export interface VideoPlayerProps {
   /** Mode: 'live' for live streaming, 'playback' for recorded videos */
@@ -155,6 +212,15 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     const pcRef = useRef<RTCPeerConnection | null>(null)
     const whepResourceRef = useRef<string | null>(null)
 
+    // Live tiles climb a ladder (lib/liveTransport): WebRTC first, HLS when
+    // it cannot connect. The session remembers a fallback so later tiles
+    // start on HLS at once, and one tile per interval probes WebRTC again.
+    // Decided once, at mount: the memory must not re-route a playing tile.
+    const [initial] = useState(() => {
+      if (mode === 'playback') return { start: 'webrtc' as const, probing: false, fallenBack: false }
+      installOnlineHook()
+      return initialTransport(preferredStreamType, !!hlsUrl && !!whepUrl, transportMemory(), Date.now())
+    })
     // Determine initial stream type based on mode and available URLs
     const getInitialStreamType = (): StreamType => {
       if (mode === 'playback') {
@@ -162,10 +228,13 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         if (hlsPlaybackUrl && preferredPlaybackType === 'hls') return 'hls'
         return 'mp4'
       }
-      return preferredStreamType
+      return initial.start
     }
 
     const [streamType, setStreamType] = useState<StreamType>(getInitialStreamType())
+    // True while this tile plays HLS because WebRTC could not connect (as
+    // opposed to the caller or the viewer asking for HLS). Drives the badge.
+    const [autoHls, setAutoHls] = useState(initial.fallenBack)
     const [isPlaying, setIsPlaying] = useState(false)
     const [isMuted, setIsMuted] = useState(muted)
     const [volume, setVolume] = useState(muted ? 0 : 1)
@@ -197,6 +266,17 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     const onAuthExpiredRef = useRef(onAuthExpired)
     onAuthExpiredRef.current = onAuthExpired
     const [isReconnecting, setIsReconnecting] = useState(false)
+    // The current WHEP attempt: when it was answered, whether ICE ever
+    // reached `connected`, and the deadline after which the tile gives up on
+    // WebRTC. A viewer's explicit stream choice (the player menu) switches
+    // the automatic ladder off for this tile.
+    const whepCreatedAtRef = useRef(0)
+    const whepConnectedRef = useRef(false)
+    const iceDeadlineRef = useRef<number | null>(null)
+    const manualChoiceRef = useRef(false)
+    const probingRef = useRef(initial.probing)
+    const rtcExtrasRef = useRef<RtcExtras>(DEFAULT_EXTRAS)
+    const giveUpRef = useRef<(reason: string) => void>(() => {})
     // Coded frame size of the incoming stream, read from the video metadata.
     // null until known (or after the source is torn down).
     const videoSize = useVideoSize(videoRef)
@@ -302,6 +382,10 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         clearTimeout(offlinePollTimerRef.current)
         offlinePollTimerRef.current = null
       }
+      if (iceDeadlineRef.current) {
+        clearTimeout(iceDeadlineRef.current)
+        iceDeadlineRef.current = null
+      }
 
       // Cleanup HLS
       if (hlsInstanceRef.current) {
@@ -321,11 +405,16 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         pcRef.current.close()
         pcRef.current = null
       }
-      // DELETE WHEP resource
+      // DELETE WHEP resource. Not for a session that never connected and
+      // that MediaMTX has already timed out: that request can only 404.
       if (whepResourceRef.current) {
-        fetch(whepResourceRef.current, { method: 'DELETE' }).catch(() => {})
+        if (shouldDeleteSession(whepConnectedRef.current, Date.now() - whepCreatedAtRef.current)) {
+          fetch(whepResourceRef.current, { method: 'DELETE' }).catch(() => {})
+        }
         whepResourceRef.current = null
       }
+      whepConnectedRef.current = false
+      whepCreatedAtRef.current = 0
       // Clear video source completely and reset the element
       if (videoRef.current) {
         const el = videoRef.current
@@ -371,6 +460,25 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     const scheduleAutoRetryRef = useRef(scheduleAutoRetry)
     scheduleAutoRetryRef.current = scheduleAutoRetry
 
+    // WebRTC could not connect from this network (ICE failed, or the
+    // deadline passed). With an HLS URL and no explicit choice from the
+    // viewer, the tile switches to HLS and the session remembers it; the
+    // spinner stays up throughout, never an error. Otherwise the old
+    // bounded WebRTC retry applies.
+    const giveUpWebRTC = useCallback((reason: string) => {
+      if (mode === 'live' && hlsUrl && !manualChoiceRef.current) {
+        rememberHls(transportMemory(), reason, Date.now())
+        probingRef.current = false
+        cleanup()
+        setIsReconnecting(false)
+        setAutoHls(true)
+        setStreamType('hls')
+        return
+      }
+      scheduleAutoRetry(reason === 'ice-failed' ? 'WebRTC connection failed' : 'WebRTC connection timed out')
+    }, [mode, hlsUrl, cleanup, scheduleAutoRetry])
+    giveUpRef.current = giveUpWebRTC
+
     // Setup WebRTC WHEP
     const setupWebRTC = useCallback(async () => {
       if (!whepUrl || !videoRef.current) return
@@ -380,26 +488,26 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       }
 
       try {
-        // ICE servers come from Settings > More Settings > WebRTC. Falling back
-        // to a public STUN keeps playback working if that read fails, but a
-        // deployment with TURN configured needs the server's list to traverse
-        // NAT at all — so this must not stay hardcoded.
-        let iceServers: RTCIceServer[] = [
-          { urls: ['stun:stun.l.google.com:19302'] },
-        ]
+        // ICE servers come from Settings > More Settings > WebRTC and from
+        // nowhere else: MediaMTX advertises every address the server knows,
+        // and the player adds the address-bar host below, so no STUN server
+        // is needed for the common case and none is contacted unless the
+        // admin configured one.
+        let iceServers: RTCIceServer[] = []
         let policy: RTCIceTransportPolicy | undefined
         let poolSize: number | undefined
         try {
           const { data } = await apiService.getWebRTCClientConfig()
-          if (Array.isArray(data?.iceServers) && data.iceServers.length) {
+          if (Array.isArray(data?.iceServers)) {
             iceServers = data.iceServers
           }
           if (data?.iceTransportPolicy) policy = data.iceTransportPolicy
           if (typeof data?.iceCandidatePoolSize === 'number') {
             poolSize = data.iceCandidatePoolSize
           }
+          rtcExtrasRef.current = parseExtras(data)
         } catch {
-          // keep the fallback
+          // keep the defaults
         }
 
         const pc = new RTCPeerConnection({
@@ -431,15 +539,32 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
             setError(null)
             setIsReconnecting(false)
             retryCountRef.current = 0
+            whepConnectedRef.current = true
+            if (iceDeadlineRef.current) {
+              clearTimeout(iceDeadlineRef.current)
+              iceDeadlineRef.current = null
+            }
             if (disconnectGraceRef.current) {
               clearTimeout(disconnectGraceRef.current)
               disconnectGraceRef.current = null
             }
+            // WebRTC works from here: forget any earlier fallback so new
+            // tiles start on it again.
+            clearMemory(transportMemory())
+            probingRef.current = false
+            setAutoHls(false)
           } else if (
             pc.connectionState === 'failed' ||
             pc.connectionState === 'closed'
           ) {
-            scheduleAutoRetry('WebRTC connection failed')
+            if (whepConnectedRef.current) {
+              // A drop after it had worked: the network blipped, not the
+              // route. Reconnect over WebRTC; the deadline on that attempt
+              // falls back if the route is really gone.
+              scheduleAutoRetry('WebRTC connection lost')
+            } else {
+              giveUpRef.current('ice-failed')
+            }
           } else if (pc.connectionState === 'disconnected') {
             // 'disconnected' can self-heal; give ICE a short grace period
             // before tearing down and reconnecting.
@@ -456,6 +581,8 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
 
         const offer = await pc.createOffer()
         await pc.setLocalDescription(offer)
+        await waitForIceGathering(pc, GATHER_WAIT_MS)
+        if (pcRef.current !== pc) return // torn down while gathering
 
         const headers: Record<string, string> = { 'Content-Type': 'application/sdp' }
         if (mediamtxToken) {
@@ -464,7 +591,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         const resp = await fetch(whepUrl, {
           method: 'POST',
           headers,
-          body: offer.sdp || '',
+          body: pc.localDescription?.sdp || offer.sdp || '',
         })
 
         if (!(resp.status === 200 || resp.status === 201)) {
@@ -484,8 +611,28 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         }
 
         whepResourceRef.current = resolveWhepSessionUrl(resp.headers.get('Location'), whepUrl)
-        const answerSdp = await resp.text()
+        whepCreatedAtRef.current = Date.now()
+        whepConnectedRef.current = false
+        // The address this page was opened on is proven reachable from
+        // here, which is more than any configured list can say. Add it to
+        // MediaMTX's answer as host candidates (lib/liveTransport); ICE
+        // tries them alongside the advertised ones and keeps the best.
+        const extraLines = candidateLines(hostCandidates({
+          pageHost: addressBarHost(window.location.hostname),
+          pagePort: pagePortOf(window.location),
+          extras: rtcExtrasRef.current,
+        }))
+        const answerSdp = insertCandidates(await resp.text(), extraLines)
         await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp })
+        if (pcRef.current !== pc) return
+        // The deadline: not connected by then means no candidate answers
+        // from this network, so stop waiting and take the HLS rung.
+        iceDeadlineRef.current = window.setTimeout(() => {
+          iceDeadlineRef.current = null
+          if (pcRef.current === pc && pc.connectionState !== 'connected') {
+            giveUpRef.current('ice-timeout')
+          }
+        }, ICE_GIVE_UP_MS)
       } catch (e: any) {
         const msg = e?.message || 'WebRTC setup failed'
         onError?.(msg)
@@ -543,19 +690,33 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       if (Hls?.isSupported()) {
         const hls = new Hls({
           enableWorker: true,
-          lowLatencyMode: false,
-          backBufferLength: 90,
+          // MediaMTX serves low-latency HLS (hlsVariant: lowLatency, 200 ms
+          // parts); playing it as such is what brings a live tile from
+          // several seconds behind to one or two. A live tile needs no
+          // long back buffer: nobody scrubs it, and 90 s per tile adds up
+          // on a wall.
+          lowLatencyMode: true,
+          backBufferLength: 10,
           maxBufferLength: 30,
           maxMaxBufferLength: 60,
           startLevel: -1,
           // Auto-recover from media errors
           fragLoadingMaxRetry: 3,
           manifestLoadingMaxRetry: 3,
-          // Add Authorization header for MediaMTX JWT auth (fallback)
-          xhrSetup: (xhr) => {
-            if (mediamtxToken) {
-              xhr.setRequestHeader('Authorization', `Bearer ${mediamtxToken}`)
-            }
+          // MediaMTX authenticates every HLS request by its ?jwt= query and
+          // propagates it from the playlist URL into the real segment and
+          // part URLs, but not into every URL it writes (the low-latency
+          // variant's GAP placeholders lack it). A request without the token
+          // is answered 401 with a Basic challenge, which the browser turns
+          // into its own sign-in box, so put the token on any URL that lacks
+          // it. hls.js leaves the request to us once xhrSetup has opened it.
+          xhrSetup: (xhr, url) => {
+            if (!mediamtxToken) return
+            const withToken = /[?&]jwt=/.test(url)
+              ? url
+              : `${url}${url.includes('?') ? '&' : '?'}jwt=${mediamtxToken}`
+            xhr.open('GET', withToken, true)
+            xhr.setRequestHeader('Authorization', `Bearer ${mediamtxToken}`)
           },
         })
         hlsInstanceRef.current = hls
@@ -997,6 +1158,9 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       restartStream()
     }
     const handleStreamTypeChange = (type: 'webrtc' | 'hls') => {
+      // The viewer chose: the automatic ladder stays out of it from now on.
+      manualChoiceRef.current = true
+      setAutoHls(false)
       if (type !== streamType) {
         offlinePollingRef.current = false
         cleanup()
@@ -1196,6 +1360,19 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
                 {t('common.refresh')}
               </button>
             </div>
+          </div>
+        )}
+
+        {/* Which rung of the ladder this tile is on, when it is not the top
+            one. Quiet on purpose: the picture is fine, just a second or two
+            behind. The tooltip says why; the port to forward is on the
+            WebRTC settings page, where the people who can act on it look. */}
+        {isLive && autoHls && streamType === 'hls' && !error && (
+          <div
+            className="absolute bottom-1.5 left-1.5 z-10 px-1 py-px text-[9px] font-mono uppercase tracking-wider text-white/70 bg-black/40 border border-white/15 cursor-help"
+            title={t('video.hlsFallback')}
+          >
+            HLS
           </div>
         )}
 

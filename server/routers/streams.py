@@ -275,32 +275,6 @@ async def get_hls_url(
     }
 
 
-async def _learn_ice_host(request: Request | None, db: Session) -> None:
-    """Teach MediaMTX the address this request arrived on, if it is new.
-
-    ``X-Server-Addr`` is set by nginx from ``$server_addr`` — its own listening
-    socket — so it describes this host, not anything the client chose. It is
-    honored only from a trusted proxy peer; the client-controlled ``Host``
-    header is deliberately never used here, since it would let any caller
-    inject arbitrary values into MediaMTX's advertised candidates.
-    """
-    if request is None:
-        return
-    try:
-        from services.webrtc_ice_host_service import WebRTCIceHostService
-
-        peer = request.client.host if request.client else ""
-        if not WebRTCIceHostService.is_trusted_proxy(peer):
-            return
-        addr = (request.headers.get("x-server-addr") or "").strip()
-        if addr:
-            await WebRTCIceHostService.learn(db, addr)
-    except Exception:
-        # Advertising is an optimization for live view; a failure here must
-        # never cost the caller its token and URLs.
-        pass
-
-
 @router.get("/{camera_id}/info")
 async def get_stream_info(
     camera_id: int,
@@ -320,13 +294,6 @@ async def get_stream_info(
     camera = _check_camera_permission(db, camera_id, current_user)
     with_sub = settings.agent_live_use_substream or (
         include_sub and _has_substream_source(db, camera))
-
-    # Every WHEP attempt is preceded by this call, so it is where we learn the
-    # address the browser actually reached us on and make sure MediaMTX
-    # advertises it as an ICE candidate. Without it MediaMTX offers only its
-    # own container addresses and live WebRTC fails silently into HLS.
-    # Best-effort: never let this break the stream info response.
-    await _learn_ice_host(request, db)
 
     stream_name = _build_stream_name(
         settings.mediamtx_stream_prefix, camera_id, camera.ip_address
@@ -465,9 +432,6 @@ async def get_whip_session(
     camera = _webcam_or_404(
         _check_camera_permission(db, camera_id, current_user, require_manage=True)
     )
-    # Same reason as get_stream_info: the browser's ICE candidates must
-    # reach MediaMTX on the address the browser reached us on.
-    await _learn_ice_host(request, db)
     from services.host_agent import publish_token
 
     stream_name, token = publish_token(camera)

@@ -25,6 +25,7 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
 from core.auth import get_current_active_user, get_current_superuser
+from core.config import settings
 from core.database import get_db
 from models import SecuritySetting
 from schemas import (
@@ -118,6 +119,14 @@ async def update_webrtc_settings(
     # the same STUN/TURN as the browser. Best-effort: MediaMTX may not be up or
     # configured, and that must not fail the save.
     await _apply_ice_to_mediamtx(settings_obj)
+    # The public address or the STUN list may have changed: re-advertise.
+    try:
+        from services.webrtc_ice_host_service import WebRTCIceHostService
+
+        await WebRTCIceHostService.refresh_public_ip(db, force=True)
+        await WebRTCIceHostService.apply_to_mediamtx(db)
+    except Exception:
+        pass
 
     return settings_obj.model_dump()
 
@@ -125,15 +134,19 @@ async def update_webrtc_settings(
 def _mediamtx_ice_servers(settings_obj: WebRTCSettingsSchema) -> list[dict]:
     """Convert stored STUN/TURN into MediaMTX's ``webrtcICEServers2`` shape.
 
-    Each entry is ``{url, username, password, clientOnly}``; ``clientOnly:
-    false`` means the media server uses the ICE server too (not just the
-    browser), which is the whole point. STUN uses empty credentials.
+    Each entry is ``{url, username, password, clientOnly}``. TURN is shared
+    (``clientOnly: false``): the media server relays through it too. STUN is
+    for the browser only: MediaMTX's single-port ICE listener cannot carry a
+    STUN-discovered candidate (pion gathers it on a separate random socket
+    that nothing forwards), so having MediaMTX ask would cost a STUN round
+    trip per session for nothing. Core asks STUN itself for the public IP and
+    advertises that on the ICE port (services/webrtc_ice_host_service.py).
     """
     out: list[dict] = []
     for s in settings_obj.stun_servers or []:
         if s:
             out.append(
-                {"url": s, "username": "", "password": "", "clientOnly": False}
+                {"url": s, "username": "", "password": "", "clientOnly": True}
             )
     for t in settings_obj.turn_servers or []:
         if not t.url:
@@ -212,7 +225,40 @@ async def get_client_rtc_config(
             if t.credential:
                 entry["credential"] = t.credential
             ice_servers.append(entry)
+    # What the player needs to add its own candidates (the address it opened
+    # the page on, on these ports) — app/src/lib/liveTransport.ts.
+    from services.webrtc_ice_host_service import WebRTCIceHostService
+
+    ice_port = int(settings.webrtc_ice_port or 8189)
+    try:
+        server_hosts = await WebRTCIceHostService.resolved_ips(db)
+    except Exception:
+        server_hosts = []
     return WebRTCClientConfig(
         iceServers=ice_servers,
         iceTransportPolicy=settings_obj.transport_policy,
+        icePort=ice_port,
+        publicIcePort=settings_obj.public_ice_port or ice_port,
+        singlePortWebrtc=bool(settings.webrtc_single_port),
+        serverHosts=server_hosts,
     )
+
+
+@router.get("/advertised")
+async def get_advertised_hosts(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_superuser),
+):
+    """The addresses MediaMTX advertises to viewers and where each came from
+    (the Settings → WebRTC page), with the ICE ports to forward."""
+    from services.webrtc_ice_host_service import WebRTCIceHostService
+
+    ice_port = int(settings.webrtc_ice_port or 8189)
+    public_ip = WebRTCIceHostService.public_ip()
+    return {
+        "hosts": WebRTCIceHostService.resolve_entries(db),
+        "ice_port": ice_port,
+        "public_ice_port": WebRTCIceHostService.public_ice_port(db),
+        "stun_public_ip": public_ip.ip,
+        "stun_server": public_ip.server,
+    }
