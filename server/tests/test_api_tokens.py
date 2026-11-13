@@ -126,9 +126,9 @@ def env(monkeypatch, tmp_path):
     for n in ("cameras.view", "live.view", "recordings.view", "settings.view",
               "api_tokens.manage"):
         s.add(models.RolePermission(role_id=viewer_role.id, permission_id=perms[n].id))
-    admin = models.User(username="admin", email="a@x", hashed_password="h",
+    admin = models.User(mfa_enabled=True, username="admin", email="a@x", hashed_password="h",
                         is_active=True, is_superuser=True, role_id=admin_role.id)
-    viewer = models.User(username="vera", email="v@x", hashed_password="h",
+    viewer = models.User(mfa_enabled=True, username="vera", email="v@x", hashed_password="h",
                          is_active=True, is_superuser=False, role_id=viewer_role.id)
     s.add_all([admin, viewer])
     s.commit()

@@ -52,6 +52,7 @@ export function getDeviceToken(): string | null {
 }
 
 let authToken: string | null = null
+let enrolmentRedirected = false
 let isRefreshing = false
 let pendingRequests: Array<(token: string | null) => void> = []
 
@@ -249,6 +250,16 @@ async function request(method: string, url: string, data?: any, options: Request
     }
   }
 
+  // Server-side MFA wall: this session's account has no enrolled second factor
+  // (e.g. an administrator just reset it). Reload so the app re-reads the
+  // account and shows the enrolment screen instead of failing call by call.
+  if (resp.status === 403 && (payload as any)?.detail?.error === 'mfa_enrollment_required') {
+    if (typeof window !== 'undefined' && !enrolmentRedirected) {
+      enrolmentRedirected = true
+      window.location.assign('/')
+    }
+  }
+
   if (!resp.ok) {
     const err: any = new Error(extractErrorMessage(payload, resp.status))
     err.status = resp.status
@@ -271,7 +282,8 @@ export const api = {
   post: (url: string, data?: any, options?: RequestOptions) => request('POST', url, data, options),
   put: (url: string, data?: any, options?: RequestOptions) => request('PUT', url, data, options),
   patch: (url: string, data?: any, options?: RequestOptions) => request('PATCH', url, data, options),
-  delete: (url: string, options?: RequestOptions) => request('DELETE', url, undefined, options),
+  // A body is rare on DELETE but allowed; used where a password must not travel in a header.
+  delete: (url: string, options?: RequestOptions, data?: any) => request('DELETE', url, data, options),
   setToken: setAuthToken,
 }
 

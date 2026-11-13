@@ -55,7 +55,7 @@ def _operator(env, *, view=(1,), manage=(1,)):  # noqa: F811
     s.commit()
     for n in ("cameras.view", "cameras.manage", "live.view"):
         s.add(m.RolePermission(role_id=role.id, permission_id=perms[n].id))
-    u = m.User(username="olga", email="o@x", hashed_password="h", is_active=True,
+    u = m.User(mfa_enabled=True, username="olga", email="o@x", hashed_password="h", is_active=True,
                is_superuser=False, role_id=role.id)
     s.add(u)
     s.commit()

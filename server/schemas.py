@@ -673,6 +673,67 @@ class MfaVerifyRequest(BaseModel):
     code: str = Field(..., min_length=6, max_length=8)
 
 
+class MfaFactorOut(BaseModel):
+    """One second factor, never with its secret."""
+    id: int
+    kind: str
+    label: str
+    enabled: bool
+    confirmed: bool
+    created_at: datetime | None = None
+    last_used_at: datetime | None = None
+
+
+class MfaFactorList(BaseModel):
+    factors: list[MfaFactorOut]
+    # Unused recovery codes (only on the account's own listing).
+    recovery_codes_remaining: int | None = None
+
+
+class MfaBeginRequest(BaseModel):
+    label: str | None = Field(None, max_length=64)
+    # Required once the account has a working authenticator.
+    current_password: str | None = None
+
+
+class MfaBeginResponse(BaseModel):
+    factor_id: int
+    otpauth_url: str
+    secret: str
+
+
+class MfaConfirmResponse(MfaFactorOut):
+    # Set when this was the account's first authenticator: shown once.
+    recovery_codes: list[str] | None = None
+
+
+class MfaRecoveryCodesRequest(BaseModel):
+    current_password: str | None = None
+
+
+class MfaRecoveryCodesResponse(BaseModel):
+    recovery_codes: list[str]
+
+
+class MfaConfirmRequest(BaseModel):
+    code: str = Field(..., min_length=6, max_length=8)
+    label: str | None = Field(None, max_length=64)
+
+
+class MfaFactorPatch(BaseModel):
+    label: str | None = Field(None, max_length=64)
+    enabled: bool | None = None
+    current_password: str | None = None
+
+
+class MfaFactorDelete(BaseModel):
+    current_password: str | None = None
+
+
+class MfaAdminFactorPatch(BaseModel):
+    enabled: bool
+
+
 # Response schemas
 class RoleResponse(RoleBase):
     id: int
@@ -731,6 +792,8 @@ class UserResponse(UserBase):
     is_superuser: bool
     password_set: bool
     mfa_enabled: bool
+    # Working authenticators (confirmed, enabled) on the account.
+    mfa_factor_count: int = 0
     auth_provider: str | None = None
     created_at: datetime
     updated_at: datetime | None = None

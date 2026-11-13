@@ -96,7 +96,7 @@ def env(monkeypatch):
     db.flush()
 
     def make_user(username: str, superuser: bool) -> User:
-        u = User(
+        u = User(mfa_enabled=True, 
             username=username, email=f"{username}@example.com",
             hashed_password=get_password_hash("Str0ng!passw0rd"),
             is_active=True, is_superuser=superuser, password_set=True,

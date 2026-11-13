@@ -26,7 +26,9 @@ from core.auth import get_current_active_user, get_current_superuser
 from core.database import get_db
 from core.logging_config import main_logger
 from models import Permission, User
-from schemas import UserCreate, UserList, UserResponse, UserUpdate
+from routers.mfa import factor_out
+from schemas import MfaAdminFactorPatch, MfaFactorList, UserCreate, UserList, UserResponse, UserUpdate
+from services import mailer, mfa_service
 from services.audit_service import write_audit_log
 from services.user_service import UserService
 from utils.mfa_guard import require_mfa_code
@@ -425,3 +427,155 @@ def activate_user(
     except Exception as e:
         main_logger.warning(f"Failed to write audit log (user.activate): {e}")
     return user
+
+
+@router.post("/{user_id}/mfa/reset")
+async def reset_user_mfa(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_superuser),
+    request: Request = None,
+    mfa_code: str | None = Header(None, alias="X-MFA-Code"),
+):
+    """Reset another user's two-factor sign-in (superuser only).
+
+    For a user who lost, or is moving away from, their authenticator app:
+    their second factor is removed and every browser session of theirs ends;
+    at their next password sign-in they enrol a new authenticator, and until
+    they do their session reaches nothing else. Requires the caller's current
+    TOTP code in X-MFA-Code. Not for your own account (sign-in would no longer
+    need your second factor); a locked-out administrator uses
+    ``scripts/disable_mfa.py`` on the host. The user is e-mailed when mail is
+    configured.
+    """
+    if user_id == current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot reset your own two-factor sign-in. Ask another administrator.",
+        )
+    _require_mfa_code(current_user, mfa_code)
+
+    target = db.query(User).filter(User.id == user_id).first()
+    if not target:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    try:
+        details = mfa_service.reset_mfa(db, target)
+    except mfa_service.MfaResetRefused as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    try:
+        write_audit_log(
+            db,
+            action="mfa.admin_reset",
+            user_id=current_user.id,
+            entity_type="user",
+            entity_id=target.id,
+            details=details,
+            ip=request.client.host if request and request.client else None,
+            user_agent=request.headers.get("user-agent") if request else None,
+        )
+    except Exception as e:
+        main_logger.warning(f"Failed to write audit log (mfa.admin_reset): {e}")
+
+    notified = False
+    if target.email:
+        try:
+            if mailer.is_configured(mailer.load(db)):
+                await mailer.send(
+                    db, target.email, "Your OpenNVR two-factor sign-in was reset",
+                    f"Hello {target.first_name or target.username},\n\n"
+                    f"An OpenNVR administrator ({current_user.username}) reset the two-factor "
+                    f"sign-in for your account '{target.username}'. You have been signed out.\n\n"
+                    "The next time you sign in with your password, OpenNVR asks you to set up "
+                    "an authenticator app again.\n\n"
+                    "If you did not ask for this, tell your administrator straight away.\n",
+                )
+                notified = True
+        except Exception as e:
+            main_logger.warning(f"MFA reset notice to {target.email} failed: {e}")
+    return {"message": "Two-factor sign-in reset", "notified": notified}
+
+
+def _mfa_target(db: Session, user_id: int, current_user: User) -> User:
+    if user_id == current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Manage your own authenticators under Settings > Two-factor sign-in.",
+        )
+    target = db.query(User).filter(User.id == user_id).first()
+    if not target:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    return target
+
+
+def _audit_mfa(db, request, current_user: User, target: User, action: str, details: dict) -> None:
+    try:
+        write_audit_log(
+            db, action=action, user_id=current_user.id, entity_type="user", entity_id=target.id,
+            details=details,
+            ip=request.client.host if request and request.client else None,
+            user_agent=request.headers.get("user-agent") if request else None,
+        )
+    except Exception as e:
+        main_logger.warning(f"Failed to write audit log ({action}): {e}")
+
+
+@router.get("/{user_id}/mfa/factors", response_model=MfaFactorList)
+def list_user_mfa_factors(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_superuser),
+):
+    """Another user's authenticators: names, state, last use. Never secrets."""
+    target = db.query(User).filter(User.id == user_id).first()
+    if not target:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    rows = mfa_service.factors(db, target)
+    db.commit()
+    return MfaFactorList(factors=[factor_out(f) for f in rows])
+
+
+@router.patch("/{user_id}/mfa/factors/{factor_id}", response_model=MfaFactorList)
+def set_user_mfa_factor(
+    user_id: int,
+    factor_id: int,
+    body: MfaAdminFactorPatch,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_superuser),
+    mfa_code: str | None = Header(None, alias="X-MFA-Code"),
+):
+    """Turn one of another user's authenticators off (a phone that went
+    missing) or back on. Turning off their last working one is a reset:
+    they are signed out and enrol again. Needs your own MFA code."""
+    target = _mfa_target(db, user_id, current_user)
+    _require_mfa_code(current_user, mfa_code)
+    try:
+        details = mfa_service.admin_set_enabled(db, target, factor_id, body.enabled)
+    except mfa_service.MfaChangeRefused as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    action = ("mfa.admin_reset" if details.get("via") else
+              "mfa.admin_factor_enabled" if body.enabled else "mfa.admin_factor_disabled")
+    _audit_mfa(db, request, current_user, target, action, details)
+    return MfaFactorList(factors=[factor_out(f) for f in mfa_service.factors(db, target)])
+
+
+@router.delete("/{user_id}/mfa/factors/{factor_id}", response_model=MfaFactorList)
+def remove_user_mfa_factor(
+    user_id: int,
+    factor_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_superuser),
+    mfa_code: str | None = Header(None, alias="X-MFA-Code"),
+):
+    """Remove one of another user's authenticators. Removing their last
+    working one is a reset. Needs your own MFA code."""
+    target = _mfa_target(db, user_id, current_user)
+    _require_mfa_code(current_user, mfa_code)
+    try:
+        details = mfa_service.admin_remove(db, target, factor_id)
+    except mfa_service.MfaChangeRefused as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    action = "mfa.admin_reset" if details.get("via") else "mfa.admin_factor_removed"
+    _audit_mfa(db, request, current_user, target, action, details)
+    return MfaFactorList(factors=[factor_out(f) for f in mfa_service.factors(db, target)])

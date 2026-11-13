@@ -21,10 +21,11 @@ the fleet happens to look like.
 
 from __future__ import annotations
 
+import pyotp
 import pytest
 
 from harness import routes
-from harness.bootstrap import generate_password
+from harness.bootstrap import enrol_mfa, generate_password
 
 pytestmark = pytest.mark.smoke
 
@@ -42,12 +43,13 @@ def viewer_role(client) -> dict:
 def _login(client, username: str, password: str):
     """Log in as a freshly created user and return a client acting as them.
 
-    Users created through ``POST /users`` land with ``mfa_enabled=False`` --
-    they enrol TOTP at first login through the UI's MFA wall -- so no code is
-    needed here. The bootstrapped admin is the exception and the reason
-    ``bootstrap.py`` computes TOTP at all.
+    Users created through ``POST /users`` land with ``mfa_enabled=False`` and
+    enrol TOTP at first login. Until they do, the server lets their session
+    reach only the enrolment routes (the MFA wall is enforced by the API, not
+    just the UI), so enrol first, then sign in with a code like a real user.
     """
-    tokens = client.login(username, password)
+    secret = enrol_mfa(client, username, password)
+    tokens = client.login(username, password, code=pyotp.TOTP(secret).now())
     return client.as_user(tokens["access_token"], tokens.get("device_token"))
 
 
