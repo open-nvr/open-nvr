@@ -12,6 +12,32 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A fresh install on a Qualcomm board with the NPU captioner pulls the
+  right image.** Choosing `litertlm` in the installer left
+  `CAPTION_ADAPTER_TAG` empty; the installer then pulled
+  `litertlm-adapter:0.1.11`, a tag that does not exist (the NPU-only
+  adapters are published only as `-qualcomm`), and the whole pull
+  aborted. `start.sh` did not recover it either: its fill ran only when it
+  was the one switching the captioner, and an adapter already set to
+  `litertlm` was left with the empty tag. The installer now pins the
+  `-qualcomm` tag where the choice is made, and the start script fills it
+  whoever chose litertlm (an operator's own tag is never touched). Found
+  on the first real fresh install of 0.1.11, Ventuno Q, 2026-11-13.
+- **Live video over a second interface.** In the network question's
+  Simple mode, MediaMTX advertised only the address shown in the UI URL
+  as its WebRTC candidate, so a browser reaching the box over a VPN or a
+  second NIC got a session and no picture ("deadline exceeded while
+  waiting connection"). Simple mode now advertises every routable
+  address; the browser keeps the one that answers.
+- **The fake-camera guide no longer knocks the webcam overlay out.** Its
+  hand-typed `docker compose … up -d fakecams` re-created MediaMTX from
+  the plain image on an installed box, and the USB webcam died with
+  "ffmpeg: executable file not found". The guide now adds the rig through
+  `.env` and `./start.sh`, and says why.
+- **A lockfile that pins the app SDK must match its version.** A test
+  fails the PR; the agent's image build on `main` failed after the 0.12.0
+  bump for exactly that.
+
 ## [0.1.11] — 2026-11-14
 
 The Qualcomm NPU release. On the qualcomm flavour the detector, the captions (Gemma), the camera agent's LLM, the search embeddings (SigLIP 2 and a sentence model), speech to text (Whisper) and the plate reader all run on the Hexagon HTP, and a fresh install on a Dragonwing board starts with one setting: the flavour overlays are split per compose file so Compose 2.24 accepts a plain install, the tag the embedder fill finds is the tag asked for, and the discovery prober's Dockerfile reaches Docker intact. Detection boxes are on by default on every live picture. Search gained weighted fusion, synonyms and typo reading, a caption arm with its own model, voice search and a bounded re-rank, off by default. The workflow engine runs workflows and has an API. ANPR on a Qualcomm box: plate candidates at full resolution, consensus across looks, per-camera scan policy. USB webcams are cameras, served by MediaMTX on Linux; Add Camera finds ONVIF cameras by multicast. The camera agent serves OpenNVR Mirror. The dashboard shows the NPU and GPU beside CPU, memory and disk, and says when requests are queued. Adapter pins at `0.1.11` (`text_embed` on its own tag). App SDK 0.12.0 (`sdk-v0.12.0`).

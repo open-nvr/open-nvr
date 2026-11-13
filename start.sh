@@ -285,7 +285,15 @@ apply_accel_env() {
     write_env_var OPENNVR_ACCEL_RESOLVED "$accel"
 }
 fill_qualcomm_captioner() {
-    case "$(get_env_var CAPTION_ADAPTER)" in ""|moondream|ollamavlm) ;; *) return 0 ;; esac
+    # Two cases fill here: the switch from a CPU captioner to litertlm, and
+    # a litertlm the installer (or the operator) already chose but left
+    # without its -qualcomm tag — the fresh install of 0.1.11 on a Ventuno
+    # Q wrote CAPTION_ADAPTER=litertlm and an empty tag, this function saw
+    # "not a CPU captioner" and returned, and `docker compose pull` went
+    # looking for litertlm-adapter:0.1.11, which does not exist
+    # (2026-11-13). An adapter the operator set to anything else is left
+    # alone.
+    case "$(get_env_var CAPTION_ADAPTER)" in ""|moondream|ollamavlm|litertlm) ;; *) return 0 ;; esac
     [[ -z "$(get_env_var CAPTION_ADAPTER_TAG)" ]] || return 0
     local tag img; tag=$(get_env_var ADAPTER_TAG)
     for tag in "${tag:-latest}-qualcomm" "latest-qualcomm"; do
@@ -1506,7 +1514,20 @@ prompt_nic_topology() {
             # branch for the rationale.
             if [ -n "$lan_hint" ]; then
                 set_env_var MEDIAMTX_PUBLIC_URL "https://${lan_hint}"
-                set_env_var MEDIAMTX_WEBRTC_HOSTS "${lan_hint}"
+                # Every routable address, not only the one the UI URL
+                # names: a browser that reaches this host over a second
+                # interface (a VPN such as Tailscale, WiFi beside the
+                # cable) gets a video session and then no video, because
+                # the only ICE candidate advertised is an address it
+                # cannot route to — "deadline exceeded while waiting
+                # connection" in MediaMTX's log (Ventuno Q, 2026-11-13,
+                # watched over Tailscale). Advertising all of them costs
+                # nothing: the browser tries each and keeps the one that
+                # answers.
+                local all_hosts
+                all_hosts=$(echo "$nics" | awk -F: '{print $2}' | grep -v '^$' | paste -sd, -)
+                case ",${all_hosts}," in *",${lan_hint},"*) ;; *) all_hosts="${lan_hint}${all_hosts:+,$all_hosts}" ;; esac
+                set_env_var MEDIAMTX_WEBRTC_HOSTS "${all_hosts}"
                 if [ -z "$(get_env_var OPENNVR_HOST_IP 2>/dev/null)" ]; then
                     export OPENNVR_HOST_IP="${lan_hint}"
                 fi

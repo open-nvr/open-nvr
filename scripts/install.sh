@@ -1312,11 +1312,17 @@ choose_example() {
             "Describes what a camera sees. moondream runs inside Docker (0.5B, answers questions, the right pick without a CUDA GPU — on CPU it is ~10x faster than Ollama's 1.8B moondream); blip runs inside Docker (plain captions only, fastest); ollamavlm proxies to your Ollama (only worth it on an NVIDIA GPU; needs an adapter tag newer than 0.1.3); litertlm runs Gemma 4 E2B on the Qualcomm Hexagon NPU (Dragonwing / Snapdragon boards only; a 2.7 GB one-time download; the -qualcomm image tag, which start.sh fills in)." "yes" \
             "moondream | blip | ollamavlm | litertlm — all local."
         if [[ "$(env_get CAPTION_ADAPTER)" == "litertlm" && -z "$(env_get CAPTION_ADAPTER_TAG)" ]]; then
-            # The NPU captioner is published only as a -qualcomm image; its
-            # first release is after ADAPTER_TAG's pin, so start.sh resolves
-            # the exact tag (ADAPTER_TAG-qualcomm, else latest-qualcomm) at
-            # every start. Nothing to pin here.
-            info "litertlm rides the -qualcomm image tag; start.sh fills CAPTION_ADAPTER_TAG on the first start."
+            # The NPU captioner is published only as a -qualcomm image. The
+            # installer pulls the camera-agent set a few lines below, and a
+            # pull of litertlm-adapter:<ADAPTER_TAG> (no suffix) aborts the
+            # whole pull with "not found" — the first fresh install of
+            # 0.1.11 on a Ventuno Q died exactly there (2026-11-13). So the
+            # tag is pinned here, where the choice is made, not deferred to
+            # start.sh (whose fill also skipped it, see fill_qualcomm_captioner).
+            local qtag; qtag="$(env_get ADAPTER_TAG)"
+            qtag="${qtag:-latest}-qualcomm"
+            env_set CAPTION_ADAPTER_TAG "$qtag"
+            info "litertlm runs from the -qualcomm image: CAPTION_ADAPTER_TAG=${qtag}."
         fi
         # ollamavlm chosen → suggest a VLM sized like the LLM was.
         if [[ "$(env_get CAPTION_ADAPTER)" == "ollamavlm" ]]; then
