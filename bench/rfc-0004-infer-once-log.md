@@ -100,6 +100,15 @@ visit on the clip camera (expect ≈ 0.1) against the office camera
 
 ## Step 3 — one shared live description per camera
 
+**Corrected 2026-11-13 under the quality rule.** The first build answered
+a live question from the newest described visit when it was fresh. A
+visit's caption is one object's crop; "what do you see" is the frame.
+That would have narrowed the agent's and the Mirror's answers, so the
+default is now a whole-frame look, shared and cached per interval, and
+the store answers only on `prefer_store=true`. The saving is the
+duplicate calls, which is what was measured as waste; the answer is
+unchanged.
+
 **Built 2026-11-13** (`services/camera_description.py`, route
 `GET /internal/camera-agent/cameras/{id}/description?max_age_s=N`):
 the newest described visit answers when it is younger than N and no
