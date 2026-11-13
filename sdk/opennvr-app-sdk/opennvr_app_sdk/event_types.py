@@ -118,6 +118,33 @@ class VisitRecorded(TypedPayload):
 
 
 @dataclass(frozen=True)
+class VisitEnriched(TypedPayload):
+    """``visit.enriched.v1`` — what the enrichment tier knows about a
+    visit: the caption, the attribute claims, where they came from.
+    Published by core each time a visit's caption or claims land, with
+    the whole current state every time (RFC-0004)."""
+
+    SCHEMA: ClassVar[str] = "visit.enriched.v1"
+    REQUIRED: ClassVar[tuple[str, ...]] = ("event_id",)
+    event_id: int = 0
+    label: str = ""
+    caption: str | None = None
+    attributes: dict[str, str] = field(default_factory=dict)
+    evidence_path: str | None = None
+    producer: str | None = None
+    enriched_by: list[str] = field(default_factory=list)
+    #: The earlier visit this one's caption and claims were copied from
+    #: (same evidence frame); absent when the look was fresh.
+    reused_from: int | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        out = super().to_payload()
+        if out.get("reused_from") is None:
+            out.pop("reused_from", None)
+        return out
+
+
+@dataclass(frozen=True)
 class PlateRecognized(TypedPayload):
     """``plate.recognized.v1`` — one accepted OCR read."""
 
@@ -301,7 +328,7 @@ class ScreeningCompleted(TypedPayload):
 #: schema → typed payload class, for every contract this SDK knows.
 EVENT_TYPES: dict[str, type[TypedPayload]] = {
     cls.SCHEMA: cls for cls in (
-        DetectionObserved, VisitRecorded, PlateRecognized, FaceRecognized, AccessDecided,
+        DetectionObserved, VisitRecorded, VisitEnriched, PlateRecognized, FaceRecognized, AccessDecided,
         OccupancyChanged, OccupancyHeatmap, OccupancyFootfall, OverlayBoxes,
         ScreeningCompleted,
     )

@@ -482,6 +482,7 @@ async def enrich_event_descriptors(event_id: int, *,
         evidence_path = row.evidence_path
         already = set((row.payload or {}).get("enriched_by") or [])
         camera_handle = f"cam{row.camera_id}"
+        reused = False
         if VQA_TASK not in already:
             # The same frame asked before (RFC-0004 step 2): its claims
             # are this visit's claims; nothing to ask.
@@ -490,7 +491,9 @@ async def enrich_event_descriptors(event_id: int, *,
             twin = enrichment_reuse.find_twin(db, row)
             if twin is not None and enrichment_reuse.reuse_descriptors(db, row, twin):
                 db.commit()
-                return "done"
+                reused = True
+            else:
+                reused = False
         if _single_call_carries(db, row, already, priority):
             # RFC-0004 step 1: the caption task asks the questions in the
             # same call as the sentence. Asking them here too would be
@@ -508,6 +511,9 @@ async def enrich_event_descriptors(event_id: int, *,
         }
     finally:
         db.close()
+    if reused:
+        await _publish_enriched(event_id)
+        return "done"
 
     # Asked once. A re-run is a deliberate act through the endpoint, not
     # something a retried background task should pay for twice.
@@ -621,9 +627,24 @@ async def enrich_event_descriptors(event_id: int, *,
         # the backfill asks again.
         apply_descriptors(db, row, claims, [VQA_TASK] if not dropped else [])
         db.commit()
+        written = True
     except Exception:  # noqa: BLE001
         logger.exception("descriptor enrichment: write failed for %s", event_id)
         db.rollback()
+        written = False
     finally:
         db.close()
+    if written and (claims or not dropped):
+        await _publish_enriched(event_id)
     return "dropped" if dropped else "done"
+
+
+async def _publish_enriched(event_id: int) -> None:
+    """``visit.enriched.v1`` for this visit, best effort (RFC-0004 step 2)."""
+    try:
+        from services.domain_bus import publish_visit_enriched
+
+        await publish_visit_enriched(int(event_id))
+    except Exception:  # noqa: BLE001
+        logger.debug("descriptor enrichment: visit.enriched not published for %s",
+                     event_id, exc_info=True)

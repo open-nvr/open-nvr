@@ -370,8 +370,9 @@ async def enrich_event_caption(event_id: int,
         db.close()
     if reused:
         # The caption is committed; its vector is the same best-effort
-        # step as after a fresh caption.
+        # step as after a fresh caption, and so is the bus.
         await _embed_caption(event_id)
+        await _publish_enriched(event_id)
         return "done"
 
     # ── Phase 2: adapter call, no session held ──────────────────────
@@ -479,9 +480,23 @@ async def enrich_event_caption(event_id: int,
     # step AFTER the session is closed (an adapter call holds no
     # session — the rule above), and nothing it does can take the
     # caption back: it is off unless EVENTS_EMBED_ENRICHMENT is on, a
-    # no-op without an adapter, and any failure is a debug line.
+    # no-op without an adapter, and any failure is a debug line. The
+    # bus is the same kind of step: visit.enriched.v1 says what the
+    # store now holds, and a failure to say it changes nothing stored.
     await _embed_caption(event_id)
+    await _publish_enriched(event_id)
     return "done"
+
+
+async def _publish_enriched(event_id: int) -> None:
+    """``visit.enriched.v1`` for this visit, best effort (RFC-0004 step 2)."""
+    try:
+        from services.domain_bus import publish_visit_enriched
+
+        await publish_visit_enriched(int(event_id))
+    except Exception:                              # noqa: BLE001
+        logger.debug("caption enrichment: visit.enriched not published for %s",
+                     event_id, exc_info=True)
 
 
 async def _embed_caption(event_id: int) -> None:

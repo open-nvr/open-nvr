@@ -120,6 +120,16 @@ def record_track_visit(
     db.add(row)
     db.commit()
     db.refresh(row)
+    # The contracted "a visit exists" signal (docs/EVENT_CONTRACTS.md,
+    # visit.recorded.v1), on the bus the moment the row is committed.
+    try:
+        from services import domain_bus
+
+        domain_bus.publish_soon(domain_bus.VISIT_RECORDED, camera_id=int(camera_id),
+                                payload=domain_bus.visit_recorded_payload(row),
+                                ts=domain_bus._iso(row.ended_at or row.started_at))
+    except Exception:                              # noqa: BLE001
+        pass
     return row
 
 

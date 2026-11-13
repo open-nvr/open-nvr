@@ -10,7 +10,7 @@ import pytest
 
 from opennvr_app_sdk import (
     EVENT_TYPES, AccessDecided, DetectionObserved, FaceRecognized, OccupancyChanged, OccupancyFootfall,
-    OccupancyHeatmap, OverlayBoxes, PlateRecognized, ScreeningCompleted, VisitRecorded,
+    OccupancyHeatmap, OverlayBoxes, PlateRecognized, ScreeningCompleted, VisitEnriched, VisitRecorded,
     typed_payload,
 )
 from opennvr_app_sdk.domain_events import DomainEventPublisher
@@ -23,6 +23,10 @@ def test_every_v1_contract_is_typed_and_round_trips():
                             "tracks": [{"id": "t1", "label": "person", "conf": 0.9, "bbox": [1, 2, 3, 4]}]},
         VisitRecorded: {"event_id": 9, "label": "car", "started_at": "2026-09-06T10:00:00Z",
                         "ended_at": "2026-09-06T10:01:00Z", "evidence_path": None},
+        VisitEnriched: {"event_id": 9, "label": "car", "caption": "A white van at the gate.",
+                        "attributes": {"colour": "white", "vehicle_type": "van"},
+                        "evidence_path": "ab/abc.jpg", "producer": "litertlm",
+                        "enriched_by": ["vqa"], "reused_from": 7},
         PlateRecognized: {"plate_text": "R197GB", "confidence": 0.93, "vehicle_label": "car",
                           "event_id": 9, "plate_box": [10, 10, 80, 30], "plate_box_confidence": 0.88,
                           "plate_box_image": [320, 120]},

@@ -13,7 +13,7 @@ or an estimate.
 |---|---|---|---|
 | 0 | this ledger | — | written 2026-11-13 |
 | 1 | one structured call per best frame (caption + attributes in one answer; per-question fallback) | #909, #910 | measured 2026-11-13 (paired frames, windows A/B/C); flag on on the Ventuno Q; default flips after the search eval |
-| 2 | do not infer twice for the same frame (exact-frame reuse; near-repeat reuse measured and declined); `visit.enriched.v1` on the bus | — | measured 2026-11-13; exact reuse in progress |
+| 2 | do not infer twice for the same frame (exact-frame reuse; near-repeat reuse measured and declined); `visit.enriched.v1` on the bus | reuse PR + bus PR | measured and built 2026-11-13; box measurement after deploy |
 | 3 | description channel: live tracks + freshest result; one shared gated call on a new track or a stale result | — | planned |
 | 4 | agent live look and Mirror onto 2 and 3; direct adapter calls removed | — | planned |
 | 5 | SDK frame-consumer rule (credits, latest frame wins, measured cadence, tracker continuity, skipped counter); KAI-C stream proxy adopts it | — | planned |
@@ -85,6 +85,18 @@ re-detects the same 450 frames ten thousand times a day, the per-person
 questions (up to five), and the agent's and the Mirror's own calls —
 not because a real camera's captions are expensive. So the quality of
 the plain caption is not what has to give; the duplicate work is.
+
+**Done, step 2 (2026-11-13):** exact-frame reuse (its PR) and the two
+bus events (the PR stacked on it). Found on the way: `visit.recorded.v1`
+had been contracted with core as producer since RFC-0002 and typed in the
+SDK, and nothing published it — apps polled the timeline API. Core now
+publishes it on commit, and `visit.enriched.v1` each time a caption or
+claims land (fresh or reused), the whole current state every message.
+One shared NATS client in `services/domain_bus.py`; without `NATS_URL`
+nothing changes. **To measure after deploy:** messages per visit on the
+box (expect 1 recorded + 1–2 enriched), and the captioner's calls per
+visit on the clip camera (expect ≈ 0.1) against the office camera
+(expect unchanged).
 
 ## Step 1 — one structured call
 
