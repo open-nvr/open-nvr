@@ -8,6 +8,21 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The governor's device-busy trigger counts only the work it can defer.**
+  It read the accelerator's total share, and on a box with a plate reader
+  the total is mostly the detector and the plate reader: measured on a
+  Ventuno Q (window C in `bench/rfc-0004-infer-once-log.md`), 77–139 %
+  busy with the captioner at 24 %, so captions were paced to one per 6 s,
+  a quarter of the visits in a burst got no caption inside the window, and
+  the detector gained nothing, because neither the detector nor the plate
+  reader is something the governor can pace. The trigger now compares
+  `EVENTS_ENRICHMENT_DEVICE_BUSY_PERCENT` with the share held by the
+  enrichment adapters it admits calls to (the monitor's per-user shares
+  filtered by the gates that exist). The reason line and the snapshot
+  say both figures: "enrichment holds 24% of Qualcomm Hexagon NPU
+  (device 112% busy)". The latency trigger is unchanged and still
+  covers the queue a share cannot see.
+
 - **One captioner call per visit, behind a flag (RFC-0004, step 1).** With
   `EVENTS_ENRICHMENT_SINGLE_CALL=true` the caption task asks the model
   once for the sentence and the descriptor answers together, as one JSON

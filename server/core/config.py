@@ -549,13 +549,17 @@ class Settings(BaseSettings):
     events_enrichment_detector_slow_factor: float = 2.0
     events_enrichment_detector_pause_factor: float = 4.0
     events_enrichment_pressure_gap_s: float = 6.0
-    # The accelerator's busy share (the dashboard's NPU figure, inference
-    # time over wall time, in-flight count when queued) above which
-    # background enrichment does not START a new call — the device-side
-    # trigger beside the detector-latency one. A running inference cannot
-    # be pre-empted on an NPU; this keeps new ones from starting while the
-    # device has no room. Measured on a Ventuno Q (2026-11-12): detector
-    # alone 10–37 %, with the description questions 85–100 %.
+    # The share of the accelerator held by the enrichment adapters the
+    # governor paces (captioner, VQA, embedder; the monitor's per-user
+    # shares, not the device total) above which background enrichment
+    # does not START a new call — the device-side trigger beside the
+    # detector-latency one. A running inference cannot be pre-empted on an
+    # NPU; this keeps new ones from starting while the work the governor
+    # can defer already fills the device. The detector's and the plate
+    # reader's shares are left out: they cannot be deferred, and counting
+    # them paced captions for no detector gain (Ventuno Q, 2026-11-13).
+    # Measured: the description questions held 48–70 % (2026-11-12), the
+    # single structured call 24 % (2026-11-13).
     events_enrichment_device_busy_percent: float = 60.0
     # The backfill sweeps history only after the governor has been NORMAL
     # this long with nothing live in hand — "when it finds resources".
