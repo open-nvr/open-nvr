@@ -9,11 +9,16 @@ already computes:
 
 * the host monitor's last CPU sample and its ``cpu_high`` alert
   (``system_monitor_service``, sampled every 15 s for the UI anyway);
-* the **accelerator's busy share** from the same sample: above
-  ``EVENTS_ENRICHMENT_DEVICE_BUSY_PERCENT`` the device has no room, and
-  background enrichment does not start a new call (a running inference
-  cannot be pre-empted on an NPU, so "pre-emptive" means at the call
-  boundary: do not start, keep units short, order by value);
+* the **share of the accelerator held by the enrichment adapters it
+  paces** (captioner, VQA, embedder — the monitor's per-user shares
+  filtered by the gates that exist), from the same sample: above
+  ``EVENTS_ENRICHMENT_DEVICE_BUSY_PERCENT`` background enrichment does
+  not start a new call (a running inference cannot be pre-empted on an
+  NPU, so "pre-emptive" means at the call boundary: do not start, keep
+  units short, order by value). Not the device total: the detector's and
+  the plate reader's shares cannot be deferred by this governor, and
+  counting them paced captions for no detector gain (measured, window C
+  of bench/rfc-0004-infer-once-log.md);
 * the **detector's latency against its own floor**, from the same
   monitor's accelerator sample (``accelerator_usage``): on a board where
   the detector shares one NPU with the captioner, a detector running at
@@ -139,13 +144,15 @@ PRESSURE_SAMPLE_TTL_S = 60.0
 
 
 def device_busy_percent() -> float:
-    """The accelerator busy share above which background enrichment does not
-    START a new call (the device signal; the detector's latency is the
-    other). Measured on a Ventuno Q, 2026-11-12: the detector alone took
-    10–37 % of the Hexagon across quiet and busy hours, and the description
-    questions pushed the sum to 85–100 %; 60 separates the two cleanly and
-    leaves a sixteen-camera detector (24 inferences/s × 25 ms = 60 %) at
-    the line, which is a device that genuinely has no room."""
+    """The share of the accelerator held by the enrichment adapters this
+    governor paces (captioner, VQA, embedder) above which it does not
+    START a new background call — the device signal; the detector's own
+    latency is the other. Measured on a Ventuno Q: the description
+    questions alone held 48–70 % of the Hexagon in the busy hours of
+    2026-11-12 (the detector 10–37 % beside them), and 24 % once the single
+    structured call replaced them (2026-11-13). 60 separates "the
+    captioner is what the device is doing" from "the captioner is one
+    user among several", which is the only case pacing it can help."""
     return min(100.0, max(10.0, float(getattr(_settings(), "events_enrichment_device_busy_percent", 60.0))))
 #: Below this floor the ratio is noise (a CPU detector at 150 ms has a
 #: real floor; a stub at 0.1 ms does not).
@@ -239,11 +246,38 @@ def detector_pressure() -> tuple[float, float, float] | None:
     return worst
 
 
-def device_busy() -> tuple[float, str] | None:
-    """(busy_percent, device_name) of the accelerator the detector runs on
-    over the monitor's last window, or None: none in use, no window yet,
-    or a stale sample. An inference-time share counts waiting as well as
-    computing, so above ~100 it says "queued", which is busier still."""
+def _normalise(name: str) -> str:
+    return str(name).strip().lower().replace("-", "_")
+
+
+def _gated_user(user: str, gated: set[str]) -> bool:
+    """Is this monitor user one of the adapters the gates know? The monitor
+    labels a user by the adapter's KAI-C name or by its self-reported
+    adapter_name ("litertlm" against "litertlm-gemma-npu"), so a prefix
+    match in either direction counts, after hyphens and underscores are
+    made one."""
+    if not user:
+        return False
+    return any(user == g or user.startswith(g) or g.startswith(user) for g in gated if g)
+
+
+def device_busy() -> tuple[float, str, float] | None:
+    """(deferrable_percent, device_name, total_percent) for the accelerator
+    the detector runs on, over the monitor's last window; None when none
+    is in use, no window yet, or the sample is stale.
+
+    ``deferrable_percent`` is the share held by the adapters THIS governor
+    admits calls to — the captioner, the VQA model, the embedder: the
+    monitor's per-user shares filtered by the enrichment gates that exist.
+    Not the device total. Measured on a Ventuno Q (2026-11-13, window C of
+    bench/rfc-0004-infer-once-log.md): the total read 77–139 % with the
+    detector and the plate reader holding most of it and the captioner at
+    24 %; the trigger fired on the total, paced captions to one per 6 s,
+    a quarter of the visits in a burst got no caption, and the detector
+    gained nothing — the brake cannot defer the plate reader or the
+    detector, so their share must not be what trips it. The total is kept
+    for the reason string and the snapshot; the detector's own wait (the
+    latency trigger) covers the queue a share figure cannot see."""
     try:
         from services.system_monitor_service import get_system_monitor
 
@@ -253,16 +287,27 @@ def device_busy() -> tuple[float, str] | None:
     ts = sample.get("ts")
     if ts is not None and time.time() - float(ts) > PRESSURE_SAMPLE_TTL_S:
         return None
-    worst: tuple[float, str] | None = None
+    try:
+        gated = {_normalise(snap.get("adapter", "")) for snap in gate_mod.snapshot_all()}
+    except Exception:                              # noqa: BLE001
+        gated = set()
+    worst: tuple[float, str, float] | None = None
     for acc in sample.get("accelerators") or []:
-        busy = acc.get("busy_percent")
-        if busy is None:
+        users = acc.get("users")
+        if not isinstance(users, list):
             continue
-        inflight = acc.get("inflight")
-        # The capped share hides the queue; the in-flight count carries it.
-        share = max(float(busy), float(inflight) * 100.0 if inflight is not None else 0.0)
-        if worst is None or share > worst[0]:
-            worst = (share, str(acc.get("name") or acc.get("kind") or "accelerator"))
+        deferrable = 0.0
+        total = 0.0
+        for user in users:
+            try:
+                pct = float(user.get("percent") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            total += pct
+            if _gated_user(_normalise(user.get("name", "")), gated):
+                deferrable += pct
+        if worst is None or deferrable > worst[0]:
+            worst = (deferrable, str(acc.get("name") or acc.get("kind") or "accelerator"), total)
     return worst
 
 
@@ -340,14 +385,16 @@ class Governor:
                                          f"{floor:.0f} ms floor: the accelerator is contended")
         busy = device_busy()
         if busy and busy[0] >= device_busy_percent():
-            # The device has no room: do not START background work. Same
-            # yield order as the latency trigger (questions dropped,
-            # captions paced, embeddings through); the latency trigger
-            # above still decides a full pause, because a share figure
-            # that counts waiting cannot tell how long the detector waits.
+            # The work this governor can defer already holds the line's
+            # share of the device: do not START more of it. Same yield
+            # order as the latency trigger (questions dropped, captions
+            # paced, embeddings through); the latency trigger above still
+            # decides a full pause, because a share figure that counts
+            # waiting cannot tell how long the detector waits.
             self._wanted_pressure = True
-            return State.LIVE_ONLY, (f"{busy[1]} {busy[0]:.0f}% busy ≥ {device_busy_percent():.0f}%: "
-                                     "no room for background enrichment")
+            return State.LIVE_ONLY, (f"enrichment holds {busy[0]:.0f}% of {busy[1]} "
+                                     f"(device {busy[2]:.0f}% busy) ≥ {device_busy_percent():.0f}%: "
+                                     "no room for more background enrichment")
         cpu = host_cpu_percent()
         soft = soft_cpu_percent()
         if cpu is not None and cpu >= soft:
@@ -424,7 +471,8 @@ class Governor:
         return {"state": self.state.value, "reason": self.reason,
                 "stable_for_s": round(self.stable_for(), 1),
                 "pressure": self.pressure,
-                "device_busy_percent": None if busy is None else round(busy[0], 1),
+                "device_busy_percent": None if busy is None else round(busy[2], 1),
+                "device_deferrable_percent": None if busy is None else round(busy[0], 1),
                 "device_busy_line": device_busy_percent(),
                 "detector_slowdown": None if pressure is None else round(pressure[0], 2),
                 "detector_ms": None if pressure is None else round(pressure[1], 1),
