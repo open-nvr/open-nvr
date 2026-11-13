@@ -79,51 +79,28 @@ DEFAULT_ADMIN_LAST_NAME=Administrator
 ---
 
 ### **`disable_mfa.py`**
-**Disable multi-factor authentication for a user**
+**Reset a user's two-factor sign-in from the host**
 
-**Purpose:** Emergency recovery tool to disable MFA when a user loses access to their authenticator app.
+**Purpose:** Recovery when nobody can use the web UI's **Settings → Users → Reset 2FA** action, typically the only administrator having lost their authenticator. For any other user, prefer the UI action: it needs the administrator's own code and e-mails the user.
 
-**When to use:**
-- ✅ User lost authenticator device
-- ✅ MFA misconfiguration preventing login
-- ✅ Testing MFA functionality
-
-**Usage:**
+**Usage (Docker install):**
 ```bash
-# Disable MFA for specific user
-cd server
-python scripts/disable_mfa.py <username>
-
-# Disable MFA for admin user (default)
-python scripts/disable_mfa.py
-python scripts/disable_mfa.py admin
+docker exec -it opennvr_core python /app/server/scripts/disable_mfa.py <username>
 ```
 
-**Examples:**
-```bash
-# Disable MFA for user 'john'
-python scripts/disable_mfa.py john
-# ✅ MFA disabled for user 'john'
+The username is required; the script never picks one for you.
 
-# User not found
-python scripts/disable_mfa.py nonexistent
-# ❌ User 'nonexistent' not found
+**What it does** (the same `services.mfa_service.reset_mfa` the UI action calls):
+1. Removes the user's TOTP secret and sets `mfa_enabled = False`
+2. Ends every browser session of theirs (bumps `token_version`; `onvr_` API tokens are not touched)
+3. Writes an `mfa.cli_reset` audit entry
+4. A single sign-on account whose identity provider owns MFA is refused: there is nothing to reset
 
-# User already has MFA disabled
-python scripts/disable_mfa.py jane
-# ℹ️  MFA already disabled for user 'jane'
-```
-
-**What it does:**
-1. Finds user in database by username
-2. Sets `mfa_enabled = False`
-3. Clears `mfa_secret` (removes TOTP secret)
-4. Commits changes to database
+**Afterwards:** at their next password sign-in the user is taken straight to the enrolment screen and scans a new QR code. Until they enrol, that session reaches nothing else.
 
 **Security Note:**
-- ⚠️ **Only run when necessary** - MFA is a critical security feature
-- ✅ User can re-enable MFA from account settings after login
-- 📝 Action is logged in database (user record updated)
+- ⚠️ Until the user enrols again, their password alone gets them to the enrolment screen. Run it when they are ready to sign in and enrol, or reset their password at the same time.
+- ⚠️ Anyone who can run `docker exec` on the host already controls OpenNVR; this script gives them nothing new.
 
 ---
 
@@ -161,14 +138,12 @@ uvicorn main:app --reload
 ```bash
 # User calls support: "I lost my phone with Google Authenticator"
 
-# 1. Disable MFA for user
-cd server
-python scripts/disable_mfa.py johndoe
+# Preferred: Settings → Users → Reset 2FA (needs your own code).
+# No administrator available? On the host:
+docker exec -it opennvr_core python /app/server/scripts/disable_mfa.py johndoe
 
-# 2. Inform user to:
-#    - Log in with username/password only
-#    - Re-enable MFA in account settings
-#    - Scan new QR code with authenticator app
+# Then the user signs in with username/password and is taken straight
+# to the enrolment screen to scan a new QR code.
 ```
 
 ---
@@ -197,10 +172,9 @@ python scripts/disable_mfa.py admin
 - 📝 Audit logs track admin user creation
 
 ### **disable_mfa.py**
-- ⚠️ **Requires direct database access** - only for administrators
-- ⚠️ Bypasses normal authentication flow
-- ✅ User must set up new MFA after re-enabling
-- 📝 Consider logging this action in audit logs (future enhancement)
+- ⚠️ **Requires shell access to the host** - only for administrators
+- ✅ The user must enrol a new authenticator at their next sign-in
+- 📝 Recorded in the audit log as `mfa.cli_reset`
 
 ---
 
@@ -232,9 +206,9 @@ psql opennvr -c "SELECT username, is_superuser FROM users WHERE username='admin'
 # 3. Run script
 python scripts/disable_mfa.py testuser
 
-# 4. Verify login works without MFA
+# 4. Verify login with the password lands on the enrolment screen
 # 5. Check database
-psql opennvr -c "SELECT username, mfa_enabled FROM users WHERE username='testuser';"
+psql opennvr -c "SELECT username, mfa_enabled, token_version FROM users WHERE username='testuser';"
 ```
 
 ---

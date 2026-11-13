@@ -95,7 +95,8 @@ def env(monkeypatch):
                 mfa_enabled=True, role_id=role.id)
     root.mfa_secret = secret
     plain = User(username="plain", email="plain@example.com", hashed_password=hashed,
-                 is_active=True, is_superuser=False, password_set=True, role_id=role.id)
+                 is_active=True, is_superuser=False, password_set=True, mfa_enabled=True,
+                 role_id=role.id)
     db.add_all([root, plain])
     db.commit()
     client = TestClient(app)

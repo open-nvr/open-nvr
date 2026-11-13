@@ -327,10 +327,13 @@ def resolve_user(db, claims: dict[str, Any], cfg: dict[str, Any]):
         return user
     if not user.is_active:
         raise ValueError("this account is deactivated")
-    if user.is_superuser and user.mfa_enabled:
-        # A superuser with TOTP enrolled is a password account (single
-        # sign-on ones skip enrolment). One found by subject here was linked
-        # by e-mail before linking was restricted; refuse it all the same.
+    if user.is_superuser and (user.mfa_enabled or (user.auth_provider or "local") != "oidc"):
+        # A superuser with TOTP enrolled, or one that is not a single sign-on
+        # account, is a password account (single sign-on ones skip
+        # enrolment). One found by subject here was linked by e-mail before
+        # linking was restricted; refuse it all the same. The second half
+        # keeps refusing it after an administrator resets its two-factor
+        # sign-in (mfa_service.reset_mfa makes such an account local).
         raise ValueError("an administrator account is never linked to single sign-on; "
                          "sign in with your password")
     # A linked account keeps its kind (auth_provider): one that had a password

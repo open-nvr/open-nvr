@@ -17,7 +17,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react'
-import { Trash2, UserCheck, UserPlus, UserCog } from 'lucide-react'
+import { KeyRound, Trash2, UserCheck, UserPlus, UserCog } from 'lucide-react'
 import { apiService } from '../../lib/apiService'
 import { extractApiError } from '../../lib/apiError'
 import { useAuth } from '../../auth/AuthContext'
@@ -33,7 +33,12 @@ type User = {
   is_active: boolean
   is_superuser: boolean
   role_id: number
+  mfa_enabled?: boolean
+  auth_provider?: string | null
 }
+
+// A single sign-on account's identity provider owns its MFA: nothing to reset here.
+const isSsoOnly = (u: User) => u.auth_provider === 'oidc' && !u.mfa_enabled
 
 type UserForm = {
   username: string
@@ -68,7 +73,7 @@ export function UsersManager() {
   const [showCreateDialog, setShowCreateDialog] = useState(false)
   const [showEditDialog, setShowEditDialog] = useState(false)
   // Permanent deletion and reactivation require the admin's TOTP code.
-  const [confirmAction, setConfirmAction] = useState<{ kind: 'delete' | 'permanent-delete' | 'activate'; user: User } | null>(null)
+  const [confirmAction, setConfirmAction] = useState<{ kind: 'delete' | 'permanent-delete' | 'activate' | 'reset-mfa'; user: User } | null>(null)
   const [mfaCode, setMfaCode] = useState('')
 
   const [form, setForm] = useState<UserForm>({ username: '', email: '', password: '', role_id: 1, first_name: '', last_name: '', is_superuser: false })
@@ -176,6 +181,8 @@ export function UsersManager() {
         await apiService.deleteUser(confirmAction.user.id)
       } else if (confirmAction.kind === 'permanent-delete') {
         await apiService.permanentlyDeleteUser(confirmAction.user.id, mfaCode.trim())
+      } else if (confirmAction.kind === 'reset-mfa') {
+        await apiService.resetUserMfa(confirmAction.user.id, mfaCode.trim())
       } else {
         await apiService.activateUser(confirmAction.user.id, mfaCode.trim())
       }
@@ -189,7 +196,9 @@ export function UsersManager() {
         ? 'Failed to delete user'
         : confirmAction.kind === 'permanent-delete'
           ? 'Failed to permanently delete user'
-          : 'Failed to activate user'
+          : confirmAction.kind === 'reset-mfa'
+            ? 'Failed to reset two-factor sign-in'
+            : 'Failed to activate user'
       setError(extractApiError(e, fallback))
     } finally {
       setLoading(false)
@@ -380,7 +389,7 @@ export function UsersManager() {
       {confirmAction && (
         <Modal
           open
-          title={<span className={`font-semibold flex items-center gap-2 ${confirmAction.kind === 'activate' ? 'text-[var(--ok)]' : 'text-[var(--danger)]'}`}>{confirmAction.kind === 'activate' ? <UserCheck size={18} /> : <Trash2 size={18} />} {confirmAction.kind === 'activate' ? 'Reactivate user?' : confirmAction.kind === 'delete' ? 'Delete user?' : 'Delete permanently?'}</span>}
+          title={<span className={`font-semibold flex items-center gap-2 ${confirmAction.kind === 'activate' ? 'text-[var(--ok)]' : 'text-[var(--danger)]'}`}>{confirmAction.kind === 'activate' ? <UserCheck size={18} /> : confirmAction.kind === 'reset-mfa' ? <KeyRound size={18} /> : <Trash2 size={18} />} {confirmAction.kind === 'activate' ? 'Reactivate user?' : confirmAction.kind === 'reset-mfa' ? 'Reset two-factor sign-in?' : confirmAction.kind === 'delete' ? 'Delete user?' : 'Delete permanently?'}</span>}
           onClose={() => { setConfirmAction(null); setMfaCode(''); setError(null) }}
           widthClassName="w-[calc(100vw-2rem)] max-w-md"
           bodyClassName="p-0 flex flex-col"
@@ -396,6 +405,8 @@ export function UsersManager() {
                 <>Delete <span className="font-semibold">{confirmAction.user.username}</span> ({confirmAction.user.email})? This will deactivate their account, so they can no longer sign in. You can reactivate them later or permanently delete them from Deactivated users.</>
               ) : confirmAction.kind === 'permanent-delete' ? (
                 <>Permanently delete <span className="font-semibold">{confirmAction.user.username}</span> ({confirmAction.user.email})? This cannot be undone. Required records must be resolved first, and historical audit records will be retained.</>
+              ) : confirmAction.kind === 'reset-mfa' ? (
+                <>Reset two-factor sign-in for <span className="font-semibold">{confirmAction.user.username}</span> ({confirmAction.user.email})? They are signed out everywhere, and at their next sign-in they set up a new authenticator app. Until they do, their password alone gets them to that setup screen, so do this when they are ready to sign in. API tokens they created keep working; revoke those under API Tokens if needed.</>
               ) : (
                 <>You are about to reactivate <span className="font-semibold">{confirmAction.user.username}</span> ({confirmAction.user.email}). They will be able to log in again.</>
               )}
@@ -426,7 +437,9 @@ export function UsersManager() {
                 ? (loading ? 'Reactivating...' : 'Reactivate user')
                 : confirmAction.kind === 'delete'
                   ? (loading ? 'Deleting...' : 'Delete user')
-                  : (loading ? 'Deleting...' : 'Permanently Delete User')}
+                  : confirmAction.kind === 'reset-mfa'
+                    ? (loading ? 'Resetting...' : 'Reset 2FA')
+                    : (loading ? 'Deleting...' : 'Permanently Delete User')}
             </button>
           </div>
         </form>
@@ -442,6 +455,7 @@ export function UsersManager() {
               <th className="p-2">{t('admin.role')}</th>
               <th className="p-2">{t('admin.active')}</th>
               <th className="p-2">{t('admin.superuser')}</th>
+              <th className="p-2">2FA</th>
               <th className="p-2">{t('admin.actions')}</th>
             </tr>
           </thead>
@@ -457,6 +471,7 @@ export function UsersManager() {
                   </span>
                 </td>
                 <td className="p-2">{u.is_superuser ? t('common.yes') : t('common.no')}</td>
+                <td className="p-2 text-xs">{isSsoOnly(u) ? <span className="text-[var(--text-dim)]">SSO</span> : u.mfa_enabled ? 'Enrolled' : <span className="text-[var(--text-dim)]">Not set up</span>}</td>
                 <td className="p-2 space-x-2">
                   <button className="px-2 py-1 border border-[var(--border)] bg-[var(--panel-2)]" onClick={() => startEdit(u)}>{t('admin.edit')}</button>
                   {isActiveView ? (
@@ -466,6 +481,9 @@ export function UsersManager() {
                   ) : (
                     <button className="px-2 py-1 border border-[color-mix(in_oklab,var(--ok)_45%,var(--border))] bg-[color-mix(in_oklab,var(--ok)_14%,transparent)] text-[var(--ok)]" onClick={() => { setConfirmAction({ kind: 'activate', user: u }); setMfaCode(''); setError(null) }}>{t('admin.activateUser')}</button>
                   )}
+                  {me?.id !== u.id && u.mfa_enabled && !isSsoOnly(u) && (
+                    <button className="px-2 py-1 border border-[var(--border)] bg-[var(--panel-2)]" title="Remove their authenticator; they set up a new one at next sign-in" onClick={() => { setConfirmAction({ kind: 'reset-mfa', user: u }); setMfaCode(''); setError(null) }}>Reset 2FA</button>
+                  )}
                   {!isActiveView && me?.id !== u.id && (
                     <button className="px-2 py-1 border border-[color-mix(in_oklab,var(--danger)_45%,var(--border))] text-[var(--danger)]" onClick={() => { setConfirmAction({ kind: 'permanent-delete', user: u }); setMfaCode(''); setError(null) }}>Delete permanently</button>
                   )}
@@ -474,7 +492,7 @@ export function UsersManager() {
             ))}
             {users.length === 0 && (
               <tr>
-                <td colSpan={6} className="p-3 text-center text-[var(--text-dim)]">{t('admin.noUsers')}</td>
+                <td colSpan={7} className="p-3 text-center text-[var(--text-dim)]">{t('admin.noUsers')}</td>
               </tr>
             )}
           </tbody>
