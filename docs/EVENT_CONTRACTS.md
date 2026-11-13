@@ -174,6 +174,16 @@ so apps stop polling the timeline API for "something happened".
 | `started_at` / `ended_at` | string | ISO-8601 UTC visit bounds. |
 | `evidence_path` | string \| null | Best-frame evidence reference, resolvable via the evidence API (not a raw filesystem path promise). |
 
+### `visit.enriched.v1` — PROPOSED (RFC-0004), not yet published
+
+The result of the enrichment tier for a visit — caption, attribute
+claims, embedding reference — published once by core when it lands, so
+search, the camera agent, the Mirror and apps subscribe instead of
+polling the store, and no consumer runs the caption model itself. Shape
+and acceptance in [`rfcs/RFC-0004-infer-once-publish-once.md`](rfcs/RFC-0004-infer-once-publish-once.md).
+Until it ships, the store (`event_text`, `visit_descriptors`) is the only
+source, and `visit.recorded.v1` above is the signal that a visit exists.
+
 ### `plate.recognized.v1`
 
 Subject: `opennvr.events.plate.recognized.v1.<camera_id>`

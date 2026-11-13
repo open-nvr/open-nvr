@@ -538,6 +538,25 @@ class Settings(BaseSettings):
     # whatever the CPU figure says (a slow GPU model looks idle to
     # psutil), and also throttles to LIVE-ONLY.
     events_enrichment_slow_call_s: float = 20.0
+    # The detector's latency against its own floor (the lowest per-window
+    # mean the monitor has seen, drifting slowly), on boards where it
+    # shares one accelerator with the captioner. At `slow_factor` the
+    # live path goes LIVE-ONLY in its accelerator form — embeddings as
+    # before, captions at most one per `pressure_gap_s`, descriptor
+    # questions dropped — and at `pause_factor` nothing is sent. Measured
+    # on a Ventuno Q (2026-11-12): the description questions held the
+    # Hexagon 70 % of the time and the detector ran 2.7–4.8× its floor.
+    events_enrichment_detector_slow_factor: float = 2.0
+    events_enrichment_detector_pause_factor: float = 4.0
+    events_enrichment_pressure_gap_s: float = 6.0
+    # The accelerator's busy share (the dashboard's NPU figure, inference
+    # time over wall time, in-flight count when queued) above which
+    # background enrichment does not START a new call — the device-side
+    # trigger beside the detector-latency one. A running inference cannot
+    # be pre-empted on an NPU; this keeps new ones from starting while the
+    # device has no room. Measured on a Ventuno Q (2026-11-12): detector
+    # alone 10–37 %, with the description questions 85–100 %.
+    events_enrichment_device_busy_percent: float = 60.0
     # The backfill sweeps history only after the governor has been NORMAL
     # this long with nothing live in hand — "when it finds resources".
     events_enrichment_backfill_idle_s: int = 120

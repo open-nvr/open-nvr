@@ -25,7 +25,9 @@ def test_busy_share_is_inference_seconds_over_wall_seconds():
     u = AcceleratorUsage()
     first = u.update(_fill(DETECT, det=10.0), _fill(KAIC, cap=5.0, stt=2.0), at=1000.0)
     assert first == [{"kind": "npu", "name": "Qualcomm Hexagon NPU", "busy_percent": None,
-                      "users": [], "source": "inference-time", "inflight": None}], "no window yet"
+                      "users": [], "source": "inference-time", "inflight": None,
+                      "detector_ms": None, "detector_floor_ms": None,
+                      "detector_slowdown": None}], "no window yet"
     # 15 s later: the detector computed 1.5 s, the captioner 3 s, whisper (CPU) 4 s
     out = u.update(_fill(DETECT, det=11.5), _fill(KAIC, cap=8.0, stt=6.0), at=1015.0)
     assert len(out) == 1 and out[0]["kind"] == "npu"
@@ -80,3 +82,31 @@ def test_the_detectors_real_provider_list_is_read():
     assert _provider_key("OpenVINOExecutionProvider:GPU") == "OpenVINOExecutionProvider:GPU"
     assert _provider_key("CUDAExecutionProvider, CPUExecutionProvider") == "CUDAExecutionProvider"
     assert _provider_key("CPUExecutionProvider") == "CPUExecutionProvider"
+
+
+def test_detector_latency_floor_and_slowdown_follow_the_windows():
+    """The detector's per-window mean, its floor (the lowest window seen,
+    drifting slowly upward) and the ratio the governor reads. A window
+    with too few inferences says nothing. Ventuno Q, 2026-11-12: 25 ms
+    quiet, 67 ms while the description questions held the Hexagon."""
+    det = DETECT.replace('{count}', '').replace(
+        'tier0_detector_latency_seconds_count{camera="cam23",model="yolo26n"} 100',
+        'tier0_detector_latency_seconds_count{camera="cam23",model="yolo26n"} {n}')
+    u = AcceleratorUsage()
+    u.update(_fill(det, det=0.0, n=0), None, at=0.0)
+    # 100 inferences at 25 ms
+    out = u.update(_fill(det, det=2.5, n=100), None, at=15.0)[0]
+    assert out["detector_ms"] == 25.0 and out["detector_floor_ms"] == 25.0 and out["detector_slowdown"] == 1.0
+    # 100 more at 67 ms: the floor barely moves, the ratio says 2.68
+    out = u.update(_fill(det, det=2.5 + 6.7, n=200), None, at=30.0)[0]
+    assert out["detector_ms"] == 67.0
+    assert 25.0 < out["detector_floor_ms"] < 26.0
+    assert 2.5 < out["detector_slowdown"] < 2.7
+    # five inferences in a window: no mean, no ratio, the floor untouched
+    floor = out["detector_floor_ms"]
+    out = u.update(_fill(det, det=9.2 + 0.5, n=205), None, at=45.0)[0]
+    assert out["detector_ms"] is None and out["detector_slowdown"] is None
+    assert out["detector_floor_ms"] == floor
+    # a quieter window pulls the floor straight down
+    out = u.update(_fill(det, det=9.7 + 2.0, n=305), None, at=60.0)[0]
+    assert out["detector_ms"] == 20.0 and out["detector_floor_ms"] == 20.0

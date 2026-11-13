@@ -1,7 +1,6 @@
 # RFC-0004 — infer once, publish once: the plan, the measurements, the record
 
-The design is `docs/rfcs/RFC-0004-infer-once-publish-once.md`
-(open-nvr PR #908 until it merges: https://github.com/open-nvr/open-nvr/pull/908).
+The design is [`docs/rfcs/RFC-0004-infer-once-publish-once.md`](../docs/rfcs/RFC-0004-infer-once-publish-once.md) (merged as PR #908).
 This file is its ledger: what was planned, what was measured before and
 after each step, and what actually shipped. Every number here is a
 measurement on the Ventuno Q (QCS8275, Hexagon HTP) unless a line says
@@ -20,7 +19,7 @@ or an estimate.
 | 5 | SDK frame-consumer rule (credits, latest frame wins, measured cadence, tracker continuity, skipped counter); KAI-C stream proxy adopts it | — | planned |
 | 6 | KAI-C capability tokens (RFC-0001): adapters accept only platform-minted calls | — | planned |
 | 7 | durable record subjects (visits, enriched visits, plates, alerts) with acks and replay | — | planned, last |
-| — | the brake: detector latency vs its floor, device busy share (governor) | #905 | PR open, CI green (2026-11-13); not yet measured on the box |
+| — | the brake: detector latency vs its floor, device busy share (governor) | #905 | merged 2026-11-13; not yet measured on the box |
 
 ## Baseline, before any step (measured 2026-11-11 and 2026-11-12)
 

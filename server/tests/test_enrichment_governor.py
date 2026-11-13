@@ -34,9 +34,11 @@ def _run(coro):
 @pytest.fixture()
 def signals(monkeypatch):
     """The governor's inputs, under the test's control."""
-    s = {"cpu": None, "cpu_high": False, "edges": []}
+    s = {"cpu": None, "cpu_high": False, "pressure": None, "device": None, "edges": []}
     monkeypatch.setattr(gov, "host_cpu_percent", lambda: s["cpu"])
     monkeypatch.setattr(gov, "host_cpu_high", lambda: s["cpu_high"])
+    monkeypatch.setattr(gov, "detector_pressure", lambda: s["pressure"])
+    monkeypatch.setattr(gov, "device_busy", lambda: s["device"])
     monkeypatch.setattr(eg, "notify_edge",
                         lambda t, *, active, description, data: s["edges"].append((t, active, data.get("state"))))
     monkeypatch.setattr(eg, "_notify", lambda gate, *, active: None)
@@ -133,6 +135,164 @@ def test_a_slow_adapter_throttles_even_on_an_idle_cpu(signals, monkeypatch):
     g = gov.governor()
     assert g.evaluate() is State.LIVE_ONLY
     assert "moondream-vlm" in g.reason and "a call" in g.reason
+
+
+# ── the detector as the brake (a shared accelerator) ─────────────────
+
+def test_a_contended_detector_throttles_with_the_cpu_idle(signals):
+    """Ventuno Q, 2026-11-12: the description questions held the Hexagon
+    and the detector ran 67 ms a frame against a 25 ms floor while the
+    host CPU looked fine. The ratio throttles on its own and the reason
+    names the numbers."""
+    signals["cpu"] = 20.0
+    signals["pressure"] = (2.68, 67.0, 25.0)
+    g = gov.governor()
+    assert g.evaluate() is State.LIVE_ONLY
+    assert g.pressure
+    assert "67 ms" in g.reason and "2.7×" in g.reason and "25 ms floor" in g.reason
+    assert signals["edges"][-1] == (gov.ALERT_TYPE, True, "live_only")
+
+
+def test_a_detector_four_times_its_floor_pauses(signals):
+    signals["pressure"] = (4.8, 119.0, 25.0)
+    g = gov.governor()
+    assert g.evaluate() is State.PAUSED
+    assert g.pressure
+    assert "119 ms" in g.reason
+
+
+def test_under_pressure_embeddings_pass_captions_are_paced_and_questions_drop(signals, clock):
+    """The yield order: embeddings as before, captions at most one per
+    gap, descriptor questions dropped — they are the bulk of the load and
+    the least valuable per second of the device."""
+    from core.config import settings
+    signals["pressure"] = (2.5, 62.0, 25.0)
+    settings.events_enrichment_pressure_gap_s = 6.0
+    gate = eg.gate_for("litertlm")
+    assert gov.governor().evaluate() is State.LIVE_ONLY
+
+    assert _run(gov.admit_live(gate, "vqa")) is False
+    assert gate.dropped_open == 1
+
+    assert _run(gov.admit_live(gate, "caption")) is True
+    gate.release("ok", elapsed_s=1.7)
+    clock["t"] += 2.0
+    assert _run(gov.admit_live(gate, "caption")) is False, "within the gap: paced"
+    clock["t"] += 5.0
+    assert _run(gov.admit_live(gate, "caption")) is True, "gap elapsed"
+    gate.release("ok", elapsed_s=1.7)
+
+    embed = eg.gate_for("clip")
+    assert _run(gov.admit_live(embed, "embed")) is True
+    embed.release("ok", elapsed_s=0.008)
+
+
+def test_pressure_clears_when_the_detector_recovers(signals, clock):
+    signals["pressure"] = (2.5, 62.0, 25.0)
+    g = gov.governor()
+    assert g.evaluate() is State.LIVE_ONLY and g.pressure
+    signals["pressure"] = (1.05, 26.0, 25.0)
+    clock["t"] += gov.STABLE_S + 1
+    assert g.evaluate() is State.NORMAL
+    assert not g.pressure
+    gate = eg.gate_for("litertlm")
+    assert _run(gov.admit_live(gate, "vqa")) is True
+    gate.release("ok", elapsed_s=2.0)
+
+
+def test_cpu_throttling_keeps_the_cpu_shaped_ranking(signals):
+    """LIVE-ONLY for CPU reasons is unchanged: VQA keeps half a line,
+    nothing is dropped outright for being a question."""
+    signals["cpu"] = 90.0
+    g = gov.governor()
+    assert g.evaluate() is State.LIVE_ONLY and not g.pressure
+    gate = eg.gate_for("litertlm")
+    assert _run(gov.admit_live(gate, "vqa")) is True
+    gate.release("ok", elapsed_s=2.0)
+
+
+def test_a_busy_device_stops_new_background_calls_before_the_detector_slows(signals, clock):
+    """The device-side trigger: the NPU share is over the line while the
+    detector's latency is still fine (the first second of a burst). No
+    new question starts, captions are paced, embeddings go through; the
+    reason names the device and the line."""
+    from core.config import settings
+    settings.events_enrichment_device_busy_percent = 60.0
+    settings.events_enrichment_pressure_gap_s = 6.0
+    signals["cpu"] = 20.0
+    signals["pressure"] = (1.1, 27.0, 25.0)
+    signals["device"] = (85.0, "Qualcomm Hexagon NPU")
+    g = gov.governor()
+    assert g.evaluate() is State.LIVE_ONLY and g.pressure
+    assert "85% busy" in g.reason and "60%" in g.reason
+    gate = eg.gate_for("litertlm")
+    assert _run(gov.admit_live(gate, "vqa")) is False
+    assert _run(gov.admit_live(gate, "caption")) is True
+    gate.release("ok", elapsed_s=1.7)
+    embed = eg.gate_for("clip")
+    assert _run(gov.admit_live(embed, "embed")) is True
+    embed.release("ok", elapsed_s=0.008)
+    # a queued device (in-flight above 1) counts as busier than its capped share
+    signals["device"] = (100.0, "Qualcomm Hexagon NPU")
+    assert g.evaluate() is State.LIVE_ONLY
+    # room again: back to normal after the calm period
+    signals["device"] = (30.0, "Qualcomm Hexagon NPU")
+    clock["t"] += gov.STABLE_S + 1
+    assert g.evaluate() is State.NORMAL and not g.pressure
+
+
+def test_the_latency_trigger_outranks_the_device_share_for_a_pause(signals):
+    """A share figure cannot say how long the detector waits; the latency
+    ratio can, and it is what pauses everything."""
+    signals["device"] = (100.0, "Qualcomm Hexagon NPU")
+    signals["pressure"] = (4.5, 112.0, 25.0)
+    g = gov.governor()
+    assert g.evaluate() is State.PAUSED
+    assert "112 ms" in g.reason
+
+
+def test_device_busy_reads_share_and_inflight_from_a_fresh_sample(monkeypatch):
+    import time as _time
+    from services import system_monitor_service as sms
+
+    class _Mon:
+        def __init__(self, sample): self._s = sample
+        def latest_sample(self): return self._s
+
+    fresh = {"ts": _time.time(), "accelerators": [
+        {"kind": "npu", "name": "Qualcomm Hexagon NPU", "busy_percent": 100.0, "inflight": 2.6}]}
+    monkeypatch.setattr(sms, "get_system_monitor", lambda: _Mon(fresh))
+    assert gov.device_busy() == (260.0, "Qualcomm Hexagon NPU"), "queued ×2.6 reads as 260 %"
+    calm = {"ts": _time.time(), "accelerators": [{"kind": "npu", "name": "NPU", "busy_percent": 12.0, "inflight": 0.12}]}
+    monkeypatch.setattr(sms, "get_system_monitor", lambda: _Mon(calm))
+    assert gov.device_busy() == (12.0, "NPU")
+    stale = dict(fresh, ts=_time.time() - gov.PRESSURE_SAMPLE_TTL_S - 5)
+    monkeypatch.setattr(sms, "get_system_monitor", lambda: _Mon(stale))
+    assert gov.device_busy() is None
+    monkeypatch.setattr(sms, "get_system_monitor", lambda: _Mon({"ts": _time.time(), "accelerators": [{"busy_percent": None}]}))
+    assert gov.device_busy() is None
+
+
+def test_detector_pressure_reads_the_monitors_fresh_sample_only(monkeypatch):
+    import time as _time
+    from services import system_monitor_service as sms
+
+    class _Mon:
+        def __init__(self, sample): self._s = sample
+        def latest_sample(self): return self._s
+
+    fresh = {"ts": _time.time(), "accelerators": [
+        {"kind": "npu", "detector_ms": 67.0, "detector_floor_ms": 25.0}]}
+    monkeypatch.setattr(sms, "get_system_monitor", lambda: _Mon(fresh))
+    assert gov.detector_pressure() == (67.0 / 25.0, 67.0, 25.0)
+    stale = dict(fresh, ts=_time.time() - gov.PRESSURE_SAMPLE_TTL_S - 5)
+    monkeypatch.setattr(sms, "get_system_monitor", lambda: _Mon(stale))
+    assert gov.detector_pressure() is None
+    tiny = {"ts": _time.time(), "accelerators": [{"detector_ms": 3.0, "detector_floor_ms": 0.5}]}
+    monkeypatch.setattr(sms, "get_system_monitor", lambda: _Mon(tiny))
+    assert gov.detector_pressure() is None, "a sub-5 ms floor is noise, not a baseline"
+    monkeypatch.setattr(sms, "get_system_monitor", lambda: _Mon({"ts": _time.time(), "accelerators": []}))
+    assert gov.detector_pressure() is None
 
 
 # ── what the live path gets ───────────────────────────────────────────

@@ -110,16 +110,35 @@ class _Totals:
     """Cumulative inference seconds per producer at one instant."""
     at: float
     detector: float = 0.0
+    detector_count: float = 0.0
     adapters: dict[str, float] = field(default_factory=dict)
     device: tuple[str, str] | None = None     # (kind, name) the detector runs on
     intel_busy_us: float | None = None
 
 
+#: A window with fewer detector inferences than this says nothing about
+#: latency (one slow frame would move the mean by itself).
+DETECTOR_WINDOW_MIN_INFERENCES = 20
+
+#: How fast the detector's latency floor follows a lasting rise (per
+#: sample, 15 s apart): 0.02 re-baselines in about twelve minutes, so a
+#: camera added for good stops counting as "contention" while a burst
+#: of captions, which is minutes long, still does.
+DETECTOR_FLOOR_DRIFT = 0.02
+
+
 class AcceleratorUsage:
-    """Keeps the previous sample's totals and turns the next into busy shares."""
+    """Keeps the previous sample's totals and turns the next into busy shares.
+
+    Also keeps the detector's **latency floor**: the lowest per-window mean
+    seen, drifting slowly upward. A window whose mean is a multiple of that
+    floor is a detector waiting on the device behind other producers — the
+    one signal the enrichment governor needs to yield, because the share
+    figures cannot tell "busy computing" from "busy waiting"."""
 
     def __init__(self) -> None:
         self._prev: _Totals | None = None
+        self.detector_floor_ms: float | None = None
 
     # ── reading ──────────────────────────────────────────────────────
 
@@ -139,6 +158,8 @@ class AcceleratorUsage:
         for name, labels, value in _samples(detect_text or ""):
             if name == "tier0_detector_latency_seconds_sum":
                 t.detector += value
+            elif name == "tier0_detector_latency_seconds_count":
+                t.detector_count += value
             elif name == "tier0_detector_backend" and value:
                 eff = _provider_key(labels.get("effective") or "")
                 dev = _PROVIDER_DEVICE.get(eff)
@@ -166,11 +187,25 @@ class AcceleratorUsage:
         kind, name = now.device
         if prev is None or now.at <= prev.at:
             return [{"kind": kind, "name": name, "busy_percent": None, "users": [],
-                     "source": "inference-time", "inflight": None}]
+                     "source": "inference-time", "inflight": None,
+                     "detector_ms": None, "detector_floor_ms": self.detector_floor_ms,
+                     "detector_slowdown": None}]
         dt = now.at - prev.at
         users: list[dict[str, Any]] = []
-        det = max(0.0, now.detector - prev.detector) / dt * 100.0
+        det_s = max(0.0, now.detector - prev.detector)
+        det = det_s / dt * 100.0
         users.append({"name": "detector", "percent": round(det, 1)})
+        # The detector's mean latency over this window, and its floor.
+        det_n = now.detector_count - prev.detector_count
+        detector_ms: float | None = None
+        if det_n >= DETECTOR_WINDOW_MIN_INFERENCES:
+            detector_ms = det_s / det_n * 1000.0
+            if self.detector_floor_ms is None or detector_ms < self.detector_floor_ms:
+                self.detector_floor_ms = detector_ms
+            else:
+                self.detector_floor_ms += (detector_ms - self.detector_floor_ms) * DETECTOR_FLOOR_DRIFT
+        slowdown = (round(detector_ms / self.detector_floor_ms, 2)
+                    if detector_ms is not None and self.detector_floor_ms else None)
         if kind == "npu" and name.startswith("Qualcomm"):
             for adapter, total in now.adapters.items():
                 if adapter in _QUALCOMM_NPU_ADAPTERS:
@@ -188,7 +223,11 @@ class AcceleratorUsage:
             busy = min(100.0, max(0.0, now.intel_busy_us - prev.intel_busy_us) / (dt * 1e6) * 100.0)
             source = "sysfs"
         return [{"kind": kind, "name": name, "busy_percent": round(busy, 1),
-                 "users": users, "source": source, "inflight": inflight}]
+                 "users": users, "source": source, "inflight": inflight,
+                 "detector_ms": None if detector_ms is None else round(detector_ms, 1),
+                 "detector_floor_ms": (None if self.detector_floor_ms is None
+                                       else round(self.detector_floor_ms, 1)),
+                 "detector_slowdown": slowdown}]
 
 
 def fetch_text(url: str, timeout: float = 2.0) -> str | None:
