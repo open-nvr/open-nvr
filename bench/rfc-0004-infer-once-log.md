@@ -470,14 +470,17 @@ attributes-only call 2,173 ms; per visit with the plain caption 5,172 ms
 → 3,675 ms (**−29 %**, two calls instead of six). Agreement: gender
 30/30, clothing_top 30/30, carrying 27/30, clothing_bottom 22/30 with
 the batched call saying "unknown" on the other 8 (legs cut by the crop),
-and **headwear 9/30 — where the single question is the one that is
-wrong**: it answered "cap" on 20 of 30 office frames whose people wear
-nothing on their heads (the frames looked at earlier: a red shirt at a
-laptop, two people at a desk), the batched call said "nothing". The
-single question's "Answer with one word, such as cap, …" leads the
-model; asked among other questions with "nothing" and "unknown" offered,
-it does not. The per-question path has had this bias wherever
-EVENTS_DESCRIPTOR_PEOPLE_EXTENDED is on.
+and **headwear 9/30**, where the two paths split 20 times: the single
+question said "cap", the batched call "nothing". Looked at: 19 of those
+20 frames are the same ~30-pixel rider on the plate clip, where no
+answer can be read off the crop — the single question invents a cap
+(its wording offers "such as cap, …"), the batched call invents
+"nothing" when it should say "unknown"; the one office frame among them
+is bare-headed, so there the single question is simply wrong. Neither
+path is trustworthy on a crop that small; the batched one is at least
+not adding a headwear claim. The single question's leading wording is
+worth fixing on its own wherever EVENTS_DESCRIPTOR_PEOPLE_EXTENDED is
+on, and a minimum crop size for the person kinds is worth a thought.
 
 **Decision:** batch the descriptor questions into one attributes-only
 call when a visit has three or more kinds to ask (the extended person
