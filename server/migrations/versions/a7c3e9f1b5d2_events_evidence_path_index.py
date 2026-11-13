@@ -3,13 +3,13 @@
 """index events.evidence_path — the same-frame lookup of enrichment reuse
 
 Revision ID: a7c3e9f1b5d2
-Revises: e4b9c2d6f0a3
+Revises: d5e1f7a9c3b4
 Create Date: 2026-11-13
 """
 from alembic import op
 
 revision = "a7c3e9f1b5d2"
-down_revision = "e4b9c2d6f0a3"
+down_revision = "d5e1f7a9c3b4"
 branch_labels = None
 depends_on = None
 
