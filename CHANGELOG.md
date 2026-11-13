@@ -6,233 +6,28 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
 ### Changed
-
-- **The single structured call is removed, not left off.** One call that
-  asked the captioner for the sentence and the attributes together
-  (`EVENTS_ENRICHMENT_SINGLE_CALL`, off by default) halved the model's
-  time per visit and, measured on the labelled search set, lost the
-  specific words search depends on: "camouflage" became "beige
-  patterned", glasses and gestures went missing, recall@10 fell by a
-  third. Quality is not a knob, so the path and the flag are gone. What
-  survives of the idea is the batching of three or more descriptor
-  questions into one call, which was measured to keep the answers.
-
-- **Three or more descriptor questions go to the model as one call.** With
-  the extended person questions on, a person visit cost the captioner one
-  call a kind — five calls, 3.7 s on a Ventuno Q. From
-  `EVENTS_DESCRIPTOR_BATCH_MIN_KINDS` kinds (3) the questions go as one
-  call with a JSON answer, 2.2 s for the same five, with the same answers
-  where the crop allows one (paired runs 5 and 5b in
-  `bench/rfc-0004-infer-once-log.md`); two kinds cost the same either way
-  and stay single. A reply that is not JSON falls back to the single
-  questions. The caption call is untouched. The headwear question no
-  longer leads with "such as helmet, cap, …", which put a cap on bare
-  heads and on crops too small to tell; it now offers "nothing" and
-  "unknown" plainly.
-
-- **The camera agent's live look and the Mirror's scene line ask core,
-  not the caption model (RFC-0004, step 4).** "What do you see on the
-  gate" and the Mirror's running subtitle now come from core's one shared
-  description: the visit the enrichment tier just described, or one gated
-  look shared with every other asker, or the last thing known stamped
-  with its age. Neither calls the captioner for the scene any more; the
-  Mirror still makes its own confirmation look when a new person appears,
-  and a question about a frame still goes to the VQA model. When core
-  does not answer, the agent takes its own look and says so in its path.
-
-- **One shared "what is on this camera now".** Core answers
-  `GET /internal/camera-agent/cameras/{id}/description?max_age_s=N` from
-  one path (RFC-0004, step 3): one caption of the pipeline's current full
-  frame through the enrichment gate at the requested priority, shared by
-  every asker that arrives while it runs and kept for N seconds; with
-  `prefer_store=true` the newest described visit answers first when it is
-  younger than N and nothing newer has started (for an app that wants
-  "what was just seen" — a visit's caption is one object's crop, not the
-  frame, so a live question never gets it unasked); when no fresh look
-  can be made, the newest thing known, stamped with its age and the
-  reason. The camera agent's live look and the Mirror's scene line move
-  onto it next: the same whole-frame answer as before, once per interval
-  instead of once per asker.
-
-- **Visits and their enrichment are on the bus.** `visit.recorded.v1` has
-  been in the contracts and the SDK since RFC-0002 with core as its
-  producer, and nothing published it; it goes out now the moment a visit
-  row is committed. `visit.enriched.v1` (RFC-0004, step 2) goes out each
-  time a visit's caption or claims land — fresh or copied from an earlier
-  visit of the same frame — carrying the whole current state (caption,
-  every claim as `kind: value`, producer, `enriched_by`, `reused_from`),
-  so the agent, the Mirror and apps can subscribe to what the store knows
-  instead of asking the caption model for it. The SDK types it
-  (`VisitEnriched`). Without `NATS_URL` nothing changes.
-
-- **A camera whose picture has stopped changing is said so.** The
-  enrichment tier knows per visit whether the evidence frame is one it has
-  seen before (the store is content-addressed); a live camera never
-  repeats a frame, a frozen stream, a stuck relay or a looping file does
-  nothing else. After `EVENTS_FROZEN_PICTURE_REPEATS` (5) such visits in a
-  row the camera gets a `picture_frozen` alarm like the recording
-  watchdog's, cleared by the first new frame; the agent's status read
-  carries `picture: frozen` and says "the picture has not changed on the
-  gate camera". Camera 23 fed the same frame for hours on 2026-11-09 and
-  nothing said so.
-
-- **The same frame is not described twice.** The evidence store is
-  content-addressed, so two visits with the same evidence path are the
-  same pixels; the later one now takes the earlier one's caption and
-  descriptor claims instead of calling the model, and says so on the
-  visit (`reused_from`). Measured on a Ventuno Q: 9,921 of a day's 10,892
-  captioner calls went to a frame already captioned (a looping test clip
-  re-detecting the same frames), none on the real office camera — so it
-  costs a real camera nothing and removes nine calls in ten on a loop, a
-  static scene re-detected or a replayed recording, with no quality
-  question. Near-repeats (the same person in the same chair, a different
-  JPEG) are deliberately not reused: at a similarity safe enough to trust
-  a real camera offers 3 % of its visits. `EVENTS_ENRICHMENT_REUSE_SAME_FRAME`
-  turns it off; `events.evidence_path` gains an index for the lookup.
-
-- **The governor's device-busy trigger counts only the work it can defer.**
-  It read the accelerator's total share, and on a box with a plate reader
-  the total is mostly the detector and the plate reader: measured on a
-  Ventuno Q (window C in `bench/rfc-0004-infer-once-log.md`), 77–139 %
-  busy with the captioner at 24 %, so captions were paced to one per 6 s,
-  a quarter of the visits in a burst got no caption inside the window, and
-  the detector gained nothing, because neither the detector nor the plate
-  reader is something the governor can pace. The trigger now compares
-  `EVENTS_ENRICHMENT_DEVICE_BUSY_PERCENT` with the share held by the
-  enrichment adapters it admits calls to (the monitor's per-user shares
-  filtered by the gates that exist). The reason line and the snapshot
-  say both figures: "enrichment holds 24% of Qualcomm Hexagon NPU
-  (device 112% busy)". The latency trigger is unchanged and still
-  covers the queue a share cannot see.
-
-- **One captioner call per visit, behind a flag (RFC-0004, step 1).** With
-  `EVENTS_ENRICHMENT_SINGLE_CALL=true` the caption task asks the model
-  once for the sentence and the descriptor answers together, as one JSON
-  object, instead of a caption call and then one call per kind on the
-  same frame (three calls a vehicle, up to six a person; on a Ventuno Q
-  225 of 325 Gemma calls in ten busy minutes were the questions). The
-  answers reach `visit_descriptors` through the same vocabulary, the
-  descriptor task leaves a visit alone when the caption task will carry
-  it, and a model that answers in prose keeps the prose as its caption
-  and is asked one by one on a later pass. Off by default until the
-  measurement on the box is in (`bench/rfc-0004-infer-once-log.md`).
-
-- **Enrichment yields to the detector on a shared accelerator.** On the
-  Ventuno Q the per-visit description questions (one for a vehicle, up to
-  five for a person, about 2 s each on Gemma) held the Hexagon 70 % of the
-  time during a busy hour, and the always-on detector, which needs 9 ms of
-  the device per frame, waited behind them: 67–119 ms a frame against a
-  25 ms floor, with the host CPU looking fine, so the CPU-shaped governor
-  never moved. The monitor's accelerator sample now carries the detector's
-  per-window mean latency and its floor (the lowest window seen, drifting
-  slowly so a lasting change re-baselines), and the governor reads the
-  ratio: at `EVENTS_ENRICHMENT_DETECTOR_SLOW_FACTOR` (2×) the live path
-  goes LIVE-ONLY in its accelerator form — embeddings as before, captions
-  at most one per `EVENTS_ENRICHMENT_PRESSURE_GAP_S` (6 s), descriptor
-  questions dropped — and at `EVENTS_ENRICHMENT_DETECTOR_PAUSE_FACTOR`
-  (4×) nothing is sent; it steps back after the usual calm period. The
-  device's own busy share is the second trigger: at
-  `EVENTS_ENRICHMENT_DEVICE_BUSY_PERCENT` (60, where the detector alone
-  measured 10–37 % and the questions pushed the sum to 85–100 %) no new
-  background call starts, since a running inference cannot be pre-empted
-  on an NPU and the only lever is not to start the next one. A dropped
-  visit keeps no caption row, which is what the backfill looks for.
-  The governor's snapshot and each `enrichment_throttled` event say the
-  detector's latency, its floor and the ratio, so the operator reads
-  "detector 67 ms a frame, 2.7× its 25 ms floor" rather than a tile at 100 %.
-
-- **The update runner is installed with OpenNVR.** Configuration → OpenNVR
-  Updates did nothing until someone ran `auto-update enable` on the host,
-  which few did. Now `up` installs the runner unless `UPDATE_RUNNER=off` in
-  `.env`, on a fresh install and on an existing site alike: on Linux it asks
-  for sudo once at a terminal, on macOS it needs nothing, on Windows it
-  needs an administrator PowerShell (a non-admin task would flash a console
-  every minute). The update policy still starts off: until it is changed in
-  the app the runner only checks in and fetches nothing.
-  `auto-update disable` turns it off and keeps it off.
-
-
-- **USB webcams are on by default on Linux (#904).** `.env.example` ships
-  `WEBCAMS=on` and the installer's question defaults to yes; an `.env` that
-  says `off` keeps it. MediaMTX then runs the `-ffmpeg` image with the
-  host's video devices (only video4linux, major 81) and the `video` group.
-  `start.sh` leaves the overlay out on a kernel with no video4linux yet,
-  where Docker could not mount `/sys/class/video4linux` and core would not
-  start, and says so.
-- **Add Camera → Manual is one row of tabs: IP camera, Browser webcam,
-  Server webcam.** It was a Webcam tab with a second row of sub-tabs
-  inside it. Each webcam tab says in one line what that kind is; the steps
-  are numbered (pick the webcam, name it, picture and sound); webcam names
-  drop the USB ids; the preview says it is not recording yet and what Add
-  will do. The three webcam lists (this browser, the server's Linux
-  webcams, the host agent's) share one row design.
 
 ### Fixed
 
-- **`auto-update enable` works on Linux.** The command the app and the
-  script showed was `sudo ./start.sh auto-update enable`, which start.sh
-  refuses (it never runs under sudo), and without sudo the script refused
-  too. It now runs as the normal user and writes only the systemd unit
-  through sudo, like the host agent.
-
-
-- **Add Camera no longer prints a SOAP fault, and a camera whose clock is
-  off can still be added.** When a camera refused the ONVIF login the
-  dialog showed the raw `<s:Envelope … ter:NotAuthorized …>` text. A camera
-  answers the same fault to a correct password when its clock is more than
-  a few minutes from ours (WS-Security checks the `Created` timestamp), so
-  core now reads the camera's clock with the unauthenticated
-  GetSystemDateAndTime after both schemes refuse, retries once with the
-  timestamp in the camera's time when the clock is off, remembers the
-  offset for that camera, and otherwise answers a 401 that says what to
-  check: the ONVIF account (often separate from the web login, or ONVIF
-  turned off) and, when measured, the clock skew in minutes. The dialog
-  shows that sentence; any other camera error is reduced to its fault code.
-
-- **A USB webcam on a Docker Desktop machine goes live (#900).** The host
-  agent's ffmpeg publishes the camera's path and its `-sub` from one
-  capture, but core only created the sub path for a webcam MediaMTX serves
-  itself on Linux. MediaMTX refused the sub, ffmpeg exited a second after
-  starting, and the camera stayed "Disconnected", retrying every minute.
-  Every provisioner now asks `local_webcams.provisioning_for` what a webcam
-  needs and creates the sub through the one place that makes sub paths:
-  camera create and edit, `POST /cameras/{id}/provision-mediamtx`, the
-  startup reconcile, and core's boot loop. The last two also stop a core
-  restart from replacing a Linux USB webcam's path without its capture
-  command.
-- **One webcam feeds one camera.** A server webcam already feeding a camera
-  is refused with a 409 on create and on edit, whatever `force` says (a
-  second capture of the device fails "device busy" for ever); the Linux
-  webcam list now says which camera a webcam feeds, as the host agent's
-  did, and needs `cameras.manage`. In the browser, a camera this tab
-  already publishes is shown "in use" and cannot be added or started for
-  a second camera.
-- **Deleting a browser webcam lets the webcam go.** Its publishing session
-  kept retrying against the deleted camera, holding the webcam open with
-  its light on, until the tab closed. Deleting stops it, and a session
-  whose camera is gone (deleted in another tab or on another device) ends
-  instead of retrying.
-- **Turning USB webcams on on Linux actually gives MediaMTX ffmpeg (#904).**
-  The webcam overlay's MediaMTX built under the same image name as the
-  default one, so `WEBCAMS=on` reused the image already on disk and every
-  webcam path failed with `exec: "ffmpeg": executable file not found`. It
-  is now its own image, `opennvr/mediamtx-webcams:local-build`.
-- **Add Camera → Webcam → OpenNVR server says what to do on that server
-  (#904).** A Linux server with webcams off was told to install the host
-  agent with `.\start.ps1`, guessed from the browser's OS. It now says to set
-  `WEBCAMS=on`; on Docker Desktop the agent's install command is the
-  server's own (`OPENNVR_HOST_OS`, written by the launchers), or both when
-  unknown. With the overlay in place and no webcam plugged in, the dialog
-  says "plug one in" instead of offering the agent.
-- **`VIDEO_GID` reaches Compose.** `start.sh` exported it from inside
-  `$(compose_args)`, a subshell, so it never left; it is now written to
-  `.env` with the other host values. Hosts whose `video` group is not 44
-  could not open the webcam.
-
-## [0.1.11] — 2026-11-12
+## [0.1.11] — 2026-11-14
 
 The Qualcomm NPU release. On the qualcomm flavour the detector, the captions (Gemma), the camera agent's LLM, the search embeddings (SigLIP 2 and a sentence model), speech to text (Whisper) and the plate reader all run on the Hexagon HTP, and a fresh install on a Dragonwing board starts with one setting: the flavour overlays are split per compose file so Compose 2.24 accepts a plain install, the tag the embedder fill finds is the tag asked for, and the discovery prober's Dockerfile reaches Docker intact. Detection boxes are on by default on every live picture. Search gained weighted fusion, synonyms and typo reading, a caption arm with its own model, voice search and a bounded re-rank, off by default. The workflow engine runs workflows and has an API. ANPR on a Qualcomm box: plate candidates at full resolution, consensus across looks, per-camera scan policy. USB webcams are cameras, served by MediaMTX on Linux; Add Camera finds ONVIF cameras by multicast. The camera agent serves OpenNVR Mirror. The dashboard shows the NPU and GPU beside CPU, memory and disk, and says when requests are queued. Adapter pins at `0.1.11` (`text_embed` on its own tag). App SDK stays 0.11.0.
+
+Between the release candidate and the tag, the enrichment tier was
+measured on the Ventuno Q and changed by the measurements: the governor
+yields to the detector on a shared accelerator and counts only the work
+it can defer; three or more descriptor questions go as one call; the
+same frame is never described twice and a camera whose picture has
+stopped changing is said so; visits and their enrichment are published
+on the bus; the agent's live look and the Mirror's subtitle come from one
+shared whole-frame description instead of their own model calls. One
+idea — the caption and the attributes in one call — was built, measured
+to cost caption words, and removed: no optimisation may lower the
+quality of an answer. The update runner is installed with OpenNVR, and a
+USB webcam on Windows goes live.
 
 ### Added
 
@@ -1015,6 +810,152 @@ The Qualcomm NPU release. On the qualcomm flavour the detector, the captions (Ge
   the detect frame; the skew window widens to at least 2 s to match.
   `full` remains for long-GOP cameras or where decode is free and exact
   timing matters.
+- **One call for the caption and the attributes was built, measured and
+  removed.** It halved the model's time per visit and, measured on the
+  labelled search set, lost the specific words search depends on:
+  "camouflage" became "beige patterned", glasses and gestures went
+  missing, recall@10 fell by a third. An optimisation that lowers the
+  quality of answers is the wrong path whatever it saves, so it is gone
+  rather than off. The measurements are in
+  `bench/rfc-0004-infer-once-log.md`.
+- **Three or more descriptor questions go to the model as one call.** With
+  the extended person questions on, a person visit cost the captioner one
+  call a kind — five calls, 3.7 s on a Ventuno Q. From
+  `EVENTS_DESCRIPTOR_BATCH_MIN_KINDS` kinds (3) the questions go as one
+  call with a JSON answer, 2.2 s for the same five, with the same answers
+  where the crop allows one (paired runs 5 and 5b in
+  `bench/rfc-0004-infer-once-log.md`); two kinds cost the same either way
+  and stay single. A reply that is not JSON falls back to the single
+  questions. The caption call is untouched. The headwear question no
+  longer leads with "such as helmet, cap, …", which put a cap on bare
+  heads and on crops too small to tell; it now offers "nothing" and
+  "unknown" plainly.
+
+- **The camera agent's live look and the Mirror's scene line ask core,
+  not the caption model (RFC-0004, step 4).** "What do you see on the
+  gate" and the Mirror's running subtitle now come from core's one shared
+  description: the visit the enrichment tier just described, or one gated
+  look shared with every other asker, or the last thing known stamped
+  with its age. Neither calls the captioner for the scene any more; the
+  Mirror still makes its own confirmation look when a new person appears,
+  and a question about a frame still goes to the VQA model. When core
+  does not answer, the agent takes its own look and says so in its path.
+
+- **One shared "what is on this camera now".** Core answers
+  `GET /internal/camera-agent/cameras/{id}/description?max_age_s=N` from
+  one path (RFC-0004, step 3): one caption of the pipeline's current full
+  frame through the enrichment gate at the requested priority, shared by
+  every asker that arrives while it runs and kept for N seconds; with
+  `prefer_store=true` the newest described visit answers first when it is
+  younger than N and nothing newer has started (for an app that wants
+  "what was just seen" — a visit's caption is one object's crop, not the
+  frame, so a live question never gets it unasked); when no fresh look
+  can be made, the newest thing known, stamped with its age and the
+  reason. The camera agent's live look and the Mirror's scene line move
+  onto it next: the same whole-frame answer as before, once per interval
+  instead of once per asker.
+
+- **Visits and their enrichment are on the bus.** `visit.recorded.v1` has
+  been in the contracts and the SDK since RFC-0002 with core as its
+  producer, and nothing published it; it goes out now the moment a visit
+  row is committed. `visit.enriched.v1` (RFC-0004, step 2) goes out each
+  time a visit's caption or claims land — fresh or copied from an earlier
+  visit of the same frame — carrying the whole current state (caption,
+  every claim as `kind: value`, producer, `enriched_by`, `reused_from`),
+  so the agent, the Mirror and apps can subscribe to what the store knows
+  instead of asking the caption model for it. The SDK types it
+  (`VisitEnriched`). Without `NATS_URL` nothing changes.
+
+- **A camera whose picture has stopped changing is said so.** The
+  enrichment tier knows per visit whether the evidence frame is one it has
+  seen before (the store is content-addressed); a live camera never
+  repeats a frame, a frozen stream, a stuck relay or a looping file does
+  nothing else. After `EVENTS_FROZEN_PICTURE_REPEATS` (5) such visits in a
+  row the camera gets a `picture_frozen` alarm like the recording
+  watchdog's, cleared by the first new frame; the agent's status read
+  carries `picture: frozen` and says "the picture has not changed on the
+  gate camera". Camera 23 fed the same frame for hours on 2026-11-09 and
+  nothing said so.
+
+- **The same frame is not described twice.** The evidence store is
+  content-addressed, so two visits with the same evidence path are the
+  same pixels; the later one now takes the earlier one's caption and
+  descriptor claims instead of calling the model, and says so on the
+  visit (`reused_from`). Measured on a Ventuno Q: 9,921 of a day's 10,892
+  captioner calls went to a frame already captioned (a looping test clip
+  re-detecting the same frames), none on the real office camera — so it
+  costs a real camera nothing and removes nine calls in ten on a loop, a
+  static scene re-detected or a replayed recording, with no quality
+  question. Near-repeats (the same person in the same chair, a different
+  JPEG) are deliberately not reused: at a similarity safe enough to trust
+  a real camera offers 3 % of its visits. `EVENTS_ENRICHMENT_REUSE_SAME_FRAME`
+  turns it off; `events.evidence_path` gains an index for the lookup.
+
+- **The governor's device-busy trigger counts only the work it can defer.**
+  It read the accelerator's total share, and on a box with a plate reader
+  the total is mostly the detector and the plate reader: measured on a
+  Ventuno Q (window C in `bench/rfc-0004-infer-once-log.md`), 77–139 %
+  busy with the captioner at 24 %, so captions were paced to one per 6 s,
+  a quarter of the visits in a burst got no caption inside the window, and
+  the detector gained nothing, because neither the detector nor the plate
+  reader is something the governor can pace. The trigger now compares
+  `EVENTS_ENRICHMENT_DEVICE_BUSY_PERCENT` with the share held by the
+  enrichment adapters it admits calls to (the monitor's per-user shares
+  filtered by the gates that exist). The reason line and the snapshot
+  say both figures: "enrichment holds 24% of Qualcomm Hexagon NPU
+  (device 112% busy)". The latency trigger is unchanged and still
+  covers the queue a share cannot see.
+
+- **Enrichment yields to the detector on a shared accelerator.** On the
+  Ventuno Q the per-visit description questions (one for a vehicle, up to
+  five for a person, about 2 s each on Gemma) held the Hexagon 70 % of the
+  time during a busy hour, and the always-on detector, which needs 9 ms of
+  the device per frame, waited behind them: 67–119 ms a frame against a
+  25 ms floor, with the host CPU looking fine, so the CPU-shaped governor
+  never moved. The monitor's accelerator sample now carries the detector's
+  per-window mean latency and its floor (the lowest window seen, drifting
+  slowly so a lasting change re-baselines), and the governor reads the
+  ratio: at `EVENTS_ENRICHMENT_DETECTOR_SLOW_FACTOR` (2×) the live path
+  goes LIVE-ONLY in its accelerator form — embeddings as before, captions
+  at most one per `EVENTS_ENRICHMENT_PRESSURE_GAP_S` (6 s), descriptor
+  questions dropped — and at `EVENTS_ENRICHMENT_DETECTOR_PAUSE_FACTOR`
+  (4×) nothing is sent; it steps back after the usual calm period. The
+  device's own busy share is the second trigger: at
+  `EVENTS_ENRICHMENT_DEVICE_BUSY_PERCENT` (60, where the detector alone
+  measured 10–37 % and the questions pushed the sum to 85–100 %) no new
+  background call starts, since a running inference cannot be pre-empted
+  on an NPU and the only lever is not to start the next one. A dropped
+  visit keeps no caption row, which is what the backfill looks for.
+  The governor's snapshot and each `enrichment_throttled` event say the
+  detector's latency, its floor and the ratio, so the operator reads
+  "detector 67 ms a frame, 2.7× its 25 ms floor" rather than a tile at 100 %.
+
+- **The update runner is installed with OpenNVR.** Configuration → OpenNVR
+  Updates did nothing until someone ran `auto-update enable` on the host,
+  which few did. Now `up` installs the runner unless `UPDATE_RUNNER=off` in
+  `.env`, on a fresh install and on an existing site alike: on Linux it asks
+  for sudo once at a terminal, on macOS it needs nothing, on Windows it
+  needs an administrator PowerShell (a non-admin task would flash a console
+  every minute). The update policy still starts off: until it is changed in
+  the app the runner only checks in and fetches nothing.
+  `auto-update disable` turns it off and keeps it off.
+
+
+- **USB webcams are on by default on Linux (#904).** `.env.example` ships
+  `WEBCAMS=on` and the installer's question defaults to yes; an `.env` that
+  says `off` keeps it. MediaMTX then runs the `-ffmpeg` image with the
+  host's video devices (only video4linux, major 81) and the `video` group.
+  `start.sh` leaves the overlay out on a kernel with no video4linux yet,
+  where Docker could not mount `/sys/class/video4linux` and core would not
+  start, and says so.
+- **Add Camera → Manual is one row of tabs: IP camera, Browser webcam,
+  Server webcam.** It was a Webcam tab with a second row of sub-tabs
+  inside it. Each webcam tab says in one line what that kind is; the steps
+  are numbered (pick the webcam, name it, picture and sound); webcam names
+  drop the USB ids; the preview says it is not recording yet and what Add
+  will do. The three webcam lists (this browser, the server's Linux
+  webcams, the host agent's) share one row design.
+
 
 ### Fixed
 
@@ -1804,6 +1745,66 @@ The Qualcomm NPU release. On the qualcomm flavour the detector, the captions (Ge
   five knobs are catalog params and apply live. Needs ai-adapter 0.1.11 for
   the band and the gate (the InsightFace miss reply now carries
   `similarity` and `confidence`); the hold works with any adapter.
+- **`auto-update enable` works on Linux.** The command the app and the
+  script showed was `sudo ./start.sh auto-update enable`, which start.sh
+  refuses (it never runs under sudo), and without sudo the script refused
+  too. It now runs as the normal user and writes only the systemd unit
+  through sudo, like the host agent.
+
+
+- **Add Camera no longer prints a SOAP fault, and a camera whose clock is
+  off can still be added.** When a camera refused the ONVIF login the
+  dialog showed the raw `<s:Envelope … ter:NotAuthorized …>` text. A camera
+  answers the same fault to a correct password when its clock is more than
+  a few minutes from ours (WS-Security checks the `Created` timestamp), so
+  core now reads the camera's clock with the unauthenticated
+  GetSystemDateAndTime after both schemes refuse, retries once with the
+  timestamp in the camera's time when the clock is off, remembers the
+  offset for that camera, and otherwise answers a 401 that says what to
+  check: the ONVIF account (often separate from the web login, or ONVIF
+  turned off) and, when measured, the clock skew in minutes. The dialog
+  shows that sentence; any other camera error is reduced to its fault code.
+
+- **A USB webcam on a Docker Desktop machine goes live (#900).** The host
+  agent's ffmpeg publishes the camera's path and its `-sub` from one
+  capture, but core only created the sub path for a webcam MediaMTX serves
+  itself on Linux. MediaMTX refused the sub, ffmpeg exited a second after
+  starting, and the camera stayed "Disconnected", retrying every minute.
+  Every provisioner now asks `local_webcams.provisioning_for` what a webcam
+  needs and creates the sub through the one place that makes sub paths:
+  camera create and edit, `POST /cameras/{id}/provision-mediamtx`, the
+  startup reconcile, and core's boot loop. The last two also stop a core
+  restart from replacing a Linux USB webcam's path without its capture
+  command.
+- **One webcam feeds one camera.** A server webcam already feeding a camera
+  is refused with a 409 on create and on edit, whatever `force` says (a
+  second capture of the device fails "device busy" for ever); the Linux
+  webcam list now says which camera a webcam feeds, as the host agent's
+  did, and needs `cameras.manage`. In the browser, a camera this tab
+  already publishes is shown "in use" and cannot be added or started for
+  a second camera.
+- **Deleting a browser webcam lets the webcam go.** Its publishing session
+  kept retrying against the deleted camera, holding the webcam open with
+  its light on, until the tab closed. Deleting stops it, and a session
+  whose camera is gone (deleted in another tab or on another device) ends
+  instead of retrying.
+- **Turning USB webcams on on Linux actually gives MediaMTX ffmpeg (#904).**
+  The webcam overlay's MediaMTX built under the same image name as the
+  default one, so `WEBCAMS=on` reused the image already on disk and every
+  webcam path failed with `exec: "ffmpeg": executable file not found`. It
+  is now its own image, `opennvr/mediamtx-webcams:local-build`.
+- **Add Camera → Webcam → OpenNVR server says what to do on that server
+  (#904).** A Linux server with webcams off was told to install the host
+  agent with `.\start.ps1`, guessed from the browser's OS. It now says to set
+  `WEBCAMS=on`; on Docker Desktop the agent's install command is the
+  server's own (`OPENNVR_HOST_OS`, written by the launchers), or both when
+  unknown. With the overlay in place and no webcam plugged in, the dialog
+  says "plug one in" instead of offering the agent.
+- **`VIDEO_GID` reaches Compose.** `start.sh` exported it from inside
+  `$(compose_args)`, a subshell, so it never left; it is now written to
+  `.env` with the other host values. Hosts whose `video` group is not 44
+  could not open the webcam.
+
 
 ## [0.1.10] — 2026-10-31
 
