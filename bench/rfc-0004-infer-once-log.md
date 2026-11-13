@@ -13,7 +13,7 @@ or an estimate.
 |---|---|---|---|
 | 0 | this ledger | — | written 2026-11-13 |
 | 1 | one structured call per best frame (caption + attributes in one answer; per-question fallback) | #909, #910 | measured 2026-11-13 (paired frames, windows A/B/C); flag on on the Ventuno Q; default flips after the search eval |
-| 2 | `visit.enriched.v1` on the bus; result cache (frame hash, model fingerprint, prompt) | — | planned |
+| 2 | do not infer twice for the same frame (exact-frame reuse; near-repeat reuse measured and declined); `visit.enriched.v1` on the bus | — | measured 2026-11-13; exact reuse in progress |
 | 3 | description channel: live tracks + freshest result; one shared gated call on a new track or a stale result | — | planned |
 | 4 | agent live look and Mirror onto 2 and 3; direct adapter calls removed | — | planned |
 | 5 | SDK frame-consumer rule (credits, latest frame wins, measured cadence, tracker continuity, skipped counter); KAI-C stream proxy adopts it | — | planned |
@@ -42,6 +42,49 @@ questions on, accurate plate mode.
 | Search eval (33 labelled cases, caption arm on bge-small) | MRR 0.71, hit@5 0.82 | `ventuno-q-text-embed-2026-11-10.md` |
 | Direct adapter callers outside the gate | the agent's live look; the Mirror's loop | code |
 | Enrichment results published on the bus | none (stored only) | `docs/EVENT_CONTRACTS.md` |
+
+## Step 2 — publish once, and do not infer twice for the same frame
+
+**Measured first (2026-11-13 06:40 UTC, on the box).** Where the
+captioner's calls went in the last 24 h:
+
+| Measurement | Value |
+|---|---|
+| captioner calls on a frame **byte-identical** to one already captioned | **9,921 of 10,892 (91 %)** |
+| the clip camera (cam26): visits / distinct evidence files | car 5,537 / 339; truck 4,303 / 79; person 908 / 28 |
+| the office camera (cam23): visits / distinct evidence files | person 454 / 454; car 150 / 150 |
+| one looping frame's caption count | 845 (the same JPEG, the same sentence, 845 times) |
+
+The evidence store is content-addressed (the path is the SHA-256 of the
+JPEG), so "the same frame" is one indexed lookup. On a looping or static
+input it removes nine calls in ten with no quality question at all —
+identical pixels, identical answer. On a real camera it removes nothing,
+so the second measurement is near-repeats there, from the SigLIP frame
+vectors the box already keeps (1,829 cam23/24 frames over 7 days):
+
+| earlier same-camera same-label frame within… | cosine ≥ 0.90 | ≥ 0.95 | ≥ 0.97 | ≥ 0.99 |
+|---|---|---|---|---|
+| 10 min | 57 % | 14 % | **3 %** | 0 % |
+| 60 min | 73 % | 20 % | 4 % | 0 % |
+| 24 h | 80 % | 22 % | 4 % | 0 % |
+
+At a threshold safe enough to reuse a caption (≥ 0.97: the same person in
+the same chair) a real camera offers 2–4 % of its visits; 0.90 is
+"similar scene", not "same frame", and reusing there would put one
+visit's words on another. **Decision:** exact-frame reuse ships now
+(caption, descriptors and marks copied from the earlier visit, no call);
+near-repeat reuse is not worth its quality risk at these rates and is
+not built.
+
+**What this says about "captions take the NPU".** On the real office
+camera: 604 visits a day = 25 an hour; at 1.2 s a caption that is 30 s
+of Gemma an hour, under 1 % of the device; with the two descriptor
+questions, about 2 %. Sixteen such cameras: 15–30 %, inside what the
+brake handles. The device was full today because of a clip that
+re-detects the same 450 frames ten thousand times a day, the per-person
+questions (up to five), and the agent's and the Mirror's own calls —
+not because a real camera's captions are expensive. So the quality of
+the plain caption is not what has to give; the duplicate work is.
 
 ## Step 1 — one structured call
 
