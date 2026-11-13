@@ -69,9 +69,11 @@ if [ -n "$PYTHON_CMD" ]; then
 fi
 
 if [ -z "$CREDENTIAL_ENCRYPTION_KEY" ]; then
-    echo -e "${YELLOW}WARNING: Could not generate Fernet key. Install: pip install cryptography${NC}"
-    echo -e "${YELLOW}         CREDENTIAL_ENCRYPTION_KEY will not be updated.${NC}"
-    echo ""
+    # A Fernet key is 32 random bytes, urlsafe-base64 encoded (44 chars,
+    # padding included): openssl makes one without the cryptography
+    # package. The example file's key is public, and the core refuses it,
+    # so the key must be generated here, not skipped.
+    CREDENTIAL_ENCRYPTION_KEY=$(openssl rand 32 | openssl base64 -A | tr '+/' '-_')
 fi
 
 # ── Display generated values ───────────────────────────────
@@ -97,19 +99,28 @@ if [ ! -f "$ENV_FILE" ]; then
     echo -e "${GREEN}✓ .env created from template.${NC}"
 fi
 
-# Helper: replace a key=value line in .env
+# Helper: replace a key=value line in .env. Pure shell, line by line: GNU
+# and BSD sed disagree on `-i` (macOS reads the expression as the backup
+# suffix and writes nothing), and a generated value may hold any character.
 replace_env_var() {
     local key="$1"
     local value="$2"
     local file="$3"
-    # Escape special characters for sed
-    local escaped_value
-    escaped_value=$(printf '%s\n' "$value" | sed 's/[\/&]/\\&/g')
-    if grep -q "^${key}=" "$file"; then
-        sed -i "s|^${key}=.*|${key}=${escaped_value}|" "$file"
-    else
-        echo "${key}=${value}" >> "$file"
-    fi
+    local tmp found=false line
+    tmp=$(mktemp "${file}.tmp.XXXXXX")
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            "${key}="*)
+                if [ "$found" = false ]; then
+                    printf '%s=%s\n' "$key" "$value" >> "$tmp"
+                    found=true
+                fi
+                ;;
+            *) printf '%s\n' "$line" >> "$tmp" ;;
+        esac
+    done < "$file"
+    [ "$found" = true ] || printf '%s=%s\n' "$key" "$value" >> "$tmp"
+    mv "$tmp" "$file"
 }
 
 echo -e "${GREEN}Writing secrets to .env ...${NC}"

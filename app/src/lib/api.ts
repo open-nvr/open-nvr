@@ -52,6 +52,7 @@ export function getDeviceToken(): string | null {
 }
 
 let authToken: string | null = null
+let enrolmentRedirected = false
 let isRefreshing = false
 let pendingRequests: Array<(token: string | null) => void> = []
 
@@ -66,7 +67,7 @@ async function tryRefreshToken(): Promise<string | null> {
   const baseURL = ((import.meta as any)?.env?.VITE_API_BASE_URL && String((import.meta as any).env.VITE_API_BASE_URL).trim()) ||
     ((import.meta as any)?.env?.PROD
       ? (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:8000')
-      : 'http://localhost:8000')
+      : '')
 
   const url = buildUrl(baseURL, '/api/v1/auth/refresh')
   const resp = await fetch(url, {
@@ -98,7 +99,7 @@ const defaultBaseURL =
   ((import.meta as any)?.env?.VITE_API_BASE_URL && String((import.meta as any).env.VITE_API_BASE_URL).trim()) ||
   ((import.meta as any)?.env?.PROD
     ? (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:8000')
-    : 'http://localhost:8000')  // Fallback for dev mode when Vite proxy is active
+    : '')
 
 function buildUrl(base: string, path: string, params?: Record<string, any>) {
   // Ensure path starts with /
@@ -130,13 +131,27 @@ function buildUrl(base: string, path: string, params?: Record<string, any>) {
 }
 
 async function doFetch(method: string, fullUrl: string, headers: Record<string, string>, body: BodyInit | undefined, options: RequestOptions) {
-  const resp = await fetch(fullUrl, {
-    method,
-    headers,
-    body: method === 'GET' ? undefined : body,
-    signal: options.signal,
-    credentials: 'omit',
-  })
+  let resp: Response
+  try {
+    resp = await fetch(fullUrl, {
+      method,
+      headers,
+      body: method === 'GET' ? undefined : body,
+      signal: options.signal,
+      credentials: 'omit',
+    })
+  } catch (cause) {
+    // Browsers expose every transport/CORS/backend-down failure as the same
+    // unhelpful "Failed to fetch" message. Use a stable internal marker so
+    // extractApiError can fall back to the translated, endpoint-specific text.
+    // Keep the technical code out of user-facing `error.message` values.
+    // Several legacy views still display the message directly; exposing the
+    // internal sentinel there made the UI show `API_NETWORK_ERROR`.
+    const error = new Error('') as Error & { code?: string }
+    error.code = 'API_NETWORK_ERROR'
+    ;(error as Error & { cause?: unknown }).cause = cause
+    throw error
+  }
 
   const rtype = options.responseType || 'json'
   let payload: any = null
@@ -235,6 +250,16 @@ async function request(method: string, url: string, data?: any, options: Request
     }
   }
 
+  // Server-side MFA wall: this session's account has no enrolled second factor
+  // (e.g. an administrator just reset it). Reload so the app re-reads the
+  // account and shows the enrolment screen instead of failing call by call.
+  if (resp.status === 403 && (payload as any)?.detail?.error === 'mfa_enrollment_required') {
+    if (typeof window !== 'undefined' && !enrolmentRedirected) {
+      enrolmentRedirected = true
+      window.location.assign('/')
+    }
+  }
+
   if (!resp.ok) {
     const err: any = new Error(extractErrorMessage(payload, resp.status))
     err.status = resp.status
@@ -257,7 +282,8 @@ export const api = {
   post: (url: string, data?: any, options?: RequestOptions) => request('POST', url, data, options),
   put: (url: string, data?: any, options?: RequestOptions) => request('PUT', url, data, options),
   patch: (url: string, data?: any, options?: RequestOptions) => request('PATCH', url, data, options),
-  delete: (url: string, options?: RequestOptions) => request('DELETE', url, undefined, options),
+  // A body is rare on DELETE but allowed; used where a password must not travel in a header.
+  delete: (url: string, options?: RequestOptions, data?: any) => request('DELETE', url, data, options),
   setToken: setAuthToken,
 }
 

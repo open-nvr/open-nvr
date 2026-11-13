@@ -21,6 +21,7 @@ import { Link } from 'react-router-dom'
 import { AlertTriangle, X } from 'lucide-react'
 import { useSystemAlerts } from '../hooks/useCameraStatus'
 import { useSystemResources } from '../lib/queries'
+import { useTranslation } from '../i18n'
 
 const DISMISS_KEY = 'system-alert-banner-dismissed'
 
@@ -37,6 +38,7 @@ function formatGb(bytes: number): string {
  * without waiting for the next event.
  */
 export function SystemAlertBanner() {
+  const { t } = useTranslation()
   const { diskCritical } = useSystemAlerts()
   const { data } = useSystemResources()
   const [dismissed, setDismissed] = useState(() => sessionStorage.getItem(DISMISS_KEY) === '1')
@@ -57,14 +59,14 @@ export function SystemAlertBanner() {
     : ''
 
   return (
-    <div className="flex items-center gap-3 mb-4 px-4 py-2.5 rounded border border-red-500/40 bg-red-500/10 text-sm" role="alert">
-      <AlertTriangle size={18} className="text-red-400 shrink-0" />
+    <div className="flex items-center gap-3 mb-4 px-4 py-2.5 border border-[color-mix(in_oklab,var(--danger)_45%,var(--border))] bg-[color-mix(in_oklab,var(--danger)_14%,transparent)] text-sm" role="alert">
+      <AlertTriangle size={18} className="text-[var(--danger)] shrink-0" />
       <div className="flex-1 min-w-0">
-        <span className="font-semibold text-red-400">Recordings disk critically low.</span>{' '}
+        <span className="font-semibold text-[var(--danger)]">{t('dashboard.recordingsDisk')} — {t('dashboard.activeAlerts')}.</span>{' '}
         <span className="text-[var(--text)]">
           {detail} Oldest footage may be purged, and recording stops if the disk fills.
         </span>{' '}
-        <Link to="/settings/recording" className="underline text-[var(--accent)]">Review retention settings</Link>
+        <Link to="/settings/recording" className="underline text-[var(--accent)]">{t('shared.reviewRetention')}</Link>
       </div>
       <button
         type="button"

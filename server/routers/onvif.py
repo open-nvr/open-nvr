@@ -28,11 +28,12 @@ import ipaddress
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
-from core.auth import get_current_superuser
+from core.auth import get_current_active_user, get_current_superuser
 from core.config import _host_is_internal
 from core.database import get_db
 from core.logging_config import main_logger
 from core.client_ip import get_client_ip
+from core.permissions import RequirePermission
 from routers.network import (
     detect_local_subnets,
     get_camera_lan_subnets,
@@ -103,6 +104,74 @@ def _assert_ip_in_camera_lan(ip: str, db: Session) -> None:
                 f"IP {ip} is outside the configured Camera LAN subnet(s) "
                 f"({', '.join(configured)})."
             ),
+        )
+
+
+# ── Per-camera authorization for the IP-keyed routes ───────────────────
+#
+# Reported (CWE-862 / CWE-639): every /camera/{ip}/... route and /connect
+# checked only that the IP was inside the camera LAN. The sibling routes
+# in routers/cameras.py (/cameras/{id}/ptz/...) require ownership; these
+# IP-keyed twins let ANY authenticated user PTZ, read the stream URI of,
+# or relay credentials at any camera on the LAN. The ceiling (internal
+# address only) is a network-safety rule; this is the missing
+# authorization rule beside it.
+#
+# Two tiers, matching what the routes are for:
+#
+# * "view"  — connect / profiles / stream-uri / time. Used by the Add
+#   Camera wizard on devices that are NOT registered yet, so an
+#   unregistered IP is allowed (any active user may create cameras);
+#   a registered IP requires ownership, a can_view grant, or superuser.
+# * "manage" — PTZ move / stop / presets. Never part of onboarding: a
+#   registered IP requires ownership, a can_manage grant, or superuser;
+#   an unregistered IP is refused outright.
+#
+# On top of the "manage" tier, the three PTZ routes also require the
+# ``ptz.control`` permission (HA-107), exactly as /cameras/{id}/ptz/* does:
+# services/permission_catalog.py promises it is layered on BOTH families,
+# so an operator who takes it away from a role must close the IP-keyed
+# path too, or the ONVIF tools page would keep steering the camera.
+require_ptz_control = RequirePermission("ptz.control")
+
+
+def _authorize_camera_ip(db: Session, user, ip: str, *, action: str) -> None:
+    """Raise 403 unless ``user`` may perform ``action`` ("view" |
+    "manage") against the camera(s) registered at ``ip``. Superusers
+    pass; deleted cameras do not count as registered."""
+    if getattr(user, "is_superuser", False):
+        return
+    from models import Camera, CameraPermission
+
+    registered = (
+        db.query(Camera)
+        .filter(Camera.ip_address == ip, Camera.deleted_at.is_(None))
+        .all()
+    )
+    if not registered:
+        if action == "view":
+            return                       # onboarding a device nobody owns yet
+        raise HTTPException(
+            status_code=403,
+            detail=f"No registered camera at {ip}; add it first to control it.",
+        )
+    if any(c.owner_id == user.id for c in registered):
+        return
+    flag = CameraPermission.can_manage if action == "manage" \
+        else CameraPermission.can_view
+    granted = (
+        db.query(CameraPermission.id)
+        .filter(
+            CameraPermission.user_id == user.id,
+            CameraPermission.camera_id.in_([c.id for c in registered]),
+            flag == True,  # noqa: E712 — SQLAlchemy column comparison
+        )
+        .first()
+    )
+    if granted is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Not enough permissions to access this camera",
         )
 
 
@@ -216,6 +285,41 @@ async def _await_scan_or_disconnect(scan: asyncio.Task, request: Request):
             )
 
 
+@router.get("/discover/agent")
+async def discover_via_host_agent(
+    refresh: bool = Query(True, description="Ask the agent for a fresh probe and wait for it (a few seconds)."),
+    current_user=Depends(get_current_superuser),
+):
+    """ONVIF cameras found by the host agent's WS-Discovery (multicast).
+
+    The agent runs on the host's own network, where multicast works: one
+    probe, every camera on that segment answers within a few seconds, and no
+    subnet has to be configured. Core cannot do this itself from a Docker
+    bridge. It does not cross routers, so the unicast sweep (GET /discover)
+    still covers routed camera networks; the dialog runs both and merges.
+
+    ``available: false`` when no agent is connected (the dialog then relies
+    on the sweep alone). Devices have the same shape as GET /discover's,
+    with ``source: "multicast"``, ``name`` and ``hardware`` added; connecting
+    to one still goes through the Camera LAN checks of /connect.
+    """
+    from services import host_agent
+
+    if not host_agent.state.connected():
+        return {"available": False, "devices": [], "scanned_at": None}
+    if refresh:
+        asked = host_agent.request_discovery()
+        # The agent hears the request at its next sync (every few seconds),
+        # probes for ~3 s and reports at once; give it up to 12 s.
+        # The wait reads one field per tick; the device list is read once, below.
+        for _ in range(48):
+            if host_agent.discovery_answered(asked):
+                break
+            await asyncio.sleep(0.25)
+    devices, scanned_at = host_agent.onvif_scan()
+    return {"available": True, "devices": devices, "scanned_at": scanned_at}
+
+
 @router.get("/discover")
 async def discover(
     request: Request,
@@ -313,6 +417,7 @@ async def connect_device(
     username: str = Query(...),
     password: str = Query(...),
     db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
 ):
     """
     Connect to ONVIF device and get all profiles with stream URIs.
@@ -321,6 +426,7 @@ async def connect_device(
     Returns device info and all available profiles with their RTSP stream URIs.
     """
     _assert_ip_in_camera_lan(ip, db)
+    _authorize_camera_ip(db, current_user, ip, action="view")
     try:
         result = await connect_and_get_profiles(ip, username, password, port)
         return result
@@ -340,9 +446,11 @@ async def camera_profiles(
         True, description="Use HTTP Digest auth (better Hikvision compatibility)"
     ),
     db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
 ):
     """Get media profiles from camera. Set use_digest=true for Hikvision devices."""
     _assert_ip_in_camera_lan(ip, db)
+    _authorize_camera_ip(db, current_user, ip, action="view")
     try:
         if use_digest:
             profiles = await fetch_profiles_digest(ip, username, password, port)
@@ -366,9 +474,11 @@ async def camera_stream_uri(
         True, description="Use HTTP Digest auth (better Hikvision compatibility)"
     ),
     db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
 ):
     """Get stream URI for a profile. Set use_digest=true for Hikvision devices."""
     _assert_ip_in_camera_lan(ip, db)
+    _authorize_camera_ip(db, current_user, ip, action="view")
     try:
         if use_digest:
             uri = await get_stream_uri_digest(
@@ -383,6 +493,24 @@ async def camera_stream_uri(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _audit_ptz(db, request, user, ip: str, action: str, details: dict) -> None:
+    """Audit a PTZ action taken through the IP-keyed ONVIF tools.
+
+    Resolves the camera id when the IP belongs to a configured camera, so
+    these rows line up with the /cameras/{id}/ptz/* ones; otherwise the IP is
+    the entity. Credentials are never recorded.
+    """
+    from models import Camera
+    from services.audit_service import audit_request
+
+    cam = db.query(Camera).filter(Camera.ip_address == ip).first()
+    audit_request(
+        db, request, action=action, user_id=getattr(user, "id", None),
+        entity_type="camera", entity_id=cam.id if cam else ip,
+        details={**details, "via": "onvif_tools", "ip": ip},
+    )
+
+
 @router.post("/camera/{ip}/ptz/move")
 async def camera_ptz_move(
     ip: str,
@@ -393,13 +521,18 @@ async def camera_ptz_move(
     port: int = Query(80, ge=1, le=65535),
     username: str = Query(...),
     password: str = Query(...),
+    request: Request = None,
     db: Session = Depends(get_db),
+    current_user=Depends(require_ptz_control),
 ):
     _assert_ip_in_camera_lan(ip, db)
+    _authorize_camera_ip(db, current_user, ip, action="manage")
     try:
         result = await ptz_continuous_move(
             ip, username, password, profile_token, x, y, z, port
         )
+        _audit_ptz(db, request, current_user, ip, "ptz.move",
+                   {"x": x, "y": y, "z": z})
         return {"ip": ip, "profileToken": profile_token, "result": result}
     except HTTPException:
         raise
@@ -414,11 +547,15 @@ async def camera_ptz_stop(
     port: int = Query(80, ge=1, le=65535),
     username: str = Query(...),
     password: str = Query(...),
+    request: Request = None,
     db: Session = Depends(get_db),
+    current_user=Depends(require_ptz_control),
 ):
     _assert_ip_in_camera_lan(ip, db)
+    _authorize_camera_ip(db, current_user, ip, action="manage")
     try:
         result = await ptz_stop(ip, username, password, profile_token, port)
+        _audit_ptz(db, request, current_user, ip, "ptz.stop", {})
         return {"ip": ip, "profileToken": profile_token, "result": result}
     except HTTPException:
         raise
@@ -431,9 +568,11 @@ async def camera_get_time(
     ip: str,
     port: int = Query(80, ge=1, le=65535),
     db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
 ):
     """Read the camera clock via GetSystemDateAndTime (no credentials needed)."""
     _assert_ip_in_camera_lan(ip, db)
+    _authorize_camera_ip(db, current_user, ip, action="view")
     try:
         result = await get_system_datetime(ip, port)
         return {"ip": ip, **result}
@@ -473,9 +612,12 @@ async def camera_ptz_preset(
     port: int = Query(80, ge=1, le=65535),
     username: str = Query(...),
     password: str = Query(...),
+    request: Request = None,
     db: Session = Depends(get_db),
+    current_user=Depends(require_ptz_control),
 ):
     _assert_ip_in_camera_lan(ip, db)
+    _authorize_camera_ip(db, current_user, ip, action="manage")
     try:
         result = await ptz_presets(
             ip,
@@ -487,6 +629,13 @@ async def camera_ptz_preset(
             preset_token=preset_token,
             port=port,
         )
+        # Listing presets is a read; setting or recalling one moves or
+        # changes the camera and is audited like any other PTZ action.
+        preset_audit = {"gotopreset": "ptz.preset.goto",
+                        "setpreset": "ptz.preset.set"}.get(action.lower())
+        if preset_audit:
+            _audit_ptz(db, request, current_user, ip, preset_audit,
+                       {"preset_token": preset_token, "name": name})
         return {
             "ip": ip,
             "profileToken": profile_token,

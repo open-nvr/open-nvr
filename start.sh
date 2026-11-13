@@ -17,7 +17,11 @@
 #   ./start.sh logs         # tail logs
 #   ./start.sh status       # show container status
 #   ./start.sh validate     # run pre-flight checks only
+#   ./start.sh prune        # remove image tags from earlier releases (disk)
 #   ./start.sh token        # re-print the first-time setup token
+#   ./start.sh update       # update to the latest release (scripts/update-host.sh)
+#   ./start.sh auto-update enable|disable|status   # the runner for in-app updates
+#   ./start.sh host-agent install|uninstall|status|logs   # USB webcams + host monitoring
 # ============================================================
 
 set -e
@@ -66,22 +70,539 @@ fi
 
 COMMAND="${1:-start}"
 
+# ── Refuse to run under sudo ──────────────────────────────
+# `sudo ./start.sh` leaves .env (written 0600 by root), the cert dirs and
+# whatever git touches owned by root; every later run as the normal user
+# then dies with ".env: Permission denied" and nothing can be read back
+# until someone with sudo chowns the checkout (seen on a test box,
+# 2026-11-02). Docker access comes from the docker group, not from root.
+# A genuine root login (no SUDO_USER) is left alone; OPENNVR_ALLOW_SUDO=1
+# overrides for the rare host that really must run this way.
+if [ "$(id -u)" = "0" ] && [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ] \
+   && [ "${OPENNVR_ALLOW_SUDO:-}" != "1" ]; then
+    echo -e "${RED}Do not run start.sh with sudo.${NC}" >&2
+    echo -e "  ${GRAY}Files it writes (.env, certificates, the checkout) would belong to root and the${NC}" >&2
+    echo -e "  ${GRAY}next ./start.sh as ${SUDO_USER} would fail with '.env: Permission denied'.${NC}" >&2
+    echo "" >&2
+    echo -e "  Run it as ${SUDO_USER} instead (add the user to the docker group if needed):" >&2
+    echo -e "    ${CYAN}sudo usermod -aG docker ${SUDO_USER} && newgrp docker${NC}" >&2
+    echo -e "  If a previous sudo run already left root-owned files here, give them back first:" >&2
+    echo -e "    ${CYAN}sudo chown -R ${SUDO_USER}:$(id -gn "${SUDO_USER}" 2>/dev/null || echo "${SUDO_USER}") \"$(pwd)\"${NC}" >&2
+    echo -e "  ${GRAY}(OPENNVR_ALLOW_SUDO=1 skips this check.)${NC}" >&2
+    exit 1
+fi
+
 # ── Helper: read a value from .env ────────────────────────
 get_env_var() {
+    # The value as compose reads it: an unquoted inline comment (" # …") and
+    # surrounding whitespace are not part of it. .env.example writes
+    # ``DETECT_ONNX_BACKEND=auto   # auto (cvdnn …)``, and the flavour logic
+    # below matches that value against ``auto``.
     local key="$1"
-    grep -E "^${key}=" .env 2>/dev/null | cut -d'=' -f2- | tr -d '"' | tr -d "'"
+    grep -E "^${key}=" .env 2>/dev/null | cut -d'=' -f2- | sed -E 's/[[:space:]]+#.*$//; s/^[[:space:]]+//; s/[[:space:]]+$//' | tr -d '"' | tr -d "'"
+}
+
+# ── OpenNVR Accelerate: hardware flavour ───────────────────
+# OPENNVR_ACCEL=auto|cpu|intel|qualcomm in .env (default auto). auto reads the host:
+#   intel     Linux with an Intel render node (/sys/class/drm/renderD*, 0x8086)
+#   qualcomm  Linux arm64 with the Hexagon compute DSP (/dev/fastrpc-cdsp):
+#             Dragonwing / Snapdragon boards on Qualcomm's Ubuntu
+#   cpu       everything else — the macOS/Windows Docker VMs expose no devices
+# A flavour is an overlay + the matching image tag suffix (-intel, -qualcomm),
+# see docker-compose.accel-*.yml. The Intel NPU overlay joins when
+# /dev/accel/accel0 is present. The flavour only fills DETECT_* values .env leaves at the CPU
+# default; an explicit operator value (qsv, a provider list) always wins.
+# The flavour image must be pullable (or already local) before we commit to
+# it: flavour tags ride the release (0.2.0-intel), so a main checkout pinned
+# to an older CORE_TAG, or an air-gapped host, would otherwise die on
+# `docker pull`. A missing image means cpu, said out loud — never a dead stack.
+accel_image() {
+    local img
+    img=$(get_env_var "DETECT_PIPELINE_IMAGE")
+    [[ -n "$img" ]] && { echo "$img"; return; }
+    local tag; tag=$(get_env_var "CORE_TAG")
+    echo "ghcr.io/open-nvr/detect-pipeline:${tag:-latest}-$1"
+}
+accel_image_available() {
+    local img="$1"
+    docker image inspect "$img" >/dev/null 2>&1 && return 0
+    docker manifest inspect "$img" >/dev/null 2>&1
+}
+ACCEL_RESOLVED=""
+detect_accel() {
+    [[ -n "$ACCEL_RESOLVED" ]] && { echo "$ACCEL_RESOLVED"; return; }
+    local want accel=cpu
+    want=$(get_env_var "OPENNVR_ACCEL" | tr '[:upper:]' '[:lower:]')
+    case "$want" in
+        cpu|intel|qualcomm) accel="$want" ;;
+        ""|auto)
+            if [[ "$OS" == Linux* ]]; then
+                local v
+                for v in /sys/class/drm/renderD*/device/vendor; do
+                    [[ -r "$v" ]] && [[ "$(cat "$v" 2>/dev/null)" == "0x8086" ]] && { accel=intel; break; }
+                done
+                # The Hexagon NPU has no render node; its fastrpc device is the tell.
+                [[ "$accel" == cpu && "$(uname -m)" == aarch64 && -e /dev/fastrpc-cdsp ]] && accel=qualcomm
+            fi ;;
+        *) echo "Unknown OPENNVR_ACCEL=$want (auto|cpu|intel|qualcomm); using cpu" >&2 ;;
+    esac
+    if [[ "$accel" != cpu ]]; then
+        local img; img=$(accel_image "$accel")
+        if ! accel_image_available "$img"; then
+            echo -e "${YELLOW}Accelerate:${NC} the $accel flavour image $img is not available (not published for this CORE_TAG, or no registry access) — staying on cpu. Build it locally and set DETECT_PIPELINE_IMAGE, or wait for a release that ships -$accel tags." >&2
+            accel=cpu
+        fi
+    fi
+    ACCEL_RESOLVED="$accel"
+    echo "$accel"
+}
+accel_args() {
+    local accel="$1" args=""
+    case "$accel" in
+        intel)
+            [[ -f docker-compose.accel-intel.yml ]] || { echo "docker-compose.accel-intel.yml not found" >&2; return 1; }
+            args="-f docker-compose.accel-intel.yml"
+            [[ -e /dev/accel/accel0 ]] && args="$args -f docker-compose.accel-intel-npu.yml"
+            ;;
+        qualcomm)
+            [[ -f docker-compose.accel-qualcomm.yml ]] || { echo "docker-compose.accel-qualcomm.yml not found" >&2; return 1; }
+            args="-f docker-compose.accel-qualcomm.yml"
+            ;;
+    esac
+    echo "$args"
+}
+
+# ── USB webcams on this machine (docs/WEBCAM.md) ───────────
+# WEBCAMS=on (the .env.example default) adds docker-compose.webcams.yml,
+# where MediaMTX captures the webcam itself. Linux only: Docker Desktop
+# cannot see USB, and there the host agent does the job. The overlay also
+# bind-mounts /sys/class/video4linux into core, and Docker cannot create a
+# missing path under /sys ("mkdir ... operation not permitted"), so on a
+# kernel that has not loaded video4linux yet (no webcam ever plugged in, a
+# cloud VM) the overlay would stop core from starting at all. Then it is
+# left out until the next `up` after a webcam appears.
+webcams_usable() {
+    [[ "$(get_env_var WEBCAMS)" == "on" && "$(uname -s)" == "Linux" \
+        && -d /sys/class/video4linux && -f docker-compose.webcams.yml ]]
+}
+
+# What core needs to know about the host, persisted to .env for the same
+# reason as apply_accel_env's values (every compose entry point must see
+# them). Runs in the PARENT shell: compose_args is a subshell.
+#   OPENNVR_HOST_OS  linux|darwin, so Add Camera → Webcam can say what to do
+#                    on THIS server (a browser on Windows looking at a Linux
+#                    server must not be told to run start.ps1).
+#   VIDEO_GID        the host's `video` group, which MediaMTX joins to open
+#                    /dev/video* (the overlay's default is Debian's 44).
+apply_host_env() {
+    local host_os=""
+    case "$(uname -s)" in Linux*) host_os=linux ;; Darwin*) host_os=darwin ;; esac
+    [[ -n "$host_os" && "$(get_env_var OPENNVR_HOST_OS)" != "$host_os" ]] && set_env_var OPENNVR_HOST_OS "$host_os"
+    [[ "$(get_env_var WEBCAMS)" == "on" && "$host_os" == linux ]] || return 0
+    if [[ ! -f docker-compose.webcams.yml ]]; then
+        echo -e "${YELLOW}Webcams:${NC} WEBCAMS=on but docker-compose.webcams.yml is missing — USB webcams stay off." >&2
+    elif [[ ! -d /sys/class/video4linux ]]; then
+        echo -e "${YELLOW}Webcams:${NC} this kernel has no video4linux yet (/sys/class/video4linux) — USB webcams stay off. Plug a webcam in, then run ./start.sh up again." >&2
+    else
+        local vgid; vgid=$(getent group video 2>/dev/null | cut -d: -f3)
+        [[ -n "$vgid" && "$(get_env_var VIDEO_GID)" != "$vgid" ]] && set_env_var VIDEO_GID "$vgid"
+    fi
+    return 0
+}
+
+# The flavour's DETECT_* defaults go into the environment compose reads
+# (shell wins over .env). This must run in the PARENT shell — compose_args
+# is used as $(compose_args), and an export inside that subshell is lost —
+# so every command that builds ARGS calls apply_accel_env first.
+#
+# PERSISTED to .env (set_env_var), not merely exported: this process is one
+# of several compose entry points. A `docker compose up -d <service>` run by
+# hand — to add a fake-camera rig, to restart one app — rebuilds every
+# service whose config differs from the running one, and with these values
+# living only in start.sh's environment it rebuilt them WITHOUT the
+# accelerator: the detect-pipeline and the yolov8 adapter came back as the
+# plain cpu image, no NPU device, and the host went to 99 % CPU while every
+# health check still said "accelerator in use" (Ventuno Q, 2026-11-01).
+# With the resolved values in .env, every entry point sees the same stack.
+# Only values the operator left at the default are filled, and a value a
+# previous flavour filled is reset when the flavour changes, so an
+# operator's own setting is never overwritten.
+apply_accel_env() {
+    local accel; accel=$(detect_accel)
+    reset_stale_accel_fills "$accel"
+    case "$accel" in
+        intel)
+            case "$(get_env_var DETECT_HWACCEL)" in ""|cpu) set_env_var DETECT_HWACCEL vaapi ;; esac
+            case "$(get_env_var DETECT_ONNX_BACKEND)" in ""|auto) set_env_var DETECT_ONNX_BACKEND ort ;; esac
+            # Pin the device rather than AUTO: AUTO warms up on CPU and can sit
+            # there for a long time — measured on Arrow Lake: NPU 7.4 ms/frame,
+            # iGPU 7.7, OpenVINO CPU 15.5, AUTO 17.0 after 30 frames. The NPU
+            # also leaves the iGPU to decode and costs almost no CPU.
+            if [[ -z "$(get_env_var DETECT_ONNX_PROVIDERS)" ]]; then
+                if [[ -e /dev/accel/accel0 ]]; then set_env_var DETECT_ONNX_PROVIDERS "OpenVINOExecutionProvider:NPU"
+                else set_env_var DETECT_ONNX_PROVIDERS "OpenVINOExecutionProvider:GPU"; fi
+            fi
+            # The ONNX adapters: each follows <NAME>_ONNX_PROVIDERS, then the
+            # shared ADAPTER_ONNX_PROVIDERS, then the overlay's default — an
+            # accelerator only where that model is proven on Intel: yolov8 on
+            # the iGPU, the pose adapter on the NPU (its model reset an Arrow
+            # Lake host when compiled for the iGPU); InsightFace, plate OCR
+            # and package detection stay on CPU until proven. Everything is
+            # a plain env override in .env; see docs/HARDWARE.md.
+            if [[ -z "$(get_env_var YOLO_POSE_ONNX_PROVIDERS)" && -z "$(get_env_var ADAPTER_ONNX_PROVIDERS)" ]]; then
+                [[ -e /dev/accel/accel0 ]] && set_env_var YOLO_POSE_ONNX_PROVIDERS "OpenVINOExecutionProvider:NPU"
+            fi
+            ;;
+        qualcomm)
+            # Decode stays in software (ffmpeg has no path to the Qualcomm
+            # video core); the detector goes to the Hexagon Tensor Processor.
+            case "$(get_env_var DETECT_ONNX_BACKEND)" in ""|auto) set_env_var DETECT_ONNX_BACKEND ort ;; esac
+            [[ -n "$(get_env_var DETECT_ONNX_PROVIDERS)" ]] || set_env_var DETECT_ONNX_PROVIDERS "QNNExecutionProvider:htp"
+            # The DSP and DMA-heap nodes are group-owned; the overlay adds the
+            # groups to the container. Read them off the host unless .env pins them.
+            local gid
+            if [[ -z "$(get_env_var FASTRPC_GID)" ]]; then
+                gid=$(getent group fastrpc 2>/dev/null | cut -d: -f3); [[ -n "$gid" ]] && set_env_var FASTRPC_GID "$gid"
+            fi
+            if [[ -z "$(get_env_var DMAHEAP_GID)" ]]; then
+                gid=$(getent group dmaheap 2>/dev/null | cut -d: -f3); [[ -n "$gid" ]] && set_env_var DMAHEAP_GID "$gid"
+            fi
+            # The captioner goes to the NPU too: the litertlm adapter (Gemma
+            # 4 E2B compiled for the Hexagon, 2.5 s a photo on a Ventuno Q
+            # where Ollama's qwen3-vl on the same CPU took 60–90 s and saved
+            # nothing). Filled only when .env still names a CPU captioner
+            # with no tag of its own — an operator's own pick (blip, a
+            # pinned tag) is kept — and only when the image exists for this
+            # ADAPTER_TAG (or as latest-qualcomm before a release ships it).
+            fill_qualcomm_captioner
+            fill_qualcomm_agent_llm
+            fill_qualcomm_embedder
+            ;;
+    esac
+    # Speech to text is resolved for EVERY flavour: STT_ADAPTER=auto is
+    # the NPU adapter on a Qualcomm board and parakeet everywhere else.
+    resolve_stt_adapter "$accel"
+    write_env_var OPENNVR_ACCEL_RESOLVED "$accel"
+}
+fill_qualcomm_captioner() {
+    case "$(get_env_var CAPTION_ADAPTER)" in ""|moondream|ollamavlm) ;; *) return 0 ;; esac
+    [[ -z "$(get_env_var CAPTION_ADAPTER_TAG)" ]] || return 0
+    local tag img; tag=$(get_env_var ADAPTER_TAG)
+    for tag in "${tag:-latest}-qualcomm" "latest-qualcomm"; do
+        img="ghcr.io/open-nvr/litertlm-adapter:${tag}"
+        if accel_image_available "$img"; then
+            set_env_var CAPTION_ADAPTER litertlm
+            set_env_var CAPTION_ADAPTER_TAG "$tag"
+            # The NPU captioner keeps up with every visit (1.7 s a photo on
+            # a Ventuno Q; measured with the detector live, bench/), so the
+            # visit descriptions the CPU installer switched off come on
+            # with it: captions and colour/type questions (the sweep of
+            # visits already recorded stays the operator's choice, below).
+            # Filled only at this moment — the
+            # switch from a CPU captioner — so a value the operator set
+            # since is never touched; leaving the flavour resets them.
+            # Only where the captioner will actually run: the service is
+            # defined by docker-compose.camera-agent.yml, so an install
+            # without that file (a plain install, no app picked) has no
+            # captioner, and flags switched on there describe nothing and
+            # tell the operator search by caption works when it cannot
+            # (fresh install, 2026-11-12). The adapter and tag are still
+            # filled, so picking the Camera Agent later is one `up` away.
+            if [[ ",$(get_env_var OPENNVR_EXAMPLE_COMPOSE)," != *,docker-compose.camera-agent.yml,* ]]; then
+                echo -e "${YELLOW}Accelerate:${NC} the NPU captioner (litertlm) is available but nothing in this install runs it. Pick the Camera Agent (./start.sh install) to describe visits and search them by caption." >&2
+                return 0
+            fi
+            case "$(get_env_var EVENTS_CAPTION_ENRICHMENT)" in ""|false) set_env_var EVENTS_CAPTION_ENRICHMENT true ;; esac
+            case "$(get_env_var EVENTS_DESCRIPTOR_ENRICHMENT)" in ""|false) set_env_var EVENTS_DESCRIPTOR_ENRICHMENT true ;; esac
+            # The sweep of older visits is the operator's choice (Footage
+            # Search → Configure → Backfill history), not the flavour's.
+            # People too: with the captioner on the NPU the two extra
+            # questions a person visit costs (top clothing, carrying) are
+            # a second or two of NPU on an image it already holds, so
+            # "person in a blue kurta" becomes an exact claim and not only
+            # a caption word (Ventuno Q, 2026-11-08). On the CPU the same
+            # questions are tens of seconds each, so the installer's false
+            # stays there. The same rule as the three above: filled at the
+            # switch, an operator's own value never touched, reset on
+            # leaving the flavour. What it records: what each person wears
+            # and carries, per visit, on this box only.
+            case "$(get_env_var EVENTS_DESCRIPTOR_PEOPLE)" in ""|false) set_env_var EVENTS_DESCRIPTOR_PEOPLE true ;; esac
+            return 0
+        fi
+    done
+    echo -e "${YELLOW}Accelerate:${NC} the NPU captioner image ghcr.io/open-nvr/litertlm-adapter:*-qualcomm is not available (no registry access?) — the captioner stays on $(get_env_var CAPTION_ADAPTER)." >&2
+}
+
+fill_qualcomm_agent_llm() {
+    # The camera agent's LLM goes to the NPU too: the litertlm adapter
+    # answers /v1/chat/completions on the engine the captioner uses (a
+    # turn 0.8–2.0 s on a Ventuno Q against 20–25 s for granite4:micro on
+    # its CPU, 10 of 10 tool choices right on the agent's evaluation
+    # questions; bench/ventuno-q-npu-agent-llm-2026-11-07.md). Filled only
+    # when the captioner fill put litertlm there and .env names no LLM
+    # provider of its own — an operator's cloud endpoint is kept. The
+    # bundle's window is fixed at 4,096 tokens: LLM_WINDOW_TOKENS makes
+    # the agent send each turn only the tool schemas the question needs.
+    [[ "$(get_env_var CAPTION_ADAPTER)" == litertlm ]] || return 0
+    # A box this fill already put on the NPU adapter (its own URL, so no
+    # operator's endpoint is being touched) gains the fallback when .env
+    # names a host Ollama, even though the switch itself is past.
+    if [[ "$(get_env_var LLM_BASE_URL)" == "http://caption-adapter:9006" ]]; then
+        local ext0; ext0=$(get_env_var OLLAMA_EXTERNAL_URL)
+        [[ -n "$ext0" && -z "$(get_env_var LLM_FALLBACK_URL)" ]] && set_env_var LLM_FALLBACK_URL "$ext0"
+        return 0
+    fi
+    case "$(get_env_var LLM_PROVIDER)" in ""|ollama) ;; *) return 0 ;; esac
+    [[ -z "$(get_env_var LLM_BASE_URL)" ]] || return 0
+    set_env_var LLM_PROVIDER openai
+    set_env_var LLM_BASE_URL http://caption-adapter:9006
+    set_env_var LLM_MODEL gemma-4-e2b-npu
+    set_env_var LLM_WINDOW_TOKENS 4096
+    # A pre-warm is seconds on the NPU; the installer turned it off for the CPU.
+    case "$(get_env_var LLM_PREWARM)" in ""|false) set_env_var LLM_PREWARM true ;; esac
+    # A host Ollama, when .env names one, answers while the NPU adapter is
+    # away (restarting, reloading its model): slower, with a spoken notice.
+    local ext; ext=$(get_env_var OLLAMA_EXTERNAL_URL)
+    [[ -n "$ext" && -z "$(get_env_var LLM_FALLBACK_URL)" ]] && set_env_var LLM_FALLBACK_URL "$ext"
+    return 0
+}
+
+# The search embedder on the NPU: SigLIP2 through ai-adapter's siglip_qnn
+# (docker-compose.accel-qualcomm.yml replaces the CPU clip image for the
+# `embeddings` profile). Filled only when the image exists for this
+# ADAPTER_TAG (or as latest-qualcomm): EVENTS_EMBED_ENRICHMENT on, the
+# `embeddings` profile added to OPENNVR_EXAMPLE_PROFILE so the adapter
+# starts and registers — the same rule as the captioner's fill: an
+# operator's own value is never touched, leaving the flavour resets both.
+# The per-camera `embed` skill assignment stays the operator's gate: the
+# flag and the adapter do nothing for a camera without it.
+fill_qualcomm_embedder() {
+    local tag img; tag=$(get_env_var ADAPTER_TAG)
+    for tag in "${tag:-latest}-qualcomm" "latest-qualcomm"; do
+        img="ghcr.io/open-nvr/siglip-qnn-adapter:${tag}"
+        if accel_image_available "$img"; then
+            # The tag that EXISTS is the one the overlay must ask for. Found
+            # as latest-qualcomm but left unsaid, the overlay requested
+            # <ADAPTER_TAG>-qualcomm — no such image for a release older
+            # than the embedder — and one missing image cancelled every
+            # other pull of the project (fresh install, 2026-11-12).
+            set_env_var EMBED_ADAPTER_TAG "$tag"
+            case "$(get_env_var EVENTS_EMBED_ENRICHMENT)" in ""|false) set_env_var EVENTS_EMBED_ENRICHMENT true ;; esac
+            local profiles; profiles=$(get_env_var OPENNVR_EXAMPLE_PROFILE)
+            case ",${profiles}," in
+                *,embeddings,*|*,enrichment,*) ;;
+                *) set_env_var OPENNVR_EXAMPLE_PROFILE "${profiles:+$profiles,}embeddings" ;;
+            esac
+            return 0
+        fi
+    done
+    echo -e "${YELLOW}Accelerate:${NC} the NPU embedder image ghcr.io/open-nvr/siglip-qnn-adapter:*-qualcomm is not available (no registry access, or not published yet) — search keeps matching words only." >&2
+}
+
+# Speech to text for the camera agent. STT_ADAPTER in .env is one word:
+#   auto (default)  whisper_qnn on a Qualcomm board whose NPU image is
+#                   available, parakeet everywhere else
+#   parakeet        Parakeet TDT 0.6B v3 on the CPU
+#   whisper         faster-whisper on the CPU (Hindi, translation)
+#   whisper_qnn     Whisper-Small w8a16 on the Hexagon NPU (Qualcomm only)
+# Compose needs four values the word implies — the image, the uvicorn
+# module, the tag (the NPU image carries the flavour) and the ONNX
+# provider — so this turns the word into them on every start. "auto"
+# itself never reaches compose: the derived image and module always do.
+# Measured on a Ventuno Q (bench/ventuno-q-stt-2026-11-09.md): the NPU
+# adapter answers in 361 ms an utterance against parakeet's 774 ms on the
+# same box's CPU, with the same accuracy on clean speech, and it tells
+# silence and noise from speech, which parakeet cannot — hence the default.
+resolve_stt_adapter() {
+    local accel="$1" want; want=$(get_env_var STT_ADAPTER | tr '[:upper:]' '[:lower:]')
+    case "$want" in
+        whisper_qnn)
+            if [[ "$accel" == qualcomm ]] && fill_whisper_qnn; then return 0; fi
+            echo -e "${YELLOW}Accelerate:${NC} STT_ADAPTER=whisper_qnn, but this is not a Qualcomm board with the image ghcr.io/open-nvr/whisper-qnn-adapter:*-qualcomm available — speech to text stays on parakeet." >&2
+            set_env_var STT_ADAPTER parakeet
+            fill_stt_cpu parakeet ;;
+        ""|auto)
+            if [[ "$accel" == qualcomm ]] && fill_whisper_qnn; then return 0; fi
+            fill_stt_cpu parakeet ;;
+        parakeet|whisper)
+            # An explicit CPU pick: compose derives the image and module
+            # from the word itself; only a stale NPU fill is cleared.
+            fill_stt_cpu "$want" ;;
+        *)  ;;   # an operator's own image/module: leave every value alone
+    esac
+}
+# The NPU adapter's four values, when its image exists for this ADAPTER_TAG
+# (or as latest-qualcomm before a release ships it). Returns 1 otherwise.
+fill_whisper_qnn() {
+    local tag img; tag=$(get_env_var ADAPTER_TAG)
+    for tag in "${tag:-latest}-qualcomm" "latest-qualcomm"; do
+        img="ghcr.io/open-nvr/whisper-qnn-adapter:${tag}"
+        if accel_image_available "$img"; then
+            set_env_var STT_ADAPTER_IMAGE whisper-qnn-adapter
+            set_env_var STT_ADAPTER_MODULE adapters.whisper_qnn.main
+            set_env_var STT_ADAPTER_TAG "$tag"
+            set_env_var STT_ONNX_PROVIDERS QNNExecutionProvider:htp
+            return 0
+        fi
+    done
+    return 1
+}
+# A CPU adapter's values: the image and module named outright (so
+# STT_ADAPTER=auto never reaches compose as "auto-adapter"), the NPU
+# provider cleared, and a tag the NPU fill wrote put back on ADAPTER_TAG.
+# A tag the operator pinned (no -qualcomm suffix) is kept.
+fill_stt_cpu() {
+    local name="$1"
+    set_env_var STT_ADAPTER_IMAGE "${name}-adapter"
+    set_env_var STT_ADAPTER_MODULE "adapters.${name}.main"
+    set_env_var STT_ONNX_PROVIDERS ""
+    case "$(get_env_var STT_ADAPTER_TAG)" in *-qualcomm) set_env_var STT_ADAPTER_TAG "" ;; esac
+}
+
+# The flavour changed since the last run (OPENNVR_ACCEL edited, or the disk
+# moved to another box). Put back the CPU default in every value the
+# PREVIOUS flavour filled — recognised by being exactly that flavour's fill,
+# so a value the operator typed survives.
+reset_stale_accel_fills() {
+    local now="$1" prev; prev=$(get_env_var OPENNVR_ACCEL_RESOLVED)
+    [[ -z "$prev" || "$prev" == "$now" ]] && return 0
+    local key val
+    for key in DETECT_HWACCEL DETECT_ONNX_BACKEND DETECT_ONNX_PROVIDERS YOLO_POSE_ONNX_PROVIDERS CAPTION_ADAPTER LLM_BASE_URL STT_ADAPTER EVENTS_EMBED_ENRICHMENT EMBED_ADAPTER_TAG; do
+        val=$(get_env_var "$key")
+        case "$prev:$key:$val" in
+            intel:DETECT_HWACCEL:vaapi) write_env_var DETECT_HWACCEL cpu ;;
+            # The NPU captioner has no CPU image: back to the installer's
+            # non-CUDA pick, riding ADAPTER_TAG again.
+            qualcomm:CAPTION_ADAPTER:litertlm)
+                write_env_var CAPTION_ADAPTER moondream; write_env_var CAPTION_ADAPTER_TAG ""
+                # ...and the descriptions it switched on: a CPU captioner
+                # cannot keep up with every visit (#583).
+                write_env_var EVENTS_CAPTION_ENRICHMENT false; write_env_var EVENTS_DESCRIPTOR_ENRICHMENT false
+                write_env_var EVENTS_DESCRIPTOR_PEOPLE false ;;
+            # The agent's LLM on the NPU adapter: back to Ollama, the CPU
+            # pre-warm off again, the window the runtime's own.
+            qualcomm:LLM_BASE_URL:http://caption-adapter:9006)
+                write_env_var LLM_PROVIDER ""; write_env_var LLM_BASE_URL ""; write_env_var LLM_MODEL ""
+                write_env_var LLM_WINDOW_TOKENS ""; write_env_var LLM_PREWARM false; write_env_var LLM_FALLBACK_URL "" ;;
+            # Speech to text on the Hexagon has no CPU image: an explicit
+            # whisper_qnn goes back to parakeet (auto resolves itself on
+            # every start, see resolve_stt_adapter), riding ADAPTER_TAG
+            # again, the derived names cleared.
+            qualcomm:STT_ADAPTER:whisper_qnn)
+                write_env_var STT_ADAPTER parakeet; write_env_var STT_ADAPTER_TAG ""
+                write_env_var STT_ADAPTER_IMAGE ""; write_env_var STT_ADAPTER_MODULE ""; write_env_var STT_ONNX_PROVIDERS "" ;;
+            # The NPU embedder has no CPU image here: the flag the fill set
+            # goes back off and the profile it added is removed (an
+            # `enrichment` profile the operator chose is kept).
+            qualcomm:EVENTS_EMBED_ENRICHMENT:true)
+                write_env_var EVENTS_EMBED_ENRICHMENT false
+                local _p; _p=$(get_env_var OPENNVR_EXAMPLE_PROFILE)
+                _p=$(printf '%s' ",${_p}," | sed -e 's/,embeddings,/,/g' -e 's/^,//' -e 's/,$//')
+                write_env_var OPENNVR_EXAMPLE_PROFILE "$_p" ;;
+            # The embedder tag the fill found on the registry: nothing to
+            # ride on a CPU flavour (the clip image follows ADAPTER_TAG).
+            qualcomm:EMBED_ADAPTER_TAG:*-qualcomm) write_env_var EMBED_ADAPTER_TAG "" ;;
+            intel:DETECT_ONNX_BACKEND:ort|qualcomm:DETECT_ONNX_BACKEND:ort) write_env_var DETECT_ONNX_BACKEND auto ;;
+            intel:DETECT_ONNX_PROVIDERS:OpenVINOExecutionProvider:NPU|intel:DETECT_ONNX_PROVIDERS:OpenVINOExecutionProvider:GPU|qualcomm:DETECT_ONNX_PROVIDERS:QNNExecutionProvider:htp)
+                write_env_var DETECT_ONNX_PROVIDERS "" ;;
+            intel:YOLO_POSE_ONNX_PROVIDERS:OpenVINOExecutionProvider:NPU) write_env_var YOLO_POSE_ONNX_PROVIDERS "" ;;
+        esac
+    done
+    echo -e "  ${YELLOW}Accelerate:${NC} flavour changed ${prev} → ${now}; the values ${prev} had filled in .env were reset." >&2
+}
+
+# The compose file set and profiles this run resolved, written where every
+# `docker compose` invocation in this directory reads them (Compose takes
+# COMPOSE_FILE / COMPOSE_PROFILES / COMPOSE_PATH_SEPARATOR from .env). A
+# bare `docker compose up -d <service>` then rebuilds that service with the
+# same overlays — the accelerator flavour included — instead of the plain
+# base file. Passing -f by hand still replaces the set, so the documented
+# way to add an overlay is OPENNVR_EXAMPLE_COMPOSE / OPENNVR_EXAMPLE_PROFILE
+# in .env and `./start.sh up`.
+persist_compose_set() {
+    local args="$1" files="" profiles="" tok prev=""
+    for tok in $args; do
+        case "$prev" in
+            -f) files="${files:+$files:}$tok" ;;
+            --profile) profiles="${profiles:+$profiles,}$tok" ;;
+        esac
+        prev="$tok"
+    done
+    write_env_var COMPOSE_PATH_SEPARATOR ":"
+    write_env_var COMPOSE_FILE "$files"
+    write_env_var COMPOSE_PROFILES "$profiles"
+}
+accel_summary() {
+    local accel; accel=$(detect_accel)
+    case "$accel" in
+        intel)
+            local npu="no NPU"; [[ -e /dev/accel/accel0 ]] && npu="NPU"
+            local shared; shared=${ADAPTER_ONNX_PROVIDERS:-$(get_env_var ADAPTER_ONNX_PROVIDERS)}
+            local adapters
+            if [[ -n "$shared" ]]; then adapters="adapters on ${shared}"
+            else
+                local y8 pose
+                y8=${YOLOV8_ONNX_PROVIDERS:-$(get_env_var YOLOV8_ONNX_PROVIDERS)}
+                pose=${YOLO_POSE_ONNX_PROVIDERS:-$(get_env_var YOLO_POSE_ONNX_PROVIDERS)}
+                adapters="yolov8 on ${y8:-OpenVINOExecutionProvider:GPU}, pose on ${pose:-CPUExecutionProvider}, other adapters on CPU unless set"
+            fi
+            echo -e "${CYAN}Accelerate:${NC} intel flavour — iGPU decode (${DETECT_HWACCEL:-$(get_env_var DETECT_HWACCEL)}), detector on ${DETECT_ONNX_PROVIDERS:-$(get_env_var DETECT_ONNX_PROVIDERS)}, ${adapters} (${npu} present)"
+            ;;
+        qualcomm)
+            echo -e "${CYAN}Accelerate:${NC} qualcomm flavour — software decode, detector on ${DETECT_ONNX_PROVIDERS:-$(get_env_var DETECT_ONNX_PROVIDERS)} (Hexagon NPU via /dev/fastrpc-cdsp); adapters: yolov8, yolo-pose, insightface, package-detection, fast-plate-ocr on the NPU (override <NAME>_ONNX_PROVIDERS or ADAPTER_ONNX_PROVIDERS in .env); captioner: $(get_env_var CAPTION_ADAPTER)$([[ "$(get_env_var CAPTION_ADAPTER)" == litertlm ]] && echo " (Gemma on the NPU)")"
+            ;;
+        *) echo -e "${GRAY}Accelerate:${NC} cpu flavour (set OPENNVR_ACCEL in .env, or add an Intel iGPU / a Qualcomm NPU)" ;;
+    esac
+}
+
+# The multicast prober (docker-compose.lan-discovery.yml) is built FROM the
+# core image, copying /opt/opennvr-host/linux-<arch>/opennvr-host out of it.
+# Releases before 0.1.11 do not carry that directory, and a build that
+# fails takes the whole `up` with it: a checkout of main with the installer's
+# release pin (CORE_TAG=0.1.10) could not start at all (Ventuno Q,
+# 2026-11-12). A pin that is not a release number (main, latest, edge, a
+# commit) is taken as current.
+LAN_DISCOVERY_MIN_CORE="0.1.11"
+lan_discovery_core_ok() {
+    local tag; tag=$(get_env_var CORE_TAG)
+    case "$tag" in
+        ""|main|latest|edge) return 0 ;;
+    esac
+    [[ "$tag" =~ ^[0-9]+(\.[0-9]+){1,3}$ ]] || return 0
+    version_ge "$tag" "$LAN_DISCOVERY_MIN_CORE"
 }
 
 # ── Build Docker Compose profile args ─────────────────────
 compose_args() {
     local args="-f $COMPOSE_FILE"
+    # USB webcams served by MediaMTX (docker-compose.webcams.yml): Linux
+    # only — the overlay passes the host's video devices into the container,
+    # which Docker Desktop cannot do. VIDEO_GID is the host's `video` group,
+    # so the container (1000:1000) may open /dev/video*.
+    if [[ "$(get_env_var LAN_DISCOVERY)" == "on" && "$(uname -s)" == "Linux" ]]; then
+        if [[ ! -f docker-compose.lan-discovery.yml ]]; then
+            echo "LAN_DISCOVERY=on but docker-compose.lan-discovery.yml is missing" >&2
+        elif lan_discovery_core_ok; then
+            args="$args -f docker-compose.lan-discovery.yml"
+        else
+            echo -e "${YELLOW}Discovery:${NC} LAN_DISCOVERY=on needs core $LAN_DISCOVERY_MIN_CORE or newer (the prober is built from the core image's host-agent binary); CORE_TAG=$(get_env_var CORE_TAG) has none. Multicast discovery is left out until the pin moves." >&2
+        fi
+    fi
+    # USB webcams: see webcams_usable and apply_host_env (which says why when
+    # WEBCAMS=on cannot be honoured; this runs in a subshell, so it stays quiet).
+    webcams_usable && args="$args -f docker-compose.webcams.yml"
     local example_compose example_profile
     example_compose=$(get_env_var "OPENNVR_EXAMPLE_COMPOSE")
     example_profile=$(get_env_var "OPENNVR_EXAMPLE_PROFILE")
-    if [[ -n "$example_compose" ]]; then
-        [[ -f "$example_compose" ]] || {
-            echo "Configured example Compose file not found: $example_compose" >&2
-            if [[ "$example_compose" == *camera-agent-lite* ]]; then
+    # Both OPENNVR_EXAMPLE_* values are comma-separated lists: the installer
+    # lets an operator pick several apps at once (the Camera Agent's own
+    # overlay plus the shared apps overlay, one profile per catalog app).
+    # A single value is a list of one, so older .env files read unchanged.
+    local f
+    for f in ${example_compose//,/ }; do
+        [[ -f "$f" ]] || {
+            echo "Configured example Compose file not found: $f" >&2
+            if [[ "$f" == *camera-agent-lite* ]]; then
                 echo "camera-agent-lite was removed — the camera-agent example (with" >&2
                 echo "OLLAMA_EXTERNAL_URL for host-GPU/CPU Ollama) replaces it." >&2
                 echo "Fix: re-run ./scripts/install.sh reconfigure, or clear the" >&2
@@ -89,19 +610,39 @@ compose_args() {
             fi
             return 1
         }
-        args="$args -f $example_compose"
+        args="$args -f $f"
+    done
+    if [[ -n "$example_compose" ]]; then
         # External LLM runtime (.env OLLAMA_EXTERNAL_URL): overlay that
         # skips the bundled ollama container and points the agent at the
         # operator's endpoint instead — the GPU path on macOS/Windows,
         # where the in-VM container is CPU-only. Only meaningful for the
         # camera-agent profiles, and harmless to append with them.
+        # The same overlay when the agent's LLM is an OpenAI-compatible
+        # endpoint (LLM_PROVIDER=openai: a cloud provider, or the NPU
+        # caption adapter on the qualcomm flavour): no Ollama to start.
         local external_llm
         external_llm=$(get_env_var "OLLAMA_EXTERNAL_URL")
-        if [[ -n "$external_llm" && "$example_compose" == *camera-agent.yml ]]; then
+        [[ "$(get_env_var LLM_PROVIDER)" == openai ]] && external_llm="${external_llm:-openai}"
+        if [[ -n "$external_llm" && "$example_compose" == *camera-agent.yml* ]]; then
             args="$args -f docker-compose.camera-agent.external-llm.yml"
         fi
     fi
-    [[ -n "$example_profile" ]] && args="$args --profile $example_profile"
+    local p
+    for p in ${example_profile//,/ }; do args="$args --profile $p"; done
+    # Hardware flavour overlay (OpenNVR Accelerate) — see detect_accel above.
+    # Resolved here so a missing overlay fails the command early, but
+    # APPENDED LAST (below the apps file): Compose merges files in order
+    # and the last definition of a service wins, so an overlay placed
+    # before docker-compose.apps.yml lost every override of a service that
+    # file defines — the NPU embedder, insightface, the plate reader and
+    # package detection all came up on their CPU images on a Qualcomm box
+    # (Ventuno Q, 2026-11-10: clip-adapter:main where siglip-qnn-adapter
+    # was asked for). The overlay's own overrides of docker-compose.yml
+    # and the example files are unaffected by the move.
+    local accel accel_overlay
+    accel=$(detect_accel)
+    accel_overlay=$(accel_args "$accel") || return 1
     # Default-on apps: occupancy-counting + footage-search ride the always-on
     # Tier-0 stream and need no extra adapter, model, or GPU, so a stock
     # install runs them (profile ``default-apps`` in docker-compose.apps.yml).
@@ -112,10 +653,34 @@ compose_args() {
     case "$(printf '%s' "$default_apps" | tr '[:upper:]' '[:lower:]')" in
         off|false|0|no) ;;
         *)
-            [[ "$example_compose" != *docker-compose.apps.yml ]] &&                 args="$args -f docker-compose.apps.yml"
+            [[ ",$example_compose," != *,docker-compose.apps.yml,* ]] && args="$args -f docker-compose.apps.yml"
             args="$args --profile default-apps"
             ;;
     esac
+    [[ -n "$accel_overlay" ]] && args="$args $accel_overlay"
+    # A flavour overlay overrides only services of docker-compose.yml. Its
+    # overrides of services that OTHER files define travel as fragments
+    # beside it — <overlay>-apps.yml for docker-compose.apps.yml (pose,
+    # faces, plates, packages, the embedder), <overlay>-agent.yml for
+    # docker-compose.camera-agent.yml (the captioner, speech to text) —
+    # and each is appended only when its file is in the set. An override
+    # of a service no file defines is a service with no image, and Compose
+    # 2.24 (the board's distro package) rejected the whole project for it:
+    # a fresh plain install on a Ventuno Q could not start at all
+    # (2026-11-12). Newer Compose skips services whose profile is off,
+    # which is how the single-file overlay went unnoticed. Order is kept:
+    # the fragments of an earlier overlay precede a later overlay's (the
+    # Intel NPU file's pose bit lands after the Intel apps fragment).
+    if [[ -n "$accel_overlay" ]]; then
+        local ov frag
+        for ov in $accel_overlay; do
+            [[ "$ov" == -f ]] && continue
+            frag="${ov%.yml}-apps.yml"
+            [[ -f "$frag" && " $args " == *" docker-compose.apps.yml "* ]] && args="$args -f $frag"
+            frag="${ov%.yml}-agent.yml"
+            [[ -f "$frag" && " $args " == *" docker-compose.camera-agent.yml "* ]] && args="$args -f $frag"
+        done
+    fi
     # Opt-in host-side debug ports for mediamtx. Off by default because
     # Docker's publishing is all-or-nothing per container — see the header
     # of docker-compose.debug-ports.yml and #298.
@@ -163,17 +728,28 @@ python3_usable() {
 port_bindable() {
     local port="$1" proto="${2:-both}"
     if python3_usable; then
+        # On Linux a non-root user may not bind below
+        # ip_unprivileged_port_start (80, 443), but the Docker daemon
+        # publishes as root and can: that EACCES says nothing about the
+        # port, so it counts as bindable. In use (EADDRINUSE) still fails.
         python3 -c '
-import socket, sys
+import errno, os, socket, sys
 p, proto = int(sys.argv[1]), sys.argv[2]
 types = {"tcp": [socket.SOCK_STREAM], "udp": [socket.SOCK_DGRAM]}.get(
     proto, [socket.SOCK_STREAM, socket.SOCK_DGRAM])
+try:
+    with open("/proc/sys/net/ipv4/ip_unprivileged_port_start") as f:
+        unprivileged = int(f.read())
+except (OSError, ValueError):
+    unprivileged = 0
+privileged = p < unprivileged and hasattr(os, "geteuid") and os.geteuid() != 0
 for typ in types:
     s = socket.socket(socket.AF_INET, typ)
     try:
         s.bind(("0.0.0.0", p))
-    except OSError:
-        sys.exit(1)
+    except OSError as e:
+        if not (privileged and e.errno == errno.EACCES):
+            sys.exit(1)
     finally:
         s.close()
 ' "$port" "$proto" >/dev/null 2>&1
@@ -227,6 +803,132 @@ port_usable() {
 #      socket in a way forbidden by its access permissions."
 # with a message naming the port and telling the operator what to do.
 #
+# ── Docker Compose version ─────────────────────────────────
+# Compose 2.24.x — what Ubuntu 24.04's docker-compose-v2 package ships —
+# attaches a container's networks one `network connect` at a time after
+# creating it and randomly drops one of them (docker/compose#11533, fixed
+# in 2.26.1). opennvr-core then comes up on opennvr_apps only, cannot
+# resolve `db` or `nats`, and its health check still reports green: the
+# Ventuno Q benchmark board lost core and nats this way on a plain
+# `./start.sh up`. run_validate warns below this version and
+# ensure_compose_networks repairs the damage after every up regardless.
+COMPOSE_MIN_VERSION="2.26.1"
+
+# "2.24.6+ds1-0ubuntu2" → "2.24.6"; "v2.29.7" → "2.29.7"; "" when the
+# plugin is missing or prints something that is not a version.
+compose_version() {
+    docker compose version --short 2>/dev/null | sed -E 's/^v//; s/[^0-9.].*$//' | grep -E '^[0-9]+(\.[0-9]+)*$'
+}
+
+# version_ge A B — true when dotted version A is B or newer (numeric parts,
+# missing parts count as 0). bash 3.2 compatible.
+version_ge() {
+    local a b i x y
+    IFS=. read -r -a a <<<"$1"
+    IFS=. read -r -a b <<<"$2"
+    for i in 0 1 2 3; do
+        x=${a[$i]:-0}; y=${b[$i]:-0}
+        [ "$x" -gt "$y" ] 2>/dev/null && return 0
+        [ "$x" -lt "$y" ] 2>/dev/null && return 1
+    done
+    return 0
+}
+
+# ── Post-up: every container on every network it declares ──
+# Compares the resolved config with what Docker actually attached and
+# reconnects what is missing — a no-op on a healthy stack, the fix for
+# the Compose bug above on an old one. Prints each repair so the operator
+# knows why the version warning matters. Skipped (non-fatal) without a
+# JSON parser; a missing check must never block a working start.
+ensure_compose_networks() {
+    local args="$1"
+    local cfg ps plan name net fixed=0
+    python3_usable || return 0
+    cfg=$(docker compose $args config --format json 2>/dev/null) || return 0
+    ps=$(docker compose $args ps --format json 2>/dev/null) || return 0
+    [ -n "$cfg" ] && [ -n "$ps" ] || return 0
+
+    plan=$(printf '%s' "$cfg" | OPENNVR_PS_JSON="$ps" python3 -c '
+import json, os, subprocess, sys
+try:
+    cfg = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+raw = os.environ.get("OPENNVR_PS_JSON", "").strip()
+# Compose >= 2.21 prints one JSON object per line; older prints an array.
+try:
+    ps = json.loads(raw)
+    if isinstance(ps, dict):
+        ps = [ps]
+except Exception:
+    ps = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                ps.append(json.loads(line))
+            except Exception:
+                pass
+nets = cfg.get("networks") or {}
+def real(alias):
+    return (nets.get(alias) or {}).get("name") or alias
+services = cfg.get("services") or {}
+for c in ps:
+    svc, name = c.get("Service"), c.get("Name")
+    if not svc or not name or str(c.get("State") or "").lower() != "running":
+        continue
+    spec = services.get(svc)
+    if spec is None:
+        continue  # a profile or overlay this run was not told about
+    decl = spec.get("networks")
+    aliases = list(decl.keys()) if isinstance(decl, dict) else list(decl or [])
+    if len(aliases) < 2 or spec.get("network_mode"):
+        continue  # the bug only ever drops a SECONDARY network
+    want = {real(a) for a in aliases}
+    # DNS names compose would have given the container on each network:
+    # the service name, the container name, and any aliases declared on
+    # that network. A bare `network connect` carries NONE of them, so the
+    # re-attached core answered on opennvr_internal but nothing on it
+    # could resolve `opennvr-core` — the detect-pipeline lost camera
+    # discovery for ten minutes on the Ventuno Q (2026-11-02).
+    dns = {}
+    for a in aliases:
+        extra = (decl.get(a) or {}).get("aliases") if isinstance(decl, dict) else None
+        dns[real(a)] = ",".join(dict.fromkeys([svc, name] + list(extra or [])))
+    out = subprocess.run(
+        ["docker", "inspect", "-f", "{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}", name],
+        capture_output=True, text=True,
+    )
+    if out.returncode != 0:
+        continue
+    have = set(out.stdout.split())
+    for net in sorted(want - have):
+        print(name, net, dns.get(net, svc))
+' 2>/dev/null) || return 0
+    [ -n "$plan" ] || return 0
+
+    local aliases alias_args a
+    while read -r name net aliases; do
+        [ -n "$name" ] && [ -n "$net" ] || continue
+        # Re-attach WITH the names compose would have registered, or the
+        # container is reachable by IP only on that network.
+        alias_args=""
+        for a in ${aliases//,/ }; do
+            alias_args="$alias_args --alias $a"
+        done
+        # shellcheck disable=SC2086
+        if docker network connect $alias_args "$net" "$name" >/dev/null 2>&1; then
+            echo -e "  ${YELLOW}⚠ Re-attached $name to $net${NC} — Compose left it off (see the Compose version warning)."
+            fixed=$((fixed + 1))
+        else
+            echo -e "  ${RED}✗ $name is not on $net and could not be attached.${NC}" >&2
+            echo -e "  ${GRAY}    docker network connect $net $name${NC}" >&2
+        fi
+    done <<<"$plan"
+    [ "$fixed" -gt 0 ] && echo -e "  ${GRAY}  Upgrade Docker Compose to $COMPOSE_MIN_VERSION or newer to stop this happening.${NC}"
+    return 0
+}
+
 # Reads the resolved config so overlays and profiles are included and this
 # stays correct as compose changes. Skipped (non-fatal) when no JSON parser
 # is available — a missing pre-flight must never block a working start.
@@ -364,6 +1066,24 @@ run_validate() {
         errors=$((errors + 1))
     else
         echo -e "  ${GREEN}✓ Docker is running${NC}"
+        # 1b. Compose version — see COMPOSE_MIN_VERSION.
+        local compose_ver
+        compose_ver=$(compose_version)
+        if [ -z "$compose_ver" ]; then
+            echo -e "  ${YELLOW}⚠ Could not read the Docker Compose version${NC}"
+            echo "      → Docker Compose v2 (the plugin, 'docker compose') is required."
+            warnings=$((warnings + 1))
+        elif version_ge "$compose_ver" "$COMPOSE_MIN_VERSION"; then
+            echo -e "  ${GREEN}✓ Docker Compose $compose_ver${NC}"
+        else
+            echo -e "  ${YELLOW}⚠ Docker Compose $compose_ver is older than $COMPOSE_MIN_VERSION${NC}"
+            echo "      → 2.24–2.25 randomly leave a new container off one of its networks"
+            echo "        (docker/compose#11533): core loses the database, health stays green."
+            echo "        start.sh re-attaches them after every up; upgrade to stop relying on that."
+            echo "        Ubuntu's docker-compose-v2 package is affected — Docker's own repository"
+            echo "        ships a current docker-compose-plugin: https://docs.docker.com/engine/install/"
+            warnings=$((warnings + 1))
+        fi
     fi
 
     # 2. Compose file
@@ -415,6 +1135,32 @@ run_validate() {
         fi
     fi
 
+    # 6b. Disk space where the images and the models land. A full disk is
+    # the one failure that leaves half a stack behind: the pull of a model
+    # dies with "no space left on device", a container is created but never
+    # started, and every later health check reads green around the hole
+    # (Ventuno Q, 55 GB eMMC, 2026-11-01). Say it before the pull.
+    local docker_root free_gb least_gb least_at path
+    docker_root=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null)
+    least_gb=""; least_at=""
+    for path in "${docker_root:-/var/lib/docker}" "."; do
+        free_gb=$(df -Pk "$path" 2>/dev/null | awk 'NR==2 {printf "%d", $4/1024/1024}')
+        [ -z "$free_gb" ] && continue
+        if [ -z "$least_gb" ] || [ "$free_gb" -lt "$least_gb" ]; then least_gb=$free_gb; least_at=$path; fi
+    done
+    if [ -n "$least_gb" ]; then
+        if [ "$least_gb" -lt "${OPENNVR_DISK_MIN_GB:-2}" ]; then
+            echo -e "  ${RED}✗ ${least_gb} GB free at ${least_at} — not enough to pull an image or a model${NC}"
+            echo -e "      → ${CYAN}./start.sh prune${NC} removes image tags from earlier releases; move RECORDINGS_PATH to a bigger disk."
+            errors=$((errors + 1))
+        elif [ "$least_gb" -lt "${OPENNVR_DISK_WARN_GB:-8}" ]; then
+            echo -e "  ${YELLOW}⚠ ${least_gb} GB free at ${least_at} — a release upgrade or a new model may not fit${NC}"
+            echo -e "      → ${CYAN}./start.sh prune${NC} removes image tags from earlier releases."
+            warnings=$((warnings + 1))
+        else
+            echo -e "  ${GREEN}✓ ${least_gb} GB free at ${least_at}${NC}"
+        fi
+    fi
     # 7. Port conflicts
     local ports=(8000 8554 8888 8889 9997)
     local busy_ports=()
@@ -1278,6 +2024,9 @@ print_first_time_setup_token() {
         echo ""
         echo "$banner" | sed 's/^/  /'
         echo ""
+        echo -e "  ${GRAY}Rejected as missing or invalid? It may already be used — run${NC}"
+        echo -e "  ${GRAY}./start.sh restart and paste the fresh token it prints.${NC}"
+        echo ""
     else
         # Container healthy AND no banner = admin already activated
         # on a previous boot. Unambiguous now — give the operator the
@@ -1291,6 +2040,61 @@ print_first_time_setup_token() {
         echo -e "  ${GRAY}(To re-arm the setup token, wipe the database volume and restart.)${NC}"
         echo ""
     fi
+}
+
+# ── Front door reachability ────────────────────────────────
+# nginx's own healthcheck runs INSIDE its container, so it stays "healthy"
+# while the host cannot reach it at all. Docker Desktop's port forwarder
+# for a container can go stale (seen after a Docker backend hiccup, across
+# a stop/start): it still accepts on :443, then drops the connection before
+# nginx ever sees it. Every page fails, nothing reaches any log, and it
+# looks like nginx holding a stale address for opennvr-core — it is not;
+# nginx re-resolves upstreams per request. Restarting nginx makes Docker
+# rebuild the forward, so probe from the host the way a browser would and
+# do that restart here instead of leaving the operator to find it.
+edge_https_ok() {
+    [ "$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 "$1" 2>/dev/null)" = "200" ]
+}
+
+check_edge_reachable() {
+    local container="opennvr_nginx"   # container_name from compose
+    command -v curl >/dev/null 2>&1 || return 0
+    # Not running = opennvr-core never got healthy (nginx waits on it), which
+    # print_first_time_setup_token has already reported. Nothing to probe.
+    [ "$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null)" = "running" ] || return 0
+
+    local port host url i
+    port="${NGINX_HOST_HTTPS_PORT:-$(get_env_var NGINX_HOST_HTTPS_PORT 2>/dev/null || echo "")}"
+    port="${port:-443}"
+    host="${NGINX_BIND_HOST:-$(get_env_var NGINX_BIND_HOST 2>/dev/null || echo "")}"
+    if [ -z "$host" ] || [ "$host" = "0.0.0.0" ]; then host="127.0.0.1"; fi
+    url="https://${host}:${port}/healthz"
+
+    # A few tries: nginx may have been started a moment ago.
+    for i in 1 2 3 4 5; do
+        edge_https_ok "$url" && return 0
+        sleep 2
+    done
+
+    # Unreachable from here. Is nginx itself answering, inside Docker?
+    if ! docker exec "$container" wget -q -O - --no-check-certificate https://localhost/healthz >/dev/null 2>&1; then
+        echo -e "  ${YELLOW}nginx is running but not answering its own health check. Inspect:${NC}"
+        echo -e "  ${GRAY}    docker logs --tail 50 ${container}${NC}"
+        return 0
+    fi
+
+    echo -e "  ${YELLOW}nginx is healthy but ${url} is unreachable from this host —${NC}"
+    echo -e "  ${YELLOW}Docker's port forward to it went stale. Restarting nginx ...${NC}"
+    docker restart "$container" >/dev/null 2>&1
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        sleep 2
+        if edge_https_ok "$url"; then
+            echo -e "  ${GREEN}✓ Web UI reachable again at https://${host}:${port}/${NC}"
+            return 0
+        fi
+    done
+    echo -e "  ${RED}The Web UI is still unreachable from this host after restarting nginx.${NC}"
+    echo -e "  ${GRAY}Restart Docker (Docker Desktop on macOS/Windows), then run ./start.sh up again.${NC}"
 }
 
 # ── Raw start / build (no front-door prompt) ───────────────
@@ -1307,20 +2111,83 @@ run_up() {
     fi
     print_banner
     run_validate || exit 1
-    ARGS=$(compose_args)
+    apply_accel_env; apply_host_env; ARGS=$(compose_args)
+    persist_compose_set "$ARGS"
     configure_nginx_bind_host || exit 1
     configure_webrtc_ice_port || exit 1
     preflight_published_ports "$ARGS" || exit 1
     export_camera_lan_ips
     write_net_hints
     echo -e "  ${GREEN}Starting all services ...${NC}"
-    docker compose $ARGS up -d --remove-orphans
+    # The updater (scripts/update-host.sh) brings the stack up through here
+    # too, with KEEP_ORPHANS=1 (containers from overlays this run was not
+    # told about are not removed) and UP_BUILD=1 (images the release
+    # builds from its own files are rebuilt from the new checkout).
+    # The updater's hand-off folders and the host agent's key-hash folder,
+    # bind-mounted into core: made here as this user, or Docker would create
+    # them root-owned on Linux and the agent's key hash could never be written.
+    mkdir -p data/updates data/update-requests data/host-agent
+    # The LAN prober (docker-compose.lan-discovery.yml) is the host agent's
+    # code in a container: it needs the agent key, and core its hash.
+    if [[ "$(get_env_var LAN_DISCOVERY)" == "on" && "$(uname -s)" == "Linux" ]]; then
+        # shellcheck source=scripts/host-agent.sh
+        . "$(dirname "$0")/scripts/host-agent.sh"
+        ha_init_key
+    fi
+    local up_flags="--remove-orphans"
+    [ "${KEEP_ORPHANS:-}" = 1 ] && up_flags=""
+    [ "${UP_BUILD:-}" = 1 ] && up_flags="$up_flags --build"
+    docker compose $ARGS up -d $up_flags
+    ensure_compose_networks "$ARGS"
     echo ""
     ADMIN_USER=$(get_env_var "DEFAULT_ADMIN_USERNAME")
     ADMIN_USER=${ADMIN_USER:-admin}
     print_access_urls "$ADMIN_USER"
     print_security_posture
     print_first_time_setup_token "$ARGS"
+    check_edge_reachable
+    # An installed host agent follows the core it talks to (scripts/host-agent.sh).
+    # shellcheck source=scripts/host-agent.sh
+    . "$(dirname "$0")/scripts/host-agent.sh"
+    run_host_agent_refresh || true
+    # The runner behind OpenNVR Updates in the app (scripts/update-host.sh).
+    # shellcheck source=scripts/update-host.sh
+    . "$(dirname "$0")/scripts/update-host.sh"
+    run_update_runner_refresh || true
+}
+
+# Image tags from earlier releases, and dangling layers. An upgrade pulls the
+# new release's tags next to the old ones and nothing removes the old: three
+# releases in, a 55 GB disk held 23 GB of images, nine of them unreachable.
+# Keeps every tag of the release in .env (CORE_TAG / ADAPTER_TAG, in every
+# flavour), every image a container still references, and the weights images.
+run_prune() {
+    local core_tag adapter_tag in_use img tag repo root
+    core_tag=$(get_env_var CORE_TAG); adapter_tag=$(get_env_var ADAPTER_TAG)
+    root=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo /var/lib/docker)
+    in_use=$(docker ps -a --format '{{.Image}}' 2>/dev/null | sort -u)
+    local -a victims=()
+    while read -r img; do
+        [ -z "$img" ] && continue
+        case "$img" in ghcr.io/open-nvr/*) ;; *) continue ;; esac
+        repo="${img%:*}"; tag="${img##*:}"
+        case "$repo" in *-weights) continue ;; esac
+        if [ -n "$core_tag" ] && { [ "$tag" = "$core_tag" ] || [[ "$tag" == "$core_tag"-* ]]; }; then continue; fi
+        if [ -n "$adapter_tag" ] && { [ "$tag" = "$adapter_tag" ] || [[ "$tag" == "$adapter_tag"-* ]]; }; then continue; fi
+        grep -qx "$img" <<<"$in_use" && continue
+        victims+=("$img")
+    done < <(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -v '<none>')
+    echo -e "  ${BRIGHT_CYAN}Disk before:${NC} $(df -Ph "$root" | awk 'NR==2 {print $4" free of "$2}')"
+    if [ ${#victims[@]} -eq 0 ]; then
+        echo -e "  ${GREEN}✓ No image tags from earlier releases to remove.${NC}"
+    else
+        echo -e "  ${YELLOW}Removing ${#victims[@]} image tag(s) not from release ${core_tag:-?} / adapters ${adapter_tag:-?}:${NC}"
+        printf '      %s\n' "${victims[@]}"
+        docker rmi "${victims[@]}" >/dev/null 2>&1 || true
+    fi
+    docker image prune -f >/dev/null 2>&1 || true
+    echo -e "  ${BRIGHT_CYAN}Disk after:${NC}  $(df -Ph "$root" | awk 'NR==2 {print $4" free of "$2}')"
+    echo -e "  ${GRAY}Models Ollama holds are not touched: ${CYAN}ollama list${GRAY} / ${CYAN}ollama rm <model>${GRAY}.${NC}"
 }
 
 run_build() {
@@ -1330,7 +2197,8 @@ run_build() {
     fi
     print_banner
     run_validate || exit 1
-    ARGS=$(compose_args)
+    apply_accel_env; apply_host_env; ARGS=$(compose_args)
+    persist_compose_set "$ARGS"
     configure_nginx_bind_host || exit 1
     configure_webrtc_ice_port || exit 1
     preflight_published_ports "$ARGS" || exit 1
@@ -1339,12 +2207,14 @@ run_build() {
     echo -e "  ${GREEN}Building images and starting all services ...${NC}"
     docker compose $ARGS build
     docker compose $ARGS up -d --remove-orphans
+    ensure_compose_networks "$ARGS"
     echo ""
     ADMIN_USER=$(get_env_var "DEFAULT_ADMIN_USERNAME")
     ADMIN_USER=${ADMIN_USER:-admin}
     print_access_urls "$ADMIN_USER"
     print_security_posture
     print_first_time_setup_token "$ARGS"
+    check_edge_reachable
 }
 
 # ── Smart front door (bare `./start.sh`) ───────────────────
@@ -1410,7 +2280,8 @@ case "$COMMAND" in
     #
     # Stopping first also frees the ports, so the probe can return to the
     # preferred ICE port when a previous run had to fall back.
-    ARGS=$(compose_args) || exit 1
+    apply_accel_env; apply_host_env; ARGS=$(compose_args) || exit 1
+    accel_summary
     echo -e "  ${YELLOW}Stopping all services ...${NC}"
     docker compose $ARGS stop
     run_up
@@ -1439,6 +2310,10 @@ case "$COMMAND" in
   validate)
     print_banner
     run_validate
+    ;;
+  prune)
+    print_banner
+    run_prune
     ;;
 
   token)
@@ -1516,9 +2391,32 @@ case "$COMMAND" in
     echo -e "  ${GRAY}You'll need to accept the new cert in your browser on next visit.${NC}"
     ;;
 
+  update)
+    # Update to a newer release, safely: verify, back up, switch, check,
+    # roll back on failure. The options are listed in the script's header.
+    # shellcheck source=scripts/update-host.sh
+    . "$(dirname "$0")/scripts/update-host.sh"
+    shift
+    run_update "$@"
+    ;;
+
+  auto-update)
+    # The timer that lets the app's Update now and automatic updates work.
+    # shellcheck source=scripts/update-host.sh
+    . "$(dirname "$0")/scripts/update-host.sh"
+    run_auto_update "${2:-status}"
+    ;;
+
+  host-agent)
+    # The agent on this machine: USB webcams and host monitoring.
+    # shellcheck source=scripts/host-agent.sh
+    . "$(dirname "$0")/scripts/host-agent.sh"
+    run_host_agent "${2:-status}"
+    ;;
+
   *)
     echo -e "${RED}Unknown command: $COMMAND${NC}"
-    echo "Usage: ./start.sh [start|restart|up|build|down|logs|status|validate|token|refresh-net|install|reconfigure|refresh-certs]"
+    echo "Usage: ./start.sh [start|restart|up|build|down|logs|status|validate|prune|token|refresh-net|install|reconfigure|refresh-certs|update|auto-update|host-agent]"
     exit 1
     ;;
 esac

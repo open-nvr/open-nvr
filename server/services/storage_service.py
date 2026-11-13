@@ -237,6 +237,10 @@ def is_recording_path_configured(db: Session = None) -> bool:
     return path is not None and path != ""
 
 
+#: Default recording paths already announced at INFO (see below).
+_announced_default_paths: set[str] = set()
+
+
 def get_effective_recordings_base_path(db: Session = None) -> str:
     """
     Get the effective recordings base path with auto-creation.
@@ -288,7 +292,13 @@ def get_effective_recordings_base_path(db: Session = None) -> str:
         # Auto-create directory
         try:
             Path(path).mkdir(parents=True, exist_ok=True)
-            storage_logger.info(f"Using default recording path: {path}")
+            # Announced once per path: the system monitor asks every 15 s,
+            # and 240 identical INFO lines an hour buried the log.
+            if path not in _announced_default_paths:
+                _announced_default_paths.add(path)
+                storage_logger.info(f"Using default recording path: {path}")
+            else:
+                storage_logger.debug(f"Using default recording path: {path}")
         except Exception as e:
             storage_logger.warning(f"Failed to create recording directory {path}: {e}")
         

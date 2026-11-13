@@ -21,8 +21,11 @@ import { useNavigate } from 'react-router-dom'
 import { toDataURL } from 'qrcode'
 import { apiService } from '../lib/apiService'
 import { useAuth } from '../auth/AuthContext'
+import { useTranslation } from '../i18n'
+import { RecoveryCodesPanel } from '../components/RecoveryCodesPanel'
 
 export function MFASetup() {
+  const { t } = useTranslation()
   const { user, refreshUser } = useAuth()
   const [otpauthUrl, setOtpauthUrl] = useState<string>('')
   const [secret, setSecret] = useState<string>('')
@@ -31,6 +34,7 @@ export function MFASetup() {
   const [loading, setLoading] = useState(true)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [qrDataUrl, setQrDataUrl] = useState<string>('')
+  const [recoveryCodes, setRecoveryCodes] = useState<string[] | null>(null)
   const navigate = useNavigate()
 
   useEffect(() => {
@@ -67,7 +71,13 @@ export function MFASetup() {
     e.preventDefault()
     setError(null)
     try {
-      await apiService.mfaVerify(code)
+      const { data } = await apiService.mfaVerify(code)
+      // Refreshing the account flips mfa_enabled and the app replaces this
+      // screen, so show the one-time recovery codes first.
+      if (data?.recovery_codes?.length) {
+        setRecoveryCodes(data.recovery_codes)
+        return
+      }
       await refreshUser()
       navigate('/')
     } catch (e: any) {
@@ -77,10 +87,17 @@ export function MFASetup() {
 
   return (
     <div className="min-h-screen grid place-items-center bg-[var(--bg)] text-[var(--text)] p-4">
-      <div className="w-full max-w-lg bg-[var(--panel)] border border-neutral-700 p-4">
-        <h1 className="text-lg font-semibold mb-1">Set up Multi‑Factor Authentication</h1>
+      <div className="w-full max-w-lg bg-[var(--panel)] border border-[var(--border)] p-4">
+        <h1 className="text-lg font-semibold mb-1">{t('mfa.setup')}</h1>
         <p className="text-sm text-[var(--text-dim)] mb-3">Scan the QR code with your authenticator app (Google Authenticator, Authy, etc.), then enter the 6‑digit code to verify.</p>
-        {loading ? (
+        {recoveryCodes ? (
+          <RecoveryCodesPanel
+            codes={recoveryCodes}
+            username={user?.username}
+            doneLabel={t('recoveryCodes.continue')}
+            onDone={async () => { await refreshUser(); navigate('/') }}
+          />
+        ) : loading ? (
           <div className="text-sm">Loading…</div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-start">
@@ -95,10 +112,10 @@ export function MFASetup() {
               </div>
             </div>
             <form onSubmit={onVerify} className="space-y-2">
-              {error && <div className="text-sm text-red-400">{error}</div>}
+              {error && <div className="text-sm text-[var(--danger)]">{error}</div>}
               <label className="block text-sm">
                 <span className="block mb-1">Authenticator Code</span>
-                <input className="w-full bg-[var(--panel-2)] border border-neutral-700 px-2 py-1" value={code} onChange={(e) => setCode(e.target.value)} minLength={6} maxLength={8} required />
+                <input className="w-full bg-[var(--panel-2)] border border-[var(--border)] px-2 py-1" value={code} onChange={(e) => setCode(e.target.value)} minLength={6} maxLength={8} required />
               </label>
               <button className="px-3 py-2 bg-[var(--accent)]/90 text-white">Verify and continue</button>
               <p className="text-[10px] text-[var(--text-dim)]">If you lose access to your MFA device, contact an administrator.</p>

@@ -23,8 +23,11 @@ planning, and a re-posted identical crop costs nothing. Paths stored in the
 DB are RELATIVE to the evidence root — the root can move with the recordings
 volume without a data migration.
 
-Size sanity: one visit = one crop (~30-80 KB). A busy camera seeing 500
-visits/day stores ~25 MB/day — noise next to the recordings themselves.
+Size sanity: one visit = one crop (~30-80 KB) plus, when Tier-0 sends it,
+the whole frame behind that crop (~150 KB, downscaled to ~1280px). A busy
+camera seeing 500 visits/day stores ~25 MB/day of crops and ~75 MB/day with
+scenes — still noise next to the recordings themselves, and both age out on
+the same retention sweep.
 """
 
 from __future__ import annotations
@@ -40,9 +43,15 @@ MAX_EVIDENCE_BYTES = 2 * 1024 * 1024
 
 
 def evidence_root() -> Path:
-    root = Path(settings.recordings_base_path) / _EVIDENCE_DIR
-    root.mkdir(parents=True, exist_ok=True)
-    return root
+    """The evidence directory. Pure path math — deliberately no mkdir.
+
+    This is on the READ path: resolve_evidence() calls it once per image
+    request, and the Vehicles page asks for a screenful at a time, so the
+    mkdir was a syscall per request on the event loop for a directory the
+    WRITE path already guarantees (save_evidence_jpeg mkdirs the shard with
+    parents=True, which creates this root).
+    """
+    return Path(settings.recordings_base_path) / _EVIDENCE_DIR
 
 
 def save_evidence_jpeg(data: bytes) -> str:

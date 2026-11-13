@@ -1,6 +1,6 @@
 # detect-pipeline (OpenNVR Tier-0)
 
-Always-on, low-risk detection for [compute-gated inference](../docs/design/compute-gated-inference.md).
+Always-on, low-risk detection for [compute-gated inference](../docs/ARCHITECTURE.md#compute-gated-inference-tier-0--agentsapps).
 Pulls a camera **substream from MediaMTX**, hardware-decodes it, and runs
 `motion → region select → cheap detector → tracker → best-frame`. **Nothing is
 gated here** (the gate + shadow mode are PR B); recording stays MediaMTX's job
@@ -78,6 +78,44 @@ Detectors: `onnx` (YOLOv8/YOLO11 via cv2.dnn — the production default; pass
 download; the CLI default for a zero-asset demo), `blob` (deterministic, for
 smoke checks), `stub` (motion + regions only).
 
+### OpenCV 5: real inference through the new DNN engine
+
+CI runs the suite on OpenCV 4.x and 5.x with fake networks and downloads no
+model. This smoke test closes the gap by hand: it loads the model **the way
+the service does** (`OnnxYoloDetector(model_path=...)`, which lets OpenCV
+pick the engine and probes the input size), reports which engine OpenCV
+chose, and then runs the same model with `ENGINE_NEW` forced and checks the
+two agree. On the Ultralytics `bus.jpg` it expects one bus filling most of
+the frame and at least three people standing in front of it, so a run that
+returns garbage boxes fails rather than passing on "five detections".
+
+Use the model the stack actually ships, not a third-party export: take it
+from the weights image (or from a running stack's
+`/app/model_weights/yolo26n.onnx` in the `detect-pipeline` container).
+
+```bash
+mkdir -p /tmp/opennvr-smoke
+id=$(docker create ghcr.io/open-nvr/yolov8-weights:v8.4.0-yolo26n)
+docker cp "$id:/yolo26n.onnx" /tmp/opennvr-smoke/yolo26n.onnx && docker rm "$id"
+curl -L https://ultralytics.com/images/bus.jpg -o /tmp/opennvr-smoke/bus.jpg
+shasum -a 256 /tmp/opennvr-smoke/yolo26n.onnx
+# dba0b5ef0ede2168afe7714ed558b7b22bc6d43a81ef5f14a2b8398baea0f182  (v8.4.0-yolo26n)
+```
+
+Run from the repository root with an OpenCV 5 environment:
+
+```bash
+uv run --project detect-pipeline python detect-pipeline/scripts/smoke_test_opencv5_engine.py \
+  --model /tmp/opennvr-smoke/yolo26n.onnx --image /tmp/opennvr-smoke/bus.jpg
+```
+
+It prints the engine the service path got (`engine=new` is the pass
+condition), both detection lists, and `PASS`; exit status 1 on any failed
+check, and an exception with its traceback if OpenCV rejects the graph.
+Last verified: OpenCV 5.0.0, `yolo26n.onnx` (v8.4.0-yolo26n), auto-selection
+chose the new engine, five detections identical between auto and forced.
+This is a runtime smoke test, not an accuracy benchmark.
+
 ## As an OpenNVR service (integrated)
 
 Ships as the `detect-pipeline` container in `docker-compose.yml`. It's an
@@ -96,8 +134,43 @@ staggered per object; motion touching it re-checks immediately) instead
 of feeding the detector every frame — an idle scene with parked objects
 now costs decode+motion, not inference. If CPU is still high on a still
 scene, look for perpetual motion sources: a camera-OSD timestamp burned
-into the substream ticks every second and defeats motion gating — turn
-the overlay off in the camera, or crop/mask it.
+into the substream ticks every second and defeats motion gating — draw a
+**motion mask** over it (Settings → Camera-Config → Masks), or turn the
+overlay off in the camera.
+
+**Masks** (`masks.py`). Two per-camera polygon kinds, drawn in core and
+delivered in the camera listing as `motion_masks` / `object_masks`:
+
+* a **motion mask** is ANDed into the thresholded difference image, so
+  pixels under it never count as motion — the OSD clock, a tree in the
+  wind, a road at the edge of the frame, a flag. The detector still sees
+  the whole frame once something else moves (regions are cut from the
+  full frame), so a person walking under a masked tree is still found.
+* an **object mask** drops a detection whose bottom-centre (where the
+  object stands) is inside it, before it can start a track — the TV
+  screen, the poster, the cars parked across the street. Optionally for
+  some labels only. Dropped detections count in
+  `tier0_object_masked_total{camera}` so a mask that swallows real
+  objects is visible.
+
+The polygons are rasterised once per worker; a redrawn mask restarts the
+camera's worker on the next reconcile tick. Same semantics as Frigate's
+`motion.mask` and `objects.filters.<label>.mask`.
+
+**Per-camera tuning** (`tuning.py`). The `DETECT_*` knobs below are one
+value for the whole pipeline; core's per-camera detection settings
+(Settings → Camera-Config → Detection, delivered as `detection` in the
+camera listing) override them for one camera: `fps`, `motion_enabled`,
+`motion_threshold`, `motion_contour_area`, `min_spawn_score`,
+`stationary_interval`, and `object_filters` — per label, `min_area` /
+`max_area` as fractions of the frame area (so the same numbers hold on
+the substream and the main stream), `min_ratio` / `max_ratio` on
+width÷height, and `min_score`. Filters run after NMS and the object mask;
+what they drop counts in `tier0_object_filtered_total{camera}`. Absent =
+inherit, so a camera with nothing set behaves exactly as before, and a
+changed record restarts the worker like a mask change does. Same
+semantics as Frigate's per-camera `detect.fps`, `motion.threshold`,
+`motion.contour_area` and `objects.filters`.
 
 **Worst case is bounded by design.** A cluttered scene (a desk of wires
 and boards) once drove the field failure this section exists for: at
@@ -138,7 +211,7 @@ with an env dial and a metric (never a silent cap):
 **Second dial: lower `DETECT_FPS`.**
 Detection runs on every analyzed frame (the gate skips alarms, not
 inference), so pipeline CPU scales almost linearly with the per-camera
-analysis rate — `DETECT_FPS`, default 2 (the CPU-friendly setting that
+analysis rate — `DETECT_FPS`, default 5 (Frigate's default; 2 is the CPU-friendly setting that
 behaves well on laptops and any macOS/Windows Docker install, where the
 VM has no GPU). Servers with headroom — and especially `DETECT_HWACCEL`
 hosts — can raise it to 5-10 for finer motion/track granularity and a
@@ -154,6 +227,107 @@ occlusion resets it. Brief visits therefore get *harder* to record as you
 give the box more CPU — watch `tier0_visits_dropped_total{reason="too_short"}`
 after a change.
 
+
+**The substream does not cost you the evidence.** Since 0.1.11 the
+pipeline detects on the substream and cuts its evidence from the main
+stream: each track's best-frame crop, the scene behind it, the plate
+candidates the OCR adapter reads and the Tier-1 escalations come from a
+full-resolution main frame captured at the same moment as the detect
+frame. The main decode runs only while something is in front of the
+camera (first motion box or track → start; `DETECT_EVIDENCE_IDLE_AFTER`
+quiet seconds → stop), and a main frame further than
+`DETECT_EVIDENCE_MAX_SKEW_S` from the detect frame is refused in favour of
+the detect frame's own crop, so a crop is never of the wrong moment.
+`tier0_evidence_crops_total{source="main"|"detect"}` says which stream
+each camera's evidence came from; `tier0_evidence_active` whether its main
+decode is running. `DETECT_EVIDENCE_STREAM=detect` turns it off.
+By default (`DETECT_EVIDENCE_DECODE=nokey`) the main decode takes only the
+stream's keyframes — the same `-skip_frame nokey` adaptive idle uses —
+measured at ~5 % of a core while active on a 960x1080 H.265 camera with a
+1 s GOP, against ~27 % for `full`; the price is a crop up to half a GOP
+(0.5–1 s on most cameras) from the detect frame, so the skew window is
+widened to at least 2 s so the lookups still hit, and the `fps` filter is
+dropped (with ffmpeg's output sync pinned to `passthrough`) so a keyframe
+is never duplicated and stamped as fresh. `DETECT_EVIDENCE_DECODE=full`
+decodes every main frame for a crop from the same instant — for cameras
+with a long GOP, or where decode is free and exact timing matters. Two
+guards keep a keyframe crop honest without that dial: the source measures
+the camera's keyframe interval and, above `DETECT_EVIDENCE_NOKEY_MAX_GOP_S`
+(2 s, with 15 % slack for a camera running a little under its nominal fps),
+switches that camera to full decode on its own (`tier0_evidence_gop_seconds`,
+`tier0_evidence_keyframes_only`); and every main crop is compared with the
+detect crop of the same box before it is used (Pearson correlation of the
+two, `DETECT_EVIDENCE_MATCH_MIN`, 0.5) — a keyframe old enough for the
+subject to have moved on, or a sub-stream the camera crops to a different
+field of view, fails it, the detect crop is kept and
+`tier0_evidence_mismatch_total` counts the refusal (the AI Adapters page
+flags a camera whose evidence is going low-res). The guard is measured,
+not assumed: `tier0_evidence_refused_total{reason}` splits refusals into
+`low_corr` (the crops do not look alike) and `flat_main` (the sub saw a
+textured subject where the main shows a blank — a wall after the subject
+left, which used to pass as undecidable), `tier0_evidence_match_score` is
+the score of every attempt in tenths and `tier0_evidence_skew_seconds` the
+time between the two frames, so a camera whose refusals are timing (low
+scores only at large gaps) reads differently from one whose streams
+disagree. `DETECT_EVIDENCE_DEBUG_DIR` dumps every attempt's crops and
+numbers for `tools/evidence_guard_report.py`, which prints the outcome
+split, the score and gap distributions, what each floor would refuse, and
+a contact sheet of the pairs.
+
+**Evidence of the moment, from the recording.** A keyframe-only decode
+hands over each keyframe about one GOP late (measured on the Ventuno Q:
+ffmpeg holds a frame in its output path and, with keyframes only, the
+next keyframe is what pushes it out), so the nearest decoded keyframe is of
+where a moving subject *was*, and the guard refused it 52 times out of 98
+on a walking person. The recorder has the right frame: MediaMTX's playback
+server serves a range ending about a second before now, as a decodable
+clip that starts at a keyframe and ends exactly at the requested time. So
+with `DETECT_EVIDENCE_PLAYBACK=true` (the default, when core offers a
+`playback_url` beside the main tap) the tracker *asks* for evidence: when
+a track's best crop improves it files a request with the detect frame's
+time, box and crop; a thread per camera (`playback.py`) waits until the
+recorder can serve that moment, fetches the clip around it, decodes it
+once (at most a GOP, ~0.3 core-seconds on a Qualcomm box), scores the
+frames nearest the moment with the same guard, and hands back the best.
+A live track takes the crop (`tier0_evidence_crops_total{source="playback"}`);
+a visit whose track has already ended is held up to
+`DETECT_EVIDENCE_HOLD_S` (6 s: the recorder's freshness wait, the turn
+behind the fetch interval and the decode add up to about 4 s) for it and
+posted with the crop patched in; `tier0_evidence_visits_hold_expired_total`
+counts holds that ran out. Per camera one fetch at a time and at least
+`DETECT_EVIDENCE_FETCH_MIN_INTERVAL_S` apart (a newer best moment replaces
+a queued one); per box `DETECT_EVIDENCE_FETCH_PARALLEL` decodes at once; a
+request the budget cannot serve is dropped and the detect crop stands.
+`tier0_evidence_fetch_total{outcome}`, `tier0_evidence_fetch_seconds_total`,
+`tier0_evidence_decode_seconds_total` and `tier0_evidence_visits_held` say
+what it costs; `tier0_evidence_visits_patched_total` (held visits that got
+their crop) against `tier0_evidence_results_late_total` (crops that found
+neither a track nor a held visit) says whether the hold is long enough.
+The guard histograms and the debug dump carry a `source` (`keyframe` or
+`playback`), so `tools/evidence_guard_report.py` compares the two paths on
+the same walk-through. A detect frame's stamp is later than the recorder's clock for the same
+picture by the sub path's own latency (measured 0.56 s on a CP Plus through
+the Qualcomm box); the request subtracts `DETECT_EVIDENCE_STAMP_LEAD_S`
+(0.5 s) and each camera then calibrates its own lead from the frames it
+accepts (`tier0_evidence_stamp_lead_seconds`). The keyframe source stays as
+the synchronous fallback. (For comparison: Frigate
+takes snapshots from the detect stream and never decodes the record
+stream; ZoneMinder offers the same keyframes-only decoding as its
+CPU-saving mode.) Core
+offers the main tap as `evidence_url` beside a sub `frame_url` (the
+`-sub` MediaMTX path), so this needs nothing but a stored substream URL.
+If the sub tap cannot be opened at all (the camera's second stream
+disabled, the path not yet served), the worker detects on the main
+stream and warns, rather than retrying the sub forever with no detection.
+
+The honest cost model: an idle camera pays only its sub decode; a camera
+with something in front of it pays the main decode for as long as that
+lasts, plus the sub. A camera that is never quiet (a busy road) therefore
+costs what it did on the main stream, plus a few percent — measured on a
+Ventuno Q with a 1114x720 clip: 3 % of a core for the 558x360 sub, 28-34 %
+for the main decode while active, the same 28-34 % the main stream cost
+before. The saving is on every camera that is quiet most of the day,
+which is most cameras.
 
 **Third dial: configure the substream.** Tier-0 decodes each
 camera's *substream* (a low-res second stream every mainstream camera
@@ -201,7 +375,7 @@ default. CPU decode only (hardware decoders deblock in silicon for free).
 **The free lever is in the camera.** Decode cost scales with the
 *source* frame rate before any of these dials apply: a substream encoded
 at 25 fps costs 5× the decode of the same substream at 5 fps, and Tier-0
-analyzes `DETECT_FPS` (2) either way. Most cameras let you set the
+analyzes `DETECT_FPS` (5) either way. Most cameras let you set the
 substream to 5-10 fps and a ~1-2 s keyframe interval in their encode
 settings — do that first; it's the cheapest CPU you'll ever save.
 
@@ -270,13 +444,15 @@ the staged runbook in [ENABLEMENT.md](ENABLEMENT.md). Disable without a redeploy
 ```bash
 # .env
 DETECT_PIPELINE_ENABLED=false     # container stays up but idle
-DETECT_FPS=2                      # frames analyzed /s /camera (1-30, default 2) — the main CPU dial
+DETECT_FPS=5                      # frames analyzed /s /camera (1-30, default 5; 2 on a CPU-only box) — the main CPU dial
 DETECT_DECODE_SKIP=nonref         # nonref (default, lossless) | bidir | nokey | none — dial 4
 DETECT_DECODE_THREADS=2           # ffmpeg decoder thread cap (0 = auto) — dial 5, lossless
 DETECT_DECODE_FAST=false          # true = skip h264 loop filter (opt-in, not bit-exact)
 DETECT_DECODE_IDLE=nokey          # adaptive decode while quiet (dial 6, default on; none = off)
 DETECT_DECODE_IDLE_AFTER=60       # quiet seconds before a camera idles
 DETECT_STATIONARY_INTERVAL=10     # re-verify stationary tracks every Nth frame (0 = every frame)
+DETECT_NMS_CROSS_LABEL_IOU=0.85   # boxes of different labels this coincident are one object (0 or 1 = off)
+DETECT_NMS_CONTAINMENT=0.85       # a same-label box this far inside a larger one is a part of it, not a second object (0 or 1 = off)
 DETECT_MOTION_ENABLED=true        # false = motion gate OFF: detector runs on every frame (costly)
 DETECT_MOTION_THRESHOLD=30        # pixel-diff threshold 1-255 (raise on noisy sensors)
 DETECT_MOTION_CONTOUR_AREA=10     # min contour area counted as motion (raise to ignore small flicker)
@@ -284,8 +460,11 @@ DETECT_MOTION_FRAME_ALPHA=0.01    # background adapt rate, steady state
 DETECT_MOTION_LIGHTNING_THRESHOLD=0.8  # frame fraction that re-triggers calibration (dawn/IR flash)
 DETECT_MOTION_CALIBRATION_MAX_FRAMES=150  # calibration deadline (#373): force the gate open after
                                   # N consecutive calibrating frames (0 = old wedge-able behavior)
+DETECT_PLATE_CANDIDATES=4         # multi-frame OCR: plate-scored crops kept per vehicle track (LPR cameras)
+DETECT_PLATE_EARLY_ATTEMPTS=2     # OCR attempts fired while the car is still in frame (0 = ingest sweep only)
+DETECT_PLATE_CANDIDATE_GAP_S=0.75 # min seconds between retained candidates (diversity across the pass)
 DETECT_DETECTOR=onnx              # onnx (YOLOv8, default) | hog | blob | stub
-DETECT_ONNX_BACKEND=cvdnn         # cvdnn (zero-dep CPU, default) | ort (ONNX Runtime)
+DETECT_ONNX_BACKEND=auto          # auto (default: ort if installed, else cvdnn) | cvdnn | ort
 DETECT_ONNX_PROVIDERS=            # ort EPs, e.g. OpenVINOExecutionProvider (Intel N100)
 DETECT_HWACCEL=vaapi              # + uncomment devices: /dev/dri in compose
 DETECT_GATE_MODE=shadow           # shadow (default: measure only) | off | enforce (act) — see ENABLEMENT.md
@@ -293,8 +472,10 @@ DETECT_GATE_HEARTBEAT_S=0         # >0: force a periodic escalate even on static
 DETECT_GATE_CRITICAL_CLASSES=     # e.g. person,weapon — always escalate, bypass suppression
 DETECT_GATE_COOLDOWN_S=30         # re-escalate the same track at most once per N seconds
 DETECT_METRICS_PORT=9109          # Prometheus /metrics (0 to disable)
-DETECT_CV_THREADS=2               # cv2 intra-op thread cap (0 = uncapped); compose also
-                                  # exports OMP_NUM_THREADS with the same value
+DETECT_CV_THREADS=                # empty (default) = AUTO: cores / concurrent cameras,
+                                  # retuned as cameras come and go. An explicit value
+                                  # opts out of that and is never retuned; compose also
+                                  # exports OMP_NUM_THREADS from it
 DETECT_DISPATCH_KAIC_URL=         # set to enable Tier-1 dispatch (#10); empty = off
 DETECT_DISPATCH_TASK=caption      # default task for routed adapters
 # always_analyze is per-camera (gate config), deliberately not a global env.
@@ -342,7 +523,16 @@ This is the **stable slice consumers code against.** It is intentionally the who
 benefit by subscribing here; no separate perception contract is needed.
 
 **Best frame.** When a track has `"best": true`, its best-frame crop (the sharpest /
-largest / most-confident frame Tier-0 already selected) is fetchable at
+largest / most-confident frame Tier-0 already selected: Frigate's edge, score and
+area rules, plus a blur veto, `DETECT_BEST_FRAME_BLUR_VETO`, that keeps a much
+blurrier frame from winning on score or area; the recording is asked for the
+best frame's moment, so the pick decides how sharp the main-stream evidence is)
+is fetchable at
+`GET :<DETECT_METRICS_PORT>/latest_frame?camera=<cam>&max_age=<s>` (JPEG, the newest
+frame the camera's worker decoded, `X-Frame-Age-Seconds` in the reply; 404 when none is
+fresher than `max_age`, default 3 s). The camera agent's live look reads this instead of
+opening its own RTSP session — 5.6–6.2 s a look on a Ventuno Q, now a memory read.
+
 `GET :<DETECT_METRICS_PORT>/best_frame?camera=<cam>&track=<id>` (JPEG; omit `&track=`
 for the camera's most-recent best). A consumer that needs to run a vision model
 should use this instead of grabbing an arbitrary live frame — more accurate, cheaper.
@@ -355,7 +545,7 @@ implementation, not per-app glue — see the SDK's
 ## Detector
 
 The default detector is **YOLOv8 ONNX** (`onnx_detector.py`), loading the same
-`yolov8n.onnx` the stack builds for the `yolov8-adapter`. The decode (YOLOv8/YOLO11
+`yolo26n.onnx` the stack builds for the `yolov8-adapter`. The decode (YOLOv8/YOLO11/YOLO26
 `(1, 4+nc, N)` → transpose → NMS) is a pure, unit-tested function; the net/session
 is injectable so tests need no model file.
 
@@ -372,7 +562,8 @@ so the backend is interchangeable):
 
 | Hardware | Install | Select |
 |---|---|---|
-| Intel N100 / iGPU / NPU | `pip install onnxruntime-openvino` | `DETECT_ONNX_PROVIDERS=OpenVINOExecutionProvider` |
+| Intel iGPU / NPU (N100, Core Ultra, Arc) | the **`-intel` image flavour** (`ACCEL=intel`: `onnxruntime-openvino` + Intel OpenCL/NPU runtime); bare: `pip install onnxruntime-openvino` | `DETECT_ONNX_PROVIDERS=OpenVINOExecutionProvider:NPU` (or `:GPU`, `:CPU`); avoid `AUTO:…`, which warms up on CPU and may stay there |
+| Qualcomm Hexagon NPU (Dragonwing IQ8 / QCS, Snapdragon) | the **`-qualcomm` image flavour** (`ACCEL=qualcomm`: `onnxruntime-qnn`, the QNN *plugin* provider, next to plain `onnxruntime`); bare: `pip install onnxruntime-qnn` | `DETECT_ONNX_PROVIDERS=QNNExecutionProvider:htp`; the service registers the plugin library itself. Needs `/dev/fastrpc-cdsp` and the host's `libcdsprpc.so.1` (see `docker-compose.accel-qualcomm.yml`) |
 | Nvidia / Jetson | `pip install onnxruntime-gpu` | `DETECT_ONNX_PROVIDERS=TensorrtExecutionProvider,CUDAExecutionProvider` |
 | Apple Silicon | `pip install onnxruntime` | `DETECT_ONNX_PROVIDERS=CoreMLExecutionProvider` |
 | Any CPU | already in the container image (`[service]` extra); bare pip installs: `pip install 'detect-pipeline[onnxruntime]'` | `DETECT_ONNX_BACKEND=ort` |
@@ -385,7 +576,23 @@ DETECT_ONNX_PROVIDERS=OpenVINOExecutionProvider,CPUExecutionProvider
 ```
 
 CPU is always appended as a fallback, so a missing accelerator provider degrades
-instead of failing. CLI equivalent: `--backend ort --providers OpenVINOExecutionProvider`.
+instead of failing — and because ORT does that *silently*, the service logs a
+warning when the first requested provider is not the one the session runs on,
+and exports `tier0_detector_backend{backend,requested,effective}` so a dashboard
+can see it. A `:device` after a provider name sets its device option
+(`device_type` for OpenVINO, `device_id` for CUDA/TensorRT, `backend_type` for
+QNN); OpenVINO's multi-device forms keep their commas:
+`OpenVINOExecutionProvider:AUTO:NPU,GPU,CPU`. Anything else a provider takes goes
+in `DETECT_ONNX_PROVIDER_OPTIONS=key=value,key=value` (QNN's HTP defaults:
+sustained clocks, fp16 for an fp32 model, the slowest/best graph finalisation).
+A plugin provider (QNN) is registered by the service and attached by device;
+its compiled graph is cached in `.opennvr-accel/` inside the model's directory
+(`<model>.<Provider>.ctx.onnx`; under the temp dir when the weights volume is
+read-only) so every session
+after the first loads in a fraction of the compile time, and the cache's
+existence is what `tier0_detector_backend{effective}` reports for it —
+`get_providers()` keeps naming a plugin whose device never came up.
+CLI equivalent: `--backend ort --providers OpenVINOExecutionProvider:NPU`.
 
 **Coral (EdgeTPU)** and **Hailo** are *also* backends on this same seam, but they
 need their own model format + SDK (not ORT providers), so they land with the
@@ -427,10 +634,15 @@ show detect-pipeline CPU/RAM next to them): `tier0_process_cpu_percent`,
 **Operator health — "is it running and keeping up?"** (the capacity signal for a
 fixed box): `tier0_worker_up{camera}`, `tier0_processing_fps{camera}` vs
 `tier0_target_fps{camera}` (a ratio well under 1 = the box can't keep up with that
-camera), and `tier0_worker_restarts_total{camera}` (repeated feed restarts = an
-unhealthy camera). Plus `tier0_stage_latency_seconds{camera,stage}` — per-stage time
-(`decode|motion|region|detect|track`) so you can see *where* a frame's time goes, not
-just the end-to-end total.
+camera), and `tier0_frames_dropped_total{camera}` (decoded frames detection never reached because it was still busy — near the camera's fps, the box cannot serve it at this budget; the worker WARNs). While a camera idles on keyframe-only decode the `fps` filter's fill copies of each keyframe arrive in a burst and the worker skips them; those are `tier0_frames_idle_duplicates_total{camera}`, not drops, and never the warning. `tier0_worker_restarts_total{camera}` (repeated feed restarts = an
+unhealthy camera; a reader whose ffmpeg is still running but has decoded nothing for
+60 s — timestamps that stopped advancing after an RTP clock wrap, no keyframes in a
+keyframe-only mode — is restarted and counted here instead of being left hanging
+until the process dies). Plus `tier0_stage_latency_seconds{camera,stage}` — per-stage time
+(`decode|motion|region|detect|track`, plus `wait` — blocked until the next frame arrived —
+and `post` — everything after the detection stages: publish, gate, evidence, stores) so
+you can see *where* a frame's time goes, not just the end-to-end total. The capacity
+warning prints the same three-way split as per-frame averages for its window.
 
 **Model-benchmarking signals** (compare two detectors of the same kind on speed +
 output): `tier0_detector_latency_seconds{camera,model}` (pure detector inference
@@ -459,7 +671,32 @@ python -m detect_pipeline.bench --source people.mp4 --detector blob --model-id y
 ```
 
 `--model-id` tags the row (A/B two builds of the same family); `--repeat N` reports
-the Tier-0 throughput (fps) as mean ± std across runs.
+the Tier-0 throughput (fps) as mean ± std across runs. `--max-frames N` bounds the
+run, which a live `rtsp://` source needs.
+
+**Per-device detector latency** (`--latency N`) times `detect()` on N whole frames
+after `--warmup` untimed ones (an NPU or iGPU compiles its graph there) and reports
+ms/frame as median / p90 / min, which is the single-stream table in
+[`docs/HARDWARE.md`](../docs/HARDWARE.md#benchmark-protocol). `--providers` takes the
+`DETECT_ONNX_PROVIDERS` syntax, so one model on one clip gives a row per device:
+
+```bash
+for dev in CPU GPU NPU; do
+  python -m detect_pipeline.bench --source clip.mp4 --detector onnx \
+    --model /app/model_weights/yolo26n.onnx \
+    --providers OpenVINOExecutionProvider:$dev --latency 30
+done
+python -m detect_pipeline.bench ... --providers CPUExecutionProvider --threads 0 --latency 30
+# [yolo26n] OpenVINOExecutionProvider, CPUExecutionProvider: median=… ms p90=… ms min=… ms over 30 frames | session build … s
+```
+
+Each row prints the provider ONNX Runtime **actually** ran on, the input size the
+model accepted (a fixed-shape export overrides `--input`) and the CPU thread count
+that ran (`--threads`; unset is ORT's service default of 2, `0` = all cores, so set
+it for a CPU baseline). If the requested accelerator could not start (wheel without
+it, device not passed through, driver missing), either mode prints
+`WARNING: … NOT accelerator numbers` and exits 2, so a CPU fallback can't pass for
+an NPU result.
 
 Run it on your real clip set / hardware — **do not publish invented numbers**.
 
@@ -476,7 +713,8 @@ to enable; it still only fires in `enforce` (`shadow`/`off` dispatch nothing).
 - **Default routing:** `caption` on person/vehicle (light, non-biometric). `face`/`plate`
   are opt-in rows. A custom model adds a row keyed on its own class/trigger, and
   `TriggerPolicy.none`/`always` let a model opt out/in — see
-  [`docs/design/trigger-policies.md`](../docs/design/trigger-policies.md).
+  `TriggerPolicy` in [`detect_pipeline/gate.py`](detect_pipeline/gate.py),
+  which is where the policy is defined rather than described.
 - **Discipline:** validate the shadow-mode miss rate on real hardware before flipping
   `enforce` + dispatch.
 
@@ -488,6 +726,6 @@ to enable; it still only fires in `enforce` (`shadow`/`off` dispatch nothing).
 - The KAI-C-backed **accelerator** detector adapter (Coral/Hailo/OpenVINO/
   TensorRT) — the local ONNX detector is CPU via cv2.dnn until then.
 
-OpenCV 4.x **and** 5.x are supported (the suite passes on both). One thing to
-smoke-test on a host: real `yolov8n.onnx` inference through OpenCV 5's new DNN
-engine (it auto-falls-back to the classic engine if needed).
+OpenCV 4.x **and** 5.x are supported (the suite passes on both). Real
+inference of the shipped model on 5.x's new DNN engine is verified by hand
+with the smoke test under "Manual verification" above, not in CI.

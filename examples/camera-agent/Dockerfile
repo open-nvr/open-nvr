@@ -27,14 +27,32 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Pin Pipecat carefully — its API has shifted between minor versions.
-# The upper bound MUST stay <0.0.60: 0.0.10x removed FrameSerializerType
-# and reworked the InputAudioRawFrame constructor, both of which
-# serializer.py / the RawPcmSerializer depend on. Keep this in lock-step
-# with pyproject.toml. If you bump these, re-run the example's test suite
-# and the demo page locally before committing.
-# Resilient install for slow / flaky PyPI links (pipecat's silero extra pulls
-# torch — a large download). Three layers of resilience:
+# The image installs EXACTLY what uv.lock says — the dependency set the
+# tests run against — never a hand-kept list of ranges. The hand list
+# once broke this build the day a new pipecat appeared on PyPI while the
+# tests, on the lock, stayed green; and even when it built, the image
+# shipped numpy 2 / opencv 5 / fastapi 0.141 against a lock that said
+# numpy 1.26 / opencv 4.11 / fastapi 0.115. Pipecat's API shifts between
+# minors (camera_agent.py, services.py and serializer.py are written
+# against the version pinned in pyproject.toml); bumping it is `uv lock`
+# first, then the full test suite (tests/test_pipeline_e2e.py included)
+# and the demo page — this file needs no edit. tests/test_image_pins.py
+# guards the shape. The App SDK is left out of the export (it is
+# installed from the in-repo tree below, like the detector examples do);
+# its own dependencies are in the lock and land here.
+COPY --from=ghcr.io/astral-sh/uv:0.12.13 /uv /bin/uv
+COPY examples/camera-agent/pyproject.toml examples/camera-agent/uv.lock /src/examples/camera-agent/
+COPY sdk/opennvr-app-sdk/pyproject.toml /src/sdk/opennvr-app-sdk/pyproject.toml
+# --locked: the lock must match pyproject.toml or the build fails HERE —
+# a bumped pin without `uv lock` is a build error, not an old pipecat in
+# the image. Hashes stay in: pip verifies every wheel against the lock.
+RUN cd /src/examples/camera-agent \
+    && uv export --locked --no-dev --no-emit-project \
+        --no-emit-package opennvr-app-sdk --extra device \
+        -o /src/requirements.txt \
+    && grep -c "==" /src/requirements.txt
+# Resilient install for slow / flaky PyPI links (a large download). Three
+# layers of resilience:
 #   * --mount=type=cache keeps the pip wheel cache across build attempts, so a
 #     re-run after a network stall only re-fetches what's still missing (this is
 #     why --no-cache-dir is intentionally dropped).
@@ -44,19 +62,28 @@ WORKDIR /app
 RUN --mount=type=cache,target=/root/.cache/pip \
     for i in 1 2 3 4 5; do \
         echo "pip install attempt $i/5..."; \
-        pip install --timeout 300 --retries 10 \
-            "pipecat-ai[silero,websocket]>=0.0.55,<0.0.60" \
-            "httpx>=0.27,<1.0" \
-            "fastapi>=0.110,<1.0" \
-            "uvicorn>=0.27,<1.0" \
-            "PyYAML>=6.0,<7.0" \
-            "nats-py>=2.6" \
-            "Pillow>=10.0" \
-            "opencv-python-headless>=4.8" \
+        pip install --timeout 300 --retries 10 --require-hashes -r /src/requirements.txt \
         && break; \
         if [ "$i" = 5 ]; then echo "pip install failed after 5 attempts" >&2; exit 1; fi; \
         echo "attempt $i failed; retrying in 15s..."; sleep 15; \
     done
+
+# Nothing is downloaded at runtime: since pipecat 1.11 the TTS sentence
+# aggregation is self-contained (sentencex rules — no NLTK, no punkt
+# download, no tokenizer warm-up before the first spoken reply), and
+# Smart Turn v3.2 and the Silero VAD ship inside the pipecat wheel. A
+# sovereign, offline site needs exactly this image and nothing else.
+
+# CPU fit. The only heavy math in THIS container is Smart Turn v3's
+# end-of-turn verdict (once per pause: an 8 s log-mel in numpy + a small
+# ONNX model) and Silero VAD (~0.7% of a core). Left uncapped, numpy's
+# BLAS/OpenMP fans the log-mel across every core, which measured SLOWER
+# on a 4-core box (90–130 ms vs ~60 ms single-threaded) and competes with
+# Whisper/Piper/Ollama next door. camera_agent.py sets the same defaults
+# when these are absent; here so `docker run -e` overrides are explicit.
+# onnxruntime's own pool is sized by `turn_cpu_threads` in config.yml
+# (auto: 1 thread, 2 from 8 cores) — see MODELS_AND_LATENCY.md.
+ENV OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 
 # The OpenNVR App SDK — monitor_host.py (the create_monitor convergence)
 # imports opennvr_app_sdk, and the count/crossing rule libraries below are
@@ -72,7 +99,12 @@ COPY examples/camera-agent/frame_sources.py   ./frame_sources.py
 COPY examples/camera-agent/serializer.py      ./serializer.py
 COPY examples/camera-agent/services.py        ./services.py
 COPY examples/camera-agent/tools.py           ./tools.py
-COPY examples/camera-agent/footage_index.py   ./footage_index.py
+COPY examples/camera-agent/mirror.py          ./mirror.py
+COPY examples/camera-agent/turns.py           ./turns.py
+COPY examples/camera-agent/fillers.py         ./fillers.py
+COPY examples/camera-agent/router.py          ./router.py
+COPY examples/camera-agent/prompt_budget.py   ./prompt_budget.py
+COPY examples/camera-agent/turn_stats.py      ./turn_stats.py
 COPY examples/camera-agent/monitor_host.py    ./monitor_host.py
 COPY examples/camera-agent/system_check.py    ./system_check.py
 # The count/crossing conversational monitors instantiate the SAME SDK rule
@@ -87,6 +119,7 @@ COPY examples/line-crossing/line_crossing.py           ./rules/line-crossing/lin
 # new task with an agent_skill becomes a skill backing with no code change.
 COPY examples/camera-agent/tasks.yml          ./tasks.yml
 COPY examples/camera-agent/config.example.yml ./config.example.yml
+COPY examples/camera-agent/config.docker.yml  ./config.docker.yml
 COPY examples/camera-agent/demo               ./demo
 
 # Point monitor_host at the bundled rule libraries (the /app layout flattens

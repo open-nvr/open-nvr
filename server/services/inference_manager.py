@@ -367,6 +367,12 @@ class InferenceManager:
                 del self.running_tasks[model_id]
                 main_logger.info(f"Removed model {model_id} from running tasks")
 
+# The singleton. Its module-level definition had gone missing, so the first
+# call raised NameError and every endpoint using the manager answered 500
+# (GET /ai-model-management/inference/running on every AI Models page load).
+_inference_manager: InferenceManager | None = None
+
+
 def get_inference_manager() -> InferenceManager:
     """Get singleton inference manager instance."""
     global _inference_manager

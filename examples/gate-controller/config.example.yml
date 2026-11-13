@@ -1,32 +1,106 @@
-# gate-controller example config. Copy to config.yml and edit.
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# gate-controller — config template. Copy to config.yml and edit:
+#
+#   python gate_controller.py --config config.yml
+#
+# HARDWARE.md has the per-vendor wiring, the transports in full, and
+# the safety notes. Read that before connecting anything.
 
 # ── The event bus (where access.decided.v1 flows) ───────────────────
 nats_url: "nats://localhost:4222"
 nats_token: null
 
-# ── Which relay opens which gate ────────────────────────────────────
-# Keys are camera core ids ("1") or platform handles ("cam1"); values
-# are the relay's trigger URL (GET default) or {url, method: POST}.
-# Any HTTP relay works: Shelly (http://<ip>/relay/0?turn=on), Tasmota
-# (http://<ip>/cm?cmnd=Power%20TOGGLE), ESPHome, commercial barrier
-# relays with an HTTP input.
-relays: {}
-#  "1": "http://192.168.1.50/relay/0?turn=on"
-#  "2": { url: "http://192.168.1.51/pulse", method: POST }
+# ── Which wiring opens which gate ───────────────────────────────────
+#
+# Keys are camera core ids ("3") or platform handles ("cam3"). Name the
+# product as a `profile` and give it a host, or spell out a transport.
+# Run `dry_run: true` until the wiring is proven.
+gates:
 
-# One car, one pulse: suppress re-triggering the same gate within
-# this many seconds (the boom is already up).
+  # A GPIO pin and a relay board — works with every barrier ever made.
+  "1":
+    name: "Main Gate"
+    transport: dry_contact
+    line: 17                  # BCM / line offset
+    active_low: true          # most relay boards are
+    pulse_ms: 500
+    # sense_line: 27          # the operator's "gate open" contact, if it has one
+    # hold_line: 22           # a second channel on its hold-open input
+    schedule:
+      - {start: "08:00", end: "09:00", days: weekdays, label: "Morning rush"}
+
+  # An IP relay. Profiles: shelly_gen2, shelly_gen1, tasmota, esphome,
+  # generic_http.
+  "2":
+    name: "Visitor Lane"
+    profile: shelly_gen2
+    host: "192.168.1.50"
+    channel: 0
+
+  # Industrial / parking controllers.
+  # "3":
+  #   name: "Truck Gate"
+  #   transport: modbus
+  #   host: "10.0.4.12"
+  #   coil: 0
+  #   sense_input: 0
+
+  # An ONVIF Profile C door controller — monitored and holdable with no
+  # extra wiring.
+  # "4":
+  #   name: "Rear Gate"
+  #   transport: onvif
+  #   url: "http://10.0.0.9/onvif/door_control"
+  #   username: "opennvr"
+  #   password: "secret"
+  #   door_token: "Door1"
+
+# ── Behaviour ───────────────────────────────────────────────────────
+
+# One car, one pulse: ignore further allows for this many seconds.
 pulse_cooldown_seconds: 5.0
 
-# Commissioning mode: log + alert as if opening, never call the relay.
+# Record as if opening, without touching hardware. Commission with this
+# ON, prove each gate with the page's Test pulse button, then turn off.
 dry_run: false
+
+# How long a gate that cannot report its position is SHOWN as open
+# after a pulse. Display only — nothing is actuated on this timer.
+assumed_open_seconds: 20.0
+
+# How often to read back the position of gates that can report one.
+poll_seconds: 5.0
+
+# Longest a hold-open may last before the gate goes back to deciding
+# per vehicle. 0 disables holding entirely. Hard ceiling is 12 hours.
+max_hold_minutes: 120.0
+
+# ── Local guards (defence in depth) ─────────────────────────────────
+#
+# The plate reader decides; these are the last line before a barrier
+# moves, and all are off by default. A plate is a weak credential —
+# anyone can print one — and this is the seam where a second look fits.
+
+# Refuse to open below this OCR confidence even on an allow. 0 = off.
+min_confidence: 0.0
+
+# If set, open only for these decision reasons — so a wider allowlist
+# can inform the log without lifting the boom. e.g. [registered]
+allowed_reasons: []
+
+# Refuse and alert when one plate opens a gate more than this many
+# times in the window: the signature of a copied plate. 0 = off.
+max_opens_per_plate: 0
+max_opens_window_minutes: 10.0
 
 # ── Alert delivery ──────────────────────────────────────────────────
 webhook_url: null
 nats_alerts_url: null
 nats_alerts_token: null
 
-# ── App contract (spec §03) — powers the App Catalog ────────────────
+# ── App contract (the catalog) ──────────────────────────────────────
 contract_port: 9210
 contract_bind_host: "0.0.0.0"
 contract_host: "localhost"

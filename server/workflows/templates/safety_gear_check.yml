@@ -1,0 +1,31 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+workflow: v1
+name: Safety gear check
+description: >-
+  The PPE app flags a person without safety kit. A Look step checks a few
+  frames for a hard hat and a high-visibility vest, and the supervisor is told
+  only when the kit is really missing. Needs the PPE app and a vision model.
+limits: { cooldown: 5m, one_at_a_time: track }
+when:
+  alert: { app: ppe-check, type: ppe_missing }
+then:
+  - ai:
+      mode: look
+      input: frames
+      prompt: >-
+        A person is in a work zone where a hard hat and a high-visibility vest
+        are required. Say whether each is worn.
+      decision: [wearing_both, missing_kit]
+      fields:
+        helmet: [worn, not_worn, cannot_tell]
+        vest: [worn, not_worn, cannot_tell]
+      rules:
+        - { when: { helmet: not_worn }, then: missing_kit }
+        - { when: { vest: not_worn }, then: missing_kit }
+        - { when: { helmet: worn, vest: worn }, then: wearing_both }
+      wearing_both: [ log: "Kit worn after all: {reason}" ]
+      missing_kit:
+        - notify: { who: role:supervisor, message: "Missing safety kit on {camera}: {reason}" }
+      unsure:
+        - notify: { who: role:supervisor, message: "Please check the kit on {camera}: {reason}" }

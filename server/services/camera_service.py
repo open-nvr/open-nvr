@@ -22,15 +22,53 @@ Handles camera creation, updates, and management.
 from datetime import UTC, datetime
 
 from fastapi import HTTPException, status
-from sqlalchemy import and_
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
+from core.camera_source import SOURCE_PUBLISHER, is_publisher
 from core.config import settings
+import logging
+
 from core.logging_config import camera_logger
 from models import Camera, CameraPermission, User
 from schemas import CameraCreate, CameraUpdate
 from services.mediamtx_admin_service import MediaMtxAdminService
 from utils.url_redaction import redact_url_credentials
+
+
+def camera_search_filter(q: str | None):
+    """Case-insensitive substring match on a camera's name, IP address or
+    location.
+
+    None for an empty or missing query, so callers can apply it
+    unconditionally and an unfiltered list stays exactly what it was. LIKE
+    wildcards in the query are escaped: searching for "cam_1" must not also
+    match "camX1".
+    """
+    term = (q or "").strip()
+    if not term:
+        return None
+    escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    pattern = f"%{escaped}%"
+    return or_(
+        Camera.name.ilike(pattern, escape="\\"),
+        Camera.ip_address.ilike(pattern, escape="\\"),
+        Camera.location.ilike(pattern, escape="\\"),
+    )
+
+
+def camera_location_filter(location: str | None, no_location: bool = False):
+    """Cameras at one location (trimmed, any case), or with none at all.
+
+    None when neither is asked for, so the list stays unfiltered. A blank
+    ``location`` counts as not asked for, like a blank search.
+    """
+    if no_location:
+        return or_(Camera.location.is_(None), func.trim(Camera.location) == "")
+    term = (location or "").strip()
+    if not term:
+        return None
+    return func.lower(func.trim(Camera.location)) == term.lower()
 
 
 class CameraService:
@@ -84,6 +122,8 @@ class CameraService:
                     firmware_version=camera_create.firmware_version,
                     serial_number=camera_create.serial_number,
                     hardware_id=camera_create.hardware_id,
+                    source_type=camera_create.source_type,
+                    source_device=camera_create.source_device or None,
                 )
 
                 db.add(db_camera)
@@ -106,6 +146,17 @@ class CameraService:
             # Commit the transaction to persist the camera
             db.commit()
             db.refresh(db_camera)
+            # Every app that runs on all cameras picks the new one, so its
+            # skills are on the camera from its first frame.
+            try:
+                from services.skill_assignments import adopt_new_camera
+                if adopt_new_camera(db, db_camera.id):
+                    db.commit()
+                    db.refresh(db_camera)
+            except Exception:  # noqa: BLE001 — never fail onboarding on this
+                db.rollback()
+                logging.getLogger(__name__).warning(
+                    "all-cameras apps could not adopt camera %s", db_camera.id, exc_info=True)
 
             # Identity-protect the recordings directory BEFORE provisioning
             # (i.e. before MediaMTX can write the first segment): if this
@@ -135,8 +186,10 @@ class CameraService:
                     exc_info=True,
                 )
 
+            if is_publisher(db_camera):
+                await CameraService._provision_publisher(db, db_camera, owner_id)
             # Auto-provision if RTSP URL is present
-            if db_camera.rtsp_url:
+            elif db_camera.rtsp_url:
                 try:
                     # Default settings for auto-provisioning.
                     # This is a Network Video RECORDER: recording is always on by
@@ -283,6 +336,105 @@ class CameraService:
             raise
 
     @staticmethod
+    async def _provision_publisher(db: Session, db_camera: Camera, owner_id: int) -> None:
+        """Provision a new webcam camera's path and its CameraConfig.
+
+        Like the RTSP branch, minus everything that needs a source URL (the
+        RTSPS probe, transport policy, substream). Recording is on, as for
+        every camera on an NVR. A failure leaves the camera row in place: the
+        startup reconcile and ``provision-mediamtx`` retry it.
+        """
+        from models import CameraConfig
+
+        from services.local_webcams import provisioning_for, substream_marker
+        extra = provisioning_for(db_camera)
+        if extra.get("substream"):
+            # The row says it has a sub stream (a Linux USB webcam, or one
+            # the host agent streams); the detect tap reads the small path
+            # and evidence the large one, as for an IP camera.
+            from services.stream_service import _build_stream_name, substream_name
+            name = _build_stream_name(settings.mediamtx_stream_prefix, db_camera.id, db_camera.ip_address)
+            db_camera.substream_url = substream_marker(substream_name(name))
+        try:
+            result = await MediaMtxAdminService.push_publisher_path(
+                camera_id=db_camera.id,
+                camera_ip=db_camera.ip_address,
+                enable_recording=True,
+                recording_segment_seconds=settings.recording_segment_seconds,
+                run_on_init=extra.get("run_on_init"),
+                substream=bool(extra.get("substream")),
+            )
+            if result.get("status") != "ok":
+                camera_logger.log_action(
+                    "camera.auto_provision_failed",
+                    message=f"Auto-provisioning failed for webcam camera {db_camera.id}",
+                    user_id=owner_id,
+                    camera_id=db_camera.id,
+                    extra_data=result,
+                )
+                return
+            db_camera.status = "provisioned"
+            if not (
+                db.query(CameraConfig)
+                .filter(CameraConfig.camera_id == db_camera.id)
+                .first()
+            ):
+                db.add(
+                    CameraConfig(
+                        camera_id=db_camera.id,
+                        source_url=None,
+                        recording_enabled=True,
+                        recording_segment_seconds=settings.recording_segment_seconds,
+                        last_provisioned_at=func.now(),
+                    )
+                )
+            db.commit()
+            db.refresh(db_camera)
+            camera_logger.log_action(
+                "camera.auto_provision_success",
+                message=f"Webcam camera {db_camera.id} provisioned; waiting for a publisher",
+                user_id=owner_id,
+                camera_id=db_camera.id,
+                extra_data=result,
+            )
+        except Exception as e:
+            db.rollback()
+            camera_logger.error(
+                f"Exception during auto-provisioning for webcam camera {db_camera.id}",
+                extra={
+                    "user_id": owner_id,
+                    "camera_id": db_camera.id,
+                    "error_type": type(e).__name__,
+                    "action": "camera.auto_provision_exception",
+                },
+                exc_info=True,
+            )
+
+    @staticmethod
+    def webcam_device_owner(
+        db: Session, source_device: str | None, exclude_camera_id: int | None = None
+    ) -> Camera | None:
+        """The camera a webcam device on the OpenNVR machine already feeds.
+
+        One device, one camera: its capture (the host agent's ffmpeg, or
+        MediaMTX's own on Linux) opens the device, and a webcam serves one
+        capture at a time — a second camera on it would fail "device busy"
+        and retry forever. A paused camera still holds its device (it gets it
+        back on reactivation); one in the bin does not. Every camera counts,
+        whoever owns it: the device is physical.
+        """
+        if not source_device:
+            return None
+        q = db.query(Camera).filter(
+            Camera.source_type == SOURCE_PUBLISHER,
+            Camera.source_device == source_device,
+            Camera.deleted_at.is_(None),
+        )
+        if exclude_camera_id is not None:
+            q = q.filter(Camera.id != exclude_camera_id)
+        return q.first()
+
+    @staticmethod
     def get_camera_by_id(db: Session, camera_id: int, user_id: int) -> Camera | None:
         """Get camera by ID (only if user owns it or is superuser)."""
         camera = (
@@ -302,60 +454,6 @@ class CameraService:
             )
 
         return camera
-
-    @staticmethod
-    def get_cameras_by_owner(
-        db: Session,
-        owner_id: int,
-        skip: int = 0,
-        limit: int = 100,
-        active_only: bool = True,
-    ) -> list[Camera]:
-        """Get list of cameras owned by a specific user."""
-        query = db.query(Camera).filter(
-            Camera.owner_id == owner_id, Camera.deleted_at.is_(None)
-        )
-        if active_only:
-            query = query.filter(Camera.is_active == True)
-
-        return query.offset(skip).limit(limit).all()
-
-    @staticmethod
-    def get_all_cameras(
-        db: Session, skip: int = 0, limit: int = 100, active_only: bool = True
-    ) -> list[Camera]:
-        """Get all cameras (for superusers)."""
-        query = db.query(Camera).filter(Camera.deleted_at.is_(None))
-        if active_only:
-            query = query.filter(Camera.is_active == True)
-
-        return query.offset(skip).limit(limit).all()
-
-    @staticmethod
-    def get_cameras_permitted(
-        db: Session,
-        user_id: int,
-        skip: int = 0,
-        limit: int = 100,
-        active_only: bool = True,
-    ) -> list[Camera]:
-        """Get cameras the user has explicit permission to view/manage (non-owner)."""
-        subq = (
-            db.query(CameraPermission.camera_id)
-            .filter(
-                and_(
-                    CameraPermission.user_id == user_id,
-                    CameraPermission.can_view == True,
-                )
-            )
-            .subquery()
-        )
-        query = db.query(Camera).filter(
-            Camera.id.in_(subq), Camera.deleted_at.is_(None)
-        )
-        if active_only:
-            query = query.filter(Camera.is_active == True)
-        return query.offset(skip).limit(limit).all()
 
     @staticmethod
     def update_camera(

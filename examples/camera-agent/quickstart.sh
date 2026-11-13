@@ -11,7 +11,7 @@
 # Voice = Whisper STT + Ollama LLM + Piper TTS + YOLOv8/BLIP vision.
 # Chat  = the same tools and scene description, no microphone/speaker.
 #
-# The Ollama model (default qwen2.5:1.5b) is pulled automatically on first start.
+# The Ollama model (default granite4:micro) is pulled automatically on first start.
 # Low-RAM box? Override it:  OLLAMA_MODEL=qwen2.5:0.5b examples/camera-agent/quickstart.sh
 # Cloud / bring-your-own brain? See examples/camera-agent/config.cloud.yml.
 # ============================================================

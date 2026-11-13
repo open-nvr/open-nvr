@@ -28,11 +28,14 @@ import {
 import { apiService } from '../../lib/apiService'
 import type Hls from 'hls.js'
 import { loadHls } from '../../lib/loadHls'
+import { resolveWhepSessionUrl } from '../../lib/streamUrl'
 import { displayAspect, isStretched, snapshotSize } from '../../lib/aspect'
 import type { AspectOverride } from '../../lib/aspect'
 import { useVideoSize } from '../../hooks/useVideoAspect'
 import { VideoControls } from './VideoControls'
+import { DetectionOverlay } from './DetectionOverlay'
 import { AlertCircle } from 'lucide-react'
+import { useTranslation } from '../../i18n'
 
 export type VideoPlayerMode = 'live' | 'playback'
 export type StreamType = 'webrtc' | 'hls' | 'mp4'
@@ -81,6 +84,28 @@ export interface VideoPlayerProps {
   /** Operator's per-camera display-aspect override ('auto' | 'native' | 'W:H').
       Absent or 'auto' runs the detection in lib/aspect.ts (issue #354). */
   displayAspectOverride?: AspectOverride | null
+  /** Core camera id — needed to subscribe this tile to its live tracks. */
+  cameraId?: number | null
+  /** Draw Tier-0 bounding boxes with label + score over the video.
+      Live mode only; costs nothing when false (no canvas, no socket). */
+  showDetections?: boolean
+  /** 'full' (default) draws the title, LIVE badge and control bar and binds
+      keyboard shortcuts. 'none' is a bare feed for glance surfaces such as
+      the dashboard wall: the caller draws its own labels, and with several
+      players on one page a shortcut bound to the page body would toggle
+      every one of them at once. 'controls' keeps the control bar and the
+      shortcuts but, like 'none', leaves the title and state badges to the
+      caller and uses the compact loading and error states — a wall of
+      tiles that labels its own feeds. */
+  chrome?: 'full' | 'controls' | 'none'
+  /** Crop the picture to fill the whole player instead of letterboxing it
+      (a tour wall's "Fill"). Off by default: every other surface keeps the
+      stream's own shape. */
+  cover?: boolean
+  /** Shown instead of "No signal" while the path has no stream — e.g. a
+      webcam that is still starting, or a browser webcam nobody is
+      publishing. The player keeps retrying either way. */
+  offlineLabel?: string
 }
 
 export interface VideoPlayerHandle {
@@ -115,9 +140,15 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       ptzActive = false,
       overlay,
       displayAspectOverride,
+      cameraId = null,
+      showDetections = false,
+      chrome = 'full',
+      cover = false,
+      offlineLabel,
     },
     ref
   ) {
+    const { t } = useTranslation()
     const containerRef = useRef<HTMLDivElement>(null)
     const videoRef = useRef<HTMLVideoElement>(null)
     const hlsInstanceRef = useRef<Hls | null>(null)
@@ -452,7 +483,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
           throw new Error(`WHEP connection failed: ${resp.status}`)
         }
 
-        whepResourceRef.current = resp.headers.get('Location') || null
+        whepResourceRef.current = resolveWhepSessionUrl(resp.headers.get('Location'), whepUrl)
         const answerSdp = await resp.text()
         await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp })
       } catch (e: any) {
@@ -976,6 +1007,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     // Keyboard shortcuts
     useEffect(() => {
       const handleKeyDown = (e: KeyboardEvent) => {
+        if (chrome === 'none') return
         if (!containerRef.current?.contains(document.activeElement) && document.activeElement !== document.body) return
 
         switch (e.key) {
@@ -1017,18 +1049,20 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
 
       window.addEventListener('keydown', handleKeyDown)
       return () => window.removeEventListener('keydown', handleKeyDown)
-    }, [isPlaying, isMuted, isLive, currentTime, duration, volume])
+    }, [isPlaying, isMuted, isLive, currentTime, duration, volume, chrome])
 
     // Double-click for fullscreen
     const handleDoubleClick = () => handleFullscreen()
+    const bare = chrome === 'none'
+    const compact = chrome !== 'full'
 
     return (
       <div
         ref={containerRef}
         className={`relative bg-[var(--bg-2)] overflow-hidden group flex items-center justify-center ${className}`}
         style={{ containerType: 'size' }}
-        tabIndex={0}
-        onDoubleClick={handleDoubleClick}
+        tabIndex={bare ? undefined : 0}
+        onDoubleClick={bare ? undefined : handleDoubleClick}
       >
         {/* Chrome band — full tile width, exactly as tall as the video, and
             vertically centred on it (100cqw = tile width). It is transparent:
@@ -1052,7 +1086,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         <div
           className="relative flex justify-center"
           style={
-            videoAspect
+            videoAspect && !cover
               ? { width: '100%', height: `min(100%, calc(100cqw / ${videoAspect}))`, containerType: 'inline-size' }
               : { width: '100%', height: '100%', containerType: 'inline-size' }
           }
@@ -1062,7 +1096,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
             min-w-0 keeps the video's intrinsic size from inflating it. */}
         <div
           className="relative h-full min-w-0 bg-black"
-          style={videoAspect ? { aspectRatio: String(videoAspect) } : { width: '100%' }}
+          style={videoAspect && !cover ? { aspectRatio: String(videoAspect) } : { width: '100%' }}
         >
 
         {/* Video element. The feed box already carries the stream's DISPLAY
@@ -1073,7 +1107,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
             fill would smear the frame across the whole tile. */}
         <video
           ref={videoRef}
-          className={`block w-full h-full ${stretched ? 'object-fill' : 'object-contain'}`}
+          className={`block w-full h-full ${cover ? 'object-cover' : stretched ? 'object-fill' : 'object-contain'}`}
           playsInline
           muted={isMuted}
           autoPlay={autoPlay}
@@ -1081,18 +1115,51 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
           preload={mode === 'playback' ? 'metadata' : 'auto'}
         />
 
+        {/* Detection overlay — INSIDE the feed box so its rectangle is the
+            video's rectangle and normalized boxes need no letterbox math.
+            Below the loading/error overlays in the tree, so those still
+            cover it. Live only: recordings carry no live tracks. */}
+        {mode === 'live' && showDetections && cameraId != null && (
+          <DetectionOverlay cameraId={cameraId} />
+        )}
+
         {/* Loading / reconnecting overlay */}
-        {(isLoading || isReconnecting) && (
+        {compact && (isLoading || isReconnecting) && !error && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-1.5 bg-black/30">
+            <div className="w-5 h-5 border-2 border-white/25 border-t-white/80 rounded-full animate-spin" />
+            {isReconnecting && (
+              <div className="text-[10px] font-mono uppercase tracking-[0.2em] text-white/55">{t('video.reconnecting')}</div>
+            )}
+          </div>
+        )}
+        {compact && error && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-[#07090d] text-white/60">
+            <AlertCircle size={16} className="opacity-70" />
+            <div className="text-[10px] font-mono uppercase tracking-[0.2em] text-center px-2">
+              {error === 'Camera offline' && offlineLabel ? offlineLabel : t('video.noSignalShort')}
+            </div>
+            {!bare && (
+              <button
+                type="button"
+                onClick={handleRefresh}
+                className="mt-1 px-2 py-0.5 text-[10px] border border-white/15 text-white/75 hover:bg-white/5 hover:text-white"
+              >
+                {t('common.refresh')}
+              </button>
+            )}
+          </div>
+        )}
+        {!compact && (isLoading || isReconnecting) && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/40">
             <div className="w-10 h-10 border-2 border-white/30 border-t-white rounded-full animate-spin" />
             {isReconnecting && (
-              <div className="text-xs text-white/80">Reconnecting…</div>
+              <div className="text-xs text-white/80">{t('video.reconnecting')}</div>
             )}
           </div>
         )}
 
         {/* Error overlay */}
-        {error && (
+        {!compact && error && (
           <div className="absolute inset-0 flex flex-col items-center justify-center text-white" style={{ background: '#1e3a8a' }}>
             {/* TV Static background */}
             <div 
@@ -1118,13 +1185,15 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
             {/* Error content */}
             <div className="relative z-10 flex flex-col items-center">
               <AlertCircle size={48} className="text-blue-200 mb-3" />
-              <div className="text-lg font-medium text-white mb-1">{error}</div>
-              <div className="text-xs text-blue-200 mb-4">No signal detected</div>
+              <div className="text-lg font-medium text-white mb-1">
+                {error === 'Camera offline' && offlineLabel ? offlineLabel : error}
+              </div>
+              <div className="text-xs text-blue-200 mb-4">{t('video.noSignal')}</div>
               <button
                 onClick={handleRefresh}
                 className="px-4 py-2 bg-blue-800/60 hover:bg-blue-700/60 border border-blue-500/50 rounded text-sm transition-colors"
               >
-                Retry Connection
+                {t('common.refresh')}
               </button>
             </div>
           </div>
@@ -1147,7 +1216,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
             so a gutter wider than the LIVE badge means the two can never
             collide at any tile size; a percentage cap only holds until the
             tile gets small enough for the badge to outgrow its share. */}
-        {title && (
+        {!compact && title && (
           <div
             className={`absolute top-1.5 left-1/2 -translate-x-1/2 z-10 truncate text-sm @max-[300px]:text-xs leading-tight font-medium text-white/90 px-1.5 py-0.5 [text-shadow:0_1px_3px_rgba(0,0,0,0.9)] transition-opacity duration-700 group-hover:opacity-100 ${
               isLive && !error ? 'max-w-[calc(100%_-_110px)]' : 'max-w-[85%]'
@@ -1160,7 +1229,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         {/* Live indicator — transparent: glowing dot + shadowed text so it
             doesn't overshadow the stream like the old solid red chip. Pinned
             to the band's corner so a long title can never run under it. */}
-        {isLive && !error && (
+        {!compact && isLive && !error && (
           <div className="absolute top-1.5 right-1.5 z-10 flex items-center gap-1 text-[10px] font-semibold tracking-wider text-red-400 [text-shadow:0_1px_3px_rgba(0,0,0,0.9)]">
             <span className="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse [box-shadow:0_0_5px_rgba(239,68,68,0.9)]" />
             LIVE
@@ -1168,7 +1237,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         )}
 
         {/* Custom controls */}
-        <div className={`transition-opacity duration-200 ${showControls || !isPlaying ? 'opacity-100' : 'opacity-0'}`}>
+        {!bare && <div className={`transition-opacity duration-200 ${showControls || !isPlaying ? 'opacity-100' : 'opacity-0'}`}>
           <VideoControls
             videoRef={videoRef}
             isLive={isLive}
@@ -1195,7 +1264,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
             onTogglePtz={onTogglePtz}
             ptzActive={ptzActive}
           />
-        </div>
+        </div>}
         </div>
       </div>
     )

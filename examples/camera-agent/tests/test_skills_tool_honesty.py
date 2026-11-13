@@ -42,7 +42,7 @@ def test_every_skill_entry_lists_all_its_tools():
     for sid in SKILL_TOOLS:
         entry = _entry(rt, sid)
         assert [t["name"] for t in entry["tools"]] == SKILL_TOOLS[sid]
-        if sid in ("footage", "apps"):
+        if sid in ("footage", "apps", "status"):
             # Honest even here: these backends aren't wired in this runtime
             # (no footage index / app registry), so their tools are NOT
             # advertised and the chips must say so.
@@ -117,7 +117,7 @@ def test_events_skill_unavailable_with_neither_backend():
 
 def test_demo_renders_tool_chips():
     html = (Path(__file__).resolve().parents[1] / "demo" / "index.html"
-            ).read_text()
+            ).read_text(encoding="utf-8")
     assert "sk-tools" in html          # chips container
     assert "sk-tool" in html
     assert "s.tools" in html           # renderer consumes the payload field

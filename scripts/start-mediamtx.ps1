@@ -1,4 +1,4 @@
-#!/usr/bin/env pwsh
+﻿#!/usr/bin/env pwsh
 # Start MediaMTX with environment variables from server/.env
 # This script automatically loads MEDIAMTX_SECRET from server/.env
 # and sets the necessary environment variables for local development.

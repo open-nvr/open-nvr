@@ -22,12 +22,17 @@
 
 import { clsx } from 'clsx'
 import { CircleAlert, Inbox, RefreshCw } from 'lucide-react'
-import type { ReactNode, ButtonHTMLAttributes, TableHTMLAttributes, HTMLAttributes, ThHTMLAttributes, TdHTMLAttributes } from 'react'
+import type { ReactNode, Ref, ButtonHTMLAttributes, CSSProperties, TableHTMLAttributes, HTMLAttributes, ThHTMLAttributes, TdHTMLAttributes } from 'react'
+import { useTranslation } from '../../i18n'
 
 /* ----------------------------- Card ----------------------------- */
 
-export function Card({ children, className = '' }: { children: ReactNode; className?: string }) {
-  return <div className={clsx('rounded border border-[var(--border)] bg-[var(--panel-2)]', className)}>{children}</div>
+// `style` is passed through because some layouts size a card from a
+// number rather than a class — a pane the operator drags to resize, a
+// panel they drag around the page. Tailwind cannot express a value that
+// only exists at runtime.
+export function Card({ children, className = '', style }: { children: ReactNode; className?: string; style?: CSSProperties }) {
+  return <div className={clsx('rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--panel-2)]', className)} style={style}>{children}</div>
 }
 
 export function CardHeader({ children, className = '' }: { children: ReactNode; className?: string }) {
@@ -44,7 +49,7 @@ export function CardContent({ children, className = '' }: { children: ReactNode;
 
 /* ----------------------------- Badge ---------------------------- */
 
-export type BadgeVariant = 'success' | 'warning' | 'destructive' | 'neutral' | 'info'
+export type BadgeVariant = 'success' | 'warning' | 'destructive' | 'neutral' | 'info' | 'critical'
 
 // Theme-token driven (see the --badge-* variables in index.css): the dark
 // theme keeps the translucent deep tints, the light theme swaps to pale
@@ -55,12 +60,39 @@ const BADGE_STYLES: Record<BadgeVariant, string> = {
   destructive: 'bg-[var(--badge-destructive-bg)] text-[var(--badge-destructive-text)]',
   neutral: 'bg-[var(--badge-neutral-bg)] text-[var(--badge-neutral-text)]',
   info: 'bg-[var(--badge-info-bg)] text-[var(--badge-info-text)]',
+  critical: 'bg-[var(--badge-critical-bg)] text-[var(--badge-critical-text)]',
+}
+
+/* ------------------------- SeverityBadge ------------------------ */
+
+// One severity pill for every alarm surface. Both alarm tables used to
+// carry their own identical Record<string,string> of raw palette classes
+// (`bg-red-600 text-white`, ...), which is the rule this file states at
+// the top not to do — and it showed: `bg-yellow-600 text-black` on the
+// light theme was close to unreadable. Four severities, four tokens.
+const SEVERITY_VARIANT: Record<string, BadgeVariant> = {
+  critical: 'critical',
+  high: 'destructive',
+  medium: 'warning',
+  low: 'neutral',
+}
+
+export function SeverityBadge({ severity, className = '' }: { severity?: string | null; className?: string }) {
+  const key = (severity ?? '').toLowerCase()
+  return (
+    <Badge
+      variant={SEVERITY_VARIANT[key] ?? 'neutral'}
+      className={clsx('uppercase text-[10px] tracking-wide', className)}
+    >
+      {severity || 'unknown'}
+    </Badge>
+  )
 }
 
 // Spreads span attributes so callers can attach a `title` — a badge that
 // summarises a state often needs to explain it on hover.
 export function Badge({ children, variant = 'neutral', className = '', ...rest }: HTMLAttributes<HTMLSpanElement> & { variant?: BadgeVariant }) {
-  return <span className={clsx('inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px]', BADGE_STYLES[variant], className)} {...rest}>{children}</span>
+  return <span className={clsx('inline-flex items-center gap-1 rounded-[var(--radius)] px-2 py-0.5 text-[11px]', BADGE_STYLES[variant], className)} {...rest}>{children}</span>
 }
 
 /* ---------------------------- Button ---------------------------- */
@@ -72,16 +104,34 @@ const BUTTON_STYLES: Record<ButtonVariant, string> = {
   primary: 'border border-transparent bg-[var(--accent)] text-white hover:brightness-95',
   outline: 'border border-[var(--border)] bg-transparent hover:bg-[var(--panel-2)] text-[var(--text)]',
   ghost: 'border border-transparent bg-transparent hover:bg-[var(--panel-2)] text-[var(--text-dim)] hover:text-[var(--text)]',
-  danger: 'border border-red-700/50 bg-red-900/30 text-red-300 hover:bg-red-900/50',
+  danger: 'border border-[color-mix(in_oklab,var(--danger)_45%,var(--border))] bg-[color-mix(in_oklab,var(--danger)_12%,transparent)] text-[var(--danger)] hover:bg-[color-mix(in_oklab,var(--danger)_22%,transparent)]',
 }
 
-export type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & { variant?: ButtonVariant }
+// Two sizes, because a page header full of default-size buttons competes
+// with the page title for weight. `sm` is for toolbars and header
+// actions; `md` stays the default everywhere else. A size PROP rather
+// than a className override: Tailwind utilities have equal specificity,
+// so passing `px-2` alongside the base `px-3` wins or loses on
+// stylesheet order, not on intent.
+export type ButtonSize = 'sm' | 'md'
 
-export function Button({ children, variant = 'default', className = '', type = 'button', ...rest }: ButtonProps) {
+const BUTTON_SIZES: Record<ButtonSize, string> = {
+  sm: 'gap-1.5 px-2 py-1 text-xs',
+  md: 'gap-2 px-3 py-1.5 text-sm',
+}
+
+export type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
+  variant?: ButtonVariant
+  size?: ButtonSize
+  // React 19 passes ref as a plain prop; it reaches the <button> via ...rest.
+  ref?: Ref<HTMLButtonElement>
+}
+
+export function Button({ children, variant = 'default', size = 'md', className = '', type = 'button', ...rest }: ButtonProps) {
   return (
     <button
       type={type}
-      className={clsx('inline-flex items-center gap-2 rounded px-3 py-1.5 text-sm disabled:opacity-50 disabled:cursor-not-allowed', BUTTON_STYLES[variant], className)}
+      className={clsx('inline-flex items-center rounded-[var(--radius-button)] disabled:opacity-50 disabled:cursor-not-allowed', BUTTON_SIZES[size], BUTTON_STYLES[variant], className)}
       {...rest}
     >
       {children}
@@ -92,7 +142,7 @@ export function Button({ children, variant = 'default', className = '', type = '
 /* --------------------------- Skeleton --------------------------- */
 
 export function Skeleton({ className = '' }: { className?: string }) {
-  return <div className={clsx('animate-pulse rounded-md bg-[var(--bg-2)]', className)} />
+  return <div className={clsx('animate-pulse rounded-[var(--radius)] bg-[var(--bg-2)]', className)} />
 }
 
 /* --------------------------- StatusDot -------------------------- */
@@ -100,10 +150,10 @@ export function Skeleton({ className = '' }: { className?: string }) {
 export type Status = 'online' | 'offline' | 'degraded' | 'error'
 
 const STATUS_STYLES: Record<Status, string> = {
-  online: 'bg-emerald-500',
-  offline: 'bg-slate-500',
-  degraded: 'bg-amber-500',
-  error: 'bg-red-500',
+  online: 'bg-[var(--ok)]',
+  offline: 'bg-[var(--text-dim)]',
+  degraded: 'bg-[var(--warn)]',
+  error: 'bg-[var(--danger)]',
 }
 
 export function StatusDot({ status }: { status: Status }) {
@@ -112,14 +162,50 @@ export function StatusDot({ status }: { status: Status }) {
 
 /* -------------------------- PageHeader -------------------------- */
 
-export function PageHeader({ title, description, actions }: { title: ReactNode; description?: ReactNode; actions?: ReactNode }) {
+// The text column must SHRINK, not push. Without `min-w-0 flex-1` its
+// hypothetical size is max-content — a long description laid out on one
+// unbroken line — and flexbox wraps a line before it shrinks an item, so
+// any page with a sentence-length description shoved its actions onto a
+// second flex row. `justify-between` then parked that lone item at the
+// START, which is why several pages render their buttons bottom-LEFT
+// under the description instead of top-right. AIAdapters, AppCatalog and
+// Vehicles all had it; Occupancy was one button away from it.
+//
+// `ml-auto` (not `justify-between`) is what right-aligns the actions,
+// and it keeps working on the wrapped line at narrow widths. `shrink-0`
+// stops the buttons compressing into two-line labels before the row
+// wraps. `max-w-3xl` keeps a long description readable rather than
+// running the full width of a 2560px monitor.
+/** `notice` is a full-width line under the title and description, for the
+ *  one state that makes the rest of the page moot (an app with no cameras).
+ *  It carries its own top margin, so a notice that renders nothing leaves
+ *  the header exactly as it was. */
+/** The page's one title, so it is the page's one `h1`. `breadcrumb` sits
+ *  above the title for nested screens (Settings > Camera-Config > Zones);
+ *  `tabs` sits under the header, full width, for pages whose sections are
+ *  routes or local tabs. */
+export function PageHeader({ title, description, actions, notice, breadcrumb, tabs }: {
+  title: ReactNode
+  description?: ReactNode
+  actions?: ReactNode
+  notice?: ReactNode
+  breadcrumb?: ReactNode
+  tabs?: ReactNode
+}) {
   return (
-    <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
-      <div>
-        <h2 className="text-lg font-semibold text-[var(--text)]">{title}</h2>
-        {description && <p className="text-sm text-[var(--text-dim)] mt-0.5">{description}</p>}
+    <div className="mb-4">
+      {breadcrumb && (
+        <nav aria-label="Breadcrumb" className="mb-1 text-xs text-[var(--text-dim)]">{breadcrumb}</nav>
+      )}
+      <div className="flex flex-wrap items-start gap-3">
+        <div className="min-w-0 flex-1">
+          <h1 className="text-lg font-semibold text-[var(--text)]">{title}</h1>
+          {description && <p className="text-sm text-[var(--text-dim)] mt-0.5 max-w-3xl">{description}</p>}
+        </div>
+        {actions && <div className="ml-auto shrink-0 flex flex-wrap items-center gap-2">{actions}</div>}
       </div>
-      {actions && <div className="flex items-center gap-2">{actions}</div>}
+      {notice}
+      {tabs && <div className="mt-3">{tabs}</div>}
     </div>
   )
 }
@@ -140,21 +226,22 @@ export function EmptyState({ icon, title, description, action }: { icon?: ReactN
 /* -------------------------- ErrorCard --------------------------- */
 
 export function ErrorCard({ title = 'Error', message, onRetry }: { title?: string; message: string; onRetry?: () => void }) {
+  const { t } = useTranslation()
   return (
-    <Card className="border-red-700/40">
+    <Card className="border-[color-mix(in_oklab,var(--danger)_40%,var(--border))]">
       <CardHeader>
-        <CircleAlert size={16} className="text-red-300" />
+        <CircleAlert size={16} className="text-[var(--danger)]" />
         <CardTitle>{title}</CardTitle>
         {onRetry && (
           <div className="ml-auto">
             <Button onClick={onRetry}>
-              <RefreshCw size={14} /> Retry
+              <RefreshCw size={14} /> {t('shared.retry')}
             </Button>
           </div>
         )}
       </CardHeader>
       <CardContent>
-        <div className="text-sm text-red-300/90">{message}</div>
+        <div className="text-sm text-[var(--danger)]">{message}</div>
       </CardContent>
     </Card>
   )
@@ -162,9 +249,11 @@ export function ErrorCard({ title = 'Error', message, onRetry }: { title?: strin
 
 /* ---------------------------- Table ----------------------------- */
 
-export function Table({ children, className = '', ...rest }: TableHTMLAttributes<HTMLTableElement>) {
+/** `wrapperClassName` styles the scrolling box around the table, e.g. a
+ *  height limit with `overflow-auto` for a table whose header sticks. */
+export function Table({ children, className = '', wrapperClassName = '', ...rest }: TableHTMLAttributes<HTMLTableElement> & { wrapperClassName?: string }) {
   return (
-    <div className="overflow-x-auto border border-[var(--border)] rounded">
+    <div className={clsx('overflow-x-auto border border-[var(--border)] rounded-[var(--radius-card)]', wrapperClassName)}>
       <table className={clsx('w-full text-sm', className)} {...rest}>
         {children}
       </table>
@@ -204,9 +293,12 @@ export function TR({ children, className = '', ...rest }: HTMLAttributes<HTMLTab
   )
 }
 
-export function TH({ children, className = '', ...rest }: ThHTMLAttributes<HTMLTableCellElement>) {
+// scope="col" is defaulted rather than left to callers: it is what makes
+// a screen reader announce the column name with each cell, and no caller
+// had ever passed it. Still overridable via the spread.
+export function TH({ children, className = '', scope = 'col', ...rest }: ThHTMLAttributes<HTMLTableCellElement>) {
   return (
-    <th className={clsx('px-3 py-2 font-medium whitespace-nowrap', className)} {...rest}>
+    <th scope={scope} className={clsx('px-3 py-2 font-medium whitespace-nowrap', className)} {...rest}>
       {children}
     </th>
   )

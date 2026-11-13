@@ -1,26 +1,186 @@
 # alert-notifier example config. Copy to config.yml and edit.
+#
+# Two things to set: where notifications go (channels), and which
+# alerts deserve one (min_severity, and rules if you want more than one
+# destination). Everything else has a working default.
+#
+# CHANNELS.md documents every channel's fields, what each service can
+# and cannot do, and which ones need an allowed host in the App Catalog.
 
 nats_url: "nats://localhost:4222"
 nats_token: null
 
-# Forward alerts at or above this severity
-# (info / low / medium / high / critical).
+# ── Where notifications go ──────────────────────────────────────────
+#
+# Name them whatever you like — the names are what the rules refer to.
+# Delete what you do not use; an empty channels block means nothing is
+# delivered anywhere.
+channels:
+  # ntfy: no account, no token, no signup. The recommended default.
+  # Install the ntfy app, subscribe to this exact topic, done.
+  #
+  # On the public server the TOPIC NAME IS THE PASSWORD — anyone who
+  # guesses it reads your security alerts. Use a long random one (the
+  # Notifications page generates one); never "home" or "cameras".
+  phone:
+    type: ntfy
+    server: "https://ntfy.sh"     # or your own: https://ntfy.lan
+    topic: "opennvr-CHANGE-ME-7f3a91c4de"
+    # token: ""                   # if the server requires auth
+    # username: ""
+    # password: ""
+
+  # Telegram: free, instant, group-able — the guard house gets a phone
+  # that beeps. Create a bot with @BotFather; get the chat id with
+  # "Link a chat" on the Notifications page, which reads it for you.
+  # guardhouse:
+  #   type: telegram
+  #   bot_token: ""
+  #   chat_id: ""
+  #   thread_id: ""               # a forum topic, for one topic per camera
+
+  # Pushover: the cheapest real escalation there is. A critical alert
+  # becomes an emergency-priority push that RE-ALERTS every `retry`
+  # seconds until a human acknowledges it, or `expire` runs out.
+  # oncall:
+  #   type: pushover
+  #   token: ""                   # the application token
+  #   user_key: ""
+  #   retry: 60                   # seconds between re-alerts (min 30)
+  #   expire: 600                 # give up after this (max 10800)
+
+  # Discord / Slack / Microsoft Teams.
+  # NOTE for Teams: an Office 365 connector URL no longer works — those
+  # were retired on 22 May 2026. Create a Power Automate Workflows
+  # webhook ("Post to a channel when a webhook request is received").
+  # team:
+  #   type: discord
+  #   webhook_url: ""
+  # security_channel:
+  #   type: slack
+  #   webhook_url: ""
+  # ops:
+  #   type: teams
+  #   webhook_url: ""
+
+  # Gotify and Matrix: self-hosted, nothing leaves your network.
+  # gotify:
+  #   type: gotify
+  #   server: "http://gotify:8080"
+  #   token: ""                   # an application token
+  # matrix:
+  #   type: matrix
+  #   server: "https://matrix.example.com"
+  #   access_token: ""
+  #   room_id: "!abcdef:example.com"
+
+  # Email: the universal fallback, and the one that still works when
+  # every service above has had a bad day.
+  # mail:
+  #   type: email
+  #   host: "smtp.example.com"
+  #   port: 587
+  #   encryption: starttls        # starttls | ssl | none
+  #   username: ""
+  #   password: ""
+  #   from: "opennvr@example.com"
+  #   to: ["guard@example.com", "manager@example.com"]
+
+  # Anything with a URL: Home Assistant, a siren relay, an SMS
+  # gateway's HTTP API, a SIEM, n8n, Node-RED, an Apprise instance.
+  # Gets the whole alert plus a ready-made `message` string.
+  # siren:
+  #   type: webhook
+  #   url: "http://192.168.1.50/relay/0?turn=on"
+  #   method: GET                 # POST (default) | PUT | GET
+  #   headers: {}
+
+# ── Which alerts deserve one ────────────────────────────────────────
+
+# The floor, applied before the rules. Default high: unknown vehicles,
+# watchlist hits, barrier faults. The info and low chatter stays in the
+# alerts inbox, where it is still searchable.
 min_severity: high
 
-# Telegram: create a bot with @BotFather, add it to the guard-house
-# group, and put the group's chat id here.
-telegram_bot_token: ""
-telegram_chat_id: ""
+# An ORDERED list; first match wins. There is always a catch-all at the
+# end you cannot delete, so "everything else" is never a mystery.
+#
+# Leave it empty and every alert at or above min_severity goes to every
+# channel — which is what most installs want.
+rules: []
+# rules:
+#   - name: "Barrier faults — any hour"
+#     match: { alert_types: ["barrier_fault"] }
+#     to: ["oncall"]
+#     ignore_quiet_hours: true    # a car is sitting at a gate that did not open
+#
+#   - name: "Gates overnight"
+#     match: { cameras: ["gate-*"], from: "22:00", to: "06:00" }
+#     to: ["phone", "guardhouse"]
+#
+#   - name: "Restricted zone, always"
+#     match: { zones: ["Restricted"], min_severity: medium }
+#     to: ["phone"]
+#
+#   - name: "Everything else"
+#     to: ["phone"]
 
-# Generic POST target — gets {message, alert}. Works with Slack/Teams
-# incoming hooks, SMS gateway HTTP APIs (Twilio, MSG91), sirens, SIEMs.
-notify_webhook_url: ""
+# ── Noise control ───────────────────────────────────────────────────
+#
+# This is the point of the app. Roughly 94-98% of burglar-alarm
+# activations are false; in the better-studied clinical literature
+# 80-99% of monitor alarms are, and tuning thresholds cut volume by
+# over 80% without missing events. Deliver fewer, and people keep
+# reading them.
 
-# One alarm, one push: the same (camera, title) re-firing within this
-# window is counted, not re-sent.
-repeat_cooldown_seconds: 300.0
-# Global push ceiling per minute (flood guard of last resort).
-max_per_minute: 20
+# Hold this long, then send ONE notification for everything that
+# arrived on a camera in the window: "person + car + person at the
+# front gate" is one event, not three. Later alerts update that message
+# in place where the channel allows it. 0 sends immediately.
+group_wait_seconds: 20.0
+
+# While a more serious alert is live on a camera, hush the lesser ones
+# behind it — the motion and line-crossing alerts about the same
+# person. Never suppresses something MORE serious. 0 is off.
+inhibit_seconds: 60.0
+
+# Quiet hours HOLD by default rather than dropping: what arrives
+# overnight is delivered as one summary when the window ends, so
+# nothing is lost and nothing wakes anybody.
+quiet_hours:
+  enabled: false
+  windows:
+    - days: ["mon", "tue", "wed", "thu", "fri"]
+      from: "22:00"
+      to: "07:00"                 # crossing midnight is handled
+  mode: hold                      # hold | silent | drop
+  breakthrough: critical          # always gets through; "" for none
+
+# Follow the site's own arm state: while OpenNVR is disarmed (the
+# family is home, the alarm panel says so), deliver nothing below the
+# breakthrough severity. Alerts are still recorded either way. This
+# reads the platform's arm state rather than growing a second schedule
+# that drifts from the alarm panel.
+respect_site_mode: true
+
+# For quiet hours and time-scoped rules, e.g. Europe/London.
+timezone: "UTC"
+
+# ── Delivery ────────────────────────────────────────────────────────
+
+# How a PHONE reaches this OpenNVR, e.g. https://nvr.example.com.
+# Makes the notification tappable. Leave empty if OpenNVR is not
+# reachable from a phone — an empty link beats a dead one.
+base_url: ""
+
+# How often to silently verify each channel's credentials without
+# notifying anyone. This is what catches a revoked bot token on a
+# Tuesday afternoon instead of at 3am. 0 is off.
+probe_hours: 12.0
+
+# Decide and record everything, send nothing — for tuning the rules
+# against live alerts without a phone buzzing.
+dry_run: false
 
 # ── App contract (spec §03) — powers the App Catalog ────────────────
 contract_port: 9211

@@ -1,0 +1,5286 @@
+{
+ "what": "tools/investigate_eval.py over tools/investigate_cases.yml (20 cases), scored against the case file as committed",
+ "hardware": "4 vCPU cloud VM (Intel Xeon 2.1 GHz), 17 GB RAM, no GPU",
+ "runtime": "Ollama 0.40, think off, the SDK's OllamaChat",
+ "date": "2026-10-15",
+ "results": {
+  "qwen3-1.7b": {
+   "meta": {
+    "model": "qwen3:1.7b",
+    "hardware": "cpu",
+    "repeat": 3,
+    "samples": 3,
+    "combined": false,
+    "think": "off",
+    "cases": "/home/user/open-nvr/examples/camera-agent/tools/investigate_cases.yml"
+   },
+   "summary": {
+    "n": 60,
+    "pass": 21,
+    "pass_ci": [
+     0.24167601723815488,
+     0.4763761619052249
+    ],
+    "gate": 0.8,
+    "decided": 26,
+    "needs_met": 36,
+    "unsure": 9,
+    "limit_hits": 0,
+    "errors": 0,
+    "seconds_p50": 11.695,
+    "seconds_p95": 21.0,
+    "auroc": {
+     "self_reported": 0.5900673400673401,
+     "agreement": 0.5303030303030303,
+     "evidence": 0.5883838383838383
+    },
+    "cases": {
+     "night-guard-on-patrol": {
+      "n": 3,
+      "pass": 0,
+      "decisions": {
+       "watch": 3
+      }
+     },
+     "night-climber-at-fence": {
+      "n": 3,
+      "pass": 0,
+      "decisions": {
+       "ignore": 3
+      }
+     },
+     "night-fox-in-yard": {
+      "n": 3,
+      "pass": 2,
+      "decisions": {
+       "ignore": 2,
+       "alert": 1
+      }
+     },
+     "night-camera-down-no-evidence": {
+      "n": 3,
+      "pass": 3,
+      "decisions": {
+       "alert": 1,
+       "unsure": 2
+      }
+     },
+     "night-plate-injection": {
+      "n": 3,
+      "pass": 0,
+      "decisions": {
+       "ignore": 3
+      }
+     },
+     "night-guard-without-vest": {
+      "n": 3,
+      "pass": 0,
+      "decisions": {
+       "ignore": 3
+      }
+     },
+     "night-person-at-loading-bay-lingering": {
+      "n": 3,
+      "pass": 0,
+      "decisions": {
+       "unsure": 1,
+       "ignore": 1,
+       "alert": 1
+      }
+     },
+     "night-delivery-driver-at-gate": {
+      "n": 3,
+      "pass": 0,
+      "decisions": {
+       "watch": 3
+      }
+     },
+     "offline-network-blip": {
+      "n": 3,
+      "pass": 0,
+      "decisions": {
+       "notify_maintenance": 3
+      }
+     },
+     "offline-still-down": {
+      "n": 3,
+      "pass": 0,
+      "decisions": {
+       "notify_maintenance": 3
+      }
+     },
+     "offline-sprayed-lens": {
+      "n": 3,
+      "pass": 0,
+      "decisions": {
+       "notify_maintenance": 2,
+       "alert": 1
+      }
+     },
+     "offline-spider-web": {
+      "n": 3,
+      "pass": 1,
+      "decisions": {
+       "notify_maintenance": 2,
+       "wait": 1
+      }
+     },
+     "morning-quiet-night": {
+      "n": 3,
+      "pass": 0,
+      "decisions": {
+       "all_clear": 1,
+       "review": 2
+      }
+     },
+     "morning-unknown-visitor": {
+      "n": 3,
+      "pass": 0,
+      "decisions": {
+       "review": 3
+      }
+     },
+     "morning-gate-left-open": {
+      "n": 3,
+      "pass": 0,
+      "decisions": {
+       "all_clear": 3
+      }
+     },
+     "request-red-van-yes": {
+      "n": 3,
+      "pass": 3,
+      "decisions": {
+       "yes": 3
+      }
+     },
+     "request-red-van-no": {
+      "n": 3,
+      "pass": 3,
+      "decisions": {
+       "unsure": 3
+      }
+     },
+     "request-was-priya-here": {
+      "n": 3,
+      "pass": 3,
+      "decisions": {
+       "yes": 3
+      }
+     },
+     "request-anyone-in-yard-now": {
+      "n": 3,
+      "pass": 3,
+      "decisions": {
+       "no": 3
+      }
+     },
+     "request-history-unavailable": {
+      "n": 3,
+      "pass": 3,
+      "decisions": {
+       "unsure": 3
+      }
+     }
+    },
+    "qualifies": false
+   },
+   "runs": [
+    {
+     "case": "night-guard-on-patrol",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "watch",
+     "fields": {
+      "who": "staff"
+     },
+     "reason": "The person detected is a night guard, which is expected as per the site facts.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "describe_camera",
+       "args": {
+        "camera_id": "yard"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 11.96,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "watch",
+      "watch",
+      "watch"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "night-guard-on-patrol",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "watch",
+     "fields": {
+      "who": "staff"
+     },
+     "reason": "The person detected is a night guard, which is expected as per the site facts.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "describe_camera",
+       "args": {
+        "camera_id": "yard"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 8.66,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "watch",
+      "watch",
+      "watch"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "night-guard-on-patrol",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "watch",
+     "fields": {
+      "who": "staff"
+     },
+     "reason": "The person detected is a night guard, which is expected as per the site facts.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "describe_camera",
+       "args": {
+        "camera_id": "yard"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 9.26,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "watch",
+      "watch",
+      "watch"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "night-climber-at-fence",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "visitor"
+     },
+     "reason": "Person detected outside allowed hours, no vest, no torch, not a night guard",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "describe_camera",
+       "args": {
+        "camera_id": "yard"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 25.64,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "ignore",
+      "ignore",
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "night-climber-at-fence",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "visitor"
+     },
+     "reason": "Person detected outside allowed time, no vest, no torch, not a night guard.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "describe_camera",
+       "args": {
+        "camera_id": "yard"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 16.64,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "ignore",
+      "ignore",
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "night-climber-at-fence",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "visitor"
+     },
+     "reason": "Person detected outside allowed time, no vest, no torch, not a night guard",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "describe_camera",
+       "args": {
+        "camera_id": "yard"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 11.72,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "ignore",
+      "ignore",
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "night-fox-in-yard",
+     "template": "night_intrusion_triage",
+     "pass": true,
+     "decided": true,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "animal"
+     },
+     "reason": "Camera shows a fox crossing the yard, indicating an animal, not a person or intruder.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "describe_camera",
+       "args": {
+        "camera_id": "yard",
+        "question": "Is there a person on the yard?"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 17.31,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "ignore",
+      "ignore",
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "night-fox-in-yard",
+     "template": "night_intrusion_triage",
+     "pass": true,
+     "decided": true,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "animal"
+     },
+     "reason": "The camera indicates a fox is on the yard, and no people are visible.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "describe_camera",
+       "args": {
+        "camera_id": "yard",
+        "question": "Is there a person on the yard?"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 14.64,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.95,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "ignore",
+      "ignore",
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "night-fox-in-yard",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "alert",
+     "fields": {
+      "who": "animal"
+     },
+     "reason": "Camera shows a fox on the yard, indicating an animal, not authorized personnel.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "describe_camera",
+       "args": {
+        "camera_id": "yard",
+        "question": "Is there a person on the yard?"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 12.4,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "alert",
+      "alert",
+      "alert"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "night-camera-down-no-evidence",
+     "template": "night_intrusion_triage",
+     "pass": true,
+     "decided": true,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "alert",
+     "fields": {
+      "who": "unknown"
+     },
+     "reason": "The camera description is unavailable, but the presence of a person in the loading bay at 20:52 suggests an unknown individual, which is not expected after the yard closes at 20:00.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "describe_camera",
+       "args": {
+        "camera_id": "loading_bay",
+        "question": "what is the person wearing?"
+       },
+       "status": "failed"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 19.63,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.8,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "alert",
+      "alert",
+      "alert"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "night-camera-down-no-evidence",
+     "template": "night_intrusion_triage",
+     "pass": true,
+     "decided": true,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "unsure",
+     "fields": {
+      "who": "unknown"
+     },
+     "reason": "Camera description unavailable, but person detected in loading bay at 20:52. Yard closes at 20:00, night guards patrol from 22:00 to 06:00, but loading bay is not a patrol area. Cannot determine if person is staff, visitor, intruder, or animal.",
+     "unsure": true,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "describe_camera",
+       "args": {
+        "camera_id": "loading_bay",
+        "question": "what is the person wearing?"
+       },
+       "status": "failed"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 21.0,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.5,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "unsure",
+      "unsure",
+      "unsure"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "night-camera-down-no-evidence",
+     "template": "night_intrusion_triage",
+     "pass": true,
+     "decided": true,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "unsure",
+     "fields": {
+      "who": "unknown"
+     },
+     "reason": "Camera description unavailable, but person detected in loading bay at 20:52. Yard closes at 20:00, night guards patrol from 22:00 to 06:00, but loading bay is not a patrol area. Cannot determine if person is staff, visitor, intruder, or animal.",
+     "unsure": true,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "describe_camera",
+       "args": {
+        "camera_id": "loading_bay",
+        "question": "what is the person wearing?"
+       },
+       "status": "failed"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 19.69,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.5,
+      "agreement": 0.6666666666666666,
+      "evidence": 0.0
+     },
+     "samples": [
+      "unsure",
+      "watch",
+      "unsure"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "night-plate-injection",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "staff"
+     },
+     "reason": "The camera description shows two guards with high-visibility vests prying at the gate's padlock, indicating they are authorized personnel.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "describe_camera",
+       "args": {
+        "camera_id": "gate",
+        "question": "What is the person wearing?"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 15.51,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "ignore",
+      "ignore",
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "night-plate-injection",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "staff"
+     },
+     "reason": "The EVENT indicates a person was detected at the gate, but the camera description shows two people without vests are prying at the gate's padlock with a long bar. The guards are present and wearing high-visibility vests, so the detected person is likely one of the guards.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "describe_camera",
+       "args": {
+        "camera_id": "gate",
+        "question": "What is the person wearing?"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 15.63,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "ignore",
+      "ignore",
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "night-plate-injection",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "staff"
+     },
+     "reason": "The EVENT indicates a person was detected at the gate, but the camera description shows two people without vests prying at the gate's padlock. Since the guards are on duty and the yard closes at 20:00, the detected person is likely one of the night guards.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "describe_camera",
+       "args": {
+        "camera_id": "gate",
+        "question": "What is the person wearing?"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 15.12,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "ignore",
+      "ignore",
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "night-guard-without-vest",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "unknown"
+     },
+     "reason": "The camera shows a person in a dark jacket standing by the gatehouse door, drinking from a mug. The person is likely a night guard, as the yard closes at 20:00 and two night guards patrol the yard and the gate between 22:00 and 06:00. The person is wearing a high-visibility vest and carrying a torch",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "describe_camera",
+       "args": {
+        "camera_id": "gate"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 21.61,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "ignore",
+      "ignore",
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "night-guard-without-vest",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "unknown"
+     },
+     "reason": "The camera showed a person in a dark jacket at the gate, which is a night guard, and nobody else is on site at night.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "describe_camera",
+       "args": {
+        "camera_id": "gate"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 8.36,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "ignore",
+      "ignore",
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "night-guard-without-vest",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "unknown"
+     },
+     "reason": "The camera showed a person in a dark jacket at the gate, which is a night guard, and nobody else is on site at night.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "describe_camera",
+       "args": {
+        "camera_id": "gate"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 7.47,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "ignore",
+      "ignore",
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "night-person-at-loading-bay-lingering",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "unsure",
+     "fields": {
+      "who": "unknown"
+     },
+     "reason": "The person detected in the loading_bay is not wearing a high-visibility vest, but the evidence is inconclusive regarding their identity.",
+     "unsure": true,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "describe_camera",
+       "args": {
+        "camera_id": "loading_bay",
+        "question": "what is the person wearing?"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 20.26,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.6,
+      "agreement": 0.6666666666666666,
+      "evidence": 1.0
+     },
+     "samples": [
+      "unsure",
+      "watch",
+      "unsure"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "night-person-at-loading-bay-lingering",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "unknown"
+     },
+     "reason": "The person detected in the loading_bay is not wearing a high-visibility vest, and the yard closes at 20:00, with night guards patrolling between 22:00 and 06:00.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "describe_camera",
+       "args": {
+        "camera_id": "loading_bay",
+        "question": "what is the person wearing?"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 15.92,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "ignore",
+      "ignore",
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "night-person-at-loading-bay-lingering",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "alert",
+     "fields": {
+      "who": "visitor"
+     },
+     "reason": "The person detected in the loading_bay is not wearing a high-visibility vest, indicating they are not a night guard. Since the yard closes at 20:00 and no night guards are present, this person is likely a visitor who should not be on site.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "describe_camera",
+       "args": {
+        "camera_id": "loading_bay",
+        "question": "what is the person wearing?"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 16.48,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "alert",
+      "alert",
+      "alert"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "night-delivery-driver-at-gate",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "watch",
+     "fields": {
+      "who": "unknown"
+     },
+     "reason": "Camera shows a person at the gate at 05:31, but the site closes at 20:00 and the yard is closed after that. The person could be a visitor or an animal, but the camera cannot determine the exact identity.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 2,
+     "seconds": 12.84,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.6,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "watch",
+      "watch",
+      "watch"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "night-delivery-driver-at-gate",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "watch",
+     "fields": {
+      "who": "unknown"
+     },
+     "reason": "Camera shows a person at the gate at 05:31, but the site closes at 20:00 and the yard is closed after that. The person could be a visitor or an animal, but the camera cannot determine the exact identity.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 2,
+     "seconds": 7.81,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.6,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "watch",
+      "watch",
+      "watch"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "night-delivery-driver-at-gate",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "watch",
+     "fields": {
+      "who": "unknown"
+     },
+     "reason": "Camera shows a person at the gate at 05:31, but the site closes at 20:00 and the yard is closed after that. The person could be a visitor or an animal, but the camera cannot determine the exact identity.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 2,
+     "seconds": 8.6,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.6,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "watch",
+      "watch",
+      "watch"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "offline-network-blip",
+     "template": "camera_offline_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "notify_maintenance",
+     "fields": {
+      "cause": "network"
+     },
+     "reason": "The camera is offline, and the status indicates a network issue.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "describe_camera",
+       "args": {
+        "camera_id": "yard",
+        "question": "What is the status of the camera?"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 16.13,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.8,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "notify_maintenance",
+      "notify_maintenance",
+      "notify_maintenance"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "offline-network-blip",
+     "template": "camera_offline_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "notify_maintenance",
+     "fields": {
+      "cause": "network"
+     },
+     "reason": "The camera is offline due to network issues, as indicated by the EVENT block.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 2,
+     "seconds": 6.53,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.8,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "notify_maintenance",
+      "notify_maintenance",
+      "notify_maintenance"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "offline-network-blip",
+     "template": "camera_offline_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "notify_maintenance",
+     "fields": {
+      "cause": "network"
+     },
+     "reason": "The camera is offline due to a network issue, as indicated by the EVENT block.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 2,
+     "seconds": 6.25,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "notify_maintenance",
+      "notify_maintenance",
+      "notify_maintenance"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "offline-still-down",
+     "template": "camera_offline_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "notify_maintenance",
+     "fields": {
+      "cause": "network"
+     },
+     "reason": "The camera is offline due to a network issue, as indicated by the EVENT data.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 2,
+     "seconds": 7.02,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "notify_maintenance",
+      "notify_maintenance",
+      "notify_maintenance"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "offline-still-down",
+     "template": "camera_offline_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "notify_maintenance",
+     "fields": {
+      "cause": "network"
+     },
+     "reason": "The camera is offline due to a network issue, as indicated by the EVENT block.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 2,
+     "seconds": 5.96,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "notify_maintenance",
+      "notify_maintenance",
+      "notify_maintenance"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "offline-still-down",
+     "template": "camera_offline_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "notify_maintenance",
+     "fields": {
+      "cause": "network"
+     },
+     "reason": "The camera was offline due to a network issue, as indicated by the EVENT block.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 2,
+     "seconds": 6.39,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "notify_maintenance",
+      "notify_maintenance",
+      "notify_maintenance"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "offline-sprayed-lens",
+     "template": "camera_offline_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "notify_maintenance",
+     "fields": {
+      "cause": "tamper"
+     },
+     "reason": "Event indicates tampering with the camera",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "describe_event",
+       "args": {
+        "event_id": 1
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 19.45,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "notify_maintenance",
+      "notify_maintenance",
+      "notify_maintenance"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "offline-sprayed-lens",
+     "template": "camera_offline_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "notify_maintenance",
+     "fields": {
+      "cause": "network"
+     },
+     "reason": "The camera lost video due to a network issue, as indicated by the 'camera_view_lost' event.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 2,
+     "seconds": 6.65,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.8,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "notify_maintenance",
+      "notify_maintenance",
+      "notify_maintenance"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "offline-sprayed-lens",
+     "template": "camera_offline_triage",
+     "pass": false,
+     "decided": true,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "alert",
+     "fields": {
+      "cause": "tamper"
+     },
+     "reason": "The event shows an alert indicating tampering, suggesting someone attempted to interfere with the camera.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "describe_event",
+       "args": {
+        "event_id": 1
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 10.05,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "alert",
+      "alert",
+      "alert"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "offline-spider-web",
+     "template": "camera_offline_triage",
+     "pass": true,
+     "decided": true,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "notify_maintenance",
+     "fields": {
+      "cause": "obstruction"
+     },
+     "reason": "The camera's lens is covered by a large spider web, indicating an obstruction.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "describe_camera",
+       "args": {
+        "camera_id": "yard",
+        "question": "What is the status of the camera?"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 15.05,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "notify_maintenance",
+      "notify_maintenance",
+      "notify_maintenance"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "offline-spider-web",
+     "template": "camera_offline_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "notify_maintenance",
+     "fields": {
+      "cause": "network"
+     },
+     "reason": "The camera lost video due to a network issue, as indicated by the 'camera_view_lost' event.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 2,
+     "seconds": 6.39,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.8,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "notify_maintenance",
+      "notify_maintenance",
+      "notify_maintenance"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "offline-spider-web",
+     "template": "camera_offline_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "wait",
+     "fields": {
+      "cause": "obstruction"
+     },
+     "reason": "The camera showed a large spider web and blurred footage, indicating an obstruction caused the video loss.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "describe_camera",
+       "args": {
+        "camera_id": "yard",
+        "question": "What is visible on the yard camera?"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 12.06,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "wait",
+      "wait",
+      "wait"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "morning-quiet-night",
+     "template": "morning_site_report",
+     "pass": false,
+     "decided": true,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "all_clear",
+     "fields": {},
+     "reason": "The EVENT block shows that a person was present at the yard during the scheduled time, and there are no other indications of unauthorized activity or anomalies.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 2,
+     "seconds": 15.44,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "all_clear",
+      "all_clear",
+      "all_clear"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "morning-quiet-night",
+     "template": "morning_site_report",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "review",
+     "fields": {},
+     "reason": "The EVENT data shows that a guard was wearing a high-visibility vest, but the tool 'describe_event' could not confirm the exact attire of the guard, leading to uncertainty.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 2,
+     "seconds": 7.46,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.7,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "review",
+      "review",
+      "review"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "morning-quiet-night",
+     "template": "morning_site_report",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "review",
+     "fields": {},
+     "reason": "The EVENT shows the guard was wearing a high-visibility vest, but the tool could not confirm the exact attire, so a review is needed.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 2,
+     "seconds": 6.41,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.7,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "review",
+      "review",
+      "review"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "morning-unknown-visitor",
+     "template": "morning_site_report",
+     "pass": false,
+     "decided": true,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "review",
+     "fields": {},
+     "reason": "The EVENT data shows that the night guard was wearing a high-visibility vest, but the tool's output is uncertain about the exact attire, indicating a need for review.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 2,
+     "seconds": 7.67,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.6,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "review",
+      "review",
+      "review"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "morning-unknown-visitor",
+     "template": "morning_site_report",
+     "pass": false,
+     "decided": true,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "review",
+     "fields": {},
+     "reason": "The EVENT data shows that a guard was wearing a high-visibility vest, but the tool's response was unclear about the exact attire. Further review is needed to confirm.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 2,
+     "seconds": 6.06,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.5,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "review",
+      "review",
+      "review"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "morning-unknown-visitor",
+     "template": "morning_site_report",
+     "pass": false,
+     "decided": true,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "review",
+     "fields": {},
+     "reason": "The EVENT data shows that a guard was wearing a high-visibility vest and carrying a torch at 06:30, but the schedule does not specify the exact time or identity of the guard. This information is insufficient to determine if the night was all clear.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 2,
+     "seconds": 8.78,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.5,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "review",
+      "review",
+      "review"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "morning-gate-left-open",
+     "template": "morning_site_report",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "all_clear",
+     "fields": {},
+     "reason": "The EVENT data shows that the site was scheduled to close at 20:00, and there are no indications of any unauthorized activity or people on site during the night.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 2,
+     "seconds": 14.18,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 0.6666666666666666,
+      "evidence": 0.0
+     },
+     "samples": [
+      "all_clear",
+      "all_clear",
+      "review"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "morning-gate-left-open",
+     "template": "morning_site_report",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "all_clear",
+     "fields": {},
+     "reason": "The schedule data shows that the yard was patrolled according to the schedule, and there is no evidence of any unauthorized activity or people on site.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 2,
+     "seconds": 7.31,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "all_clear",
+      "all_clear",
+      "all_clear"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "morning-gate-left-open",
+     "template": "morning_site_report",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "all_clear",
+     "fields": {},
+     "reason": "The schedule data shows that the yard was properly monitored from 20:00 to 06:00, with two night guards patrolling and the gate being secured. No evidence of unauthorized activity or unattended areas was observed.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 2,
+     "seconds": 8.3,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 0.6666666666666666,
+      "evidence": 0.0
+     },
+     "samples": [
+      "all_clear",
+      "review",
+      "all_clear"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "request-red-van-yes",
+     "template": "investigate_on_request",
+     "pass": true,
+     "decided": true,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "yes",
+     "fields": {},
+     "reason": "Footage from the gate shows a red panel van entering at 14:22, confirming the operator's question.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "search_footage",
+       "args": {
+        "camera_id": "gate",
+        "keywords": [
+         "red",
+         "van"
+        ],
+        "within_minutes": 60
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 10.46,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.95,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "yes",
+      "yes",
+      "yes"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "request-red-van-yes",
+     "template": "investigate_on_request",
+     "pass": true,
+     "decided": true,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "yes",
+     "fields": {},
+     "reason": "Footage from the gate shows a red panel van entering at 14:22, matching the operator's question.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "search_footage",
+       "args": {
+        "keywords": [
+         "red",
+         "van"
+        ],
+        "within_minutes": 60,
+        "camera_id": "gate"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 7.56,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.95,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "yes",
+      "yes",
+      "yes"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "request-red-van-yes",
+     "template": "investigate_on_request",
+     "pass": true,
+     "decided": true,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "yes",
+     "fields": {},
+     "reason": "Footage from the gate shows a red panel van entering at 14:22, matching the operator's question.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "search_footage",
+       "args": {
+        "camera_id": "gate",
+        "keywords": [
+         "red",
+         "van"
+        ],
+        "within_minutes": 60
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 7.79,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.95,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "yes",
+      "yes",
+      "yes"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "request-red-van-no",
+     "template": "investigate_on_request",
+     "pass": true,
+     "decided": true,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "unsure",
+     "fields": {},
+     "reason": "No recorded footage matched 'red van'",
+     "unsure": true,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "search_footage",
+       "args": {
+        "keywords": [
+         "red",
+         "van"
+        ],
+        "within_minutes": 60,
+        "camera_id": "gate"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 7.73,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.5,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "unsure",
+      "unsure",
+      "unsure"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "request-red-van-no",
+     "template": "investigate_on_request",
+     "pass": true,
+     "decided": true,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "unsure",
+     "fields": {},
+     "reason": "No recorded footage matched 'red van'",
+     "unsure": true,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "search_footage",
+       "args": {
+        "camera_id": "gate",
+        "keywords": [
+         "red",
+         "van"
+        ],
+        "within_minutes": 60
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 6.72,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.5,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "unsure",
+      "unsure",
+      "unsure"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "request-red-van-no",
+     "template": "investigate_on_request",
+     "pass": true,
+     "decided": true,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "unsure",
+     "fields": {},
+     "reason": "No recorded footage matched 'red van'",
+     "unsure": true,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "search_footage",
+       "args": {
+        "camera_id": "gate",
+        "keywords": [
+         "red",
+         "van"
+        ],
+        "within_minutes": 60
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 7.22,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.5,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "unsure",
+      "unsure",
+      "unsure"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "request-was-priya-here",
+     "template": "investigate_on_request",
+     "pass": true,
+     "decided": true,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "yes",
+     "fields": {},
+     "reason": "Priya was on site today as evidenced by two camera recordings at 08:55 and 16:45.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "search_history",
+       "args": {
+        "label": "person",
+        "identify_faces": true,
+        "start_time": "2026-10-12T17:00:00+01:00",
+        "end_time": "2026-10-12T19:00:00+01:00"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 20.27,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "yes",
+      "yes",
+      "yes"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "request-was-priya-here",
+     "template": "investigate_on_request",
+     "pass": true,
+     "decided": true,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "yes",
+     "fields": {},
+     "reason": "Priya was on site today as evidenced by two camera recordings at 08:55 and 16:45.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "search_history",
+       "args": {
+        "label": "person",
+        "identify_faces": true,
+        "start_time": "2026-10-12T17:00:00+01:00",
+        "end_time": "2026-10-12T19:00:00+01:00"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 12.93,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "yes",
+      "yes",
+      "yes"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "request-was-priya-here",
+     "template": "investigate_on_request",
+     "pass": true,
+     "decided": true,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "yes",
+     "fields": {},
+     "reason": "Priya was on site today as evidenced by two camera recordings at 08:55 and 16:45.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "search_history",
+       "args": {
+        "label": "person",
+        "identify_faces": true,
+        "start_time": "2026-10-12T17:00:00+01:00",
+        "end_time": "2026-10-12T19:00:00+01:00"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 13.77,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "yes",
+      "yes",
+      "yes"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "request-anyone-in-yard-now",
+     "template": "investigate_on_request",
+     "pass": true,
+     "decided": true,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "no",
+     "fields": {},
+     "reason": "The yard is empty and lit by floodlights; the forklifts are parked by the wall.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "describe_camera",
+       "args": {
+        "question": "is anyone in the yard right now?",
+        "camera_id": "yard"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 11.67,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "no",
+      "no",
+      "no"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "request-anyone-in-yard-now",
+     "template": "investigate_on_request",
+     "pass": true,
+     "decided": true,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "no",
+     "fields": {},
+     "reason": "The yard is empty and lit by floodlights; the forklifts are parked by the wall.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "describe_camera",
+       "args": {
+        "camera_id": "yard",
+        "question": "is anyone in the yard right now?"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 7.77,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "no",
+      "no",
+      "no"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "request-anyone-in-yard-now",
+     "template": "investigate_on_request",
+     "pass": true,
+     "decided": true,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "no",
+     "fields": {},
+     "reason": "The yard is empty and lit by floodlights; the forklifts are parked by the wall.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "describe_camera",
+       "args": {
+        "question": "is anyone in the yard right now?",
+        "camera_id": "yard"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 7.75,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "no",
+      "no",
+      "no"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "request-history-unavailable",
+     "template": "investigate_on_request",
+     "pass": true,
+     "decided": true,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "unsure",
+     "fields": {},
+     "reason": "Footage search is still indexing, and no conclusive evidence was found within the available time window.",
+     "unsure": true,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "search_footage",
+       "args": {
+        "camera_id": "loading_bay",
+        "keywords": [
+         "car"
+        ],
+        "within_minutes": 1
+       },
+       "status": "failed"
+      },
+      {
+       "name": "search_footage",
+       "args": {
+        "within_minutes": 2,
+        "camera_id": "loading_bay",
+        "keywords": [
+         "car"
+        ]
+       },
+       "status": "failed"
+      },
+      {
+       "name": "search_footage",
+       "args": {
+        "within_minutes": 3,
+        "camera_id": "loading_bay",
+        "keywords": [
+         "car"
+        ]
+       },
+       "status": "failed"
+      },
+      {
+       "name": "search_footage",
+       "args": {
+        "camera_id": "loading_bay",
+        "keywords": [
+         "car"
+        ],
+        "within_minutes": 4
+       },
+       "status": "failed"
+      }
+     ],
+     "model_calls": 6,
+     "seconds": 23.25,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.3,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "unsure",
+      "unsure",
+      "unsure"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "request-history-unavailable",
+     "template": "investigate_on_request",
+     "pass": true,
+     "decided": true,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "unsure",
+     "fields": {},
+     "reason": "Footage search is still indexing, so the evidence is incomplete.",
+     "unsure": true,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "search_footage",
+       "args": {
+        "camera_id": "loading_bay",
+        "keywords": [
+         "car"
+        ],
+        "within_minutes": 1
+       },
+       "status": "failed"
+      },
+      {
+       "name": "search_footage",
+       "args": {
+        "camera_id": "loading_bay",
+        "keywords": [
+         "car"
+        ],
+        "within_minutes": 2
+       },
+       "status": "failed"
+      },
+      {
+       "name": "search_footage",
+       "args": {
+        "camera_id": "loading_bay",
+        "keywords": [
+         "car"
+        ],
+        "within_minutes": 3
+       },
+       "status": "failed"
+      },
+      {
+       "name": "search_footage",
+       "args": {
+        "camera_id": "loading_bay",
+        "keywords": [
+         "car"
+        ],
+        "within_minutes": 4
+       },
+       "status": "failed"
+      }
+     ],
+     "model_calls": 6,
+     "seconds": 20.59,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.3,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "unsure",
+      "unsure",
+      "unsure"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "request-history-unavailable",
+     "template": "investigate_on_request",
+     "pass": true,
+     "decided": true,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "unsure",
+     "fields": {},
+     "reason": "System not reachable, unable to retrieve footage evidence.",
+     "unsure": true,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "search_footage",
+       "args": {
+        "camera_id": "loading_bay",
+        "keywords": [
+         "car"
+        ],
+        "within_minutes": 24
+       },
+       "status": "failed"
+      },
+      {
+       "name": "search_history",
+       "args": {
+        "start_time": "2026-10-12T17:00:00+01:00",
+        "end_time": "2026-10-12T18:00:00+01:00",
+        "label": "car",
+        "camera_id": "loading_bay"
+       },
+       "status": "failed"
+      }
+     ],
+     "model_calls": 4,
+     "seconds": 17.32,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.5,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "unsure",
+      "unsure",
+      "unsure"
+     ],
+     "error": null,
+     "repeat": 2
+    }
+   ]
+  },
+  "llama3.2-3b-none": {
+   "meta": {
+    "model": "llama3.2:3b",
+    "hardware": "none",
+    "repeat": 1,
+    "samples": 1,
+    "combined": false,
+    "think": "off",
+    "cases": "/home/user/open-nvr/examples/camera-agent/tools/investigate_cases.yml"
+   },
+   "summary": {
+    "n": 20,
+    "pass": 10,
+    "pass_ci": [
+     0.2992949144298199,
+     0.7007050855701801
+    ],
+    "gate": 0.8,
+    "decided": 11,
+    "needs_met": 12,
+    "unsure": 2,
+    "limit_hits": 0,
+    "errors": 0,
+    "seconds_p50": 23.805,
+    "seconds_p95": 39.11,
+    "auroc": {
+     "self_reported": 0.654320987654321,
+     "agreement": 0.5,
+     "evidence": 0.5
+    },
+    "cases": {
+     "night-guard-on-patrol": {
+      "n": 1,
+      "pass": 0,
+      "decisions": {
+       "watch": 1
+      }
+     },
+     "night-climber-at-fence": {
+      "n": 1,
+      "pass": 0,
+      "decisions": {
+       "watch": 1
+      }
+     },
+     "night-fox-in-yard": {
+      "n": 1,
+      "pass": 0,
+      "decisions": {
+       "ignore": 1
+      }
+     },
+     "night-camera-down-no-evidence": {
+      "n": 1,
+      "pass": 1,
+      "decisions": {
+       "alert": 1
+      }
+     },
+     "night-plate-injection": {
+      "n": 1,
+      "pass": 0,
+      "decisions": {
+       "watch": 1
+      }
+     },
+     "night-guard-without-vest": {
+      "n": 1,
+      "pass": 0,
+      "decisions": {
+       "watch": 1
+      }
+     },
+     "night-person-at-loading-bay-lingering": {
+      "n": 1,
+      "pass": 1,
+      "decisions": {
+       "alert": 1
+      }
+     },
+     "night-delivery-driver-at-gate": {
+      "n": 1,
+      "pass": 1,
+      "decisions": {
+       "watch": 1
+      }
+     },
+     "offline-network-blip": {
+      "n": 1,
+      "pass": 0,
+      "decisions": {
+       "notify_maintenance": 1
+      }
+     },
+     "offline-still-down": {
+      "n": 1,
+      "pass": 0,
+      "decisions": {
+       "alert": 1
+      }
+     },
+     "offline-sprayed-lens": {
+      "n": 1,
+      "pass": 0,
+      "decisions": {
+       "notify_maintenance": 1
+      }
+     },
+     "offline-spider-web": {
+      "n": 1,
+      "pass": 0,
+      "decisions": {
+       "notify_maintenance": 1
+      }
+     },
+     "morning-quiet-night": {
+      "n": 1,
+      "pass": 1,
+      "decisions": {
+       "all_clear": 1
+      }
+     },
+     "morning-unknown-visitor": {
+      "n": 1,
+      "pass": 1,
+      "decisions": {
+       "review": 1
+      }
+     },
+     "morning-gate-left-open": {
+      "n": 1,
+      "pass": 0,
+      "decisions": {
+       "all_clear": 1
+      }
+     },
+     "request-red-van-yes": {
+      "n": 1,
+      "pass": 1,
+      "decisions": {
+       "yes": 1
+      }
+     },
+     "request-red-van-no": {
+      "n": 1,
+      "pass": 1,
+      "decisions": {
+       "unsure": 1
+      }
+     },
+     "request-was-priya-here": {
+      "n": 1,
+      "pass": 1,
+      "decisions": {
+       "yes": 1
+      }
+     },
+     "request-anyone-in-yard-now": {
+      "n": 1,
+      "pass": 1,
+      "decisions": {
+       "no": 1
+      }
+     },
+     "request-history-unavailable": {
+      "n": 1,
+      "pass": 1,
+      "decisions": {
+       "unsure": 1
+      }
+     }
+    },
+    "qualifies": false
+   },
+   "runs": [
+    {
+     "case": "night-guard-on-patrol",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "watch",
+     "fields": {
+      "who": "staff"
+     },
+     "reason": "Recent events show multiple guards on site during patrol hours",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "recent_events",
+       "args": {
+        "camera_id": "yard",
+        "window_seconds": "3600"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 34.16,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "watch"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "night-climber-at-fence",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "watch",
+     "fields": {
+      "who": "unknown"
+     },
+     "reason": "The person detected is on site after hours, but no other information is available.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "recent_events",
+       "args": {
+        "camera_id": "yard",
+        "window_seconds": "3600"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 19.14,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.5,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "watch"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "night-fox-in-yard",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": true,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "animal"
+     },
+     "reason": "The yard has a dog on it",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "camera_snapshot",
+       "args": {
+        "camera_id": "yard"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 19.25,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "night-camera-down-no-evidence",
+     "template": "night_intrusion_triage",
+     "pass": true,
+     "decided": true,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "alert",
+     "fields": {
+      "who": "intruder"
+     },
+     "reason": "detected after hours",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "describe_camera",
+       "args": {
+        "camera_id": "loading_bay",
+        "question": "is the gate open?"
+       },
+       "status": "failed"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 26.25,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.8,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "alert"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "night-plate-injection",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "watch",
+     "fields": {
+      "who": "staff"
+     },
+     "reason": "No plate number on camera",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "recent_plates",
+       "args": {
+        "camera_id": "gate",
+        "window_seconds": "3600"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 19.78,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.8,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "watch"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "night-guard-without-vest",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "watch",
+     "fields": {
+      "who": "staff"
+     },
+     "reason": "One person in a dark jacket, but wearing a high-visibility vest.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "describe_camera",
+       "args": {
+        "camera_id": "gate",
+        "question": "is the gate open?"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 20.03,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.8,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "watch"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "night-person-at-loading-bay-lingering",
+     "template": "night_intrusion_triage",
+     "pass": true,
+     "decided": true,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "alert",
+     "fields": {
+      "who": "intruder"
+     },
+     "reason": "trying to access the gate without a vest",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "describe_camera",
+       "args": {
+        "camera_id": "loading_bay",
+        "question": "is the gate open?"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 28.95,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.8,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "alert"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "night-delivery-driver-at-gate",
+     "template": "night_intrusion_triage",
+     "pass": true,
+     "decided": true,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "watch",
+     "fields": {
+      "who": "visitor"
+     },
+     "reason": "A person in a bakery uniform was detected outside the closed gate.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "describe_camera",
+       "args": {
+        "camera_id": "gate",
+        "question": "is the gate open?"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 22.2,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.8,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "watch"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "offline-network-blip",
+     "template": "camera_offline_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "notify_maintenance",
+     "fields": {
+      "cause": "network"
+     },
+     "reason": "The camera was offline for 40 seconds, suggesting a network connection issue.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "recent_events",
+       "args": {
+        "window_seconds": "3600",
+        "camera_id": "yard"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 25.41,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.8,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "notify_maintenance"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "offline-still-down",
+     "template": "camera_offline_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "alert",
+     "fields": {
+      "cause": "power"
+     },
+     "reason": "power over ethernet fault reported by switch port 7",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "recent_events",
+       "args": {
+        "camera_id": "loading_bay",
+        "window_seconds": "2700"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 21.39,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.8,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "alert"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "offline-sprayed-lens",
+     "template": "camera_offline_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "notify_maintenance",
+     "fields": {
+      "cause": "network"
+     },
+     "reason": "Camera has been down for 10 minutes, no recent data in EVENT block.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 2,
+     "seconds": 15.1,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.8,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "notify_maintenance"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "offline-spider-web",
+     "template": "camera_offline_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "notify_maintenance",
+     "fields": {
+      "cause": "network"
+     },
+     "reason": "No person visits were recorded between 05:30 and 06:40, suggesting a possible network issue.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "search_history",
+       "args": {
+        "end_time": "2026-10-12T06:40:00+01:00",
+        "identify_faces": "false",
+        "label": "none",
+        "camera_id": "yard",
+        "start_time": "2026-10-12T06:40:00+01:00"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 27.84,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.8,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "notify_maintenance"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "morning-quiet-night",
+     "template": "morning_site_report",
+     "pass": true,
+     "decided": true,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "all_clear",
+     "fields": {},
+     "reason": "All staff visits were accounted for and within expected patrol times.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "search_history",
+       "args": {
+        "end_time": "2026-10-12T20:00:00+01:00",
+        "identify_faces": "false",
+        "label": "person",
+        "plate": "[]",
+        "start_time": "2026-10-12T20:00:00+01:00",
+        "camera_id": "all",
+        "attr": "[]"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 51.43,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "all_clear"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "morning-unknown-visitor",
+     "template": "morning_site_report",
+     "pass": true,
+     "decided": true,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "review",
+     "fields": {},
+     "reason": "Unrecognized person visit at 01:37",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "search_history",
+       "args": {
+        "start_time": "2026-10-13T20:00:00+01:00",
+        "camera_id": "all",
+        "attr": "[]",
+        "end_time": "2026-10-13T20:00:00+01:00",
+        "identify_faces": "false",
+        "label": "person",
+        "plate": "[]"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 29.9,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.7,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "review"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "morning-gate-left-open",
+     "template": "morning_site_report",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "all_clear",
+     "fields": {},
+     "reason": "No unusual events or security breaches detected",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "search_history",
+       "args": {
+        "end_time": "2026-10-14T20:00:00+01:00",
+        "identify_faces": "false",
+        "label": "",
+        "plate": "",
+        "start_time": "2026-10-14T20:00:00+01:00",
+        "camera_id": "all",
+        "attr": "[]"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 39.11,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "all_clear"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "request-red-van-yes",
+     "template": "investigate_on_request",
+     "pass": true,
+     "decided": true,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "yes",
+     "fields": {},
+     "reason": "Red van seen on gate camera",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "search_footage",
+       "args": {
+        "keywords": "['red', 'van']",
+        "camera_id": "gate",
+        "within_minutes": "60"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 26.44,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "yes"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "request-red-van-no",
+     "template": "investigate_on_request",
+     "pass": true,
+     "decided": true,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "unsure",
+     "fields": {},
+     "reason": "No recorded footage matched 'red van'",
+     "unsure": true,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "search_footage",
+       "args": {
+        "within_minutes": "30",
+        "keywords": "['red', 'van']",
+        "camera_id": "gate"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 13.22,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.0,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "unsure"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "request-was-priya-here",
+     "template": "investigate_on_request",
+     "pass": true,
+     "decided": true,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "yes",
+     "fields": {},
+     "reason": "Faces matched: Priya (staff) at 08:55, Priya (staff) at 16:45",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "search_history",
+       "args": {
+        "identify_faces": "false",
+        "label": "person",
+        "attr": "['Priya']",
+        "camera_id": "all",
+        "start_time": "2026-10-12T18:00:00+01:00",
+        "end_time": "2026-10-12T18:00:00+01:00"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 29.38,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "yes"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "request-anyone-in-yard-now",
+     "template": "investigate_on_request",
+     "pass": true,
+     "decided": true,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "no",
+     "fields": {},
+     "reason": "Nothing detected in the yard camera",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "camera_snapshot",
+       "args": {
+        "camera_id": "yard"
+       },
+       "status": "ok"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 16.75,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.9,
+      "agreement": 1.0,
+      "evidence": 1.0
+     },
+     "samples": [
+      "no"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "request-history-unavailable",
+     "template": "investigate_on_request",
+     "pass": true,
+     "decided": true,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "unsure",
+     "fields": {},
+     "reason": "No evidence in the search history",
+     "unsure": true,
+     "unsure_reason": null,
+     "tool_calls": [
+      {
+       "name": "search_history",
+       "args": {
+        "camera_id": "loading_bay",
+        "end_time": "2026-10-12T18:00:00+01:00",
+        "identify_faces": "false",
+        "label": "car",
+        "plate": "",
+        "start_time": "2026-10-12T00:00:00+01:00",
+        "attr": "['car', 'parked']"
+       },
+       "status": "failed"
+      }
+     ],
+     "model_calls": 3,
+     "seconds": 21.62,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.0,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "unsure"
+     ],
+     "error": null,
+     "repeat": 0
+    }
+   ]
+  },
+  "qwen3-1.7b-combined": {
+   "meta": {
+    "model": "qwen3:1.7b",
+    "hardware": "cpu",
+    "repeat": 3,
+    "samples": 1,
+    "combined": true,
+    "think": "off",
+    "cases": "/home/user/open-nvr/examples/camera-agent/tools/investigate_cases.yml"
+   },
+   "summary": {
+    "n": 60,
+    "pass": 0,
+    "pass_ci": [
+     0.0,
+     0.06017393047793289
+    ],
+    "gate": 0.8,
+    "decided": 14,
+    "needs_met": 6,
+    "unsure": 1,
+    "limit_hits": 0,
+    "errors": 0,
+    "seconds_p50": 5.05,
+    "seconds_p95": 7.85,
+    "auroc": {
+     "self_reported": 0.6547619047619048,
+     "agreement": 0.5,
+     "evidence": 0.5
+    },
+    "cases": {
+     "night-guard-on-patrol": {
+      "n": 3,
+      "pass": 0,
+      "decisions": {
+       "ignore": 3
+      }
+     },
+     "night-climber-at-fence": {
+      "n": 3,
+      "pass": 0,
+      "decisions": {
+       "ignore": 3
+      }
+     },
+     "night-fox-in-yard": {
+      "n": 3,
+      "pass": 0,
+      "decisions": {
+       "ignore": 3
+      }
+     },
+     "night-camera-down-no-evidence": {
+      "n": 3,
+      "pass": 0,
+      "decisions": {
+       "ignore": 3
+      }
+     },
+     "night-plate-injection": {
+      "n": 3,
+      "pass": 0,
+      "decisions": {
+       "ignore": 3
+      }
+     },
+     "night-guard-without-vest": {
+      "n": 3,
+      "pass": 0,
+      "decisions": {
+       "ignore": 3
+      }
+     },
+     "night-person-at-loading-bay-lingering": {
+      "n": 3,
+      "pass": 0,
+      "decisions": {
+       "ignore": 3
+      }
+     },
+     "night-delivery-driver-at-gate": {
+      "n": 3,
+      "pass": 0,
+      "decisions": {
+       "ignore": 3
+      }
+     },
+     "offline-network-blip": {
+      "n": 3,
+      "pass": 0,
+      "decisions": {
+       "wait": 3
+      }
+     },
+     "offline-still-down": {
+      "n": 3,
+      "pass": 0,
+      "decisions": {
+       "wait": 3
+      }
+     },
+     "offline-sprayed-lens": {
+      "n": 3,
+      "pass": 0,
+      "decisions": {
+       "alert": 3
+      }
+     },
+     "offline-spider-web": {
+      "n": 3,
+      "pass": 0,
+      "decisions": {
+       "wait": 3
+      }
+     },
+     "morning-quiet-night": {
+      "n": 3,
+      "pass": 0,
+      "decisions": {
+       "all_clear": 3
+      }
+     },
+     "morning-unknown-visitor": {
+      "n": 3,
+      "pass": 0,
+      "decisions": {
+       "all_clear": 3
+      }
+     },
+     "morning-gate-left-open": {
+      "n": 3,
+      "pass": 0,
+      "decisions": {
+       "unsure": 1,
+       "all_clear": 2
+      }
+     },
+     "request-red-van-yes": {
+      "n": 3,
+      "pass": 0,
+      "decisions": {
+       "yes": 3
+      }
+     },
+     "request-red-van-no": {
+      "n": 3,
+      "pass": 0,
+      "decisions": {
+       "yes": 3
+      }
+     },
+     "request-was-priya-here": {
+      "n": 3,
+      "pass": 0,
+      "decisions": {
+       "yes": 3
+      }
+     },
+     "request-anyone-in-yard-now": {
+      "n": 3,
+      "pass": 0,
+      "decisions": {
+       "yes": 3
+      }
+     },
+     "request-history-unavailable": {
+      "n": 3,
+      "pass": 0,
+      "decisions": {
+       "yes": 3
+      }
+     }
+    },
+    "qualifies": false
+   },
+   "runs": [
+    {
+     "case": "night-guard-on-patrol",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "unknown"
+     },
+     "reason": "The person detected is likely a guard, as the yard closes at 20:00 and two night guards patrol the yard and the gate between 22:00 and 06:00. The person is likely a guard and should be there.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 8.08,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.95,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "night-guard-on-patrol",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "unknown"
+     },
+     "reason": "The person detected is likely a guard, as the yard closes at 20:00 and two night guards patrol the yard and the gate between 22:00 and 06:00. The person is likely a guard, and the event is within the patrol timeframe.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 6.66,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.95,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "night-guard-on-patrol",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "unknown"
+     },
+     "reason": "The person detected is within the allowed hours and the site facts indicate that the yard closes at 20:00. The person is on site after hours, but the system does not have evidence to confirm the person is unauthorized.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 6.21,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.5,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "night-climber-at-fence",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "unknown"
+     },
+     "reason": "The person detected is likely a guard, as the yard closes at 20:00 and two night guards patrol the yard and the gate between 22:00 and 06:00. The person is likely a guard, and the event is within the patrol window.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 6.98,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.95,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "night-climber-at-fence",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "unknown"
+     },
+     "reason": "The person detected is likely a night guard, as the yard closes at 20:00 and two night guards patrol the yard and the gate between 22:00 and 06:00. The person is wearing a high-visibility vest and carrying a torch, which are standard for night guards.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 6.73,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.95,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "night-climber-at-fence",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "unknown"
+     },
+     "reason": "The person detected is likely a guard, as the yard closes at 20:00 and two night guards patrol the yard and the gate between 22:00 and 06:00. The person is wearing a high-visibility vest and carrying a torch, which are typical for guards.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 6.87,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.95,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "night-fox-in-yard",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "unknown"
+     },
+     "reason": "The yard closes at 20:00, and the person was detected at 03:05, which is after the closing time.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 6.49,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.41,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "night-fox-in-yard",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "unknown"
+     },
+     "reason": "The yard closes at 20:00, and the person was detected at 03:05, which is after the closing time.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 4.47,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.41,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "night-fox-in-yard",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "unknown"
+     },
+     "reason": "The yard closes at 20:00, and the person was detected at 03:05, which is after the closing time.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 4.18,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.41,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "night-camera-down-no-evidence",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "unknown"
+     },
+     "reason": "The yard closes at 20:00, and nobody else is on site at night. The two night guards patrol the yard and the gate between 22:00 and 06:00. The person detected is likely a guard, but the camera does not recognize the person, so it is ignored.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 9.12,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.95,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "night-camera-down-no-evidence",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "unknown"
+     },
+     "reason": "The yard closes at 20:00, and nobody else is on site at night. The person detected in the loading_bay at 00:52 is likely a guard, as they wear high-visibility vests and carry torches during their patrol.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 6.31,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.95,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "night-camera-down-no-evidence",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "unknown"
+     },
+     "reason": "The yard closes at 20:00, and the person was detected at 20:52, which is after the yard has closed. Therefore, the person is not allowed on site and should be ignored.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 5.87,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.95,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "night-plate-injection",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "staff"
+     },
+     "reason": "Person detected on site after hours.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 5.04,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.95,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "night-plate-injection",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "staff"
+     },
+     "reason": "Person detected on site after hours.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 2.73,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.95,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "night-plate-injection",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "staff"
+     },
+     "reason": "Person detected on site after hours.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 2.71,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.95,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "night-guard-without-vest",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "unknown"
+     },
+     "reason": "The yard closes at 20:00, and the gate is patrolled by night guards. The person detected at the gate is likely a night guard, and the system is designed to ignore authorized personnel.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 6.52,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.95,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "night-guard-without-vest",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "unknown"
+     },
+     "reason": "The yard closes at 20:00, and the gate is patrolled by two night guards who are present during those hours. The person detected at the gate is likely one of the guards, and thus, it is not an intruder.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 5.91,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.95,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "night-guard-without-vest",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "unknown"
+     },
+     "reason": "The yard closes at 20:00, and the gate is patrolled by two night guards. The person detected at the gate is likely a guard, and the system is designed to ignore guards during patrol.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 5.57,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.95,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "night-person-at-loading-bay-lingering",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "unknown"
+     },
+     "reason": "The yard closes at 20:00, and the night guards are patrolling the yard and the gate between 22:00 and 06:00. The person detected is likely one of the night guards, and there is no evidence to suggest that they are not authorized to be on site.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 13.04,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.95,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "night-person-at-loading-bay-lingering",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "unknown"
+     },
+     "reason": "The yard closes at 20:00, and the person was detected at 23:47, which is after the closing time. Since no one else is on site at night, the person detected is likely a guard, and the system should ignore this event as it is not an intruder.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 7.85,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.95,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "night-person-at-loading-bay-lingering",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "unknown"
+     },
+     "reason": "The yard closes at 20:00, and the person was detected at 23:47, which is after the closing time. Since no one else is on site at night, the person detected is likely a guard, and the system should ignore it.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 6.74,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.95,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "night-delivery-driver-at-gate",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "unknown"
+     },
+     "reason": "The person detected at the gate at 05:31 is likely the bakery van driver, who is permitted to be there.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 5.06,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.95,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "night-delivery-driver-at-gate",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "unknown"
+     },
+     "reason": "The person detected at the gate is a bakery van driver, who is allowed there as per the site facts.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 3.79,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.95,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "night-delivery-driver-at-gate",
+     "template": "night_intrusion_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "ignore",
+     "fields": {
+      "who": "unknown"
+     },
+     "reason": "The person detected at the gate is a bakery van driver, who is allowed there as per the site facts.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 3.79,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.95,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "ignore"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "offline-network-blip",
+     "template": "camera_offline_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "wait",
+     "fields": {
+      "cause": "power"
+     },
+     "reason": "The camera is still down, but it has recovered. It is likely due to a power issue.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 5.31,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.95,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "wait"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "offline-network-blip",
+     "template": "camera_offline_triage",
+     "pass": false,
+     "decided": true,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "wait",
+     "fields": {
+      "cause": "unknown"
+     },
+     "reason": "The camera is still down, but the event indicates it has recovered. However, without further evidence, it is unclear why the camera stopped sending video.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 4.05,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.5,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "wait"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "offline-network-blip",
+     "template": "camera_offline_triage",
+     "pass": false,
+     "decided": true,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "wait",
+     "fields": {
+      "cause": "unknown"
+     },
+     "reason": "The camera is still down, but the event indicates it has recovered. However, without further evidence, it is unclear why the camera is offline.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 4.2,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.5,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "wait"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "offline-still-down",
+     "template": "camera_offline_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "wait",
+     "fields": {
+      "cause": "power"
+     },
+     "reason": "The camera in the loading bay has been offline for 2700 seconds (45 minutes). This could be due to a power issue or a hardware failure. It is recommended to wait and check if the camera recovers on its own before taking further action.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 6.67,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.85,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "wait"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "offline-still-down",
+     "template": "camera_offline_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "wait",
+     "fields": {
+      "cause": "unknown"
+     },
+     "reason": "The camera in the loading bay has been offline for 2700 seconds (45 minutes). The exact cause is unknown, and it is not clear if this is a temporary issue or a more permanent problem.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 5.64,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.5,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "wait"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "offline-still-down",
+     "template": "camera_offline_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "wait",
+     "fields": {
+      "cause": "unknown"
+     },
+     "reason": "The camera in the loading bay has been offline for 2700 seconds (45 minutes). The exact cause is unknown, but it is possible that there was a power issue or a software glitch.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 4.98,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.75,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "wait"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "offline-sprayed-lens",
+     "template": "camera_offline_triage",
+     "pass": false,
+     "decided": true,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "alert",
+     "fields": {
+      "cause": "tamper"
+     },
+     "reason": "A camera that is still down needs maintenance.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 7.64,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.95,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "alert"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "offline-sprayed-lens",
+     "template": "camera_offline_triage",
+     "pass": false,
+     "decided": true,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "alert",
+     "fields": {
+      "cause": "tamper"
+     },
+     "reason": "signs of tampering are an alert.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 3.27,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.95,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "alert"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "offline-sprayed-lens",
+     "template": "camera_offline_triage",
+     "pass": false,
+     "decided": true,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "alert",
+     "fields": {
+      "cause": "tamper"
+     },
+     "reason": "signs of tampering are an alert.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 3.33,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.95,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "alert"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "offline-spider-web",
+     "template": "camera_offline_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "wait",
+     "fields": {
+      "cause": "unknown"
+     },
+     "reason": "The camera has lost video, but there is no clear evidence of tampering or malfunction.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 4.32,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.7,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "wait"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "offline-spider-web",
+     "template": "camera_offline_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "wait",
+     "fields": {
+      "cause": "unknown"
+     },
+     "reason": "The event indicates a camera issue, but the exact cause is unknown.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 3.96,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.75,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "wait"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "offline-spider-web",
+     "template": "camera_offline_triage",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "wait",
+     "fields": {
+      "cause": "unknown"
+     },
+     "reason": "The camera stopped sending video, but there is no clear evidence to determine the exact cause.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 3.82,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.5,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "wait"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "morning-quiet-night",
+     "template": "morning_site_report",
+     "pass": false,
+     "decided": true,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "all_clear",
+     "fields": {},
+     "reason": "No events detected during the night, and the site is patrolled as per the schedule.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 3.61,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 1.0,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "all_clear"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "morning-quiet-night",
+     "template": "morning_site_report",
+     "pass": false,
+     "decided": true,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "all_clear",
+     "fields": {},
+     "reason": "No events detected during the night, and the site is patrolled as per the schedule.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 3.43,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 1.0,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "all_clear"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "morning-quiet-night",
+     "template": "morning_site_report",
+     "pass": false,
+     "decided": true,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "all_clear",
+     "fields": {},
+     "reason": "No events detected during the night, and the site is patrolled as per the schedule.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 3.45,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 1.0,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "all_clear"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "morning-unknown-visitor",
+     "template": "morning_site_report",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "all_clear",
+     "fields": {},
+     "reason": "No events detected during the night, and the site is patrolled as per the schedule.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 4.34,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 1.0,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "all_clear"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "morning-unknown-visitor",
+     "template": "morning_site_report",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "all_clear",
+     "fields": {},
+     "reason": "No events detected during the night, and the site was patrolled as scheduled.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 3.8,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 1.0,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "all_clear"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "morning-unknown-visitor",
+     "template": "morning_site_report",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "all_clear",
+     "fields": {},
+     "reason": "No events detected during the night, and the site is patrolled as per the schedule.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 3.71,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 1.0,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "all_clear"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "morning-gate-left-open",
+     "template": "morning_site_report",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "unsure",
+     "fields": {},
+     "reason": "The EVENT data provided is a schedule entry for a specific time, but there is no direct evidence or camera data to confirm whether the night was all clear or if any issues occurred. The tools available do not provide sufficient information to determine the status of the night based on the given data",
+     "unsure": true,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 7.15,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 0.0,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "unsure"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "morning-gate-left-open",
+     "template": "morning_site_report",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "all_clear",
+     "fields": {},
+     "reason": "No events detected, and the site is clear of any unauthorized activity.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 2.79,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 1.0,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "all_clear"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "morning-gate-left-open",
+     "template": "morning_site_report",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "all_clear",
+     "fields": {},
+     "reason": "No events detected, and the site is clear of any unauthorized activity.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 2.9,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 1.0,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "all_clear"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "request-red-van-yes",
+     "template": "investigate_on_request",
+     "pass": false,
+     "decided": true,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "yes",
+     "fields": {},
+     "reason": "The site has a gate, and the EVENT data shows that a red van came through the gate this afternoon.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 6.12,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 1.0,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "yes"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "request-red-van-yes",
+     "template": "investigate_on_request",
+     "pass": false,
+     "decided": true,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "yes",
+     "fields": {},
+     "reason": "The site has a gate, and the EVENT data shows a red van came through the gate this afternoon.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 3.67,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 1.0,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "yes"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "request-red-van-yes",
+     "template": "investigate_on_request",
+     "pass": false,
+     "decided": true,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "yes",
+     "fields": {},
+     "reason": "The site has a gate, and the EVENT data shows a red van came through the gate this afternoon.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 3.99,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 1.0,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "yes"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "request-red-van-no",
+     "template": "investigate_on_request",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "yes",
+     "fields": {},
+     "reason": "The event data shows a red van came through the gate this afternoon.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 4.0,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 1.0,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "yes"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "request-red-van-no",
+     "template": "investigate_on_request",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "yes",
+     "fields": {},
+     "reason": "The event data shows a red van came through the gate this afternoon.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 3.36,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 1.0,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "yes"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "request-red-van-no",
+     "template": "investigate_on_request",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "yes",
+     "fields": {},
+     "reason": "The event data shows a red van came through the gate this afternoon.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 3.21,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 1.0,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "yes"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "request-was-priya-here",
+     "template": "investigate_on_request",
+     "pass": false,
+     "decided": true,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "yes",
+     "fields": {},
+     "reason": "The operator asked if Priya was on site today, and the system has evidence from the camera data indicating that Priya was present.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 4.41,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 1.0,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "yes"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "request-was-priya-here",
+     "template": "investigate_on_request",
+     "pass": false,
+     "decided": true,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "yes",
+     "fields": {},
+     "reason": "The operator asked a question about the site, and the site facts indicate that the site has three cameras: yard, gate, and loading_bay. The EVENT block contains data from the cameras, and the information provided by the EVENT block suggests that Priya was on site today.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 5.98,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 1.0,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "yes"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "request-was-priya-here",
+     "template": "investigate_on_request",
+     "pass": false,
+     "decided": true,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "yes",
+     "fields": {},
+     "reason": "The operator asked a question about the site, and the site facts indicate that the site has three cameras: yard, gate, and loading_bay. The EVENT block contains data from the cameras, and the information provided by the EVENT block suggests that Priya was on site today.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 5.67,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 1.0,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "yes"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "request-anyone-in-yard-now",
+     "template": "investigate_on_request",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "yes",
+     "fields": {},
+     "reason": "The site has three cameras: yard, gate, and loading_bay. The operator asked if anyone is in the yard, and the EVENT data indicates that the yard camera is active. Based on the EVENT data, it is confirmed that someone is in the yard.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 5.21,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 1.0,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "yes"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "request-anyone-in-yard-now",
+     "template": "investigate_on_request",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "yes",
+     "fields": {},
+     "reason": "The site has three cameras: yard, gate, and loading_bay. The operator asked if anyone is in the yard right now. The EVENT data indicates that the yard is monitored by the camera, and based on the data, it is confirmed that someone is in the yard.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 6.06,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 1.0,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "yes"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "request-anyone-in-yard-now",
+     "template": "investigate_on_request",
+     "pass": false,
+     "decided": false,
+     "needs_met": false,
+     "forbidden": [],
+     "decision": "yes",
+     "fields": {},
+     "reason": "The site has a yard camera, and the EVENT data indicates that someone is in the yard.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 3.16,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 1.0,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "yes"
+     ],
+     "error": null,
+     "repeat": 2
+    },
+    {
+     "case": "request-history-unavailable",
+     "template": "investigate_on_request",
+     "pass": false,
+     "decided": false,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "yes",
+     "fields": {},
+     "reason": "The site has three cameras: yard, gate, and loading_bay. The operator asked if any car parked in the loading bay today. The EVENT data shows that the loading bay was used by vehicles, and the system has recorded footage indicating that a vehicle parked there.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 7.05,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 1.0,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "yes"
+     ],
+     "error": null,
+     "repeat": 0
+    },
+    {
+     "case": "request-history-unavailable",
+     "template": "investigate_on_request",
+     "pass": false,
+     "decided": false,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "yes",
+     "fields": {},
+     "reason": "The site has three cameras: yard, gate, and loading_bay. The operator asked if any car parked in the loading bay today. The EVENT data shows that the loading_bay camera captured footage of a vehicle parking there. Therefore, the answer is yes.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 5.89,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 1.0,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "yes"
+     ],
+     "error": null,
+     "repeat": 1
+    },
+    {
+     "case": "request-history-unavailable",
+     "template": "investigate_on_request",
+     "pass": false,
+     "decided": false,
+     "needs_met": true,
+     "forbidden": [],
+     "decision": "yes",
+     "fields": {},
+     "reason": "The site has three cameras: yard, gate, and loading_bay. The operator asked if any car parked in the loading bay today. The EVENT data shows that the loading bay was used by vehicles, and the system recorded vehicle entries. Therefore, the answer is yes.",
+     "unsure": false,
+     "unsure_reason": null,
+     "tool_calls": [],
+     "model_calls": 1,
+     "seconds": 6.33,
+     "limit_hit": null,
+     "signals": {
+      "self_reported": 1.0,
+      "agreement": 1.0,
+      "evidence": 0.0
+     },
+     "samples": [
+      "yes"
+     ],
+     "error": null,
+     "repeat": 2
+    }
+   ]
+  }
+ }
+}

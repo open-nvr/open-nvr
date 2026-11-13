@@ -18,6 +18,7 @@ doc table first, then here.
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -56,12 +57,88 @@ def _envelope(
     }
 
 
+#: A plate box within this many pixels of its crop's edge is CLIPPED —
+#: the same tolerance core's plate_enrichment applies (#378).
+_PLATE_EDGE_TOLERANCE_PX = 2
+#: Default floor for the localiser's confidence — same value as core's
+#: OPENNVR_PLATE_MIN_DETECTION_CONFIDENCE (#386). 0 disables.
+_DETECTION_FLOOR_DEFAULT = 0.6
+
+
+def _detection_floor() -> float:
+    raw = os.environ.get("KAI_C_PLATE_MIN_DETECTION_CONFIDENCE", "")
+    try:
+        value = float(raw)
+    except ValueError:
+        return _DETECTION_FLOOR_DEFAULT
+    return value if value > 0 else 0.0
+
+
+def _require_localisation() -> bool:
+    raw = os.environ.get("KAI_C_PLATE_REQUIRE_LOCALISATION", "").strip()
+    return raw.lower() not in ("0", "false", "no", "off")
+
+
+def _detection_disqualifies(detection: Any) -> bool:
+    """Is this read one the contract should never carry?
+
+    ``plate.recognized.v1`` promises a *recognised plate*, and every
+    subscriber — the LPR app raising "Unknown vehicle K884", the gate
+    controller opening a barrier — acts on it as one. Three kinds of
+    accepted OCR output are demonstrably not that, and each used to be
+    published and then filtered by ONE consumer (core's timeline) while
+    the others alerted on it:
+
+    * **clipped** — the plate box abuts the crop edge: a fragment
+      ("K884" of "K884RS") read at full confidence (#378);
+    * **weak localisation** — the detector barely believed it was a
+      plate: a badge OCR'd into characters (#386);
+    * **not localised** — the detector looked at a vehicle crop and
+      found no plate, and the OCR read the car body instead.
+
+    All three need the adapter's ``plate_detection`` block; without it
+    (an OCR-only adapter, or an older one) there is no opinion and the
+    read passes, exactly as before. The judgement is pure arithmetic on
+    fields the adapter already reports, so it belongs at the one place
+    every initiator's reads already meet.
+    """
+    if not isinstance(detection, dict):
+        return False
+    attempted = detection.get("attempted")
+    found = detection.get("found")
+    if attempted is True and found is not True:
+        return _require_localisation()
+    box = detection.get("box")
+    size = detection.get("image_size")
+    try:
+        if (isinstance(box, (list, tuple)) and len(box) == 4
+                and isinstance(size, (list, tuple)) and len(size) == 2):
+            x1, y1, x2, y2 = (float(v) for v in box)
+            w, h = (float(v) for v in size)
+            if w > 0 and h > 0 and (
+                x1 <= _PLATE_EDGE_TOLERANCE_PX
+                or y1 <= _PLATE_EDGE_TOLERANCE_PX
+                or x2 >= w - _PLATE_EDGE_TOLERANCE_PX
+                or y2 >= h - _PLATE_EDGE_TOLERANCE_PX
+            ):
+                return True
+    except (TypeError, ValueError):
+        pass
+    conf = detection.get("confidence")
+    floor = _detection_floor()
+    if (floor > 0 and isinstance(conf, (int, float))
+            and not isinstance(conf, bool) and float(conf) < floor):
+        return True
+    return False
+
+
 def _normalise_fast_plate_ocr(
     result: Dict[str, Any],
     *,
     camera_id: str,
     correlation_id: Optional[str],
     event_id: Optional[int],
+    observed_at: Optional[str] = None,
 ) -> Normalised:
     """``fast_plate_ocr`` completion → ``plate.recognized.v1``.
 
@@ -79,6 +156,9 @@ def _normalise_fast_plate_ocr(
     text = "".join(text.split()).upper()[:32]
     if not text:
         return None
+    detection = result.get("plate_detection")
+    if _detection_disqualifies(detection):
+        return None
     confidence = result.get("confidence")
     if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
         confidence = None
@@ -91,9 +171,96 @@ def _normalise_fast_plate_ocr(
         "vehicle_label": None,
         "event_id": event_id,
     }
+    # Additive optional field: WHEN the look this read came off was
+    # captured, ISO-8601 UTC, exactly as the initiator sent it.
+    #
+    # The envelope's own ``ts`` cannot answer this — it is publish time,
+    # so a consumer had no way to date a read except by when the message
+    # reached it, and that drifts with OCR backlog. Echoed like
+    # ``event_id``, never interpreted: KAI-C does not know this system's
+    # clocks and must not invent a value when the initiator omits one.
+    if isinstance(observed_at, str) and observed_at:
+        payload["observed_at"] = observed_at[:40]
+    # Additive optional field (EVENT_CONTRACTS.md "additive-only"): the
+    # plate box the adapter localised, in the OCR'd crop's pixel space.
+    # Consumers use it to reject PARTIAL reads — a crop whose edge cuts
+    # through the plate still OCRs the surviving characters at high
+    # confidence, so only the geometry can tell "K884" (a fragment of
+    # "K884RS") from a whole plate. Still forwarded for consumers with
+    # stricter policies; the obvious junk is no longer published at all
+    # (see _detection_disqualifies).
+    if isinstance(detection, dict):
+        # How sure the localiser was that this was a plate at all.
+        # Consumers reject FALSE localisations with it (#386): a
+        # manufacturer badge OCRs into plausible characters at plausible
+        # read confidence, from a box nowhere near a crop edge, so
+        # neither the read's own confidence nor the geometry above can
+        # tell it from a plate. The detector's doubt can.
+        conf = detection.get("confidence")
+        if isinstance(conf, (int, float)) and not isinstance(conf, bool):
+            payload["plate_box_confidence"] = float(conf)
+        box = detection.get("box")
+        if isinstance(box, (list, tuple)) and len(box) == 4:
+            payload["plate_box"] = list(box)
+            # The frame of reference travels WITH the box: multi-frame
+            # OCR reads plate CANDIDATE crops whose size differs from
+            # the visit's evidence frame, so a consumer judging the box
+            # against the evidence would measure in the wrong image.
+            # Optional + additive, like plate_box itself.
+            size = detection.get("image_size")
+            if isinstance(size, (list, tuple)) and len(size) == 2:
+                payload["plate_box_image"] = list(size)
     subject = f"opennvr.events.plate.recognized.v1.{camera_id}"
     return subject, _envelope(
         "plate.recognized.v1",
+        camera_id=camera_id,
+        correlation_id=correlation_id,
+        payload=payload,
+    )
+
+
+def _normalise_face_recognition(
+    result: Dict[str, Any],
+    *,
+    adapter_name: str,
+    camera_id: str,
+    correlation_id: Optional[str],
+    track_id: Optional[int] = None,
+    label: Optional[str] = None,
+    observed_at: Optional[str] = None,
+    **_: Any,
+) -> Normalised:
+    """``face_recognition`` result → ``face.recognized.v1``.
+
+    Only for the platform's face route (a Tier-1 dispatch names the
+    track): an app's own identification calls (enrolment checks, its
+    own frames) are the app's business and publish nothing here. A crop
+    with no face says nothing either. An unknown face IS published
+    (``person_id`` null): "someone not enrolled is at the gate" is what
+    a gate needs to know. Faces are PII: the subject is scope-guarded
+    (``events:face.recognized``), never on by default."""
+    if track_id is None or result.get("face_bbox") in (None, []):
+        return None
+    recognized = bool(result.get("recognized") and result.get("person_id"))
+    payload: Dict[str, Any] = {
+        "adapter": adapter_name,
+        "track_id": track_id,
+        "label": label,
+        "recognized": recognized,
+        "person_id": str(result["person_id"]) if recognized else None,
+        "category": result.get("category") if recognized else None,
+        "similarity": float(result["similarity"])
+        if isinstance(result.get("similarity"), (int, float)) else None,
+        "threshold": float(result["threshold"])
+        if isinstance(result.get("threshold"), (int, float)) else None,
+        "face_box": list(result["face_bbox"])
+        if isinstance(result.get("face_bbox"), (list, tuple)) else None,
+    }
+    if observed_at:
+        payload["observed_at"] = observed_at
+    subject = f"opennvr.events.face.recognized.v1.{camera_id}"
+    return subject, _envelope(
+        "face.recognized.v1",
         camera_id=camera_id,
         correlation_id=correlation_id,
         payload=payload,
@@ -105,6 +272,13 @@ NORMALISERS: Dict[str, Callable[..., Normalised]] = {
     "fast_plate_ocr": _normalise_fast_plate_ocr,
 }
 
+#: result ``task`` → normaliser, for tasks any adapter may serve: face
+#: apps run their own face adapters (each with its own gallery), so the
+#: face event cannot be keyed on one adapter name.
+TASK_NORMALISERS: Dict[str, Callable[..., Normalised]] = {
+    "face_recognition": _normalise_face_recognition,
+}
+
 
 def normalise_completion(
     adapter_name: str,
@@ -113,6 +287,9 @@ def normalise_completion(
     camera_id: Optional[str],
     correlation_id: Optional[str] = None,
     event_id: Optional[int] = None,
+    observed_at: Optional[str] = None,
+    track_id: Optional[int] = None,
+    label: Optional[str] = None,
 ) -> Normalised:
     """Domain event for one successful completion, or None.
 
@@ -122,6 +299,10 @@ def normalise_completion(
     not domain-worthy (e.g. a rejected OCR read). Never raises.
     """
     fn = NORMALISERS.get(adapter_name)
+    by_task = False
+    if fn is None and isinstance(result, dict):
+        fn = TASK_NORMALISERS.get(str(result.get("task") or ""))
+        by_task = fn is not None
     if fn is None:
         return None
     if not camera_id:
@@ -133,11 +314,22 @@ def normalise_completion(
     if not isinstance(result, dict):
         return None
     try:
+        if by_task:
+            return fn(
+                result,
+                adapter_name=adapter_name,
+                camera_id=camera_id,
+                correlation_id=correlation_id,
+                track_id=track_id,
+                label=label,
+                observed_at=observed_at,
+            )
         return fn(
             result,
             camera_id=camera_id,
             correlation_id=correlation_id,
             event_id=event_id,
+            observed_at=observed_at,
         )
     except Exception:  # noqa: BLE001 — normalisation must never hurt the caller
         logger.warning(

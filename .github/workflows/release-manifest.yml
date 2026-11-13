@@ -1,0 +1,200 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: Apache-2.0
+#
+# Signed release manifest (docs/design/auto-update-implementation-plan.md,
+# UPD-102/UPD-103): the one file every OpenNVR updater trusts. It pins
+# every image of the release by digest and image ID, the git commit and
+# the Alembic head, and is signed with the project's Ed25519 release key.
+#
+# Triggered on:
+#   - a v* tag's image publishes finishing. workflow_run fires once per
+#     workflow, and the manifest needs BOTH publish-images and
+#     publish-detect-pipeline done at that commit; the first to finish
+#     finds the other still running and stops, the second does the work.
+#   - workflow_dispatch with a tag: a manifest for an existing release
+#     (the v0.1.8 backfill, so today's sites have a starting point), or a
+#     re-run. The tools come from the branch the workflow runs on; the
+#     compose files, .env.example and migrations from the tag itself
+#     (checked out to ./release-src), so a tag cut before the tools
+#     existed is still described by its own files.
+#
+# Needs, in the `release` environment (deployments limited to main): secret
+# RELEASE_SIGNING_KEY (base64 raw Ed25519 private key, from
+# `python -m updater keygen`) and variable RELEASE_SIGNING_KEY_ID (its id
+# in server/updater/keys.json). Without the secret the manifest is built
+# and uploaded as a workflow artifact only, unsigned.
+#
+# Release-specific facts an operator must know (a new required secret,
+# the oldest version this one upgrades from, urgency) go in
+# release/<version>.json at the tag; see scripts/release/make_manifest.py.
+
+name: release-manifest
+
+on:
+  workflow_run:
+    workflows: [publish-images, publish-detect-pipeline]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, e.g. v0.1.8"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  manifest:
+    name: build + sign + attach
+    runs-on: ubuntu-latest
+    # The signing key is a secret of the `release` environment, which only
+    # main may deploy to: a workflow edited on another branch cannot sign.
+    environment: release
+    permissions:
+      contents: write   # upload the release assets
+      actions: read     # see whether the other publish has finished
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.workflow_run.head_branch }}
+    steps:
+      # The tools: this workflow's own ref.
+      - uses: actions/checkout@v4
+      # What the manifest describes: the release tag's files.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.workflow_run.head_sha }}
+          path: release-src
+
+      - name: Both image publishes done for this commit?
+        id: ready
+        run: |
+          set -euo pipefail
+          sha="$(git -C release-src rev-parse HEAD)"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = workflow_dispatch ]; then
+            echo "go=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          go=true
+          for wf in publish-images.yml publish-detect-pipeline.yml; do
+            state="$(gh run list --workflow "$wf" --commit "$sha" --event push --limit 1 \
+                       --json status,conclusion --jq '.[0] | "\(.status)/\(.conclusion)"')"
+            echo "$wf: $state"
+            [ "$state" = "completed/success" ] || go=false
+          done
+          echo "go=$go" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        if: steps.ready.outputs.go == 'true'
+        with:
+          python-version: "3.11"
+
+      - name: Build and sign the manifest
+        if: steps.ready.outputs.go == 'true'
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          RELEASE_SIGNING_KEY_ID: ${{ vars.RELEASE_SIGNING_KEY_ID }}
+        run: |
+          set -euo pipefail
+          pip install --quiet "cryptography>=46"
+          version="${TAG#v}"
+          extra=()
+          [ -f "release-src/release/${version}.json" ] && extra=(--extra "release-src/release/${version}.json")
+          python scripts/release/make_manifest.py --version "$version" --source release-src \
+            --commit "${{ steps.ready.outputs.sha }}" --out dist "${extra[@]}"
+          # The withdrawn-release list as it is on this workflow's ref (main),
+          # so re-running this for the latest tag publishes a withdrawal.
+          python scripts/release/sign_revocations.py --out dist
+
+      - uses: actions/upload-artifact@v4
+        if: steps.ready.outputs.go == 'true'
+        with:
+          name: release-manifest-${{ env.TAG }}
+          path: dist/
+
+      - name: Attach to the GitHub release
+        if: steps.ready.outputs.go == 'true'
+        run: |
+          set -euo pipefail
+          if [ ! -f dist/release-manifest.json.sig ]; then
+            echo "::warning::unsigned (no RELEASE_SIGNING_KEY): kept as a workflow artifact only"
+            exit 0
+          fi
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            # A draft, so publishing the release stays a person's decision.
+            gh release create "$TAG" --draft --verify-tag --title "$TAG" \
+              --notes "See CHANGELOG.md. Signed update manifest attached."
+          fi
+          gh release upload "$TAG" dist/release-manifest.json dist/release-manifest.json.sig \
+            dist/release-revocations.json dist/release-revocations.json.sig --clobber
+          echo "attached the signed manifest to $TAG" >> "$GITHUB_STEP_SUMMARY"
+
+  # Edge (UPD-504): a signed manifest for each main build, on the rolling
+  # `edge` pre-release, for test sites that run `update --channel edge`.
+  # Never installed automatically (updater/policy.py). Versioned
+  # X.Y.(Z+1)-edge.<run>: after the last release, before the next one.
+  edge:
+    name: edge manifest for main
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+      actions: read
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.event == 'push'
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Both image publishes done for this commit?
+        id: ready
+        run: |
+          set -euo pipefail
+          go=true
+          for wf in publish-images.yml publish-detect-pipeline.yml; do
+            state="$(gh run list --workflow "$wf" --commit "$SHA" --event push --limit 1 \
+                       --json status,conclusion --jq '.[0] | "\(.status)/\(.conclusion)"')"
+            echo "$wf: $state"
+            [ "$state" = "completed/success" ] || go=false
+          done
+          echo "go=$go" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        if: steps.ready.outputs.go == 'true'
+        with:
+          python-version: "3.11"
+
+      - name: Build, sign and publish the edge manifest
+        if: steps.ready.outputs.go == 'true'
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          RELEASE_SIGNING_KEY_ID: ${{ vars.RELEASE_SIGNING_KEY_ID }}
+        run: |
+          set -euo pipefail
+          pip install --quiet "cryptography>=46"
+          base=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' server/main.py)
+          IFS=. read -r major minor patch <<< "${base%%-*}"
+          version="${major}.${minor}.$((patch + 1))-edge.${{ github.run_number }}"
+          # publish-images tags each main build sha-<7 chars> (type=sha,format=short).
+          python scripts/release/make_manifest.py --channel edge --version "$version" \
+            --commit "$SHA" --pin "CORE_TAG=sha-${SHA:0:7}" --out dist
+          if [ ! -f dist/release-manifest.json.sig ]; then
+            echo "::warning::unsigned (no RELEASE_SIGNING_KEY): edge manifest not published"
+            exit 0
+          fi
+          if ! gh release view edge >/dev/null 2>&1; then
+            gh release create edge --prerelease --title "Edge (main)" --target main \
+              --notes "The newest main build, for test sites only: ./start.sh update --channel edge"
+          fi
+          gh release upload edge dist/release-manifest.json dist/release-manifest.json.sig --clobber
+          echo "edge $version ($SHA) published" >> "$GITHUB_STEP_SUMMARY"

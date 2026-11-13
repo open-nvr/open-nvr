@@ -79,7 +79,70 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ["detect-pipeline:9109"]
+
+  # Footage search: latency by query shape, what operators did with the
+  # answers, and how much of the footage search can actually see. Core's
+  # internal door, so it takes the site key rather than a bearer token.
+  - job_name: opennvr-search
+    metrics_path: /api/v1/search/metrics
+    http_headers:
+      X-Internal-Api-Key:
+        values: ["<INTERNAL_API_KEY from .env>"]   # or files:
+    static_configs:
+      - targets: ["opennvr-core:8000"]
 ```
+
+## Search metrics
+
+Search fails in three unrelated ways, and one latency number hides all
+of them — so the series are split accordingly.
+
+**Is it fast?** `opennvr_search_seconds{shape}` is labelled by the cost
+class of the query, because a structured search (class, camera, window)
+is an index seek and a ranked text search over a common word has to
+score the entire match set before it can name the best 24. Those differ
+by two orders of magnitude; a p95 across both means nothing.
+`opennvr_search_count_seconds` times the exact-total query separately —
+it is the one cost this API adds over simply fetching a page, and
+watching it is how you decide whether the total is worth keeping exact.
+
+**Was the answer any good?** Nobody labels footage, so there is no
+ground truth to score against; these are the honest proxies.
+`opennvr_search_query_words_total{state="ignored"}` over `matched` is
+the share of each sentence the parser could not use — the one accuracy
+signal that needs no human to volunteer it.
+`opennvr_search_refinements_total` counts searches that arrived with the
+interpretation edited, which means the first parse was wrong in the
+operator's view. `opennvr_search_queries_total{outcome="empty"}` is the
+top-line "search does not work" number, and it is also the trigger to
+reach for semantic retrieval: a rising empty rate followed by a
+successful rephrase is vocabulary mismatch, which is the one problem
+embeddings actually solve. `opennvr_search_open_rank` is the position of
+the result somebody opened — consistently 1–3 means ranking works,
+nothing opened at all means the search did not.
+
+**What can search even see?** Recall is capped by enrichment, and no
+query tuning lifts that cap. The gap between `opennvr_search_visits` and
+`opennvr_search_enriched_visits` is how much of the footage word queries
+cannot reach; `opennvr_search_described_visits{kind}` says which
+claim kinds exist at all, so "colour search does not work here" can be
+answered with the reason rather than a guess. `opennvr_search_skills`
+reports what KAI-C has registered and healthy, which is what produces
+that coverage — a drop there is tomorrow's recall complaint, and is
+worth alerting on today.
+`opennvr_search_descriptor_conflicts_total{kind}` counts two skills
+disagreeing about the same visit, which is how one quietly going wrong
+becomes visible. `opennvr_search_journeys_total{method}` is the honesty
+signal for cross-camera routes: mostly `identity` means plates and faces
+are carrying the answers, mostly `time-only` means the deployment is
+guessing and the answers should be read that way.
+
+The coverage gauges are sampled on a timer rather than computed per
+scrape, and `opennvr_search_coverage_age_seconds` says how old the
+sample is — a two-minute-old number is fine as long as it admits it.
+Nothing here is labelled by camera, by user, or by query text: who
+searched for what is not an operational metric, and a search log full of
+names and plates is a liability rather than an asset.
 
 Quick check that a target is reachable and authorised, from inside the
 compose network:

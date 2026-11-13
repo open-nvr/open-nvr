@@ -1,0 +1,129 @@
+# Relevance-labelled search cases for the Ventuno Q (camera 23, the office
+# CP Plus camera), labelled 2026-11-10 from the captions of the 400 most
+# recent captioned visits (ids 17763–18165, 2026-11-05 11:36 → 11-10 11:34)
+# with a look at the evidence frame where a caption was ambiguous. The
+# window pins every search to that labelled pool, so a right answer from
+# an older visit is not counted as a wrong one.
+#
+# `relevant` is strict: a visit is listed when its caption (or frame) shows
+# what the query asks for, not when it is merely of the same class. `kind`
+# groups the cases: caption (the words are near the captioner's own),
+# paraphrase (the words are not), attribute (a colour/garment the
+# descriptors may also claim), typo (a misspelling the parser should
+# correct), negative (nothing on the site answers it).
+#
+# Run: python3 tools/search_eval.py --cases bench/search-eval-cases-ventuno-q-2026-11-10.yml --login
+
+window:
+  from: "2026-11-05T11:30:00Z"
+
+cases:
+  - query: man in a yellow shirt
+    kind: attribute
+    note: three visitors, Nov 7 11:47–11:50
+    relevant: [17932, 17929, 17928, 17924, 17923, 17921, 17920, 17919, 17918, 17917, 17916]
+  - query: person wearing a plaid shirt
+    kind: attribute
+    relevant: [17931, 17929, 17924, 17923, 17921, 17920, 17918, 17913, 17908]
+  - query: light blue kurta
+    kind: caption
+    relevant: [17932, 17927]
+  - query: man in a light blue shirt
+    kind: attribute
+    relevant: [17930, 17925, 17917, 17916, 17915, 17914, 17913, 17921, 17918, 17896, 17852, 17846, 17837]
+  - query: someone carrying a backpack
+    kind: paraphrase
+    note: the captions say "wearing"/"carrying a dark backpack"; a backpack on a desk alone does not count
+    relevant: [17904, 17895, 17933]
+  - query: person talking on a phone
+    kind: paraphrase
+    note: holding/looking at a smartphone counts; "looking at a device" does not
+    relevant: [18102, 18104, 18147, 18149]
+  - query: pink car
+    kind: attribute
+    relevant: [18084, 18075, 18053]
+  - query: pickup truck
+    kind: caption
+    relevant: [18049, 18050, 17943, 17941]
+  - query: a bus
+    kind: caption
+    relevant: [18134, 18101]
+  - query: three people together
+    kind: paraphrase
+    note: counts; the captions say "three men"
+    relevant: [17921, 17918, 17916, 17881, 17880, 17879, 17876, 17875, 17874, 17871, 17867, 17866, 17798]
+  - query: two men looking at a laptop
+    kind: paraphrase
+    relevant: [17828, 17823, 17820, 17816, 17815, 17814, 17811, 17810, 17809, 17804, 17794, 17767]
+  - query: man with a beard in a pink t-shirt
+    kind: attribute
+    relevant: [17901, 17892, 17891, 17889, 17883, 17869, 17864, 17848, 17845, 17844, 17833, 17818, 17812, 17806, 17802, 17776]
+  - query: man in a green t-shirt
+    kind: attribute
+    note: light green and dark green both count
+    relevant: [17907, 17906, 17905, 17882, 17870, 17868, 17865, 17862, 17858, 17856, 17854, 17853, 17850, 17843, 17842, 17840, 17832, 17831, 17811, 17772, 17771, 17763, 17839, 17835, 17834, 17821, 17815, 17799, 17790, 17789, 17788, 17837]
+  - query: person in camouflage
+    kind: caption
+    relevant: [18089, 18086, 18055, 18054, 17965, 17960, 17937]
+  - query: someone pointing at the camera
+    kind: caption
+    relevant: [18044, 17935]
+  - query: man leaning against a wall
+    kind: caption
+    relevant: [17933, 17919, 17890, 17826, 17824, 17802, 17766]
+  - query: hooded sweatshirt
+    kind: caption
+    relevant: [17903, 17897, 17970]
+  - query: person sitting on the hood of a car
+    kind: caption
+    relevant: [18146]
+  - query: white car parked in front of a building
+    kind: caption
+    note: strict — the two captions that say so; the other white cars are not counted either way
+    relevant: [18068, 18062]
+  - query: dark blue car
+    kind: attribute
+    relevant: [18141, 18103]
+  - query: man with glasses and a black t-shirt
+    kind: attribute
+    note: a "dark t-shirt" with glasses counts as black
+    relevant: [17885, 17877, 17784, 17783, 17769, 17768, 17765, 17893, 17878, 17809, 17804, 17803, 17786, 17773, 17787, 17814]
+  - query: person wearing a striped shirt
+    kind: attribute
+    relevant: [17972, 17928, 17916, 17912]
+  - query: man sitting on the floor with a laptop
+    kind: caption
+    relevant: [17794]
+  - query: person looking at a whiteboard
+    kind: caption
+    relevant: [18158, 18022, 18010, 17985, 17983]
+  - query: man in a plaid shirt next to a man in yellow
+    kind: paraphrase
+    relevant: [17929, 17924, 17923, 17921, 17920, 17918]
+  # typos — the same answers as the clean query
+  - query: persn in a yelow shirt
+    kind: typo
+    relevant: [17932, 17929, 17928, 17924, 17923, 17921, 17920, 17919, 17918, 17917, 17916]
+  - query: camoflage uniform
+    kind: typo
+    relevant: [18089, 18086, 18055, 18054, 17965, 17960, 17937]
+  - query: pikup truck
+    kind: typo
+    relevant: [18049, 18050, 17943, 17941]
+  # negatives — nothing in the pool answers these
+  - query: a dog
+    kind: negative
+    relevant: []
+  - query: a cat on the roof
+    kind: negative
+    relevant: []
+  - query: a motorcycle
+    kind: negative
+    relevant: []
+  - query: snow on the ground
+    kind: negative
+    relevant: []
+  - query: a red truck at the dock
+    kind: negative
+    note: the only trucks are a white pickup and a dark vintage one
+    relevant: []

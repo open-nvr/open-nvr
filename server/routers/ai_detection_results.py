@@ -18,17 +18,31 @@
 AI Detection Results Router - Store and retrieve detection results
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from core.auth import get_current_active_user
 from core.database import get_db
 from models import AIDetectionResult, AIModel, User
+from services.camera_scope import manageable_camera_ids, scope_query, visible_camera_ids
 
 router = APIRouter(prefix="/ai-detection-results", tags=["ai-detection-results"])
+
+# Every route here is scoped by camera, through the one rule every read
+# surface uses (services/camera_scope): reading needs view on the result's
+# camera, writing and deleting need manage. A result with no camera is a
+# superuser's only. An id the caller cannot see answers 404, as if it did
+# not exist, so ids cannot be probed. (GHSA-fpp6-xfgg-f4h3: these routes
+# authenticated the caller and scoped nothing.)
+
+
+def _covers(scope: set[int] | None, camera_id: int | None) -> bool:
+    if scope is None:
+        return True
+    return camera_id is not None and camera_id in scope
 
 
 # Pydantic schemas
@@ -82,6 +96,11 @@ async def create_detection_result(
     db: Session = Depends(get_db),
 ):
     """Store a detection result."""
+    if not _covers(manageable_camera_ids(db, current_user), result_data.camera_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="you do not have permission to write results for this camera",
+        )
     try:
         # Verify model exists
         ai_model = db.query(AIModel).filter(AIModel.id == result_data.model_id).first()
@@ -127,6 +146,7 @@ async def get_detection_results(
 ):
     """Get detection results with optional filters."""
     query = db.query(AIDetectionResult).join(AIModel)
+    query = scope_query(query, AIDetectionResult.camera_id, visible_camera_ids(db, current_user))
 
     if model_id:
         query = query.filter(AIDetectionResult.model_id == model_id)
@@ -164,7 +184,7 @@ async def get_detection_result(
         db.query(AIDetectionResult).filter(AIDetectionResult.id == result_id).first()
     )
 
-    if not result:
+    if not result or not _covers(visible_camera_ids(db, current_user), result.camera_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Detection result with ID {result_id} not found",
@@ -188,10 +208,15 @@ async def delete_detection_result(
         db.query(AIDetectionResult).filter(AIDetectionResult.id == result_id).first()
     )
 
-    if not result:
+    if not result or not _covers(visible_camera_ids(db, current_user), result.camera_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Detection result with ID {result_id} not found",
+        )
+    if not _covers(manageable_camera_ids(db, current_user), result.camera_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="you do not have permission to delete results for this camera",
         )
 
     try:
@@ -211,21 +236,19 @@ async def delete_detection_result(
 # Bulk delete old results
 @router.delete("/bulk/older-than/{days}")
 async def delete_old_results(
-    days: int,
+    days: int = Path(..., ge=1),
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db),
 ):
-    """Delete detection results older than specified days."""
+    """Delete detection results older than `days` days, on the cameras the
+    caller manages (every camera for a superuser). At least one day: "older
+    than 0 days" is everything, which is not what this button is for."""
     try:
-        from datetime import timedelta
-
         cutoff_date = datetime.utcnow() - timedelta(days=days)
 
-        deleted_count = (
-            db.query(AIDetectionResult)
-            .filter(AIDetectionResult.created_at < cutoff_date)
-            .delete()
-        )
+        query = db.query(AIDetectionResult).filter(AIDetectionResult.created_at < cutoff_date)
+        query = scope_query(query, AIDetectionResult.camera_id, manageable_camera_ids(db, current_user))
+        deleted_count = query.delete(synchronize_session=False)
 
         db.commit()
 

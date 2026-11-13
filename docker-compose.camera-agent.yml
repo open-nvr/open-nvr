@@ -54,9 +54,24 @@ services:
   # selected model on boot; first run may download faster-whisper weights into
   # the persisted cache, then later boots reuse them.
   # ──────────────────────────────────────────────────────────────
+  # The agent's speech-to-text slot. The SERVICE keeps the whisper name
+  # (the agent dials whisper_url = http://whisper-adapter:9003 and the
+  # register step calls it "whisper"); STT_ADAPTER picks the IMAGE, the
+  # caption-adapter pattern below: `parakeet` (the default — Parakeet
+  # TDT 0.6B v3, WER 1.4 % at 0.31 s an utterance on four cores,
+  # English + 25 European languages, no translation) or `whisper`
+  # (faster-whisper base.en, 3.3 % at 1.42 s; Hindi, translation).
+  # Both serve the same §5.3 result on port 9003. Parakeet is newer
+  # than adapter release 0.1.7, so it rides its own tag variable.
+  # A third choice on Qualcomm boards: `whisper_qnn` (Whisper-Small w8a16
+  # as QNN context binaries on the Hexagon NPU; the default there through
+  # STT_ADAPTER=auto — start.sh fills the image/module/tag/provider below
+  # from the word on every start; the image name and the module name
+  # differ, hence the two derived variables).
   whisper-adapter:
     profiles: [camera-agent]
-    image: ghcr.io/open-nvr/whisper-adapter:${ADAPTER_TAG:-latest}
+    image: ghcr.io/open-nvr/${STT_ADAPTER_IMAGE:-${STT_ADAPTER:-parakeet}-adapter}:${STT_ADAPTER_TAG:-${ADAPTER_TAG:-latest}}
+    command: ["uvicorn", "${STT_ADAPTER_MODULE:-adapters.${STT_ADAPTER:-parakeet}.main}:app", "--host", "0.0.0.0", "--port", "9003"]
     container_name: opennvr_whisper_adapter
     logging: *svc-logs
     restart: unless-stopped
@@ -65,7 +80,13 @@ services:
       # English-only Whisper: faster on CPU and avoids the multilingual
       # model hallucinating foreign-language tokens on noisy/quiet audio.
       - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-base.en}
+      # CTranslate2 threads on CPU; empty = all cores. Adapter 1.0.1+.
+      - OPENNVR_WHISPER_CPU_THREADS=${WHISPER_CPU_THREADS:-}
+      # ONNX providers for an ONNX STT adapter; empty keeps the adapter's
+      # own default (parakeet: CPU; whisper_qnn: the Hexagon).
+      - ADAPTER_ONNX_PROVIDERS=${STT_ONNX_PROVIDERS:-}
     volumes:
+      # Whisper's download cache; inert for parakeet (weights baked in).
       - opennvr_whisper_models:/app/model_weights/whisper
     networks:
       - opennvr_internal
@@ -114,8 +135,16 @@ services:
     entrypoint: ["sh", "-c"]
     command:
       - |
-        VOICE=en_US-libritts-high
-        BASE=https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/libritts/high
+        # PIPER_VOICE (.env) names any voice from rhasspy/piper-voices as
+        # <lang>_<REGION>-<name>-<quality>; the download path follows from
+        # it. The default is a MEDIUM voice on purpose: on CPU the quality
+        # tier is the cost — libritts-high took ~4 cores and 25 s for two
+        # sentences on the field box; medium is 2-3x cheaper and as clear.
+        # The agent asks for this voice per request (AppConfig.piper_voice).
+        VOICE=${PIPER_VOICE:-en_US-lessac-medium}
+        LANG_REGION=$${VOICE%%-*}; REST=$${VOICE#*-}
+        NAME=$${REST%-*}; QUALITY=$${REST##*-}; LANG_CODE=$${LANG_REGION%%_*}
+        BASE=https://huggingface.co/rhasspy/piper-voices/resolve/main/$$LANG_CODE/$$LANG_REGION/$$NAME/$$QUALITY
         cd /voices || exit 0
         for f in "$$VOICE.onnx" "$$VOICE.onnx.json"; do
           if [ -s "$$f" ]; then
@@ -149,6 +178,12 @@ services:
         condition: service_completed_successfully
     environment:
       - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
+      # The voice used when a request names none (the agent names one),
+      # and the ONNX thread cap per synthesis: one utterance fanning
+      # across every core is what starved the detector on a 4-core box.
+      # Both honoured by adapter releases from 1.0.1 on.
+      - OPENNVR_PIPER_VOICE=${PIPER_VOICE:-en_US-lessac-medium}
+      - OPENNVR_PIPER_THREADS=${PIPER_THREADS:-2}
     volumes:
       # The adapter resolves MODEL_WEIGHTS_DIR/piper -> /app/model_weights/piper.
       # Custom/extra voices: drop .onnx + .onnx.json pairs into the
@@ -170,7 +205,13 @@ services:
   # Both images are normalized to port 9006 so downstream wiring stays fixed.
   # ──────────────────────────────────────────────────────────────
   caption-adapter:
-    profiles: [camera-agent, camera-agent-chat]
+    # ``enrichment`` / ``descriptions``: core's own caption and descriptor
+    # enrichment needs exactly this adapter, and needs it whether or not
+    # anyone runs the agent. It lives in this file for historical reasons
+    # — the agent needed a captioner first — and duplicating it into
+    # docker-compose.apps.yml (which an earlier version of that file did)
+    # means two adapters answering scene_caption, with KAI-C picking.
+    profiles: [camera-agent, camera-agent-chat, enrichment, descriptions]
     # CAPTION_ADAPTER_TAG lets the caption image ride a different tag than
     # the pinned ADAPTER_TAG. It existed because the default (ollamavlm)
     # shipped only after 0.1.3; adapter releases from 0.1.4 on publish it,
@@ -222,7 +263,10 @@ services:
   # re-pends an adapter that re-declares more scope than was approved.
   # ──────────────────────────────────────────────────────────────
   caption-adapter-register:
-    profiles: [camera-agent, camera-agent-chat]
+    # Same four profiles as the adapter: an unregistered captioner is
+    # invisible to KAI-C, which is the whole failure this one-shot exists
+    # to prevent.
+    profiles: [camera-agent, camera-agent-chat, enrichment, descriptions]
     image: alpine:3.20
     container_name: opennvr_caption_register
     logging: *svc-logs
@@ -340,6 +384,9 @@ services:
       - opennvr_ollama_models:/root/.ollama
     networks:
       - opennvr_internal
+      # footage-search (docker-compose.apps.yml) calls ollama from the
+      # internal apps network.
+      - opennvr_apps
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 30s
@@ -373,7 +420,7 @@ services:
       - -c
       - |
         set -e
-        MODEL="$${OLLAMA_MODEL:-qwen2.5:1.5b}"
+        MODEL="$${OLLAMA_MODEL:-granite4:micro}"
         echo "Pulling Ollama model: $$MODEL"
         OLLAMA_HOST=http://ollama:11434 ollama pull "$$MODEL"
         echo "LLM model ready."
@@ -388,7 +435,7 @@ services:
           fi
         fi
     environment:
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:1.5b}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-granite4:micro}
       - OLLAMA_VLM_MODEL=${OLLAMA_VLM_MODEL:-moondream}
       - CAPTION_ADAPTER=${CAPTION_ADAPTER:-moondream}
     volumes:
@@ -423,7 +470,7 @@ services:
           exit 0
         fi
         umask 077
-        SAN="DNS:localhost,DNS:camera-agent,DNS:opennvr.local,IP:127.0.0.1,IP:::1"
+        SAN="DNS:localhost,DNS:camera-agent,DNS:camera-agent-chat,DNS:opennvr.local,IP:127.0.0.1,IP:::1"
         if [ -n "$${OPENNVR_HOST_IP}" ]; then
           SAN="$${SAN},IP:$${OPENNVR_HOST_IP}"
         fi
@@ -461,18 +508,49 @@ services:
         ourl=$$(sed_esc "$${OLLAMA_URL}")
         cadapter=$$(sed_esc "$${CAPTION_ADAPTER}")
         ouiurl=$$(sed_esc "$${OPENNVR_UI_URL}")
+        lprewarm=$$(sed_esc "$${LLM_PREWARM:-true}")
+        lprov=$$(sed_esc "$${LLM_PROVIDER:-ollama}")
+        lburl=$$(sed_esc "$${LLM_BASE_URL}")
+        lmodel=$$(sed_esc "$${LLM_MODEL:-$${OLLAMA_MODEL}}")
+        lwin=$$(sed_esc "$${LLM_WINDOW_TOKENS:-0}")
+        lfurl=$$(sed_esc "$${LLM_FALLBACK_URL}")
+        lfmodel=$$(sed_esc "$${LLM_FALLBACK_MODEL:-granite4:micro}")
+        # The NPU adapter's chat endpoint sits behind the stack's own
+        # token; a cloud provider's key is LLM_API_KEY in .env.
+        lkey="$${LLM_API_KEY}"
+        case "$${LLM_BASE_URL}" in http://caption-adapter:*) [ -n "$$lkey" ] || lkey="$${INTERNAL_API_KEY}" ;; esac
+        lkey=$$(sed_esc "$$lkey")
         sed -e "s/[$$][{]INTERNAL_API_KEY[}]/$$ikey/g" \
             -e "s/[$$][{]CAMERA_AGENT_LISTEN_HOST[}]/$$lhost/g" \
             -e "s/[$$][{]OLLAMA_MODEL[}]/$$omodel/g" \
             -e "s/[$$][{]OLLAMA_URL[}]/$$ourl/g" \
             -e "s/[$$][{]CAPTION_ADAPTER[}]/$$cadapter/g" \
             -e "s/[$$][{]OPENNVR_UI_URL[}]/$$ouiurl/g" \
+            -e "s/[$$][{]LLM_PREWARM[}]/$$lprewarm/g" \
+            -e "s/[$$][{]LLM_PROVIDER[}]/$$lprov/g" \
+            -e "s/[$$][{]LLM_BASE_URL[}]/$$lburl/g" \
+            -e "s/[$$][{]LLM_API_KEY[}]/$$lkey/g" \
+            -e "s/[$$][{]LLM_MODEL[}]/$$lmodel/g" \
+            -e "s/[$$][{]LLM_WINDOW_TOKENS[}]/$$lwin/g" \
+            -e "s/[$$][{]LLM_FALLBACK_URL[}]/$$lfurl/g" \
+            -e "s/[$$][{]LLM_FALLBACK_MODEL[}]/$$lfmodel/g" \
             < /template/config.docker.yml > /generated/config.yml
         echo "Wrote /generated/config.yml (voice) from template."
     environment:
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - CAMERA_AGENT_LISTEN_HOST=0.0.0.0
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:1.5b}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-granite4:micro}
+      - LLM_PREWARM=${LLM_PREWARM:-true}
+      # The LLM provider (.env): ollama, or openai for any OpenAI-compatible
+      # endpoint — on the qualcomm flavour start.sh points it at the NPU
+      # caption adapter's /v1/chat/completions.
+      - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
+      - LLM_BASE_URL=${LLM_BASE_URL:-}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_MODEL=${LLM_MODEL:-}
+      - LLM_WINDOW_TOKENS=${LLM_WINDOW_TOKENS:-0}
+      - LLM_FALLBACK_URL=${LLM_FALLBACK_URL:-}
+      - LLM_FALLBACK_MODEL=${LLM_FALLBACK_MODEL:-granite4:micro}
       # Where the agent reaches the LLM runtime. Default: the bundled
       # ollama container. Set OLLAMA_EXTERNAL_URL in .env (e.g.
       # http://host.docker.internal:11434 for native Ollama on the host
@@ -495,6 +573,10 @@ services:
     # Same repo + release cadence as opennvr-core, so it shares CORE_TAG.
     image: ghcr.io/open-nvr/camera-agent:${CORE_TAG:-latest}
     container_name: opennvr_camera_agent
+    # The hostname the agent sees itself as = the service name other
+    # containers resolve and the certificate's SAN (default would be the
+    # bare container id, which neither resolves nor matches the cert).
+    hostname: camera-agent
     logging: *svc-logs
     restart: unless-stopped
     depends_on:
@@ -525,16 +607,11 @@ services:
       # "after 12:10 pm" alarm on an IST site stayed dormant until
       # 12:10 UTC (= 5:40 pm local). Must match the mediamtx/core TZ.
       - TZ=${TZ:-UTC}
+      # The Piper voice the agent asks for (see piper-voices-init).
+      - PIPER_VOICE=${PIPER_VOICE:-en_US-lessac-medium}
     volumes:
       - opennvr_camera_agent_config:/app/config:ro
       - ./agent-certs/camera-agent:/certs:ro
-      # Read-only view of the footage-search index → enables the
-      # search_footage voice tool ("did a red truck come by earlier?").
-      # Same named volume the apps overlay's footage-search service
-      # writes (compose runs from the same project, so the names meet).
-      # Without the apps overlay it's just an empty dir and the tool
-      # reports cleanly that the index hasn't been built.
-      - opennvr_footage_search_data:/footage:ro
     command:
       - --config
       - /app/config/config.yml
@@ -563,18 +640,49 @@ services:
         ourl=$$(sed_esc "$${OLLAMA_URL}")
         cadapter=$$(sed_esc "$${CAPTION_ADAPTER}")
         ouiurl=$$(sed_esc "$${OPENNVR_UI_URL}")
+        lprewarm=$$(sed_esc "$${LLM_PREWARM:-true}")
+        lprov=$$(sed_esc "$${LLM_PROVIDER:-ollama}")
+        lburl=$$(sed_esc "$${LLM_BASE_URL}")
+        lmodel=$$(sed_esc "$${LLM_MODEL:-$${OLLAMA_MODEL}}")
+        lwin=$$(sed_esc "$${LLM_WINDOW_TOKENS:-0}")
+        lfurl=$$(sed_esc "$${LLM_FALLBACK_URL}")
+        lfmodel=$$(sed_esc "$${LLM_FALLBACK_MODEL:-granite4:micro}")
+        # The NPU adapter's chat endpoint sits behind the stack's own
+        # token; a cloud provider's key is LLM_API_KEY in .env.
+        lkey="$${LLM_API_KEY}"
+        case "$${LLM_BASE_URL}" in http://caption-adapter:*) [ -n "$$lkey" ] || lkey="$${INTERNAL_API_KEY}" ;; esac
+        lkey=$$(sed_esc "$$lkey")
         sed -e "s/[$$][{]INTERNAL_API_KEY[}]/$$ikey/g" \
             -e "s/[$$][{]CAMERA_AGENT_LISTEN_HOST[}]/$$lhost/g" \
             -e "s/[$$][{]OLLAMA_MODEL[}]/$$omodel/g" \
             -e "s/[$$][{]OLLAMA_URL[}]/$$ourl/g" \
             -e "s/[$$][{]CAPTION_ADAPTER[}]/$$cadapter/g" \
             -e "s/[$$][{]OPENNVR_UI_URL[}]/$$ouiurl/g" \
+            -e "s/[$$][{]LLM_PREWARM[}]/$$lprewarm/g" \
+            -e "s/[$$][{]LLM_PROVIDER[}]/$$lprov/g" \
+            -e "s/[$$][{]LLM_BASE_URL[}]/$$lburl/g" \
+            -e "s/[$$][{]LLM_API_KEY[}]/$$lkey/g" \
+            -e "s/[$$][{]LLM_MODEL[}]/$$lmodel/g" \
+            -e "s/[$$][{]LLM_WINDOW_TOKENS[}]/$$lwin/g" \
+            -e "s/[$$][{]LLM_FALLBACK_URL[}]/$$lfurl/g" \
+            -e "s/[$$][{]LLM_FALLBACK_MODEL[}]/$$lfmodel/g" \
             < /template/config.docker.chat.yml > /generated/config.yml
         echo "Wrote /generated/config.yml (chat) from template."
     environment:
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
       - CAMERA_AGENT_LISTEN_HOST=0.0.0.0
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:1.5b}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-granite4:micro}
+      - LLM_PREWARM=${LLM_PREWARM:-true}
+      # The LLM provider (.env): ollama, or openai for any OpenAI-compatible
+      # endpoint — on the qualcomm flavour start.sh points it at the NPU
+      # caption adapter's /v1/chat/completions.
+      - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
+      - LLM_BASE_URL=${LLM_BASE_URL:-}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_MODEL=${LLM_MODEL:-}
+      - LLM_WINDOW_TOKENS=${LLM_WINDOW_TOKENS:-0}
+      - LLM_FALLBACK_URL=${LLM_FALLBACK_URL:-}
+      - LLM_FALLBACK_MODEL=${LLM_FALLBACK_MODEL:-granite4:micro}
       # See the voice config-init: bundled ollama by default, or the
       # operator's external runtime via OLLAMA_EXTERNAL_URL in .env.
       - OLLAMA_URL=${OLLAMA_EXTERNAL_URL:-http://ollama:11434}
@@ -594,7 +702,9 @@ services:
       context: .
       dockerfile: examples/camera-agent/Dockerfile
     image: opennvr/camera-agent:local-build
+    pull_policy: ${APPS_PULL_POLICY:-build}
     container_name: opennvr_camera_agent_chat
+    hostname: camera-agent-chat
     logging: *svc-logs
     restart: unless-stopped
     depends_on:
@@ -622,21 +732,32 @@ services:
     volumes:
       - opennvr_camera_agent_config_chat:/app/config:ro
       - ./agent-certs/camera-agent:/certs:ro
-      # Same read-only footage-search index view as the voice agent.
-      - opennvr_footage_search_data:/footage:ro
     command:
       - --config
       - /app/config/config.yml
     networks:
       - opennvr_internal
 
+  # Core calls the agent's contract (/health, /state) over https — the
+  # agent terminates TLS itself with the self-signed certificate above.
+  # Mounting the certificate directory read-only under core's app-certs
+  # trust directory (services/app_tls.py) lets core verify it; the
+  # hostname must still match the SAN, hence the service name above.
+  # The key inside is 0600 root: unreadable to core's user, and unneeded.
+  opennvr-core:
+    volumes:
+      - ./agent-certs/camera-agent:/etc/opennvr/app-certs/camera-agent:ro
+
 volumes:
-  # footage-search's SQLite index. Declared here as well as in
-  # docker-compose.apps.yml so this overlay works standalone: same name +
-  # same compose project → the SAME volume, so when the apps overlay runs
-  # the footage-search indexer, the agent's search_footage tool reads what
-  # it writes. Without the apps overlay it stays an empty dir (harmless).
-  opennvr_footage_search_data:
+  # opennvr_footage_search_data is gone. It carried footage-search's
+  # SQLite index, mounted read-only here so the agent's search_footage
+  # tool could fall back to it during an outage. footage-search 2.0.0
+  # deleted that index, so nothing writes the file: a fallback would
+  # have served whatever was true on the day of the upgrade, during an
+  # outage, when nobody is positioned to notice the dates are months
+  # old. search_footage is answered from the event store and says so
+  # plainly when it cannot be reached. An upgraded install can reclaim
+  # the old volume with `docker volume rm opennvr_footage_search_data`.
   # Ollama model store — persisted so the LLM survives ``compose down``.
   opennvr_ollama_models:
   # Faster-whisper model cache for the GHCR whisper adapter.

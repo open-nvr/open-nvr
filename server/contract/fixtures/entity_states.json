@@ -1,0 +1,12 @@
+{
+  "states": {
+    "camera.1.count.person": {
+      "state": 1,
+      "attributes": {}
+    },
+    "camera.1.detection": {
+      "state": true,
+      "attributes": {}
+    }
+  }
+}

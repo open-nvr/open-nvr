@@ -34,6 +34,14 @@ def test_file_frame_source_reads_bytes():
     assert src.fetch() == b"\xff\xd8JPEG"
 
 
+def test_file_frame_source_accepts_a_standard_file_uri(tmp_path):
+    # file:///C:/… on Windows, file:///tmp/… elsewhere.
+    frame = tmp_path / "frame.jpg"
+    frame.write_bytes(b"\xff\xd8JPEG")
+    src = fs.build_frame_source(camera_id="c1", url=frame.as_uri())
+    assert src.fetch() == b"\xff\xd8JPEG"
+
+
 def test_redact_strips_credentials_and_jwt_query():
     assert fs._redact("rtsp://u:p@h:554/s") == "rtsp://h:554/s"
     assert fs._redact("rtsp://mediamtx:8554/cam-1?jwt=SECRET") == "rtsp://mediamtx:8554/cam-1?REDACTED"

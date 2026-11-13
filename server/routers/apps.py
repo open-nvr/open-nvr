@@ -37,7 +37,7 @@ Routes (mounted under ``/api/v1``):
 import ipaddress
 import logging
 import secrets
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -45,17 +45,28 @@ from urllib.parse import urlparse
 
 import httpx
 import yaml
-from fastapi import APIRouter, Body, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from core.auth import get_current_active_user, verify_token
+from core.auth import get_current_active_user, get_current_superuser, verify_token
 from core.database import get_db
 from core.permissions import RequirePermission
 from models import AppInstallIntent, InstalledApp, User
+from services.enrichment_backfill import FOOTAGE_APP_ID, forget_backfill_switch
+from services.app_keys import (
+    AppPrincipal, issue_key, looks_like_app_key,
+    resolve_app_key, revoke_key,
+)
+from services.app_tls import app_verify
 from services.audit_service import write_audit_log
+from services.app_entitlements import (
+    entitlement_view, may_enable, store_license_key, verify_with_app,
+)
+from services import app_egress
+from services.app_egress import egress_view
 
 # The one-click install/uninstall endpoints require this RBAC permission
 # (in addition to the APPS_INSTALL_ENABLED opt-in). Reused as a FastAPI
@@ -71,6 +82,10 @@ STATUS_PROBE_TIMEOUT_S = 3.0
 # Actions can do real work (a footage query over SQLite); more generous
 # than a health probe, still bounded so a hung app can't pin a worker.
 ACTION_PROXY_TIMEOUT_S = 10.0
+# How often the app's own config poll is allowed to write `last_seen`.
+# The SDK polls every ~10s; the freshness windows that read this column
+# are minutes wide, so a write per poll would be pure DB churn.
+APP_SEEN_WRITE_EVERY = timedelta(seconds=30)
 
 
 # ── App Store index (the "discover" half of the catalog) ───────────
@@ -109,20 +124,96 @@ class IndexEntry(BaseModel):
     summary: str
     category: str
     version: str
-    image: str
+    # "installable" (default): a shipped image + compose service the
+    # one-click installer applies. "external": a listing that links out
+    # — a third-party app distributed elsewhere; the catalog shows
+    # "Learn more" and never offers Install.
+    kind: str = "installable"
+    image: str | None = None
+    external_url: str | None = None
+    # Commerce, mirroring the manifest: free | paid | subscription |
+    # contact, a human price line, and whether enabling needs a licence.
+    pricing: str = "free"
+    price_note: str = ""
+    entitlement: str = "none"
+    author: str = ""
+    # Catalog curation (reviewer-set, never by the submitter's manifest):
+    # ``verified`` = the maintainers vouch for the author (identity
+    # confirmed, image reproducible from the linked source); ``featured``
+    # = shown in the Featured row at the top of the catalog.
+    verified: bool = False
+    featured: bool = False
+    # Catalog policy (docs/APP_LISTING_TERMS.md): an installable app is
+    # open source under the open-nvr organisation — ``source`` is that
+    # repository (or a path in this one), ``contact`` reaches its
+    # maintainer, and ``network_egress`` lists every host it talks to
+    # ([] = never leaves the site). The card shows all three.
+    source: str | None = None
+    contact: str | None = None
+    network_egress: list[str] = []
+    # The one exception to the open-source rule: a first-party app
+    # (author OpenNVR) may be ``proprietary`` — an image built and signed
+    # by the org's CI, with no ``source``. Absent = open source. The card
+    # says which; scripts/validate_apps_index.py enforces who may.
+    license: str | None = None
+    # Who signs the image (scripts/app-installer/signing.py). Absent for
+    # ghcr.io/open-nvr images — the org's CI signs those; declared
+    # ({identity: <regexp>, issuer}) for an image built elsewhere.
+    signing: dict[str, str] | None = None
+    # Editorial popularity rank, 0-100, set by the maintainers — NOT a
+    # measured install count. OpenNVR deployments never phone home (the
+    # egress proxy exists precisely so apps cannot), so there is no
+    # telemetry to count installs with, and inventing a number would be
+    # a lie told in a security product. Absent = unranked; the catalog
+    # sorts those last and never renders a fake total.
+    popularity: int | None = None
+    # Listing screenshots as paths inside the frontend build
+    # (app/public/app-screenshots/<id>/...), served by core's static
+    # route. Deliberately NOT remote URLs: a third-party image would
+    # leak every catalog viewer's IP to that host and would not load at
+    # all on an air-gapped site — both of which this product promises
+    # against everywhere else.
+    screenshots: list[str] = []
     requires_tasks: list[str] = []
     # RFC-0002 Phase 3 (decision 7): KAI-C adapters that must be
     # provisioned with the app; the reconciler ups + refcounts them.
     requires_adapters: list[str] = []
     emits: list[str] = []
     docs_url: str
-    install: InstallSpec
+    install: InstallSpec | None = None
     build_context: str | None = None
     # Optional sha256 digest the reconciler pins the image to. When
     # present, the one-click installer deploys ``image@sha256:...`` for
     # supply-chain integrity; when absent, the reconciler logs a loud
     # "UNPINNED — dev only" warning. Not for production without a digest.
     image_digest: str | None = None
+
+    @model_validator(mode="after")
+    def _shape_by_kind(self) -> "IndexEntry":
+        if self.kind not in ("installable", "external"):
+            raise ValueError("kind must be 'installable' or 'external'")
+        if self.kind == "installable" and (not self.image or self.install is None):
+            raise ValueError("installable entries need image + install")
+        if self.kind == "external" and not (self.external_url or "").startswith("https://"):
+            raise ValueError("external entries need an https:// external_url")
+        if self.pricing not in ("free", "paid", "subscription", "contact"):
+            raise ValueError("pricing must be free | paid | subscription | contact")
+        if self.entitlement not in ("none", "license_key"):
+            raise ValueError("entitlement must be none | license_key")
+        return self
+
+
+def _signed_by(entry: IndexEntry) -> str | None:
+    """Who the installer expects to have signed the image: ``"OpenNVR CI"``
+    for the org's own images, the declared identity for others, ``None``
+    when unsigned (only ever deploys with INSTALLER_SIGNATURES=off)."""
+    if entry.kind == "external":
+        return None
+    if entry.signing and entry.signing.get("identity"):
+        return str(entry.signing["identity"])
+    if (entry.image or "").startswith("ghcr.io/open-nvr/"):
+        return "OpenNVR CI"
+    return None
 
 
 @lru_cache(maxsize=1)
@@ -165,13 +256,60 @@ _PRIMITIVE_TYPES: dict[str, tuple[type, ...]] = {
 }
 
 
+def _is_point(p: Any) -> bool:
+    return (isinstance(p, (list, tuple)) and len(p) == 2
+            and all(isinstance(c, (int, float)) and not isinstance(c, bool) for c in p))
+
+
+def _is_hsv(value: Any) -> bool:
+    """One HSV bound on OpenCV's 8-bit scale.
+
+    Hue is 0-179 there, not 0-360 — the halved-degree convention of
+    ``cv2.cvtColor(..., COLOR_BGR2HSV)`` on a uint8 image. A range
+    written in degrees would pass any looser check and then silently
+    match nothing at all.
+    """
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        return False
+    if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in value):
+        return False
+    h, sat, val = value
+    return 0 <= h <= 179 and 0 <= sat <= 255 and 0 <= val <= 255
+
+
 def _value_matches_type(value: Any, type_name: str) -> bool:
     """True when ``value`` is acceptable for a manifest param ``type``.
 
-    Dotted UI-schema types (``"geometry.polygon"``) are list-shaped on
-    the wire — deep validation is the catalog zone editor's job, so we
-    only require a list. Unknown plain type names are not blocked.
+    Dotted UI-schema types are what the catalog's geometry editor
+    writes and the SDK's ``geometry`` module reads:
+
+    * ``geometry.polygon`` — a list of ``[x, y]`` points (unit space).
+      The editor saves while a zone is still being drawn, so the point
+      COUNT is the app's to judge; an empty list clears the zone.
+    * ``geometry.tripwire`` — ``{"a": [x, y], "b": [x, y],
+      "count_direction": both|a_to_b|b_to_a}`` (``Tripwire.from_config``);
+      ``null`` clears it.
+    * ``color.hsv_range`` — ``{"low": [h, s, v], "high": [h, s, v]}`` as
+      the catalog's colour picker writes it, on OpenCV's 8-bit scale
+      (hue 0-179, NOT 0-360). ``{}`` or ``null`` means unset.
+
+    Other dotted types are list-shaped by convention. Unknown plain
+    type names are not blocked.
     """
+    if type_name == "geometry.tripwire":
+        if value is None:
+            return True
+        return (isinstance(value, dict)
+                and _is_point(value.get("a")) and _is_point(value.get("b"))
+                and value.get("count_direction", "both") in ("both", "a_to_b", "b_to_a"))
+    if type_name == "geometry.polygon":
+        return isinstance(value, list) and all(_is_point(p) for p in value)
+    if type_name == "color.hsv_range":
+        if value is None or value == {}:
+            return True         # unset: fall back to whatever else is configured
+        if not isinstance(value, dict):
+            return False
+        return all(_is_hsv(value.get(k)) for k in ("low", "high"))
     if "." in type_name:
         return isinstance(value, list)
     expected = _PRIMITIVE_TYPES.get(type_name)
@@ -190,6 +328,7 @@ def validate_app_config(manifest: dict, config: dict) -> list[str]:
     - config keys not declared in the manifest;
     - params with ``required=True`` and no default that are absent;
     - values whose type doesn't match the param ``type`` name;
+    - values outside a declared ``choices`` set;
     - ``per_camera=True`` params must be a dict keyed by camera id
       whose values each pass the type check.
     """
@@ -230,8 +369,104 @@ def validate_app_config(manifest: dict, config: dict) -> list[str]:
 
         if not _value_matches_type(value, type_name):
             errors.append(f"param '{name}' must be of type {type_name}")
+            continue
+
+        if (bad := _not_a_choice(value, param)) is not None:
+            errors.append(bad)
 
     return errors
+
+
+def _not_a_choice(value, param: dict) -> str | None:
+    """Reject a value the app said it would never accept.
+
+    A ``choices`` param is a closed set — the form offers a select, but
+    the API is the real boundary, and an app that receives a value it
+    never declared will at best ignore it and at worst fall over on a
+    thread where nobody sees it.
+    """
+    choices = param.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+    allowed = [c.get("value") if isinstance(c, dict) else c for c in choices]
+    # Numbers compare across int/float (0 and 0.0 are the same choice);
+    # bool is excluded because in Python `True == 1`, and a boolean
+    # sneaking past an integer choice set is the kind of thing that
+    # only shows up in production.
+    for candidate in allowed:
+        if candidate == value and isinstance(candidate, bool) == isinstance(value, bool):
+            return None
+    shown = ", ".join(repr(c) for c in allowed)
+    return f"param '{param['name']}' must be one of: {shown}"
+
+
+
+def _per_camera_param_names(manifest: dict) -> set[str]:
+    return {
+        p["name"]
+        for p in (manifest.get("params") or [])
+        if isinstance(p, dict) and "name" in p and p.get("per_camera")
+    }
+
+
+def _scope_per_camera_config(manifest: dict, config: dict,
+                             scope: set[int] | None) -> dict:
+    """``config`` with every ``per_camera`` param trimmed to the camera
+    keys inside ``scope`` (None = unrestricted)."""
+    if scope is None:
+        return config
+    from services.camera_scope import in_scope
+
+    out = dict(config)
+    for name in _per_camera_param_names(manifest):
+        value = out.get(name)
+        if isinstance(value, dict):
+            out[name] = {k: v for k, v in value.items() if in_scope(scope, k)}
+    return out
+
+
+def _merge_scoped_config(manifest: dict, stored: dict, incoming: dict,
+                         manage_scope: set[int] | None) -> tuple[dict, list[str]]:
+    """Apply a NON-superuser's ``incoming`` config on top of ``stored``.
+
+    Returns ``(merged, denied)``. ``denied`` names what they may not
+    change — a site-wide (non per-camera) key whose value differs, or
+    a per-camera entry for a camera outside ``manage_scope`` that
+    differs — and a non-empty list means the write is refused whole.
+
+    Absence is NOT a change here: a per-camera key left out of the
+    payload is untouched, and within a key the caller read a config
+    trimmed to their cameras (``_scope_per_camera_config``), so a
+    camera missing from their payload is one they never saw and its
+    stored entry is kept. Only a camera they can manage is removed by
+    omission from a key they DID send — that is them erasing their own
+    zone.
+    """
+    from services.camera_scope import in_scope
+
+    per_camera = _per_camera_param_names(manifest)
+    merged = dict(stored)
+    denied: list[str] = []
+    for key in sorted(set(stored) | set(incoming)):
+        if key not in per_camera:
+            if key in incoming and incoming[key] != stored.get(key):
+                denied.append(f"'{key}' (site-wide setting)")
+            continue
+        if key not in incoming:
+            continue            # untouched: the stored entries stand
+        before = stored.get(key) if isinstance(stored.get(key), dict) else {}
+        after = incoming.get(key) if isinstance(incoming.get(key), dict) else {}
+        result = dict(before)
+        for cam in sorted(set(before) | set(after), key=str):
+            if in_scope(manage_scope, cam):
+                if cam in after:
+                    result[cam] = after[cam]
+                else:
+                    result.pop(cam, None)
+            elif cam in after and after[cam] != before.get(cam):
+                denied.append(f"'{key}' for camera '{cam}'")
+        merged[key] = result
+    return merged, denied
 
 
 # ── App URL sovereignty guard (SSRF) ───────────────────────────────
@@ -334,16 +569,47 @@ def _internal_api_key() -> str:
 
 
 def get_register_principal(
+    request: Request,
     x_internal_api_key: str | None = Header(default=None, alias="X-Internal-Api-Key"),
     credentials: HTTPAuthorizationCredentials | None = Depends(_optional_bearer),
     db: Session = Depends(get_db),
-) -> User | None:
+) -> User | AppPrincipal | None:
     """Authenticate a registration call.
 
     Returns the ``User`` for the JWT path, or ``None`` for the
     service-key path (audit-logged as the ``app-sdk`` service
     identity). Raises 401 when neither credential is valid.
     """
+    return _service_or_user_principal(x_internal_api_key, credentials, db, request)
+
+
+def _service_or_user_principal(
+    x_internal_api_key: str | None,
+    credentials: HTTPAuthorizationCredentials | None,
+    db: Session,
+    request: Request | None = None,
+) -> User | AppPrincipal | None:
+    """Shared body of the two service-capable principals.
+
+    Three credential kinds, checked in this order:
+
+    * an **app key** (``oak_…``, in either header) → :class:`AppPrincipal`
+      for that app — it may read its own registry rows and re-register;
+    * the deployment's ``INTERNAL_API_KEY`` → ``None`` (platform
+      service identity, unscoped);
+    * a user JWT → the ``User``.
+    """
+    bearer = credentials.credentials if credentials is not None else None
+    for candidate in (x_internal_api_key, bearer):
+        if looks_like_app_key(candidate):
+            row = resolve_app_key(db, candidate)
+            if row is not None:
+                return AppPrincipal(app_id=row.id)
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or revoked app key",
+            )
+
     if x_internal_api_key is not None:
         expected = _internal_api_key()
         if expected and secrets.compare_digest(x_internal_api_key, expected):
@@ -358,6 +624,12 @@ def get_register_principal(
             )
 
     if credentials is not None:
+        from services import api_tokens
+
+        if api_tokens.looks_like_token(credentials.credentials):
+            # An API token (HA-101): same route table, permission and
+            # camera checks as core.auth. Raises 401/403 itself.
+            return api_tokens.authorize_request(request, db, credentials.credentials)
         token_data = verify_token(credentials.credentials)
         if token_data is not None:
             user = (
@@ -375,16 +647,26 @@ def get_register_principal(
 
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Provide a bearer token or X-Internal-Api-Key",
+        detail="Provide a bearer token, an app key, or X-Internal-Api-Key",
         headers={"WWW-Authenticate": "Bearer"},
     )
 
 
+def _own_app_only(principal, app_id: str) -> None:
+    """An app key reads ITS OWN registry rows and nothing else."""
+    if isinstance(principal, AppPrincipal) and principal.app_id != app_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="An app key may only access its own app",
+        )
+
+
 def get_read_principal(
+    request: Request,
     x_internal_api_key: str | None = Header(default=None, alias="X-Internal-Api-Key"),
     credentials: HTTPAuthorizationCredentials | None = Depends(_optional_bearer),
     db: Session = Depends(get_db),
-) -> User | None:
+) -> User | AppPrincipal | None:
     """Authenticate a READ-ONLY registry call (``GET /apps`` and
     ``GET /apps/{id}/status``).
 
@@ -402,40 +684,8 @@ def get_read_principal(
     stay strictly ``get_current_active_user`` (register additionally
     accepts the key via :func:`get_register_principal`).
     """
-    if x_internal_api_key is not None:
-        expected = _internal_api_key()
-        if expected and secrets.compare_digest(x_internal_api_key, expected):
-            return None  # service identity
-        # A service sends its one token as BOTH headers (it can't know
-        # which kind the operator provisioned) — a non-matching key
-        # only fails the request when there's no bearer to fall back to.
-        if credentials is None:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid internal API key",
-            )
+    return _service_or_user_principal(x_internal_api_key, credentials, db, request)
 
-    if credentials is not None:
-        token_data = verify_token(credentials.credentials)
-        if token_data is not None:
-            user = (
-                db.query(User)
-                .filter(User.username == token_data.username)
-                .first()
-            )
-            if user is not None and user.is_active:
-                return user
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Provide a bearer token or X-Internal-Api-Key",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
 
 
 # ── Request schemas / serialization ────────────────────────────────
@@ -446,6 +696,23 @@ class AppRegisterRequest(BaseModel):
 
     url: str
     manifest: dict[str, Any]
+    # The SDK's own version, for the compatibility line in the response
+    # and the audit row. Optional: older SDKs send nothing.
+    sdk_version: str | None = None
+    # "I hold no app key" — an app booting without a persisted key (no
+    # volume, first run) registers with the site key and asks for one;
+    # the registry (re)issues it. An app registering WITH its own key
+    # never gets a new one back.
+    wants_key: bool = False
+
+
+#: The app-registry contract version the SDK negotiates against, and
+#: the oldest SDK this server still speaks to. Bump API_VERSION on any
+#: change to the register/config/state/actions shapes; bump
+#: MIN_SDK_VERSION only when an old SDK would misbehave, not merely
+#: miss a feature.
+API_VERSION = "1.4"
+MIN_SDK_VERSION = "0.2.0"
 
 
 def _serialize_app(row: InstalledApp) -> dict[str, Any]:
@@ -461,7 +728,45 @@ def _serialize_app(row: InstalledApp) -> dict[str, Any]:
         "last_seen": row.last_seen,
         "manifest": row.manifest_json,
         "config": row.config_json or {},
+        # Credential state only — the key itself is returned once, at issue.
+        "has_api_key": bool(row.api_key_hash),
+        "api_key_issued_at": row.api_key_issued_at,
+        # Licence verdict (never the key) — services/app_entitlements.py.
+        "entitlement": entitlement_view(row),
+        # Network: what the listing declared, what the operator allowed,
+        # what the proxy refused — services/app_egress.py.
+        "egress": egress_view(row),
+        "overlay_enabled": bool(getattr(row, "overlay_enabled", False)),
+        # Whether this app takes a camera pick at all. Apps that read no
+        # camera data (they act on other apps' alerts) declare False.
+        "camera_picker": (row.manifest_json or {}).get("camera_picker", True) is not False,
+        # Runs on every camera without a pick (the agent). The platform
+        # holds its picks; the catalog says "All cameras" instead of
+        # warning that none were selected.
+        "all_cameras": (row.manifest_json or {}).get("all_cameras") is True,
+        # The model skills a pick of this app brings to a camera.
+        "skills": _app_tasks_of(row),
+        "hardware": _hardware_of(row),
     }
+
+
+def _hardware_of(row: InstalledApp) -> dict[str, Any] | None:
+    """The bar the installed app's required tasks set, and its fit on
+    this box (services/hardware_profile). Required tasks only: an
+    enrich task the box lacks degrades the app, it does not stop it."""
+    from services.hardware_profile import describe
+    manifest = row.manifest_json or {}
+    tasks = manifest.get("requires_tasks") if isinstance(manifest, dict) else None
+    try:
+        return describe([str(t) for t in (tasks or []) if isinstance(t, str)])
+    except Exception:  # noqa: BLE001
+        logger.debug("hardware bar for app %s unavailable", row.id, exc_info=True)
+        return None
+
+
+def _app_tasks_of(row) -> list[str]:
+    from services.skill_assignments import app_tasks
+    return app_tasks(row.manifest_json)
 
 
 def _get_app_or_404(db: Session, app_id: str) -> InstalledApp:
@@ -494,8 +799,48 @@ async def list_apps(
     catalog to relay installed apps as conversational skills. Read only;
     see :func:`get_read_principal`.
     """
+    from sqlalchemy import func
+
+    from models import Camera, SkillAssignment
+    from services.skill_assignments import APP_CONSUMER_PREFIX
+
     rows = db.query(InstalledApp).order_by(InstalledApp.id).all()
-    return [_serialize_app(row) for row in rows]
+    # How many live cameras each app picked, in one query — so a card
+    # can say "No cameras picked" without a request per app.
+    picked_counts = dict(
+        db.query(SkillAssignment.consumer, func.count(func.distinct(SkillAssignment.camera_id)))
+        .join(Camera, Camera.id == SkillAssignment.camera_id)
+        .filter(SkillAssignment.consumer.like(f"{APP_CONSUMER_PREFIX}%"),
+                Camera.deleted_at.is_(None))
+        .group_by(SkillAssignment.consumer)
+        .all()
+    )
+    out = []
+    for row in rows:
+        item = _serialize_app(row)
+        item["picked_cameras"] = int(picked_counts.get(f"{APP_CONSUMER_PREFIX}{row.id}", 0))
+        out.append(item)
+    return out
+
+
+@router.get("/bus")
+async def get_apps_bus(
+    current_user: User = Depends(get_current_active_user),
+):
+    """The apps bus and its leaf link to the platform bus, as core last
+    saw it (``services/apps_bus_watch.py``). ``linked: false`` for more
+    than the grace period is the "apps are up but alerts stopped"
+    condition; the inbox alert says the same thing."""
+    from core.config import settings
+    from services import apps_bus_watch
+
+    url = apps_bus_watch.monitor_url(settings.nats_apps_url, settings.nats_apps_monitor_url)
+    return {
+        "enabled": bool(settings.nats_apps_url),
+        "url": settings.nats_apps_url or None,
+        "monitor_url": url or None,
+        **apps_bus_watch.state(),
+    }
 
 
 @router.get("/index")
@@ -529,6 +874,8 @@ async def get_apps_index(
         )
 
     installed = {row.id: row for row in db.query(InstalledApp).all()}
+    from services.hardware_profile import describe, host_profile
+    host = host_profile()
 
     apps: list[dict[str, Any]] = []
     for entry in entries:
@@ -540,14 +887,34 @@ async def get_apps_index(
                 "summary": entry.summary,
                 "category": entry.category,
                 "version": entry.version,
+                "kind": entry.kind,
                 "image": entry.image,
+                "external_url": entry.external_url,
+                "pricing": entry.pricing,
+                "price_note": entry.price_note,
+                "entitlement": entry.entitlement,
+                "author": entry.author,
+                "verified": entry.verified,
+                "featured": entry.featured,
+                "popularity": entry.popularity,
+                "screenshots": entry.screenshots,
+                "source": entry.source,
+                "license": entry.license,
+                "contact": entry.contact,
+                "network_egress": entry.network_egress,
+                # Signed: the one-click installer verifies a Sigstore
+                # signature from this identity before any pinned install.
+                "signed_by": _signed_by(entry),
                 "requires_tasks": entry.requires_tasks,
+                # Derived from the tasks, never declared: the bar those
+                # tasks set in tasks.yml and whether this box meets it.
+                "hardware": describe(list(entry.requires_tasks or []), host),
                 "emits": entry.emits,
                 "docs_url": entry.docs_url,
                 "install": {
                     "compose": entry.install.compose,
                     "command": entry.install.command,
-                },
+                } if entry.install is not None else None,
                 "installed": row is not None,
                 "enabled": bool(row.enabled) if row is not None else None,
             }
@@ -582,6 +949,8 @@ async def register_app(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Manifest is missing required fields: {', '.join(missing)}",
         )
+    # An app key registers only the app it was minted for.
+    _own_app_only(principal, str(manifest["id"]))
 
     url_error = validate_app_url(request.url)
     if url_error is not None:
@@ -599,31 +968,78 @@ async def register_app(
 
     row.name = str(manifest["name"])
     row.version = str(manifest["version"])
+    if request.sdk_version:
+        row.sdk_version = str(request.sdk_version)[:32]
     row.category = manifest.get("category")
     row.url = request.url.rstrip("/")
     row.manifest_json = manifest
     row.status = "registered"
     row.last_seen = datetime.now(UTC)
+    # An app the operator deployed is ON. ``enabled`` is now enforced —
+    # a disabled app gets no roster, so it reads no camera and does no
+    # work — which makes the flag the app is BORN with the difference
+    # between a stock install that works and one that silently does
+    # nothing until every app is toggled by hand. Presence is the
+    # intent; the operator's later Disable is theirs to keep, so this
+    # happens on FIRST registration only. A licensed app still has to
+    # clear its entitlement, exactly as the enable route requires.
+    if created:
+        allowed, _reason = may_enable(row)
+        row.enabled = bool(allowed)
+    # A manifest that gains (or changes) ``tier0_labels`` must reach the
+    # cameras picked BEFORE this version, or the upgrade silently changes
+    # nothing until every camera is unpicked and re-picked.
+    if not created:
+        from services.skill_assignments import sync_app_pick_labels
+
+        sync_app_pick_labels(db, app_id)
+    # An app that runs on all cameras (the agent) holds a platform pick on
+    # every live camera; a manifest that gains the flag reaches cameras
+    # that predate it the same way tier0_labels do.
+    from services.skill_assignments import (
+        reproject_app_cameras, sync_all_camera_picks,
+    )
+
+    sync_all_camera_picks(db, app_id)
+    # Skills follow the manifest: a version that gains or drops a task
+    # must reach the cameras already picked for it — sync_app_pick_labels
+    # above re-projects only when tier0_labels changed.
+    if not created:
+        reproject_app_cameras(db, app_id)
+    # Per-app credential: issued on first registration, and re-issued
+    # whenever the app registers with the SITE key (or a user) and says
+    # it holds no key of its own (a fresh container with no persisted
+    # key). An app presenting its own key keeps it. Audited below.
+    issued_key: str | None = None
+    if not isinstance(principal, AppPrincipal) and (
+            created or not row.api_key_hash or request.wants_key):
+        issued_key = issue_key(db, row)
     db.commit()
     db.refresh(row)
+    if issued_key is not None or created:
+        _sync_bus_users(db)
 
+    actor_user = principal if isinstance(principal, User) else None
+    registered_by = (
+        f"user:{principal.username}" if isinstance(principal, User)
+        else f"app:{principal.app_id}" if isinstance(principal, AppPrincipal)
+        else "service:internal-api-key"
+    )
     write_audit_log(
         db,
         action="app.register",
         # Service-key registrations have no user row; the actor is
         # recorded in details instead so the audit trail stays whole.
-        user_id=principal.id if principal is not None else None,
+        user_id=actor_user.id if actor_user is not None else None,
         entity_type="app",
         entity_id=app_id,
         details={
             "created": created,
             "url": row.url,
             "version": row.version,
-            "registered_by": (
-                f"user:{principal.username}"
-                if principal is not None
-                else "service:internal-api-key"
-            ),
+            "sdk_version": request.sdk_version,
+            "registered_by": registered_by,
+            "key_issued": issued_key is not None,
         },
     )
     # RFC-0002 Phase 5: event-scope grants. v1 policy is grant-on-
@@ -639,27 +1055,101 @@ async def register_app(
             write_audit_log(
                 db,
                 action="app.scope_granted",
-                user_id=principal.id if principal is not None else None,
+                user_id=actor_user.id if actor_user is not None else None,
                 entity_type="app",
                 entity_id=app_id,
                 details={"scope": scope.strip(), "policy": "grant-on-registration"},
             )
+    out = _serialize_app(row)
+    out["registry"] = _registry_info()
+    if issued_key is not None:
+        # The only time the key exists in the clear. The SDK persists it.
+        out["api_key"] = issued_key
+    return out
+
+
+def _sync_bus_users(db: Session) -> None:
+    """Re-render the apps-bus users file after a credential change.
+    Best effort: a failure is logged, never surfaced to the app."""
+    try:
+        from services.nats_users import write_users_conf
+
+        write_users_conf(db)
+    except Exception:  # noqa: BLE001
+        logger.exception("apps-bus users file not updated")
+
+
+def _registry_info() -> dict[str, Any]:
+    try:
+        from main import __version__ as server_version  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 — tests import the router alone
+        server_version = "unknown"
+    from core.config import settings
+
+    info: dict[str, Any] = {
+        "server_version": server_version,
+        "api_version": API_VERSION,
+        "min_sdk_version": MIN_SDK_VERSION,
+    }
+    # Where an app joins the event bus with ITS OWN key (user = app id,
+    # password = the key). Absent when the deployment has no apps bus
+    # yet; the SDK then falls back to the configured nats_url + token.
+    if settings.nats_apps_url:
+        info["bus"] = {"url": settings.nats_apps_url, "auth": "app_key"}
+    return info
+
+
+class OverlayToggle(BaseModel):
+    enabled: bool
+
+
+@router.put("/{app_id}/overlay")
+async def set_app_overlay(
+    app_id: str,
+    payload: OverlayToggle,
+    current_user: User = Depends(get_current_superuser),
+    db: Session = Depends(get_db),
+):
+    """Allow (or stop allowing) this app's ``overlay.boxes.v1`` events to
+    be drawn over the live video. Superuser: an app painting on every
+    operator's screen is a site decision. The app itself is untouched —
+    it keeps publishing; the bridge just stops forwarding."""
+    row = _get_app_or_404(db, app_id)
+    row.overlay_enabled = bool(payload.enabled)
+    db.commit()
+    logger.info("app overlay %s: %s by %s",
+                "enabled" if payload.enabled else "disabled",
+                app_id, current_user.username)
     return _serialize_app(row)
 
 
 @router.post("/{app_id}/enable")
 async def enable_app(
     app_id: str,
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_superuser),
     db: Session = Depends(get_db),
 ):
     """
     Enable an app. 404 if the app was never registered.
 
-    Requires authenticated user.
+    Superuser only — turning a site-wide app on is a site decision.
+    A licensed app (manifest ``entitlement: license_key``) also needs
+    a key the app has accepted — 402 otherwise, with the reason.
     """
     row = _get_app_or_404(db, app_id)
+    allowed, reason = may_enable(row)
+    if not allowed:
+        raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                            detail=f"Cannot enable '{app_id}': {reason}")
     row.enabled = True
+    # The picks this app holds count again: re-project the cameras it
+    # picked so the union — and every consumer reading it — sees the
+    # skill come back (#539). Picks were never dropped on Disable, so
+    # this restores the operator's selection exactly.
+    from services.skill_assignments import reproject_app_cameras
+
+    db.flush()
+    reproject_app_cameras(db, app_id)
     db.commit()
     db.refresh(row)
 
@@ -676,16 +1166,26 @@ async def enable_app(
 @router.post("/{app_id}/disable")
 async def disable_app(
     app_id: str,
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(get_current_superuser),
     db: Session = Depends(get_db),
 ):
     """
     Disable an app. 404 if the app was never registered.
 
-    Requires authenticated user.
+    Superuser only — turning a site-wide app off silences it for
+    every operator's cameras, not just the caller's.
     """
     row = _get_app_or_404(db, app_id)
     row.enabled = False
+    # A disabled app stops being a consumer: re-project its cameras so
+    # its picks drop out of the union (#539). Without this the app went
+    # quiet but the compute it switched on did not — a disabled ANPR
+    # kept buying plate OCR on every vehicle. The picks themselves stay,
+    # so Enable restores the selection.
+    from services.skill_assignments import reproject_app_cameras
+
+    db.flush()
+    reproject_app_cameras(db, app_id)
     db.commit()
     db.refresh(row)
 
@@ -718,11 +1218,161 @@ async def get_app_config(
     ``X-Internal-Api-Key``): the app itself is the intended service
     caller. Writes stay user-JWT-only (``PUT`` below).
     """
+    _own_app_only(principal, app_id)
     row = _get_app_or_404(db, app_id)
+
+    # HEARTBEAT. The SDK polls this endpoint every ~10s from the running
+    # app, which is the best liveness signal the platform has — and core
+    # was throwing it away, leaving `last_seen` frozen at boot and the
+    # skill badge reporting "no recent contact" (or a sticky "unreachable"
+    # from one failed probe) for an app that had been talking to us all
+    # along. Only an AppPrincipal for THIS app counts: the site's internal
+    # key is held by companion services too, and their polling says
+    # nothing about whether the app is alive.
+    if isinstance(principal, AppPrincipal) and principal.app_id == app_id:
+        now = datetime.now(UTC)
+        prev = row.last_seen
+        if prev is not None and prev.tzinfo is None:
+            prev = prev.replace(tzinfo=UTC)
+        # Throttled: at a 10s poll this would otherwise commit on every
+        # request, per app, forever.
+        if prev is None or (now - prev) > APP_SEEN_WRITE_EVERY:
+            row.last_seen = now
+            db.commit()
+
+    config = row.config_json or {}
+    if isinstance(principal, User) and not principal.is_superuser:
+        # A user sees the site-wide settings (read-only for them) but
+        # only THEIR cameras' per-camera entries — a zone drawn on a
+        # camera they were never assigned is not theirs to look at.
+        from services.camera_scope import visible_camera_ids
+
+        config = _scope_per_camera_config(
+            row.manifest_json or {}, config,
+            visible_camera_ids(db, principal))
+    elif isinstance(principal, AppPrincipal):
+        # The app itself gets per-camera settings (zones, ROIs) only for
+        # the cameras picked for it. Stored entries for other cameras stay
+        # in the registry — a camera unpicked and picked again keeps its
+        # zone — but the app is never handed geometry for a camera it
+        # does not work on.
+        from services.skill_assignments import picked_camera_ids as _picked
+
+        config = _scope_per_camera_config(
+            row.manifest_json or {}, config, _picked(db, row.id))
+
+    # The cameras picked for this app. Riding the config poll is what
+    # lets a running app notice a pick within one poll: a pick changes no
+    # config key, so without this the app would only find out on its own
+    # roster refresh — or never.
+    from services.camera_scope import visible_camera_ids as _visible
+    from services.skill_assignments import picked_camera_ids
+
+    picked = picked_camera_ids(db, row.id)
+    if isinstance(principal, User) and not principal.is_superuser:
+        scope = _visible(db, principal)
+        if scope is not None:
+            picked &= scope
+    if isinstance(principal, AppPrincipal) and not row.enabled:
+        # What the app is allowed to read (``app_camera_ids``), said on
+        # the poll it already makes: a disabled app stops within one
+        # poll instead of running on until someone stops its container.
+        # The operator's own view keeps the selection — disabling an app
+        # must not lose the cameras it was pointed at.
+        picked = set()
     return {
         "id": row.id,
-        "config": row.config_json or {},
+        "config": config,
+        # The operator's switch, so the app can stop (and say why) rather
+        # than discover it through empty rosters and 404s.
+        "enabled": bool(row.enabled),
+        "cameras": sorted(picked),
         "updated_at": row.updated_at,
+        # The licence verdict rides the live config poll so the app can
+        # feature-gate itself (ContractMixin.entitlement).
+        "entitlement": entitlement_view(row),
+    }
+
+
+@router.get("/{app_id}/cameras")
+async def get_app_cameras(
+    app_id: str,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """The camera picker for one app: every camera the caller can see,
+    and whether this app has picked it.
+
+    Picks are written through the ordinary claim routes
+    (``PUT/DELETE /skills/{skill}/cameras/{camera_id}`` with
+    ``consumer``) — returned here as ``skill``/``consumer`` so the UI
+    never has to derive them. Those routes already require permission to
+    manage the camera, which is the rule for changing a pick; ``can_manage``
+    says so per camera so the picker can disable what the user can't
+    change instead of failing on click.
+
+    Each camera also carries what the picker shows beside it:
+    ``live_online`` (off the in-memory status tracker; ``None`` = paused
+    or not known yet) and ``used_by`` — the names of the OTHER installed
+    apps that picked it, so "will this clash?" is answered on the tile
+    (it never does: any number of apps may pick one camera).
+    """
+    from models import Camera, SkillAssignment
+    from services.camera_scope import manageable_camera_ids, visible_camera_ids
+    from services.camera_status_service import get_camera_status_service
+    from services.skill_assignments import (
+        APP_CONSUMER_PREFIX, app_consumer, app_pick_skill, picked_camera_ids,
+    )
+
+    row = _get_app_or_404(db, app_id)
+    visible = visible_camera_ids(db, current_user)
+    manageable = manageable_camera_ids(db, current_user)
+    picked = picked_camera_ids(db, row.id)
+
+    query = db.query(Camera).filter(Camera.deleted_at.is_(None))
+    if visible is not None:
+        query = query.filter(Camera.id.in_(visible or {-1}))
+    rows = query.order_by(Camera.name, Camera.id).all()
+    ids = [cam.id for cam in rows]
+
+    # One grouped read each, never per camera.
+    live = get_camera_status_service().snapshot(ids) if ids else {}
+    app_names = {a.id: a.name for a in db.query(InstalledApp.id, InstalledApp.name).all()}
+    used_by: dict[int, set[str]] = {}
+    if ids:
+        for camera_id, consumer in (
+            db.query(SkillAssignment.camera_id, SkillAssignment.consumer)
+            .filter(SkillAssignment.camera_id.in_(ids),
+                    SkillAssignment.consumer.like(f"{APP_CONSUMER_PREFIX}%"),
+                    SkillAssignment.consumer != app_consumer(row.id))
+            .all()
+        ):
+            other = consumer[len(APP_CONSUMER_PREFIX):]
+            if other in app_names:
+                used_by.setdefault(camera_id, set()).add(app_names[other] or other)
+
+    cameras = [
+        {
+            "id": cam.id,
+            "handle": f"cam{cam.id}",
+            "name": cam.name,
+            "location": cam.location,
+            "is_active": bool(cam.is_active),
+            "live_online": live.get(cam.id) if cam.is_active else None,
+            "picked": cam.id in picked,
+            "can_manage": manageable is None or cam.id in manageable,
+            "used_by": sorted(used_by.get(cam.id, ())),
+        }
+        for cam in rows
+    ]
+    return {
+        "app_id": row.id,
+        "skill": app_pick_skill(row.id),
+        "consumer": app_consumer(row.id),
+        "camera_picker": (row.manifest_json or {}).get("camera_picker", True) is not False,
+        "all_cameras": (row.manifest_json or {}).get("all_cameras") is True,
+        "skills": _app_tasks_of(row),
+        "cameras": cameras,
     }
 
 
@@ -745,10 +1395,28 @@ async def update_app_config(
     overwritten), so ``config_json`` is the effective config and the
     registry stays the single source of truth (spec §05).
 
-    Requires authenticated user.
+    Authorization: a superuser may change anything. Any other user may
+    change ONLY the ``per_camera`` entries (zones, tripwires, per-camera
+    limits) of cameras they can manage; a site-wide key or another
+    camera's entry arriving CHANGED is a 403, and entries for cameras
+    they cannot see (trimmed from their read) are preserved. The global
+    settings of an app (its watchlists, thresholds, alarm policy) are a
+    site decision, not a per-operator one.
     """
     row = _get_app_or_404(db, app_id)
     manifest = row.manifest_json or {}
+    if not current_user.is_superuser:
+        from services.camera_scope import manageable_camera_ids
+
+        config, denied = _merge_scoped_config(
+            manifest, row.config_json or {}, config,
+            manageable_camera_ids(db, current_user))
+        if denied:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=("Only a superuser can change "
+                        + ", ".join(denied)),
+            )
     errors = validate_app_config(manifest, config)
     if errors:
         raise HTTPException(
@@ -767,6 +1435,16 @@ async def update_app_config(
     row.config_json = effective
     db.commit()
     db.refresh(row)
+    if app_id == "license-plate-recognition":
+        # The plate scan policy reads this row (cached briefly); a save
+        # in the form should apply to the very next visit.
+        from services.plate_policy import forget_cached_config
+
+        forget_cached_config()
+    elif app_id == FOOTAGE_APP_ID:
+        # The enrichment backfill reads this row's "Backfill history"
+        # switch (cached briefly); a save should apply to the next pass.
+        forget_backfill_switch()
 
     write_audit_log(
         db,
@@ -835,9 +1513,33 @@ async def invoke_app_action(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid action params: {'; '.join(errors)}",
         )
+    # An action aimed at a camera (``camera_id`` / ``camera`` param —
+    # open THIS gate, clear THIS zone) is a control on that camera:
+    # the caller must be allowed to manage it. Actions with no camera
+    # target (enroll a face, search footage) stay open to any user.
+    if not current_user.is_superuser:
+        from services.camera_scope import (
+            camera_id_from_handle, manageable_camera_ids,
+        )
 
-    base_url = row.url.rstrip("/")
-    if validate_app_url(base_url) is not None:
+        unset = object()
+        scope = unset
+        for key in ("camera_id", "camera"):
+            target = params.get(key)
+            if target is None:
+                continue
+            cam_id = camera_id_from_handle(target)
+            if scope is unset:
+                scope = manageable_camera_ids(db, current_user)
+            # None = every camera: an API token whose owner is a superuser
+            # (the token itself is never one) and that has no allow-list.
+            if cam_id is None or (scope is not None and cam_id not in scope):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Not permitted to control this camera",
+                )
+
+    if validate_app_url(row.url.rstrip("/")) is not None:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="App URL is blocked by the registry's URL policy",
@@ -858,18 +1560,34 @@ async def invoke_app_action(
         },
     )
 
-    # The app's action surface is key-gated (the SDK requires the
-    # deployment token on its only write endpoint) — forward it. The
-    # JWT gate above remains the operator check; this key is transport
-    # auth between server and app.
-    from core.config import settings
+    return await call_app_action(db, row, action_name, params, current_user)
 
-    headers = (
-        {"X-Internal-Api-Key": settings.internal_api_key}
-        if settings.internal_api_key
-        else {}
-    )
-    async with httpx.AsyncClient(timeout=ACTION_PROXY_TIMEOUT_S) as client:
+
+async def call_app_action(db: Session, row: InstalledApp, action_name: str,
+                          params: dict[str, Any], current_user,
+                          *, timeout: float = ACTION_PROXY_TIMEOUT_S) -> Any:
+    """POST one action to the app's contract surface as ``current_user``
+    and return its JSON. The caller has already checked the declaration,
+    params, camera and audit (``invoke_app_action``; ``GET /search``'s
+    footage query). An app error or non-JSON answer is a 502."""
+    base_url = row.url.rstrip("/")
+    if validate_app_url(base_url) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="App URL is blocked by the registry's URL policy",
+        )
+    # Transport auth between core and the app: a per-app signed call
+    # token (SDK ≥ 0.6), and the site key only for apps too old to verify
+    # one (services/app_user_context.call_headers). The JWT gate above
+    # remains the operator check.
+    from services.app_user_context import call_headers, user_context_headers
+
+    headers = call_headers(row, purpose="action")
+    # Who is invoking, and which cameras they may see/manage — signed
+    # for this app (services/app_user_context.py) so it can render or
+    # refuse per user without a login of its own.
+    headers.update(user_context_headers(db, row, current_user, purpose="action"))
+    async with httpx.AsyncClient(timeout=timeout, verify=app_verify()) as client:
         try:
             resp = await client.post(
                 f"{base_url}/actions/{action_name}",
@@ -900,6 +1618,102 @@ async def invoke_app_action(
         )
 
 
+class LicenseIn(BaseModel):
+    license_key: str
+
+
+@router.put("/{app_id}/license")
+async def put_app_license(
+    app_id: str,
+    payload: LicenseIn,
+    current_user: User = Depends(get_current_superuser),
+    db: Session = Depends(get_db),
+):
+    """Store a licence key (encrypted, never returned) and ask the app
+    to verify it. Superuser only. Returns the verdict; enabling the app
+    is refused until it is ``valid``."""
+    row = _get_app_or_404(db, app_id)
+    key = payload.license_key.strip()
+    if not key or len(key) > 2000:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="license_key must be 1..2000 characters")
+    store_license_key(row, key)
+    db.commit()
+    view = await verify_with_app(row)
+    db.commit()
+    write_audit_log(db, action="app.license.set", user_id=current_user.id,
+                    entity_type="app", entity_id=app_id,
+                    details={"status": view["status"], "plan": view["plan"]})
+    return {"id": app_id, "entitlement": view}
+
+
+@router.post("/{app_id}/license/verify")
+async def verify_app_license(
+    app_id: str,
+    current_user: User = Depends(get_current_superuser),
+    db: Session = Depends(get_db),
+):
+    """Re-ask the app about the stored key (after a renewal, or when the
+    app was down when the key was entered)."""
+    row = _get_app_or_404(db, app_id)
+    view = await verify_with_app(row)
+    db.commit()
+    return {"id": app_id, "entitlement": view}
+
+
+@router.delete("/{app_id}/license")
+async def delete_app_license(
+    app_id: str,
+    current_user: User = Depends(get_current_superuser),
+    db: Session = Depends(get_db),
+):
+    """Forget the key. A licensed app that is enabled stays enabled
+    until it is next toggled — revoking a key is not an outage."""
+    row = _get_app_or_404(db, app_id)
+    store_license_key(row, None)
+    db.commit()
+    write_audit_log(db, action="app.license.clear", user_id=current_user.id,
+                    entity_type="app", entity_id=app_id)
+    return {"id": app_id, "entitlement": entitlement_view(row)}
+
+
+@router.post("/{app_id}/key/rotate")
+async def rotate_app_key(
+    app_id: str,
+    current_user: User = Depends(get_current_superuser),
+    db: Session = Depends(get_db),
+):
+    """Mint a NEW app key and return it once; the old one stops working
+    immediately. Superuser only. Hand the value to the app's operator
+    (``OPENNVR_APP_KEY``), or restart the app with the site key and it
+    asks for one itself (``wants_key``)."""
+    row = _get_app_or_404(db, app_id)
+    plain = issue_key(db, row)
+    db.commit()
+    _sync_bus_users(db)
+    write_audit_log(db, action="app.key.rotate", user_id=current_user.id,
+                    entity_type="app", entity_id=app_id)
+    return {"id": app_id, "api_key": plain,
+            "api_key_issued_at": row.api_key_issued_at}
+
+
+@router.delete("/{app_id}/key")
+async def revoke_app_key(
+    app_id: str,
+    current_user: User = Depends(get_current_superuser),
+    db: Session = Depends(get_db),
+):
+    """Revoke the app's key: it can no longer read its config, its
+    roster, or re-register with that key. Superuser only."""
+    row = _get_app_or_404(db, app_id)
+    revoke_key(row)
+    db.commit()
+    _sync_bus_users(db)
+    write_audit_log(db, action="app.key.revoke", user_id=current_user.id,
+                    entity_type="app", entity_id=app_id)
+    return {"id": app_id, "has_api_key": False}
+
+
 @router.get("/{app_id}/status")
 async def get_app_status(
     app_id: str,
@@ -923,6 +1737,7 @@ async def get_app_status(
     (``X-Internal-Api-Key``) — a service reads live app state to relay
     it; see :func:`get_read_principal`. Read only.
     """
+    _own_app_only(principal, app_id)
     row = _get_app_or_404(db, app_id)
     base_url = row.url.rstrip("/")
 
@@ -934,11 +1749,16 @@ async def get_app_status(
     health: dict[str, Any]
     state: Any = None
     reachable = False
-    async with httpx.AsyncClient(timeout=STATUS_PROBE_TIMEOUT_S) as client:
+    async with httpx.AsyncClient(timeout=STATUS_PROBE_TIMEOUT_S, verify=app_verify()) as client:
         try:
             health_resp = await client.get(f"{base_url}/health")
             health_resp.raise_for_status()
-            health = health_resp.json()
+            payload = health_resp.json()
+            # /health is contractually an object. An app that answers 200
+            # with a list or a bare scalar must not crash the probe (the
+            # dict access below would raise and 500 the whole endpoint) —
+            # keep the body for the operator under a key and carry on.
+            health = payload if isinstance(payload, dict) else {"body": payload}
             reachable = True
         except Exception:
             health = {"status": "unreachable"}
@@ -954,10 +1774,34 @@ async def get_app_status(
     # SDK /health reports `ready` (spec §03); tolerate its absence on
     # a 200 rather than flagging a healthy app unreachable.
     ready = reachable and bool(health.get("ready", True))
-    row.status = "ok" if ready else "unreachable"
+    # Three states, not two. "unreachable" is reserved for an app that
+    # did not answer at all — the catalog paints it red and the
+    # operator goes looking for a dead container. An app that answered
+    # and told us it cannot work is "degraded": amber, still running,
+    # and the reason is in `not_ready`. Collapsing the two would send
+    # somebody hunting a container that is perfectly alive.
+    row.status = "ok" if ready else ("degraded" if reachable else "unreachable")
+    # PUBLISH that verdict. The SDK's health_snapshot() speaks `ready`
+    # and never sets `status`, so a consumer reading health["status"] saw
+    # nothing for every SDK-built app and rendered it "unknown" — only
+    # hand-written apps (the camera-agent) that happen to emit a `status`
+    # string ever looked healthy, and the failure paths below are the
+    # only reason "unreachable" showed at all. Normalising here keeps ONE
+    # derivation of health: an app that sets its own `status` still wins.
+    if reachable and not isinstance(health.get("status"), str):
+        health["status"] = "ok" if ready else "degraded"
     if reachable:
         row.last_seen = datetime.now(UTC)
     db.commit()
+
+    if isinstance(principal, User) and not principal.is_superuser:
+        # Live state is per-camera data (occupancy per zone, the LPR
+        # review queue, each camera's last read): a user gets their
+        # cameras' slice. The service-key path (the agent) is scoped
+        # by its own roster, and a superuser sees the site.
+        from services.camera_scope import filter_app_state, visible_camera_ids
+
+        state = filter_app_state(state, visible_camera_ids(db, principal))
 
     return {"health": health, "state": state}
 
@@ -1018,6 +1862,14 @@ def _index_entry_or_404(app_id: str) -> IndexEntry:
         )
     for entry in entries:
         if entry.id == app_id:
+            if entry.kind != "installable":
+                # A link-out listing has no image and no compose service:
+                # nothing for the reconciler to apply.
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"App '{app_id}' is an external listing — install it "
+                           f"from {entry.external_url}",
+                )
             return entry
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
@@ -1160,7 +2012,13 @@ async def uninstall_app(
     reg = db.query(InstalledApp).filter(InstalledApp.id == app_id).first()
     if reg is not None:
         db.delete(reg)
-        db.commit()
+    # And its camera picks: nothing should keep running — or keep plate
+    # OCR switched on — for an app that is gone. A reinstall starts with
+    # nothing picked, like any fresh app.
+    from services.skill_assignments import release_app_picks
+
+    release_app_picks(db, app_id)
+    db.commit()
 
     write_audit_log(
         db,
@@ -1216,6 +2074,79 @@ async def get_install_status(
 UI_PROXY_MAX_BYTES = 1_000_000
 
 
+# ── Network egress ────────────────────────────────────────────────
+# Apps live on an internal network; the egress proxy asks core, per
+# connection, whether the calling app may open a host. Policy and the
+# denial memory live in services/app_egress.py.
+
+
+class EgressCheckIn(BaseModel):
+    client_ip: str
+    host: str
+    port: int = 443
+
+
+class EgressAllowIn(BaseModel):
+    allow: list[str] = []
+
+
+@router.post("/egress/check")
+async def egress_check(
+    payload: EgressCheckIn,
+    x_internal_api_key: str | None = Header(default=None, alias="X-Internal-Api-Key"),
+    db: Session = Depends(get_db),
+):
+    """The egress proxy's question — site key only. Answers
+    ``{allowed, app_id, reason}``; a denial is logged, counted and, once
+    per app and destination per hour, raised in the inbox."""
+    expected = _internal_api_key()
+    if not expected or not x_internal_api_key or not secrets.compare_digest(
+        x_internal_api_key, expected
+    ):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="invalid internal api key")
+    return app_egress.check(db, payload.client_ip, payload.host, payload.port)
+
+
+@router.get("/{app_id}/egress")
+async def get_app_egress(
+    app_id: str,
+    principal: User | None = Depends(get_read_principal),
+    db: Session = Depends(get_db),
+):
+    """Declared, allowed and enforced hosts, plus recent denials. Any
+    authenticated user, or the site key (the catalog reads it)."""
+    return egress_view(_get_app_or_404(db, app_id))
+
+
+@router.put("/{app_id}/egress")
+async def put_app_egress(
+    app_id: str,
+    payload: EgressAllowIn,
+    current_user: User = Depends(get_current_superuser),
+    db: Session = Depends(get_db),
+):
+    """Replace the operator's allow list for this install (superuser).
+    Host rules only: ``host``, ``*.domain``, an IPv4 address or CIDR,
+    optionally ``:port``."""
+    row = _get_app_or_404(db, app_id)
+    try:
+        allow = app_egress.validate_operator_rules(payload.allow)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=str(exc)) from exc
+    before = list(row.egress_allow or [])
+    row.egress_allow = allow
+    db.commit()
+    app_egress.clear_denials(app_id)
+    write_audit_log(
+        db, action="app.egress.allow", user_id=current_user.id,
+        entity_type="app", entity_id=app_id,
+        details={"before": before, "after": allow},
+    )
+    return egress_view(row)
+
+
 @router.get("/{app_id}/ui")
 async def get_app_ui(
     app_id: str,
@@ -1251,9 +2182,14 @@ async def get_app_ui(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="App URL is blocked by policy.",
         )
+    # The viewer's identity and camera scope travel with the request
+    # (signed for this app) so the page can be per-user.
+    from services.app_user_context import user_context_headers
+
+    headers = user_context_headers(db, row, current_user, purpose="ui")
     try:
-        async with httpx.AsyncClient(timeout=STATUS_PROBE_TIMEOUT_S) as client:
-            resp = await client.get(f"{base_url}/ui")
+        async with httpx.AsyncClient(timeout=STATUS_PROBE_TIMEOUT_S, verify=app_verify()) as client:
+            resp = await client.get(f"{base_url}/ui", headers=headers)
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,

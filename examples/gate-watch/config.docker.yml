@@ -1,0 +1,20 @@
+# Rendered to /app/config/config.yml by the config-init container.
+webhook_url: null
+nats_alerts_url: "nats://nats:4222"
+nats_alerts_token: "${INTERNAL_API_KEY}"
+poll_interval_seconds: 30
+open_seconds: 120
+cooldown_seconds: 600
+unsure_tolerance: 2
+look_timeout_seconds: 60   # how long one answer may take; a CPU look is several seconds
+vqa_adapter: ""
+question: "Is the gate in this picture open or closed? Answer with one word: open or closed."
+alert_severity: "medium"
+attach_snapshot: true
+cameras: []
+contract_port: 9214
+contract_bind_host: "0.0.0.0"
+contract_host: "gate-watch"   # the compose service name
+opennvr_url: "http://opennvr-core:8000"
+kaic_url: "http://opennvr-core:8100"
+kaic_api_key: "${INTERNAL_API_KEY}"

@@ -31,6 +31,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from .captime import capture_wall
 from .metrics import record_visit_dropped, record_visit_posted
 
 log = logging.getLogger("detect_pipeline.events")
@@ -55,6 +56,79 @@ class Visit:
     # which is NOT the DB id; core sends the real one separately as
     # ``open_nvr_camera_id``. None → derived from camera_id at post time.
     nvr_camera_id: int | None = None
+    # Multi-frame OCR: up to K plate-candidate crops (JPEG), most
+    # promising first. Core's enrichment sweeps these in order until a
+    # read clears the confidence floor — several diverse lottery
+    # tickets per car instead of one. Empty for non-vehicle visits and
+    # non-LPR cameras. Appended LAST (after nvr_camera_id, same rule
+    # that field followed) so existing POSITIONAL constructions keep
+    # their meaning.
+    candidate_jpegs: tuple = ()
+    # The WHOLE frame the best crop was taken from (JPEG). The visit's
+    # second evidence image: ``jpeg`` is the subject, this is the scene it
+    # was in. Already encoded by the tracker (eagerly, at best-frame update
+    # time — holding the pixels would be 6.2 MB per track), so there is
+    # nothing to do here but carry it. None when DETECT_SCENE_EVIDENCE is
+    # off or the tracker was never fed pixels. Appended LAST, same rule
+    # candidate_jpegs followed, so positional constructions keep meaning.
+    scene_jpeg: bytes | None = None
+    # Wall-clock capture time of each entry in ``candidate_jpegs``, same
+    # order. The read that wins core's consensus sweep takes its
+    # observed_at from here — the moment in the video the winning look
+    # came from, which is the only time on the row that provably belongs
+    # to the vehicle whose number was read. Empty (never partial) when
+    # the ring could not supply stamps. Appended LAST, same rule as
+    # above, so positional constructions keep meaning.
+    candidate_ts: tuple = ()
+    # Wall-clock capture time of the frame ``jpeg`` was cut from. When a
+    # visit ships no candidates — every visit on a camera without the LPR
+    # skill — core's sweep OCRs that evidence crop instead, and this is the
+    # only time that read can honestly carry. Appended LAST, same rule as
+    # above, so positional constructions keep meaning.
+    evidence_ts: float | None = None
+    # Where the object stood over the visit: the bottom-centre of its box,
+    # normalised 0..1 of the frame, at most PATH_MAX_POINTS evenly thinned.
+    # Core files the visit under the camera's zones from it (HA-109). Empty
+    # when frame size was unknown. Appended LAST, same rule as above.
+    path: tuple = ()
+    # Where ``jpeg`` came from and how good a look it was, for core's
+    # per-camera evidence quality (the escalation proposal): the stream
+    # the crop was cut from ("detect" = the sub-sized fallback, "main" =
+    # the keyframe path, "playback" = the recording), the smaller side of
+    # the subject's box on the detect frame in pixels, the detect frame's
+    # height, and the crop's time skew from the detect frame. None when
+    # the tracker did not record them. Appended LAST, same rule as above.
+    evidence_source: str | None = None
+    evidence_box_px: int | None = None
+    evidence_frame_px: int | None = None
+    evidence_skew_s: float | None = None
+    # The most people the detector had in frame at once while this visit
+    # was live, this one included — counted per frame over the confirmed
+    # tracks of the same label actually matched that frame. "Three
+    # people together" is a question the search can only answer from this:
+    # a caption may say "three men", a track never knows it had company
+    # (walk 13 on the Ventuno Q, 2026-11-06). 1 for a visit alone; None
+    # from a lifecycle that never saw the tracks (test doubles).
+    people_in_frame: int | None = None
+
+
+#: Most points kept per visit path. When a long visit fills it, every other
+#: point is dropped, so the path stays spread over the whole visit.
+PATH_MAX_POINTS = 32
+
+
+def foot_point(box, width, height) -> tuple[float, float] | None:
+    """Bottom-centre of a pixel box ``(x1, y1, x2, y2)``, normalised, or None."""
+    try:
+        w, h = float(width), float(height)
+        x1, y1, x2, y2 = (float(c) for c in box)
+    except (TypeError, ValueError):
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    x = min(1.0, max(0.0, (x1 + x2) / 2.0 / w))
+    y = min(1.0, max(0.0, y2 / h))
+    return (round(x, 4), round(y, 4))
 
 
 def _core_camera_id(v: Visit) -> int:
@@ -202,6 +276,35 @@ class VisitPoster:
         }
         if v.jpeg:
             body["evidence_jpeg_b64"] = base64.b64encode(v.jpeg).decode("ascii")
+            # Dates the crop above, and only it. Core uses this when the
+            # visit ships no candidates and its sweep reads that crop.
+            if v.evidence_ts is not None:
+                body["evidence_ts"] = float(v.evidence_ts)
+        if v.people_in_frame:
+            body["people_in_frame"] = int(v.people_in_frame)
+        if v.evidence_source:
+            body["evidence_source"] = str(v.evidence_source)
+        if v.evidence_box_px is not None:
+            body["evidence_box_px"] = int(v.evidence_box_px)
+        if v.evidence_frame_px is not None:
+            body["evidence_frame_px"] = int(v.evidence_frame_px)
+        if v.evidence_skew_s is not None:
+            body["evidence_skew_s"] = float(v.evidence_skew_s)
+        # Omitted entirely when absent (not sent as null), so a core that
+        # predates the field never sees a key it has no opinion about.
+        if v.scene_jpeg:
+            body["scene_jpeg_b64"] = base64.b64encode(v.scene_jpeg).decode("ascii")
+        if v.path:
+            body["path"] = [[x, y] for x, y in v.path]
+        if v.candidate_jpegs:
+            body["candidate_jpegs_b64"] = [
+                base64.b64encode(j).decode("ascii") for j in v.candidate_jpegs
+            ]
+            # Sent only when it lines up 1:1 with the crops: core zips the
+            # two, and a short list would hand a read someone else's
+            # timestamp. A missing list just means no observed_at.
+            if len(v.candidate_ts) == len(v.candidate_jpegs):
+                body["candidate_ts"] = [float(t) for t in v.candidate_ts]
         req = urllib.request.Request(
             f"{self.core_url}{EVENTS_PATH}",
             data=json.dumps(body).encode("utf-8"),
@@ -229,14 +332,19 @@ class VisitLifecycle:
         camera_id: str,
         *,
         nvr_camera_id: int | None = None,
-        min_duration_s: float = 1.0,
+        # A visit shorter than this (first to last sighting) is a flicker,
+        # not history. 1.5 s: the fragments a crowd produces last a second;
+        # a person crossing the frame takes longer on any sane camera.
+        min_duration_s: float = 1.5,
     ) -> None:
         self.camera_id = camera_id
         self.nvr_camera_id = nvr_camera_id
         self.min_duration_s = min_duration_s
         self._live: dict = {}
 
-    def observe(self, tracks, now_wall: float) -> list[Visit]:
+    def observe(self, tracks, now_wall: float, frame_size=None) -> list[Visit]:
+        """``frame_size`` is ``(width, height)`` of the frame the boxes are
+        in; without it visits carry no path (and get no zone tags)."""
         current = set()
         for tr in tracks:
             current.add(tr.id)
@@ -245,21 +353,84 @@ class VisitLifecycle:
                 v = self._live[tr.id] = {
                     "start": now_wall, "label": tr.label, "score": float(tr.score),
                     "stationary": False, "confirmed": False, "crop": None,
+                    "crop_ts": None, "ring": None, "scene": None, "path": [],
+                    "path_step": 1, "path_seen": 0,
+                    "crop_source": None, "crop_box_px": None, "crop_skew_s": None,
+                    "frame_px": None, "frames": 0, "group_frames": 0,
+                    "people_max": 0,
                 }
-            v["end"] = now_wall
+            # The visit ends when the object was LAST SEEN, not when its
+            # track finally expired: a track coasts for seconds after its
+            # last match, and a fragment the detector boxed for four frames
+            # in a crowd (a head, a sleeve) read as a six-second visit and
+            # sailed past min_duration_s (replayed on the Ventuno Q,
+            # 2026-11-05). Test doubles without the flag count every frame.
+            if getattr(tr, "matched_now", True):
+                v["end"] = now_wall
             v["label"] = tr.label
+            v["frames"] += 1
+            if getattr(tr, "matched_now", True) and getattr(tr, "confirmed", False):
+                v["people_max"] = max(v["people_max"], sum(
+                    1 for o in tracks
+                    if o.label == tr.label and getattr(o, "confirmed", False)
+                    and getattr(o, "matched_now", True)))
+            if getattr(tr, "group_now", False):
+                v["group_frames"] += 1
+            ring = getattr(tr, "plate_ring", None)
+            if ring is not None:
+                v["ring"] = ring
             v["score"] = max(v["score"], float(tr.score))
             v["stationary"] = bool(getattr(tr, "stationary", False))
             v["confirmed"] = v["confirmed"] or bool(getattr(tr, "confirmed", False))
             crop = getattr(tr, "best_crop", None)
             if crop is not None:
                 v["crop"] = crop
+                # Kept in lockstep with the crop: a stamp from an older
+                # best frame would date the read by a look it did not
+                # come from. getattr default, like best_crop itself —
+                # test doubles and older trackers lack the field.
+                v["crop_ts"] = getattr(tr, "best_crop_ts", None)
+                # The crop's provenance and the look's size, in lockstep
+                # with the crop for the same reason as the stamp.
+                v["crop_source"] = getattr(tr, "best_crop_source", None)
+                v["crop_skew_s"] = getattr(tr, "best_crop_skew_s", None)
+                best = getattr(tr, "best", None)
+                bbox = getattr(best, "box", None)
+                v["crop_box_px"] = (int(max(0, min(bbox[2] - bbox[0], bbox[3] - bbox[1])))
+                                    if bbox is not None else None)
+            if frame_size is not None:
+                v["frame_px"] = int(frame_size[1])
+            # getattr with a default, like best_crop above: test doubles and
+            # any older tracker simply do not carry the field.
+            scene = getattr(tr, "best_scene_jpeg", None)
+            if scene is not None:
+                v["scene"] = scene
+            if frame_size is not None:
+                self._add_path_point(v, getattr(tr, "box", None), frame_size)
         finished = []
         for tid in [t for t in self._live if t not in current]:
             visit = self._finish(tid, self._live.pop(tid))
             if visit is not None:
                 finished.append(visit)
         return finished
+
+    @staticmethod
+    def _add_path_point(v: dict, box, frame_size) -> None:
+        """Keep every ``path_step``-th point; when the path is full, drop
+        every other point and double the step, so a visit of any length
+        ends up as at most PATH_MAX_POINTS points spread over all of it."""
+        if box is None:
+            return
+        pt = foot_point(box, *frame_size)
+        if pt is None:
+            return
+        v["path_seen"] += 1
+        if (v["path_seen"] - 1) % v["path_step"]:
+            return
+        v["path"].append(pt)
+        if len(v["path"]) > PATH_MAX_POINTS:
+            v["path"] = v["path"][::2]
+            v["path_step"] *= 2
 
     def flush(self) -> list[Visit]:
         """Finish everything still live (worker stopping)."""
@@ -279,6 +450,12 @@ class VisitLifecycle:
             # it is NOT the junk-suppression rail — min_duration_s below is.
             record_visit_dropped(self.camera_id, "unconfirmed")
             return None
+        if v.get("frames", 0) and v.get("group_frames", 0) * 2 > v["frames"]:
+            # The track followed a box the detector drew around a group of
+            # people, each tracked on their own: not a visit, a duplicate
+            # of several.
+            record_visit_dropped(self.camera_id, "group")
+            return None
         if (end - v["start"]) < self.min_duration_s:
             # Junk suppression is deliberate, but it was previously invisible:
             # there was no way to tell "nothing happened" from "the floor is
@@ -295,6 +472,30 @@ class VisitLifecycle:
                 jpeg = _encode_jpeg(crop)
             except Exception:
                 jpeg = None  # a visit without a photo still beats no history
+        candidate_jpegs: list[bytes] = []
+        candidate_ts: list[float] = []
+        ring = v.get("ring")
+        if ring is not None:
+            try:
+                from .bestframe import _encode_jpeg
+
+                for cand in ring.ranked():
+                    encoded = _encode_jpeg(cand.crop)
+                    if encoded:
+                        candidate_jpegs.append(encoded)
+                        # Monotonic on the ring (the tracker's clock) —
+                        # converted here, while the reading is fresh, so
+                        # the age it is measured against is the encode,
+                        # not core's ingest.
+                        candidate_ts.append(capture_wall(cand.ts))
+            except Exception:
+                # Candidates are an enhancement; the visit itself (and its
+                # single-crop enrichment fallback) must never be lost to a
+                # bad encode.
+                candidate_jpegs = candidate_jpegs or []
+                # Never ship a partial stamp list — see _post.
+                if len(candidate_ts) != len(candidate_jpegs):
+                    candidate_ts = []
         return Visit(
             camera_id=self.camera_id,
             nvr_camera_id=self.nvr_camera_id,
@@ -305,4 +506,22 @@ class VisitLifecycle:
             ended_at=datetime.fromtimestamp(end, tz=timezone.utc),
             stationary=v["stationary"],
             jpeg=jpeg,
+            candidate_jpegs=tuple(candidate_jpegs),
+            candidate_ts=tuple(candidate_ts),
+            # Converted here, like the candidate stamps: the age measured
+            # is this call, not core's ingest. None when the tracker never
+            # recorded one (older tracker, or a visit with no crop).
+            evidence_ts=(capture_wall(v["crop_ts"])
+                         if jpeg is not None and v.get("crop_ts") is not None
+                         else None),
+            # Already bytes — deliberately NOT re-encoded here (unlike crop
+            # and the candidates, which arrive as pixels).
+            scene_jpeg=v.get("scene"),
+            path=tuple(v.get("path") or ()),
+            evidence_source=(str(v["crop_source"]) if jpeg is not None and v.get("crop_source") else None),
+            evidence_box_px=(v.get("crop_box_px") if jpeg is not None else None),
+            evidence_frame_px=v.get("frame_px"),
+            evidence_skew_s=(float(v["crop_skew_s"])
+                             if jpeg is not None and v.get("crop_skew_s") is not None else None),
+            people_in_frame=(v.get("people_max") or None),
         )

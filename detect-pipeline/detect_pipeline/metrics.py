@@ -14,6 +14,8 @@ pipeline/gate core stays metric-free and unit-testable. Names follow
     tier0_frames_total{camera}                         counter
     tier0_detector_runs_total{camera}                  counter
     tier0_detector_skipped_total{camera,reason}        counter  reason=calibrating|no_motion
+    tier0_motion_forced_exits_total{camera}            counter
+    tier0_motion_latched_open{camera}                  gauge
     tier0_tracks_active{camera}                        gauge
     tier0_events_published_total{camera}               counter
     gate_escalations_total{camera,reason}              counter
@@ -21,6 +23,7 @@ pipeline/gate core stays metric-free and unit-testable. Names follow
     gate_shadow_would_suppress_total{camera}           counter
     tier0_frame_latency_seconds{camera}                histogram
     tier0_decode_config{camera,skip,threads,fast,hwaccel,idle}  info (always 1)
+    tier0_detector_backend{backend,requested,effective}  info (always 1)
 
 Derived KPIs (compute in Prometheus/Grafana or the benchmark harness):
 motion-gate ratio = skipped / (runs + skipped); expensive-call reduction =
@@ -37,6 +40,8 @@ from collections import defaultdict
 log = logging.getLogger("detect_pipeline.metrics")
 
 _BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0)
+#: For scores in [0, 1] (the evidence match score): tenths.
+SCORE_BUCKETS = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
 
 
 def _escape(v: str) -> str:
@@ -76,16 +81,19 @@ class Metrics:
         with self._lock:
             self._gauges[self._key(name, labels)] = value
 
-    def observe(self, name: str, value: float, labels: dict | None = None) -> None:
+    def observe(self, name: str, value: float, labels: dict | None = None,
+                buckets: tuple = _BUCKETS) -> None:
+        """``buckets`` fixes a histogram's bucket set on its first observe
+        (seconds by default; SCORE_BUCKETS for a [0, 1] score)."""
         k = self._key(name, labels)
         with self._lock:
             h = self._hist.get(k)
             if h is None:
-                h = {"buckets": {b: 0.0 for b in _BUCKETS}, "sum": 0.0, "count": 0.0}
+                h = {"buckets": {b: 0.0 for b in buckets}, "sum": 0.0, "count": 0.0}
                 self._hist[k] = h
             h["sum"] += value
             h["count"] += 1.0
-            for b in _BUCKETS:                    # cumulative le-buckets
+            for b in h["buckets"]:                # cumulative le-buckets
                 if value <= b:
                     h["buckets"][b] += 1.0
 
@@ -168,7 +176,7 @@ class Metrics:
         for (name, labels), h in hists:
             typ(name, "histogram")
             base = dict(labels)
-            for b in _BUCKETS:
+            for b in sorted(h["buckets"]):
                 bl = dict(base, le=str(b))
                 lines.append(f"{name}_bucket{_labels_str(bl)} {_fmt(h['buckets'][b])}")
             lines.append(f"{name}_bucket{_labels_str(dict(base, le='+Inf'))} {_fmt(h['count'])}")
@@ -222,6 +230,27 @@ def record_frame(
     # Bounded-load guards (#track-explosion) — never cap silently:
     if getattr(result, "regions_capped", False):
         metrics.inc("tier0_regions_capped_total", cam)
+    # Object masks (masks.py): detections dropped for standing inside one.
+    # Counted so a mask that swallows real objects is visible, not silent.
+    masked = int(getattr(result, "masked_detections", 0) or 0)
+    if masked:
+        metrics.inc("tier0_object_masked_total", cam, value=float(masked))
+    # Per-label size/shape/score filters (tuning.py): same rule, never silent.
+    filtered = int(getattr(result, "filtered_detections", 0) or 0)
+    if filtered:
+        metrics.inc("tier0_object_filtered_total", cam, value=float(filtered))
+    # Motion gate: the #373 deadline firing is the signal that the gate
+    # cannot model this scene. It used to be invisible — the repeat WARN
+    # is demoted to debug, so a gate feeding the detector 1.5% of frames
+    # looked exactly like a quiet camera. The counter is incremented on
+    # the per-frame EDGE; the gauge says the gate has latched open.
+    if getattr(result, "motion_forced_exit", False):
+        metrics.inc("tier0_motion_forced_exits_total", cam)
+    metrics.gauge(
+        "tier0_motion_latched_open",
+        1.0 if getattr(result, "motion_latched_open", False) else 0.0,
+        cam,
+    )
     skipped = int(getattr(result, "skipped_stationary", 0) or 0)
     if skipped:
         metrics.inc("tier0_stationary_skipped_total", cam, value=float(skipped))
@@ -303,6 +332,94 @@ def sample_frame_age_metrics(now: float | None = None) -> None:
     """
     for cam, age in frame_ages_s(now).items():
         metrics.gauge("tier0_frame_age_seconds", age, {"camera": cam})
+
+
+def record_evidence(camera_id: str, active: bool, stats: dict, *,
+                    frames: int = 0, starts: int = 0, mismatches: int = 0,
+                    gop_s: float | None = None,
+                    keyframes_only: bool | None = None,
+                    refusals: dict | None = None,
+                    samples: list | None = None) -> None:
+    """Main-stream evidence (evidence.py): whether the camera's main decode
+    is running right now, how many best-crop updates were cut from which
+    stream, and how many main frames it has read. The split by source is
+    the number a quality study reads: evidence from "main" is full-res,
+    evidence from "detect" is the sub-sized fallback (no main frame close
+    enough in time, the main decode still starting — or, counted on its
+    own as ``mismatch``, a main frame that did not LOOK like the detect
+    frame inside the box: a keyframe too old for a moving subject, or a
+    sub-stream with a different field of view). ``gop_s`` is the keyframe
+    interval keyframe-only mode measured; ``keyframes_only`` whether the
+    camera is still on keyframes (0 = full decode, by dial or because the
+    GOP was too long)."""
+    metrics.gauge("tier0_evidence_active", 1.0 if active else 0.0, {"camera": camera_id})
+    for source in ("main", "detect", "playback"):
+        metrics.gauge("tier0_evidence_crops_total", float(stats.get(source, 0)),
+                      {"camera": camera_id, "source": source})
+    metrics.gauge("tier0_evidence_mismatch_total", float(mismatches), {"camera": camera_id})
+    metrics.gauge("tier0_evidence_frames_total", float(frames), {"camera": camera_id})
+    metrics.gauge("tier0_evidence_starts_total", float(starts), {"camera": camera_id})
+    if gop_s is not None:
+        metrics.gauge("tier0_evidence_gop_seconds", float(gop_s), {"camera": camera_id})
+    if keyframes_only is not None:
+        metrics.gauge("tier0_evidence_keyframes_only", 1.0 if keyframes_only else 0.0,
+                      {"camera": camera_id})
+    # The guard, measured: refusals by reason (a crop that did not look
+    # like the detect crop vs a blank main crop where the sub saw a
+    # subject), the score of every attempt (tenths) and how far in time the
+    # main frame used was from the detect frame. Together they say whether
+    # a camera's refusals are timing (skew high, score low on moving
+    # subjects) or geometry/exposure (score low at any skew).
+    for reason, n in (refusals or {}).items():
+        metrics.gauge("tier0_evidence_refused_total", float(n),
+                      {"camera": camera_id, "reason": reason})
+    for sample in samples or ():
+        score, skew = sample[0], sample[1]
+        # A 7th element names the path ("keyframe" — the synchronous ring —
+        # or "playback", the recording); older samples are the keyframe path.
+        source = sample[6] if len(sample) > 6 else "keyframe"
+        labels = {"camera": camera_id, "source": source}
+        if score is not None:
+            metrics.observe("tier0_evidence_match_score", max(0.0, min(1.0, float(score))),
+                            labels, buckets=SCORE_BUCKETS)
+        if skew is not None:
+            metrics.observe("tier0_evidence_skew_seconds", float(skew), labels)
+
+
+def record_playback_evidence(camera_id: str, pb, held: int = 0, patched: int = 0, late: int = 0,
+                             expired: int = 0) -> None:
+    """Evidence fetched from the recording (playback.py): requests filed,
+    outcomes, what the fetches and decodes cost, and visits currently held
+    for a pending result."""
+    cam = {"camera": camera_id}
+    metrics.gauge("tier0_evidence_fetch_requests_total", float(pb.requests), cam)
+    metrics.gauge("tier0_evidence_fetch_dropped_total", float(pb.dropped), cam)
+    for outcome, n in pb.outcomes.items():
+        metrics.gauge("tier0_evidence_fetch_total", float(n), {"camera": camera_id, "outcome": outcome})
+    metrics.gauge("tier0_evidence_fetch_seconds_total", float(pb.fetch_seconds), cam)
+    metrics.gauge("tier0_evidence_decode_seconds_total", float(pb.decode_seconds), cam)
+    metrics.gauge("tier0_evidence_visits_held", float(held), cam)
+    # Held visits that got their recording crop before posting, and accepted
+    # results that found neither a live track nor a held visit (the hold was
+    # too short, or the request waited too long): the two numbers that say
+    # whether DETECT_EVIDENCE_HOLD_S is right for this camera.
+    metrics.gauge("tier0_evidence_visits_patched_total", float(patched), cam)
+    metrics.gauge("tier0_evidence_results_late_total", float(late), cam)
+    metrics.gauge("tier0_evidence_visits_hold_expired_total", float(expired), cam)
+    metrics.gauge("tier0_evidence_stamp_lead_seconds", float(getattr(pb, "stamp_lead_s", 0.0)), cam)
+
+
+#: Why a camera detects on its MAIN stream, as the value of
+#: ``tier0_detect_on_main{camera}`` (0 = detecting on the sub stream). A
+#: value rather than a label so a camera whose reason changes on restart
+#: leaves no stale series behind.
+DETECT_ON_MAIN_REASONS = {"": 0, "policy": 1, "no_substream": 2, "sub_unreachable": 3, "sub_too_small": 4}
+
+
+def record_detect_stream(camera_id: str, stream: str, reason: str = "") -> None:
+    """Which stream this camera's worker detects on, and why when it is the main."""
+    code = DETECT_ON_MAIN_REASONS.get(reason, 1) if stream == "main" else 0
+    metrics.gauge("tier0_detect_on_main", float(code), {"camera": camera_id})
 
 
 def record_mainstream_fallback(camera_id: str, active: bool) -> None:
@@ -415,6 +532,31 @@ def record_decode_config(
     metrics.gauge("tier0_decode_config", 1.0, labels)
 
 
+def record_frames_idle_duplicates(camera_id: str, n: int) -> None:
+    """Frames skipped while the camera idled on keyframe-only decode: the
+    ``fps`` filter fills the rate with COPIES of each keyframe, and they
+    arrive in a burst when the next keyframe does; the worker takes the
+    newest and the copies are overwritten. Nothing was lost — the same
+    picture ran — so these are counted apart from drops and never raise
+    the capacity warning. On the Ventuno Q (2026-11-09) they read as a
+    28 % drop rate in idle minutes while the loop spent 280 ms per frame
+    waiting for the next one."""
+    if n > 0:
+        metrics.inc("tier0_frames_idle_duplicates_total", {"camera": camera_id}, float(n))
+
+
+def record_frames_dropped(camera_id: str, n: int) -> None:
+    """Decoded frames the detector never saw: the drain thread overwrote
+    them because detection was still busy with an older one (#507). Exact,
+    from the gaps in Frame.seq. A sustained rate near the camera's fps is
+    the capacity signal — the box cannot serve this camera at its
+    configured detector budget — and the worker WARNs on it; before the
+    drain was decoupled, the same condition dropped the RTSP session and
+    read as a flaky camera."""
+    if n > 0:
+        metrics.inc("tier0_frames_dropped_total", {"camera": camera_id}, float(n))
+
+
 def record_worker_restart(camera_id: str) -> None:
     """A source (ffmpeg) restart for this camera — repeated restarts = an unhealthy feed."""
     metrics.inc("tier0_worker_restarts_total", {"camera": camera_id})
@@ -427,6 +569,14 @@ def record_processing_fps(camera_id: str, fps: float) -> None:
 
 
 _proc_prev: dict[str, float | None] = {"cpu_s": None, "t": None}
+#: The CPU gauge is CPU time over the window since the previous sample. Two
+#: scrapers landing within a second of each other (the dashboard poll, the
+#: health check, an operator's curl) made windows of a few hundred
+#: milliseconds, and the process does its work in bursts of about 0.3 CPU-s
+#: per keyframe cycle: a window that caught one burst read 60 to 140 %
+#: (Ventuno Q, 2026-11-04/05) while the real load was 9 %. A window shorter
+#: than this keeps the previous reading and keeps accumulating.
+CPU_WINDOW_MIN_S = 2.0
 
 
 def sample_process_metrics(registry: Metrics | None = None) -> None:
@@ -435,6 +585,8 @@ def sample_process_metrics(registry: Metrics | None = None) -> None:
     Emitted so the OpenNVR app can show detect-pipeline CPU/RAM next to the AI
     adapters (which already export the same shape) and compare before/after
     enabling the gate. No dependency — reads /proc directly; a no-op off Linux.
+    The CPU figure is only recomputed over a window of at least
+    CPU_WINDOW_MIN_S, so coinciding scrapers cannot invent a spike.
     """
     reg = registry or metrics
     try:
@@ -447,16 +599,22 @@ def sample_process_metrics(registry: Metrics | None = None) -> None:
         return
     now = time.monotonic()
     reg.gauge("tier0_process_resident_memory_bytes", float(rss))
-    if _proc_prev["cpu_s"] is not None and now > _proc_prev["t"]:
-        pct = (cpu_s - _proc_prev["cpu_s"]) / (now - _proc_prev["t"]) * 100.0
+    if _proc_prev["cpu_s"] is not None:
+        elapsed = now - _proc_prev["t"]
+        if elapsed < CPU_WINDOW_MIN_S:
+            return                                   # too short a window: keep the last reading
+        pct = (cpu_s - _proc_prev["cpu_s"]) / elapsed * 100.0
         reg.gauge("tier0_process_cpu_percent", max(0.0, pct))
     _proc_prev["cpu_s"], _proc_prev["t"] = cpu_s, now
 
 
 def serve_metrics(port: int = 9109, *, registry: Metrics | None = None,
-                  best_frames=None, health_fn=None):  # pragma: no cover
+                  best_frames=None, health_fn=None, latest_frames=None):  # pragma: no cover
     """Start a background HTTP server exposing ``/metrics`` (and, when a
-    ``BestFrameStore`` is given, ``/best_frame?camera=&track=``). Best-effort."""
+    ``BestFrameStore`` is given, ``/best_frame?camera=&track=``; when a
+    ``LatestFrameStore`` is given, ``/latest_frame?camera=&max_age=`` — the
+    newest decoded frame as JPEG, 404 when none is fresher than ``max_age``
+    seconds, default 3). Best-effort."""
     import http.server
     import threading as _t
     from urllib.parse import parse_qs, urlparse
@@ -501,6 +659,25 @@ def serve_metrics(port: int = 9109, *, registry: Metrics | None = None,
                     return
                 self._send(200, jpeg, "image/jpeg")
                 return
+            if path == "/latest_frame" and latest_frames is not None:
+                q = parse_qs(parsed.query)
+                cam = (q.get("camera") or [""])[0]
+                try:
+                    max_age = float((q.get("max_age") or ["3"])[0])
+                except ValueError:
+                    max_age = 3.0
+                got = latest_frames.jpeg(cam, max_age) if cam else None
+                if got is None:
+                    self._send(404, b"no fresh frame")
+                    return
+                jpeg, age = got
+                self.send_response(200)
+                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Length", str(len(jpeg)))
+                self.send_header("X-Frame-Age-Seconds", f"{age:.2f}")
+                self.end_headers()
+                self.wfile.write(jpeg)
+                return
             self._send(404)
 
         def log_message(self, *a):  # silence access log
@@ -509,3 +686,44 @@ def serve_metrics(port: int = 9109, *, registry: Metrics | None = None,
     httpd = http.server.ThreadingHTTPServer(("0.0.0.0", port), _Handler)
     _t.Thread(target=httpd.serve_forever, name="tier0-metrics", daemon=True).start()
     return httpd
+
+
+def record_detector_backend(backend: str, requested: str, effective: str) -> None:
+    """Export what the Tier-0 detector ACTUALLY runs on.
+
+    The decode twin of this is ``tier0_decode_config``; this one answers "is
+    the detector on the NPU, or did OpenVINO quietly fall back to CPU?". ORT
+    drops a provider it cannot initialise and carries on silently, so
+    ``effective`` (from the live session) is the value that matters;
+    ``requested`` is kept beside it so the fallback is visible in one query:
+    ``tier0_detector_backend{requested!="",effective="CPUExecutionProvider"}``.
+    Human form, e.g. ``OpenVINOExecutionProvider(AUTO:NPU,GPU,CPU)``.
+    """
+    labels = {
+        "backend": str(backend or "unknown"),
+        "requested": str(requested or ""),
+        "effective": str(effective or ""),
+    }
+    metrics.drop_series("tier0_detector_backend", "backend", labels["backend"])
+    metrics.gauge("tier0_detector_backend", 1.0, labels)
+    last_detector_backend.update(labels)
+
+
+#: The labels the last ``record_detector_backend`` call exported, for a log
+#: line that must say what the detector runs on — the capacity warning: "18
+#: cameras over capacity" reads very differently with "on CPUExecutionProvider,
+#: QNNExecutionProvider(htp) requested" after it.
+last_detector_backend: dict[str, str] = {"backend": "", "requested": "", "effective": ""}
+
+
+def detector_backend_phrase() -> str:
+    """``on <effective>`` plus ``, <requested> requested`` when they differ —
+    empty before the first detector is built."""
+    eff, req = last_detector_backend.get("effective", ""), last_detector_backend.get("requested", "")
+    if not eff:
+        return ""
+    phrase = f"detector on {eff}"
+    wanted = req.split(",")[0].strip().split("(")[0]     # "QNNExecutionProvider(htp)" → the provider
+    if wanted and wanted != eff.split(",")[0].strip():
+        phrase += f" ({req} requested — not accelerated)"
+    return phrase

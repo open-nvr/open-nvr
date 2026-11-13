@@ -49,7 +49,8 @@ def _build_tools(ctx: CameraContext, *,
                  detection_response=None,
                  recognition_response=None,
                  best_frame_fetch=None,
-                 resolve_camera=None) -> CameraTools:
+                 resolve_camera=None,
+                 pipeline_camera=None) -> CameraTools:
     caption = AsyncMock()
     caption.infer.return_value = caption_response or {
         "result": {"caption": "a box on a doormat"}
@@ -69,10 +70,75 @@ def _build_tools(ctx: CameraContext, *,
         recognition_client=recognise,
         best_frame_fetch=best_frame_fetch,
         resolve_camera=resolve_camera,
+        pipeline_camera=pipeline_camera,
     )
 
 
 # ── describe_camera ────────────────────────────────────────────────
+@pytest.mark.asyncio
+async def test_describe_camera_asks_core_first_and_makes_no_call_of_its_own():
+    """RFC-0004 step 4: the plain look comes from core's shared
+    description; the caption client is not touched."""
+    ctx = _ctx_with_camera()
+    tools = _build_tools(ctx)
+    asked: list[tuple[str, float]] = []
+
+    async def _core(camera_id, max_age_s):
+        asked.append((camera_id, max_age_s))
+        return {"text": "A man in a red shirt at the gate.", "source": "visit", "model_called": False}
+
+    tools._description_fetch = _core
+    result = await tools.describe_camera({"camera_id": "front-porch"})
+    assert "front-porch" in result and "A man in a red shirt at the gate" in result
+    assert asked == [("front-porch", tools._DESCRIPTION_MAX_AGE_S)]
+    tools._caption.infer.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_stale_core_answer_is_given_with_its_age_not_as_now():
+    ctx = _ctx_with_camera()
+    tools = _build_tools(ctx)
+
+    async def _core(camera_id, max_age_s):
+        return {"text": "A parked car.", "source": "stale", "age_s": 95.0,
+                "reason": "no fresh frame from the camera", "model_called": False}
+
+    tools._description_fetch = _core
+    result = await tools.describe_camera({"camera_id": "front-porch"})
+    assert "as of 95 s ago" in result and "no fresh frame from the camera" in result
+    assert "A parked car" in result
+    tools._caption.infer.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_when_core_does_not_answer_the_tool_takes_its_own_look():
+    ctx = _ctx_with_camera()
+    tools = _build_tools(ctx)
+
+    async def _core(camera_id, max_age_s):
+        return None
+
+    tools._description_fetch = _core
+    result = await tools.describe_camera({"camera_id": "front-porch"})
+    assert "box on a doormat" in result
+    tools._caption.infer.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_a_question_still_goes_to_the_vision_model():
+    ctx = _ctx_with_camera()
+    tools = _build_tools(ctx, caption_response={"result": {"answer": "two"}})
+    calls: list = []
+
+    async def _core(camera_id, max_age_s):
+        calls.append(camera_id)
+        return {"text": "ignored", "source": "visit"}
+
+    tools._description_fetch = _core
+    result = await tools.describe_camera({"camera_id": "front-porch", "question": "how many people?"})
+    assert "two" in result and calls == []
+
+
 
 
 @pytest.mark.asyncio
@@ -323,11 +389,13 @@ async def test_camera_snapshot_reports_when_no_tier0_data():
 
 @pytest.mark.asyncio
 async def test_camera_snapshot_resolves_agent_camera_to_pipeline_id():
-    # The Tier-0 ring is keyed by the pipeline camera id ("3"); the tool is called
-    # with the agent id ("front-porch"). Without the resolver they'd never match.
+    # The Tier-0 ring is keyed by the pipeline camera id ("cam3"); the tool is
+    # called with the agent id ("front-porch"). Without the pipeline resolver
+    # they'd never match — and the SERVER id resolver is the wrong one here
+    # (the pipeline says cam3, the platform says 3).
     ctx = _ctx_with_camera()
-    _record_tier0(ctx, "3", ["person"])                 # ring keyed by pipeline id
-    tools = _build_tools(ctx, resolve_camera=lambda c: "3")
+    _record_tier0(ctx, "cam3", ["person"])              # ring keyed by pipeline id
+    tools = _build_tools(ctx, resolve_camera=lambda c: "3", pipeline_camera=lambda c: "cam3")
     out = await tools.camera_snapshot({"camera_id": "front-porch"})
     assert "a person" in out
 
@@ -474,6 +542,9 @@ def test_search_history_reports_visits_and_names(anyio_backend=None):
     out = asyncio.run(tools.search_history({
         "label": "person",
         "start_time": "2026-08-12T15:00", "end_time": "2026-08-12T16:00",
+        # Face-matching is opt-in now — a recognition call per photo is the
+        # wrong price for "did anyone come"; this test asks WHO.
+        "identify_faces": True,
     }))
     assert "2 person visit(s)" in out
     assert "photo kept" in out          # times are spoken in LOCAL tz (host-dependent)
@@ -630,3 +701,247 @@ def test_a_broken_ring_never_breaks_the_history_answer(anyio_backend=None):
     tools._ctx.recent_events = boom
     out = asyncio.run(tools.search_history({"label": "person"}))
     assert "1 person visit(s)" in out
+
+
+# ── "Did you see a BLUE car" ─────────────────────────────────────────
+#
+# search_history could filter by label, time, camera and plate and
+# nothing else. Asked about a blue car it searched for cars, dropped
+# `blue` before the query was built, and narrated whatever came back —
+# so an operator asking the same question three times got three
+# confident answers to a question they had not asked. The capability
+# existed in the platform's own search the whole time.
+
+
+class _OldEventsClient:
+    """An app SDK from before the attribute filter.
+
+    Explicit parameters and no ``**kwargs``, which is the shape the
+    capability probe has to recognise — passing ``attrs`` to this would
+    raise, and silently not passing it would answer the wrong question.
+    """
+
+    def __init__(self, events):
+        self._events = events
+        self.searches = []
+
+    async def search(self, *, label=None, camera_id=None, plate=None,
+                     start=None, end=None, limit=50):
+        self.searches.append(
+            dict(label=label, camera_id=camera_id, plate=plate,
+                 start=start, end=end, limit=limit))
+        return self._events
+
+    async def evidence(self, event_id):
+        return None
+
+
+def test_the_attribute_reaches_the_query(anyio_backend=None):
+    import asyncio
+    ec = _FakeEventsClient([_FakeEvent(1, label="car")])
+    tools = _history_tools(ec)
+
+    out = asyncio.run(tools.search_history(
+        {"label": "car", "attr": ["blue"]}))
+
+    assert ec.searches[0]["attrs"] == ["blue"], (
+        "the attribute was dropped before the query — the bug")
+    assert "blue" in out, (
+        "the answer must say what it filtered on, so an operator can see "
+        "the question was understood")
+
+
+def test_an_sdk_that_cannot_filter_says_so_rather_than_guessing(
+        anyio_backend=None):
+    """The failure this whole change is about, one layer down.
+
+    An older SDK cannot carry `attrs`. Dropping it and answering anyway
+    would return every car to someone who asked about a blue one —
+    the original bug, relocated. A limitation an operator can read beats
+    a confident answer to a question nobody asked.
+    """
+    import asyncio
+    ec = _OldEventsClient([_FakeEvent(1, label="car"), _FakeEvent(2, label="car")])
+    tools = _history_tools(ec)
+
+    out = asyncio.run(tools.search_history(
+        {"label": "car", "attr": ["blue"]}))
+
+    assert ec.searches == [], "it must not run the unfiltered query at all"
+    assert "blue" in out
+    assert "can't filter" in out.lower() or "older" in out.lower()
+    assert "I remember" not in out, "no answer may be narrated"
+
+
+def test_an_old_sdk_still_answers_questions_it_can_answer(anyio_backend=None):
+    """The probe must gate the attribute, not the tool."""
+    import asyncio
+    ec = _OldEventsClient([_FakeEvent(1, label="car")])
+    tools = _history_tools(ec)
+
+    out = asyncio.run(tools.search_history({"label": "car"}))
+
+    assert ec.searches and ec.searches[0]["label"] == "car"
+    assert "I remember" in out
+
+
+def test_no_match_on_an_attribute_says_which_kind_of_empty(anyio_backend=None):
+    """"No blue cars" and "nothing looked at what colour they were" are
+    opposite answers behind an identical empty list, and only one of
+    them is an answer."""
+    import asyncio
+    ec = _FakeEventsClient([])
+    tools = _history_tools(ec)
+
+    out = asyncio.run(tools.search_history(
+        {"label": "car", "attr": ["blue"]}))
+
+    assert "blue" in out
+    assert "described" in out.lower(), (
+        "an empty attribute search must name the condition it depends on "
+        "— that something looked at the visit at all")
+
+
+def test_the_tool_schema_advertises_the_attribute(anyio_backend=None):
+    """A parameter the model cannot see is a parameter that does not
+    exist: the bug was a missing slot, not a bad prompt."""
+    import json
+
+    defs = build_tool_definitions(["cam1"])
+    spec = next(t for t in defs
+                if t["function"]["name"] == "search_history")
+    props = spec["function"]["parameters"]["properties"]
+
+    assert "attr" in props
+    assert props["attr"]["type"] == "array"
+    assert "blue" in json.dumps(props["attr"]).lower()
+
+
+def test_the_schema_tells_the_model_a_name_is_askable(anyio_backend=None):
+    """"Was Varun here yesterday?" is answerable and the model has to
+    know it.
+
+    face_id IS written — smart-doorbell claims it through
+    /internal/app/visits/claims — and it is deliberately kept OUT of
+    free text, so a name will never be found by searching words. The
+    only route is the attr filter. A model that has not been told that
+    will reach for describe_camera and narrate the live view, which is
+    the behaviour this whole thread started from.
+    """
+    defs = build_tool_definitions(["cam1"])
+    spec = next(t for t in defs if t["function"]["name"] == "search_history")
+    desc = spec["function"]["parameters"]["properties"]["attr"]["description"].lower()
+
+    assert "name" in desc, "the schema never mentions that a person's name is a filter"
+    assert "list_people" in desc, (
+        "the model needs pointing at the roster — a misspelled name matches "
+        "nothing, and silently")
+
+
+def test_the_live_note_does_not_answer_an_attribute_question(anyio_backend=None):
+    """A car on camera is not evidence about a RED car question.
+
+    The field failure: "have you seen any red car in the last hour" came
+    back as "I see a car on cam1 right now, and it's still in progress."
+    Tier-0 emits a class and a box — it has never known colour — so the
+    live ring cannot speak to the part of the question that did the
+    narrowing, and saying "a car IS on cam1" in reply to it claims a
+    relevance it does not have. This is the same rule as the cat/person
+    test above, one level down.
+    """
+    import asyncio
+    tools = _history_tools(_FakeEventsClient([]))
+    tools._ctx.recent_events = (
+        lambda *, camera_id, window_seconds: [_RingEv([{"label": "car"}])])
+    out = asyncio.run(
+        tools.search_history({"label": "car", "attr": ["colour:red"]}))
+    assert "cannot tell whether it is" in out, out
+    assert "colour:red" in out
+
+
+def test_the_live_note_is_safe_to_quote_on_its_own(anyio_backend=None):
+    """The note is appended to an answer, and a small model summarising the
+    tool result can keep this sentence and drop the one before it — which
+    is what happened in the field. So the note must not mislead when it is
+    the only thing that survives: it says outright that it is not the
+    answer, and never asserts the attribute."""
+    import asyncio
+    tools = _history_tools(_FakeEventsClient([]))
+    tools._ctx.recent_events = (
+        lambda *, camera_id, window_seconds: [_RingEv([{"label": "car"}])])
+    out = asyncio.run(
+        tools.search_history({"label": "car", "attr": ["colour:red"]}))
+    note = out[out.index(" Separately"):]
+    assert "not an answer to that question" in note
+    # The dangerous reading: the note alone must never look like a yes.
+    assert "red car" not in note.lower()
+
+
+def test_an_unnarrowed_question_still_gets_the_plain_note(anyio_backend=None):
+    """The caveat is for attributes the ring cannot see. "Did any car come"
+    is a question the ring CAN speak to, and burying that in hedging would
+    cost the operator the thing the note exists to tell them."""
+    import asyncio
+    tools = _history_tools(_FakeEventsClient([]))
+    tools._ctx.recent_events = (
+        lambda *, camera_id, window_seconds: [_RingEv([{"label": "car"}])])
+    out = asyncio.run(tools.search_history({"label": "car"}))
+    assert "right now a car IS on" in out
+    assert "cannot tell whether" not in out
+
+
+def test_the_note_caveats_attributes_on_a_found_answer_too(anyio_backend=None):
+    """Not only on the empty branch. Visits WERE remembered, described as
+    red; a live undescribed car still cannot be called one of them."""
+    import asyncio
+    tools = _history_tools(_FakeEventsClient([_FakeEvent(1)], crops={}))
+    tools._ctx.recent_events = (
+        lambda *, camera_id, window_seconds: [_RingEv([{"label": "car"}])])
+    out = asyncio.run(
+        tools.search_history({"label": "car", "attr": ["colour:red"]}))
+    assert "1 car visit(s) described as colour:red" in out
+    assert "cannot tell whether it is colour:red" in out
+
+
+# ── detection de-duplication (mirrors Tier-0's NMS policy) ────────────
+
+def _det(label, x, y, w, h, conf):
+    return {"label": label, "confidence": conf, "bbox": {"x": x, "y": y, "w": w, "h": h}}
+
+
+def test_dedup_collapses_same_label_duplicates_keeping_the_strongest():
+    out = CameraTools._dedup_detections([
+        _det("person", 0.10, 0.10, 0.20, 0.40, 0.6),
+        _det("person", 0.11, 0.10, 0.20, 0.41, 0.9),
+    ])
+    assert [d["confidence"] for d in out] == [0.9]
+
+
+def test_dedup_collapses_one_object_labelled_two_ways():
+    out = CameraTools._dedup_detections([
+        _det("car", 0.10, 0.20, 0.30, 0.25, 0.9),
+        _det("truck", 0.11, 0.20, 0.30, 0.25, 0.7),   # near-identical box
+    ])
+    assert [d["label"] for d in out] == ["car"]
+
+
+def test_dedup_keeps_a_person_in_front_of_a_car():
+    out = CameraTools._dedup_detections([
+        _det("car", 0.0, 0.0, 0.5, 0.5, 0.9),
+        _det("person", 0.2, 0.1, 0.1, 0.4, 0.8),      # inside the car, low IoU
+    ])
+    assert sorted(d["label"] for d in out) == ["car", "person"]
+
+
+def test_dedup_cross_label_rule_can_be_disabled():
+    dets = [_det("car", 0.1, 0.2, 0.3, 0.25, 0.9), _det("truck", 0.11, 0.2, 0.3, 0.25, 0.7)]
+    assert len(CameraTools._dedup_detections(dets, cross_label_iou=None)) == 2
+
+
+def test_iou_reads_boxes_as_top_left_like_the_contract():
+    # Two boxes side by side, touching: IoU must be 0, not the ~0.33 a
+    # centre-form reading of these values used to give.
+    a = {"x": 0.0, "y": 0.0, "w": 0.2, "h": 0.2}
+    b = {"x": 0.2, "y": 0.0, "w": 0.2, "h": 0.2}
+    assert CameraTools._iou(a, b) == 0.0
+    assert CameraTools._iou(a, dict(a)) == 1.0

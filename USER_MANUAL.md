@@ -54,6 +54,36 @@ from.
    and reports back whether it can decode it.
 5. Click **Save**.
 
+**Adding many cameras at once (import):**
+
+**Cameras → Import** takes a CSV or Excel file. Download the template from
+the same dialog: its second sheet explains every column.
+
+- **One row per camera:** name, location, address, login, and the RTSP URL
+  (or leave the URL blank and OpenNVR finds it by ONVIF).
+- **One row per NVR or DVR:** fill in `channels` (`1-16`, `1,3,5-8`) and
+  `vendor` (`hikvision`, `uniview`, `dahua` or `cpplus`) and the row becomes
+  one camera per channel, named "<name> Ch 1", "Ch 2"…, each with that
+  channel's main stream and substream. For any other recorder, give an
+  `rtsp_url` with `{ch}` where the channel number goes.
+
+Before anything is saved, the import shows every row as New, Update
+(matches a camera already here), Unchanged, Duplicate (twice in the file)
+or Error, with the reason. Choose whether matched cameras are updated, then
+import: cameras are added a few at a time in the background, and the
+results can be downloaded at the end. Rows with errors are skipped, never
+the whole file. Importing the same file again changes nothing, a blank cell
+never changes a camera, and a camera left out of the file is not deleted.
+A camera you may not manage is refused. **Read each camera's details and
+set its clock** makes the import slower (seconds per camera) but fills in
+make and model straight away.
+
+**Cameras → Export** writes the cameras you manage, filtered as the list is
+(search, location, Active only), in the import file's columns, so an export
+can be edited and imported back. Passwords, and the logins inside RTSP URLs,
+are left out unless you tick **Include passwords**, which asks for your MFA
+code; every export is recorded in the audit log.
+
 **Per-camera settings worth visiting:**
 
 - **Recording → Retention** — days to keep recorded segments before
@@ -77,6 +107,97 @@ labels) render in real time when AI detection is enabled for that camera.
 WebRTC is the default transport. If the browser can't establish a WebRTC
 connection (corporate networks, restrictive firewalls), the player falls
 back to HLS — same content, ~3 second latency penalty.
+
+### Camera tours (display boards)
+
+A tour cycles a screen through sets of cameras, for example 20 North-zone
+cameras for a minute, then 20 South-zone cameras, then back to the start.
+Build tours under **Settings → More Settings → Camera Tours** (needs the
+`cameras.manage` permission); anyone with `live.view` can run one from the
+**Tours** button in Live View.
+
+- **Steps.** Each step is a layout, a list of cameras and how long to show
+  them (10 seconds to 1 hour). Plain grids such as 5×4 are offered next to
+  the Live View layouts, so a 20-camera wall needs no custom layout.
+- **More cameras than tiles.** A step pages through them, a full duration
+  per page: "North, all 60 cameras, 5×4" shows three pages of 20.
+- **Picking cameras.** The editor is a page of its own: steps on the left
+  (drag to reorder; the panel and its sections fold away), the selected step
+  on the right, split in two. On its left, pick cameras: search by name or
+  IP, filter by the camera's **Location** field, or add a whole location at
+  once. On its right, **Preview** lays each page out exactly as the wall
+  does, from still pictures: the layout you chose, every tile in its place,
+  and tiles without a camera left empty (numbered here, dark on the wall).
+  Drag a tile onto another to swap the two, ✕ to remove one (its tile is
+  left empty and no other camera moves; **Close gaps** packs them up again).
+  A camera ticked in the list fills the first
+  empty tile. To
+  put a camera on a particular tile, drag it from the list onto the tile, or
+  click the tile, then the camera. A camera already in the step moves there
+  instead of showing twice, and the editor says so. Pictures are stills; **▶** on any camera opens it live, only
+  when asked. Filling in each camera's Location (North, South, Branch 12…)
+  is what makes this quick.
+- **Checks while you edit.** The top bar always counts how many of your
+  cameras are on the tour, and the camera list marks each one that is **Not on
+  tour**. **Save tour** warns you if any are left out, but you can still save.
+  Each page shows how many of its tiles have cameras; empty tiles stay dark on
+  the wall.
+- **Fit or Fill.** Per tour: Fit shows each camera's whole picture; Fill
+  crops it to fill its tile, which suits portrait and fisheye cameras.
+- **Page changes.** **Load the next page in advance** (on by default) plays the
+  next page's cameras, hidden, for the last 5 seconds of a page, so they are
+  already playing when it shows; the display PC plays two pages for those
+  seconds. **When the page changes** is a short **Crossfade** (default) or a
+  straight **Cut**. A tile whose video has not started yet shows that
+  camera's last frame from this wall rather than a black tile.
+- **Who sees what.** Every viewer sees only the cameras they are allowed
+  to see; the bar says how many were left out. Changing or deleting a tour
+  needs the right to manage every camera in it; anyone else can run it.
+
+**Alarms on the wall.** Turn on **Interrupt the tour when an alarm happens** in a tour's
+settings and an alert on one of its cameras takes over the wall: the
+camera fills the screen with a red frame and a banner saying what happened
+and when, and up to four alarming cameras share the wall. After **Show
+each alarm for** (30 s by default) the tour carries on exactly where it was; **Back to
+tour** or **Esc** returns at once. Choose what counts — alerts from apps and
+camera analytics (with a lowest severity), the camera's own alarms
+(motion, tamper, line crossing), or both — and whether only the tour's
+cameras or any camera the screen can see may take over. **Same camera can interrupt again after** stops one busy camera from holding the wall.
+
+Running a tour on a display board:
+
+1. Copy the tour's **display link** from the Camera Tours page
+   (`https://<host>/display/tour/<id>`). It shows the wall alone, with no
+   sidebar or header. (Live View's **Tours** button opens the same tour
+   inside the app instead.)
+2. On the display PC, sign in with an account that only has `live.view`
+   and the cameras that board should show.
+3. Start the browser in kiosk mode, e.g.
+   `chrome --kiosk https://<host>/display/tour/<id>`. Kiosk mode makes the
+   browser window fill the screen with no address bar, and the display
+   link fills that window. Turn off the operating system's screen sleep.
+
+On the wall: a chip in the bottom corner always says what is on screen and
+what comes next ("North → South in 18 s"). **Space** pauses and resumes (a
+paused wall says so until it is resumed — moving the mouse never pauses
+it), **← / →** step, **F** toggles fullscreen, and clicking a tile shows
+that camera on its own until it is clicked again. Someone who may edit the
+tour can open the page on screen from the wall's bar (**Edit this page**). It
+opens in the same page editor the tour uses, with ‹ › to move between pages and
+**Edit whole tour** for everything else; saving or cancelling brings them back
+to the wall, on that page. Saving changes the tour, so every screen running it
+changes too. Removing a camera leaves its tile empty (dark on the wall): no
+other camera moves. Edits to a tour reach running walls within five
+minutes; a turned-off tour shows a notice and starts again by itself when
+it is turned back on. A running board keeps itself signed in; one left
+switched off for more than 30 days has to sign in again.
+
+Tiles play each camera's low-resolution substream to keep a large wall
+light on the display PC, and switch to the main stream for any camera
+whose substream does not work. Each tile on screen opens one extra
+connection from OpenNVR to that camera's recorder; with many recorders
+this is negligible, but a single NVR with a low connection limit may
+need fewer tiles per page.
 
 ### Playback
 
@@ -142,6 +263,16 @@ boot.
 **User management → Add user** → role `admin`. The new admin signs in
 with the credentials you set, then changes their password on first
 login.
+
+### Connect Home Assistant
+
+**Settings → API Tokens → New token** (the *Home Assistant* preset), then
+**Settings → Integrations → Add → MQTT** with *Home Assistant discovery*
+on and that token as *Act as API token*. Home Assistant's own MQTT
+integration then lists OpenNVR, every camera, zone and app as devices —
+nothing to install on the Home Assistant side. Step by step, automation
+examples and troubleshooting:
+[docs/HOME_ASSISTANT_USER_GUIDE.md](docs/HOME_ASSISTANT_USER_GUIDE.md).
 
 ### View logs
 

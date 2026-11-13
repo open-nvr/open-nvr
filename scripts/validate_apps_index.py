@@ -84,6 +84,15 @@ DEFAULT_INDEX = REPO_ROOT / "server" / "config" / "apps_index.yml"
 USE_CASE_MAP = REPO_ROOT / "server" / "config" / "use_case_map.yml"
 TASKS_REGISTRY = REPO_ROOT / "server" / "config" / "tasks.yml"
 APPS_OVERLAY = REPO_ROOT / "docker-compose.apps.yml"
+# Listing screenshots live in the frontend build so core serves them
+# from its own origin — see the `screenshots` note on IndexEntry.
+SCREENSHOT_ROOT = REPO_ROOT / "app" / "public"
+SCREENSHOT_DIR = "app-screenshots"
+
+# Closed source is a first-party privilege (docs/APP_LISTING_TERMS.md §1):
+# ``license: proprietary`` is accepted only on an entry by this author.
+PROPRIETARY = "proprietary"
+FIRST_PARTY_AUTHOR = "OpenNVR"
 
 # Required top-level fields, mirroring the IndexEntry pydantic model in
 # server/routers/apps.py (build_context / emits / image_digest are optional).
@@ -105,6 +114,13 @@ _KEBAB_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 # image ref: a ghcr.io/... path or an opennvr/... path, optionally :tagged.
 # (The digest lives in image_digest, not here.)
 _IMAGE_RE = re.compile(r"^(?:ghcr\.io/[a-z0-9._/-]+|opennvr/[a-z0-9._/-]+)(?::[a-zA-Z0-9._-]+)?$")
+
+# A screenshot path: app-screenshots/<app-id>/<file>.<ext>, repo-relative.
+# Anchored and segment-limited, so "../" or an absolute path cannot pass.
+_SCREENSHOT_RE = re.compile(
+    r"^app-screenshots/[a-z0-9]+(?:-[a-z0-9]+)*"
+    r"/[A-Za-z0-9][A-Za-z0-9._-]*\.(?:png|jpg|jpeg|webp|avif)$"
+)
 
 # A published-image digest is sha256 + exactly 64 lowercase hex chars.
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -304,7 +320,11 @@ def _check_compose_snippet(
         # what the copy-paste actually runs diverge.
         svc_image = svc.get("image")
         if isinstance(svc_image, str) and app_id and image:
-            allowed = {image, _pin_slot_for(app_id)}
+            # Two pin-slot shapes: the in-tree examples default to their
+            # local build; an app from its own repository (opennvr-app new
+            # --repo) defaults to its published image — no local build.
+            env_key = app_id.upper().replace("-", "_") + "_IMAGE"
+            allowed = {image, _pin_slot_for(app_id), "${" + env_key + ":-" + image + "}"}
             if svc_image not in allowed:
                 errors.append(
                     f"{label}: install.compose service '{svc_name}' image "
@@ -334,8 +354,117 @@ def validate_entry(
     if not isinstance(entry, dict):
         return [f"{label}: not a mapping (got {type(entry).__name__})"], warnings
 
+    # kind: "installable" (default — image + compose service) or
+    # "external" (a link-out listing: no image, no install, an https
+    # external_url). Commerce fields mirror the manifest.
+    kind = entry.get("kind", "installable")
+    if kind not in ("installable", "external"):
+        errors.append(f"{label}: kind must be 'installable' or 'external' (got {kind!r})")
+        kind = "installable"
+    external = kind == "external"
+    if external:
+        ext = entry.get("external_url")
+        if not isinstance(ext, str) or not ext.startswith("https://"):
+            errors.append(f"{label}: external entries need an https:// external_url")
+        for forbidden in ("install", "image", "build_context", "image_digest"):
+            if entry.get(forbidden):
+                errors.append(
+                    f"{label}: external entries must not carry '{forbidden}' — "
+                    "a listing that links out is never installed by the reconciler")
+    pricing = entry.get("pricing", "free")
+    if pricing not in ("free", "paid", "subscription", "contact"):
+        errors.append(f"{label}: pricing must be free | paid | subscription | contact")
+    if entry.get("entitlement", "none") not in ("none", "license_key"):
+        errors.append(f"{label}: entitlement must be none | license_key")
+    if pricing != "free" and not entry.get("price_note"):
+        warnings.append(f"{label}: pricing is '{pricing}' but price_note is empty")
+    # Curation flags are booleans a REVIEWER sets; a verified listing
+    # names its author (the badge reads "verified · <author>").
+    for flag in ("verified", "featured"):
+        if flag in entry and not isinstance(entry[flag], bool):
+            errors.append(f"{label}: {flag} must be true or false")
+    if entry.get("verified") is True and not str(entry.get("author") or "").strip():
+        errors.append(f"{label}: a verified listing must name its author")
+    # Catalog policy (docs/APP_LISTING_TERMS.md): an installable app is
+    # open source under the open-nvr organisation, names its maintainer,
+    # gives a way to reach them, and declares its network egress — with
+    # ONE exception: a first-party app (author OpenNVR) may be closed
+    # source, declared as ``license: proprietary``, and is then an image
+    # built and signed by the org's CI with no source and no build.
+    lic = entry.get("license")
+    if lic is not None and lic != PROPRIETARY:
+        errors.append(
+            f"{label}: 'license' is either absent (open source, the default) "
+            f"or '{PROPRIETARY}' (got {lic!r})")
+    if not external:
+        if not str(entry.get("author") or "").strip():
+            errors.append(f"{label}: catalog apps must name their author")
+        src = str(entry.get("source") or "")
+        if lic == PROPRIETARY:
+            if entry.get("author") != FIRST_PARTY_AUTHOR:
+                errors.append(
+                    f"{label}: only first-party apps (author "
+                    f"'{FIRST_PARTY_AUTHOR}') may be closed source — a "
+                    "third-party catalog app is open source, or an external listing")
+            if src:
+                errors.append(f"{label}: a proprietary app has no public 'source' to link")
+            if entry.get("build_context"):
+                errors.append(
+                    f"{label}: a proprietary app has no 'build_context' — its "
+                    "source is not in this repository")
+            if not str(entry.get("image") or "").startswith("ghcr.io/open-nvr/"):
+                errors.append(
+                    f"{label}: a proprietary app's image must be a "
+                    "ghcr.io/open-nvr/ image (built and signed by the org's CI)")
+        elif not src.startswith("https://github.com/open-nvr/"):
+            errors.append(
+                f"{label}: catalog apps are open source under the open-nvr "
+                "organisation — 'source' must be a https://github.com/open-nvr/... URL")
+        contact = str(entry.get("contact") or "").strip()
+        if not (contact.startswith("https://") or re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", contact)):
+            errors.append(f"{label}: 'contact' must be an email or an https:// URL")
+    egress = entry.get("network_egress")
+    if egress is None:
+        errors.append(
+            f"{label}: 'network_egress' is required — list every host the app "
+            "connects to, or [] if it never leaves the site")
+    elif not isinstance(egress, list) or not all(isinstance(h, str) and h.strip() for h in egress):
+        errors.append(f"{label}: 'network_egress' must be a list of host names")
+
+    # Image signing (scripts/app-installer/signing.py): a ghcr.io/open-nvr
+    # image is signed by the org's CI and needs nothing here. Any other
+    # registry must declare who signs it — an OIDC certificate identity
+    # regexp (and issuer) the installer verifies with cosign — or the
+    # one-click installer refuses the pinned image as "no known signer".
+    signing = entry.get("signing")
+    image = str(entry.get("image") or "")
+    if signing is not None:
+        if not isinstance(signing, dict):
+            errors.append(f"{label}: 'signing' must be a mapping with 'identity' (and optional 'issuer')")
+        else:
+            identity = signing.get("identity")
+            if not isinstance(identity, str) or not identity.strip():
+                errors.append(f"{label}: 'signing.identity' must be a non-empty regexp")
+            else:
+                try:
+                    re.compile(identity)
+                except re.error as exc:
+                    errors.append(f"{label}: 'signing.identity' is not a valid regexp ({exc})")
+            issuer = signing.get("issuer", "https://token.actions.githubusercontent.com")
+            if not isinstance(issuer, str) or not issuer.startswith("https://"):
+                errors.append(f"{label}: 'signing.issuer' must be an https:// URL")
+            unknown = set(signing) - {"identity", "issuer"}
+            if unknown:
+                errors.append(f"{label}: 'signing' has unknown keys {sorted(unknown)}")
+    elif not external and image and not image.startswith("ghcr.io/open-nvr/") and entry.get("image_digest"):
+        errors.append(
+            f"{label}: a pinned image outside ghcr.io/open-nvr needs 'signing: "
+            "{identity: <regexp>}' — the installer verifies signatures before install")
+
     # Required fields present + non-empty.
-    for field in REQUIRED_FIELDS:
+    required = tuple(f for f in REQUIRED_FIELDS
+                     if not (external and f in ("image", "install")))
+    for field in required:
         if field not in entry:
             errors.append(f"{label}: missing required field '{field}'")
         elif field != "requires_tasks" and not entry[field]:
@@ -354,6 +483,48 @@ def validate_entry(
                 f"{label}: field '{str_field}' must be a string, got "
                 f"{type(val).__name__} ({val!r}) — quote it in the YAML"
             )
+    # Editorial popularity: an int in 0-100 or absent. It is a curated
+    # rank, not telemetry (nothing phones home), so the only thing to
+    # enforce is that it is a sane number rather than a fake total.
+    pop = entry.get("popularity")
+    if pop is not None:
+        if isinstance(pop, bool) or not isinstance(pop, int):
+            errors.append(
+                f"{label}: 'popularity' must be an integer 0-100, got "
+                f"{type(pop).__name__} ({pop!r})"
+            )
+        elif not (0 <= pop <= 100):
+            errors.append(f"{label}: 'popularity' must be within 0-100, got {pop}")
+
+    # Screenshots: repo-relative paths under app/public/app-screenshots/
+    # that ACTUALLY EXIST. A remote URL is refused on purpose — it would
+    # leak every catalog viewer's IP to a third party and would not load
+    # on an air-gapped site. A missing file is refused because a listing
+    # advertising a broken image is worse than one with no image.
+    shots = entry.get("screenshots")
+    if shots is not None:
+        if not isinstance(shots, list) or any(not isinstance(x, str) for x in shots):
+            errors.append(f"{label}: 'screenshots' must be a list of strings")
+        else:
+            for shot in shots:
+                if shot.startswith(("http://", "https://", "//")):
+                    errors.append(
+                        f"{label}: screenshot {shot!r} is a remote URL — ship the "
+                        f"image under app/public/{SCREENSHOT_DIR}/{entry.get('id')}/ "
+                        "instead; a remote image leaks viewer IPs and breaks "
+                        "air-gapped installs"
+                    )
+                elif not _SCREENSHOT_RE.match(shot):
+                    errors.append(
+                        f"{label}: screenshot {shot!r} must look like "
+                        f"'{SCREENSHOT_DIR}/<app-id>/<file>.png|jpg|jpeg|webp|avif'"
+                    )
+                elif not (SCREENSHOT_ROOT / shot).is_file():
+                    errors.append(
+                        f"{label}: screenshot {shot!r} does not exist at "
+                        f"app/public/{shot}"
+                    )
+
     emits = entry.get("emits")
     if emits is not None and (
         not isinstance(emits, list)
@@ -377,7 +548,9 @@ def validate_entry(
         # docker-compose.apps.yml — an entry without a service block
         # there fails on install for EVERY user (review finding: 8 of 10
         # original entries were uninstallable exactly this way).
-        if overlay_services is not None and app_id not in overlay_services:
+        if external:
+            pass   # nothing to install; the service-block contract does not apply
+        elif overlay_services is not None and app_id not in overlay_services:
             errors.append(
                 f"{label}: id '{app_id}' has no service block in "
                 "docker-compose.apps.yml — the entry is uninstallable. "
@@ -465,7 +638,9 @@ def validate_entry(
 
     # install: compose + command both present, non-empty, and SAFE.
     install = entry.get("install")
-    if not isinstance(install, dict):
+    if external:
+        pass   # no install block by construction (checked above)
+    elif not isinstance(install, dict):
         errors.append(f"{label}: install must be a mapping with compose + command")
     else:
         compose = install.get("compose")

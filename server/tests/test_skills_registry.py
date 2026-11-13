@@ -33,6 +33,7 @@ os.environ.setdefault("INTERNAL_API_KEY", secrets.token_urlsafe(48))
 os.environ.setdefault("CREDENTIAL_ENCRYPTION_KEY", Fernet.generate_key().decode())
 
 from services.skills_registry import (  # noqa: E402
+    APP_LIVE_CONTACT_WITHIN,
     APP_STALE_AFTER,
     derive_skills,
 )
@@ -151,7 +152,10 @@ def test_app_lifecycle_dormant_active_degraded():
     rows = [
         _app_row("a-dormant", enabled=False),
         _app_row("a-active"),
-        _app_row("a-unreachable", status="unreachable"),
+        # A failed probe is only believed once the app has ALSO stopped
+        # checking in — see test_live_contact_outranks_a_stale_probe.
+        _app_row("a-unreachable", status="unreachable",
+                 last_seen=NOW - APP_STALE_AFTER - timedelta(seconds=1)),
         _app_row("a-stale",
                  last_seen=NOW - APP_STALE_AFTER - timedelta(seconds=1)),
         _app_row("a-never-seen", last_seen=None),
@@ -161,8 +165,37 @@ def test_app_lifecycle_dormant_active_degraded():
     assert _skill(view, "app:a-dormant")["status"] == "dormant"
     assert _skill(view, "app:a-active")["status"] == "active"
     assert _skill(view, "app:a-unreachable")["status"] == "degraded"
+    assert _skill(view, "app:a-unreachable")["reason"] == (
+        "app unreachable at last contact")
     assert _skill(view, "app:a-stale")["status"] == "degraded"
     assert _skill(view, "app:a-never-seen")["status"] == "degraded"
+
+
+def test_live_contact_outranks_a_stale_probe():
+    """The bug this guards: nothing re-runs the /status probe, so one
+    failure (an app still booting, a blip) pinned `status` to
+    "unreachable" forever and the skill badge read "degraded" for an app
+    that was demonstrably running. The app's own config poll refreshes
+    last_seen every ~10s; fresh contact wins."""
+    row = _app_row("a-live", status="unreachable",
+                   last_seen=NOW - timedelta(seconds=15))
+    view = derive_skills(tasks_registry=[], adapters_health={},
+                         adapters_caps={}, apps_rows=[row], now=NOW)
+    s = _skill(view, "app:a-live")
+    assert s["status"] == "active"
+    assert s["reason"] is None
+
+
+def test_dead_app_does_not_coast_on_an_old_heartbeat():
+    """The other side of it: contact just outside the live window no
+    longer excuses a failed probe, so a genuinely dead app is not held
+    'active' by a heartbeat from minutes ago."""
+    row = _app_row("a-dead", status="unreachable",
+                   last_seen=NOW - APP_LIVE_CONTACT_WITHIN
+                   - timedelta(seconds=5))
+    view = derive_skills(tasks_registry=[], adapters_health={},
+                         adapters_caps={}, apps_rows=[row], now=NOW)
+    assert _skill(view, "app:a-dead")["status"] == "degraded"
 
 
 def test_app_entry_shape():

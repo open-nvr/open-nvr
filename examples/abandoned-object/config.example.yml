@@ -1,72 +1,111 @@
 # Copyright (c) 2026 OpenNVR
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Abandoned-object (unattended-item) example app — config template.
+# Abandoned object (unattended item) — config template.
 #
-# Copy this file to ``config.yml``, fill in the values, and run:
+# Copy to ``config.yml``, fill in for your deployment, and run:
 #
 #   python abandoned_object.py --config config.yml
 
 # ── NATS endpoint (KAI-C's event bus) ──────────────────────────────
+#
+# This app SUBSCRIBES to the detection stream rather than driving its
+# own inference: one detector on the box, every app fans out from it.
 nats_url: "nats://nats:4222"
-# nats_url: "nats://127.0.0.1:4222"   # bare-metal / host-mode
 nats_token: null
 
-# IMPORTANT: needs per-object identity. Subscribe to a stream whose
-# detections carry a ``track_id`` — chain the ``bytetrack`` adapter
-# after your detector so a stationary object keeps a stable id.
-subject_pattern: "opennvr.inference.>"
-
-# ── What counts as an "object" vs a "person" ──────────────────────
+# ── Tracking ───────────────────────────────────────────────────────
 #
-# object_labels: the items that can be "abandoned". COCO has
-#   backpack / handbag / suitcase; add box etc. if your detector
-#   emits them.
-# person_label: the label used for owner-proximity suppression.
+# An item is followed, not merely spotted — "this bag has been alone
+# for 90s" needs a stable id. On the stock stack consume Tier-0, which
+# already tracks:
+#   subject_pattern: "opennvr.inference.tier0.>"
+#   consume_tier0: true
+# Without track ids nothing is reported, and the app says so once.
+subject_pattern: "opennvr.inference.>"
+consume_tier0: false
+
+# ── What can be left, and what counts as company ───────────────────
+#
+# object_labels: the classes that can be abandoned. COCO gives
+#   backpack / handbag / suitcase; add box, bicycle, bottle … if your
+#   detector emits them.
+# person_label:  anyone of this class within owner_radius of an item
+#   means the item is attended.
 object_labels:
   - "backpack"
   - "handbag"
   - "suitcase"
 person_label: "person"
 
-# ── Abandon predicate ─────────────────────────────────────────────
+# ── The rule ───────────────────────────────────────────────────────
 #
-# dwell_seconds:       how long an object must sit still, unattended,
-#                      before it's "abandoned".
-# move_tolerance_px:   how far (pixels) the object center may drift and
-#                      still count as stationary; beyond this the anchor
-#                      resets (it was carried, not left).
-# person_radius_px:    a person within this many pixels of the object
-#                      counts as its owner → suppresses the alert.
-# owner_grace_seconds: how recently a person must have been near for
-#                      suppression to apply (owner "just stepped away"
-#                      window).
-# track_ttl_seconds:   forget an object track this long after last sight.
-dwell_seconds: 30
-move_tolerance_px: 40
-person_radius_px: 250
-owner_grace_seconds: 10
-track_ttl_seconds: 60
+# unattended_seconds:  alone this long → abandoned. A boarding gate or
+#                      platform edge wants 45–60; a seating area 180; a
+#                      long-stay car park 600.
+# settle_seconds:      near-still this long before the item is a
+#                      candidate at all — keeps everything carried past
+#                      the camera out of the list.
+# move_tolerance:      drift allowed while still counting as still, as a
+#                      fraction of the frame width (0.02 = 2%). Beyond
+#                      it the item was carried and its clock restarts.
+# owner_radius:        a person this close (fraction of the frame width)
+#                      means somebody is with it. Wider = quieter, later.
+# owner_grace_seconds: how long a person the detector has lost still
+#                      counts as being there.
+# escalate_after_seconds: still there and unacknowledged this long after
+#                      the alert → a second, higher one. 0 = off.
+# alert_cooldown_seconds: per camera, the least gap between alerts, so a
+#                      pile of bags is one alert.
+# min_bbox_height / max_bbox_height: ignore items smaller / larger than
+#                      this fraction of the frame (0 = no limit).
+# track_ttl_seconds:   lost from view this long → the item is gone (an
+#                      abandoned one is reported as taken or hidden).
+unattended_seconds: 60
+settle_seconds: 5
+move_tolerance: 0.02
+owner_radius: 0.15
+owner_grace_seconds: 5
+escalate_after_seconds: 300
+alert_severity: "high"
+alert_cooldown_seconds: 30
+min_bbox_height: 0
+max_bbox_height: 0
+fixture_radius: 0.03
+attach_snapshot: true
+track_ttl_seconds: 10
 
-# ── Webhook (optional) ────────────────────────────────────────────
+# When alerts fire. Items are followed and counted around the clock
+# either way. Omit or null = always.
+active_hours: null
+# active_hours: {start: "22:00", end: "06:00"}
+
+# ── Fixtures ───────────────────────────────────────────────────────
+# Spots that always hold something — a bin, a planter, a pallet rack —
+# in the same 0–1 space the zones are drawn in. Normally built from the
+# Left Items page ("Mark as fixture"); listed here they survive a
+# restart.
+fixtures: {}
+# fixtures:
+#   cam-hall: [[0.18, 0.62]]
+
+# ── Alert delivery ─────────────────────────────────────────────────
 webhook_url: null
-
-# ── NATS alert fan-out (optional) ─────────────────────────────────
-# Publishes to opennvr.alerts.app.abandoned-object.{camera_id}
 nats_alerts_url: null
 nats_alerts_token: null
 
-# ── Cameras / zones ───────────────────────────────────────────────
+# ── Cameras ────────────────────────────────────────────────────────
 #
-# One entry per camera × watched zone. Objects are only candidates
-# while their center is inside the zone polygon.
+# Standalone, list them here with the zone in pixel coordinates.
+# Connected to OpenNVR (opennvr_url set), leave this out: cameras are
+# picked and zones drawn in the App Catalog, live.
 cameras:
-  - camera_id: "cam-concourse"
+  - camera_id: "cam-hall"
     frame_width: 1920
     frame_height: 1080
     zone_name: "concourse"
     zone:
-      - [150, 250]
-      - [1770, 250]
-      - [1770, 1000]
-      - [150, 1000]
+      - [300, 200]
+      - [1620, 200]
+      - [1620, 900]
+      - [300, 900]

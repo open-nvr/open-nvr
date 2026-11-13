@@ -1,32 +1,75 @@
 /**
  * Copyright (c) 2026 OpenNVR
  * This file is part of OpenNVR.
- * 
+ *
  * OpenNVR is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
- * 
+ *
  * OpenNVR is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU Affero General Public License
  * along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useState, useEffect } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { useEffect, useRef, useState } from 'react'
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom'
+import {
+  AlertCircle, AlertTriangle, CheckCircle2, Clock, Eye, EyeOff, KeyRound, Loader2, Lock, LogIn, Mail, UserRound,
+} from 'lucide-react'
 import { useAuth } from '../auth/AuthContext'
+import { apiService } from '../lib/apiService'
+import { extractApiError } from '../lib/apiError'
+import { useTranslation } from '../i18n'
+import { AuthAlert, AuthLayout, authButton, authFieldIcon, authInput, authLabel, authLink } from '../components/AuthLayout'
 
 export function Login() {
-  const { login, loading, error, setupRequired } = useAuth()
+  const { t } = useTranslation()
+  const { login, loginWithTokens, loading, error, setupRequired } = useAuth()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
   const [retryAfterSeconds, setRetryAfterSeconds] = useState(0)
   const navigate = useNavigate()
+  const location = useLocation()
+  const [params, setParams] = useSearchParams()
+  // Ways in besides a password, as the server offers them.
+  const [options, setOptions] = useState<{ email_reset: boolean; oidc: { enabled: boolean; label: string; allow_local_login: boolean } } | null>(null)
+  const [showLocal, setShowLocal] = useState(false)
+  const [ssoBusy, setSsoBusy] = useState(false)
+  const [ssoError, setSsoError] = useState<string | null>(null)
+
+  useEffect(() => {
+    apiService.recoveryOptions().then((r) => setOptions(r.data)).catch(() => setOptions(null))
+    const state: any = location.state
+    if (state?.message) setMsg(String(state.message))
+  }, [location.state])
+
+  // Back from the identity provider: a one-time code to swap for a session,
+  // or the reason it did not work.
+  useEffect(() => {
+    const code = params.get('sso')
+    const err = params.get('sso_error')
+    if (err) {
+      setSsoError(err)
+      setParams({}, { replace: true })
+      return
+    }
+    if (!code) return
+    setParams({}, { replace: true })
+    setSsoBusy(true)
+    apiService.oidcExchange(code)
+      .then(({ data }) => loginWithTokens(data))
+      .then(() => navigate('/', { replace: true }))
+      .catch((e: any) => setSsoError(extractApiError(e, t('login.ssoFailed'))))
+      .finally(() => setSsoBusy(false))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const formatRetryTime = (seconds: number) => {
     if (seconds <= 0) return '0s'
@@ -77,50 +120,223 @@ export function Login() {
     }
   }
 
+  const locked = retryAfterSeconds > 0
+  const sso = options?.oidc?.enabled ? options.oidc : null
+  const localAllowed = !sso || sso.allow_local_login || showLocal
+
   return (
-    <div
-      className="min-h-screen grid place-items-center bg-[var(--bg)] text-[var(--text)] p-4"
-      style={{
-        backgroundImage: 'linear-gradient(rgba(0,0,0,0.45), rgba(0,0,0,0.45)), url(/opennvr_bg.svg)',
-        backgroundSize: 'cover',
-        backgroundPosition: 'center',
-      }}
-    >
-      <div className="flex flex-col items-center gap-8">
-        {/* Logo outside the form - 35% of viewport */}
-        <img src="/opennvr-logo.svg" alt="OpenNVR" className="w-[35vw] h-auto" style={{ minWidth: '280px', maxWidth: '500px' }} />
-        
-        <form onSubmit={onSubmit} className="w-full max-w-sm rounded-lg bg-[#1a2332] border border-[#2a3a4f] shadow-2xl p-6 space-y-4">
-        {setupRequired && (
-          <div className="text-sm text-orange-300 bg-orange-900/30 border border-orange-500/30 rounded p-3">
-            First-time setup required. Please complete setup before logging in.
+    <AuthLayout>
+      <form onSubmit={onSubmit} className="space-y-5">
+          {ssoError && <AuthAlert tone="error" icon={<AlertCircle size={16} />}>{ssoError}</AuthAlert>}
+          {sso && (
+            <div className="space-y-3">
+              <a
+                href={`/api/v1/auth/oidc/start`}
+                className={authButton}
+                aria-disabled={ssoBusy}
+                onClick={(e) => { if (ssoBusy) e.preventDefault() }}
+              >
+                {ssoBusy ? <Loader2 size={16} className="animate-spin" /> : <LogIn size={16} />}
+                {ssoBusy ? t('login.ssoSigningIn') : `${t('login.ssoContinue')} ${sso.label}`}
+              </a>
+              {!sso.allow_local_login && !showLocal ? (
+                <div className="text-center text-xs">
+                  <button type="button" className={authLink} onClick={() => setShowLocal(true)}>{t('login.adminSignIn')}</button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-3 text-xs text-[var(--text-dim)]">
+                  <span className="h-px flex-1 bg-[#2a3a4f]" />{t('login.orPassword')}<span className="h-px flex-1 bg-[#2a3a4f]" />
+                </div>
+              )}
+            </div>
+          )}
+          {localAllowed && (<>
+          {setupRequired && (
+            <AuthAlert tone="warn" icon={<AlertTriangle size={16} />}>{t('login.setupRequired')}</AuthAlert>
+          )}
+          {locked && (
+            <AuthAlert tone="warn" icon={<Clock size={16} />}>
+              {t('login.tooManyAttempts')} {formatRetryTime(retryAfterSeconds)}.
+            </AuthAlert>
+          )}
+          {error && <AuthAlert tone="error" icon={<AlertCircle size={16} />}>{error}</AuthAlert>}
+          {msg && <AuthAlert tone="ok" icon={<CheckCircle2 size={16} />}>{msg}</AuthAlert>}
+
+          <div className="space-y-1.5">
+            <label htmlFor="login-username" className={authLabel}>
+              {t('login.username')}
+            </label>
+            <div className="relative">
+              <UserRound size={16} className={authFieldIcon} />
+              <input
+                id="login-username"
+                className={authInput}
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                placeholder="admin"
+                autoComplete="username"
+                autoFocus
+                required
+              />
+            </div>
           </div>
-        )}
-        {retryAfterSeconds > 0 && (
-          <div className="text-sm text-amber-200 bg-amber-900/30 border border-amber-500/30 rounded p-3">
-            Too many failed attempts. Try again in {formatRetryTime(retryAfterSeconds)}.
+
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
+              <label htmlFor="login-password" className={authLabel}>
+                {t('login.password')}
+              </label>
+              <ForgotPassword emailReset={!!options?.email_reset} />
+            </div>
+            <div className="relative">
+              <Lock size={16} className={authFieldIcon} />
+              <input
+                id="login-password"
+                type={showPassword ? 'text' : 'password'}
+                className={`${authInput} pr-11`}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete="current-password"
+                required
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword((v) => !v)}
+                className="absolute right-1.5 top-1/2 grid h-8 w-8 -translate-y-1/2 place-items-center text-[var(--text-dim)] hover:bg-white/5 hover:text-[var(--text)]"
+                aria-label={showPassword ? t('login.hidePassword') : t('login.showPassword')}
+                title={showPassword ? t('login.hidePassword') : t('login.showPassword')}
+              >
+                {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+              </button>
+            </div>
           </div>
-        )}
-        {error && <div className="text-sm text-red-300 bg-red-900/30 border border-red-500/30 rounded p-2">{error}</div>}
-        {msg && <div className="text-sm text-emerald-300 bg-emerald-900/30 border border-emerald-500/30 rounded p-2">{msg}</div>}
-        <label className="block text-sm text-gray-200">
-          <span className="block mb-2 text-gray-400 font-medium">Username</span>
-          <input className="w-full bg-[#0f1720] border border-[#2a3a4f] focus:border-[#5eb3f6] outline-none px-4 py-2.5 rounded text-gray-100 placeholder-gray-500" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="admin" required />
-        </label>
-        <label className="block text-sm text-gray-200">
-          <span className="block mb-2 text-gray-400 font-medium">Password</span>
-          <input type="password" className="w-full bg-[#0f1720] border border-[#2a3a4f] focus:border-[#5eb3f6] outline-none px-4 py-2.5 rounded text-gray-100 placeholder-gray-500" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="●●●●●●●●" required />
-        </label>
-        {/* MFA input moved to dedicated page */}
-        <button disabled={loading || retryAfterSeconds > 0} className="w-full px-3 py-2 rounded bg-[var(--accent)]/90 text-white disabled:opacity-60 shadow-md hover:bg-[var(--accent)]">
-          {loading ? 'Signing in…' : retryAfterSeconds > 0 ? `Try again in ${formatRetryTime(retryAfterSeconds)}` : 'Sign in'}
-        </button>
-        <div className="flex items-center justify-between text-xs text-gray-500">
-          {/* <span>Tip: default admin is admin / admin123</span> */}
-          {/* <Link to="/register" className="underline">Register</Link> */}
-        </div>
+
+          <button
+            type="submit"
+            disabled={loading || locked}
+            className={authButton}
+          >
+            {loading && <Loader2 size={16} className="animate-spin" />}
+            {loading
+              ? t('login.signingIn')
+              : locked
+                ? `${t('login.tryAgainIn')} ${formatRetryTime(retryAfterSeconds)}`
+                : t('login.signIn')}
+          </button>
+          </>)}
       </form>
-      </div>
+    </AuthLayout>
+  )
+}
+
+/** "Forgot password?" as a popover anchored to the link.
+ *
+ *  There is no self-service reset — no mail server to send a link
+ *  through — so the honest answer is who can help. It floats rather than
+ *  pushing the form down, opens on click only (a hover card that appears
+ *  as the pointer crosses the form is a distraction), and closes on
+ *  "Got it", Escape or a click outside. */
+function ForgotPassword({ emailReset }: { emailReset: boolean }) {
+  const { t } = useTranslation()
+  const [open, setOpen] = useState(false)
+  const [email, setEmail] = useState('')
+  const [sending, setSending] = useState(false)
+  const [sent, setSent] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  const send = async () => {
+    if (!email) return
+    setSending(true)
+    try {
+      await apiService.forgotPassword(email)
+      setSent(true)
+    } catch {
+      setSent(true)                 // the server answers the same way for every address; so do we
+    } finally {
+      setSending(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-controls="forgot-password-help"
+        className={`text-xs ${authLink}`}
+      >
+        {t('login.forgot')}
+      </button>
+      {open && (
+        <div
+          id="forgot-password-help"
+          role="dialog"
+          aria-label={t('login.forgotTitle')}
+          className="absolute right-0 top-full z-20 mt-2 w-72 border border-[#2a3a4f] bg-[#111a27] p-4 shadow-2xl"
+        >
+          {/* The arrow: a rotated square sharing the card's border. */}
+          <span
+            aria-hidden
+            className="absolute -top-1.5 right-6 h-3 w-3 rotate-45 border-l border-t border-[#2a3a4f] bg-[#111a27]"
+          />
+          <div className="flex gap-3">
+            <span className="grid h-8 w-8 shrink-0 place-items-center bg-[#5eb3f6]/15 text-[#5eb3f6]">
+              <KeyRound size={16} />
+            </span>
+            <div className="space-y-1 flex-1">
+              <div className="text-sm font-semibold text-[var(--text)]">{t('login.forgotTitle')}</div>
+              <p className="text-xs leading-relaxed text-[var(--text-dim)]">
+                {emailReset ? (sent ? t('login.forgotSent') : t('login.forgotEmailHelp')) : t('login.forgotHelp')}
+              </p>
+              {emailReset && !sent && (
+                <div className="relative mt-2">
+                  <Mail size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--text-dim)]" />
+                  <input
+                    type="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder={t('login.forgotEmailLabel')}
+                    autoFocus
+                    className="h-9 w-full border border-[#2a3a4f] bg-[#0d141d] pl-8 pr-2 text-xs text-[var(--text)] focus:outline-none focus:ring-1 focus:ring-[#5eb3f6]"
+                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); send() } }}
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+          <div className="mt-3 flex justify-end gap-2">
+            {emailReset && !sent && (
+              <button type="button" onClick={send} disabled={sending || !email}
+                className="px-2.5 py-1 text-xs font-medium bg-[var(--accent)] text-white disabled:opacity-50">
+                {sending ? t('login.forgotSending') : t('login.forgotSend')}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setOpen(false)}
+              autoFocus={!emailReset || sent}
+              className="px-2.5 py-1 text-xs font-medium text-[#5eb3f6] hover:bg-white/5"
+            >
+              {t('login.forgotOk')}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -347,7 +347,12 @@ function Prepare-Environment {
     if (-not (Test-Path '.env')) {
         if (-not (Test-Path '.env.example')) { Fail '.env.example is missing' }
         Copy-Item '.env.example' '.env'; Ok 'Created .env from .env.example'
-    } else { Ok 'Using existing .env; secrets are preserved, and you can update values below' }
+        # Everything in .env is now the example's default, not an answer.
+        $script:FreshEnv = $true
+    } else {
+        Ok 'Using existing .env; secrets are preserved, and you can update values below'
+        $script:FreshEnv = $false
+    }
 
     # Secrets — generated automatically; prompted only if still a placeholder.
     Ensure-SecretValue POSTGRES_PASSWORD 'PostgreSQL password' (New-Password)
@@ -389,6 +394,38 @@ function Find-ExampleCompose([string]$Name) {
     foreach ($candidate in $candidates) { if (Test-Path $candidate) { return $candidate } }
     return $null
 }
+# The App Catalog as the installer sees it: every server/config/apps_index.yml
+# entry whose id is a service in docker-compose.apps.yml (the rule
+# scripts/validate_apps_index.py enforces). Mirrors catalog_apps in install.sh.
+function Get-CatalogApps {
+    $index = 'server/config/apps_index.yml'; $overlay = 'docker-compose.apps.yml'
+    if (-not (Test-Path $index) -or -not (Test-Path $overlay)) { return @() }
+    $services = @{}
+    foreach ($line in Get-Content $overlay) {
+        if ($line -match '^  ([a-z0-9-]+):$') { $services[$Matches[1]] = $true }
+    }
+    $apps = @(); $id = ''; $name = ''; $summary = ''; $folded = $false
+    $flush = {
+        if ($id -and $services.ContainsKey($id)) {
+            $s = $summary -replace '^["'']|["'']$', ''
+            if ($s.Length -gt 72) { $s = $s.Substring(0, 71) + '…' }
+            $script:__apps += ,@{ Id = $id; Name = $name; Summary = $s }
+        }
+    }
+    $script:__apps = @()
+    foreach ($line in Get-Content $index) {
+        if ($folded) { $summary = $line.Trim(); $folded = $false; continue }
+        if ($line -match '^- id: (\S+)') { & $flush; $id = $Matches[1]; $name = ''; $summary = ''; continue }
+        if ($line -match '^  name: (.*)$') { $name = $Matches[1]; continue }
+        if ($line -match '^  summary: (.*)$') {
+            $summary = $Matches[1]
+            if ($summary -in @('>-', '>', '|')) { $folded = $true }
+            continue
+        }
+    }
+    & $flush
+    return $script:__apps
+}
 function Prompt-OverlayDefaults([string]$File) {
     $text = [IO.File]::ReadAllText((Resolve-Path $File))
     $seen = @{}
@@ -422,6 +459,9 @@ function Pick-ModelFromCatalog([string]$Kind, [string]$Suggest, [string]$Label, 
         $tested = if ($f[3] -eq 'yes') { 'tested' } else { 'untested' }
         Write-Host ('   {0}. {1,-16} ~{2}GB  {3,-8} {4,-8} {5}{6}{7}' -f ($i + 1), $f[1], $f[2], $f[4], $tested, $f[5], $fit, $mark)
     }
+    # No suggestion matched a row (or none was given): default to the
+    # first entry rather than show "[]" and accept an empty answer.
+    if (-not $defaultIdx -and [string]::IsNullOrWhiteSpace($Suggest)) { $defaultIdx = '1' }
     $answer = Read-Host "  $Label [$(if ($defaultIdx) { $defaultIdx } else { $Suggest })]"
     if ([string]::IsNullOrWhiteSpace($answer)) { $answer = if ($defaultIdx) { $defaultIdx } else { $Suggest } }
     $n = 0
@@ -485,45 +525,64 @@ function Choose-Example {
     $script:ExampleName = ''; $script:ExampleCompose = ''; $script:ExampleProfile = ''
     Set-EnvValue OPENNVR_EXAMPLE ''; Set-EnvValue OPENNVR_EXAMPLE_COMPOSE ''; Set-EnvValue OPENNVR_EXAMPLE_PROFILE ''
     Write-Host ''
-    Write-Host '  -- Example app ----------------------------------------'
-    Info 'Examples add an AI app on top of the core NVR. The Camera Agent lets you'
-    Info 'ask your cameras questions out loud or by chat. Everything runs locally.'
-    if (-not (Ask-YesNo 'Set up an example app now?' $false)) { return }
-    $examples = @(Get-ChildItem 'examples' -Directory | Sort-Object Name)
-    if ($examples.Count -eq 0) { Warn 'No examples were found'; return }
-    # Default to the Camera Agent: it is the example this installer is
-    # built around -- the mode, LLM-runtime and model prompts below all
-    # exist to serve it -- and the only one shipping a Compose manifest
-    # today, so a default of 0 made Enter decline the very thing this
-    # section had just finished pitching. Its NUMBER moves whenever an
-    # example directory is added, so look it up by name; if it is ever
-    # missing or unshippable the default falls back to 0 (core only).
-    $defaultChoice = 0
-    Write-Host ''; Info 'Available examples:'
-    for ($i=0; $i -lt $examples.Count; $i++) {
-        $manifest = Find-ExampleCompose $examples[$i].Name
-        $status = if ($manifest) { "installable: $manifest" } else { 'no Compose manifest' }
-        $mark = ''
-        if ($examples[$i].Name -eq 'camera-agent' -and $manifest) {
-            $defaultChoice = $i + 1; $mark = '  <- default'
-        }
-        Write-Host ('  {0,2}. {1,-30} [{2}]{3}' -f ($i+1), $examples[$i].Name, $status, $mark)
+    Write-Host '  -- Apps -----------------------------------------------'
+    Info 'Apps add AI on top of the core NVR. Two run on every install already --'
+    Info 'occupancy-counting and footage-search (opt out: OPENNVR_DEFAULT_APPS=off).'
+    Info 'The Camera Agent lets you ask your cameras questions out loud or by chat.'
+    Info 'Everything listed here can also be installed later from Settings -> App Catalog.'
+    if (-not (Ask-YesNo 'Pick apps to run from the first start?' $false)) { return }
+    # The menu IS the App Catalog, not a directory listing (see the note in
+    # install.sh's choose_example): the Camera Agent with its own overlay,
+    # then every catalog app, all sharing docker-compose.apps.yml with one
+    # profile per app id.
+    $apps = @()
+    $agentCompose = Find-ExampleCompose 'camera-agent'
+    if ($agentCompose) {
+        $apps += ,@{ Id = 'camera-agent'; Name = 'Camera Agent'; Summary = 'Ask your cameras questions -- voice or chat, on a local LLM.'; Compose = $agentCompose }
     }
-    Write-Host '   0. Core stack only'; Write-Host ''
-    $choiceRaw = Read-Host "  Select an example [$defaultChoice]"; if ([string]::IsNullOrWhiteSpace($choiceRaw)) { $choiceRaw = "$defaultChoice" }
-    $choice = 0; if (-not [int]::TryParse($choiceRaw, [ref]$choice)) { Fail 'Invalid selection' }
-    if ($choice -eq 0) { return }
-    if ($choice -lt 1 -or $choice -gt $examples.Count) { Fail 'Selection out of range' }
-    $name = $examples[$choice-1].Name; $manifest = Find-ExampleCompose $name
-    if (-not $manifest) { Fail "The '$name' example has no Docker Compose manifest" }
+    foreach ($a in Get-CatalogApps) { $apps += ,@{ Id = $a.Id; Name = $a.Name; Summary = $a.Summary; Compose = 'docker-compose.apps.yml' } }
+    if ($apps.Count -eq 0) { Warn 'No installable apps were found'; return }
+    # Default to the Camera Agent: the mode, LLM-runtime and model prompts
+    # below all exist to serve it, and a default of 0 made Enter decline the
+    # very thing this section had just finished pitching.
+    $defaultChoice = 0
+    if ($apps[0].Id -eq 'camera-agent') { $defaultChoice = 1 }
+    Write-Host ''; Info 'Available apps:'
+    for ($i=0; $i -lt $apps.Count; $i++) {
+        $mark = ''
+        if (($i + 1) -eq $defaultChoice) { $mark = '  <- default' }
+        if ($apps[$i].Id -in @('occupancy-counting', 'footage-search')) { $mark = '  [on by default]' }
+        Write-Host ('  {0,2}. {1,-27} {2}{3}' -f ($i+1), $apps[$i].Id, $apps[$i].Name, $mark)
+        Write-Host ('      {0,-27} {1}' -f '', $apps[$i].Summary)
+    }
+    Write-Host '   0. Core stack and the default apps only'; Write-Host ''
+    $choiceRaw = Read-Host "  Select apps, comma-separated [$defaultChoice]"; if ([string]::IsNullOrWhiteSpace($choiceRaw)) { $choiceRaw = "$defaultChoice" }
+    $choiceRaw = $choiceRaw -replace '\s', ''
+    if ($choiceRaw -notmatch '^[0-9]+(,[0-9]+)*$') { Fail 'Invalid selection' }
+    # Several apps may be picked at once; persisted the way start.ps1 reads
+    # them back -- comma-separated compose files (deduplicated) and profiles.
+    $names = @(); $profiles = @(); $composes = @()
+    foreach ($nRaw in ($choiceRaw -split ',')) {
+        $n = [int]$nRaw
+        if ($n -eq 0) { continue }
+        if ($n -lt 1 -or $n -gt $apps.Count) { Fail "Selection out of range: $n" }
+        $a = $apps[$n-1]
+        if ($names -contains $a.Id) { continue }
+        $names += $a.Id; $profiles += $a.Id
+        if ($composes -notcontains $a.Compose) { $composes += $a.Compose }
+    }
+    if ($names.Count -eq 0) { return }
+    # The Camera Agent is the one app with prompts of its own below.
+    $name = if ($names -contains 'camera-agent') { 'camera-agent' } else { '' }
+    $manifest = $composes -join ','
     # $prof, not $profile — $PROFILE is an automatic PowerShell variable.
-    $prof = $name
+    $prof = $profiles -join ','
     if ($name -eq 'camera-agent') {
         Write-Host ''
         Explain 'Camera Agent runs in VOICE mode (speak, hear spoken answers) or CHAT mode (type, read answers). Voice adds Whisper speech-to-text and Piper text-to-speech; chat is lighter.' 'pick one' '1 (voice)'
         $mode = Ask-Value 'Camera Agent mode: 1=voice, 2=chat' '1'
         # $prof, not $profile - $PROFILE is an automatic PowerShell variable.
-        $prof = if ($mode -eq '2') { 'camera-agent-chat' } else { 'camera-agent' }
+        if ($mode -eq '2') { $prof = $prof -replace 'camera-agent', 'camera-agent-chat' }
 
         Write-Host ''
         # LLM runtime FIRST: where the LLM runs decides which hardware the
@@ -660,10 +719,12 @@ function Choose-Example {
         # suggest_llm_model in install.sh) - keep the three in sync.
         $ramGb = 0; $cores = [int]($env:NUMBER_OF_PROCESSORS); $accel = 'cpu'
         try { $ramGb = [int]([math]::Floor((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory / 1GB)) } catch {}
-        if ($llmWhere -eq 'host') {
-            if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
-                try { & nvidia-smi -L *> $null; if ($LASTEXITCODE -eq 0) { $accel = 'cuda' } } catch {}
-            }
+        # NVIDIA counts either way — in-container (nvidia runtime) or on
+        # the host — exactly as install.sh's detect_llm_hardware says.
+        # Gating this on the host-Ollama choice classed every RTX box
+        # that picked the bundled container as CPU-only.
+        if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
+            try { & nvidia-smi -L *> $null; if ($LASTEXITCODE -eq 0) { $accel = 'cuda' } } catch {}
         }
         # Both Ollama models are RESIDENT AT ONCE (the shipped compose sets
         # OLLAMA_KEEP_ALIVE=-1), and they share the box with the OpenNVR
@@ -678,7 +739,7 @@ function Choose-Example {
         # Ceiling = the tested envelope; never suggest past what this agent
         # has been exercised with. Speed ceiling too: a model that fits can
         # still be unusable, so CPU-only boxes are tiered by cores.
-        $capLlm = if ($accel -ne 'cpu') { 4 } elseif ($cores -ge 8) { 3 } elseif ($cores -ge 4) { 2 } else { 1 }
+        $capLlm = if ($accel -ne 'cpu') { 4 } elseif ($cores -ge 4) { 3 } else { 1 }   # 4+ cores: granite4:micro (measured; see install.sh)
         if ($capLlm -gt $budgetGb) { $capLlm = $budgetGb }
 
         # The catalog's speed column is editorial prose; this is the only
@@ -714,6 +775,13 @@ function Choose-Example {
         # Whatever the LLM did not take. A vision model the machine cannot
         # hold is worse than a smaller one: it evicts the LLM every question.
         $remaining = [math]::Max(0, $budgetGb - $llmRam)
+        # What to preselect if the operator picks ollamavlm against the
+        # advice: the largest tested vision model the leftover budget
+        # holds, else the tested low-RAM pick. Mirrors install.sh; without
+        # it the vision menu opened with a blank default and Enter wrote
+        # an empty OLLAMA_VLM_MODEL.
+        $ifChosen = Pick-FromCatalog 'vlm' $remaining 9
+        $vlmIfChosen = if ($ifChosen) { $ifChosen[0] } else { 'moondream' }
         if ($accel -eq 'cpu' -and $cores -lt 4) { $remaining = 0 }
         # Vision gets a SPEED ceiling too, not just a RAM one - the same rule
         # the LLM got. Without it every machine with room landed on the same
@@ -721,8 +789,25 @@ function Choose-Example {
         # ~25 s against ~1-2 s on a GPU.
         $vlmSpeedCap = if ($accel -eq 'cpu') { 1 } else { 9 }
         $pick = Pick-FromCatalog 'vlm' $remaining $vlmSpeedCap
-        if ($pick) { $vlmSuggest = $pick[0]; $captionSuggest = 'ollamavlm' }
-        else { $vlmSuggest = ''; $captionSuggest = 'moondream' }
+        # Vision through Ollama is a GPU path, full stop: Ollama's 1.8B
+        # moondream takes 30 s+ a frame on CPU and core's enrichers give
+        # up at 15-20 s, so every visit burnt two cores and saved nothing
+        # (#583). The in-container 0.5B moondream adapter answers the same
+        # questions ~10x faster on the same cores. Mirrors install.sh.
+        if ($accel -eq 'cuda' -and $pick) {
+            $vlmSuggest = $pick[0]; $captionSuggest = 'ollamavlm'
+            $captionReason = 'an NVIDIA GPU serves vision through Ollama at ~1-2 s a frame'
+        } elseif ($accel -eq 'cuda') {
+            $vlmSuggest = ''; $captionSuggest = 'moondream'
+            $captionReason = 'too little RAM left for an Ollama vision model beside the LLM'
+        } else {
+            $vlmSuggest = ''; $captionSuggest = 'moondream'
+            $captionReason = "no CUDA GPU: the in-container 0.5B moondream answers in seconds where Ollama's 1.8B takes 30 s+ a frame on CPU"
+        }
+        # Background visit descriptions stay on when the RESOLVED captioner
+        # runs on a GPU (ollamavlm on a CUDA Ollama) and are asked about
+        # otherwise, where they cannot keep up with a busy camera. Decided
+        # below, after CAPTION_ADAPTER is known.
 
         # Transcription is on the voice critical path, so weak machines get
         # the fast tier and strong ones the accurate one.
@@ -732,7 +817,7 @@ function Choose-Example {
         if ($vlmSuggest) {
             Ok "Suggesting $llmSuggest + $vlmSuggest (both stay resident)"
         } else {
-            Ok "Suggesting $llmSuggest; too little left for an Ollama vision model, so scene description falls back to the small in-container moondream"
+            Ok "Suggesting $llmSuggest; scene description via the in-container moondream adapter - $captionReason"
         }
 
         Write-Host ''
@@ -773,19 +858,55 @@ function Choose-Example {
         $captionDefault = 'moondream'
         if ($llmWhere -eq 'host' -and $captionSuggest -eq 'ollamavlm') { $captionDefault = 'ollamavlm' }
         Configure-Value CAPTION_ADAPTER 'Scene-description model' $captionDefault `
-            'Describes what a camera sees. ollamavlm proxies to your Ollama (GPU-fast when the LLM runs on this machine - the default in that case; needs an adapter tag newer than 0.1.3); moondream/blip run inside Docker (moondream answers questions, blip writes plain captions).' 'yes' `
+            "Describes what a camera sees. moondream runs inside Docker (0.5B, answers questions, the right pick without a CUDA GPU - on CPU it is ~10x faster than Ollama's 1.8B moondream); blip runs inside Docker (plain captions only, fastest); ollamavlm proxies to your Ollama (only worth it on an NVIDIA GPU; needs an adapter tag newer than 0.1.3)." 'yes' `
             'moondream | blip | ollamavlm - all local.'
         if ((Get-EnvValue CAPTION_ADAPTER) -eq 'ollamavlm') {
-            Explain 'Multimodal Ollama model the ollamavlm adapter uses for scene questions; the adapter auto-pulls it. gemma3:4b (tested - clearly better answers) is suggested where RAM allows; moondream is the tested low-RAM pick.' 'yes' $vlmSuggest
+            if ([string]::IsNullOrWhiteSpace($vlmSuggest)) { $vlmSuggest = $vlmIfChosen }
+            Explain 'Multimodal Ollama model the ollamavlm adapter uses for scene questions; the adapter auto-pulls it. qwen3-vl:2b-instruct (measured: no false yeses, the best counter) is suggested on an accelerator; moondream is the tested CPU pick.' 'yes' $vlmSuggest
             Set-EnvValue OLLAMA_VLM_MODEL (Pick-ModelFromCatalog 'vlm' $vlmSuggest 'Vision model (Ollama)' $budgetGb)
         }
-    } else {
-        Prompt-OverlayDefaults $manifest
+
+        # Describing every recorded visit: on for a GPU, asked on CPU. Same
+        # rule and wording as install.sh's configure_enrichment_flags; an
+        # existing .env keeps the operator's last answer.
+        $captionAdapter = Get-EnvValue CAPTION_ADAPTER
+        $enrichSuggest = if ($accel -eq 'cuda' -and $captionAdapter -eq 'ollamavlm') { 'true' } else { 'false' }
+        $enrichCurrent = Get-EnvValue EVENTS_CAPTION_ENRICHMENT
+        $enrichCurrentD = Get-EnvValue EVENTS_DESCRIPTOR_ENRICHMENT
+        # A fresh .env holds .env.example's defaults, not an answer.
+        if ($script:FreshEnv) { $enrichCurrent = ''; $enrichCurrentD = '' }
+        if ($enrichCurrent -and $enrichCurrentD -and $enrichCurrent -ne $enrichCurrentD) {
+            Ok "Keeping your split setting: captions=$enrichCurrent, descriptors=$enrichCurrentD (edit .env to change)"
+        } elseif ($enrichSuggest -eq 'true' -and -not $enrichCurrent) {
+            Set-EnvValue EVENTS_CAPTION_ENRICHMENT 'true'
+            Set-EnvValue EVENTS_DESCRIPTOR_ENRICHMENT 'true'
+            Ok "Visit descriptions (captions + colour/type) ON - $captionAdapter on the GPU keeps up with the visit rate"
+        } else {
+            $enrichDefault = if ($enrichCurrent) { $enrichCurrent -eq 'true' } else { $enrichSuggest -eq 'true' }
+            Write-Host ''
+            Explain "Describe every recorded visit in the background (a caption plus colour/type questions per visit) so search matches words like 'white van'. Here the captioner ($captionAdapter) runs on the CPU: it takes seconds per image and a busy camera outruns it, so the work burns CPU the detector and recorder need and saves nothing. Leave it off unless traffic is light. Anything recorded meanwhile can be described later: set both flags to true together with EVENTS_ENRICHMENT_BACKFILL=true." `
+                'no' $(if ($enrichDefault) { 'y' } else { 'n' }) `
+                "Hardware detected: $accel, captioner: $captionAdapter. Turn on later by setting EVENTS_CAPTION_ENRICHMENT=true and EVENTS_DESCRIPTOR_ENRICHMENT=true in .env."
+            if (Ask-YesNo 'Describe every recorded visit in the background?' $enrichDefault) {
+                Set-EnvValue EVENTS_CAPTION_ENRICHMENT 'true'
+                Set-EnvValue EVENTS_DESCRIPTOR_ENRICHMENT 'true'
+            } else {
+                Set-EnvValue EVENTS_CAPTION_ENRICHMENT 'false'
+                Set-EnvValue EVENTS_DESCRIPTOR_ENRICHMENT 'false'
+            }
+        }
     }
+    if (($names -join ',') -ne 'camera-agent') {
+        # Catalog apps are not prompted here: their knobs live in the App
+        # Catalog's config form after start (see install.sh).
+        Info 'Catalog apps take their cameras, zones and thresholds from'
+        Info 'Settings -> App Catalog once the stack is up.'
+    }
+    $name = $names -join ','
     $script:ExampleName=$name; $script:ExampleCompose=$manifest; $script:ExampleProfile=$prof
     Set-EnvValue OPENNVR_EXAMPLE $name; Set-EnvValue OPENNVR_EXAMPLE_COMPOSE $manifest; Set-EnvValue OPENNVR_EXAMPLE_PROFILE $prof
     Ok "Selected $name ($prof)"
-    if ($name -eq 'camera-agent') {
+    if ($names -contains 'camera-agent') {
         Info 'The local LLM model downloads on first start - usually the slowest step.'
     }
 }
@@ -803,7 +924,7 @@ function Check-DockerVmAllowance {
     $hostMemGb = 0
     try { $hostMemGb = [int]([math]::Floor((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory / 1GB)) } catch {}
     $needMem = 6
-    if ($script:ExampleName -and -not (Get-EnvValue OLLAMA_EXTERNAL_URL)) { $needMem = 8 }
+    if ((($script:ExampleName -split ',') -contains 'camera-agent') -and -not (Get-EnvValue OLLAMA_EXTERNAL_URL)) { $needMem = 8 }
     Info "Docker VM allowance: $vmCpus CPUs / $vmMemGb GB (this machine has $hostMemGb GB)."
     if ($vmMemGb -lt $needMem -or $vmCpus -lt 4) {
         Warn "That is on the small side for what you selected (recommended: >=4 CPUs, >=$needMem GB)."
@@ -830,15 +951,15 @@ function Pull-AndBuild {
     Check-DockerVmAllowance
     $script:ComposeArgs = @('-f', $BaseCompose)
     if ($script:ExampleCompose) {
-        $script:ComposeArgs += @('-f', $script:ExampleCompose)
+        foreach ($f in @($script:ExampleCompose -split ',' | Where-Object { $_ })) { $script:ComposeArgs += @('-f', $f) }
         # External-LLM overlay, same condition as Get-ComposeArgs in start.ps1.
         # Without it the bundled ollama/ollama-model-pull services are still
         # in an ACTIVE profile here, so `pull` downloads the 3.7 GB
         # ollama/ollama image for containers the launcher then never starts.
-        if ((Get-EnvValue OLLAMA_EXTERNAL_URL) -and $script:ExampleCompose -like '*camera-agent.yml') {
+        if ((Get-EnvValue OLLAMA_EXTERNAL_URL) -and $script:ExampleCompose -like '*camera-agent.yml*') {
             $script:ComposeArgs += @('-f', 'docker-compose.camera-agent.external-llm.yml')
         }
-        $script:ComposeArgs += @('--profile', $script:ExampleProfile)
+        foreach ($p in @($script:ExampleProfile -split ',' | Where-Object { $_ })) { $script:ComposeArgs += @('--profile', $p) }
         Info "Pulling images for $script:ExampleName..."
         docker compose @script:ComposeArgs pull --ignore-buildable
         if ($LASTEXITCODE -ne 0) { Fail "Failed to pull $script:ExampleName" }
@@ -854,6 +975,27 @@ Detect-Platform
 Check-Prerequisites
 Prepare-Environment
 Pull-AndBuild
+# The host agent (docs\HOST_AGENT.md): USB webcams on this machine and its own
+# CPU/memory/disk readings. `up` installs it when HOST_AGENT=on.
+$haDefault = (Get-EnvValue 'HOST_AGENT') -ne 'off'
+if (Ask-YesNo 'Install the OpenNVR host agent (USB webcams on this PC, its real CPU/memory/disk readings)?' $haDefault) {
+    Set-EnvValue 'HOST_AGENT' 'on'; Ok 'Host agent: installed when OpenNVR starts'
+} else {
+    Set-EnvValue 'HOST_AGENT' 'off'; Info 'Host agent: off (later: .\start.ps1 host-agent install)'
+}
+# The runner behind OpenNVR Updates in the app: `up` installs it. It only
+# checks in until an update policy is chosen in the app, and the policy
+# starts off, so nothing is fetched unasked.
+if ((Get-EnvValue 'UPDATE_RUNNER') -eq 'off') {
+    Info 'Update runner: off (later: .\start.ps1 auto-update enable)'
+} else {
+    Set-EnvValue 'UPDATE_RUNNER' 'on'
+    if ($script:Platform -eq 'Windows') {
+        Ok 'Update runner: installed when OpenNVR starts (needs an administrator PowerShell); choose an update policy in Configuration > OpenNVR Updates'
+    } else {
+        Ok 'Update runner: installed when OpenNVR starts; choose an update policy in Configuration > OpenNVR Updates'
+    }
+}
 Write-Host ''; Info 'Configuration and images are ready. Starting OpenNVR...'; Write-Host ''
 if ($script:Platform -eq 'Windows') { & (Join-Path $ProjectRoot 'start.ps1') up; exit $LASTEXITCODE }
 & bash (Join-Path $ProjectRoot 'start.sh') up

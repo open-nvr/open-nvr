@@ -267,6 +267,9 @@
     .msg.agent{align-self:flex-start; background:var(--glass2); border:1px solid var(--stroke);
       border-radius:14px 14px 14px 4px; padding:0.55rem 0.75rem;} .msg.agent .who{color:var(--agent);}
     .msg.sys{align-self:center; max-width:100%; text-align:center; color:var(--faint); font-size:0.78rem; font-style:italic;}
+    .msg.flowline .ms{opacity:0.75; font-variant-numeric:tabular-nums;}
+    .msg.flowline .stage.slowest{color:var(--muted); font-style:normal;}
+    .msg.flowline .ms.total{opacity:1; color:var(--muted);}
     .msg .olink{margin-top:6px; font-size:0.76rem; padding:0.35rem 0.6rem;}
     .frames{display:flex; gap:6px; flex-wrap:wrap; margin-top:7px;}
     .frame-thumb{width:132px; max-width:42vw; border-radius:9px; border:1px solid var(--stroke); cursor:pointer; display:block;}
@@ -327,26 +330,37 @@
     .skill .sk-tool{font-size:0.6rem; color:var(--faint); background:rgba(0,0,0,0.25);
       border:1px solid var(--stroke); border-radius:999px; padding:0 0.4rem;}
     .skill .sk-tool.off{opacity:0.45; text-decoration:line-through;}
+    /* The whole chip is the on/off control, so it must LOOK pressable and
+       announce its state: green when the agent carries the skill, grey
+       when it does not. A skill whose backend is missing is neither —
+       it is not the toggle's fault, so it reads as unavailable and says
+       why instead of pretending a tap would work. */
+    .skill.sk-on{background:rgba(46,160,67,0.13); border-color:rgba(46,160,67,0.5);}
+    .skill.sk-off{opacity:0.6;}
+    .skill.sk-tappable{cursor:pointer;}
+    .skill.sk-tappable:hover{border-color:var(--accent);}
+    .skill.sk-tappable:focus-visible{outline:2px solid var(--accent); outline-offset:1px;}
+    .skill.sk-gated{cursor:not-allowed;}
+    .skill .sk-dot{width:7px; height:7px; border-radius:50%; flex:0 0 auto;
+      background:var(--faint);}
+    .skill.sk-on .sk-dot{background:#2ea043;}
+    /* Scroll the list, not the page: with every skill listed (on and off)
+       this grows well past the card. */
+    #skillsList{max-height:22rem; overflow-y:auto; padding-right:0.15rem;}
+    .sk-group{font-size:0.62rem; text-transform:uppercase; letter-spacing:0.06em;
+      color:var(--faint); margin:0.55rem 0 0.15rem;}
+    .sk-group:first-child{margin-top:0.15rem;}
     .skill .sk-x{background:transparent; border:none; color:var(--faint); cursor:pointer; font-size:0.95rem; flex:0 0 auto; padding:0 0.1rem;}
-    .skill .sk-x:hover{color:var(--danger);}
-    #skillBrowse{margin-top:0.5rem; border-top:1px solid var(--stroke); padding-top:0.5rem;}
+    /* Speech, per app. Muted is the resting state and must read as such
+       at a glance — a lit speaker means this app WILL talk over you. */
+    .skill .sk-speak{opacity:0.45;}
+    .skill .sk-speak.on{opacity:1; color:var(--accent);}
+    .skill .sk-manage{text-decoration:none; color:var(--faint);}
+    .skill a.sk-manage:hover{color:var(--text);}
+    .skill .sk-speak:hover{color:var(--text);}
     #skillSearch,.addform input,.addform select{width:100%; background:rgba(0,0,0,0.28); color:var(--text);
       border:1px solid var(--stroke); border-radius:9px; padding:0.45rem 0.55rem; font-size:0.8rem; margin-bottom:0.4rem;}
     #skillSearch:focus,.addform input:focus,.addform select:focus{outline:none; border-color:var(--accent);}
-    .brow{display:flex; align-items:center; gap:0.5rem; padding:0.42rem 0.5rem; border-radius:10px; margin:0.25rem 0;
-      font-size:0.8rem; background:var(--glass2); border:1px solid var(--stroke);}
-    .brow .b-ic{width:18px; text-align:center; flex:0 0 auto;}
-    .brow .b-nm{flex:1; min-width:0;} .brow .b-nm small{display:block; color:var(--faint); font-size:0.66rem;}
-    .brow .b-add{background:var(--accent); color:#04121f; border:none; border-radius:7px; font-weight:700;
-      font-size:0.72rem; padding:0.28rem 0.55rem; pointer-events:none;}
-    .brow .b-need{font-size:0.66rem; color:var(--faint); text-align:right; max-width:52%;}
-    .brow .b-enable{flex:0 0 auto; font-size:0.66rem; font-weight:700; color:var(--accent); text-decoration:none;
-      border:1px solid var(--accent); border-radius:7px; padding:0.2rem 0.4rem; white-space:nowrap;}
-    .brow .b-enable:hover{background:var(--accent); color:#04121f;}
-    .brow.addable{cursor:pointer;}
-    .brow.addable:hover{outline:1px solid var(--accent);}
-    .brow.addable:hover .b-add{background:var(--accent-strong);}
-    .brow.off{opacity:0.55;}
     .addform{margin:0.3rem 0 0.5rem;}
     .addform-lbl{display:flex; align-items:center; gap:0.4rem; font-size:0.72rem; color:var(--muted); margin-bottom:0.4rem;}
     .addform-lbl input{width:auto; flex:1; margin:0;}
@@ -487,6 +501,13 @@
     .rec-seg:hover,.rec-seg.on{border-color:var(--accent); color:var(--accent);}
     .rec-note{font-size:0.7rem; color:var(--faint); padding:0.3rem 0;}
     .player video{display:block; width:100%; aspect-ratio:16/9; max-height:44vh; object-fit:contain; background:#000;}
+    /* Detection boxes: a canvas over the whole player; the JS maps boxes
+       onto the video's CONTENT rect (object-fit:contain letterboxes), so
+       a box lands on the object, not on the black bar. */
+    .player canvas.boxes{position:absolute; inset:0; width:100%; height:100%; pointer-events:none; display:none;}
+    .player canvas.boxes.on{display:block;}
+    .player .boxbtn{right:2.6rem;}
+    .player .boxbtn.on{color:var(--accent); border-color:var(--accent);}
 
     /* ── events feed ─────────────────────────────────────────────────── */
     .evt{display:flex; align-items:flex-start; gap:0.45rem; padding:0.4rem 0.5rem; background:var(--glass2);
@@ -502,6 +523,18 @@
     .ringrow select{flex:1; margin-bottom:0;}
     .ev-scope{font-size:0.66rem; color:var(--faint);}
     .ev-scope a{color:var(--accent); text-decoration:none;}
+
+    /* ── "OpenNVR is not answering" pill ─────────────────────────────── */
+    /* A transient state, deliberately NOT the login card: a slow core is
+       not an expired session. Sits above the page, below the overlay. */
+    #coreOffline{position:fixed; top:0.75rem; left:50%; transform:translateX(-50%); z-index:90;
+      display:flex; align-items:center; gap:0.45rem; padding:0.38rem 0.85rem; border-radius:999px;
+      background:rgba(20,29,48,0.94); border:1px solid var(--stroke2); color:var(--faint);
+      font-size:0.74rem; box-shadow:var(--shadow);}
+    #coreOffline[hidden]{display:none;}
+    #coreOffline .dot{width:7px; height:7px; border-radius:50%; background:#e0a33e;
+      animation:core-pulse 1.2s ease-in-out infinite;}
+    @keyframes core-pulse{0%,100%{opacity:1;} 50%{opacity:0.25;}}
 
     /* ── login overlay (auth_mode="opennvr") ─────────────────────────── */
     #loginOverlay{position:fixed; inset:0; z-index:100; display:flex; align-items:center; justify-content:center;
@@ -631,6 +664,19 @@
               <p class="lede" id="lede">Type a question, tap the mic to dictate — or tap <strong>Talk</strong> for hands-free voice.</p>
               <label class="wakeopt" id="wakeOpt" title="When on, the agent only answers utterances that start with its name — side conversations are ignored. OFF by default: name matching depends on STT hearing the name right, and a missed match means a real question gets ignored.">
                 <input type="checkbox" id="wakeReq"> only answer “Hey <span id="wakeName">agent</span>…”</label>
+              <label class="wakeopt" id="bargeOpt" title="Interrupting the agent while it speaks. Firm (default): only sustained speech — about half a second of clear talking over it — stops the reply, so a cough, a word or two aside, or room noise does not. Eager: stops on the first clear syllable. Off: the agent always finishes; speak after it stops.">
+                interrupt when I talk over it:
+                <select id="bargeMode" aria-label="Barge-in">
+                  <option value="firm">firm — sustained speech only</option>
+                  <option value="eager">eager — first syllable</option>
+                  <option value="off">off — let it finish</option>
+                </select></label>
+              <label class="wakeopt" id="talkModeOpt" title="Streaming (default): your voice streams to the agent as you speak, it decides when you have finished (a semantic end-of-turn model, not a silence timer), answers sentence by sentence as soon as the first one is ready, and you can talk over it. Turn by turn: the page records one utterance, waits for 0.9 s of silence, uploads it, and plays the whole answer when it is ready.">
+                talk mode:
+                <select id="talkMode" aria-label="Talk mode">
+                  <option value="stream">streaming — answers as it goes</option>
+                  <option value="turns">turn by turn — record, then answer</option>
+                </select></label>
               <div class="micdot" id="micdot" hidden>mic live</div>
             </div>
           </div>
@@ -660,10 +706,12 @@
             <div class="player" id="camPlayer" title="Click the picture to pin this exact frame into the chat">
               <img id="camImg" alt="camera view" hidden>
               <video id="camVideo" controls playsinline hidden></video>
+              <canvas id="camBoxes" class="boxes" aria-hidden="true"></canvas>
               <div id="camNoFrame" class="empty-note" hidden>No frame — camera off or unreachable.</div>
               <span class="ovl" id="camTs"></span>
               <span class="modepill" id="camMode"><span class="mdot"></span><span id="camModeText">LIVE</span></span>
               <button class="fsbtn" id="camFs" type="button" title="Full screen" aria-label="Full screen">⛶</button>
+              <button class="fsbtn boxbtn" id="camBoxesBtn" type="button" title="Boxes: outline tracked objects with label and confidence" aria-label="Toggle detection boxes" aria-pressed="false">▣</button>
             </div>
             <div class="transport">
               <button class="pbtn" id="camPlay" title="Play / pause">⏸</button>
@@ -782,14 +830,10 @@
           <div id="histList"></div>
         </div>
         <div class="card" id="skillsCard">
-          <div class="cardhead"><h2>Skills</h2><span class="headbtns"><button class="restorebtn" id="skillRestore" type="button" hidden title="Re-enable every default skill you've removed">Restore defaults</button><button class="addbtn" id="skillAdd" type="button" title="Add a skill" aria-label="Add a skill">+</button></span></div>
-          <div class="skillhint">Capabilities the agent carries. × to remove.</div>
+          <div class="cardhead"><h2>Skills</h2><span class="headbtns"><button class="restorebtn" id="skillRestore" type="button" hidden title="Re-enable every default skill you've removed">Restore defaults</button><button class="addbtn" id="skillAdd" type="button" title="Get more skills from the App Catalog" aria-label="Get more skills">+</button></span></div>
+          <div class="skillhint">Tap a skill to turn it on or off. On ones sit at the top. 🔊 speaks that app&#39;s alerts aloud — off unless you turn it on.</div>
+          <input id="skillSearch" type="search" placeholder="Search skills…" autocomplete="off" aria-label="Search skills">
           <div id="skillsList"></div>
-          <div id="skillBrowse" hidden>
-            <input id="skillSearch" type="text" placeholder="Search skills to add…" autocomplete="off">
-            <div id="skillBrowseList"></div>
-            <button class="ghost" id="skillBrowseClose" type="button">Done</button>
-          </div>
         </div>
         <!-- One AUTOMATIONS surface for every standing behavior the agent
              runs — alarms, watches, background tasks, scheduled reports.
@@ -809,6 +853,12 @@
             <div class="empty-note" id="ringInherited"></div>
             <div id="ringRows"></div>
             <button class="ghost" id="ringAddRow" type="button">+ add target</button>
+            <div class="rec-lbl">Speak alerts from installed apps</div>
+            <select id="announceApps" aria-label="Speak app alerts">
+              <option value="important">Important only — high &amp; critical (default)</option>
+              <option value="all">All — every app alert, e.g. each plate read</option>
+              <option value="none">Never — show in the feed with a chime, don't speak</option>
+            </select>
             <button class="ghost primary" id="ringSave" type="button">Save defaults</button>
           </div>
           <!-- One-click presets, rendered from GET /alarm-presets with HONEST
@@ -894,6 +944,12 @@
     </div>
   </div>
 
+  <!-- "OpenNVR is not answering": the agent could not reach core to
+       validate this session (HTTP 503). Transient by construction — the
+       page keeps its token and retries, rather than raising the login
+       card on a core that is merely busy. -->
+  <div id="coreOffline" hidden><span class="dot"></span><span>OpenNVR is not answering — reconnecting…</span></div>
+
   <!-- Login overlay (auth_mode="opennvr"): the agent proxies OpenNVR's
        login, so tokens are the server's own — one origin, mobile-same
        bearer contract, revocation/MFA stay the server's job. -->
@@ -939,20 +995,47 @@
     let _device=localStorage.getItem("agent_device_token")||"";
     const _rawFetch=window.fetch.bind(window);
     let _refreshing=null;
+    // "OpenNVR is not answering" — transient, and deliberately not the
+    // login card. The agent answers 503 when it could not ask core
+    // whether our token is good; that is a reason to wait, not to sign
+    // out. Self-clears so a page left idle doesn't keep a stale pill.
+    let _offlineT=null;
+    function showCoreOffline(){ const el=$("coreOffline"); if(!el) return;
+      el.hidden=false; clearTimeout(_offlineT);
+      _offlineT=setTimeout(()=>{ el.hidden=true; },15000); }
+    function hideCoreOffline(){ const el=$("coreOffline"); if(!el) return;
+      clearTimeout(_offlineT); el.hidden=true; }
+    // Is THIS 503 the agent saying it could not reach core? Other
+    // endpoints answer 503 for their own reasons — /frame does it for a
+    // camera that is simply off, and the page polls that constantly — so
+    // the status alone must not be read as "OpenNVR is down".
+    async function _coreUnreachable(r){
+      if(r.status!==503) return false;
+      try{ const d=await r.clone().json(); return !!(d&&d.error==="core_unreachable"); }
+      catch{ return false; }
+    }
+    // "ok" | "dead" | "unavailable". A refresh the SERVER refused ends the
+    // session; one it could not answer at all does not — treating those
+    // the same is what signed operators out whenever core got busy.
     async function _tryRefresh(){
-      if(!_refreshTok) return false;
+      if(!_refreshTok) return "dead";
       if(_refreshing) return _refreshing;   // collapse concurrent 401s
       _refreshing=(async()=>{
         try{ const r=await _rawFetch("/auth/refresh",{method:"POST",
             headers:{"Content-Type":"application/json"},
             body:JSON.stringify({refresh_token:_refreshTok})});
-          if(!r.ok) return false;
+          // Any 5xx on this route means the exchange did not complete
+          // (core down, gateway timeout, proxy error). Only a 4xx is the
+          // server actually refusing the refresh token.
+          if(r.status>=500) return "unavailable";
+          if(!r.ok) return "dead";
           const d=await r.json();
-          if(!d.access_token) return false;
+          if(!d.access_token) return "dead";
           _token=d.access_token; sessionStorage.setItem("agent_token",_token);
           if(d.refresh_token){ _refreshTok=d.refresh_token; sessionStorage.setItem("agent_refresh",_refreshTok); }
-          return true;
-        }catch{ return false; } finally{ setTimeout(()=>{_refreshing=null;},0); }
+          return "ok";
+        }catch{ return "unavailable"; }      // network error: can't tell
+        finally{ setTimeout(()=>{_refreshing=null;},0); }
       })();
       return _refreshing;
     }
@@ -964,14 +1047,23 @@
           if(_device) o.headers["X-Device-Token"]=_device; }
         return _rawFetch(url,o); };
       let r=await send();
-      if(r.status===401&&local&&_authMode==="opennvr"){
-        if(await _tryRefresh()) r=await send();
-        if(r.status===401) showLogin();
+      if(local&&_authMode==="opennvr"){
+        if(await _coreUnreachable(r)){ showCoreOffline(); return r; }
+        if(r.status===401){
+          const outcome=await _tryRefresh();
+          if(outcome==="unavailable"){ showCoreOffline(); return r; }
+          if(outcome==="ok"){
+            r=await send();
+            if(await _coreUnreachable(r)){ showCoreOffline(); return r; }
+          }
+          if(r.status===401) showLogin();
+        }
       }
       if(r.status===403&&local&&_authMode==="opennvr"){
         try{ const d=await r.clone().json();
           if(d&&d.error==="device_not_approved") showDeviceBlocked(); }catch{}
       }
+      if(local&&r.ok) hideCoreOffline();
       return r;
     };
     // Device-firewall denial: this browser is enrolled but not yet approved.
@@ -1134,6 +1226,21 @@
     // mouth from the live amplitude — so she visibly "speaks". If the user talks
     // clearly over her (mic well above the room floor), playback stops so they
     // can ask straight away (barge-in).
+    //
+    // Barge-in is deliberately NOT eager by default. This page's hands-free
+    // loop is an energy detector (no speech model on the client), so the
+    // only evidence that someone is talking TO the agent is how long and
+    // how loudly they keep talking. Four animation frames (~70 ms) above
+    // the gate — the old rule — stopped a reply on a cough, a word to
+    // someone else in the room, or a chair scraping. "firm" needs ~550 ms
+    // of speech, well above the noise floor, with short dips tolerated
+    // (natural speech has gaps); "eager" is the old behaviour; "off"
+    // never interrupts. Persisted per browser.
+    const BARGE_PRESETS={firm:{ms:550,margin:2.5,dipMs:150},eager:{ms:70,margin:1.7,dipMs:0},off:null};
+    let bargeMode=(function(){ try{ const v=localStorage.getItem("agent_barge_mode"); return v in BARGE_PRESETS?v:"firm"; }catch{ return "firm"; } })();
+    (function(){ const sel=$("bargeMode"); if(!sel) return; sel.value=bargeMode;
+      sel.addEventListener("change",()=>{ bargeMode=sel.value in BARGE_PRESETS?sel.value:"firm";
+        try{ localStorage.setItem("agent_barge_mode",bargeMode); }catch{} }); })();
     function setMouth(amp){ if(mouthEl) mouthEl.setAttribute("ry",(2+Math.min(1,amp*4)*14).toFixed(1)); }
     function stopSpeaking(){ if(currentSource){ try{currentSource.stop();}catch{} currentSource=null; }
       if(mouthRAF){ cancelAnimationFrame(mouthRAF); mouthRAF=null; } setMouth(0); }
@@ -1147,15 +1254,19 @@
           playbackAnalyser.connect(audioCtx.destination); }   // wire to speakers once
         const an=playbackAnalyser, abuf=new Float32Array(an.fftSize);
         const src=audioCtx.createBufferSource(); src.buffer=buf;
-        src.connect(an); currentSource=src; let bargeFrames=0;
+        src.connect(an); currentSource=src;
+        let bargeStart=0, bargeLastLoud=0;              // ms timestamps of the current over-talk run
         const tick=()=>{
           if(currentSource!==src){ fin(); return; }       // stopped (barge-in / reset)
           an.getFloatTimeDomainData(abuf); let s=0; for(let i=0;i<abuf.length;i++)s+=abuf[i]*abuf[i];
           setMouth(Math.sqrt(s/abuf.length));
-          if(analyser && sessionActive){                   // barge-in detection
-            const mic=rms(), gate=Math.max(START_RMS,noiseFloor*START_MARGIN)*1.7;
-            bargeFrames = mic>gate ? bargeFrames+1 : 0;
-            if(bargeFrames>=4){ stopSpeaking(); fin(); return; }
+          const preset=BARGE_PRESETS[bargeMode];
+          if(analyser && sessionActive && preset){         // barge-in detection
+            const now=performance.now();
+            const mic=rms(), gate=Math.max(START_RMS,noiseFloor*START_MARGIN)*preset.margin;
+            if(mic>gate){ if(!bargeStart) bargeStart=now; bargeLastLoud=now; }
+            else if(bargeStart && now-bargeLastLoud>preset.dipMs){ bargeStart=0; }   // the run ended
+            if(bargeStart && bargeLastLoud-bargeStart>=preset.ms){ stopSpeaking(); fin(); return; }
           }
           mouthRAF=requestAnimationFrame(tick);
         };
@@ -1208,16 +1319,34 @@
       t.textContent=now.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
       t.title=now.toLocaleString();
       return t; }
-    function addFlow(trace,timings){
+    // Stage durations are the server's own perf_counter marks (the trace
+    // carries ms per step; /converse adds stt/tts/total) — nothing extra
+    // is measured or computed for this line.
+    const fmtMs=ms=>ms==null?"":(ms<1000?Math.round(ms)+"ms":(ms/1000).toFixed(ms<10000?1:0)+"s");
+    function addFlow(trace,timings,total){
       // One muted line under the reply: the pipeline this turn actually ran,
-      // e.g.  stt → llm → describe_camera (cam1 · vlm) → llm → tts
-      if(!trace||!trace.length) return;
-      const steps=trace.map(s=>s.step+(s.detail?" ("+s.detail+")":""));
-      if(timings&&timings.stt!=null) steps.unshift("stt");
-      if(timings&&timings.tts!=null) steps.push("tts");
+      // with what each stage cost, the slowest stage emphasised, total at the end:
+      //   stt 0.4s → llm 1.2s → describe_camera (cam1 · vlm) 35ms → llm 0.9s → tts 0.3s · 2.9s
+      // "reply" names where the answer came from, not a stage that ran.
+      trace=(trace||[]).filter(s=>s.step!=="reply");
+      if(!trace.length) return;
+      const stages=trace.map(s=>({label:s.step+(s.detail?" ("+s.detail+")":""), ms:s.ms}));
+      if(timings&&timings.stt!=null) stages.unshift({label:"stt", ms:timings.stt});
+      if(timings&&timings.tts!=null) stages.push({label:"tts", ms:timings.tts});
+      const known=stages.filter(x=>x.ms!=null);
+      const slowest=known.length>1?known.reduce((a,b)=>b.ms>a.ms?b:a):null;
+      const sum=known.reduce((a,x)=>a+x.ms,0);
+      const tot=(timings&&timings.total!=null)?timings.total:(total!=null?total:null);
       const d=document.createElement("div"); d.className="msg sys flowline";
-      d.title=trace.map(s=>s.step+": "+s.ms+" ms").join("\n");
-      d.textContent="⛓ "+steps.join(" → ");
+      d.appendChild(document.createTextNode("⛓ "));
+      stages.forEach((x,i)=>{
+        if(i) d.appendChild(document.createTextNode(" → "));
+        const st=document.createElement("span"); st.className="stage"+(x===slowest?" slowest":"");
+        st.appendChild(document.createTextNode(x.label));
+        if(x.ms!=null){ const t=document.createElement("span"); t.className="ms"; t.textContent=" "+fmtMs(x.ms); st.appendChild(t); }
+        d.appendChild(st); });
+      if(tot!=null){ const t=document.createElement("span"); t.className="ms total"; t.textContent=" · "+fmtMs(tot); d.appendChild(t); }
+      d.title="Server-side stage timings (ms). "+(tot!=null&&tot>sum+50?"Total includes transport/decode; ":"")+(slowest?"Slowest: "+slowest.label:"");
       logEl.appendChild(d); logEl.scrollTop=logEl.scrollHeight;
     }
     function addMsg(text,who,frames){ const d=document.createElement("div"); d.className="msg "+who;
@@ -1226,20 +1355,23 @@
         d.innerHTML=`<span class="who">${label}</span>`;
         d.querySelector(".who").appendChild(msgTime());
         d.appendChild(document.createTextNode(text));
-        // Show the frame(s) the agent actually looked at, inline in the bubble.
-        if(frames&&frames.length){ const fr=document.createElement("div"); fr.className="frames";
-          frames.forEach(f=>{ const wrap=document.createElement("div");
-            const im=document.createElement("img"); im.className="frame-thumb";
-            // caption wins over role: a remembered best-frame carries its own
-            // timestamp ("#38 · 16:25"), and showing a past photo under a bare
-            // camera name would read as the live view.
-            const lbl=f.caption||f.role||f.camera_id;
-            im.src="data:image/jpeg;base64,"+f.jpeg_b64; im.alt=im.title=lbl;
-            im.addEventListener("click",()=>openLightbox(im.src,lbl));
-            const cap=document.createElement("div"); cap.className="frame-cap"; cap.textContent=lbl;
-            wrap.appendChild(im); wrap.appendChild(cap); fr.appendChild(wrap); });
-          d.appendChild(fr); } }
-      logEl.appendChild(d); logEl.scrollTop=logEl.scrollHeight; }
+        appendFrames(d,frames); }
+      logEl.appendChild(d); logEl.scrollTop=logEl.scrollHeight; return d; }
+    // Show the frame(s) the agent actually looked at, inline in a bubble —
+    // a text answer's and a streamed answer's alike.
+    function appendFrames(d,frames){ if(!frames||!frames.length) return;
+      const fr=document.createElement("div"); fr.className="frames";
+      frames.forEach(f=>{ const wrap=document.createElement("div");
+        const im=document.createElement("img"); im.className="frame-thumb";
+        // caption wins over role: a remembered best-frame carries its own
+        // timestamp ("#38 · 16:25"), and showing a past photo under a bare
+        // camera name would read as the live view.
+        const lbl=f.caption||f.role||f.camera_id;
+        im.src="data:image/jpeg;base64,"+f.jpeg_b64; im.alt=im.title=lbl;
+        im.addEventListener("click",()=>openLightbox(im.src,lbl));
+        const cap=document.createElement("div"); cap.className="frame-cap"; cap.textContent=lbl;
+        wrap.appendChild(im); wrap.appendChild(cap); fr.appendChild(wrap); });
+      d.appendChild(fr); logEl.scrollTop=logEl.scrollHeight; }
     function openLightbox(src,label){ let ov=document.getElementById("lightbox");
       if(!ov){ ov=document.createElement("div"); ov.id="lightbox"; ov.className="lightbox";
         ov.addEventListener("click",()=>ov.classList.remove("show")); document.body.appendChild(ov); }
@@ -1294,7 +1426,7 @@
     async function ask(){
       const inp=$("askInput"), q=inp.value.trim(); if(!q) return;
       inp.value=""; addMsg(q,"user"); setStatus("Thinking…"); setAvatar("thinking");
-      $("askBtn").disabled=true;
+      $("askBtn").disabled=true; _askInFlight=true;
       // A pinned frame scopes the turn to its camera and rides along so the
       // agent answers about the EXACT frame the user clicked. One-shot:
       // cleared after the send either way.
@@ -1305,10 +1437,10 @@
           body:JSON.stringify(body)});
         const d=await r.json();
         if(!r.ok){ addMsg("Error: "+(d.error||("HTTP "+r.status)),"sys"); }
-        else { if(d.reply) addMsg(d.reply,"agent",d.frames); addFlow(d.trace); showWorking(d.cameras_used); showLatency({total:d.latency_ms}); }
+        else { if(d.reply) addMsg(d.reply,"agent",d.frames); addFlow(d.trace,null,d.latency_ms); showWorking(d.cameras_used); showLatency({total:d.latency_ms}); }
         setStatus("Ready. Type a question.","");
       }catch(err){ addMsg("Request failed: "+err.message,"sys"); setStatus("Error","error"); }
-      finally{ $("askBtn").disabled=false; setAvatar("idle"); }
+      finally{ $("askBtn").disabled=false; _askInFlight=false; setAvatar("idle"); }
     }
     // ── the camera roster: a live view, not a boot snapshot ─────────────
     // This used to run exactly ONCE, at page load, and the /updates socket
@@ -1644,6 +1776,53 @@
     let _viewGen=0;
     let _playback=false;   // a recorded segment is in the player
     let _pc=null, _whepResource=null;   // live WebRTC (WHEP) session
+    // ── Detection boxes over the camera screen's player ──────────────
+    // Same design as OpenNVR's Live View overlay: boxes arrive as data
+    // (Tier-0 tracks, relayed by the agent over /updates), drawn on a
+    // canvas over the video, never burned into the stream. Per-browser
+    // toggle, ON by default — the boxes are what shows the AI at work on
+    // every live picture (Live view, dashboard, tour, this page alike); a
+    // viewer who wants the clean picture turns them off once.
+    let _boxesOn=true; try{ _boxesOn=localStorage.getItem("agent.boxes")!=="off"; }catch{}
+    let _lastTracks=null, _boxRaf=null;
+    const BOX_STALE_MS=2000;
+    const LABEL_HUES={person:205,car:30,truck:45,bus:45,motorcycle:15,bicycle:160,dog:290,cat:290,bird:120,license_plate:60,plate:60,face:330};
+    function hueFor(l){ if(l in LABEL_HUES) return LABEL_HUES[l]; let h=0; for(const ch of l) h=(h*31+ch.charCodeAt(0))%360; return h; }
+    function setBoxes(on){ _boxesOn=!!on; try{ localStorage.setItem("agent.boxes",on?"on":"off"); }catch{}
+      const b=$("camBoxesBtn"), c=$("camBoxes");
+      if(b){ b.classList.toggle("on",_boxesOn); b.setAttribute("aria-pressed",_boxesOn?"true":"false"); }
+      if(c){ c.classList.toggle("on",_boxesOn); if(!_boxesOn){ const x=c.getContext("2d"); x&&x.clearRect(0,0,c.width,c.height); } }
+      if(_boxesOn) drawBoxes(); }
+    function onTracks(t){ if(!t||!window._camScreenCam||t.camera!==window._camScreenCam) return;
+      _lastTracks={...t, at:Date.now()}; if(_boxesOn) requestBoxes(); }
+    function requestBoxes(){ if(_boxRaf==null) _boxRaf=requestAnimationFrame(()=>{ _boxRaf=null; drawBoxes(); }); }
+    /* The video is object-fit:contain inside a 16:9 element, so the frame
+       may be letterboxed. Compute the content rect from the coded size so
+       normalized boxes land on the object, not the bars. */
+    function videoContentRect(v,cw,ch){
+      const vw=v.videoWidth, vh=v.videoHeight; if(!vw||!vh) return {x:0,y:0,w:cw,h:ch};
+      const s=Math.min(cw/vw, ch/vh), w=vw*s, h=vh*s; return {x:(cw-w)/2, y:(ch-h)/2, w, h}; }
+    function drawBoxes(){ const c=$("camBoxes"), v=$("camVideo"); if(!c||!_boxesOn) return;
+      const dpr=window.devicePixelRatio||1, cw=c.clientWidth, ch=c.clientHeight;
+      if(!cw||!ch) return;
+      const W=Math.round(cw*dpr), H=Math.round(ch*dpr); if(c.width!==W||c.height!==H){ c.width=W; c.height=H; }
+      const x=c.getContext("2d"); x.clearRect(0,0,W,H);
+      const t=_lastTracks; if(!t || Date.now()-t.at>BOX_STALE_MS || v.hidden) return;
+      const r=videoContentRect(v,W,H), lw=Math.max(1.5,2*dpr), fpx=Math.max(10,Math.round(12*dpr));
+      x.font=`600 ${fpx}px system-ui,-apple-system,sans-serif`; x.textBaseline="top"; x.lineJoin="round";
+      const a=t.calibrating?0.55:1;
+      for(const tr of t.tracks||[]){ const [nx,ny,nw,nh]=tr.box||[]; if(!(nw>0&&nh>0)) continue;
+        const bx=r.x+nx*r.w, by=r.y+ny*r.h, bw=nw*r.w, bh=nh*r.h, hue=hueFor(tr.label||"object");
+        x.lineWidth=lw+2; x.strokeStyle=`rgba(0,0,0,${0.55*a})`; x.strokeRect(bx,by,bw,bh);
+        x.lineWidth=lw; x.strokeStyle=`hsla(${hue},85%,60%,${a})`; x.strokeRect(bx,by,bw,bh);
+        const txt=`${tr.label||"object"}${tr.id!=null?" #"+tr.id:""} ${Math.round((tr.score||0)*100)}%`;
+        const px=Math.round(fpx*0.45), py=Math.round(fpx*0.25), tw=x.measureText(txt).width, cwid=tw+px*2, chh=fpx+py*2;
+        const cx=Math.min(Math.max(0,bx),W-cwid), cy=by-chh>=0?by-chh:by;
+        x.fillStyle=`hsla(${hue},85%,45%,${0.92*a})`; x.fillRect(cx,cy,cwid,chh);
+        x.fillStyle=`rgba(255,255,255,${a})`; x.fillText(txt,cx+px,cy+py); } }
+    setInterval(()=>{ if(_boxesOn&&_lastTracks&&Date.now()-_lastTracks.at>BOX_STALE_MS){ _lastTracks=null; requestBoxes(); } },500);
+    (function(){ const b=$("camBoxesBtn"); if(b) b.addEventListener("click",e=>{ e.stopPropagation(); setBoxes(!_boxesOn); }); setBoxes(_boxesOn); })();
+
     function openCamScreen(cam,push=true){
       if(window._camScreenCam===cam) return;   // already here — no dup history
       window._camScreenCam=cam; _tl=null;      // stale timeline never drives the new camera
@@ -1658,7 +1837,7 @@
       const sr=$("suggestRow"); if(sr) sr.hidden=true;
       addMsg("Focused on "+cam+" — talk or type below, everything is scoped to this camera. ‹ Back returns to all cameras.","sys"); }
     function closeCamScreen(push=true){
-      window._camScreenCam=null;
+      window._camScreenCam=null; _lastTracks=null; requestBoxes();
       const inp=$("askInput"); if(inp) inp.placeholder="Type a question, e.g. how many people on cam1?";
       renderSuggestions();   // chips return on the all-cameras screen
       if(_liveTimer){clearInterval(_liveTimer);_liveTimer=null;}
@@ -2118,13 +2297,28 @@
     function pickMimeType(){ for(const t of ["audio/webm;codecs=opus","audio/webm","audio/ogg;codecs=opus","audio/mp4"])
       if(window.MediaRecorder&&MediaRecorder.isTypeSupported(t))return t; return ""; }
 
+    // The greeting plays when the page OPENS, not when Talk is pressed — a
+    // person greets you when you walk in. ?hour= is this browser's local
+    // hour so a remote operator hears the right "Good morning". Browsers
+    // refuse audio before a user gesture: the text shows at once and, if
+    // playback is blocked, the audio is held and spoken on the first tap
+    // or click anywhere (or on Talk).
+    let _introAudio=null;
     async function playIntro(){ setStatus("Introducing…"); setAvatar("speaking");
-      try{ const d=await (await fetch("/intro")).json();
-        if(d.text) addMsg(d.text,"agent"); if(d.audio_b64){ speaking=true; setAvatar("speaking"); await speak(d.audio_b64); speaking=false; } }
-      catch{ addMsg("Hi, I'm the OpenNVR Agent.","agent"); } }
+      try{ const d=await (await fetch("/intro?hour="+new Date().getHours())).json();
+        if(d.text) addMsg(d.text,"agent");
+        if(d.audio_b64){ const ok=await trySpeak(d.audio_b64); if(!ok) _introAudio=d.audio_b64; } }
+      catch{ addMsg("Hi, I'm the OpenNVR Agent.","agent"); }
+      finally{ if(!sessionActive){ setAvatar("idle"); setStatus("Ready. Type, dictate, or tap Talk."); } } }
+    async function trySpeak(b64){
+      try{ ensureOutputAudio(); if(audioCtx.state!=="running") return false;
+        speaking=true; setAvatar("speaking"); await speak(b64); speaking=false; return true; }
+      catch{ speaking=false; return false; } }
+    async function playHeldIntro(){ if(!_introAudio) return; const a=_introAudio; _introAudio=null; await trySpeak(a); }
+    document.addEventListener("pointerdown",()=>{ if(_introAudio) playHeldIntro(); },{capture:true});
 
     // ── listening loop ──
-    function vadTick(){ if(!sessionActive||speaking||busy||alarmRinging)return;
+    function vadTick(){ if(!sessionActive||speaking||busy||alarmRinging||streamWs)return;
       const now=performance.now();
       if(!capturing && (now-lastActivity>IDLE_MS)){ pauseForIdle(); return; }
       const level=rms();
@@ -2150,7 +2344,25 @@
     function stopCapture(){ if(!recorder||recorder.state==="inactive")return; capturing=false; loudFrames=0;
       setAvatar("thinking"); setStatus("Thinking…"); recorder.stop(); }
 
+    // ── thinking aloud ──
+    // The server publishes a "working" line the moment it knows which slow
+    // tool the turn needs ("Let me check the gate camera between 2 and 3").
+    // Voice turn: speak it while the tool runs; the answer cuts it if it
+    // lands first. Typed turn: status line only. Ignored when no turn is in
+    // flight (a late line after Stop) or while the agent is already speaking.
+    let _fillerSrc=null, _askInFlight=false;
+    async function onWorking(w){ if(!w||!w.text||!(busy||_askInFlight||streamWs)) return;
+      setStatus(w.text,"active");
+      if(!w.audio_b64||!sessionActive||speaking) return;
+      try{ speaking=true; setAvatar("speaking"); _fillerSrc=true; await speak(w.audio_b64); }
+      catch{} finally{ _fillerSrc=null; speaking=false; if(busy) setAvatar("thinking"); } }
+    function cutFiller(){ if(_fillerSrc){ stopSpeaking(); _fillerSrc=null; speaking=false; } }
+
     async function onUtterance(){ const blob=new Blob(chunks,{type:recorder.mimeType||"audio/webm"});
+      // Stop pressed while recording: the recorder's onstop still fires, after
+      // the session ended — answering it left "Thinking…" on screen with a
+      // Talk button and a reply nobody waited for.
+      if(!sessionActive) return;
       if(blob.size<1200){ if(sessionActive){setAvatar("listening");setStatus("Listening… speak your question.","active");} return; }
       busy=true; const gen=++turnGen; inflightCtl=new AbortController();
       setAvatar("thinking"); setStatus("Thinking… tap Stop to cancel.","active");
@@ -2177,7 +2389,9 @@
         addFlow(data.trace,data.timings_ms);
         if(data.reply && !data.audio_b64 && data.tts_error && !ttsWarned){ ttsWarned=true;
           addMsg("🔇 Voice replies are unavailable — the speech (Piper) adapter isn't responding, so replies are text-only until it recovers. Check: docker logs opennvr_piper_adapter","sys"); }
+        cutFiller();                                    // the answer outranks "let me check…"
         if(data.audio_b64 && gen===turnGen){ speaking=true; setAvatar("speaking"); await speak(data.audio_b64); speaking=false; }
+        if(data.end && gen===turnGen && sessionActive){ stopSession(); setStatus("Goodbye — tap Talk when you need me."); return; }
         if(sessionActive){ setAvatar("listening"); setStatus("Listening… ask a follow-up, or tap Stop.","active"); }
       }catch(err){ if(gen!==turnGen || err.name==="AbortError") return;  // user cancelled — not an error
         addMsg("Request failed: "+err.message,"sys"); if(sessionActive){setAvatar("listening");setStatus("Error: "+err.message,"error");} }
@@ -2196,14 +2410,23 @@
       if(_pinnedFrame){ clearPin(); addMsg("Unpinned — voice questions use live frames; type to ask about a pinned frame.","sys"); }
       talkBtn.innerHTML=IC.stop+" Stop"; talkBtn.classList.add("listening");
       if(!introPlayed){ introPlayed=true; await playIntro(); }
+      else if(_introAudio){ await playHeldIntro(); }   // page-open greeting the browser held back
       if(!sessionActive) return;
+      if(talkMode==="stream"){
+        const ok=await startStream();
+        if(ok){ micdotEl.hidden=false; setAvatar("listening"); setStatus("Connecting…","active");
+          if(!levelRAF) levelRAF=requestAnimationFrame(levelRing);
+          if(!pollTimer) pollTimer=setInterval(pollAllHttp,POLL_MS);
+          if(!alarmTimer) alarmTimer=setInterval(pollAlarmsHttp,2500);
+          return; }
+        if(!sessionActive) return; }
       micdotEl.hidden=false; setAvatar("listening"); setStatus("Listening… just speak.","active");
       if(!levelRAF) levelRAF=requestAnimationFrame(levelRing);
       if(!vadTimer) vadTimer=setInterval(vadTick,TICK_MS);
       if(!pollTimer) pollTimer=setInterval(pollAllHttp,POLL_MS);
       if(!alarmTimer) alarmTimer=setInterval(pollAlarmsHttp,2500);
     }
-    function endSession(){ sessionActive=false; if(vadTimer){clearInterval(vadTimer);vadTimer=null;} if(capturing)stopCapture();
+    function endSession(){ sessionActive=false; stopStream(); if(vadTimer){clearInterval(vadTimer);vadTimer=null;} if(capturing)stopCapture();
       if(levelRAF){cancelAnimationFrame(levelRAF);levelRAF=null;} talkBtn.style.boxShadow="";
       stopSpeaking(); micdotEl.hidden=true; talkBtn.classList.remove("listening"); setAvatar("idle");
       // Abandon any in-flight turn: drop its eventual reply client-side
@@ -2422,7 +2645,15 @@
 
     // ── monitors ──
     async function pollMonitors(data){ if(!authReady())return; if(!data) try{ data=await (await fetch("/monitors")).json(); }catch{ return; }
-      for(const n of (data.notifications||[])){ if(!seenNotes[n.id]){ seenNotes[n.id]=true; addMsg(n.text,"agent"); playChime("notify"); await announce(n.text); } }
+      // A notification (a watch hit, an app alert) is an EVENT, not a turn
+      // of the conversation: it already lands in the Activity feed with its
+      // camera and time. Here it only chimes and, under the site's policy,
+      // is spoken — the transcript stays what was said between the operator
+      // and the agent.
+      for(const n of (data.notifications||[])){ if(!seenNotes[n.id]){ seenNotes[n.id]=true; playChime("notify"); loadEvents();
+          // App alerts carry announce=false under the site's "important
+          // only" / "never" policy: chimed, not narrated.
+          if(n.announce!==false) await announce(n.text); } }
       renderMonitors(data.monitors||[]); }
     function renderMonitors(monitors){ const active=monitors.filter(m=>m.active);
       if(!active.length){ monitorListEl.innerHTML=""; updateAutoEmpty(); return; }
@@ -2533,11 +2764,16 @@
       _updWs=ws;
       ws.onmessage=(ev)=>{ let d; try{ d=JSON.parse(ev.data); }catch{ return; }
         _updLive=true; _updBackoff=1500;
+        if(d.tracks) onTracks(d.tracks);
+        if(d.working) onWorking(d.working);
+        if(d.turn) onStreamTurn(d.turn);
         if(d.tasks) pollTasks(d.tasks);
         if(d.monitors) pollMonitors(d.monitors);
         if(d.reports) pollReports(d.reports);
         if(d.events) loadEvents(d.events);
-        if(d.alarms) pollAlarms(d.alarms); };
+        if(d.alarms) pollAlarms(d.alarms);
+        if(d.show_camera) openCamScreen(String(d.show_camera));   // the agent's show_camera tool
+      };
       ws.onclose=()=>{ _updWs=null; _updLive=false;
         _updBackoff=Math.min(_updBackoff*2,15000);
         setTimeout(connectUpdates,_updBackoff); };
@@ -2545,6 +2781,103 @@
     }
     function pollAllHttp(){ if(_updLive) return; pollTasks();pollMonitors();pollReports();loadEvents(); }
     function pollAlarmsHttp(){ if(_updLive) return; pollAlarms(); }
+
+    // ── streaming talk mode: mic → /ws as 16 kHz PCM; audio + JSON events back ──
+    // The request/response path above waits for 0.9 s of silence, uploads the
+    // clip and plays the whole answer when every stage is done — 3–7 s of
+    // nothing after you stop talking, and no interrupting. Over /ws the
+    // pipeline's own turn-taking (Silero VAD + Smart Turn v3) decides when you
+    // have finished, each sentence is spoken as soon as it is synthesised, and
+    // the server-side interruption gate lets you talk over it (turns.py).
+    const TALK_MODES={stream:1,turns:1};
+    let talkMode=(function(){ try{ const v=localStorage.getItem("agent_talk_mode"); return v in TALK_MODES?v:"stream"; }catch{ return "stream"; } })();
+    (function(){ const sel=$("talkMode"); if(!sel) return;
+      if(!window.AudioWorkletNode||!window.WebSocket){ talkMode="turns"; sel.value="turns"; sel.disabled=true;
+        sel.parentElement.title="Streaming needs AudioWorklet, which this browser lacks; turn by turn only."; return; }
+      sel.value=talkMode;
+      sel.addEventListener("change",()=>{ talkMode=sel.value in TALK_MODES?sel.value:"stream";
+        try{ localStorage.setItem("agent_talk_mode",talkMode); }catch{}
+        if(sessionActive){ stopSession(); } }); })();
+    const STREAM_OUT_RATE=22050;
+    let streamWs=null, streamNode=null, streamSrc=null, streamMute=null, streamPlayhead=0, streamSources=[],
+        streamReplyEl=null, streamBotTalking=false, streamMouthRAF=null, streamWorkletReady=false;
+    // Runs in the audio thread: averages the mic's samples down to 16 kHz
+    // (a box filter — good enough for speech, no aliasing whistle) and posts
+    // 20 ms Int16 frames (320 samples) to the page, which forwards them.
+    const PCM_WORKLET=`class PcmDownsampler extends AudioWorkletProcessor{
+      constructor(){ super(); this.ratio=sampleRate/16000; this.pos=0; this.sum=0; this.cnt=0; this.out=[]; }
+      process(inputs){ const ch=inputs[0]&&inputs[0][0]; if(!ch) return true;
+        for(let i=0;i<ch.length;i++){ this.sum+=ch[i]; this.cnt++; this.pos++;
+          if(this.pos>=this.ratio){ this.pos-=this.ratio; const v=Math.max(-1,Math.min(1,this.sum/this.cnt)); this.sum=0; this.cnt=0;
+            this.out.push(v<0?v*32768:v*32767); } }
+        while(this.out.length>=320){ const f=new Int16Array(this.out.splice(0,320)); this.port.postMessage(f.buffer,[f.buffer]); }
+        return true; } }
+      registerProcessor("pcm-downsampler",PcmDownsampler);`;
+    function streamUrl(){ const q=new URLSearchParams(); if(_token) q.set("token",_token); if(_device) q.set("device_token",_device);
+      return (location.protocol==="https:"?"wss://":"ws://")+location.host+"/ws"+(q.toString()?"?"+q.toString():""); }
+    async function startStream(){
+      await ensureMic(); ensureOutputAudio();
+      if(!streamWorkletReady){
+        try{ await audioCtx.audioWorklet.addModule(URL.createObjectURL(new Blob([PCM_WORKLET],{type:"application/javascript"}))); streamWorkletReady=true; }
+        catch(err){ addMsg("Streaming voice is unavailable in this browser ("+err+"); using turn by turn.","sys"); return false; } }
+      streamNode=new AudioWorkletNode(audioCtx,"pcm-downsampler");
+      streamSrc=audioCtx.createMediaStreamSource(mediaStream); streamSrc.connect(streamNode);
+      streamMute=audioCtx.createGain(); streamMute.gain.value=0; streamNode.connect(streamMute); streamMute.connect(audioCtx.destination);
+      const ws=new WebSocket(streamUrl()); ws.binaryType="arraybuffer"; streamWs=ws;
+      streamNode.port.onmessage=(e)=>{ if(streamWs===ws&&ws.readyState===1) ws.send(e.data); };
+      ws.onopen=()=>{ if(streamWs!==ws) return; setAvatar("listening"); setStatus("Listening… just speak.","active"); };
+      ws.onmessage=(ev)=>{ if(streamWs!==ws) return;
+        if(typeof ev.data==="string"){ let d; try{ d=JSON.parse(ev.data); }catch{ return; } onStreamEvent(d); return; }
+        playStreamChunk(ev.data); };
+      ws.onclose=(ev)=>{ if(streamWs!==ws) return; streamWs=null;
+        if(sessionActive){ const why=ev.code===4401?"login required":ev.code===4403?"this device is not approved":ev.code===1013?"the agent is restarting":"connection closed";
+          endSession(); talkBtn.innerHTML=IC.mic+" Talk"; syncSegChat(); setStatus("Voice stream ended: "+why+".","error"); } };
+      ws.onerror=()=>{ try{ ws.close(); }catch{} };
+      return true; }
+    function stopStream(){ streamEndPending=false; if(streamWs){ const w=streamWs; streamWs=null; try{ w.close(); }catch{} }
+      if(streamNode){ try{ streamNode.port.onmessage=null; streamNode.disconnect(); }catch{} streamNode=null; }
+      if(streamSrc){ try{ streamSrc.disconnect(); }catch{} streamSrc=null; }
+      if(streamMute){ try{ streamMute.disconnect(); }catch{} streamMute=null; }
+      flushStreamAudio(); streamReplyEl=null; }
+    function flushStreamAudio(){ streamSources.forEach(src=>{ try{ src.onended=null; src.stop(); }catch{} }); streamSources=[];
+      streamPlayhead=0; streamBotTalking=false; setMouth(0); }
+    function playStreamChunk(buf){ const i16=new Int16Array(buf); if(!i16.length) return;
+      const f32=new Float32Array(i16.length); for(let i=0;i<i16.length;i++) f32[i]=i16[i]/32768;
+      const ab=audioCtx.createBuffer(1,f32.length,STREAM_OUT_RATE); ab.copyToChannel(f32,0);
+      if(!playbackAnalyser){ playbackAnalyser=audioCtx.createAnalyser(); playbackAnalyser.fftSize=512; playbackAnalyser.connect(audioCtx.destination); }
+      const src=audioCtx.createBufferSource(); src.buffer=ab; src.connect(playbackAnalyser);
+      // Gapless: each chunk starts where the previous one ends, a hair ahead of now.
+      const now=audioCtx.currentTime; if(streamPlayhead<now+0.03) streamPlayhead=now+0.03;
+      src.start(streamPlayhead); streamPlayhead+=ab.duration; streamSources.push(src);
+      src.onended=()=>{ streamSources=streamSources.filter(x=>x!==src);
+        if(!streamSources.length){ streamBotTalking=false; setMouth(0);
+          if(streamEndPending){ endStreamSession(); return; }
+          if(sessionActive&&streamWs){ setAvatar("listening"); setStatus("Listening… just speak.","active"); } } };
+      if(!streamBotTalking){ streamBotTalking=true; cutFiller(); setAvatar("speaking"); setStatus("Speaking…","active"); streamMouth(); } }
+    function streamMouth(){ if(streamMouthRAF||!playbackAnalyser) return; const an=playbackAnalyser, abuf=new Float32Array(an.fftSize);
+      const tick=()=>{ if(!streamBotTalking){ streamMouthRAF=null; setMouth(0); return; }
+        an.getFloatTimeDomainData(abuf); let s=0; for(let i=0;i<abuf.length;i++) s+=abuf[i]*abuf[i]; setMouth(Math.sqrt(s/abuf.length));
+        streamMouthRAF=requestAnimationFrame(tick); };
+      streamMouthRAF=requestAnimationFrame(tick); }
+    // A streamed turn's extras, over /updates: the frames it looked at go
+    // into the answer's bubble (or a bubble of their own if the words have
+    // not arrived yet), and the strip says which cameras were used.
+    function onStreamTurn(t){ if(!t||!streamWs) return;
+      if(t.frames&&t.frames.length){ const el=streamReplyEl||addMsg("","agent"); streamReplyEl=el; appendFrames(el,t.frames); }
+      if(t.cameras_used&&t.cameras_used.length) showWorking(t.cameras_used); }
+    function onStreamEvent(d){ if(!d||!d.type) return;
+      switch(d.type){
+        case "user_started": lastActivity=performance.now(); if(!streamBotTalking){ setAvatar("listening"); setStatus("Listening…","active"); } break;
+        case "user_stopped": lastActivity=performance.now(); if(!streamBotTalking){ setAvatar("thinking"); setStatus("Thinking…","active"); } break;
+        case "transcript": if(d.text){ addMsg(d.text,"user"); } streamReplyEl=null; break;
+        case "turn_end": streamReplyEl=null; break;
+        case "reply": if(d.text){ if(streamReplyEl){ streamReplyEl.appendChild(document.createTextNode(" "+d.text)); logEl.scrollTop=logEl.scrollHeight; }
+                        else { streamReplyEl=addMsg(d.text,"agent"); } } break;
+        case "interrupted": flushStreamAudio(); streamReplyEl=null; setAvatar("listening"); setStatus("Listening…","active"); break;
+        case "session_end": streamEndPending=true; if(!streamBotTalking&&!streamSources.length) endStreamSession(); else setTimeout(()=>{ if(streamEndPending) endStreamSession(); },8000); break;
+        default: break; } }
+    let streamEndPending=false;
+    function endStreamSession(){ if(!streamEndPending) return; streamEndPending=false; if(sessionActive){ stopSession(); setStatus("Goodbye — tap Talk when you need me."); } }
 
     // ── wiring ──
     silenceBtn.addEventListener("click", ackAlarms);
@@ -2635,36 +2968,116 @@
     // capability away, so the ✕ asks first. Value = what the agent loses.
     const CORE_SKILLS={alarm:"set or silence alarms",watch:"keep watches and live counts",
       report:"run scheduled reports",task:"work on longer jobs in the background"};
+    // ONE list, not two. Every skill the agent could carry is here: the
+    // ones it has are green and on top, the rest grey below, and a tap
+    // moves a skill between them. The old design hid everything that was
+    // off behind a separate "browse to add" panel, so the answer to "what
+    // else can this thing do?" was invisible until you went looking.
+    function skillMatches(s, q){
+      if(!q) return true;
+      return (s.name||"").toLowerCase().includes(q)
+          || (s.id||"").toLowerCase().includes(q)
+          || (s.uses||"").toLowerCase().includes(q)
+          || (s.summary||"").toLowerCase().includes(q);
+    }
     function renderSkills(){ const el=$("skillsList"); if(!el) return; el.innerHTML="";
+      const q=(($("skillSearch")||{}).value||"").trim().toLowerCase();
       const on=_skills.filter(s=>s.enabled);
       gateRailCards(on.map(s=>s.id));
       // "Restore defaults" appears only when something is actually restorable:
       // a skill that's off but whose backend is available (backend-gated
       // skills aren't the toggle's fault and restoring can't enable them).
       const rb=$("skillRestore"); if(rb) rb.hidden=!_skills.some(s=>!s.enabled&&s.available);
-      if(!on.length) el.innerHTML='<div class="empty-note">No skills enabled — tap + to add.</div>';
-      for(const s of on){ const d=document.createElement("div"); d.className="skill";
-        d.innerHTML=`<span class="sk-ic">${s.icon}</span><span class="sk-body"><span class="sk-nm"></span><span class="sk-uses"></span></span><button class="sk-x" title="Remove skill">✕</button>`;
-        d.querySelector(".sk-nm").textContent=s.name;
-        d.querySelector(".sk-uses").textContent="uses "+s.uses;
-        // Tool-level honesty: list every tool this skill bundles; grey out
-        // (and strike through) any the model can't actually call, so an
-        // "on" card can't imply hidden tools work. App-door entries carry
-        // no tools array — nothing is rendered for them.
-        if(Array.isArray(s.tools)&&s.tools.length){
-          const tl=document.createElement("span"); tl.className="sk-tools";
-          for(const t of s.tools){ const c=document.createElement("span");
-            c.className="sk-tool"+(t.advertised?"":" off");
-            c.textContent=t.name;
-            if(!t.advertised) c.title="Hidden from the model — not in enabled_tools (or its backend isn't wired). The agent can't call this tool.";
-            tl.appendChild(c); }
-          d.querySelector(".sk-body").appendChild(tl);
-        }
-        d.querySelector(".sk-x").addEventListener("click",()=>{
-          if(CORE_SKILLS[s.id] && !window.confirm('Turn off "'+s.name+'"? The agent will no longer be able to '+CORE_SKILLS[s.id]+' until you add it back.')) return;
-          toggleSkill(s.id,"disable"); });
-        el.appendChild(d); }
-      renderBrowse(); renderSuggestions(); }
+      const shownOn=on.filter(s=>skillMatches(s,q));
+      const shownOff=_skills.filter(s=>!s.enabled&&skillMatches(s,q));
+      if(!shownOn.length&&!shownOff.length){
+        el.innerHTML='<div class="empty-note">'+(q?"No skill matches that.":"No skills yet — tap + to get some.")+'</div>';
+        renderSuggestions(); return; }
+      const group=t=>{const g=document.createElement("div"); g.className="sk-group"; g.textContent=t; el.appendChild(g);};
+      if(shownOn.length) group("On — the agent can do these");
+      for(const s of shownOn) el.appendChild(skillChip(s));
+      if(shownOff.length) group("Available — tap to turn on");
+      for(const s of shownOff) el.appendChild(skillChip(s));
+      renderSuggestions(); }
+
+    function skillChip(s){
+      const d=document.createElement("div");
+      // Gated = a tap cannot turn this on, for one of two reasons: the
+      // backend isn't configured, or no adapter advertises a task that
+      // could back it. Both keep their GUIDANCE from the old browse
+      // panel — name the adapter, offer the deep link — because "off,
+      // and here is why, and here is where to fix it" is the whole
+      // value of listing an unavailable skill at all.
+      let reason="", suggested=[], apps=[];
+      if(!s.enabled && !s.available) reason = s.hint || "needs setup";
+      else if(!s.enabled && s.tasks_available===false){
+        reason = "needs an adapter advertising " +
+          ((s.backing_tasks&&s.backing_tasks.length)?s.backing_tasks.join(" / "):"a backing task");
+        suggested = s.suggested_adapters || [];
+        if(suggested.length) reason += " — suggested: " + suggested.map(adapterLabel).join(", ");
+        apps = s.suggested_apps || [];
+      }
+      const gated = Boolean(reason);
+      const tappable = !s.read_only && !gated;
+      d.className="skill "+(s.enabled?"sk-on":"sk-off")+(gated?" sk-gated":(tappable?" sk-tappable":""));
+      if(tappable){ d.tabIndex=0; d.setAttribute("role","switch");
+        d.setAttribute("aria-checked",s.enabled?"true":"false"); }
+      d.title = gated ? reason : (s.enabled?"Tap to turn off":"Tap to turn on");
+      const manage = (s.source==="app" && s.manage_url)
+        ? `<a class="sk-x sk-manage" href="${s.manage_url}" target="_blank" rel="noopener" title="Open in the App Catalog (enable, disable or uninstall the app itself)">⚙</a>` : "";
+      // Speech is per app and OFF unless asked for: an app alert that
+      // speaks itself interrupts whatever the operator was saying.
+      const speak = (s.source==="app" && s.enabled)
+        ? `<button class="sk-x sk-speak${s.speaks?" on":""}" title="${s.speaks?"Speaking this app's alerts aloud — tap to silence":"Silent — tap to speak this app's alerts aloud"}" aria-label="Speak alerts from this app" aria-pressed="${s.speaks?"true":"false"}">${s.speaks?"🔊":"🔇"}</button>` : "";
+      d.innerHTML=`<span class="sk-dot"></span><span class="sk-ic">${s.icon}</span><span class="sk-body"><span class="sk-nm"></span><span class="sk-uses"></span></span>${speak}${manage}`;
+      d.querySelector(".sk-nm").textContent=s.name;
+      d.querySelector(".sk-uses").textContent = gated ? reason : "uses "+s.uses;
+      // Navigation only — the agent never enables an adapter or installs
+      // an app; both stay operator actions behind OpenNVR's own gates.
+      const enableUrl = (gated && s.tasks_available===false) ? (s.enable_url||"") : "";
+      const appUrl = (gated && s.tasks_available===false) ? (s.app_enable_url||"") : "";
+      const app0 = apps.length ? apps[0] : "";
+      if(enableUrl || (appUrl && app0)){
+        const fix=document.createElement("span"); fix.className="sk-tools";
+        if(enableUrl){ const a=document.createElement("a");
+          a.className="sk-tool"; a.href=enableUrl; a.target="_blank"; a.rel="noopener";
+          a.textContent="Enable an adapter →";
+          a.title="Open OpenNVR's AI Adapters view";
+          a.addEventListener("click",e=>e.stopPropagation()); fix.appendChild(a); }
+        if(appUrl && app0){ const a=document.createElement("a");
+          a.className="sk-tool"; a.href=appUrl; a.target="_blank"; a.rel="noopener";
+          a.textContent="or install "+appLabel(app0);
+          a.title="Install a packaged app from OpenNVR's App Catalog";
+          a.addEventListener("click",e=>e.stopPropagation()); fix.appendChild(a); }
+        d.querySelector(".sk-body").appendChild(fix);
+      }
+      // Tool-level honesty: list every tool this skill bundles; grey out
+      // (and strike through) any the model can't actually call, so an
+      // "on" card can't imply hidden tools work. App-door entries carry
+      // no tools array — nothing is rendered for them.
+      if(Array.isArray(s.tools)&&s.tools.length){
+        const tl=document.createElement("span"); tl.className="sk-tools";
+        for(const t of s.tools){ const c=document.createElement("span");
+          c.className="sk-tool"+(t.advertised?"":" off");
+          c.textContent=t.name;
+          if(!t.advertised) c.title="Hidden from the model — not in enabled_tools (or its backend isn't wired). The agent can't call this tool.";
+          tl.appendChild(c); }
+        d.querySelector(".sk-body").appendChild(tl);
+      }
+      // Inner controls must not toggle the chip they sit on.
+      const stop=e=>e.stopPropagation();
+      const mg=d.querySelector(".sk-manage"); if(mg) mg.addEventListener("click",stop);
+      const sp=d.querySelector(".sk-speak");
+      if(sp) sp.addEventListener("click",e=>{ stop(e); setAppSpeech(s.app_id,!s.speaks); });
+      if(tappable){
+        const toggle=()=>{
+          if(s.enabled && CORE_SKILLS[s.id] &&
+             !window.confirm('Turn off "'+s.name+'"? The agent will no longer be able to '+CORE_SKILLS[s.id]+' until you turn it back on.')) return;
+          toggleSkill(s.id, s.enabled?"disable":"enable"); };
+        d.addEventListener("click",toggle);
+        d.addEventListener("keydown",e=>{ if(e.key===" "||e.key==="Enter"){ e.preventDefault(); toggle(); } });
+      }
+      return d; }
     // ── "try asking…" chips: each enabled skill's example question, made
     // tappable. The examples already live in the skills payload — this just
     // surfaces them where a new user is actually looking (above the input).
@@ -2690,56 +3103,16 @@
       "loitering-detection":"Loitering Detection","occupancy-counting":"Occupancy Counting",
       "license-plate-recognition":"License Plate Recognition","smart-doorbell":"Smart Doorbell"};
     const appLabel=a=>APP_LABELS[a]||a.replace(/-/g," ").replace(/\b\w/g,c=>c.toUpperCase());
-    function renderBrowse(){ const el=$("skillBrowseList"); if(!el) return;
-      const q=(($("skillSearch")||{}).value||"").toLowerCase();
-      const add=_skills.filter(s=>!s.enabled && (s.name.toLowerCase().includes(q)||s.id.includes(q)));
-      el.innerHTML = add.length?"":'<div class="empty-note">No matching skills.</div>';
-      for(const s of add){
-        // Grey the row with a reason when the skill can't be enabled yet:
-        // either its backend requirement is unmet (server hint), or no adapter
-        // currently advertises a task that could back it (live KAI-C view).
-        // For the latter, GUIDE the operator: name the suggested adapter(s)
-        // and, when the server knows the OpenNVR UI URL, offer an "Enable →"
-        // link into the AI Adapters view. It's a navigation link only — the
-        // agent never enables/approves an adapter (operator action, gated).
-        let reason="",suggested=[],apps=[];
-        if(!s.available) reason=s.hint||"needs setup";
-        else if(s.tasks_available===false){
-          reason="needs an adapter advertising "+((s.backing_tasks&&s.backing_tasks.length)?s.backing_tasks.join(" / "):"a backing task");
-          suggested=(s.suggested_adapters||[]);
-          if(suggested.length) reason+=" — suggested: "+suggested.map(adapterLabel).join(", ");
-          apps=(s.suggested_apps||[]);
-        }
-        const enableUrl=(reason&&s.tasks_available===false)?(s.enable_url||""):"";
-        // App-install on-ramp, symmetric to the adapter "Enable →": when
-        // this skill is greyed and we know a packaged catalog app that
-        // delivers it, offer "or install the <App> app" deep-linking the
-        // App Catalog. Navigation only — install stays an operator action.
-        const appUrl=(reason&&s.tasks_available===false)?(s.app_enable_url||""):"";
-        const app0=apps.length?apps[0]:"";
-        const d=document.createElement("div"); d.className="brow"+(reason?" off":" addable");
-        d.innerHTML=`<span class="b-ic">${s.icon}</span><span class="b-nm"><span></span><small></small></span>`+
-          (reason?'<span class="b-need"></span>':'<span class="b-add">Add</span>')+
-          (enableUrl?'<a class="b-enable" target="_blank" rel="noopener">Enable →</a>':'')+
-          ((appUrl&&app0)?'<a class="b-enable b-app" target="_blank" rel="noopener"></a>':'');
-        d.querySelector(".b-nm span").textContent=s.name;
-        d.querySelector(".b-nm small").textContent="uses "+s.uses;
-        if(reason){ d.querySelector(".b-need").textContent=reason; d.title=reason;
-          if(enableUrl){ const a=d.querySelector(".b-enable"); a.href=enableUrl;
-            a.title="Enable an adapter in OpenNVR's AI Adapters view";
-            a.addEventListener("click",e=>e.stopPropagation()); }
-          if(appUrl&&app0){ const a=d.querySelector(".b-app"); a.href=appUrl;
-            a.textContent="or install the "+appLabel(app0)+" app";
-            a.title="Install a packaged app from OpenNVR's App Catalog";
-            a.addEventListener("click",e=>e.stopPropagation()); } }
-        else { d.title="Enable "+s.name; d.addEventListener("click",()=>toggleSkill(s.id,"enable")); }
-        el.appendChild(d); } }
     async function toggleSkill(id,action){
       try{ const r=await fetch("/skills/"+encodeURIComponent(id)+"/"+action,{method:"POST"});
         const d=await r.json().catch(()=>({}));
         if(!r.ok){ addMsg("Couldn't "+action+" skill: "+(d.hint||d.error||("HTTP "+r.status)),"sys"); return; }
         _skills=d.skills||_skills; renderSkills(); loadHardware();
-        addMsg((action==="enable"?"Enabled":"Removed")+" a skill — the agent reconfigured its tools.","sys");
+        // "muted" now means "not spoken" (the 🔊 toggle), so this says
+        // "off in the agent" instead — the two controls must not sound
+        // like the same thing.
+        if(id.startsWith("app:")) addMsg(action==="enable"?"App turned back on in the agent — it relays and answers questions again.":"App turned off in the agent — its alerts won't appear here and it won't be queried. The app itself keeps running; tap it again to turn it back on.","sys");
+        else addMsg((action==="enable"?"Enabled":"Removed")+" a skill — the agent reconfigured its tools.","sys");
       }catch(err){ addMsg("Couldn't "+action+" skill: "+err.message,"sys"); } }
     // One-click undo for an over-pruned agent: clears every runtime toggle
     // server-side (fresh-boot state). Backend-gated skills stay gated.
@@ -2750,11 +3123,30 @@
         _skills=d.skills||_skills; renderSkills(); loadHardware();
         addMsg(d.restored?("Restored "+d.restored+" default skill"+(d.restored===1?"":"s")+" — the agent reconfigured its tools."):"Skills already at defaults.","sys");
       }catch(err){ addMsg("Couldn't restore default skills: "+err.message,"sys"); } }
-    // + / browse / search / restore wiring
-    (function(){ const add=$("skillAdd"), br=$("skillBrowse"), close=$("skillBrowseClose"), search=$("skillSearch"), restore=$("skillRestore");
-      if(add&&br) add.addEventListener("click",()=>{ br.hidden=!br.hidden; add.classList.toggle("open",!br.hidden); if(!br.hidden){ renderBrowse(); search&&search.focus(); } });
-      if(close) close.addEventListener("click",()=>{ br.hidden=true; add.classList.remove("open"); });
-      if(search) search.addEventListener("input", renderBrowse);
+    // Speak (or silence) one app's relayed alerts. Per app on purpose:
+    // the site-wide policy could only choose between "every app talks"
+    // and "none do", which is why a plate read could interrupt a
+    // conversation that had nothing to do with the gate.
+    async function setAppSpeech(appId, speak){
+      if(!appId) return;
+      try{ const r=await fetch("/skills/app/"+encodeURIComponent(appId)+"/speech",
+             {method:"POST",headers:{"Content-Type":"application/json"},
+              body:JSON.stringify({speak:!!speak})});
+        const d=await r.json().catch(()=>({}));
+        if(!r.ok){ addMsg("Couldn't change speech for that app: "+(d.error||("HTTP "+r.status)),"sys"); return; }
+        _skills=d.skills||_skills; renderSkills();
+        addMsg(speak?"That app's alerts will now be read aloud.":"That app's alerts stay silent — they still appear in the feed.","sys");
+      }catch(err){ addMsg("Couldn't change speech for that app: "+err.message,"sys"); } }
+
+    // + now means "get MORE skills", not "reveal the ones you already
+    // have": everything installed is listed inline, so the only thing
+    // left to add comes from the App Catalog.
+    (function(){ const add=$("skillAdd"), search=$("skillSearch"), restore=$("skillRestore");
+      if(add) add.addEventListener("click",()=>{
+        const base=(window._opennvrUi||"").replace(/\/$/,"");
+        if(base){ window.open(base+"/app-catalog","_blank","noopener"); }
+        else{ addMsg("More skills come from installed apps — open the App Catalog in OpenNVR and enable an app; its skill appears here automatically.","sys"); } });
+      if(search) search.addEventListener("input", renderSkills);
       if(restore) restore.addEventListener("click", restoreSkills); })();
 
     // ── Site alert-level defaults editor (admin): edits the OVERRIDE
@@ -2775,6 +3167,7 @@
       if(!d){ addMsg("Couldn't load alert defaults.","sys"); return; }
       const rows=$("ringRows"); rows.innerHTML="";
       for(const [k,v] of Object.entries(d.overrides||{})) rows.appendChild(_ringRow(k,v));
+      const an=$("announceApps"); if(an) an.value=d.announce_app_alerts||"important";
       const inherited=Object.entries(d.defaults||{}).filter(([k])=>!(k in (d.overrides||{})));
       $("ringInherited").textContent=inherited.length?
         ("Inherited: "+inherited.map(([k,v])=>k+" → "+v).join(", ")):"";
@@ -2786,8 +3179,9 @@
         for(const row of document.querySelectorAll("#ringRows .ringrow")){
           const t=row.querySelector("input").value.trim().toLowerCase();
           if(t) overrides[t]=row.querySelector("select").value; }
+        const announce_app_alerts=($("announceApps")||{}).value||"important";
         try{ const r=await fetch("/alarm-defaults",{method:"PUT",
-            headers:{"Content-Type":"application/json"},body:JSON.stringify({overrides})});
+            headers:{"Content-Type":"application/json"},body:JSON.stringify({overrides,announce_app_alerts})});
           const d=await r.json().catch(()=>({}));
           if(!r.ok){ addMsg("Couldn't save alert defaults: "+(d.error||("HTTP "+r.status)),"sys"); return; }
           window._ringDefaults=d.defaults||{};
@@ -2876,7 +3270,8 @@
         d.querySelector(".hw-nm").textContent=r.label+(r.adapters&&r.adapters.length?" · "+r.adapters.join(", "):"");
         d.querySelector(".hw-min").textContent="Runs on: "+(r.min||"—");
         const rec=d.querySelector(".hw-rec");
-        if(r.recommended){ rec.textContent="Faster with: "+r.recommended; } else { rec.textContent="CPU is fine"; rec.classList.add("ok"); }
+        if(r.recommended){ rec.textContent="Faster with: "+r.recommended; }
+        else { rec.textContent=r.accelerated?"On the accelerator":"CPU is fine"; rec.classList.add("ok"); }
         d.querySelector(".hw-note").textContent=r.note||"";
         det.appendChild(d); }
       if(hw.tips&&hw.tips.length){ const t=document.createElement("div"); t.className="hwtips";
@@ -2948,7 +3343,8 @@
     // Resolve auth state (open /agent) BEFORE loading any gated data, so a
     // signed-out visitor doesn't fire a burst of 401s behind the login. After
     // sign-in the page reloads with a token and these run normally.
-    loadAgent().then(()=>{ if(authReady()){ loadCameras().then(()=>{ openDeepLinkedCamera(); loadHistory(); }); loadNotify(); loadAlarmPresets(); loadAlarmTargets(); loadSkills(); loadHardware(); loadEvents(); } connectUpdates(); });
+    loadAgent().then(()=>{ if(authReady()){ loadCameras().then(()=>{ openDeepLinkedCamera(); loadHistory(); }); loadNotify(); loadAlarmPresets(); loadAlarmTargets(); loadSkills(); loadHardware(); loadEvents();
+        if(!introPlayed){ introPlayed=true; playIntro(); } } connectUpdates(); });
     pollHealth(); setInterval(pollHealth, 15000);
     // Phone tab bar: pure show/hide via body[data-mtab]; boot on Chat.
     (function(){ const bar=$("mtabs"); if(!bar) return;

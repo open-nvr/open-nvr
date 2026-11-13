@@ -1,0 +1,224 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: Apache-2.0
+"""credentials.py + the registration handshake: an app bootstraps with
+the site key, is issued its own key once, persists it, sends it from
+then on, and falls back when core rejects it."""
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import pytest
+
+from opennvr_app_sdk import (
+    AlertDispatcher, AppCredentials, AppManifest, Detector, StdoutChannel,
+    contract as contract_mod,
+)
+from opennvr_app_sdk import credentials as creds_mod
+from opennvr_app_sdk.cameras import internal_api_key
+
+
+@pytest.fixture(autouse=True)
+def _isolated_key_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENNVR_APP_KEY_FILE", str(tmp_path / "app.key"))
+    monkeypatch.delenv("OPENNVR_APP_KEY", raising=False)
+    monkeypatch.delenv("OPENNVR_INTERNAL_API_KEY", raising=False)
+    yield
+
+
+def test_site_key_until_an_app_key_is_issued(monkeypatch):
+    monkeypatch.setenv("OPENNVR_INTERNAL_API_KEY", "site-secret")
+    c = AppCredentials()
+    assert not c.has_app_key and c.token() == "site-secret"
+    assert c.headers() == {"Authorization": "Bearer site-secret",
+                           "X-Internal-Api-Key": "site-secret"}
+    c.adopt("oak_my-app_" + "a" * 32)
+    assert c.has_app_key and c.token().startswith("oak_my-app_")
+    # Persisted: a fresh resolver (next boot) finds it, and every client
+    # that builds headers from the credential now sends the app key.
+    assert AppCredentials().token() == c.token()
+    assert internal_api_key() == c.token()
+    assert creds_mod.key_file().stat().st_mode & 0o777 == 0o600
+
+
+def test_env_app_key_and_explicit_app_key_win(monkeypatch):
+    monkeypatch.setenv("OPENNVR_INTERNAL_API_KEY", "site-secret")
+    monkeypatch.setenv("OPENNVR_APP_KEY", "oak_x_" + "b" * 32)
+    assert AppCredentials().token() == "oak_x_" + "b" * 32
+    assert AppCredentials("oak_y_" + "c" * 32).token() == "oak_y_" + "c" * 32
+    # An explicit non-app token is treated as the site key.
+    monkeypatch.delenv("OPENNVR_APP_KEY")
+    assert AppCredentials("cfg-site").token() == "cfg-site"
+
+
+def test_invalidate_drops_the_key_and_falls_back(monkeypatch):
+    monkeypatch.setenv("OPENNVR_INTERNAL_API_KEY", "site-secret")
+    c = AppCredentials()
+    c.adopt("oak_my-app_" + "d" * 32)
+    c.invalidate()
+    assert c.token() == "site-secret" and not creds_mod.key_file().exists()
+
+
+# ── the handshake through register_with_opennvr ────────────────────────
+
+MANIFEST = AppManifest(id="my-app", name="My App", version="1.0.0",
+                       category="test", summary="t", requires_tasks=[],
+                       subscribes="opennvr.inference.>")
+
+
+class _App(Detector):
+    manifest = MANIFEST
+
+    def on_detections(self, camera_id, detections, event):
+        pass
+
+
+class _FakePost:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def __call__(self, url, *, json=None, headers=None, timeout=None, trust_env=None):
+        self.calls.append({"json": json, "headers": headers or {}})
+        status, body = self.responses.pop(0)
+        return SimpleNamespace(status_code=status, text="", json=lambda: body)
+
+
+def _app():
+    cfg = SimpleNamespace(opennvr_url="http://core:8080", contract_port=9200,
+                          contract_host="my-app", opennvr_token="site-secret",
+                          nats_url="nats://x", nats_token=None)
+    return _App(cfg, AlertDispatcher([StdoutChannel()]))
+
+
+def test_registration_adopts_the_issued_key_then_uses_it(monkeypatch):
+    fake = _FakePost([
+        (200, {"id": "my-app", "api_key": "oak_my-app_" + "e" * 32,
+               "registry": {"server_version": "0.1.4", "api_version": "1.1",
+                            "min_sdk_version": "0.2.0"}}),
+        (200, {"id": "my-app"}),
+    ])
+    monkeypatch.setattr(contract_mod.httpx, "post", fake)
+    app = _app()
+    assert app.register_with_opennvr() is True
+    first = fake.calls[0]
+    assert first["headers"]["X-Internal-Api-Key"] == "site-secret"
+    assert first["json"]["wants_key"] is True
+    # Second boot-time registration: our own key, no request for a new one.
+    assert app.register_with_opennvr() is True
+    second = fake.calls[1]
+    assert second["headers"]["X-Internal-Api-Key"] == "oak_my-app_" + "e" * 32
+    assert second["json"]["wants_key"] is False
+    # …and the config poll sends the same key.
+    url, headers = app._config_poll_target()
+    assert url.endswith("/api/v1/apps/my-app/config")
+    assert headers["X-Internal-Api-Key"] == "oak_my-app_" + "e" * 32
+
+
+def test_a_credential_built_before_registration_still_sends_the_app_key(monkeypatch):
+    """An app holds more than one credential — the contract's, and one
+    per client it builds — and only the contract's is handed the key
+    core issues. A client built in the app's ``__init__`` therefore
+    resolved its credential before any key existed and went on sending
+    the SITE key, which core reads as a platform component: unscoped,
+    every camera in the building, the operator's selection bypassed.
+    """
+    monkeypatch.setenv("OPENNVR_INTERNAL_API_KEY", "site-secret")
+    early = AppCredentials()  # e.g. OpenNVR() in the app's constructor
+    assert early.token() == "site-secret" and not early.has_app_key
+
+    key = "oak_my-app_" + "9" * 32
+    fake = _FakePost([(200, {"id": "my-app", "api_key": key})])
+    monkeypatch.setattr(contract_mod.httpx, "post", fake)
+    assert _app().register_with_opennvr() is True
+
+    assert early.token() == key
+    assert early.has_app_key and early.app_id == "my-app"
+
+
+def test_the_issued_key_is_shared_even_when_it_cannot_be_persisted(monkeypatch):
+    """The key file is how credentials in one app find each other, and
+    it is not always writable (read-only rootfs, no volume). Losing the
+    app key to a failed write means losing the camera scoping with it,
+    so the issued key is remembered in the process too."""
+    monkeypatch.setenv("OPENNVR_INTERNAL_API_KEY", "site-secret")
+    monkeypatch.setattr(creds_mod, "store_app_key", lambda key: False)
+    early = AppCredentials()
+    key = "oak_my-app_" + "8" * 32
+    AppCredentials().adopt(key)
+    assert not creds_mod.key_file().exists()
+    assert early.token() == key
+
+
+def test_rejected_app_key_is_discarded_for_the_next_attempt(monkeypatch):
+    creds_mod.store_app_key("oak_my-app_" + "f" * 32)
+    fake = _FakePost([(401, {"detail": "Invalid or revoked app key"}),
+                      (200, {"id": "my-app", "api_key": "oak_my-app_" + "1" * 32})])
+    monkeypatch.setattr(contract_mod.httpx, "post", fake)
+    app = _app()
+    assert app.register_with_opennvr() is False
+    assert fake.calls[0]["headers"]["X-Internal-Api-Key"].startswith("oak_")
+    # Next attempt bootstraps with the site key and asks anew.
+    assert app.register_with_opennvr() is True
+    assert fake.calls[1]["headers"]["X-Internal-Api-Key"] == "site-secret"
+    assert fake.calls[1]["json"]["wants_key"] is True
+    assert app.credentials.token() == "oak_my-app_" + "1" * 32
+
+
+def test_old_sdk_is_warned_not_broken(monkeypatch, caplog):
+    fake = _FakePost([(200, {"id": "my-app",
+                             "registry": {"server_version": "9.0.0",
+                                          "min_sdk_version": "99.0.0"}})])
+    monkeypatch.setattr(contract_mod.httpx, "post", fake)
+    with caplog.at_level("WARNING"):
+        assert _app().register_with_opennvr() is True
+    assert any("requires opennvr-app-sdk >= 99.0.0" in r.message for r in caplog.records)
+
+
+# ── the apps bus: join NATS as the app, never with the site token ────────
+
+
+def test_registration_adopts_the_apps_bus_and_the_loop_joins_as_the_app(monkeypatch):
+    key = "oak_my-app_" + "f" * 32
+    fake = _FakePost([
+        (200, {"id": "my-app", "api_key": key,
+               "registry": {"server_version": "main", "api_version": "1.3",
+                            "min_sdk_version": "0.2.0",
+                            "bus": {"url": "nats://nats-apps:4222", "auth": "app_key"}}}),
+    ])
+    monkeypatch.setattr(contract_mod.httpx, "post", fake)
+    app = _app()
+    assert app.register_with_opennvr() is True
+    assert app.credentials.bus_url == "nats://nats-apps:4222"
+    assert app.credentials.app_id == "my-app"
+    # What the NATS loop and the alert channel will connect with.
+    kw = creds_mod.bus_connection(app.credentials, "nats://nats:4222", "site-secret")
+    assert kw == {"servers": ["nats://nats-apps:4222"], "user": "my-app", "password": key}
+    assert "token" not in kw
+    # A fresh process (same key file) remembers the bus.
+    again = creds_mod.AppCredentials()
+    assert again.bus_url == "nats://nats-apps:4222" and again.app_key == key
+    # Invalidation forgets both.
+    again.invalidate()
+    assert creds_mod.AppCredentials().bus_url is None
+
+
+def test_without_a_bus_the_configured_url_and_token_are_used(monkeypatch):
+    monkeypatch.delenv("OPENNVR_APP_BUS_URL", raising=False)
+    kw = creds_mod.bus_connection(creds_mod.AppCredentials(), "nats://nats:4222", "site-secret")
+    assert kw == {"servers": ["nats://nats:4222"], "token": "site-secret"}
+    assert creds_mod.bus_connection(None, "nats://nats:4222", None) == {"servers": ["nats://nats:4222"]}
+    # An app key alone (older core: no bus advertised) still falls back.
+    monkeypatch.setenv("OPENNVR_APP_KEY", "oak_my-app_" + "a" * 32)
+    kw = creds_mod.bus_connection(creds_mod.AppCredentials(), "nats://nats:4222", "site-secret")
+    assert kw["servers"] == ["nats://nats:4222"] and "user" not in kw
+    # OPENNVR_APP_BUS_URL wins over the file.
+    monkeypatch.setenv("OPENNVR_APP_BUS_URL", "nats://elsewhere:4222")
+    kw = creds_mod.bus_connection(creds_mod.AppCredentials(), "nats://nats:4222", "site-secret")
+    assert kw["servers"] == ["nats://elsewhere:4222"] and kw["user"] == "my-app"
+
+
+def test_app_id_from_key():
+    assert creds_mod.app_id_from_key("oak_plate-vip_" + "0" * 32) == "plate-vip"
+    assert creds_mod.app_id_from_key("oak_a.b_c_" + "0" * 32) == "a.b_c"     # ids may contain _
+    assert creds_mod.app_id_from_key("not-a-key") is None
+    assert creds_mod.app_id_from_key(None) is None

@@ -81,6 +81,11 @@ enabled_tools:
   - list_apps
   - app_status
   - recent_app_alerts
+  # What is set up (alarms, watches, reports), whether every camera is
+  # online and recording, and "show me the gate" on the page.
+  - list_standing
+  - system_status
+  - show_camera
   # Voice parity with the chat demo: look back at recent events, watch a
   # camera over time, and arm/disarm alarms by voice ("alarm me if someone
   # is at the door after 10pm"). All ride the streams the standard stack
@@ -99,15 +104,41 @@ enabled_tools:
   - stop_monitor
   - create_alarm
   - stop_alarm
+  # Scheduled reports ("every hour tell me what you see", "a 7am rundown").
+  # The agent's greeting has always offered them; without these two names
+  # the model could only answer such a request with a watch (Ventuno Q,
+  # 2026-11-09: "every ten minutes give me a report" became a people count).
+  - create_report
+  - stop_report
 
-# LLM tuning. qwen2.5:1.5b is the docker-compose.camera-agent.yml default —
-# ~1 GB of RAM, snappy on CPU, Apache-2.0, and NON-thinking (the right choice on
-# CPU: a thinking model can burn its whole token budget on hidden reasoning). For
-# more headroom set OLLAMA_MODEL=qwen2.5:3b in your .env — that single var drives
-# BOTH the model pull and this config; qwen2.5:0.5b is the low-RAM floor.
+# LLM tuning. granite4:micro is the docker-compose.camera-agent.yml default —
+# ~3 GB of RAM, Apache-2.0, NON-thinking (the right choice on CPU: a thinking
+# model can burn its whole token budget on hidden reasoning), and the best
+# measured at looking before it answers. For faster turns set
+# OLLAMA_MODEL=qwen3:1.7b in your .env — that single var drives BOTH the model
+# pull and this config; qwen2.5:0.5b is the low-RAM floor.
 # Whichever model you pick, it MUST support tool calling — see
 # https://ollama.com/blog/tool-support.
-llm_model: ${OLLAMA_MODEL}
+# The LLM runtime. ollama (default): Ollama's native API at ollama_url.
+# openai: any OpenAI-compatible chat API at llm_base_url — a cloud provider,
+# a local server, or the NPU caption adapter's /v1/chat/completions (the
+# qualcomm flavour: start.sh fills LLM_PROVIDER=openai and the adapter's
+# URL, and a turn runs on the Hexagon in 1–2 s instead of 20–25 s on the
+# CPU; bench/ventuno-q-npu-agent-llm-2026-11-07.md). All from .env.
+llm_provider: ${LLM_PROVIDER}
+llm_base_url: ${LLM_BASE_URL}
+llm_api_key: ${LLM_API_KEY}
+llm_model: ${LLM_MODEL}
+# A context window the runtime cannot grow (the NPU bundle: 4096). Each
+# turn then sends only the tool schemas the question is likely to need and
+# the newest history (prompt_budget.py). 0 = the runtime manages the window.
+llm_window_tokens: ${LLM_WINDOW_TOKENS}
+# When llm_provider is openai and that endpoint goes away (the NPU adapter
+# restarting, its model reloading): an Ollama to answer from meanwhile,
+# slower, with one spoken notice. Empty = no fallback. The qualcomm
+# flavour's start.sh fills it from OLLAMA_EXTERNAL_URL when .env has one.
+llm_fallback_url: ${LLM_FALLBACK_URL}
+llm_fallback_model: ${LLM_FALLBACK_MODEL}
 # Pre-set so that IF you switch OLLAMA_MODEL to a "thinking" model (e.g. a qwen3)
 # it stays snappy and non-verbose; a harmless no-op for the non-thinking qwen2.5
 # default.
@@ -117,6 +148,56 @@ llm_temperature: 0.4
 # model ramble for ~20s of CPU generation; 128 is plenty and noticeably
 # faster per turn.
 llm_max_tokens: 128
+
+# ── Turn-taking ───────────────────────────────────────────────────
+# Silero VAD opens a turn; Smart Turn v3 (Pipecat's semantic end-of-turn
+# model, bundled, CPU) closes it — a pause mid-sentence no longer ends
+# the turn. The VAD stop window is short on purpose (the model judges
+# the pause). Raise turn_stop_secs on slow speakers; lower it for snappier
+# replies at the cost of occasional early cut-offs.
+vad_confidence: 0.55
+vad_start_secs: 0.15
+vad_stop_secs: 0.2
+turn_stop_secs: 1.0
+# Smart Turn only ever looks at the last 8 s of a turn; buffering more is
+# pure cost.
+turn_max_secs: 8.0
+# Hardware fit (see MODELS_AND_LATENCY.md → "Turn detection on CPU").
+#   turn_detector: auto | smart | timer — auto runs Smart Turn v3 whenever
+#     this process has ≥2 cores and falls back to a plain silence timer
+#     (turn_timer_secs, no model) on a single core.
+#   turn_cpu_threads: onnxruntime threads for one verdict; leave unset for
+#     auto (1 thread — measured fastest up to 7 cores — 2 from 8 cores).
+turn_detector: auto
+# Interruptions on the streaming (/ws) pipeline — like a person's. While the
+# agent speaks, only a phrase that is real speech of ≥ interrupt_min_ms,
+# holds ≥ interrupt_min_words words once backchannels ("mm-hm", "okay") are
+# stripped, and reads as said TO the agent (its name, a question, a
+# request or correction, the site's own words — cameras, gate, plate…)
+# cuts it off; a cough, "yeah", or a remark to someone else does not.
+# GET /interruptions lists every decision with its reason — tune from that.
+#   interruptions: gated (default) | eager (any speech interrupts) | off
+interruptions: gated
+interrupt_min_ms: 300
+interrupt_min_words: 2
+interrupt_addressee: true
+# Thinking aloud: when a voice question needs a slow tool, the agent says
+# what it is about to do while it does it — "Let me check the gate camera
+# for vehicles between 2 and 3" — built from the tool call's own arguments
+# (no LLM), Piper-synthesised in parallel with the tool and cached by
+# text, at most once per turn, and only when the expected wait (this
+# site's own recent stage timings) is at least filler_min_ms. Typed
+# questions get the line as a status only. GET /thinking-aloud shows the
+# decisions. filler_source "model" asks the LLM to write the line in the
+# same first pass (a few extra tokens) with the template as fallback.
+# Off by default: built for a CPU-only box where a tool turn took 5-10 s;
+# on an NPU the answer lands in a second or two and the line reads as an
+# unexpected extra reply. Set true on a slow box.
+thinking_aloud: false
+filler_min_ms: 1500
+filler_source: template
+# turn_cpu_threads: 1
+# turn_timer_secs: 0.8
 # Context window. The default (4096) no longer fits this config's toolset:
 # 13 advertised tool schemas + the system prompt (rules, clock, roster, task
 # guidance) measure ~3.5-4.5k tokens BEFORE any conversation history — and
@@ -124,6 +205,10 @@ llm_max_tokens: 128
 # prompt first, which quietly breaks tool routing. 8192 gives comfortable
 # headroom; KV-cache cost for a 1.5-2b model at 8k is a few hundred MB.
 llm_num_ctx: 8192
+# Pre-warm the LLM at start (system prompt + tools, one token). false where
+# the LLM runs on the CPU: minutes of cores at every restart (the installer
+# sets LLM_PREWARM).
+llm_prewarm: ${LLM_PREWARM}
 
 # 1.0 (was 2.0) so the camera screen's 1 fps still refresh actually gets a
 # NEW frame each second — at TTL 2.0 every other poll returned the same
@@ -137,13 +222,6 @@ event_ring_size: 256
 # standard stack compose (which uses INTERNAL_API_KEY).
 nats_inference_url: nats://nats:4222
 
-# The footage-search app's SQLite index, mounted read-only by the compose
-# overlay (volume opennvr_footage_search_data → /footage). Enables the
-# search_footage tool — "did a red truck come by earlier today?". The
-# reader re-tries on every call, so the tool lights up automatically once
-# the apps overlay's indexer has created the file; until then it reports
-# the index hasn't been built yet.
-footage_index_path: /footage/footage_index.sqlite3
 nats_inference_token: ${INTERNAL_API_KEY}
 
 # Load cameras from OpenNVR. OpenNVR returns internal MediaMTX frame-source
@@ -179,6 +257,11 @@ auth_mode: opennvr
 # TLS: self-signed pair generated by camera-agent-certs-init and mounted by
 # the compose overlay. Serving https is what lets the demo mic work from
 # LAN devices (getUserMedia needs a secure origin).
+# The URL core reaches this agent at on the compose network — registered
+# with the App Catalog as the contract URL core probes (/health, /state).
+# The service name, which is in the certificate's SAN; the container's
+# own hostname would be an unresolvable container id.
+agent_contract_url: https://camera-agent:9100
 tls_certfile: /certs/server.crt
 tls_keyfile: /certs/server.key
 
@@ -190,9 +273,10 @@ port: 9100
 cameras: []
 
 system_prompt: |
-  You are a concise voice assistant for a home security camera system.
-  You have NO knowledge of what any camera currently shows — the ONLY
-  way to know is to call a tool.
+  You are a concise voice assistant for a camera system. You have NO
+  knowledge of what any camera currently shows — the ONLY way to know is
+  to call a tool; if you have not called one this turn, you do not know,
+  and you never describe a camera from imagination.
 
   RULES:
   - For questions about what a camera sees RIGHT NOW, what is happening,
@@ -209,8 +293,5 @@ system_prompt: |
       call describe_event with its [#id].
     - "did a red truck come by?" — searching by appearance/attributes →
       call search_footage with keywords.
-  - NEVER invent, guess, or describe what is on a camera from imagination.
-    If you have not called a tool this turn, you do not know.
-  - Base your answer ONLY on the tool result, in 1-2 short spoken sentences.
   - If a tool says a camera cannot be reached, tell the user that camera
     appears to be offline.

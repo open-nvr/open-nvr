@@ -74,3 +74,16 @@ def test_health_reports_advertised_tools_not_all_handlers():
     rt = _runtime(["detect_objects", "describe_camera"])
     health = TestClient(build_app(rt)).get("/health").json()
     assert sorted(health["tools"]) == ["describe_camera", "detect_objects"]
+
+
+def test_recent_events_takes_all_as_every_camera():
+    """Every other tool spells every camera 'all'; recent_events wanted
+    '__any__' and refused 'all' — which Gemma chose three times of three
+    for "what did the cameras see overnight?" (the NPU eval, 2026-11-08)."""
+    import asyncio
+    rt = _runtime(None)
+    out = asyncio.run(rt.tools.recent_events({"camera_id": "all", "window_seconds": 600}))
+    assert not out.startswith("ERROR"), out
+    out_any = asyncio.run(rt.tools.recent_events({"camera_id": "__any__", "window_seconds": 600}))
+    assert out == out_any
+

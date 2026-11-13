@@ -22,18 +22,42 @@
 // model is present before enabling. Config forms are generated from the
 // manifest param schema — no app-specific UI code.
 
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { HardwareBadge, type HardwareBar } from '../components/HardwareBadge'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Activity, ArrowRight, Boxes, Check, Copy, Download, ExternalLink, RefreshCw, Settings2, Trash2 } from 'lucide-react'
+import { Activity, ArrowDownWideNarrow, ArrowLeft, ArrowRight, BadgeCheck, Boxes, Check, Copy, Download, ExternalLink, KeyRound, RefreshCw, Search, Settings2, Trash2 } from 'lucide-react'
 import { apiService } from '../lib/apiService'
+import { useAuth } from '../auth/AuthContext'
 import { extractApiError } from '../lib/apiError'
 import { Modal } from '../components/Modal'
 import { useSnackbar } from '../components/Snackbar'
+import { useTranslation } from '../i18n'
+import { useConfirm } from '../components/ui/ConfirmDialog'
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, EmptyState, ErrorCard, PageHeader, Skeleton, type BadgeVariant } from '../components/ui'
 import { GeometryEditor } from './apps/GeometryEditor'
 import { ChipListEditor } from './apps/ChipListEditor'
+import { ColorRangeEditor } from './apps/ColorRangeEditor'
 import { TimeWindowEditor } from './apps/TimeWindowEditor'
+import {
+  AppCameraScope,
+  type CameraSetupItem,
+  cameraLabel,
+  CameraPicker,
+  appCamerasKey,
+  savePicks,
+  savedPicks,
+  useAppCameras,
+} from './apps/CameraPicker'
+import {
+  CameraSetupDialog, entryFor, isCameraSetupType, isDrawn, shortParamName,
+} from './apps/CameraSetupDialog'
+import { taskProvider, type CapabilitiesLike, type Tier0Like } from '../lib/kaic'
+import { listOf, skillLabel } from '../lib/skillNames'
+import { InfoTip } from '../components/ui/InfoTip'
+import { AppHeader } from './apps/AppHeader'
+import { verticalFor } from '../lib/appVerticals'
+import { matchesCatalogFilter, sortCatalog, type CatalogSort } from '../lib/catalogFilter'
 
 export type ManifestParam = {
   name: string
@@ -42,6 +66,16 @@ export type ManifestParam = {
   per_camera?: boolean
   required?: boolean
   description?: string
+  // One-click values the catalog offers for list params (SDK Param.suggestions).
+  suggestions?: string[]
+  /** What to CALL this. Falls back to `name` — apps adopt it one at a time. */
+  label?: string
+  /** Heading to file this under. Ungrouped params stay at the top. */
+  group?: string
+  /** Real but rarely touched: collapsed behind a disclosure, never dropped. */
+  advanced?: boolean
+  /** A closed set — rendered as a select, and enforced by the server. */
+  choices?: { value: any; label: string }[]
 }
 
 export type AppManifest = {
@@ -80,6 +114,8 @@ export type AppManifest = {
   // ("{host}" in it is replaced with the browser's hostname).
   ui_mode?: 'internal' | 'external'
   ui_url?: string
+  // App publishes overlay.boxes.v1 — the catalog shows an Overlay switch.
+  overlay?: boolean
   // Store listing (the Details section): long-form description
   // (blank-line-separated paragraphs), authorship, and the concrete
   // jobs the app solves.
@@ -94,6 +130,113 @@ export type AppManifest = {
   // Vertical capabilities this app provides ("vehicles", "occupancy")
   // — first-class pages in the main nav light up per capability.
   provides?: string[]
+  // Commerce: free | paid | subscription | contact, a human price line,
+  // and whether enabling needs a licence key the app verifies.
+  pricing?: 'free' | 'paid' | 'subscription' | 'contact'
+  price_note?: string
+  entitlement?: 'none' | 'license_key'
+}
+
+// The platform's record of a licensed app's key (never the key itself)
+// and the app's own verdict on it — GET /apps and the config poll.
+export type Entitlement = {
+  mode: 'none' | 'license_key'
+  status: 'none' | 'unverified' | 'valid' | 'invalid'
+  plan?: string | null
+  expires_at?: string | null
+  message?: string
+  limits?: Record<string, any>
+  checked_at?: string | null
+  has_license_key: boolean
+}
+
+/** A small pricing badge for cards and listings; nothing for free apps. */
+function PricingBadge({ pricing, note }: { pricing?: string; note?: string }) {
+  if (!pricing || pricing === 'free') return null
+  const label = pricing === 'contact' ? 'contact for pricing' : pricing
+  return (
+    <Badge variant="neutral" title={note || undefined}>
+      {label}{note ? ` · ${note}` : ''}
+    </Badge>
+  )
+}
+
+/** "Licence key required" — shown BEFORE install so an operator knows a
+ * licensed app will not enable until an administrator enters a key the
+ * app accepts (the installed card then carries the LicensePanel). */
+function LicenceRequiredBadge({ entitlement }: { entitlement?: string }) {
+  if (entitlement !== 'license_key') return null
+  return (
+    <Badge
+      variant="warning"
+      title="Installs normally, but cannot be enabled until an administrator enters a licence key the app verifies"
+    >
+      <KeyRound size={12} /> licence key required
+    </Badge>
+  )
+}
+
+/** Every catalog app is reviewed, and open source unless it is a
+ * first-party app marked closed source;
+ * this badge means MORE than that: the OpenNVR maintainers run this app
+ * in production and vouch for it. Set by reviewers in the index. */
+function VerifiedBadge({ verified, author }: { verified?: boolean; author?: string }) {
+  if (!verified) return null
+  return (
+    <Badge
+      variant="success"
+      title={`Maintainer-verified${author ? ` (by ${author})` : ''} — the OpenNVR maintainers run this app in production`}
+    >
+      <BadgeCheck size={12} /> maintainer-verified
+    </Badge>
+  )
+}
+
+/** What an operator should know before installing: where the code is,
+ * who to reach, and which hosts the app talks to outside the stack. */
+function ProvenanceLine({ app, hideEgress = false }: { app: IndexApp; hideEgress?: boolean }) {
+  const egress = app.network_egress ?? []
+  const external = app.kind === 'external'
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--text-dim)]">
+      {external ? (
+        <span title="Distributed by its author; OpenNVR has not reviewed it and never installs it">not reviewed by OpenNVR</span>
+      ) : app.license === 'proprietary' ? (
+        <span title="A first-party app from OpenNVR: the image is built and signed by OpenNVR's CI; its source is not published">
+          closed source · by OpenNVR
+        </span>
+      ) : app.source ? (
+        <a href={app.source} target="_blank" rel="noreferrer" className="hover:text-[var(--text)]"
+           title="Open source — the catalog image is built from this repository">
+          open source · built from source
+        </a>
+      ) : null}
+      {!external && app.signed_by && (
+        <span title={`Image signed (Sigstore) by ${app.signed_by}; the installer verifies the signature before installing`}>
+          signed
+        </span>
+      )}
+      {app.contact && (
+        <a href={app.contact.includes('@') && !app.contact.startsWith('http') ? `mailto:${app.contact}` : app.contact}
+           target="_blank" rel="noreferrer" className="hover:text-[var(--text)]">
+          contact
+        </a>
+      )}
+      {!external && !hideEgress && (
+        <span
+          title={
+            egress.length
+              ? 'Apps run on an isolated network. These are the only hosts this one declared, reviewed with the listing; anything else it tries is blocked and reported after install.'
+              : 'Apps run on an isolated network with no route to your LAN or the internet, and this one declared no hosts at all — anything it tries is blocked and reported.'
+          }
+        >
+          {egress.length === 0
+            ? 'no outside connections'
+            : `connects to: ${egress.join(', ')}`}
+        </span>
+      )}
+    </div>
+  )
 }
 
 /** Resolve an external ui_url for THIS browser: apps rarely know their
@@ -121,27 +264,81 @@ export type RegisteredApp = {
   status?: string
   last_seen?: string | null
   manifest?: AppManifest | null
+  hardware?: HardwareBar | null
   config?: Record<string, any> | null
+  entitlement?: Entitlement | null
+  egress?: AppEgress | null
+  /** Operator allowed this app's overlay.boxes.v1 to draw over live video. */
+  overlay_enabled?: boolean
+  /** Does this app work on cameras picked for it? False for apps that act
+   *  only on other apps' alerts; they get no Cameras section. */
+  camera_picker?: boolean
+  /** Runs on every camera; the platform holds its picks (the agent). */
+  all_cameras?: boolean
+  /** The model skills a pick of this app brings to a camera. */
+  skills?: string[]
+  /** How many live cameras are picked for this app (list endpoint only). */
+  picked_cameras?: number
+}
+
+// GET /apps/{id}/egress — apps live on an internal network and leave it
+// only through the egress proxy, which allows what the listing declared
+// plus what the operator allowed here; the rest is refused and listed.
+export type AppEgress = {
+  declared: string[]
+  allow: string[]
+  enforced: string[]
+  denied: { host: string; port: number | null; count: number; first_seen: string; last_seen: string }[]
 }
 
 export type AppStatusResp = {
-  health?: { status?: string; [k: string]: any } | null
+  // `ready` is the SDK contract (spec §03); `status` is the string core
+  // normalises on top of it. Read status first, fall back to ready.
+  health?: { status?: string; ready?: boolean; [k: string]: any } | null
   state?: any
 }
 
 // An entry from GET /api/v1/apps/index — the store listing. Entries with
 // installed=true are already registered and surface under "Installed" instead.
 type IndexApp = {
+  /** Editorial rank set by maintainers (0-100), not measured telemetry. */
+  popularity?: number | null
+  /** Paths under the frontend build; see app/public/app-screenshots. */
+  screenshots?: string[]
   id: string
   name: string
   summary?: string
   category: string
   version: string
-  image?: string
+  // "installable" (image + compose service) or "external" (a listing
+  // that links out — no Install button, a "Learn more" link instead).
+  kind?: 'installable' | 'external'
+  external_url?: string | null
+  pricing?: 'free' | 'paid' | 'subscription' | 'contact'
+  price_note?: string
+  entitlement?: 'none' | 'license_key'
+  author?: string
+  // Reviewer-set curation flags (never from the submitter's manifest).
+  verified?: boolean
+  featured?: boolean
+  // Catalog policy: where the open source lives, who maintains it, and
+  // every host it talks to outside the stack ([] = never leaves the site).
+  source?: string | null
+  // 'proprietary' = a first-party app whose source is not published
+  // (an image built and signed by OpenNVR's CI); absent = open source.
+  license?: string | null
+  contact?: string | null
+  network_egress?: string[]
+  // Who the one-click installer expects to have signed the image
+  // ("OpenNVR CI", or a declared identity); null = unsigned.
+  signed_by?: string | null
+  image?: string | null
   requires_tasks?: string[]
+  /** Derived on the server from requires_tasks; see HardwareBadge. */
+  hardware?: HardwareBar | null
   emits?: string[]
   docs_url?: string
-  install?: { compose?: string; command?: string }
+  install?: { compose?: string; command?: string } | null
   installed: boolean
   enabled: boolean | null
 }
@@ -259,11 +456,6 @@ function useInstallStatusPoll(id: string, active: boolean) {
     retry: 0,
     refetchInterval: (query) => {
       const status = query.state.data?.status
-      if (status === 'applied') {
-        queryClient.invalidateQueries({ queryKey: ['apps'] })
-        queryClient.invalidateQueries({ queryKey: ['apps-index'] })
-        return false
-      }
       if (status !== 'pending') return false
       const started = startedAtRef.current
       if (started !== null && Date.now() - started > INSTALL_POLL_MAX_MS) {
@@ -273,7 +465,35 @@ function useInstallStatusPoll(id: string, active: boolean) {
       return 2000
     },
   })
+  // Refresh the groups from an EFFECT, not from inside refetchInterval.
+  // That callback is the observer computing its next delay — a spot React
+  // Query may call more than once per settle and never promises to call
+  // on a terminal status, so invalidating there made "the app appears
+  // under Installed" depend on scheduler timing. Keyed on the status
+  // transition instead, it fires exactly once when the reconciler lands.
+  const settledStatus = query.data?.status
+  useEffect(() => {
+    if (settledStatus !== 'applied') return
+    queryClient.invalidateQueries({ queryKey: ['apps'] })
+    queryClient.invalidateQueries({ queryKey: ['apps-index'] })
+  }, [settledStatus, queryClient])
   return { ...query, timedOut }
+}
+
+/** Headless: keeps an accepted install intent polling at PAGE level, so
+ *  the group refresh survives the operator closing the install dialog.
+ *  Mounted per pending id by AppCatalog; shares the modal's query key,
+ *  so this costs no extra requests while the dialog is still open. */
+function InstallWatcher({ id, onSettled }: { id: string; onSettled: () => void }) {
+  const { data, timedOut } = useInstallStatusPoll(id, true)
+  const status = data?.status
+  useEffect(() => {
+    if (timedOut || (status && status !== 'pending')) onSettled()
+    // onSettled is recreated per render by the parent; depending on it
+    // here would retrigger the effect endlessly.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status, timedOut])
+  return null
 }
 
 function InstallStatusNote({ status }: { status: InstallStatusResp }) {
@@ -301,13 +521,57 @@ export function asStringList(v: unknown): string[] {
   return []
 }
 
-/** Union of every task advertised by any adapter registered with KAI-C. */
-function availableTasks(caps: CapabilitiesResp | undefined): Set<string> {
-  const tasks = new Set<string>()
-  for (const info of Object.values(caps?.adapters ?? {})) {
-    for (const t of asStringList(info?.tasks_advertised).concat(asStringList(info?.tasks))) tasks.add(t)
+/** Tier-0 detect-pipeline liveness — the platform's own object detection,
+ *  which Detector apps ride even with no KAI-C adapter registered. */
+function useTier0() {
+  return useQuery({
+    queryKey: ['tier0-metrics'],
+    queryFn: async () => {
+      const { data } = await apiService.getTier0Metrics()
+      return data as Tier0Like
+    },
+    retry: 0,
+    staleTime: 30_000,
+  })
+}
+
+/** One-click values for a list param: for a *_labels param, the labels
+ *  Tier-0 has seen on this site first, then the manifest's own
+ *  suggestions, then the stock detection vocabulary. */
+const STOCK_LABELS = ['person', 'car', 'truck', 'bus', 'motorcycle', 'bicycle', 'dog', 'cat', 'backpack', 'handbag', 'suitcase']
+function suggestionsFor(p: ManifestParam, seenLabels: string[]): string[] {
+  const out: string[] = []
+  const push = (v: string) => { if (v && !out.includes(v)) out.push(v) }
+  if (/label/i.test(p.name)) for (const l of seenLabels) push(l)
+  for (const v of p.suggestions ?? []) push(String(v))
+  if (/label/i.test(p.name)) for (const l of STOCK_LABELS) push(l)
+  return out
+}
+
+/** What an app needs from the models on this system, in plain words:
+ *  either "all there" or exactly which piece is missing. */
+function RequiresBadge({ requires, caps, tier0 }: { requires: string[]; caps: CapabilitiesLike; tier0: Tier0Like }) {
+  if (requires.length === 0) return null
+  const missing = requires.filter((t) => !taskProvider(t, caps, tier0))
+  const say = (ids: string[]) => {
+    const text = listOf(ids.map(skillLabel))
+    return text.charAt(0).toUpperCase() + text.slice(1)
   }
-  return tasks
+  if (missing.length === 0) {
+    return (
+      <Badge variant="success" title="Everything this app needs is already running on this system.">
+        ✓ {say(requires)} — available
+      </Badge>
+    )
+  }
+  return (
+    <Badge
+      variant="warning"
+      title="Nothing on this system provides this yet. Add a model for it under AI & Detections, then install the app."
+    >
+      {say(missing)} — not available yet
+    </Badge>
+  )
 }
 
 export function statusVariant(status?: string): BadgeVariant {
@@ -335,48 +599,202 @@ export function statusVariant(status?: string): BadgeVariant {
 /** Params whose values aren't scalar edit as JSON in the generated form. */
 function isJsonParam(p: ManifestParam): boolean {
   const t = (p.type || '').toLowerCase()
+  // A closed set is a picker whatever its values are made of, so it
+  // never becomes a JSON textarea.
+  if (hasChoices(p)) return false
   return p.per_camera === true || t === 'list' || t.startsWith('geometry.') || t === 'dict' || t === 'json' || t === 'time_range'
+}
+
+function hasChoices(p: ManifestParam): boolean {
+  return Array.isArray(p.choices) && p.choices.length > 0
+}
+
+/** What the operator should see as this param's name. */
+function paramLabel(p: ManifestParam): string {
+  return p.label || p.name
+}
+
+/**
+ * Choice values survive the round trip through a <select>, whose value
+ * is always a string. The index is the key, so 0 and 0.0 and "0" stay
+ * distinct and a value never has to be parsed back out of its label.
+ */
+function choiceIndex(p: ManifestParam, value: any): string {
+  const i = (p.choices ?? []).findIndex((c) => c.value === value)
+  return i < 0 ? '' : String(i)
+}
+
+/**
+ * Params whose VALUE is JSON, whatever editor draws them.
+ *
+ * Distinct from `isJsonParam`, which answers a different question — "is
+ * a raw textarea the right EDITOR". A colour range has its own picker
+ * and so is not a textarea param, but it is still an object on the
+ * wire, and conflating the two sent `[object Object]` to an endpoint
+ * expecting `{low, high}`.
+ */
+function isJsonValued(p: ManifestParam): boolean {
+  return isJsonParam(p) || (p.type || '').toLowerCase() === 'color.hsv_range'
 }
 
 function initialFormValue(p: ManifestParam, config: Record<string, any> | null | undefined): string | boolean {
   const current = config && p.name in config ? config[p.name] : p.default
-  if (p.type === 'bool' && !isJsonParam(p)) return Boolean(current)
-  if (isJsonParam(p)) return current === undefined ? '' : JSON.stringify(current, null, 2)
+  if (hasChoices(p)) return choiceIndex(p, current)
+  if (p.type === 'bool' && !isJsonValued(p)) return Boolean(current)
+  // NULL counts as unset, exactly like undefined. A param declared with
+  // no default arrives as null, and stringifying that gave the literal
+  // text "null" — which is not empty, so it was parsed back to null and
+  // SAVED, and the server rightly refused a per-camera param that was
+  // not a dict. Nobody had touched the field.
+  if (isJsonValued(p)) {
+    return current === undefined || current === null
+      ? '' : JSON.stringify(current, null, 2)
+  }
   return current === undefined || current === null ? '' : String(current)
 }
 
 /* ------------------------- Config modal ------------------------- */
 
-export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: () => void }) {
+/** Stable empty draft while the picks load. */
+const NO_PICKS: Set<number> = new Set()
+
+export function AppConfigModal({ app, onClose, initialCamera }: {
+  app: RegisteredApp
+  onClose: () => void
+  /** Open straight onto this camera's Set up (id or "camN" handle) — how
+   *  an app page's "Draw it" lands on the right camera. */
+  initialCamera?: number | string
+}) {
   const queryClient = useQueryClient()
   const { showSuccess } = useSnackbar()
   const params = app.manifest?.params ?? []
+  // Site-wide params are superuser-only on the server; anyone else may
+  // draw/edit only the per-camera entries of cameras they manage (the
+  // server merges those into the stored config and refuses the rest).
+  const { user: me } = useAuth()
+  const isAdmin = !!me?.is_superuser
+  const canEditParam = (p: ManifestParam) => isAdmin || p.per_camera === true
   const [values, setValues] = useState<Record<string, string | boolean>>(() =>
     Object.fromEntries(params.map((p) => [p.name, initialFormValue(p, app.config)]))
   )
   const [error, setError] = useState<string | null>(null)
+  const takesPicks = app.camera_picker !== false
+  // Camera picks are a draft until Save, like every other field here.
+  // Seeded once from the server; a background refetch never overwrites
+  // what the user has ticked.
+  const picksQuery = useAppCameras(app.id, takesPicks)
+  const [draftPicks, setDraftPicks] = useState<Set<number> | null>(null)
+  useEffect(() => {
+    if (draftPicks === null && picksQuery.data) setDraftPicks(savedPicks(picksQuery.data))
+  }, [draftPicks, picksQuery.data])
+  // What is drawn on each camera, read from this form's own per-camera
+  // geometry fields (live, so a zone drawn below ticks its card above).
+  // "Not drawn" is information, not an error: most apps treat no zone as
+  // the whole frame.
+  //
+  // Those fields are set up from each camera's card (#480), not in the
+  // form body: there they were one section per field, each with its own
+  // camera dropdown, so two zones on two cameras meant choosing a camera
+  // four times. Only for apps that select cameras — an app without a
+  // camera list keeps its per-camera fields in the form.
+  const cameraParams = useMemo(
+    () => (takesPicks
+      ? params.filter((p) => p.per_camera && isCameraSetupType(p.type))
+      : []),
+    [params, takesPicks],
+  )
+  const formParams = useMemo(
+    () => params.filter((p) => !cameraParams.includes(p)),
+    [params, cameraParams],
+  )
+  const cameraSetup = useCallback((cameraId: number): CameraSetupItem[] =>
+    cameraParams.map((p) => ({
+      label: shortParamName(p.name),
+      done: isDrawn(entryFor(values[p.name], cameraId)),
+    })), [cameraParams, values])
+  const [setupCameraId, setSetupCameraId] = useState<number | null>(null)
+  const setupCamera = picksQuery.data?.cameras.find((c) => c.id === setupCameraId)
+  // Land on the requested camera's Set up once the camera list is known —
+  // once, so closing the dialog does not reopen it.
+  const seededSetup = useRef(false)
+  useEffect(() => {
+    if (seededSetup.current || initialCamera == null || !picksQuery.data) return
+    seededSetup.current = true
+    const wanted = picksQuery.data.cameras.find((c) =>
+      typeof initialCamera === 'number' ? c.id === initialCamera
+        : c.handle === initialCamera || String(c.id) === initialCamera)
+    if (wanted && cameraParams.length > 0) setSetupCameraId(wanted.id)
+  }, [initialCamera, picksQuery.data, cameraParams.length])
+  // Roles an app keeps per camera elsewhere (ANPR's gate roles, set on the
+  // Vehicles page), shown read-only in the picker so unpicking one is a
+  // decision rather than an accident.
+  const cameraRoles = useMemo(() => {
+    const raw = (app.config as any)?.camera_roles
+    if (!raw || typeof raw !== 'object') return undefined
+    const out: Record<string, string> = {}
+    for (const [id, v] of Object.entries(raw as Record<string, any>)) {
+      const label = typeof v === 'string' ? v : (v?.label || v?.role)
+      if (label) out[String(id)] = String(label)
+    }
+    return out
+  }, [app.config])
+  // Labels Tier-0 has actually detected on this site (from its metrics)
+  // — the most useful vocabulary for a *_labels param, ahead of the
+  // manifest's generic suggestions.
+  const tier0 = useTier0()
+  const seenLabels = useMemo(() => {
+    const by = (tier0.data as any)?.detector?.detections_by_class as Record<string, number> | undefined
+    if (!by) return [] as string[]
+    return Object.entries(by).sort((a, b) => b[1] - a[1]).map(([k]) => k)
+  }, [tier0.data])
 
   const saveMutation = useMutation({
-    mutationFn: (config: Record<string, any>) => apiService.updateAppConfig(app.id, config),
+    // Picks first: a zone saved for a camera is only useful once that
+    // camera is the app's.
+    mutationFn: async (config: Record<string, any> | null) => {
+      if (takesPicks && picksQuery.data && draftPicks) {
+        await savePicks(picksQuery.data, draftPicks)
+      }
+      if (config) await apiService.updateAppConfig(app.id, config)
+    },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['apps'] })
       showSuccess(`${app.name} configuration saved`)
       onClose()
     },
     onError: (e) => setError(extractApiError(e, 'Failed to save app configuration.')),
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ['apps'] })
+      queryClient.invalidateQueries({ queryKey: ['cameras'] })
+      queryClient.invalidateQueries({ queryKey: appCamerasKey(app.id) })
+    },
   })
 
   const submit = () => {
     setError(null)
+    if (params.length === 0) {
+      saveMutation.mutate(null)
+      return
+    }
     const config: Record<string, any> = {}
     for (const p of params) {
+      if (!canEditParam(p)) continue   // untouched site-wide keys stay as stored
       const raw = values[p.name]
       const t = (p.type || '').toLowerCase()
-      if (isJsonParam(p)) {
+      if (hasChoices(p)) {
+        const picked = (p.choices ?? [])[Number(raw)]
+        if (!picked) {
+          if (p.required) {
+            setError(`"${paramLabel(p)}" is required.`)
+            return
+          }
+          continue
+        }
+        config[p.name] = picked.value
+      } else if (isJsonValued(p)) {
         const text = String(raw ?? '').trim()
         if (!text) {
           if (p.required) {
-            setError(`"${p.name}" is required.`)
+            setError(`"${paramLabel(p)}" is required.`)
             return
           }
           continue
@@ -384,7 +802,7 @@ export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: 
         try {
           config[p.name] = JSON.parse(text)
         } catch {
-          setError(`"${p.name}" is not valid JSON.`)
+          setError(`"${paramLabel(p)}" is not valid JSON.`)
           return
         }
       } else if (t === 'bool') {
@@ -393,21 +811,21 @@ export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: 
         const text = String(raw ?? '').trim()
         if (!text) {
           if (p.required) {
-            setError(`"${p.name}" is required.`)
+            setError(`"${paramLabel(p)}" is required.`)
             return
           }
           continue
         }
         const num = Number(text)
         if (!Number.isFinite(num) || (t === 'int' && !Number.isInteger(num))) {
-          setError(`"${p.name}" must be a valid ${t === 'int' ? 'integer' : 'number'}.`)
+          setError(`"${paramLabel(p)}" must be a valid ${t === 'int' ? 'integer' : 'number'}.`)
           return
         }
         config[p.name] = num
       } else {
         const text = String(raw ?? '')
         if (!text && p.required) {
-          setError(`"${p.name}" is required.`)
+          setError(`"${paramLabel(p)}" is required.`)
           return
         }
         if (text || !p.required) config[p.name] = text
@@ -421,83 +839,83 @@ export function AppConfigModal({ app, onClose }: { app: RegisteredApp; onClose: 
       open
       title={`Configure ${app.name}`}
       onClose={onClose}
+      // A side panel, not a centred dialog: configuring an app is work
+      // you do AGAINST the page you came from — the screening list, the
+      // occupancy zones — and a centred box behind a dark backdrop hides
+      // the very thing you are tuning. Full height also suits a form
+      // that is now grouped into sections.
+      //
+      // It stays WIDE on purpose. The scan zone and the uniform colour
+      // are drawn on a 16:9 camera snapshot, and a conventional 400px
+      // drawer would make the most important part of setup worse, not
+      // better. Forms with nothing to draw get a narrower one.
+      placement="side"
       widthClassName={
-        params.some((p) => (p.type || '').toLowerCase().startsWith('geometry.'))
-          ? 'w-[720px]'
-          : 'w-[560px]'
+        formParams.some((p) => {
+          const t = (p.type || '').toLowerCase()
+          return t.startsWith('geometry.') || t === 'color.hsv_range'
+        })
+          ? 'w-[780px]'
+          : 'w-[520px]'
       }
     >
-      {params.length === 0 ? (
-        <div className="text-sm text-[var(--text-dim)]">This app declares no configurable parameters.</div>
-      ) : (
-        <div className="space-y-4">
-          {params.map((p) => {
-            const t = (p.type || '').toLowerCase()
-            const value = values[p.name]
-            return (
-              <div key={p.name}>
-                <label className="block text-sm mb-1">
-                  <span className="font-medium">{p.name}</span>
-                  <span className="ml-2 text-xs text-[var(--text-dim)]">
-                    {p.type}
-                    {p.per_camera ? ' · per camera' : ''}
-                    {p.required ? ' · required' : ''}
-                  </span>
-                </label>
-                {p.description && <div className="text-xs text-[var(--text-dim)] mb-1">{p.description}</div>}
-                {t === 'geometry.polygon' || t === 'geometry.tripwire' ? (
-                  <GeometryEditor
-                    kind={t === 'geometry.tripwire' ? 'tripwire' : 'polygon'}
-                    value={String(value ?? '')}
-                    onChange={(json) => setValues((v) => ({ ...v, [p.name]: json }))}
-                  />
-                ) : t === 'list' && !p.per_camera ? (
-                  <ChipListEditor
-                    value={String(value ?? '')}
-                    placeholder={`add ${p.name} value, Enter`}
-                    onChange={(json) => setValues((v) => ({ ...v, [p.name]: json }))}
-                  />
-                ) : t === 'time_range' ? (
-                  <TimeWindowEditor
-                    value={String(value ?? '')}
-                    onChange={(range) => setValues((v) => ({ ...v, [p.name]: range }))}
-                  />
-                ) : isJsonParam(p) ? (
-                  <textarea
-                    className="w-full h-28 px-2 py-1.5 text-sm font-mono rounded border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
-                    value={String(value ?? '')}
-                    placeholder={p.per_camera ? '{"camera_id": …}' : '[…]'}
-                    onChange={(e) => setValues((v) => ({ ...v, [p.name]: e.target.value }))}
-                  />
-                ) : t === 'bool' ? (
-                  <label className="inline-flex items-center gap-2 text-sm">
-                    <input
-                      type="checkbox"
-                      checked={Boolean(value)}
-                      onChange={(e) => setValues((v) => ({ ...v, [p.name]: e.target.checked }))}
-                    />
-                    Enabled
-                  </label>
-                ) : (
-                  <input
-                    type={t === 'int' || t === 'float' ? 'number' : 'text'}
-                    step={t === 'float' ? 'any' : undefined}
-                    className="w-full px-2 py-1.5 text-sm rounded border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
-                    value={String(value ?? '')}
-                    onChange={(e) => setValues((v) => ({ ...v, [p.name]: e.target.value }))}
-                  />
-                )}
-              </div>
-            )
-          })}
-        </div>
+      <AppCameraScope.Provider value={takesPicks ? (draftPicks ?? NO_PICKS) : null}>
+      {takesPicks && (
+        <section className="mb-5">
+          <h3 className="mb-1 text-sm font-semibold">Cameras</h3>
+          <p className="mb-2 text-xs text-[var(--text-dim)]">
+            The cameras {app.name} watches. A camera can be used by several apps.
+          </p>
+          <CameraPicker
+            appName={app.name}
+            query={picksQuery}
+            draft={draftPicks}
+            onChange={setDraftPicks}
+            cameraRoles={cameraRoles}
+            setup={cameraSetup}
+            onSetUp={setSetupCameraId}
+          />
+        </section>
       )}
+      {setupCamera && (
+        <CameraSetupDialog
+          appName={app.name}
+          cameraId={setupCamera.id}
+          cameraName={cameraLabel(setupCamera, picksQuery.data?.cameras ?? [])}
+          location={setupCamera.location}
+          params={cameraParams}
+          values={values}
+          canEdit={setupCamera.can_manage}
+          otherCameras={(picksQuery.data?.cameras ?? [])
+            .filter((c) => draftPicks?.has(c.id) && c.id !== setupCamera.id)
+            .map((c) => ({ id: c.id, name: cameraLabel(c, picksQuery.data?.cameras ?? []) }))}
+          onCancel={() => setSetupCameraId(null)}
+          onDone={(edited) => {
+            setValues((v) => ({ ...v, ...edited }))
+            setSetupCameraId(null)
+          }}
+        />
+      )}
+      {formParams.length === 0 ? (
+        cameraParams.length === 0 && (
+          <div className="text-sm text-[var(--text-dim)]">This app declares no configurable parameters.</div>
+        )
+      ) : (
+        <ParamForm
+          params={formParams}
+          values={values}
+          setValues={setValues}
+          canEditParam={canEditParam}
+          seenLabels={seenLabels}
+        />
+      )}
+      </AppCameraScope.Provider>
 
-      {error && <div className="mt-3 text-sm text-red-400">{error}</div>}
+      {error && <div className="mt-3 text-sm text-[var(--danger)]">{error}</div>}
 
       <div className="mt-4 flex justify-end gap-2">
         <Button variant="ghost" onClick={onClose}>Cancel</Button>
-        {params.length > 0 && (
+        {(params.length > 0 || takesPicks) && (
           <Button variant="primary" onClick={submit} disabled={saveMutation.isPending}>
             {saveMutation.isPending ? 'Saving…' : 'Save'}
           </Button>
@@ -537,14 +955,14 @@ function ImageParamInput({ hasValue, onPick }: { hasValue: boolean; onPick: (b64
       <input
         type="file"
         accept="image/*"
-        className="block w-full text-sm text-[var(--text-dim)] file:mr-2 file:px-2 file:py-1 file:rounded file:border file:border-[var(--border)] file:bg-[var(--bg-2)] file:text-[var(--text)]"
+        className="block w-full text-sm text-[var(--text-dim)] file:mr-2 file:px-2 file:py-1 file:border file:border-[var(--border)] file:bg-[var(--bg-2)] file:text-[var(--text)]"
         onChange={(e) => onFile(e.target.files?.[0])}
       />
       {preview && (
-        <img src={preview} alt="selected" className="h-24 rounded border border-[var(--border)] object-cover" />
+        <img src={preview} alt="selected" className="h-24 border border-[var(--border)] object-cover" />
       )}
       {!preview && hasValue && <div className="text-xs text-[var(--text-dim)]">image selected</div>}
-      {err && <div className="text-xs text-red-400">{err}</div>}
+      {err && <div className="text-xs text-[var(--danger)]">{err}</div>}
     </div>
   )
 }
@@ -565,6 +983,7 @@ export function AppActionModal({
   action: ManifestAction
   onClose: () => void
 }) {
+  const confirm = useConfirm()
   const params = action.params ?? []
   const [values, setValues] = useState<Record<string, string | boolean>>(() =>
     Object.fromEntries(
@@ -593,7 +1012,7 @@ export function AppActionModal({
     onError: (e) => setError(extractApiError(e, `${action.label} failed.`)),
   })
 
-  const submit = () => {
+  const submit = async () => {
     setError(null)
     const payload: Record<string, any> = {}
     for (const p of params) {
@@ -604,30 +1023,30 @@ export function AppActionModal({
         payload[p.name] = Boolean(raw)
       } else if (t === 'int' || t === 'float') {
         if (!text) {
-          if (p.required) return setError(`"${p.name}" is required.`)
+          if (p.required) return setError(`"${paramLabel(p)}" is required.`)
           continue
         }
         const num = Number(text)
         if (!Number.isFinite(num) || (t === 'int' && !Number.isInteger(num))) {
-          return setError(`"${p.name}" must be a valid ${t === 'int' ? 'integer' : 'number'}.`)
+          return setError(`"${paramLabel(p)}" must be a valid ${t === 'int' ? 'integer' : 'number'}.`)
         }
         payload[p.name] = num
       } else if (t === 'list' || t === 'dict') {
         if (!text) {
-          if (p.required) return setError(`"${p.name}" is required.`)
+          if (p.required) return setError(`"${paramLabel(p)}" is required.`)
           continue
         }
         try {
           payload[p.name] = JSON.parse(text)
         } catch {
-          return setError(`"${p.name}" is not valid JSON.`)
+          return setError(`"${paramLabel(p)}" is not valid JSON.`)
         }
       } else {
-        if (!text && p.required) return setError(`"${p.name}" is required.`)
+        if (!text && p.required) return setError(`"${paramLabel(p)}" is required.`)
         if (text || !p.required) payload[p.name] = text
       }
     }
-    if (action.confirm && !window.confirm(`Run "${action.label}" on ${app.name}?`)) return
+    if (action.confirm && !(await confirm({ title: `Run "${action.label}" on ${app.name}?` }))) return
     runMutation.mutate(payload)
   }
 
@@ -672,7 +1091,7 @@ export function AppActionModal({
                 <input
                   type={t === 'int' || t === 'float' ? 'number' : 'text'}
                   step={t === 'float' ? 'any' : undefined}
-                  className="w-full px-2 py-1.5 text-sm rounded border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
+                  className="w-full px-2 py-1.5 text-sm border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
                   value={String(value ?? '')}
                   onChange={(e) => setValues((v) => ({ ...v, [p.name]: e.target.value }))}
                   onKeyDown={(e) => {
@@ -684,7 +1103,7 @@ export function AppActionModal({
           )
         })}
 
-        {error && <div className="text-sm text-red-400">{error}</div>}
+        {error && <div className="text-sm text-[var(--danger)]">{error}</div>}
 
         <div className="flex justify-end gap-2">
           <Button variant="ghost" onClick={onClose}>Close</Button>
@@ -705,7 +1124,7 @@ export function AppActionModal({
                 />
               )
             ) : (
-              <pre className="text-xs bg-[var(--bg-2)] border border-[var(--border)] rounded p-2 overflow-x-auto">
+              <pre className="text-xs bg-[var(--bg-2)] border border-[var(--border)] p-2 overflow-x-auto">
                 {JSON.stringify(result, null, 2)}
               </pre>
             )}
@@ -734,8 +1153,13 @@ function AppStatusChip({ appId }: { appId: string }) {
 
   if (!requested) {
     return (
-      <Button variant="ghost" className="text-xs px-2 py-1" onClick={() => setRequested(true)}>
-        <Activity size={12} /> Check
+      <Button
+        variant="ghost"
+        className="text-xs px-2 py-1"
+        onClick={() => setRequested(true)}
+        title="Ask the app for its health — core fetches the app's /health and /state on demand. Not automatic: probing every card on load would fan out one request per installed app."
+      >
+        <Activity size={12} /> Check health
       </Button>
     )
   }
@@ -743,7 +1167,19 @@ function AppStatusChip({ appId }: { appId: string }) {
   if (statusQuery.isError) {
     return <Badge variant="destructive">{extractApiError(statusQuery.error, 'status check failed')}</Badge>
   }
-  const health = statusQuery.data?.health?.status ?? 'unknown'
+  // Core normalises `status` onto /health now. Still derive from the
+  // contract's own `ready` when it is absent, so a newer UI against an
+  // older core shows the truth instead of "unknown" — the SDK has always
+  // spoken `ready` (spec §03), and `status` is the convenience on top.
+  const rawHealth = statusQuery.data?.health
+  const health =
+    typeof rawHealth?.status === 'string'
+      ? rawHealth.status
+      : typeof rawHealth?.ready === 'boolean'
+        ? rawHealth.ready
+          ? 'ok'
+          : 'degraded'
+        : 'unknown'
   return (
     <span className="inline-flex items-center gap-1">
       <Badge variant={statusVariant(health)}>{health}</Badge>
@@ -790,7 +1226,7 @@ function MetricView({ view, value }: { view: StateViewSpec; value: any }) {
   else display = String(value)
   return (
     <div
-      className="rounded border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 text-xs"
+      className="border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 text-xs"
       title={view.description || view.name}
     >
       <span className="text-[var(--text-dim)]">{view.label}</span>{' '}
@@ -923,7 +1359,7 @@ function LogView({ view, value }: { view: StateViewSpec; value: any }) {
   return (
     <div title={view.description || view.name}>
       <div className="text-xs text-[var(--text-dim)] mb-1">{view.label}</div>
-      <div className="rounded border border-[var(--border)] bg-[var(--bg-2)] divide-y divide-[var(--border)] max-h-64 overflow-y-auto">
+      <div className="border border-[var(--border)] bg-[var(--bg-2)] divide-y divide-[var(--border)] max-h-64 overflow-y-auto">
         {rows.map((row, i) => {
           const isObj = row != null && typeof row === 'object'
           const msg = isObj ? row.message ?? row.text ?? row.msg ?? JSON.stringify(row) : String(row)
@@ -961,7 +1397,7 @@ function GalleryView({ view, value }: { view: StateViewSpec; value: any }) {
           const caption = isObj ? it.label ?? it.plate ?? it.name ?? it.caption : undefined
           const when = isObj ? fmtWhen(it.time ?? it.ts ?? it.timestamp ?? it.at) : ''
           return (
-            <div key={i} className="rounded border border-[var(--border)] bg-[var(--bg-2)] overflow-hidden">
+            <div key={i} className="border border-[var(--border)] bg-[var(--bg-2)] overflow-hidden">
               {src ? (
                 <img src={src} alt={caption || 'snapshot'} className="w-full h-24 object-cover" loading="lazy" />
               ) : (
@@ -1048,33 +1484,317 @@ function skillStatusVariant(status: SkillEntry['status']): BadgeVariant {
   }
 }
 
-function AppCard({ app, tasks, skill, onConfigure }: { app: RegisteredApp; tasks: Set<string>; skill?: SkillEntry; onConfigure: () => void }) {
+/** The licence line on a licensed app's card: status, plan, expiry, the
+ * app's own message; and, for administrators, the key entry itself. The
+ * key is sent once and never read back. */
+function LicensePanel({ app, isAdmin }: { app: RegisteredApp; isAdmin: boolean }) {
   const queryClient = useQueryClient()
-  const navigate = useNavigate()
   const { showSuccess, showError } = useSnackbar()
+  const { t } = useTranslation()
+  const confirm = useConfirm()
+  const [key, setKey] = useState('')
+  const ent = app.entitlement
+  const status = ent?.status ?? 'none'
+  const variant: BadgeVariant =
+    status === 'valid' ? 'success' : status === 'invalid' ? 'destructive' : 'warning'
+  const label =
+    status === 'valid'
+      ? `licensed${ent?.plan ? ` · ${ent.plan}` : ''}${ent?.expires_at ? ` · until ${ent.expires_at.slice(0, 10)}` : ''}`
+      : status === 'invalid'
+        ? 'licence rejected'
+        : status === 'unverified'
+          ? 'licence not yet verified'
+          : 'licence required'
+  const set = useMutation({
+    mutationFn: () => apiService.setAppLicense(app.id, key.trim()),
+    onSuccess: (res: any) => {
+      queryClient.invalidateQueries({ queryKey: ['apps'] })
+      setKey('')
+      const e = res?.data?.entitlement
+      if (e?.status === 'valid') showSuccess(`${app.name}: licence accepted`)
+      else showError(`${app.name}: ${e?.message || 'licence not accepted'}`)
+    },
+    onError: (e) => showError(extractApiError(e, 'Could not store the licence key.')),
+  })
+  const verify = useMutation({
+    mutationFn: () => apiService.verifyAppLicense(app.id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['apps'] }),
+    onError: (e) => showError(extractApiError(e, 'Could not re-verify the licence.')),
+  })
+  const clear = useMutation({
+    mutationFn: () => apiService.clearAppLicense(app.id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['apps'] }),
+    onError: (e) => showError(extractApiError(e, 'Could not clear the licence key.')),
+  })
+  return (
+    <div className="border border-[var(--border)] p-2 space-y-2">
+      <div className="flex items-center gap-2 flex-wrap text-xs">
+        <Badge variant={variant}>{label}</Badge>
+        {ent?.message && status !== 'valid' && (
+          <span className="text-[var(--text-dim)]">{ent.message}</span>
+        )}
+        {ent?.limits && Object.keys(ent.limits).length > 0 && (
+          <span className="text-[var(--text-dim)]">
+            {Object.entries(ent.limits).map(([k, v]) => `${k}: ${String(v)}`).join(' · ')}
+          </span>
+        )}
+      </div>
+      {isAdmin && (
+        <div className="flex items-center gap-2">
+          <input
+            className="flex-1 px-2 py-1 text-sm font-mono border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
+            placeholder={ent?.has_license_key ? 'replace licence key…' : 'licence key'}
+            value={key}
+            onChange={(e) => setKey(e.target.value)}
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <Button variant="outline" onClick={() => set.mutate()} disabled={!key.trim() || set.isPending}>
+            {set.isPending ? 'Verifying…' : 'Save & verify'}
+          </Button>
+          {ent?.has_license_key && (
+            <>
+              <Button variant="ghost" onClick={() => verify.mutate()} disabled={verify.isPending}>Re-check</Button>
+              <Button
+                variant="ghost"
+                disabled={clear.isPending}
+                onClick={async () => {
+                  const ok = await confirm({
+                    title: t('catalog.confirmForgetLicenceTitle'),
+                    message: t('catalog.confirmForgetLicenceMessage', { name: app.name }),
+                    confirmLabel: t('catalog.forget'),
+                    danger: true,
+                  })
+                  if (ok) clear.mutate()
+                }}
+              >
+                Forget
+              </Button>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Per-app permission to draw on the live video. Shown only for apps
+ *  whose manifest declares `overlay`; off by default because an app
+ *  painting on every operator's screen is a privilege, not a default. */
+function OverlayPanel({ app, isAdmin }: { app: RegisteredApp; isAdmin: boolean }) {
+  const queryClient = useQueryClient()
+  const { showSuccess, showError } = useSnackbar()
+  const on = Boolean(app.overlay_enabled)
+  const set = useMutation({
+    mutationFn: (enabled: boolean) => apiService.setAppOverlay(app.id, enabled),
+    onSuccess: (_d, enabled) => {
+      queryClient.invalidateQueries({ queryKey: ['apps'] })
+      showSuccess(enabled
+        ? `${app.name} may now draw boxes over the live view (turn on "Boxes" in Live View to see them)`
+        : `${app.name} no longer draws over the live view`)
+    },
+    onError: (e) => showError(extractApiError(e, 'Could not change the overlay setting.')),
+  })
+  return (
+    <div className="border border-[var(--border)] p-2 space-y-1 text-xs">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="font-medium text-[var(--text)]">Overlay</span>
+        <Badge variant={on ? 'success' : 'neutral'}>{on ? 'draws on live view' : 'not drawn'}</Badge>
+        {isAdmin && (
+          <Button
+            variant="outline"
+            className="ml-auto"
+            onClick={() => set.mutate(!on)}
+            disabled={set.isPending}
+            aria-pressed={on}
+          >
+            {on ? 'Stop drawing' : 'Allow drawing'}
+          </Button>
+        )}
+      </div>
+      <p className="text-[var(--text-dim)] leading-relaxed">
+        This app publishes boxes it wants shown over the live video — plate
+        outlines, zones. They appear only if you allow it here <em>and</em> an
+        operator has Boxes on in Live View. The app keeps running either way.
+      </p>
+    </div>
+  )
+}
+
+function NetworkPanel({ app, isAdmin }: { app: RegisteredApp; isAdmin: boolean }) {
+  const queryClient = useQueryClient()
+  const { showSuccess, showError } = useSnackbar()
+  const [draft, setDraft] = useState('')
+  const eg = app.egress
+  const save = useMutation({
+    mutationFn: (allow: string[]) => apiService.setAppEgress(app.id, allow),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['apps'] })
+      setDraft('')
+      showSuccess(`${app.name}: allowed hosts updated`)
+    },
+    onError: (e) => showError(extractApiError(e, 'Could not update the allowed hosts.')),
+  })
+  if (!eg) return null
+  const allow = eg.allow ?? []
+  const denied = eg.denied ?? []
+  const notes = (eg.declared ?? []).filter((d) => !eg.enforced.includes(d.trim().toLowerCase()))
+  const listingHosts = eg.enforced.filter((h) => !allow.includes(h))
+  const addHost = (host: string) => {
+    const h = host.trim().toLowerCase()
+    if (!h || allow.includes(h)) return
+    save.mutate([...allow, h])
+  }
+  return (
+    <div className="border border-[var(--border)] p-2 space-y-2 text-xs">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="font-medium text-[var(--text)]">Network</span>
+        {eg.enforced.length === 0 && denied.length === 0 ? (
+          <span className="text-[var(--text-dim)]">nothing outside OpenNVR</span>
+        ) : null}
+        {listingHosts.map((h) => (
+          <Badge key={`l-${h}`} variant="neutral" title="Declared in the catalog listing">{h}</Badge>
+        ))}
+        {allow.map((h) => (
+          <span key={`a-${h}`} className="inline-flex items-center gap-1">
+            <Badge variant="success" title="Allowed by an administrator for this install">{h}</Badge>
+            {isAdmin && (
+              <button
+                type="button"
+                className="text-[var(--text-dim)] hover:text-[var(--text)]"
+                title="Stop allowing this host"
+                onClick={() => save.mutate(allow.filter((x) => x !== h))}
+                disabled={save.isPending}
+              >
+                ×
+              </button>
+            )}
+          </span>
+        ))}
+        {notes.length > 0 && (
+          <span className="text-[var(--text-dim)]" title="From the listing — a note, not a rule">
+            also: {notes.join('; ')}
+          </span>
+        )}
+      </div>
+      {/* Say what this panel IS. It reads like a bare list of hostnames
+          otherwise, and the guarantee behind it — the reason to care
+          about an app's listed hosts BEFORE installing it — is invisible.
+          Two lines: the rule, then what to do about it. */}
+      <p className="text-[var(--text-dim)] leading-relaxed">
+        Apps run on an isolated network with no route to your camera
+        network or the internet. Everything above is what this app may
+        reach through the OpenNVR egress proxy — anything else is blocked
+        and reported here, so an app cannot quietly send footage or data
+        somewhere you did not approve.
+        {isAdmin && ' Allow a host only if you know why the app needs it.'}
+      </p>
+      {denied.length > 0 && (
+        <div className="space-y-1">
+          <div className="text-[var(--text-dim)]">
+            Refused by the egress proxy — the app tried to reach these and they are neither declared nor allowed:
+          </div>
+          {denied.map((d) => {
+            const dest = d.port ? `${d.host}:${d.port}` : d.host
+            return (
+              <div key={dest} className="flex items-center gap-2 flex-wrap">
+                <Badge variant="destructive">{dest}</Badge>
+                <span className="text-[var(--text-dim)]">
+                  {d.count}× · last {fmtWhen(d.last_seen)}
+                </span>
+                {isAdmin && (
+                  <Button variant="outline" onClick={() => addHost(dest)} disabled={save.isPending}>
+                    Allow
+                  </Button>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+      {isAdmin && (
+        <div className="flex items-center gap-2">
+          <input
+            className="flex-1 px-2 py-1 text-sm font-mono border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
+            placeholder="allow a host: ha.local:8123, *.ntfy.sh, 192.168.1.0/24"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addHost(draft) } }}
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <Button variant="outline" onClick={() => addHost(draft)} disabled={!draft.trim() || save.isPending}>
+            Allow
+          </Button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function AppCard({ app, caps, tier0, skill }: { app: RegisteredApp; caps: CapabilitiesLike; tier0: Tier0Like; skill?: SkillEntry }) {
+  const confirm = useConfirm()
+  const queryClient = useQueryClient()
+  const { showSuccess, showError } = useSnackbar()
+  // Enable/disable is a site decision (superuser-only on the server;
+  // uninstall keeps its own apps.install permission); everyone can open
+  // Configure for their cameras' zones.
+  const { user: me } = useAuth()
+  const isAdmin = !!me?.is_superuser
   const [uninstallPollActive, setUninstallPollActive] = useState(false)
   const [uninstallNote, setUninstallNote] = useState<string | null>(null)
+  // Shown after THIS operator enables the app — a toast is gone in a few
+  // seconds and an external app's URL is something you need to read,
+  // click, or copy.
+  const [enableNote, setEnableNote] = useState(false)
   // Manifest-declared operator action currently open in its form modal.
   const [activeAction, setActiveAction] = useState<ManifestAction | null>(null)
 
   const requires = asStringList(app.manifest?.requires_tasks)
-  const missing = requires.filter((t) => !tasks.has(t))
   const manifestActions = (app.manifest?.actions ?? []).filter((a) => a && a.name && a.label)
+
+  // Where this app surfaces once enabled, decided from the manifest:
+  // an external app is a product of its own at a URL; an internal app
+  // that provides a vertical gets a page under Applications; anything
+  // else lives on its own catalog dashboard.
+  const externalUrl =
+    app.manifest?.ui_mode === 'external' && app.manifest?.ui_url
+      ? resolveUiUrl(app.manifest.ui_url)
+      : null
+  const vertical = externalUrl ? null : verticalFor(app.manifest)
 
   const toggleMutation = useMutation({
     mutationFn: () => (app.enabled ? apiService.disableApp(app.id) : apiService.enableApp(app.id)),
     onSuccess: () => {
       const wasEnabling = !app.enabled
       queryClient.invalidateQueries({ queryKey: ['apps'] })
-      showSuccess(`${app.name} ${app.enabled ? 'disabled' : 'enabled'}`)
-      // First enable takes the operator straight to the app's own page so
-      // they land on its live dashboard and actions, not back on the grid.
-      if (wasEnabling) navigate(`/app-catalog/${app.id}`)
+      if (!wasEnabling) {
+        setEnableNote(false)
+        // Say what it does, now that it does something: disabling used
+        // to leave the app running and only stop operator actions.
+        showSuccess(`${app.name} disabled — it stops watching its cameras within a few seconds. Its settings and camera selection are kept.`)
+        return
+      }
+      // Enabling used to redirect straight to the app's page, which
+      // answered "what does it do" but not "where do I find it again" —
+      // the operator was moved somewhere without being told why. Say
+      // where it now lives and let them choose to go.
+      showSuccess(
+        externalUrl
+          ? `${app.name} enabled — open it at ${externalUrl}`
+          : vertical
+            ? `${app.name} enabled — listed under Applications → ${vertical.label}`
+            : `${app.name} enabled — open it from its card`
+      )
+      setEnableNote(true)
     },
     onError: (e) => showError(extractApiError(e, `Failed to ${app.enabled ? 'disable' : 'enable'} ${app.name}.`)),
   })
 
   const uninstallStatus = useInstallStatusPoll(app.id, uninstallPollActive)
+  // A licensed app cannot be enabled until the app has accepted a key.
+  const needsLicense =
+    app.manifest?.entitlement === 'license_key' && app.entitlement?.status !== 'valid'
 
   // Same opt-in + RBAC gating as install: a 403 degrades to an inline note
   // (fail-closed) rather than an error toast, since the operator may have
@@ -1106,27 +1826,52 @@ function AppCard({ app, tasks, skill, onConfigure }: { app: RegisteredApp; tasks
     uninstallMutation.isPending ||
     (uninstallStatus.data?.status === 'pending' && !uninstallStatus.timedOut)
 
-  const confirmUninstall = () => {
-    if (window.confirm(`Uninstall ${app.name}? This asks the reconciler to remove the app from this host.`)) {
+  const confirmUninstall = async () => {
+    if (await confirm({
+      title: `Uninstall ${app.name}?`,
+      message: 'This asks the reconciler to remove the app from this host.',
+      confirmLabel: 'Uninstall',
+      danger: true,
+    })) {
       uninstallMutation.mutate()
     }
   }
 
   return (
     <Card>
-      <CardHeader>
+      {/* flex-wrap locally rather than on the shared CardHeader: a long
+          app name plus category, version, pricing and the two status
+          pills overflows a narrow grid column, and clipping status is
+          how "disabled" ends up half-hidden behind Uninstall. */}
+      <CardHeader className="flex-wrap">
         <Boxes size={16} className="text-[var(--text-dim)]" />
         <Link to={`/app-catalog/${app.id}`} className="hover:underline">
           <CardTitle>{app.name}</CardTitle>
         </Link>
         <Badge variant="info">{app.category}</Badge>
         <span className="text-xs text-[var(--text-dim)]">v{app.version}</span>
-        <div className="ml-auto">
+        <PricingBadge pricing={app.manifest?.pricing} note={app.manifest?.price_note} />
+        {/* enabled/disabled is STATE, not an action — it belongs beside the
+            health chip, not pinned with ml-auto to the end of the button
+            row, where a card with several manifest actions pushed it off
+            the edge and clipped it against Uninstall. */}
+        <div className="ml-auto flex items-center gap-2">
+          <Badge variant={app.enabled ? 'success' : 'neutral'}>
+            {app.enabled ? 'enabled' : 'disabled'}
+          </Badge>
           <AppStatusChip appId={app.id} />
         </div>
       </CardHeader>
       <CardContent className="space-y-3 text-sm">
         <div className="text-[var(--text-dim)]">{app.manifest?.summary || 'No summary provided.'}</div>
+
+        {app.manifest?.entitlement === 'license_key' && (
+          <LicensePanel app={app} isAdmin={isAdmin} />
+        )}
+
+        <NetworkPanel app={app} isAdmin={isAdmin} />
+
+        {app.manifest?.overlay && <OverlayPanel app={app} isAdmin={isAdmin} />}
 
         {/* RFC-0002 Phase 1: the skill this app provides, as the platform
             registry sees it — same derivation the agent's panel renders,
@@ -1146,31 +1891,69 @@ function AppCard({ app, tasks, skill, onConfigure }: { app: RegisteredApp; tasks
         )}
 
         {requires.length > 0 && (
-          <div>
-            {missing.length === 0 ? (
-              <Badge variant="success">● requires {requires.join(' + ')} — available</Badge>
-            ) : (
-              <Badge variant="warning">requires {missing.join(' + ')} — not installed</Badge>
-            )}
+          <div className="flex flex-wrap gap-2">
+            <RequiresBadge requires={requires} caps={caps} tier0={tier0} />
+            <HardwareBadge hardware={app.hardware} />
           </div>
         )}
 
-        {Array.isArray(app.manifest?.state_schema) && app.manifest.state_schema.length > 0 && (
-          <LiveStateViews appId={app.id} views={app.manifest.state_schema as StateViewSpec[]} />
+        {/* Where every freshly installed app starts. Said on the card, not
+            only inside Configure, because an enabled app with no cameras
+            otherwise looks exactly like one that is working. */}
+        {app.all_cameras && (
+          <div>
+            <Badge title="Runs on every camera — the platform selects them for this app, and its skills are in every camera's set while it is enabled">
+              All cameras
+            </Badge>
+          </div>
+        )}
+        {app.camera_picker !== false && !app.all_cameras && app.picked_cameras === 0 && (
+          <div>
+            <Badge variant="warning" title="Select cameras in Configure — until then this app does nothing">
+              No cameras
+            </Badge>
+          </div>
         )}
 
-        <div className="flex items-center gap-2 pt-1">
+        {/* Live results deliberately do NOT render here. The catalog is
+            the management surface — install, enable, configure, remove —
+            and an app's output belongs to the app: /app-catalog/<id>
+            (AppView) already renders the same state_schema as a polling
+            dashboard, and a first-class vertical has its own page on top
+            of that. Worse, this card shares the ['app-status', id] query
+            key with those pages, so merely visiting Vehicles or Occupancy
+            filled the cache and the card sprouted plate tables nobody
+            asked for. Card title → AppView is the route to results. */}
+
+        <div className="flex flex-wrap items-center gap-2 pt-1">
+          {isAdmin && (
           <Button
             variant={app.enabled ? 'default' : 'primary'}
             onClick={() => toggleMutation.mutate()}
-            disabled={toggleMutation.isPending}
+            disabled={toggleMutation.isPending || (!app.enabled && needsLicense)}
+            title={!app.enabled && needsLicense ? 'Enter a licence key the app accepts first' : undefined}
             aria-pressed={app.enabled}
           >
             {toggleMutation.isPending ? 'Working…' : app.enabled ? 'Disable' : 'Enable'}
           </Button>
-          <Button variant="outline" onClick={onConfigure}>
-            <Settings2 size={14} /> Configure
-          </Button>
+          )}
+          {app.manifest?.ui_mode === 'external' && app.manifest?.ui_url && (
+            // A full application with its own web UI (the OpenNVR Agent):
+            // link out to it — its {host} is wherever this browser is.
+            <Button
+              variant="primary"
+              onClick={() => window.open(resolveUiUrl(app.manifest!.ui_url!), '_blank', 'noopener,noreferrer')}
+              disabled={!app.enabled}
+              title={app.enabled ? resolveUiUrl(app.manifest.ui_url) : 'Enable the app first'}
+            >
+              <ExternalLink size={14} /> Open app
+            </Button>
+          )}
+          {/* Configuration lives on the app's own page: the catalog is
+              the store (install, enable, remove), the page is the product. */}
+          <Link to={verticalFor(app.manifest)?.to ?? `/app-catalog/${app.id}`}>
+            <Button variant="outline"><Settings2 size={14} /> Open &amp; configure</Button>
+          </Link>
           {manifestActions.map((a) => (
             <Button
               key={a.name}
@@ -1185,15 +1968,50 @@ function AppCard({ app, tasks, skill, onConfigure }: { app: RegisteredApp; tasks
           <Button variant="danger" onClick={confirmUninstall} disabled={uninstallInFlight}>
             <Trash2 size={14} /> {uninstallInFlight ? 'Uninstalling…' : 'Uninstall'}
           </Button>
-          <Badge variant={app.enabled ? 'success' : 'neutral'} className="ml-auto">
-            {app.enabled ? 'enabled' : 'disabled'}
-          </Badge>
         </div>
 
-        {uninstallNote && <div className="text-sm text-amber-400">{uninstallNote}</div>}
+        {enableNote && app.enabled && (
+          <div className="border border-[var(--border)] bg-[var(--bg-2)] p-3 text-sm space-y-2">
+            {externalUrl ? (
+              <>
+                <div className="text-[var(--text-dim)]">
+                  {app.name} runs as its own application. Open it at:
+                </div>
+                <a
+                  href={externalUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-mono text-xs break-all text-[var(--accent)] hover:underline"
+                >
+                  {externalUrl}
+                </a>
+              </>
+            ) : vertical ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[var(--text-dim)]">
+                  Listed in the sidebar under Applications →
+                </span>
+                <Link to={vertical.to} className="text-[var(--accent)] hover:underline">
+                  {vertical.label}
+                </Link>
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[var(--text-dim)]">
+                  This app has no page of its own — its dashboard lives on
+                </span>
+                <Link to={`/app-catalog/${app.id}`} className="text-[var(--accent)] hover:underline">
+                  its app page
+                </Link>
+              </div>
+            )}
+          </div>
+        )}
+
+        {uninstallNote && <div className="text-sm text-[var(--warn)]">{uninstallNote}</div>}
         {uninstallPollActive && uninstallStatus.data && <InstallStatusNote status={uninstallStatus.data} />}
         {uninstallStatus.timedOut && (
-          <div className="text-xs text-amber-400">
+          <div className="text-xs text-[var(--warn)]">
             Still pending after 5 minutes — the app-installer service may not be
             running (see docs/APPS_INSTALL.md).
           </div>
@@ -1213,7 +2031,17 @@ function AppCard({ app, tasks, skill, onConfigure }: { app: RegisteredApp; tasks
 // works. When the backend opts in AND the caller is permitted, the primary
 // "Install (one-click)" button POSTs an intent and we poll the reconciler; a
 // 403 quietly degrades to "run the command below instead."
-function InstallModal({ app, onClose }: { app: IndexApp; onClose: () => void }) {
+function InstallModal({
+  app,
+  onClose,
+  onAccepted,
+}: {
+  app: IndexApp
+  onClose: () => void
+  /** Fired when the backend accepts the intent, so the PAGE can keep
+   *  watching the reconciler even after this dialog is dismissed. */
+  onAccepted: (id: string) => void
+}) {
   const { showSuccess, showError } = useSnackbar()
   const [copied, setCopied] = useState<string | null>(null)
   const [pollActive, setPollActive] = useState(false)
@@ -1231,6 +2059,12 @@ function InstallModal({ app, onClose }: { app: IndexApp; onClose: () => void }) 
     onSuccess: () => {
       showSuccess('Install requested — the app will appear under Installed once the reconciler applies it')
       setPollActive(true)
+      // Hand the intent to the page too: closing this dialog unmounts the
+      // poll above, and that poll is what refreshes the groups. Without
+      // it, an operator who dismissed the dialog (the normal thing to do
+      // while the reconciler works) had to hit Refresh by hand before the
+      // app showed up under Installed.
+      onAccepted(app.id)
     },
     onError: (e) => {
       if (isForbidden(e)) {
@@ -1285,7 +2119,7 @@ function InstallModal({ app, onClose }: { app: IndexApp; onClose: () => void }) 
     <Modal open title={`Install ${app.name}`} onClose={onClose} widthClassName="w-[640px]">
       <div className="space-y-4">
         {/* Primary path: one-click install (opt-in + RBAC gated server-side). */}
-        <div className="rounded border border-[var(--border)] bg-[var(--bg-2)] p-3 space-y-2">
+        <div className="border border-[var(--border)] bg-[var(--bg-2)] p-3 space-y-2">
           <div className="flex flex-wrap items-center gap-2">
             <Button variant="primary" onClick={() => installMutation.mutate()} disabled={inFlight}>
               <Download size={14} /> {inFlight ? 'Installing…' : 'Install (one-click)'}
@@ -1294,11 +2128,11 @@ function InstallModal({ app, onClose }: { app: IndexApp; onClose: () => void }) 
               The backend enforces opt-in and permissions; if it's disabled, use the command below.
             </span>
           </div>
-          {forbidden && <div className="text-sm text-amber-400">{forbidden}</div>}
-          {error && <div className="text-sm text-red-400">{error}</div>}
+          {forbidden && <div className="text-sm text-[var(--warn)]">{forbidden}</div>}
+          {error && <div className="text-sm text-[var(--danger)]">{error}</div>}
           {pollActive && statusQuery.data && <InstallStatusNote status={statusQuery.data} />}
           {statusQuery.timedOut && (
-            <div className="text-sm text-amber-400">
+            <div className="text-sm text-[var(--warn)]">
               Still pending after 5 minutes — the app-installer service may not be
               running. Start it with the app-installer compose profile (see
               docs/APPS_INSTALL.md), or use the command below.
@@ -1318,7 +2152,7 @@ function InstallModal({ app, onClose }: { app: IndexApp; onClose: () => void }) 
                 {copied === 'command' ? <Check size={12} /> : <Copy size={12} />} Copy
               </Button>
             </div>
-            <pre className="w-full overflow-x-auto rounded border border-[var(--border)] bg-[var(--bg-2)] p-3 text-xs text-[var(--text)] font-mono whitespace-pre-wrap">
+            <pre className="w-full overflow-x-auto border border-[var(--border)] bg-[var(--bg-2)] p-3 text-xs text-[var(--text)] font-mono whitespace-pre-wrap">
               {command}
             </pre>
           </div>
@@ -1332,7 +2166,7 @@ function InstallModal({ app, onClose }: { app: IndexApp; onClose: () => void }) 
                 {copied === 'compose' ? <Check size={12} /> : <Copy size={12} />} Copy
               </Button>
             </div>
-            <pre className="w-full max-h-72 overflow-auto rounded border border-[var(--border)] bg-[var(--bg-2)] p-3 text-xs text-[var(--text)] font-mono">
+            <pre className="w-full max-h-72 overflow-auto border border-[var(--border)] bg-[var(--bg-2)] p-3 text-xs text-[var(--text)] font-mono">
               {compose}
             </pre>
           </div>
@@ -1352,35 +2186,71 @@ function InstallModal({ app, onClose }: { app: IndexApp; onClose: () => void }) 
 
 /* ------------------------ Available app card --------------------- */
 
-function AvailableAppCard({ app, tasks, onInstall }: { app: IndexApp; tasks: Set<string>; onInstall: () => void }) {
+function AvailableAppCard({ app, caps, tier0, onInstall }: { app: IndexApp; caps: CapabilitiesLike; tier0: Tier0Like; onInstall: () => void }) {
   const requires = asStringList(app.requires_tasks)
-  const missing = requires.filter((t) => !tasks.has(t))
 
   return (
     <Card>
-      <CardHeader>
+      {/* Same wrap as the installed card: name + category + version +
+          pricing + licence + "third-party" is six things in a narrow grid
+          column, and without this the last ones are clipped at the edge. */}
+      <CardHeader className="flex-wrap">
         <Boxes size={16} className="text-[var(--text-dim)]" />
-        <CardTitle>{app.name}</CardTitle>
+        {/* An uninstalled listing has a detail page too now, so the title
+            behaves like the installed card's: click it to read more
+            before deciding. */}
+        <Link to={`/app-catalog/${app.id}`} className="hover:underline">
+          <CardTitle>{app.name}</CardTitle>
+        </Link>
         <Badge variant="info">{app.category}</Badge>
         <span className="text-xs text-[var(--text-dim)]">v{app.version}</span>
+        <PricingBadge pricing={app.pricing} note={app.price_note} />
+        <LicenceRequiredBadge entitlement={app.entitlement} />
+        <PopularityBadge popularity={app.popularity} />
+        {app.kind === 'external' && <Badge variant="neutral">third-party</Badge>}
       </CardHeader>
       <CardContent className="space-y-3 text-sm">
+        <ScreenshotStrip shots={app.screenshots} appName={app.name} />
         <div className="text-[var(--text-dim)]">{app.summary || 'No summary provided.'}</div>
-
-        {requires.length > 0 && (
-          <div>
-            {missing.length === 0 ? (
-              <Badge variant="success">● requires {requires.join(' + ')} — available</Badge>
-            ) : (
-              <Badge variant="warning">requires {missing.join(' + ')} — not installed</Badge>
-            )}
+        {(app.author || app.verified) && (
+          <div className="flex items-center gap-2 text-xs text-[var(--text-dim)]">
+            {app.author && <span>by {app.author}</span>}
+            <VerifiedBadge verified={app.verified} author={app.author} />
+          </div>
+        )}
+        <ProvenanceLine app={app} />
+        {app.entitlement === 'license_key' && (
+          <div className="text-xs text-[var(--text-dim)]">
+            Licensed app: after install, an administrator enters the vendor's key in the
+            catalog; the app cannot be enabled until it accepts one.
           </div>
         )}
 
-        <div className="flex items-center gap-2 pt-1">
-          <Button variant="primary" onClick={onInstall}>
-            <Download size={14} /> Install
-          </Button>
+        {requires.length > 0 && (
+          <div className="flex flex-wrap gap-2">
+            <RequiresBadge requires={requires} caps={caps} tier0={tier0} />
+            <HardwareBadge hardware={app.hardware} />
+          </div>
+        )}
+
+        <div className="flex flex-wrap items-center gap-2 pt-1">
+          {app.kind === 'external' && app.external_url ? (
+            <a href={app.external_url} target="_blank" rel="noreferrer">
+              <Button variant="primary">
+                <ExternalLink size={14} /> Learn more
+              </Button>
+            </a>
+          ) : (
+            <Button variant="primary" onClick={onInstall}>
+              <Download size={14} /> Install
+            </Button>
+          )}
+          <Link
+            to={`/app-catalog/${app.id}`}
+            className="inline-flex items-center gap-1 text-sm text-[var(--text-dim)] hover:text-[var(--text)]"
+          >
+            Details <ArrowRight size={14} />
+          </Link>
           {app.docs_url && (
             <a
               href={app.docs_url}
@@ -1397,6 +2267,231 @@ function AvailableAppCard({ app, tasks, onInstall }: { app: IndexApp; tasks: Set
   )
 }
 
+/** The catalog is a curated index anyone can add to, and nothing on the
+ *  page said so. Deliberately ONE line at the page and detail level
+ *  rather than on every card: repeated twelve times down a grid it stops
+ *  being an invitation and becomes chrome competing with Install. */
+function ContributeNote({ appName }: { appName?: string }) {
+  const { t } = useTranslation()
+  return (
+    <p className="text-xs text-[var(--text-dim)] leading-relaxed">
+      {t('catalog.feedback')}
+      {appName ? <> — {t('catalog.contributeNext')}</> : null}. {t('catalog.missingBroken')}{' '}
+      <a
+        className="text-[var(--accent)] hover:underline"
+        href="mailto:contact@opennvr.org?subject=OpenNVR%20App%20Catalog%20feedback"
+      >
+        contact@opennvr.org
+      </a>
+      , {t('catalog.orSend')}{' '}
+      <a
+        className="text-[var(--accent)] hover:underline"
+        href="https://github.com/open-nvr/open-nvr/blob/main/docs/CONTRIBUTING_APPS.md"
+        target="_blank"
+        rel="noreferrer"
+      >
+        {t('catalog.howContribute')}
+      </a>
+      .
+    </p>
+  )
+}
+
+/* --------------------- Uninstalled app detail --------------------- */
+
+/** The detail page for an app that is NOT installed — /app-catalog/<id>
+ *  used to dead-end there with "App <id> is not installed", which is
+ *  backwards: the moment you most want to read about an app is before
+ *  you install it. Rendered here rather than in AppView because every
+ *  piece it needs (provenance, requires, egress, install) already lives
+ *  in this file. */
+export function UninstalledAppPage({ appId }: { appId: string }) {
+  const indexQuery = useAppIndex()
+  const capsQuery = useKaiCapabilities()
+  const tier0Query = useTier0()
+  const [installOpen, setInstallOpen] = useState(false)
+  const [pendingInstall, setPendingInstall] = useState<string | null>(null)
+
+  const app = (indexQuery.data ?? []).find((a) => a.id === appId) ?? null
+
+  const back = (
+    <Link to="/app-catalog" className="inline-flex items-center gap-1 text-sm text-[var(--text-dim)] hover:text-[var(--text)]">
+      <ArrowLeft size={14} /> App Catalog
+    </Link>
+  )
+
+  if (indexQuery.isPending) {
+    return (
+      <div className="space-y-3">
+        {back}
+        <Skeleton className="h-8 w-48" />
+        <Skeleton className="h-40 w-full" />
+      </div>
+    )
+  }
+  // An errored index and a genuinely unknown id are different problems
+  // and get different messages — the first is retryable, the second is
+  // a bad link.
+  if (indexQuery.isError) {
+    return (
+      <div className="space-y-3">
+        {back}
+        <ErrorCard
+          title="App index unavailable"
+          message={extractApiError(indexQuery.error, `Could not look up "${appId}".`)}
+          onRetry={() => indexQuery.refetch()}
+        />
+      </div>
+    )
+  }
+  if (!app) {
+    return (
+      <div className="space-y-3">
+        {back}
+        <ErrorCard message={`"${appId}" is not installed, and no app by that id is listed in the catalog.`} />
+      </div>
+    )
+  }
+
+  const requires = asStringList(app.requires_tasks)
+  const external = app.kind === 'external'
+  // The index and /apps are separate cache entries refreshed by separate
+  // requests, so just after an install the index can already say
+  // installed while the registry list this page fell through from is
+  // still stale. Offering "Install" there would be wrong, and briefly
+  // duplicate an install. Say what is happening instead.
+  const registryLagging = Boolean(app.installed)
+
+  const egress = app.network_egress ?? []
+  const emits = app.emits ?? []
+  const humanize = (s: string) => {
+    const t = s.replace(/[-_]+/g, ' ')
+    return t.charAt(0).toUpperCase() + t.slice(1)
+  }
+  const row = 'grid grid-cols-1 gap-1 sm:grid-cols-[11rem_1fr] sm:gap-4'
+  const term = 'text-[var(--text-dim)]'
+
+  return (
+    <div className="space-y-3">
+      <AppHeader
+        name={app.name}
+        category={app.category}
+        version={app.version}
+        summary={app.summary}
+        badges={<>
+          <PricingBadge pricing={app.pricing} note={app.price_note} />
+          <LicenceRequiredBadge entitlement={app.entitlement} />
+          <PopularityBadge popularity={app.popularity} />
+          <VerifiedBadge verified={app.verified} author={app.author} />
+          {external && <Badge variant="neutral">third-party</Badge>}
+          <Badge variant="neutral">{registryLagging ? 'Installing…' : 'Not installed'}</Badge>
+        </>}
+        meta={<ProvenanceLine app={app} hideEgress />}
+        actions={<>
+          {external && app.external_url ? (
+            <a href={app.external_url} target="_blank" rel="noreferrer">
+              <Button size="sm" variant="primary"><ExternalLink size={14} /> Learn more</Button>
+            </a>
+          ) : registryLagging ? (
+            <Button size="sm" variant="outline" onClick={() => indexQuery.refetch()}>
+              <RefreshCw size={14} /> Finishing install…
+            </Button>
+          ) : (
+            <Button size="sm" variant="primary" onClick={() => setInstallOpen(true)}>
+              <Download size={14} /> Install
+            </Button>
+          )}
+          {app.docs_url && (
+            <a href={app.docs_url} target="_blank" rel="noreferrer">
+              <Button size="sm" variant="outline"><ExternalLink size={14} /> Docs</Button>
+            </a>
+          )}
+        </>}
+      >
+        {app.screenshots && app.screenshots.length > 0 && (
+          <div className="mt-3 flex gap-3 overflow-x-auto pb-1">
+            {app.screenshots.map((src) => (
+              <img
+                key={src}
+                src={`/${src}`}
+                alt={`${app.name} screenshot`}
+                loading="lazy"
+                className="h-56 border border-[var(--border)] bg-[var(--bg-2)] shrink-0"
+                onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none' }}
+              />
+            ))}
+          </div>
+        )}
+      </AppHeader>
+
+      {/* Everything worth knowing before installing, as one short list.
+          It used to be three cards, each opening with a paragraph about
+          KAI-C and Tier-0 that told an operator nothing they could act on. */}
+      <Card className="px-4 py-3">
+        <dl className="space-y-2.5 text-sm">
+          {requires.length > 0 && (
+            <div className={row}>
+              <dt className={term}>Needs</dt>
+              <dd className="flex flex-wrap gap-2">
+                <RequiresBadge requires={requires} caps={capsQuery.data} tier0={tier0Query.data} />
+                <HardwareBadge hardware={app.hardware} />
+              </dd>
+            </div>
+          )}
+          <div className={row}>
+            <dt className={`${term} inline-flex items-center gap-1.5`}>
+              Internet access <InfoTip>{'Apps run on an isolated network with no route to your cameras or the internet. Anything not listed here is blocked and reported.'}</InfoTip>
+            </dt>
+            <dd>
+              {egress.length === 0 ? (
+                <span className="text-[var(--badge-success-text)]">None — stays inside OpenNVR</span>
+              ) : (
+                <div className="flex flex-wrap gap-1">
+                  {egress.map((h) => <Badge key={h} variant="neutral" className="font-mono">{h}</Badge>)}
+                </div>
+              )}
+            </dd>
+          </div>
+          {emits.length > 0 && (
+            <div className={row}>
+              <dt className={term}>Alerts it can raise</dt>
+              <dd className="flex flex-wrap gap-1">
+                {emits.map((e) => <Badge key={e} variant="neutral" title={e}>{humanize(e)}</Badge>)}
+              </dd>
+            </div>
+          )}
+          {app.entitlement === 'license_key' && (
+            <div className={row}>
+              <dt className={term}>Licence</dt>
+              <dd className="text-[var(--text-dim)]">
+                Needs a licence key from the vendor. An administrator enters it after install;
+                the app can’t be turned on until it’s accepted.
+              </dd>
+            </div>
+          )}
+        </dl>
+      </Card>
+
+      <div className="pt-1">
+        <ContributeNote appName={app.name} />
+      </div>
+
+      {installOpen && (
+        <InstallModal
+          app={app}
+          onClose={() => setInstallOpen(false)}
+          onAccepted={(id) => setPendingInstall(id)}
+        />
+      )}
+      {/* Same reason as the catalog grid: the watcher must outlive the
+          dialog, or closing it strands the page on "not installed". */}
+      {pendingInstall && (
+        <InstallWatcher id={pendingInstall} onSettled={() => setPendingInstall(null)} />
+      )}
+    </div>
+  )
+}
+
 /* ----------------------------- View ------------------------------ */
 
 function SkeletonGrid({ count = 3 }: { count?: number }) {
@@ -1404,6 +2499,127 @@ function SkeletonGrid({ count = 3 }: { count?: number }) {
     <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
       {Array.from({ length: count }).map((_, i) => (
         <Skeleton key={i} className="h-44" />
+      ))}
+    </div>
+  )
+}
+
+function CatalogFilters({
+  query, onQuery, category, onCategory, categories, resultCount,
+  sort, onSort, allowPopular,
+}: {
+  query: string
+  onQuery: (v: string) => void
+  category: string | null
+  onCategory: (v: string | null) => void
+  categories: string[]
+  /** null when no filter is active — the counts below speak for themselves. */
+  resultCount: number | null
+  sort: CatalogSort
+  onSort: (v: CatalogSort) => void
+  /** False when no listing carries an editorial rank, so the option is
+   *  hidden rather than offered as a no-op. */
+  allowPopular: boolean
+}) {
+  const { t } = useTranslation()
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <div className="relative flex-1 min-w-[14rem]">
+        <Search
+          size={14}
+          className="absolute left-2 top-1/2 -translate-y-1/2 text-[var(--text-dim)] pointer-events-none"
+        />
+        <input
+          type="search"
+          value={query}
+          onChange={(e) => onQuery(e.target.value)}
+          placeholder={t('catalog.search')}
+          aria-label="Search apps"
+          className="w-full pl-7 pr-2 py-1.5 text-sm border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
+        />
+      </div>
+      <div className="flex flex-wrap items-center gap-1" role="group" aria-label="Filter by category">
+        <button
+          type="button"
+          onClick={() => onCategory(null)}
+          aria-pressed={category === null}
+          className={`px-2 py-1 text-xs rounded border ${category === null
+            ? 'border-[var(--accent)] text-[var(--text)]'
+            : 'border-[var(--border)] text-[var(--text-dim)] hover:text-[var(--text)]'}`}
+        >
+          All
+        </button>
+        {categories.map((c) => (
+          <button
+            key={c}
+            type="button"
+            onClick={() => onCategory(category === c ? null : c)}
+            aria-pressed={category === c}
+            className={`px-2 py-1 text-xs rounded border ${category === c
+              ? 'border-[var(--accent)] text-[var(--text)]'
+              : 'border-[var(--border)] text-[var(--text-dim)] hover:text-[var(--text)]'}`}
+          >
+            {c}
+          </button>
+        ))}
+      </div>
+      <label className="flex items-center gap-1 text-xs text-[var(--text-dim)]">
+        <ArrowDownWideNarrow size={14} />
+        <span className="sr-only sm:not-sr-only">{t('catalog.sort')}</span>
+        <select
+          value={sort}
+          onChange={(e) => onSort(e.target.value as CatalogSort)}
+          aria-label="Sort apps"
+          className="px-2 py-1 text-xs border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
+        >
+          <option value="recommended">{t('catalog.recommended')}</option>
+          <option value="name">{t('catalog.nameAZ')}</option>
+          {allowPopular && <option value="popular">{t('catalog.mostPopular')}</option>}
+        </select>
+      </label>
+      {resultCount !== null && (
+        <span className="text-xs text-[var(--text-dim)]">
+          {resultCount === 0 ? 'no matches' : `${resultCount} match${resultCount === 1 ? '' : 'es'}`}
+        </span>
+      )}
+    </div>
+  )
+}
+
+/** Editorial rank, shown as a word rather than a number. The value is a
+ *  maintainer's judgement, not a measured install count — rendering
+ *  "87" would read as telemetry this product deliberately does not
+ *  collect. Only the clearly-popular end of the scale says anything. */
+function PopularityBadge({ popularity }: { popularity?: number | null }) {
+  if (typeof popularity !== 'number' || popularity < 70) return null
+  return (
+    <Badge
+      variant="info"
+      title="Editorial pick by the OpenNVR maintainers — not an install count; deployments never phone home."
+    >
+      popular
+    </Badge>
+  )
+}
+
+/** Listing screenshots. Local files only (see app/public/app-screenshots),
+ *  so this never reaches off-site and works air-gapped. */
+function ScreenshotStrip({ shots, appName }: { shots?: string[]; appName: string }) {
+  if (!shots || shots.length === 0) return null
+  return (
+    <div className="flex gap-2 overflow-x-auto pb-1">
+      {shots.slice(0, 4).map((src) => (
+        <img
+          key={src}
+          src={`/${src}`}
+          alt={`${appName} screenshot`}
+          loading="lazy"
+          className="h-24 border border-[var(--border)] bg-[var(--bg-2)] shrink-0"
+          // A listing must survive a missing file rather than showing a
+          // broken-image glyph; the CI gate blocks that case, but a
+          // partial deploy should not disfigure the card.
+          onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none' }}
+        />
       ))}
     </div>
   )
@@ -1421,14 +2637,18 @@ function GroupHeader({ title, count }: { title: string; count?: number }) {
 }
 
 export function AppCatalog() {
+  const { t } = useTranslation()
   const appsQuery = useApps()
   const indexQuery = useAppIndex()
   const capsQuery = useKaiCapabilities()
   const skillsQuery = useSkillsRegistry()
-  const [configApp, setConfigApp] = useState<RegisteredApp | null>(null)
   const [installApp, setInstallApp] = useState<IndexApp | null>(null)
+  // Install intents the reconciler has not settled yet. Held at page
+  // level on purpose — the dialog that started them is usually closed
+  // long before the reconciler finishes.
+  const [pendingInstalls, setPendingInstalls] = useState<string[]>([])
 
-  const tasks = useMemo(() => availableTasks(capsQuery.data), [capsQuery.data])
+  const tier0Query = useTier0()
   const apps = appsQuery.data ?? []
 
   // Registry entries for app-provided skills, keyed by app id ("app:<id>"
@@ -1449,45 +2669,136 @@ export function AppCatalog() {
     () => (indexQuery.data ?? []).filter((a) => !a.installed),
     [indexQuery.data]
   )
+  // Featured = reviewer-flagged listings not yet installed; they render in
+  // their own row above the full list (and stay in the list too, so a
+  // category scan still finds them).
+  const featured = useMemo(() => available.filter((a) => a.featured), [available])
 
+  // ── Search + category ───────────────────────────────────────────
+  // The catalog is meant to grow (community and third-party listings on
+  // top of the shipped index), and scrolling three grids to find one app
+  // stops working well before that. Both groups filter together: an
+  // operator searching "plate" wants to know it is already installed
+  // just as much as they want the listing.
+  const [query, setQuery] = useState('')
+  const [category, setCategory] = useState<string | null>(null)
+
+  const categories = useMemo(() => {
+    const seen = new Set<string>()
+    for (const a of apps) if (a.category) seen.add(a.category)
+    for (const a of indexQuery.data ?? []) if (a.category) seen.add(a.category)
+    return Array.from(seen).sort()
+  }, [apps, indexQuery.data])
+
+  // Drop a category that nothing carries any more (the index changed
+  // under a stale selection), so the page cannot filter to nothing with
+  // no way back except reloading.
+  useEffect(() => {
+    if (category && categories.length > 0 && !categories.includes(category)) {
+      setCategory(null)
+    }
+  }, [categories, category])
+
+  const [sort, setSort] = useState<CatalogSort>('recommended')
+  // Offer "Most popular" only when something is actually ranked. With no
+  // editorial ranks set, that order collapses to alphabetical, and a
+  // control that silently does nothing is worse than one that is absent.
+  const anyRanked = useMemo(
+    () => (indexQuery.data ?? []).some((a) => typeof a.popularity === 'number'),
+    [indexQuery.data]
+  )
+  useEffect(() => {
+    if (!anyRanked && sort === 'popular') setSort('recommended')
+  }, [anyRanked, sort])
+
+  const filtering = query.trim() !== '' || category !== null
+  const shownInstalled = useMemo(
+    () => sortCatalog(apps, sort === 'popular' ? 'name' : sort).filter((a) => matchesCatalogFilter(
+      { name: a.name, id: a.id, category: a.category,
+        summary: a.manifest?.summary, author: a.manifest?.author },
+      query, category)),
+    // Installed rows carry no editorial rank — "most popular" among apps
+    // you already chose to install means nothing, so that order falls
+    // back to name here rather than pretending to rank them.
+    [apps, query, category, sort]
+  )
+  const shownAvailable = useMemo(
+    () => sortCatalog(available, sort).filter((a) => matchesCatalogFilter(
+      { name: a.name, id: a.id, category: a.category,
+        summary: a.summary, author: a.author },
+      query, category)),
+    [available, query, category, sort]
+  )
+
+  // Refresh everything the page RENDERS, not just the two app lists. The
+  // "requires X — nothing provides it" badge and the per-app skill line
+  // are computed from KAI-C's capabilities, Tier-0 and the skills
+  // registry; leaving those three stale meant an operator who registered
+  // the missing adapter and pressed Refresh watched the warning sit
+  // there, with no way short of a full page reload to clear it.
   const refresh = () => {
     appsQuery.refetch()
     indexQuery.refetch()
+    capsQuery.refetch()
+    skillsQuery.refetch()
+    tier0Query.refetch()
   }
+  const refreshing =
+    appsQuery.isFetching || indexQuery.isFetching ||
+    capsQuery.isFetching || skillsQuery.isFetching || tier0Query.isFetching
 
   return (
     <section className="space-y-6">
+      {/* "App Catalog", matching the sidebar. It called itself "App Store"
+          while the nav said "App Catalog" — the same two-names-for-one-
+          thing that made the plate app hard to place. */}
       <PageHeader
-        title="App Store"
-        description="Detector apps built on the OpenNVR App SDK. Enable, configure, and monitor installed apps, or browse the index for more to install — each card checks its required AI tasks against the adapters registered with KAI-C."
+        title={t('catalog.title')}
+        description={t('catalog.description')}
         actions={
-          <Button onClick={refresh} disabled={appsQuery.isPending || indexQuery.isFetching}>
-            <RefreshCw size={14} className={appsQuery.isFetching || indexQuery.isFetching ? 'animate-spin' : ''} /> Refresh
+          <Button onClick={refresh} disabled={refreshing}>
+            <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} /> {t('catalog.refresh')}
           </Button>
         }
       />
 
+      <CatalogFilters
+        query={query}
+        onQuery={setQuery}
+        category={category}
+        onCategory={setCategory}
+        categories={categories}
+        resultCount={filtering ? shownInstalled.length + shownAvailable.length : null}
+        sort={sort}
+        onSort={setSort}
+        allowPopular={anyRanked}
+      />
+
       {/* --------------------------- Installed --------------------------- */}
       <div className="space-y-3">
-        <GroupHeader title="Installed" count={apps.length} />
+        <GroupHeader title={t('catalog.installed')} count={shownInstalled.length} />
         {appsQuery.isPending ? (
           <SkeletonGrid count={6} />
         ) : appsQuery.isError ? (
           <ErrorCard
-            title="App registry unavailable"
-            message={extractApiError(appsQuery.error, 'Could not load the app registry.')}
+            title={t('catalog.registryUnavailable')}
+            message={extractApiError(appsQuery.error, t('catalog.loadRegistry'))}
             onRetry={() => appsQuery.refetch()}
           />
         ) : apps.length === 0 ? (
           <EmptyState
             icon={<Boxes size={28} />}
-            title="No apps installed yet"
+            title={t('catalog.noInstalled')}
             description="Apps self-register on boot; install one from the index below or see sdk/opennvr-app-sdk to build your own."
           />
+        ) : shownInstalled.length === 0 ? (
+          <div className="text-sm text-[var(--text-dim)]">
+            No installed app matches this filter.
+          </div>
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
-            {apps.map((app) => (
-              <AppCard key={app.id} app={app} tasks={tasks} skill={skillsByApp.get(app.id)} onConfigure={() => setConfigApp(app)} />
+            {shownInstalled.map((app) => (
+              <AppCard key={app.id} app={app} caps={capsQuery.data} tier0={tier0Query.data} skill={skillsByApp.get(app.id)} />
             ))}
           </div>
         )}
@@ -1496,9 +2807,33 @@ export function AppCatalog() {
       {/* ---------------------- Available to install --------------------- */}
       {/* Best-effort: if the index endpoint errors, we simply omit this group
           rather than blanking the page above. */}
+      {/* An index that fails to load used to remove BOTH groups below with
+          no message at all, so "the index is down" looked exactly like
+          "there is nothing to install". Say which it is. */}
+      {indexQuery.isError && (
+        <ErrorCard
+          title={t('catalog.indexUnavailable')}
+          message={extractApiError(indexQuery.error, t('catalog.loadIndex'))}
+          onRetry={() => indexQuery.refetch()}
+        />
+      )}
+
+      {/* Featured is a discovery shelf; while filtering it is just the
+          same cards twice. */}
+      {!indexQuery.isError && !filtering && featured.length > 0 && (
+        <div className="space-y-3">
+          <GroupHeader title="Featured" count={featured.length} />
+          <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
+            {featured.map((app) => (
+              <AvailableAppCard key={`featured-${app.id}`} app={app} caps={capsQuery.data} tier0={tier0Query.data} onInstall={() => setInstallApp(app)} />
+            ))}
+          </div>
+        </div>
+      )}
+
       {!indexQuery.isError && (
         <div className="space-y-3">
-          <GroupHeader title="Available to install" count={available.length} />
+          <GroupHeader title="Available to install" count={shownAvailable.length} />
           {indexQuery.isPending ? (
             <SkeletonGrid count={3} />
           ) : available.length === 0 ? (
@@ -1507,18 +2842,217 @@ export function AppCatalog() {
               title="No additional apps available"
               description="Every app in the index is already installed."
             />
+          ) : shownAvailable.length === 0 ? (
+            <div className="text-sm text-[var(--text-dim)]">
+              No available app matches this filter.
+            </div>
           ) : (
             <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
-              {available.map((app) => (
-                <AvailableAppCard key={app.id} app={app} tasks={tasks} onInstall={() => setInstallApp(app)} />
+              {shownAvailable.map((app) => (
+                <AvailableAppCard key={app.id} app={app} caps={capsQuery.data} tier0={tier0Query.data} onInstall={() => setInstallApp(app)} />
               ))}
             </div>
           )}
         </div>
       )}
 
-      {configApp && <AppConfigModal key={configApp.id} app={configApp} onClose={() => setConfigApp(null)} />}
-      {installApp && <InstallModal key={installApp.id} app={installApp} onClose={() => setInstallApp(null)} />}
+      <div className="pt-2 border-t border-[var(--border)]">
+        <ContributeNote />
+      </div>
+
+      {installApp && (
+        <InstallModal
+          key={installApp.id}
+          app={installApp}
+          onClose={() => setInstallApp(null)}
+          onAccepted={(id) => setPendingInstalls((p) => (p.includes(id) ? p : [...p, id]))}
+        />
+      )}
+      {/* Outlives the dialog: these are what move a freshly installed app
+          into the Installed group without a manual Refresh. */}
+      {pendingInstalls.map((id) => (
+        <InstallWatcher
+          key={id}
+          id={id}
+          onSettled={() => setPendingInstalls((p) => p.filter((x) => x !== id))}
+        />
+      ))}
     </section>
+  )
+}
+
+
+/**
+ * The generated config form.
+ *
+ * Params are shown under their declared `group`, in manifest order, and
+ * anything marked `advanced` is collapsed behind one disclosure. The
+ * point is not tidiness: this app declares sixteen knobs, of which an
+ * operator setting up a room touches about five, and a flat list of
+ * sixteen makes the five impossible to find. Nothing is ever dropped —
+ * a knob nobody should turn is still one somebody may need to reach.
+ */
+function ParamForm({
+  params, values, setValues, canEditParam, seenLabels,
+}: {
+  params: ManifestParam[]
+  values: Record<string, string | boolean>
+  setValues: React.Dispatch<React.SetStateAction<Record<string, string | boolean>>>
+  canEditParam: (p: ManifestParam) => boolean
+  seenLabels: string[]
+}) {
+  const [showAdvanced, setShowAdvanced] = useState(false)
+  const basic = params.filter((p) => !p.advanced)
+  const advanced = params.filter((p) => p.advanced)
+
+  const render = (list: ManifestParam[]) => {
+    // Manifest order decides both the groups and the params inside them.
+    const groups: { name: string; items: ManifestParam[] }[] = []
+    for (const p of list) {
+      const name = p.group || ''
+      const last = groups[groups.length - 1]
+      if (last && last.name === name) last.items.push(p)
+      else groups.push({ name, items: [p] })
+    }
+    return groups.map((g, i) => (
+      <div key={`${g.name}-${i}`} className="space-y-4">
+        {g.name && (
+          <div className="border-b border-[var(--border)] pb-1 text-xs font-semibold uppercase tracking-wide text-[var(--text-dim)]">
+            {g.name}
+          </div>
+        )}
+        {g.items.map((p) => (
+          <ParamField
+            key={p.name}
+            p={p}
+            values={values}
+            setValues={setValues}
+            canEditParam={canEditParam}
+            seenLabels={seenLabels}
+          />
+        ))}
+      </div>
+    ))
+  }
+
+  return (
+    <div className="space-y-4">
+      {render(basic)}
+      {advanced.length > 0 && (
+        <div className="space-y-4 pt-1">
+          <button
+            type="button"
+            onClick={() => setShowAdvanced((v) => !v)}
+            aria-expanded={showAdvanced}
+            className="text-xs text-[var(--accent)] hover:brightness-110"
+          >
+            {showAdvanced ? 'Hide' : 'Show'} advanced settings ({advanced.length})
+          </button>
+          {showAdvanced && render(advanced)}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ParamField({
+  p, values, setValues, canEditParam, seenLabels,
+}: {
+  p: ManifestParam
+  values: Record<string, string | boolean>
+  setValues: React.Dispatch<React.SetStateAction<Record<string, string | boolean>>>
+  canEditParam: (p: ManifestParam) => boolean
+  seenLabels: string[]
+}) {
+  const t = (p.type || '').toLowerCase()
+  const value = values[p.name]
+  return (
+              <div key={p.name}>
+                <label className="block text-sm mb-1">
+                  <span className="font-medium">{paramLabel(p)}</span>
+                  {/* The wire name earns its place only when it is not
+                      already the label — it is what the API and the docs
+                      call this, so it is worth keeping, quietly. The
+                      TYPE is not shown beside a labelled param: "float"
+                      tells an operator nothing the input does not. */}
+                  <span className="ml-2 text-xs text-[var(--text-dim)]">
+                    {p.label ? p.name : p.type}
+                    {p.per_camera ? ' · per camera' : ''}
+                    {p.required ? ' · required' : ''}
+                  </span>
+                </label>
+                {p.description && <div className="text-xs text-[var(--text-dim)] mb-1">{p.description}</div>}
+                {!canEditParam(p) ? (
+                  <div
+                    className="w-full px-2 py-1.5 text-sm font-mono border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text-dim)] whitespace-pre-wrap break-all"
+                    title="Site-wide setting — only an administrator can change it"
+                  >
+                    {String(value ?? '') || '—'}
+                    <span className="ml-2 text-[11px] font-sans">(administrator only)</span>
+                  </div>
+                ) : hasChoices(p) ? (
+                  <select
+                    value={String(value ?? '')}
+                    onChange={(e) => setValues((v) => ({ ...v, [p.name]: e.target.value }))}
+                    aria-label={paramLabel(p)}
+                    className="w-full px-2 py-1.5 text-sm border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
+                  >
+                    {/* No blank option: a closed set with a default is
+                        always on one of its own values, and an empty row
+                        only offers a way to mean nothing. */}
+                    {(p.choices ?? []).map((c, i) => (
+                      <option key={i} value={String(i)}>{c.label}</option>
+                    ))}
+                  </select>
+                ) : t === 'color.hsv_range' ? (
+                  <ColorRangeEditor
+                    value={String(value ?? '')}
+                    onChange={(json) => setValues((v) => ({ ...v, [p.name]: json }))}
+                  />
+                ) : t === 'geometry.polygon' || t === 'geometry.tripwire' ? (
+                  <GeometryEditor
+                    kind={t === 'geometry.tripwire' ? 'tripwire' : 'polygon'}
+                    value={String(value ?? '')}
+                    onChange={(json) => setValues((v) => ({ ...v, [p.name]: json }))}
+                  />
+                ) : t === 'list' && !p.per_camera ? (
+                  <ChipListEditor
+                    value={String(value ?? '')}
+                    placeholder={`add ${p.name} value, Enter`}
+                    onChange={(json) => setValues((v) => ({ ...v, [p.name]: json }))}
+                    suggestions={suggestionsFor(p, seenLabels)}
+                    suggestionsLabel={/label/i.test(p.name) && seenLabels.length > 0 ? 'Seen on your cameras / suggested:' : 'Suggestions:'}
+                  />
+                ) : t === 'time_range' ? (
+                  <TimeWindowEditor
+                    value={String(value ?? '')}
+                    onChange={(range) => setValues((v) => ({ ...v, [p.name]: range }))}
+                  />
+                ) : isJsonParam(p) ? (
+                  <textarea
+                    className="w-full h-28 px-2 py-1.5 text-sm font-mono border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
+                    value={String(value ?? '')}
+                    placeholder={p.per_camera ? '{"camera_id": …}' : '[…]'}
+                    onChange={(e) => setValues((v) => ({ ...v, [p.name]: e.target.value }))}
+                  />
+                ) : t === 'bool' ? (
+                  <label className="inline-flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(value)}
+                      onChange={(e) => setValues((v) => ({ ...v, [p.name]: e.target.checked }))}
+                    />
+                    Enabled
+                  </label>
+                ) : (
+                  <input
+                    type={t === 'int' || t === 'float' ? 'number' : 'text'}
+                    step={t === 'float' ? 'any' : undefined}
+                    className="w-full px-2 py-1.5 text-sm border border-[var(--border)] bg-[var(--bg-2)] text-[var(--text)]"
+                    value={String(value ?? '')}
+                    onChange={(e) => setValues((v) => ({ ...v, [p.name]: e.target.value }))}
+                  />
+                )}
+              </div>
   )
 }

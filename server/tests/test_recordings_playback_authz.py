@@ -97,9 +97,13 @@ def test_owner_sees_own_camera():
     assert _can_view_camera(FakeUser(5, ), FakeCamera(9, owner_id=5), db)
 
 
-def test_null_owner_camera_visible_to_any_user():
+def test_null_owner_camera_is_superuser_only():
+    # An unassigned (legacy) camera must never be the one everybody
+    # can see: no owner, no grant → hidden until an admin assigns it.
     db = FakeSession(cameras=[], grant_result=None)
-    assert _can_view_camera(FakeUser(5), FakeCamera(9, owner_id=None), db)
+    assert not _can_view_camera(FakeUser(5), FakeCamera(9, owner_id=None), db)
+    assert _can_view_camera(FakeUser(1, superuser=True),
+                            FakeCamera(9, owner_id=None), db)
 
 
 def test_non_owner_without_grant_denied():
@@ -116,11 +120,11 @@ def test_non_owner_with_grant_allowed():
 
 def test_viewable_filters_out_foreign_cameras():
     mine = FakeCamera(1, owner_id=5)
-    shared = FakeCamera(2, owner_id=None)   # legacy null-owner: visible
+    orphan = FakeCamera(2, owner_id=None)   # legacy null-owner: superuser-only
     foreign = FakeCamera(3, owner_id=99)    # not mine, no grant: hidden
-    db = FakeSession(cameras=[mine, shared, foreign], grant_result=None)
+    db = FakeSession(cameras=[mine, orphan, foreign], grant_result=None)
     got = {c.id for c in _viewable_cameras(db, FakeUser(5))}
-    assert got == {1, 2}
+    assert got == {1}
 
 
 def test_viewable_superuser_sees_all():

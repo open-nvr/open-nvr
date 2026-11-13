@@ -90,6 +90,14 @@ export const recordingService = {
   getRecordingStorage: () => api.get('/api/v1/recordings/storage'),
   updateRecordingStorage: (payload: any) => api.put('/api/v1/recordings/storage', payload),
   getRecordingRetention: () => api.get('/api/v1/recordings/retention'),
+  // Site opt-in for pausing recording (HA-108) and the cameras paused now.
+  getRecordingPauseSetting: () => api.get('/api/v1/system/settings/recording-pause'),
+  setRecordingPauseSetting: (enabled: boolean) =>
+    api.put('/api/v1/system/settings/recording-pause', { enabled }),
+  setCameraRecording: (
+    cameraId: number,
+    body: { enabled: boolean; resume_after_s?: number; reason?: string },
+  ) => api.post(`/api/v1/cameras/${cameraId}/recording`, body),
   updateRecordingRetention: (payload: any) => api.put('/api/v1/recordings/retention', payload),
 
   // Orphaned (quarantined) recording trees — footage that could not be

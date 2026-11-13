@@ -73,7 +73,7 @@ export function SystemHealthSettings() {
 
   if (!settings) return <div className="p-6 text-sm text-[var(--text-dim)]">Loading…</div>
 
-  const inputClass = 'w-full px-3 py-2 bg-[var(--bg-2)] border border-neutral-700 rounded focus:border-[var(--accent)] focus:outline-none'
+  const inputClass = 'w-full px-3 py-2 bg-[var(--bg-2)] border border-[var(--border)]  focus:border-[var(--accent)] focus:outline-none'
 
   return (
     <div className="p-6 max-w-3xl">
@@ -83,14 +83,14 @@ export function SystemHealthSettings() {
       </h2>
 
       <form onSubmit={handleSave} className="space-y-6">
-        <div className="bg-[var(--panel)] border border-neutral-800 rounded-lg p-6 space-y-6">
+        <div className="bg-[var(--panel)] border border-[var(--border)] p-6 space-y-6">
           <div className="flex items-center gap-3">
             <input
               type="checkbox"
               id="mon-enabled"
               checked={settings.enabled}
               onChange={(e) => set('enabled', e.target.checked)}
-              className="w-4 h-4 text-[var(--accent)] bg-[var(--bg-2)] border-neutral-700 rounded"
+              className="w-4 h-4 text-[var(--accent)] bg-[var(--bg-2)] border-[var(--border)]"
             />
             <label htmlFor="mon-enabled" className="text-sm font-medium">
               Monitor host resources and raise alerts
@@ -171,7 +171,7 @@ export function SystemHealthSettings() {
               id="mon-notify"
               checked={settings.notify_integrations}
               onChange={(e) => set('notify_integrations', e.target.checked)}
-              className="w-4 h-4 text-[var(--accent)] bg-[var(--bg-2)] border-neutral-700 rounded"
+              className="w-4 h-4 text-[var(--accent)] bg-[var(--bg-2)] border-[var(--border)]"
             />
             <label htmlFor="mon-notify" className="text-sm font-medium">
               Send alerts to enabled integrations (email / webhook / Slack / Teams)
@@ -183,7 +183,7 @@ export function SystemHealthSettings() {
           <button
             type="submit"
             disabled={loading}
-            className="px-4 py-2 bg-[var(--accent)] text-white rounded hover:bg-[var(--accent)]/90 disabled:opacity-50 flex items-center gap-2"
+            className="px-4 py-2 bg-[var(--accent)] text-white hover:bg-[var(--accent)]/90 disabled:opacity-50 flex items-center gap-2"
           >
             <Save size={16} />
             {loading ? 'Saving...' : 'Save Monitoring Settings'}

@@ -23,7 +23,7 @@ it wraps [`fast-plate-ocr`](https://github.com/ankandrew/fast-plate-ocr)
                        │  gate escalation → Tier-1 dispatch          │
                        │  best-frame crop → KAI-C → fast_plate_ocr   │
                        │  (once per vehicle VISIT, on cameras        │
-                       │   assigned the LPR skill; core's per-visit  │
+                       │   selected for ANPR; core's per-visit       │
                        │   enrichment is the fallback producer)      │
                        │  KAI-C publishes:                           │
                        │  opennvr.events.plate.recognized.v1.<cam>   │
@@ -32,7 +32,7 @@ it wraps [`fast-plate-ocr`](https://github.com/ankandrew/fast-plate-ocr)
                                           ▼
                        ┌─────────────────────────────────────────────┐
                        │ THIS APP (PlateAlerter, ~100 lines of rule) │
-                       │  camera scope (assignment table) →          │
+                       │  camera scope (selected cameras) →          │
                        │  min_confidence → dedup window →            │
                        │  watchlist severity → AlertDispatcher       │
                        │  (stdout / webhook / NATS)                  │
@@ -54,13 +54,17 @@ inference cost, and two plate-consuming apps cost the same as one.
 * **No events, no alerts.** Plates flow only where the platform chain
   can run: the `fast_plate_ocr` adapter registered (ships with this
   app's compose overlay), and either core's plate enrichment on
-  vehicle visits (default-on) or Tier-1 dispatch on cameras assigned
-  the LPR skill (gate `enforce` + dispatch URL, off by default).
-* **Dedup is per-plate-per-camera, time-windowed**, exactly as before:
-  a plate re-read within `dedup_window_seconds` fires once; a
-  one-character misread is a different plate (no fuzzy matching).
+  vehicle visits (default-on) or Tier-1 dispatch on cameras selected
+  for this app (gate `enforce` + dispatch URL, off by default).
+* **Dedup is per-plate-per-camera, time-windowed**: a plate re-read
+  within `dedup_window_seconds` fires once. Watchlist and registry
+  matching tolerates `fuzzy_max_distance` character substitutions
+  (default 1); a fuzzy match never opens a barrier.
 * **Regional tuning** lives in the adapter (`OPENNVR_LPR_MODEL`), not
-  here — this app never sees a pixel.
+  here — this app never sees a pixel. For Indian sites set
+  `OPENNVR_LPR_MODEL=indian-plates-v1` in `.env`: a model fine-tuned on
+  Indian plates, baked into the adapter image, that reads 85% of held-out
+  real crops exactly where the global model reads 39%.
 
 ## Quick start
 
@@ -72,9 +76,10 @@ docker compose -f docker-compose.yml -f docker-compose.apps.yml \
   --profile apps up -d license-plate-recognition
 ```
 
-Then assign cameras the **License Plate Recognition** skill (Cameras →
-edit → Assignments). No camera URLs to configure — the app scopes
-itself to assigned cameras via the assignment table. Results:
+Then select its cameras: App Catalog → License Plate Recognition →
+Configure → **Cameras** (or give a camera a gate role on the Vehicles
+page, which selects it too). No camera URLs to configure, and no cameras
+selected = no plates. Results:
 `docker compose logs -f license-plate-recognition` plus the alerts
 inbox; watchlists are editable live from the App Catalog config form.
 
@@ -104,6 +109,24 @@ You'll see lines like:
 SIGINT / SIGTERM stops cleanly — the NATS subscription drains and the
 alert dispatcher flushes.
 
+### Scan mode — how hard the platform works for each plate
+
+Set in the App Catalog's config form (`scan_mode`, with per-camera
+`scan_mode_overrides`); core's plate sweep reads it from the registry.
+
+| Mode | Looks per visit | Writes when | Re-sighting window | Use for |
+|---|---|---|---|---|
+| `accurate` (default) | up to 4 | 2 looks agree | 30 s | entry gates, barriers — the number must be right |
+| `fast` | up to 2 | first accepted read | 8 s | road cameras, weak CPUs — the table keeps up with the alarms |
+| `auto` | as accurate | as accurate | as accurate | mixed sites: flips to `fast` only while more visits wait for OCR than the box can run at once |
+
+`fast` is the mode where "plate read alarm is there but the table is
+empty or late" goes away: the first accepted read is written the
+moment it is published, the same read the app alarmed on. The price is
+that a single misread stands until a human corrects it — which is why
+a gate stays `accurate`. Core's own knobs (`OPENNVR_PLATE_*` in
+`.env`) define what `accurate` means.
+
 ## Layout
 
 ```
@@ -114,7 +137,8 @@ examples/license-plate-recognition/
 ├── pyproject.toml                One dependency: the app SDK
 ├── README.md                     you are here
 └── tests/
-    └── test_license_plate_recognition.py (16 tests)
+    ├── test_license_plate_recognition.py (73 tests)
+    └── test_observed_at_forwarding.py (4 tests)
 ```
 
 ## Tests

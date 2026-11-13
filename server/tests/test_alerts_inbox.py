@@ -1,0 +1,849 @@
+# Copyright (c) 2026 OpenNVR
+# Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0)
+"""The operator alert inbox — consumer, acknowledge flow, ring config.
+
+The gap this closes: every SDK app has published §11.5 alerts onto
+``opennvr.alerts.>`` since the alert stack shipped, and the LPR config
+even promised the operator-UI inbox picks them up — but no core
+consumer existed. An armed "alarm on unknown vehicle" fired into a log
+nobody watches: no row, no ring, no acknowledgement. Pinned here:
+
+* every well-formed alert on the bus becomes exactly ONE inbox row —
+  at-least-once redelivery (same ``alert_id``) never rings twice;
+* malformed envelopes are dropped, unknown severities surface as
+  ``high`` (an app bug in one field must not hide a fired alert, and
+  must not escalate it to critical either);
+* acknowledge is idempotent and records WHO silenced the alarm;
+* the ring policy (none | ping | continuous per severity) round-trips,
+  rejects typos loudly, and degrades corrupt stored state to defaults —
+  never to silence-on-critical.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import secrets
+import sys
+import types as _types
+from pathlib import Path
+
+import pytest
+from cryptography.fernet import Fernet
+
+_HERE = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_HERE))
+os.environ.setdefault("DATABASE_URL", "sqlite:///./_alerts_test.db")
+os.environ.setdefault("SECRET_KEY", secrets.token_urlsafe(48))
+os.environ.setdefault("MEDIAMTX_SECRET", secrets.token_hex(32))
+os.environ.setdefault("INTERNAL_API_KEY", secrets.token_urlsafe(48))
+os.environ.setdefault("CREDENTIAL_ENCRYPTION_KEY", Fernet.generate_key().decode())
+
+_lm = _types.ModuleType("core.logging_config")
+
+
+class _L:
+    def __getattr__(self, _n):
+        return lambda *a, **k: None
+
+
+_lm.__getattr__ = lambda _n: _L()
+_lm.setup_logging = lambda *a, **k: None
+sys.modules.setdefault("core.logging_config", _lm)
+
+from sqlalchemy import create_engine  # noqa: E402
+from sqlalchemy.orm import sessionmaker  # noqa: E402
+from sqlalchemy.pool import StaticPool  # noqa: E402
+
+import core.database as cdb  # noqa: E402
+import models  # noqa: E402
+from services.alerts_inbox import (  # noqa: E402
+    DEFAULT_RING_CONFIG,
+    apply_alert,
+    normalize_ring_config,
+)
+
+
+@pytest.fixture()
+def db(monkeypatch):
+    monkeypatch.setitem(sys.modules, "core.database", cdb)
+    monkeypatch.setitem(sys.modules, "models", models)
+    eng = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    models.Base.metadata.create_all(eng)
+    SessionLocal = sessionmaker(bind=eng)
+    monkeypatch.setattr(cdb, "SessionLocal", SessionLocal)
+    # apply_alert fires alarm actions on a daemon thread that opens its
+    # own session. On this StaticPool — ONE sqlite connection shared by
+    # every session — that thread's close() is a ROLLBACK on the same
+    # connection, and when it lands while the next apply_alert holds an
+    # uncommitted INSERT, that insert vanishes: ObjectDeletedError on the
+    # post-commit refresh, seen as a CI-only flake. Production sessions
+    # have their own connections; the action tests below call
+    # dispatch_alarm_actions directly. Keep the thread out of here.
+    import services.alarm_actions as _aa
+
+    monkeypatch.setattr(_aa, "dispatch_in_background", lambda alert: None)
+    s = SessionLocal()
+    role = models.Role(name="admin")
+    s.add(role)
+    s.commit()
+    # A superuser: these tests exercise the inbox MECHANICS (ack, poll,
+    # ring policy). Camera scoping has its own tests further down.
+    user = models.User(username="op", email="op@x", hashed_password="x",
+                       role_id=role.id, is_superuser=True)
+    s.add(user)
+    s.commit()
+    user_id = user.id
+    s.close()
+    yield SessionLocal, user_id
+
+
+def _envelope(alert_id="alrt_abc123", severity="high", **extra):
+    return {
+        "alert_id": alert_id,
+        "fired_at": "2026-09-03T10:00:00+00:00",
+        "title": "Unregistered vehicle at the gate",
+        "description": "Plate ZZ999XX is not in the register",
+        "severity": severity,
+        "source": {"kind": "app", "name": "license-plate-recognition",
+                   "version": "1.0.0"},
+        "camera_id": "cam1",
+        "correlation_id": "corr-1",
+        "evidence": {"plate": "ZZ999XX"},
+        "tags": ["lpr", "unknown-vehicle"],
+        **extra,
+    }
+
+
+def _rows(SessionLocal):
+    s = SessionLocal()
+    try:
+        return s.query(models.AppAlert).order_by(models.AppAlert.id).all()
+    finally:
+        s.close()
+
+
+# ── the consumer core ──────────────────────────────────────────────
+
+
+def test_alert_becomes_one_inbox_row(db):
+    SessionLocal, _ = db
+    assert apply_alert(_envelope()) == "stored"
+    rows = _rows(SessionLocal)
+    assert len(rows) == 1
+    a = rows[0]
+    assert a.alert_id == "alrt_abc123"
+    assert a.severity == "high"
+    assert a.title == "Unregistered vehicle at the gate"
+    assert a.source_name == "license-plate-recognition"
+    assert a.camera_id == "cam1"
+    assert json.loads(a.evidence) == {"plate": "ZZ999XX"}
+    assert json.loads(a.tags) == ["lpr", "unknown-vehicle"]
+    assert a.acknowledged_at is None
+
+
+def test_redelivery_never_rings_twice(db):
+    """NATS is at-least-once and the consumer reconnects: the same
+    alert_id redelivered must be a no-op, not a second ringing row."""
+    SessionLocal, _ = db
+    assert apply_alert(_envelope()) == "stored"
+    assert apply_alert(_envelope()) == "duplicate"
+    assert len(_rows(SessionLocal)) == 1
+
+
+def test_malformed_envelopes_are_dropped(db):
+    SessionLocal, _ = db
+    assert apply_alert(None) == "malformed"
+    assert apply_alert("not-a-dict") == "malformed"
+    assert apply_alert({"title": "no id"}) == "malformed"
+    assert apply_alert({"alert_id": "a1", "title": "  "}) == "malformed"
+    assert _rows(SessionLocal) == []
+
+
+def test_unknown_severity_surfaces_as_high(db):
+    """An app bug in one field must not HIDE a fired alert — and must
+    not escalate it to critical either."""
+    SessionLocal, _ = db
+    assert apply_alert(_envelope(severity="URGENT!!")) == "stored"
+    assert _rows(SessionLocal)[0].severity == "high"
+
+
+def test_info_is_a_notice_not_an_escalation(db):
+    """Field bug: the LPR app fires routine "Plate X read" at "info", a
+    level the inbox lacks; the unknown-severity fallback promoted every
+    one to HIGH and rang the beep — while the operator's "alarm on
+    unknown vehicles" toggle (which governs a different alert entirely)
+    appeared to do nothing. Levels apps commonly use map onto ours;
+    only genuinely unknown values escalate."""
+    SessionLocal, _ = db
+    for i, (given, expected) in enumerate([
+        ("info", "low"), ("INFO", "low"), ("notice", "low"),
+        ("warning", "medium"), ("error", "high"), (" Low ", "low"),
+    ]):
+        assert apply_alert(_envelope(alert_id=f"alrt_sev{i}",
+                                     severity=given)) == "stored"
+    got = {r.alert_id: r.severity for r in _rows(SessionLocal)}
+    assert got == {"alrt_sev0": "low", "alrt_sev1": "low", "alrt_sev2": "low",
+                   "alrt_sev3": "medium", "alrt_sev4": "high",
+                   "alrt_sev5": "low"}
+
+
+def test_unparseable_fired_at_still_stores(db):
+    SessionLocal, _ = db
+    assert apply_alert(_envelope(fired_at="not-a-date")) == "stored"
+    assert _rows(SessionLocal)[0].fired_at is not None
+
+
+# ── observed_at: when it happened vs when the app decided (#451) ───
+
+
+def test_the_alert_carries_when_the_thing_was_seen(db):
+    """fired_at is when the producing app finished deciding; observed_at
+    is when the plate was actually read. Storing only fired_at is what
+    made one read show two different times — this page and the vehicle
+    list disagreed by however long OCR and the bus took."""
+    SessionLocal, _ = db
+    assert apply_alert(_envelope(
+        evidence={"plate": "ZZ999XX",
+                  "observed_at": "2026-09-03T09:59:52+00:00"},
+    )) == "stored"
+    row = _rows(SessionLocal)[0]
+    assert row.observed_at is not None
+    # Eight seconds before the app fired — the pipeline lag, now visible
+    # rather than baked into the only timestamp on the row.
+    assert row.observed_at.replace(tzinfo=None).isoformat()         == "2026-09-03T09:59:52"
+    assert row.fired_at is not None
+
+
+def test_an_alert_without_an_observed_time_is_undated_not_guessed(db):
+    """Producers that do not send one leave it NULL and the UI falls
+    back to fired_at. Copying fired_at in here would forge the very
+    distinction the column exists to make."""
+    SessionLocal, _ = db
+    assert apply_alert(_envelope()) == "stored"
+    assert _rows(SessionLocal)[0].observed_at is None
+
+
+def test_a_junk_observed_time_never_costs_us_the_alert(db):
+    """An app bug in one field must not hide a fired alarm."""
+    SessionLocal, _ = db
+    for i, junk in enumerate([12345, "not-a-date", None, {"a": 1}]):
+        assert apply_alert(_envelope(
+            alert_id=f"alrt_junk{i}",
+            evidence={"observed_at": junk},
+        )) == "stored"
+    assert all(r.observed_at is None for r in _rows(SessionLocal))
+
+
+def test_evidence_that_is_not_a_dict_is_simply_not_a_source(db):
+    SessionLocal, _ = db
+    assert apply_alert(_envelope(evidence="just a string")) == "stored"
+    assert _rows(SessionLocal)[0].observed_at is None
+
+
+# ── the API (list / ack / ring config) ─────────────────────────────
+
+
+@pytest.fixture()
+def client(db, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    import core.auth as auth_mod
+    from core.database import get_db
+    from routers.alerts_inbox import router
+
+    SessionLocal, user_id = db
+    app = FastAPI()
+    app.include_router(router)
+
+    def _fake_db():
+        s = SessionLocal()
+        try:
+            yield s
+        finally:
+            s.close()
+
+    s = SessionLocal()
+    user = s.get(models.User, user_id)
+    s.expunge(user)
+    s.close()
+
+    app.dependency_overrides[get_db] = _fake_db
+    app.dependency_overrides[auth_mod.get_current_active_user] = lambda: user
+    app.dependency_overrides[auth_mod.get_current_superuser] = lambda: user
+    return TestClient(app), SessionLocal, user_id
+
+
+def test_list_unacked_and_ack_flow(client):
+    tc, SessionLocal, user_id = client
+    apply_alert(_envelope("a1", severity="critical"))
+    apply_alert(_envelope("a2", severity="low"))
+
+    out = tc.get("/alerts-inbox", params={"unacked": True}).json()
+    assert out["unacked_count"] == 2
+    assert [a["alert_id"] for a in out["alerts"]] == ["a2", "a1"]  # newest first
+
+    first_id = out["alerts"][1]["id"]
+    r = tc.post("/alerts-inbox/ack", json={"ids": [first_id]})
+    assert r.json() == {"acknowledged": 1}
+    out = tc.get("/alerts-inbox", params={"unacked": True}).json()
+    assert out["unacked_count"] == 1
+    # WHO silenced it is recorded.
+    acked = _rows(SessionLocal)[0]
+    assert acked.acknowledged_by == user_id
+    # Idempotent: re-acking changes nothing (first silencer wins).
+    stamp = acked.acknowledged_at
+    assert tc.post("/alerts-inbox/ack",
+                   json={"ids": [first_id]}).json() == {"acknowledged": 0}
+    assert _rows(SessionLocal)[0].acknowledged_at == stamp
+
+    # Empty body = ack ALL remaining.
+    assert tc.post("/alerts-inbox/ack", json={}).json() == {"acknowledged": 1}
+    assert tc.get("/alerts-inbox",
+                  params={"unacked": True}).json()["unacked_count"] == 0
+
+
+def test_after_id_polling_window(client):
+    tc, *_ = client
+    apply_alert(_envelope("a1"))
+    apply_alert(_envelope("a2"))
+    all_rows = tc.get("/alerts-inbox").json()["alerts"]
+    newest = all_rows[0]["id"]
+    out = tc.get("/alerts-inbox", params={"after_id": newest}).json()
+    assert out["alerts"] == []
+    apply_alert(_envelope("a3"))
+    out = tc.get("/alerts-inbox", params={"after_id": newest}).json()
+    assert [a["alert_id"] for a in out["alerts"]] == ["a3"]
+
+
+def test_ring_config_defaults_roundtrip_and_validation(client):
+    tc, *_ = client
+    out = tc.get("/alerts-inbox/ring-config").json()
+    assert out["ring"] == DEFAULT_RING_CONFIG
+
+    r = tc.put("/alerts-inbox/ring-config",
+               json={"ring": {"low": "ping", "critical": "continuous"}})
+    assert r.status_code == 200
+    assert r.json()["ring"]["low"] == "ping"
+    assert tc.get("/alerts-inbox/ring-config").json()["ring"]["low"] == "ping"
+
+    # Typos are rejected LOUDLY — never stored, never silently defaulted.
+    assert tc.put("/alerts-inbox/ring-config",
+                  json={"ring": {"critical": "continuos"}}).status_code == 422
+    assert tc.put("/alerts-inbox/ring-config",
+                  json={"ring": {"fatal": "ping"}}).status_code == 422
+
+
+def test_corrupt_stored_ring_config_degrades_to_defaults():
+    """A corrupt stored value must never mean silence-on-critical."""
+    assert normalize_ring_config(None) == DEFAULT_RING_CONFIG
+    assert normalize_ring_config("garbage") == DEFAULT_RING_CONFIG
+    assert normalize_ring_config(
+        {"critical": "nonsense", "low": "ping"}
+    ) == {**DEFAULT_RING_CONFIG, "low": "ping"}
+
+
+def test_test_alarm_takes_the_real_path(client):
+    """The 'is it working?' button must exercise the same chain a real
+    alert takes — a row in the same table, ringing and acknowledging
+    like any other — and reject severities the ring policy doesn't
+    know."""
+    tc, SessionLocal, _ = client
+    r = tc.post("/alerts-inbox/test", json={"severity": "critical"})
+    assert r.status_code == 200 and r.json()["status"] == "fired"
+    rows = _rows(SessionLocal)
+    assert len(rows) == 1
+    assert rows[0].severity == "critical"
+    assert rows[0].source_name == "alarm-test"
+    assert rows[0].alert_id.startswith("alrt_test_")
+    # Counts as unacked (it must ring), acks like any other.
+    assert tc.get("/alerts-inbox",
+                  params={"unacked": True}).json()["unacked_count"] == 1
+    assert tc.post("/alerts-inbox/ack", json={}).json()["acknowledged"] == 1
+    # Unknown severity is a loud 422, not a silent default.
+    assert tc.post("/alerts-inbox/test",
+                   json={"severity": "fatal"}).status_code == 422
+
+
+# ── alarm actions (call / SMS / hooter) ────────────────────────────
+
+
+def _actions_cfg(**over):
+    base = {
+        "min_severity": "high",
+        "twilio": {"enabled": True, "account_sid": "ACxx",
+                   "auth_token": "secret-token",
+                   "from_number": "+1000", "to_numbers": ["+1911"],
+                   "mode": "both"},
+        "webhook": {"enabled": True, "url": "http://relay.local/on",
+                    "method": "POST"},
+    }
+    base.update(over)
+    return base
+
+
+def test_actions_config_masks_the_secret_and_keeps_it_on_blank(client):
+    tc, *_ = client
+    out = tc.put("/alerts-inbox/actions", json=_actions_cfg()).json()["actions"]
+    assert out["twilio"]["auth_token_set"] is True
+    assert "auth_token" not in out["twilio"]
+    assert "auth_token_enc" not in out["twilio"], (
+        "even the ciphertext must not leave the server")
+    # Update WITHOUT a token: the stored secret survives.
+    out = tc.put("/alerts-inbox/actions",
+                 json={"twilio": {"from_number": "+2000"}}).json()["actions"]
+    assert out["twilio"]["auth_token_set"] is True
+    assert out["twilio"]["from_number"] == "+2000"
+    assert out["twilio"]["to_numbers"] == ["+1911"]   # merge, not replace
+    assert tc.get("/alerts-inbox/actions").json()["actions"]["twilio"][
+        "auth_token_set"] is True
+    # Bad severity is loud.
+    assert tc.put("/alerts-inbox/actions",
+                  json={"min_severity": "fatal"}).status_code == 422
+
+
+def test_stored_alert_dispatches_actions_only_at_or_above_min_severity(
+        client, monkeypatch):
+    """The severity gate is the difference between 'the guard's phone
+    rings for an intruder' and 'the guard's phone rings for every parked
+    car'."""
+    import services.alarm_actions as aa
+
+    tc, *_ = client
+    tc.put("/alerts-inbox/actions", json=_actions_cfg(min_severity="high"))
+
+    calls: list[dict] = []
+    monkeypatch.setattr(aa, "_dispatch_twilio",
+                        lambda tw, alert: calls.append(
+                            {"kind": "twilio", "sev": alert["severity"]}) or [])
+    monkeypatch.setattr(aa, "_dispatch_webhook",
+                        lambda wh, alert: calls.append(
+                            {"kind": "webhook", "sev": alert["severity"]})
+                        or {"action": "webhook", "ok": True, "detail": ""})
+
+    aa.dispatch_alarm_actions({"severity": "low", "title": "quiet"})
+    assert calls == [], "below min_severity must dispatch NOTHING"
+    aa.dispatch_alarm_actions({"severity": "critical", "title": "loud"})
+    assert {c["kind"] for c in calls} == {"twilio", "webhook"}
+
+
+def test_twilio_dispatch_shapes_the_rest_calls(client, monkeypatch):
+    """Lockstep with Twilio's API: basic-auth (sid, token), Calls.json
+    with inline TwiML, Messages.json with a Body — and the DECRYPTED
+    token, proving the vault round-trip."""
+    import services.alarm_actions as aa
+
+    tc, *_ = client
+    tc.put("/alerts-inbox/actions", json=_actions_cfg())
+
+    posts: list[dict] = []
+
+    class _Resp:
+        status_code = 201
+
+        def json(self):
+            return {}
+
+    class _FakeHttpx:
+        @staticmethod
+        def post(url, data=None, auth=None, timeout=None):
+            posts.append({"url": url, "data": data, "auth": auth})
+            return _Resp()
+
+    # The REAL vault decrypts (the PUT above encrypted with it); only
+    # the network is faked.
+    import sys as _sys
+    monkeypatch.setitem(_sys.modules, "httpx", _FakeHttpx)
+    results = aa.dispatch_alarm_actions(
+        {"severity": "critical", "title": "Unknown vehicle",
+         "camera_id": "cam1"}, force=True)
+
+    urls = [p["url"] for p in posts]
+    assert any(u.endswith("/Calls.json") for u in urls)
+    assert any(u.endswith("/Messages.json") for u in urls)
+    for p in posts:
+        assert p["auth"] == ("ACxx", "secret-token"), (
+            "dispatch must use the DECRYPTED stored token")
+        assert p["data"]["To"] == "+1911"
+    call = next(p for p in posts if p["url"].endswith("/Calls.json"))
+    assert "<Say" in call["data"]["Twiml"]
+    sms = next(p for p in posts if p["url"].endswith("/Messages.json"))
+    assert "Unknown vehicle" in sms["data"]["Body"]
+    assert all(r["ok"] for r in results if r["action"].startswith("twilio"))
+
+
+
+# ── camera scope (RBAC): you get the alarms for YOUR cameras ───────
+
+
+@pytest.fixture()
+def scoped_client(db, monkeypatch):
+    """Two cameras (owner: someone else), one operator granted can_view
+    on the first only, plus a superuser — the same app, two callers."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    import core.auth as auth_mod
+    from core.database import get_db
+    from routers.alerts_inbox import router
+
+    SessionLocal, admin_id = db
+    s = SessionLocal()
+    role = s.query(models.Role).first()
+    op = models.User(username="guard", email="g@x", hashed_password="x",
+                     role_id=role.id)
+    s.add(op)
+    s.commit()
+    gate = models.Camera(name="Gate", ip_address="10.0.0.1", owner_id=admin_id)
+    yard = models.Camera(name="Yard", ip_address="10.0.0.2", owner_id=admin_id)
+    s.add_all([gate, yard])
+    s.commit()
+    s.add(models.CameraPermission(user_id=op.id, camera_id=gate.id,
+                                  can_view=True, can_manage=False))
+    s.commit()
+    gate_id, yard_id = gate.id, yard.id
+    admin = s.get(models.User, admin_id)
+    s.refresh(admin)
+    s.refresh(op)
+    s.expunge(admin)
+    s.expunge(op)
+    s.close()
+
+    app = FastAPI()
+    app.include_router(router)
+
+    def _fake_db():
+        sess = SessionLocal()
+        try:
+            yield sess
+        finally:
+            sess.close()
+
+    app.dependency_overrides[get_db] = _fake_db
+    current = {"user": op}
+    app.dependency_overrides[auth_mod.get_current_active_user] = \
+        lambda: current["user"]
+
+    def _as_superuser():
+        from fastapi import HTTPException
+        if not current["user"].is_superuser:
+            raise HTTPException(status_code=403, detail="Not enough permissions")
+        return current["user"]
+
+    app.dependency_overrides[auth_mod.get_current_superuser] = _as_superuser
+    return TestClient(app), current, op, admin, gate_id, yard_id
+
+
+def test_inbox_lists_counts_and_acks_only_visible_cameras(scoped_client):
+    tc, current, op, admin, gate_id, yard_id = scoped_client
+    apply_alert(_envelope("on-gate", camera_id=f"cam{gate_id}"))
+    apply_alert(_envelope("on-yard", camera_id=f"cam{yard_id}"))
+    apply_alert(_envelope("site-wide", camera_id=None))
+
+    # The guard: the gate alarm and the camera-less notice, never the yard.
+    out = tc.get("/alerts-inbox", params={"unacked": True}).json()
+    assert sorted(a["alert_id"] for a in out["alerts"]) == ["on-gate", "site-wide"]
+    assert out["unacked_count"] == 2
+
+    # Ack-all silences MY inbox only; the yard alarm keeps ringing for
+    # whoever can see the yard.
+    assert tc.post("/alerts-inbox/ack", json={}).json() == {"acknowledged": 2}
+    current["user"] = admin
+    out = tc.get("/alerts-inbox", params={"unacked": True}).json()
+    assert [a["alert_id"] for a in out["alerts"]] == ["on-yard"]
+    assert out["unacked_count"] == 1
+
+    # An explicit id on someone else's camera is not acked (not found).
+    yard_row = out["alerts"][0]["id"]
+    current["user"] = op
+    assert tc.post("/alerts-inbox/ack",
+                   json={"ids": [yard_row]}).json() == {"acknowledged": 0}
+    assert tc.get("/alerts-inbox").json()["alerts"] and all(
+        a["alert_id"] != "on-yard" for a in tc.get("/alerts-inbox").json()["alerts"])
+
+
+def test_user_granted_nothing_sees_only_camera_less_alerts(scoped_client, db):
+    tc, current, op, admin, gate_id, yard_id = scoped_client
+    SessionLocal, _ = db
+    s = SessionLocal()
+    s.query(models.CameraPermission).delete()
+    s.commit()
+    s.close()
+    apply_alert(_envelope("on-gate", camera_id=f"cam{gate_id}"))
+    apply_alert(_envelope("notice", camera_id=""))
+    out = tc.get("/alerts-inbox").json()
+    assert [a["alert_id"] for a in out["alerts"]] == ["notice"]
+    assert out["unacked_count"] == 1
+
+
+def test_alarm_policy_is_superuser_only(scoped_client):
+    tc, current, op, admin, *_ = scoped_client
+    # The bell needs the ring policy to know HOW to ring: readable by all.
+    assert tc.get("/alerts-inbox/ring-config").status_code == 200
+    # Changing the site's alarm policy, its actions, or firing test
+    # alarms into everyone's inbox is not.
+    assert tc.put("/alerts-inbox/ring-config",
+                  json={"ring": {"low": "ping"}}).status_code == 403
+    assert tc.get("/alerts-inbox/actions").status_code == 403
+    assert tc.put("/alerts-inbox/actions",
+                  json={"min_severity": "high"}).status_code == 403
+    assert tc.post("/alerts-inbox/actions/test").status_code == 403
+    assert tc.post("/alerts-inbox/test", json={"severity": "high"}).status_code == 403
+    current["user"] = admin
+    assert tc.put("/alerts-inbox/ring-config",
+                  json={"ring": {"low": "ping"}}).status_code == 200
+    assert tc.get("/alerts-inbox/actions").status_code == 200
+
+
+# ── paging (#451 follow-up) ─────────────────────────────────────────
+
+
+def _src(name):
+    """An envelope from a named app — `source` is a nested dict, so
+    source_name cannot be passed as a flat **extra."""
+    return {"source": {"kind": "app", "name": name, "version": "1.0.0"}}
+
+
+def test_pages_do_not_repeat_or_drop_rows(client):
+    tc, *_ = client
+    for i in range(7):
+        apply_alert(_envelope(f"pg{i}"))
+    whole = [a["alert_id"]
+             for a in tc.get("/alerts-inbox", params={"limit": 50}).json()["alerts"]]
+    paged = []
+    for skip in (0, 3, 6):
+        paged += [a["alert_id"] for a in tc.get(
+            "/alerts-inbox", params={"skip": skip, "limit": 3}).json()["alerts"]]
+    assert paged == whole
+
+
+def test_total_respects_filters_while_unacked_count_does_not(client):
+    """The two numbers answer different questions and sit side by side in
+    one response, so pin the difference — names alone will not stop it."""
+    tc, *_ = client
+    for i in range(3):
+        apply_alert(_envelope(f"crit{i}", severity="critical"))
+    for i in range(5):
+        apply_alert(_envelope(f"low{i}", severity="low"))
+    body = tc.get("/alerts-inbox",
+                  params={"severity": "critical", "limit": 2}).json()
+    assert len(body["alerts"]) == 2      # one page
+    assert body["total"] == 3            # matching THIS filter
+    assert body["unacked_count"] == 8    # the badge, filter-blind
+
+
+def test_a_page_past_the_end_reports_the_true_total(client):
+    """resolve_total's trap through the route: an empty page at skip=100
+    proves total <= 100, never that it IS 100."""
+    tc, *_ = client
+    for i in range(5):
+        apply_alert(_envelope(f"end{i}"))
+    body = tc.get("/alerts-inbox", params={"skip": 100, "limit": 25}).json()
+    assert body["alerts"] == []
+    assert body["total"] == 5
+
+
+def test_before_id_pins_a_page_against_new_arrivals(client):
+    tc, *_ = client
+    for i in range(4):
+        apply_alert(_envelope(f"anchor{i}"))
+    anchor = tc.get("/alerts-inbox",
+                    params={"limit": 50}).json()["alerts"][0]["id"]
+    for i in range(2):
+        apply_alert(_envelope(f"late{i}"))        # arrive mid-read
+    body = tc.get("/alerts-inbox",
+                  params={"before_id": anchor, "limit": 50}).json()
+    assert body["total"] == 4
+    assert all(not a["alert_id"].startswith("late") for a in body["alerts"])
+
+
+@pytest.mark.parametrize("params", [
+    {"limit": 0}, {"limit": 201}, {"skip": -1},
+])
+def test_out_of_range_paging_is_rejected(client, params):
+    tc, *_ = client
+    assert tc.get("/alerts-inbox", params=params).status_code == 422
+
+
+# ── acknowledge by filter ("acknowledge all N", not "this page") ────
+
+
+def test_ack_by_source_leaves_other_sources_alone(client):
+    tc, *_ = client
+    apply_alert(_envelope("lpr1", **_src("license-plate-recognition")))
+    apply_alert(_envelope("lpr2", **_src("license-plate-recognition")))
+    apply_alert(_envelope("other", **_src("intrusion-detection")))
+    r = tc.post("/alerts-inbox/ack",
+                json={"source_name": "license-plate-recognition"})
+    assert r.json()["acknowledged"] == 2
+    left = tc.get("/alerts-inbox",
+                  params={"unacked": True, "limit": 50}).json()
+    assert [a["alert_id"] for a in left["alerts"]] == ["other"]
+
+
+def test_ack_by_severity_matches_what_the_label_would_claim(client):
+    """The point of the filtered ack: the number the button shows and the
+    number it silences must be the same number."""
+    tc, *_ = client
+    for i in range(3):
+        apply_alert(_envelope(f"c{i}", severity="critical"))
+    apply_alert(_envelope("l", severity="low"))
+    shown = tc.get("/alerts-inbox",
+                   params={"severity": "critical", "limit": 50}).json()["total"]
+    acked = tc.post("/alerts-inbox/ack",
+                    json={"severity": "critical"}).json()["acknowledged"]
+    assert acked == shown == 3
+
+
+def test_ack_refuses_ids_and_filters_together(client):
+    tc, *_ = client
+    apply_alert(_envelope("both"))
+    r = tc.post("/alerts-inbox/ack", json={"ids": [1], "source_name": "x"})
+    assert r.status_code == 400
+
+
+def test_total_never_counts_alerts_on_invisible_cameras(scoped_client):
+    """The leak case. A pager total that ignores scope tells an operator
+    exactly how many alarms exist on cameras they cannot open."""
+    tc, current, op, admin, gate_id, yard_id = scoped_client
+    for i in range(2):
+        apply_alert(_envelope(f"gate{i}", camera_id=f"cam{gate_id}"))
+    for i in range(5):
+        apply_alert(_envelope(f"yard{i}", camera_id=f"cam{yard_id}"))
+    apply_alert(_envelope("site-wide", camera_id=None))
+
+    # op sees the gate pair and the camera-less notice — and the total
+    # must agree with the rows, not with the table.
+    body = tc.get("/alerts-inbox", params={"limit": 50}).json()
+    assert body["total"] == len(body["alerts"]) == 3
+
+    current["user"] = admin
+    body = tc.get("/alerts-inbox", params={"limit": 50}).json()
+    assert body["total"] == 8
+
+
+def test_a_filtered_ack_cannot_reach_another_operators_camera(scoped_client):
+    """"Acknowledge all" widened what one click does, so pin the limit:
+    a filter still cannot silence an alarm outside the caller's scope."""
+    tc, current, op, admin, gate_id, yard_id = scoped_client
+    apply_alert(_envelope("gate-lpr", camera_id=f"cam{gate_id}",
+                          **_src("license-plate-recognition")))
+    apply_alert(_envelope("yard-lpr", camera_id=f"cam{yard_id}",
+                          **_src("license-plate-recognition")))
+
+    acked = tc.post("/alerts-inbox/ack",
+                    json={"source_name": "license-plate-recognition"}).json()
+    assert acked == {"acknowledged": 1}          # the gate one only
+
+    current["user"] = admin
+    left = tc.get("/alerts-inbox", params={"unacked": True}).json()
+    assert [a["alert_id"] for a in left["alerts"]] == ["yard-lpr"]
+
+
+# ── evidence photos and alert kinds ─────────────────────────────────
+
+
+def _jpeg(size_bytes: int = 1200) -> bytes:
+    """A byte string the evidence store will accept as a JPEG."""
+    return b"\xff\xd8\xff\xe0" + b"\x00" * (size_bytes - 4)
+
+
+def test_a_photo_no_longer_costs_the_whole_evidence_dict(db, tmp_path,
+                                                         monkeypatch):
+    """The bug this column exists for.
+
+    An app that inlined a base64 crop blew the 8000-char clip, the JSON
+    came back unparseable, and EVERY other evidence field went with it —
+    silently. The photo now lands in the evidence store and the rest of
+    the dict survives intact.
+    """
+    import base64
+
+    from services import evidence_store
+
+    monkeypatch.setattr(evidence_store.settings, "recordings_base_path",
+                        str(tmp_path))
+    SessionLocal, _ = db
+    huge = base64.b64encode(_jpeg(60_000)).decode()
+    assert apply_alert(_envelope(
+        evidence={"plate": "ZZ999XX", "observed_at": "2026-09-03T10:00:00+00:00",
+                  "snapshot_b64": huge})) == "stored"
+
+    row = _rows(SessionLocal)[0]
+    assert json.loads(row.evidence)["plate"] == "ZZ999XX"   # not lost
+    assert json.loads(row.images)["snapshot"].endswith(".jpg")
+    assert "snapshot_b64" not in (row.evidence or "")
+
+
+def test_image_paths_ride_along_and_keep_their_names(db):
+    SessionLocal, _ = db
+    assert apply_alert(_envelope(evidence={
+        "images": {"face": "ab/face.jpg", "body": "cd/body.jpg"}})) == "stored"
+    assert json.loads(_rows(SessionLocal)[0].images) == {
+        "face": "ab/face.jpg", "body": "cd/body.jpg"}
+
+
+def test_an_oversized_field_drops_itself_not_its_neighbours(db):
+    SessionLocal, _ = db
+    assert apply_alert(_envelope(
+        evidence={"keep": "small", "blob": "x" * 20_000})) == "stored"
+    stored = json.loads(_rows(SessionLocal)[0].evidence)
+    assert stored["keep"] == "small"
+    assert stored["_dropped"] == ["blob"]
+
+
+def test_alert_type_is_stored_and_filterable(db):
+    SessionLocal, _ = db
+    assert apply_alert(_envelope("a-flag", alert_type="scanner_flag")) == "stored"
+    # ...and a producer that only tagged a kind is understood too.
+    assert apply_alert(_envelope("a-tag", tags=["type:no_scan"])) == "stored"
+    kinds = {r.alert_id: r.alert_type for r in _rows(SessionLocal)}
+    assert kinds == {"a-flag": "scanner_flag", "a-tag": "no_scan"}
+
+
+def test_an_operator_can_fetch_the_photo_off_an_alert(client, tmp_path,
+                                                      monkeypatch):
+    """End to end: the app stored a crop, the alert cited it, and the
+    desk can open it — the whole point of the images column."""
+    from services import evidence_store
+
+    monkeypatch.setattr(evidence_store.settings, "recordings_base_path",
+                        str(tmp_path))
+    tc, _, _ = client
+    rel = evidence_store.save_evidence_jpeg(_jpeg())
+    apply_alert(_envelope("with-photo", evidence={"images": {"face": rel}}))
+
+    row = tc.get("/alerts-inbox").json()["alerts"][0]
+    assert row["images"] == ["face"]
+
+    got = tc.get(f"/alerts-inbox/{row['id']}/images/face")
+    assert got.status_code == 200
+    assert got.content == _jpeg()
+    # A name the alert never mentioned is not a way to browse the store.
+    assert tc.get(f"/alerts-inbox/{row['id']}/images/body").status_code == 404
+
+
+def test_history_filters_by_kind_camera_date_and_text(client):
+    tc, _, _ = client
+    apply_alert(_envelope("f1", alert_type="scanner_flag", camera_id="cam1",
+                          fired_at="2026-09-01T10:00:00+00:00",
+                          title="Scanner flagged this person"))
+    apply_alert(_envelope("f2", alert_type="no_scan", camera_id="cam2",
+                          fired_at="2026-09-05T10:00:00+00:00",
+                          title="Person entered without a scan"))
+
+    def ids(**params):
+        return [a["alert_id"] for a in
+                tc.get("/alerts-inbox", params=params).json()["alerts"]]
+
+    assert ids(alert_type="scanner_flag") == ["f1"]
+    assert ids(camera_id="cam2") == ["f2"]
+    assert ids(**{"from": "2026-09-03T00:00:00Z"}) == ["f2"]
+    assert ids(to="2026-09-03T00:00:00Z") == ["f1"]
+    assert ids(q="without a scan") == ["f2"]
+    # An unreadable bound is ignored rather than 500ing the page.
+    assert set(ids(**{"from": "last tuesday"})) == {"f1", "f2"}

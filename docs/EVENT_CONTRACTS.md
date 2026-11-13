@@ -94,11 +94,26 @@ The map lives in KAI-C beside the publisher, is part of this contract
 | Adapter | Domain event emitted |
 |---|---|
 | `fast_plate_ocr` | `plate.recognized.v1` |
+| any adapter whose result `task` is `face_recognition`, when Tier-1 dispatch named the track | `face.recognized.v1` |
+
+Face apps each run their own face adapter (each holds its own gallery),
+so the face row is keyed on the result's task rather than one adapter
+name. It fires only for the platform's face route: an app's own
+identification calls carry no track and publish nothing here.
 
 ## Contracted events (v1)
 
 What already flows, now with names. Payload field tables list required
 fields; producers may add optional ones under the additive-only rule.
+
+Every v1 payload below is also a class in the App SDK
+(`opennvr_app_sdk.event_types`: `DetectionObserved`, `VisitRecorded`,
+`PlateRecognized`, `AccessDecided`, `OccupancyChanged`,
+`OccupancyHeatmap`, `OccupancyFootfall`). `event.typed()` on a
+`DomainEvent` parses the payload — required fields enforced, additive
+fields kept in `.extra`, off-contract payloads returned as `None` and
+logged — and `DomainEventPublisher.publish_typed(...)` writes one. The
+tables here remain normative; the classes follow them.
 
 ### `detection.observed.v1`
 
@@ -117,16 +132,38 @@ consumers.
 |---|---|---|
 | `frame` | object | `{w, h}` in pixels — lets consumers normalise boxes. |
 | `calibrating` | bool | Tier-0 still calibrating; treat tracks as provisional. |
-| `tracks` | array | Same track shape as `opennvr.tier0.v1` (`id`, `label`, `conf`, `bbox`, motion fields). Normative source: `detect_pipeline/bus.py::build_payload`. |
+| `tracks` | array | Same track shape as `opennvr.tier0.v1` (`id`, `label`, `conf`, `bbox`, motion fields). Normative source: `detect_pipeline/bus.py::build_payload`. Each track also carries `matched` (bool): true when the object was detected in *this* frame, false when the track is **coasting** — kept alive at its last box (up to `coast_ttl_seconds`) because the tracker did not see it leave. Also `misses` (int): consecutive frames the detector looked for this track and did not find it — stays 0 while a **stationary** track is skipped on purpose (re-verified every Nth frame). And `since_match_s` (float): seconds since the last positive match, 0 on the frame it was matched. Tier-0 re-verifies tracks on a per-frame region budget, so a present object is matched every few frames, not every frame. A live renderer should hide a track with `misses > 0` and otherwise draw it while `since_match_s` is recent (core uses 3 s); consumers reasoning about presence (visits, occupancy) want every track. Additive: absent means matched / 0. |
+
+### `overlay.boxes.v1`
+
+Subject: `opennvr.events.overlay.boxes.v1.<camera_id>`
+Producer: any app (SDK `OverlayBoxes` / `DomainEventPublisher.publish_overlay`).
+
+Boxes an app wants drawn over the operator's live video — plate
+localisations, zones, anything with a rectangle. Core forwards them to
+the browser (`/events/ws`, `task=overlay`) **only for apps the operator
+has switched on in the App Catalog** (`installed_apps.overlay_enabled`,
+off by default); otherwise the event is published and ignored, so an
+app may call `publish_overlay` unconditionally. Whether a given screen
+draws them is that viewer's own toggle. Core never draws an app's
+boxes for a camera the viewer may not watch.
+
+`payload`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `boxes` | array | Required. `{label, box: [x, y, w, h], score?, id?}`; `box` normalized to 0..1 of the frame. |
+| `frame` | `{w, h}` \| absent | Optional. If `box` is in pixels, ship the frame size and core normalizes. Pixel boxes without it are dropped. |
+| `seq` | int \| absent | Optional producer sequence. |
 
 ### `visit.recorded.v1`
 
 Subject: `opennvr.events.visit.recorded.v1.<camera_id>`
 Producer: core (timeline ingestion), at the moment a finished visit
-row is persisted (`services/timeline_service.py::record_track_visit`).
-
-Today visits are DB rows only; this contract puts the fact on the bus
-so apps stop polling the timeline API for "something happened".
+row is persisted (`services/timeline_service.py::record_track_visit`,
+through `services/domain_bus.py`). Published since 0.1.12; before that
+the contract existed and nothing emitted it, and apps polled the
+timeline API for "something happened".
 
 `payload`:
 
@@ -136,6 +173,39 @@ so apps stop polling the timeline API for "something happened".
 | `label` | string | Track label (`person`, `car`, ...). |
 | `started_at` / `ended_at` | string | ISO-8601 UTC visit bounds. |
 | `evidence_path` | string \| null | Best-frame evidence reference, resolvable via the evidence API (not a raw filesystem path promise). |
+
+### `visit.enriched.v1`
+
+Subject: `opennvr.events.visit.enriched.v1.<camera_id>`
+Producer: core (the enrichment tier), each time a visit's caption or
+descriptor claims land in the store — fresh from the model, or copied
+from an earlier visit of the same evidence frame
+(`services/domain_bus.py::publish_visit_enriched`). Published since
+0.1.12 (RFC-0004, step 2).
+
+One message per landing; **every message carries the whole current
+state** of the visit's enrichment, so a subscriber that sees one knows
+everything the store knows at that moment and never has to merge. A
+visit whose caption lands first and whose claims land later produces
+two messages, the second a superset of the first. `ts` is the visit's
+end (its observation), not the publish time.
+
+`payload`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `event_id` | int | The timeline row id — join key for the REST API and for `visit.recorded.v1`. |
+| `label` | string | Track label (`person`, `car`, …). |
+| `caption` | string \| null | The visit's sentence, as `event_text` holds it; null when no caption has landed (claims only). |
+| `attributes` | object | Every descriptor claim as `kind: value` (`colour`, `vehicle_type`, `clothing_top`, `carrying`, …), the same vocabulary the attribute filter searches. Empty when none. |
+| `evidence_path` | string \| null | Best-frame evidence reference, as in `visit.recorded.v1`. |
+| `producer` | string \| null | The caption's adapter (`event_text.source`), for audit. |
+| `enriched_by` | string[] | The skills recorded as having looked (`image_captioning`, `vqa`, …), so "looked and found nothing" is distinguishable from "not yet". |
+| `reused_from` | int \| absent | Present when the caption and claims were copied from this earlier visit of the same frame (RFC-0004 step 2, exact-frame reuse); absent for a fresh look. |
+
+Consumers that need a question answered about a frame ask core, never
+an adapter (RFC-0004); this event is how they learn what core already
+knows, instead of asking the model again.
 
 ### `plate.recognized.v1`
 
@@ -155,6 +225,22 @@ empty/failed reads do not fire).
 | `confidence` | number \| null | Adapter-reported confidence for the read, when available. |
 | `vehicle_label` | string \| null | Upstream detection label (`car`/`truck`/`bus`) when the chain knows it. |
 | `event_id` | int \| null | Timeline visit row this read enriches, when initiated from a visit. |
+| `plate_box` | `[x1,y1,x2,y2]` \| absent | Optional. Where the adapter localised the plate, in the pixel space of the crop it was given. KAI-C does not publish a read whose box abuts the crop edge (a **partial** read), whose localiser scored below `KAI_C_PLATE_MIN_DETECTION_CONFIDENCE` (default 0.6), or whose localiser looked and found no plate (`KAI_C_PLATE_REQUIRE_LOCALISATION`, default on) — so every subscriber sees the same gate. The box is still forwarded for consumers with stricter policies. Consumers may use it to reject **partial** reads: a crop whose edge cuts through the plate still OCRs the surviving characters at high confidence, so `confidence` cannot distinguish `K884` (a fragment of `K884RS`) from a whole plate — only the geometry can. Absent when the adapter reports no localisation. |
+| `plate_box_confidence` | number \| absent | Optional. How sure the adapter's localiser was that it had found a plate at all — distinct from `confidence`, which scores the characters. Consumers reject **false localisations** with it: a manufacturer badge reads as plausible characters (the Audi four rings OCR as `C00D`) at plausible read confidence, from a box in the middle of the crop, so neither `confidence` nor `plate_box` can catch it — but the localiser scored it 0.38 where genuine plates score 0.85+. Absent from OCR-only adapters and from producers that predate the field (consumers then have no opinion to apply). |
+| `observed_at` | string \| absent | Optional. ISO-8601 UTC capture time of the **look this read came off** — when the plate was seen, as distinct from when anything processed it. Supplied by the initiator and echoed verbatim (KAI-C never mints one: it has no knowledge of the initiating system's clocks). This is the authoritative observation time for a read; see the note under the table on why the envelope's `ts` is not. Consumers that display or export a read MUST prefer it, falling back only for producers that predate it. Absent when the initiator did not know the capture time — e.g. a read taken from a stored evidence frame rather than a timestamped candidate look. |
+| `plate_box_image` | `[width,height]` \| absent | Optional. The size of the image `plate_box` is measured in — exactly the bytes the adapter OCR'd. Multi-frame OCR sends plate *candidate* crops whose size differs from the visit's evidence frame, so a consumer judging the box against the evidence file would measure in the wrong image; when this field is present it is the only correct denominator. Absent from adapters that predate it (consumers then fall back to the evidence file's size, correct for single-evidence producers). |
+
+> **`observed_at` vs the envelope's `ts`.** The envelope contract above
+> defines `ts` as the wall-clock time of the *observation*. For
+> `plate.recognized.v1` the current implementation does not meet that:
+> `kai_c/domain_events.py::_envelope` stamps `ts` at publish, so it
+> trails the observation by however long OCR and queueing took — a lag
+> that grows with backlog and is therefore worst exactly when a gate is
+> busiest. Rather than redefine `ts` for every producer mid-flight, the
+> observation time is carried explicitly in `observed_at`, which is
+> additive and unambiguous. Treat `ts` as "when this was published" for
+> this schema, and `observed_at` as "when it happened". Consumers that
+> date a read by `ts` are measuring our pipeline, not the world.
 
 #### Producer convergence (Phase 0 exit criterion)
 
@@ -175,6 +261,43 @@ Tier-1 dispatch (per escalated track, best-frame). Convergence:
 Accept: a subscriber consumes plates without knowing which producer
 fired them.
 
+### `face.recognized.v1`
+
+Subject: `opennvr.events.face.recognized.v1.<camera_id>`
+Producer: the KAI-C normaliser, for results of the Tier-1 **face route**
+(`person` → the face adapter a face app claimed for this camera; see
+`docs/design/face-recognition-route.md`).
+
+One event per face-route reply that found a face — recognised **or
+not**: an unknown face at a gate is news. A crop with no face fires
+nothing. The pipeline re-sends a person while their crop improves until
+one reply recognises them (or a few attempts), so a consumer sees
+several events per `track_id`, the last of them usually the recognised
+one; deciding over a short window per track is the intended use.
+
+**Faces are personal data.** Subscribing needs the
+`events:face.recognized` scope, granted at install (RFC-0002 decision 6);
+the route itself exists only on cameras a face app claimed.
+
+`payload`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `adapter` | string | The face adapter that answered (the claiming app's). |
+| `track_id` | int | The Tier-0 track the crop came from: the person being followed on this camera. |
+| `label` | string \| null | The track's class (`person`). |
+| `recognized` | bool | The adapter matched an enrolled face above its threshold. |
+| `person_id` | string \| null | Who, in that adapter's gallery; null when not recognised. |
+| `category` | string \| null | The gallery's category for that person, when recognised. |
+| `similarity` | number \| null | The match's similarity (0..1), when the adapter reports one. |
+| `threshold` | number \| null | The threshold the adapter applied. |
+| `face_box` | `[x1,y1,x2,y2]` \| null | The face, in pixels of the crop the adapter was given. |
+| `observed_at` | string \| absent | Optional, as in `plate.recognized.v1`. |
+
+The crop itself is not in the event: a consumer that keeps evidence
+fetches the track's best frame from the pipeline
+(`/best_frame?camera=<id>&track=<track_id>`) while it is fresh.
+
 ### `alert.fired.v1`
 
 Subject: `opennvr.events.alert.fired.v1.<camera_id>`
@@ -186,13 +309,32 @@ The existing wire shape (`opennvr_app_sdk/alerts.py::Alert.to_wire`:
 payload — it already satisfies the envelope's spirit and every
 first-party app publishes it.
 
-Transition note: apps publish today on
-`opennvr.alerts.{source.kind}.{source.name}.{camera_id}`. That tree
-remains supported as the *plumbing* address (subscribers filtering by
-which app fired, e.g. the alerts-subscriber example). The SDK
-dispatcher dual-publishes to the domain subject so consumers that
-only care "an alert fired on this camera" stop encoding app names in
-subscriptions. New consumers use the domain subject.
+**Not yet published. Consumers must subscribe to the plumbing tree.**
+Apps publish on `opennvr.alerts.{source.kind}.{source.name}.{camera_id}`
+and nowhere else: `AlertDispatcher.fire` fans out over its channels, and
+`NatsAlertChannel.send` publishes `alert_subject()`, which builds that
+subject alone. Nothing in the platform has ever published on
+`opennvr.events.alert.fired.v1.*`.
+
+An earlier revision of this note claimed the SDK dispatcher
+dual-publishes to the domain subject. It does not, and the claim cost
+real behaviour: `alert-notifier` 1.0 was written against it, subscribed
+to the domain tree, installed cleanly, reported healthy, and delivered
+zero notifications for its entire life. A subscriber on
+`opennvr.events.alert.fired.v1.>` receives nothing today.
+
+So: **subscribe to `opennvr.alerts.>`** (or a narrower slice of it) and
+tolerate both envelope shapes, as `examples/alert-notifier` does — the
+plumbing tree carries the bare `Alert.to_wire` dict, and a future domain
+publisher would wrap that same dict as `payload`. The wire shape above
+is settled; only the address is pending.
+
+Making the domain subject real needs two changes together, which is why
+it has not happened by accident: the dispatcher must dual-publish, AND
+per-app NATS permissions must grant it. `nats_users.app_permissions`
+allows `opennvr.events.>` only to apps whose manifest declares
+`provides`, so an app that fires alerts without providing a vertical
+would be denied on every publish.
 
 ### `access.decided.v1`
 
@@ -244,6 +386,62 @@ samples (90-day retention).
 | `max_occupancy` | int \| null | The zone's configured ceiling at publish time (charts scale against it). |
 | `min_occupancy` | int \| null | The configured floor, when set. |
 
+### `occupancy.heatmap.v1`
+
+Subject: `opennvr.events.occupancy.heatmap.v1.<camera_id>`
+Producer: `app:occupancy-counting` (or any app binning where watched
+entities stand — consumers must not branch on the producer).
+
+A sparse DELTA of a per-camera heat grid: every watched detection's
+foot point (bottom-centre of its normalised box) binned into a fixed
+`cols × rows` grid in unit space, accrued since the previous publish
+and shipped on a fixed cadence (the reference app: every 60 s, only
+for cameras whose grid is non-empty). Core sums deltas into one row
+per camera-hour (90-day retention) and serves any window from them
+(`GET /api/v1/occupancy/heatmap?camera_id=&hours=`), which the
+Occupancy page paints over a still of the camera.
+
+`payload`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `cols`, `rows` | int | Grid shape. Unit space, row-major, top-left first; resolution-independent. A consumer keeps one shape per camera-hour and drops deltas of another shape. |
+| `cells` | `[[index, hits], …]` | Sparse: only cells hit since the last publish, `index = row * cols + col`. Hits are per detection per frame. |
+| `frames` | int | Detection frames that contributed to this delta — lets a reader normalise to hits-per-frame. |
+| `period_seconds` | int | The producer's publish cadence, for readers estimating coverage. |
+| `labels` | list[string] | The watched labels binned (`person`, `car`, …). Additive. |
+
+### `occupancy.footfall.v1`
+
+Subject: `opennvr.events.occupancy.footfall.v1.<camera_id>`
+Producer: `app:occupancy-counting` (or any app tracking visitors —
+consumers must not branch on the producer). `app:line-crossing`
+publishes the crossing fields with dwell zeroed; `app:loitering-detection`
+publishes the dwell fields with crossings zeroed, so the two can share a
+camera without double counting. The hourly rows served by
+`GET /api/v1/occupancy/footfall` carry `dwell_count`, `dwell_avg_seconds`
+and `dwell_max_seconds` per hour as well as the crossing counts.
+
+A DELTA of per-visitor facts since the previous publish, on the same
+cadence as the heatmap and only when non-empty: crossings of the
+camera's entry line (a→b is an entry, b→a an exit) and finished stays
+inside the zone (dwell — from the frame a track first sat inside the
+zone to the frame it left, or to its track expiring). Core sums deltas
+into one row per camera-hour (90-day retention) and serves
+`GET /api/v1/occupancy/footfall?hours=` — hourly buckets and totals —
+behind the Occupancy page's flow chart and stay figures.
+
+`payload`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `entries`, `exits` | int | Entry-line crossings in each direction this period. 0 when the camera has no entry line. |
+| `dwell_count` | int | Stays that FINISHED this period (stays under 1 s are edge flicker and not counted). |
+| `dwell_seconds` | number | Their summed duration — `dwell_seconds / dwell_count` is the period's average stay. |
+| `dwell_max_seconds` | number | The longest stay finished this period. |
+| `period_seconds` | int | The producer's publish cadence. |
+| `labels` | list[string] | The watched labels tracked. Additive. |
+
 ## Out of contract (deliberately)
 
 * `opennvr.inference.>` payload internals beyond what each adapter's
@@ -262,3 +460,51 @@ samples (90-day retention).
 4. CI (`test_event_contracts.py`) will fail any first-party publish or
    subscribe on an `opennvr.events.*` subject that this document does
    not list — that failure is the review prompt, not an obstacle.
+
+## `screening.completed.v1` — one entry screening, ruled on
+
+Published by the guard-scan-compliance app when it finishes ruling on a
+person at the entrance. Core consumes it into `guard_screenings`
+(`services/guardscan_event_consumer.py`), which the Entry Screening page
+and its reports are built from.
+
+**Every screening is published, the clean ones included.** Compliance is
+complete scans over all screenings, and an event stream of only the
+failures gives a page that can count complaints but never state a rate.
+
+Subject: `opennvr.events.screening.completed.v1.<camera_id>`
+
+```json
+{
+  "schema": "screening.completed.v1",
+  "camera_id": "cam3",
+  "ts": 1789251600.0,
+  "producer": "app:guard-scan-compliance",
+  "payload": {
+    "session": "7c3c36c02d",
+    "at": "2026-09-13T09:31:00+00:00",
+    "ts": 1789251600.0,
+    "verdict": "compliant",
+    "score": 100.0,
+    "coverage": 100.0,
+    "order_score": 100.0,
+    "steps_done": ["Left arm", "Right arm", "Front", "Back"],
+    "steps_missing": [],
+    "flagged": false,
+    "duration_s": 108.4,
+    "engaged_s": 38.2,
+    "ended_by": "left",
+    "images": { "face": "ab/<sha>.jpg", "body": "cd/<sha>.jpg",
+                "scene": "ef/<sha>.jpg", "guard_face": "01/<sha>.jpg" }
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `session` | The producer's id for this screening, and the dedup key: the bus is at-least-once, and a redelivery must not inflate the day's denominator. |
+| `verdict` | `compliant` \| `partial` \| `incomplete` \| `no_scan`. A future grade band is stored as-is rather than dropped. |
+| `score` | 0–100, from the site's own procedure rules. |
+| `flagged` | The wand's indicator lit during this screening. |
+| `ended_by` | `left`, `complete`, `timeout`, `walked_off`, `feed_lost`. |
+| `images` | Relative paths into the evidence store — never image bytes. |

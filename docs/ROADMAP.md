@@ -17,7 +17,7 @@ The current release. Everything below is in main and runnable today.
 
 ### Architecture & security
 - Three-tier offline-first deployment model (isolated camera network →
-  middleware gateway → analytics) — the [published paper's](https://doi.org/10.5281/zenodo.17261761)
+  middleware gateway → analytics) — the [published paper's](https://doi.org/10.5281/zenodo.22804254)
   reference implementation.
 - Strong-secret validator refuses to boot on placeholder credentials.
   One-time setup token for first-boot admin provisioning.
@@ -52,8 +52,9 @@ The current release. Everything below is in main and runnable today.
 - `loitering-detection` — dwell-time state machine on NATS subscriber.
 - `inference-listener` — minimal NATS subscriber template.
 - `alerts-subscriber` — fan-out alerts to webhooks / SIEM / chat.
-- `license-plate-recognition` — two-stage YOLOv8 + fast-plate-ocr
-  chain with allow / deny watchlists.
+- `license-plate-recognition` — plate reads from core's vehicle visits
+  (fast-plate-ocr localises and reads the plate) with allow / deny
+  watchlists, a registry and overstay alerts.
 - `smart-doorbell` — InsightFace recognition with severity routing,
   REST-based enrollment.
 - `package-delivery` — per-track state machine for arrival / linger /
@@ -61,6 +62,8 @@ The current release. Everything below is in main and runnable today.
 - `camera-agent` — voice loop over Pipecat + Whisper + Ollama + Piper,
   with BLIP / YOLOv8 / InsightFace as grounded tools.
 - `home-assistant-relay` — MQTT-discovery bridge for HA dashboards.
+  **Deprecated** in favour of the Home Assistant integration and the
+  built-in MQTT discovery (v0.2, below).
 
 ### Developer surface
 - `opennvr-adapter-sdk` published from source (PyPI release wires off
@@ -153,6 +156,22 @@ The headline themes are *new AI capabilities* and *operator polish*.
   decision, not vibes. Motivating case: moondream answering "appears to
   be empty" on a frame with a person directly in front of the lens,
   where qwen3-vl:4b answers correctly.
+
+### Home Assistant
+Design: [docs/design/home-assistant-integration.md](design/home-assistant-integration.md).
+- **Native integration** (`integrations/home-assistant/`: `hass-opennvr`
+  and the `pyopennvr` client library): cameras with WebRTC live view,
+  controls, health, alerts, the media browser, actions, notifications
+  with media relayed through Home Assistant, and a dashboard card
+  session. It connects with a scoped, per-camera **API token**, and
+  every action it takes is audited. Installable once `pyopennvr` is on
+  PyPI and the two repos are split out.
+- **Built-in MQTT discovery**: an MQTT integration with discovery on
+  publishes the same devices and entities to Home Assistant's own MQTT
+  integration, with commands running as the bound API token. It replaces
+  `home-assistant-relay`.
+- **Assist** (tools for Home Assistant's voice and LLM agents), then spikes
+  on an ONVIF server and a Matter bridge.
 
 ### Operator polish
 - **Active Directory / SAML SSO** for staff authentication. v0.1 uses
@@ -272,6 +291,41 @@ to a release window. Pull requests and design discussions are welcome.
 - **Edge co-processor integration.** Coral / TensorRT / Hailo adapter
   variants beyond the ONNX-only adapters that ship in v0.1.
 - **Native Kubernetes operator** for Helm-chart deployments at scale.
+- **App Catalog for developers** (see `docs/DEVELOPER_PROGRAM.md`):
+  catalog policy decided — installable apps are open source under the
+  `open-nvr` organisation, built from source by CI, with author, contact
+  and declared network egress on the card; closed software lists as
+  external; paid = open code that gates a licensed model or service.
+  Shipped: maintainer-verified badge, Featured row, provenance line,
+  validator rules, the org's `build-catalog-app` reusable workflow
+  (any `open-nvr/app-*` repository builds, signs and publishes its image
+  from source by calling it), `opennvr-app new --repo` (CI, publish
+  workflow and listing entry scaffolded), `make pin-apps-index`. Shipped:
+  signed catalog images (Sigstore keyless in the publish workflow) verified by the
+  installer before any pinned install; per-app NATS credentials (the `nats-apps`
+  leaf bus; user = app id, permissions from the manifest;
+  `requires_scopes` enforced on the bus), per-app call tokens (no site
+  key reaches an app), and enforced egress (apps on an internal
+  network; the egress proxy allows declared + operator-allowed hosts,
+  refusals in the inbox — `docs/APP_NETWORK.md`). Still open: install
+  counts (opt-in, aggregate) and a showcase page. SDK toward 1.0
+  (published in 0.5.0, extended in 0.7.0 with OpenNVR 0.1.6): `opennvr_app_sdk.testing`
+  (recorder, event builders, `feed`, `FakeCore`, pytest fixtures), the
+  v1 domain events as typed classes, `opennvr-app validate`, async
+  `ai.stream()`.
+- **Commercial direction** (decided Sep 2026): sovereign / NDAA-restricted
+  enterprise deployments with support and compliance packs first
+  (shipped: `docs/ENTERPRISE.md`, `docs/REFERENCE_APPLIANCE.md`,
+  `scripts/evidence_pack.py`); OpenNVR Models designed
+  (`docs/design/models-service.md`) with the adapter side shipped in
+  the ai-adapter repository (signed licensed bundles, yolov8 as the
+  reference);
+  OpenNVR Models (per-site fine-tuning, delivered as licensed adapters
+  through the catalog) second; a paid partner tier (certification,
+  hosted licence service, lead routing — paid by the vendor, never a
+  cut of sales) once real third-party apps exist; cloud add-on and
+  hardware later. The platform and the SDK stay free; nothing in the
+  catalog is gated.
 
 ## How to influence the roadmap
 
@@ -298,6 +352,12 @@ Discussion and a migration path will ship alongside.
    events. The federated-AI roadmap item (v0.3) is opt-in by design and
    will land with the same posture.
 4. **Honest CHANGELOG.** Breaking changes get a major-version bump.
+5. **The app-registry contract is versioned and tested.** What an SDK
+   app reads from `POST /apps/register`, `/config` and `/status` does
+   not change shape without an `api_version` bump, and `min_sdk_version`
+   only moves when an old SDK would misbehave —
+   `docs/DEVELOPER_PROGRAM.md` § *The compatibility promise*, pinned by
+   `server/tests/test_registry_contract.py`.
    We're 0.x — bumps are cheaper here than at 1.x — but the policy
    stays the same when we cross 1.0.
 

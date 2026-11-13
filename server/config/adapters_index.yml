@@ -1,0 +1,457 @@
+# Copyright (c) 2026 OpenNVR
+# This file is part of OpenNVR.
+#
+# OpenNVR is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# OpenNVR is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
+#
+# ─────────────────────────────────────────────────────────────────────
+# OpenNVR AI Adapters — the curated index of installable models.
+#
+# Apps have had a catalog since the beginning; adapters had none, so a
+# third party with a working model had nowhere to be listed and an
+# operator had no way to find one. This is that catalog, served at
+# GET /api/v1/adapters/index.
+#
+# AN APP ASKS FOR A TASK, NEVER FOR AN ADAPTER BY NAME. `requires_tasks`
+# in an AppManifest names a task convention (§5.x); any adapter that
+# advertises it can satisfy it. That is the whole point of the contract:
+# a better plate reader is a drop-in for the shipped one, and an
+# operator swaps it without touching a single app.
+#
+# EVERY FIELD BELOW THE HEADER IS READ FROM THE ADAPTER'S OWN
+# /capabilities. Generate an entry rather than writing one:
+#
+#     opennvr-adapter listing . --image ghcr.io/you/my-model:1.0.0
+#
+# That way a listing cannot claim a task the adapter does not advertise,
+# a permission it does not request, or a fingerprint it does not
+# compute. scripts/validate_adapters_index.py enforces the shape; see
+# docs/CONTRIBUTING_ADAPTERS.md for the review a listing gets.
+#
+# `tier` records the relationship, not the quality:
+#   first_party — built and published by OpenNVR from the ai-adapter
+#                 repository; supported with the platform.
+#   community   — built by somebody else, reviewed and listed here. The
+#                 image is theirs; the contract is what we check.
+
+- id: yolov8-object-detection
+  name: YOLOv8 Object Detection
+  summary: General object detection — people, vehicles, animals and the rest of COCO. The default detector most apps ride.
+  version: "1.0.0"
+  tier: first_party
+  image: ghcr.io/open-nvr/yolov8-adapter:latest
+  tasks_advertised: [object_detection]
+  model:
+    framework: onnxruntime
+    modalities_in: [image]
+    modalities_out: [bbox_classes]
+    fingerprinted: true
+  permissions:
+    gpu: false
+    network_egress: []
+    host_filesystem: []
+  scheduling: { max_inflight: 1, fair_queuing: per_camera }
+  supports_stream: true
+  license: AGPL-3.0
+  vendor: open-nvr
+  model_card_url: https://github.com/ultralytics/ultralytics
+  docs_url: https://github.com/open-nvr/ai-adapter/blob/main/adapters/yolov8/README.md
+  source: https://github.com/open-nvr/ai-adapter/tree/main/adapters/yolov8
+  contact: https://github.com/open-nvr/ai-adapter/issues
+
+- id: yolo-pose
+  name: YOLO Pose
+  summary: Body keypoints — shoulders, elbows, wrists, hips — so a rule can reason about what a person is DOING, not just where they are. CPU-first, ~12 fps on 8 cores at 448px.
+  version: "1.0.0"
+  tier: first_party
+  image: ghcr.io/open-nvr/yolo-pose-adapter:latest
+  tasks_advertised: [pose_estimation]
+  model:
+    framework: onnxruntime
+    modalities_in: [image]
+    modalities_out: [keypoints]
+    fingerprinted: true
+  permissions:
+    gpu: false
+    network_egress: []
+    host_filesystem: []
+  scheduling: { max_inflight: 1, fair_queuing: per_camera }
+  supports_stream: true
+  license: AGPL-3.0
+  vendor: open-nvr
+  model_card_url: https://docs.ultralytics.com/tasks/pose/
+  docs_url: https://github.com/open-nvr/ai-adapter/blob/main/adapters/yolo_pose/README.md
+  source: https://github.com/open-nvr/ai-adapter/tree/main/adapters/yolo_pose
+  contact: https://github.com/open-nvr/ai-adapter/issues
+
+- id: fast-plate-ocr
+  name: Fast Plate OCR
+  summary: >-
+    Localises the number plate in a vehicle crop and reads it — the plate
+    reader the LPR app expects. Runs on the CPU, on Intel through OpenVINO,
+    or on the Hexagon NPU on the qualcomm flavour (79 ms a plate there
+    against 276 ms on the CPU).
+  version: "1.1.0"
+  tier: first_party
+  image: ghcr.io/open-nvr/fast-plate-ocr-adapter:latest
+  tasks_advertised: [license_plate_recognition]
+  model:
+    framework: onnxruntime
+    modalities_in: [image]
+    modalities_out: [text]
+    fingerprinted: true
+  permissions:
+    gpu: false
+    network_egress: []
+    host_filesystem: []
+  scheduling: { max_inflight: 1, fair_queuing: per_camera }
+  supports_stream: false
+  license: AGPL-3.0
+  vendor: open-nvr
+  model_card_url: https://github.com/ankandrew/fast-plate-ocr
+  docs_url: https://github.com/open-nvr/ai-adapter/blob/main/adapters/fast_plate_ocr/README.md
+  source: https://github.com/open-nvr/ai-adapter/tree/main/adapters/fast_plate_ocr
+  contact: https://github.com/open-nvr/ai-adapter/issues
+
+- id: insightface-recognition
+  name: InsightFace Recognition
+  summary: Face detection and embedding, for the smart-doorbell's known-visitor matching. Faces are PII — installing this is an operator decision.
+  version: "1.0.0"
+  tier: first_party
+  image: ghcr.io/open-nvr/insightface-adapter:latest
+  tasks_advertised: [face_detection, face_recognition]
+  model:
+    framework: onnxruntime
+    modalities_in: [image]
+    modalities_out: [embedding]
+    fingerprinted: true
+  permissions:
+    gpu: false
+    network_egress: []
+    host_filesystem: []
+  scheduling: { max_inflight: 1, fair_queuing: per_camera }
+  supports_stream: false
+  license: AGPL-3.0
+  vendor: open-nvr
+  model_card_url: https://github.com/deepinsight/insightface
+  docs_url: https://github.com/open-nvr/ai-adapter/blob/main/adapters/insightface/README.md
+  source: https://github.com/open-nvr/ai-adapter/tree/main/adapters/insightface
+  contact: https://github.com/open-nvr/ai-adapter/issues
+
+- id: clip-embeddings
+  name: CLIP Embeddings
+  summary: >-
+    Semantic search. Turns a frame into a vector AND a query in words into a
+    vector in the same space, so a search for "truck" finds the visit a
+    captioner called "a lorry". Search fuses this with the keyword ranking;
+    without it, search matches words exactly as it does today.
+  version: "1.0.0"
+  tier: first_party
+  image: ghcr.io/open-nvr/clip-adapter:latest
+  tasks_advertised: [embed]
+  model:
+    framework: open_clip
+    # BOTH directions, which is this adapter's one unusual property: it
+    # answers a request that carries no image at all.
+    modalities_in: [image, text]
+    modalities_out: [embedding]
+    fingerprinted: true
+  permissions:
+    gpu: false
+    # Genuinely empty: the weights are baked into the image and the
+    # runtime is pinned offline, so this adapter never dials anything.
+    # Same posture as the BLIP captioner.
+    network_egress: []
+    host_filesystem: []
+  scheduling: { max_inflight: 1, fair_queuing: per_camera }
+  supports_stream: false
+  license: AGPL-3.0
+  vendor: open-nvr
+  model_card_url: https://github.com/mlfoundations/open_clip
+  docs_url: https://github.com/open-nvr/ai-adapter/blob/main/adapters/clip/README.md
+  source: https://github.com/open-nvr/ai-adapter/tree/main/adapters/clip
+  contact: https://github.com/open-nvr/ai-adapter/issues
+
+- id: text-embed
+  name: Text Embeddings
+  summary: >-
+    The caption arm of semantic search. A sentence encoder (bge-small,
+    384-d, MIT) that turns a visit's caption — and a search in words — into
+    vectors made to be compared with each other, where the frame embedder's
+    text tower is not. Without it search falls back to that text tower.
+  version: "1.0.0"
+  tier: first_party
+  image: ghcr.io/open-nvr/text-embed-adapter:latest
+  tasks_advertised: [text_embed]
+  model:
+    framework: onnxruntime
+    modalities_in: [text]
+    modalities_out: [embedding]
+    fingerprinted: true
+  permissions:
+    gpu: false
+    network_egress: []
+    host_filesystem: []
+  scheduling: { max_inflight: 2, fair_queuing: none }
+  supports_stream: false
+  license: AGPL-3.0
+  vendor: open-nvr
+  model_card_url: https://huggingface.co/BAAI/bge-small-en-v1.5
+  docs_url: https://github.com/open-nvr/ai-adapter/blob/main/adapters/text_embed/README.md
+  source: https://github.com/open-nvr/ai-adapter/tree/main/adapters/text_embed
+  contact: https://github.com/open-nvr/ai-adapter/issues
+
+- id: whisper-asr
+  name: Whisper ASR
+  summary: Speech to text, with translation. Weights download on first boot into the adapter's volume; pre-populate it for an air-gapped site.
+  version: "1.0.0"
+  tier: first_party
+  image: ghcr.io/open-nvr/whisper-adapter:latest
+  tasks_advertised: [audio_transcription, audio_translation]
+  model:
+    framework: faster-whisper
+    modalities_in: [audio]
+    modalities_out: [text]
+    fingerprinted: true
+  permissions:
+    gpu: true
+    network_egress: []
+    host_filesystem: []
+  scheduling: { max_inflight: 1, fair_queuing: none }
+  supports_stream: false
+  license: AGPL-3.0
+  vendor: open-nvr
+  model_card_url: https://github.com/SYSTRAN/faster-whisper
+  docs_url: https://github.com/open-nvr/ai-adapter/blob/main/adapters/whisper/README.md
+  source: https://github.com/open-nvr/ai-adapter/tree/main/adapters/whisper
+  contact: https://github.com/open-nvr/ai-adapter/issues
+
+- id: parakeet-asr
+  name: Parakeet ASR
+  summary: >-
+    Speech to text with NVIDIA Parakeet TDT 0.6B v3 on ONNX Runtime, int8,
+    CPU first. The agent's default: on its own phrasings, WER 1.4 % at
+    0.31 s an utterance on four cores where whisper base.en scores 3.3 %
+    at 1.42 s. English and 25 European languages; no translation, no
+    Hindi (whisper for those). Weights baked in, no network egress.
+  version: "1.0.0"
+  tier: first_party
+  image: ghcr.io/open-nvr/parakeet-adapter:latest
+  tasks_advertised: [audio_transcription]
+  model:
+    framework: onnx-asr
+    modalities_in: [audio]
+    modalities_out: [text]
+    fingerprinted: true
+  permissions:
+    gpu: false
+    network_egress: []
+    host_filesystem: []
+  scheduling: { max_inflight: 1, fair_queuing: none }
+  supports_stream: false
+  license: AGPL-3.0
+  vendor: open-nvr
+  model_card_url: https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
+  docs_url: https://github.com/open-nvr/ai-adapter/blob/main/adapters/parakeet/README.md
+  source: https://github.com/open-nvr/ai-adapter/tree/main/adapters/parakeet
+  contact: https://github.com/open-nvr/ai-adapter/issues
+
+- id: piper-tts
+  name: Piper TTS
+  summary: Text to speech, on CPU. What the OpenNVR Agent speaks with.
+  version: "1.0.0"
+  tier: first_party
+  image: ghcr.io/open-nvr/piper-adapter:latest
+  tasks_advertised: [speech_synthesis]
+  model:
+    framework: piper-tts
+    modalities_in: [text]
+    modalities_out: [audio]
+    fingerprinted: true
+  permissions:
+    gpu: false
+    network_egress: []
+    host_filesystem: []
+  scheduling: { max_inflight: 1, fair_queuing: none }
+  supports_stream: false
+  license: AGPL-3.0
+  vendor: open-nvr
+  model_card_url: https://github.com/rhasspy/piper
+  docs_url: https://github.com/open-nvr/ai-adapter/blob/main/adapters/piper/README.md
+  source: https://github.com/open-nvr/ai-adapter/tree/main/adapters/piper
+  contact: https://github.com/open-nvr/ai-adapter/issues
+
+- id: blip-scene-caption
+  name: BLIP Scene Caption
+  summary: Describes what is in a frame, in a sentence. Feeds footage search and the agent's "what do you see?".
+  version: "1.0.0"
+  tier: first_party
+  image: ghcr.io/open-nvr/blip-adapter:latest
+  tasks_advertised: [scene_caption]
+  model:
+    framework: transformers
+    modalities_in: [image]
+    modalities_out: [text]
+    fingerprinted: true
+  permissions:
+    gpu: false
+    network_egress: []
+    host_filesystem: []
+  scheduling: { max_inflight: 1, fair_queuing: per_camera }
+  supports_stream: false
+  license: AGPL-3.0
+  vendor: open-nvr
+  model_card_url: https://huggingface.co/Salesforce/blip-image-captioning-base
+  docs_url: https://github.com/open-nvr/ai-adapter/blob/main/adapters/blip/README.md
+  source: https://github.com/open-nvr/ai-adapter/tree/main/adapters/blip
+  contact: https://github.com/open-nvr/ai-adapter/issues
+
+- id: bytetrack-multi-object-tracker
+  name: ByteTrack Multi-Object Tracker
+  summary: Adds stable track ids to detections, so a rule can tell "one person for thirty seconds" from "thirty people for one second".
+  version: "1.0.0"
+  tier: first_party
+  image: ghcr.io/open-nvr/bytetrack-adapter:latest
+  tasks_advertised: [multi_object_tracking]
+  model:
+    framework: supervision
+    modalities_in: [image]
+    modalities_out: [bbox_classes]
+    fingerprinted: true
+  permissions:
+    gpu: false
+    network_egress: []
+    host_filesystem: []
+  scheduling: { max_inflight: 1, fair_queuing: per_camera }
+  supports_stream: false
+  license: AGPL-3.0
+  vendor: open-nvr
+  model_card_url: https://github.com/roboflow/supervision
+  docs_url: https://github.com/open-nvr/ai-adapter/blob/main/adapters/bytetrack/README.md
+  source: https://github.com/open-nvr/ai-adapter/tree/main/adapters/bytetrack
+  contact: https://github.com/open-nvr/ai-adapter/issues
+
+- id: package-detection
+  name: Package Detection
+  summary: Parcels on a doorstep — the one class COCO does not have. YOLOv8n fine-tuned on two openly licensed doorstep sets (test mAP50 0.91, ~30 ms per frame on CPU), called on demand by the Package Delivery app; register it and the app's counts go from proxy to good.
+  version: "1.0.0"
+  tier: first_party
+  image: ghcr.io/open-nvr/package-detection-adapter:latest
+  tasks_advertised: [package_detection]
+  model:
+    framework: onnxruntime
+    modalities_in: [image]
+    modalities_out: [bbox_classes]
+    fingerprinted: true
+  permissions:
+    gpu: false
+    network_egress: []
+    host_filesystem: []
+  scheduling: { max_inflight: 1, fair_queuing: per_camera }
+  supports_stream: false
+  license: AGPL-3.0
+  vendor: open-nvr
+  model_card_url: https://github.com/open-nvr/ai-adapter/blob/main/adapters/package_detection/README.md
+  docs_url: https://github.com/open-nvr/ai-adapter/blob/main/adapters/package_detection/README.md
+  source: https://github.com/open-nvr/ai-adapter/tree/main/adapters/package_detection
+  contact: https://github.com/open-nvr/ai-adapter/issues
+
+- id: moondream-vlm
+  name: Moondream VLM
+  summary: Answers questions about a frame, not just captions it — a drop-in for the caption slot that also does visual Q&A.
+  version: "1.0.0"
+  tier: first_party
+  image: ghcr.io/open-nvr/moondream-adapter:latest
+  tasks_advertised: [visual_qa, scene_caption]
+  model:
+    framework: moondream
+    modalities_in: [image, text]
+    modalities_out: [text]
+    fingerprinted: true
+  permissions:
+    gpu: false
+    network_egress: []
+    host_filesystem: []
+  scheduling: { max_inflight: 1, fair_queuing: per_camera }
+  supports_stream: false
+  license: AGPL-3.0
+  vendor: open-nvr
+  model_card_url: https://huggingface.co/vikhyatk/moondream2
+  docs_url: https://github.com/open-nvr/ai-adapter/blob/main/adapters/moondream/README.md
+  source: https://github.com/open-nvr/ai-adapter/tree/main/adapters/moondream
+  contact: https://github.com/open-nvr/ai-adapter/issues
+
+- id: litertlm-gemma-npu
+  name: Gemma on the Qualcomm NPU (LiteRT-LM)
+  summary: >-
+    Captions and visual Q&A from Gemma 4 E2B running on the Hexagon NPU of
+    Qualcomm Dragonwing boards (Ventuno Q / IQ-8275) through LiteRT-LM — the
+    caption slot for a box whose CPU cannot keep up with a vision model.
+    Measured on a Ventuno Q: 2.5 s a photo warm, 4.3 s cold. NPU only:
+    needs the qualcomm flavour (start.sh picks it there). The 2.7 GB model
+    and Qualcomm's runtime libraries download once at first start.
+  version: "1.0.0"
+  tier: first_party
+  image: ghcr.io/open-nvr/litertlm-adapter:latest-qualcomm
+  tasks_advertised: [visual_qa, scene_caption]
+  model:
+    framework: litert-lm
+    modalities_in: [image, text]
+    modalities_out: [text]
+    fingerprinted: true
+  permissions:
+    gpu: false
+    network_egress: [huggingface.co, softwarecenter.qualcomm.com]
+    host_filesystem: ["/dev/fastrpc-cdsp", "/dev/dma_heap"]
+  scheduling: { max_inflight: 1, fair_queuing: per_camera }
+  supports_stream: false
+  license: Apache-2.0
+  vendor: open-nvr
+  model_card_url: https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm
+  docs_url: https://github.com/open-nvr/ai-adapter/blob/main/adapters/litertlm/README.md
+  source: https://github.com/open-nvr/ai-adapter/tree/main/adapters/litertlm
+  contact: https://github.com/open-nvr/ai-adapter/issues
+
+- id: open-vocab-detection
+  name: Open-Vocabulary Detection
+  summary: >-
+    Detect whatever you can describe. A box and a score for any phrase the
+    caller writes — "red truck", "forklift", "person wearing a hard hat" —
+    where the always-on detector knows only its eighty classes. OWL-ViT v2.
+    Slow on CPU (seconds a frame), so it is for a search, a check or a
+    workflow step rather than every frame. Weights baked in, no network
+    egress.
+  version: "1.0.0"
+  tier: first_party
+  image: ghcr.io/open-nvr/open-vocab-adapter:latest
+  tasks_advertised: [open_vocab_detection]
+  model:
+    framework: transformers
+    modalities_in: [image, text]
+    modalities_out: [bbox_classes]
+    fingerprinted: true
+  permissions:
+    gpu: false
+    # Genuinely empty: the ~600 MB weights are baked into the image and
+    # the runtime is pinned offline, so this adapter never dials
+    # anything. Same posture as BLIP and CLIP.
+    network_egress: []
+    host_filesystem: []
+  scheduling: { max_inflight: 1, fair_queuing: per_camera }
+  supports_stream: false
+  license: AGPL-3.0
+  vendor: open-nvr
+  model_card_url: https://huggingface.co/google/owlv2-base-patch16-ensemble
+  docs_url: https://github.com/open-nvr/ai-adapter/blob/main/adapters/vlm/README.md
+  source: https://github.com/open-nvr/ai-adapter/tree/main/adapters/vlm
+  contact: https://github.com/open-nvr/ai-adapter/issues

@@ -15,21 +15,28 @@
 # along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
 
 """
-ONVIF service with HTTP Digest authentication support.
+ONVIF service using raw SOAP requests over httpx.
 
-This module provides ONVIF functionality using raw SOAP requests with HTTP Digest auth,
-which is more compatible with Hikvision and other devices that don't properly support
-WS-Security (UsernameToken).
-
-The standard onvif-zeep library uses WS-Security which many devices reject.
-This implementation uses HTTP Digest authentication which is more widely supported.
+Authentication is HTTP Digest first — the most widely honoured scheme
+(Hikvision, Dahua, Axis, most OEM firmware) and the one the standard
+onvif-zeep library cannot do, since it only speaks WS-Security. Devices
+that answer a Digest-authenticated request with an ONVIF ``NotAuthorized``
+SOAP fault instead of an HTTP challenge (TP-Link Tapo, some Reolink
+firmware) are retried once with a WS-Security UsernameToken
+PasswordDigest header; a host that needed the retry is remembered for the
+rest of the process so later calls to it (PTZ in particular) go straight
+to WS-Security instead of paying the rejected Digest round trip every
+time. See ``_onvif_request``.
 """
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import html
 import re
-from datetime import UTC, datetime
+import secrets
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
 
@@ -47,6 +54,7 @@ def _xml_text(raw: str) -> str:
     strings — ``?transmode=unicast&amp;profile=va`` was stored and handed to
     MediaMTX verbatim."""
     return html.unescape(raw)
+
 
 # ONVIF XML namespaces
 SOAP_NS = "http://www.w3.org/2003/05/soap-envelope"
@@ -76,6 +84,166 @@ def _soap_envelope(body: str) -> str:
 </soap:Envelope>'''
 
 
+def _soap_envelope_wsse(
+    body: str, username: str, password: str, clock_offset_s: float = 0.0
+) -> str:
+    """Wrap a request in a WS-Security UsernameToken PasswordDigest header.
+
+    ``clock_offset_s`` is the camera's clock minus ours: the ``Created``
+    timestamp is stamped in the camera's time, because a camera checks it
+    against its own clock (typically within ±5 min) and answers
+    ``NotAuthorized`` otherwise — indistinguishable from a wrong password.
+    """
+    nonce_raw = secrets.token_bytes(20)
+    nonce = base64.b64encode(nonce_raw).decode("ascii")
+    created = (datetime.now(UTC) + timedelta(seconds=clock_offset_s)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    password_digest = base64.b64encode(
+        hashlib.sha1(
+            nonce_raw + created.encode("utf-8") + password.encode("utf-8")
+        ).digest()
+    ).decode("ascii")
+
+    return f'''<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="{SOAP_NS}"
+               xmlns:tds="{TDS_NS}"
+               xmlns:trt="{TRT_NS}"
+               xmlns:tt="{TT_NS}"
+               xmlns:tptz="{TPT_NS}"
+               xmlns:timg="{TIMG_NS}"
+               xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"
+               xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd">
+  <soap:Header>
+    <wsse:Security soap:mustUnderstand="1">
+      <wsse:UsernameToken>
+        <wsse:Username>{html.escape(username)}</wsse:Username>
+        <wsse:Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest">{password_digest}</wsse:Password>
+        <wsse:Nonce EncodingType="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary">{nonce}</wsse:Nonce>
+        <wsu:Created>{created}</wsu:Created>
+      </wsse:UsernameToken>
+    </wsse:Security>
+  </soap:Header>
+  <soap:Body>
+    {body}
+  </soap:Body>
+</soap:Envelope>'''
+
+
+#: Hosts (``scheme://netloc``) that rejected HTTP Digest with an auth fault
+#: and accepted WS-Security instead. Process-local and never persisted: a
+#: wrong entry costs one WS-Security-first request that would have worked
+#: anyway, and a camera whose firmware changes its mind is corrected on
+#: the next auth fault (see ``_onvif_request``). Keyed by scheme+netloc,
+#: not URL, because the device, media and PTZ services of one camera share
+#: the same authentication behaviour.
+_WSSE_PREFERRED_HOSTS: set[str] = set()
+
+
+def _auth_key(url: str) -> str:
+    parsed = urlparse(url)
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+#: Camera clock minus this host's clock, in seconds, per ``_auth_key`` host:
+#: learned when a WS-Security login succeeded only once stamped in the
+#: camera's time, so later requests to that camera start from it. Process
+#: local, like ``_WSSE_PREFERRED_HOSTS``; a stale value costs one retry.
+_CLOCK_OFFSETS: dict[str, float] = {}
+
+#: A camera clock within this many seconds of ours is not a reason to
+#: retry: every firmware tolerates it, and a retry would only add a round
+#: trip to a plain wrong password.
+CLOCK_SKEW_TOLERANCE_S = 60.0
+
+_GET_SYSTEM_DATE_AND_TIME = "<tds:GetSystemDateAndTime/>"
+_UTC_DATETIME_RE = re.compile(r"UTCDateTime>(.*?)</[^>]*UTCDateTime>", re.S)
+
+
+def _parse_utc_datetime(text: str) -> datetime | None:
+    """The ``UTCDateTime`` of a GetSystemDateAndTime answer, or None. Prefix
+    agnostic (``tt:``, ``tds:``, none), tolerant of whitespace."""
+    m = _UTC_DATETIME_RE.search(text)
+    if not m:
+        return None
+    block = m.group(1)
+
+    def field(tag: str) -> int | None:
+        mm = re.search(rf"<(?:\w+:)?{tag}>\s*(\d+)\s*<", block)
+        return int(mm.group(1)) if mm else None
+
+    parts = [field(t) for t in ("Year", "Month", "Day", "Hour", "Minute", "Second")]
+    if any(v is None for v in parts):
+        return None
+    try:
+        return datetime(*parts, tzinfo=UTC)  # type: ignore[arg-type]
+    except ValueError:
+        return None
+
+
+async def _camera_clock_offset(client, url: str, headers: dict) -> float | None:
+    """Camera clock minus ours, in seconds, from an unauthenticated
+    GetSystemDateAndTime on the device service of ``url``'s host (the one
+    ONVIF call every camera answers without credentials). None when the
+    camera does not answer it or the answer has no UTC time."""
+    try:
+        resp = await client.post(
+            f"{_auth_key(url)}/onvif/device_service",
+            content=_soap_envelope(_GET_SYSTEM_DATE_AND_TIME),
+            headers=headers,
+        )
+        camera_now = _parse_utc_datetime(resp.text)
+    except Exception:  # noqa: BLE001 - a diagnostic probe never turns into an error of its own
+        return None
+    if camera_now is None:
+        return None
+    return (camera_now - datetime.now(UTC)).total_seconds()
+
+
+def _auth_refused_detail(offset_s: float | None) -> str:
+    """What the operator reads when both schemes refused the credentials."""
+    text = (
+        "The camera rejected the ONVIF username or password (NotAuthorized). "
+        "Some cameras keep an ONVIF account separate from the web login, or "
+        "need ONVIF turned on in the camera's integration settings."
+    )
+    if offset_s is None:
+        text += (
+            " The camera's clock could not be read; a clock more than a few "
+            "minutes off also makes a camera refuse a correct password."
+        )
+    elif abs(offset_s) > CLOCK_SKEW_TOLERANCE_S:
+        minutes = abs(offset_s) / 60
+        text += (
+            f" Its clock is {minutes:.0f} min {'ahead of' if offset_s > 0 else 'behind'} "
+            "this server; the login was also tried at the camera's time."
+        )
+    return text
+
+
+_SOAP_FAULT_RE = re.compile(r"<(?:[\w.-]+:)?Fault\b", re.IGNORECASE)
+#: ``ter:NotAuthorized`` is the ONVIF code; ``wsse:FailedAuthentication`` /
+#: ``wsse:InvalidSecurityToken`` are the WS-Security ones devices that
+#: implement that profile literally return; "Authority failure" is the
+#: Tapo reason text.
+_AUTH_FAULT_RE = re.compile(
+    r"(?:NotAuthorized|FailedAuthentication|InvalidSecurityToken|Authority\s+failure)",
+    re.IGNORECASE,
+)
+
+
+def _is_auth_fault(response_text: str) -> bool:
+    """Return whether a SOAP response body is an ONVIF authentication fault.
+
+    Decided on the body alone: SOAP 1.2 says a fault is an HTTP 400/500,
+    but some firmware returns faults with HTTP 200, and a ``<Fault>``
+    carrying ``NotAuthorized`` is unambiguous whatever the status code.
+    """
+    return bool(
+        _SOAP_FAULT_RE.search(response_text) and _AUTH_FAULT_RE.search(response_text)
+    )
+
+
 async def _onvif_request(
     url: str,
     body_xml: str,
@@ -84,7 +252,16 @@ async def _onvif_request(
     timeout: float = 10.0,
 ) -> tuple[int, str]:
     """
-    Make an ONVIF SOAP request using HTTP Digest authentication.
+    Make an ONVIF SOAP request, authenticating with HTTP Digest or WS-Security.
+
+    Digest is tried first. A response that is an ONVIF auth fault
+    (``_is_auth_fault``) is retried once with a WS-Security UsernameToken,
+    and a host that accepts the retry is remembered in
+    ``_WSSE_PREFERRED_HOSTS`` so its later requests start with WS-Security.
+    The mirror case is handled too: a remembered host that returns an auth
+    fault to WS-Security is retried with Digest and forgotten. Either way
+    at most two requests are made, and a second auth fault is returned to
+    the caller as-is.
 
     Args:
         url: Full URL to the ONVIF service endpoint
@@ -96,31 +273,93 @@ async def _onvif_request(
     Returns:
         Tuple of (status_code, response_text)
     """
-    envelope = _soap_envelope(body_xml)
     headers = {"Content-Type": "application/soap+xml; charset=utf-8"}
+    has_credentials = bool(username and password)
+    auth_key = _auth_key(url)
+    wsse_first = has_credentials and auth_key in _WSSE_PREFERRED_HOSTS
 
-    auth = None
-    if username and password:
-        auth = httpx.DigestAuth(username, password)
+    def _digest_request():
+        return {
+            "content": _soap_envelope(body_xml),
+            "headers": headers,
+            "auth": httpx.DigestAuth(username, password) if has_credentials else None,
+        }
+
+    def _wsse_request(clock_offset_s: float | None = None):
+        if clock_offset_s is None:
+            clock_offset_s = _CLOCK_OFFSETS.get(auth_key, 0.0)
+        return {
+            "content": _soap_envelope_wsse(body_xml, username, password, clock_offset_s),
+            "headers": headers,
+        }
 
     # verify=False: cameras use self-signed certs on the LAN; the whole point of
     # supporting https here is reaching devices whose control API is TLS-only.
     async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
         try:
-            response = await client.post(
-                url, content=envelope, headers=headers, auth=auth
+            first = _wsse_request() if wsse_first else _digest_request()
+            response = await client.post(url, **first)
+            if not (has_credentials and _is_auth_fault(response.text)):
+                return response.status_code, response.text
+
+            if wsse_first:
+                main_logger.info(
+                    "ONVIF WS-Security authentication rejected by %s; retrying with HTTP Digest",
+                    auth_key,
+                )
+                _WSSE_PREFERRED_HOSTS.discard(auth_key)
+                response = await client.post(url, **_digest_request())
+            else:
+                main_logger.info(
+                    "ONVIF Digest authentication rejected by %s; retrying with WS-Security",
+                    auth_key,
+                )
+                response = await client.post(url, **_wsse_request())
+                if not _is_auth_fault(response.text):
+                    _WSSE_PREFERRED_HOSTS.add(auth_key)
+
+            if not _is_auth_fault(response.text):
+                return response.status_code, response.text
+
+            # Both schemes refused the same credentials. A WS-Security
+            # PasswordDigest also fails when the camera clock is outside its
+            # tolerance window (typically ±5 min), which looks exactly like
+            # a wrong password to the operator (an Add Camera dialog showed
+            # the raw ``ter:NotAuthorized`` fault, 2026-11-12). So: read the
+            # camera's clock, and if it is off, try once more with Created
+            # stamped in the camera's time. A camera that still refuses is
+            # a wrong password, reported as one — never the SOAP fault.
+            offset = await _camera_clock_offset(client, url, headers)
+            if offset is not None and abs(offset) > CLOCK_SKEW_TOLERANCE_S:
+                main_logger.info(
+                    "ONVIF camera %s clock is %+.0f s from ours; retrying WS-Security at its time",
+                    auth_key, offset,
+                )
+                response = await client.post(url, **_wsse_request(offset))
+                if not _is_auth_fault(response.text):
+                    _CLOCK_OFFSETS[auth_key] = offset
+                    _WSSE_PREFERRED_HOSTS.add(auth_key)
+                    return response.status_code, response.text
+            main_logger.warning(
+                "ONVIF authentication failed for %s with HTTP Digest and WS-Security "
+                "(camera clock offset: %s)",
+                auth_key, "unknown" if offset is None else f"{offset:+.0f} s",
             )
-            return response.status_code, response.text
-        except httpx.TimeoutException:
+            raise HTTPException(status_code=401, detail=_auth_refused_detail(offset))
+        except HTTPException:
+            raise   # the 401 above, not an "ONVIF request failed" 500
+        except httpx.TimeoutException as e:
             raise HTTPException(
                 status_code=504, detail=f"ONVIF request timeout to {url}"
-            )
+            ) from e
         except httpx.ConnectError as e:
             raise HTTPException(
                 status_code=503, detail=f"Cannot connect to ONVIF device: {e}"
-            )
+            ) from e
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"ONVIF request failed: {e}")
+            raise HTTPException(
+                status_code=500, detail=f"ONVIF request failed: {e}"
+            ) from e
 
 
 def _extract_xaddr(capabilities_xml: str, service_tag: str) -> str | None:
@@ -606,6 +845,114 @@ async def ptz_stop_digest(
         raise HTTPException(status_code=status, detail=f"PTZ stop failed: {text[:500]}")
 
     return {"status": "stopped"}
+
+
+# Preset tokens are camera-issued identifiers ("1", "Preset_3", "p-0001"...).
+# They are interpolated into SOAP, so anything outside this shape is refused
+# before it reaches the camera; names are XML-escaped instead (free text).
+PRESET_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+
+
+def _checked_preset_token(token: str) -> str:
+    if not PRESET_TOKEN_RE.fullmatch(token or ""):
+        raise HTTPException(status_code=422, detail="Invalid preset token")
+    return token
+
+
+def _parse_presets(text: str) -> list[dict[str, str]]:
+    """``[{"token", "name"}]`` from a GetPresetsResponse.
+
+    Tolerant of the namespace prefix and of attribute order, the two things
+    vendors vary (see fetch_profiles_digest). A preset with no name gets its
+    token as the name.
+    """
+    presets = []
+    for m in re.finditer(
+        r"<(?:\w+:)?Preset\b([^>]*?)(?:/>|>(.*?)</(?:\w+:)?Preset>)", text, re.DOTALL
+    ):
+        tok = re.search(r'token="([^"]+)"', m.group(1))
+        if not tok:
+            continue
+        name_m = re.search(r"<(?:\w+:)?Name>([^<]*)</(?:\w+:)?Name>", m.group(2) or "")
+        token = _xml_text(tok.group(1))
+        name = _xml_text(name_m.group(1)).strip() if name_m else ""
+        presets.append({"token": token, "name": name or token})
+    return presets
+
+
+async def ptz_get_presets_digest(
+    ip: str,
+    username: str,
+    password: str,
+    profile_token: str,
+    port: int = 80,
+    scheme: str = "http",
+) -> list[dict[str, str]]:
+    """The camera's stored PTZ presets for a media profile."""
+    ptz_url = await get_ptz_service_url(ip, username, password, port, scheme)
+    if not ptz_url:
+        raise HTTPException(status_code=404, detail="PTZ service not available")
+    body = f"""<tptz:GetPresets>
+      <tptz:ProfileToken>{html.escape(profile_token)}</tptz:ProfileToken>
+    </tptz:GetPresets>"""
+    status, text = await _onvif_request(ptz_url, body, username, password)
+    if status != 200:
+        raise HTTPException(status_code=status, detail=f"PTZ presets failed: {text[:500]}")
+    return _parse_presets(text)
+
+
+async def ptz_goto_preset_digest(
+    ip: str,
+    username: str,
+    password: str,
+    profile_token: str,
+    preset_token: str,
+    port: int = 80,
+    scheme: str = "http",
+) -> dict[str, Any]:
+    """Move the camera to a stored preset."""
+    preset_token = _checked_preset_token(preset_token)
+    ptz_url = await get_ptz_service_url(ip, username, password, port, scheme)
+    if not ptz_url:
+        raise HTTPException(status_code=404, detail="PTZ service not available")
+    body = f"""<tptz:GotoPreset>
+      <tptz:ProfileToken>{html.escape(profile_token)}</tptz:ProfileToken>
+      <tptz:PresetToken>{preset_token}</tptz:PresetToken>
+    </tptz:GotoPreset>"""
+    status, text = await _onvif_request(ptz_url, body, username, password)
+    if status != 200:
+        raise HTTPException(status_code=status, detail=f"PTZ goto preset failed: {text[:500]}")
+    return {"status": "moving", "preset": preset_token}
+
+
+async def ptz_set_preset_digest(
+    ip: str,
+    username: str,
+    password: str,
+    profile_token: str,
+    name: str,
+    preset_token: str | None = None,
+    port: int = 80,
+    scheme: str = "http",
+) -> dict[str, Any]:
+    """Store the current position as a preset. With ``preset_token`` it
+    overwrites that preset; without, the camera allocates a new one."""
+    token_xml = ""
+    if preset_token is not None:
+        token_xml = f"<tptz:PresetToken>{_checked_preset_token(preset_token)}</tptz:PresetToken>"
+    ptz_url = await get_ptz_service_url(ip, username, password, port, scheme)
+    if not ptz_url:
+        raise HTTPException(status_code=404, detail="PTZ service not available")
+    body = f"""<tptz:SetPreset>
+      <tptz:ProfileToken>{html.escape(profile_token)}</tptz:ProfileToken>
+      <tptz:PresetName>{html.escape(name)}</tptz:PresetName>
+      {token_xml}
+    </tptz:SetPreset>"""
+    status, text = await _onvif_request(ptz_url, body, username, password)
+    if status != 200:
+        raise HTTPException(status_code=status, detail=f"PTZ set preset failed: {text[:500]}")
+    m = re.search(r"<(?:\w+:)?PresetToken>([^<]+)</(?:\w+:)?PresetToken>", text)
+    return {"token": _xml_text(m.group(1)) if m else preset_token, "name": name}
 
 
 async def get_system_datetime(

@@ -24,6 +24,34 @@ if [ -d "/app/kai-c-state" ]; then
     chown -R opennvr:opennvr /app/kai-c-state 2>/dev/null || true
 fi
 
+# Where core leaves update requests for the host's updater
+# (services/update_status.py). Only this folder: the updater's own state
+# is mounted read-only and stays the host user's.
+if [ -d "/app/update-requests" ]; then
+    chown opennvr:opennvr /app/update-requests 2>/dev/null || true
+fi
+
+# KAI-C's audit log (kai_c/audit.py) defaults to
+# /var/log/opennvr/kai-c-audit.jsonl and creates the directory on first
+# write — which, as the opennvr user under a root-owned /var/log, it
+# cannot. Every registration, inference and refusal was then logged as
+# "audit-log write failed: Permission denied" and dropped: the audit
+# trail the product is sold on was empty on a stock image. Root creates
+# it here, before gosu hands off.
+mkdir -p /var/log/opennvr 2>/dev/null || true
+chown opennvr:opennvr /var/log/opennvr 2>/dev/null || true
+
+# Apps-bus users file (opennvr_nats_auth volume, shared with nats-apps).
+# nats-apps runs as root and creates the directory root:root 755 when it
+# seeds users.conf, so core (uid opennvr) could never replace the seed
+# with the real per-app users: every app's own NATS user stayed unknown
+# to the bus and it refused them all ("authentication error - User
+# <app>"). Core writes atomically (tempfile + rename in this directory),
+# so it needs to own the directory, not just the file.
+if [ -d "/var/lib/opennvr/nats" ]; then
+    chown -R opennvr:opennvr /var/lib/opennvr/nats 2>/dev/null || true
+fi
+
 # Recordings tree: MediaMTX used to run as root, so segment dirs it created
 # under the shared mount were root-owned — unlinkable by the backend
 # (uid 1000), which broke retention aging and the camera hard-delete purge
@@ -31,9 +59,30 @@ fi
 # files are fine; this migrates whatever an older stack left behind. Scoped
 # to files NOT already owned by opennvr, so on a healthy tree it is a
 # metadata-only scan, not a full re-chown.
+#
+# It must never hold up boot, and it used to. On a mount where ownership
+# does not stick (NFS with root_squash, SMB/CIFS, NTFS through Docker
+# Desktop, exFAT), every file stays "not opennvr" forever, so every start
+# walked and re-chowned the whole archive before supervisord ran. Core sat
+# on this line until its healthcheck marked it unhealthy, and a big
+# archive on a slow disk does the same even when chown works. So: probe
+# once, skip the walk where chown cannot work, and otherwise walk in the
+# background.
 if [ -d "/app/recordings" ]; then
-    echo "Fixing ownership of non-opennvr files in recordings tree..."
-    find /app/recordings ! -user opennvr -exec chown opennvr:opennvr {} + 2>/dev/null || true
+    _probe="/app/recordings/.opennvr-chown-probe.$$"
+    if touch "$_probe" 2>/dev/null \
+        && chown opennvr:opennvr "$_probe" 2>/dev/null \
+        && [ "$(stat -c %U "$_probe" 2>/dev/null)" = "opennvr" ]; then
+        rm -f "$_probe"
+        echo "Fixing ownership of non-opennvr files in recordings tree (in the background)..."
+        (
+            find /app/recordings ! -user opennvr -exec chown opennvr:opennvr {} + 2>/dev/null || true
+            echo "Recordings tree ownership fix finished."
+        ) &
+    else
+        rm -f "$_probe" 2>/dev/null || true
+        echo "Recordings mount does not keep file ownership; skipping the ownership fix."
+    fi
 fi
 
 # ──────────────────────────────────────────────────────────────────────
@@ -65,6 +114,46 @@ fi
     tail -n 0 -F /app/logs/opennvr-backend.log \
       | grep --line-buffered -A 6 "first-time setup token"
 ) &
+
+# ──────────────────────────────────────────────────────────────────────
+# #547: Surface startup failures to docker logs.
+# ──────────────────────────────────────────────────────────────────────
+# The forwarder above solves ONE line of output. Everything else a
+# process writes to stderr — including the traceback that kills it —
+# lands in a file inside the container and reaches nobody.
+#
+# That is not hypothetical. In #547 the backend died at import on every
+# install: `docker logs opennvr_core` showed only supervisord restarting
+# it in a loop, the container reported "Started", and the published port
+# still accepted TCP because Docker binds it whether or not anything is
+# listening. The actual ValidationError sat in
+# /app/logs/opennvr-backend-error.log, which an operator has to already
+# know about to look in. The reporter found it; most would have filed
+# "doesn't work" or walked away.
+#
+# The project had noticed twice and worked around it twice rather than
+# fixing it — tests/e2e/harness/evidence.py collects these files
+# specially because "grepping core's Docker output returns nothing,
+# every time", and tests/host-hardening/ carries the banner forwarder
+# above. Two workarounds for one missing pipe.
+#
+# Volume is not a concern, which is worth stating because it is the
+# obvious objection. uvicorn's LOGGING_CONFIG sends the ACCESS logger to
+# stdout and only the default logger — startup, warnings, tracebacks —
+# to stderr. So this carries the lines an operator needs and not one
+# line per HTTP request.
+#
+# The files stay exactly as they were: this tees, it does not move.
+# evidence.py still collects them, supervisord still rotates them.
+for _log in /app/logs/opennvr-backend-error.log /app/logs/kai-c-error.log; do
+    _tag="$(basename "$_log" -error.log)"
+    (
+        mkdir -p /app/logs
+        touch "$_log"
+        chown opennvr:opennvr "$_log"
+        tail -n 0 -F "$_log" | sed -u "s|^|[$_tag] |"
+    ) &
+done
 
 # Switch to opennvr user and run supervisord
 exec gosu opennvr /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf

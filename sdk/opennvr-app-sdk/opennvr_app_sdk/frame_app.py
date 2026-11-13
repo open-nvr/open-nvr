@@ -57,6 +57,33 @@ class KaiCError(Exception):
     via the correlation_id we sent)."""
 
 
+def build_infer_request(
+    base_url: str, adapter_name: str, frame_bytes: bytes, *, task: str,
+    api_key: str | None = None, camera_id: str | None = None,
+    params: dict[str, Any] | None = None, correlation_id: str | None = None,
+) -> tuple[str, dict[str, str], dict[str, Any]]:
+    """``(url, headers, json body)`` for one KAI-C inference call — the
+    one wire shape both the sync :class:`KaiCClient` and the async
+    client (``aio.py``) send, so they cannot drift."""
+    url = f"{base_url.rstrip('/')}/api/v1/infer/{adapter_name}"
+    headers = {
+        "X-Correlation-Id": correlation_id or f"app-{uuid.uuid4().hex[:12]}",
+    }
+    if api_key:
+        headers["X-Internal-Api-Key"] = api_key
+    # Body shape matches the server's build_infer_payload:
+    # {"frame_b64", "task", "camera_id", **params} — adapters read
+    # task + params, KAI-C reads camera_id for NATS subject + audit.
+    body: dict[str, Any] = {
+        "task": task,
+        "frame_b64": base64.b64encode(frame_bytes).decode("ascii"),
+        **(params or {}),
+    }
+    if camera_id is not None:
+        body["camera_id"] = str(camera_id)
+    return url, headers, body
+
+
 class KaiCClient:
     """Tiny client for KAI-C's ``POST /api/v1/infer/{adapter}``.
 
@@ -94,29 +121,22 @@ class KaiCClient:
         frame_bytes: bytes,
         *,
         task: str,
-        camera_id: str,
+        camera_id: str | None = None,
         params: dict[str, Any] | None = None,
         correlation_id: str | None = None,
     ) -> dict[str, Any]:
         """Send one frame; return the raw §5.1 ``InferResponse`` body.
 
-        Raises :class:`KaiCError` on transport failure or non-200; the
-        frame loop catches and decides whether to alert / skip / abort."""
-        url = f"{self._base_url}/api/v1/infer/{self._adapter_name}"
-        headers = {
-            "X-Correlation-Id": correlation_id or f"app-{uuid.uuid4().hex[:12]}",
-        }
-        if self._api_key:
-            headers["X-Internal-Api-Key"] = self._api_key
-        # Body shape matches the server's build_infer_payload:
-        # {"frame_b64", "task", "camera_id", **params} — adapters read
-        # task + params, KAI-C reads camera_id for NATS subject + audit.
-        body = {
-            "task": task,
-            "camera_id": camera_id,
-            "frame_b64": base64.b64encode(frame_bytes).decode("ascii"),
-            **(params or {}),
-        }
+        ``camera_id`` is optional, as it is for KAI-C itself: with it
+        the call is attributed to the camera (audit, skill budgets, the
+        NATS subject); without it KAI-C treats the call as a one-off
+        probe. Raises :class:`KaiCError` on transport failure or
+        non-200; the frame loop catches and decides whether to alert /
+        skip / abort."""
+        url, headers, body = build_infer_request(
+            self._base_url, self._adapter_name, frame_bytes, task=task,
+            api_key=self._api_key, camera_id=camera_id, params=params,
+            correlation_id=correlation_id)
         try:
             response = self._client.post(url, json=body, headers=headers)
         except Exception as exc:
@@ -186,12 +206,34 @@ class FrameApp(ContractMixin):
     def stop(self) -> None:
         self._stop_event.set()
 
+    def on_cameras_update(self, camera_ids: frozenset[int]) -> None:
+        """Follow the cameras picked for this app: the poll loop fetches
+        frames for exactly those, as ``cam<id>`` handles.
+
+        Only runs when the app is connected (the live config poll is
+        what delivers picks). A standalone run keeps the camera list it
+        was constructed with. Nothing picked → an empty list → the loop
+        ticks and does nothing, which is the point.
+        """
+        if getattr(self.manifest, "camera_picker", True) is False:
+            return
+        self._cameras = [f"cam{i}" for i in sorted(camera_ids)]
+        logger.info("%s: cameras now %s",
+                    self.manifest.id if self.manifest else type(self).__name__,
+                    ", ".join(self._cameras) or "none (nothing picked)")
+
     # ── Poll loop (tick is testable without asyncio) ───────────────
 
     def handle_tick(self) -> list[Alert]:
         """One poll cycle: fetch a frame per camera, run the rule,
         dispatch whatever it produced. Fetch / rule failures are
         logged per camera and never propagate."""
+        if self.app_enabled is False:
+            # Switched off in the catalog. Core also empties the roster,
+            # which stops a FrameApp that takes its cameras from the
+            # picker; this covers the ones that take them from their own
+            # YAML (camera_picker=False, a standalone run).
+            return []
         fired: list[Alert] = []
         for camera_id in self._cameras:
             try:

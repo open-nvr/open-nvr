@@ -49,9 +49,101 @@ class _OneBoxDetector:
 def test_nms_suppresses_overlapping_same_label():
     a = Detection("person", (0, 0, 100, 100), 0.9)
     b = Detection("person", (5, 5, 105, 105), 0.6)      # heavy overlap, lower score
-    c = Detection("car", (0, 0, 100, 100), 0.8)         # different label, kept
+    c = Detection("car", (40, 60, 200, 200), 0.8)       # different label, partial overlap: kept
     out = nms([a, b, c])
     assert a in out and c in out and b not in out
+
+
+def test_nms_collapses_one_object_labelled_two_ways():
+    """A vehicle read as both car and truck is one box, the stronger label."""
+    car = Detection("car", (100, 100, 400, 300), 0.9)
+    truck = Detection("truck", (102, 98, 398, 303), 0.7)   # near-identical box
+    assert nms([car, truck]) == [car]
+
+
+def test_nms_keeps_a_person_in_front_of_a_car():
+    car = Detection("car", (0, 0, 400, 300), 0.9)
+    person = Detection("person", (150, 50, 250, 300), 0.8)  # inside the car box, IoU low
+    out = nms([car, person])
+    assert car in out and person in out
+
+
+def test_nms_cross_label_rule_can_be_disabled():
+    car = Detection("car", (100, 100, 400, 300), 0.9)
+    truck = Detection("truck", (102, 98, 398, 303), 0.7)
+    for off in (None, 1.0, 0.0, -0.5, 2.0):
+        assert len(nms([car, truck], cross_label_iou=off)) == 2, off
+
+
+def test_nms_drops_a_part_box_inside_the_same_object():
+    """Camera 23, 2026-11-05: the detector boxed the walker's full body and,
+    at lower score, head and shoulders. IoU between a part and the whole is
+    small, so IoU alone kept both and each became its own visit."""
+    body = Detection("person", (100, 50, 220, 380), 0.86)
+    upper = Detection("person", (108, 52, 214, 190), 0.61)    # fully inside, IoU ≈ 0.4
+    # the torso box the detector drew beside the whole on the recordings
+    # (arms out: wider than the body box, 75 % inside it, IoU 0.46)
+    torso = Detection("person", (392, 197, 510, 400), 0.91)
+    whole = Detection("person", (388, 197, 480, 553), 0.88)
+    assert nms([torso, whole]) == [whole]
+    assert nms([body, upper]) == [body]
+    assert nms([upper, body]) == [body], "order of arrival does not matter: the larger box wins"
+    # the part scoring HIGHER than the whole (the face is the clearest part,
+    # and what the walk-through on 2026-11-05 still produced after the first
+    # version of this rule): the whole still wins
+    sure_upper = Detection("person", (108, 52, 214, 190), 0.93)
+    assert nms([sure_upper, body]) == [body]
+    assert nms([body, sure_upper]) == [body]
+    # three people crossing together: the detector also drew one wide box
+    # around the group; each person is inside it but a third of its width,
+    # so they are people, not parts, and the group box does not swallow them
+    group = Detection("person", (80, 40, 460, 390), 0.7)
+    a = Detection("person", (90, 50, 200, 380), 0.85)
+    b = Detection("person", (210, 60, 320, 385), 0.8)
+    c = Detection("person", (330, 55, 450, 380), 0.82)
+    out = nms([group, a, b, c])
+    assert a in out and b in out and c in out
+    assert group not in out, "the box around the group is the duplicate, not the people"
+    # two people boxed together with both members detected: same verdict
+    pair = Detection("person", (80, 40, 340, 390), 0.75)
+    assert set(nms([pair, a, b])) == {a, b}
+    # one box inside another, alone, reads as a part: a person in a group
+    # box whose other members were missed loses this frame (the tracker's
+    # group marking covers the box over time)
+    assert nms([pair, b]) == [pair]
+    # a second person partly behind the first is NOT a part: half outside
+    other = Detection("person", (180, 60, 300, 380), 0.7)
+    assert set(nms([body, other])) == {body, other}
+    # the rule can be switched off
+    assert len(nms([body, upper], containment=0.0)) == 2
+    assert len(nms([body, upper], containment=1.0)) == 2
+    # a person inside a car's box is a different label: kept
+    car = Detection("car", (0, 0, 400, 300), 0.9)
+    person = Detection("person", (150, 50, 250, 290), 0.8)
+    assert set(nms([car, person])) == {car, person}
+
+
+def test_nms_cross_label_never_stricter_than_same_label():
+    # Touching, barely overlapping boxes of different labels: a cross-label
+    # value below the same-label threshold is raised to it, not applied.
+    car = Detection("car", (0, 0, 100, 100), 0.9)
+    person = Detection("person", (60, 0, 160, 100), 0.8)   # IoU ≈ 0.25
+    assert len(nms([car, person], cross_label_iou=0.1)) == 2
+
+
+def test_pipeline_passes_cross_label_setting_to_nms():
+    class _TwoLabels:
+        def detect(self, crop):
+            return [RawDetection("car", 0.9, (0.25, 0.25, 0.75, 0.75)),
+                    RawDetection("truck", 0.8, (0.25, 0.25, 0.75, 0.75))]
+    for setting, expected in ((0.85, 1), (0.0, 2)):
+        tracker = Tracker((H, W), TrackConfig(fps=5, min_initialized=1))
+        pipe = DetectPipeline(
+            _FakeSource(1), _FakeMotion(calibrating=False), _TwoLabels(), tracker,
+            cross_label_iou=setting,
+        )
+        result = pipe.process_frame(next(iter(_FakeSource(1).stream())))
+        assert len(result.detections) == expected, setting
 
 
 def test_select_regions_dedups_overlapping():
@@ -335,3 +427,66 @@ def test_one_failing_region_does_not_kill_the_frame():
     assert det.n > 1, "pipeline stopped calling the detector after the failure"
     assert any(r.tracks or r.detections for r in results), \
         "later regions must still produce detections"
+
+
+# ── re-verification order under a budget ───────────────────────────
+
+
+def test_budgeted_reverification_goes_to_the_longest_waiting_tracks_first(monkeypatch):
+    """Under a region budget the reserve used to round-robin by
+    `frame_idx % len(track_boxes)`; the candidate count changes every
+    frame, so the modulo aliased and some tracks were skipped again and
+    again — measured 6–11 s between re-checks for present objects on a
+    shed budget. The tracks that have waited longest since their last
+    positive match now go first, so the wait is bounded for everyone."""
+    from detect_pipeline import pipeline as pl
+
+    clock = [100.0]
+    tracker = Tracker((H, W), TrackConfig(fps=5, min_initialized=1), clock=lambda: clock[0])
+    # Three far-apart tracks spawned at t=100, 101, 102. Each later update
+    # leaves the earlier ones unmatched (coasting, unscanned), so their
+    # last_matched stays at spawn time: ages differ, newest last.
+    boxes = [(10, 10, 60, 60), (150, 10, 200, 60), (10, 150, 60, 200)]
+    for i, b in enumerate(boxes):
+        clock[0] = 100.0 + i
+        tracker.update([Detection("person", b, 0.9)], scanned_regions=[])
+    by_box = {t.box: t for t in tracker.tracks}
+    assert len(by_box) == 3
+
+    captured: dict = {}
+
+    def _spy(motion_boxes, track_boxes, *a, **k):
+        captured["track_boxes"] = list(track_boxes)
+        return [], False
+
+    monkeypatch.setattr(pl, "select_regions", _spy)
+    pipe = DetectPipeline(
+        _FakeSource(1), _FakeMotion(box=(300, 300, 310, 310), calibrating=False),
+        _OneBoxDetector(), tracker, max_regions=2,
+    )
+    clock[0] = 110.0
+    pipe.process_frame(_frame(1))
+
+    order = captured["track_boxes"]
+    assert order == sorted(order, key=lambda b: by_box[b].last_matched), \
+        "re-verification candidates are not oldest-first"
+    assert order[0] == boxes[0] and order[-1] == boxes[2]
+
+
+def test_reverification_order_is_stable_for_equal_ages(monkeypatch):
+    """Ties break on track id, so two tracks matched in the same frame do
+    not swap places from one frame to the next."""
+    from detect_pipeline import pipeline as pl
+
+    tracker = Tracker((H, W), TrackConfig(fps=5, min_initialized=1), clock=lambda: 100.0)
+    tracker.update([Detection("person", (150, 10, 200, 60), 0.9),
+                    Detection("person", (10, 10, 60, 60), 0.9)], scanned_regions=[])
+    ids = {t.box: t.id for t in tracker.tracks}
+    captured: dict = {}
+    monkeypatch.setattr(pl, "select_regions",
+                        lambda m, tb, *a, **k: (captured.setdefault("tb", list(tb)), (False,))[1] and ([], False) or ([], False))
+    pipe = DetectPipeline(_FakeSource(1), _FakeMotion(box=(300, 300, 310, 310)),
+                          _OneBoxDetector(), tracker, max_regions=2)
+    pipe.process_frame(_frame(1))
+    tb = captured["tb"]
+    assert [ids[b] for b in tb] == sorted(ids[b] for b in tb)

@@ -25,9 +25,53 @@ import { syncCameraIdentity } from '../lib/cameraIdentity'
 import type { IdentityField } from '../lib/cameraIdentity'
 import { Modal } from './Modal'
 import { Badge, Button, EmptyState } from './ui'
-import { Camera, ChevronDown, CheckCircle, Loader2, Plus, RefreshCw, Search, SearchX, Video, X } from 'lucide-react'
+import { Field, Input } from './ui/form'
+import { Tabs } from './ui/Tabs'
+import { Camera, ChevronDown, CheckCircle, Loader2, Monitor, Plus, RefreshCw, Search, SearchX, Server, Video, X } from 'lucide-react'
+import { WebcamAddPanel } from './WebcamAddPanel'
+import { useTranslation } from '../i18n'
+import { extractApiError } from '../lib/apiError'
 
-type DiscoveredCamera = { ip: string; scheme?: string; service_urls?: string[] }
+type DiscoveredCamera = {
+  ip: string
+  scheme?: string
+  service_urls?: string[]
+  /** From the camera's own WS-Discovery answer (host agent), when it gave one. */
+  name?: string | null
+  hardware?: string | null
+}
+
+function ipKey(ip: unknown): number {
+  if (typeof ip !== 'string') return Number.MAX_SAFE_INTEGER
+  const p = ip.split('.')
+  if (p.length !== 4) return Number.MAX_SAFE_INTEGER
+  const n = p.map((s) => (/^\d{1,3}$/.test(s) ? Number(s) : -1))
+  return n.every((v) => v >= 0 && v <= 255) ? ((n[0] * 256 + n[1]) * 256 + n[2]) * 256 + n[3] : Number.MAX_SAFE_INTEGER
+}
+
+// Results arrive from two places (the multicast probe within seconds, the
+// subnet sweep later): merge by address and keep the list in address order
+// so it does not reshuffle as the sweep lands. The probe's row contributes
+// the name and model the camera announced; the sweep's row contributes the
+// service URL and port it MEASURED, which beat the probe's guess of
+// http://ip:80 — the first cut let the guess win and Connect went to the
+// wrong port on a camera the sweep alone would have connected.
+function mergeCameras(prev: DiscoveredCamera[], next: DiscoveredCamera[], from: 'probe' | 'sweep'): DiscoveredCamera[] {
+  const by = new Map(prev.filter((c) => typeof c.ip === 'string').map((c) => [c.ip, c]))
+  for (const c of next) {
+    if (typeof c.ip !== 'string') continue
+    const old = by.get(c.ip)
+    if (!old) { by.set(c.ip, c); continue }
+    const measured = from === 'sweep' ? c : old
+    const announced = from === 'sweep' ? old : c
+    by.set(c.ip, {
+      ...announced, ...measured,
+      name: announced.name ?? measured.name ?? null,
+      hardware: announced.hardware ?? measured.hardware ?? null,
+    })
+  }
+  return [...by.values()].sort((a, b) => ipKey(a.ip) - ipKey(b.ip))
+}
 
 // The device's ONVIF port lives inside its service URL. The server sends
 // {ip, scheme, service_urls}; both the subtitle and the connect call need
@@ -56,6 +100,22 @@ function subnet24(ip: string): string | null {
 // The /connect 403 for an IP outside the configured Camera LAN. The other
 // /connect 403 ("non-internal address") deliberately doesn't match — that
 // one isn't fixable from here.
+/**
+ * A server detail an operator can read, or ''. A camera's raw SOAP fault
+ * ("GetProfiles failed: <?xml … ter:NotAuthorized …") is reduced to its
+ * fault code; nothing with markup reaches the red box.
+ */
+const humanServerDetail = (detail: string): string => {
+  if (!detail) return ''
+  if (!detail.includes('<')) return detail.length <= 400 ? detail : detail.slice(0, 397) + '…'
+  const code = detail.match(/ter:([A-Za-z]+)/)?.[1] || detail.match(/wsse:([A-Za-z]+)/)?.[1]
+  const prefix = detail.split('<')[0].replace(/[:\s]+$/, '')
+  if (code === 'NotAuthorized' || code === 'FailedAuthentication') {
+    return 'The camera rejected the ONVIF username or password. Some cameras keep an ONVIF account separate from the web login, or need ONVIF turned on.'
+  }
+  return `${prefix || 'The camera returned an error'}${code ? ` (${code})` : ''}.`
+}
+
 function parseLanBlock(e: any): { configured: string[] } | null {
   if (e?.status !== 403) return null
   const detail = typeof e?.data?.detail === 'string' ? e.data.detail : e?.message || ''
@@ -77,7 +137,17 @@ export function AddCameraDialog({
   existingCameras?: Array<{id: number, name: string}>
   title?: string
 }) {
+  const { t } = useTranslation()
+  const localizedTitle = title === 'Add Camera to Tile' ? t('cameraDialog.title') : title
   const [mode, setMode] = useState<'discover' | 'select' | 'manual'>('discover')
+  // Manual has two kinds of camera: an IP camera (address / RTSP URL) and a
+  // webcam (this browser's, or a USB one on the OpenNVR server), which has
+  // its own guided flow (WebcamAddPanel) with its own Add and Done.
+  // One row of tabs under Manual: an IP camera, or a webcam in this browser
+  // or on the OpenNVR server (one level, not a webcam tab with its own sub-tabs).
+  const [manualKind, setManualKind] = useState<'ip' | 'browser' | 'server'>('ip')
+  // The webcam panel's Add / Done, shown in the footer like every other tab's.
+  const [webcamAction, setWebcamAction] = useState<{ label: string; onClick: () => void; disabled: boolean } | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
@@ -231,11 +301,28 @@ export function AddCameraDialog({
     // Show the target range while the scan is still running.
     if (overrideCidr) setScanInfo({ cidrs: [overrideCidr], source: 'override' })
 
+    // The multicast probe (the LAN prober on Linux, the host agent on Docker
+    // Desktop), beside the sweep: cameras on the OpenNVR machine's own
+    // network show up within seconds. It is part of THIS scan: awaited with
+    // the sweep, cancelled with it, counted in "Found N". No prober (or one
+    // that found nothing) just leaves the sweep to it.
+    const probe = apiService.onvifDiscoverAgent(abort.signal).then(
+      (r: any) => {
+        const d = r?.data
+        if (seq !== scanSeqRef.current || !d?.available || !d.devices?.length) return
+        setDiscoveredCameras((prev) => mergeCameras(prev, d.devices, 'probe'))
+      },
+      () => {},
+    )
+
     try {
-      const response = await apiService.onvifDiscover(
-        overrideCidr ? { cidr: overrideCidr } : undefined,
-        abort.signal,
-      )
+      const [response] = await Promise.all([
+        apiService.onvifDiscover(
+          overrideCidr ? { cidr: overrideCidr } : undefined,
+          abort.signal,
+        ),
+        probe,
+      ])
       if (seq !== scanSeqRef.current) return
       const data = response?.data || {}
       const devices = data.devices || []
@@ -245,14 +332,14 @@ export function AddCameraDialog({
       }
       setHostCidrs(prev => Array.from(new Set([...prev, ...(data.suggested_cidrs || [])])))
       if (data.client_cidr) setClientCidr(data.client_cidr)
-      setDiscoveredCameras(devices.map((d: any) => ({
+      setDiscoveredCameras((prev) => mergeCameras(prev, devices.map((d: any) => ({
         ip: d.ip || d.host || d.address,
         scheme: d.scheme || 'http',
         service_urls: d.service_urls || [],
-      })))
+      })), 'sweep'))
     } catch (e: any) {
       if (seq !== scanSeqRef.current || e?.name === 'AbortError') return
-      setError(e?.data?.detail || e?.message || 'Discovery failed. Try manual entry.')
+      setError(extractApiError(e, 'Discovery failed. Try manual entry.'))
     } finally {
       if (seq === scanSeqRef.current) setDiscovering(false)
     }
@@ -349,7 +436,7 @@ export function AddCameraDialog({
   // Purely advisory: on failure we just show no badges.
   useEffect(() => {
     let cancelled = false
-    apiService.getCameras({ limit: 500 }).then((res: any) => {
+    apiService.getCameras().then((res: any) => {
       if (cancelled) return
       const map = new Map<string, string>()
       for (const c of res?.data?.cameras || []) {
@@ -388,7 +475,8 @@ export function AddCameraDialog({
     setError(null)
     setLanPrompt(null)
     setLanPromptError(null)
-    setCameraName('') // Reset camera name for user input
+    // The name the camera announced (multicast discovery), else empty.
+    setCameraName(camera.name || '')
   }
 
   // Leave the connect step back to the results list (results are kept).
@@ -461,7 +549,7 @@ export function AddCameraDialog({
           setError('Could not get RTSP URL. Check camera settings.')
         }
       } else {
-        setError('No stream profiles found. Check credentials.')
+        setError(t('cameraDialog.noProfiles'))
       }
     } catch (e: any) {
       const detail = e?.response?.data?.detail || e?.data?.detail || e?.message || ''
@@ -471,11 +559,11 @@ export function AddCameraDialog({
         // Fixable in place: offer to extend the Camera LAN with this subnet.
         setLanPrompt({ ip: selectedCamera.ip, subnet, configured: lanBlock.configured })
       } else if (e?.status === 401 || detail.includes('401') || detail.toLowerCase().includes('authentication')) {
-        setError('Authentication failed. Check username and password.')
+        setError(humanServerDetail(detail) || 'Authentication failed. Check username and password.')
       } else if (detail.includes('timeout') || detail.includes('connect')) {
-        setError('Cannot connect to camera. Check IP address and network.')
+          setError(t('cameraDialog.connectError'))
       } else {
-        setError(detail || 'Connection failed. Check credentials and network.')
+        setError(humanServerDetail(detail) || 'Connection failed. Check credentials and network.')
       }
     } finally {
       setAuthenticating(false)
@@ -546,7 +634,7 @@ export function AddCameraDialog({
     }
 
     if (!cameraName.trim()) {
-      setError('Camera name is required')
+      setError(t('cameraDialog.requiredName'))
       return
     }
 
@@ -572,7 +660,7 @@ export function AddCameraDialog({
   // Add manual camera
   const handleAddManualCamera = async () => {
     if (!form.name.trim() || !form.ip_address.trim()) {
-      setError('Name and IP address are required')
+      setError(t('cameraDialog.requiredNameIp'))
       return
     }
 
@@ -655,9 +743,11 @@ export function AddCameraDialog({
   // Single primary footer action per screen state, so the CTA never jumps
   // between body and footer.
   const primaryAction =
-    mode === 'manual'
+    mode === 'manual' && manualKind !== 'ip'
+      ? webcamAction
+      : mode === 'manual'
       ? {
-          label: loading ? 'Adding...' : 'Add Camera',
+            label: loading ? t('cameraDialog.adding') : t('cameraDialog.title'),
           onClick: handleAddManualCamera,
           disabled: loading || !form.name.trim() || !form.ip_address.trim(),
         }
@@ -669,7 +759,7 @@ export function AddCameraDialog({
         }
       : mode === 'discover' && selectedCamera && connected
       ? {
-          label: loading ? 'Adding...' : 'Add Camera',
+            label: loading ? t('cameraDialog.adding') : t('cameraDialog.title'),
           onClick: handleAddDiscoveredCamera,
           disabled: loading || !cameraName.trim() || !rtspUrl,
         }
@@ -679,7 +769,7 @@ export function AddCameraDialog({
     <div className="space-y-2">
       {/* Duplicate-camera confirm (409 from create) */}
       {duplicatePrompt && (
-        <div className="p-3 border border-amber-600 bg-amber-950/40 text-sm">
+        <div className="p-3 border border-[var(--warn)] bg-[color-mix(in_oklab,var(--warn)_14%,transparent)] text-sm">
           <div className="mb-2">
             A camera with this IP address or stream URL is already added
             {duplicatePrompt.names.length > 0 && (
@@ -692,11 +782,11 @@ export function AddCameraDialog({
               Cancel
             </Button>
             <button
-              className="px-3 py-1 text-sm bg-amber-600 text-white disabled:opacity-50"
+              className="px-3 py-1 text-sm bg-[var(--warn)] text-white disabled:opacity-50"
               onClick={() => createAndFinish(duplicatePrompt.payload, true)}
               disabled={loading}
             >
-              {loading ? 'Adding...' : 'Add Anyway'}
+              {loading ? t('cameraDialog.adding') : t('cameraDialog.addAnyway')}
             </button>
           </div>
         </div>
@@ -707,7 +797,7 @@ export function AddCameraDialog({
           would just re-trigger the same 409). */}
       {!duplicatePrompt && (
         <div className="flex items-center justify-end gap-2">
-          <Button onClick={onClose}>Cancel</Button>
+          <Button onClick={onClose}>{t('cameraDialog.cancel')}</Button>
           {primaryAction && (
             <Button
               variant="primary"
@@ -726,7 +816,7 @@ export function AddCameraDialog({
     <Modal
       open
       onClose={onClose}
-      title={<><Video size={16} /> {title}</>}
+      title={<><Video size={16} /> {localizedTitle}</>}
       widthClassName="w-full max-w-3xl mx-4"
       bodyClassName="p-0 flex flex-col"
       footer={footer}
@@ -740,7 +830,7 @@ export function AddCameraDialog({
           onClick={() => { setMode('discover'); resetConnectStep() }}
         >
           <Search size={12} className="inline mr-1" />
-          Discover
+          {t('cameraDialog.discover')}
         </button>
         <button
           role="tab"
@@ -749,7 +839,7 @@ export function AddCameraDialog({
           onClick={() => { setMode('manual'); cancelScan(); setError(null) }}
         >
           <Plus size={12} className="inline mr-1" />
-          Manual
+          {t('cameraDialog.manual')}
         </button>
         {existingCameras.length > 0 && (
           <button
@@ -759,15 +849,17 @@ export function AddCameraDialog({
             onClick={() => { setMode('select'); cancelScan(); setError(null) }}
           >
             <Camera size={12} className="inline mr-1" />
-            Existing
+            {t('cameraDialog.existing')}
           </button>
         )}
       </div>
 
       {/* Content */}
-      <div className="p-4 flex-1 min-h-0">
+      {/* One fixed height for every tab (and the connect step), so switching
+          tabs never resizes the dialog; taller content scrolls inside it. */}
+      <div className="p-4 h-[min(500px,62vh)] overflow-y-auto thin-scroll">
         {error && (
-          <div className="mb-4 p-2 bg-red-900/20 border border-red-800 text-red-400 text-sm">
+          <div className="mb-4 p-2 bg-[color-mix(in_oklab,var(--danger)_14%,transparent)] border border-[color-mix(in_oklab,var(--danger)_45%,var(--border))] text-[var(--danger)] text-sm">
             {error}
           </div>
         )}
@@ -777,7 +869,7 @@ export function AddCameraDialog({
             and the results as the full-width single scroller. Controls never
             move between states. */}
         {mode === 'discover' && !selectedCamera && (
-          <div className="flex flex-col gap-2 md:h-[420px]">
+          <div className="flex flex-col gap-2 h-full">
             {/* Scan bar — identical in every state. */}
             <div className="shrink-0">
               <div className="flex gap-2">
@@ -819,7 +911,7 @@ export function AddCameraDialog({
                         if (opening) refreshPlan()
                       }}
                       aria-label="Choose a detected network"
-                      title="Choose a detected network"
+                      title={t('cameraDialog.chooseNetworkTitle')}
                     >
                       <ChevronDown size={14} className={`transition-transform ${rangeMenuOpen ? 'rotate-180' : ''}`} />
                     </button>
@@ -830,14 +922,14 @@ export function AddCameraDialog({
                         className="absolute z-10 left-0 right-0 top-full mt-1 bg-[var(--panel)] border border-[var(--border)] shadow-lg"
                       >
                         <div className="flex items-center justify-between px-2 py-1 border-b border-[var(--border)]">
-                          <span className="text-[10px] uppercase tracking-wide text-[var(--text-dim)]">Detected networks</span>
+                          <span className="text-[10px] uppercase tracking-wide text-[var(--text-dim)]">{t('cameraDialog.detectedNetworks')}</span>
                           <button
                             type="button"
                             className="p-0.5 text-[var(--text-dim)] hover:text-[var(--text)] disabled:opacity-50"
                             onClick={() => refreshPlan()}
                             disabled={planRefreshing}
                             aria-label="Re-detect networks"
-                            title="Re-detect the current networks"
+                            title={t('cameraDialog.redetectTitle')}
                           >
                             <RefreshCw size={12} className={planRefreshing ? 'animate-spin' : ''} />
                           </button>
@@ -928,7 +1020,7 @@ export function AddCameraDialog({
             {/* The typed range diverges from the saved Camera LAN — offer to
                 persist it (that boundary gates which cameras can be added). */}
             {saveMovesBoundary && (
-              <div className="shrink-0 flex items-center gap-2 rounded border border-[var(--border)] bg-[var(--panel-2)]/40 px-3 py-2 text-xs text-[var(--text-dim)]">
+              <div className="shrink-0 flex items-center gap-2 border border-[var(--border)] bg-[var(--panel-2)]/40 px-3 py-2 text-xs text-[var(--text-dim)]">
                 <span className="flex-1 min-w-0 truncate">
                   Scans of <span className="font-mono">{rangeInput.trim()}</span> are one-off — the saved
                   Camera LAN (<span className="font-mono">{configuredCidr}</span>) is unchanged.
@@ -939,7 +1031,7 @@ export function AddCameraDialog({
                   disabled={savingRange}
                 >
                   {savingRange && <Loader2 size={12} className="animate-spin" />}
-                  Save as Camera LAN & scan
+                  {t('cameraDialog.saveLanScan')}
                 </Button>
               </div>
             )}
@@ -951,15 +1043,15 @@ export function AddCameraDialog({
                   for operators who already know the IP. (Results are always
                   empty mid-scan — handleDiscover clears them.) */}
               {discovering && (
-                <div className="rounded border border-[var(--border)] bg-[var(--panel-2)]/40 p-3 space-y-2">
-                  <div className="text-[10px] uppercase tracking-wide text-[var(--text-dim)]">While it scans</div>
+                <div className="border border-[var(--border)] bg-[var(--panel-2)]/40 p-3 space-y-2">
+                  <div className="text-[10px] uppercase tracking-wide text-[var(--text-dim)]">{t('cameraDialog.whileScanning')}</div>
                   <ul className="text-xs text-[var(--text-dim)] space-y-1 list-disc pl-4">
-                    <li>Cameras must be powered on and connected to one of the scanned networks.</li>
-                    <li>ONVIF must be enabled on the camera — usually under Settings → Network → ONVIF.</li>
-                    <li>Camera on a different subnet? Change the range above and press Scan — the sweep re-aims instantly.</li>
+                    <li>{t('cameraDialog.scanGuidancePower')}</li>
+                    <li>{t('cameraDialog.scanGuidanceOnvif')}</li>
+                    <li>{t('cameraDialog.scanGuidanceSubnet')}</li>
                   </ul>
                   <div className="flex items-center justify-between gap-2 pt-0.5">
-                    <span className="text-xs text-[var(--text-dim)]">Already know the camera's IP?</span>
+                    <span className="text-xs text-[var(--text-dim)]">{t('cameraDialog.knowIp')}</span>
                     <Button
                       className="text-xs px-2 py-1"
                       onClick={() => { setMode('manual'); cancelScan(); setError(null) }}
@@ -975,29 +1067,29 @@ export function AddCameraDialog({
                 noAutoRange ? (
                   <EmptyState
                     icon={<SearchX size={28} />}
-                    title="No network range to scan"
+                    title={t('cameraDialog.noRange')}
                     description="Type the subnet your cameras are on in the bar above (e.g. 192.168.1.0/24), then press Scan."
                   />
                 ) : scanStopped ? (
                   <EmptyState
                     icon={<SearchX size={28} />}
-                    title="Scan stopped"
-                    description="Adjust the range above, or scan again."
+                    title={t('cameraDialog.scanStopped')}
+                    description={t('cameraDialog.adjustRange')}
                     action={
                       <Button onClick={handleScanClick}>
                         <Search size={14} />
-                        Rescan
+                        {t('cameraDialog.rescan')}
                       </Button>
                     }
                   />
                 ) : (
                   <EmptyState
                     icon={<SearchX size={28} />}
-                    title={`No cameras found${scanInfo && scanInfo.cidrs.length > 0 ? ` in ${scanInfo.cidrs.join(', ')}` : ''}`}
+                    title={`${t('cameraDialog.noCameras')}${scanInfo && scanInfo.cidrs.length > 0 ? ` in ${scanInfo.cidrs.join(', ')}` : ''}`}
                     description={
                       suggestionCidrs.length > 0
-                        ? 'Try scanning another detected network:'
-                        : 'Check the scan range above, or use Manual entry.'
+                        ? t('cameraDialog.tryNetwork')
+                        : t('cameraDialog.scanRangeHelp')
                     }
                     action={
                       <div className="space-y-3">
@@ -1014,23 +1106,21 @@ export function AddCameraDialog({
                               <Search size={12} />
                               <span className="font-mono text-xs">{s}</span>
                               {s === clientCidr && (
-                                <span className="text-[10px] text-[var(--text-dim)]">your network</span>
+                                <span className="text-[10px] text-[var(--text-dim)]">{t('cameraDialog.yourNetwork')}</span>
                               )}
                             </Button>
                           ))}
                           <Button onClick={() => { setMode('manual'); setError(null) }}>
                             <Plus size={14} />
-                            Add manually
+                            {t('cameraDialog.addManually')}
                           </Button>
                         </div>
                         {/* Visible without opening the dropdown — the dropdown
                             repeats this for people already looking there. */}
                         <div className="text-[10px] leading-relaxed text-[var(--text-dim)] max-w-md mx-auto">
-                          Your network missing here? Run{' '}
+                          {t('cameraDialog.networkMissing')}{' '}
                           <code className="font-mono">start.sh refresh-net</code> (or{' '}
-                          <code className="font-mono">start.ps1 refresh-net</code>) on the host,
-                          then press <RefreshCw size={9} className="inline align-baseline" /> in the
-                          scan-range dropdown above.
+                          <code className="font-mono">start.ps1 refresh-net</code> {t('cameraDialog.hostRefresh')}
                         </div>
                       </div>
                     }
@@ -1041,7 +1131,7 @@ export function AddCameraDialog({
               {discoveredCameras.map((camera) => (
                 <button
                   key={camera.ip}
-                  className="w-full flex items-center justify-between gap-4 rounded border border-[var(--border)] bg-[var(--panel-2)]/40 px-4 py-3 text-left hover:bg-[var(--panel-2)] transition-colors"
+                  className="w-full flex items-center justify-between gap-4 border border-[var(--border)] bg-[var(--panel-2)]/40 px-4 py-3 text-left hover:bg-[var(--panel-2)] transition-colors"
                   onClick={() => handleSelectDiscovered(camera)}
                 >
                   <div className="flex items-center gap-3 min-w-0">
@@ -1049,9 +1139,12 @@ export function AddCameraDialog({
                     <div className="min-w-0">
                       <div className="text-sm font-medium flex items-center gap-2">
                         <span className="font-mono">{camera.ip}</span>
-                        {addedByIp.has(camera.ip) && <Badge variant="info">Already added</Badge>}
+                        {camera.name && <span className="truncate font-normal">{camera.name}</span>}
+                        {addedByIp.has(camera.ip) && <Badge variant="info">{t('cameraDialog.alreadyAdded')}</Badge>}
                       </div>
-                      <div className="text-xs text-[var(--text-dim)]">{deviceSubtitle(camera)}</div>
+                      <div className="text-xs text-[var(--text-dim)]">
+                        {deviceSubtitle(camera)}{camera.hardware ? ` · ${camera.hardware}` : ''}
+                      </div>
                     </div>
                   </div>
                   <ChevronDown size={16} className="text-[var(--text-dim)] -rotate-90 shrink-0" />
@@ -1073,7 +1166,7 @@ export function AddCameraDialog({
               ← Back to camera list
             </button>
 
-            <div className="p-3 bg-[var(--bg-2)] border border-neutral-700">
+            <div className="p-3 bg-[var(--bg-2)] border border-[var(--border)]">
               <div className="flex items-center gap-3">
                 <Camera size={24} className="text-[var(--accent)]" />
                 <div>
@@ -1090,19 +1183,19 @@ export function AddCameraDialog({
 
             <div className="grid grid-cols-2 gap-3">
               <label className="flex flex-col gap-1">
-                <span className="text-xs text-[var(--text-dim)]">Username</span>
+                    <span className="text-xs text-[var(--text-dim)]">{t('cameraDialog.username')}</span>
                 <input
                   type="text"
-                  className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
+                  className="bg-[var(--bg-2)] border border-[var(--border)] px-3 py-2 text-sm"
                   value={credentials.username}
                   onChange={(e) => handleCredentialsChange({ username: e.target.value })}
                 />
               </label>
               <label className="flex flex-col gap-1">
-                <span className="text-xs text-[var(--text-dim)]">Password</span>
+                <span className="text-xs text-[var(--text-dim)]">{t('cameraDialog.password')}</span>
                 <input
                   type="password"
-                  className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
+                  className="bg-[var(--bg-2)] border border-[var(--border)] px-3 py-2 text-sm"
                   placeholder="Leave blank if none"
                   autoFocus
                   value={credentials.password}
@@ -1119,7 +1212,7 @@ export function AddCameraDialog({
 
             {/* Camera LAN block from /connect — fixable in place. */}
             {lanPrompt && (
-              <div className="p-3 border border-amber-600 bg-amber-950/40 text-sm space-y-2">
+              <div className="p-3 border border-[var(--warn)] bg-[color-mix(in_oklab,var(--warn)_14%,transparent)] text-sm space-y-2">
                 <div>
                   This camera ({lanPrompt.ip}) is outside the configured Camera LAN
                   {lanPrompt.configured.length > 0 && (
@@ -1127,13 +1220,13 @@ export function AddCameraDialog({
                   )}
                   . The Camera LAN controls which networks cameras can be connected on.
                 </div>
-                {lanPromptError && <div className="text-xs text-red-400">{lanPromptError}</div>}
+                {lanPromptError && <div className="text-xs text-[var(--danger)]">{lanPromptError}</div>}
                 <div className="flex justify-end gap-2">
                   <Button onClick={() => { setLanPrompt(null); setLanPromptError(null) }} disabled={lanPromptBusy}>
                     Cancel
                   </Button>
                   <button
-                    className="px-3 py-1 text-sm bg-amber-600 text-white disabled:opacity-50 inline-flex items-center gap-2"
+                    className="px-3 py-1 text-sm bg-[var(--warn)] text-white disabled:opacity-50 inline-flex items-center gap-2"
                     onClick={handleLanPromptFix}
                     disabled={lanPromptBusy}
                   >
@@ -1146,24 +1239,24 @@ export function AddCameraDialog({
 
             {connected && (
               <>
-                <div className="p-2.5 bg-green-900/20 border border-green-700">
-                  <div className="flex items-center gap-2 text-green-400 text-sm">
+                <div className="p-2.5 bg-[color-mix(in_oklab,var(--ok)_14%,transparent)] border border-[var(--ok)]">
+                  <div className="flex items-center gap-2 text-[var(--ok)] text-sm">
                     <CheckCircle size={14} />
                     Connected{rtspUrl ? ' — stream found' : ''}
                   </div>
                   {rtspUrl && (
                     <details className="mt-1">
-                      <summary className="text-xs text-[var(--text-dim)] cursor-pointer">Stream URL</summary>
+                      <summary className="text-xs text-[var(--text-dim)] cursor-pointer">{t('cameraDialog.streamUrl')}</summary>
                       <div className="text-xs font-mono text-[var(--text-dim)] break-all mt-1">{rtspUrl}</div>
                     </details>
                   )}
                 </div>
 
                 <label className="flex flex-col gap-1">
-                  <span className="text-xs text-[var(--text-dim)]">Camera Name *</span>
+                  <span className="text-xs text-[var(--text-dim)]">{t('cameraDialog.cameraName')} *</span>
                   <input
                     type="text"
-                    className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
+                    className="bg-[var(--bg-2)] border border-[var(--border)] px-3 py-2 text-sm"
                     placeholder="e.g., Front Door, Lobby"
                     autoFocus
                     value={cameraName}
@@ -1178,9 +1271,9 @@ export function AddCameraDialog({
                 </label>
 
                 <label className="flex flex-col gap-1">
-                  <span className="text-xs text-[var(--text-dim)]">Stream Profile</span>
+                  <span className="text-xs text-[var(--text-dim)]">{t('cameraDialog.streamProfile')}</span>
                   <select
-                    className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
+                    className="bg-[var(--bg-2)] border border-[var(--border)] px-3 py-2 text-sm"
                     value={selectedProfile}
                     onChange={(e) => handleProfileChange(e.target.value)}
                   >
@@ -1194,30 +1287,30 @@ export function AddCameraDialog({
                 </label>
 
                 {deviceInfo && (
-                  <details className="p-3 bg-[var(--bg-2)] border border-neutral-700 text-xs">
+                  <details className="p-3 bg-[var(--bg-2)] border border-[var(--border)] text-xs">
                     <summary className="font-medium text-sm cursor-pointer">
-                      {[deviceInfo.manufacturer, deviceInfo.model].filter(Boolean).join(' ') || 'Device Information'}
+                      {[deviceInfo.manufacturer, deviceInfo.model].filter(Boolean).join(' ') || t('cameraDialog.deviceInfo')}
                     </summary>
                     <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[var(--text-dim)] mt-2">
-                      <span>Manufacturer:</span>
-                      <span className="text-[var(--text)]">{deviceInfo.manufacturer || 'Unknown'}</span>
-                      <span>Model:</span>
-                      <span className="text-[var(--text)]">{deviceInfo.model || 'Unknown'}</span>
+                      <span>{t('cameraDialog.manufacturer')}</span>
+                      <span className="text-[var(--text)]">{deviceInfo.manufacturer || t('cameraDialog.unknown')}</span>
+                      <span>{t('cameraDialog.model')}</span>
+                      <span className="text-[var(--text)]">{deviceInfo.model || t('cameraDialog.unknown')}</span>
                       {deviceInfo.serialnumber && (
                         <>
-                          <span>Serial Number:</span>
+                          <span>{t('cameraDialog.serial')}</span>
                           <span className="text-[var(--text)] font-mono">{deviceInfo.serialnumber}</span>
                         </>
                       )}
                       {deviceInfo.firmwareversion && (
                         <>
-                          <span>Firmware:</span>
+                          <span>{t('cameraDialog.firmware')}</span>
                           <span className="text-[var(--text)]">{deviceInfo.firmwareversion}</span>
                         </>
                       )}
                       {deviceInfo.hardwareid && (
                         <>
-                          <span>Hardware ID:</span>
+                          <span>{t('cameraDialog.hardwareId')}</span>
                           <span className="text-[var(--text)] font-mono">{deviceInfo.hardwareid}</span>
                         </>
                       )}
@@ -1229,93 +1322,87 @@ export function AddCameraDialog({
           </div>
         )}
 
-        {/* MANUAL MODE */}
+        {/* MANUAL MODE — an IP camera by address/URL, or a webcam. */}
         {mode === 'manual' && (
-          <div className="space-y-4">
-            <div className="grid grid-cols-2 gap-3">
-              <label className="flex flex-col gap-1">
-                <span className="text-xs text-[var(--text-dim)]">Camera Name *</span>
-                <input
-                  type="text"
-                  className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
-                  placeholder="e.g., Front Door"
-                  value={form.name}
-                  onChange={(e) => setForm(f => ({ ...f, name: e.target.value }))}
-                />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span className="text-xs text-[var(--text-dim)]">IP Address *</span>
-                <input
-                  type="text"
-                  className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
-                  placeholder="192.168.1.100"
-                  value={form.ip_address}
-                  onChange={(e) => setForm(f => ({ ...f, ip_address: e.target.value }))}
-                  onBlur={() => syncIdentity('ip_address')}
-                />
-              </label>
-            </div>
-
-            <div className="grid grid-cols-3 gap-3">
-              <label className="flex flex-col gap-1">
-                <span className="text-xs text-[var(--text-dim)]">Port</span>
-                <input
-                  type="number"
-                  className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
-                  value={form.port}
-                  onChange={(e) => setForm(f => ({ ...f, port: parseInt(e.target.value) || 554 }))}
-                  onBlur={() => syncIdentity('port')}
-                />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span className="text-xs text-[var(--text-dim)]">Username</span>
-                <input
-                  type="text"
-                  className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
-                  placeholder="admin"
-                  value={form.username}
-                  onChange={(e) => setForm(f => ({ ...f, username: e.target.value }))}
-                  onBlur={() => syncIdentity('username')}
-                />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span className="text-xs text-[var(--text-dim)]">Password</span>
-                <input
-                  type="password"
-                  className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm"
-                  value={form.password}
-                  onChange={(e) => setForm(f => ({ ...f, password: e.target.value }))}
-                  onBlur={() => syncIdentity('password')}
-                />
-              </label>
-            </div>
-
-            <label className="flex flex-col gap-1">
-              <span className="text-xs text-[var(--text-dim)]">RTSP URL</span>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  className="flex-1 bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm font-mono text-xs"
-                  placeholder="rtsp://192.168.1.100:554/stream1"
-                  value={form.rtsp_url}
-                  onChange={(e) => setForm(f => ({ ...f, rtsp_url: e.target.value }))}
-                  onBlur={() => syncIdentity('rtsp_url')}
-                />
-                <button
-                  type="button"
-                  className="px-3 py-2 border border-neutral-700 bg-[var(--panel-2)] text-xs whitespace-nowrap"
-                  onClick={() => setScanQr(true)}
-                  title="Scan the QR from the OpenNVR Cam app"
+          <div className="flex flex-col gap-4">
+            <Tabs
+              tabs={[
+                { key: 'ip', label: <span className="inline-flex items-center gap-1.5"><Video size={14} /> IP camera</span> },
+                { key: 'browser', label: <span className="inline-flex items-center gap-1.5"><Monitor size={14} /> Browser webcam</span> },
+                { key: 'server', label: <span className="inline-flex items-center gap-1.5"><Server size={14} /> Server webcam</span> },
+              ]}
+              active={manualKind}
+              onChange={(k) => { setManualKind(k as 'ip' | 'browser' | 'server'); setError(null) }}
+            />
+            {manualKind !== 'ip' ? (
+              <WebcamAddPanel key={manualKind} source={manualKind} onDone={(id) => onCameraAdded(id)} onError={setError} onAction={setWebcamAction} />
+            ) : (
+              <div className="grid grid-cols-6 gap-3">
+                <Field label={t('cameraDialog.cameraName')} required className="col-span-6">
+                  <Input
+                    placeholder="e.g., Front Door"
+                    value={form.name}
+                    onChange={(e) => setForm(f => ({ ...f, name: e.target.value }))}
+                  />
+                </Field>
+                <Field label={t('cameraDialog.ipAddress')} required className="col-span-4">
+                  <Input
+                    placeholder="192.168.1.100"
+                    value={form.ip_address}
+                    onChange={(e) => setForm(f => ({ ...f, ip_address: e.target.value }))}
+                    onBlur={() => syncIdentity('ip_address')}
+                  />
+                </Field>
+                <Field label={t('cameraDialog.port')} className="col-span-2">
+                  <Input
+                    type="number"
+                    value={form.port}
+                    onChange={(e) => setForm(f => ({ ...f, port: parseInt(e.target.value) || 554 }))}
+                    onBlur={() => syncIdentity('port')}
+                  />
+                </Field>
+                <Field label={t('cameraDialog.username')} className="col-span-3">
+                  <Input
+                    placeholder="admin"
+                    autoComplete="off"
+                    value={form.username}
+                    onChange={(e) => setForm(f => ({ ...f, username: e.target.value }))}
+                    onBlur={() => syncIdentity('username')}
+                  />
+                </Field>
+                <Field label={t('cameraDialog.password')} className="col-span-3">
+                  <Input
+                    type="password"
+                    autoComplete="new-password"
+                    value={form.password}
+                    onChange={(e) => setForm(f => ({ ...f, password: e.target.value }))}
+                    onBlur={() => syncIdentity('password')}
+                  />
+                </Field>
+                <Field
+                  label={`${t('cameraDialog.rtspUrl')} (optional)`}
+                  hint="Left blank, it is found from the IP address and login. The login is added to it for you."
+                  className="col-span-6"
                 >
-                  Scan QR
-                </button>
+                  {(id, describedBy) => (
+                    <div className="flex gap-2">
+                      <Input
+                        id={id}
+                        aria-describedby={describedBy}
+                        className="flex-1 font-mono text-xs"
+                        placeholder="rtsp://192.168.1.100:554/stream1"
+                        value={form.rtsp_url}
+                        onChange={(e) => setForm(f => ({ ...f, rtsp_url: e.target.value }))}
+                        onBlur={() => syncIdentity('rtsp_url')}
+                      />
+                      <Button variant="outline" onClick={() => setScanQr(true)} title="Scan the QR from the OpenNVR Cam app">
+                        Scan QR
+                      </Button>
+                    </div>
+                  )}
+                </Field>
               </div>
-              <span className="text-[10px] text-[var(--text-dim)]">
-                Optional. No need to put credentials in the URL — the
-                Username/Password above are added automatically. Leave blank to
-                build the URL from the IP + credentials.
-              </span>
-            </label>
+            )}
           </div>
         )}
 
@@ -1323,11 +1410,11 @@ export function AddCameraDialog({
         {mode === 'select' && (
           <div className="space-y-3">
             <div className="relative">
-              <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-500" />
+              <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--text-dim)]" />
               <input
                 type="text"
-                className="w-full bg-[var(--bg-2)] border border-neutral-700 pl-10 pr-3 py-2 text-sm"
-                placeholder="Search cameras..."
+                className="w-full bg-[var(--bg-2)] border border-[var(--border)] pl-10 pr-3 py-2 text-sm"
+                placeholder={t('cameraDialog.search')}
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
               />
@@ -1344,10 +1431,10 @@ export function AddCameraDialog({
                 filteredCameras.map(camera => (
                   <button
                     key={camera.id}
-                    className="w-full text-left px-3 py-2 bg-[var(--bg-2)] border border-neutral-700 hover:border-[var(--accent)] flex items-center gap-3 transition-colors"
+                    className="w-full text-left px-3 py-2 bg-[var(--bg-2)] border border-[var(--border)] hover:border-[var(--accent)] flex items-center gap-3 transition-colors"
                     onClick={() => handleSelectExisting(camera.id)}
                   >
-                    <div className="w-8 h-8 bg-[var(--panel)] border border-neutral-600 flex items-center justify-center">
+                    <div className="w-8 h-8 bg-[var(--panel)] border border-[var(--border)] flex items-center justify-center">
                       <Camera size={16} className="text-[var(--text-dim)]" />
                     </div>
                     <div>

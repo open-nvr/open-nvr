@@ -1,0 +1,34 @@
+[project]
+name = "opennvr-example-camera-tamper"
+version = "1.0.0"
+description = "OpenNVR camera-tamper example app (frame-polling: covered, defocused, moved or frozen camera)"
+requires-python = ">=3.11"
+license = { text = "AGPL-3.0" }
+dependencies = [
+    "opennvr-app-sdk",
+    "numpy>=1.26",
+    "Pillow>=10,<12",
+]
+
+[tool.uv.sources]
+opennvr-app-sdk = { path = "../../sdk/opennvr-app-sdk", editable = true }
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+camera-tamper = "camera_tamper:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"

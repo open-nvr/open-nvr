@@ -104,6 +104,17 @@ def test_create_report_handler_parses_time_and_defaults(monkeypatch):
         # missing query → asks
         ask = await rt._handle_create_report({"name": "C"})
         assert ask.endswith("?")
+        # the model left the schedule blank (or put a word in `at`): the
+        # question's own words decide
+        rt.tools.current_question = "every hour tell me what you see on cam1"
+        try:
+            await rt._handle_create_report({"name": "Hourly", "query": "what you see", "at": "every_minutes"})
+            assert rt.reports.list()[2]["schedule"] == "every 60 min"
+            rt.tools.current_question = "every evening summarise the day"
+            await rt._handle_create_report({"name": "Eve", "query": "the day"})
+            assert rt.reports.list()[3]["schedule"] == "daily at 18:00"
+        finally:
+            rt.tools.current_question = ""
 
     asyncio.run(go())
 
@@ -143,3 +154,40 @@ def test_report_endpoints(monkeypatch):
     assert client.delete(f"/reports/{rid}").status_code == 200
     assert client.post("/reports/9999/run").status_code == 404
     assert client.post("/reports", json={"name": "x"}).status_code == 400
+
+
+def test_a_what_you_see_report_becomes_a_scene_round_and_a_history_summary_does_not():
+    rt = _runtime()
+    q = ca.scene_report_query("every hour tell me what you see", rt)
+    assert q.startswith("Scene report.") and "describe_camera" in q and "cam1" in q
+    assert ca.scene_report_query("summarize overnight activity", rt) == "summarize overnight activity"
+    assert ca.scene_report_query("how many people came by", rt) == "how many people came by"
+    assert ca.scene_report_query("describe the view every hour", rt).startswith("Scene report.")
+
+
+def test_the_words_interval_beats_a_model_clock_time_and_a_copied_example_query():
+    """granite4:micro answered "every hour tell me what you see on cam23"
+    with at="03:00" and the schema's example as the query (Ventuno Q CPU
+    eval, 2026-11-10): the report ran daily at 3 about the overnight."""
+    rt = _runtime()
+
+    async def go():
+        rt.tools.current_question = "every hour tell me what you see on cam1"
+        try:
+            await rt._handle_create_report({"name": "Hourly Cam1 Look",
+                                            "query": "what the cameras saw overnight", "at": "03:00"})
+        finally:
+            rt.tools.current_question = ""
+        (r,) = rt.reports.list()
+        assert r["schedule"] == "every 60 min"
+        assert r["query"] == "every hour tell me what you see on cam1"
+        # a clock time the words also name is kept
+        rt.tools.current_question = "every morning at 7 summarise overnight activity"
+        try:
+            await rt._handle_create_report({"name": "AM", "query": "overnight summary", "at": "07:00"})
+        finally:
+            rt.tools.current_question = ""
+        assert rt.reports.list()[1]["schedule"] == "daily at 07:00"
+        assert rt.reports.list()[1]["query"] == "overnight summary"
+
+    asyncio.run(go())

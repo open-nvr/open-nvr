@@ -28,6 +28,8 @@ import json
 from pathlib import Path
 
 import httpx
+import logging
+
 import pytest
 
 from kai_c.audit import AuditStore
@@ -330,6 +332,37 @@ async def test_deferred_seed_retries_until_up_with_config_consent(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_pending_retry_failures_reach_the_operator_log(tmp_path: Path, audit, caplog):
+    """A persisted adapter whose registration keeps failing (401 after a
+    secret rotation, bad capabilities, ...) used to fail at DEBUG only —
+    the operator saw plates stop and nothing in the log said why. The
+    first failure and every twentieth must be a WARNING naming the
+    adapter, the URL, the attempt count and the error; the ones in
+    between stay quiet so a down adapter can't flood the log."""
+    stub = _DownThenUpStub(url="http://127.0.0.1:9100",
+                           capabilities=_base_caps(gpu=True))
+    reg = _registry_for(stub, audit, _store(tmp_path))
+    reg.defer("fast_plate_ocr", stub.url, source="runtime",
+              grant_all_on_register=False, error="boot race")
+
+    caplog.set_level(logging.DEBUG, logger="kai_c.registry")
+    for _ in range(40):
+        await reg.retry_pending()       # never comes up
+    assert reg.pending_registrations()[0]["attempts"] == 40
+
+    warnings = [r for r in caplog.records
+                if r.levelno == logging.WARNING and "fast_plate_ocr" in r.getMessage()]
+    # attempt 1, 20 and 40 — three warnings, not forty.
+    assert len(warnings) == 3, [w.getMessage() for w in warnings]
+    first = warnings[0].getMessage()
+    assert "after 1 attempt" in first
+    assert stub.url in first
+    assert "deferred" in first          # points at GET /api/v1/adapters
+    assert "after 40 attempt" in warnings[-1].getMessage()
+    await reg.aclose()
+
+
+@pytest.mark.asyncio
 async def test_pending_restore_survives_a_second_restart(tmp_path: Path, audit):
     """Restart while the adapter is STILL down: the queued restore must
     keep its receipt (grants included), or a double restart would
@@ -440,3 +473,42 @@ async def test_poll_loop_drives_the_retry(tmp_path: Path, audit):
             "poll loop never retried the deferred registration")
     finally:
         await reg.aclose()
+
+
+@pytest.mark.asyncio
+async def test_seed_registration_does_not_wipe_pending_receipts(
+    tmp_path: Path, audit,
+):
+    """The real boot order: ``main.py`` runs the ADAPTER_REGISTRY seed
+    loop BEFORE ``restore_persisted()``. A seed registration must not
+    truncate the receipt file on its way through — the runtime entries
+    are still on disk and nothing has read them yet.
+
+    Regression: ``_persist_locked`` serialises only in-memory
+    ``source == "runtime"`` adapters, of which there are none that
+    early, so the seed's persist wrote ``{"adapters": []}`` over the
+    receipts and ``restore_persisted`` then read the file it had just
+    emptied. ``ADAPTER_REGISTRY`` always holds at least ``default``, so
+    this fired on EVERY boot — silently unregistering fast_plate_ocr and
+    404-ing every plate read (the exact #371 symptom the receipt file
+    was added to fix).
+    """
+    stub = _StubAdapter(url="http://127.0.0.1:9100",
+                        capabilities=_base_caps())
+    store = _store(tmp_path)
+    store.save([{"name": "fast_plate_ocr", "url": stub.url,
+                 "granted_permissions": []}])
+
+    reg = _registry_for(stub, audit, store)
+    # Seed loop first, exactly as the lifespan handler orders it.
+    await reg.register("default", stub.url, source="seed")
+    assert [e["name"] for e in store.load()] == ["fast_plate_ocr"], (
+        "the seed registration truncated the receipt file"
+    )
+
+    # …and the restore that follows still finds it.
+    queued = reg.restore_persisted()
+    assert [p.name for p in queued] == ["fast_plate_ocr"]
+    await reg.retry_pending()
+    assert reg.get("fast_plate_ocr") is not None
+    await reg.aclose()

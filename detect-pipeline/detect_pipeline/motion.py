@@ -21,10 +21,13 @@ whole-frame brightness change from flooding the detector at dawn/dusk.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 import cv2
 import numpy as np
+
+from .masks import Polygon, rasterize
 
 log = logging.getLogger(__name__)
 
@@ -53,9 +56,24 @@ class MotionConfig:
     #: signal. After this many consecutive calibrating frames the gate
     #: forces itself open (WARN logged): a scene that is always busy is
     #: the scene, and the detector should see it. 0 disables the
-    #: deadline (pre-#373 behaviour). Default 150 ≈ 75 s at 2 fps —
+    #: deadline (pre-#373 behaviour). Default 150 ≈ 30 s at 5 fps —
     #: real calibration settles in well under 50 frames.
     calibration_max_frames: int = 150
+    #: Consecutive deadline-forced exits before the gate concludes this
+    #: scene has NO STATIC BACKGROUND and stays open for good. The
+    #: deadline above bounds each episode, but on a scene the gate can
+    #: never model — a PTZ mid-pan, a moving source, a mast in high wind
+    #: — calibration re-trips immediately and the deadline degrades into
+    #: a DUTY CYCLE: one open frame every ``calibration_max_frames``,
+    #: i.e. the detector sees ~1% of frames, near-silently (the repeat
+    #: WARN is demoted to debug). Latching open after this many
+    #: consecutive forced exits turns that into a bounded, loud,
+    #: self-healing failure. A natural calibration resets the count and
+    #: releases the latch. 0 disables the latch (deadline-only, #373
+    #: behaviour). Default 2 ≈ 60 s at 5 fps before giving up: one
+    #: exit could be a genuine dawn flash over a busy road, two is a
+    #: scene that will not settle.
+    calibration_max_forced_exits: int = 2
 
 
 def _grab_contours(found) -> list:
@@ -76,6 +94,7 @@ class MotionDetector:
         contrast_frame_history: int = 50,
         interpolation: int = cv2.INTER_NEAREST,
         label: str = "",
+        mask: Iterable[Polygon] | None = None,
     ) -> None:
         self.config = config or MotionConfig()
         #: Camera id (or similar) for log attribution — #373's wedge was
@@ -86,6 +105,18 @@ class MotionDetector:
         fh = min(self.config.frame_height or frame_shape[0], frame_shape[0])
         self.resize_factor = frame_shape[0] / fh
         self.motion_frame_size = (fh, fh * frame_shape[1] // frame_shape[0])
+        # The operator's motion mask, rasterised once at the motion image's
+        # size: 255 where motion may count, 0 under a mask. ANDed into the
+        # thresholded difference every frame (one cheap op), so a masked
+        # OSD clock or tree never produces a motion box and never wakes
+        # the detector. None = no mask drawn. See masks.py.
+        self.mask_keep: np.ndarray | None = None
+        self.masked_fraction = 0.0
+        polys = tuple(mask or ())
+        if polys:
+            masked = rasterize(polys, self.motion_frame_size)
+            self.mask_keep = cv2.bitwise_not(masked)
+            self.masked_fraction = float(np.count_nonzero(masked)) / masked.size
         self.avg_frame = np.zeros(self.motion_frame_size, np.float32)
         self.motion_frame_count = 0
         # Gate OFF (#373): never calibrating, and detect() returns a
@@ -96,6 +127,13 @@ class MotionDetector:
         self.calibrating_frames = 0
         self.forced_calibration_exits = 0
         self._forced_exit_warned = False
+        #: Forced exits with no natural calibration in between, and
+        #: whether the gate has given up on modelling this scene.
+        self.consecutive_forced_exits = 0
+        self.latched_open = False
+        #: Per-frame edge for metrics: did the deadline fire THIS frame?
+        #: Cumulative counters must not be fed to a Prometheus ``inc``.
+        self.forced_exit_this_frame = False
         self.blur_radius = blur_radius
         self.interpolation = interpolation
         self.contrast_values = np.zeros((contrast_frame_history, 2), np.uint8)
@@ -124,6 +162,12 @@ class MotionDetector:
         self.calibrating = False
         self.calibrating_frames = 0
         self.forced_calibration_exits += 1
+        self.consecutive_forced_exits += 1
+        self.forced_exit_this_frame = True
+        cap = self.config.calibration_max_forced_exits
+        if cap > 0 and self.consecutive_forced_exits >= cap:
+            self._latch_open(limit)
+            return
         msg = (
             "motion gate %s: calibration did not settle after %d frames "
             "— forcing the gate OPEN so detection runs (forced exits so "
@@ -141,9 +185,36 @@ class MotionDetector:
             self._forced_exit_warned = True
             log.warning(msg, *args)
 
+    def _latch_open(self, limit: int) -> None:
+        """Give up gating a scene that has no static background.
+
+        ``calibration_max_forced_exits`` consecutive deadline exits mean
+        the quiet frame that clears calibration is never coming — the
+        background model has nothing stable to lock onto. Re-entering
+        calibration only to force out again throttles the detector to
+        one frame in ``calibration_max_frames``, forever. So the gate
+        stays open until the scene proves itself modelable again; a
+        genuinely quiet frame releases the latch (a PTZ that finished
+        its pan starts being gated again, with no operator action).
+        """
+        self.latched_open = True
+        log.warning(
+            "motion gate %s: NO STATIC BACKGROUND — %d consecutive "
+            "calibration deadlines of %d frames each. This scene cannot "
+            "be modelled by the motion gate, so it is LATCHED OPEN: the "
+            "detector now runs on every frame (higher CPU on this "
+            "camera, but it was previously seeing ~1 frame in %d). "
+            "Usual causes: a PTZ mid-pan, a moving/handheld source, or "
+            "a camera shaking in wind. If that is permanent, set "
+            "DETECT_MOTION_ENABLED=false. The latch releases by itself "
+            "if the scene ever goes quiet.",
+            self.label or "?", self.consecutive_forced_exits, limit, limit,
+        )
+
     def detect(self, luma: np.ndarray) -> list[tuple[int, int, int, int]]:
         """Return motion boxes (x1, y1, x2, y2) in full-frame coordinates."""
         motion_boxes: list[tuple[int, int, int, int]] = []
+        self.forced_exit_this_frame = False
         if not self.config.enabled:
             # Gate OFF: the whole frame is "in motion" every frame, so
             # region selection scans the full frame and the detector
@@ -180,6 +251,9 @@ class MotionDetector:
         frame_delta = cv2.absdiff(resized, cv2.convertScaleAbs(self.avg_frame))
         thresh = cv2.threshold(frame_delta, self.config.threshold, 255, cv2.THRESH_BINARY)[1]
         thresh_dilated = cv2.dilate(thresh, None, iterations=1)
+        if self.mask_keep is not None:
+            # The operator's mask: motion under it is not motion.
+            thresh_dilated = cv2.bitwise_and(thresh_dilated, self.mask_keep)
         contours = _grab_contours(
             cv2.findContours(thresh_dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         )
@@ -208,21 +282,33 @@ class MotionDetector:
             self.config.skip_motion_threshold is not None
             and pct_motion > self.config.skip_motion_threshold
         ):
-            self.calibrating = True
-            # #373: dropped frames still count toward the deadline — a
-            # scene permanently above skip_motion_threshold must not
-            # wedge the gate shut forever either.
-            self._enforce_calibration_deadline()
+            if not self.latched_open:
+                # A latched-open gate must not be dragged back into
+                # calibration by this path — that is the duty cycle the
+                # latch exists to break. The frame is still dropped:
+                # "too noisy to use" is independent of gating.
+                self.calibrating = True
+                # #373: dropped frames still count toward the deadline — a
+                # scene permanently above skip_motion_threshold must not
+                # wedge the gate shut forever either.
+                self._enforce_calibration_deadline()
             return []
 
-        # Calibrated once motion is small and few contours remain.
+        # Calibrated once motion is small and few contours remain. A
+        # genuinely quiet frame is also the evidence that releases the
+        # latch: the scene does have a stable background after all.
         if pct_motion < 0.05 and len(motion_boxes) <= 4:
             self.calibrating = False
+            self.consecutive_forced_exits = 0
+            self.latched_open = False
 
         # Lightning/IR/whole-frame change: recalibrate. This does NOT stop
         # detection here; it flips is_calibrating() so the pipeline stops sending
         # regions to the detector while recording continues.
-        if self.calibrating or pct_motion > self.config.lightning_threshold:
+        # A latched-open gate ignores both re-trip paths by design.
+        if not self.latched_open and (
+            self.calibrating or pct_motion > self.config.lightning_threshold
+        ):
             self.calibrating = True
 
         # #373: bound the episode — after calibration_max_frames of

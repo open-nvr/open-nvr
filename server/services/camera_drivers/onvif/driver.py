@@ -996,10 +996,17 @@ class OnvifDriver(CameraDriver):
             ) or re.search(r'Value="(true|false)"', block)
             state = "active" if (val and val.group(1).lower() == "true") else "inactive"
             etype = (topic or "event").split("/")[-1].split(":")[-1] or "event"
+            # Which rule fired (the operator's name for the line or field),
+            # from the Source items; vendors spell the key differently.
+            rule = _first(
+                r'<(?:\w+:)?Source\b.*?Name="(?:Rule|RuleName|rule)"[^>]*Value="([^"]*)"',
+                block,
+            )
             yield {
                 "event_type": etype,
                 "event_state": state,
                 "description": topic,
+                "rule": rule or None,
             }
 
     async def subscribe_events(self):

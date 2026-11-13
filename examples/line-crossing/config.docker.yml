@@ -18,51 +18,59 @@ nats_url: "nats://nats:4222"
 # The standard stack runs NATS with ``--auth INTERNAL_API_KEY``.
 nats_token: "${INTERNAL_API_KEY}"
 
-# IMPORTANT: line-crossing needs per-object identity — detections must
-# carry a ``track_id`` (chain the ``bytetrack`` adapter after your
-# detector, or use a detector that tracks natively).
-subject_pattern: "opennvr.inference.>"
+# Line-crossing needs per-object identity — a ``track_id`` on every
+# detection. Tier-0, the stack's always-on detector, tracks natively and
+# publishes on ``opennvr.inference.tier0.>``; the SDK bridges those events
+# into the app when ``consume_tier0`` is on. Zero extra inference. To use
+# a chained bytetrack adapter instead, subscribe to ``opennvr.inference.>``
+# and set consume_tier0: false.
+subject_pattern: "opennvr.inference.tier0.>"
+consume_tier0: true
 
-# ── What to count — EDIT for your scene ────────────────────────────
+# ── What to count — edit in the App Catalog (applies live) ─────────
 watch_labels:
   - "person"
 track_ttl_seconds: 30
 
+# ── Directions, alerts, filters — all editable live in the catalog ──
+# A→B is the arrow you draw; call the two directions what they mean here.
+label_a_to_b: "in"
+label_b_to_a: "out"
+# every = alert on each crossing (perimeter) · threshold = alert when
+# today's count reaches passthrough_threshold · off = count only.
+alert_mode: "every"
+alert_severity: "high"
+# Least seconds between two alerts per camera; crossings inside the
+# window are counted, not alerted — a group at the gate is one alert.
+alert_cooldown_seconds: 0
+# Alerts only inside this daily window (counting runs all day). Leave the
+# values empty for always. Cross-midnight ("22:00" → "06:00") is fine.
+active_hours:
+  start: ""
+  end: ""
+passthrough_threshold: 0
+min_track_age_seconds: 0
+min_bbox_height: 0
+daily_reset_hour: 0
+attach_snapshot: true
+# Counts ride the platform's footfall history (90 days, hourly). Turn off
+# if the occupancy app has an entry line on the same camera.
+publish_footfall: true
+footfall_period_seconds: 60
+
 # ── Alert delivery ─────────────────────────────────────────────────
-# Alerts always go to stdout (``docker compose logs line-crossing``).
 webhook_url: null
-# Fan alerts back onto the bus so the operator-UI alerts inbox and any
-# other subscriber pick them up without per-app webhooks.
 nats_alerts_url: "nats://nats:4222"
 nats_alerts_token: "${INTERNAL_API_KEY}"
 
-# ── Cameras / tripwires — EDIT: camera_id must match KAI-C's event
-# subjects; line.a / line.b are pixel coords, orientation A→B defines
-# the counted direction ("a_to_b", "b_to_a", or "both"). ─────────────
-cameras:
-  - camera_id: "cam-1"
-    frame_width: 1920
-    frame_height: 1080
-    wire_name: "tripwire"
-    line:
-      a: [0, 540]
-      b: [1920, 540]
-      count_direction: "both"
+# ── Cameras ────────────────────────────────────────────────────────
+# Empty: the app works on the cameras selected for it in the App Catalog
+# (Configure → Cameras), follows changes live, and takes each camera's
+# line from the catalog's tripwire editor. None selected means
+# nothing counted and no compute. Listing cameras here pins the set
+# (standalone use).
+cameras: []
 
-# ── App contract (spec §03) ─────────────────────────────────────────
-# NOTE: unlike loitering-detection, this app's AppConfig does not parse
-# contract_port / contract_bind_host / contract_host / opennvr_url, so
-# no /health /manifest /state server is started and no registry
-# self-registration happens. The OPENNVR_INTERNAL_API_KEY / OPENNVR_URL
-# environment variables set by the overlay are therefore inert for this
-# app today; the overlay still sets them so the app picks them up the
-# moment contract support lands here.
-
-# ── App contract (spec §03) — serves /health /manifest /state on
-# :9202; self-registers with the app registry so the catalog shows a
-# live status dot and the OpenNVR Agent's app door lists this app as a
-# conversational skill. The registration/config-poll token rides the
-# OPENNVR_INTERNAL_API_KEY env var the overlay sets.
 contract_port: 9202
 contract_host: "line-crossing"
 opennvr_url: "http://opennvr-core:8000"

@@ -1,0 +1,21 @@
+# Rendered to /app/config/config.yml by the config-init container.
+webhook_url: null
+nats_alerts_url: "nats://nats:4222"
+nats_alerts_token: "${INTERNAL_API_KEY}"
+poll_interval_seconds: 5
+confirm_seconds: 10
+cooldown_seconds: 300
+rebaseline_seconds: 600
+blur_ratio: 0.3
+dark_fraction: 0.85
+uniform_std: 6
+moved_correlation: 0.45
+freeze_polls: 6
+frozen_mad: 0.2
+alert_severity: "high"
+attach_snapshot: true
+cameras: []
+contract_port: 9212
+contract_bind_host: "0.0.0.0"
+contract_host: "camera-tamper"   # the compose service name
+opennvr_url: "http://opennvr-core:8000"

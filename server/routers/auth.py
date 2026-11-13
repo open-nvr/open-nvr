@@ -37,7 +37,6 @@ from core.auth import (
     get_current_active_user,
     get_mfa_provisioning_uri,
     get_password_hash,
-    verify_totp_code,
 )
 from core.config import settings
 from core.database import get_db
@@ -55,8 +54,10 @@ from schemas import (
     UserRegister,
     UserResponse,
 )
+from services import mfa_service
 from services.audit_service import write_audit_log
 from services.first_time_setup_service import (
+    restore as _restore_setup_token,
     verify_and_consume as _verify_setup_token,
 )
 from services.user_service import UserService
@@ -67,21 +68,29 @@ router = APIRouter(prefix="/auth", tags=["authentication"])
 @router.post("/check-setup", response_model=FirstTimeSetupCheckResponse)
 async def check_first_time_setup(db: Session = Depends(get_db)):
     """Check if first-time setup is required for admin user."""
-    admin_user = (
-        db.query(User).filter(User.username == settings.default_admin_username).first()
+    # Report the superuser actually waiting for setup rather than assuming it
+    # is named DEFAULT_ADMIN_USERNAME: the setup page submits this name, and
+    # a name with no pending account can never be activated (#632).
+    pending = (
+        db.query(User)
+        .filter(User.is_superuser.is_(True), User.password_set.is_(False))
+        .order_by(User.id)
+        .first()
     )
+    if pending:
+        return FirstTimeSetupCheckResponse(
+            setup_required=True, username=pending.username
+        )
 
-    if not admin_user:
+    # No users at all: startup seeding has not created the admin yet.
+    if db.query(User.id).first() is None:
         return FirstTimeSetupCheckResponse(
             setup_required=True, username=settings.default_admin_username
         )
 
-    if not admin_user.password_set:
-        return FirstTimeSetupCheckResponse(
-            setup_required=True, username=admin_user.username
-        )
-
-    return FirstTimeSetupCheckResponse(setup_required=False)
+    return FirstTimeSetupCheckResponse(
+        setup_required=False,
+        registration_open=bool(settings.public_registration_enabled))
 
 
 @router.post("/first-time-setup", response_model=FirstTimeSetupResponse)
@@ -113,33 +122,40 @@ async def first_time_setup(
             detail="First-time setup token missing or invalid.",
         )
 
-    # Find user that needs setup
-    user = (
-        db.query(User)
-        .filter(User.username == payload.username, User.password_set == False)
-        .first()
-    )
-
-    if not user:
-        raise HTTPException(
-            status_code=400, detail="User not found or setup already completed"
+    # The token is spent from here on. If anything below fails, put it back:
+    # otherwise a wrong username or a rejected password leaves every retry
+    # failing with "token missing or invalid" until a restart (issue #632).
+    try:
+        # Find user that needs setup
+        user = (
+            db.query(User)
+            .filter(User.username == payload.username, User.password_set == False)
+            .first()
         )
 
-    # Enforce password policy
-    UserService._enforce_password_policy(
-        db, user.username, user.email, payload.password
-    )
+        if not user:
+            raise HTTPException(
+                status_code=400, detail="User not found or setup already completed"
+            )
 
-    # Set password
-    user.hashed_password = get_password_hash(payload.password)
-    user.password_set = True
+        # Enforce password policy
+        UserService._enforce_password_policy(
+            db, user.username, user.email, payload.password
+        )
 
-    # Generate MFA secret
-    mfa_secret = generate_mfa_secret()
-    user.mfa_secret = mfa_secret
-    user.mfa_enabled = True
+        # Set password
+        user.hashed_password = get_password_hash(payload.password)
+        user.password_set = True
 
-    db.commit()
+        # Generate MFA secret
+        mfa_secret = generate_mfa_secret()
+        mfa_service.enrol_confirmed(db, user, mfa_secret)
+
+        db.commit()
+    except Exception:
+        db.rollback()
+        _restore_setup_token(payload.setup_token)
+        raise
 
     # Generate QR code URI for MFA setup
     mfa_qr_uri = get_mfa_provisioning_uri(user.username, mfa_secret)
@@ -165,7 +181,14 @@ async def first_time_setup(
 async def register_user(
     payload: UserRegister, db: Session = Depends(get_db), request: Request = None
 ):
-    """Public registration for viewer role by default."""
+    """Self-service registration (viewer role). Off unless the operator
+    opted in with ``PUBLIC_REGISTRATION_ENABLED`` — accounts on an NVR
+    are otherwise the administrator's to create (``POST /users``)."""
+    if not settings.public_registration_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail="Self-service registration is disabled on this server; "
+                   "ask an administrator for an account")
     viewer = db.query(Role).filter(Role.name == "viewer").first()
     if not viewer:
         raise HTTPException(status_code=400, detail="Viewer role is not set up")
@@ -246,6 +269,28 @@ def _enroll_device(db, request, response, user_id: int | None) -> str | None:
         return None
 
 
+def _refuse_if_local_login_off(db: Session, user: User | None) -> None:
+    """When the site signs in through its identity provider only, a
+    password login is refused — except for superusers, so a broken
+    provider can never lock the operators out."""
+    if user is None or user.is_superuser:
+        return
+    from services import oidc
+
+    offer = oidc.login_offer(db)
+    if offer["enabled"] and not offer["allow_local_login"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Password sign-in is off for this site; use '{offer['label']}'.",
+        )
+
+
+def _token_claims(user: User) -> dict:
+    """What every token carries: who, and the password generation it was
+    issued under (a reset bumps it and ends the old sessions)."""
+    return {"sub": user.username, "ver": int(user.token_version or 0)}
+
+
 def _mfa_login_required(db: Session, user: User) -> bool:
     """Whether this login must present a TOTP code.
 
@@ -255,7 +300,7 @@ def _mfa_login_required(db: Session, user: User) -> bool:
     flag to False so the client shows the MFA-setup wall after this password
     login; /auth/mfa/verify turns it back on once enrollment completes.
     """
-    if user.mfa_enabled and not user.mfa_secret:
+    if user.mfa_enabled and not mfa_service.has_active_factor(db, user):
         user.mfa_enabled = False
         db.add(user)
         db.commit()
@@ -283,6 +328,7 @@ async def login_for_access_token(
 
     # Check if user needs first-time setup
     user_check = db.query(User).filter(User.username == form_data.username).first()
+    _refuse_if_local_login_off(db, user_check)
     if user_check and not user_check.password_set:
         auth_logger.log_action(
             "auth.setup_required",
@@ -415,9 +461,9 @@ async def login_for_access_token(
 
     access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)
     access_token = create_access_token(
-        data={"sub": user.username}, expires_delta=access_token_expires
+        data=_token_claims(user), expires_delta=access_token_expires
     )
-    refresh_token = create_refresh_token(data={"sub": user.username})
+    refresh_token = create_refresh_token(data=_token_claims(user))
 
     auth_logger.log_action(
         "auth.login_success",
@@ -472,6 +518,7 @@ async def login_with_json(
     user_check = (
         db.query(User).filter(User.username == user_credentials.username).first()
     )
+    _refuse_if_local_login_off(db, user_check)
     if user_check and not user_check.password_set:
         raise HTTPException(
             status_code=403,
@@ -507,9 +554,20 @@ async def login_with_json(
         )
 
     if _mfa_login_required(db, user):
-        if not user_credentials.code or not verify_totp_code(
-            user.mfa_secret, user_credentials.code
-        ):
+        used = mfa_service.verify_login_code(db, user, user_credentials.code)
+        if used == "recovery":
+            try:
+                write_audit_log(
+                    db, action="mfa.recovery_code_used", user_id=user.id, entity_type="user",
+                    entity_id=user.id,
+                    details={"username": user.username,
+                             "remaining": mfa_service.recovery_codes_remaining(db, user)},
+                    ip=request.client.host if request and request.client else None,
+                    user_agent=request.headers.get("user-agent") if request else None,
+                )
+            except Exception as e:
+                auth_logger.error(f"Failed to write audit log: {e}", exc_info=True)
+        if not used:
             # Handle MFA failure as a failed login attempt
             user.failed_login_attempts += 1
 
@@ -560,9 +618,9 @@ async def login_with_json(
 
     access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)
     access_token = create_access_token(
-        data={"sub": user.username}, expires_delta=access_token_expires
+        data=_token_claims(user), expires_delta=access_token_expires
     )
-    refresh_token = create_refresh_token(data={"sub": user.username})
+    refresh_token = create_refresh_token(data=_token_claims(user))
     try:
         write_audit_log(
             db,
@@ -595,11 +653,21 @@ async def login_with_json(
 async def mfa_setup(
     current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)
 ):
-    """Generate and return provisioning URI + secret for TOTP; store secret disabled until verify."""
-    secret = generate_mfa_secret()
-    current_user.mfa_secret = secret
-    current_user.mfa_enabled = False
-    db.commit()
+    """Generate and return provisioning URI + secret for TOTP; store secret disabled until verify.
+
+    Only for an account that has not enrolled yet (the enrolment wall). On an
+    enrolled account this would replace the authenticator and switch MFA off
+    on the strength of a session alone, so it is refused.
+    """
+    if mfa_service.has_active_factor(db, current_user):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Two-factor sign-in is already set up for this account. "
+                   "Add another authenticator under Settings > Two-factor sign-in.",
+        )
+    # The same pending enrolment comes back until it expires, so reloading the
+    # enrolment screen does not invalidate a QR code already scanned.
+    _factor, secret = mfa_service.begin_totp(db, current_user)
     otpauth_url = get_mfa_provisioning_uri(
         current_user.username, secret, issuer="OpenNVR Surveillance"
     )
@@ -613,13 +681,14 @@ async def mfa_verify(
     db: Session = Depends(get_db),
     request: Request = None,
 ):
-    """Verify user-provided TOTP code to enable MFA."""
-    if not current_user.mfa_secret:
+    """Verify a code from the pending enrolment to turn it into the account's
+    authenticator (the enrolment wall's second step)."""
+    if not mfa_service.factors(db, current_user, include_pending=True):
         raise HTTPException(status_code=400, detail="MFA not initialized")
-    if not verify_totp_code(current_user.mfa_secret, payload.code):
+    first = not mfa_service.has_active_factor(db, current_user)
+    if mfa_service.confirm_totp(db, current_user, payload.code) is None:
         raise HTTPException(status_code=400, detail="Invalid code")
-    current_user.mfa_enabled = True
-    db.commit()
+    codes = mfa_service.generate_recovery_codes(db, current_user) if first else None
     try:
         write_audit_log(
             db,
@@ -633,33 +702,19 @@ async def mfa_verify(
         )
     except Exception:
         pass
-    return {"message": "MFA enabled"}
+    # Recovery codes: shown this once, for signing in without the phone.
+    return {"message": "MFA enabled", "recovery_codes": codes}
 
 
 @router.post("/mfa/disable")
-async def mfa_disable(
-    current_user: User = Depends(get_current_active_user),
-    db: Session = Depends(get_db),
-    request: Request = None,
-):
-    """Disable MFA for current user."""
-    current_user.mfa_enabled = False
-    current_user.mfa_secret = None
-    db.commit()
-    try:
-        write_audit_log(
-            db,
-            action="mfa.disable",
-            user_id=current_user.id,
-            entity_type="user",
-            entity_id=current_user.id,
-            details={"username": current_user.username},
-            ip=request.client.host if request and request.client else None,
-            user_agent=request.headers.get("user-agent") if request else None,
-        )
-    except Exception:
-        pass
-    return {"message": "MFA disabled"}
+async def mfa_disable(current_user: User = Depends(get_current_active_user)):
+    """Retired. MFA is mandatory, and turning it off on a session alone undid
+    the second factor; an administrator resets a user's two-factor sign-in."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="Two-factor sign-in can no longer be switched off. "
+               "Ask an administrator to reset it.",
+    )
 
 
 @router.post("/refresh", response_model=Token)
@@ -688,9 +743,11 @@ async def refresh_access_token(
     user = db.query(User).filter(User.username == username, User.is_active == True).first()
     if not user:
         raise credentials_exception
+    if int(payload.get("ver") or 0) != int(user.token_version or 0):
+        raise credentials_exception                   # password changed since (no ver = 0): sign in again
 
-    new_access_token = create_access_token(data={"sub": user.username})
-    new_refresh_token = create_refresh_token(data={"sub": user.username})
+    new_access_token = create_access_token(data=_token_claims(user))
+    new_refresh_token = create_refresh_token(data=_token_claims(user))
     return {
         "access_token": new_access_token,
         "refresh_token": new_refresh_token,

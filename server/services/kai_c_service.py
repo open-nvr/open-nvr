@@ -481,7 +481,9 @@ class KaiCService:
         # KaiCService's import graph at module import time.
         from core.config import settings
 
-        if not settings.inference_use_mediamtx_tap:
+        # A camera with no URL of its own (a webcam publishing into its
+        # path) can only be read through the tap, whatever the setting.
+        if not settings.inference_use_mediamtx_tap and fallback_url:
             return fallback_url
 
         base = settings.mediamtx_rtsp_url
@@ -569,9 +571,11 @@ class KaiCService:
             #    internal key. KAI-C applies sovereignty/fingerprint
             #    governance AND publishes the result on NATS, so the
             #    subscriber example apps (occupancy / loitering /
-            #    line-crossing / abandoned-object / footage-search) see
-            #    the server's own camera inference without a separate
-            #    producer app running. Returns the adapter body directly.
+            #    line-crossing / abandoned-object) see the server's own
+            #    camera inference without a separate producer app
+            #    running. Returns the adapter body directly.
+            #    (footage-search used to be in that list; since 2.0.0 it
+            #    subscribes to nothing and reads the event store.)
             #
             #  v1 (default): same contract body → POST /infer/local
             #    (legacy passthrough; no NATS/governance). Safe when the

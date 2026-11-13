@@ -225,3 +225,17 @@ def test_resolver_follows_a_removed_camera_too():
     rt._sync_camera_roster()
     assert rt.tools._resolve_camera("cam2") == "cam2"   # unknown again
     assert rt.tools._resolve_camera("cam1") == "1"      # survivor unaffected
+
+
+def test_pipeline_camera_id_is_cam_plus_server_id_not_the_bare_id():
+    """detect-pipeline knows the camera as cam<server id> (its bus subjects,
+    metrics, /best_frame, /latest_frame). Resolving to the bare server id
+    made every pipeline fetch a 404 and every live look a 6 s RTSP grab."""
+    rt = _runtime()
+    assert rt.tools._pipeline_camera("cam1") == "cam1"           # no server id yet: the handle
+    rt._register_opennvr_cameras([_nvr_spec("cam1", 1), _nvr_spec("front_door", 7)])
+    rt._sync_camera_roster()
+    assert rt.tools._pipeline_camera("cam1") == "cam1"
+    assert rt.tools._pipeline_camera("front_door") == "cam7"
+    assert rt.tools._resolve_camera("front_door") == "7"         # the platform's own id, unchanged
+

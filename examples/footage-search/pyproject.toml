@@ -1,14 +1,14 @@
 [project]
 name = "opennvr-example-footage-search"
-version = "1.0.0"
-description = "OpenNVR footage-search example app (natural-language search over recorded inference history)"
+version = "2.0.0"
+description = "OpenNVR footage-search example app (natural-language search over recorded footage)"
 requires-python = ">=3.11"
 license = { text = "AGPL-3.0" }
 
-# The SDK owns the runtime stack (nats-py subscribe loop, PyYAML
-# config, httpx — which the optional Ollama query parser also rides).
-# SQLite is in the stdlib. No kai-c imports — the event schema is
-# documented JSON.
+# The SDK owns the runtime stack: the contract server, the OpenNVR
+# client this app searches through, PyYAML config, and httpx (which
+# the optional Ollama query parser also rides). No database of its
+# own any more — see the README.
 dependencies = [
     "opennvr-app-sdk",
 ]

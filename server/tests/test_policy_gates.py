@@ -11,6 +11,8 @@ and ``server/`` is inserted on sys.path.
 """
 from __future__ import annotations
 
+import pathlib
+
 import os
 import secrets
 import sys
@@ -246,3 +248,19 @@ def test_refusal_fail_closed_when_audit_raises(monkeypatch):
     with pytest.raises(HTTPException) as ei2:
         policy.require_ai_sovereignty_allowed(_FakeRequest())
     assert ei2.value.status_code == status.HTTP_403_FORBIDDEN
+
+
+def test_the_example_files_own_secrets_are_placeholders():
+    """A .env copied from .env.example and never edited must not boot:
+    those values are public (#686)."""
+    import re
+
+    from core.secret_policy import PLACEHOLDER_FRAGMENTS
+
+    example = (pathlib.Path(__file__).resolve().parents[2] / ".env.example").read_text()
+    for key in ("POSTGRES_PASSWORD", "SECRET_KEY", "INTERNAL_API_KEY", "MEDIAMTX_SECRET",
+                "CREDENTIAL_ENCRYPTION_KEY"):
+        m = re.search(rf"^{key}=([^#\n]+)", example, re.M)
+        assert m, key
+        value = m.group(1).strip().lower()
+        assert any(f in value for f in PLACEHOLDER_FRAGMENTS), f"{key}'s example value would pass the check"

@@ -144,7 +144,10 @@ services:
       # Host-loopback only (host-side debugging). See V-015.
       # RTSPS stays published by default: it is user-facing (VLC / ffmpeg
       # from the host, and MEDIAMTX_EXTERNAL_RTSPS_URL below points at it).
-      - "127.0.0.1:8322:8322" # RTSPS (for VLC / ffmpeg from the host)
+      # RTSPS_BIND_HOST=0.0.0.0 (or a LAN IP) lets LAN clients such as Home
+      # Assistant's stream component pull RTSPS; see docs/HOME_ASSISTANT.md.
+      # Every stream still needs a signed token. Default: loopback only.
+      - "${RTSPS_BIND_HOST:-127.0.0.1}:${MEDIAMTX_HOST_RTSPS_PORT:-8322}:8322" # RTSPS (for VLC / ffmpeg from the host)
       # HLS (8888), WHEP signalling (8889), playback (9996) and the admin
       # API (9997) are NOT published by default. Browsers reach the first
       # three through nginx (/hls/, /webrtc/, /playback/) and the container
@@ -171,11 +174,17 @@ services:
       - TZ=${TZ:-UTC}
       - MEDIAMTX_SECRET=${MEDIAMTX_SECRET}
       - BACKEND_HOST=${BACKEND_HOST:-opennvr_core}
-      - MTX_AUTHJWTJWKS=http://opennvr_core:8000/.well-known/jwks.json
+      # Same host/port as BACKEND_HOST above, deliberately: both address the
+      # backend container, and if they can disagree they eventually will.
+      # A wrong host here is near-invisible -- MediaMTX simply cannot
+      # validate stream JWTs, so every authenticated RTSP read 401s and
+      # Tier-0 reports only "source unavailable".
+      - MTX_AUTHJWTJWKS=http://${BACKEND_HOST:-opennvr_core}:${BACKEND_PORT:-8000}/.well-known/jwks.json
       - BACKEND_PORT=${BACKEND_PORT:-8000}
       # ICE candidate hosts advertised in the SDP answer (so the browser can
-      # reach UDP/8189). Set by start.sh from the detected topology; empty =
-      # mediamtx auto-detects (fine on single-NIC, breaks behind NAT/multi-NIC).
+      # reach UDP/8189). Set by start.sh from the detected topology. Empty =
+      # mediamtx sees only its bridge addresses, which a LAN browser can't
+      # reach; core pushes its own list at runtime (see opennvr_core below).
       - MTX_WEBRTCADDITIONALHOSTS=${MEDIAMTX_WEBRTC_HOSTS:-}
       # ICE media listen port. Overridable because some Windows hosts have
       # 8189 inside a WinNAT/Hyper-V reserved range (netsh interface ipv4
@@ -187,8 +196,25 @@ services:
       - MTX_WEBRTCLOCALTCPADDRESS=:${WEBRTC_ICE_PORT:-8189}
     networks:
       - opennvr_internal
+      # Apps that WATCH (a gesture, a fall, a scan sweep) read the
+      # stream itself, and an app cannot reach a network it is not on.
+      # Reachability is not permission: every RTSP connection still
+      # needs a MediaMTX JWT, and an app gets one only from
+      # GET /internal/app/cameras/{id}/stream, which mints a token
+      # scoped to that one camera's path — so being on this network
+      # lets an app read the cameras it was assigned, and no others.
+      - opennvr_apps
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1:9997/v3/paths/list"]
+      # 401 counts as healthy. The Control API requires a JWT now
+      # (mediamtx.docker.yml: authJWTExclude is empty), and this probe
+      # cannot hold one: the signing key is written by core at runtime,
+      # and core waits on THIS healthcheck via depends_on — while
+      # mediamtx fetches its JWKS from core. A probe that demanded a
+      # valid token would deadlock the stack on first boot. What is
+      # being asserted here is the same thing it always was: the
+      # listener is up and answering. Same reasoning, in the same words,
+      # as services/mediamtx_client.check_available().
+      test: ["CMD-SHELL", "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9997/v3/paths/list | grep -qE '200|401'"]
       interval: 30s
       timeout: 10s
       start_period: 10s
@@ -203,15 +229,54 @@ services:
     container_name: opennvr_nats
     logging: *svc-logs
     restart: unless-stopped
-    command:
-      - --name
-      - opennvr-nats
-      - --auth
-      - ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set in .env for the NATS event bus}
-      - --http_port
-      - "8222"
+    # nats/nats.conf: the same token auth as before, plus the leaf-node
+    # port the apps bus (nats-apps, below) connects through.
+    command: ["-c", "/etc/nats/nats.conf"]
+    environment:
+      # Quoted ON PURPOSE. nats-server expands ``token: $INTERNAL_API_KEY``
+      # by parsing the variable's value as a config literal: a key that
+      # starts with a digit (any hex or base64 secret, most of the time)
+      # parses as a number and the server refuses to start — "variable
+      # reference for 'INTERNAL_API_KEY' could not be parsed". Wrapping
+      # the value in quotes makes it a string; clients present the bare
+      # key as before. nats-apps renders the same key into a URL itself
+      # and must keep receiving it bare.
+      - INTERNAL_API_KEY="${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set in .env for the NATS event bus}"
+    volumes:
+      - ./nats/nats.conf:/etc/nats/nats.conf:ro
     networks:
       - opennvr_internal
+      - opennvr_apps
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8222/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  # The apps bus — a NATS leaf server every SDK app joins as ITS OWN
+  # user (user = app id, password = the app's key) under permissions
+  # derived from its manifest. Core writes the users file to the shared
+  # volume; the entrypoint reloads the server when it changes. Apps never
+  # hold the site token. See docs/APP_CREDENTIALS.md.
+  nats-apps:
+    image: nats:2-alpine
+    container_name: opennvr_nats_apps
+    logging: *svc-logs
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/etc/nats/apps-entrypoint.sh"]
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+    volumes:
+      - ./nats/apps.conf:/etc/nats/apps.conf:ro
+      - ./nats/apps-entrypoint.sh:/etc/nats/apps-entrypoint.sh:ro
+      - opennvr_nats_auth:/var/lib/opennvr/nats
+    depends_on:
+      nats:
+        condition: service_healthy
+    networks:
+      - opennvr_internal
+      - opennvr_apps
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8222/healthz"]
       interval: 30s
@@ -223,10 +288,10 @@ services:
   # adapter reads (a thin copier, so first boot needs no apt/pip). Bring your own
   # model via a custom weights image — see examples/yolov8-weights/README.md.
   yolov8-weights-init:
-    # A ~20 MB image containing just /yolov8n.onnx (built by
+    # A ~20 MB image containing just /yolo26n.onnx (built by
     # build-yolov8-weights.yml). Override YOLOV8_WEIGHTS_IMAGE in .env for a
     # custom model.
-    image: ${YOLOV8_WEIGHTS_IMAGE:-ghcr.io/open-nvr/yolov8-weights:v8.3.0}
+    image: ${YOLOV8_WEIGHTS_IMAGE:-ghcr.io/open-nvr/yolov8-weights:v8.4.0-yolo26n}
     pull_policy: missing
     container_name: opennvr_yolov8_weights_init
     logging: *svc-logs
@@ -243,13 +308,13 @@ services:
     entrypoint: ["sh", "-ec"]
     command:
       - |
-        WEIGHTS=/weights/yolov8n.onnx
+        WEIGHTS=/weights/yolo26n.onnx
         if [ -s "$$WEIGHTS" ]; then
-          echo "yolov8n.onnx already present at $$WEIGHTS (size: $$(wc -c < $$WEIGHTS) bytes); skipping."
+          echo "yolo26n.onnx already present at $$WEIGHTS (size: $$(wc -c < $$WEIGHTS) bytes); skipping."
           exit 0
         fi
-        echo "Copying pre-baked yolov8n.onnx into volume..."
-        cp /yolov8n.onnx "$$WEIGHTS"
+        echo "Copying pre-baked yolo26n.onnx into volume..."
+        cp /yolo26n.onnx "$$WEIGHTS"
         echo "Wrote $$(wc -c < $$WEIGHTS) bytes to $$WEIGHTS."
     volumes:
       - opennvr_yolov8_weights:/weights
@@ -274,6 +339,10 @@ services:
       # So the weights volume MUST be mounted there, otherwise the model
       # loads to FileNotFoundError and every /infer returns 503.
       - MODEL_WEIGHTS_DIR=/app/model_weights
+      # The file the weights-init wrote. Adapter release 0.1.7+ reads this;
+      # unset, the adapter looks for yolov8n.onnx (an older volume still
+      # has one, which is why an upgrade never breaks).
+      - YOLOV8_WEIGHTS_FILE=yolo26n.onnx
     volumes:
       - opennvr_yolov8_weights:/app/model_weights:ro
     networks:
@@ -315,7 +384,7 @@ services:
         condition: service_healthy
       nats:
         condition: service_healthy
-      # The default detector loads the same yolov8n.onnx the yolov8-adapter uses.
+      # The default detector loads the same yolo26n.onnx the yolov8-adapter uses.
       yolov8-weights-init:
         condition: service_completed_successfully
     environment:
@@ -326,7 +395,7 @@ services:
       # Default detector: YOLOv8 ONNX via cv2.dnn (falls back to no-op if the
       # model is missing — the container never crash-loops).
       - DETECT_DETECTOR=${DETECT_DETECTOR:-onnx}
-      - DETECT_ONNX_MODEL=/app/model_weights/yolov8n.onnx
+      - DETECT_ONNX_MODEL=/app/model_weights/yolo26n.onnx
       # Only tunable with a dynamic-axes export; the shipped model is fixed
       # at 640 and the service adapts (with a warning) if this disagrees.
       - DETECT_ONNX_INPUT=${DETECT_ONNX_INPUT:-640}
@@ -335,6 +404,7 @@ services:
       # onnxruntime wheel in a derived image) — see detect-pipeline/README.md.
       - DETECT_ONNX_BACKEND=${DETECT_ONNX_BACKEND:-auto}
       - DETECT_ONNX_PROVIDERS=${DETECT_ONNX_PROVIDERS:-}
+      - DETECT_ONNX_PROVIDER_OPTIONS=${DETECT_ONNX_PROVIDER_OPTIONS:-}
       - DETECT_HWACCEL=${DETECT_HWACCEL:-cpu}
       # Decode-side frame skip (-skip_frame): nonref (default — provably
       # lossless, drops only frames nothing references) | bidir | nokey
@@ -370,6 +440,25 @@ services:
       # detector reaction at all times).
       - DETECT_DECODE_IDLE=${DETECT_DECODE_IDLE:-nokey}
       - DETECT_DECODE_IDLE_AFTER=${DETECT_DECODE_IDLE_AFTER:-60}
+      # Evidence from the MAIN stream while detecting on the substream: a
+      # second decode that runs only while something is in front of the
+      # camera, so crops/scenes/plate candidates are full-resolution. See
+      # .env.example and detect-pipeline/README.md ("The substream does not
+      # cost you the evidence"). DETECT_EVIDENCE_STREAM=detect turns it off.
+      - DETECT_EVIDENCE_STREAM=${DETECT_EVIDENCE_STREAM:-main}
+      - DETECT_EVIDENCE_FPS=${DETECT_EVIDENCE_FPS:-5}
+      - DETECT_EVIDENCE_IDLE_AFTER=${DETECT_EVIDENCE_IDLE_AFTER:-15}
+      - DETECT_EVIDENCE_MAX_SKEW_S=${DETECT_EVIDENCE_MAX_SKEW_S:-0.35}
+      - DETECT_EVIDENCE_DECODE=${DETECT_EVIDENCE_DECODE:-nokey}
+      - DETECT_EVIDENCE_NOKEY_MAX_GOP_S=${DETECT_EVIDENCE_NOKEY_MAX_GOP_S:-2.0}
+      - DETECT_EVIDENCE_MATCH_MIN=${DETECT_EVIDENCE_MATCH_MIN:-0.5}
+      - DETECT_SUB_MIN_HEIGHT=${DETECT_SUB_MIN_HEIGHT:-480}
+      - DETECT_EVIDENCE_DEBUG_DIR=${DETECT_EVIDENCE_DEBUG_DIR:-}
+      - DETECT_EVIDENCE_PLAYBACK=${DETECT_EVIDENCE_PLAYBACK:-true}
+      - DETECT_EVIDENCE_HOLD_S=${DETECT_EVIDENCE_HOLD_S:-6.0}
+      - DETECT_EVIDENCE_FETCH_MIN_INTERVAL_S=${DETECT_EVIDENCE_FETCH_MIN_INTERVAL_S:-2.0}
+      - DETECT_EVIDENCE_FETCH_PARALLEL=${DETECT_EVIDENCE_FETCH_PARALLEL:-2}
+      - DETECT_EVIDENCE_STAMP_LEAD_S=${DETECT_EVIDENCE_STAMP_LEAD_S:-0.5}
       # Gate: shadow (default — measure only, no behavior change; the app's
       # Compute-gated panel shows would-save numbers) | off | enforce (act;
       # enable only after validating shadow data — see detect-pipeline/ENABLEMENT.md).
@@ -381,9 +470,14 @@ services:
       # from starving CPU-bound co-tenants; raise it on big machines.
       # Empty = sized to the fleet (cores / concurrent inferences).
       - DETECT_CV_THREADS=${DETECT_CV_THREADS:-}
+      - DETECT_VISITS_ENABLED=${DETECT_VISITS_ENABLED:-}
+      - DETECT_GATE_COOLDOWN_S=${DETECT_GATE_COOLDOWN_S:-}
+      - DETECT_DISPATCH_TASK=${DETECT_DISPATCH_TASK:-}
+      - DETECT_HWACCEL_DEVICE=${DETECT_HWACCEL_DEVICE:-}
+      - DETECT_REFRESH_SECONDS=${DETECT_REFRESH_SECONDS:-}
       # Per-camera analysis rate. Detection runs on every analyzed frame,
       # so this is the pipeline's main CPU dial — see .env.example.
-      - DETECT_FPS=${DETECT_FPS:-2}
+      - DETECT_FPS=${DETECT_FPS:-5}
       # Re-verify stationary tracks every Nth frame instead of every frame
       # (staggered per track; motion near the object re-checks immediately).
       # 0 = pre-gating behavior. See .env.example.
@@ -396,12 +490,20 @@ services:
       #   DETECT_MAX_TRACKS   live tracks per camera, hard cap
       #   DETECT_TRACK_TTL    seconds an unverified track may live (0 = off)
       #   DETECT_MIN_SPAWN_SCORE  score needed to CREATE a track
+      #   DETECT_TRACK_MOTION     false = the old greedy distance matcher (no motion prediction)
+      #   DETECT_NMS_CROSS_LABEL_IOU  boxes of DIFFERENT labels this
+      #                       coincident are one object (0 or 1 = off)
+      #   DETECT_NMS_CONTAINMENT  a same-label box this far inside a larger
+      #                       one is a part of it, not a second object
       - DETECT_LABELS=${DETECT_LABELS:-}
       - DETECT_CONF=${DETECT_CONF:-}
       - DETECT_MAX_REGIONS=${DETECT_MAX_REGIONS:-}
       - DETECT_MAX_TRACKS=${DETECT_MAX_TRACKS:-}
       - DETECT_TRACK_TTL=${DETECT_TRACK_TTL:-}
       - DETECT_MIN_SPAWN_SCORE=${DETECT_MIN_SPAWN_SCORE:-}
+      - DETECT_TRACK_MOTION=${DETECT_TRACK_MOTION:-true}
+      - DETECT_NMS_CROSS_LABEL_IOU=${DETECT_NMS_CROSS_LABEL_IOU:-}
+      - DETECT_NMS_CONTAINMENT=${DETECT_NMS_CONTAINMENT:-}
       # Motion-gate tunables (#373; see .env.example). The calibration
       # deadline keeps a permanently-busy scene from wedging the gate
       # shut — before it, a scene that never went quiet skipped EVERY
@@ -412,6 +514,26 @@ services:
       - DETECT_MOTION_FRAME_ALPHA=${DETECT_MOTION_FRAME_ALPHA:-}
       - DETECT_MOTION_LIGHTNING_THRESHOLD=${DETECT_MOTION_LIGHTNING_THRESHOLD:-}
       - DETECT_MOTION_CALIBRATION_MAX_FRAMES=${DETECT_MOTION_CALIBRATION_MAX_FRAMES:-}
+      - DETECT_MOTION_MAX_FORCED_EXITS=${DETECT_MOTION_MAX_FORCED_EXITS:-}
+      # Multi-frame plate OCR (LPR cameras only; see .env.example):
+      # several diverse OCR attempts per vehicle instead of one, with
+      # the first fired while the car is still in frame.
+      - DETECT_PLATE_CANDIDATES=${DETECT_PLATE_CANDIDATES:-}
+      - DETECT_PLATE_EARLY_ATTEMPTS=${DETECT_PLATE_EARLY_ATTEMPTS:-}
+      - DETECT_PLATE_CANDIDATE_GAP_S=${DETECT_PLATE_CANDIDATE_GAP_S:-}
+      # Context around the detection box in stored crops (fraction of
+      # the box per side). Cosmetic: a wider margin keeps the whole car
+      # in the read frame when the detector's box trails it.
+      - DETECT_CROP_MARGIN=${DETECT_CROP_MARGIN:-}
+      # Best-frame blur veto (fraction of the current best's sharpness
+      # a candidate must reach to win on score or area); 0 = off.
+      - DETECT_BEST_FRAME_BLUR_VETO=${DETECT_BEST_FRAME_BLUR_VETO:-}
+      # Scene evidence: a SECOND JPEG per visit — the whole frame the
+      # best crop was taken from, so the evidence dialog can show the
+      # car in its lane instead of a crop of the car.
+      - DETECT_SCENE_EVIDENCE=${DETECT_SCENE_EVIDENCE:-}
+      - DETECT_SCENE_MAX_PX=${DETECT_SCENE_MAX_PX:-}
+      - DETECT_SCENE_JPEG_QUALITY=${DETECT_SCENE_JPEG_QUALITY:-}
       # Opt-in CPU saving (docs/CAMERA_ASSIGNMENTS.md): skip analysis on
       # cameras whose assignments are all detection-free. Empty = off.
       - DETECT_SKIP_UNASSIGNED=${DETECT_SKIP_UNASSIGNED:-}
@@ -419,6 +541,11 @@ services:
       # #10 Tier-1 dispatch: empty = off. Set to the KAI-C URL (e.g. http://kai-c:8100)
       # to run the gated model on enforce escalations, governed + audited by KAI-C.
       - DETECT_DISPATCH_KAIC_URL=${DETECT_DISPATCH_KAIC_URL:-}
+      # The face route only (docs/design/face-recognition-route.md): people
+      # on cameras a face app claimed go to that app's face adapter through
+      # KAI-C. Nothing else is dispatched, and with no face app installed
+      # nothing at all. Set to empty to turn the face route off.
+      - DETECT_FACE_KAIC_URL=${DETECT_FACE_KAIC_URL-http://opennvr-core:8100}
     volumes:
       # Read-only mount of the shared yolov8 weights volume (built by
       # yolov8-weights-init) — same model as the yolov8-adapter.
@@ -433,7 +560,9 @@ services:
       start_period: 90s
       retries: 3
     # For VAAPI/QSV hardware decode, pass the render node through and set
-    # DETECT_HWACCEL=vaapi in .env (uncomment):
+    # DETECT_HWACCEL=vaapi in .env (uncomment) — or set OPENNVR_ACCEL=intel
+    # and let docker-compose.accel-intel.yml do this plus the OpenVINO
+    # detector on the NPU/iGPU (OpenNVR Accelerate, docs/HARDWARE.md):
     # devices:
     #   - /dev/dri:/dev/dri
     # Setting DETECT_HWACCEL without this mapping is the expensive mistake:
@@ -463,7 +592,7 @@ services:
       yolov8-adapter:
         condition: service_healthy
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${CORE_HOST_PORT:-8000}:8000"
     volumes:
       - shared_frames:/app/AI-adapters/AIAdapters/frames
       - ${RECORDINGS_PATH:-./recordings}:/app/recordings
@@ -476,11 +605,20 @@ services:
       # re-registered from this file on boot, so restarting/recreating
       # this container no longer silently kills plate recognition.
       - opennvr_kai_c_state:/app/kai-c-state
+      # Apps-bus users file (services/nats_users.py) — nats-apps reads it.
+      - opennvr_nats_auth:/var/lib/opennvr/nats
       # Host LAN IP hints, rewritten by the launchers on every run so ONVIF
       # discovery keeps seeing the host's *current* networks even when the
       # OPENNVR_HOST_IP/OPENNVR_LAN_IPS env vars (frozen at container
       # creation) go stale after a subnet change.
       - ./data/net-hints:/app/net-hints:ro
+      # OpenNVR updates (services/update_status.py): core reads the host
+      # updater's state and writes requests for it; it never runs Docker.
+      - ./data/updates:/app/update-state:ro
+      - ./data/update-requests:/app/update-requests
+      # The host agent (services/host_agent.py): only the sha256 of its key.
+      # The key itself is in ./data/host-agent-key, which no container mounts.
+      - ./data/host-agent:/app/host-agent:ro
     environment:
       # Must match the mediamtx service's TZ — recording directories are
       # named in local time and parsed with the same zone.
@@ -505,24 +643,142 @@ services:
       # container gets, so both sides agree on what the hardware can do.
       - INFERENCE_TAP_STREAM=${INFERENCE_TAP_STREAM:-auto}
       - DETECT_HWACCEL=${DETECT_HWACCEL:-cpu}
-      - MEDIAMTX_EXTERNAL_RTSPS_URL=rtsps://localhost:8322
+      # Override (with RTSPS_BIND_HOST) to hand LAN clients a reachable RTSPS
+      # URL, e.g. Home Assistant's stream component (docs/HOME_ASSISTANT.md).
+      - MEDIAMTX_EXTERNAL_RTSPS_URL=${MEDIAMTX_EXTERNAL_RTSPS_URL:-rtsps://localhost:8322}
+      # Browser origins allowed to call the API cross-origin (a Home
+      # Assistant dashboard card). The default is core's built-in list.
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173}
       - MEDIAMTX_PLAYBACK_URL=http://mediamtx:9996
       # Browser-facing URLs go through nginx (TLS, any LAN device).
       # MEDIAMTX_PUBLIC_URL is set by start.sh from the detected topology and
       # falls back to https://localhost. Same-origin with the UI (no mixed content).
+      # The web UI rebases these onto the origin it was opened on
+      # (app/src/lib/streamUrl.ts) and plays recordings through the API, so the
+      # fallback is harmless there; API clients (Home Assistant) need it set.
       - MEDIAMTX_EXTERNAL_BASE_URL=${MEDIAMTX_PUBLIC_URL:-https://localhost}/webrtc
       - MEDIAMTX_EXTERNAL_HLS_URL=${MEDIAMTX_PUBLIC_URL:-https://localhost}/hls
       - MEDIAMTX_EXTERNAL_PLAYBACK_URL=${MEDIAMTX_PUBLIC_URL:-https://localhost}/playback
-      # Seed for the ICE hosts MediaMTX advertises. The backend owns the
-      # authoritative list (DB-backed, learned from the address browsers
-      # actually reach) and re-pushes it on every MediaMTX start, so this is
-      # only a first-boot hint — unlike MTX_WEBRTCADDITIONALHOSTS on the
-      # mediamtx service, losing it no longer breaks live WebRTC.
+      # Seed for the ICE hosts MediaMTX advertises. The backend keeps the list
+      # in the DB and re-pushes it on every MediaMTX start, so a recreated
+      # container keeps it. It can also learn the address browsers reach, but
+      # not in this layout: nginx is on the bridge, so it only ever reports a
+      # container address. Without start.sh, set this in .env or live WebRTC
+      # from other machines fails (HLS still works).
       - MEDIAMTX_WEBRTC_HOSTS=${MEDIAMTX_WEBRTC_HOSTS:-}
       - KAI_C_URL=http://127.0.0.1:8100
+      # Duplicate-sighting dedup for plate reads: a fragmented track
+      # (moving camera, occlusion) re-reads the car just read; the same
+      # (camera, plate) within this rolling window is folded into one
+      # sighting and costs at most ONE extra OCR call. 0 disables.
+      - OPENNVR_PLATE_DEDUP_WINDOW_S=${OPENNVR_PLATE_DEDUP_WINDOW_S:-}
+      # Reject FALSE plate localisations (#386): a manufacturer badge
+      # reads as plausible characters mid-crop, so neither read
+      # confidence nor the partial-read geometry catches it — only the
+      # localiser's own score does (genuine plates 0.85+, the reported
+      # badge 0.38). 0 disables.
+      - OPENNVR_PLATE_MIN_DETECTION_CONFIDENCE=${OPENNVR_PLATE_MIN_DETECTION_CONFIDENCE:-}
+      # Fuzzy dedup: plates within this edit distance inside the window
+      # are one car read slightly differently. 0 = exact only.
+      - OPENNVR_PLATE_DEDUP_DISTANCE=${OPENNVR_PLATE_DEDUP_DISTANCE:-}
+      # Consensus: how many separate looks must agree before a plate
+      # is written (1 = first accepted read wins).
+      - OPENNVR_PLATE_MIN_AGREEING_READS=${OPENNVR_PLATE_MIN_AGREEING_READS:-}
+      # Reject reads whose localiser found no plate in the vehicle
+      # crop (the OCR then read the car body). 0 disables.
+      - OPENNVR_PLATE_REQUIRE_LOCALISATION=${OPENNVR_PLATE_REQUIRE_LOCALISATION:-}
+      # A finished sweep keeps its row closed to forwarded single reads
+      # for this long (KAI-C's late echo of its own last attempt).
+      - OPENNVR_PLATE_SWEEP_ECHO_GRACE_S=${OPENNVR_PLATE_SWEEP_ECHO_GRACE_S:-}
+      # The scan-mode knobs (plate_policy.py reads them from the
+      # environment): fast mode's re-sighting window, and the backlog at
+      # which auto flips to fast. Documented in .env.example since 0.1.6
+      # and never passed through until now.
+      - OPENNVR_PLATE_FAST_DEDUP_WINDOW_S=${OPENNVR_PLATE_FAST_DEDUP_WINDOW_S:-}
+      - OPENNVR_PLATE_AUTO_BACKLOG=${OPENNVR_PLATE_AUTO_BACKLOG:-}
+      # ── What gets asked about a visit after it finishes ──────────
+      #
+      # Every one of these was read by the code and documented, and NONE
+      # of them reached this container: the service enumerates its
+      # environment by hand and nobody added the third list. So on a
+      # compose install — which is every install — the three that
+      # default true could not be turned OFF to cut an inference bill,
+      # and the two that default false could not be turned ON at all.
+      # EVENTS_DESCRIPTOR_PEOPLE was a shipped, documented opt-in that
+      # nobody could opt into.
+      #
+      # The failure is invisible from outside: the code falls back to
+      # its own default, the container starts clean, and the log says
+      # nothing. Guarded now by test_server_env_wiring.py, the server's
+      # equivalent of the detect-pipeline check that caught the same
+      # defect in DETECT_MOTION_MAX_FORCED_EXITS.
+      #
+      # NOTE ON THE `:-` BELOW. It does not make these optional in the
+      # way it looks. Compose substitutes an unset variable with the
+      # EMPTY STRING and still passes the variable, so `.env` staying
+      # silent about one of these sends `''` to a `bool` field — which
+      # crashed the backend at import on every install that did not set
+      # all six (#547). Settings now reads an empty value as "unset" and
+      # falls back to the documented default;
+      # test_empty_env_means_unset.py holds that, for every variable
+      # written in this form rather than only these six.
+      - EVENTS_PLATE_ENRICHMENT=${EVENTS_PLATE_ENRICHMENT:-}
+      - EVENTS_CAPTION_ENRICHMENT=${EVENTS_CAPTION_ENRICHMENT:-}
+      - EVENTS_DESCRIPTOR_ENRICHMENT=${EVENTS_DESCRIPTOR_ENRICHMENT:-}
+      - EVENTS_DESCRIPTOR_PEOPLE=${EVENTS_DESCRIPTOR_PEOPLE:-}
+      - EVENTS_DESCRIPTOR_PEOPLE_EXTENDED=${EVENTS_DESCRIPTOR_PEOPLE_EXTENDED:-}
+      - EVENTS_DESCRIPTOR_BATCH_MIN_KINDS=${EVENTS_DESCRIPTOR_BATCH_MIN_KINDS:-}
+      - EVENTS_ENRICHMENT_REUSE_SAME_FRAME=${EVENTS_ENRICHMENT_REUSE_SAME_FRAME:-}
+      - EVENTS_FROZEN_PICTURE_REPEATS=${EVENTS_FROZEN_PICTURE_REPEATS:-}
+      # Semantic search. Off by default; without this line an operator
+      # could set it in .env, restart, and still have no embeddings —
+      # with nothing anywhere saying why.
+      - EVENTS_EMBED_ENRICHMENT=${EVENTS_EMBED_ENRICHMENT:-}
+      - EVENTS_ENRICHMENT_BACKFILL=${EVENTS_ENRICHMENT_BACKFILL:-}
+      # Admission control for the enrichers (#583): wait-line depth,
+      # per-call timeout, and the breaker's consecutive-timeout trip.
+      - EVENTS_ENRICHMENT_QUEUE_DEPTH=${EVENTS_ENRICHMENT_QUEUE_DEPTH:-}
+      - EVENTS_ENRICHMENT_TIMEOUT_S=${EVENTS_ENRICHMENT_TIMEOUT_S:-}
+      - EVENTS_ENRICHMENT_BREAKER_TIMEOUTS=${EVENTS_ENRICHMENT_BREAKER_TIMEOUTS:-}
+      - EVENTS_CAPTION_RETRY_COOLDOWN_S=${EVENTS_CAPTION_RETRY_COOLDOWN_S:-}
+      # The governor: soft CPU line, slow-call budget, backfill idle
+      # period and optional clock window.
+      - EVENTS_ENRICHMENT_GOVERNOR_CPU_PERCENT=${EVENTS_ENRICHMENT_GOVERNOR_CPU_PERCENT:-}
+      - EVENTS_ENRICHMENT_DETECTOR_SLOW_FACTOR=${EVENTS_ENRICHMENT_DETECTOR_SLOW_FACTOR:-}
+      - EVENTS_ENRICHMENT_DETECTOR_PAUSE_FACTOR=${EVENTS_ENRICHMENT_DETECTOR_PAUSE_FACTOR:-}
+      - EVENTS_ENRICHMENT_PRESSURE_GAP_S=${EVENTS_ENRICHMENT_PRESSURE_GAP_S:-}
+      - EVENTS_ENRICHMENT_DEVICE_BUSY_PERCENT=${EVENTS_ENRICHMENT_DEVICE_BUSY_PERCENT:-}
+      - EVENTS_ENRICHMENT_SLOW_CALL_S=${EVENTS_ENRICHMENT_SLOW_CALL_S:-}
+      - EVENTS_ENRICHMENT_BACKFILL_IDLE_S=${EVENTS_ENRICHMENT_BACKFILL_IDLE_S:-}
+      - EVENTS_ENRICHMENT_BACKFILL_WINDOW=${EVENTS_ENRICHMENT_BACKFILL_WINDOW:-}
+      - EVENTS_ENRICHMENT_BACKFILL_SHARE=${EVENTS_ENRICHMENT_BACKFILL_SHARE:-0.5}
+      - EVENTS_ENRICHMENT_BACKFILL_INTERACTIVE_HOLD_S=${EVENTS_ENRICHMENT_BACKFILL_INTERACTIVE_HOLD_S:-90}
+      - EVENTS_ENRICHMENT_REQUEST_CAP=${EVENTS_ENRICHMENT_REQUEST_CAP:-}
+      # Retention of the store's rows (0 = follow the recordings window)
+      # and of the operator inbox; the vector arm's similarity floor.
+      - EVENTS_RETENTION_DAYS=${EVENTS_RETENTION_DAYS:-}
+      - ALERTS_INBOX_RETENTION_DAYS=${ALERTS_INBOX_RETENTION_DAYS:-}
+      - SEARCH_VECTOR_MIN_SIMILARITY=${SEARCH_VECTOR_MIN_SIMILARITY:-}
+      - SEARCH_CAPTION_MIN_SIMILARITY=${SEARCH_CAPTION_MIN_SIMILARITY:-}
+      - SEARCH_TEXT_ARM_WEIGHT=${SEARCH_TEXT_ARM_WEIGHT:-}
+      - SEARCH_VECTOR_ARM_WEIGHT=${SEARCH_VECTOR_ARM_WEIGHT:-}
+      - SEARCH_CAPTION_ARM_WEIGHT=${SEARCH_CAPTION_ARM_WEIGHT:-}
+      - SEARCH_RERANK_TOP=${SEARCH_RERANK_TOP:-}
+      - SEARCH_RERANK_TIMEOUT_S=${SEARCH_RERANK_TIMEOUT_S:-}
+      # Apps allowed to run on every camera without a pick (the agent).
+      - ALL_CAMERAS_APPS=${ALL_CAMERAS_APPS:-}
+      # KAI-C (same container) applies the clipped / weak / unlocalised
+      # gates BEFORE publishing plate.recognized.v1, so no subscriber
+      # ever alerts on a fragment or a badge. Same defaults as core's.
+      - KAI_C_PLATE_MIN_DETECTION_CONFIDENCE=${OPENNVR_PLATE_MIN_DETECTION_CONFIDENCE:-}
+      - KAI_C_PLATE_REQUIRE_LOCALISATION=${OPENNVR_PLATE_REQUIRE_LOCALISATION:-}
       # Where KAI-C persists runtime adapter registrations (#371) —
       # points at the opennvr_kai_c_state volume mounted above.
       - KAI_C_STATE_DIR=/app/kai-c-state
+      # How long KAI-C waits for one adapter answer (a CPU captioner can
+      # take a minute); core's EVENTS_ENRICHMENT_TIMEOUT_S should not be
+      # longer than this. A timeout is a 504 and trips core's breaker.
+      - KAI_C_INFER_TIMEOUT_S=${KAI_C_INFER_TIMEOUT_S:-90}
       # ONVIF discovery auto-detection: inside this bridge container the only
       # visible network is the compose bridge, so the launchers export the
       # host's LAN IPs as the real subnet hints — OPENNVR_HOST_IP (default
@@ -531,9 +787,21 @@ services:
       - OPENNVR_HOST_IP=${OPENNVR_HOST_IP:-}
       - OPENNVR_LAN_IPS=${OPENNVR_LAN_IPS:-}
       - OPENNVR_DOCKER_SUBNET=${OPENNVR_DOCKER_SUBNET:-172.28.0.0/16}
+      # The host's OS (linux|darwin|windows), written by start.sh/start.ps1:
+      # Add Camera → Webcam says what to do on the server, not on the browser's OS.
+      - OPENNVR_HOST_OS=${OPENNVR_HOST_OS:-}
       - RECORDINGS_HOST_BASE=${RECORDINGS_PATH:-./recordings}
       - RECORDINGS_CONTAINER_BASE=/app/recordings
       - RECORDINGS_BASE_PATH=/app/recordings
+      # The bootstrap admin account. These were documented in .env and asked
+      # for by install.sh but never passed through, so the account was always
+      # "admin" whatever the operator chose (#632). Read only when the admin
+      # is first created; changing them later does not rename anyone.
+      - DEFAULT_ADMIN_USERNAME=${DEFAULT_ADMIN_USERNAME:-admin}
+      - DEFAULT_ADMIN_PASSWORD=${DEFAULT_ADMIN_PASSWORD:-}
+      - DEFAULT_ADMIN_EMAIL=${DEFAULT_ADMIN_EMAIL:-admin@opennvr.local}
+      - DEFAULT_ADMIN_FIRST_NAME=${DEFAULT_ADMIN_FIRST_NAME:-System}
+      - DEFAULT_ADMIN_LAST_NAME=${DEFAULT_ADMIN_LAST_NAME:-Administrator}
       - SECRET_KEY=${SECRET_KEY}
       - CREDENTIAL_ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY}
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
@@ -572,6 +840,16 @@ services:
       - TRUSTED_PROXY_CIDRS=${TRUSTED_PROXY_CIDRS:-127.0.0.1/32,::1/128,${OPENNVR_DOCKER_SUBNET:-172.28.0.0/16}}
       - INTERNAL_SERVICE_CIDRS=${INTERNAL_SERVICE_CIDRS:-127.0.0.1/32,::1/128,${OPENNVR_DOCKER_SUBNET:-172.28.0.0/16}}
       - NATS_URL=nats://nats:4222
+      # The apps bus: where registering apps are told to join with their
+      # own key, and the users file core renders for it (nats-apps
+      # includes and reloads it). Unset both to fall back to apps on the
+      # platform bus with the site token.
+      - NATS_APPS_URL=${NATS_APPS_URL:-nats://nats-apps:4222}
+      - NATS_USERS_CONF=/var/lib/opennvr/nats/users.conf
+      # Agentic Workflows (RFC #620): the model AI steps run on. Empty =
+      # AI steps answer "unsure" and rule-based workflows still run.
+      - WORKFLOWS_LLM_URL=${WORKFLOWS_LLM_URL:-}
+      - WORKFLOWS_LLM_MODEL=${WORKFLOWS_LLM_MODEL:-qwen3-vl:2b-instruct}
       - FRAMES_DIR=/app/AI-adapters/AIAdapters/frames
       - HOST=${HOST:-0.0.0.0}
       # Avoid inheriting a generic host DEBUG value (some shells/tools set
@@ -580,6 +858,7 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     networks:
       - opennvr_internal
+      - opennvr_apps
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -648,8 +927,8 @@ services:
     ports:
       # NGINX_BIND_HOST restricts the public edge to a specific interface
       # (e.g. a management VLAN). Default 0.0.0.0 for LAN reachability.
-      - "${NGINX_BIND_HOST:-0.0.0.0}:443:443"
-      - "${NGINX_BIND_HOST:-0.0.0.0}:80:80"
+      - "${NGINX_BIND_HOST:-0.0.0.0}:${NGINX_HOST_HTTPS_PORT:-443}:443"
+      - "${NGINX_BIND_HOST:-0.0.0.0}:${NGINX_HOST_HTTP_PORT:-80}:80"
     volumes:
       - ./nginx-certs:/etc/nginx/certs:ro
       - ./nginx/opennvr.conf:/etc/nginx/conf.d/default.conf:ro
@@ -686,13 +965,46 @@ services:
     logging: *svc-logs
     restart: unless-stopped
     ports:
-      - "127.0.0.1:9999:8080"
+      - "127.0.0.1:${LOG_VIEWER_HOST_PORT:-9999}:8080"
     environment:
       - DOZZLE_FILTER=name=opennvr
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
 
+  # ──────────────────────────────────────────────────────────────
+  # mDNS announcer — OPT-IN (COMPOSE_PROFILES=mdns), LINUX HOSTS ONLY.
+  # Advertises _opennvr._tcp so Home Assistant discovers OpenNVR instead of
+  # asking for a URL (HA-117). It needs network_mode: host for multicast to
+  # leave the host's NIC, which Docker Desktop (Windows/macOS) does not
+  # really provide; there, enter the URL in Home Assistant instead.
+  # Announces only public facts (version, port, API path).
+  # ──────────────────────────────────────────────────────────────
+  opennvr-mdns:
+    profiles: [mdns]
+    build:
+      context: ./scripts/mdns-announcer
+    image: opennvr/mdns-announcer:local
+    pull_policy: ${APPS_PULL_POLICY:-build}
+    container_name: opennvr_mdns
+    logging: *svc-logs
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - OPENNVR_HOST_IP=${OPENNVR_HOST_IP:-}
+      - OPENNVR_LAN_IPS=${OPENNVR_LAN_IPS:-}
+      - OPENNVR_HTTPS_PORT=${NGINX_HOST_HTTPS_PORT:-443}
+      - OPENNVR_MDNS_NAME=${OPENNVR_MDNS_NAME:-OpenNVR}
+
 networks:
+  # Where apps live (docker-compose.apps.yml): INTERNAL — no route to the
+  # LAN or the internet. Apps reach core, the buses and the egress proxy
+  # here; everything outside goes through the proxy, which asks core per
+  # destination (docs/APP_NETWORK.md). Set APPS_EGRESS_ENFORCED=false to
+  # give apps a normal bridge again (recreate: ``docker compose down``
+  # first — a network's internal flag cannot change in place).
+  opennvr_apps:
+    driver: bridge
+    internal: ${APPS_EGRESS_ENFORCED:-true}
   opennvr_internal:
     driver: bridge
     # Pinned so the trust zone is deterministic and doesn't collide with the
@@ -709,6 +1021,9 @@ networks:
 
 volumes:
   opennvr_db_data:
+  # Apps-bus users file: one NATS user per installed app, rendered by
+  # core, reloaded by nats-apps. Safe to wipe — core rewrites it on boot.
+  opennvr_nats_auth:
   shared_frames:
   # yolov8 model weights — persistent so the init container only
   # runs once. Wipe with ``docker volume rm openvr_opennvr_yolov8_weights``

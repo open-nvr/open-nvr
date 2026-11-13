@@ -86,3 +86,36 @@ def test_set_decode_skip_respawns_with_new_mode_and_no_backoff():
     assert len(spawned) == 2
     assert spawned[1][spawned[1].index("-skip_frame") + 1] == "nokey"
     assert slept == []                                 # deliberate flip: no backoff
+
+
+def test_first_frame_after_a_flip_is_marked_deliberate_and_a_failure_is_not():
+    """The respawn after ``set_decode_skip`` must hand the worker a seq-0
+    frame with ``deliberate_restart`` set, or the worker books the flip as a
+    feed restart. The flag that requests the flip is cleared when the flipped
+    session ends — before the respawn used to read it — so on a box with
+    adaptive decode every idle<->active flip showed up in
+    ``tier0_worker_restarts_total`` (17 on a healthy camera in one morning)
+    and ``tier0_decode_mode_changes_total`` never moved."""
+    size = frame_size_bytes(16, 16)
+
+    class _Proc:
+        def __init__(self):
+            self.stdout = io.BytesIO(b"\x00" * size)   # one frame then EOF
+        def poll(self): return 0
+        def terminate(self): pass
+        def wait(self, timeout=None): return 0
+        def kill(self): pass
+
+    src = FrameSource(
+        "rtsp://mtx/cam1-sub", width=16, height=16, fps=2,
+        decode_skip="nonref", spawn=lambda argv: _Proc(), max_restarts=2,
+        backoff_seconds=0, _sleep=lambda s: None,
+    )
+    frames = src.stream()
+    first = next(frames)
+    assert first.seq == 0 and not first.deliberate_restart
+    src.set_decode_skip("nokey")                       # deliberate flip
+    after_flip = next(frames)                          # first frame of the respawn
+    assert after_flip.seq == 0 and after_flip.deliberate_restart
+    after_eof = next(frames)                           # that session ends on its own: a real restart
+    assert after_eof.seq == 0 and not after_eof.deliberate_restart

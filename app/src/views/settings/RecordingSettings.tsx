@@ -21,6 +21,9 @@ import { apiService } from '../../lib/apiService'
 import { Save, FolderOpen, Clock, Shield, HardDrive, Archive, Link2, Trash2, RefreshCw } from 'lucide-react'
 import { useSnackbar } from '../../components/Snackbar'
 import { UsageBar } from '../../components/ui/stats'
+import { RecordingPauseSetting } from './RecordingPauseSetting'
+import { useDateFormat, type DateFormatters } from '../../i18n'
+import { useConfirm } from '../../components/ui/ConfirmDialog'
 
 interface OrphanIdentity {
     camera_uuid?: string | null
@@ -55,16 +58,18 @@ function formatBytes(bytes: number): string {
     return `${(bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${units[i]}`
 }
 
-function formatDay(iso?: string | null): string {
+function formatDay(iso: string | null | undefined, fmt: DateFormatters): string {
     if (!iso) return '?'
     try {
-        return new Date(iso).toLocaleDateString()
+        return fmt.date(iso)
     } catch {
         return iso
     }
 }
 
 export function RecordingSettings() {
+    const confirm = useConfirm()
+    const fmt = useDateFormat()
     const { showError, showSuccess } = useSnackbar()
     const [loading, setLoading] = useState(false)
     const [path, setPath] = useState('')
@@ -73,6 +78,8 @@ export function RecordingSettings() {
     const [retentionDays, setRetentionDays] = useState(30)
     const [protectFlagged, setProtectFlagged] = useState(true)
     const [minFreeSpace, setMinFreeSpace] = useState<number | ''>('')
+    // The floor in force when the field is empty (automatic: 2 GB or 2 % of the disk).
+    const [autoFreeSpace, setAutoFreeSpace] = useState<number | null>(null)
     const [purgeOrphaned, setPurgeOrphaned] = useState(false)
 
     // Disk usage of the effective recordings volume (absent on older
@@ -112,6 +119,7 @@ export function RecordingSettings() {
             setRetentionDays(retention.retention_days ?? 30)
             setProtectFlagged(retention.protect_flagged ?? true)
             setMinFreeSpace(retention.min_free_space_gb ?? '')
+            setAutoFreeSpace(retention.effective_min_free_space_gb ?? null)
             setPurgeOrphaned(retention.purge_orphaned_under_pressure ?? false)
         } catch (e: any) {
             showError(e?.message || 'Failed to load recording settings')
@@ -148,9 +156,11 @@ export function RecordingSettings() {
             return
         }
         const cam = cameras.find((c) => c.id === camId)
-        const ok = window.confirm(
-            `Attach ${orphan.file_count} recording file(s) (${formatDay(orphan.earliest)} – ${formatDay(orphan.latest)}, ${formatBytes(orphan.total_bytes)}) to camera "${cam?.name || camId}"?\n\nThe footage will appear in that camera's playback timeline.`
-        )
+        const ok = await confirm({
+            title: `Attach ${orphan.file_count} recording file(s) (${formatDay(orphan.earliest, fmt)} – ${formatDay(orphan.latest, fmt)}, ${formatBytes(orphan.total_bytes)}) to camera "${cam?.name || camId}"?`,
+            message: "The footage will appear in that camera's playback timeline.",
+            confirmLabel: 'Attach',
+        })
         if (!ok) return
         try {
             setOrphanBusy(orphan.id)
@@ -171,9 +181,12 @@ export function RecordingSettings() {
     }
 
     const handleDeleteOrphan = async (orphan: OrphanTree) => {
-        const ok = window.confirm(
-            `Permanently delete ${orphan.file_count} recording file(s) (${formatBytes(orphan.total_bytes)}) from "${orphan.id}"?\n\nThis cannot be undone.`
-        )
+        const ok = await confirm({
+            title: `Permanently delete ${orphan.file_count} recording file(s) (${formatBytes(orphan.total_bytes)}) from "${orphan.id}"?`,
+            message: 'This cannot be undone.',
+            confirmLabel: 'Delete',
+            danger: true,
+        })
         if (!ok) return
         try {
             setOrphanBusy(orphan.id)
@@ -240,9 +253,11 @@ export function RecordingSettings() {
                 Recording Settings
             </h2>
 
+            <RecordingPauseSetting />
+
             {/* Storage Settings */}
             <form onSubmit={handleSaveStorage} className="space-y-6 mb-8">
-                <div className="bg-[var(--panel)] border border-neutral-800 rounded-lg p-6">
+                <div className="bg-[var(--panel)] border border-[var(--border)] p-6">
                     <h3 className="text-lg font-medium mb-4 flex items-center gap-2">
                         <HardDrive size={20} />
                         Storage Location
@@ -258,13 +273,13 @@ export function RecordingSettings() {
                     <div className="space-y-4">
                         <div>
                             <label className="block text-sm font-medium mb-1">
-                                Recording Path <span className="text-neutral-500 text-xs">(optional, uses auto-detected default if empty)</span>
+                                Recording Path <span className="text-[var(--text-dim)] text-xs">(optional, uses auto-detected default if empty)</span>
                             </label>
                             <input
                                 type="text"
                                 value={path}
                                 onChange={(e) => setPath(e.target.value)}
-                                className="w-full px-3 py-2 bg-[var(--bg-2)] border border-neutral-700 rounded focus:border-[var(--accent)] focus:outline-none"
+                                className="w-full px-3 py-2 bg-[var(--bg-2)] border border-[var(--border)] focus:border-[var(--accent)] focus:outline-none"
                                 placeholder="Docker: /app/recordings  |  Local: ./recordings or D:/Recordings"
                             />
                             <p className="text-xs text-[var(--text-dim)] mt-1">
@@ -297,7 +312,7 @@ export function RecordingSettings() {
                     <button
                         type="submit"
                         disabled={loading}
-                        className="px-4 py-2 bg-[var(--accent)] text-white rounded hover:bg-[var(--accent)]/90 disabled:opacity-50 flex items-center gap-2"
+                        className="px-4 py-2 bg-[var(--accent)] text-white hover:bg-[var(--accent)]/90 disabled:opacity-50 flex items-center gap-2"
                     >
                         <Save size={16} />
                         {loading ? 'Saving...' : 'Save Storage Settings'}
@@ -307,7 +322,7 @@ export function RecordingSettings() {
 
             {/* Retention Settings */}
             <form onSubmit={handleSaveRetention} className="space-y-6">
-                <div className="bg-[var(--panel)] border border-neutral-800 rounded-lg p-6">
+                <div className="bg-[var(--panel)] border border-[var(--border)] p-6">
                     <h3 className="text-lg font-medium mb-4 flex items-center gap-2">
                         <Clock size={20} />
                         Retention Policy
@@ -326,7 +341,7 @@ export function RecordingSettings() {
                                 max={3650}
                                 value={retentionDays}
                                 onChange={(e) => setRetentionDays(parseInt(e.target.value) || 0)}
-                                className="w-full px-3 py-2 bg-[var(--bg-2)] border border-neutral-700 rounded focus:border-[var(--accent)] focus:outline-none"
+                                className="w-full px-3 py-2 bg-[var(--bg-2)] border border-[var(--border)] focus:border-[var(--accent)] focus:outline-none"
                                 placeholder="30"
                             />
                             <p className="text-xs text-[var(--text-dim)] mt-1">
@@ -341,7 +356,7 @@ export function RecordingSettings() {
                                 id="protect-flagged"
                                 checked={protectFlagged}
                                 onChange={(e) => setProtectFlagged(e.target.checked)}
-                                className="w-4 h-4 text-[var(--accent)] bg-[var(--bg-2)] border-neutral-700 rounded focus:ring-[var(--accent)]"
+                                className="w-4 h-4 text-[var(--accent)] bg-[var(--bg-2)] border-[var(--border)] focus:ring-[var(--accent)]"
                             />
                             <label htmlFor="protect-flagged" className="text-sm font-medium flex items-center gap-2">
                                 <Shield size={16} className="text-[var(--accent)]" />
@@ -357,16 +372,18 @@ export function RecordingSettings() {
                             <label className="block text-sm font-medium mb-1">Minimum Free Space (GB)</label>
                             <input
                                 type="number"
-                                min={1}
+                                min={0}
                                 max={100000}
                                 value={minFreeSpace}
                                 onChange={(e) => setMinFreeSpace(e.target.value === '' ? '' : parseInt(e.target.value))}
-                                className="w-full px-3 py-2 bg-[var(--bg-2)] border border-neutral-700 rounded focus:border-[var(--accent)] focus:outline-none"
-                                placeholder="Leave empty to disable"
+                                className="w-full px-3 py-2 bg-[var(--bg-2)] border border-[var(--border)] focus:border-[var(--accent)] focus:outline-none"
+                                placeholder={autoFreeSpace != null ? `Automatic: ${autoFreeSpace} GB` : 'Automatic'}
                             />
                             <p className="text-xs text-[var(--text-dim)] mt-1">
-                                If free space falls below this threshold, oldest recordings will be deleted until space is freed.
-                                Leave empty to disable this feature.
+                                Below this much free space the oldest recordings are rotated out, oldest first, and recording
+                                continues. Leave empty for automatic: 2 GB or 2 % of the disk, whichever is more
+                                {autoFreeSpace != null ? ` (${autoFreeSpace} GB here)` : ''}. Photos of events are never
+                                deleted for space. Set 0 to turn rotation off.
                             </p>
                         </div>
 
@@ -377,7 +394,7 @@ export function RecordingSettings() {
                                 id="purge-orphaned"
                                 checked={purgeOrphaned}
                                 onChange={(e) => setPurgeOrphaned(e.target.checked)}
-                                className="w-4 h-4 text-[var(--accent)] bg-[var(--bg-2)] border-neutral-700 rounded focus:ring-[var(--accent)]"
+                                className="w-4 h-4 text-[var(--accent)] bg-[var(--bg-2)] border-[var(--border)] focus:ring-[var(--accent)]"
                             />
                             <label htmlFor="purge-orphaned" className="text-sm font-medium flex items-center gap-2">
                                 <Archive size={16} className="text-[var(--accent)]" />
@@ -396,7 +413,7 @@ export function RecordingSettings() {
                     <button
                         type="submit"
                         disabled={loading}
-                        className="px-4 py-2 bg-[var(--accent)] text-white rounded hover:bg-[var(--accent)]/90 disabled:opacity-50 flex items-center gap-2"
+                        className="px-4 py-2 bg-[var(--accent)] text-white hover:bg-[var(--accent)]/90 disabled:opacity-50 flex items-center gap-2"
                     >
                         <Save size={16} />
                         {loading ? 'Saving...' : 'Save Retention Settings'}
@@ -408,16 +425,16 @@ export function RecordingSettings() {
                 attributed to a current camera (e.g. after a database rebuild).
                 Hidden when empty or when the user is not a superuser. */}
             {orphansAvailable && orphans.length > 0 && (
-                <div className="mt-8 bg-[var(--panel)] border border-amber-700/50 rounded-lg p-6">
+                <div className="mt-8 bg-[var(--panel)] border border-[color-mix(in_oklab,var(--warn)_45%,var(--border))] p-6">
                     <div className="flex items-center justify-between mb-4">
                         <h3 className="text-lg font-medium flex items-center gap-2">
-                            <Archive size={20} className="text-amber-500" />
+                            <Archive size={20} className="text-[var(--warn)]" />
                             Orphaned Recordings
                         </h3>
                         <button
                             onClick={handleRescan}
                             disabled={orphanBusy !== null}
-                            className="px-3 py-1.5 text-sm border border-neutral-700 rounded hover:border-[var(--accent)] disabled:opacity-50 flex items-center gap-2"
+                            className="px-3 py-1.5 text-sm border border-[var(--border)] hover:border-[var(--accent)] disabled:opacity-50 flex items-center gap-2"
                         >
                             <RefreshCw size={14} className={orphanBusy === '__rescan__' ? 'animate-spin' : ''} />
                             Rescan
@@ -432,7 +449,7 @@ export function RecordingSettings() {
                     <div className="overflow-x-auto">
                         <table className="w-full text-sm">
                             <thead>
-                                <tr className="text-left text-[var(--text-dim)] border-b border-neutral-800">
+                                <tr className="text-left text-[var(--text-dim)] border-b border-[var(--border)]">
                                     <th className="py-2 pr-4">Previous identity</th>
                                     <th className="py-2 pr-4">Footage</th>
                                     <th className="py-2 pr-4">Reason</th>
@@ -442,7 +459,7 @@ export function RecordingSettings() {
                             </thead>
                             <tbody>
                                 {orphans.map((o) => (
-                                    <tr key={o.id} className="border-b border-neutral-800/50 align-middle">
+                                    <tr key={o.id} className="border-b border-[var(--border)] align-middle">
                                         <td className="py-3 pr-4">
                                             <div className="font-medium">
                                                 {o.identity?.camera_name || o.original_dir || o.id}
@@ -455,7 +472,7 @@ export function RecordingSettings() {
                                         <td className="py-3 pr-4 whitespace-nowrap">
                                             <div>{o.file_count} files · {formatBytes(o.total_bytes)}</div>
                                             <div className="text-xs text-[var(--text-dim)]">
-                                                {formatDay(o.earliest)} – {formatDay(o.latest)}
+                                                {formatDay(o.earliest, fmt)} – {formatDay(o.latest, fmt)}
                                             </div>
                                         </td>
                                         <td className="py-3 pr-4 text-xs text-[var(--text-dim)] whitespace-nowrap">
@@ -473,7 +490,7 @@ export function RecordingSettings() {
                                                         [o.id]: e.target.value === '' ? '' : parseInt(e.target.value),
                                                     }))
                                                 }
-                                                className="px-2 py-1.5 bg-[var(--bg-2)] border border-neutral-700 rounded focus:border-[var(--accent)] focus:outline-none"
+                                                className="px-2 py-1.5 bg-[var(--bg-2)] border border-[var(--border)] focus:border-[var(--accent)] focus:outline-none"
                                             >
                                                 <option value="">Select camera…</option>
                                                 {cameras.map((c) => (
@@ -489,7 +506,7 @@ export function RecordingSettings() {
                                                 <button
                                                     onClick={() => handleAttach(o)}
                                                     disabled={orphanBusy !== null || attachTarget[o.id] === '' || attachTarget[o.id] === undefined}
-                                                    className="px-3 py-1.5 text-sm bg-[var(--accent)] text-white rounded hover:bg-[var(--accent)]/90 disabled:opacity-50 flex items-center gap-1.5"
+                                                    className="px-3 py-1.5 text-sm bg-[var(--accent)] text-white hover:bg-[var(--accent)]/90 disabled:opacity-50 flex items-center gap-1.5"
                                                 >
                                                     <Link2 size={14} />
                                                     {orphanBusy === o.id ? 'Working…' : 'Attach'}
@@ -497,7 +514,7 @@ export function RecordingSettings() {
                                                 <button
                                                     onClick={() => handleDeleteOrphan(o)}
                                                     disabled={orphanBusy !== null}
-                                                    className="px-3 py-1.5 text-sm border border-red-800 text-red-400 rounded hover:bg-red-950/40 disabled:opacity-50 flex items-center gap-1.5"
+                                                    className="px-3 py-1.5 text-sm border border-[color-mix(in_oklab,var(--danger)_45%,var(--border))] text-[var(--danger)] hover:bg-[color-mix(in_oklab,var(--danger)_14%,transparent)] disabled:opacity-50 flex items-center gap-1.5"
                                                 >
                                                     <Trash2 size={14} />
                                                     Delete

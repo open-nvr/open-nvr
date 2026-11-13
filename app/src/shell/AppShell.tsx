@@ -18,18 +18,25 @@
 
 import { Outlet, NavLink, Link, useLocation } from 'react-router-dom'
 import { DeviceBlockedOverlay } from '../components/DeviceBlockedOverlay'
-import { Menu, Monitor, Camera, Car, Users, Settings as SettingsIcon, Bell, Maximize, Minimize, LogOut, User as UserIcon, Sun, Moon, MonitorPlay, RefreshCcw, FileSearch, Brain, FileCheck, AlertTriangle, Plug, LifeBuoy, KeyRound, Shield, Network, Cpu, Boxes, Cloud, Database, ChevronDown, Layers } from 'lucide-react'
+import { AlertTriangle, Bell, Boxes, Camera, ChevronDown, Cloud, Cpu, Database, FileCheck, KeyRound, Layers, LifeBuoy, LogOut, Maximize, Menu, Minimize, Monitor, MonitorPlay, Moon, Network, Plug, RefreshCcw, Search as SearchIcon, Settings as SettingsIcon, Shield, ShieldCheck, Sun, Globe } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import { apiService } from '../lib/apiService'
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { useFullscreen } from '../hooks/useFullscreen'
 import { useClickOutside } from '../hooks/useClickOutside'
+import { useMediaQuery } from '../hooks/useMediaQuery'
 import { useAuth } from '../auth/AuthContext'
 import { useTheme } from '../hooks/useTheme'
 import { usePermissions, NAV_PERMISSIONS } from '../hooks/usePermissions'
+import { APP_VERTICALS, manifestProvides, verticalFor } from '../lib/appVerticals'
+import { verticalIcon } from '../lib/verticalIcons'
 import { ErrorBoundary } from '../components/ErrorBoundary'
 import { CameraStatusProvider } from '../hooks/useCameraStatus'
 import { SystemAlertBanner } from '../components/SystemAlertBanner'
+import { AlertBell } from '../components/AlertBell'
+import { WebcamPublishingIndicator } from '../components/WebcamPublishingIndicator'
+import { useTranslation, useDateFormat, type DateFormatters } from '../i18n'
+import { Logo } from '../components/Logo'
 
 type NavItem = {
   to: string
@@ -46,6 +53,11 @@ type NavGroup = {
   label: string
   /** pinned groups render their items directly — no header, never collapsible */
   pinned?: boolean
+  /** flat groups scroll with the rest of the menu but render as bare
+   *  links — no header, nothing to expand. For a destination that is one
+   *  page, not a section: a collapsible header hiding a single item is
+   *  a click for nothing. */
+  flat?: boolean
   items: NavItem[]
 }
 
@@ -60,6 +72,7 @@ const NAV_GROUPS: NavGroup[] = [
       { to: '/', label: 'Dashboard', icon: <Monitor size={16} />, perm: '/' },
       { to: '/live', label: 'Live View', icon: <Camera size={16} />, perm: '/live' },
       { to: '/playback/sync', label: 'Recordings', icon: <MonitorPlay size={16} />, perm: '/playback/sync' },
+      { to: '/search', label: 'Search', icon: <SearchIcon size={16} />, perm: '/search' },
       { to: '/cameras', label: 'Cameras', icon: <Camera size={16} />, perm: '/cameras' },
     ],
   },
@@ -67,11 +80,9 @@ const NAV_GROUPS: NavGroup[] = [
     key: 'ai',
     label: 'AI & Detections',
     items: [
-      { to: '/ai-engine', label: 'AI Engine', icon: <Brain size={16} />, perm: '/ai-engine' },
       { to: '/byom', label: 'AI Models (BYOM)', icon: <Boxes size={16} />, perm: '/byom' },
       { to: '/ai-detection-results', label: 'Detection Results', icon: <Database size={16} />, perm: '/byom' },
       { to: '/ai-adapters', label: 'AI Adapters', icon: <Layers size={16} />, perm: '/ai-engine' },
-      { to: '/app-catalog', label: 'App Catalog', icon: <Boxes size={16} />, perm: '/ai-engine' },
     ],
   },
   {
@@ -79,7 +90,8 @@ const NAV_GROUPS: NavGroup[] = [
     label: 'Security & Network',
     items: [
       { to: '/network', label: 'Network', icon: <Network size={16} />, perm: '/network' },
-      { to: '/logs', label: 'Logs & Forensics', icon: <FileSearch size={16} />, perm: '/logs' },
+      // /logs ("Logs & Forensics") is still only a "coming soon" placeholder,
+      // so it is left out of the menu; the route itself still resolves.
     ],
   },
   {
@@ -107,7 +119,20 @@ const NAV_GROUPS: NavGroup[] = [
   },
 ]
 
+const NAV_LABEL_KEYS: Record<string, string> = {
+  Dashboard: 'nav.dashboard', 'Live View': 'nav.liveView', Recordings: 'nav.recordings',
+  Search: 'nav.search', Cameras: 'nav.cameras',
+  'AI & Detections': 'nav.aiDetections', 'AI Models (BYOM)': 'nav.aiModels',
+  'Detection Results': 'nav.detectionResults', 'AI Adapters': 'nav.aiAdapters', 'Security & Network': 'nav.securityNetwork',
+  Network: 'nav.network', 'Logs & Forensics': 'nav.logsForensics', Governance: 'nav.governance', 'Audit Logs': 'nav.auditLogs',
+  'Compliance & Reports': 'nav.complianceReports', 'Alerts & Incidents': 'nav.alertsIncidents', 'Access Control (RBAC)': 'nav.accessControl',
+  'Customer Keys (BYOK)': 'nav.customerKeys', Administration: 'nav.administration', Configuration: 'nav.configuration',
+  'Media Server Config': 'nav.mediaServerConfig', Integrations: 'nav.integrations', Cloud: 'nav.cloud', Firmware: 'nav.firmware',
+  Support: 'nav.support', Applications: 'nav.applications', 'App Catalog': 'nav.appCatalog',
+}
+
 // Accordion: at most one group is open at a time; its key is persisted.
+const SIDEBAR_OPEN_KEY = 'opennvr.sidebar.open'
 const OPEN_GROUP_KEY = 'opennvr.sidebar.openGroup'
 
 function loadOpenGroup(): string | null {
@@ -119,9 +144,16 @@ function loadOpenGroup(): string | null {
 }
 
 export function AppShell() {
+  const { language, setLanguage, t } = useTranslation()
   const rootRef = useRef<HTMLDivElement>(null)
   const { isFullscreen, toggle } = useFullscreen(rootRef as React.RefObject<HTMLDivElement>)
-  const [sidebarOpen, setSidebarOpen] = useState(true)
+  // Remembered across reloads, like the open group below.
+  const [sidebarOpen, setSidebarOpen] = useState(() => {
+    try { return localStorage.getItem(SIDEBAR_OPEN_KEY) !== '0' } catch { return true }
+  })
+  useEffect(() => {
+    try { localStorage.setItem(SIDEBAR_OPEN_KEY, sidebarOpen ? '1' : '0') } catch { /* storage unavailable */ }
+  }, [sidebarOpen])
   const { user, logout } = useAuth()
   const { hasPermission } = usePermissions()
   const [menuOpen, setMenuOpen] = useState(false)
@@ -132,6 +164,27 @@ export function AppShell() {
   const [sidebarScrolling, setSidebarScrolling] = useState(false)
   const location = useLocation()
   const [openGroup, setOpenGroup] = useState<string | null>(loadOpenGroup)
+
+  // Below 1024px the sidebar is a drawer over the page, opened from the top
+  // bar, instead of a column that squeezed the page to a sliver on a phone.
+  // It is always fully expanded there, and closes on every navigation. The
+  // desktop layout is untouched.
+  const isNarrow = useMediaQuery('(max-width: 1023px)')
+  const [drawerOpen, setDrawerOpen] = useState(false)
+  useEffect(() => { setDrawerOpen(false) }, [location.pathname, isNarrow])
+  const expanded = isNarrow || sidebarOpen
+
+  // Escape closes the account menu and the drawer, like every other popup.
+  useEffect(() => {
+    if (!menuOpen && !drawerOpen) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      setMenuOpen(false)
+      setDrawerOpen(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [menuOpen, drawerOpen])
 
   const canView = (path: keyof typeof NAV_PERMISSIONS) => {
     const requiredPerm = NAV_PERMISSIONS[path]
@@ -149,6 +202,8 @@ export function AppShell() {
     queryFn: async () => {
       const { data } = await apiService.getApps()
       return (Array.isArray(data) ? data : []) as {
+        id: string
+        name?: string
         enabled?: boolean
         manifest?: { requires_tasks?: string[]; provides?: string[] } | null
       }[]
@@ -158,48 +213,95 @@ export function AppShell() {
     refetchInterval: 120_000,
   })
   // The curated first-class pages, capability-keyed on manifest
-  // `provides` (with a legacy predicate for manifests that predate the
-  // field). Adding a vertical = one row here + its page — the nav
-  // scales with what THIS install enabled, never with catalog size.
+  // `provides` from the shared APP_VERTICALS table (with its legacy
+  // predicate for manifests that predate the field). The catalog reads
+  // that same table to tell an operator where a freshly enabled app will
+  // show up — one row, so the promise and the menu cannot disagree.
+  // Adding a vertical = one row there + its page.
   const apps = appsNav.data ?? []
-  const providesEnabled = (capability: string, legacy?: (m: any) => boolean) =>
-    apps.some((a) => a.enabled && (
-      (a.manifest?.provides ?? []).includes(capability) ||
-      (legacy ? legacy(a.manifest ?? {}) : false)
-    ))
-  const lprEnabled = providesEnabled('vehicles',
-    (m) => (m.requires_tasks ?? []).includes('license_plate_recognition'))
-  const occupancyEnabled = providesEnabled('occupancy')
+  const enabledVerticals = APP_VERTICALS.filter((v) =>
+    apps.some((a) => a.enabled && manifestProvides(a.manifest, v))
+  )
+  // Icons come from lib/verticalIcons, shared with each app page's title
+  // bar, so the page you land on shows the glyph of the link you clicked.
+  const enabledRoutes = enabledVerticals.map((v) => v.to).join(',')
 
   const visibleGroups = useMemo(
     () => {
       const groups = NAV_GROUPS.map((g) => ({ ...g, items: g.items.filter((i) => canView(i.perm)) })).filter((g) => g.items.length > 0)
-      const appItems = [
-        ...(lprEnabled && canView('/vehicles')
-          ? [{ to: '/vehicles', label: 'Vehicles', icon: <Car size={16} />, perm: '/vehicles' as const }]
-          : []),
-        ...(occupancyEnabled && canView('/occupancy')
-          ? [{ to: '/occupancy', label: 'Occupancy', icon: <Users size={16} />, perm: '/occupancy' as const }]
-          : []),
-      ]
-      if (appItems.length > 0) {
-        // Right after the pinned NVR group: these are operational pages.
-        groups.splice(1, 0, { key: 'applications', label: 'Applications', items: appItems })
+      const appItems = enabledVerticals
+        // `v.to in NAV_PERMISSIONS` first: a vertical added to the table
+        // without its permission row would otherwise ask canView about an
+        // unknown path and get an undefined requirement — fail closed.
+        .filter((v) => v.to in NAV_PERMISSIONS && canView(v.to as keyof typeof NAV_PERMISSIONS))
+        .map((v) => ({
+          to: v.to,
+          label: v.label,
+          icon: verticalIcon(v.to),
+          perm: v.to as keyof typeof NAV_PERMISSIONS,
+        }))
+      // Right after the pinned NVR group (i.e. under Cameras): these are
+      // operational pages, not settings.
+      // An enabled app with no first-class page is still an application:
+      // it is listed here by name and opens its own page (/apps/<id> —
+      // dashboard, cameras, skills, Configure), so nobody has to find a
+      // running app in the catalog to change how it works.
+      const dashboardItems = canView('/app-catalog')
+        ? apps
+            .filter((a) => a.enabled && !verticalFor(a.manifest))
+            .map((a) => ({
+              to: `/apps/${a.id}`,
+              label: a.name || a.id,
+              icon: <Boxes size={16} />,
+              perm: '/app-catalog' as keyof typeof NAV_PERMISSIONS,
+            }))
+        : []
+      const allAppItems = [...appItems, ...dashboardItems]
+      let at = 1
+      if (allAppItems.length > 0) {
+        groups.splice(at, 0, { key: 'applications', label: 'Applications', items: allAppItems })
+        at += 1
+      }
+      // App Catalog sits with the apps, not under "AI & Detections" —
+      // plenty of apps are not AI at all (the notifier, the barrier, the
+      // agent), and the catalog is where the pages above come FROM. Flat
+      // and directly below Applications, so it stays one click even when
+      // no app is installed yet — which is exactly when someone needs to
+      // find it.
+      const catalog: NavItem = {
+        to: '/app-catalog', label: 'App Catalog',
+        icon: <Boxes size={16} />, perm: '/app-catalog',
+      }
+      if (canView(catalog.perm)) {
+        groups.splice(at, 0, {
+          key: 'app-catalog', label: 'App Catalog', flat: true, items: [catalog],
+        })
       }
       return groups
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [hasPermission, lprEnabled, occupancyEnabled]
+    [hasPermission, enabledRoutes, apps.filter((a) => a.enabled && !verticalFor(a.manifest)).map((a) => a.id).join(',')]
   )
   const pinnedGroups = visibleGroups.filter((g) => g.pinned)
   const menuGroups = visibleGroups.filter((g) => !g.pinned)
+  // Sticky headers dock at `index * 32`, but a flat group contributes no
+  // header — counting it would leave a 32px hole in the stack and push
+  // every header below it out of place. Offsets count headers, not groups.
+  const headerSlot = useMemo(() => {
+    let n = 0
+    return menuGroups.map((g) => (g.flat ? -1 : n++))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleGroups])
 
+  // visibleGroups, not NAV_GROUPS: the Applications group is built at runtime
+  // from the installed apps, so scanning only the static groups meant an app
+  // page never opened its own group in the sidebar.
   const activeGroupKey = useMemo(() => {
-    for (const g of NAV_GROUPS) {
+    for (const g of visibleGroups) {
       if (g.items.some((i) => (i.to === '/' ? location.pathname === '/' : location.pathname.startsWith(i.to)))) return g.key
     }
     return null
-  }, [location.pathname])
+  }, [location.pathname, visibleGroups])
 
   function persistOpenGroup(key: string | null) {
     try {
@@ -236,80 +338,155 @@ export function AppShell() {
   return (
     <CameraStatusProvider>
     <div ref={rootRef} className="min-h-screen bg-[var(--bg)] text-[var(--text)]">
-  {/* Top white header (sticky) */}
-  <header className="bg-[var(--bg-2)] border-b border-[var(--border)] text-[var(--text)] h-12 flex items-center px-4 text-sm uppercase tracking-wide sticky top-0 z-40">
-        <Link to="/" className="font-semibold inline-flex items-center gap-2">
-          <img src="/opennvr-logo.svg" alt="OpenNVR" className="h-10" />
-        </Link>
-        <div className="ml-auto flex items-center gap-3">
-          <button
-            aria-label="Toggle Theme"
-            className="inline-flex items-center gap-1 px-2 py-1 bg-[var(--panel)] hover:bg-[var(--panel-2)] rounded"
-            onClick={toggleTheme}
-            title={theme === 'light' ? 'Switch to dark' : 'Switch to light'}
-          >
-            {theme === 'light' ? <Moon size={14} /> : <Sun size={14} />}
-            <span className="hidden md:inline">{theme === 'light' ? 'Dark' : 'Light'}</span>
-          </button>
-          {canView('/live') && (
-            <Link
-              to="/live"
-              className="inline-flex items-center gap-1 px-2 py-1 bg-[var(--panel)] hover:bg-[var(--panel-2)] rounded"
-              title="Open Live View"
+      {/* ── Top bar ──
+          Three zones: brand left, the time centred (an NVR is read
+          against the clock, so it earns the middle), actions right with
+          the account in the corner. Actions are icon-only squares of one
+          size with tooltips — labelled buttons of five different widths
+          read as a toolbar spilled across the bar. No `uppercase` here:
+          it was leaking into every menu opened from the bar. */}
+      <header className="sticky top-0 z-40 grid h-12 grid-cols-[1fr_auto_1fr] items-center gap-4 border-b border-[var(--border)] bg-[var(--bg-2)] px-4 text-sm text-[var(--text)]">
+        <div className="flex items-center gap-1 justify-self-start">
+          {isNarrow && (
+            <button
+              className={TOP_ICON}
+              onClick={() => setDrawerOpen((o) => !o)}
+              aria-label={t('sidebar.toggle')}
+              aria-expanded={drawerOpen}
+              title={t('sidebar.toggle')}
             >
-              <Camera size={14} />
-              <span className="hidden md:inline">Live</span>
+              <Menu size={17} />
+            </button>
+          )}
+          <Link to="/" className="inline-flex items-center" aria-label="OpenNVR home">
+            <Logo className="h-10 w-auto text-[var(--text)]" />
+          </Link>
+        </div>
+
+        <LiveClock />
+
+        <div className="flex items-center justify-self-end gap-1">
+          <WebcamPublishingIndicator />
+          <AlertBell />
+          {canView('/live') && (
+            <Link to="/live" className={`${TOP_ICON} max-sm:hidden`} title={t('header.openLiveView')} aria-label={t('header.openLiveView')}>
+              <MonitorPlay size={17} />
             </Link>
           )}
+          <button
+            className={`${TOP_ICON} max-sm:hidden`}
+            onClick={toggle}
+            title={isFullscreen ? t('header.exitFullscreen') : t('header.enterFullscreen')}
+            aria-label={isFullscreen ? t('header.exitFullscreen') : t('header.enterFullscreen')}
+          >
+            {isFullscreen ? <Minimize size={16} /> : <Maximize size={16} />}
+          </button>
+          <button
+            className={TOP_ICON}
+            onClick={toggleTheme}
+            title={theme === 'light' ? t('header.switchToDark') : t('header.switchToLight')}
+            aria-label={t('header.toggleTheme')}
+          >
+            {theme === 'light' ? <Moon size={16} /> : <Sun size={16} />}
+          </button>
+          <label
+            className="relative inline-flex h-8 items-center gap-1 rounded-md pl-2 text-xs text-[var(--text-dim)] hover:bg-[var(--panel-2)] hover:text-[var(--text)]"
+            title={t('language.label')}
+          >
+            <Globe size={15} />
+            <select
+              value={language}
+              onChange={(event) => setLanguage(event.target.value as typeof language)}
+              aria-label={t('language.label')}
+              className="h-8 max-w-[3.75rem] sm:max-w-none cursor-pointer bg-transparent text-xs font-medium uppercase text-inherit outline-none"
+            >
+              <option value="en">EN — {t('language.english')}</option>
+              <option value="fr">FR — {t('language.french')}</option>
+            </select>
+          </label>
+
+          <span aria-hidden className="mx-2 h-6 w-px bg-[var(--border)]" />
+
           <div className="relative" ref={accountMenuRef}>
             <button
-              className="inline-flex items-center gap-1 px-2 py-1 bg-[var(--panel)] hover:bg-[var(--panel-2)] rounded"
+              className="inline-flex h-8 items-center gap-1.5 rounded-full py-0.5 pl-0.5 pr-2 hover:bg-[var(--panel-2)]"
               onClick={() => setMenuOpen((s) => !s)}
-              title={user ? user.username : 'Account'}
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
+              title={user?.username ?? t('header.account')}
             >
-              <UserIcon size={14} />
-              <span className="hidden md:inline">{user?.username ?? 'Account'}</span>
+              <Avatar name={user?.username} size="sm" />
+              <ChevronDown size={14} className={`text-[var(--text-dim)] transition-transform ${menuOpen ? 'rotate-180' : ''}`} />
             </button>
             {menuOpen && (
-              <div className="absolute right-0 mt-1 bg-[var(--panel)] border border-[var(--border)] text-sm min-w-40 z-50">
-                <div className="px-3 py-2 text-[var(--text-dim)]">Signed in as <span className="text-[var(--text)]">{user?.username}</span></div>
-                <button className="w-full text-left px-3 py-2 hover:bg-[var(--panel-2)] inline-flex items-center gap-2" onClick={logout}>
-                  <LogOut size={14} /> Logout
-                </button>
+              <div
+                role="menu"
+                className="absolute right-0 z-50 mt-2 w-72 max-w-[calc(100vw-1rem)] overflow-hidden border border-[var(--border)] bg-[var(--panel)] shadow-2xl"
+              >
+                <div className="flex items-center gap-3 bg-[var(--bg-2)] px-4 py-4">
+                  <Avatar name={user?.username} size="lg" />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate font-semibold text-[var(--text)]" title={user?.username}>{user?.username}</div>
+                    {user?.email && (
+                      <div className="truncate text-xs text-[var(--text-dim)]" title={user.email}>{user.email}</div>
+                    )}
+                    <span className="mt-1.5 inline-flex items-center gap-1 rounded-full bg-[var(--accent)]/12 px-2 py-0.5 text-[11px] font-medium text-[var(--accent)]">
+                      <ShieldCheck size={11} />
+                      {user?.is_superuser ? t('header.roleAdmin') : t('header.roleUser')}
+                    </span>
+                  </div>
+                </div>
+                <div className="border-t border-[var(--border)] p-1.5">
+                  {canView('/settings') && (
+                    <Link
+                      role="menuitem"
+                      to="/settings"
+                      onClick={() => setMenuOpen(false)}
+                      className="flex w-full items-center gap-2.5 px-3 py-2 text-[var(--text)] hover:bg-[var(--panel-2)]"
+                    >
+                      <SettingsIcon size={16} className="text-[var(--text-dim)]" /> {t('header.settings')}
+                    </Link>
+                  )}
+                  <button
+                    role="menuitem"
+                    className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-[var(--danger)] hover:bg-[color-mix(in_oklab,var(--danger)_10%,transparent)]"
+                    onClick={logout}
+                  >
+                    <LogOut size={16} /> {t('header.logout')}
+                  </button>
+                </div>
               </div>
             )}
           </div>
-          <button
-            aria-label="Toggle Fullscreen"
-            className="inline-flex items-center gap-1 px-2 py-1 bg-[var(--panel)] hover:bg-[var(--panel-2)] rounded"
-            onClick={toggle}
-            title={isFullscreen ? 'Exit Fullscreen' : 'Enter Fullscreen'}
-          >
-            {isFullscreen ? <Minimize size={14} /> : <Maximize size={14} />}
-            <span className="hidden md:inline">Fullscreen</span>
-          </button>
-          <LiveClock />
         </div>
       </header>
 
       <div className="flex">
-        {/* Sidebar */}
-  <aside className={`${sidebarOpen ? 'w-56' : 'w-14'} flex-shrink-0 sticky top-12 self-start h-[calc(100vh-3rem)] transition-all duration-200 bg-[var(--bg-2)] flex flex-col`}>
+        {isNarrow && drawerOpen && (
+          <div className="fixed inset-0 top-12 z-30 bg-black/50" onClick={() => setDrawerOpen(false)} aria-hidden="true" />
+        )}
+        {/* Sidebar: a column on desktop, a drawer below 1024px */}
+        <aside
+          inert={isNarrow && !drawerOpen}
+          className={isNarrow
+            ? `fixed top-12 bottom-0 left-0 z-40 w-64 shadow-2xl transition-transform duration-200 bg-[var(--bg-2)] flex flex-col ${drawerOpen ? 'translate-x-0' : '-translate-x-full'}`
+            : `${sidebarOpen ? 'w-56' : 'w-14'} flex-shrink-0 sticky top-12 self-start h-[calc(100vh-3rem)] transition-all duration-200 bg-[var(--bg-2)] flex flex-col`}
+        >
           {/* Fixed header: toggle + pinned items never scroll away; its bottom
               border is the clip line for the scrollable nav below */}
           <div className="flex-shrink-0 p-2 border-b border-[var(--border)]">
             <button
               className="inline-flex items-center justify-center p-2 text-[var(--text-dim)] hover:text-[var(--text)] hover:bg-[var(--panel-2)] rounded"
-              onClick={() => setSidebarOpen((s) => !s)}
-              aria-label="Toggle Sidebar"
-              title={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
+              onClick={() => (isNarrow ? setDrawerOpen(false) : setSidebarOpen((s) => !s))}
+              aria-label={t('sidebar.toggle')}
+              title={expanded ? t('sidebar.collapse') : t('sidebar.expand')}
             >
               <Menu size={16} />
             </button>
             {pinnedGroups.map((group) => (
               <div key={group.key} className="mt-2 space-y-0.5">
                 {group.items.map((item) => (
-                  <SideLink key={item.to} to={item.to} end={item.end} label={item.label} icon={item.icon} collapsed={!sidebarOpen} />
+                  <SideLink key={item.to} to={item.to} end={item.end} label={t(NAV_LABEL_KEYS[item.label] ?? item.label)} icon={item.icon} collapsed={!expanded} />
                 ))}
               </div>
             ))}
@@ -319,11 +496,22 @@ export function AppShell() {
           <nav ref={sidebarRef} onScroll={onSidebarScroll} className={`flex-1 overflow-y-auto overflow-x-hidden px-2 sidebar-scroll ${sidebarScrolling ? 'is-scrolling' : ''}`}>
             {menuGroups.map((group, gi) => {
               const collapsed = openGroup !== group.key
-              if (!sidebarOpen) {
+              if (!expanded) {
                 return (
                   <div key={group.key} className="mb-2 pb-2 border-b border-[var(--border)] last:border-b-0 space-y-0.5">
                     {group.items.map((item) => (
-                      <SideLink key={item.to} to={item.to} end={item.end} label={item.label} icon={item.icon} collapsed />
+                      <SideLink key={item.to} to={item.to} end={item.end} label={t(NAV_LABEL_KEYS[item.label] ?? item.label)} icon={item.icon} collapsed />
+                    ))}
+                  </div>
+                )
+              }
+              // Flat: a single destination, so no header and nothing to
+              // collapse — it just sits in the list as a link.
+              if (group.flat) {
+                return (
+                  <div key={group.key} className="py-1 space-y-0.5">
+                    {group.items.map((item) => (
+                      <SideLink key={item.to} to={item.to} end={item.end} label={t(NAV_LABEL_KEYS[item.label] ?? item.label)} icon={item.icon} />
                     ))}
                   </div>
                 )
@@ -335,18 +523,18 @@ export function AppShell() {
               return (
                 <Fragment key={group.key}>
                   <button
-                    style={{ top: gi * 32 }}
+                    style={{ top: headerSlot[gi] * 32 }}
                     className="sticky z-10 w-full h-8 flex items-center justify-between px-2.5 text-sm font-medium bg-[var(--bg-2)] text-[var(--text-dim)] hover:text-[var(--text)] hover:bg-[var(--panel-2)] rounded"
                     onClick={() => toggleGroup(group.key)}
                     aria-expanded={!collapsed}
                   >
-                    <span className="truncate whitespace-nowrap">{group.label}</span>
+                    <span className="truncate whitespace-nowrap">{t(NAV_LABEL_KEYS[group.label] ?? group.label)}</span>
                     <ChevronDown size={16} className={`flex-shrink-0 transition-transform ${collapsed ? '-rotate-90' : ''}`} />
                   </button>
                   {!collapsed && (
                     <div className="pl-3 py-1 space-y-0.5">
                       {group.items.map((item) => (
-                        <SideLink key={item.to} to={item.to} end={item.end} label={item.label} icon={item.icon} />
+                        <SideLink key={item.to} to={item.to} end={item.end} label={t(NAV_LABEL_KEYS[item.label] ?? item.label)} icon={item.icon} />
                       ))}
                     </div>
                   )}
@@ -374,12 +562,39 @@ export function AppShell() {
 }
 
 function LiveClock() {
+  const fmt = useDateFormat()
   const [now, setNow] = useState(() => new Date())
   useEffect(() => {
     const id = window.setInterval(() => setNow(new Date()), 1000)
     return () => window.clearInterval(id)
   }, [])
-  return <span className="opacity-90 tabular-nums">{now.toLocaleString()}</span>
+  return (
+    <div className="hidden items-baseline gap-2 tabular-nums md:flex" aria-live="off">
+      <span className="text-sm font-semibold text-[var(--text)]">
+        {fmt.time(now, { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+      </span>
+      <span className="text-xs text-[var(--text-dim)]">
+        {fmt.date(now, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })}
+      </span>
+    </div>
+  )
+}
+
+/** One size for every icon action in the top bar. */
+const TOP_ICON =
+  'grid h-8 w-8 place-items-center rounded-md text-[var(--text-dim)] transition-colors hover:bg-[var(--panel-2)] hover:text-[var(--text)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--accent)]'
+
+function Avatar({ name, size }: { name?: string; size: 'sm' | 'lg' }) {
+  return (
+    <span
+      aria-hidden
+      className={`grid shrink-0 place-items-center rounded-full bg-[var(--accent)] font-semibold uppercase text-white ${
+        size === 'lg' ? 'h-11 w-11 text-base' : 'h-7 w-7 text-xs'
+      }`}
+    >
+      {(name ?? '?').charAt(0)}
+    </span>
+  )
 }
 
 function SideLink({ to, label, icon, collapsed, end }: { to: string; label: string; icon: React.ReactNode; collapsed?: boolean; end?: boolean }) {

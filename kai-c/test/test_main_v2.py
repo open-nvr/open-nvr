@@ -385,3 +385,96 @@ def test_register_rejects_malformed_url(kaic_app):
         json={"name": "bad", "url": "this is not a url at all"},
     )
     assert response.status_code == 422, response.text
+
+
+# ── The legacy pair must answer from the REAL registry ──────────────
+#
+# /adapters/health and /capabilities are the ONLY two KAI-C endpoints the
+# OpenNVR backend calls (KaiCService.check_kai_c_health and
+# get_capabilities). They used to iterate ADAPTER_REGISTRY — the static,
+# env-derived dict that holds exactly one entry, `default`. So core saw
+# one adapter however many were registered, healthy and serving.
+#
+# What that cost on a live box: seven adapters registered and healthy,
+# and GET /skills answering "no registered adapter provides this task"
+# for every one of them. Caption and descriptor enrichment are planned
+# off that view, so neither ever ran — zero captions and zero non-plate
+# claims across 28,000 visits. Plate reads kept working only because the
+# ANPR app calls its adapter directly, which is what made the rest look
+# like a configuration mistake rather than a bug.
+
+
+def test_legacy_health_reports_runtime_registered_adapters(kaic_app):
+    """The regression. Register through v1, read through the legacy
+    endpoint the backend actually calls, and find it there."""
+    client, _ = kaic_app
+    client.post("/api/v1/adapters/register",
+                json={"name": "stub-x", "url": "http://127.0.0.1:9100"})
+
+    body = client.get("/adapters/health").json()
+
+    assert body["kai_c_status"] == "ok"
+    assert "stub-x" in body["adapters"], (
+        "an adapter registered at runtime is invisible to the one health "
+        "endpoint the backend calls — this is the bug")
+    assert body["adapters"]["stub-x"]["url"] == "http://127.0.0.1:9100"
+
+
+def test_legacy_capabilities_carries_the_tasks_core_reads(kaic_app):
+    """The shape matters as much as the presence.
+
+    server/services/skills_registry._tasks_by_adapter reads
+    adapters[name]["capabilities"]["tasks_advertised"]. A payload that
+    lists the adapter but not its tasks resolves to an empty provider
+    set, which looks exactly like the bug being fixed."""
+    client, _ = kaic_app
+    client.post("/api/v1/adapters/register",
+                json={"name": "stub-x", "url": "http://127.0.0.1:9100"})
+
+    body = client.get("/capabilities").json()
+
+    entry = body["adapters"]["stub-x"]
+    assert entry["url"] == "http://127.0.0.1:9100"
+    assert entry["capabilities"]["tasks_advertised"] == ["echo"]
+
+
+def test_legacy_endpoints_agree_with_the_v1_surface(kaic_app):
+    """Two views of one registry that disagree is how this started. The
+    legacy pair keeps its old SHAPE; it may not keep its own opinion."""
+    client, _ = kaic_app
+    client.post("/api/v1/adapters/register",
+                json={"name": "stub-x", "url": "http://127.0.0.1:9100"})
+
+    v1 = {a["name"] for a in client.get("/api/v1/adapters").json()["adapters"]}
+    health = set(client.get("/adapters/health").json()["adapters"])
+    caps = set(client.get("/capabilities").json()["adapters"])
+
+    assert v1 == health == caps, (v1, health, caps)
+
+
+def test_the_legacy_pair_does_not_fan_out_to_adapters(kaic_app, monkeypatch):
+    """It used to make N synchronous requests.get calls from inside an
+    async handler, so one unreachable adapter stalled the whole service
+    for its timeout. The registry already holds what both endpoints
+    need."""
+    client, _ = kaic_app
+    client.post("/api/v1/adapters/register",
+                json={"name": "stub-x", "url": "http://127.0.0.1:9100"})
+
+    import main as kaic_main
+
+    # COUNT the calls; do not raise from the stub. The old loop wrapped
+    # every probe in `except Exception`, so a raising stub produced a
+    # perfectly normal 200 with an "error" row and the test passed
+    # against the very code it was meant to catch. First version of this
+    # test did exactly that.
+    calls: list[str] = []
+
+    def _counted(url, *a, **k):
+        calls.append(str(url))
+        raise RuntimeError("unreachable")
+
+    monkeypatch.setattr(kaic_main.requests, "get", _counted)
+    assert client.get("/adapters/health").status_code == 200
+    assert client.get("/capabilities").status_code == 200
+    assert calls == [], f"legacy endpoints fanned out to {calls}"

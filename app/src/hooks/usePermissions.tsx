@@ -125,7 +125,35 @@ export const NAV_PERMISSIONS = {
   '/live': 'live.view',
   '/vehicles': 'live.view', // plate reads are camera history — same tier as live view
   '/occupancy': 'live.view', // live head-counts — same tier as live view
-  '/playback': 'recordings.view',
+  // Screening records carry photographs of customers, so they sit
+  // behind the same permission as the alert inbox — and the API is
+  // gated on the same name, so the two cannot drift apart.
+  '/guard-compliance': 'alerts.view',
+  // The face directory holds photographs of named people, so it sits
+  // with the alert inbox, like screening records do.
+  '/people': 'alerts.view',
+  '/tripwires': 'live.view', // counts are camera history — same tier as live view
+  '/loitering': 'alerts.view', // dwellers now + alarms with snapshots — the alerts tier
+  // Arming a site is an alarm-desk action, and the page shows alarm
+  // snapshots, so it sits in the same tier as the inbox.
+  '/perimeter': 'alerts.view',
+  // The unattended-item queue: live items plus alarms with their
+  // snapshots — the alerts tier, like the other incident pages.
+  '/left-items': 'alerts.view',
+  // Doorstep photographs of couriers, residents and strangers — the
+  // same tier as the alert inbox that carries them.
+  '/deliveries': 'alerts.view',
+  // Opening a barrier is an alarm-desk action, and the page shows the
+  // plate reads and refusals behind each decision — the alerts tier,
+  // like the other pages that let an operator act on what they see.
+  '/gates': 'alerts.view',
+  // Pausing alert delivery is an alarm-desk action, and the page shows
+  // the alerts that were delivered or held back — the alerts tier, like
+  // the inbox they came from.
+  '/notifications': 'alerts.view',
+  // Search answers with evidence photos and opens recordings — it is
+  // the recordings workflow, and carries its tier.
+  '/search': 'recordings.view',
   '/playback/sync': 'recordings.view',
   '/cameras': 'cameras.view',
   '/rbac': 'users.view',
@@ -135,11 +163,14 @@ export const NAV_PERMISSIONS = {
   '/updates': 'firmware.view',
   '/logs': 'audit.view',
   '/ai-engine': 'ai.view',
+  // Browsing the catalog is its own right: most apps are not AI, and
+  // looking is far weaker than apps.install, which still gates install.
+  '/app-catalog': 'apps.view',
   '/byom': 'byom.manage',
   '/compliance': 'compliance.view',
   '/alerts-incidents': 'alerts.view',
+  '/alarms': 'alerts.view',
   '/integrations': 'integrations.view',
-  '/onvif-tools': 'onvif.discover',
   '/cloud': 'cloud.view',
   '/support': null, // Always visible
   '/settings': 'settings.view',

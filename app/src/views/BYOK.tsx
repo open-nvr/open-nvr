@@ -18,12 +18,18 @@
 
 import { useEffect, useState } from 'react'
 import { apiService } from '../lib/apiService'
+import { extractApiError } from '../lib/apiError'
 import { useAuth } from '../auth/AuthContext'
-import { KeyRound, Upload, FileText, Shield, CheckCircle, AlertCircle, Loader2, Info, X } from 'lucide-react'
+import { useTranslation } from '../i18n'
+import { KeyRound, Upload, FileText, Shield, CheckCircle, AlertCircle, Loader2, Info } from 'lucide-react'
+import { useConfirm } from '../components/ui/ConfirmDialog'
+import { Modal } from '../components/Modal'
 
 type KeyItem = { id: string; name: string; description?: string; cert_pem?: string; key_pem?: string; created_at?: string }
 
 export function BYOK() {
+  const { t } = useTranslation()
+  const confirm = useConfirm()
   const { user } = useAuth()
   const canAdmin = !!user?.is_superuser
   const [loading, setLoading] = useState(false)
@@ -42,14 +48,14 @@ export function BYOK() {
         const { data } = await apiService.getMediaSourceSettings()
         const single: KeyItem = {
           id: 'default',
-          name: 'Default Certificate',
+          name: t('byok.defaultCertificate'),
           description: data?.tls_cert_description || '',
           cert_pem: data?.tls_cert_pem || '',
           key_pem: data?.tls_key_pem || '',
         }
         setDraft(single)
       } catch (e: any) {
-        setError(e?.data?.detail || e?.message || 'Failed to load keys')
+        setError(extractApiError(e, t('byok.failedLoad')))
       } finally { setLoading(false) }
     })()
   }, [])
@@ -71,9 +77,9 @@ export function BYOK() {
         tls_key_pem: draft.key_pem || null,
         tls_cert_description: draft.description || null
       })
-      setNotice('Certificate saved successfully')
+      setNotice(t('byok.saved'))
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to save')
+      setError(extractApiError(e, t('byok.failedSave')))
     } finally { setLoading(false) }
   }
 
@@ -82,7 +88,7 @@ export function BYOK() {
     if (!file) return
     const text = await file.text()
     setDraft({ ...draft, [field]: text })
-    setNotice(`${field === 'cert_pem' ? 'Certificate' : 'Private key'} loaded from file`)
+    setNotice(`${field === 'cert_pem' ? t('byok.certificate') : t('byok.privateKey')} ${t('byok.loadedFromFile')}`)
   }
 
   async function handleUpload() {
@@ -98,7 +104,7 @@ export function BYOK() {
       const caFile = caInput?.files?.[0]
       
       if (!certFile && !keyFile) {
-        setError('Please select at least a certificate or key file')
+        setError(t('byok.selectFile'))
         return
       }
       
@@ -107,7 +113,7 @@ export function BYOK() {
         key_file: keyFile,
         ca_bundle_file: caFile,
       })
-      setNotice('Files uploaded successfully')
+      setNotice(t('byok.uploaded'))
       setUploadNames({})
       // Refresh data
       const { data } = await apiService.getMediaSourceSettings()
@@ -117,13 +123,13 @@ export function BYOK() {
         key_pem: data?.tls_key_pem || '',
       })
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Upload failed')
+      setError(extractApiError(e, t('byok.uploadFailed')))
     } finally { setLoading(false) }
   }
 
   async function clearCertificates() {
     if (!canAdmin) return
-    if (!confirm('Are you sure you want to clear all certificates? This will remove the current TLS configuration.')) return
+    if (!(await confirm({ title: t('byok.confirmClear'), danger: true }))) return
     try {
       setLoading(true)
       setError(null)
@@ -134,9 +140,9 @@ export function BYOK() {
       })
       setDraft({ ...draft, cert_pem: '', key_pem: '', description: '' })
       setUploadNames({})
-      setNotice('Certificates cleared successfully')
+      setNotice(t('byok.cleared'))
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to clear certificates')
+      setError(extractApiError(e, t('byok.failedClear')))
     } finally {
       setLoading(false)
     }
@@ -150,60 +156,47 @@ export function BYOK() {
     <section className="space-y-6">
       {/* Info Dialog */}
       {showInfo && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-[var(--panel)] border border-neutral-700 p-6 max-w-lg w-full mx-4">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold flex items-center gap-2">
-                <Info size={20} className="text-[var(--accent)]" />
-                About BYOK
-              </h3>
-              <button onClick={() => setShowInfo(false)} className="text-[var(--text-dim)] hover:text-[var(--text)]">
-                <X size={20} />
-              </button>
-            </div>
+        <Modal
+          open
+          title={<><Info size={18} className="text-[var(--accent)]" /> {t('byok.about')}</>}
+          onClose={() => setShowInfo(false)}
+          widthClassName="w-[calc(100vw-2rem)] max-w-lg"
+        >
             <div className="space-y-4 text-sm">
               <div>
-                <h4 className="font-medium text-[var(--text)] mb-1">What is BYOK?</h4>
+                <h4 className="font-medium text-[var(--text)] mb-1">{t('byok.what')}</h4>
                 <p className="text-[var(--text-dim)]">
-                  BYOK (Bring Your Own Key) allows you to use your own TLS certificates for encrypting 
-                  video data when streaming or recording to cloud servers over the internet.
+                  {t('byok.whatText')}
                 </p>
               </div>
               <div>
-                <h4 className="font-medium text-[var(--text)] mb-1">When do you need this?</h4>
+                <h4 className="font-medium text-[var(--text)] mb-1">{t('byok.whenNeed')}</h4>
                 <ul className="text-[var(--text-dim)] list-disc list-inside space-y-1">
-                  <li>Pushing recordings to a remote cloud server</li>
-                  <li>Streaming video to an external server over the internet</li>
-                  <li>Enterprise compliance requirements (HIPAA, PCI-DSS, SOC2)</li>
+                  <li>{t('byok.remoteRecording')}</li><li>{t('byok.externalStreaming')}</li><li>{t('byok.compliance')}</li>
                 </ul>
               </div>
               <div>
-                <h4 className="font-medium text-[var(--text)] mb-1">When is this NOT needed?</h4>
+                <h4 className="font-medium text-[var(--text)] mb-1">{t('byok.whenNotNeed')}</h4>
                 <ul className="text-[var(--text-dim)] list-disc list-inside space-y-1">
-                  <li>Local-only deployments (NVR on same network as cameras)</li>
-                  <li>No cloud streaming or recording configured</li>
+                  <li>{t('byok.localOnly')}</li><li>{t('byok.noCloud')}</li>
                 </ul>
               </div>
               <div>
-                <h4 className="font-medium text-[var(--text)] mb-1">How to use?</h4>
+                <h4 className="font-medium text-[var(--text)] mb-1">{t('byok.how')}</h4>
                 <ol className="text-[var(--text-dim)] list-decimal list-inside space-y-1">
-                  <li>Configure cloud recording or streaming server IP first</li>
-                  <li>Obtain a TLS certificate and private key from your CA</li>
-                  <li>Paste the PEM content or upload the files</li>
-                  <li>Click "Save Certificate" to apply</li>
+                  <li>{t('byok.step1')}</li><li>{t('byok.step2')}</li><li>{t('byok.step3')}</li><li>{t('byok.step4')}</li>
                 </ol>
               </div>
             </div>
             <div className="mt-6 flex justify-end">
-              <button 
+              <button
                 onClick={() => setShowInfo(false)} 
                 className="px-4 py-2 bg-[var(--accent)] text-white"
               >
-                Got it
+                {t('common.close')}
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
 
       {/* Header */}
@@ -211,7 +204,7 @@ export function BYOK() {
         <div>
           <h1 className="text-xl font-semibold flex items-center gap-2">
             <KeyRound className="text-[var(--accent)]" size={24} />
-            Customer Keys (BYOK)
+            {t('byok.title')}
             <button 
               onClick={() => setShowInfo(true)} 
               className="text-[var(--text-dim)] hover:text-[var(--accent)] transition-colors"
@@ -221,36 +214,36 @@ export function BYOK() {
             </button>
           </h1>
           <p className="text-sm text-[var(--text-dim)] mt-1">
-            TLS certificates for encrypting cloud streaming and recording connections
+            {t('byok.subtitle')}
           </p>
         </div>
         <div className={`px-3 py-1.5 text-xs font-medium flex items-center gap-1.5 ${
-          isComplete ? 'bg-green-500/20 text-green-400 border border-green-500/30' : 
-          hasCert || hasKey ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' : 
-          'bg-neutral-500/20 text-neutral-400 border border-neutral-500/30'
+          isComplete ? 'bg-[color-mix(in_oklab,var(--ok)_14%,transparent)] text-[var(--ok)] border border-[color-mix(in_oklab,var(--ok)_45%,var(--border))]' : 
+          hasCert || hasKey ? 'bg-[color-mix(in_oklab,var(--warn)_14%,transparent)] text-[var(--warn)] border border-[color-mix(in_oklab,var(--warn)_45%,var(--border))]' : 
+          'bg-[var(--badge-neutral-bg)] text-[var(--text-dim)] border border-[var(--border)]'
         }`}>
           {isComplete ? <CheckCircle size={14} /> : <AlertCircle size={14} />}
-          {isComplete ? 'Configured' : hasCert || hasKey ? 'Incomplete' : 'Not Configured'}
+          {isComplete ? t('byok.configured') : hasCert || hasKey ? t('byok.incomplete') : t('byok.notConfigured')}
         </div>
       </div>
 
       {/* Alerts */}
       {notice && (
-        <div className="p-3 bg-green-500/10 border border-green-500/30 text-green-300 text-sm flex items-center gap-2">
+        <div className="p-3 bg-[color-mix(in_oklab,var(--ok)_14%,transparent)] border border-[color-mix(in_oklab,var(--ok)_45%,var(--border))] text-[var(--ok)] text-sm flex items-center gap-2">
           <CheckCircle size={16} />
           {notice}
         </div>
       )}
       {error && (
-        <div className="p-3 bg-red-500/10 border border-red-500/30 text-red-300 text-sm flex items-center gap-2">
+        <div className="p-3 bg-[color-mix(in_oklab,var(--danger)_14%,transparent)] border border-[color-mix(in_oklab,var(--danger)_45%,var(--border))] text-[var(--danger)] text-sm flex items-center gap-2">
           <AlertCircle size={16} />
           {error}
-          <button className="ml-auto text-xs underline" onClick={() => setError(null)}>Dismiss</button>
+          <button className="ml-auto text-xs underline" onClick={() => setError(null)}>{t('common.dismiss')}</button>
         </div>
       )}
 
       {/* Tab Selector */}
-      <div className="flex gap-2 border-b border-neutral-700">
+      <div className="flex gap-2 border-b border-[var(--border)]">
         <button
           className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${
             activeTab === 'paste' 
@@ -260,7 +253,7 @@ export function BYOK() {
           onClick={() => setActiveTab('paste')}
         >
           <FileText size={14} className="inline mr-2" />
-          Paste PEM Content
+          {t('byok.pastePem')}
         </button>
         <button
           className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${
@@ -271,7 +264,7 @@ export function BYOK() {
           onClick={() => setActiveTab('upload')}
         >
           <Upload size={14} className="inline mr-2" />
-          Upload Files
+          {t('byok.uploadFiles')}
         </button>
       </div>
 
@@ -280,17 +273,17 @@ export function BYOK() {
         <div className="space-y-4">
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             {/* Certificate */}
-            <div className="border border-neutral-700 bg-[var(--panel-2)] overflow-hidden">
-              <div className="px-4 py-3 border-b border-neutral-700 flex items-center justify-between">
+            <div className="border border-[var(--border)] bg-[var(--panel-2)] overflow-hidden">
+              <div className="px-4 py-3 border-b border-[var(--border)] flex items-center justify-between">
                 <div className="font-medium flex items-center gap-2">
                   <FileText size={16} className="text-[var(--accent)]" />
-                  Certificate (PEM)
+                  {t('byok.certificate')} (PEM)
                 </div>
-                {hasCert && <span className="text-xs text-green-400 flex items-center gap-1"><CheckCircle size={12} /> Loaded</span>}
+                {hasCert && <span className="text-xs text-[var(--ok)] flex items-center gap-1"><CheckCircle size={12} /> {t('byok.loaded')}</span>}
               </div>
               <div className="p-4 space-y-3">
                 <label className="block">
-                  <span className="text-xs text-[var(--text-dim)] mb-1 block">Load from file</span>
+                  <span className="text-xs text-[var(--text-dim)] mb-1 block">{t('byok.loadFromFile')}</span>
                   <input 
                     type="file" 
                     accept=".pem,.crt,.cer,.txt" 
@@ -299,29 +292,29 @@ export function BYOK() {
                   />
                 </label>
                 <textarea 
-                  className="w-full h-48 bg-[var(--panel)] border border-neutral-700 px-3 py-2 text-sm font-mono resize-none focus:outline-none focus:border-[var(--accent)]" 
+                  className="w-full h-48 bg-[var(--panel)] border border-[var(--border)] px-3 py-2 text-sm font-mono resize-none focus:outline-none focus:border-[var(--accent)]" 
                   value={draft.cert_pem || ''} 
                   onChange={(e) => setDraft({ ...draft, cert_pem: e.target.value })} 
                   placeholder="-----BEGIN CERTIFICATE-----&#10;MIIDXTCCAkWgAwIBAgIJAJC1...&#10;-----END CERTIFICATE-----" 
                 />
                 <p className="text-xs text-[var(--text-dim)]">
-                  Provide a valid X.509 certificate in PEM format. This certificate will be used for TLS encryption.
+                  {t('byok.certificateHint')}
                 </p>
               </div>
             </div>
 
             {/* Private Key */}
-            <div className="border border-neutral-700 bg-[var(--panel-2)] overflow-hidden">
-              <div className="px-4 py-3 border-b border-neutral-700 flex items-center justify-between">
+            <div className="border border-[var(--border)] bg-[var(--panel-2)] overflow-hidden">
+              <div className="px-4 py-3 border-b border-[var(--border)] flex items-center justify-between">
                 <div className="font-medium flex items-center gap-2">
-                  <KeyRound size={16} className="text-amber-400" />
-                  Private Key (PEM)
+                  <KeyRound size={16} className="text-[var(--warn)]" />
+                  {t('byok.privateKey')} (PEM)
                 </div>
-                {hasKey && <span className="text-xs text-green-400 flex items-center gap-1"><CheckCircle size={12} /> Loaded</span>}
+                {hasKey && <span className="text-xs text-[var(--ok)] flex items-center gap-1"><CheckCircle size={12} /> {t('byok.loaded')}</span>}
               </div>
               <div className="p-4 space-y-3">
                 <label className="block">
-                  <span className="text-xs text-[var(--text-dim)] mb-1 block">Load from file</span>
+                  <span className="text-xs text-[var(--text-dim)] mb-1 block">{t('byok.loadFromFile')}</span>
                   <input 
                     type="file" 
                     accept=".pem,.key,.txt" 
@@ -330,24 +323,24 @@ export function BYOK() {
                   />
                 </label>
                 <textarea 
-                  className="w-full h-48 bg-[var(--panel)] border border-neutral-700 px-3 py-2 text-sm font-mono resize-none focus:outline-none focus:border-[var(--accent)]" 
+                  className="w-full h-48 bg-[var(--panel)] border border-[var(--border)] px-3 py-2 text-sm font-mono resize-none focus:outline-none focus:border-[var(--accent)]" 
                   value={draft.key_pem || ''} 
                   onChange={(e) => setDraft({ ...draft, key_pem: e.target.value })} 
                   placeholder="-----BEGIN PRIVATE KEY-----&#10;MIIEvgIBADANBgkqhkiG9w0B...&#10;-----END PRIVATE KEY-----" 
                 />
                 <p className="text-xs text-[var(--text-dim)]">
-                  Paste the corresponding private key in PEM format. Keep this key secure and never share it.
+                  {t('byok.privateKeyHint')}
                 </p>
               </div>
             </div>
           </div>
 
           {/* Description & Actions */}
-          <div className="border border-neutral-700 bg-[var(--panel-2)] p-4 space-y-4">
+          <div className="border border-[var(--border)] bg-[var(--panel-2)] p-4 space-y-4">
             <div>
-              <label className="text-sm text-[var(--text-dim)] mb-1 block">Description (optional)</label>
+              <label className="text-sm text-[var(--text-dim)] mb-1 block">{t('byok.description')}</label>
               <input 
-                className="w-full bg-[var(--panel)] border border-neutral-700 px-3 py-2 text-sm focus:outline-none focus:border-[var(--accent)]" 
+                className="w-full bg-[var(--panel)] border border-[var(--border)] px-3 py-2 text-sm focus:outline-none focus:border-[var(--accent)]" 
                 placeholder="e.g., Production certificate for cloud streaming - expires Dec 2025" 
                 value={draft.description || ''} 
                 onChange={(e) => setDraft({ ...draft, description: e.target.value })} 
@@ -360,18 +353,18 @@ export function BYOK() {
                 disabled={!canAdmin || loading}
               >
                 {loading ? <Loader2 size={16} className="animate-spin" /> : <CheckCircle size={16} />}
-                Save Certificate
+                {t('byok.saveCertificate')}
               </button>
               {(hasCert || hasKey) && (
                 <button 
-                  className="px-4 py-2 bg-red-500/20 text-red-400 border border-red-500/30 font-medium hover:bg-red-500/30 transition-colors" 
+                  className="px-4 py-2 bg-[color-mix(in_oklab,var(--danger)_14%,transparent)] text-[var(--danger)] border border-[color-mix(in_oklab,var(--danger)_45%,var(--border))] font-medium hover:bg-[color-mix(in_oklab,var(--danger)_14%,transparent)] transition-colors" 
                   onClick={clearCertificates}
                 >
-                  Clear Certificates
+                  {t('byok.clearCertificates')}
                 </button>
               )}
               {!canAdmin && (
-                <span className="text-xs text-amber-400">Admin privileges required to modify certificates</span>
+                <span className="text-xs text-[var(--warn)]">{t('byok.adminRequired')}</span>
               )}
             </div>
           </div>
@@ -380,16 +373,16 @@ export function BYOK() {
 
       {/* Upload Tab */}
       {activeTab === 'upload' && (
-        <div className="border border-neutral-700 bg-[var(--panel-2)] p-6 space-y-6">
+        <div className="border border-[var(--border)] bg-[var(--panel-2)] p-6 space-y-6">
           <div className="text-center">
             <Upload size={40} className="mx-auto text-[var(--text-dim)] mb-3" />
-            <h3 className="font-medium mb-1">Upload Certificate Files</h3>
-            <p className="text-sm text-[var(--text-dim)]">Select your certificate, private key, and optionally a CA bundle file</p>
+            <h3 className="font-medium mb-1">{t('byok.uploadCertificateFiles')}</h3>
+            <p className="text-sm text-[var(--text-dim)]">{t('byok.selectFiles')}</p>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             {/* Cert Upload */}
-            <div className="border border-dashed border-neutral-600 p-4 text-center hover:border-[var(--accent)] transition-colors">
+            <div className="border border-dashed border-[var(--border)] p-4 text-center hover:border-[var(--accent)] transition-colors">
               <input
                 id="byok-upload-cert"
                 type="file"
@@ -399,16 +392,16 @@ export function BYOK() {
               />
               <label htmlFor="byok-upload-cert" className="cursor-pointer block">
                 <FileText size={24} className="mx-auto text-[var(--accent)] mb-2" />
-                <div className="text-sm font-medium mb-1">Certificate</div>
+                <div className="text-sm font-medium mb-1">{t('byok.certificate')}</div>
                 <div className="text-xs text-[var(--text-dim)]">
-                  {uploadNames.cert || 'Click to select .pem, .crt, .cer'}
+                  {uploadNames.cert || t('byok.selectCertificate')}
                 </div>
-                {uploadNames.cert && <CheckCircle size={14} className="mx-auto mt-2 text-green-400" />}
+                {uploadNames.cert && <CheckCircle size={14} className="mx-auto mt-2 text-[var(--ok)]" />}
               </label>
             </div>
 
             {/* Key Upload */}
-            <div className="border border-dashed border-neutral-600 p-4 text-center hover:border-[var(--accent)] transition-colors">
+            <div className="border border-dashed border-[var(--border)] p-4 text-center hover:border-[var(--accent)] transition-colors">
               <input
                 id="byok-upload-key"
                 type="file"
@@ -417,17 +410,17 @@ export function BYOK() {
                 onChange={(e) => setUploadNames((n) => ({ ...n, key: e.target.files?.[0]?.name || '' }))}
               />
               <label htmlFor="byok-upload-key" className="cursor-pointer block">
-                <KeyRound size={24} className="mx-auto text-amber-400 mb-2" />
-                <div className="text-sm font-medium mb-1">Private Key</div>
+                <KeyRound size={24} className="mx-auto text-[var(--warn)] mb-2" />
+                <div className="text-sm font-medium mb-1">{t('byok.privateKey')}</div>
                 <div className="text-xs text-[var(--text-dim)]">
-                  {uploadNames.key || 'Click to select .pem, .key'}
+                  {uploadNames.key || t('byok.selectKey')}
                 </div>
-                {uploadNames.key && <CheckCircle size={14} className="mx-auto mt-2 text-green-400" />}
+                {uploadNames.key && <CheckCircle size={14} className="mx-auto mt-2 text-[var(--ok)]" />}
               </label>
             </div>
 
             {/* CA Bundle Upload */}
-            <div className="border border-dashed border-neutral-600 p-4 text-center hover:border-[var(--accent)] transition-colors">
+            <div className="border border-dashed border-[var(--border)] p-4 text-center hover:border-[var(--accent)] transition-colors">
               <input
                 id="byok-upload-ca"
                 type="file"
@@ -436,12 +429,12 @@ export function BYOK() {
                 onChange={(e) => setUploadNames((n) => ({ ...n, ca: e.target.files?.[0]?.name || '' }))}
               />
               <label htmlFor="byok-upload-ca" className="cursor-pointer block">
-                <Shield size={24} className="mx-auto text-blue-400 mb-2" />
-                <div className="text-sm font-medium mb-1">CA Bundle <span className="text-[var(--text-dim)]">(optional)</span></div>
+                <Shield size={24} className="mx-auto text-[var(--accent)] mb-2" />
+                <div className="text-sm font-medium mb-1">{t('byok.caBundle')} <span className="text-[var(--text-dim)]">({t('byok.optional')})</span></div>
                 <div className="text-xs text-[var(--text-dim)]">
-                  {uploadNames.ca || 'Click to select CA chain'}
+                  {uploadNames.ca || t('byok.selectCa')}
                 </div>
-                {uploadNames.ca && <CheckCircle size={14} className="mx-auto mt-2 text-green-400" />}
+                {uploadNames.ca && <CheckCircle size={14} className="mx-auto mt-2 text-[var(--ok)]" />}
               </label>
             </div>
           </div>
@@ -453,12 +446,12 @@ export function BYOK() {
               disabled={!canAdmin || loading || (!uploadNames.cert && !uploadNames.key)}
             >
               {loading ? <Loader2 size={16} className="animate-spin" /> : <Upload size={16} />}
-              Upload Files
+              {t('byok.uploadFiles')}
             </button>
           </div>
 
           <p className="text-xs text-[var(--text-dim)] text-center">
-            Files are securely stored on the server and will be used for TLS encryption.
+            {t('byok.storageHint')}
           </p>
         </div>
       )}

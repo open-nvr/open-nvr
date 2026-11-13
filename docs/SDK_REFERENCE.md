@@ -1,0 +1,230 @@
+# `opennvr_app_sdk` — public API index
+
+The SDK is the *only* import a vision app needs. This page is the map
+of what it exports (`opennvr_app_sdk.__all__`), grouped by what you
+are trying to do; the docstrings in the source are the reference for
+each name and `make sdk-docs` renders them to HTML. Concepts and
+walkthroughs live in [FIRST_DETECTOR.md](FIRST_DETECTOR.md),
+[APP_PLATFORM.md](APP_PLATFORM.md), [APP_SURFACES.md](APP_SURFACES.md)
+and [APP_CREDENTIALS.md](APP_CREDENTIALS.md).
+
+Version: `opennvr_app_sdk.__version__` (`0.7.0`, on PyPI since OpenNVR 0.1.6). Licence: Apache-2.0.
+
+```bash
+pip install opennvr-app-sdk            # or: uv add opennvr-app-sdk
+pip install "opennvr-app-sdk[nats]"    # + NATS client for the subscribe loops
+```
+
+**One runnable example per class** lives in
+[`sdk/opennvr-app-sdk/cookbook/`](../sdk/opennvr-app-sdk/cookbook/) —
+how each is constructed or subclassed and which APIs it uses, imported
+and exercised by the test suite so it cannot drift from the code. This
+page is the index of names; the cookbook is the index of *uses*.
+
+## Pick an archetype — the class you subclass
+
+| Archetype | Subclass | Implement | Run with | Source of frames/events |
+|---|---|---|---|---|
+| **Detector** | `Detector` | `on_detections(camera_id, detections, event) -> Iterable[Alert]` | `app(MyDetector).run()` | Tier-0 / adapter inference events on NATS — no model of your own |
+| **FrameApp** | `FrameApp` | `on_frame(camera_id, jpeg) -> Iterable[Alert]` | `app(MyApp).run()` | Frames you pull; you call inference via `KaiCClient` or `nvr.ai` |
+| **DomainEventSubscriber** | `DomainEventSubscriber` | `subscriptions = [...]`, `on_event(DomainEvent)`; `self.fire(alert)` dispatches as the app | `domain_event_app(MyApp).run()` | Domain events (`plate.recognized.v1`, …) other apps publish |
+| **AlertSubscriber** | `AlertSubscriber` | `on_alert(alert, subject)` | `alert_app(MySub).run()` | `opennvr.alerts.*` — relays, SIEM bridges |
+
+All four mix in `ContractMixin`, which gives every app the registry
+contract for free: `/health`, `/state`, `/manifest`, `/actions/{name}`,
+`/entitlement/verify` served by `ContractServer`; registration with
+core (`register_with_opennvr`); live config (`on_config_update`,
+`start_config_poll`); credentials (`credentials`); the calling user
+(`current_user`); and licensing (`verify_license`,
+`on_entitlement_update`, `entitlement`). Optional hooks to override:
+`setup()`, `state_snapshot()`, `health_snapshot()`, `on_action(name,
+params)`.
+
+Runners: `AppRunner`, `AlertSubscriberRunner` (what `app()` /
+`alert_app()` / `domain_event_app()` return; `.run(argv)` parses the
+CLI, loads config, wires signals).
+
+## Describe the app — the manifest
+
+| Name | Purpose |
+|---|---|
+| `AppManifest` | Identity + schema: `id`, `name`, `version`, `category`, `summary`, `requires_tasks`, `requires_adapters`, `requires_scopes`, `provides`, `subscribes`, `params`, `emits`, `state_schema`, `actions`, `tier0_labels` (classes the app needs Tier-0 to track; the platform widens Tier-0 with them on the cameras picked for the app — see [tier0-consumption.md](tier0-consumption.md)), `has_ui` / `ui_mode` / `ui_url`, `description`, `author`, `website`, `license`, `use_cases`, `contact`, `pricing`, `price_note`, `entitlement` |
+| `Param` | One config field the catalog renders (`key`, `type`, `default`, `per_camera`, …) |
+| `AlertType` | One kind of alert the app `emits` |
+| `StateView` | One live view of `/state` the catalog renders (`state_schema`) |
+| `Action` | One operator verb the catalog offers (`POST /actions/{name}`) |
+| `PRICING_MODELS` | `free`, `paid`, `subscription`, `contact` |
+| `ENTITLEMENT_MODES` | `none`, `license_key` |
+| `Entitlement` | What `verify_license` returns: `valid`, `plan`, `expires_at`, `message`, `limits` |
+
+## Talk to the platform — `OpenNVR`
+
+```python
+from opennvr_app_sdk import OpenNVR
+nvr = OpenNVR()                      # OPENNVR_URL + the app's own key
+```
+
+| Name | Purpose |
+|---|---|
+| `OpenNVR(url=None, *, token=None, kaic_url=None, timeout=…)` | The client; everything below hangs off it |
+| `.cameras() -> list[Camera]`, `.camera(x)` | The app's roster (only cameras picked for it); `.roster()` returns `None` when core is unreachable, `[]` when nothing is picked |
+| `.snapshot(camera) -> bytes \| None` | Current JPEG |
+| `.recordings(camera)` → `RecordingsAPI` | `.list(start, end)`, `.url(start, duration)`, `.frame_at(at)` |
+| `.timeline` → `TimelineAPI` | `.search(camera=, label=, …)`, `.evidence(event_id)`, `.plate_stats()`, `.plate_summary()`, `.plate_sessions()` |
+| `.alerts` → `AlertsAPI` | `.inbox(unacked=, limit=, after_id=)` — what this app raised, and whether anyone acknowledged it |
+| `.site_mode() -> dict \| None` | The site's arming state (`mode`: `disarmed` / `armed_home` / `armed_away`, plus `changed_at`, `changed_by`, `modes`); deployment-wide and read-only — arming is the operator's verb. `None` = core could not be asked, not "disarmed" |
+| `.state` → `StateAPI` | `.get`, `.set`, `.delete`, `.items(prefix)` — durable per-app key/value in core |
+| `.ai` → `AIAPI` | `.capabilities()`, `.infer(adapter, jpeg, task=…)`, `.stream(adapter, camera_id=…)` |
+| `Camera` | `id`, `handle` (`camN`), `name`, `role`, `frame_url`, `assignments`; `.has_skill(s)` |
+| `Recording` | `start`, `duration` |
+| `PlatformError` | Raised by writes; reads degrade to `None` / `[]` and log |
+| `InferStream` | The WebSocket inference session behind `nvr.ai.stream()`; `open()`, `infer(jpeg)`, `close()`, context-manager |
+| `AsyncOpenNVR` (`opennvr_app_sdk.aio`) | The same client `await`-ed, for FastAPI/agent loops: `await nvr.cameras()`, `await nvr.state.set(...)`, `async with`; `http_client=` shares a pool; `async with nvr.ai.stream(...) as s: await s.infer(jpeg)` (`AsyncInferStream`) |
+
+Lower-level helpers that predate the client and remain public:
+`discover_cameras(url)`, `cameras_for_skill(...)` (superseded by `OpenNVR().roster()` — the cameras picked for the app),
+`filter_cameras_for_skill(...)`, `full_frame_polygon()`, `EventsClient`
+/ `StoredEvent` (async event search), `KaiCClient` / `KaiCError`
+(direct KAI-C HTTP), and the Tier-0 helpers `Tier0Snapshot`,
+`snapshot_from_event`, `tier0_to_detections`, `is_tier0_subject`,
+`describe_counts`, `BestFrameClient`, `make_best_frame_fetch`.
+
+## Raise alerts
+
+| Name | Purpose |
+|---|---|
+| `Alert` | `title`, `description`, `camera_id`, `severity` (`low`/`medium`/`high`/`critical`), `alert_type`, `images` (`{name: path}` from `nvr.save_evidence()` — never image bytes, the bus caps a message at 1 MB), `evidence`, `tags`, `correlation_id`; `.to_wire()` |
+| `AlertSource`, `set_default_source(...)` | Who raised it (app id/name/version) — set once at startup |
+| `AlertDispatcher`, `build_dispatcher(webhook_url=…, nats_alerts_url=…)` | Fan-out: `StdoutChannel` always, `WebhookChannel` and `NatsAlertChannel` opt-in |
+| `alert_subject(alert)`, `DEFAULT_ALERT_SUBJECT_PREFIX` | The NATS subject an alert lands on (`opennvr.alerts.<severity>.<camera>`) |
+| `AlertChannel` | Protocol for your own channel: `send(alert) -> bool` |
+
+Alerts published on NATS reach the operator inbox, the bell and the
+alarm actions without any further code.
+
+## Publish and consume domain events
+
+| Name | Purpose |
+|---|---|
+| `DomainEventPublisher` | `.publish(schema, camera_id, payload)` on `opennvr.events.<schema>.<camera>` |
+| `domain_envelope(...)`, `domain_subject(schema, camera_id)` | The wire helpers |
+| `DomainEvent` | Parsed envelope: `id`, `schema`, `camera_id`, `ts`, `payload`, `producer`, `correlation_id`, `subject` |
+| `DomainEventSubscriber`, `domain_event_app`, `parse_domain_event` | The consuming archetype (above) |
+| `DomainEvent.typed()` | The payload as its contract class, or `None` when the SDK does not type the schema / the payload is off-contract (logged) |
+| `DomainEventPublisher.publish_typed(payload, camera_id=…)` | Publish a typed payload; the schema is the class's |
+| `PlateRecognized`, `AccessDecided`, `OccupancyChanged`, `OccupancyHeatmap`, `OccupancyFootfall`, `VisitRecorded`, `DetectionObserved` | The v1 contracts as frozen dataclasses: required fields enforced, additive fields kept in `.extra`, `to_payload()` / `from_payload()` round-trip; `AccessDecided.allow` fails closed on unknown decisions |
+| `EVENT_TYPES`, `typed_payload(schema, payload)` | schema → class, and the tolerant parser behind `typed()` |
+
+Schemas and their payloads: [EVENT_CONTRACTS.md](EVENT_CONTRACTS.md).
+
+## Identity
+
+| Name | Purpose |
+|---|---|
+| `AppCredentials`, `auth_headers()` | The app's own key (`OPENNVR_APP_KEY`, or `.opennvr/app.key`), falling back to the site key only to bootstrap; `.bus_url` / `.app_id` — the apps bus core advertised and the NATS user name |
+| `UserContext`, `current_user()` | Inside `/ui` and `/actions/*`: the user core forwarded — `id`, `username`, `is_superuser`, `.can_see(cam)`, `.can_manage(cam)`, `.visible(ids)` |
+| `verify_call_token(token, secret, audience=, purpose=)` | Verifies `X-OpenNVR-Call`, core's per-app proof on `/actions/*` and `/entitlement/verify`; the contract server applies it for you |
+
+## Rules — geometry and state
+
+| Name | Purpose |
+|---|---|
+| `Zone` (`.contains`, `.from_config`), `Tripwire` (`.side`, `.crossing`), `Point`, `bbox_center(bbox, w, h)` | Polygons and lines in frame coordinates; `from_config` reads what the catalog's zone editor stored |
+| `KeyedState`, `StateRecord`, `keyed_state(ttl=…)` | Per-key TTL memory for dwell/cooldown/tracking rules; `Detector.keyed_state(ttl)` is the shortcut |
+
+## Frames (FrameApp)
+
+| Name | Purpose |
+|---|---|
+| `FrameSource` | Protocol: `get_frame(camera_id) -> bytes \| None` |
+| `build_frame_source(camera_id=, url=)` | `rtsp://`, `http(s)://` snapshot, or `file://` from one URL |
+| `HttpSnapshotSource`, `FileFrameSource`, `CameraFrameSource`, `DictFrameSource`, `dict_frame_source(...)`, `FrameSourceError` | The concrete sources and the mapping wrapper |
+
+Prefer `nvr.snapshot(camera)` (server-side capture, no RTSP in your
+container) unless you need full frame rate.
+
+## Config
+
+| Name | Purpose |
+|---|---|
+| `BaseAppConfig` | The dataclass of everything the SDK reads from `cfg`: `nats_url` (required), `nats_token`, `subject_pattern`, `webhook_url`, `nats_alerts_*`, `contract_*`, `opennvr_url` / `opennvr_token`, `config_poll_seconds`. Subclass it and add your own fields |
+| `load_app_config(path, cls=BaseAppConfig)` | One YAML file → your subclass: base keys validated (operator-readable errors), extra fields taken by name or defaulted, a field with no default required; put app checks in `__post_init__` |
+| `load_yaml(path)`, `require(cfg, key)` | The lower-level helpers, for anything richer |
+
+## Testing your app — `opennvr_app_sdk.testing`
+
+No broker, no core, no Docker. The helpers every example's test suite
+used to hand-roll, versioned with the SDK so they stay right when the
+contracts move:
+
+| Name | Purpose |
+|---|---|
+| `RecorderChannel` | An alert channel that keeps `.alerts` (`.titles`, `.clear()`); `.dispatcher()` for the app |
+| `app_config(**overrides)` | A config object with every key the archetypes read (test hosts, nothing contacted) |
+| `detection(label, *, confidence, x, y, w, h, track_id)` | One contract-shaped detection |
+| `inference_event(*detections, camera_id=…)` | An adapter `InferenceCompletedEvent` — what `Detector` consumes |
+| `tier0_event(*tracks)`, `tier0_track(label, box=…)` | A Tier-0 event (pixel boxes; `tier0_to_detections` bridges it) |
+| `domain_event(schema, payload, camera_id=…)` | A contracted envelope; `payload` may be typed (`PlateRecognized(...)`) or a dict |
+| `feed(app, *events)` | Run raw events through the app's decode → handle → dispatch path; returns the alerts fired |
+| `FakeCore(cameras=…, snapshots=…)` | A loopback core for apps that use `OpenNVR()`: cameras, snapshots, state, alerts, register; `.requests` records every call |
+| `opennvr_app_sdk.testing.pytest_plugin` | The same as fixtures: `recorder`, `app_config_factory`, `fake_core` |
+
+```python
+from opennvr_app_sdk.testing import RecorderChannel, app_config, detection, feed, inference_event
+
+def test_fires_on_a_person():
+    rec = RecorderChannel()
+    app = MyDetector(app_config(watch_labels=["person"]), rec.dispatcher())
+    fired = feed(app, inference_event(detection("person")))
+    assert rec.titles == ["Person seen"] and fired == rec.alerts
+```
+
+## Validating — `opennvr-app validate`
+
+`opennvr-app validate [path]` imports the app and checks what the
+catalog, the registry and a listing reviewer would trip over: the
+manifest (id, version, category, params and their defaults, alert
+types, scopes, actions, commerce fields, the `verify_license` hook
+when `entitlement` says so), that `config.example.yml` loads through
+the app's own `AppConfig`, that `apps-index-entry.yml` mirrors the
+manifest and carries author, contact, source and `network_egress`,
+and the repository shape (Dockerfile, tests, LICENSE). Errors exit 1;
+warnings do not. Run it in the app's own environment.
+
+## Scaffolding
+
+`opennvr-app new <app-id> [--task T] [--dest DIR] [--sdk auto|pypi|path] [--repo]`
+— the generator ships in the wheel (`opennvr_app_sdk.scaffold`). Out of
+a checkout it pins the published SDK and writes a self-contained
+Dockerfile; inside the OpenNVR repository (`scripts/create_opennvr_app.py`)
+it keeps the editable path so examples track the SDK on main. `--repo`
+adds what a repository under the `open-nvr` organisation needs: CI, a
+`publish.yml` that builds and signs the image through the org's
+`build-catalog-app` workflow, and the App Catalog listing entry
+(`apps-index-entry.yml`) — [CONTRIBUTING_APPS.md](CONTRIBUTING_APPS.md) §2.
+
+## Releasing
+
+The package is published to PyPI as
+[`opennvr-app-sdk`](https://pypi.org/project/opennvr-app-sdk/) by
+`.github/workflows/publish-sdk.yml` through PyPI trusted publishing —
+no token lives in the repository. A release is:
+
+1. Bump `opennvr_app_sdk/_version.py` **and** `pyproject.toml` to the
+   same version, add the CHANGELOG entry, merge.
+2. `git tag sdk-v<version> && git push origin sdk-v<version>`.
+
+The workflow refuses a tag that does not match both files, runs the
+suite on 3.11–3.13, builds the sdist and wheel, `twine check`s them,
+installs the wheel in a clean venv and imports it, then publishes
+(the `pypi` environment may require a maintainer's approval). Every
+PR touching `sdk/**` runs the same pipeline minus the publish.
+
+## Stability
+
+Every name above is covered by the
+[compatibility promise](DEVELOPER_PROGRAM.md#the-compatibility-promise):
+removals and signature changes are announced a minor release ahead and
+the deprecated name keeps working, with a warning, until then. Names
+starting with `_` and modules not re-exported from the package root
+are internal.

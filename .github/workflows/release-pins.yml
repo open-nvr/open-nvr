@@ -29,8 +29,13 @@ on:
   # it on every main push and every tag is cheaper than one broken install.
   push:
     branches: [main]
-    tags:
-      - "v*"
+  # On a release tag the check used to race the publish it was checking:
+  # it fired ten seconds after the tag and found the core images missing
+  # (every release so far), then went green on a manual rerun. Run it
+  # when the publishes that build those images have finished instead.
+  workflow_run:
+    workflows: [publish-images, publish-detect-pipeline]
+    types: [completed]
   workflow_dispatch:
 
 permissions:
@@ -40,7 +45,11 @@ jobs:
   verify-pins:
     name: pinned images exist on GHCR
     runs-on: ubuntu-latest
+    # After a publish: only a successful one, and at the commit it built.
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
       - name: Verify every pinned image is pullable
         run: python3 scripts/verify_release_pins.py

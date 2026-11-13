@@ -1,0 +1,141 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="540" viewBox="0 0 1280 540" role="img" aria-labelledby="t d">
+<title id="t">OpenNVR: a new capability is software, not a new box</title>
+<desc id="d">Four steps, animated. A new model is released. It becomes an adapter on your existing OpenNVR box: it slots in and is checked, its weights fingerprinted, its permissions declared, the local-only policy applied. An app in the App Catalog is installed and puts it to work. Your people get the result as an alert on their phone. Recording runs the whole time. A new appliance is crossed out: no new box, no truck roll.</desc>
+<defs>
+<filter id="sh" x="-20%" y="-20%" width="140%" height="150%"><feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000000" flood-opacity="0.35"/></filter>
+</defs>
+<style>
+/*PALETTE*/svg{--card:#0d1117;--cardline:#232c3a;--box:#141c28;--boxline:#2a3648;--ink:#e6edf3;--muted:#9fb0c6;--faint:#7d8fa8;--wire:#45566e;--blue:#4fb3ff;--green:#3ee08f;--amber:#f5b544;--kaic:#111926;--kaicline:#2c3b52;--slot:#6f86a8;--chip:#172234;--chipline:#2c3b52;--ok:#0f2a20;--okline:#1f5f44;--oktext:#3ee08f;--warn:#2a2210;--warnline:#6b5420;--newfill:#0f2236}/*END*/
+text{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',sans-serif}
+.m{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace}
+.cardbg{fill:var(--card);stroke:var(--cardline)}
+.box{fill:var(--box);stroke:var(--boxline);stroke-width:1.5;filter:url(#sh)}
+.boxhi{fill:var(--box);stroke:var(--blue);stroke-width:2;filter:url(#sh)}
+.frame{fill:var(--kaic);stroke:var(--kaicline);stroke-width:1.5}
+.ico{fill:none;stroke:var(--ink);stroke-width:2.5;stroke-linecap:round;stroke-linejoin:round}
+.ink{fill:var(--ink)}.mut{fill:var(--muted)}.fnt{fill:var(--faint)}.blu{fill:var(--blue)}.grn{fill:var(--green)}.amb{fill:var(--amber)}.okt{fill:var(--oktext)}
+.wire{fill:none;stroke:var(--wire);stroke-width:3}
+.flow{fill:none;stroke:var(--blue);stroke-width:3;stroke-dasharray:10 22;animation:kDash 1.2s linear infinite}
+.arrow{fill:var(--wire)}
+.plug{fill:var(--box);stroke:var(--blue);stroke-width:2}
+.empty{fill:none;stroke:var(--boxline);stroke-width:1.5;stroke-dasharray:6 6}
+.chip{fill:var(--chip);stroke:var(--chipline)}
+.newt{fill:var(--newfill);stroke:var(--blue);stroke-width:2}
+.okc{fill:var(--ok);stroke:var(--okline)}
+.wrn{fill:var(--warn);stroke:var(--warnline)}
+.stepoff{fill:var(--chip);stroke:var(--chipline)}
+.stepon{fill:var(--blue)}
+.strike{stroke:var(--amber);stroke-width:2.5;stroke-linecap:round}
+@keyframes kDash{to{stroke-dashoffset:-32}}
+.blink{animation:kBlink 1.6s ease-in-out infinite}@keyframes kBlink{0%,100%{opacity:1}50%{opacity:.25}}
+.tl{animation-duration:14s;animation-iteration-count:infinite;animation-timing-function:ease;animation-fill-mode:both}
+.s1{animation-name:kS1}@keyframes kS1{0%,1%{opacity:0}3%,21%{opacity:1}23%,100%{opacity:0}}
+.s2{animation-name:kS2}@keyframes kS2{0%,21%{opacity:0}23%,35%{opacity:1}37%,100%{opacity:0}}
+.s3{animation-name:kS3}@keyframes kS3{0%,35%{opacity:0}37%,56%{opacity:1}58%,100%{opacity:0}}
+.s4{animation-name:kS4}@keyframes kS4{0%,56%{opacity:0}58%,95%{opacity:1}97%,100%{opacity:0}}
+.mv{animation-name:kMv}@keyframes kMv{0%{opacity:0;transform:none}5%,11%{opacity:1;transform:none}21%,95%{opacity:1;transform:translate(310px,-54px)}98%,100%{opacity:0;transform:translate(310px,-54px)}}
+.slot0{animation-name:kSlot}@keyframes kSlot{0%,20%{opacity:1}21.5%,97%{opacity:0}99%,100%{opacity:1}}
+.c1{animation-name:kC1}@keyframes kC1{0%,23%{opacity:0}25%,95%{opacity:1}98%,100%{opacity:0}}
+.c2{animation-name:kC2}@keyframes kC2{0%,27%{opacity:0}29%,95%{opacity:1}98%,100%{opacity:0}}
+.c3{animation-name:kC3}@keyframes kC3{0%,31%{opacity:0}33%,95%{opacity:1}98%,100%{opacity:0}}
+.w1{animation-name:kW1}@keyframes kW1{0%,35%{opacity:0}37%,95%{opacity:1}98%,100%{opacity:0}}
+.tile0{animation-name:kT0}@keyframes kT0{0%,40%{opacity:1}42%,97%{opacity:0}99%,100%{opacity:1}}
+.tile1{animation-name:kT1}@keyframes kT1{0%,40%{opacity:0;transform:scale(.85)}43%,95%{opacity:1;transform:none}98%,100%{opacity:0}}
+.inst{animation-name:kIn}@keyframes kIn{0%,47%{opacity:0}49%,95%{opacity:1}98%,100%{opacity:0}}
+.w2{animation-name:kW2}@keyframes kW2{0%,53%{opacity:0}55%,95%{opacity:1}98%,100%{opacity:0}}
+.note{animation-name:kNote}@keyframes kNote{0%,58%{opacity:0;transform:translateY(-14px)}62%,95%{opacity:1;transform:none}98%,100%{opacity:0}}
+.tile1{transform-box:fill-box;transform-origin:center}
+@media (prefers-reduced-motion:reduce){
+.tl,.flow,.blink{animation:none!important}
+.s1,.s2,.s3,.slot0,.tile0{opacity:0}
+.mv{transform:translate(310px,-54px)}
+}
+</style>
+
+<rect class="cardbg" x="0.5" y="0.5" width="1279" height="539" rx="20"/>
+<text x="36" y="46" class="m fnt" font-size="11.5" font-weight="600" letter-spacing="1.8">OPENNVR · A NEW CAPABILITY IS SOFTWARE</text>
+
+<!-- ===== the four steps; the active one lights up ===== -->
+<circle class="stepoff" cx="51" cy="90" r="11"/><circle class="stepon tl s1" cx="51" cy="90" r="11"/><text x="51" y="94.5" class="m mut" font-size="12" font-weight="700" text-anchor="middle">1</text><text class="tl s1" x="51" y="94.5" fill="#ffffff" font-family="ui-monospace,Menlo,monospace" font-size="12" font-weight="700" text-anchor="middle">1</text><text x="70" y="95" class="mut" font-size="14.5" font-weight="600">A new model is released</text><text class="tl s1 ink" x="70" y="95" font-size="14.5" font-weight="600">A new model is released</text>
+<circle class="stepoff" cx="326" cy="90" r="11"/><circle class="stepon tl s2" cx="326" cy="90" r="11"/><text x="326" y="94.5" class="m mut" font-size="12" font-weight="700" text-anchor="middle">2</text><text class="tl s2" x="326" y="94.5" fill="#ffffff" font-family="ui-monospace,Menlo,monospace" font-size="12" font-weight="700" text-anchor="middle">2</text><text x="345" y="95" class="mut" font-size="14.5" font-weight="600">It becomes an adapter</text><text class="tl s2 ink" x="345" y="95" font-size="14.5" font-weight="600">It becomes an adapter</text>
+<circle class="stepoff" cx="651" cy="90" r="11"/><circle class="stepon tl s3" cx="651" cy="90" r="11"/><text x="651" y="94.5" class="m mut" font-size="12" font-weight="700" text-anchor="middle">3</text><text class="tl s3" x="651" y="94.5" fill="#ffffff" font-family="ui-monospace,Menlo,monospace" font-size="12" font-weight="700" text-anchor="middle">3</text><text x="670" y="95" class="mut" font-size="14.5" font-weight="600">An app puts it to work</text><text class="tl s3 ink" x="670" y="95" font-size="14.5" font-weight="600">An app puts it to work</text>
+<circle class="stepoff" cx="1051" cy="90" r="11"/><circle class="stepon tl s4" cx="1051" cy="90" r="11"/><text x="1051" y="94.5" class="m mut" font-size="12" font-weight="700" text-anchor="middle">4</text><text class="tl s4" x="1051" y="94.5" fill="#ffffff" font-family="ui-monospace,Menlo,monospace" font-size="12" font-weight="700" text-anchor="middle">4</text><text x="1070" y="95" class="mut" font-size="14.5" font-weight="600">Your people get it</text><text class="tl s4 ink" x="1070" y="95" font-size="14.5" font-weight="600">Your people get it</text>
+
+<!-- ===== 1. the model ===== -->
+<rect class="box" x="40" y="130" width="210" height="200" rx="14"/>
+<g class="ico" transform="translate(145 176)">
+  <path d="M-30 -16 L0 -22 M-30 -16 L0 0 M-30 -16 L0 22 M-30 16 L0 -22 M-30 16 L0 0 M-30 16 L0 22 M0 -22 L30 0 M0 0 L30 0 M0 22 L30 0" stroke-width="1.6"/>
+  <circle cx="-30" cy="-16" r="5" fill="var(--box)"/><circle cx="-30" cy="16" r="5" fill="var(--box)"/>
+  <circle cx="0" cy="-22" r="5" fill="var(--box)"/><circle cx="0" cy="0" r="5" fill="var(--box)"/><circle cx="0" cy="22" r="5" fill="var(--box)"/>
+  <circle cx="30" cy="0" r="5" fill="var(--box)"/>
+</g>
+<text x="145" y="234" class="ink" font-size="17" font-weight="600" text-anchor="middle">New model</text>
+<text x="145" y="254" class="mut" font-size="12.5" text-anchor="middle">from research, a vendor,</text>
+<text x="145" y="270" class="mut" font-size="12.5" text-anchor="middle">or your own fine-tune</text>
+<path class="wire" d="M250 230 H290"/>
+
+<!-- ===== your box ===== -->
+<rect class="frame" x="290" y="120" width="650" height="300" rx="18"/>
+<text x="310" y="146" class="m fnt" font-size="11" font-weight="600" letter-spacing="1.4">YOUR OPENNVR BOX · THE SAME HARDWARE</text>
+
+<!-- 2. adapter -->
+<rect class="box" x="315" y="162" width="270" height="198" rx="14"/>
+<text x="450" y="192" class="ink" font-size="17" font-weight="600" text-anchor="middle">Adapter</text>
+<text x="450" y="212" class="m mut" font-size="11" text-anchor="middle">~30 lines · opennvr-adapter-sdk</text>
+<rect class="empty tl slot0" x="380" y="228" width="150" height="34" rx="8"/>
+<g class="m okt" font-size="12">
+  <text class="tl c1" x="335" y="290">✓ weights fingerprinted</text>
+  <text class="tl c2" x="335" y="312">✓ permissions declared</text>
+  <text class="tl c3" x="335" y="334">✓ local_only policy holds</text>
+</g>
+
+<!-- adapter to app, through KAI-C -->
+<path class="wire" d="M585 245 H640"/>
+<path class="flow tl w1" d="M585 245 H640"/>
+<text x="612" y="236" class="m fnt" font-size="10.5" text-anchor="middle">KAI-C</text>
+
+<!-- 3. App Catalog -->
+<rect class="box" x="640" y="162" width="280" height="198" rx="14"/>
+<text x="780" y="192" class="ink" font-size="17" font-weight="600" text-anchor="middle">App Catalog</text>
+<rect class="chip" x="656" y="210" width="76" height="52" rx="8"/><text x="694" y="241" class="m mut" font-size="11" text-anchor="middle">intrusion</text>
+<rect class="chip" x="742" y="210" width="76" height="52" rx="8"/><text x="780" y="241" class="m mut" font-size="11" text-anchor="middle">plates</text>
+<rect class="chip" x="828" y="210" width="76" height="52" rx="8"/><text x="866" y="241" class="m mut" font-size="11" text-anchor="middle">occupancy</text>
+<rect class="chip" x="656" y="274" width="76" height="52" rx="8"/><text x="694" y="305" class="m mut" font-size="11" text-anchor="middle">loitering</text>
+<rect class="chip" x="742" y="274" width="76" height="52" rx="8"/><text x="780" y="305" class="m mut" font-size="11" text-anchor="middle">search</text>
+<rect class="empty tl tile0" x="828" y="274" width="76" height="52" rx="8"/><g class="tl tile1"><rect class="newt" x="828" y="274" width="76" height="52" rx="8"/><text x="866" y="298" class="m blu" font-size="11" font-weight="700" text-anchor="middle">fall alert</text></g><text class="tl inst m okt" x="866" y="315" font-size="10" text-anchor="middle">installed ✓</text>
+
+<!-- out of the box, to people -->
+<path class="wire" d="M920 245 H1018"/>
+<path class="flow tl w2" d="M920 245 H1018"/>
+<polygon class="arrow" points="1016,236 1032,245 1016,254"/>
+
+<!-- records, the whole time -->
+<circle class="grn blink" cx="318" cy="396" r="6"/>
+<text x="334" y="401" font-size="13.5" class="mut"><tspan class="ink" font-weight="600">Records</tspan>  recording the whole time, never paused</text>
+
+<!-- 4. people -->
+<rect class="box" x="1040" y="120" width="170" height="300" rx="24"/>
+<rect class="chip" x="1052" y="146" width="146" height="250" rx="12"/>
+<rect class="chip" x="1105" y="130" width="40" height="6" rx="3"/>
+<text x="1125" y="170" class="m fnt" font-size="11" text-anchor="middle">09:41</text>
+<g class="tl note">
+  <rect class="boxhi" x="1060" y="186" width="130" height="80" rx="10"/>
+  <circle class="blu" cx="1074" cy="204" r="4"/>
+  <text x="1084" y="208" class="ink" font-size="13" font-weight="700">Fall alert</text>
+  <text x="1072" y="230" class="ink" font-size="12.5">Person down</text>
+  <text x="1072" y="250" class="m mut" font-size="10.5">Ward 3 · cam 2</text>
+</g>
+
+<!-- ===== the model chip, travelling into the adapter ===== -->
+<g class="tl mv">
+  <rect class="plug" x="70" y="282" width="150" height="34" rx="8"/>
+  <text x="145" y="304" class="m blu" font-size="12" font-weight="600" text-anchor="middle">fall-detect.onnx</text>
+</g>
+
+<!-- ===== what did not change ===== -->
+<rect class="empty" x="40" y="452" width="150" height="54" rx="10"/>
+<text x="115" y="484" class="m fnt" font-size="12" text-anchor="middle">new appliance</text>
+<line class="strike" x1="64" y1="479" x2="166" y2="479"/>
+<text x="214" y="474" class="ink" font-size="17" font-weight="600">No new box. No truck roll. Nothing paused.</text>
+<text x="214" y="498" class="mut" font-size="13.5">A new capability is a container on the hardware you already have: one click to install, and the recordings never notice.</text>
+</svg>

@@ -117,6 +117,9 @@ class _FakeAuth:
         return ({"username": "v", "is_superuser": False, "role_name": "viewer"}
                 if token == "tok-viewer" else None)
 
+    async def visible_cameras(self, token, user=None):
+        return None   # unrestricted — per-camera scope has its own tests
+
     async def device_allowed(self, device_token):
         self.device_calls += 1
         self.device_tokens.append(device_token)

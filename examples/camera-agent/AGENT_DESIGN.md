@@ -74,8 +74,22 @@ Two tiers, both seeded:
    | "thanks, that's all" | no tool call, polite close |
 
    Run these against each candidate model (qwen2.5:1.5b, qwen2.5:0.5b, a cloud model)
-   to pick the brain per deployment — the harness already quantifies latency; add
-   pass/fail on the expected tool + a keyword check on the answer.
+   to pick the brain per deployment. **This is `tools/eval_harness.py`**, with
+   the cases above (and more) in `tools/eval_cases.yml`:
+
+       python tools/eval_harness.py --url http://localhost:9100 \
+           --camera <id> --repeat 5 --throwaway --out run.json
+
+   Scoring is deterministic: the turn trace says which tool ran, who chose it
+   (`by`: model / router / forced) and the arguments as asked, and the harness
+   reads the alarms and monitors a case created back from the agent, so both
+   what the model asked for and what the agent made of it are checked. Each
+   case reports a **pass** rate (the agent did the right thing) and a
+   **model** rate (the model chose it itself — a forced grounding does not
+   count), with a 95% interval over the repeats, grouped by router tier.
+   For the model on its own, run the agent with `router_tier0: false` and
+   `router_hints: false`; the JSON records which way it ran. Only against a
+   throwaway agent: cases arm real alarms and clear the chat history.
 
 ## The takeaway
 Don't reach for prompt tricks. Make capabilities **tools**, keep the **prompt**

@@ -15,7 +15,7 @@ The SDK ships three archetypes. This guide builds a **Detector**: it
 *subscribes* to KAI-C's NATS inference stream and reacts to detections
 another app is already driving — so it pays **zero adapter GPU cost**.
 (`FrameApp` *drives* inference itself — see
-[`examples/intrusion-detection`](../examples/intrusion-detection) — and
+[`examples/smart-doorbell`](../examples/smart-doorbell) — and
 `AlertSubscriber` is the pass-through archetype that rides the alert bus,
 like [`examples/home-assistant-relay`](../examples/home-assistant-relay).)
 
@@ -23,7 +23,19 @@ like [`examples/home-assistant-relay`](../examples/home-assistant-relay).)
 
 ## 1. Generate the app (1 min)
 
-From the repo root:
+> Building in your **own repository**? You don't need this checkout at
+> all — the generator ships in the SDK (0.5.0+):
+>
+> ```bash
+> pip install opennvr-app-sdk && opennvr-app new package-watch --task object_detection
+> ```
+>
+> That pins the published SDK and writes a Dockerfile that builds from
+> PyPI alone. [EXTERNAL_APP_WALKTHROUGH.md](EXTERNAL_APP_WALKTHROUGH.md)
+> is that path walked end to end, licence gate included.
+
+From the repo root (the same generator, via a wrapper that keeps in-tree
+apps on the checkout's SDK):
 
 ```bash
 python3 scripts/create_opennvr_app.py package-watch --task object_detection
@@ -124,7 +136,14 @@ Green means your app is wired to the SDK correctly *before* you've
 written a line of your own logic. As you replace the starter rule, keep
 this file green — extend it to pin your predicate (a below-threshold
 case stays quiet, an in-zone case fires, etc.), exactly the way the
-shipped examples' tests do.
+shipped examples' tests do. The test uses `opennvr_app_sdk.testing`
+(`RecorderChannel`, `inference_event`, `detection`, `feed`,
+`FakeCore`) — [SDK_REFERENCE.md](SDK_REFERENCE.md#testing-your-app--opennvr_app_sdktesting)
+lists the rest.
+
+Then `uv run opennvr-app validate .` — it checks the manifest, the
+example config, the listing entry and the repository shape the way a
+reviewer would, in a second.
 
 ## 4. Run it against the stack (5 min)
 
@@ -156,6 +175,27 @@ docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps u
 Uncomment the `contract_port` / `opennvr_url` block in `config.yml` (the
 generator ships it commented) to turn the contract surface + catalog
 self-registration on.
+
+On first registration core issues the app **its own key** (`oak_…`),
+which the SDK stores and uses from then on — the site key in
+`config.yml` is only for bootstrap ([APP_CREDENTIALS.md](APP_CREDENTIALS.md)).
+With that key, `OpenNVR()` gives the rule everything else it might
+want from the platform — the cameras picked for it, a snapshot, past
+events, a place to keep state across restarts — without touching NATS
+or HTTP yourself:
+
+```python
+from opennvr_app_sdk import OpenNVR
+
+nvr = OpenNVR()                       # OPENNVR_URL + the app's key
+for cam in nvr.cameras():             # only cameras picked for this app
+    last = nvr.state.get(f"seen:{cam.handle}")
+    jpeg = nvr.snapshot(cam)
+```
+
+The full client is in [APP_PLATFORM.md](APP_PLATFORM.md); inside `/ui`
+and actions, `current_user()` tells you who is asking and which cameras
+they may see ([APP_SURFACES.md §5](APP_SURFACES.md)).
 
 ## 5. Publish to the App Store (2 min to start)
 
@@ -194,6 +234,13 @@ either door can actually open — is [`docs/TWO_DOORS.md`](TWO_DOORS.md).
 
 ## Related reading
 
+- [`docs/DEVELOPER_PROGRAM.md`](DEVELOPER_PROGRAM.md) — the deal: what
+  the platform gives you, selling apps and models, the compatibility
+  promise.
+- [`docs/SDK_REFERENCE.md`](SDK_REFERENCE.md) — every public SDK name,
+  by task; [`docs/APP_PLATFORM.md`](APP_PLATFORM.md) — the `OpenNVR`
+  client; [`docs/APP_CREDENTIALS.md`](APP_CREDENTIALS.md) — the app's
+  own key.
 - [`docs/APP_SURFACES.md`](APP_SURFACES.md) — **the next step after this
   guide**: make your app a full citizen — agent skill, live config,
   state views, and action forms, all declared, no frontend.

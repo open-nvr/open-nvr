@@ -45,6 +45,7 @@ from dataclasses import dataclass
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from core.camera_source import is_publisher
 from models import Camera, CameraCapability
 from services import onvif_digest_service as ods
 
@@ -256,6 +257,12 @@ async def get_driver_for_camera(
     camera = db.query(Camera).filter(Camera.id == camera_id).first()
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
+    if is_publisher(camera):
+        # A webcam has no control API, and its placeholder address must
+        # never be dialled (0.0.0.0 reaches this host's own ports).
+        raise HTTPException(
+            status_code=409, detail="A webcam has no camera settings or controls"
+        )
 
     if force:
         invalidate_port_cache(camera_id)

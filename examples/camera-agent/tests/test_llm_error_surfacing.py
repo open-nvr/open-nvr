@@ -216,7 +216,7 @@ def test_a_real_think_rejection_still_retries_without_it():
 
 # ── demo: the header dot puts the brain above the eye ───────────────────
 
-_HTML = (Path(__file__).resolve().parents[1] / "demo" / "index.html").read_text()
+_HTML = (Path(__file__).resolve().parents[1] / "demo" / "index.html").read_text(encoding="utf-8")
 
 
 def test_demo_health_dot_shows_llm_error_red_and_first():

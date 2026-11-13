@@ -1,19 +1,16 @@
 [project]
 name = "opennvr-example-intrusion-detection"
-version = "1.0.0"
-description = "OpenNVR intrusion-detection example app"
+version = "1.1.0"
+description = "OpenNVR intrusion-detection example app (Tier-0 subscriber, perimeter arming state machine)"
 requires-python = ">=3.11"
 license = { text = "AGPL-3.0" }
 
-# The SDK owns the runtime stack (httpx KAI-C calls + webhooks, PyYAML
-# config, nats-py alert fan-out, the FrameApp poll loop, frame sources,
-# zone geometry) — see docs/design/app-sdk-spec.html. websockets stays
-# local: the §6 streaming-mode path through KAI-C's
-# /api/v1/infer/{adapter}/stream proxy (opt-in via
-# ``kaic_transport: ws`` in config) is unique to this example.
+# The SDK owns the runtime stack (nats-py subscribe loop, httpx alert
+# webhooks, PyYAML config, zone geometry) — see docs/APP_PLATFORM.md.
+# What is left in-repo is the rule: the per-camera arming state machine
+# plus this app's config parsing.
 dependencies = [
     "opennvr-app-sdk",
-    "websockets>=13.0",
 ]
 
 [tool.uv.sources]
@@ -39,3 +36,4 @@ intrusion-detection = "intrusion_detection:main"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+asyncio_mode = "auto"

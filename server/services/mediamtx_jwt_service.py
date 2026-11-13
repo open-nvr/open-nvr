@@ -1,16 +1,16 @@
 # Copyright (c) 2026 OpenNVR
 # This file is part of OpenNVR.
-# 
+#
 # OpenNVR is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
-# 
+#
 # OpenNVR is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
-# 
+#
 # You should have received a copy of the GNU Affero General Public License
 # along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
 
@@ -30,9 +30,18 @@ Security:
 import base64
 import hashlib
 import os
+import threading
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+try:  # POSIX only; on Windows the in-process lock is all we have
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
 
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
@@ -92,64 +101,171 @@ class MediaMtxJwtService:
     _public_key: rsa.RSAPublicKey | None = None
     _kid: str | None = None  # Key ID for JWKS
 
+    # Key creation is serialised: the first start used to race itself.
+    # MediaMTX fetches the JWKS while the first stream token is being
+    # minted, both land in the threadpool, both saw no key files, both
+    # generated a pair and the two plain ``write_bytes`` calls interleaved —
+    # leaving a public key that did not belong to the private key and every
+    # stream token rejected until someone rewrote the file by hand. The
+    # thread lock covers one process; the flock covers a second process on
+    # the same volume (uvicorn --reload, a one-off management command).
+    _lock = threading.RLock()
+    LOCK_FILE_NAME = ".keys.lock"
+
+    @classmethod
+    @contextmanager
+    def _keys_dir_lock(cls) -> Iterator[None]:
+        """Hold the thread lock and (POSIX) an exclusive lock on the keys dir."""
+        with cls._lock:
+            if fcntl is None:
+                yield
+                return
+            with open(cls.KEYS_DIR / cls.LOCK_FILE_NAME, "a+b") as fh:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+    @staticmethod
+    def _write_atomic(path: Path, data: bytes, *, private: bool) -> None:
+        """Write ``data`` to a sibling temp file and rename it over ``path``.
+
+        A reader never sees a half-written key, and a crash between the two
+        key files leaves either the old pair or a complete new file — never
+        a torn one. The private key is created 0600 from the first byte.
+        """
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        fd = os.open(
+            tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600 if private else 0o644
+        )
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+                fh.flush()
+                os.fsync(fh.fileno())
+            if private:
+                _harden_key_file_permissions(tmp)
+            os.replace(tmp, path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+
+    @staticmethod
+    def _public_pem_of(private_key: rsa.RSAPrivateKey) -> bytes:
+        return private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+
     @classmethod
     def _ensure_keys_exist(cls) -> None:
-        """Generate RSA key pair if not exists."""
-        cls.KEYS_DIR.mkdir(exist_ok=True)
+        """Generate the RSA key pair if it does not exist (locked)."""
+        cls.KEYS_DIR.mkdir(parents=True, exist_ok=True)
+        with cls._keys_dir_lock():
+            cls._ensure_keys_exist_locked()
 
-        if not cls.PRIVATE_KEY_PATH.exists() or not cls.PUBLIC_KEY_PATH.exists():
+    @classmethod
+    def _ensure_keys_exist_locked(cls) -> None:
+        """Body of :meth:`_ensure_keys_exist`; the caller holds the lock.
+
+        A private key without its public half (a start interrupted between
+        the two writes) keeps the private key and derives the public file
+        from it, so tokens already minted stay valid and the kid is stable.
+        """
+        if cls.PRIVATE_KEY_PATH.exists() and cls.PUBLIC_KEY_PATH.exists():
+            return
+
+        private_key: rsa.RSAPrivateKey | None = None
+        if cls.PRIVATE_KEY_PATH.exists():
+            try:
+                loaded = serialization.load_pem_private_key(
+                    cls.PRIVATE_KEY_PATH.read_bytes(),
+                    password=None,
+                    backend=default_backend(),
+                )
+                if isinstance(loaded, rsa.RSAPrivateKey):
+                    private_key = loaded
+                    main_logger.warning(
+                        "[MediaMTX JWT] Public key file missing; deriving it from the existing private key"
+                    )
+            except (ValueError, TypeError) as exc:
+                main_logger.warning(
+                    "[MediaMTX JWT] Existing private key is unreadable (%s); generating a new pair",
+                    exc,
+                )
+
+        if private_key is None:
             main_logger.info("[MediaMTX JWT] Generating new RSA key pair...")
-
             # Generate 2048-bit RSA key pair
             private_key = rsa.generate_private_key(
                 public_exponent=65537, key_size=2048, backend=default_backend()
             )
-
-            # Save private key (PEM format)
             private_pem = private_key.private_bytes(
                 encoding=serialization.Encoding.PEM,
                 format=serialization.PrivateFormat.PKCS8,
                 encryption_algorithm=serialization.NoEncryption(),
             )
-            cls.PRIVATE_KEY_PATH.write_bytes(private_pem)
+            cls._write_atomic(cls.PRIVATE_KEY_PATH, private_pem, private=True)
 
-            # Save public key (PEM format)
-            public_key = private_key.public_key()
-            public_pem = public_key.public_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PublicFormat.SubjectPublicKeyInfo,
-            )
-            cls.PUBLIC_KEY_PATH.write_bytes(public_pem)
-
-            # Restrict the private key to the owner (POSIX chmod; Windows ACL).
-            _harden_key_file_permissions(cls.PRIVATE_KEY_PATH)
-
-            main_logger.info("[MediaMTX JWT] RSA key pair generated successfully")
+        cls._write_atomic(
+            cls.PUBLIC_KEY_PATH, cls._public_pem_of(private_key), private=False
+        )
+        main_logger.info("[MediaMTX JWT] RSA key pair ready")
 
     @classmethod
     def _load_keys(cls) -> None:
-        """Load RSA keys from files."""
+        """Load RSA keys from files (once per process, under the lock)."""
         if cls._private_key is not None:
             return
 
-        cls._ensure_keys_exist()
+        cls.KEYS_DIR.mkdir(parents=True, exist_ok=True)
+        with cls._keys_dir_lock():
+            if cls._private_key is not None:  # another thread got here first
+                return
 
-        # Load private key
-        private_pem = cls.PRIVATE_KEY_PATH.read_bytes()
-        cls._private_key = serialization.load_pem_private_key(
-            private_pem, password=None, backend=default_backend()
-        )
+            cls._ensure_keys_exist_locked()
 
-        # Load public key
-        public_pem = cls.PUBLIC_KEY_PATH.read_bytes()
-        cls._public_key = serialization.load_pem_public_key(
-            public_pem, backend=default_backend()
-        )
+            private_pem = cls.PRIVATE_KEY_PATH.read_bytes()
+            private_key = serialization.load_pem_private_key(
+                private_pem, password=None, backend=default_backend()
+            )
+            if not isinstance(private_key, rsa.RSAPrivateKey):
+                raise TypeError("[MediaMTX JWT] private key is not RSA")
 
-        # Generate Key ID from public key hash
-        cls._kid = hashlib.sha256(public_pem).hexdigest()[:16]
+            # The public file must be the private key's own half. A pair
+            # torn by the old unlocked first start (or a hand-edited file)
+            # is repaired here rather than minting tokens MediaMTX rejects.
+            public_pem = cls.PUBLIC_KEY_PATH.read_bytes()
+            expected_numbers = private_key.public_key().public_numbers()
+            try:
+                public_key = serialization.load_pem_public_key(
+                    public_pem, backend=default_backend()
+                )
+                matches = (
+                    isinstance(public_key, rsa.RSAPublicKey)
+                    and public_key.public_numbers() == expected_numbers
+                )
+            except (ValueError, TypeError):
+                matches = False
+            if not matches:
+                main_logger.warning(
+                    "[MediaMTX JWT] %s does not match the private key; rewriting it from the private key",
+                    cls.PUBLIC_KEY_PATH,
+                )
+                public_pem = cls._public_pem_of(private_key)
+                cls._write_atomic(cls.PUBLIC_KEY_PATH, public_pem, private=False)
+                public_key = serialization.load_pem_public_key(
+                    public_pem, backend=default_backend()
+                )
 
-        main_logger.info(f"[MediaMTX JWT] Keys loaded, kid={cls._kid}")
+            cls._public_key = public_key  # type: ignore[assignment]
+            # Generate Key ID from public key hash
+            cls._kid = hashlib.sha256(public_pem).hexdigest()[:16]
+            # Published last: readers that skip the lock check this attribute.
+            cls._private_key = private_key
+
+            main_logger.info(f"[MediaMTX JWT] Keys loaded, kid={cls._kid}")
 
     @classmethod
     def get_jwks(cls) -> dict[str, Any]:
@@ -274,6 +390,7 @@ class MediaMtxJwtService:
         camera_id: int,
         camera_path: str,
         expiry_minutes: int = 1440,  # 24 hours for cameras
+        extra_paths: list[str] | None = None,
     ) -> str:
         """
         Create a JWT token for camera publishing.
@@ -300,7 +417,10 @@ class MediaMtxJwtService:
             "iat": int(now.timestamp()),
             "exp": int(expiry.timestamp()),
             "jti": f"cam-{camera_id}-{int(now.timestamp())}",
-            "mediamtx_permissions": [{"action": "publish", "path": camera_path}],
+            # One publisher may feed more than one path: a webcam's ffmpeg
+            # publishes the main path and its -sub in one process.
+            "mediamtx_permissions": [{"action": "publish", "path": p}
+                                     for p in [camera_path, *(extra_paths or [])]],
             "camera_id": camera_id,
             "type": "camera_publish",
         }

@@ -22,9 +22,15 @@
 
 import { Component, type ReactNode } from 'react'
 import { CircleAlert, RefreshCw } from 'lucide-react'
+import { useTranslation } from '../i18n'
 
 type Props = { children: ReactNode; title?: string }
 type State = { error: Error | null }
+
+function TryAgainLabel() {
+  const { t } = useTranslation()
+  return <>{t('shared.tryAgain')}</>
+}
 
 export class ErrorBoundary extends Component<Props, State> {
   state: State = { error: null }
@@ -41,23 +47,23 @@ export class ErrorBoundary extends Component<Props, State> {
     if (!this.state.error) return this.props.children
     return (
       <div className="p-6">
-        <div className="max-w-lg mx-auto rounded border border-red-700/40 bg-[var(--panel-2)]">
+        <div className="max-w-lg mx-auto border border-[color-mix(in_oklab,var(--danger)_45%,var(--border))] bg-[var(--panel-2)]">
           <div className="px-4 py-3 border-b border-[var(--border)] flex items-center gap-2">
-            <CircleAlert size={16} className="text-red-300" />
+            <CircleAlert size={16} className="text-[var(--danger)]" />
             <h3 className="text-sm font-semibold text-[var(--text)]">{this.props.title ?? 'Something went wrong'}</h3>
           </div>
           <div className="p-4 space-y-3">
             <p className="text-sm text-[var(--text-dim)]">
               This view crashed, but the rest of the app is still running. You can retry, or use the sidebar to go somewhere else.
             </p>
-            <pre className="text-xs text-red-300/90 bg-[var(--bg-2)] border border-[var(--border)] rounded p-2 overflow-auto max-h-32">
+            <pre className="text-xs text-[var(--danger)] bg-[var(--bg-2)] border border-[var(--border)] p-2 overflow-auto max-h-32">
               {this.state.error.message}
             </pre>
             <button
-              className="inline-flex items-center gap-2 rounded px-3 py-1.5 text-sm border border-[var(--border)] bg-[var(--panel)] hover:bg-[var(--panel-2)] text-[var(--text)]"
+              className="inline-flex items-center gap-2 px-3 py-1.5 text-sm border border-[var(--border)] bg-[var(--panel)] hover:bg-[var(--panel-2)] text-[var(--text)]"
               onClick={() => this.setState({ error: null })}
             >
-              <RefreshCw size={14} /> Try again
+              <RefreshCw size={14} /> <TryAgainLabel />
             </button>
           </div>
         </div>

@@ -60,6 +60,7 @@ import httpx
 
 from core.config import settings
 from core.logging_config import recording_logger
+from services.mediamtx_client import playback_auth
 
 
 @dataclass
@@ -114,6 +115,9 @@ class PlaybackSession:
     # URL and stall. A session therefore serves one consistent snapshot; picking
     # up newly finished footage happens when the client starts a new session.
     remux_index: Any = None
+    # Serve the video-only remux (browser.mp4) instead of the HLS manifest:
+    # H.265, or any recording whose audio MSE can't decode (G.711 -> ipcm).
+    needs_remux: bool = False
 
 
 class HlsPlaybackService:
@@ -377,7 +381,8 @@ class HlsPlaybackService:
             end_str = end_time.isoformat()
 
             url = f"{settings.mediamtx_playback_url}/list"
-            params = {"path": camera_path, "start": start_str, "end": end_str}
+            params = {"path": camera_path, "start": start_str, "end": end_str,
+                      **playback_auth()}
 
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.get(url, params=params)
@@ -516,14 +521,15 @@ class HlsPlaybackService:
             )
             return
 
-        # Codec of the first file decides the path for the whole session: the
-        # H.265 remux is per-file, so an HEVC session is truncated to its
-        # first clip (the client's boundary logic opens the next one).
+        # Codecs of the first file decide the path for the whole session: the
+        # remux is per-file, so a remuxed session is truncated to its first
+        # clip (the client's boundary logic opens the next one).
         first_path = rows[0][0]
         first_start = rows[0][1]
         try:
             from services.hevc_remux_service import (
-                is_browser_incompatible_video,
+                needs_browser_remux,
+                probe_audio_codec,
                 probe_video_codec,
             )
 
@@ -534,16 +540,35 @@ class HlsPlaybackService:
             session.video_codec = cls._stored_codec(
                 camera_id, first_start, db
             ) or probe_video_codec(first_path)
-            needs_remux = is_browser_incompatible_video(session.video_codec)
+            # Only the video codec is stored per row; the audio probe reads
+            # just the moov box at the file head.
+            needs_remux = needs_browser_remux(
+                session.video_codec, probe_audio_codec(first_path)
+            )
         except Exception:
             session.video_codec = None
             needs_remux = False
-        if needs_remux:
-            rows = rows[:1]
+        session.needs_remux = needs_remux
 
         session_start = session.start_time
         if session_start.tzinfo is None:
             session_start = session_start.replace(tzinfo=UTC)
+
+        if needs_remux:
+            # The remux serves ONE file, so it must be the file that holds the
+            # session start: the latest one that started at or before it.
+            # rows[0] is not that file at a clip boundary. The resolver keeps
+            # files that end near the start (clock skew, and a row's duration
+            # runs past the next row's start), so rows[0] was the PREVIOUS
+            # file, and the player, asking for the next one, got the same file
+            # back forever and stalled at the first boundary.
+            holding = rows[0]
+            for row in rows:
+                if row[1] > session_start:
+                    break
+                holding = row
+            rows = [holding]
+            first_path = holding[0]
 
         files: list[SessionFile] = []
         timeline = 0.0  # seconds of media accumulated on the session timeline
@@ -623,9 +648,9 @@ class HlsPlaybackService:
         except Exception:
             session.file_offset_seconds = 0.0
 
-        # For H.265, freeze the remux recipe NOW (see PlaybackSession.remux_index):
-        # the file may still be growing, and re-indexing mid-playback would shift
-        # every byte offset under the player.
+        # For a remuxed session, freeze the recipe NOW (see
+        # PlaybackSession.remux_index): the file may still be growing, and
+        # re-indexing mid-playback would shift every byte offset under the player.
         if needs_remux:
             try:
                 from services.hevc_remux_service import build_remux_index
@@ -903,6 +928,7 @@ class HlsPlaybackService:
                 "path": session.camera_path,
                 "start": start_str,
                 "duration": "0.1",
+                **playback_auth(),
             }
 
             async with httpx.AsyncClient(timeout=30.0) as client:
@@ -948,6 +974,7 @@ class HlsPlaybackService:
                 "path": session.camera_path,
                 "start": start_str,
                 "duration": str(segment_duration),
+                **playback_auth(),
             }
 
             async with httpx.AsyncClient(timeout=60.0) as client:
@@ -992,6 +1019,7 @@ class HlsPlaybackService:
                 "path": session.camera_path,
                 "start": start_str,
                 "duration": str(segment_duration),
+                **playback_auth(),
             }
 
             async with httpx.AsyncClient(timeout=120.0) as client:

@@ -28,7 +28,7 @@ import csv
 from datetime import date, datetime, timedelta
 from io import StringIO
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import Date, cast, func
 from sqlalchemy.orm import Session
 
@@ -36,6 +36,7 @@ from core.auth import get_current_active_user, get_current_superuser
 from core.database import get_db
 from core.logging_config import main_logger
 from models import AuditLog, Camera, Recording, User
+from services.camera_scope import in_scope, scope_query, visible_camera_ids
 
 router = APIRouter(prefix="/compliance", tags=["compliance"])
 
@@ -55,7 +56,12 @@ async def get_security_check(
 
     from services.security_compliance import check_cameras
 
-    cameras = db.query(Camera).filter(Camera.is_active == True).all()  # noqa: E712
+    # The cameras this caller may see: the check names each camera, its
+    # address, vendor and whether its credentials are weak.
+    cameras = scope_query(
+        db.query(Camera).filter(Camera.is_active == True),  # noqa: E712
+        Camera.id, visible_camera_ids(db, current_user),
+    ).all()
     result = check_cameras(cameras)
     result["generated_at"] = datetime.now(timezone.utc).isoformat()
     return result
@@ -87,7 +93,10 @@ async def get_compliance_summary(
 
     try:
         # Total active cameras in DB
-        cameras = db.query(Camera).filter(Camera.is_active == True).all()
+        cameras = scope_query(
+            db.query(Camera).filter(Camera.is_active == True),  # noqa: E712
+            Camera.id, visible_camera_ids(db, current_user),
+        ).all()
         total_cameras = len(cameras)
 
         # 1. Fetch active paths (Online Status)
@@ -271,6 +280,10 @@ async def get_recording_coverage(
             )
         )
 
+        scope = visible_camera_ids(db, current_user)
+        if camera_id is not None and not in_scope(scope, camera_id):
+            raise HTTPException(status_code=404, detail="Camera not found")
+        query = scope_query(query, Camera.id, scope)
         if camera_id:
             query = query.filter(Camera.id == camera_id)
 
@@ -320,7 +333,9 @@ async def get_access_audit(
     ),
     days: int = Query(7, ge=1, le=90, description="Number of days to look back"),
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_active_user),
+    # Who did what, from where, across every user: the audit log's own
+    # router is superuser-only, and this view of it is too.
+    current_user=Depends(get_current_superuser),
 ):
     """
     Get recent camera access audit logs.

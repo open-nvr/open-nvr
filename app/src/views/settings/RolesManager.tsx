@@ -17,10 +17,13 @@
  */
 
 import { useEffect, useMemo, useState } from 'react'
-import { Shield, ShieldPlus, X } from 'lucide-react'
+import { Shield, ShieldPlus } from 'lucide-react'
 import { apiService } from '../../lib/apiService'
 import { extractApiError } from '../../lib/apiError'
 import { useAuth } from '../../auth/AuthContext'
+import { useTranslation } from '../../i18n'
+import { useConfirm } from '../../components/ui/ConfirmDialog'
+import { Modal } from '../../components/Modal'
 
 type Role = {
   id: number
@@ -36,6 +39,8 @@ type RoleForm = {
 }
 
 export function RolesManager() {
+  const { t } = useTranslation()
+  const confirm = useConfirm()
   const { user: me } = useAuth()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -63,7 +68,7 @@ export function RolesManager() {
         setRoles(list)
         setTotal((res.data && (res.data as any).total) ? (res.data as any).total : list.length)
       } catch (e: any) {
-        setError(extractApiError(e, 'Failed to load roles'))
+        setError(extractApiError(e, t('admin.failedLoadRoles')))
       } finally {
         setLoading(false)
       }
@@ -107,7 +112,7 @@ export function RolesManager() {
       resetForm()
       await refresh()
     } catch (e: any) {
-      setError(extractApiError(e, 'Failed to create role'))
+      setError(extractApiError(e, t('admin.failedCreateRole')))
     } finally {
       setLoading(false)
     }
@@ -125,123 +130,115 @@ export function RolesManager() {
       resetForm()
       await refresh()
     } catch (e: any) {
-      setError(extractApiError(e, 'Failed to update role'))
+      setError(extractApiError(e, t('admin.failedUpdateRole')))
     } finally {
       setLoading(false)
     }
   }
 
   const onDelete = async (r: Role) => {
-    if (!confirm(`Delete role "${r.name}"?`)) return
+    if (!(await confirm({ title: `${t('admin.confirmDeleteRole')} "${r.name}" ?`, danger: true }))) return
     try {
       setLoading(true)
       setError(null)
       await apiService.deleteRole(r.id)
       await refresh()
     } catch (e: any) {
-      setError(extractApiError(e, 'Failed to delete role'))
+      setError(extractApiError(e, t('admin.failedDeleteRole')))
     } finally {
       setLoading(false)
     }
   }
 
   if (!canAdmin) {
-    return <div className="text-sm text-amber-400">Admin only: you don’t have permission to manage roles.</div>
+    return <div className="text-sm text-[var(--warn)]">{t('admin.only')}</div>
   }
 
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2">
-        <h2 className="text-base font-semibold">Roles</h2>
+        <h2 className="text-base font-semibold">{t('admin.roles')}</h2>
         <div className="ml-auto flex items-center gap-2 text-sm">
-          <select className="bg-[var(--panel-2)] border border-neutral-700 px-2 py-1" value={limit} onChange={(e) => { setPage(1); setLimit(Number(e.target.value)) }}>
+          <select className="bg-[var(--panel-2)] border border-[var(--border)] px-2 py-1" value={limit} onChange={(e) => { setPage(1); setLimit(Number(e.target.value)) }}>
             {[10, 20, 50].map(n => <option key={n} value={n}>{n}/page</option>)}
           </select>
-          <button className="px-2 py-1 bg-[var(--accent)] text-white rounded" onClick={startCreate}>Add Role</button>
+          <button className="px-2 py-1 bg-[var(--accent)] text-white" onClick={startCreate}>{t('admin.addRole')}</button>
         </div>
       </div>
 
-      {error && <div className="text-sm text-red-400">{error}</div>}
+      {error && <div className="text-sm text-[var(--danger)]">{error}</div>}
 
       {/* Create Role Dialog */}
       {showCreateDialog && (
-        <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
-          <div className="bg-[var(--panel)] border border-neutral-600 w-full max-w-md shadow-xl max-h-[90vh] flex flex-col">
-            <div className="flex items-center justify-between p-4 border-b border-neutral-700">
-              <h3 className="font-semibold flex items-center gap-2">
-                <ShieldPlus size={18} />
-                Add New Role
-              </h3>
-              <button className="p-1 hover:bg-[var(--panel-2)] rounded" onClick={() => { setShowCreateDialog(false); resetForm(); setError(null) }}>
-                <X size={18} />
-              </button>
-            </div>
-            <form onSubmit={onCreate} className="flex flex-col flex-1 min-h-0">
-              <div className="p-4 overflow-auto flex-1 space-y-4">
-                {error && (
-                  <div className="p-2 bg-red-900/20 border border-red-800 text-red-400 text-sm">{error}</div>
-                )}
-                <label className="flex flex-col gap-1">
-                  <span className="text-xs text-[var(--text-dim)]">Name *</span>
-                  <input type="text" className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm" placeholder="e.g., operator" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required minLength={1} maxLength={50} />
-                </label>
-                <label className="flex flex-col gap-1">
-                  <span className="text-xs text-[var(--text-dim)]">Description</span>
-                  <input type="text" className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm" value={form.description || ''} onChange={(e) => setForm({ ...form, description: e.target.value })} />
-                </label>
-              </div>
-              <div className="flex items-center justify-end gap-2 p-4 border-t border-neutral-700">
-                <button type="button" className="px-4 py-2 text-sm border border-neutral-600 hover:bg-[var(--panel-2)]" onClick={() => { setShowCreateDialog(false); resetForm(); setError(null) }}>Cancel</button>
-                <button type="submit" className="px-4 py-2 text-sm bg-[var(--accent)] text-white disabled:opacity-50" disabled={loading}>{loading ? 'Creating...' : 'Create Role'}</button>
-              </div>
-            </form>
+        <Modal
+          open
+          title={<><ShieldPlus size={18} /> {t('admin.addNewRole')}</>}
+          onClose={() => { setShowCreateDialog(false); resetForm(); setError(null) }}
+          widthClassName="w-[calc(100vw-2rem)] max-w-md"
+          bodyClassName="p-0 flex flex-col"
+          closeOnBackdrop={false}
+        >
+        <form onSubmit={onCreate} className="flex flex-col flex-1 min-h-0">
+          <div className="p-4 overflow-auto flex-1 space-y-4">
+            {error && (
+              <div className="p-2 bg-[color-mix(in_oklab,var(--danger)_14%,transparent)] border border-[color-mix(in_oklab,var(--danger)_45%,var(--border))] text-[var(--danger)] text-sm">{error}</div>
+            )}
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-[var(--text-dim)]">{t('admin.name')} *</span>
+              <input type="text" className="bg-[var(--bg-2)] border border-[var(--border)] px-3 py-2 text-sm" placeholder="e.g., operator" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required minLength={1} maxLength={50} />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-[var(--text-dim)]">{t('admin.description')}</span>
+              <input type="text" className="bg-[var(--bg-2)] border border-[var(--border)] px-3 py-2 text-sm" value={form.description || ''} onChange={(e) => setForm({ ...form, description: e.target.value })} />
+            </label>
           </div>
-        </div>
+          <div className="flex items-center justify-end gap-2 p-4 border-t border-[var(--border)]">
+            <button type="button" className="px-4 py-2 text-sm border border-[var(--border)] hover:bg-[var(--panel-2)]" onClick={() => { setShowCreateDialog(false); resetForm(); setError(null) }}>{t('admin.cancel')}</button>
+            <button type="submit" className="px-4 py-2 text-sm bg-[var(--accent)] text-white disabled:opacity-50" disabled={loading}>{loading ? `${t('common.loading')}` : t('admin.createRole')}</button>
+          </div>
+        </form>
+        </Modal>
       )}
 
       {/* Edit Role Dialog */}
       {showEditDialog && editing && (
-        <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
-          <div className="bg-[var(--panel)] border border-neutral-600 w-full max-w-md shadow-xl max-h-[90vh] flex flex-col">
-            <div className="flex items-center justify-between p-4 border-b border-neutral-700">
-              <h3 className="font-semibold flex items-center gap-2">
-                <Shield size={18} />
-                Edit Role: {editing.name}
-              </h3>
-              <button className="p-1 hover:bg-[var(--panel-2)] rounded" onClick={() => { setShowEditDialog(false); setEditing(null); resetForm(); setError(null) }}>
-                <X size={18} />
-              </button>
-            </div>
-            <form onSubmit={onUpdate} className="flex flex-col flex-1 min-h-0">
-              <div className="p-4 overflow-auto flex-1 space-y-4">
-                {error && (
-                  <div className="p-2 bg-red-900/20 border border-red-800 text-red-400 text-sm">{error}</div>
-                )}
-                <label className="flex flex-col gap-1">
-                  <span className="text-xs text-[var(--text-dim)]">Name *</span>
-                  <input type="text" className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required minLength={1} maxLength={50} />
-                </label>
-                <label className="flex flex-col gap-1">
-                  <span className="text-xs text-[var(--text-dim)]">Description</span>
-                  <input type="text" className="bg-[var(--bg-2)] border border-neutral-700 px-3 py-2 text-sm" value={form.description || ''} onChange={(e) => setForm({ ...form, description: e.target.value })} />
-                </label>
-              </div>
-              <div className="flex items-center justify-end gap-2 p-4 border-t border-neutral-700">
-                <button type="button" className="px-4 py-2 text-sm border border-neutral-600 hover:bg-[var(--panel-2)]" onClick={() => { setShowEditDialog(false); setEditing(null); resetForm(); setError(null) }}>Cancel</button>
-                <button type="submit" className="px-4 py-2 text-sm bg-[var(--accent)] text-white disabled:opacity-50" disabled={loading}>{loading ? 'Updating...' : 'Update Role'}</button>
-              </div>
-            </form>
+        <Modal
+          open
+          title={<><Shield size={18} /> {t('admin.editRole')}: {editing.name}</>}
+          onClose={() => { setShowEditDialog(false); setEditing(null); resetForm(); setError(null) }}
+          widthClassName="w-[calc(100vw-2rem)] max-w-md"
+          bodyClassName="p-0 flex flex-col"
+          closeOnBackdrop={false}
+        >
+        <form onSubmit={onUpdate} className="flex flex-col flex-1 min-h-0">
+          <div className="p-4 overflow-auto flex-1 space-y-4">
+            {error && (
+              <div className="p-2 bg-[color-mix(in_oklab,var(--danger)_14%,transparent)] border border-[color-mix(in_oklab,var(--danger)_45%,var(--border))] text-[var(--danger)] text-sm">{error}</div>
+            )}
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-[var(--text-dim)]">{t('admin.name')} *</span>
+              <input type="text" className="bg-[var(--bg-2)] border border-[var(--border)] px-3 py-2 text-sm" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required minLength={1} maxLength={50} />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-[var(--text-dim)]">{t('admin.description')}</span>
+              <input type="text" className="bg-[var(--bg-2)] border border-[var(--border)] px-3 py-2 text-sm" value={form.description || ''} onChange={(e) => setForm({ ...form, description: e.target.value })} />
+            </label>
           </div>
-        </div>
+          <div className="flex items-center justify-end gap-2 p-4 border-t border-[var(--border)]">
+            <button type="button" className="px-4 py-2 text-sm border border-[var(--border)] hover:bg-[var(--panel-2)]" onClick={() => { setShowEditDialog(false); setEditing(null); resetForm(); setError(null) }}>{t('admin.cancel')}</button>
+            <button type="submit" className="px-4 py-2 text-sm bg-[var(--accent)] text-white disabled:opacity-50" disabled={loading}>{loading ? `${t('common.loading')}` : t('admin.updateRole')}</button>
+          </div>
+        </form>
+        </Modal>
       )}
 
-      <div className="overflow-auto border border-neutral-700">
+      <div className="overflow-auto border border-[var(--border)]">
         <table className="w-full text-sm">
           <thead className="bg-[var(--panel-2)] text-left">
             <tr>
-              <th className="p-2">Name</th>
-              <th className="p-2">Description</th>
-              <th className="p-2">Actions</th>
+              <th className="p-2">{t('admin.name')}</th>
+              <th className="p-2">{t('admin.description')}</th>
+              <th className="p-2">{t('admin.actions')}</th>
             </tr>
           </thead>
           <tbody>
@@ -250,14 +247,14 @@ export function RolesManager() {
                 <td className="p-2">{r.name}</td>
                 <td className="p-2">{r.description || ''}</td>
                 <td className="p-2 space-x-2">
-                  <button className="px-2 py-1 border border-neutral-700 bg-[var(--panel-2)]" onClick={() => startEdit(r)}>Edit</button>
-                  <button className="px-2 py-1 border border-neutral-700 bg-[var(--panel-2)]" onClick={() => onDelete(r)}>Delete</button>
+                  <button className="px-2 py-1 border border-[var(--border)] bg-[var(--panel-2)]" onClick={() => startEdit(r)}>{t('admin.edit')}</button>
+                  <button className="px-2 py-1 border border-[var(--border)] bg-[var(--panel-2)]" onClick={() => onDelete(r)}>{t('admin.delete')}</button>
                 </td>
               </tr>
             ))}
             {paged.length === 0 && (
               <tr>
-                <td colSpan={3} className="p-3 text-center text-[var(--text-dim)]">No roles</td>
+                <td colSpan={3} className="p-3 text-center text-[var(--text-dim)]">{t('admin.noRoles')}</td>
               </tr>
             )}
           </tbody>
@@ -265,9 +262,9 @@ export function RolesManager() {
       </div>
 
       <div className="flex items-center gap-2 text-sm">
-        <button className="px-2 py-1 border border-neutral-700 bg-[var(--panel-2)]" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>Prev</button>
-        <span>Page {page} / {totalPages}</span>
-        <button className="px-2 py-1 border border-neutral-700 bg-[var(--panel-2)]" disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)}>Next</button>
+        <button className="px-2 py-1 border border-[var(--border)] bg-[var(--panel-2)]" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>{t('admin.previous')}</button>
+        <span>{t('admin.page')} {page} / {totalPages}</span>
+        <button className="px-2 py-1 border border-[var(--border)] bg-[var(--panel-2)]" disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)}>{t('admin.next')}</button>
       </div>
     </div>
   )

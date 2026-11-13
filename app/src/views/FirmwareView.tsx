@@ -19,12 +19,16 @@
 import { useEffect, useState } from 'react'
 import { apiService } from '../lib/apiService'
 import { useAuth } from '../auth/AuthContext'
+import { useTranslation } from '../i18n'
+import { useConfirm } from '../components/ui/ConfirmDialog'
 
 type OsInfo = { os?: string; kernel?: string; bios?: string; distro?: string; version?: string }
 type UpdateStatus = { available?: boolean; count?: number; packages?: string[]; method?: string }
 type AutoUpdateSettings = { enabled?: boolean; schedule?: string; reboot_if_required?: boolean }
 
 export function FirmwareView() {
+  const { t } = useTranslation()
+  const confirm = useConfirm()
   const { user } = useAuth()
   const canAdmin = !!user?.is_superuser
   const [loading, setLoading] = useState(true)
@@ -59,12 +63,12 @@ export function FirmwareView() {
         <h1 className="text-lg font-semibold">Firmware</h1>
       </div>
 
-      {error && <div className="p-2 rounded bg-red-500/10 border border-red-500/30 text-red-300 text-sm">{error}</div>}
+      {error && <div className="p-2 bg-[color-mix(in_oklab,var(--danger)_14%,transparent)] border border-[color-mix(in_oklab,var(--danger)_45%,var(--border))] text-[var(--danger)] text-sm">{error}</div>}
 
-      {notice && <div className="p-2 rounded bg-green-500/10 border border-green-500/30 text-green-300 text-sm">{notice}</div>}
+      {notice && <div className="p-2 bg-[color-mix(in_oklab,var(--ok)_14%,transparent)] border border-[color-mix(in_oklab,var(--ok)_45%,var(--border))] text-[var(--ok)] text-sm">{notice}</div>}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <div className="border border-neutral-700 bg-[var(--panel-2)] p-3 text-sm space-y-1">
+        <div className="border border-[var(--border)] bg-[var(--panel-2)] p-3 text-sm space-y-1">
           <div className="text-[var(--text-dim)]">Operating System</div>
           <div className="text-[var(--text)]">{osInfo.os || '—'}</div>
           <div className="text-[var(--text-dim)]">Kernel</div>
@@ -75,7 +79,7 @@ export function FirmwareView() {
           <div className="text-[var(--text)]">{osInfo.distro || osInfo.version || '—'}</div>
         </div>
 
-        <div className="border border-neutral-700 bg-[var(--panel-2)] p-3 text-sm space-y-2">
+        <div className="border border-[var(--border)] bg-[var(--panel-2)] p-3 text-sm space-y-2">
           <div className="text-[var(--text-dim)]">Security Updates</div>
           <div className="text-[var(--text)]">
             Status: {loading ? 'Checking…' : updateStatus.available ? `${updateStatus.count || 0} updates available` : 'Up to date'}
@@ -99,10 +103,10 @@ export function FirmwareView() {
             />
             <label htmlFor="auto-update">Enable auto updates (Linux & Windows)</label>
           </div>
-          <div className="text-xs text-[var(--text-dim)]">Auto updates are enabled by default as requested.</div>
+          <div className="text-xs text-[var(--text-dim)]">Auto updates are enabled by default.</div>
           <div className="flex gap-2">
             <button 
-              className="px-3 py-1 bg-[var(--panel)] border border-neutral-700 rounded disabled:opacity-50" 
+              className="px-3 py-1 bg-[var(--panel)] border border-[var(--border)] disabled:opacity-50" 
               disabled={!canAdmin || loading}
               onClick={async () => {
                 try {
@@ -118,9 +122,17 @@ export function FirmwareView() {
               Check for updates
             </button>
             <button 
-              className="px-3 py-1 bg-[var(--accent)] text-white rounded disabled:opacity-50" 
+              className="px-3 py-1 bg-[var(--accent)] text-white disabled:opacity-50" 
               disabled={!canAdmin || loading || !updateStatus.available}
               onClick={async () => {
+                // Applying OS updates can restart services under a live NVR.
+                const ok = await confirm({
+                  title: t('firmware.confirmApplyTitle'),
+                  message: t('firmware.confirmApplyMessage'),
+                  confirmLabel: t('firmware.apply'),
+                  danger: true,
+                })
+                if (!ok) return
                 try {
                   setLoading(true)
                   const { data } = await apiService.applyUpdates()

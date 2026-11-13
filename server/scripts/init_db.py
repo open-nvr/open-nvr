@@ -27,6 +27,11 @@ from core.auth import get_password_hash
 from core.config import settings
 from core.database import SessionLocal, init_db
 from models import Permission, Role, RolePermission, User
+from services.permission_catalog import (
+    NEW_PERMISSIONS_HA,
+    NEW_PERMISSIONS_UPDATE,
+    NEW_PERMISSIONS_WORKFLOWS,
+)
 
 
 def create_initial_data():
@@ -163,6 +168,14 @@ def create_initial_data():
         p_apps_install = get_or_create_perm(
             "apps.install", "Install/uninstall curated App Store apps"
         )
+        # Browsing the catalog is its own permission, not a corner of
+        # ai.view: most apps are not AI (the notifier, the barrier, the
+        # agent), and "may look at what is installed" is a much weaker
+        # right than "may install". Granted to operator, withheld from
+        # viewer, and NEVER implying apps.install.
+        p_apps_view = get_or_create_perm(
+            "apps.view", "Browse the App Catalog and view installed apps"
+        )
 
         # Compliance
         p_compliance_view = get_or_create_perm(
@@ -174,6 +187,13 @@ def create_initial_data():
             "byok.manage", "Manage customer encryption keys"
         )
         p_byom_manage = get_or_create_perm("byom.manage", "Manage custom AI models")
+
+        # Added for the Home Assistant integration / API tokens (HA-004). The
+        # descriptions are also the upgrade-path seed (main.py). Grant rules
+        # preserve behaviour: nobody gains or loses an ability on upgrade.
+        # OpenNVR updates (UPD-301): admins only, like every new ability.
+        for _perm in (*NEW_PERMISSIONS_HA, *NEW_PERMISSIONS_UPDATE, *NEW_PERMISSIONS_WORKFLOWS):
+            get_or_create_perm(_perm.name, _perm.description)
 
         # Helper to set role permissions (replace)
         def set_role_perms(role: Role, perm_names: list[str]):
@@ -197,6 +217,15 @@ def create_initial_data():
                 "onvif.discover",
                 "alerts.view",
                 "ai.view",
+                "apps.view",
+                # ptz.control is an extra requirement on top of PTZ's
+                # existing ownership check (see services/permission_catalog),
+                # granted with live.view so it narrows nobody.
+                "ptz.control",
+                # Agentic Workflows (RFC #620, section 7).
+                "workflows.view",
+                "workflows.manage",
+                "workflows.approve",
             ],
         )
         set_role_perms(
@@ -205,6 +234,8 @@ def create_initial_data():
                 "cameras.view",
                 "live.view",
                 "recordings.view",
+                "ptz.control",
+                "workflows.view",
             ],
         )
 
@@ -264,7 +295,21 @@ def create_initial_data():
             "qwerty",
         })
 
-        if not admin_user:
+        # Never bootstrap a second admin next to an existing one; see the
+        # matching guard in main.py's startup re-seed (#632).
+        has_superuser = (
+            db.query(User.id)
+            .filter(User.is_superuser.is_(True), User.is_active.is_(True))
+            .first()
+            is not None
+        )
+
+        if not admin_user and has_superuser:
+            print(
+                f"Configured admin {settings.default_admin_username!r} not found; "
+                "an active superuser already exists, so none was created."
+            )
+        elif not admin_user:
             initial_password = settings.default_admin_password
             if initial_password and initial_password.lower() in KNOWN_BAD_PASSWORDS:
                 # Loud, explicit refusal. Print to stderr so the operator

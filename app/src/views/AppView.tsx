@@ -23,13 +23,17 @@
 // form, and action forms are the SAME declarative pieces the catalog
 // card uses — this page just gives them room to breathe.
 
+import { HardwareBadge, type HardwareBar } from '../components/HardwareBadge'
 import { useMemo, useState } from 'react'
-import { useParams, Link, useNavigate } from 'react-router-dom'
+import { useTranslation } from '../i18n'
+import { useConfirm } from '../components/ui/ConfirmDialog'
+import { useParams, useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Boxes, RefreshCw, Settings2, Trash2, Activity, ExternalLink, BookOpen } from 'lucide-react'
+import { RefreshCw, Settings2, Trash2, Activity, ExternalLink, BookOpen } from 'lucide-react'
 import { apiService } from '../lib/apiService'
 import { extractApiError } from '../lib/apiError'
 import { useSnackbar } from '../components/Snackbar'
+import { availableTasks as computeAvailableTasks, type CapabilitiesLike, type Tier0Like } from '../lib/kaic'
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, ErrorCard, Skeleton } from '../components/ui'
 import {
   AppConfigModal,
@@ -41,7 +45,13 @@ import {
   type RegisteredApp,
   type AppStatusResp,
   type ManifestAction,
+  UninstalledAppPage,
 } from './AppCatalog'
+import { AppNoCamerasNotice } from './apps/AppSetup'
+import { skillLabel } from '../lib/skillNames'
+import { Switch } from '../components/ui/Switch'
+import { AppCamerasCard } from './apps/AppCamerasCard'
+import { AppHeader } from './apps/AppHeader'
 
 function useApp(appId: string) {
   return useQuery({
@@ -92,9 +102,21 @@ function useCapabilities() {
     queryKey: ['kai-c-capabilities'],
     queryFn: async () => {
       const { data } = await apiService.getCapabilities()
-      return data as { adapters?: Record<string, { tasks_advertised?: string[] }> }
+      return data as CapabilitiesLike
     },
     retry: 0,
+  })
+}
+
+function useTier0() {
+  return useQuery({
+    queryKey: ['tier0-metrics'],
+    queryFn: async () => {
+      const { data } = await apiService.getTier0Metrics()
+      return data as Tier0Like
+    },
+    retry: 0,
+    staleTime: 30_000,
   })
 }
 
@@ -102,23 +124,23 @@ export function AppView() {
   const { appId = '' } = useParams()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const { t } = useTranslation()
+  const confirm = useConfirm()
   const { showSuccess, showError } = useSnackbar()
 
   const appQuery = useApp(appId)
   const app = appQuery.data
   const status = useLiveStatus(appId, Boolean(app?.enabled))
   const caps = useCapabilities()
+  const tier0 = useTier0()
 
   const [configOpen, setConfigOpen] = useState(false)
   const [activeAction, setActiveAction] = useState<ManifestAction | null>(null)
 
-  const availableTasks = useMemo(() => {
-    const set = new Set<string>()
-    for (const a of Object.values(caps.data?.adapters ?? {})) {
-      for (const t of a.tasks_advertised ?? []) set.add(t)
-    }
-    return set
-  }, [caps.data])
+  const availableTasks = useMemo(
+    () => computeAvailableTasks(caps.data, tier0.data),
+    [caps.data, tier0.data]
+  )
 
   // "internal" embeds the sandboxed /ui dashboard; "external" means the
   // app is a full application — we link out instead of embedding.
@@ -136,7 +158,11 @@ export function AppView() {
     mutationFn: () => (app?.enabled ? apiService.disableApp(appId) : apiService.enableApp(appId)),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['apps'] })
-      showSuccess(`${app?.name} ${app?.enabled ? 'disabled' : 'enabled'}`)
+      showSuccess(
+        app?.enabled
+          ? `${app?.name} disabled — it stops watching its cameras within a few seconds. Its settings and camera selection are kept.`
+          : `${app?.name} enabled`
+      )
     },
     onError: (e) => showError(extractApiError(e, 'Failed to toggle app.')),
   })
@@ -162,101 +188,110 @@ export function AppView() {
   if (appQuery.isError) {
     return <ErrorCard message={extractApiError(appQuery.error, 'Could not load this app.')} />
   }
-  if (!app) {
-    return (
-      <div className="space-y-3">
-        <Link to="/app-catalog" className="inline-flex items-center gap-1 text-sm text-[var(--text-dim)] hover:text-[var(--text)]">
-          <ArrowLeft size={14} /> App Store
-        </Link>
-        <ErrorCard message={`App "${appId}" is not installed.`} />
-      </div>
-    )
-  }
+  // Not installed is not an error — it is the listing, which is exactly
+  // what someone following a link from the catalog wants to read before
+  // deciding. The catalog owns that page; this route just defers to it.
+  if (!app) return <UninstalledAppPage appId={appId} />
 
   const health = status.data?.health?.status ?? (app.enabled ? 'checking…' : 'disabled')
   const uptimeS = status.data?.health?.uptime_s as number | undefined
 
   return (
-    <div className="space-y-5">
-      <Link to="/app-catalog" className="inline-flex items-center gap-1 text-sm text-[var(--text-dim)] hover:text-[var(--text)]">
-        <ArrowLeft size={14} /> App Store
-      </Link>
-
-      {/* ── Hero header ─────────────────────────────────────────── */}
-      <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-1)] p-5">
-        <div className="flex flex-wrap items-start gap-4">
-          <div className="grid place-items-center h-14 w-14 rounded-xl bg-[var(--bg-2)] border border-[var(--border)] shrink-0">
-            <Boxes size={26} className="text-[var(--accent,var(--text-dim))]" />
-          </div>
-          <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
-              <h1 className="text-xl font-semibold">{app.name}</h1>
-              <Badge variant="info">{app.category}</Badge>
-              <span className="text-xs text-[var(--text-dim)]">v{app.version}</span>
-            </div>
-            <p className="text-sm text-[var(--text-dim)] mt-1 max-w-2xl">
-              {app.manifest?.summary || 'No summary provided.'}
-            </p>
-            {requires.length > 0 && (
-              <div className="mt-2">
-                {missing.length === 0 ? (
-                  <Badge variant="success">● requires {requires.join(' + ')} — available</Badge>
-                ) : (
-                  <Badge variant="warning">requires {missing.join(' + ')} — not installed</Badge>
-                )}
-              </div>
-            )}
-          </div>
-          <div className="ml-auto flex flex-col items-end gap-2">
-            <div className="inline-flex items-center gap-2">
-              <Badge variant={statusVariant(health)}>{health}</Badge>
-              {app.enabled && (
-                <button
-                  className="text-[var(--text-dim)] hover:text-[var(--text)]"
-                  title="Refresh status"
-                  onClick={() => status.refetch()}
-                >
-                  <RefreshCw size={13} className={status.isFetching ? 'animate-spin' : ''} />
-                </button>
-              )}
-            </div>
+    <div className="space-y-3">
+      <AppHeader
+        name={app.name}
+        category={app.category}
+        version={app.version}
+        summary={app.manifest?.summary}
+        badges={<>
+          <span className="inline-flex items-center gap-1.5 text-xs">
+            <Badge variant={statusVariant(health)}>{health === 'ok' ? 'Running' : health}</Badge>
             {uptimeS != null && (
-              <span className="text-xs text-[var(--text-dim)]">up {formatUptime(uptimeS)}</span>
+              <span className="text-[var(--text-dim)]">up {formatUptime(uptimeS)}</span>
             )}
-            <div className="flex items-center gap-2 pt-1">
-              {externalUrl && (
-                <Button
-                  variant="primary"
-                  onClick={() => window.open(externalUrl, '_blank', 'noopener,noreferrer')}
-                  disabled={!app.enabled}
-                  title={app.enabled ? externalUrl : 'Enable the app first'}
-                >
-                  <ExternalLink size={14} /> Open app
-                </Button>
-              )}
-              <Button
-                variant={app.enabled ? 'default' : 'primary'}
-                onClick={() => toggle.mutate()}
-                disabled={toggle.isPending}
+            {app.enabled && (
+              <button
+                className="text-[var(--text-dim)] hover:text-[var(--text)]"
+                title="Refresh status"
+                aria-label="Refresh status"
+                onClick={() => status.refetch()}
               >
-                {toggle.isPending ? 'Working…' : app.enabled ? 'Disable' : 'Enable'}
-              </Button>
-              <Button variant="outline" onClick={() => setConfigOpen(true)}>
-                <Settings2 size={14} /> Configure
-              </Button>
-              <Button
-                variant="danger"
-                onClick={() => {
-                  if (window.confirm(`Uninstall ${app.name}?`)) uninstall.mutate()
-                }}
-                disabled={uninstall.isPending}
-              >
-                <Trash2 size={14} />
-              </Button>
-            </div>
-          </div>
-        </div>
-      </div>
+                <RefreshCw size={12} className={status.isFetching ? 'animate-spin' : ''} />
+              </button>
+            )}
+          </span>
+          {/* Only when something is missing — a "requirement met"
+              badge on every healthy app was noise. */}
+          {missing.length > 0 && (
+            <Badge variant="warning" title="No installed model provides this, so the app cannot do its job yet.">
+              Needs {missing.map(skillLabel).join(' + ')} — not available
+            </Badge>
+          )}
+          <HardwareBadge hardware={(app as { hardware?: HardwareBar | null } | undefined)?.hardware} />
+        </>}
+        actions={<>
+          {externalUrl && (
+            <Button
+              size="sm"
+              variant="primary"
+              onClick={() => window.open(externalUrl, '_blank', 'noopener,noreferrer')}
+              disabled={!app.enabled}
+              title={app.enabled ? externalUrl : 'Enable the app first'}
+            >
+              <ExternalLink size={14} /> Open app
+            </Button>
+          )}
+          <label
+            className="inline-flex items-center gap-2 border border-[var(--border)] px-2.5 py-1 text-sm"
+            title={app.enabled ? 'Turn the app off. Its settings and cameras are kept.' : 'Turn the app on'}
+          >
+            <Switch
+              checked={app.enabled}
+              onChange={async () => {
+                // Turning an app off stops its detections and alerts on every
+                // camera at once; turning it on needs no second thought.
+                if (app.enabled) {
+                  const ok = await confirm({
+                    title: t('apps.confirmDisableTitle', { name: app.name }),
+                    message: t('apps.confirmDisableMessage'),
+                    confirmLabel: t('apps.disable'),
+                    danger: true,
+                  })
+                  if (!ok) return
+                }
+                toggle.mutate()
+              }}
+              disabled={toggle.isPending}
+              label={`${app.name} enabled`}
+            />
+            <span className={app.enabled ? '' : 'text-[var(--text-dim)]'}>
+              {toggle.isPending ? 'Working…' : app.enabled ? 'On' : 'Off'}
+            </span>
+          </label>
+          <Button size="sm" variant="outline" onClick={() => setConfigOpen(true)}>
+            <Settings2 size={14} /> Configure
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="hover:!text-[var(--danger,#ef4444)]"
+            title="Uninstall"
+            aria-label={`Uninstall ${app.name}`}
+            onClick={async () => {
+              if (await confirm({ title: `Uninstall ${app.name}?`, confirmLabel: 'Uninstall', danger: true })) uninstall.mutate()
+            }}
+            disabled={uninstall.isPending}
+          >
+            <Trash2 size={15} />
+          </Button>
+        </>}
+      >
+        {/* Same notice, same words as every app page's header. */}
+        <AppNoCamerasNotice app={app} />
+      </AppHeader>
+      {/* The app's cameras and the skills it brings them — on the app's page,
+          like every other application page. */}
+      <AppCamerasCard app={app} />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {/* ── Details + live dashboard ───────────────────────────── */}
@@ -308,7 +343,7 @@ export function AppView() {
                     // is app-authored HTML — render it inert.
                     sandbox=""
                     srcDoc={appUi.data ?? ''}
-                    className="w-full rounded-md border border-[var(--border)] bg-white"
+                    className="w-full border border-[var(--border)] bg-white"
                     style={{ height: 360 }}
                   />
                 )}
@@ -350,7 +385,7 @@ export function AppView() {
                 {actions.map((a) => (
                   <button
                     key={a.name}
-                    className="w-full text-left rounded border border-[var(--border)] bg-[var(--bg-2)] px-3 py-2 hover:border-[var(--accent,var(--border))] disabled:opacity-50"
+                    className="w-full text-left border border-[var(--border)] bg-[var(--bg-2)] px-3 py-2 hover:border-[var(--accent,var(--border))] disabled:opacity-50"
                     onClick={() => setActiveAction(a)}
                     disabled={!app.enabled}
                     title={!app.enabled ? 'Enable the app first' : a.description || a.name}

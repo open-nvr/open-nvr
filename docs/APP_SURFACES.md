@@ -35,6 +35,7 @@ reaches you). Get those right and every surface below lights up.
 | **Feature forms (actions)** | Catalog card buttons | `AppManifest.actions` + `on_action()` |
 | **Agent skill** | OpenNVR Agent skills panel + conversation | the contract keys (§2) — automatic |
 | **Announcements** | notification feed, webhooks, voice | just emit alerts (you already do) |
+| **Home Assistant entities** | HA devices and entities, MQTT discovery, Assist | `AppManifest.entities` — sensors/buttons read from your `/state`, commands mapped onto your `actions` |
 
 ---
 
@@ -43,7 +44,8 @@ reaches you). Get those right and every surface below lights up.
 You already have this: every alert your app dispatches through the
 SDK's `AlertDispatcher` rides `opennvr.alerts.>` on the bus. The
 platform fans it out — the operator UI's alerts inbox, the webhook
-fan-out, the Home Assistant relay if installed, **and the agent's
+fan-out, Home Assistant (the native integration and the built-in MQTT
+discovery both carry app alerts as events), **and the agent's
 proactive channel**: "the license-plate app flagged a watchlist plate"
 reaches the user as a notification (and spoken, on voice deployments)
 with the tab closed. Conversationally, `recent_app_alerts` answers
@@ -190,11 +192,102 @@ Actions are **operator verbs**, and the platform enforces that in
 layers: the catalog invokes them through a server proxy that requires
 a **user JWT** (never the service key — the OpenNVR Agent *cannot*
 invoke your action, by test-pinned design); your app's own `/actions`
-endpoint requires the deployment's `X-Internal-Api-Key`; and every
-invocation is audit-logged (param **keys** only — values like search
+endpoint accepts the call only with `X-OpenNVR-Call`, a 60-second token
+core signs with *your* app's secret (SDK ≥ 0.6 — see
+[APP_CREDENTIALS.md](APP_CREDENTIALS.md#core-calling-your-app-without-the-site-key));
+and every invocation is audit-logged (param **keys** only — values like search
 terms stay out of the log). The agent can *read* your state and *relay*
 your alerts; it can never *act* on your app. Design your actions
 assuming an authenticated human is on the other end — because one is.
+
+### Who is asking: `current_user()`
+
+The proxy tells you **which** human. Core signs the caller's identity
+for your app (`X-OpenNVR-User`, a 60-second JWT over the SHA-256 of
+your app key — see [APP_CREDENTIALS.md](APP_CREDENTIALS.md)) on every
+`/ui` view and every action, and the SDK verifies it before your code
+runs. Inside `ui_html()` and `on_action()`:
+
+```python
+from opennvr_app_sdk import current_user
+
+def on_action(self, name, params):
+    user = current_user()            # or self.current_user
+    if user is None:                 # older core / no app key yet
+        raise ValueError("no operator identity")
+    if not user.can_manage(params["camera_id"]):
+        raise ValueError("not permitted on that camera")   # → 400
+    ...
+
+def ui_html(self):
+    user = self.current_user
+    cams = user.visible(self.cameras) if user else []
+    ...
+```
+
+`UserContext` carries `user_id`, `username`, `is_superuser`, `cameras`
+(ids the user may *view*, `None` = every camera), `manage` (ids they may
+*control*), and `purpose` (`"ui"` / `"action"`). Per-camera RBAC is
+enforced by core on its own routes; this is how your app applies the
+same assignment to what *it* shows and does. A token that fails any
+check is treated as absent — never trusted partially.
+
+Two things also changed on the proxies since this section was first
+written: enabling/disabling an app is **superuser-only**, and
+`PUT /apps/{id}/config` accepts only per-camera entries (zones,
+tripwires) from a non-superuser, for cameras they manage — the
+site-wide params of your manifest are an administrator's to change.
+`GET /apps/{id}/status` returns a non-superuser only their cameras'
+slice of your `/state`, keyed by the `camN` handles the SDK already
+uses.
+
+## 5b. Selling your app: pricing and licences
+
+Three manifest fields turn a listing into a product:
+
+```python
+AppManifest(
+    ...,
+    pricing="subscription",           # free | paid | subscription | contact
+    price_note="$29 / camera / year", # the human line under the badge
+    entitlement="license_key",        # none | license_key
+)
+```
+
+`pricing` and `price_note` are display only — the catalog shows the
+badge on your card and on your App Store listing (the index entry
+mirrors them; a listing can also be `kind: external` and link out to
+where you distribute the app). `entitlement: license_key` is the gate:
+an administrator enters a key in the catalog, core stores it encrypted
+and asks **your app** whether it is valid, and refuses to enable the
+app until you say yes. You decide what a key means:
+
+```python
+from opennvr_app_sdk import Entitlement
+
+class MyApp(Detector):
+    manifest = AppManifest(..., entitlement="license_key")
+
+    def verify_license(self, license_key: str) -> Entitlement:
+        claims = my_signature_check(license_key)          # or call your licence server
+        if claims is None:
+            return Entitlement(valid=False, message="unknown or tampered key")
+        return Entitlement(valid=True, plan=claims.plan,
+                           expires_at=claims.expires, limits={"cameras": claims.cameras})
+
+    def on_entitlement_update(self, entitlement):        # optional
+        self.max_cameras = entitlement.get("limits", {}).get("cameras")
+```
+
+Core calls `POST /entitlement/verify` on your contract port (site-key
+gated like actions), records the verdict — status, plan, expiry,
+message, limits — shows it to the administrator, and re-delivers it on
+your live config poll as `self.entitlement` so you can feature-gate
+yourself. Re-verification runs on every key change and on demand
+(`POST /apps/{id}/license/verify`); an app that is unreachable when
+asked keeps its previous verdict, so a restart never silently
+un-licenses a site. Core never sees your licence logic and never
+returns the key to anyone.
 
 ## 6. "What if I really need custom UI?"
 

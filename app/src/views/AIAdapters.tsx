@@ -21,11 +21,15 @@
 // Registration, permission approval, and metrics come later with the KAI-C
 // /api/v1/adapters migration.
 
+import { HardwareBadge, type HardwareBar } from '../components/HardwareBadge'
 import { Fragment, useState, type ReactNode } from 'react'
+import { adapterContract, adapterTasks } from '../lib/kaic'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Activity, Cpu, Database, Globe, HardDrive, Info, Layers, Lock, RefreshCw, ShieldAlert, ShieldCheck, Share2, Server } from 'lucide-react'
 import { apiService } from '../lib/apiService'
 import { extractApiError } from '../lib/apiError'
+import { useTranslation, useDateFormat } from '../i18n'
+import { useConfirm } from '../components/ui/ConfirmDialog'
 import { useSnackbar } from '../components/Snackbar'
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, EmptyState, ErrorCard, PageHeader, Skeleton, type BadgeVariant } from '../components/ui'
 import { MetricPanel, Sparkline, SparkRow, StatTile } from '../components/ui/stats'
@@ -83,9 +87,10 @@ function asStringList(v: unknown): string[] {
 /** Pull the interesting contract fields out of whatever shape the adapter reported. */
 function summarizeAdapter(name: string, caps: AdapterInfo | undefined, health: AdapterInfo | undefined) {
   const status = (health?.status ?? health?.health ?? (typeof health === 'string' ? health : undefined)) as string | undefined
-  const model = caps?.model ?? {}
-  const tasks = asStringList(caps?.tasks_advertised).concat(asStringList(caps?.tasks))
-  const permissions = caps?.permissions ?? {}
+  const contract = adapterContract(caps)          // {url, capabilities:{…}} or flat
+  const model = contract.model ?? {}
+  const tasks = adapterTasks(caps)
+  const permissions = contract.permissions ?? {}
   const requestedPerms: string[] = []
   if (permissions.gpu) requestedPerms.push('GPU')
   for (const host of asStringList(permissions.network_egress)) requestedPerms.push(`egress: ${host}`)
@@ -95,12 +100,14 @@ function summarizeAdapter(name: string, caps: AdapterInfo | undefined, health: A
   return {
     name,
     status,
-    modelName: model.name ?? caps?.adapter?.name,
+    modelName: model.name ?? contract.adapter?.name,
     modelVersion: model.version,
     framework: model.framework,
     fingerprint: typeof model.fingerprint === 'string' ? model.fingerprint : undefined,
     tasks: Array.from(new Set(tasks)),
     requestedPerms,
+    // Derived on the server from the tasks (services/hardware_profile).
+    hardware: ((caps as { hardware?: HardwareBar | null } | undefined)?.hardware) ?? null,
     raw: caps ?? health ?? {},
   }
 }
@@ -142,6 +149,8 @@ type AdapterMetricsResp = {
   series?: SeriesPoint[]
   fingerprint_changes: string[]
   samples: number
+  // Inferences actually served in the window (scrapes are `samples`).
+  requests?: number
   // SDK ≥1.2: model identity labels from adapter_model_info, and the
   // adapter's own domain series (detections by class, audio seconds,
   // realtime factor…) as windowed deltas keyed by series identity.
@@ -209,13 +218,22 @@ function formatWindow(seconds: number | undefined): string {
 // ok is green; model errors are the model's fault (amber, tune/rollback);
 // provider/transport/refused mean the serving path is broken (red).
 function outcomeBarClass(outcome: string): string {
-  if (outcome === 'ok') return 'bg-emerald-500'
-  if (outcome === 'model_error') return 'bg-amber-500'
-  return 'bg-red-500'
+  if (outcome === 'ok') return 'bg-[var(--ok)]'
+  if (outcome === 'model_error') return 'bg-[var(--warn)]'
+  return 'bg-[var(--critical)]'
 }
 
-function LatencyBars({ latency }: { latency: AdapterMetricsResp['latency_ms'] }) {
+function LatencyBars({ latency, requests }: { latency: AdapterMetricsResp['latency_ms']; requests?: number }) {
   const scale = latency?.p99 ?? 0
+  if (requests === 0 && latency?.p50 == null) {
+    // Scraped fine, asked nothing: dashes here read as "broken" — say what it is.
+    return (
+      <div className="text-xs text-[var(--text-dim)]">
+        No inference requests in this window — nothing to measure yet. Percentiles appear once something
+        (an app, the agent, a camera task) sends this adapter work.
+      </div>
+    )
+  }
   const rows = [
     { label: 'p50', value: latency?.p50 ?? null },
     { label: 'p95', value: latency?.p95 ?? null },
@@ -228,9 +246,9 @@ function LatencyBars({ latency }: { latency: AdapterMetricsResp['latency_ms'] })
         return (
           <div key={r.label} className="grid grid-cols-[32px_1fr_56px] items-center gap-2">
             <span className="font-mono text-xs text-[var(--text-dim)]">{r.label}</span>
-            <div className="h-2 rounded bg-[var(--panel-2)] overflow-hidden">
+            <div className="h-2 bg-[var(--panel-2)] overflow-hidden">
               <div
-                className={`h-full rounded ${r.label === 'p99' ? 'bg-amber-500' : 'bg-[var(--accent)]'}`}
+                className={`h-full  ${r.label === 'p99' ? 'bg-[var(--warn)]' : 'bg-[var(--accent)]'}`}
                 style={{ width: `${width}%` }}
               />
             </div>
@@ -250,7 +268,7 @@ function OutcomesSplit({ outcomes }: { outcomes: Record<string, number> }) {
   entries.sort(([a], [b]) => (a === 'ok' ? -1 : b === 'ok' ? 1 : a.localeCompare(b)))
   return (
     <div>
-      <div className="flex h-2.5 rounded overflow-hidden mb-2">
+      <div className="flex h-2.5 overflow-hidden mb-2">
         {entries.map(([outcome, n]) => (
           <div key={outcome} className={outcomeBarClass(outcome)} style={{ width: `${(n / total) * 100}%` }} title={`${outcome}: ${n}`} />
         ))}
@@ -258,7 +276,7 @@ function OutcomesSplit({ outcomes }: { outcomes: Record<string, number> }) {
       <div className="flex flex-wrap gap-x-4 gap-y-1">
         {entries.map(([outcome, n]) => (
           <span key={outcome} className="inline-flex items-center gap-1.5 font-mono text-xs text-[var(--text-dim)]">
-            <i className={`w-2 h-2 rounded-sm ${outcomeBarClass(outcome)}`} />
+            <i className={`w-2 h-2  ${outcomeBarClass(outcome)}`} />
             {outcome} {((n / total) * 100).toFixed(total < 200 ? 0 : 1)}%
           </span>
         ))}
@@ -273,21 +291,22 @@ function SaturationGauge({ inflight, maxInflight }: { inflight: number; maxInfli
   return (
     <div>
       <div className="flex items-baseline gap-2">
-        <span className={`font-mono text-lg font-bold tabular-nums ${warn ? 'text-amber-400' : 'text-[var(--text)]'}`}>
+        <span className={`font-mono text-lg font-bold tabular-nums ${warn ? 'text-[var(--warn)]' : 'text-[var(--text)]'}`}>
           {inflight} / {maxInflight > 0 ? maxInflight : '—'}
         </span>
         <span className="font-mono text-xs text-[var(--text-dim)]">
           {pct != null ? `${pct}%${warn ? ' — near ceiling' : ''}` : 'no declared ceiling'}
         </span>
       </div>
-      <div className="h-2 rounded bg-[var(--panel-2)] overflow-hidden mt-2">
-        <div className={`h-full ${warn ? 'bg-amber-500' : 'bg-emerald-500'}`} style={{ width: `${Math.min(100, pct ?? 0)}%` }} />
+      <div className="h-2 bg-[var(--panel-2)] overflow-hidden mt-2">
+        <div className={`h-full ${warn ? 'bg-[var(--warn)]' : 'bg-[var(--ok)]'}`} style={{ width: `${Math.min(100, pct ?? 0)}%` }} />
       </div>
     </div>
   )
 }
 
 function FingerprintChanges({ changes }: { changes: string[] }) {
+  const fmt = useDateFormat()
   const count = changes?.length ?? 0
   if (count === 0) return <div className="text-xs text-[var(--text-dim)]">No weight changes observed — fingerprint stable.</div>
   const latest = changes.reduce((a, b) => (a > b ? a : b))
@@ -296,7 +315,7 @@ function FingerprintChanges({ changes }: { changes: string[] }) {
     <div className="flex items-baseline gap-2">
       <span className="font-mono text-lg font-bold tabular-nums text-[var(--text)]">{count}</span>
       <span className="font-mono text-xs text-[var(--text-dim)]">
-        change{count === 1 ? '' : 's'} · latest {Number.isNaN(latestDate.getTime()) ? latest : latestDate.toLocaleString()}
+        change{count === 1 ? '' : 's'} · latest {Number.isNaN(latestDate.getTime()) ? latest : fmt.dateTime(latestDate)}
       </span>
     </div>
   )
@@ -384,6 +403,8 @@ function AdapterPermissionsSection({ name }: { name: string }) {
   const [open, setOpen] = useState(false)
   const queryClient = useQueryClient()
   const { showSuccess, showError } = useSnackbar()
+  const { t } = useTranslation()
+  const confirm = useConfirm()
   const query = useAdapterPermissions(name)
 
   const invalidate = () => {
@@ -438,20 +459,20 @@ function AdapterPermissionsSection({ name }: { name: string }) {
               ))}
             </div>
           ) : query.isError ? (
-            <div className="text-sm text-red-300/90 border border-red-700/40 rounded p-3">
+            <div className="text-sm text-[var(--danger)] border border-[color-mix(in_oklab,var(--danger)_45%,var(--border))] p-3">
               {extractApiError(query.error, 'Could not load adapter permissions.')}
             </div>
           ) : p ? (
             <div className="space-y-2">
               {p.approval_status === 'pending' && (
-                <div className="flex items-start gap-2 text-xs text-amber-300 border border-amber-700/40 bg-amber-900/20 rounded p-3">
+                <div className="flex items-start gap-2 text-xs text-[var(--warn)] border border-[color-mix(in_oklab,var(--warn)_45%,var(--border))] bg-[color-mix(in_oklab,var(--warn)_14%,transparent)] p-3">
                   <ShieldAlert size={14} className="flex-shrink-0 mt-0.5" />
                   <span>This adapter cannot serve inference until its permissions are approved.</span>
                 </div>
               )}
 
               {p.declared.length === 0 ? (
-                <div className="text-xs text-[var(--text-dim)] border border-[var(--border)] rounded bg-[var(--bg-2)] p-3">
+                <div className="text-xs text-[var(--text-dim)] border border-[var(--border)] bg-[var(--bg-2)] p-3">
                   This adapter declares no host permissions — nothing to approve.
                 </div>
               ) : (
@@ -462,13 +483,13 @@ function AdapterPermissionsSection({ name }: { name: string }) {
                     return (
                       <div
                         key={perm.key}
-                        className="flex items-center gap-2 border border-[var(--border)] rounded bg-[var(--bg-2)] px-3 py-2"
+                        className="flex items-center gap-2 border border-[var(--border)] bg-[var(--bg-2)] px-3 py-2"
                       >
                         <span className="text-[var(--text-dim)]">{permissionKindIcon(perm.kind)}</span>
                         <div className="min-w-0 flex-1">
                           <div className="text-sm truncate" title={perm.label}>{perm.label}</div>
                           {perm.sovereignty_conflict && (
-                            <div className="flex items-center gap-1 text-[11px] text-red-400 mt-0.5">
+                            <div className="flex items-center gap-1 text-[11px] text-[var(--danger)] mt-0.5">
                               <ShieldAlert size={11} /> conflicts with local_only
                             </div>
                           )}
@@ -479,7 +500,15 @@ function AdapterPermissionsSection({ name }: { name: string }) {
                             variant="danger"
                             className="text-xs px-2 py-1"
                             disabled={busy}
-                            onClick={() => revoke.mutate([perm.key])}
+                            onClick={async () => {
+                              const ok = await confirm({
+                                title: t('adapters.confirmRevokeTitle'),
+                                message: t('adapters.confirmRevokeMessage', { permission: perm.key, adapter: name }),
+                                confirmLabel: t('adapters.revoke'),
+                                danger: true,
+                              })
+                              if (ok) revoke.mutate([perm.key])
+                            }}
                           >
                             Revoke
                           </Button>
@@ -553,17 +582,18 @@ function AdapterMetricsSection({ name }: { name: string }) {
               ))}
             </div>
           ) : query.isError ? (
-            <div className="text-sm text-red-300/90 border border-red-700/40 rounded p-3">
+            <div className="text-sm text-[var(--danger)] border border-[color-mix(in_oklab,var(--danger)_45%,var(--border))] p-3">
               {extractApiError(query.error, 'Could not load adapter metrics.')}
             </div>
           ) : noSamples ? (
-            <div className="text-xs text-[var(--text-dim)] border border-[var(--border)] rounded bg-[var(--bg-2)] p-3">
+            <div className="text-xs text-[var(--text-dim)] border border-[var(--border)] bg-[var(--bg-2)] p-3">
               No samples yet — this adapter hasn't served governed inference in the {formatWindow(m?.window_s) || 'current'} window.
             </div>
           ) : m ? (
             <div className="space-y-2">
               <div className="font-mono text-[11px] text-[var(--text-dim)]">
-                {formatWindow(m.window_s)}{m.samples != null ? ` · ${m.samples} samples` : ''}
+                {formatWindow(m.window_s)}{m.samples != null ? ` · ${m.samples} scrapes` : ''}
+                {m.requests != null ? ` · ${m.requests} request${m.requests === 1 ? '' : 's'}` : ''}
                 {m.model_info?.model ? (
                   <span>
                     {' · '}
@@ -580,7 +610,7 @@ function AdapterMetricsSection({ name }: { name: string }) {
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 <MetricPanel title="Inference latency" decision="which model per camera; is the SLA breached">
-                  <LatencyBars latency={m.latency_ms} />
+                  <LatencyBars latency={m.latency_ms} requests={m.requests} />
                 </MetricPanel>
                 <MetricPanel title="Outcomes" decision="rollback / retire / investigate the adapter">
                   <OutcomesSplit outcomes={m.outcomes} />
@@ -602,7 +632,7 @@ function AdapterMetricsSection({ name }: { name: string }) {
                 </MetricPanel>
                 <MetricPanel title="Queue depth" decision="throttle fan-in / drop to keyframes">
                   <div className="flex items-baseline gap-2">
-                    <span className={`font-mono text-lg font-bold tabular-nums ${(m.queue_depth ?? 0) > 0 ? 'text-amber-400' : 'text-[var(--text)]'}`}>
+                    <span className={`font-mono text-lg font-bold tabular-nums ${(m.queue_depth ?? 0) > 0 ? 'text-[var(--warn)]' : 'text-[var(--text)]'}`}>
                       {m.queue_depth ?? 0}
                     </span>
                     <span className="font-mono text-xs text-[var(--text-dim)]">frames waiting on the model</span>
@@ -711,17 +741,17 @@ function FleetStrip({ fleet }: { fleet: FleetMetricsResp | undefined }) {
   return (
     <Card>
       <CardContent className="flex flex-wrap items-center gap-x-6 gap-y-2 py-3 font-mono text-xs">
-        <span><span className="text-emerald-400 font-bold tabular-nums">{ok}</span>
+        <span><span className="text-[var(--ok)] font-bold tabular-nums">{ok}</span>
           <span className="text-[var(--text-dim)]">/{entries.length} adapters ok</span></span>
         <span><span className="text-[var(--text-dim)]">worst p95 </span>
           <span className="font-bold tabular-nums">{worst ? `${formatMs(worst.p95)}` : '—'}</span>
           {worst && <span className="text-[var(--text-dim)]"> ({worst.name})</span>}</span>
         <span><span className="font-bold tabular-nums">{Math.round(rpm)}</span>
           <span className="text-[var(--text-dim)]"> req/min fleet-wide</span></span>
-        <span className={nearCeiling ? 'text-amber-400' : ''}>
+        <span className={nearCeiling ? 'text-[var(--warn)]' : ''}>
           <span className="font-bold tabular-nums">{nearCeiling}</span>
           <span className={nearCeiling ? '' : 'text-[var(--text-dim)]'}> near capacity</span></span>
-        <span className={drifted ? 'text-amber-400' : ''}>
+        <span className={drifted ? 'text-[var(--warn)]' : ''}>
           <span className="font-bold tabular-nums">{drifted}</span>
           <span className={drifted ? '' : 'text-[var(--text-dim)]'}> with model drift (1h)</span></span>
       </CardContent>
@@ -747,6 +777,7 @@ type Tier0MetricsResp = {
     min_fps_ratio: number | null
     worst_camera: string | null
     restarts_total: number
+    frames_dropped_total?: number
   }
   detector?: {
     latency_avg_ms: number | null
@@ -763,6 +794,7 @@ type Tier0MetricsResp = {
     skipped_calibrating: number
     skipped_stationary?: number
     motion_gate_ratio: number | null
+    motion_latched_cameras?: string[]
   }
   cameras?: Array<{
     camera: string
@@ -777,7 +809,22 @@ type Tier0MetricsResp = {
     tracks_active: number
     visits_posted: number
     visits_dropped: number
+    frames_dropped?: number
     mainstream_fallback: boolean
+    /** Which stream the worker detects on and why it is the main (per-camera setting, no sub, sub unreachable, sub too small). */
+    detect_stream?: { stream: 'sub' | 'main'; reason: string } | null
+    evidence?: {
+      main: number
+      detect: number
+      /** Crops fetched from the recording: full-resolution, like main. Absent on an older core. */
+      playback?: number
+      mismatch: number
+      low_res_ratio: number | null
+      gop_s: number | null
+      keyframes_only: boolean | null
+    } | null
+    motion_latched_open?: boolean
+    motion_forced_exits?: number
   }>
   events_flow?: {
     bus_events_published: number
@@ -838,6 +885,7 @@ function formatPct(v: number | null | undefined): string {
  * users see the evidence without the button doing anything for them.
  */
 function PromotionCard({ d }: { d: Tier0MetricsResp }) {
+  const fmt = useDateFormat()
   const { showSuccess, showError } = useSnackbar()
   const queryClient = useQueryClient()
   const promo = d.promotion
@@ -863,11 +911,11 @@ function PromotionCard({ d }: { d: Tier0MetricsResp }) {
   if (d.mode === 'enforce') {
     const g = d.gate
     return (
-      <div className="border border-emerald-700/50 bg-emerald-600/10 rounded p-3 text-sm">
+      <div className="border border-[color-mix(in_oklab,var(--ok)_45%,var(--border))] bg-[color-mix(in_oklab,var(--ok)_14%,transparent)] p-3 text-sm">
         <div className="flex items-center justify-between gap-3">
           <span>
-            <ShieldCheck size={14} className="inline mr-1.5 text-emerald-400" />
-            Enforcement is on — {(g?.suppressions ?? 0).toLocaleString()} expensive
+            <ShieldCheck size={14} className="inline mr-1.5 text-[var(--ok)]" />
+            Enforcement is on — {fmt.number(g?.suppressions ?? 0)} expensive
             looks skipped so far.
           </span>
           <Button variant="ghost" className="text-xs shrink-0"
@@ -885,7 +933,7 @@ function PromotionCard({ d }: { d: Tier0MetricsResp }) {
   // ready — the recommendation with evidence
   if (promo.ready) {
     return (
-      <div className="border border-[var(--accent,#5eb3f6)]/60 bg-[var(--accent,#5eb3f6)]/10 rounded p-3 text-sm space-y-2">
+      <div className="border border-[var(--accent,#5eb3f6)]/60 bg-[var(--accent,#5eb3f6)]/10 p-3 text-sm space-y-2">
         <div>
           <Info size={14} className="inline mr-1.5" />
           Shadow data ({promo.shadow_days?.toFixed(0)} days): enforcement would
@@ -903,7 +951,7 @@ function PromotionCard({ d }: { d: Tier0MetricsResp }) {
   // collecting — progress doubles as the in-product Tier-0 explainer
   const days = promo.shadow_days ?? 0
   return (
-    <div className="border border-[var(--border)] rounded bg-[var(--bg-2)] p-3 text-xs text-[var(--text-dim)]">
+    <div className="border border-[var(--border)] bg-[var(--bg-2)] p-3 text-xs text-[var(--text-dim)]">
       Measuring in shadow — day {Math.max(1, Math.ceil(days))} of 7. The gate is
       auditing every escalate/suppress decision without acting; once a week of
       data shows meaningful savings, you can enable enforcement here with one
@@ -917,20 +965,22 @@ function PromotionCard({ d }: { d: Tier0MetricsResp }) {
 }
 
 function ComputeGatedPanel() {
+  const { t: translate } = useTranslation()
+  const fmt = useDateFormat()
   const query = useTier0Metrics()
   const d = query.data
 
   // Absent / unreachable pipeline is a normal state (gate off / not deployed).
   if (query.isError || (d && !d.available)) {
     const reason = d?.reason === 'disabled'
-      ? 'Disabled — set detect_pipeline_metrics_url to enable.'
-      : 'The detect-pipeline is not reachable — the compute-gated pipeline may be off or not deployed.'
+      ? translate('adapters.pipelineDisabled')
+      : translate('adapters.pipelineUnreachable')
     return (
       <Card>
         <CardHeader>
           <Activity size={16} className="text-[var(--text-dim)]" />
-          <CardTitle>Compute-gated inference</CardTitle>
-          <div className="ml-auto"><Badge variant="neutral">unavailable</Badge></div>
+          <CardTitle>{translate('adapters.computeGated')}</CardTitle>
+          <div className="ml-auto"><Badge variant="neutral">{translate('adapters.unavailable')}</Badge></div>
         </CardHeader>
         <CardContent><div className="text-sm text-[var(--text-dim)]">{reason}</div></CardContent>
       </Card>
@@ -957,7 +1007,7 @@ function ComputeGatedPanel() {
     <Card>
       <CardHeader>
         <Activity size={16} className="text-[var(--text-dim)]" />
-        <CardTitle>Compute-gated inference</CardTitle>
+        <CardTitle>{translate('adapters.computeGated')}</CardTitle>
         <div className="ml-auto flex items-center gap-2">
           {d.model && <Badge variant="info"><Cpu size={12} /> {d.model}</Badge>}
           <Badge variant={mode.variant}>{mode.text}</Badge>
@@ -968,15 +1018,20 @@ function ComputeGatedPanel() {
         <PromotionCard d={d} />
         {/* Operator health — is it running, and is the box keeping up with the cameras? */}
         {d.health && (d.health.workers_total > 0 || d.health.restarts_total > 0) && (
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
             <StatTile label="Workers up" value={`${d.health.workers_up} / ${d.health.workers_total}`}
               sub="analyze-enabled cameras" warn={d.health.workers_up < d.health.workers_total} />
             <StatTile label="Keeping up"
               value={d.health.min_fps_ratio != null ? formatPct(d.health.min_fps_ratio) : '—'}
               sub={d.health.worst_camera ? `worst: ${d.health.worst_camera}` : 'processed ÷ target fps'}
               warn={d.health.min_fps_ratio != null && d.health.min_fps_ratio < 0.9} />
-            <StatTile label="Restarts" value={(d.health.restarts_total ?? 0).toLocaleString()}
+            <StatTile label="Restarts" value={fmt.number(d.health.restarts_total ?? 0)}
               sub="camera feed restarts" warn={(d.health.restarts_total ?? 0) > 0} />
+            {/* Decoded frames detection never reached (#507): the box cannot
+                serve that camera at its detector budget. Used to surface as
+                restarts, because the session died instead. */}
+            <StatTile label="Frames dropped" value={fmt.number(d.health.frames_dropped_total ?? 0)}
+              sub="decoded, never detected on" warn={(d.health.frames_dropped_total ?? 0) > 0} />
           </div>
         )}
 
@@ -984,10 +1039,16 @@ function ComputeGatedPanel() {
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
           <StatTile label="CPU" value={p?.cpu_percent != null ? `${Math.round(p.cpu_percent)}%` : '—'} sub="detect-pipeline process" />
           <StatTile label="Memory" value={formatBytes(p?.memory_bytes)} sub="resident" />
+          {/* 0% here is honest but useless without the reason: a scene the gate
+              could not model (dashcam, a road that never empties) is latched
+              open and skips nothing by design. Say so instead of showing a
+              zero the operator cannot act on. */}
           <StatTile label="Motion-gate" value={formatPct(f?.motion_gate_ratio)}
-            sub={`${(f?.skipped_no_motion ?? 0).toLocaleString()} idle frames skipped`} />
-          <StatTile label="Frames" value={(f?.total ?? 0).toLocaleString()}
-            sub={`${(f?.detector_runs ?? 0).toLocaleString()} ran the detector`} />
+            sub={(f?.motion_latched_cameras?.length ?? 0) > 0
+              ? `gate latched open on ${f!.motion_latched_cameras!.join(', ')} — no static background`
+              : `${fmt.number(f?.skipped_no_motion ?? 0)} idle frames skipped`} />
+          <StatTile label="Frames" value={fmt.number(f?.total ?? 0)}
+            sub={`${fmt.number(f?.detector_runs ?? 0)} ran the detector`} />
         </div>
 
         {/* Per-camera detail — the fleet aggregate hides exactly the camera
@@ -995,7 +1056,7 @@ function ComputeGatedPanel() {
             protecting the stream by detecting less; "main stream" flags the
             5x-decode-cost misconfiguration the operator can actually fix. */}
         {(d.cameras?.length ?? 0) > 0 && (
-          <div className="border border-[var(--border)] rounded bg-[var(--bg-2)] p-3 overflow-x-auto">
+          <div className="border border-[var(--border)] bg-[var(--bg-2)] p-3 overflow-x-auto">
             <div className="text-[11px] uppercase tracking-wider text-[var(--text-dim)] mb-2 font-mono">
               Cameras
             </div>
@@ -1017,25 +1078,45 @@ function ComputeGatedPanel() {
                   return (
                     <tr key={c.camera} className="border-t border-[var(--border)]">
                       <td className="pr-4 py-1">
-                        <span className={c.up ? '' : 'text-red-400'}>{c.camera}{c.up ? '' : ' (down)'}</span>
+                        <span className={c.up ? '' : 'text-[var(--danger)]'}>{c.camera}{c.up ? '' : ' (down)'}</span>
                       </td>
-                      <td className={`pr-4 py-1 tabular-nums ${fpsLow ? 'text-amber-400' : ''}`}>
+                      <td className={`pr-4 py-1 tabular-nums ${fpsLow ? 'text-[var(--warn)]' : ''}`}>
                         {c.fps ?? '—'}{c.target_fps != null ? ` / ${c.target_fps}` : ''}
                       </td>
                       <td className="pr-4 py-1 tabular-nums">
                         {c.frame_age_s != null ? `${c.frame_age_s}s` : '—'}
                       </td>
-                      <td className={`pr-4 py-1 tabular-nums ${c.shedding ? 'text-amber-400' : ''}`}>
+                      <td className={`pr-4 py-1 tabular-nums ${c.shedding ? 'text-[var(--warn)]' : ''}`}>
                         {c.regions_budget ?? '—'}{c.regions_configured != null ? ` / ${c.regions_configured}` : ''}
                         {c.shedding ? ' · shedding' : ''}
+                        {c.motion_latched_open ? ' · gate open (no static background)' : ''}
                       </td>
                       <td className="pr-4 py-1 tabular-nums">{c.tracks_active}</td>
-                      <td className={`pr-4 py-1 tabular-nums ${c.visits_dropped > 0 ? 'text-amber-400' : ''}`}>
-                        {c.visits_posted.toLocaleString()}
+                      <td className={`pr-4 py-1 tabular-nums ${c.visits_dropped > 0 ? 'text-[var(--warn)]' : ''}`}>
+                        {fmt.number(c.visits_posted)}
                         {c.visits_dropped > 0 ? ` (+${c.visits_dropped} dropped)` : ''}
                       </td>
                       <td className="py-1">
-                        {c.mainstream_fallback && <Badge variant="warning">main stream</Badge>}
+                        {c.detect_stream?.stream === 'main' ? (
+                          <Badge variant="warning">
+                            {{ policy: 'detecting on main (chosen)', no_substream: 'detecting on main (no sub stream)',
+                               sub_unreachable: 'detecting on main (sub unreachable)',
+                               sub_too_small: 'detecting on main (sub too small)' }[c.detect_stream.reason] ?? 'detecting on main'}
+                          </Badge>
+                        ) : c.mainstream_fallback && <Badge variant="warning">main stream</Badge>}
+                        {/* Substream detection with main-stream evidence: warn when a
+                            meaningful share of the best crops fell back to the low-res
+                            detect frame, and say why when the main frame was refused for
+                            not matching (keyframe too old, or a second stream with a
+                            different field of view). */}
+                        {c.evidence && c.evidence.low_res_ratio != null
+                          && c.evidence.main + c.evidence.detect + (c.evidence.playback ?? 0) >= 10
+                          && c.evidence.low_res_ratio >= 0.25 && (
+                          <Badge variant="warning">
+                            {`evidence ${Math.round(c.evidence.low_res_ratio * 100)}% low-res`}
+                            {c.evidence.mismatch > 0 ? ` (${c.evidence.mismatch} mismatched)` : ''}
+                          </Badge>
+                        )}
                       </td>
                     </tr>
                   )
@@ -1050,20 +1131,20 @@ function ComputeGatedPanel() {
             Zero here while detections climb is "detected but nobody was told". */}
         {d.events_flow && (
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-            <StatTile label="Bus events" value={d.events_flow.bus_events_published.toLocaleString()}
+            <StatTile label="Bus events" value={fmt.number(d.events_flow.bus_events_published)}
               sub="published to NATS (alarms, apps)" />
-            <StatTile label="Visits posted" value={d.events_flow.visits_posted.toLocaleString()}
+            <StatTile label="Visits posted" value={fmt.number(d.events_flow.visits_posted)}
               sub="written to history" />
-            <StatTile label="Visits dropped" value={d.events_flow.visits_dropped.toLocaleString()}
+            <StatTile label="Visits dropped" value={fmt.number(d.events_flow.visits_dropped)}
               sub="lost before history" warn={d.events_flow.visits_dropped > 0} />
-            <StatTile label="Sink errors" value={d.events_flow.sink_errors.toLocaleString()}
+            <StatTile label="Sink errors" value={fmt.number(d.events_flow.sink_errors)}
               sub="event-store write failures" warn={d.events_flow.sink_errors > 0} />
           </div>
         )}
 
         {/* Detector model — speed + output volume, the aspects you A/B two models on */}
         {d.detector && (
-          <div className="border border-[var(--border)] rounded bg-[var(--bg-2)] p-3">
+          <div className="border border-[var(--border)] bg-[var(--bg-2)] p-3">
             <div className="text-[11px] uppercase tracking-wider text-[var(--text-dim)] mb-2 font-mono">
               Detector model{d.model ? ` — ${d.model}` : ''}
             </div>
@@ -1076,15 +1157,15 @@ function ComputeGatedPanel() {
                 )}
               </span>
               <span>
-                <span className="font-bold tabular-nums">{(d.detector.detections_total ?? 0).toLocaleString()}</span>
+                <span className="font-bold tabular-nums">{fmt.number(d.detector.detections_total ?? 0)}</span>
                 <span className="text-[var(--text-dim)]"> detections</span>
               </span>
               {Object.entries(d.detector.detections_by_class ?? {})
                 .sort((a, b) => b[1] - a[1]).slice(0, 6)
                 .map(([label, n]) => (
                   <span key={label} className="inline-flex items-center gap-1.5 text-[var(--text-dim)]">
-                    <i className="w-1.5 h-1.5 rounded-sm bg-[var(--accent,#5eb3f6)]" />
-                    {label} <span className="tabular-nums text-[var(--text)]">{n.toLocaleString()}</span>
+                    <i className="w-1.5 h-1.5 bg-[var(--accent,#5eb3f6)]" />
+                    {label} <span className="tabular-nums text-[var(--text)]">{fmt.number(n)}</span>
                   </span>
                 ))}
             </div>
@@ -1102,7 +1183,7 @@ function ComputeGatedPanel() {
         )}
 
         {/* Gate decisions: what got suppressed (the saving) vs escalated (the cost) */}
-        <div className="border border-[var(--border)] rounded bg-[var(--bg-2)] p-3">
+        <div className="border border-[var(--border)] bg-[var(--bg-2)] p-3">
           <div className="text-[11px] uppercase tracking-wider text-[var(--text-dim)] mb-2 font-mono">
             Gate decisions{shadow ? ' — shadow preview' : ''}
           </div>
@@ -1110,20 +1191,20 @@ function ComputeGatedPanel() {
             <div className="text-xs text-[var(--text-dim)]">No gate decisions recorded yet.</div>
           ) : (
             <>
-              <div className="flex h-2.5 rounded overflow-hidden mb-2">
-                <div className="bg-emerald-500" style={{ width: `${(suppressN / decisionTotal) * 100}%` }}
+              <div className="flex h-2.5 overflow-hidden mb-2">
+                <div className="bg-[var(--ok)]" style={{ width: `${(suppressN / decisionTotal) * 100}%` }}
                   title={`${shadow ? 'would suppress' : 'suppressed'}: ${suppressN}`} />
-                <div className="bg-amber-500" style={{ width: `${(escN / decisionTotal) * 100}%` }}
+                <div className="bg-[var(--warn)]" style={{ width: `${(escN / decisionTotal) * 100}%` }}
                   title={`escalated: ${escN}`} />
               </div>
               <div className="flex flex-wrap gap-x-4 gap-y-1 font-mono text-xs text-[var(--text-dim)]">
                 <span className="inline-flex items-center gap-1.5">
-                  <i className="w-2 h-2 rounded-sm bg-emerald-500" />
-                  {shadow ? 'would suppress' : 'suppressed'} {suppressN.toLocaleString()} ({formatPct(suppressN / decisionTotal)})
+                  <i className="w-2 h-2 bg-[var(--ok)]" />
+                  {shadow ? 'would suppress' : 'suppressed'} {fmt.number(suppressN)} ({formatPct(suppressN / decisionTotal)})
                 </span>
                 <span className="inline-flex items-center gap-1.5">
-                  <i className="w-2 h-2 rounded-sm bg-amber-500" />
-                  escalated {escN.toLocaleString()} ({formatPct(escN / decisionTotal)})
+                  <i className="w-2 h-2 bg-[var(--warn)]" />
+                  escalated {fmt.number(escN)} ({formatPct(escN / decisionTotal)})
                 </span>
               </div>
             </>
@@ -1136,7 +1217,7 @@ function ComputeGatedPanel() {
             Expensive-model calls (Tier-1)
           </div>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-            <StatTile label="Dispatched" value={(t?.dispatched ?? 0).toLocaleString()} sub="governed via KAI-C" />
+            <StatTile label="Dispatched" value={fmt.number(t?.dispatched ?? 0)} sub="governed via KAI-C" />
             <StatTile label="Latency" value={formatMs(t?.latency_avg_ms)}
               sub={t?.latency_p95_ms != null ? `p95 ${formatMs(t.latency_p95_ms)}` : 'avg per call'} />
             <StatTile label="In flight" value={`${t?.inflight ?? 0}`} sub="concurrent now" />
@@ -1155,6 +1236,7 @@ function ComputeGatedPanel() {
 }
 
 export function AIAdapters() {
+  const { t } = useTranslation()
   const healthQuery = useKaiHealth()
   const capsQuery = useKaiCapabilities()
   const fleetQuery = useFleetMetrics()
@@ -1179,11 +1261,11 @@ export function AIAdapters() {
   return (
     <section className="space-y-4">
       <PageHeader
-        title="AI Adapters"
-        description="Models registered with KAI-C, the sovereignty and audit gateway. Every inference the platform runs goes through one of these adapters. Health & metrics update on KAI-C's 60s scrape."
+        title={t('adapters.title')}
+        description={t('adapters.description')}
         actions={
           <Button onClick={refresh} disabled={loading}>
-            <RefreshCw size={14} className={healthQuery.isFetching || capsQuery.isFetching ? 'animate-spin' : ''} /> Refresh
+            <RefreshCw size={14} className={healthQuery.isFetching || capsQuery.isFetching ? 'animate-spin' : ''} /> {t('adapters.refresh')}
           </Button>
         }
       />
@@ -1196,7 +1278,7 @@ export function AIAdapters() {
       <Card>
         <CardHeader>
           <Server size={16} className="text-[var(--text-dim)]" />
-          <CardTitle>KAI-C Gateway</CardTitle>
+          <CardTitle>{t('adapters.gateway')}</CardTitle>
           <div className="ml-auto">
             {healthQuery.isPending ? (
               <Skeleton className="h-5 w-16" />
@@ -1210,7 +1292,7 @@ export function AIAdapters() {
         {(healthQuery.data?.message || healthQuery.isError) && (
           <CardContent>
             <div className="text-sm text-[var(--text-dim)]">
-              {healthQuery.data?.message ?? extractApiError(healthQuery.error, 'KAI-C is not reachable from the backend.')}
+              {healthQuery.data?.message ?? extractApiError(healthQuery.error, t('adapters.notReachable'))}
             </div>
           </CardContent>
         )}
@@ -1225,14 +1307,14 @@ export function AIAdapters() {
         </div>
       ) : bothFailed ? (
         <ErrorCard
-          title="Adapter registry unavailable"
-          message={extractApiError(capsQuery.error, 'Could not load adapter capabilities from KAI-C.')}
+          title={t('adapters.registryUnavailable')}
+          message={extractApiError(capsQuery.error, t('adapters.loadCapabilities'))}
           onRetry={refresh}
         />
       ) : adapters.length === 0 ? (
         <EmptyState
           icon={<Layers size={28} />}
-          title="No adapters registered"
+          title={t('adapters.noRegistered')}
           description="Start an AI adapter (YOLOv8, BLIP, Whisper, …) and register it with KAI-C to see it here. See docs/AI_ADAPTER_CONTRACT.md for the contract."
         />
       ) : (
@@ -1243,6 +1325,7 @@ export function AIAdapters() {
                 <Layers size={16} className="text-[var(--text-dim)]" />
                 <CardTitle>{a.name}</CardTitle>
                 <div className="ml-auto flex items-center gap-2">
+                  <HardwareBadge hardware={a.hardware} />
                   <AdapterApprovalBadge name={a.name} />
                   {a.status && <Badge variant={statusVariant(a.status)}>{a.status}</Badge>}
                 </div>
@@ -1298,7 +1381,7 @@ export function AIAdapters() {
                     {expanded === a.name ? 'Hide raw capabilities' : 'Show raw capabilities'}
                   </Button>
                   {expanded === a.name && (
-                    <pre className="mt-2 p-3 text-xs leading-snug overflow-auto max-h-64 border border-[var(--border)] rounded bg-[var(--bg-2)]">
+                    <pre className="mt-2 p-3 text-xs leading-snug overflow-auto max-h-64 border border-[var(--border)] bg-[var(--bg-2)]">
                       {JSON.stringify(a.raw, null, 2)}
                     </pre>
                   )}

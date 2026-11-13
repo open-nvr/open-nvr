@@ -38,22 +38,49 @@ subject_pattern: "opennvr.inference.>"
 watch_labels:
   - "person"
 
-# ── Loitering thresholds ──────────────────────────────────────────
+# ── Tracking ──────────────────────────────────────────────────────
 #
-# threshold_seconds:  fire an alert when a watched-label entity has
-#                     been in the zone continuously for this many
-#                     seconds. Choose based on your scene: 30s for
-#                     a doorway (someone hovering); 5 min for a
-#                     parking lot (a parked car is normal); etc.
+# Dwell is measured per tracked object (one stay per track_id). On the
+# stock stack consume Tier-0, which already tracks:
+#   subject_pattern: "opennvr.inference.tier0.>"
+#   consume_tier0: true
+# Without track ids the app falls back to one stay per (camera, label).
+consume_tier0: false
+
+# ── Rule ──────────────────────────────────────────────────────────
 #
-# grace_period_seconds: how long the detection can be ABSENT (no
-#                     in-zone detection frames received) before the
-#                     dwell timer resets. Absorbs brief occlusion /
-#                     false negatives. 5s is typical for 1-fps
-#                     inference; bump higher (15-30s) for very sparse
-#                     inference frequency.
+# threshold_seconds:  dwell inside the zone that counts as loitering.
+#                     Forecourts, fire exits: 30–60 s. Lobbies and
+#                     waiting areas: 2–5 min.
+# escalate_after_seconds: if still there this long after the first
+#                     alert, raise a second one a severity step higher.
+# active_hours:       alerts fire only inside this window; stays are
+#                     counted all day. Cross-midnight is fine (22:00–06:00).
+# after_hours_threshold_seconds: outside active_hours, 0 keeps quiet;
+#                     >0 alerts after THIS many seconds instead.
+# group_size / group_seconds: 'gathering' alert when that many watched
+#                     objects dwell together for that long. 0 = off.
+# alert_cooldown_seconds: least time between two first-stage alerts on
+#                     one camera. Escalations are not held back.
+# grace_period_seconds: a detection gap shorter than this does not end
+#                     a stay. 5 s suits ~2 fps; raise it for sparse inference.
+# min_bbox_height:    ignore boxes shorter than this fraction of the frame.
 threshold_seconds: 60
+escalate_after_seconds: 0
+alert_severity: "medium"
+active_hours:
+  start: ""
+  end: ""
+after_hours_threshold_seconds: 0
+group_size: 0
+group_seconds: 30
+alert_cooldown_seconds: 0
 grace_period_seconds: 5
+min_bbox_height: 0
+daily_reset_hour: 0
+attach_snapshot: true
+publish_dwell: true
+dwell_period_seconds: 60
 
 # ── Webhook (optional) ────────────────────────────────────────────
 #
@@ -112,9 +139,6 @@ cameras:
     frame_width: 1920
     frame_height: 1080
     zone_name: "loading-bay"
-    # Vehicles loitering > 5 min in the loading bay are unusual:
-    # bump threshold_seconds at the app level OR add a config-per-
-    # camera override (deferred to follow-up).
     zone:
       - [100, 600]
       - [1820, 600]

@@ -1,0 +1,34 @@
+# gate-watch — operator config (standalone run). On a compose install the
+# config-init container renders config.docker.yml instead.
+
+webhook_url: null
+nats_alerts_url: null
+nats_alerts_token: null
+
+# How often each gate is looked at. Each look is one question to the
+# vision model through KAI-C: a few seconds on CPU, so 30 s is a sensible
+# floor there; 10 s on a GPU box.
+poll_interval_seconds: 30
+# The gate must be seen open for this long before it alerts.
+open_seconds: 120
+# After an alert, the same gate stays quiet this long unless it closes.
+cooldown_seconds: 600
+# Looks in a row that could not be judged before the gate counts as unknown.
+unsure_tolerance: 2
+
+# Which KAI-C adapter answers the question. Empty = the first registered
+# adapter advertising visual_qa (the shipped moondream adapter).
+look_timeout_seconds: 60   # how long one answer may take; a CPU look is several seconds
+vqa_adapter: ""
+question: "Is the gate in this picture open or closed? Answer with one word: open or closed."
+
+alert_severity: "medium"
+attach_snapshot: true
+
+# Standalone only: cameras to poll, with where to fetch a frame from and
+# the gate's corners. On a compose install leave empty; the cameras are
+# picked in the App Catalog and the gate drawn there.
+cameras: []
+#  - camera_id: "gate"
+#    frame_url: "http://192.168.1.10/snapshot.jpg"
+#    gate: [[0.30, 0.40], [0.70, 0.40], [0.70, 0.95], [0.30, 0.95]]

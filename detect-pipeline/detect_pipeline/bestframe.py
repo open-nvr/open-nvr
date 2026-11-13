@@ -38,6 +38,57 @@ def _encode_jpeg(crop_bgr, quality: int = 85) -> bytes:
     return buf.tobytes()
 
 
+# Core refuses an evidence JPEG over 2 MiB. Budget below that: a scene the
+# server drops is a scene the operator never sees, and the pixel/quality
+# clamps alone do NOT bound this — a high-entropy frame (rain, foliage,
+# sensor noise at night) encodes to 2.4 MB at 1920px/q95, measured.
+MAX_SCENE_BYTES = 1_500_000
+_SCENE_FALLBACK_QUALITY = (60, 45)
+
+
+def encode_scene_jpeg(
+    bgr, *, max_px: int = 1280, quality: int = 78,
+    max_bytes: int = MAX_SCENE_BYTES,
+) -> bytes:
+    """The WHOLE frame as JPEG, downscaled to ``max_px`` on its long edge.
+
+    The visit's second evidence image. ``_crop_bgr`` is framed for the
+    SUBJECT — box plus a quarter-box margin — which is exactly what makes it
+    unable to answer the operator's other question: not "what was it" but
+    "where was it, what else was in shot, was the gate open". No margin
+    setting gives you both without ruining the first, so the scene is a
+    separate image rather than a wider crop.
+
+    Downscaled because it is context, not the record: 1280px is already 2x
+    the dialog it is shown in, and it keeps the file (~150 KB) an order of
+    magnitude under core's MAX_EVIDENCE_BYTES. Never UPSCALES — a 640x360
+    substream frame is stored as-is rather than interpolated into a bigger
+    lie about how much detail the camera gave us.
+
+    Degrades to fit ``max_bytes``: a noisy night frame at the operator's
+    chosen quality can land over core's cap, and a rejected scene helps
+    nobody. Quality is the thing to give up — the scene is looked at, not
+    read, so re-encoding softer beats not having it.
+    """
+    import cv2
+
+    h, w = bgr.shape[:2]
+    long_edge = max(int(h), int(w))
+    if max_px and long_edge > max_px:
+        scale = float(max_px) / float(long_edge)
+        bgr = cv2.resize(
+            bgr,
+            (max(1, int(w * scale)), max(1, int(h * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+    jpeg = _encode_jpeg(bgr, quality)
+    for lower in _SCENE_FALLBACK_QUALITY:
+        if len(jpeg) <= max_bytes or lower >= quality:
+            break
+        jpeg = _encode_jpeg(bgr, lower)
+    return jpeg
+
+
 class BestFrameStore:
     """Thread-safe, bounded cache of each track's best-frame crop (encoded lazily)."""
 
@@ -180,3 +231,75 @@ class BestFrameStore:
     def __len__(self) -> int:
         with self._lock:
             return self._count_locked()
+
+
+# ── the latest decoded frame, per camera ──────────────────────────────
+
+class LatestFrameStore:
+    """The most recent frame each camera's worker decoded, as JPEG on demand.
+
+    Tier-0 decodes every camera's stream all day; until now nothing could
+    ask it for the picture it just decoded. The camera agent's live look
+    (detect_objects, describe_camera with no active track) opened its own
+    RTSP session instead: connect, wait for a keyframe, decode — measured
+    on a Ventuno Q at 5.6–6.2 s a look against 0.1 s for the detector and
+    0.5 s for the answer (the 32-case eval, 2026-11-08). This store makes
+    the live look a memory read: the worker puts a reference to each frame
+    it processes (I420 bytes, no copy), and a fetch converts and encodes
+    the newest one once, caching the JPEG by sequence number.
+
+    ``max_age_s`` is the freshness the caller demands: a frame older than
+    that is a dead or paused stream, and ``None`` sends the caller to its
+    own fallback. Thread-safe; ``_clock``, ``_to_bgr`` and ``_encode`` are
+    injectable so the tests never touch cv2.
+    """
+
+    def __init__(self, *, jpeg_quality: int = 85, _clock=time.time,
+                 _to_bgr=None, _encode=_encode_jpeg) -> None:
+        self._q = int(jpeg_quality)
+        self._clock = _clock
+        self._to_bgr = _to_bgr
+        self._encode = _encode
+        self._lock = threading.Lock()
+        # camera -> (frame, wall_ts, seq, encoded_jpeg_or_None)
+        self._latest: dict[str, list] = {}
+
+    def put(self, camera_id: str, frame) -> None:
+        """Remember ``frame`` as the camera's newest. A reference, no copy."""
+        seq = getattr(frame, "seq", None)
+        with self._lock:
+            self._latest[camera_id] = [frame, self._clock(), seq, None]
+
+    def age_s(self, camera_id: str) -> float | None:
+        with self._lock:
+            entry = self._latest.get(camera_id)
+            return None if entry is None else max(0.0, self._clock() - entry[1])
+
+    def jpeg(self, camera_id: str, max_age_s: float = 3.0) -> tuple[bytes, float] | None:
+        """(JPEG bytes, age in seconds) of the newest frame, or None when the
+        camera has none or it is older than ``max_age_s``."""
+        with self._lock:
+            entry = self._latest.get(camera_id)
+            if entry is None:
+                return None
+            frame, ts, _seq, cached = entry
+            age = max(0.0, self._clock() - ts)
+            if age > max_age_s:
+                return None
+            if cached is not None:
+                return cached, age
+        to_bgr = self._to_bgr
+        if to_bgr is None:
+            from .detector import to_bgr as _tb
+            to_bgr = _tb
+        jpeg = self._encode(to_bgr(frame.data, frame.width, frame.height), self._q)
+        with self._lock:
+            entry = self._latest.get(camera_id)
+            if entry is not None and entry[0] is frame:
+                entry[3] = jpeg
+        return jpeg, age
+
+    def drop(self, camera_id: str) -> None:
+        with self._lock:
+            self._latest.pop(camera_id, None)
+

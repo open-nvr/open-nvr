@@ -112,7 +112,6 @@ def test_factory_routes_http_schemes():
 @pytest.mark.parametrize(
     ("url", "match"),
     [
-        ("rtsp://cam/stream", "rtsp"),
         ("opennvr://cameras/1/snapshot", "opennvr"),
         ("gopher://cam/snap", "unsupported frame source scheme"),
     ],
@@ -120,6 +119,16 @@ def test_factory_routes_http_schemes():
 def test_factory_rejects_unsupported_schemes(url, match):
     with pytest.raises(FrameSourceError, match=match):
         build_frame_source(camera_id="cam-1", url=url)
+
+
+def test_factory_routes_rtsp_to_the_stream_backed_source():
+    """rtsp:// used to be refused outright. It now keeps one decoder
+    warm and hands back its newest frame, so a polling FrameApp can be
+    pointed at a stream without paying an ffmpeg start per tick."""
+    from opennvr_app_sdk.rtsp import RtspStillSource
+
+    source = build_frame_source(camera_id="cam-1", url="rtsp://cam/stream")
+    assert isinstance(source, RtspStillSource)
 
 
 # ── DictFrameSource bridge ─────────────────────────────────────────

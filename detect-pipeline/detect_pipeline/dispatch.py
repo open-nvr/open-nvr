@@ -13,9 +13,12 @@ Model-agnostic by construction: routing is a **declarative class→adapter map**
 caption default is one editable row), and a model may opt out (`TriggerPolicy.none`),
 in (`always`), or bring its own trigger — see `docs/design/trigger-policies.md`.
 
-Off by default: a dispatcher is only built when a KAI-C URL is configured, and it
-fires only on **enforce** escalations (`shadow`/`off` dispatch nothing). Best-effort:
-KAI-C down or slow never blocks or crashes the Tier-0 worker.
+Off by default: a dispatcher is only built when a KAI-C URL is configured, and the
+default routes fire only on **enforce** escalations (`shadow`/`off` dispatch nothing
+from them). The one exception is the opt-in **face route** (see FACE_SKILL): it
+exists only on cameras a face app claimed, and runs there whatever the gate mode,
+so turning faces on for a gate camera changes nothing on any other camera.
+Best-effort: KAI-C down or slow never blocks or crashes the Tier-0 worker.
 """
 from __future__ import annotations
 
@@ -53,7 +56,7 @@ ADAPTER_TASKS: dict[str, str] = {
 # the OCR adapter. Not a default: plates are privacy-sensitive, so the
 # route exists only where an operator (or an app's claim) assigned it.
 PLATE_SKILL = "license_plate_recognition"
-PLATE_ROUTE_LABELS: tuple[str, ...] = ("bicycle", "bus", "car",
+PLATE_ROUTE_LABELS: tuple[str, ...] = ("bus", "car",
                                        "motorcycle", "truck")
 PLATE_ADAPTER = "fast_plate_ocr"
 
@@ -62,22 +65,131 @@ PLATE_ADAPTER = "fast_plate_ocr"
 # cost. caption stays cooldown-paced (a scene evolves; a plate doesn't).
 ONCE_PER_TRACK_ADAPTERS = frozenset({PLATE_ADAPTER})
 
+# The face route (RFC-0002 decision 9: ``person -> insightface``), opt-in per
+# camera like plates. A face app claims the face_recognition skill on the
+# cameras it uses and names ITS adapter in the claim (each face app keeps
+# its own gallery), so the route is person -> that app's adapter(s). Unlike
+# the default routes it is not tied to the gate's enforce mode: the claim
+# itself is the operator's opt-in for that camera, and every other camera
+# stays exactly as the gate mode says.
+FACE_SKILL = "face_recognition"
+FACE_TASK = "face_recognition"
+FACE_ROUTE_LABELS: tuple[str, ...] = ("person",)
+# Re-send a person's crop while it improves, until a result names them or
+# this many attempts: the first crop is often a turned head (a plate is
+# read once; a face is not).
+FACE_MAX_ATTEMPTS = 5
+FACE_MIN_INTERVAL_S = 0.5
 
-def router_for_skills(skills, base: "DispatchRouter | None" = None) -> "DispatchRouter | None":
+
+def face_adapters_of(skill_adapters) -> tuple[str, ...]:
+    """The face adapters a camera's claims name, sorted (stable routing)."""
+    return tuple(sorted({a for s, a in (skill_adapters or ()) if s == FACE_SKILL and a}))
+
+
+def router_for_skills(skills, base: "DispatchRouter | None" = None,
+                      skill_adapters=None) -> "DispatchRouter | None":
     """The per-camera router: ``base`` plus the routes this camera's
     assigned skills activate. Returns ``base`` unchanged (identity —
     including None) when the skills add nothing, so unassigned cameras
-    share the one base router."""
-    if not skills or PLATE_SKILL not in skills:
+    share the one base router.
+
+    ``skill_adapters`` is the camera's ``(skill, adapter)`` pairs from its
+    claims; the face route needs them (which app's adapter to ask). A
+    face_recognition claim naming no adapter adds nothing — there is no
+    platform-wide gallery to guess."""
+    plates = bool(skills) and PLATE_SKILL in skills
+    faces = face_adapters_of(skill_adapters) if skills and FACE_SKILL in skills else ()
+    if base is None or not (plates or faces):
         return base
-    src = base.routes if base is not None else None
-    router = DispatchRouter(routes=src,
-                            default=list(base.default) if base else None)
-    for label in PLATE_ROUTE_LABELS:
-        row = router.routes.setdefault(label, [])
-        if PLATE_ADAPTER not in row:
-            row.append(PLATE_ADAPTER)
+    router = DispatchRouter(routes=base.routes, default=list(base.default))
+    if plates:
+        for label in PLATE_ROUTE_LABELS:
+            row = router.routes.setdefault(label, [])
+            if PLATE_ADAPTER not in row:
+                row.append(PLATE_ADAPTER)
+    if faces:
+        router.face_adapters = frozenset(faces)
+        for label in FACE_ROUTE_LABELS:
+            row = router.routes.setdefault(label, [])
+            for adapter in faces:
+                if adapter not in row:
+                    row.append(adapter)
     return router
+
+
+class FaceFollowUp:
+    """Per camera: which tracks the face route has asked about, and when
+    to ask again.
+
+    A track is sent when the gate escalates it, then again whenever its
+    best crop has improved since the last attempt (at most every
+    ``min_interval_s``), until a result recognises it or ``max_attempts``
+    is reached. Results arrive on the dispatcher's thread, hence the
+    lock. Bounded FIFO like OncePerTrack."""
+
+    def __init__(self, max_attempts: int = FACE_MAX_ATTEMPTS,
+                 min_interval_s: float = FACE_MIN_INTERVAL_S, maxlen: int = 1024) -> None:
+        from collections import OrderedDict
+        self.max_attempts = max(1, int(max_attempts))
+        self.min_interval_s = max(0.0, float(min_interval_s))
+        self._maxlen = max(1, int(maxlen))
+        self._lock = threading.Lock()
+        # (track_id, adapter) -> [attempts, crop_ts sent, sent at, recognised]
+        self._state: "OrderedDict[tuple, list]" = OrderedDict()
+
+    def started(self, track_id, adapter: str) -> bool:
+        with self._lock:
+            return (track_id, adapter) in self._state
+
+    def want(self, track, adapter: str, now: float) -> bool:
+        """Should this track's crop be (re)sent to ``adapter`` now?"""
+        with self._lock:
+            st = self._state.get((track.id, adapter))
+            st = list(st) if st is not None else None
+        if st is None:
+            return True
+        attempts, crop_ts, sent_at, done = st
+        if done or attempts >= self.max_attempts:
+            return False
+        if now - sent_at < self.min_interval_s:
+            return False
+        ts = getattr(track, "best_crop_ts", None)
+        # A better crop since the last attempt (a tracker that does not
+        # stamp crops counts every frame as new; the cap bounds it).
+        return ts is None or crop_ts is None or ts > crop_ts
+
+    def sent(self, track, adapter: str, now: float) -> None:
+        key = (track.id, adapter)
+        with self._lock:
+            st = self._state.get(key)
+            if st is None:
+                st = [0, None, 0.0, False]
+                self._state[key] = st
+            st[0] += 1
+            st[1] = getattr(track, "best_crop_ts", None)
+            st[2] = now
+            self._state.move_to_end(key)
+            if len(self._state) > self._maxlen:
+                self._state.popitem(last=False)
+
+    def result(self, track_id, adapter: str, response) -> None:
+        """A face result came back: a recognised person ends the follow-up."""
+        if not face_recognised(response):
+            return
+        with self._lock:
+            st = self._state.get((track_id, adapter))
+            if st is not None:
+                st[3] = True
+
+
+def face_recognised(response) -> bool:
+    """Did a KAI-C face_recognition response name someone? Tolerant of
+    the envelope (``{"result": {...}}`` or the bare result)."""
+    if not isinstance(response, dict):
+        return False
+    res = response.get("result") if isinstance(response.get("result"), dict) else response
+    return bool(res.get("recognized") and res.get("person_id"))
 
 
 class OncePerTrack:
@@ -124,6 +236,10 @@ class DispatchRouter:
         src = DEFAULT_ROUTES if routes is None else routes
         self.routes = {k: list(v) for k, v in src.items()}
         self.default = list(default or [])
+        # Adapters on this router that are the opt-in face route: dispatched
+        # on the gate's escalations in any mode, task face_recognition, and
+        # followed up per track (see FaceFollowUp).
+        self.face_adapters: frozenset[str] = frozenset()
 
     def route(self, label: str) -> list[str]:
         return list(self.routes.get(label, self.default))
@@ -146,11 +262,12 @@ def _encode_jpeg(crop_bgr, quality: int = 85) -> bytes:
 
 
 class Dispatcher(Protocol):
-    def dispatch(self, camera_id: str, adapter: str, crop_bgr, track) -> "bool | None":
+    def dispatch(self, camera_id: str, adapter: str, crop_bgr, track, **kw) -> "bool | None":
         ...
 
 
-def _http_post_json(url: str, body: dict, api_key: str | None, timeout: float) -> None:  # pragma: no cover
+def _http_post_json(url: str, body: dict, api_key: str | None, timeout: float):  # pragma: no cover
+    """POST; the parsed JSON reply (None when it is not JSON)."""
     import urllib.request
     req = urllib.request.Request(
         url, data=json.dumps(body).encode("utf-8"), method="POST",
@@ -159,7 +276,11 @@ def _http_post_json(url: str, body: dict, api_key: str | None, timeout: float) -
     if api_key:
         req.add_header("X-Internal-Api-Key", api_key)
     with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
-        resp.read()
+        raw = resp.read()
+    try:
+        return json.loads(raw.decode("utf-8")) if raw else None
+    except ValueError:
+        return None
 
 
 class KaicDispatcher:
@@ -221,9 +342,14 @@ class KaicDispatcher:
             else:
                 self._cam_inflight.pop(camera_id, None)
 
-    def dispatch(self, camera_id: str, adapter: str, crop_bgr, track) -> bool:
+    def dispatch(self, camera_id: str, adapter: str, crop_bgr, track, *,
+                 task: str | None = None, on_result=None) -> bool:
         """True = submitted; False = dropped (backpressure / camera share /
-        pool shutdown). The once-per-track filter marks only on True."""
+        pool shutdown). The once-per-track filter marks only on True.
+
+        ``task`` overrides the adapter's task (the face route);
+        ``on_result(track_id, adapter, response)`` gets KAI-C's reply, on
+        the dispatch thread."""
         if not self._claim_camera_slot(camera_id):
             metrics.inc("tier1_dispatch_dropped_total",
                         {"camera": camera_id, "adapter": adapter})
@@ -235,25 +361,30 @@ class KaicDispatcher:
             log.debug("tier1 dispatch backpressure; dropping %s/%s", camera_id, adapter)
             return False
         try:
-            self._pool.submit(self._run, camera_id, adapter, crop_bgr, track)
+            self._pool.submit(self._run, camera_id, adapter, crop_bgr, track, task, on_result)
         except Exception:                          # pool shutting down, etc.
             self._sem.release()
             self._release_camera_slot(camera_id)
             return False
         return True
 
-    def _run(self, camera_id, adapter, crop_bgr, track) -> None:
+    def _run(self, camera_id, adapter, crop_bgr, track, task=None, on_result=None) -> None:
         self._bump_inflight(1)
         metrics.inc("tier1_dispatch_total", {"camera": camera_id, "adapter": adapter})
         t0 = time.monotonic()
         try:
             body = build_infer_body(
-                ADAPTER_TASKS.get(adapter, self.task),
+                task or ADAPTER_TASKS.get(adapter, self.task),
                 _encode_jpeg(crop_bgr, self.jpeg_quality),
                 {"camera_id": camera_id, "track_id": track.id, "label": track.label},
             )
-            self._post(f"{self.base_url}/api/v1/infer/{adapter}", body, self.api_key, self.timeout)
+            reply = self._post(f"{self.base_url}/api/v1/infer/{adapter}", body, self.api_key, self.timeout)
             metrics.observe("tier1_dispatch_latency_seconds", time.monotonic() - t0, {"adapter": adapter})
+            if on_result is not None:
+                try:
+                    on_result(track.id, adapter, reply)
+                except Exception:
+                    log.debug("tier1 on_result failed %s/%s", camera_id, adapter, exc_info=True)
         except Exception:
             metrics.inc("tier1_dispatch_errors_total", {"camera": camera_id, "adapter": adapter})
             log.debug("tier1 dispatch failed %s/%s", camera_id, adapter, exc_info=True)
@@ -266,9 +397,42 @@ class KaicDispatcher:
         self._pool.shutdown(wait=False)
 
 
+def _send_face(camera_id, adapter, track, dispatcher, follow: "FaceFollowUp | None", now: float) -> bool:
+    crop = getattr(track, "best_crop", None)
+    if crop is None:
+        return False
+    if follow is not None and not follow.want(track, adapter, now):
+        return False
+    accepted = dispatcher.dispatch(camera_id, adapter, crop, track, task=FACE_TASK,
+                                   on_result=follow.result if follow is not None else None)
+    if accepted is not False and follow is not None:
+        follow.sent(track, adapter, now)
+    return accepted is not False
+
+
+def follow_up_faces(camera_id: str, tracks, router: "DispatchRouter | None",
+                    dispatcher: "Dispatcher | None", follow: "FaceFollowUp | None",
+                    now: float | None = None) -> int:
+    """Every frame, on a face-route camera: re-send people the face route
+    already started on whose best crop has improved (see FaceFollowUp).
+    Only tracks the gate escalated once are followed: the gate still
+    decides who is worth a first look."""
+    if dispatcher is None or router is None or follow is None or not router.face_adapters:
+        return 0
+    now = time.monotonic() if now is None else now
+    issued = 0
+    for t in tracks:
+        for adapter in router.route(getattr(t, "label", "")):
+            if adapter in router.face_adapters and follow.started(t.id, adapter):
+                issued += int(_send_face(camera_id, adapter, t, dispatcher, follow, now))
+    return issued
+
+
 def dispatch_escalations(camera_id: str, tracks, gate_result, router: DispatchRouter,
                          dispatcher: Dispatcher | None,
-                         once: OncePerTrack | None = None) -> int:
+                         once: OncePerTrack | None = None,
+                         follow: "FaceFollowUp | None" = None,
+                         now: float | None = None) -> int:
     """Dispatch the expensive model for each **enforced** escalation.
 
     Returns the number of (adapter) dispatches issued. In `shadow`/`off`,
@@ -283,12 +447,26 @@ def dispatch_escalations(camera_id: str, tracks, gate_result, router: DispatchRo
         return 0
     by_id = {t.id: t for t in tracks}
     issued = 0
+    # The opt-in face route answers to the claim, not the gate mode: every
+    # escalation counts, shadow or enforce (see FACE_SKILL).
+    faces = getattr(router, "face_adapters", frozenset())
+    if faces:
+        now = time.monotonic() if now is None else now
+        for d in gate_result.decisions:
+            t = by_id.get(d.track_id)
+            if not d.escalate or t is None:
+                continue
+            for adapter in router.route(d.label):
+                if adapter in faces:
+                    issued += int(_send_face(camera_id, adapter, t, dispatcher, follow, now))
     for d in gate_result.to_dispatch():           # escalations, enforce-only
         t = by_id.get(d.track_id)
         crop = getattr(t, "best_crop", None) if t is not None else None
         if crop is None:
             continue
         for adapter in router.route(d.label):
+            if adapter in faces:
+                continue                          # sent above
             gated = once is not None and adapter in ONCE_PER_TRACK_ADAPTERS
             if gated and once.seen(t.id, adapter):
                 continue

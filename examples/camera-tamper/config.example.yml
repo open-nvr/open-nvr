@@ -1,0 +1,38 @@
+# camera-tamper — operator config (standalone run). On a compose install
+# the config-init container renders config.docker.yml instead.
+
+# The SDK's alert dispatch: a webhook, the alerts bus, or both.
+webhook_url: null
+nats_alerts_url: null
+nats_alerts_token: null
+
+# How often each camera is looked at. Every check is a few milliseconds
+# of arithmetic on a small greyscale copy; no model runs.
+poll_interval_seconds: 5
+
+# A condition has to hold this long before it is an alert, so a hand
+# passing the lens or a headlight flare does not page anyone.
+confirm_seconds: 10
+# After an alert, the same condition on the same camera stays quiet this long.
+cooldown_seconds: 300
+# A camera that stays "moved" this long was re-aimed on purpose: the new
+# view becomes the reference and the condition clears.
+rebaseline_seconds: 600
+
+# The four tests, each against the camera's own learned reference view.
+blur_ratio: 0.3           # sharpness below this fraction of the reference → defocused
+dark_fraction: 0.85       # this fraction of pixels near black → covered
+uniform_std: 6            # or the picture has almost no contrast at all → covered
+moved_correlation: 0.45   # edge correlation with the reference below this → moved
+freeze_polls: 6           # this many unchanged frames in a row → frozen
+frozen_mad: 0.2           # mean pixel change (0-255) under which two frames count as unchanged
+
+alert_severity: "high"    # covered / defocused / moved / frozen
+attach_snapshot: true     # the offending frame on the alert
+
+# Standalone only: cameras to poll, with where to fetch a frame from.
+# On a compose install leave empty; the cameras picked in the App
+# Catalog are fetched through core.
+cameras: []
+#  - camera_id: "gate"
+#    frame_url: "http://192.168.1.10/snapshot.jpg"

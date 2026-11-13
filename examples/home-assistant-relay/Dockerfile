@@ -32,6 +32,7 @@ COPY examples/home-assistant-relay/ha_mapper.py           ./ha_mapper.py
 COPY examples/home-assistant-relay/publishers.py          ./publishers.py
 COPY examples/home-assistant-relay/home_assistant_relay.py ./home_assistant_relay.py
 COPY examples/home-assistant-relay/config.example.yml     ./config.example.yml
+COPY examples/home-assistant-relay/config.docker.yml  ./config.docker.yml
 
 ENV PYTHONUNBUFFERED=1
 

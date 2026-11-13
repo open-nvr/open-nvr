@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1220"/><stop offset="1" stop-color="#111c33"/>
+    </linearGradient>
+    <linearGradient id="wire" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2563eb"/><stop offset="1" stop-color="#22c55e"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <g stroke="#1e2b48" stroke-width="1" opacity="0.6">
+    <path d="M0 160H1280M0 320H1280M0 480H1280M320 0V640M640 0V640M960 0V640"/>
+  </g>
+  <text x="80" y="150" font-family="Inter, -apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="34" font-weight="700" fill="#93c5fd" letter-spacing="6">OPENNVR</text>
+  <text x="80" y="250" font-family="Inter, -apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="66" font-weight="800" fill="#f8fafc">Build AI applications</text>
+  <text x="80" y="330" font-family="Inter, -apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="66" font-weight="800" fill="#f8fafc">for your cameras.</text>
+  <text x="80" y="395" font-family="Inter, -apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="26" fill="#cbd5e1">Open-source video infrastructure · any AI model · an app SDK · Home Assistant built in</text>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="24" fill="#e2e8f0">
+    <rect x="80" y="460" width="190" height="56" rx="10" fill="#0f172a" stroke="#334155"/>
+    <text x="175" y="496" text-anchor="middle">IP camera</text>
+    <path d="M270 488H330" stroke="url(#wire)" stroke-width="4"/>
+    <rect x="330" y="460" width="220" height="56" rx="10" fill="#0f172a" stroke="#2563eb"/>
+    <text x="440" y="496" text-anchor="middle" fill="#93c5fd">OpenNVR</text>
+    <path d="M550 488H610" stroke="url(#wire)" stroke-width="4"/>
+    <rect x="610" y="460" width="230" height="56" rx="10" fill="#0f172a" stroke="#334155"/>
+    <text x="725" y="496" text-anchor="middle">any AI model</text>
+    <path d="M840 488H900" stroke="url(#wire)" stroke-width="4"/>
+    <rect x="900" y="460" width="300" height="56" rx="10" fill="#0f172a" stroke="#22c55e"/>
+    <text x="1050" y="496" text-anchor="middle" fill="#86efac">your application</text>
+  </g>
+  <text x="80" y="590" font-family="Inter, -apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="24" fill="#64748b">Your cameras. Your infrastructure. Your AI.   ·   opennvr.org   ·   AGPL-3.0</text>
+</svg>

@@ -21,7 +21,9 @@ import logging
 import os
 import urllib.request
 
+from .masks import parse_motion_masks, parse_object_masks
 from .service import CameraSpec
+from .tuning import parse_tuning
 
 log = logging.getLogger("detect_pipeline.providers")
 
@@ -91,23 +93,24 @@ class HttpCameraProvider:
 
 
 def _default_fps() -> int:
-    """Per-camera analysis rate: DETECT_FPS env, else 2.
+    """Per-camera analysis rate: DETECT_FPS env, else 5 (Frigate's default; 2 on
+    a CPU-only box that needs the headroom — the camera's detection settings
+    override it per camera).
 
-    Detection currently runs on EVERY analyzed frame (the gate skips
-    alarms, not inference), so this is the single biggest CPU dial the
-    pipeline has. The default is the CPU-friendly 2: it behaves well on
-    laptops and ANY macOS/Windows Docker install (the VM has no GPU),
-    and pipeline CPU scales ~linearly if a server with headroom — or a
-    DETECT_HWACCEL host — raises it to 5-10 for finer motion/track
-    granularity. Clamped to [1, 30]; a camera dict carrying an explicit
-    per-camera ``fps`` still wins.
+    Detection runs on every analyzed frame the gate lets through, so this
+    is the single biggest CPU dial the pipeline has; CPU scales ~linearly
+    with it. 5 is what the tracker, the gate and the plate reader are tuned
+    against; a laptop, a macOS/Windows Docker install (the VM has no GPU)
+    or a CPU-only box short of headroom lowers it to 2. Clamped to
+    [1, 30]; a camera dict carrying an explicit per-camera ``fps`` still
+    wins.
     """
     try:
-        fps = int(os.environ.get("DETECT_FPS", "2"))
+        fps = int(os.environ.get("DETECT_FPS", "5"))
     except ValueError:
-        log.warning("DETECT_FPS=%r is not an integer; using 2",
+        log.warning("DETECT_FPS=%r is not an integer; using 5",
                     os.environ.get("DETECT_FPS"))
-        return 2
+        return 5
     return max(1, min(30, fps))
 
 
@@ -123,6 +126,8 @@ DETECTION_SHAPED_SKILLS: frozenset[str] = frozenset({
     "line_crossing", "intrusion_detection", "loitering_detection",
     "abandoned_object", "package_delivery", "smart_doorbell",
     "footage_search", "motion_detection",
+    # The face route starts from Tier-0's person tracks.
+    "face_recognition",
 })
 
 
@@ -134,21 +139,45 @@ def _skip_unassigned() -> bool:
     )
 
 
-def _assignment_view(c: dict) -> tuple[frozenset[str] | None, bool, frozenset[str] | None]:
-    """(per-camera labels, analyze, skills) from a camera dict's ``assignments``.
+def _clean_labels(raw: object) -> frozenset[str]:
+    if not isinstance(raw, (list, tuple, set, frozenset)):
+        return frozenset()
+    return frozenset(str(s).strip().lower() for s in raw if str(s).strip())
 
-    Labels come from an ``object_detection`` assignment carrying labels —
-    "camera 4 wants person + truck" — and REPLACE the global DETECT_LABELS
-    for that camera only (unset → global applies, as ever). ``analyze``
-    stays True unless the opt-in skip mode is on AND the camera carries
-    assignments, none of them detection-shaped. The back-compat rule
-    everywhere: NO assignments = no restriction declared = analyze with
-    global labels, exactly as before assignments existed.
+
+def _assignment_view(
+    c: dict,
+) -> tuple[frozenset[str] | None, bool, frozenset[str] | None, frozenset[str] | None]:
+    """(per-camera labels, analyze, skills, extra labels) from a camera
+    dict's ``assignments``.
+
+    Two label sources, with opposite meanings:
+
+    * ``labels`` on the ``object_detection`` entry is the operator's
+      NARROWING — "camera 4 wants person + truck" — and REPLACES the
+      global DETECT_LABELS for that camera only (unset → global applies,
+      as ever).
+    * ``labels`` on ANY OTHER entry is an app's WIDENING: core fills an
+      app pick's labels from the app manifest's ``tier0_labels`` (the
+      classes the app needs Tier-0 to track — a bag, a parcel — that the
+      global set does not name). These are ADDED to whatever the camera
+      would otherwise track, never a replacement, so an operator's
+      narrowing still stands for what it names and an app still sees
+      its classes. Returned separately (``extra``) rather than merged
+      here because "narrowed to None" means "the global set" and the
+      global set lives with the worker (``service.allowed_labels_for``),
+      which is where the union is taken.
+
+    ``analyze`` stays True unless the opt-in skip mode is on AND the
+    camera carries assignments, none of them detection-shaped. The
+    back-compat rule everywhere: NO assignments = no restriction declared
+    = analyze with global labels, exactly as before assignments existed.
     """
     assignments = c.get("assignments")
     if not isinstance(assignments, list) or not assignments:
-        return None, True, None
+        return None, True, None, None
     labels: frozenset[str] | None = None
+    extra: set[str] = set()
     skills: set[str] = set()
     for a in assignments:
         if not isinstance(a, dict):
@@ -157,10 +186,11 @@ def _assignment_view(c: dict) -> tuple[frozenset[str] | None, bool, frozenset[st
         if not skill:
             continue
         skills.add(skill)
-        if skill == "object_detection" and a.get("labels"):
-            labels = frozenset(
-                str(s).strip().lower() for s in a["labels"] if str(s).strip()
-            ) or None
+        if skill == "object_detection":
+            if a.get("labels"):
+                labels = _clean_labels(a["labels"]) or None
+        else:
+            extra |= _clean_labels(a.get("labels"))
     analyze = True
     if _skip_unassigned() and skills and not (skills & DETECTION_SHAPED_SKILLS):
         analyze = False
@@ -169,7 +199,32 @@ def _assignment_view(c: dict) -> tuple[frozenset[str] | None, bool, frozenset[st
             "and DETECT_SKIP_UNASSIGNED is on",
             c.get("camera_id"), ", ".join(sorted(skills)),
         )
-    return labels, analyze, (frozenset(skills) or None)
+    return labels, analyze, (frozenset(skills) or None), (frozenset(extra) or None)
+
+
+def _skill_adapters(c: dict) -> frozenset[tuple[str, str]] | None:
+    """``(skill, adapter)`` pairs a camera's assignment entries name.
+
+    A claim may say which adapter serves its skill on this camera
+    (``{"skill": "face_recognition", "adapters": ["insightface_x"]}``):
+    face apps each keep their own gallery, so the platform cannot pick
+    one. None when no entry names an adapter."""
+    assignments = c.get("assignments")
+    if not isinstance(assignments, list):
+        return None
+    pairs: set[tuple[str, str]] = set()
+    for a in assignments:
+        if not isinstance(a, dict):
+            continue
+        skill = str(a.get("skill", "")).strip().lower()
+        adapters = a.get("adapters")
+        if not skill or not isinstance(adapters, (list, tuple)):
+            continue
+        for ad in adapters:
+            name = str(ad).strip()
+            if name:
+                pairs.add((skill, name))
+    return frozenset(pairs) or None
 
 
 # Cameras already warned about a missing/garbled open_nvr_camera_id — the
@@ -182,7 +237,7 @@ def _to_spec(c: dict) -> CameraSpec:
     # The endpoint returns active cameras with a resolved ``frame_url``. All
     # active cameras are analyzed by default (on-by-default); an ``analyze`` flag
     # is honoured if the endpoint ever adds per-camera opt-out.
-    labels, assignment_analyze, skills = _assignment_view(c)
+    labels, assignment_analyze, skills, extra_labels = _assignment_view(c)
     # Core's numeric Camera.id, sent alongside the "cam{id}" handle — the
     # events store keys on the number (see CameraSpec.nvr_camera_id). The
     # str() round-trip rejects bools/floats (int(True) == 1 would file
@@ -200,6 +255,7 @@ def _to_spec(c: dict) -> CameraSpec:
                 "will fall back to parsing the handle",
                 handle, c.get("open_nvr_camera_id"),
             )
+    tuning = parse_tuning(c.get("detection"))
     return CameraSpec(
         camera_id=str(c["camera_id"]),
         nvr_camera_id=nvr_id,
@@ -208,10 +264,28 @@ def _to_spec(c: dict) -> CameraSpec:
         analyze=bool(c.get("analyze", True)) and assignment_analyze,
         width=c.get("width"),
         height=c.get("height"),
-        fps=int(c.get("fps", _default_fps())),
+        fps=tuning.fps if tuning.fps is not None else int(c.get("fps", _default_fps())),
         hwaccel=(c.get("hwaccel") or None),   # None = not declared → global applies
         labels=labels,
+        extra_labels=extra_labels,
         skills=skills,
+        skill_adapters=_skill_adapters(c),
+        # Core offers the main tap beside a sub tap so evidence can be cut
+        # at full resolution (evidence.py). Absent on older cores and on
+        # cameras whose frame_url already IS the main stream.
+        evidence_url=(str(c.get("evidence_url")).strip() or None)
+        if c.get("evidence_url") else None,
+        # The recorder's playback endpoint for this camera's main stream
+        # (playback.py): evidence of the same moment, asked for after the
+        # fact. Absent on older cores and when there is no second stream.
+        playback_url=(str(c.get("playback_url")).strip() or None)
+        if c.get("playback_url") else None,
+        # The operator's masks (masks.py). Absent on older cores = none.
+        motion_masks=parse_motion_masks(c.get("motion_masks")),
+        object_masks=parse_object_masks(c.get("object_masks")),
+        # This camera's overrides of the global knobs (tuning.py); the
+        # per-camera fps there wins over the listing's fps and the env.
+        tuning=tuning,
     )
 
 

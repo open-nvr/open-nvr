@@ -30,7 +30,10 @@ web UI.
                                              │ FaceRead
                                              ▼
                               ┌───────────────────────────────────┐
-                              │ classify: family / known / unknown │
+                              │ visits.py: one verdict per VISIT  │
+                              │   match → the name, at once       │
+                              │   no match for the hold → stranger │
+                              │   near miss → unclear, not alerted │
                               └──────────────┬────────────────────┘
                                              │
                                              ▼
@@ -46,6 +49,49 @@ web UI.
 A single `correlation_id` flows through every step so KAI-C's audit
 log joins the chain end-to-end: alert → KAI-C inference event →
 adapter audit line.
+
+### One verdict per visit
+
+The first frame of an approach is the worst one: side-on, blurred,
+half out of shot. Judged alone it is "no match", and a doorbell that
+announced a stranger on it would then, one clean frame later, announce
+the same person by name. Everything that does this well decides per
+visit — Frigate scores a tracked person over the whole track, Double
+Take retries up to ten frames before calling anyone unknown, the
+Dahua and Hikvision recorders pick one best shot and compare once —
+and so does this app:
+
+* A face opens a **visit** on that camera. A match ends it at once:
+  nobody waits to be greeted.
+* No match by the end of `decision_hold_seconds` (4 s) and the visit
+  is decided from its **best frame** — the largest face it saw.
+* If the nearest enrolled face came within `unknown_score` of the
+  threshold on any frame, the verdict is **unclear**: a tile on the
+  wall, a line in the feed, no alert. That is a known person seen
+  badly far more often than a stranger who resembles one, and the
+  tile is where the missing angle gets enrolled from.
+* Frames below the quality gate (`min_face_px`, `min_face_confidence`)
+  neither open nor decide a visit. The default of 100 px is a face
+  within a few metres on the camera's main stream; below it a miss
+  says distance, not stranger. A match is never gated by size.
+* A name is a vote: each matching frame adds its similarity, weighted
+  by the size of the face, to that person's tally, and the visit is
+  announced once the leading person has `min_match_reads` matching
+  frames (1 by default, so the first match still decides at once).
+  With 2, a lone match that never repeats is recorded as unclear,
+  leaning to that name, and the next matching frame upgrades it.
+* A visit already announced as a stranger that matches later is
+  **upgraded**: the `known_visitor` alert carries
+  `evidence.supersedes` (the stranger alert's id) and a
+  `supersedes:<id>` tag, the tile comes off the wall, the feed line is
+  corrected, and the bell does not ring twice. A relay that can
+  replace a notification (ntfy, Home Assistant) should key on it.
+
+Set `decision_hold_seconds: 0` to decide on the first frame and rely
+on corrections, if four seconds is too long for a gate. The InsightFace
+adapter from 0.1.11 returns `similarity` and `confidence` on a miss;
+with an older adapter the band and the gate pass what they are not
+told, and the hold alone still removes the false strangers.
 
 ## Why the REST-only enrollment matters
 
@@ -63,6 +109,112 @@ small Python script. Side effects:
   adapter; it survives restarts but never holds raw images,
   only the 512-d embedding vectors.
 
+## Who came to the door, and when
+
+The feed and the stranger wall used to be in-memory only, so a restart
+or a redeploy wiped every stranger the doorbell had ever seen. They are
+now written to the app's durable store in core, which means "who came to
+my door three days ago" has an answer that survives `docker compose up`.
+
+Two settings govern how long the door remembers, both editable from the
+App Catalog:
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `unknown_severity` | `high` | How loud an unrecognised face is. `critical` is the loudest the platform has. |
+| `known_severity` | *(unset)* | Overrides the level for a recognised person. Unset keeps the per-category default — family, resident and friend `low`; staff, contractor and visitor `info`. A watchlist match and an expired pass are decided before this and stay `high`. |
+| `history_days` | 30 | How long a visit stays in the history. |
+| `history_max` | 200 | Hard cap on remembered visits, whatever the age. |
+
+Each visit costs a line of text — when, which camera, recognised or not,
+and who. Only the most recent unrecognised visits also keep a thumbnail,
+because those are the tiles anyone actually looks at.
+
+The full-size crop goes to the platform's evidence store, where alerts
+already cite their pictures and where OpenNVR's own retention governs
+it — and it can be fetched back, so **a stranger from last Tuesday can
+still be enrolled**. "The doorbell was restarted" is not something an
+operator should have to care about when they click Enrol on a face.
+
+The wall says which of two things it means when a tile has no picture
+inline, because they are not the same:
+
+| Tile says | What it means |
+| --- | --- |
+| **photo kept — open to enrol** | The log does not carry a thumbnail this far back, but the platform still holds the crop. Open it and enrol. |
+| **snapshot aged out** | Retention has taken the crop. The visit is still in the history; the photo is gone. |
+
+What never happens is enrolling from the wall thumbnail. That is a
+~190 px image kept for drawing the tile, and feeding it to the adapter
+would teach it a worse face than the operator believes they handed over
+— so a capture with no fetchable crop refuses rather than quietly
+enrolling something inferior.
+
+Why the identity is the app's own record rather than a claim on the
+platform's visit rows: this app polls snapshots, so it has a frame and a
+face but no `event_id`. Attaching a name to a platform visit would mean
+guessing which visit the frame belonged to by matching timestamps, and a
+guessed identity in the shared store is indistinguishable afterwards
+from a measured one.
+
+## The bell
+
+An alert and a chime are different events, and treating them as one is
+what makes doorbells annoying. Every face at the door is worth
+**recording**; only some are worth **interrupting** somebody for. The
+alert, the feed, the history and the operator inbox are unaffected by
+anything in this section — it decides one narrower question: does
+something ring, and what does it play.
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `chime_enabled` | `true` | Off still alerts and records; nothing rings. |
+| `quiet_hours` | *(none)* | `HH:MM-HH:MM` in which only an `alarm` tone rings. |
+| `rechime_seconds` | 300 | Least gap between rings for the same caller. |
+| `chime_tones` | see below | Tone per person category. |
+
+The shipped table, which is opinionated on purpose:
+
+| Category | Tone | Why |
+| --- | --- | --- |
+| `family`, `resident` | `none` | A bell that rings when the family comes home is the bell people stop hearing — and then it does not work for the stranger either. |
+| `friend`, `staff` | `chime` | Announce, softly. |
+| `contractor`, `visitor` | `ding_dong` | Somebody with business at the door. |
+| `watchlist` | `alarm` | The one recognised face that must be louder than a stranger. |
+| *(unknown)* | `ding_dong` | A caller nobody has enrolled. |
+
+Three rules, each a thing real doorbells get wrong:
+
+1. **Who it is decides the sound**, per the table above.
+2. **Quiet hours silence the bell, not the alarm.** A delivery at 03:00
+   goes in the log and does not wake the house; a stranger at 03:00
+   does. Suppressing that would be a burglar alarm that observes
+   bedtime, so only the `alarm` tone overrides the window — which is
+   exactly the line between "someone is here" and "something is wrong".
+3. **A bell that rings twelve times is noise.** `rechime_seconds` is
+   separate from, and longer than, `dedup_window_seconds`: being told
+   again in a feed costs nothing, being rung at again costs attention.
+   A suppressed ring does not restart the clock, so somebody walking
+   past during quiet hours cannot delay the ring that should follow it.
+
+**Ringing is somebody else's job, deliberately.** This app decides; it
+does not make a noise. The decision rides in the alert envelope, as
+`evidence.chime` and a `chime:<tone>` tag, so whatever the household
+actually rings — the alerts-subscriber relay into ntfy or Telegram, a
+Home Assistant automation over OpenNVR's MQTT bridge, a webhook to a
+smart speaker — plays the right tone at the right time. An app that
+tried to own the speaker would work on exactly one deployment.
+
+```json
+"chime": { "tone": "ding_dong", "ring": false,
+           "reason": "quiet hours (22:00-07:00)" }
+```
+
+When it decides **not** to ring it says why, in words, in the same
+envelope and on the dashboard. A doorbell that silently chose to stay
+quiet is indistinguishable from a broken one, and whoever is debugging
+it in the morning has nothing else to go on.
+
 ## Honesty up front
 
 Real-world failure modes the example does NOT yet handle:
@@ -72,8 +224,9 @@ Real-world failure modes the example does NOT yet handle:
   `recognition_threshold` is a global knob, not per-person.
 * **Aggressive face-occlusion** (sunglasses, scarf, hat). The
   adapter may detect the face but recognition similarity drops
-  below threshold → falls back to UNKNOWN. Set `dedup_window`
-  appropriately so a family member walking past doesn't flood you.
+  below threshold. The near-miss band usually turns that into an
+  "unclear" tile rather than a stranger alert; a full scarf will
+  still read as unknown.
 * **Bad enrollment photos.** A frontal, well-lit JPEG is what
   InsightFace expects. A side profile gives a poor embedding and
   the person won't match consistently.
@@ -82,20 +235,27 @@ Real-world failure modes the example does NOT yet handle:
 
 ## Quick start
 
+> **On the compose stack you do none of this.** `docker-compose.apps.yml`
+> provisions `insightface-adapter` (published as
+> `ghcr.io/open-nvr/insightface-adapter`) and registers it with KAI-C
+> alongside the app — `--profile smart-doorbell`, the installer's app
+> picker, or one click from the App Catalog. The enrolled-faces DB and
+> the ~280 MB `buffalo_l` model pack each live on a named volume. The
+> steps below are the bare-metal developer path.
+
 ```bash
 # 1. Start the InsightFace adapter (in the ai-adapter repo).
-#    On first boot the adapter downloads the ~200 MB Buffalo-L
-#    InsightFace model pack to /app/model_weights inside the
-#    container. Mount a host directory there so the download
-#    happens once and persists across container restarts.
+#    On first boot the adapter downloads the buffalo_l model pack into
+#    ~/.insightface inside the container (InsightFace's default root).
+#    Mount a host directory there so the download happens once.
 cd ai-adapter
 docker build -f adapters/insightface/Dockerfile -t opennvr/insightface-adapter:local .
 OPENNVR_ADAPTER_TOKEN=$(openssl rand -hex 16)
-mkdir -p face-db model-weights
+mkdir -p face-db model-cache
 docker run --rm -d --name insightface -p 9005:9005 \
   -e OPENNVR_ADAPTER_TOKEN=$OPENNVR_ADAPTER_TOKEN \
   -v $(pwd)/face-db:/data \
-  -v $(pwd)/model-weights:/app/model_weights \
+  -v $(pwd)/model-cache:/root/.insightface \
   opennvr/insightface-adapter:local
 
 # 2. Start KAI-C and register the adapter
@@ -169,6 +329,86 @@ faces carry a base64 JPEG snapshot in `evidence.snapshot_b64`, so:
 SIGINT / SIGTERM stops cleanly — the in-flight cycle finishes,
 dispatcher drains.
 
+### The People page
+
+Enabling the app lights **Applications → Smart Doorbell** in the main
+navigation (the manifest `provides: ["people"]`). That page is the face
+directory for a home, a gated premises or an office:
+
+* **Directory** — everyone enrolled, with photo, category, notes, an
+  optional *valid until* date, and when the door last saw them. Search
+  by name, id or notes; filter by category.
+* **Add person** — name, category, notes, expiry, and a photo from one
+  of three places: **Upload** a file, snap one from **a door camera**,
+  or take one on **this device** (below).
+* **Guided capture from this device.** The browser's own camera — a
+  laptop or phone webcam — walked through four poses: straight on, a
+  quarter turn left, a quarter turn right, and chin lifted for the angle
+  a camera above a door sees. Each pose is captured, retakeable by
+  clicking its thumbnail, and skippable; the set enrols together, the
+  first pose creating the person and the rest appended as samples.
+
+  This exists because a single front-on portrait is the one pose a door
+  camera almost never gets: people arrive at an angle, look at the lock,
+  glance down at a parcel. It also means a household can be enrolled at
+  a desk in a couple of minutes, before anyone has walked past the door.
+
+  Four is where it stops on purpose. Past four the gains come from
+  different *light* rather than different angles, and the light at the
+  operator's desk is not the light at the door — which is what the
+  strangers wall and *Add a photo* are for.
+
+  Requirements, and the failure modes named rather than swallowed:
+  browsers hand a page the camera only on a secure origin, which
+  OpenNVR's own nginx provides (https, self-signed by default); reached
+  over plain http through some other proxy, the dialog says so instead
+  of offering a button that does nothing. A blocked permission, a
+  machine with no camera, and a camera already held by a video call are
+  each reported as themselves. The preview is mirrored so that "turn
+  left" is followable, but the frame stored is the true, unmirrored one
+  — face embeddings are not mirror-invariant, so enrolling flipped
+  samples would cost accuracy against unflipped door footage. The
+  camera is released the moment the dialog closes. If some poses are
+  rejected (no face found in that frame), the ones that landed are kept
+  and the dialog says how many — three of four is a usable person.
+* **Strangers at the door** — every unrecognised face the camera took,
+  newest first. Click one, and *Enrol this person* turns that snapshot
+  into a known face: no photo to go and find.
+* **Edit / Remove** — rename, move to another category, set or clear an
+  expiry, add a note.
+* **More than one photo per person.** Each person holds a set of face
+  samples and a match is the best of them, so the porch camera's
+  evening, 30-degree view of Alice can sit beside her daytime selfie.
+  *Add a photo* on a person appends; the strangers wall offers *This
+  is…* so a capture the door missed becomes exactly the sample it
+  needed. Five samples from the door camera itself is where recognition
+  gets reliable; the adapter keeps up to 32 per person, oldest dropped
+  first. "Start over" on the editor replaces the set (a bad first
+  enrolment).
+
+Categories and what the door does with them: `family`, `resident`,
+`friend` are greeted (low); `staff`, `contractor`, `visitor` are noted
+(info); `watchlist` alarms (high) on every sighting; anyone whose
+`valid_until` has passed raises `expired_pass` (high) instead of a
+greeting. Notes and expiry live in the adapter's face DB as metadata,
+so they survive app restarts and image upgrades.
+
+### In the App Catalog
+
+The app page (Settings → App Catalog → Smart Doorbell) carries the same
+surfaces in their generic form:
+
+* **Live** — enrolled-face count, known visitors vs strangers since
+  start, a per-camera table (ok / waiting / stalled / error, with the
+  fetch error spelled out), a thumbnail wall of the latest strangers,
+  and the recent-visitor feed.
+* **Dashboard** — the same, as one page (`GET /ui`, proxied and
+  sandboxed by core).
+* **Quick actions** — *Enroll a face* (name + photo + category),
+  *Enrolled faces*, *Remove a face*.
+* **Config form** — `recognition_threshold`, `dedup_window_seconds` and
+  the snapshot knobs apply live; cameras still need a restart.
+
 ## Layout
 
 ```
@@ -176,6 +416,9 @@ examples/smart-doorbell/
 ├── smart_doorbell.py              CLI + SmartDoorbell driver
 ├── face_recognition_pipeline.py   Testable pipeline (no daemon loop)
 ├── alerts.py                      Alert envelope + stdout/webhook/NATS dispatchers
+├── chime.py                       When the door rings, and with what
+├── visits.py                      One verdict per visit: hold, band, gate, upgrade
+├── visit_log.py                   Who came to the door, kept across restarts
 ├── frame_sources.py               file:// + http(s):// frame fetchers
 ├── config.example.yml             Operator config with every option
 ├── pyproject.toml                 Minimal deps (httpx, PyYAML, nats-py)
@@ -195,7 +438,8 @@ PYTHONPATH=. pytest tests/
 
 31 tests total. The tests stub the recognition client (no KAI-C
 needed) and exercise the parser, dedup window, severity routing,
-snapshot attachment.
+snapshot attachment, and the per-visit decision (hold, near-miss band,
+quality gate, upgrade in place).
 
 ## Why this is a template
 

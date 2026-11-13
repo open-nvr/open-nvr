@@ -1,0 +1,494 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>OpenNVR Mirror</title>
+  <!--
+    OpenNVR Mirror: a kiosk page. The camera's live video fills the screen,
+    Tier-0 boxes ride on top, the vision model's sentence about the scene is
+    the subtitle, and every person gets a card (clothes, what they carry, an
+    apparent age range) that follows their box. All of it on the box; nothing
+    is stored. Served by the camera agent at /mirror; everything arrives over
+    the agent's /updates socket (same login and camera scope as /demo).
+  -->
+  <style>
+    :root{
+      --bg:#05080f; --panel:rgba(10,16,30,.72); --panel2:rgba(14,22,40,.9);
+      --text:#eef3ff; --dim:#8fa0c4; --accent:#4fd1ff; --accent2:#9b7bff; --ok:#43e08a;
+      --warn:#ffb347; --border:rgba(120,150,220,.22);
+      --font:"Inter",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:var(--font);overflow:hidden}
+    .stage{position:fixed;inset:0;background:#000}
+    .stage video,.stage img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000}
+    .stage img{display:none}
+    .stage canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+    .vignette{position:absolute;inset:0;pointer-events:none;background:
+      linear-gradient(to bottom,rgba(0,0,0,.55),transparent 18%,transparent 70%,rgba(0,0,0,.75))}
+
+    /* ── top bar ── */
+    .top{position:fixed;top:0;left:0;right:0;display:flex;align-items:center;gap:18px;padding:18px 26px;z-index:5}
+    .brand{display:flex;align-items:center;gap:12px;font-weight:700;font-size:22px;letter-spacing:.2px}
+    .brand .logo{width:40px;height:40px;border-radius:10px;overflow:hidden;box-shadow:0 0 24px rgba(94,179,246,.4);flex:none}
+    .brand .logo svg{width:40px;height:40px;display:block}
+    .brand .word{display:flex;flex-direction:column;line-height:1.1}
+    .brand .nvr{color:#5eb3f6}
+    .brand .site{font-size:12px;font-weight:500;color:var(--dim);letter-spacing:.3px;text-decoration:none;margin-top:3px}
+    .brand .site:hover{color:var(--text)}
+    .live{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--dim);font-weight:600;text-transform:uppercase;letter-spacing:1px}
+    .live .dot{width:9px;height:9px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 0 rgba(67,224,138,.7);animation:pulse 1.6s infinite}
+    .live.off .dot{background:var(--warn);animation:none}
+    @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(67,224,138,.7)}70%{box-shadow:0 0 0 10px rgba(67,224,138,0)}100%{box-shadow:0 0 0 0 rgba(67,224,138,0)}}
+    .chips{margin-left:auto;display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end}
+    .chip{background:var(--panel);border:1px solid var(--border);backdrop-filter:blur(10px);border-radius:999px;padding:7px 13px;
+      font-size:13px;color:var(--dim);display:flex;gap:7px;align-items:center;white-space:nowrap}
+    .chip b{color:var(--text);font-variant-numeric:tabular-nums;font-size:14px}
+    .chip.npu{border-color:rgba(79,209,255,.45);color:#cfefff}
+    .chip.npu b{color:var(--accent)}
+
+    /* ── person cards ── */
+    .rail{position:fixed;top:84px;right:22px;bottom:150px;width:min(330px,32vw);display:flex;flex-direction:column;gap:12px;z-index:5;overflow:hidden}
+    .card{background:var(--panel2);border:1px solid var(--border);border-radius:16px;padding:12px;display:flex;gap:12px;
+      backdrop-filter:blur(12px);box-shadow:0 10px 30px rgba(0,0,0,.35);animation:rise .35s ease-out;transition:opacity .4s}
+    .card.gone{opacity:.25}
+    .card.tentative .tags{opacity:.6}
+    @keyframes rise{from{transform:translateY(14px);opacity:0}to{transform:none;opacity:1}}
+    .card .pic{width:84px;height:104px;border-radius:12px;background:#0b1326;flex:none;overflow:hidden;border:1px solid var(--border);display:grid;place-items:center;color:var(--dim)}
+    .card .pic img{width:100%;height:100%;object-fit:cover}
+    .card .body{min-width:0;flex:1}
+    .card .who{font-weight:700;font-size:15px;line-height:1.25;margin-bottom:6px}
+    .card .who .id{color:var(--dim);font-weight:500;font-size:12px;margin-left:6px}
+    .card .tags{display:flex;flex-wrap:wrap;gap:5px}
+    .tag{font-size:12px;padding:3px 8px;border-radius:999px;background:rgba(79,209,255,.12);border:1px solid rgba(79,209,255,.25);color:#d8f3ff}
+    .tag.k{color:var(--dim);background:transparent;border-color:transparent;padding-left:0;padding-right:2px}
+    .card .wait{color:var(--dim);font-size:13px}
+    .card .wait i{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--accent);margin-right:7px;animation:pulse 1.2s infinite}
+
+    /* ── subtitle ── */
+    .sub{position:fixed;left:50%;bottom:44px;transform:translateX(-50%);width:min(1100px,86vw);z-index:6;text-align:center}
+    .sub .text{display:inline-block;background:rgba(5,8,15,.78);border:1px solid var(--border);backdrop-filter:blur(14px);
+      border-radius:18px;padding:16px 26px;font-size:clamp(20px,2.6vw,34px);font-weight:600;line-height:1.3;
+      text-shadow:0 2px 12px rgba(0,0,0,.6);transition:opacity .5s,transform .5s;max-width:100%}
+    .sub .text.fresh{animation:pop .45s ease-out}
+    @keyframes pop{from{transform:translateY(10px) scale(.98);opacity:.2}to{transform:none;opacity:1}}
+    .sub .meta{margin-top:9px;font-size:13px;color:var(--dim);display:flex;gap:14px;justify-content:center;align-items:center}
+    .sub .meta .lat b{color:var(--accent)}
+    .sub .meta .spk{display:none;align-items:center;gap:6px;color:var(--ok)}
+    .sub .meta .spk.on{display:inline-flex}
+    .bar{display:inline-flex;gap:2px;align-items:flex-end;height:12px}
+    .bar i{width:3px;background:var(--ok);animation:eq .8s infinite ease-in-out}
+    .bar i:nth-child(2){animation-delay:.15s}.bar i:nth-child(3){animation-delay:.3s}.bar i:nth-child(4){animation-delay:.45s}
+    @keyframes eq{0%,100%{height:3px}50%{height:12px}}
+
+    /* ── controls (auto-hide) ── */
+    .ctl{position:fixed;left:22px;bottom:22px;display:flex;gap:8px;z-index:7;opacity:.25;transition:opacity .3s}
+    body.active .ctl,.ctl:hover{opacity:1}
+    .btn{background:var(--panel2);border:1px solid var(--border);color:var(--text);border-radius:12px;padding:9px 13px;font:600 13px var(--font);cursor:pointer;display:flex;gap:7px;align-items:center}
+    .btn.on{border-color:var(--accent);color:#dff6ff;box-shadow:0 0 0 1px rgba(79,209,255,.3) inset}
+    .btn select{background:transparent;border:0;color:inherit;font:inherit;outline:none}
+    .btn select option{color:#000}
+    .foot{position:fixed;right:22px;bottom:22px;z-index:5;font-size:12px;color:var(--dim);text-align:right;line-height:1.5}
+    .foot b{color:var(--text)}
+
+    /* ── start / login overlay ── */
+    .ov{position:fixed;inset:0;z-index:20;display:grid;place-items:center;background:radial-gradient(60% 60% at 50% 40%,rgba(79,209,255,.12),transparent 70%),rgba(5,8,15,.92)}
+    .ov[hidden]{display:none}
+    .panel{width:min(520px,92vw);background:var(--panel2);border:1px solid var(--border);border-radius:22px;padding:30px 30px 26px;box-shadow:0 30px 80px rgba(0,0,0,.6)}
+    .panel h1{margin:0 0 6px;font-size:30px;letter-spacing:-.3px}
+    .panel p{margin:0 0 18px;color:var(--dim);line-height:1.5}
+    .panel .row{display:flex;gap:10px;margin:10px 0}
+    .panel label{display:flex;align-items:center;gap:10px;color:var(--text);font-size:14px;padding:10px 12px;background:rgba(255,255,255,.04);border:1px solid var(--border);border-radius:12px;flex:1}
+    .panel input[type=text],.panel input[type=password]{flex:1;background:rgba(255,255,255,.05);border:1px solid var(--border);border-radius:12px;padding:12px 14px;color:var(--text);font:15px var(--font);outline:none}
+    .panel input[type=checkbox]{width:18px;height:18px;accent-color:var(--accent)}
+    .go{width:100%;margin-top:14px;padding:15px;border:0;border-radius:14px;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#041018;font:700 17px var(--font);cursor:pointer;box-shadow:0 10px 30px rgba(79,209,255,.3)}
+    .go:disabled{opacity:.5;cursor:default}
+    .err{color:#ff8a8a;font-size:13px;min-height:18px;margin-top:8px}
+    .hint{position:fixed;left:50%;top:46%;transform:translate(-50%,-50%);z-index:4;text-align:center;color:var(--dim);font-size:clamp(18px,2.4vw,30px);font-weight:600;
+      text-shadow:0 2px 10px rgba(0,0,0,.7);opacity:0;transition:opacity .8s;pointer-events:none}
+    .hint.on{opacity:1}
+    @media (max-width:800px){ .rail{display:none} .chips .chip:not(.npu){display:none} .brand{font-size:18px} }
+  </style>
+</head>
+<body>
+  <div class="stage">
+    <video id="v" autoplay playsinline muted hidden></video>
+    <img id="still" alt="">
+    <canvas id="boxes"></canvas>
+    <div class="vignette"></div>
+  </div>
+
+  <div class="top">
+    <div class="brand">
+      <!-- The OpenNVR mark and wordmark (app/public/opennvr-icon.svg, Logo.tsx), inline. -->
+      <span class="logo" aria-hidden="true"><svg viewBox="0 0 64 64"><rect width="64" height="64" fill="#1e3a5f" rx="10"/><text x="32" y="45" font-family="Arial, sans-serif" font-weight="bold" font-size="28" text-anchor="middle" fill="#ffffff"><tspan fill="#5eb3f6">O</tspan>N</text></svg></span>
+      <span class="word"><span class="name">Open<span class="nvr">NVR</span> Mirror</span><a class="site" href="https://www.opennvr.org" target="_blank" rel="noopener">www.opennvr.org</a></span>
+    </div>
+    <div class="live off" id="live"><span class="dot"></span><span id="liveTxt">connecting</span></div>
+    <div class="chips">
+      <div class="chip"><span>people</span><b id="cPeople">0</b></div>
+      <div class="chip"><span>objects</span><b id="cObjects">0</b></div>
+      <div class="chip"><span>descriptions</span><b id="cCaps">0</b></div>
+      <div class="chip npu"><span>vision model</span><b id="cVlm">–</b><span>on-device</span></div>
+    </div>
+  </div>
+
+  <div class="rail" id="rail"></div>
+
+  <div class="hint" id="hint">Step in front of the camera</div>
+
+  <div class="sub">
+    <div class="text" id="cap"> </div>
+    <div class="meta"><span class="lat" id="lat"></span><span class="spk" id="spk"><span class="bar"><i></i><i></i><i></i><i></i></span>speaking</span></div>
+  </div>
+
+  <div class="ctl">
+    <button class="btn" id="camBtn" title="Camera"><span>📷</span><select id="camSel"></select></button>
+    <button class="btn on" id="voiceBtn" aria-pressed="true">🔊 Voice</button>
+    <button class="btn on" id="boxBtn" aria-pressed="true">▣ Boxes</button>
+    <button class="btn" id="fsBtn">⛶ Full screen</button>
+  </div>
+  <div class="foot">All AI runs on this box<br><b>nothing is stored, nothing leaves</b></div>
+
+  <div class="ov" id="ov">
+    <div class="panel">
+      <h1>OpenNVR Mirror</h1>
+      <p>Live detection, live description, live voice — all on the device in front of you.</p>
+      <div id="loginRows" hidden>
+        <div class="row"><input type="text" id="user" placeholder="OpenNVR username" autocomplete="username"></div>
+        <div class="row"><input type="password" id="pass" placeholder="password" autocomplete="current-password"></div>
+        <div class="row" id="totpRow" hidden><input type="text" id="totp" placeholder="one-time code (authenticator app)" inputmode="numeric" autocomplete="one-time-code"></div>
+      </div>
+      <div class="row">
+        <label><span>Camera</span><select id="camSel0" style="flex:1;background:transparent;border:0;color:inherit;font:inherit;outline:none"></select></label>
+      </div>
+      <div class="row">
+        <label><input type="checkbox" id="voice0" checked> Speak the descriptions</label>
+        <label><input type="checkbox" id="boxes0" checked> Draw boxes</label>
+      </div>
+      <button class="go" id="go">Start the mirror</button>
+      <div class="err" id="err"></div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const qs = new URLSearchParams(location.search);
+
+  // ── auth: the demo's arrangement, shortened. Tokens in sessionStorage,
+  //    device token in localStorage, one refresh before asking to log in.
+  let authMode = "none";
+  let token = sessionStorage.getItem("agent_token") || "";
+  let refreshTok = sessionStorage.getItem("agent_refresh") || "";
+  let device = localStorage.getItem("agent_device_token") || "";
+  const raw = window.fetch.bind(window);
+  async function tryRefresh() {
+    if (!refreshTok) return false;
+    try {
+      const r = await raw("/auth/refresh", {method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({refresh_token: refreshTok})});
+      if (!r.ok) return false;
+      const d = await r.json();
+      if (!d.access_token) return false;
+      token = d.access_token; sessionStorage.setItem("agent_token", token);
+      if (d.refresh_token) { refreshTok = d.refresh_token; sessionStorage.setItem("agent_refresh", refreshTok); }
+      return true;
+    } catch { return false; }
+  }
+  async function api(url, opts = {}) {
+    const send = () => { const o = {...opts, headers: {...(opts.headers || {})}};
+      if (token) o.headers["Authorization"] = "Bearer " + token;
+      if (device) o.headers["X-Device-Token"] = device;
+      return raw(url, o); };
+    let r = await send();
+    if (r.status === 401 && authMode === "opennvr" && await tryRefresh()) r = await send();
+    return r;
+  }
+  // The agent passes OpenNVR's login answer through verbatim: a string
+  // `detail`, an object `detail` ({message, error}), or `error`. MFA and
+  // the device firewall arrive the same way and get their own words.
+  function errText(d, status) {
+    const dt = d && d.detail;
+    let t = (dt && typeof dt === "object") ? (dt.message || dt.error || JSON.stringify(dt)) : (dt || (d && (d.error || d.message)));
+    if (typeof t === "object") t = JSON.stringify(t);
+    t = t || ("sign-in failed (HTTP " + status + ")");
+    if (/mfa|totp|one.time|2fa/i.test(t)) { $("totpRow").hidden = false; return "This account needs a one-time code: enter it below and start again."; }
+    if (/device_not_approved|not approved|device/i.test(t) && status === 403) return "This browser is not yet approved: OpenNVR → Settings → Firewall, approve the device, then start again.";
+    return t;
+  }
+  async function login(user, pass) {
+    if (!user || !pass) throw new Error("username and password are required");
+    const body = {username: user, password: pass};
+    const totp = ($("totp").value || "").trim(); if (totp) body.totp_code = totp;
+    const r = await raw("/auth/login", {method: "POST", headers: {"Content-Type": "application/json", ...(device ? {"X-Device-Token": device} : {})},
+      body: JSON.stringify(body)});
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || !d.access_token) throw new Error(errText(d, r.status));
+    token = d.access_token; sessionStorage.setItem("agent_token", token);
+    if (d.refresh_token) { refreshTok = d.refresh_token; sessionStorage.setItem("agent_refresh", refreshTok); }
+    if (d.device_token) { device = d.device_token; localStorage.setItem("agent_device_token", device); }
+  }
+
+  // ── state
+  let camera = qs.get("camera") || localStorage.getItem("mirror.camera") || "";
+  let voice = (qs.get("voice") || localStorage.getItem("mirror.voice") || "on") !== "off";
+  let boxesOn = (qs.get("boxes") || localStorage.getItem("mirror.boxes") || "on") !== "off";
+  let lastTracks = null, raf = null, cards = new Map(), ws = null, wsBackoff = 1000, hb = null;
+  let pc = null, whepResource = null, stillTimer = null, stillGen = 0, audioCtx = null, playing = 0;
+  const BOX_STALE_MS = 2500;
+  const HUES = {person: 200, car: 30, truck: 45, bus: 45, motorcycle: 15, bicycle: 160, dog: 290, cat: 290, backpack: 120, handbag: 120, suitcase: 120, umbrella: 60, cell_phone: 330, "cell phone": 330, bottle: 180, laptop: 260, cup: 180, chair: 100};
+  const hue = (l) => { if (l in HUES) return HUES[l]; let h = 0; for (const c of l) h = (h * 31 + c.charCodeAt(0)) % 360; return h; };
+
+  // ── video: WHEP first (the Live view's WebRTC), stills as the fallback
+  function stopVideo() {
+    if (pc) { try { pc.close(); } catch {} pc = null; }
+    if (whepResource) { raw(whepResource, {method: "DELETE"}).catch(() => {}); whepResource = null; }
+    stillGen++; if (stillTimer) { clearTimeout(stillTimer); stillTimer = null; }
+    const v = $("v"); if (v.srcObject) { v.srcObject = null; } v.hidden = true; $("still").style.display = "none";
+  }
+  // Core advertises the stream at the host it was configured with; the
+  // browser reaches the box by whatever name it typed (a LAN address, a
+  // Tailscale one). Same path and port, this page's host — what the main
+  // UI does too. A WHEP server that cannot be reached must fail fast, or
+  // the page sits on "connecting" instead of showing stills.
+  function rebaseHost(url) { try { const u = new URL(url); u.hostname = location.hostname; return u.href; } catch { return url; } }
+  async function withTimeout(promise, ms, what) {
+    let t; const timeout = new Promise((_, rej) => { t = setTimeout(() => rej(new Error(what + " timed out")), ms); });
+    try { return await Promise.race([promise, timeout]); } finally { clearTimeout(t); }
+  }
+  async function startVideo(cam) {
+    stopVideo();
+    setLive(false, "connecting video");
+    let d = null;
+    try { const r = await api("/streams/" + encodeURIComponent(cam) + "/live"); if (r.ok) d = await r.json(); } catch {}
+    if (d && d.whep_url) {
+      d.whep_url = rebaseHost(d.whep_url);
+      try {
+        const p = new RTCPeerConnection({iceServers: [{urls: ["stun:stun.l.google.com:19302"]}]});
+        pc = p;
+        p.onconnectionstatechange = () => { if (pc === p && (p.connectionState === "failed" || p.connectionState === "disconnected" || p.connectionState === "closed")) { startStills(cam); } };
+        p.addTransceiver("video", {direction: "recvonly"});
+        p.addTransceiver("audio", {direction: "recvonly"});
+        const got = new Promise((res) => { p.ontrack = (ev) => { const [s] = ev.streams; const v = $("v");
+          if (s) { v.srcObject = s; v.muted = true; v.hidden = false; $("still").style.display = "none"; v.play().catch(() => {}); res(true); } }; });
+        const offer = await p.createOffer(); await p.setLocalDescription(offer);
+        const ac = new AbortController(); const abortT = setTimeout(() => ac.abort(), 6000);
+        let resp;
+        const whepHeaders = {"Content-Type": "application/sdp"};
+        try { const jwt = new URL(d.whep_url).searchParams.get("jwt"); if (jwt) whepHeaders["Authorization"] = "Bearer " + jwt; } catch {}
+        try { resp = await raw(d.whep_url, {method: "POST", headers: whepHeaders, body: offer.sdp || "", signal: ac.signal}); }
+        finally { clearTimeout(abortT); }
+        if (!(resp.status === 200 || resp.status === 201)) throw new Error("WHEP " + resp.status);
+        const loc = resp.headers.get("Location"); whepResource = loc ? new URL(loc, d.whep_url).href : null;
+        await withTimeout(p.setRemoteDescription({type: "answer", sdp: await resp.text()}), 5000, "answer");
+        const ok = await Promise.race([got, new Promise((r) => setTimeout(() => r(false), 6000))]);
+        if (ok) { setLive(true, "live · webrtc"); return; }
+      } catch (e) { console.warn("webrtc failed", e); }
+    }
+    startStills(cam);
+  }
+  function startStills(cam) {
+    if (pc) { try { pc.close(); } catch {} pc = null; }
+    const v = $("v"); v.hidden = true; const img = $("still"); img.style.display = "block";
+    // One request at a time: a slow frame (the agent grabbing RTSP itself
+    // when the pipeline has nothing fresh) must not stack requests behind it.
+    const gen = ++stillGen;
+    const tick = async () => {
+      if (gen !== stillGen) return;
+      try { const r = await api("/frame/" + encodeURIComponent(cam)); if (r.ok) {
+        const b = await r.blob(); const u = URL.createObjectURL(b); const old = img.dataset.u; img.src = u; img.dataset.u = u; if (old) URL.revokeObjectURL(old); } } catch {}
+      if (gen === stillGen) stillTimer = setTimeout(tick, 1000);
+    };
+    if (stillTimer) clearTimeout(stillTimer);
+    tick();
+    setLive(true, "live · stills");
+  }
+  function setLive(on, txt) { const el = $("live"); el.classList.toggle("off", !on); $("liveTxt").textContent = txt; }
+
+  // ── boxes
+  function contentRect(W, H) {
+    const v = $("v"), img = $("still");
+    const vw = !v.hidden ? v.videoWidth : img.naturalWidth, vh = !v.hidden ? v.videoHeight : img.naturalHeight;
+    if (!vw || !vh) return {x: 0, y: 0, w: W, h: H};
+    const s = Math.min(W / vw, H / vh), w = vw * s, h = vh * s; return {x: (W - w) / 2, y: (H - h) / 2, w, h};
+  }
+  function roundRect(x, X, Y, w, h, r) { x.beginPath(); x.moveTo(X + r, Y); x.arcTo(X + w, Y, X + w, Y + h, r); x.arcTo(X + w, Y + h, X, Y + h, r); x.arcTo(X, Y + h, X, Y, r); x.arcTo(X, Y, X + w, Y, r); x.closePath(); }
+  function requestDraw() { if (raf == null) raf = requestAnimationFrame(() => { raf = null; draw(); }); }
+  function draw() {
+    const c = $("boxes"); const dpr = window.devicePixelRatio || 1, cw = c.clientWidth, ch = c.clientHeight; if (!cw || !ch) return;
+    const W = Math.round(cw * dpr), H = Math.round(ch * dpr); if (c.width !== W || c.height !== H) { c.width = W; c.height = H; }
+    const x = c.getContext("2d"); x.clearRect(0, 0, W, H);
+    const t = lastTracks; if (!boxesOn || !t || Date.now() - t.at > BOX_STALE_MS) return;
+    const r = contentRect(W, H), lw = Math.max(2, 2.5 * dpr), fpx = Math.max(13, Math.round(17 * dpr));
+    x.font = `600 ${fpx}px ${getComputedStyle(document.body).fontFamily}`; x.textBaseline = "top"; x.lineJoin = "round";
+    for (const tr of t.tracks || []) {
+      const [nx, ny, nw, nh] = tr.box || []; if (!(nw > 0 && nh > 0)) continue;
+      const bx = r.x + nx * r.w, by = r.y + ny * r.h, bw = nw * r.w, bh = nh * r.h, h = hue(tr.label || "object");
+      const card = tr.id != null ? cards.get(String(tr.id)) : null;
+      x.shadowColor = `hsla(${h},90%,60%,.6)`; x.shadowBlur = 14 * dpr;
+      x.lineWidth = lw; x.strokeStyle = `hsla(${h},90%,62%,.95)`; roundRect(x, bx, by, bw, bh, 10 * dpr); x.stroke();
+      x.shadowBlur = 0;
+      const pct = Math.round((tr.score || 0) * 100);
+      const main = (card && card.summary && card.confirmed) ? card.summary : (tr.label || "object").replace("_", " ");
+      const txt = `${main}  ${pct}%`;
+      const px = Math.round(fpx * .55), py = Math.round(fpx * .3), tw = x.measureText(txt).width, cwid = Math.min(tw + px * 2, W - 8), chh = fpx + py * 2;
+      const cx = Math.min(Math.max(4, bx), W - cwid - 4), cy = by - chh - 6 * dpr >= 0 ? by - chh - 6 * dpr : by + 6 * dpr;
+      x.fillStyle = `hsla(${h},80%,22%,.92)`; roundRect(x, cx, cy, cwid, chh, 8 * dpr); x.fill();
+      x.strokeStyle = `hsla(${h},90%,62%,.9)`; x.lineWidth = 1.5 * dpr; x.stroke();
+      x.fillStyle = "#fff"; x.fillText(txt, cx + px, cy + py, cwid - px * 2);
+    }
+  }
+  window.addEventListener("resize", requestDraw);
+  setInterval(requestDraw, 400);
+
+  // ── cards
+  function renderCards() {
+    const rail = $("rail"); const ids = new Set();
+    for (const [id, c] of cards) {
+      ids.add(id);
+      let el = rail.querySelector(`[data-id="${CSS.escape(id)}"]`);
+      if (!el) { el = document.createElement("div"); el.className = "card"; el.dataset.id = id;
+        el.innerHTML = `<div class="pic"><span>👤</span></div><div class="body"><div class="who"></div><div class="tags"></div></div>`; rail.prepend(el); }
+      el.classList.toggle("gone", !c.visible);
+      el.querySelector(".who").innerHTML = c.summary
+        ? `${esc(c.summary)}<span class="id">#${esc(id)}${c.confirmed ? "" : " · confirming"}</span>`
+        : (c.confirmed ? `<span class="wait">person #${esc(id)}</span>` : `<span class="wait"><i></i>looking…</span>`);
+      el.classList.toggle("tentative", !c.confirmed);
+      const tags = el.querySelector(".tags"); tags.innerHTML = "";
+      for (const k of ["gender", "age", "top", "bottom", "headwear", "glasses", "carrying", "expression"]) {
+        if (!c.fields || !c.fields[k]) continue;
+        tags.insertAdjacentHTML("beforeend", `<span class="tag k">${esc(k)}</span><span class="tag">${esc(c.fields[k])}</span>`);
+      }
+      if (c.picAt !== c.describedAt && c.describedAt) { c.picAt = c.describedAt; loadPic(el, id); }
+    }
+    for (const el of [...rail.children]) if (!ids.has(el.dataset.id)) el.remove();
+  }
+  async function loadPic(el, id) {
+    try { const r = await api(`/mirror/crop/${encodeURIComponent(camera)}/${encodeURIComponent(id)}`); if (!r.ok) return;
+      const b = await r.blob(); const pic = el.querySelector(".pic"); pic.innerHTML = ""; const img = document.createElement("img"); img.src = URL.createObjectURL(b); pic.appendChild(img); } catch {}
+  }
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+
+  // ── messages
+  function onTracks(t) {
+    if (!t || t.camera !== camera) return;
+    lastTracks = {...t, at: Date.now()};
+    const seen = new Set();
+    for (const tr of t.tracks || []) {
+      if (tr.label !== "person" || tr.id == null) continue;
+      const id = String(tr.id); seen.add(id);
+      const c = cards.get(id) || {summary: "", fields: null, describedAt: 0, picAt: 0};
+      c.visible = true; c.lastSeen = Date.now(); cards.set(id, c);
+    }
+    for (const [id, c] of cards) { if (!seen.has(id)) { c.visible = false; if (Date.now() - (c.lastSeen || 0) > 4500) cards.delete(id); } }
+    $("cPeople").textContent = String(seen.size);
+    $("cObjects").textContent = String((t.tracks || []).length);
+    $("hint").classList.toggle("on", seen.size === 0 && !(t.tracks || []).length);
+    renderCards(); requestDraw();
+  }
+  let restartT = null;
+  function restartSoon() { if (restartT) return; restartT = setTimeout(() => { restartT = null; if (!$("ov").hidden) return; start(); }, 1500); }
+  function onMirror(m) {
+    if (m.state === "stopped") { restartSoon(); return; }
+    if (m.card) {
+      const id = String(m.card.track_id); const c = cards.get(id) || {visible: true, lastSeen: Date.now()};
+      c.summary = m.card.summary || ""; c.fields = m.card.fields || {}; c.confirmed = !!m.card.confirmed; c.describedAt = Date.now(); cards.set(id, c); renderCards(); requestDraw();
+    }
+    if (typeof m.caption === "string" && m.caption) {
+      const el = $("cap"); el.textContent = m.caption; el.classList.remove("fresh"); void el.offsetWidth; el.classList.add("fresh");
+    }
+    if (m.greeting) { const el = $("cap"); el.textContent = m.greeting; el.classList.remove("fresh"); void el.offsetWidth; el.classList.add("fresh"); }
+    if (m.vlm_ms != null) $("lat").innerHTML = `vision answer <b>${(m.vlm_ms / 1000).toFixed(1)} s</b>`;
+    if (m.stats) { $("cCaps").textContent = String(m.stats.captions + m.stats.cards); if (m.stats.vlm_ms_avg != null) $("cVlm").textContent = (m.stats.vlm_ms_avg / 1000).toFixed(1) + " s"; }
+    if (m.audio_b64 && voice) play(m.audio_b64);
+  }
+  function connect() {
+    if (ws) { try { ws.close(); } catch {} ws = null; }
+    const q = new URLSearchParams(); if (token) q.set("token", token); if (device) q.set("device_token", device);
+    let s; try { s = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/updates?" + q.toString()); } catch { setTimeout(connect, wsBackoff); return; }
+    ws = s;
+    s.onopen = () => { if ($("ov").hidden) restartSoon(); };   // an agent restart: the loop is gone, the page is not
+    s.onmessage = (ev) => { let d; try { d = JSON.parse(ev.data); } catch { return; } wsBackoff = 1000;
+      if (d.tracks) onTracks(d.tracks); if (d.mirror) onMirror(d.mirror); };
+    s.onclose = async (ev) => { ws = null; if (ev.code === 4401 && authMode === "opennvr") { if (!(await tryRefresh())) { showOverlay(true); return; } }
+      wsBackoff = Math.min(wsBackoff * 2, 10000); setTimeout(connect, wsBackoff); };
+    s.onerror = () => { try { s.close(); } catch {} };
+  }
+
+  // ── audio: decoded on the page's AudioContext, one at a time
+  async function play(b64) {
+    try {
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === "suspended") await audioCtx.resume();
+      const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      const buf = await audioCtx.decodeAudioData(bytes.buffer.slice(0));
+      const src = audioCtx.createBufferSource(); src.buffer = buf; src.connect(audioCtx.destination);
+      playing++; $("spk").classList.add("on");
+      src.onended = () => { playing--; if (playing <= 0) { playing = 0; $("spk").classList.remove("on"); } };
+      src.start();
+    } catch (e) { console.warn("audio", e); }
+  }
+
+  // ── session
+  async function start() {
+    const r = await api("/mirror/start", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({camera, voice})});
+    if (r.status === 401) { showOverlay(true); return false; }
+    if (!r.ok) { const d = await r.json().catch(() => ({})); $("err").textContent = d.error || ("could not start (" + r.status + ")"); return false; }
+    const d = await r.json(); if (d.mirror) { if (d.mirror.caption) $("cap").textContent = d.mirror.caption; }
+    if (hb) clearInterval(hb);
+    hb = setInterval(() => api("/mirror/heartbeat", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({voice})}).catch(() => {}), 15000);
+    return true;
+  }
+  window.addEventListener("pagehide", () => { try { navigator.sendBeacon("/mirror/stop"); } catch {} });
+
+  async function loadCameras() {
+    const r = await api("/mirror/state"); if (r.status === 401) { showOverlay(true); return []; }
+    const d = r.ok ? await r.json() : {cameras: []};
+    const cams = d.cameras || [];
+    for (const sel of [$("camSel"), $("camSel0")]) { sel.innerHTML = ""; for (const c of cams) { const o = document.createElement("option"); o.value = c; o.textContent = c; sel.appendChild(o); } if (camera && cams.includes(camera)) sel.value = camera; }
+    if (!camera && cams.length) camera = cams[0];
+    if (d.mirror && d.mirror.running && d.mirror.camera) { camera = d.mirror.camera; $("camSel").value = camera; $("camSel0").value = camera; }
+    return cams;
+  }
+  function showOverlay(needLogin) { $("loginRows").hidden = !needLogin; $("ov").hidden = false; }
+
+  async function go() {
+    $("err").textContent = ""; $("go").disabled = true;
+    try {
+      if (!$("loginRows").hidden) { await login($("user").value.trim(), $("pass").value); }
+      await loadCameras();
+      camera = $("camSel0").value || camera; voice = $("voice0").checked; boxesOn = $("boxes0").checked;
+      localStorage.setItem("mirror.camera", camera); localStorage.setItem("mirror.voice", voice ? "on" : "off"); localStorage.setItem("mirror.boxes", boxesOn ? "on" : "off");
+      $("voiceBtn").classList.toggle("on", voice); $("boxBtn").classList.toggle("on", boxesOn); $("camSel").value = camera;
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); await audioCtx.resume().catch(() => {});
+      if (!(await start())) return;
+      $("ov").hidden = true; document.body.classList.add("active"); setTimeout(() => document.body.classList.remove("active"), 4000);
+      connect(); startVideo(camera);
+    } catch (e) { $("err").textContent = (e && e.message) ? e.message : String(e); $("loginRows").hidden = false; }
+    finally { $("go").disabled = false; }
+  }
+
+  // ── controls
+  $("go").addEventListener("click", go);
+  $("pass").addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+  $("voiceBtn").addEventListener("click", () => { voice = !voice; $("voiceBtn").classList.toggle("on", voice); localStorage.setItem("mirror.voice", voice ? "on" : "off");
+    api("/mirror/heartbeat", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({voice})}).catch(() => {}); });
+  $("boxBtn").addEventListener("click", () => { boxesOn = !boxesOn; $("boxBtn").classList.toggle("on", boxesOn); localStorage.setItem("mirror.boxes", boxesOn ? "on" : "off"); requestDraw(); });
+  $("fsBtn").addEventListener("click", () => { if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen().catch(() => {}); });
+  $("camSel").addEventListener("change", async () => { camera = $("camSel").value; localStorage.setItem("mirror.camera", camera); cards.clear(); lastTracks = null; renderCards(); requestDraw(); await start(); startVideo(camera); });
+  let idleT = null; document.addEventListener("mousemove", () => { document.body.classList.add("active"); clearTimeout(idleT); idleT = setTimeout(() => document.body.classList.remove("active"), 3000); });
+
+  // ── boot
+  (async () => {
+    try { const a = await (await raw("/agent")).json(); authMode = a.auth_mode || "none"; } catch {}
+    $("voice0").checked = voice; $("boxes0").checked = boxesOn;
+    const needLogin = authMode === "opennvr" && !token;
+    const cams = needLogin ? [] : await loadCameras();
+    if (!needLogin && cams.length && qs.get("autostart") === "1") { go(); } else { showOverlay(needLogin || (authMode === "opennvr" && !cams.length)); }
+  })();
+})();
+</script>
+</body>
+</html>

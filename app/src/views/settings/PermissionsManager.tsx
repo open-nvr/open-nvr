@@ -20,11 +20,15 @@ import { useEffect, useMemo, useState } from 'react'
 import { apiService } from '../../lib/apiService'
 import { extractApiError } from '../../lib/apiError'
 import { useAuth } from '../../auth/AuthContext'
+import { useTranslation } from '../../i18n'
+import { useSnackbar } from '../../components/Snackbar'
 
 type Role = { id: number; name: string; description?: string }
 type Permission = { id: number; name: string; description?: string }
 
 export function PermissionsManager() {
+  const { t } = useTranslation()
+  const { showSuccess } = useSnackbar()
   const { user: me } = useAuth()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -55,7 +59,7 @@ export function PermissionsManager() {
           setSelectedRoleId(rolesList[0].id)
         }
       } catch (e: any) {
-        setError(extractApiError(e, 'Failed to load roles/permissions'))
+        setError(extractApiError(e, t('admin.failedLoadPermissions')))
       } finally {
         setLoading(false)
       }
@@ -72,7 +76,7 @@ export function PermissionsManager() {
         const list = (res.data && (res.data as any).permissions) ? (res.data as any).permissions : (Array.isArray(res.data) ? res.data : [])
         setAssignedIds(list.map((p: Permission) => p.id))
       } catch (e: any) {
-        setError(extractApiError(e, 'Failed to load role permissions'))
+        setError(extractApiError(e, t('admin.failedLoadRolePermissions')))
       } finally {
         setLoading(false)
       }
@@ -89,35 +93,37 @@ export function PermissionsManager() {
       setLoading(true)
       setError(null)
       await apiService.setRolePermissions(selectedRoleId, assignedIds)
+      // Saving used to give no feedback at all on success.
+      showSuccess(t('admin.permissionsSaved'))
     } catch (e: any) {
-      setError(extractApiError(e, 'Failed to save permissions'))
+      setError(extractApiError(e, t('admin.failedSavePermissions')))
     } finally {
       setLoading(false)
     }
   }
 
   if (!canAdmin) {
-    return <div className="text-sm text-amber-400">Admin only: you don’t have permission to manage permissions.</div>
+    return <div className="text-sm text-[var(--warn)]">{t('admin.onlyPermissions')}</div>
   }
 
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2">
-        <h2 className="text-base font-semibold">Permissions</h2>
+        <h2 className="text-base font-semibold">{t('admin.permissions')}</h2>
         <div className="ml-auto text-sm flex items-center gap-2">
-          <span className="text-[var(--text-dim)]">Role</span>
-          <select className="bg-[var(--panel-2)] border border-neutral-700 px-2 py-1" value={selectedRoleId ?? ''} onChange={(e) => setSelectedRoleId(Number(e.target.value))}>
+          <span className="text-[var(--text-dim)]">{t('admin.role')}</span>
+          <select className="bg-[var(--panel-2)] border border-[var(--border)] px-2 py-1" value={selectedRoleId ?? ''} onChange={(e) => setSelectedRoleId(Number(e.target.value))}>
             {roles.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
           </select>
-          <button className="px-2 py-1 bg-[var(--accent)] text-white" onClick={save} disabled={loading || !selectedRoleId}>Save</button>
+          <button className="px-2 py-1 bg-[var(--accent)] text-white" onClick={save} disabled={loading || !selectedRoleId}>{t('admin.save')}</button>
         </div>
       </div>
 
-      {error && <div className="text-sm text-red-400">{error}</div>}
+      {error && <div className="text-sm text-[var(--danger)]">{error}</div>}
 
       <div className="grid grid-cols-2 gap-3 text-sm">
         {permissions.map(p => (
-          <label key={p.id} className="flex items-center gap-2 border border-neutral-700 bg-[var(--panel-2)] p-2">
+          <label key={p.id} className="flex items-center gap-2 border border-[var(--border)] bg-[var(--panel-2)] p-2">
             <input type="checkbox" className="accent-[var(--accent)]" checked={assignedIds.includes(p.id)} onChange={() => toggle(p.id)} />
             <div>
               <div className="font-medium">{p.name}</div>
@@ -126,7 +132,7 @@ export function PermissionsManager() {
           </label>
         ))}
         {permissions.length === 0 && (
-          <div className="text-[var(--text-dim)]">No permissions defined.</div>
+          <div className="text-[var(--text-dim)]">{t('admin.noPermissions')}</div>
         )}
       </div>
     </div>

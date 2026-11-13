@@ -8,7 +8,7 @@ The short version: OpenNVR isn't trying to replace Frigate for the hobbyist Home
 
 Frigate is the most popular self-hosted NVR for homelab and Home Assistant users, with mature hardware-accelerated detection (Coral, OpenVINO, TensorRT, Hailo) and a recently expanded AI capability set (face recognition, LPR, CLIP semantic search, GenAI descriptions). New capabilities land in-tree under MIT. ZoneMinder is the twenty-year-old legacy choice — broad camera compatibility, deeply documented, GPLv2, designed before the modern AI-surveillance era. Shinobi is the prosumer-SMB option with a polished UI, narrower plugin AI surface, and a dual-licence model (GPLv3 / AGPLv3 community plus Shinobi Pro commercial). Viseron is the closest architectural peer — a small Python-native NVR with a clean detector abstraction, MIT-licensed, Home-Assistant-aligned. Verkada is the commercial cloud incumbent — proprietary, SaaS, vendor-managed AI, no operator-side infrastructure.
 
-OpenNVR differs from all of them on the same five axes: a published Open Adapter Contract v1 so third-party AI ships outside the main repo under any compatible licence; an end-to-end `X-Correlation-Id` audit chain with sha256 model-fingerprint drift detection; two independent default-deny sovereignty gates (`DEPLOYMENT_MODE=offline`, `AI_SOVEREIGNTY=local_only`); a peer-citable architecture paper (DOI 10.5281/zenodo.17261761); and a voice-agent example. The sections below go through each comparison in prose — what each project does well, where the architectures genuinely diverge, and who should pick which.
+OpenNVR differs from all of them on the same five axes: a published Open Adapter Contract v1 so third-party AI ships outside the main repo under any compatible licence; an end-to-end `X-Correlation-Id` audit chain with sha256 model-fingerprint drift detection; two independent default-deny sovereignty gates (`DEPLOYMENT_MODE=offline`, `AI_SOVEREIGNTY=local_only`); a peer-citable architecture paper (DOI 10.5281/zenodo.22804254); and a voice-agent example. The sections below go through each comparison in prose — what each project does well, where the architectures genuinely diverge, and who should pick which.
 
 ## Frigate — the most-asked comparison
 
@@ -157,7 +157,7 @@ If you're shortlisting NVRs, the questions worth asking each candidate are:
 4. **What does it take to add a new AI capability?**
    (OpenNVR: ~30 lines of Python following the SDK + a Dockerfile.)
 5. **Where is your threat model published?**
-   (OpenNVR: [DOI 10.5281/zenodo.17261761](https://doi.org/10.5281/zenodo.17261761).)
+   (OpenNVR: [DOI 10.5281/zenodo.22804254](https://doi.org/10.5281/zenodo.22804254).)
 6. **Honest about gaps?**
    (OpenNVR: see this page + [ROADMAP.md](ROADMAP.md) + paper §8.)
 

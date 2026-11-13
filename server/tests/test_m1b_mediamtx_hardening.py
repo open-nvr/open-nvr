@@ -103,6 +103,32 @@ def test_yaml_parses_cleanly(filename: str) -> None:
     assert isinstance(cfg, dict), f"{filename} did not parse to a dict"
 
 
+# Keys MediaMTX 1.15 marks deprecated and keeps behind a *pointer* field.
+# ``Conf.Clone()`` (a JSON round trip, run on every API config change) gives
+# the pointer a new address, and ``closeResources`` compares the field with
+# ``!=`` — so with any of these keys set, EVERY ``/config/paths/*`` call
+# restarts the RTSP, RTSPS and API listeners ("[RTSP] listener is closing"),
+# drops every RTSP reader (detect-pipeline, recorder taps) and, when the new
+# listener binds before the old one is released, kills the process with
+# ``listen tcp :8554: bind: address already in use``. Measured on the Ventuno
+# Q loaner on 2026-11-02 (two crashes in an hour of camera edits) and
+# reproduced against bluenviron/mediamtx:1.15.4 with the live config: removing
+# ``rtspUDPReadBufferSize`` is the whole fix.
+DEPRECATED_POINTER_KEYS = ("rtspUDPReadBufferSize",)
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ["mediamtx.docker.yml", "mediamtx.yml", "mediamtx.local.yml"],
+)
+def test_templates_do_not_set_deprecated_pointer_keys(filename: str) -> None:
+    """Deprecated pointer-typed keys make every config reload restart the
+    RTSP listener (see DEPRECATED_POINTER_KEYS); the templates must not set them."""
+    cfg = yaml.safe_load((REPO_ROOT / filename).read_text())
+    present = [k for k in DEPRECATED_POINTER_KEYS if k in cfg]
+    assert not present, f"{filename} sets deprecated key(s) {present}"
+
+
 @pytest.mark.parametrize(
     "filename",
     ["mediamtx.docker.yml", "mediamtx.yml"],
@@ -831,3 +857,111 @@ def test_startup_hook_retries_instead_of_dying_once(monkeypatch):
     assert "startup/hook" in hook and "opennvr_core" in hook
     assert "FAILED after 60 attempts" in hook, "final give-up must be loud"
     assert parsed["runOnInitRestart"] is False
+
+
+# ── the control plane is authenticated ─────────────────────────────
+#
+# These exist because of a comment that stopped being true. Both shipped
+# configs excluded `api` and `playback` from JWT auth, justified in-file
+# by "already protected by localhost binding", while apiAddress and
+# playbackAddress were 0.0.0.0. That gap was invisible while only core
+# shared a network with mediamtx; it became a hole the moment mediamtx
+# joined opennvr_apps so apps could read RTSP, because an app container
+# could then read MEDIAMTX_SECRET out of /v3/config/pathdefaults/get and
+# POST a path with a runOnInit into a container holding the recordings
+# volume.
+
+
+@pytest.mark.parametrize("filename", ["mediamtx.docker.yml", "mediamtx.yml"])
+def test_no_action_is_excluded_from_jwt_auth(filename: str) -> None:
+    """Nothing bound on 0.0.0.0 may skip authentication."""
+    cfg = yaml.safe_load((REPO_ROOT / filename).read_text(encoding="utf-8"))
+    assert cfg.get("authJWTExclude") == [], (
+        f"{filename} exempts {cfg.get('authJWTExclude')} from JWT auth while "
+        f"apiAddress={cfg.get('apiAddress')} and "
+        f"playbackAddress={cfg.get('playbackAddress')} are not localhost"
+    )
+
+
+@pytest.mark.parametrize("filename", ["mediamtx.docker.yml", "mediamtx.yml"])
+def test_the_playback_token_can_travel_in_the_query(filename: str) -> None:
+    """Core attaches its playback credential as ?jwt=, because nginx
+    forwards the query string and adds no headers. If this is ever
+    turned off, every server-side segment fetch 401s."""
+    cfg = yaml.safe_load((REPO_ROOT / filename).read_text(encoding="utf-8"))
+    assert cfg.get("authJWTInHTTPQuery") is True
+
+
+def test_the_dev_template_may_exempt_because_it_really_is_localhost() -> None:
+    """mediamtx.local.yml keeps the exemptions — and is the only file
+    entitled to, because its addresses actually are 127.0.0.1. The test
+    is here so that stops being true loudly rather than silently."""
+    cfg = yaml.safe_load(
+        (REPO_ROOT / "mediamtx.local.yml").read_text(encoding="utf-8"))
+    if cfg.get("authJWTExclude"):
+        assert str(cfg.get("apiAddress", "")).startswith("127.0.0.1")
+        assert str(cfg.get("playbackAddress", "")).startswith("127.0.0.1")
+
+
+def test_the_healthcheck_does_not_require_a_token() -> None:
+    """A probe that demanded a valid JWT would deadlock first boot:
+    core waits on this healthcheck, and mediamtx fetches its JWKS from
+    core. 401 means the listener is up, which is all this ever asserted.
+    """
+    compose = yaml.safe_load(
+        (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+    test = compose["services"]["mediamtx"]["healthcheck"]["test"]
+    assert "401" in " ".join(test), (
+        "the mediamtx healthcheck will fail once the API requires auth")
+
+
+def test_core_authenticates_its_own_admin_calls(monkeypatch) -> None:
+    """Every one of MediaMtxAdminService's ~20 call sites goes through
+    _headers(). It used to attach a bearer token only when
+    settings.mediamtx_admin_token was set, and nothing in the deployment
+    ever set it."""
+    sys.path.insert(0, str(REPO_ROOT / "server"))
+    from services.mediamtx_admin_service import MediaMtxAdminService
+
+    monkeypatch.setattr(MediaMtxAdminService, "_token", None, raising=False)
+    monkeypatch.setattr(MediaMtxAdminService, "_token_until", 0.0, raising=False)
+    monkeypatch.setattr(
+        "services.mediamtx_jwt_service.MediaMtxJwtService.create_admin_token",
+        classmethod(lambda cls, expiry_minutes=5: "minted.jwt.token"),
+    )
+
+    headers = MediaMtxAdminService._headers()
+    assert headers["Authorization"] == "Bearer minted.jwt.token"
+
+
+def test_a_failure_to_mint_does_not_break_the_call(monkeypatch) -> None:
+    """During the first seconds of boot core has not written its signing
+    key yet. The right answer is an unauthenticated request that MediaMTX
+    refuses with a 401 the caller already handles — not an exception from
+    inside the header builder."""
+    sys.path.insert(0, str(REPO_ROOT / "server"))
+    from services.mediamtx_admin_service import MediaMtxAdminService
+
+    monkeypatch.setattr(MediaMtxAdminService, "_token", None, raising=False)
+    monkeypatch.setattr(MediaMtxAdminService, "_token_until", 0.0, raising=False)
+    monkeypatch.setattr(
+        "services.mediamtx_jwt_service.MediaMtxJwtService.create_admin_token",
+        classmethod(lambda cls, expiry_minutes=5: (_ for _ in ()).throw(
+            RuntimeError("no signing key yet"))),
+    )
+
+    headers = MediaMtxAdminService._headers()
+    assert "Authorization" not in headers
+    assert headers["Content-Type"] == "application/json"
+
+
+def test_a_relative_mediamtx_segment_path_resolves_from_the_root():
+    """The shipped recordPath is relative (./app/recordings/…); MediaMTX
+    reports it as spelled, from its working directory /. Opened from
+    core's /app it was /app/app/recordings/… and nothing was ever found."""
+    from routers.mediamtx_hooks import absolute_segment_path
+    assert absolute_segment_path("./app/recordings/cam-23/2026-11-07/00/11-37-571384.mp4") == \
+        "/app/recordings/cam-23/2026-11-07/00/11-37-571384.mp4"
+    assert absolute_segment_path("app/recordings/cam-1/x.mp4") == "/app/recordings/cam-1/x.mp4"
+    assert absolute_segment_path("/app/recordings/cam-1/x.mp4") == "/app/recordings/cam-1/x.mp4"
+    assert absolute_segment_path("") == ""

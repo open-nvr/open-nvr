@@ -283,3 +283,37 @@ def test_shipped_configs_advertise_history_and_route_past(fname):
     assert {"search_history", "recent_events"} <= enabled
     assert "search_history" in raw["system_prompt"]
     assert re.search(r"past", raw["system_prompt"], re.IGNORECASE)
+
+
+# ── the description survives the forced call ──────────────────────────
+
+
+def test_a_colour_in_a_past_question_becomes_an_attr():
+    """"Did you see any blue car in the last 15 mins" used to force
+    search_history(label=car) and the answer listed every car, colour
+    unmentioned. The colour must ride along as an attr."""
+    name, args = ca._pick_forced_call(
+        "did you see any blue car in last 15 mins from now", "cam1", ALL, now=NOW)
+    assert name == "search_history"
+    assert args["label"] == "car"
+    assert args["attr"] == ["blue"]
+    assert args["start_time"] == (NOW - timedelta(minutes=15)).isoformat(timespec="seconds")
+
+
+def test_type_and_carrying_words_are_attrs_and_aliases_are_canonical():
+    _, args = ca._pick_forced_call("did a grey lorry come by yesterday?", "cam1", ALL, now=NOW)
+    assert args["label"] == "person" or args["label"] == "truck"   # 'lorry' is not a Tier-0 noun…
+    assert args["attr"] == ["grey", "truck"]                        # …but it IS a claim
+    _, args = ca._pick_forced_call("did anyone with a rucksack pass last night?", "cam1", ALL, now=NOW)
+    assert args["label"] == "person" and args["attr"] == ["backpack"]
+
+
+def test_a_plain_question_carries_no_attr():
+    _, args = ca._pick_forced_call("did you see a person today?", "cam4", ALL, now=NOW)
+    assert "attr" not in args
+
+
+def test_speech_to_text_card_means_car():
+    _, args = ca._pick_forced_call(
+        "did you see any blue card this morning in last 30 minutes", "cam1", ALL, now=NOW)
+    assert args["label"] == "car" and args["attr"] == ["blue"]

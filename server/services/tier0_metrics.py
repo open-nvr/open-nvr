@@ -110,6 +110,70 @@ def _by_camera(samples: list[Sample], name: str) -> dict[str, float]:
     return out
 
 
+def _sum_by_camera(samples: list[Sample], name: str) -> dict[str, float]:
+    """Per-camera SUM of a family split by another label too (reason, model).
+
+    ``_by_camera`` keeps the last series it sees per camera, which is right
+    for one-series-per-camera gauges but silently drops all but one series
+    of, say, ``tier0_detector_skipped_total{camera,reason}``.
+    """
+    out: dict[str, float] = {}
+    for s in samples:
+        if s.name == name and "camera" in s.labels:
+            cam = s.labels["camera"]
+            out[cam] = out.get(cam, 0.0) + s.value
+    return out
+
+
+def _by_label(samples: list[Sample], name: str, label: str, value: str) -> dict[str, float]:
+    """Latest value per camera of the series of ``name`` whose ``label``
+    equals ``value`` — one slice of a family split by a second label."""
+    out: dict[str, float] = {}
+    for s in samples:
+        if s.name == name and "camera" in s.labels and s.labels.get(label) == value:
+            out[s.labels["camera"]] = s.value
+    return out
+
+
+#: Values of the pipeline's tier0_detect_on_main gauge (metrics.py
+#: DETECT_ON_MAIN_REASONS): 0 = detecting on the sub stream; otherwise why
+#: the main stream is being decoded for detection.
+_DETECT_ON_MAIN_REASONS = {1: "policy", 2: "no_substream", 3: "sub_unreachable", 4: "sub_too_small"}
+
+
+def _detect_stream_row(code) -> dict | None:
+    """``{"stream": "sub"|"main", "reason": ...}``; None when the pipeline
+    predates the gauge (an older image must read as unknown, not as sub)."""
+    if code is None:
+        return None
+    code = int(code)
+    if code == 0:
+        return {"stream": "sub", "reason": ""}
+    return {"stream": "main", "reason": _DETECT_ON_MAIN_REASONS.get(code, "policy")}
+
+
+def _evidence_row(main, detect, mismatch, gop_s, keyframes_only, playback=None) -> dict | None:
+    """The per-camera evidence block, or None when the pipeline never
+    reported one for this camera. ``low_res_ratio`` is the share of best
+    crops that ended up at detect-stream resolution (a crop from the
+    recording, ``playback``, is full-resolution like ``main``); ``mismatch``
+    how many of those were a main frame refused for not matching."""
+    if main is None and detect is None and playback is None:
+        return None
+    m, d, pb = int(main or 0), int(detect or 0), int(playback or 0)
+    total = m + d + pb
+    return {
+        "main": m,
+        "detect": d,
+        "playback": pb,
+        "mismatch": int(mismatch or 0),
+        "low_res_ratio": round(d / total, 3) if total else None,
+        "gop_s": round(float(gop_s), 2) if gop_s is not None else None,
+        "keyframes_only": (None if keyframes_only is None
+                           else bool(keyframes_only >= 1.0)),
+    }
+
+
 def _labels_by_camera(samples: list[Sample], name: str) -> dict[str, dict]:
     """Label sets of an info-metric family, keyed by camera.
 
@@ -137,6 +201,37 @@ def _decode_row(labels: dict | None) -> dict | None:
         "fast": labels.get("fast") == "true",
         "hwaccel": labels.get("hwaccel") or "cpu",
         "idle": labels.get("idle") or "off",
+    }
+
+
+def _provider_name(spec: str) -> str:
+    """``"QNNExecutionProvider(htp), CPUExecutionProvider"`` → ``QNNExecutionProvider``."""
+    return spec.split(",")[0].strip().split("(")[0].strip()
+
+
+def _backend_row(samples: list[Sample]) -> dict | None:
+    """What the Tier-0 detector runs on, from the ``tier0_detector_backend``
+    info-metric: the request against the live session, and whether the
+    accelerator asked for is the one in use. ``fallback`` is the state the
+    dashboard must show: an accelerator was requested and CPU is doing the
+    work — a pipeline recreated without its NPU device looked exactly like
+    "the box is too small" until somebody read its log (Ventuno Q,
+    2026-11-01)."""
+    row = next((s for s in samples if s.name == "tier0_detector_backend"), None)
+    if row is None:
+        return None
+    requested = row.labels.get("requested") or ""
+    effective = row.labels.get("effective") or ""
+    wanted = _provider_name(requested)
+    got = _provider_name(effective)
+    accelerator_requested = bool(wanted) and wanted != "CPUExecutionProvider"
+    accelerated = accelerator_requested and got == wanted
+    return {
+        "backend": row.labels.get("backend") or "unknown",
+        "requested": requested,
+        "effective": effective,
+        "accelerated": accelerated,
+        "fallback": accelerator_requested and not accelerated,
     }
 
 
@@ -244,14 +339,44 @@ def reduce_metrics(samples: list[Sample]) -> dict[str, Any]:
     budget_cfg = _by_camera(samples, "tier0_regions_configured")
     tracks_act = _by_camera(samples, "tier0_tracks_active")
     mainstream = _by_camera(samples, "tier0_mainstream_fallback")
+    detect_on_main = _by_camera(samples, "tier0_detect_on_main")
+    # Main-stream evidence (substream detection): which stream the best
+    # crops came from, and how many main crops were refused because they
+    # did not look like the detect frame (a keyframe too old for a moving
+    # subject, or a sub-stream with a different field of view). A camera
+    # whose refusals climb is one whose sharp evidence is quietly becoming
+    # low-res — the operator's cue to set DETECT_EVIDENCE_DECODE=full or
+    # fix the camera's second stream.
+    ev_main = _by_label(samples, "tier0_evidence_crops_total", "source", "main")
+    ev_detect = _by_label(samples, "tier0_evidence_crops_total", "source", "detect")
+    ev_playback = _by_label(samples, "tier0_evidence_crops_total", "source", "playback")
+    ev_mismatch = _by_camera(samples, "tier0_evidence_mismatch_total")
+    ev_gop = _by_camera(samples, "tier0_evidence_gop_seconds")
+    ev_keyonly = _by_camera(samples, "tier0_evidence_keyframes_only")
     visits_ok = _by_camera(samples, "tier0_visits_posted_total")
     visits_drop = _by_camera(samples, "tier0_visits_dropped_total")
+    # Decoded frames detection never reached because it was still busy
+    # (#507). This is the capacity signal now: before, the same condition
+    # dropped the RTSP session and showed up as restarts.
+    frames_drop = _by_camera(samples, "tier0_frames_dropped_total")
     capped = _by_camera(samples, "tier0_regions_capped_total")
+    # The motion gate's own verdict on the scene. A camera whose scene never
+    # calibrates (dashcam, a road that never empties) is LATCHED OPEN: the
+    # detector runs on every frame and the gate skips nothing — so the
+    # Motion-gate tile reads 0% and, without this, nothing said why.
+    latched = _by_camera(samples, "tier0_motion_latched_open")
+    forced_exits = _sum_by_camera(samples, "tier0_motion_forced_exits_total")
     up_by_cam = _by_camera(samples, "tier0_worker_up")
     # The decode dials this camera actually opened with. Sits next to the
     # struggling-camera signals on purpose: "cam3 is shedding" and "cam3 is
     # decoding on the CPU with skip=none" is one answer, not two lookups.
     decode_cfg = _labels_by_camera(samples, "tier0_decode_config")
+    # Per-camera detector cost and skips, for the Home Assistant sensors
+    # (HA-105). Latency is the mean since the pipeline started; skipped is a
+    # monotonic count across reasons (no motion, calibrating).
+    lat_sum = _sum_by_camera(samples, "tier0_detector_latency_seconds_sum")
+    lat_cnt = _sum_by_camera(samples, "tier0_detector_latency_seconds_count")
+    skipped_by_cam = _sum_by_camera(samples, "tier0_detector_skipped_total")
     all_cams = sorted(set(proc) | set(tgt) | set(up_by_cam) | set(frame_age))
     cameras = []
     for cam in all_cams:
@@ -270,9 +395,21 @@ def reduce_metrics(samples: list[Sample]) -> dict[str, Any]:
             "shedding": (b is not None and c is not None and b < c),
             "regions_capped_total": int(capped.get(cam, 0)),
             "tracks_active": int(tracks_act.get(cam, 0)),
+            "inference_ms": (round(lat_sum[cam] / lat_cnt[cam] * 1000.0, 2)
+                             if lat_cnt.get(cam) else None),
+            "skipped_total": int(skipped_by_cam.get(cam, 0)),
             "visits_posted": int(visits_ok.get(cam, 0)),
             "visits_dropped": int(visits_drop.get(cam, 0)),
+            "frames_dropped": int(frames_drop.get(cam, 0)),
             "mainstream_fallback": bool(mainstream.get(cam, 0) >= 1.0),
+            "detect_stream": _detect_stream_row(detect_on_main.get(cam)),
+            # None when the pipeline predates main-stream evidence or the
+            # camera has no second stream — not a fabricated zero.
+            "evidence": _evidence_row(
+                ev_main.get(cam), ev_detect.get(cam), ev_mismatch.get(cam),
+                ev_gop.get(cam), ev_keyonly.get(cam), ev_playback.get(cam)),
+            "motion_latched_open": bool(latched.get(cam, 0) >= 1.0),
+            "motion_forced_exits": int(forced_exits.get(cam, 0)),
             # None when the pipeline predates the metric — an older
             # detect-pipeline image against a newer core must render as
             # "unknown", never as a fabricated default config.
@@ -285,6 +422,7 @@ def reduce_metrics(samples: list[Sample]) -> dict[str, Any]:
         "min_fps_ratio": round(ratios[worst_cam], 3) if worst_cam else None,
         "worst_camera": worst_cam,
         "restarts_total": int(_sum(samples, "tier0_worker_restarts_total")),
+        "frames_dropped_total": int(_sum(samples, "tier0_frames_dropped_total")),
     }
 
     # Coarse mode inference (best-effort UI label, not a control signal):
@@ -307,6 +445,8 @@ def reduce_metrics(samples: list[Sample]) -> dict[str, Any]:
         "mode": mode,
         "model": model,
         "health": health,
+        # The detector's hardware, for the dashboard's health bar.
+        "backend": _backend_row(samples),
         "detector": {
             "latency_avg_ms": det_avg_ms,
             "latency_p95_ms": det_p95_ms,
@@ -325,6 +465,12 @@ def reduce_metrics(samples: list[Sample]) -> dict[str, Any]:
             "skipped_calibrating": int(skipped_calib),
             "skipped_stationary": int(skipped_stationary),
             "motion_gate_ratio": motion_gate_ratio,
+            # Cameras the gate gave up on (no static background). The ratio
+            # above is honest for them — 0% skipped — but not actionable
+            # without the reason.
+            "motion_latched_cameras": [
+                cam for cam in all_cams if latched.get(cam, 0) >= 1.0
+            ],
         },
         "cameras": cameras,
         # The pipeline's outputs actually LEAVING it: detections become NATS

@@ -10,12 +10,12 @@
 #   - detect-pipeline pytest regressions (Tier-0 CV pipeline + service),
 #     including the real-ffmpeg decode tests
 #   - example pytest regressions across all nine shipped examples
-#   - React frontend build failures
+#   - React frontend type, lint (errors only) and build failures
 #
 # What this does NOT do (yet):
 #   - End-to-end docker-compose smoke (separate slice — see internal
 #     SMOKE_TEST checklist)
-#   - Lint / ruff (not yet wired into the project's dev workflow)
+#   - Python lint / ruff (not yet wired into the project's dev workflow)
 #   - Multi-Python matrix (project requires >=3.11; testing one stable
 #     version is enough until we get into 3.12-specific issues)
 
@@ -56,6 +56,69 @@ jobs:
       - name: Run pytest
         working-directory: server
         run: uv run pytest tests/ -q
+      # The two stdlib-only sidecars next to core: the privileged
+      # installer's reconciler and the apps' egress proxy. Same venv —
+      # they need nothing but pytest (and PyYAML for the index).
+      - name: Sidecars (app-installer, egress-proxy, mdns-announcer)
+        run: server/.venv/bin/python -m pytest -q -p no:cacheprovider scripts/app-installer/tests scripts/egress-proxy/tests scripts/mdns-announcer/test_announcer.py tools/tests
+      # The Home Assistant contract (HA-115): a change to
+      # server/contract/contract.json needs the matching version bump
+      # (MAJOR for anything removed or narrowed, MINOR for additions).
+      - name: HA contract check
+        # No `|| true` on the fetch: a failed fetch used to be swallowed and
+        # the script then died with "base ref not found", blaming the wrong
+        # step. Let the fetch fail where it fails. The `+` is for runs ON
+        # main: the shallow checkout already holds origin/main, and updating
+        # it from a one-commit fetch is a non-fast-forward that git refuses
+        # without it (every push to main failed here, comparing main to
+        # itself).
+        run: |
+          git fetch --no-tags --depth=1 origin +main:refs/remotes/origin/main
+          server/.venv/bin/python scripts/contract_check.py --base origin/main
+
+  # ── App SDK ──────────────────────────────────────────────────────
+  # The examples exercise the SDK indirectly; this runs its own suite
+  # (the platform client, credentials, user context, contract server,
+  # the sync/async parity check). publish-sdk.yml runs the same across
+  # 3.11–3.13 plus the build on sdk/** changes.
+  sdk:
+    name: sdk (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: "sdk/opennvr-app-sdk/uv.lock"
+      - name: Run pytest
+        working-directory: sdk/opennvr-app-sdk
+        run: uv run --frozen --group dev pytest -q
+
+  # ── Home Assistant integration ───────────────────────────────────
+  # pyopennvr and the integration (integrations/home-assistant/), on the
+  # Python Home Assistant 2026.9 needs; pytest-homeassistant-custom-component
+  # pins homeassistant itself. PyTurboJPEG is the camera component's own
+  # requirement. hassfest validates the manifest, translations, services.
+  home-assistant:
+    name: home-assistant (pytest, hassfest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Install
+        run: |
+          pip install "pytest-homeassistant-custom-component==0.13.365" "PyTurboJPEG==1.8.3"
+          pip install -e integrations/home-assistant/pyopennvr
+      - name: pyopennvr
+        working-directory: integrations/home-assistant/pyopennvr
+        run: python -m pytest -q
+      - name: integration
+        working-directory: integrations/home-assistant/hass-opennvr
+        run: python -m pytest -q -p no:cacheprovider --cov=custom_components.opennvr --cov-fail-under=95
+      - name: hassfest
+        run: docker run --rm -v "$PWD/integrations/home-assistant/hass-opennvr:/github/workspace" ghcr.io/home-assistant/hassfest
 
   # ── KAI-C middleware ─────────────────────────────────────────────
   # kai-c/ uses [dependency-groups] for dev deps (pytest + pytest-
@@ -103,10 +166,14 @@ jobs:
   # ── Example apps ─────────────────────────────────────────────────
   # Each example has its own pyproject.toml + test suite. Matrix over
   # them so a broken example surfaces with the example name in the
-  # job title, not buried inside one combined job.
-  # Examples don't ship a uv.lock (they're copy-as-template), so
-  # `uv sync` resolves fresh against the pyproject. Dev extras live
+  # job title, not buried inside one combined job. Dev extras live
   # under [project.optional-dependencies] dev, hence `--extra dev`.
+  # Every example commits a uv.lock; camera-agent's is checked with
+  # --locked because its image installs exactly what that lock says
+  # (examples/camera-agent/Dockerfile) — a lock that drifted from its
+  # pyproject.toml must fail here, not be quietly re-resolved on the
+  # runner and then baked into an image nothing tested. The other
+  # examples' locks are stale today; re-lock them before widening this.
   examples:
     name: example/${{ matrix.example }} (pytest)
     runs-on: ubuntu-latest
@@ -115,9 +182,15 @@ jobs:
       matrix:
         example:
           - abandoned-object
+          - alert-notifier
+          - camera-tamper
           - alerts-subscriber
           - camera-agent
           - footage-search
+          - garbage-dumping
+          - ppe-check
+          - gate-watch
+          - gate-controller
           - home-assistant-relay
           - inference-listener
           - intrusion-detection
@@ -134,10 +207,16 @@ jobs:
           enable-cache: true
       - name: Sync dependencies
         working-directory: examples/${{ matrix.example }}
-        run: uv sync --extra dev
+        run: uv sync --extra dev ${{ matrix.example == 'camera-agent' && '--locked' || '' }}
       - name: Run pytest
         working-directory: examples/${{ matrix.example }}
         run: uv run pytest -q
+      # What a listing reviewer checks, on every example, every PR
+      # (the camera-agent is an agent, not a catalog app — no manifest).
+      - name: opennvr-app validate
+        if: matrix.example != 'camera-agent'
+        working-directory: examples/${{ matrix.example }}
+        run: uv run opennvr-app validate .
 
   # ── React frontend build ─────────────────────────────────────────
   frontend:
@@ -153,6 +232,16 @@ jobs:
       - name: Install dependencies
         working-directory: app
         run: npm ci
+      # vite build does not typecheck (esbuild strips types), so a type
+      # error can ship unnoticed — tsc is the gate for that.
+      - name: Typecheck
+        working-directory: app
+        run: npm run typecheck
+      # ESLint covers .ts/.tsx now. Most rules are warnings (existing debt,
+      # promoted one at a time); only errors fail this step.
+      - name: Lint
+        working-directory: app
+        run: npm run lint
       - name: Build
         working-directory: app
         run: npm run build

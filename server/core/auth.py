@@ -23,7 +23,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pyotp
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -153,7 +153,7 @@ def verify_token(token: str) -> TokenData | None:
             )
             return None
 
-        token_data = TokenData(username=username)
+        token_data = TokenData(username=username, ver=payload.get("ver"))
         auth_logger.log_action(
             "auth.token_verify_success",
             message=f"Token verified successfully for user: {username}",
@@ -170,11 +170,60 @@ def verify_token(token: str) -> TokenData | None:
         return None
 
 
+# What a password-only session of a local account that has not enrolled a
+# second factor may reach: itself, and the enrolment calls (everything under
+# /auth/mfa/). Matched against the route template FastAPI resolved, never the
+# raw URL.
+_ENROLMENT_ROUTES = frozenset({
+    "/auth/me", "/auth/logout", "/users/me", "/users/me/permissions",
+})
+_ENROLMENT_PREFIX = "/auth/mfa/"
+
+
+def mfa_enrolment_pending(user: User) -> bool:
+    """A local account without an enrolled second factor. Single sign-on
+    accounts are exempt: their identity provider owns MFA."""
+    return (user.auth_provider or "local") != "oidc" and not user.mfa_enabled
+
+
+def _refuse_until_enrolled(request: Request, user: User) -> None:
+    """Server-side half of the MFA wall: until the account enrols, its session
+    reaches only the routes above. The SPA routes such a session to the
+    enrolment screen anyway; this stops the API being used around it. The
+    check reads the database on every request, so a reset bites at once and
+    no token can carry a stale "enrolled" claim."""
+    if not mfa_enrolment_pending(user):
+        return
+    route = request.scope.get("route")
+    path = getattr(route, "path", None) or request.url.path
+    prefix = settings.api_prefix.rstrip("/")
+    if path.startswith(prefix):
+        path = path[len(prefix):]
+    if path in _ENROLMENT_ROUTES and request.method in ("GET", "POST"):
+        return
+    if path.startswith(_ENROLMENT_PREFIX):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={
+            "error": "mfa_enrollment_required",
+            "message": "Set up two-factor sign-in before using OpenNVR.",
+        },
+    )
+
+
 def get_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db),
 ) -> User:
-    """Get current authenticated user from JWT token."""
+    """Get the current principal: a user from a JWT, or, for an ``onvr_`` API
+    token, a read-only TokenPrincipal acting for the token's owner (HA-101).
+
+    A token principal is never a superuser, may only reach the routes in
+    services.api_tokens.TOKEN_ROUTES, and is checked against its scopes, its
+    owner's permissions and its camera allow-list before the route runs.
+    """
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -182,6 +231,10 @@ def get_current_user(
     )
 
     token = credentials.credentials
+    from services import api_tokens
+
+    if api_tokens.looks_like_token(token):
+        return api_tokens.authorize_request(request, db, token)
     token_data = verify_token(token)
     if token_data is None:
         auth_logger.log_action(
@@ -200,6 +253,17 @@ def get_current_user(
         )
         raise credentials_exception
 
+    if int(token_data.ver or 0) != int(user.token_version or 0):
+        # The password was changed or reset after this token was issued. A
+        # token from before versions existed counts as version 0, so the
+        # first reset after an upgrade ends those sessions too.
+        auth_logger.log_action(
+            "auth.user_auth_failed",
+            user_id=user.id,
+            message=f"User authentication failed: stale token version - {user.username}",
+            extra_data={"username": user.username, "reason": "token_version"},
+        )
+        raise credentials_exception
     if not user.is_active:
         auth_logger.log_action(
             "auth.user_auth_failed",
@@ -210,6 +274,7 @@ def get_current_user(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Inactive user"
         )
+    _refuse_until_enrolled(request, user)
 
     auth_logger.log_action(
         "auth.user_auth_success",

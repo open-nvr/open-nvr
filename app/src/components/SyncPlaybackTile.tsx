@@ -18,12 +18,13 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type Hls from 'hls.js'
-import { CameraOff, Loader2, Radio, AlertCircle, Volume2 } from 'lucide-react'
+import { CameraOff, Radio, AlertCircle, Volume2 } from 'lucide-react'
 import { apiService } from '../lib/apiService'
 import { displayAspect, isStretched } from '../lib/aspect'
 import type { AspectOverride } from '../lib/aspect'
 import { useVideoSize } from '../hooks/useVideoAspect'
 import { AspectFrame } from './VideoPlayer'
+import { useTranslation } from '../i18n'
 import { loadHls } from '../lib/loadHls'
 import type { TimelineSegment } from './PlaybackTimeline'
 
@@ -71,6 +72,7 @@ export function SyncPlaybackTile({
   onActivate,
   displayAspectOverride,
 }: SyncPlaybackTileProps) {
+  const { t } = useTranslation()
   const videoRef = useRef<HTMLVideoElement>(null)
   const hlsRef = useRef<Hls | null>(null)
   // The lazily-loaded hls.js module (see lib/loadHls); null until resolved.
@@ -185,7 +187,7 @@ export function SyncPlaybackTile({
       }
 
       if (browserMp4Url) {
-        // H.265 path: server-remuxed hvc1 MP4 played natively. The remuxed
+        // Remux path (H.265, or PCM audio): server-remuxed MP4 played natively. The remuxed
         // file is the whole physical on-disk file, beginning fileOffsetSec
         // before the session anchor — map the window to the file so every
         // in-file seek is a native HTTP-Range seek.
@@ -382,9 +384,7 @@ export function SyncPlaybackTile({
   return (
     <div
       onClick={onActivate}
-      className={`relative bg-black overflow-hidden cursor-pointer flex items-center justify-center aspect-video lg:aspect-auto border ${
-        active ? 'border-[var(--accent)]' : 'border-[var(--border)]'
-      }`}
+      className="relative bg-black overflow-hidden cursor-pointer flex items-center justify-center aspect-video lg:aspect-auto"
       style={{ containerType: 'size' }}
     >
       {/* The clip carries the camera's coded size, which for an anamorphic
@@ -398,36 +398,45 @@ export function SyncPlaybackTile({
         />
       </AspectFrame>
 
-      {/* Name chip */}
-      <div className="absolute top-1 left-1 flex items-center gap-1 max-w-[85%] px-1.5 py-0.5 bg-black/60 text-white text-[10px] leading-tight">
-        <span className="truncate">{cameraName}</span>
-        {active && !muted && <Volume2 size={10} className="shrink-0 text-[var(--accent)]" />}
+      {/* Label band, as on Live View and the dashboard wall: legible over
+          any picture without a solid bar. The speaker marks the tile whose
+          audio is playing. */}
+      <div className="pointer-events-none absolute inset-x-0 top-0 z-10 h-9 bg-gradient-to-b from-black/75 to-transparent" />
+      <div className="pointer-events-none absolute left-2 right-2 top-1.5 z-10 flex items-center gap-1.5 text-white">
+        <span className="text-[11px] font-medium truncate [text-shadow:0_1px_2px_rgba(0,0,0,0.9)]">{cameraName}</span>
+        {active && !muted && <Volume2 size={11} className="shrink-0 text-[var(--accent)]" aria-hidden="true" />}
       </div>
+
+      {/* Selected tile: an inset ring, so the hairline grid never shifts. */}
+      {active && <div className="pointer-events-none absolute inset-0 z-20 ring-1 ring-inset ring-[var(--accent)]" />}
 
       {showSpinner && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/30 pointer-events-none">
-          <Loader2 size={26} className="animate-spin text-[var(--accent)]" />
+          <div className="w-5 h-5 border-2 border-white/25 border-t-white/80 rounded-full animate-spin" />
         </div>
       )}
 
       {(status === 'gap' || status === 'idle') && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-black/70 pointer-events-none">
-          <CameraOff size={22} className="text-neutral-500" />
-          <span className="text-[11px] text-neutral-400">No recording at this time</span>
+        <div
+          className="absolute inset-0 flex flex-col items-center justify-center gap-1.5 text-white/45 pointer-events-none"
+          style={{ background: 'repeating-linear-gradient(135deg, #07090d 0 10px, #0b0f16 10px 20px)' }}
+        >
+          <CameraOff size={18} />
+          <span className="text-[10px] font-mono uppercase tracking-[0.2em]">{t('shared.noRecordingNow')}</span>
         </div>
       )}
 
       {status === 'live' && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-black/70 pointer-events-none">
-          <Radio size={22} className="text-green-500 animate-pulse" />
-          <span className="text-[11px] text-neutral-300">Still recording — watch in Live View</span>
+          <Radio size={18} className="text-[var(--on-video-ok)] animate-pulse" />
+          <span className="text-[10px] font-mono uppercase tracking-[0.2em] text-[var(--on-video)]">{t('shared.stillRecording')}</span>
         </div>
       )}
 
       {status === 'error' && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-black/70 pointer-events-none">
-          <AlertCircle size={22} className="text-amber-400" />
-          <span className="text-[11px] text-neutral-300">Playback failed here</span>
+          <AlertCircle size={18} className="text-[var(--on-video-warn)]" />
+          <span className="text-[10px] font-mono uppercase tracking-[0.2em] text-[var(--on-video-warn)]">{t('shared.playbackFailed')}</span>
         </div>
       )}
     </div>

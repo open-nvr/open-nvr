@@ -43,7 +43,7 @@ def _tools(caption, *, latest_event):
         return b"BEST-FRAME-STALE"
     return CameraTools(
         context=ctx, detection_client=None, caption_client=caption,
-        recognition_client=None, footage_index=None,
+        recognition_client=None,
         best_frame_fetch=best_frame_fetch,
     )
 

@@ -1,0 +1,353 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: Apache-2.0
+"""Typed payloads for the contracted domain events.
+
+``docs/EVENT_CONTRACTS.md`` names every event the platform and its apps
+put on the bus — ``plate.recognized.v1``, ``access.decided.v1``, the
+occupancy trio, … — and their required payload fields. Until now an
+app read them as ``event.payload["plate_text"]`` and wrote them as a
+hand-built dict. These classes are the same contracts as Python:
+
+    from opennvr_app_sdk import PlateRecognized, AccessDecided
+
+    class Gate(DomainEventSubscriber):
+        subscriptions = [PlateRecognized.SCHEMA]
+
+        def on_event(self, event):
+            plate = event.typed()             # PlateRecognized, or None if off-contract
+            if plate and plate.confidence and plate.confidence > 0.8:
+                self.publisher.publish_typed(
+                    AccessDecided(plate_text=plate.plate_text, decision="allow",
+                                  reason="registered"),
+                    camera_id=event.camera_id)
+
+Rules, all from the contract:
+
+* **Additive-only.** Fields a producer adds later ride in ``extra`` and
+  come back out of ``to_payload()`` untouched; a consumer on an older
+  SDK never loses them, a consumer on a newer SDK never breaks on
+  their absence.
+* **Required is required.** A payload missing a required field does
+  not parse (``ValueError``); ``DomainEvent.typed()`` turns that into
+  ``None`` and a log line, so a long-lived subscriber never dies to
+  one bad message.
+* **Unknown values are tolerated where the contract says so**
+  (``level``, ``reason``, ``decision`` are strings, not enums — a
+  gate must fail closed on a decision it does not recognise, and it
+  can only do that if parsing did not already reject it).
+"""
+from __future__ import annotations
+
+import dataclasses
+import logging
+from dataclasses import dataclass, field, fields
+from typing import Any, ClassVar, TypeVar
+
+logger = logging.getLogger(__name__)
+
+T = TypeVar("T", bound="TypedPayload")
+
+
+@dataclass(frozen=True)
+class TypedPayload:
+    """Base of every typed payload: ``SCHEMA``, ``from_payload``,
+    ``to_payload``. Subclasses list the contract's fields; ``extra``
+    keeps whatever else the producer sent."""
+
+    SCHEMA: ClassVar[str] = ""
+    #: Field names a payload MUST carry (the contract's non-optional rows).
+    REQUIRED: ClassVar[tuple[str, ...]] = ()
+
+    @classmethod
+    def from_payload(cls: type[T], payload: dict[str, Any]) -> T:
+        if not isinstance(payload, dict):
+            raise ValueError(f"{cls.SCHEMA}: payload must be an object")
+        names = {f.name for f in fields(cls)} - {"extra"}
+        missing = [name for name in cls.REQUIRED if payload.get(name) is None]
+        if missing:
+            raise ValueError(f"{cls.SCHEMA}: missing required field(s) {missing}")
+        known = {k: v for k, v in payload.items() if k in names}
+        extra = {k: v for k, v in payload.items() if k not in names}
+        try:
+            return cls(**known, extra=extra)  # type: ignore[arg-type]
+        except TypeError as exc:
+            raise ValueError(f"{cls.SCHEMA}: {exc}") from exc
+
+    def to_payload(self) -> dict[str, Any]:
+        """The wire payload: every contract field (nullable ones as
+        ``null``), then ``extra`` — never overriding a contract field."""
+        out: dict[str, Any] = {}
+        for f in fields(self):
+            if f.name == "extra":
+                continue
+            value = getattr(self, f.name)
+            out[f.name] = list(value) if isinstance(value, tuple) else value
+        for k, v in self.extra.items():
+            out.setdefault(k, v)
+        return out
+
+    # Keyword-only so ``PlateRecognized("R197GB")`` fills plate_text, not extra.
+    extra: dict[str, Any] = field(default_factory=dict, compare=False, kw_only=True)
+
+
+# ── the v1 contracts ────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class DetectionObserved(TypedPayload):
+    """``detection.observed.v1`` — one Tier-0 frame result with tracks."""
+
+    SCHEMA: ClassVar[str] = "detection.observed.v1"
+    REQUIRED: ClassVar[tuple[str, ...]] = ("frame", "tracks")
+    frame: dict[str, Any] = field(default_factory=dict)      # {"w", "h"}
+    tracks: list[dict[str, Any]] = field(default_factory=list)
+    calibrating: bool = False
+
+
+@dataclass(frozen=True)
+class VisitRecorded(TypedPayload):
+    """``visit.recorded.v1`` — a finished timeline visit persisted by core."""
+
+    SCHEMA: ClassVar[str] = "visit.recorded.v1"
+    REQUIRED: ClassVar[tuple[str, ...]] = ("event_id", "label", "started_at", "ended_at")
+    event_id: int = 0
+    label: str = ""
+    started_at: str = ""
+    ended_at: str = ""
+    evidence_path: str | None = None
+
+
+@dataclass(frozen=True)
+class VisitEnriched(TypedPayload):
+    """``visit.enriched.v1`` — what the enrichment tier knows about a
+    visit: the caption, the attribute claims, where they came from.
+    Published by core each time a visit's caption or claims land, with
+    the whole current state every time (RFC-0004)."""
+
+    SCHEMA: ClassVar[str] = "visit.enriched.v1"
+    REQUIRED: ClassVar[tuple[str, ...]] = ("event_id",)
+    event_id: int = 0
+    label: str = ""
+    caption: str | None = None
+    attributes: dict[str, str] = field(default_factory=dict)
+    evidence_path: str | None = None
+    producer: str | None = None
+    enriched_by: list[str] = field(default_factory=list)
+    #: The earlier visit this one's caption and claims were copied from
+    #: (same evidence frame); absent when the look was fresh.
+    reused_from: int | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        out = super().to_payload()
+        if out.get("reused_from") is None:
+            out.pop("reused_from", None)
+        return out
+
+
+@dataclass(frozen=True)
+class PlateRecognized(TypedPayload):
+    """``plate.recognized.v1`` — one accepted OCR read."""
+
+    SCHEMA: ClassVar[str] = "plate.recognized.v1"
+    REQUIRED: ClassVar[tuple[str, ...]] = ("plate_text",)
+    plate_text: str = ""
+    confidence: float | None = None
+    vehicle_label: str | None = None
+    event_id: int | None = None
+    plate_box: list[float] | None = None
+    plate_box_confidence: float | None = None
+    plate_box_image: list[int] | None = None
+    # ISO-8601 UTC capture time of the look this read came off: WHEN the
+    # plate was seen, as opposed to when anything processed it. Prefer it
+    # over the envelope's ts, which for this schema is publish time and
+    # so trails the read by the OCR + delivery lag (EVENT_CONTRACTS.md).
+    # None from producers that predate it.
+    observed_at: str | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        out = super().to_payload()
+        # The optional fields are "absent", not null, when unknown.
+        for name in ("plate_box", "plate_box_confidence", "plate_box_image",
+                     "observed_at"):
+            if out.get(name) is None:
+                out.pop(name, None)
+        return out
+
+
+@dataclass(frozen=True)
+class FaceRecognized(TypedPayload):
+    """``face.recognized.v1`` — the platform face route's answer for one
+    tracked person: recognised (``person_id``) or an unknown face.
+
+    Several arrive per ``track_id`` while the pipeline retries a person's
+    improving crop; decide over a short window per track. Subscribing
+    needs the ``events:face.recognized`` scope (faces are PII)."""
+
+    SCHEMA: ClassVar[str] = "face.recognized.v1"
+    REQUIRED: ClassVar[tuple[str, ...]] = ("adapter", "track_id", "recognized")
+    adapter: str = ""
+    track_id: int = 0
+    recognized: bool = False
+    label: str | None = None
+    person_id: str | None = None
+    category: str | None = None
+    similarity: float | None = None
+    threshold: float | None = None
+    face_box: list[float] | None = None
+    observed_at: str | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        out = super().to_payload()
+        if out.get("observed_at") is None:
+            out.pop("observed_at", None)
+        return out
+
+
+@dataclass(frozen=True)
+class AccessDecided(TypedPayload):
+    """``access.decided.v1`` — an admission decision for a plate at a gate.
+    Consumers actuate only on ``decision == "allow"``; anything else,
+    including values this SDK does not know, is "do not actuate"."""
+
+    SCHEMA: ClassVar[str] = "access.decided.v1"
+    REQUIRED: ClassVar[tuple[str, ...]] = ("plate_text", "decision", "reason")
+    plate_text: str = ""
+    decision: str = "deny"
+    reason: str = "unknown"
+    owner: str | None = None
+    unit: str | None = None
+    confidence: float | None = None
+
+    @property
+    def allow(self) -> bool:
+        return self.decision == "allow"
+
+
+@dataclass(frozen=True)
+class OccupancyChanged(TypedPayload):
+    """``occupancy.changed.v1`` — a zone's head-count moved."""
+
+    SCHEMA: ClassVar[str] = "occupancy.changed.v1"
+    REQUIRED: ClassVar[tuple[str, ...]] = ("count", "level")
+    count: int = 0
+    level: str = "normal"
+    max_occupancy: int | None = None
+    min_occupancy: int | None = None
+
+
+@dataclass(frozen=True)
+class OccupancyHeatmap(TypedPayload):
+    """``occupancy.heatmap.v1`` — a sparse delta of a per-camera heat grid."""
+
+    SCHEMA: ClassVar[str] = "occupancy.heatmap.v1"
+    REQUIRED: ClassVar[tuple[str, ...]] = ("cols", "rows", "cells", "frames", "period_seconds")
+    cols: int = 0
+    rows: int = 0
+    cells: list[list[int]] = field(default_factory=list)     # [[index, hits], …]
+    frames: int = 0
+    period_seconds: int = 60
+    labels: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class OverlayBoxes(TypedPayload):
+    """``overlay.boxes.v1`` — boxes an app wants drawn over the live video.
+
+    ``boxes`` entries are ``{"label", "box": [x, y, w, h], "score"?, "id"?}``
+    with ``box`` normalized to 0..1 of the frame — an app never knows the
+    resolution the operator is watching at, and core draws over streams
+    of every size. Send ``frame: {w, h}`` if your boxes are in pixels and
+    core will normalize; send nothing drawable and nothing is drawn.
+
+    Whether it IS drawn is the operator's call, per app, in the App
+    Catalog (off by default). Publishing costs nothing when it is off.
+    """
+
+    SCHEMA: ClassVar[str] = "overlay.boxes.v1"
+    REQUIRED: ClassVar[tuple[str, ...]] = ("boxes",)
+    boxes: list[dict[str, Any]] = field(default_factory=list)
+    frame: dict[str, int] | None = None
+    seq: int | None = None
+
+
+@dataclass(frozen=True)
+class OccupancyFootfall(TypedPayload):
+    """``occupancy.footfall.v1`` — entries, exits and finished stays since the last publish."""
+
+    SCHEMA: ClassVar[str] = "occupancy.footfall.v1"
+    REQUIRED: ClassVar[tuple[str, ...]] = ("entries", "exits", "dwell_count", "dwell_seconds",
+                                           "dwell_max_seconds", "period_seconds")
+    entries: int = 0
+    exits: int = 0
+    dwell_count: int = 0
+    dwell_seconds: float = 0.0
+    dwell_max_seconds: float = 0.0
+    period_seconds: int = 60
+    labels: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ScreeningCompleted(TypedPayload):
+    """``screening.completed.v1`` — one entry screening, ruled on.
+
+    Published when an app finishes judging whether a person was scanned
+    properly at an entrance. Every screening is published, the clean ones
+    included: compliance is complete scans over ALL screenings, and a
+    stream of only the failures can count complaints but never state a
+    rate.
+
+    ``steps_done`` / ``steps_missing`` are human labels ("Left arm"), not
+    ids — the set of surfaces is the operator's configuration, not a
+    fixed enum. ``images`` maps a role to an evidence path already
+    uploaded through the platform, never to bytes: an alert is a NATS
+    message and a couple of base64 crops exceed the default 1 MB ceiling,
+    which the broker refuses silently.
+    """
+
+    SCHEMA: ClassVar[str] = "screening.completed.v1"
+    REQUIRED: ClassVar[tuple[str, ...]] = ("session", "verdict", "score")
+    session: str = ""
+    verdict: str = ""
+    score: float = 0.0
+    at: str | None = None
+    ts: float | None = None
+    coverage: float | None = None
+    order_score: float | None = None
+    steps_done: list[str] = field(default_factory=list)
+    steps_missing: list[str] = field(default_factory=list)
+    flagged: bool = False
+    duration_s: float | None = None
+    engaged_s: float | None = None
+    ended_by: str | None = None
+    guard_key: str | None = None
+    guard_name: str | None = None
+    images: dict[str, str] = field(default_factory=dict)
+    alert_id: str | None = None
+
+
+#: schema → typed payload class, for every contract this SDK knows.
+EVENT_TYPES: dict[str, type[TypedPayload]] = {
+    cls.SCHEMA: cls for cls in (
+        DetectionObserved, VisitRecorded, VisitEnriched, PlateRecognized, FaceRecognized, AccessDecided,
+        OccupancyChanged, OccupancyHeatmap, OccupancyFootfall, OverlayBoxes,
+        ScreeningCompleted,
+    )
+}
+
+
+def typed_payload(schema: str, payload: dict[str, Any]) -> TypedPayload | None:
+    """The typed payload for ``schema``, ``None`` when the schema is not
+    one this SDK types (a newer contract, or an app's own) or the
+    payload is off-contract (logged)."""
+    cls = EVENT_TYPES.get(schema)
+    if cls is None:
+        return None
+    try:
+        return cls.from_payload(payload)
+    except ValueError as exc:
+        logger.warning("domain event %s: payload off-contract: %s", schema, exc)
+        return None
+
+
+def is_typed_payload(obj: Any) -> bool:
+    return dataclasses.is_dataclass(obj) and isinstance(obj, TypedPayload) and bool(type(obj).SCHEMA)

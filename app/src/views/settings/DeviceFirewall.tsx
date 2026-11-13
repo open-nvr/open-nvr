@@ -20,6 +20,8 @@ import { useCallback, useEffect, useState } from 'react'
 import { useSnackbar } from '../../components/Snackbar'
 import { Badge, Button, ErrorCard, Skeleton } from '../../components/ui'
 import { apiService } from '../../lib/apiService'
+import { useDateFormat, useTranslation, type DateFormatters } from '../../i18n'
+import { useConfirm } from '../../components/ui/ConfirmDialog'
 
 type Device = {
   id: number
@@ -71,7 +73,10 @@ const STATUS_BADGE: Record<string, 'success' | 'warning' | 'destructive'> = {
  * only serves an OpenNVR-signed token, which a blocked device cannot obtain.
  */
 export function DeviceFirewall() {
+  const fmt = useDateFormat()
   const { showSuccess, showError } = useSnackbar()
+  const { t } = useTranslation()
+  const confirm = useConfirm()
   const [devices, setDevices] = useState<Device[]>([])
   const [active, setActive] = useState(false)
   const [loading, setLoading] = useState(true)
@@ -133,7 +138,7 @@ export function DeviceFirewall() {
   return (
     <div className="space-y-4">
       {/* Enforcement toggle */}
-      <div className="flex items-start justify-between gap-4 border border-[var(--border)] rounded p-4">
+      <div className="flex items-start justify-between gap-4 border border-[var(--border)] p-4">
         <div>
           <div className="flex items-center gap-2">
             <span className="text-sm font-medium">Restrict access to approved devices</span>
@@ -152,7 +157,7 @@ export function DeviceFirewall() {
           </p>
         </div>
         <Button
-          variant={active ? 'secondary' : 'primary'}
+          variant={active ? 'outline' : 'primary'}
           disabled={busy === 'toggle'}
           onClick={() => toggle(!active)}
         >
@@ -161,21 +166,21 @@ export function DeviceFirewall() {
       </div>
 
       {active && approvedCount === 0 && (
-        <div className="rounded border border-amber-600/40 bg-amber-600/10 px-3 py-2 text-xs text-amber-500">
+        <div className="border border-[color-mix(in_oklab,var(--warn)_45%,var(--border))] bg-[color-mix(in_oklab,var(--warn)_14%,transparent)] px-3 py-2 text-xs text-[var(--warn)]">
           Enforcement is on but no device is approved — you may lock yourself
           out. Approve at least this device before relying on it.
         </div>
       )}
 
       {pending.length > 0 && (
-        <div className="rounded border border-amber-600/40 bg-amber-600/10 px-3 py-2 text-xs text-amber-500">
+        <div className="border border-[color-mix(in_oklab,var(--warn)_45%,var(--border))] bg-[color-mix(in_oklab,var(--warn)_14%,transparent)] px-3 py-2 text-xs text-[var(--warn)]">
           {pending.length} device{pending.length > 1 ? 's are' : ' is'} waiting
           for approval.
         </div>
       )}
 
       {/* Device table */}
-      <div className="overflow-auto border border-[var(--border)] rounded">
+      <div className="overflow-auto border border-[var(--border)]">
         <table className="w-full text-sm">
           <thead>
             <tr className="text-left text-[var(--text-dim)] border-b border-[var(--border)]">
@@ -215,7 +220,7 @@ export function DeviceFirewall() {
                 </td>
                 <td className="px-3 py-2 text-[var(--text-dim)]">{d.attempt_count}×</td>
                 <td className="px-3 py-2 text-xs text-[var(--text-dim)]">
-                  {d.last_seen ? new Date(d.last_seen).toLocaleString() : '—'}
+                  {d.last_seen ? fmt.dateTime(d.last_seen) : '—'}
                 </td>
                 <td className="px-3 py-2">
                   <div className="flex justify-end gap-2">
@@ -231,14 +236,32 @@ export function DeviceFirewall() {
                     {d.status !== 'blocked' && (
                       <Button
                         disabled={busy === String(d.id)}
-                        onClick={() => act(() => apiService.blockDevice(d.id), String(d.id))}
+                        onClick={async () => {
+                          // Blocking the browser you are using locks you out,
+                          // so this one asks first and says so.
+                          const ok = await confirm({
+                            title: t('firewall.confirmBlockTitle'),
+                            message: t('firewall.confirmBlockMessage', { name: d.label || d.ip_address || `#${d.id}` }),
+                            confirmLabel: t('firewall.block'),
+                            danger: true,
+                          })
+                          if (ok) act(() => apiService.blockDevice(d.id), String(d.id))
+                        }}
                       >
                         Block
                       </Button>
                     )}
                     <Button
                       disabled={busy === String(d.id)}
-                      onClick={() => act(() => apiService.deleteDevice(d.id), String(d.id))}
+                      onClick={async () => {
+                        const ok = await confirm({
+                          title: t('firewall.confirmForgetTitle'),
+                          message: t('firewall.confirmForgetMessage', { name: d.label || d.ip_address || `#${d.id}` }),
+                          confirmLabel: t('firewall.forget'),
+                          danger: true,
+                        })
+                        if (ok) act(() => apiService.deleteDevice(d.id), String(d.id))
+                      }}
                     >
                       Forget
                     </Button>

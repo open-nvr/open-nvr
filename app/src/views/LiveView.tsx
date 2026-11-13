@@ -27,7 +27,7 @@ import { useFullscreen } from '../hooks/useFullscreen'
 import { useClickOutside } from '../hooks/useClickOutside'
 import { usePermissions } from '../hooks/usePermissions'
 import { useCameraStatus } from '../hooks/useCameraStatus'
-import { Camera, Maximize, Play, Settings, Save, Image as ImageIcon, Book, HardDrive, Power, X, Grid, Move, Square, Plus, Minus, ChevronDown, ChevronUp, Video, Search, AlertCircle, Expand, Scan } from 'lucide-react'
+import { Camera, CameraOff, Maximize, Minimize, Play, Settings, Save, Image as ImageIcon, Book, HardDrive, Power, LayoutGrid, Menu as MenuIcon, Move, Square, Plus, Minus, ChevronDown, ChevronUp, Video, Search, AlertCircle, Expand, Scan, ScanEye, Tv, ArrowLeftRight, Minimize2 } from 'lucide-react'
 import { 
   DndContext, 
   DragOverlay, 
@@ -41,143 +41,20 @@ import {
   type DragStartEvent
 } from '@dnd-kit/core'
 import { restrictToWindowEdges } from '@dnd-kit/modifiers'
+import { useTranslation } from '../i18n'
+import { useNavigate, useSearchParams } from 'react-router-dom'
+import { useSnackbar } from '../components/Snackbar'
+import { Modal } from '../components/Modal'
+import { useConfirm } from '../components/ui/ConfirmDialog'
+import { useCameras } from '../lib/queries'
+import { MiniSegment, STATE_INK, type CamState } from './dashboard/WidgetFrame'
+import { clsx } from 'clsx'
+import { PREDEFINED_LAYOUTS, type LayoutDefinition } from '../lib/liveLayouts'
+import { ToursMenu } from '../components/live/ToursMenu'
+import { webcamOfflineLabel } from '../lib/hostAgent'
 
-// Layout definitions - matching the WindowSettings
-interface LayoutDefinition {
-  name: string
-  gridCols: number
-  gridRows: number
-  tiles: Array<{ row: number; col: number; rowSpan: number; colSpan: number }>
-}
-
-const PREDEFINED_LAYOUTS: Record<string, LayoutDefinition> = {
-  '1x1': {
-    name: '1×1',
-    gridCols: 1,
-    gridRows: 1,
-    tiles: [{ row: 0, col: 0, rowSpan: 1, colSpan: 1 }]
-  },
-  '2x2': {
-    name: '2×2',
-    gridCols: 2,
-    gridRows: 2,
-    tiles: [
-      { row: 0, col: 0, rowSpan: 1, colSpan: 1 },
-      { row: 0, col: 1, rowSpan: 1, colSpan: 1 },
-      { row: 1, col: 0, rowSpan: 1, colSpan: 1 },
-      { row: 1, col: 1, rowSpan: 1, colSpan: 1 },
-    ]
-  },
-  '3x3': {
-    name: '3×3',
-    gridCols: 3,
-    gridRows: 3,
-    tiles: Array.from({ length: 9 }, (_, i) => ({ row: Math.floor(i / 3), col: i % 3, rowSpan: 1, colSpan: 1 }))
-  },
-  '4x4': {
-    name: '4×4',
-    gridCols: 4,
-    gridRows: 4,
-    tiles: Array.from({ length: 16 }, (_, i) => ({ row: Math.floor(i / 4), col: i % 4, rowSpan: 1, colSpan: 1 }))
-  },
-  '1+5': {
-    name: '1+5',
-    gridCols: 3,
-    gridRows: 3,
-    tiles: [
-      { row: 0, col: 0, rowSpan: 2, colSpan: 2 },
-      { row: 0, col: 2, rowSpan: 1, colSpan: 1 },
-      { row: 1, col: 2, rowSpan: 1, colSpan: 1 },
-      { row: 2, col: 0, rowSpan: 1, colSpan: 1 },
-      { row: 2, col: 1, rowSpan: 1, colSpan: 1 },
-      { row: 2, col: 2, rowSpan: 1, colSpan: 1 },
-    ]
-  },
-  '1+7': {
-    name: '1+7',
-    gridCols: 4,
-    gridRows: 4,
-    tiles: [
-      { row: 0, col: 0, rowSpan: 3, colSpan: 3 },
-      { row: 0, col: 3, rowSpan: 1, colSpan: 1 },
-      { row: 1, col: 3, rowSpan: 1, colSpan: 1 },
-      { row: 2, col: 3, rowSpan: 1, colSpan: 1 },
-      { row: 3, col: 0, rowSpan: 1, colSpan: 1 },
-      { row: 3, col: 1, rowSpan: 1, colSpan: 1 },
-      { row: 3, col: 2, rowSpan: 1, colSpan: 1 },
-      { row: 3, col: 3, rowSpan: 1, colSpan: 1 },
-    ]
-  },
-  '2+8': {
-    name: '2+8',
-    gridCols: 4,
-    gridRows: 4,
-    tiles: [
-      { row: 0, col: 0, rowSpan: 2, colSpan: 2 },
-      { row: 0, col: 2, rowSpan: 2, colSpan: 2 },
-      { row: 2, col: 0, rowSpan: 1, colSpan: 1 },
-      { row: 2, col: 1, rowSpan: 1, colSpan: 1 },
-      { row: 2, col: 2, rowSpan: 1, colSpan: 1 },
-      { row: 2, col: 3, rowSpan: 1, colSpan: 1 },
-      { row: 3, col: 0, rowSpan: 1, colSpan: 1 },
-      { row: 3, col: 1, rowSpan: 1, colSpan: 1 },
-      { row: 3, col: 2, rowSpan: 1, colSpan: 1 },
-      { row: 3, col: 3, rowSpan: 1, colSpan: 1 },
-    ]
-  },
-  '1+12': {
-    name: '1+12',
-    gridCols: 4,
-    gridRows: 4,
-    tiles: [
-      { row: 0, col: 0, rowSpan: 3, colSpan: 3 },
-      { row: 0, col: 3, rowSpan: 1, colSpan: 1 },
-      { row: 1, col: 3, rowSpan: 1, colSpan: 1 },
-      { row: 2, col: 3, rowSpan: 1, colSpan: 1 },
-      { row: 3, col: 0, rowSpan: 1, colSpan: 1 },
-      { row: 3, col: 1, rowSpan: 1, colSpan: 1 },
-      { row: 3, col: 2, rowSpan: 1, colSpan: 1 },
-      { row: 3, col: 3, rowSpan: 1, colSpan: 1 },
-    ]
-  },
-  '4+9': {
-    name: '4+9',
-    gridCols: 5,
-    gridRows: 5,
-    tiles: [
-      { row: 0, col: 0, rowSpan: 2, colSpan: 2 },
-      { row: 0, col: 2, rowSpan: 2, colSpan: 2 },
-      { row: 2, col: 0, rowSpan: 2, colSpan: 2 },
-      { row: 2, col: 2, rowSpan: 2, colSpan: 2 },
-      { row: 0, col: 4, rowSpan: 1, colSpan: 1 },
-      { row: 1, col: 4, rowSpan: 1, colSpan: 1 },
-      { row: 2, col: 4, rowSpan: 1, colSpan: 1 },
-      { row: 3, col: 4, rowSpan: 1, colSpan: 1 },
-      { row: 4, col: 0, rowSpan: 1, colSpan: 1 },
-      { row: 4, col: 1, rowSpan: 1, colSpan: 1 },
-      { row: 4, col: 2, rowSpan: 1, colSpan: 1 },
-      { row: 4, col: 3, rowSpan: 1, colSpan: 1 },
-      { row: 4, col: 4, rowSpan: 1, colSpan: 1 },
-    ]
-  },
-  '1+1+10': {
-    name: '1+1+10',
-    gridCols: 5,
-    gridRows: 4,
-    tiles: [
-      { row: 0, col: 0, rowSpan: 3, colSpan: 2 },
-      { row: 0, col: 2, rowSpan: 3, colSpan: 2 },
-      { row: 0, col: 4, rowSpan: 1, colSpan: 1 },
-      { row: 1, col: 4, rowSpan: 1, colSpan: 1 },
-      { row: 2, col: 4, rowSpan: 1, colSpan: 1 },
-      { row: 3, col: 0, rowSpan: 1, colSpan: 1 },
-      { row: 3, col: 1, rowSpan: 1, colSpan: 1 },
-      { row: 3, col: 2, rowSpan: 1, colSpan: 1 },
-      { row: 3, col: 3, rowSpan: 1, colSpan: 1 },
-      { row: 3, col: 4, rowSpan: 1, colSpan: 1 },
-    ]
-  },
-}
+/** The dashboard wall's still-tile background, for tiles with no picture. */
+const NO_PICTURE_BG = 'repeating-linear-gradient(135deg, #07090d 0 10px, #0b0f16 10px 20px)'
 
 interface WindowSettings {
   layouts_enabled: Record<string, boolean>
@@ -194,6 +71,7 @@ interface WindowSettings {
 }
 
 export function LiveView() {
+  const { t } = useTranslation()
   const { hasPermission } = usePermissions()
   const canManageCameras = hasPermission('cameras.manage')
   const [currentLayout, setCurrentLayout] = useState<string>('3x3')
@@ -205,7 +83,24 @@ export function LiveView() {
   // FS toolbar visibility — toggled by the bottom-center handle button
   const [fsToolbarVisible, setFsToolbarVisible] = useState(false)
   const [availableCameras, setAvailableCameras] = useState<Array<{id: number, name: string, live_online?: boolean | null, display_aspect_ratio?: AspectOverride | null}>>([])
-  
+  const [camerasLoaded, setCamerasLoaded] = useState(false)
+  const { showWarning } = useSnackbar()
+
+  // Cameras → View and the dashboard wall link here as /live?camera=<id>:
+  // that camera is shown on its own. Deliberately kept out of the saved
+  // display order — following a link must not rearrange the operator's wall.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const focusParam = Number(searchParams.get('camera'))
+  const focusCameraId = Number.isInteger(focusParam) && focusParam > 0 ? focusParam : null
+  const focusCamera = focusCameraId ? availableCameras.find(c => c.id === focusCameraId) : undefined
+  const exitFocus = () => setSearchParams({}, { replace: true })
+  useEffect(() => {
+    if (focusCameraId && camerasLoaded && !focusCamera) {
+      showWarning(t('live.notFound', { id: focusCameraId }))
+      setSearchParams({}, { replace: true })
+    }
+  }, [focusCameraId, camerasLoaded, focusCamera, setSearchParams, showWarning, t])
+
   // Camera display order - array of camera IDs in display sequence
   // This determines which camera appears in which tile position
   const [cameraDisplayOrder, setCameraDisplayOrder] = useState<number[]>(() => {
@@ -230,6 +125,24 @@ export function LiveView() {
   const toggleFillMode = () => setFillMode(prev => {
     const next = !prev
     try { localStorage.setItem('liveview-grid-mode', next ? 'fill' : 'fit') } catch { /* private mode */ }
+    return next
+  })
+
+  // Detection overlay: boxes + label + score from Tier-0, drawn over every
+  // live tile. Per-browser preference like the grid mode — an operator at
+  // the wall who wants a clean picture turns it off once and it stays
+  // off. On by default: the boxes are what shows the AI is working, and a
+  // first look at the Live view should show it.
+  const [showDetections, setShowDetections] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('liveview-detections') !== 'off'
+    } catch {
+      return true
+    }
+  })
+  const toggleDetections = () => setShowDetections(prev => {
+    const next = !prev
+    try { localStorage.setItem('liveview-detections', next ? 'on' : 'off') } catch { /* private mode */ }
     return next
   })
 
@@ -283,7 +196,8 @@ export function LiveView() {
         display_aspect_ratio: cam.display_aspect_ratio,
       }))
       setAvailableCameras(cameraList)
-      
+      setCamerasLoaded(true)
+
       // Update display order: add new cameras, remove deleted ones
       setCameraDisplayOrder(prevOrder => {
         const existingIds = new Set(cameraList.map((c: {id: number}) => c.id))
@@ -401,14 +315,28 @@ export function LiveView() {
     return PREDEFINED_LAYOUTS[currentLayout] || PREDEFINED_LAYOUTS['3x3']
   }
   
-  const layoutDef = getLayoutDef()
+  const layoutDef = focusCameraId ? PREDEFINED_LAYOUTS['1x1'] : getLayoutDef()
+
+  // Which tile each on-screen camera sits on, for the picker's "On tile N".
+  const tileOf = new Map<number, number>()
+  if (!focusCameraId) {
+    layoutDef.tiles.forEach((_, i) => {
+      if (cameraDisplayOrder[i]) tileOf.set(cameraDisplayOrder[i], i)
+    })
+  }
+
+  // Picking a layout leaves the single-camera view.
+  const selectLayout = (id: string) => {
+    if (focusCameraId) exitFocus()
+    setCurrentLayout(id)
+  }
 
   // Fit the grid to the available area while keeping every cell 16:9: the
   // largest cell size is computed from the container's width AND height, so
   // videos fill their tiles edge-to-edge (overlays sit on the feed, not on
   // pillarbox bars) and the toolbar below stays on screen.
   const [gridSize, setGridSize] = useState<{ w: number; h: number } | null>(null)
-  const GRID_GAP = 8 // matches the grid's Tailwind gap-2
+  const GRID_GAP = 1 // matches the grid's Tailwind gap-px
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
@@ -478,18 +406,36 @@ export function LiveView() {
   return (
     // Fixed viewport-height layout: header + grid + toolbar must all fit
     // without a page scrollbar. 3rem = app header, 2rem = main's p-4.
-    <section className="flex flex-col gap-2 h-[calc(100vh-5rem)]">
-      {/* Header doubles as the toolbar — one row of chrome instead of two */}
-      <header className="flex-shrink-0 flex items-center gap-2 bg-[var(--bg-2)] border border-[var(--border)] p-2 text-xs">
-        <h1 className="text-lg font-semibold whitespace-nowrap mr-2">Live View</h1>
+    // One panel in the dashboard widgets' grammar: a slim header, then the
+    // wall owns every remaining pixel, tiles split by hairlines.
+    <section className="flex flex-col h-[calc(100vh-5rem)] border border-[var(--border)] bg-[var(--panel-2)] overflow-hidden">
+      <header className="h-8 shrink-0 flex items-center gap-2 px-2.5 border-b border-[var(--border)] bg-[color-mix(in_oklab,var(--bg-2)_55%,var(--panel-2))]">
+        <Tv size={13} className="text-[var(--text-dim)] shrink-0" aria-hidden="true" />
+        <h1 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--text)] whitespace-nowrap">{t('live.title')}</h1>
+        {focusCameraId ? (
+          <>
+            <span className="text-[11px] text-[var(--text)] truncate min-w-0">{focusCamera?.name ?? ''}</span>
+            <HeadButton onClick={exitFocus} title={t('dashboard.backToWall')}>
+              <Minimize2 size={11} aria-hidden="true" />
+              {t('dashboard.backToWall')}
+            </HeadButton>
+          </>
+        ) : (
+          <span className="hidden sm:inline text-[11px] text-[var(--text-dim)] font-mono tabular-nums truncate min-w-0">
+            {availableCameras.length} {t('dashboard.camerasPlural')} · {layoutDef.name}
+          </span>
+        )}
         <ToolbarContents
-          currentLayout={currentLayout}
-          setCurrentLayout={setCurrentLayout}
+          currentLayout={focusCameraId ? '' : currentLayout}
+          setCurrentLayout={selectLayout}
           availableLayouts={availableLayouts}
           onOpenMenu={() => setMenuOpen(true)}
           onToggleFullscreen={toggleFs}
+          isFullscreen={isFullscreen}
           fillMode={fillMode}
           onToggleFillMode={toggleFillMode}
+          showDetections={showDetections}
+          onToggleDetections={toggleDetections}
         />
       </header>
 
@@ -499,10 +445,10 @@ export function LiveView() {
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
       >
-        <div ref={containerRef} className="flex-1 min-h-0 flex items-center justify-center">
+        <div ref={containerRef} className="flex-1 min-h-0 flex items-center justify-center bg-black">
         <div
           ref={gridRef}
-          className="grid gap-2 relative"
+          className="grid gap-px relative bg-[#1a1f29]"
           style={{
             gridTemplateColumns: `repeat(${layoutDef.gridCols}, minmax(0, 1fr))`,
             gridTemplateRows: `repeat(${layoutDef.gridRows}, minmax(0, 1fr))`,
@@ -517,8 +463,8 @@ export function LiveView() {
           {layoutDef.tiles.map((tile, i) => {
             // cameraDisplayOrder maps tile index → camera id; 0 (or missing)
             // marks an empty tile, so empty slots can sit anywhere.
-            const assignedCameraId = cameraDisplayOrder[i] || null
-            
+            const assignedCameraId = focusCameraId ?? (cameraDisplayOrder[i] || null)
+
             return (
               <div
                 key={i}
@@ -530,16 +476,21 @@ export function LiveView() {
                 <DroppableTile tileId={`tile-${i}`}>
                   <DraggableTile 
                     tileId={`tile-${i}`}
-                    hasCameraAssigned={!!assignedCameraId}
+                    hasCameraAssigned={!focusCameraId && !!assignedCameraId}
                   >
-                    <Tile 
-                      index={i} 
-                      availableCameras={availableCameras} 
-                      assignedCameraId={assignedCameraId} 
-                      onCameraSelected={(cameraId) => assignCameraToTile(i, cameraId)}
+                    <Tile
+                      index={i}
+                      availableCameras={availableCameras}
+                      assignedCameraId={assignedCameraId}
+                      tileOf={tileOf}
+                      onCameraSelected={(cameraId) =>
+                        focusCameraId
+                          ? setSearchParams({ camera: String(cameraId) }, { replace: true })
+                          : assignCameraToTile(i, cameraId)}
                       onCameraAdded={loadCameras}
                       isDragging={activeDragId === `tile-${i}`}
                       canManage={canManageCameras}
+                      showDetections={showDetections}
                     />
                   </DraggableTile>
                 </DroppableTile>
@@ -553,18 +504,21 @@ export function LiveView() {
               <button
                 className="pointer-events-auto flex items-center justify-center w-12 h-5 bg-black/50 hover:bg-black/80 text-white/60 hover:text-white transition-colors"
                 onClick={() => setFsToolbarVisible((v) => !v)}
-                title={fsToolbarVisible ? 'Hide toolbar' : 'Show toolbar'}
+                title={fsToolbarVisible ? t('live.hideToolbar') : t('live.showToolbar')}
               >
                 {fsToolbarVisible ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
               </button>
               {fsToolbarVisible && (
-                <div className="pointer-events-auto self-stretch flex items-center gap-2 bg-[var(--bg-2)] border border-[var(--border)] p-2 text-xs">
+                <div className="pointer-events-auto self-stretch h-8 flex items-center gap-2 px-2.5 bg-[var(--panel-2)] border-t border-[var(--border)]">
                   <ToolbarContents
-                    currentLayout={currentLayout}
-                    setCurrentLayout={setCurrentLayout}
+                    currentLayout={focusCameraId ? '' : currentLayout}
+                    setCurrentLayout={selectLayout}
                     availableLayouts={availableLayouts}
                     onOpenMenu={() => setMenuOpen(true)}
                     onToggleFullscreen={toggleFs}
+                    isFullscreen={isFullscreen}
+                    showDetections={showDetections}
+                    onToggleDetections={toggleDetections}
                     dropUp
                     showFitToggle={false}
                   />
@@ -584,17 +538,17 @@ export function LiveView() {
             const cameraId = cameraDisplayOrder[tileIndex]
             const camera = availableCameras.find(c => c.id === cameraId)
             return (
-              <div className="w-32 bg-[var(--bg-2)] border-2 border-[var(--accent)] shadow-2xl rounded overflow-hidden pointer-events-none">
+              <div className="w-32 bg-[var(--bg-2)] border-2 border-[var(--accent)] shadow-2xl overflow-hidden pointer-events-none">
                 <div className="flex flex-col">
                   {/* Camera name header */}
                   <div className="bg-black/80 px-2 py-1 flex items-center justify-between">
                     <span className="text-[10px] font-medium text-white truncate">
                       {camera?.name || `Camera ${cameraId}`}
                     </span>
-                    <span className="text-[8px] bg-red-600 px-1 rounded text-white">LIVE</span>
+                    <span className="text-[8px] bg-[var(--critical)] px-1 text-white">{t('live.live')}</span>
                   </div>
                   {/* Preview area */}
-                  <div className="h-16 bg-neutral-800 flex items-center justify-center">
+                  <div className="h-16 bg-[var(--panel-2)] flex items-center justify-center">
                     <div className="text-center">
                       <Move size={14} className="mx-auto text-[var(--accent)]" />
                     </div>
@@ -616,11 +570,9 @@ function DroppableTile({ tileId, children }: { tileId: string; children: React.R
   const { setNodeRef, isOver } = useDroppable({ id: tileId })
   
   return (
-    <div 
-      ref={setNodeRef} 
-      className={`h-full transition-all duration-150 ${isOver ? 'ring-2 ring-[var(--accent)] ring-offset-1 ring-offset-[var(--bg)]' : ''}`}
-    >
+    <div ref={setNodeRef} className="h-full relative">
       {children}
+      {isOver && <div className="pointer-events-none absolute inset-0 z-40 ring-2 ring-inset ring-[var(--accent)]" />}
     </div>
   )
 }
@@ -656,25 +608,31 @@ function Tile({
   index, 
   availableCameras, 
   assignedCameraId,
+  tileOf,
   onCameraSelected,
   onCameraAdded,
   isDragging = false,
-  canManage = false
-}: { 
+  canManage = false,
+  showDetections = false,
+}: {
   index: number
   availableCameras: Array<{id: number, name: string, live_online?: boolean | null, display_aspect_ratio?: AspectOverride | null}>
   assignedCameraId?: number | null
+  tileOf: Map<number, number>
   onCameraSelected?: (cameraId: number) => void
   onCameraAdded?: () => void
   isDragging?: boolean
+  showDetections?: boolean
   canManage?: boolean
 }) {
+  const { t } = useTranslation()
   const [cameraId, setCameraId] = useState<number | null>(null)
   const [cameraName, setCameraName] = useState<string>('')
   const [urls, setUrls] = useState<{ whep?: string; hls?: string; token?: string } | null>(null)
   const playerRef = useRef<VideoPlayerHandle>(null)
   const [ptzOpen, setPtzOpen] = useState(false)
   const [showCameraDialog, setShowCameraDialog] = useState(false)
+  const [showPicker, setShowPicker] = useState(false)
 
   // Close the PTZ pad when the tile's camera changes.
   useEffect(() => {
@@ -769,36 +727,43 @@ function Tile({
     setShowCameraDialog(false)
   }
   
-  return (
-    <div className="flex flex-col bg-[var(--bg-2)] border border-[var(--border)] relative overflow-hidden h-full">
-      {/* Video container — fills the grid cell. Width comes from the grid
-          column and height from the 1fr row, so the whole layout fits the
-          viewport; object-contain letter/pillarboxes the stream inside. */}
-      <div className="relative w-full flex-1 min-h-0 overflow-hidden">
-        {!cameraId && <div className="absolute right-2 top-2 z-20 text-[10px] uppercase tracking-wide bg-black/60 px-1 py-0.5">NO CAMERA</div>}
-        {!hasLink && cameraId && <div className="absolute right-2 top-2 z-20 text-[10px] uppercase tracking-wide bg-black/60 px-1 py-0.5">NO LINK</div>}
+  // Label state, in the dashboard wall's terms: the list query refreshes on
+  // its own, so REC and the dot follow the recorder without a remount.
+  const cams = useCameras()
+  const listed = cams.data?.cameras?.find((c) => c.id === cameraId)
+  const rec = listed?.recording_state
+  const state: CamState =
+    effectiveConnectivity === 'offline' ? 'offline'
+      : connectivity === 'online' || (listed?.live_online ?? assignedCamera?.live_online) === true ? 'online'
+        : 'degraded'
 
-        {/* Absolute so the <video>'s intrinsic size (e.g. a 1:1 stream) can't
-            stretch this box — the player sizes itself to the stream's DISPLAY
-            aspect inside it and letter/pillarboxes against the panel bg. */}
-        <div className="absolute inset-0">
-          {hasLink ? (
-            <VideoPlayer
-              key={`${cameraId}-${streamVersion}`}
-              ref={playerRef}
-              mode="live"
-              whepUrl={urls?.whep}
-              hlsUrl={urls?.hls}
-              mediamtxToken={urls?.token}
-              onAuthExpired={handleAuthExpired}
-              title={displayName}
-              preferredStreamType="webrtc"
-              autoPlay
-              muted
-              onSnapshot={handleSnapshot}
-              displayAspectOverride={assignedCamera?.display_aspect_ratio}
-              onTogglePtz={() => setPtzOpen((s) => !s)}
-              ptzActive={ptzOpen}
+  return (
+    <div className="group/tile relative h-full overflow-hidden bg-black">
+      {/* Absolute so the <video>'s intrinsic size (e.g. a 1:1 stream) can't
+          stretch this box — the player sizes itself to the stream's DISPLAY
+          aspect inside it and letterboxes against black. */}
+      <div className="absolute inset-0">
+        {hasLink ? (
+          <VideoPlayer
+            key={`${cameraId}-${streamVersion}`}
+            ref={playerRef}
+            mode="live"
+            chrome="controls"
+            whepUrl={urls?.whep}
+            hlsUrl={urls?.hls}
+            mediamtxToken={urls?.token}
+            onAuthExpired={handleAuthExpired}
+            title={displayName}
+            preferredStreamType="webrtc"
+            autoPlay
+            muted
+            onSnapshot={handleSnapshot}
+            displayAspectOverride={assignedCamera?.display_aspect_ratio}
+            offlineLabel={webcamOfflineLabel(assignedCamera as any)}
+            cameraId={cameraId}
+            showDetections={showDetections}
+            onTogglePtz={() => setPtzOpen((s) => !s)}
+            ptzActive={ptzOpen}
               overlay={ptzOpen && cameraId ? (
                 /* Mini PTZ pad — rendered inside the player so it survives
                    the player element going fullscreen; sits above the
@@ -809,7 +774,7 @@ function Tile({
                     <button className="px-1 py-1 bg-[var(--panel-2)] border border-[var(--border)]" onClick={() => ptzStop(cameraId)}><Square size={12} /></button>
                     <button className="px-1 py-1 bg-[var(--panel-2)] border border-[var(--border)] hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, 0, -0.5)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}>&darr;</button>
                     <button className="px-1 py-1 bg-[var(--panel-2)] border border-[var(--border)] hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, -0.5, 0)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}>&larr;</button>
-                    <button className="px-1 py-1 bg-[var(--panel-2)] border border-[var(--border)] hover:bg-red-500/30" onClick={() => setPtzOpen(false)}>Close</button>
+                    <button className="px-1 py-1 bg-[var(--panel-2)] border border-[var(--border)] hover:bg-[color-mix(in_oklab,var(--danger)_30%,transparent)]" onClick={() => setPtzOpen(false)}>Close</button>
                     <button className="px-1 py-1 bg-[var(--panel-2)] border border-[var(--border)] hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, 0.5, 0)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}>&rarr;</button>
                     <button className="px-1 py-1 bg-[var(--panel-2)] border border-[var(--border)] hover:bg-[var(--accent)]/30" onMouseDown={() => ptzMove(cameraId, 0, 0, 0.5)} onMouseUp={() => ptzStop(cameraId)} onMouseLeave={() => ptzStop(cameraId)}><Plus size={12} /></button>
                     <div />
@@ -817,44 +782,113 @@ function Tile({
                   </div>
                 </div>
               ) : null}
-              className="w-full h-full"
-            />
-          ) : (
-            <div className="w-full h-full flex flex-col items-center justify-center text-xs text-[var(--text-dim)] gap-3">
-              {cameraId ? (
-                <span>No stream available</span>
-              ) : canManage ? (
-                <>
+            className="w-full h-full !bg-black"
+          />
+        ) : (
+          <div className="w-full h-full flex flex-col items-center justify-center gap-2 text-white/45" style={{ background: NO_PICTURE_BG }}>
+            {cameraId ? (
+              <>
+                <CameraOff size={18} />
+                <span className="text-[10px] font-mono uppercase tracking-[0.2em]">{t('live.noStream')}</span>
+              </>
+            ) : canManage ? (
+              <>
+                <button
+                  className="w-9 h-9 border border-dashed border-white/20 hover:border-[var(--accent)] hover:bg-[var(--accent)]/10 transition-colors flex items-center justify-center group"
+                  onClick={() => setShowCameraDialog(true)}
+                  title={t('live.addCamera')}
+                >
+                  <Plus size={16} className="text-white/50 group-hover:text-[var(--accent)]" />
+                </button>
+                <span className="text-[10px] font-mono uppercase tracking-[0.2em]">{t('live.clickToAdd')}</span>
+              </>
+            ) : (
+              <>
+                <span className="text-[10px] font-mono uppercase tracking-[0.2em]">{t('live.noAssigned')}</span>
+                {availableCameras.length > 0 && (
                   <button
-                    className="w-16 h-16 rounded-full bg-[var(--panel)] border-2 border-dashed border-neutral-600 hover:border-[var(--accent)] hover:bg-[var(--accent)]/10 transition-colors flex items-center justify-center group"
-                    onClick={() => setShowCameraDialog(true)}
-                    title="Add Camera"
+                    type="button"
+                    className="text-[10px] px-2 py-1 border border-white/20 hover:border-[var(--accent)] hover:text-[var(--accent)]"
+                    onClick={() => setShowPicker(true)}
                   >
-                    <Plus size={28} className="text-neutral-500 group-hover:text-[var(--accent)]" />
+                    {t('live.chooseCamera')}
                   </button>
-                  <span className="text-neutral-500">Click to add camera</span>
-                </>
-              ) : (
-                <span className="text-neutral-500">No camera assigned</span>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Offline overlay — from the camera list on first paint, then from
-            backend camera_status events. Clears itself (and the player
-            restarts via the key above) when the camera comes back; no user
-            interaction needed. */}
-        {cameraId && effectiveConnectivity === 'offline' && (
-          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 bg-black/70 text-center">
-            <AlertCircle size={24} className="text-yellow-400" />
-            <div className="text-xs uppercase tracking-wide text-yellow-300">Camera offline</div>
-            <div className="text-[11px] text-[var(--text-dim)]">Waiting for camera to reconnect…</div>
+                )}
+              </>
+            )}
           </div>
         )}
-
-
       </div>
+
+      {/* Offline overlay — from the camera list on first paint, then from
+          backend camera_status events. Clears itself (and the player
+          restarts via the key above) when the camera comes back; no user
+          interaction needed. */}
+      {cameraId && effectiveConnectivity === 'offline' && (
+        <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-1.5 text-white/45 text-center" style={{ background: NO_PICTURE_BG }}>
+          <AlertCircle size={18} className="text-[var(--on-video-warn)]" />
+          <div className="text-[10px] font-mono uppercase tracking-[0.2em] text-[var(--on-video-warn)]">{t('live.cameraOffline')}</div>
+          <div className="text-[10px] text-white/35">{t('live.waitingReconnect')}</div>
+        </div>
+      )}
+
+      {/* Label band, as on the dashboard wall: state dot, name, REC — legible
+          over any picture without a solid bar. Above the offline overlay so
+          a dead tile still says which camera it is. */}
+      {cameraId && (
+        <>
+          <div className="pointer-events-none absolute inset-x-0 top-0 z-30 h-9 bg-gradient-to-b from-black/75 to-transparent" />
+          <div className="pointer-events-none absolute left-2 right-2 top-1.5 z-30 flex items-center gap-1.5 text-white">
+            <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: STATE_INK[state] }} aria-hidden="true" />
+            <span className="text-[11px] font-medium truncate [text-shadow:0_1px_2px_rgba(0,0,0,0.9)]">{displayName}</span>
+            <span className="ml-auto shrink-0 flex items-center gap-2 leading-none text-[9px] font-bold tracking-[0.15em] [text-shadow:0_1px_2px_rgba(0,0,0,0.9)]">
+              {!hasLink && <span className="text-[var(--on-video-warn)]">{t('live.noLink')}</span>}
+              {rec === 'recording' ? (
+                <span className="flex items-center gap-1 text-[var(--on-video-danger)]">
+                  <span className="w-1.5 h-1.5 rounded-full bg-[var(--on-video-danger)] animate-pulse" aria-hidden="true" />REC
+                </span>
+              ) : rec === 'stalled' ? (
+                <span className="text-[var(--on-video-warn)]">{t('dashboard.stalled').toUpperCase()}</span>
+              ) : rec === 'degraded' ? (
+                <span className="text-[var(--on-video-danger)]">{t('dashboard.statusDegraded').toUpperCase()}</span>
+              ) : null}
+            </span>
+          </div>
+        </>
+      )}
+
+      {/* Change camera — any tile that has one. Choosing which camera sits
+          where is the viewer's own wall, so it needs no manage permission.
+          Below the label band, clear of the player's bottom controls. */}
+      {cameraId && (
+        <button
+          type="button"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={() => setShowPicker(true)}
+          className="absolute right-1.5 top-8 z-30 p-1.5 bg-black/60 hover:bg-black/80 text-white/90 border border-white/10 opacity-0 group-hover/tile:opacity-100 focus-visible:opacity-100 transition-opacity"
+          title={t('live.changeCamera')}
+          aria-label={t('live.changeCamera')}
+        >
+          <ArrowLeftRight size={12} />
+        </button>
+      )}
+
+      {showPicker && (
+        // The picker renders inside the draggable tile; keep its pointer
+        // events (scrolling the list, say) from starting a tile drag.
+        <div onPointerDown={(e) => e.stopPropagation()}>
+        <CameraPicker
+          cameras={availableCameras}
+          currentId={cameraId}
+          tileOf={tileOf}
+          onPick={(id) => {
+            setShowPicker(false)
+            if (id !== cameraId) onCameraSelected?.(id)
+          }}
+          onClose={() => setShowPicker(false)}
+        />
+        </div>
+      )}
 
       {/* Camera Selection/Add Dialog */}
       {showCameraDialog && (
@@ -895,9 +929,12 @@ function ToolbarContents({
   availableLayouts,
   onOpenMenu,
   onToggleFullscreen,
+  isFullscreen = false,
   dropUp = false,
   fillMode,
   onToggleFillMode,
+  showDetections,
+  onToggleDetections,
   showFitToggle = true,
 }: {
   currentLayout: string
@@ -905,87 +942,219 @@ function ToolbarContents({
   availableLayouts: Array<{ id: string; name: string; tiles: number }>
   onOpenMenu: () => void
   onToggleFullscreen: () => void
+  isFullscreen?: boolean
   /** Layout dropdown direction: up when the bar sits at the bottom (fullscreen). */
   dropUp?: boolean
   fillMode?: boolean
   onToggleFillMode?: () => void
+  showDetections?: boolean
+  onToggleDetections?: () => void
   showFitToggle?: boolean
 }) {
+  const { t } = useTranslation()
+  const navigate = useNavigate()
   const [layoutDropdownOpen, setLayoutDropdownOpen] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
   useClickOutside(dropdownRef, layoutDropdownOpen, () => setLayoutDropdownOpen(false))
 
+  const quick = ['1x1', '2x2', '3x3', '4x4']
+    .map((id) => availableLayouts.find((l) => l.id === id))
+    .filter((l): l is { id: string; name: string; tiles: number } => !!l)
+
   return (
-    <>
-      <button className="inline-flex items-center gap-1 px-2 py-1 bg-[var(--panel-2)] border border-[var(--border)]" onClick={onOpenMenu}>
-        <Grid size={14} /> Menu
-      </button>
-      <div className="ml-auto flex items-center gap-1">
-        {/* Quick layout buttons — collapse into the dropdown below md */}
-        {['1x1', '2x2', '3x3', '4x4'].map((layoutId) => {
-          const available = availableLayouts.find(l => l.id === layoutId)
-          if (!available) return null
-          return (
-            <button
-              key={layoutId}
-              className={`px-2 py-1 border hidden md:inline-flex ${currentLayout === layoutId ? 'bg-[var(--accent)]/80 border-[var(--accent)]' : 'bg-[var(--panel-2)] border-[var(--border)]'}`}
-              onClick={() => setCurrentLayout(layoutId)}
-            >
-              {available.name}
-            </button>
-          )
-        })}
-        {/* More layouts dropdown */}
-        <div className="relative" ref={dropdownRef}>
-          <button
-            className="px-2 py-1 bg-[var(--panel-2)] border border-[var(--border)] inline-flex items-center gap-1"
-            onClick={() => setLayoutDropdownOpen(!layoutDropdownOpen)}
-          >
-            <Grid size={14} />
-            <ChevronDown size={12} />
-          </button>
-          {layoutDropdownOpen && (
-            <div className={`absolute right-0 z-50 bg-[var(--panel)] border border-[var(--border)] shadow-lg min-w-[160px] ${dropUp ? 'bottom-full mb-1' : 'top-full mt-1'}`}>
-              {availableLayouts.map(layout => (
-                <button
-                  key={layout.id}
-                  className={`w-full text-left px-3 py-2 text-xs hover:bg-[var(--panel-2)] ${currentLayout === layout.id ? 'bg-[var(--accent)]/20 text-[var(--accent)]' : ''}`}
-                  onClick={() => { setCurrentLayout(layout.id); setLayoutDropdownOpen(false) }}
-                >
-                  {layout.name} ({layout.tiles})
-                </button>
-              ))}
-              <div className="border-t border-[var(--border)] px-3 py-2">
-                <button
-                  className="text-xs text-[var(--text-dim)] hover:text-[var(--accent)]"
-                  onClick={() => {
-                    setLayoutDropdownOpen(false)
-                    ;(window as any).routerNavigate?.('/settings/more-settings/window-settings')
-                  }}
-                >
-                  ⚙ Configure Layouts...
-                </button>
-              </div>
-            </div>
-          )}
+    <div className="ml-auto flex items-center gap-1 shrink-0">
+      {/* Start a camera tour on this screen (views/TourView). */}
+      <ToursMenu dropUp={dropUp} />
+      {/* Quick layouts — collapse into the dropdown below md */}
+      {quick.length > 0 && (
+        <div className="hidden md:flex">
+          <MiniSegment
+            label={t('live.layouts')}
+            value={currentLayout}
+            options={quick.map((l) => ({ value: l.id, label: l.name }))}
+            onChange={setCurrentLayout}
+          />
         </div>
-        {/* Fit/Fill toggle (hidden in fullscreen, which always fills) */}
-        {showFitToggle && onToggleFillMode && (
-          <button
-            className={`px-2 py-1 border inline-flex items-center gap-1 ${fillMode ? 'bg-[var(--accent)]/80 border-[var(--accent)]' : 'bg-[var(--panel-2)] border-[var(--border)]'}`}
-            onClick={onToggleFillMode}
-            title={fillMode ? 'Fill: grid uses all available space' : 'Fit: strict 16:9 cells, centered'}
-          >
-            {fillMode ? <Expand size={14} /> : <Scan size={14} />}
-            <span className="hidden sm:inline">{fillMode ? 'Fill' : 'Fit'}</span>
-          </button>
+      )}
+      {/* More layouts dropdown */}
+      <div className="relative" ref={dropdownRef}>
+        <HeadButton
+          onClick={() => setLayoutDropdownOpen(!layoutDropdownOpen)}
+          aria-haspopup="menu"
+          aria-expanded={layoutDropdownOpen}
+          aria-label={t('live.layouts')}
+          title={t('live.layouts')}
+        >
+          <LayoutGrid size={12} />
+          <ChevronDown size={11} />
+        </HeadButton>
+        {layoutDropdownOpen && (
+          <div className={`absolute right-0 z-50 bg-[var(--panel)] border border-[var(--border)] shadow-lg min-w-[160px] ${dropUp ? 'bottom-full mb-1' : 'top-full mt-1'}`}>
+            {availableLayouts.map(layout => (
+              <button
+                key={layout.id}
+                className={`w-full text-left px-3 py-1.5 text-xs hover:bg-[var(--panel-2)] ${currentLayout === layout.id ? 'bg-[var(--accent)]/20 text-[var(--accent)]' : ''}`}
+                onClick={() => { setCurrentLayout(layout.id); setLayoutDropdownOpen(false) }}
+              >
+                {layout.name} <span className="text-[var(--text-dim)] font-mono">({layout.tiles})</span>
+              </button>
+            ))}
+            <div className="border-t border-[var(--border)] px-3 py-1.5">
+              <button
+                className="text-xs text-[var(--text-dim)] hover:text-[var(--accent)]"
+                onClick={() => {
+                  setLayoutDropdownOpen(false)
+                  navigate('/settings/more-settings/window-settings')
+                }}
+              >
+                ⚙ {t('live.configureLayouts')}
+              </button>
+            </div>
+          </div>
         )}
-        <button className="px-2 py-1 bg-[var(--panel-2)] border border-[var(--border)] inline-flex items-center gap-1" onClick={onToggleFullscreen} title="Fullscreen">
-          <Maximize size={14} />
-          <span className="hidden sm:inline">Fullscreen</span>
-        </button>
       </div>
-    </>
+      <span className="w-px h-4 bg-[var(--border)] mx-0.5" aria-hidden="true" />
+      {/* Fit/Fill toggle (hidden in fullscreen, which always fills) */}
+      {showFitToggle && onToggleFillMode && (
+        <HeadButton active={fillMode} onClick={onToggleFillMode} title={fillMode ? t('live.fill') : t('live.fit')}>
+          {fillMode ? <Expand size={12} /> : <Scan size={12} />}
+          <span className="hidden sm:inline">{fillMode ? t('live.fill') : t('live.fit')}</span>
+        </HeadButton>
+      )}
+      {/* Detection overlay on/off — icon only, lit when on like Fit/Fill;
+          the tooltip says what it draws. */}
+      {onToggleDetections && (
+        <HeadButton
+          active={showDetections}
+          onClick={onToggleDetections}
+          aria-pressed={showDetections}
+          aria-label={t('live.boxes')}
+          title={showDetections
+            ? `${t('live.boxes')}: on — tracked objects are outlined with label and confidence`
+            : `${t('live.boxes')}: off — outline tracked objects with label and confidence`}
+        >
+          <ScanEye size={12} />
+        </HeadButton>
+      )}
+      <HeadButton
+        onClick={onToggleFullscreen}
+        aria-label={isFullscreen ? t('video.exitFullscreen') : t('live.fullscreen')}
+        title={isFullscreen ? t('video.exitFullscreen') : t('live.fullscreen')}
+      >
+        {isFullscreen ? <Minimize size={12} /> : <Maximize size={12} />}
+      </HeadButton>
+      <HeadButton onClick={onOpenMenu} title={t('live.menu')} aria-label={t('live.menu')}>
+        <MenuIcon size={12} />
+      </HeadButton>
+    </div>
+  )
+}
+
+/** A header-sized button, matching the dashboard's MiniSegment: lit when active. */
+function HeadButton({ active = false, className, children, ...rest }: React.ButtonHTMLAttributes<HTMLButtonElement> & { active?: boolean }) {
+  return (
+    <button
+      type="button"
+      {...rest}
+      className={clsx(
+        'h-5 px-1.5 inline-flex items-center gap-1 text-[10px] leading-none border',
+        active
+          ? 'border-[var(--accent)] bg-[var(--accent)] text-white'
+          : 'border-[var(--border)] text-[var(--text-dim)] hover:text-[var(--text)] hover:bg-[var(--panel)]',
+        className,
+      )}
+    >
+      {children}
+    </button>
+  )
+}
+
+/**
+ * Pick the camera for one tile from every camera there is — the way to put a
+ * camera on screen when there are more cameras than tiles. Choosing one that
+ * is already on another tile swaps the two (see assignCameraToTile).
+ */
+function CameraPicker({
+  cameras,
+  currentId,
+  tileOf,
+  onPick,
+  onClose,
+}: {
+  cameras: Array<{ id: number; name: string; live_online?: boolean | null }>
+  currentId: number | null
+  tileOf: Map<number, number>
+  onPick: (cameraId: number) => void
+  onClose: () => void
+}) {
+  const { t } = useTranslation()
+  const [query, setQuery] = useState('')
+  const q = query.trim().toLowerCase()
+  const list = useMemo(
+    () =>
+      cameras
+        .filter((c) => !q || c.name.toLowerCase().includes(q) || String(c.id) === q)
+        .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true })),
+    [cameras, q],
+  )
+
+  return (
+    <Modal open title={t('live.chooseCamera')} onClose={onClose} widthClassName="w-[420px] max-w-[92vw]">
+      <div className="relative">
+        <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--text-dim)]" aria-hidden="true" />
+        <input
+          type="search"
+          autoFocus
+          className="w-full bg-[var(--bg-2)] border border-[var(--border)] focus:border-[var(--accent)] outline-none pl-8 pr-3 py-1.5 text-sm"
+          placeholder={t('cameraDialog.search')}
+          aria-label={t('cameraDialog.search')}
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && list.length > 0) {
+              e.preventDefault()
+              onPick(list[0].id)
+            }
+          }}
+        />
+      </div>
+      <div className="mt-2 max-h-[55vh] overflow-y-auto space-y-px">
+        {list.length === 0 ? (
+          <div className="text-center text-sm text-[var(--text-dim)] py-6">{t('catalog.noResults')}</div>
+        ) : (
+          list.map((c) => {
+            const tile = tileOf.get(c.id)
+            const current = c.id === currentId
+            return (
+              <button
+                key={c.id}
+                type="button"
+                aria-current={current || undefined}
+                onClick={() => onPick(c.id)}
+                className={clsx(
+                  'w-full text-left px-2.5 py-1.5 flex items-center gap-2 text-sm border',
+                  current
+                    ? 'border-[var(--accent)] bg-[var(--accent)]/10'
+                    : 'border-transparent hover:bg-[var(--panel)] hover:border-[var(--border)]',
+                )}
+              >
+                <span
+                  className="w-1.5 h-1.5 rounded-full shrink-0"
+                  style={{ background: STATE_INK[c.live_online === false ? 'offline' : c.live_online ? 'online' : 'degraded'] }}
+                  aria-hidden="true"
+                />
+                <span className="truncate">{c.name}</span>
+                {tile !== undefined && (
+                  <span className="ml-auto shrink-0 text-[10px] font-mono text-[var(--text-dim)]">
+                    {t('live.onTile', { n: tile + 1 })}
+                  </span>
+                )}
+              </button>
+            )
+          })
+        )}
+      </div>
+    </Modal>
   )
 }
 
@@ -1001,51 +1170,58 @@ function MenuOverlay({ onClose }: { onClose: () => void }) {
     { icon: <Power />, label: 'Shutdown', action: 'shutdown' },
   ]
   return (
-    <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center">
-      <div className="bg-[var(--panel)] border border-[var(--accent)]/60 p-4 w-[520px] max-w-[90vw]">
-        <div className="flex items-center mb-3">
-          <div className="text-sm font-semibold">Menu</div>
-          <button className="ml-auto px-2 py-1 bg-[var(--panel-2)] border border-neutral-700 inline-flex items-center gap-1" onClick={onClose}>
-            <X size={14} /> Close
-          </button>
-        </div>
-        <div className="grid grid-cols-3 gap-3">
-          {items.map((it) => (
-            <MenuItem key={it.label} item={it as any} onClose={onClose} />
-          ))}
-        </div>
+    <Modal open title="Menu" onClose={onClose} widthClassName="w-[520px] max-w-[92vw]">
+      <div className="grid grid-cols-3 gap-3">
+        {items.map((it) => (
+          <MenuItem key={it.label} item={it as any} onClose={onClose} />
+        ))}
       </div>
-    </div>
+    </Modal>
   )
 }
 
 function MenuItem({ item, onClose }: { item: { icon: React.ReactNode; label: string; action: string; highlight?: boolean }, onClose: () => void }) {
-  const navigate = (window as any).routerNavigate as ((path: string) => void) | undefined
+  const navigate = useNavigate()
+  const { showSuccess, showError } = useSnackbar()
+  const confirm = useConfirm()
   async function handleClick() {
     switch (item.action) {
       case 'live':
-        navigate && navigate('/live')
+        navigate('/live')
         break
       case 'export':
-        navigate && navigate('/playback')
+        navigate('/playback/sync')
         break
+      // /settings/webrtc was never a tab key; this is the real first tab.
       case 'settings':
-        navigate && navigate('/settings/webrtc')
+        navigate('/settings/camera-config/device')
         break
       case 'hdd':
-        navigate && navigate('/settings/media-source')
+        navigate('/settings/media-source')
         break
       case 'image':
-        navigate && navigate('/ai-engine')
+        navigate('/search')
+        break
+      // These two tiles did nothing at all before: no case handled them.
+      case 'manual':
+        navigate('/support')
+        break
+      case 'camera':
+        navigate('/cameras')
         break
       case 'shutdown':
         try {
-          const ok = window.confirm('Are you sure you want to shutdown the system?')
+          const ok = await confirm({
+            title: 'Shut down the system?',
+            message: 'Live view, recording and every app stop until the machine is powered on again.',
+            confirmLabel: 'Shut down',
+            danger: true,
+          })
           if (!ok) break
           await apiService.systemShutdown()
-          alert('Shutdown requested. The system may go offline shortly.')
+          showSuccess('Shutdown requested. The system may go offline shortly.')
         } catch (e: any) {
-          alert(e?.message || 'Failed to request shutdown')
+          showError(e?.message || 'Failed to request shutdown')
         }
         break
       default:
@@ -1054,8 +1230,8 @@ function MenuItem({ item, onClose }: { item: { icon: React.ReactNode; label: str
     onClose()
   }
   return (
-    <button onClick={handleClick} className={`flex flex-col items-center gap-2 py-3 bg-[var(--bg-2)] border ${item.highlight ? 'border-[var(--accent)]' : 'border-neutral-700'} hover:border-[var(--accent)]`}>
-      <div className="w-10 h-10 flex items-center justify-center bg-[var(--panel-2)] border border-neutral-700">
+    <button onClick={handleClick} className={`flex flex-col items-center gap-2 py-3 bg-[var(--bg-2)] border ${item.highlight ? 'border-[var(--accent)]' : 'border-[var(--border)]'} hover:border-[var(--accent)]`}>
+      <div className="w-10 h-10 flex items-center justify-center bg-[var(--panel-2)] border border-[var(--border)]">
         {item.icon}
       </div>
       <span className="text-xs">{item.label}</span>

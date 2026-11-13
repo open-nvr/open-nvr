@@ -51,14 +51,29 @@ from models import (
 from routers import (
     ai_detection_results,
     ai_model_management,
+    adapters_catalog,
     ai_models,
+    alerts_inbox,
+    api_tokens as api_tokens_router,
+    zones as zones_router,
+    masks as masks_router,
+    detection_settings as detection_settings_router,
+    evidence_escalation as evidence_escalation_router,
+    live_state as live_state_router,
+    media as media_router,
+    site_mode as site_mode_router,
+    entities as entities_router,
+    search as search_router,
     apps,
     audit_logs,
     auth,
+    mfa as mfa_router,
     camera_config,
     camera_settings,
     cameras,
+    app_platform,
     internal_camera_agent,
+    search,
     timeline_events,
     cloud as cloud_router,
     cloud_inference,
@@ -72,10 +87,13 @@ from routers import (
     mediamtx_admin,
     mediamtx_hooks,
     network as network_router,
+    guardscan as guardscan_router,
     occupancy as occupancy_router,
     onvif as onvif_router,
     orphaned_recordings,
     password_policy,
+    sso,
+    auth_settings,
     permissions,
     recordings,
     roles,
@@ -85,10 +103,16 @@ from routers import (
     suricata_logs,
     suricata_stream,
     system,
+    system_update,
+    tours,
     users,
     webrtc,
     window_settings,
     device_firewall,
+    workflows as workflows_router,
+    approvals as approvals_router,
+    host_agent as host_agent_router,
+    webcams as webcams_router,
 )
 from scripts.init_db import create_initial_data
 from services.mediamtx_admin_service import MediaMtxAdminService as _MtxAdmin
@@ -96,7 +120,7 @@ from services.mediamtx_admin_service import MediaMtxAdminService as _MtxAdmin
 # The OpenNVR release this build is cut from. Surfaced in /health and in the
 # OpenAPI schema, and quoted in bug reports (see SECURITY.md) — so it tracks the
 # git tag, not the API shape. Bump it in the release commit.
-__version__ = "0.1.4"
+__version__ = "0.1.11"
 
 # FFmpeg-based RTSP proxy and recorder removed
 
@@ -117,7 +141,8 @@ async def lifespan(app: FastAPI):
         posture = current_posture()
         main_logger.info(
             f"Boot policy: deployment_mode={posture['deployment_mode']} "
-            f"ai_sovereignty={posture['ai_sovereignty']}"
+            f"ai_sovereignty={posture['ai_sovereignty']} "
+            f"detection_overlay={'on' if settings.detection_overlay_enabled else 'OFF'}"
         )
         audit_boot_posture()
         # Warn loudly if the retired ALLOW_REMOTE_MEDIAMTX env var is still set
@@ -156,6 +181,49 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         main_logger.error(f"Camera uuid backfill failed: {e}", exc_info=True)
 
+    # Integration secrets written before they were encrypted at rest are
+    # sealed on the next write; do that write now, once, so no plain
+    # password outlives the upgrade.
+    try:
+        db = SessionLocal()
+        try:
+            import json as _json
+
+            from sqlalchemy import text as _text
+            from sqlalchemy.orm.attributes import flag_modified
+
+            from core.sealed_json import needs_sealing
+            from models import Integration as _Integration
+            plain_ids = []
+            for iid, raw in db.execute(_text("SELECT id, config FROM integrations")).all():
+                cfg = _json.loads(raw) if isinstance(raw, str) else raw
+                if needs_sealing(cfg):
+                    plain_ids.append(iid)
+            for row in db.query(_Integration).filter(_Integration.id.in_(plain_ids)).all():
+                flag_modified(row, "config")
+            if plain_ids:
+                db.commit()
+                main_logger.info(f"Sealed secrets in {len(plain_ids)} integration config(s)")
+        finally:
+            db.close()
+    except Exception as e:
+        main_logger.error(f"Integration secret sealing failed: {e}", exc_info=True)
+
+    # Skills follow apps: retire the camera page's rows, give all-cameras
+    # apps their picks, re-project every camera (derived skills from
+    # manifests registered before this code exist only after this).
+    try:
+        db = SessionLocal()
+        try:
+            from services.skill_assignments import reconcile_on_startup
+            stats = reconcile_on_startup(db)
+            db.commit()
+            main_logger.info(f"Skill assignments reconciled: {stats}")
+        finally:
+            db.close()
+    except Exception as e:
+        main_logger.error(f"Skill assignment reconcile failed: {e}", exc_info=True)
+
     # Seed defaults (roles, permissions, admin user) and ensure admin user exists
     try:
         db = SessionLocal()
@@ -174,7 +242,23 @@ async def lifespan(app: FastAPI):
                     .filter(_User.username == settings.default_admin_username)
                     .first()
                 )
-                if not admin_user:
+                # Only re-seed when nobody can administer the system. Until
+                # #632 compose never passed DEFAULT_ADMIN_USERNAME, so an
+                # install may hold a configured name that never matched its
+                # real admin; creating it now would add a second, unclaimed
+                # superuser and send the UI back to first-time setup.
+                has_superuser = (
+                    db.query(_User.id)
+                    .filter(_User.is_superuser.is_(True), _User.is_active.is_(True))
+                    .first()
+                    is not None
+                )
+                if not admin_user and has_superuser:
+                    main_logger.info(
+                        f"Configured admin {settings.default_admin_username!r} "
+                        "not found, but an active superuser exists; not creating it."
+                    )
+                elif not admin_user:
                     main_logger.info(
                         "Admin user not found, creating default admin user..."
                     )
@@ -210,30 +294,35 @@ async def lifespan(app: FastAPI):
 
             # Idempotently seed permissions added in later releases (e.g.
             # apps.install); the full seed above only runs on an empty table.
+            # Grants that preserve behaviour happen only on the creating boot
+            # (see services/permission_catalog.py).
             try:
-                from models import Permission as _Permission2
+                from services.permission_catalog import seed_new_permissions
 
-                for _pname, _pdesc in (
-                    (
-                        "apps.install",
-                        "Install/uninstall curated App Store apps",
-                    ),
-                ):
-                    if (
-                        db.query(_Permission2)
-                        .filter(_Permission2.name == _pname)
-                        .first()
-                        is None
-                    ):
-                        db.add(_Permission2(name=_pname, description=_pdesc))
-                        db.commit()
-                        main_logger.info(
-                            "Seeded new permission %r (upgrade path)", _pname
-                        )
+                for _pname, _granted, _source in seed_new_permissions(db):
+                    main_logger.info(
+                        "Seeded new permission %r (upgrade path)%s", _pname,
+                        f"; granted to {_granted} role(s) holding {_source}"
+                        if _source else "",
+                    )
             except Exception:
                 main_logger.warning(
                     "Upgrade-path permission seeding failed", exc_info=True
                 )
+                # The rest of startup reuses this session; a failed flush
+                # would otherwise leave it unusable (PendingRollbackError).
+                db.rollback()
+
+            # Apps bus: (re)render the per-app NATS users file so the
+            # nats-apps leaf server knows every app that holds a key —
+            # a fresh volume, a restored DB or a crash mid-write all
+            # converge here. No-op when NATS_USERS_CONF is unset.
+            try:
+                from services.nats_users import write_users_conf
+
+                write_users_conf(db)
+            except Exception:
+                main_logger.warning("apps-bus users file not written", exc_info=True)
 
             # If any user still needs first-time setup, arm a one-time token and
             # print it to stdout; it gates /auth/first-time-setup so nobody can
@@ -306,25 +395,16 @@ async def lifespan(app: FastAPI):
                     provisioned_count = 0
                     failed_count = 0
 
+                    from services.mediamtx_startup_service import (
+                        MediaMtxStartupService as _MtxStartup,
+                    )
+
                     for cfg, cam in rows:
-                        payload = {
-                            # The camera row wins over the config row. cfg.source_url
-                            # is a snapshot taken when the camera was first
-                            # provisioned; reading it here is what used to revert an
-                            # edited RTSP URL on every restart. Keeping it as the
-                            # fallback lets this loop self-heal rows that drifted
-                            # before the edit path started syncing it — no migration.
-                            "source_url": cam.rtsp_url or cfg.source_url,
-                            # Without this key _provision_substream falls back to
-                            # deriving the sub URL from vendor convention, silently
-                            # discarding an operator-stored one on every restart.
-                            "substream_url": cam.substream_url,
-                            "rtsp_transport": cfg.rtsp_transport,
-                            "recording_enabled": cfg.recording_enabled,
-                            "recording_path": cfg.recording_path,
-                            "recording_segment_seconds": cfg.recording_segment_seconds,
-                        }
                         try:
+                            # Inside the try: a webcam's config mints a publish
+                            # token, and one camera's failure must not stop the
+                            # rest from being provisioned.
+                            payload = _MtxStartup.boot_path_config(cam, cfg)
                             # upsert, not add: when MediaMTX outlives a server
                             # restart every path already exists, and a plain add
                             # leaves each one on whatever config it had.
@@ -361,6 +441,15 @@ async def lifespan(app: FastAPI):
                     main_logger.info(
                         f"[MTX] Background provisioning completed: {provisioned_count} success, {failed_count} failed"
                     )
+                    # Cameras with no substream stored: find one (ONVIF, then
+                    # the vendor rule, each probed) and provision its -sub
+                    # path, so Tier-0 detects on the cheap stream without
+                    # anyone revisiting cameras added before this existed or
+                    # while they were offline. Background, a few at a time.
+                    from core.background_tasks import spawn_background as _spawn
+                    from services.substream_sweep import run_startup_sweep
+
+                    _spawn(run_startup_sweep(), name="substream-discovery")
 
                 finally:
                     db.close()
@@ -375,11 +464,40 @@ async def lifespan(app: FastAPI):
             main_logger.error(
                 f"[MTX] Background provisioning failed: {e}", exc_info=True
             )
+        finally:
+            # Whatever provisioning did (ran, was disabled, or failed):
+            # reschedule automatic recording resumes (HA-108) and resume the
+            # overdue ones, so a restart never turns "pause for an hour"
+            # into "pause forever".
+            try:
+                from services.recording_pause import restore_on_startup
+
+                await restore_on_startup()
+            except Exception as e:  # noqa: BLE001
+                main_logger.error(f"[MTX] recording-pause restore failed: {e}",
+                                  exc_info=True)
+            # Cameras whose detection source is their own analytics: the
+            # event subscriptions are asyncio tasks and need re-arming.
+            try:
+                from services import native_analytics
+
+                await native_analytics.restore_on_startup()
+            except Exception as e:
+                main_logger.error(f"native analytics restore failed: {e}", exc_info=True)
 
     # Start background provisioning task
     import asyncio
 
-    asyncio.create_task(background_mediamtx_provisioning())
+    # Fire-and-forget tasks MUST go through spawn_background: a bare
+    # asyncio.create_task() whose return value is dropped is only weakly
+    # referenced by the loop, and the GC really does destroy such tasks
+    # mid-flight (field incident: the alerts-inbox consumer was killed
+    # one second after subscribing — "coroutine ignored GeneratorExit" —
+    # and the site lost its alarm chain until the next restart).
+    from core.background_tasks import run_consumer_forever, spawn_background
+
+    spawn_background(background_mediamtx_provisioning(),
+                     name="mediamtx-provisioning")
 
     # Start retention cleanup scheduler
     async def background_retention_cleanup():
@@ -409,7 +527,8 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             main_logger.error(f"Retention cleanup scheduler failed: {e}", exc_info=True)
 
-    asyncio.create_task(background_retention_cleanup())
+    spawn_background(background_retention_cleanup(),
+                     name="retention-cleanup")
 
     # Disk-pressure loop: a near-full disk cannot wait for the daily sweep —
     # MediaMTX simply fails to write once space runs out. Every 5 minutes:
@@ -453,7 +572,7 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             main_logger.error(f"Disk pressure scheduler failed: {e}", exc_info=True)
 
-    asyncio.create_task(background_disk_pressure())
+    spawn_background(background_disk_pressure(), name="disk-pressure")
 
     # Host resource monitor: CPU/RAM/disk sampling + edge-triggered alerts
     # (system_events + live bus). 15s cadence; work runs in a worker thread.
@@ -477,7 +596,13 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             main_logger.error(f"System monitor scheduler failed: {e}", exc_info=True)
 
-    asyncio.create_task(background_system_monitor())
+    spawn_background(background_system_monitor(), name="system-monitor")
+
+    # OpenNVR updates: results and newly found versions become host-level
+    # alerts like the monitor's (services/update_notifier.py).
+    from services.update_notifier import run_forever as _update_notifier
+
+    spawn_background(_update_notifier(), name="update-notifier")
 
     # Recording-health watchdog: surfaces "camera silently stopped recording"
     # as a camera event within minutes instead of being discovered days later.
@@ -512,7 +637,33 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             main_logger.error(f"Recording watchdog scheduler failed: {e}", exc_info=True)
 
-    asyncio.create_task(background_recording_watchdog())
+    spawn_background(background_recording_watchdog(),
+                     name="recording-watchdog")
+
+    # Apps-bus link watchdog: the apps bus is a leaf of the platform bus
+    # and every app alert crosses that one link. When it is down both
+    # servers look healthy and alerts just stop — so core checks
+    # nats-apps' /leafz itself and raises an inbox alert if the link is
+    # gone for more than a couple of minutes.
+    async def background_apps_bus_watch():
+        try:
+            from services import apps_bus_watch
+
+            url = apps_bus_watch.monitor_url(settings.nats_apps_url,
+                                             settings.nats_apps_monitor_url)
+            if not url:
+                return
+            await asyncio.sleep(30)  # let nats-apps come up and dial the leaf
+            while True:
+                try:
+                    await asyncio.to_thread(apps_bus_watch.check_once, url)
+                except Exception as e:
+                    main_logger.error(f"Apps-bus watch failed: {e}", exc_info=True)
+                await asyncio.sleep(apps_bus_watch.CHECK_INTERVAL_S)
+        except Exception as e:
+            main_logger.error(f"Apps-bus watch scheduler failed: {e}", exc_info=True)
+
+    spawn_background(background_apps_bus_watch(), name="apps-bus-watch")
 
     # Recordings-index reconciler: startup backfill of the recordings table
     # from the on-disk archive, then a periodic recent-window convergence
@@ -526,33 +677,229 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             main_logger.error(f"Recording reconciler failed: {e}", exc_info=True)
 
-    asyncio.create_task(background_recording_reconciler())
+    spawn_background(background_recording_reconciler(),
+                     name="recording-reconciler")
 
     # RFC-0002 Phase 0: consume plate.recognized.v1 from the bus and write
     # plate_text onto timeline rows — producer-independent (EVENT_CONTRACTS.md
     # convergence). No NATS_URL / no nats-py degrades to the enrichment
     # fallback's synchronous writes; the loop itself never raises.
     async def background_plate_event_consumer():
-        try:
+        async def _loop():
             from services.plate_event_consumer import run_consumer_loop
 
             await run_consumer_loop()
-        except Exception as e:
-            main_logger.error(f"Plate event consumer failed: {e}", exc_info=True)
 
-    asyncio.create_task(background_plate_event_consumer())
+        await run_consumer_forever("Plate event consumer", _loop)
+
+    spawn_background(background_plate_event_consumer(),
+                     name="plate-event-consumer")
 
     # Occupancy history: consume occupancy.changed.v1 samples into the
     # history store (EVENT_CONTRACTS.md). Same best-effort posture.
     async def background_occupancy_event_consumer():
-        try:
+        async def _loop():
             from services.occupancy_event_consumer import run_consumer_loop
 
             await run_consumer_loop()
-        except Exception as e:
-            main_logger.error(f"Occupancy consumer failed: {e}", exc_info=True)
 
-    asyncio.create_task(background_occupancy_event_consumer())
+        await run_consumer_forever("Occupancy consumer", _loop)
+
+    spawn_background(background_occupancy_event_consumer(),
+                     name="occupancy-event-consumer")
+
+    # Agentic Workflows (RFC #620): app alerts start the workflows they
+    # trigger. Same best-effort posture as the consumers above.
+    async def background_workflow_engine():
+        from workflows.consumer import run_consumer_loop, start_engine
+
+        engine = await asyncio.to_thread(start_engine)
+        from workflows.consumer import sweep_timeouts
+
+        spawn_background(sweep_timeouts(engine), name="workflow-approval-timeouts")
+
+        async def _loop():
+            await run_consumer_loop(engine)
+
+        await run_consumer_forever("Workflow engine", _loop)
+
+    spawn_background(background_workflow_engine(), name="workflow-engine")
+
+    # Entry screenings: consume screening.completed.v1 into the
+    # compliance ledger. Every screening, not only the ones that
+    # alerted — a compliance rate needs its denominator.
+    async def background_guardscan_event_consumer():
+        async def _loop():
+            from services.guardscan_event_consumer import run_consumer_loop
+
+            await run_consumer_loop()
+
+        await run_consumer_forever("Guard screening consumer", _loop)
+
+    spawn_background(background_guardscan_event_consumer(),
+                     name="guardscan-event-consumer")
+
+    # Live detection overlay: bridge Tier-0 tracks (NATS) onto the
+    # in-process bus so /events/ws can stream normalized boxes to the
+    # browser. Same best-effort posture: no bus → no overlay, never a
+    # failed boot.
+    async def background_tier0_track_consumer():
+        async def _loop():
+            from services.tier0_track_consumer import run_consumer_loop
+
+            await run_consumer_loop()
+
+        await run_consumer_forever("Tier-0 track consumer", _loop)
+
+    spawn_background(background_tier0_track_consumer(),
+                     name="tier0-track-consumer")
+
+    # Live state (HA-110): Tier-0 sends nothing when nothing is detected,
+    # so a quiet camera is noticed by this sweeper, not by a frame.
+    async def background_live_state_sweeper():
+        async def _loop():
+            from services.tier0_track_consumer import run_live_state_sweeper
+
+            await run_live_state_sweeper()
+
+        await run_consumer_forever("live-state sweeper", _loop)
+
+    spawn_background(background_live_state_sweeper(), name="live-state-sweeper")
+
+    # Server-described entities (HA-114): one resolver for the site.
+    async def background_entity_states():
+        async def _loop():
+            from services.entity_state_publisher import run_forever
+
+            await run_forever()
+
+        await run_consumer_forever("entity-state publisher", _loop)
+
+    spawn_background(background_entity_states(), name="entity-state-publisher")
+
+    # The camera graph (journey_transition_learning, on by default).
+    # learn_transitions had no caller outside its tests, so
+    # camera_transitions was empty on every deployment and every
+    # cross-camera route fell back to "no learned route between these
+    # cameras yet" — scored on time alone, which is the weakest answer
+    # the feature can give. Nothing about it was broken; nobody had ever
+    # run it.
+    #
+    # Nightly and FULL (never `since`): a windowed scan writes that
+    # window's counts over the totals, and only a full scan may prune an
+    # edge the site no longer supports. In a worker thread, because it is
+    # a synchronous scan of every plate and face claim and must not block
+    # the event loop — the same rule the retention sweep above follows.
+    async def background_transition_learning():
+        try:
+            from core.config import settings
+
+            if not getattr(settings, "journey_transition_learning", True):
+                return
+
+            def _learn() -> int:
+                from core.database import SessionLocal
+                from services.journey import learn_transitions
+
+                db = SessionLocal()
+                try:
+                    return learn_transitions(db)
+                finally:
+                    db.close()
+
+            # After the first enrichment has had a chance to write some
+            # claims; an empty first pass would prune a graph learned
+            # before the restart.
+            await asyncio.sleep(900)
+            while True:
+                try:
+                    edges = await asyncio.to_thread(_learn)
+                    main_logger.info(
+                        "Camera graph relearned: %s edges", edges)
+                except Exception as e:  # noqa: BLE001
+                    main_logger.error(f"Camera graph learning failed: {e}",
+                                      exc_info=True)
+                await asyncio.sleep(24 * 60 * 60)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            main_logger.error(f"Camera graph scheduler failed: {e}",
+                              exc_info=True)
+
+    spawn_background(background_transition_learning(),
+                     name="camera-graph-learning")
+
+    # Back catalogue (off by default; the switch is Footage Search →
+    # Configure → Backfill history, EVENTS_ENRICHMENT_BACKFILL=true forces
+    # it on; the loop below waits until one of them says so): the two
+    # enrichers run off the INGEST path, so every visit recorded before
+    # they shipped has a row in events and nothing in event_text or
+    # visit_descriptors — and the first search an operator runs after
+    # upgrading is against yesterday, which returns nothing. This walks
+    # history newest-first and hands each visit to the SAME enricher.
+    # When history is done it stays on as a slow catch-up for the visits
+    # the enrichment gate dropped under load (#583) — the one path that
+    # makes "described later" true — so it is long-lived now, but still
+    # spawned directly: a pass that fails is logged and the next one
+    # runs, which is all a supervisor would do.
+    async def background_enrichment_backfill():
+        try:
+            from services.enrichment_backfill import run_backfill_loop
+
+            # After the first cameras and skill assignments have settled:
+            # reading the gate against a half-provisioned assignment table
+            # would answer "not assigned" and skip visits that qualify.
+            await asyncio.sleep(180)
+            await run_backfill_loop()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            main_logger.error(f"Enrichment backfill failed: {e}", exc_info=True)
+
+    spawn_background(background_enrichment_backfill(),
+                     name="enrichment-backfill")
+
+    # The requested lane: visits a search asked about, described now
+    # rather than whenever the backfill reaches them (#583). One worker,
+    # in order, through the same enrichers and the same governor.
+    async def background_enrichment_requests():
+        try:
+            from services.enrichment_requests import run_requests_worker
+
+            await run_requests_worker()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            main_logger.error(f"Enrichment requests worker failed: {e}", exc_info=True)
+
+    spawn_background(background_enrichment_requests(),
+                     name="enrichment-requests")
+
+    # Home Assistant MQTT discovery (HA-402): one bridge per enabled MQTT
+    # integration with discovery on. No integration, nothing runs.
+    async def background_mqtt_bridges():
+        try:
+            from services.ha_mqtt_discovery import manager
+
+            await manager.reload()
+        except Exception as e:  # never block startup on a broker
+            main_logger.error(f"MQTT bridges not started: {e}")
+
+    spawn_background(background_mqtt_bridges(), name="mqtt-bridges")
+
+    # Operator alert inbox: consume opennvr.alerts.> (the SDK apps'
+    # NatsAlertChannel) into app_alerts so the UI bell can ring and
+    # acknowledge. Same best-effort posture — no bus, no inbox, no crash.
+    async def background_alerts_inbox_consumer():
+        async def _loop():
+            from services.alerts_inbox import run_consumer_loop
+
+            await run_consumer_loop()
+
+        await run_consumer_forever("Alerts inbox consumer", _loop)
+
+    spawn_background(background_alerts_inbox_consumer(),
+                     name="alerts-inbox-consumer")
 
     # Start camera connectivity reconciler — safety net for the MediaMTX
     # runOnReady/runOnNotReady hooks (catches missed hooks and restarts of
@@ -575,6 +922,13 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     main_logger.info("Shutting down FastAPI application...")
+
+    try:
+        from services.ha_mqtt_discovery import manager as mqtt_manager
+
+        await mqtt_manager.stop()
+    except Exception as e:
+        main_logger.error(f"Error stopping MQTT bridges: {e}")
 
     # Stop all running inference tasks
     try:
@@ -644,8 +998,14 @@ app.add_middleware(
         "Accept",
         "Origin",
         "X-Requested-With",
+        # Lets a browser client (e.g. a Home Assistant card) tag its request
+        # so the resulting audit row can be traced back to it.
+        "X-Correlation-Id",
     ],  # Explicit headers
-    expose_headers=["Content-Range", "Accept-Ranges", "Content-Length"],
+    expose_headers=[
+        "Content-Range", "Accept-Ranges", "Content-Length",
+        "X-Correlation-Id", "X-Request-ID",
+    ],
 )
 
 # Compress text responses (JSON, HTML, JS/CSS when served by uvicorn directly).
@@ -670,19 +1030,26 @@ app.add_middleware(RequestLoggingMiddleware)
 # HTTPException handler (preserve proper status codes like 401/403/404)
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
+    from utils.url_redaction import redact_signed_media_path, redact_url_query
+
     main_logger.log_action(
         "http.exception",
         message=f"HTTP Exception: {exc.status_code} - {exc.detail}",
         extra_data={
             "status_code": exc.status_code,
             "detail": exc.detail,
-            "url": str(request.url),
+            # Same redaction as the request log: a signed media URL (HA-112)
+            # is a bearer credential in the path, and a 403/404 for one
+            # (expired, or a resource that vanished) lands here.
+            "url": redact_signed_media_path(redact_url_query(str(request.url))),
             "method": request.method,
         },
         ip_address=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
     )
-    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    from core.http_errors import http_exception_response
+
+    return http_exception_response(exc)
 
 
 # Global exception handler (catch-all)
@@ -706,11 +1073,17 @@ async def global_exception_handler(request: Request, exc: Exception):
 # Health check endpoint
 @app.get("/health")
 async def health_check():
-    """Health check endpoint."""
+    """Health check endpoint.
+
+    ``commit`` is the git commit the image was built from (Dockerfile
+    GIT_COMMIT; null for a local build without it): the updater checks it,
+    since every build between two releases carries the same ``version``.
+    """
     return {
         "status": "healthy",
         "service": "OpenNVR Surveillance System API",
         "version": __version__,
+        "commit": os.environ.get("OPENNVR_BUILD_COMMIT") or None,
     }
 
 
@@ -730,12 +1103,22 @@ async def get_jwks():
 
 # Include routers
 app.include_router(auth.router, prefix=settings.api_prefix)
+app.include_router(mfa_router.router, prefix=settings.api_prefix)
+app.include_router(sso.router, prefix=settings.api_prefix)
+app.include_router(auth_settings.router, prefix=settings.api_prefix)
 app.include_router(users.router, prefix=settings.api_prefix)
 app.include_router(cameras.router, prefix=settings.api_prefix)
 app.include_router(camera_settings.router, prefix=settings.api_prefix)
 app.include_router(internal_camera_agent.router, prefix=settings.api_prefix)
+# The app platform door (snapshot, recordings, plates, alerts, state) —
+# app-key scoped; see routers/app_platform.py and docs/APP_PLATFORM.md.
+app.include_router(app_platform.router, prefix=settings.api_prefix)
 app.include_router(timeline_events.router, prefix=settings.api_prefix)
+app.include_router(search.router, prefix=settings.api_prefix)
+app.include_router(alerts_inbox.router, prefix=settings.api_prefix)
 app.include_router(streams.router, prefix=settings.api_prefix)
+app.include_router(host_agent_router.router, prefix=settings.api_prefix)
+app.include_router(webcams_router.router, prefix=settings.api_prefix)
 app.include_router(camera_config.router, prefix=settings.api_prefix)
 app.include_router(roles.router, prefix=settings.api_prefix)
 app.include_router(permissions.router, prefix=settings.api_prefix)
@@ -743,11 +1126,23 @@ app.include_router(password_policy.router, prefix=settings.api_prefix)
 app.include_router(security.router, prefix=settings.api_prefix)
 app.include_router(webrtc.router, prefix=settings.api_prefix)
 app.include_router(window_settings.router, prefix=settings.api_prefix)
+app.include_router(tours.router, prefix=settings.api_prefix)
+app.include_router(system_update.router, prefix=settings.api_prefix)
 app.include_router(device_firewall.router, prefix=settings.api_prefix)
 app.include_router(media_source.router, prefix=settings.api_prefix)
 app.include_router(mediamtx_admin.router, prefix=settings.api_prefix)
 app.include_router(mediamtx_hooks.router, prefix=settings.api_prefix)
 app.include_router(audit_logs.router, prefix=settings.api_prefix)
+app.include_router(api_tokens_router.router, prefix=settings.api_prefix)
+app.include_router(zones_router.router, prefix=settings.api_prefix)
+app.include_router(masks_router.router, prefix=settings.api_prefix)
+app.include_router(detection_settings_router.router, prefix=settings.api_prefix)
+app.include_router(evidence_escalation_router.router, prefix=settings.api_prefix)
+app.include_router(live_state_router.router, prefix=settings.api_prefix)
+app.include_router(media_router.router, prefix=settings.api_prefix)
+app.include_router(site_mode_router.router, prefix=settings.api_prefix)
+app.include_router(entities_router.router, prefix=settings.api_prefix)
+app.include_router(search_router.router, prefix=settings.api_prefix)
 app.include_router(recordings.router, prefix=settings.api_prefix)
 app.include_router(orphaned_recordings.router, prefix=settings.api_prefix)
 app.include_router(
@@ -761,6 +1156,9 @@ app.include_router(cloud_router.router, prefix=settings.api_prefix)
 app.include_router(cloud_streaming.router, prefix=settings.api_prefix)
 app.include_router(firmware_router.router, prefix=settings.api_prefix)
 app.include_router(ai_models.router, prefix=settings.api_prefix)
+# The AI adapter catalog — which models a deployment can install
+# (server/config/adapters_index.yml, docs/CONTRIBUTING_ADAPTERS.md).
+app.include_router(adapters_catalog.router, prefix=settings.api_prefix)
 app.include_router(ai_model_management.router, prefix=settings.api_prefix)
 app.include_router(ai_detection_results.router, prefix=settings.api_prefix)
 app.include_router(apps.router, prefix=settings.api_prefix)
@@ -784,6 +1182,9 @@ app.include_router(
 app.include_router(system, prefix=settings.api_prefix)
 app.include_router(events_router, prefix=settings.api_prefix)
 app.include_router(occupancy_router.router, prefix=settings.api_prefix)
+app.include_router(guardscan_router.router, prefix=settings.api_prefix)
+app.include_router(workflows_router.router, prefix=settings.api_prefix)
+app.include_router(approvals_router.router, prefix=settings.api_prefix)
 
 
 # =============================================================================

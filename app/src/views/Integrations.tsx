@@ -22,6 +22,8 @@ import { useAuth } from '../auth/AuthContext'
 import { useSnackbar } from '../components/Snackbar'
 import { Modal } from '../components/Modal'
 import { Plus, Trash, Settings, Activity, CheckCircle, AlertCircle, Play, Plug } from 'lucide-react'
+import { useTranslation } from '../i18n'
+import { useConfirm } from '../components/ui/ConfirmDialog'
 
 type IntegrationType = 'webhook' | 'slack' | 'teams' | 'email' | 'mqtt' | 's3' | 'syslog' | 'prometheus'
 
@@ -37,6 +39,8 @@ const INTEGRATION_TYPES: { value: IntegrationType; label: string }[] = [
 ]
 
 export function Integrations() {
+  const { t } = useTranslation()
+  const confirm = useConfirm()
   const { user } = useAuth()
   const canAdmin = !!user?.is_superuser
   const { showSuccess, showError } = useSnackbar()
@@ -53,6 +57,8 @@ export function Integrations() {
   const [type, setType] = useState<IntegrationType>('webhook')
   const [enabled, setEnabled] = useState(true)
   const [config, setConfig] = useState<any>({})
+  // API tokens an MQTT integration can act as (Home Assistant discovery).
+  const [tokens, setTokens] = useState<any[]>([])
 
   const fetchIntegrations = async () => {
     try {
@@ -70,6 +76,11 @@ export function Integrations() {
 
   useEffect(() => {
     fetchIntegrations()
+    apiService.listApiTokens()
+      .then(({ data }: any) => setTokens(
+        // Address-limited tokens can't be bound: MQTT commands come from the broker.
+        (data?.tokens || []).filter((tk: any) => !tk.revoked_at && !tk.allowed_cidrs?.length)))
+      .catch(() => setTokens([]))
   }, [])
 
   const resetForm = () => {
@@ -95,7 +106,7 @@ export function Integrations() {
   }
 
   const handleDelete = async (id: number) => {
-    if (!confirm('Are you sure you want to delete this integration?')) return
+    if (!(await confirm({ title: 'Are you sure you want to delete this integration?', danger: true }))) return
     try {
       await apiService.deleteIntegration(id)
       showSuccess('Integration deleted')
@@ -237,6 +248,31 @@ export function Integrations() {
             <Field label="Topic Prefix">
               <input className="input" value={config.topic_prefix || 'opennvr'} onChange={e => setConfig({...config, topic_prefix: e.target.value})} />
             </Field>
+            <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={config.ha_discovery !== false}
+                onChange={e => setConfig({...config, ha_discovery: e.target.checked})} />
+              Home Assistant discovery (devices and entities appear in Home Assistant's MQTT integration)
+            </label>
+            {config.ha_discovery !== false && (
+              <>
+                <Field label="Act as API token">
+                  <select className="input" value={config.api_token_id ?? ''} required
+                    onChange={e => setConfig({...config, api_token_id: e.target.value ? Number(e.target.value) : undefined})}>
+                    <option value="">Choose a token…</option>
+                    {tokens.map(tk => <option key={tk.id} value={tk.id}>{tk.name} ({tk.prefix})</option>)}
+                  </select>
+                  <p className="text-xs text-[var(--text-dim)] mt-1">
+                    Its scopes and cameras decide what is published and which commands Home Assistant may send. Create one under Settings &gt; API Tokens.
+                  </p>
+                </Field>
+                <Field label="Discovery Prefix">
+                  <input className="input" value={config.discovery_prefix || 'homeassistant'} onChange={e => setConfig({...config, discovery_prefix: e.target.value})} />
+                </Field>
+                <p className="text-xs text-[var(--text-dim)]">
+                  Use either this or the native OpenNVR integration in Home Assistant, not both: every entity would appear twice.
+                </p>
+              </>
+            )}
             <Field label="Events">
               <EventsMatrix value={config.events || {}} onChange={v => setConfig({...config, events: v})} />
             </Field>
@@ -282,13 +318,13 @@ export function Integrations() {
       <div className="flex items-center justify-between">
         <div>
            <h1 className="text-xl font-semibold flex items-center gap-2">
-            <Plug /> Integrations
+            <Plug /> {t('integrations.title')}
            </h1>
-           <p className="text-[var(--text-dim)]">Connect third-party services for alerts, storage, and monitoring.</p>
+          <p className="text-[var(--text-dim)]">Connect third-party services for alerts, storage, and monitoring.</p>
         </div>
         {canAdmin && (
           <button className="btn btn-primary flex items-center gap-2" onClick={openCreate}>
-            <Plus size={16} /> Add Integration
+            <Plus size={16} /> {t('integrations.add')}
           </button>
         )}
       </div>
@@ -304,13 +340,13 @@ export function Integrations() {
                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                     {canAdmin && (
                        <>
-                         <button className="p-1.5 hover:bg-[var(--bg-hover)] rounded" onClick={() => handleTest(item.id)} title="Test Connection" disabled={testingId === item.id}>
+                         <button className="p-1.5 hover:bg-[var(--panel-2)]" onClick={() => handleTest(item.id)} title="Test Connection" disabled={testingId === item.id}>
                            {testingId === item.id ? <Activity size={16} className="animate-pulse" /> : <Play size={16} />}
                          </button>
-                         <button className="p-1.5 hover:bg-[var(--bg-hover)] rounded" onClick={() => openEdit(item)} title="Configure">
+                         <button className="p-1.5 hover:bg-[var(--panel-2)]" onClick={() => openEdit(item)} title="Configure">
                            <Settings size={16} />
                          </button>
-                         <button className="p-1.5 hover:bg-red-900/30 text-red-400 rounded" onClick={() => handleDelete(item.id)} title="Delete">
+                         <button className="p-1.5 hover:bg-[color-mix(in_oklab,var(--danger)_14%,transparent)] text-[var(--danger)]" onClick={() => handleDelete(item.id)} title="Delete">
                            <Trash size={16} />
                          </button>
                        </>
@@ -321,14 +357,14 @@ export function Integrations() {
                  {INTEGRATION_TYPES.find(t => t.value === item.type)?.label || item.type}
               </div>
               {/* Mini status indicator configuration summary */}
-              <div className="text-xs text-[var(--text-dim)] bg-[var(--bg)] p-2 rounded truncate font-mono h-8 flex items-center">
+              <div className="text-xs text-[var(--text-dim)] bg-[var(--bg)] p-2 truncate font-mono h-8 flex items-center">
                 {getSummary(item)}
               </div>
            </div>
         ))}
         
         {integrations.length === 0 && !loading && (
-           <div className="col-span-full py-12 text-center border-2 border-dashed border-[var(--border)] rounded-lg text-[var(--text-dim)]">
+           <div className="col-span-full py-12 text-center border-2 border-dashed border-[var(--border)] text-[var(--text-dim)]">
              <div className="flex justify-center mb-2"><Plug size={32} /></div>
              <p>No integrations configured.</p>
              {canAdmin && <button className="text-[var(--accent)] hover:underline mt-2" onClick={openCreate}>Add your first one</button>}
@@ -352,13 +388,13 @@ export function Integrations() {
                  <input className="input" value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Ops Team Slack" required />
               </Field>
               
-              <div className="p-4 bg-[var(--bg)] rounded border border-[var(--border)] max-h-[50vh] overflow-y-auto">
+              <div className="p-4 bg-[var(--bg)] border border-[var(--border)] max-h-[50vh] overflow-y-auto">
                  {renderConfigFields()}
               </div>
               
               <label className="flex items-center gap-2">
                  <input type="checkbox" className="accent-[var(--accent)]" checked={enabled} onChange={e => setEnabled(e.target.checked)} />
-                 <span className={enabled ? 'text-green-400' : 'text-[var(--text-dim)]'}>{enabled ? 'Enabled' : 'Disabled'}</span>
+                 <span className={enabled ? 'text-[var(--ok)]' : 'text-[var(--text-dim)]'}>{enabled ? 'Enabled' : 'Disabled'}</span>
               </label>
 
               <div className="flex justify-end gap-2 mt-6">
@@ -376,7 +412,7 @@ export function Integrations() {
 
 function StatusIcon({ enabled }: { enabled: boolean }) {
   return enabled ? 
-    <CheckCircle size={18} className="text-green-500" /> : 
+    <CheckCircle size={18} className="text-[var(--ok)]" /> : 
     <AlertCircle size={18} className="text-[var(--text-dim)]" />
 }
 
@@ -412,7 +448,7 @@ function EventsMatrix({ value, onChange }: { value: any, onChange: (v: any) => v
   return (
     <div className="grid grid-cols-2 gap-2 text-xs">
       {events.map(evt => (
-        <label key={evt} className="flex items-center gap-2 cursor-pointer hover:bg-[var(--bg-hover)] p-1 rounded select-none">
+        <label key={evt} className="flex items-center gap-2 cursor-pointer hover:bg-[var(--panel-2)] p-1 select-none">
           <input type="checkbox" className="accent-[var(--accent)]" checked={!!value[evt]} onChange={e => onChange({...value, [evt]: e.target.checked})} />
           {evt}
         </label>

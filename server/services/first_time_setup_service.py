@@ -127,6 +127,22 @@ def verify_and_consume(supplied: str | None) -> bool:
         return ok
 
 
+def restore(token: str) -> None:
+    """Re-arm a token that ``verify_and_consume`` accepted for a request
+    that then failed (unknown username, rejected password, DB error).
+
+    Consuming up front keeps the token single-use under concurrency; putting
+    it back on failure stops one typo from locking the operator out until a
+    restart (issue #632). A no-op if another token is already armed.
+    """
+    global _state
+    if not token:
+        return
+    with _lock:
+        if _state is None:
+            _state = _TokenState(token=token)
+
+
 def is_armed() -> bool:
     """Test hook: return True iff a token is currently armed."""
     with _lock:

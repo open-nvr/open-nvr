@@ -26,6 +26,65 @@ from models import Integration
 logger = logging.getLogger(__name__)
 
 
+def _bridge_offer(integration_id: int, suffix: str, body: dict) -> bool:
+    """Hand a message to the live MQTT bridge for this integration, if
+    any. Best-effort: import or queue failures mean "no bridge"."""
+    try:
+        import json as _json
+
+        from services.ha_mqtt_discovery import manager
+        return manager.offer(integration_id, suffix, _json.dumps(body, default=str))
+    except Exception:  # noqa: BLE001 — aiomqtt missing, or no bridge
+        return False
+
+
+def _webhook_target_refusal(url: str) -> str | None:
+    """An operator-facing reason to refuse this webhook target, or None.
+
+    A webhook is SUPPOSED to leave the building — Slack, Teams, a
+    customer endpoint — so this is not the camera/ONVIF guard inverted
+    onto it. Two things are refused:
+
+    * cloud instance metadata (169.254.169.254 and friends), which no
+      real webhook targets and which hands out cloud credentials to
+      anyone who can aim a POST at it; and
+    * anything outside ``settings.webhook_allowed_hosts`` when the
+      operator has set that allowlist.
+
+    Superuser-only today, so this is hardening rather than a privilege
+    boundary — but "superuser" is not "may read the cloud account's
+    credentials", and metadata is exactly that escalation.
+    """
+    from urllib.parse import urlparse
+
+    from core.config import _METADATA_ADDRESSES, settings
+
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return "Webhook URL could not be parsed"
+    if parsed.scheme not in ("http", "https"):
+        return "Webhook URL must be http or https"
+    host = (parsed.hostname or "").strip().lower()
+    if not host:
+        return "Webhook URL has no host"
+
+    try:
+        import ipaddress
+
+        if ipaddress.ip_address(host) in _METADATA_ADDRESSES:
+            return "Refusing to POST to the cloud metadata endpoint"
+    except ValueError:
+        pass   # a hostname, not an IP literal
+
+    allow = [h.strip().lower() for h in
+             (settings.webhook_allowed_hosts or "").split(",") if h.strip()]
+    if allow and host not in allow:
+        return (f"Host {host!r} is not in webhook_allowed_hosts; "
+                "add it there to allow this destination")
+    return None
+
+
 class IntegrationService:
     @staticmethod
     async def test_integration(integration: Integration) -> dict:
@@ -38,6 +97,10 @@ class IntegrationService:
                 return await IntegrationService._test_email(integration.config)
             elif integration.type in ["webhook", "slack", "teams"]:
                 return await IntegrationService._test_webhook(integration)
+            elif integration.type == "mqtt":
+                from services.mqtt_settings import test_connection
+
+                return await test_connection(integration.config)
             else:
                 # For other types, we just acknowledge for now
                 return {
@@ -122,6 +185,10 @@ class IntegrationService:
         if not url:
             return {"success": False, "message": "Missing Webhook URL"}
 
+        refusal = _webhook_target_refusal(url)
+        if refusal:
+            return {"success": False, "message": refusal}
+
         async with httpx.AsyncClient() as client:
             try:
                 # Some webhooks need headers
@@ -143,9 +210,15 @@ class IntegrationService:
                     "message": f"Webhook endpoint returned error: {e.response.status_code}",
                 }
             except httpx.RequestError as e:
+                # Coarse on purpose. The exact error distinguishes
+                # "connection refused" from "timed out", which turns a
+                # webhook test into an internal port scanner that reports
+                # its findings. The detail goes to the log instead.
+                logger.warning("webhook delivery failed for integration %s: %s",
+                               getattr(integration, "id", "?"), e)
                 return {
                     "success": False,
-                    "message": f"Webhook connection failed: {e!s}",
+                    "message": "Webhook connection failed — see the server log.",
                 }
 
     @staticmethod
@@ -178,7 +251,7 @@ class IntegrationService:
         finally:
             db.close()
 
-        for integration in rows:
+        async def deliver(integration) -> None:
             try:
                 if integration.type == "email":
                     result = await IntegrationService._send_email(
@@ -193,8 +266,20 @@ class IntegrationService:
                         integration,
                         {"subject": subject, "message": message, **payload},
                     )
+                elif integration.type == "mqtt":
+                    from services.mqtt_settings import publish_once
+                    body = {"subject": subject, "message": message, **payload}
+                    # Ride the discovery bridge's standing session when it
+                    # has one: a busy site rings thousands of alerts a day,
+                    # and a connect/publish/disconnect per alert was a
+                    # connection storm on the broker. One-off only when no
+                    # bridge is up (discovery off, or the broker is down).
+                    if _bridge_offer(integration.id, "alerts", body):
+                        result = {"success": True, "message": "published via bridge"}
+                    else:
+                        result = await publish_once(integration.config, "alerts", body)
                 else:
-                    continue
+                    return
                 if not result.get("success"):
                     logger.warning(
                         f"Alert delivery to integration '{integration.name}' "
@@ -204,3 +289,9 @@ class IntegrationService:
                 logger.warning(
                     f"Alert delivery to integration '{integration.name}' raised: {e}"
                 )
+
+        # Side by side: an unreachable broker or mail server must not delay
+        # the others by its connect timeout.
+        import asyncio
+
+        await asyncio.gather(*(deliver(i) for i in rows))

@@ -128,8 +128,13 @@ async def test_setup_honours_start_frame_sample_rates():
 
 
 @pytest.mark.asyncio
-async def test_serializer_type_is_binary():
-    from pipecat.serializers.base_serializer import FrameSerializerType
+async def test_serializer_is_a_pipecat_frame_serializer():
+    """1.x: FrameSerializer is a BaseObject with a task manager and
+    events; the serializer must construct through it (no ``type``
+    property any more — binary is implied by returning bytes)."""
+    from pipecat.serializers.base_serializer import FrameSerializer
     from serializer import RawPcmSerializer
 
-    assert RawPcmSerializer().type == FrameSerializerType.BINARY
+    s = RawPcmSerializer()
+    assert isinstance(s, FrameSerializer)
+    assert s.name.startswith("RawPcmSerializer")

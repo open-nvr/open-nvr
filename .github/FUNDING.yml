@@ -1,0 +1,3 @@
+# Shows the "Sponsor" button on the repository. Funding, hardware loans and
+# engineering time are all described on the sponsors page.
+custom: ["https://www.opennvr.org/sponsors/", "https://www.opennvr.org/hardware-program/"]

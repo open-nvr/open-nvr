@@ -1,0 +1,129 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Test, build and publish the App SDK (sdk/opennvr-app-sdk) to PyPI.
+#
+#   - PR / push touching sdk/**   → tests, build the sdist + wheel, check
+#                                   metadata, install the wheel in a clean
+#                                   venv and import it (the "works from
+#                                   the repo, broken from PyPI" class).
+#   - tag sdk-v<version>          → the same, then publish to PyPI via
+#                                   trusted publishing (no API token in
+#                                   secrets: PyPI trusts this workflow +
+#                                   the `pypi` environment through OIDC).
+#
+# The tag must equal the version in pyproject.toml / _version.py — the
+# `verify-version` step refuses otherwise, so a release is one command:
+#     git tag sdk-v0.4.0 && git push origin sdk-v0.4.0
+#
+# One-time setup on PyPI (project owner): Manage → Publishing → add a
+# GitHub publisher with owner `open-nvr`, repository `open-nvr`,
+# workflow `publish-sdk.yml`, environment `pypi`. Then create the
+# `pypi` environment in this repo's settings (optionally with required
+# reviewers — that makes every release a click by a maintainer).
+
+name: publish-sdk
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "sdk/opennvr-app-sdk/**"
+      - ".github/workflows/publish-sdk.yml"
+    tags:
+      - "sdk-v*"
+  pull_request:
+    paths:
+      - "sdk/opennvr-app-sdk/**"
+      - ".github/workflows/publish-sdk.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: publish-sdk-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: sdk/opennvr-app-sdk
+
+jobs:
+  test:
+    name: sdk (pytest, py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Run tests
+        run: uv run --python ${{ matrix.python }} --group dev pytest -q
+
+  build:
+    name: sdist + wheel
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Verify the tag matches the package version
+        if: startsWith(github.ref, 'refs/tags/sdk-v')
+        run: |
+          tag="${GITHUB_REF#refs/tags/sdk-v}"
+          py=$(uv run --python 3.12 --no-project python -c \
+               "import re,pathlib;print(re.search(r'__version__ = \"([^\"]+)\"', pathlib.Path('opennvr_app_sdk/_version.py').read_text()).group(1))")
+          toml=$(uv run --python 3.12 --no-project python -c \
+               "import tomllib,pathlib;print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
+          echo "tag=$tag _version.py=$py pyproject=$toml"
+          test "$tag" = "$py" && test "$tag" = "$toml"
+
+      - name: Build
+        run: uv build --out-dir dist
+
+      - name: Check metadata (README renders on PyPI, licence, classifiers)
+        run: uv run --python 3.12 --no-project --with twine twine check --strict dist/*
+
+      - name: Install the wheel in a clean venv and import it
+        run: |
+          uv venv --python 3.12 /tmp/sdk-venv
+          uv pip install --python /tmp/sdk-venv/bin/python dist/*.whl
+          /tmp/sdk-venv/bin/python - <<'EOF'
+          import opennvr_app_sdk as s
+          from opennvr_app_sdk import OpenNVR, Detector, AppManifest, Alert
+          from opennvr_app_sdk.aio import AsyncOpenNVR
+          print("opennvr-app-sdk", s.__version__, "→", len(s.__all__), "public names")
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: opennvr-app-sdk-dist
+          path: sdk/opennvr-app-sdk/dist/
+          if-no-files-found: error
+
+  publish:
+    name: publish to PyPI
+    if: startsWith(github.ref, 'refs/tags/sdk-v')
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/opennvr-app-sdk/
+    permissions:
+      id-token: write      # OIDC → PyPI trusted publishing
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: opennvr-app-sdk-dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          print-hash: true

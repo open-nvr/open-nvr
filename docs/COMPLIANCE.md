@@ -2,7 +2,7 @@
 
 This page maps the architectural threat model in
 **[*Eliminating Systemic IP Camera Vulnerabilities via Offline-First Open
-Security Architecture* (Singh et al., 2025 — DOI 10.5281/zenodo.17261761)](https://doi.org/10.5281/zenodo.17261761)**
+Security Architecture* (Singh et al., 2025 — DOI 10.5281/zenodo.22804254)](https://doi.org/10.5281/zenodo.22804254)**
 to the controls OpenNVR actually implements. Hand it to your compliance auditor
 or procurement officer when they need evidence that the architecture is not
 ad-hoc.
@@ -53,6 +53,21 @@ defending the architectural choice in a regulated procurement, see
 [`GOVERNMENT_DEPLOYMENT.md`](GOVERNMENT_DEPLOYMENT.md). That page is a
 printable one-pager for IT decision-makers; this page is the
 implementation evidence behind it.
+
+## The evidence pack
+
+Everything on this page, as it stands on one deployment, in one zip:
+
+```
+python3 scripts/evidence_pack.py --url https://nvr.example.org --user admin --days 90
+```
+
+Posture, the camera security check, recording coverage, adapters and
+fingerprints, installed apps with their signer and egress, firewall
+rules and the audit log for the period, plus `EVIDENCE.md` (PASS /
+ATTENTION / UNKNOWN per check, framework → files) and `manifest.json`
+with the SHA-256 of every artefact. Read-only; credentials redacted.
+[ENTERPRISE.md](ENTERPRISE.md#the-evidence-pack).
 
 ## Audit-chain quick reference
 

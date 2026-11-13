@@ -27,22 +27,59 @@
 // providing app's config endpoint — the same live-update path the
 // catalog form uses.
 
-import { useMemo, useRef, useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  BellRing, Car, Download, FileText, History, PhoneCall, Plus, RefreshCw,
-  Search, ShieldAlert, ShieldCheck, Trash2, Upload,
+  useEffect, useId, useMemo, useRef, useState,
+  type ChangeEvent, type FormEvent, type ReactNode,
+} from 'react'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  ArrowRight, BellRing, BookUser, Car, Download, FileText,
+  History, Pencil, Plus, RefreshCw, Search, ShieldAlert,
+  ShieldCheck, SlidersHorizontal, Sparkles, Trash2, Upload, Volume2,
 } from 'lucide-react'
 import { apiService } from '../lib/apiService'
+import { useAuth } from '../auth/AuthContext'
+import { useTranslation, useDateFormat, type DateFormatters } from '../i18n'
+import { Link, useNavigate } from 'react-router-dom'
+import {
+  alarmSeenAt,
+  alarmSeenTitle,
+  alertsInboxService,
+  type InboxAlert,
+} from '../services/alertsInboxService'
 import { extractApiError } from '../lib/apiError'
 import { AuthedImage } from '../components/AuthedImage'
 import { Modal } from '../components/Modal'
+import { Tabs } from '../components/ui/Tabs'
 import { useSnackbar } from '../components/Snackbar'
+import { useInView } from '../hooks/useInView'
+import { useDebounce } from '../hooks/useDebounce'
+import { usePagination } from '../hooks/usePagination'
+import { useRowSelection } from '../hooks/useRowSelection'
+import { AlarmsFilters, AlarmsSelectionBar, AlarmsTable, cameraIdFromHandle } from '../components/alarms/AlarmsTable'
+import { useAckAlarms, useAlarmsList } from '../components/alarms/useAlarmsList'
+import { DataTable, useAvailableHeight, type Column } from '../components/ui/DataTable'
+import { Pagination } from '../components/ui/Pagination'
+import { SegmentedControl } from '../components/ui/SegmentedControl'
+import { StatTile } from '../components/ui/stats'
+import { Switch } from '../components/ui/Switch'
+import { InfoTip } from '../components/ui/InfoTip'
+import { formatSeenAt, seenAtTitle } from '../lib/time'
+import {
+  LPR_SKILL,
+  cameraAdopted,
+  type CameraAssignment,
+} from '../lib/cameraAssignments'
+import { cameraService } from '../services/cameraService'
 import {
   Badge, Button, Card, CardContent,
-  EmptyState, ErrorCard, PageHeader, Skeleton,
+  EmptyState, SeverityBadge, Skeleton,
 } from '../components/ui'
 import type { RegisteredApp } from './AppCatalog'
+import { AppConfigureButton, AppPageHeader } from './apps/AppSetup'
+import { AppCamerasCard } from './apps/AppCamerasCard'
+import { MoreMenu } from '../components/ui/MoreMenu'
+import { useConfirm } from '../components/ui/ConfirmDialog'
 
 export const LPR_TASK = 'license_plate_recognition'
 
@@ -53,8 +90,104 @@ type PlateEvent = {
   plate_text?: string | null
   started_at?: string | null
   ended_at?: string | null
+  // When the PLATE was seen: the capture time of the look the read won
+  // on. Null on rows with no plate and on reads made before the platform
+  // recorded it — use plateSeenAt(), never this directly.
+  observed_at?: string | null
   has_evidence?: boolean
   evidence_url?: string | null
+  // TRUE means there are two distinct images to show: the crop the plate
+  // was READ from (#382) as well as the vehicle-best frame above. The
+  // server sets it false when the two paths are equal, i.e. when there is
+  // no second image to offer (timeline_events.py). The flags are
+  // independent — a row can carry a crop and no frame.
+  has_plate_evidence?: boolean
+  plate_evidence_url?: string | null
+  // The whole frame behind the vehicle crop. Still served, and kept here
+  // so the response shape stays documented, but NOTHING on this page
+  // renders it: the scene is the visit's best-thumbnail moment, which on
+  // a merged track belongs to a different car than the plate. Use
+  // has_plate_frame for anything an operator will act on.
+  has_scene_evidence?: boolean
+  scene_evidence_url?: string | null
+  // The frame the plate crop was cut from. The only image on the row
+  // guaranteed to show the car the number belongs to: a visit is not
+  // always one vehicle (track association merges a departing car with
+  // the one behind it), so the vehicle frame and the scene can both be
+  // a different car from the plate.
+  has_plate_frame?: boolean
+  plate_frame_url?: string | null
+  // plate_reads: how many looks agreed on the number (1 = a single
+  // read, nothing confirmed it); plate_source: which writer put it
+  // there. Both are display caveats — see EvidenceDialog.
+  payload?: {
+    plate_merged?: boolean
+    plate_reads?: number
+    plate_source?: string
+  } | null
+}
+
+// The two images are different frames by construction — multi-frame OCR
+// reads plate candidates, while the best frame is picked for the biggest
+// VEHICLE box, which at close range is exactly when the plate leaves the
+// crop. The preview dialog stacks BOTH, so it never has to choose (#387);
+// the row thumbnail still does, having room for one, and picks the
+// vehicle — the number is already spelled out in the next column.
+//
+// The queryKey shapes are shared with the thumbnail on purpose: opening
+// the dialog re-uses whichever blob the row already fetched, so it pays
+// for one request, not two.
+
+/** The vehicle-best frame — context: which car. */
+function vehicleFrameSource(e: PlateEvent) {
+  return {
+    queryKey: ['evidence', e.id],
+    fetchBlob: () => apiService.getEventEvidence(e.id),
+  }
+}
+
+/** The crop the plate was READ from. Only meaningful when
+ *  ``has_plate_evidence``: otherwise /plate-evidence 404s, or answers the
+ *  vehicle frame's own bytes. */
+function plateCropSource(e: PlateEvent) {
+  return {
+    queryKey: ['plate-evidence', e.id],
+    fetchBlob: () => apiService.getEventPlateEvidence(e.id),
+  }
+}
+
+/** The frame the plate crop came from — proof: WHICH car. */
+function plateFrameSource(e: PlateEvent) {
+  return {
+    queryKey: ['plate-frame', e.id],
+    fetchBlob: () => apiService.getEventPlateFrame(e.id),
+  }
+}
+
+// One image for a 64px row thumbnail: the vehicle, not the number. The
+// plate crop reads as a number the row already prints in text, so it
+// spent a whole column saying nothing new — the operator wants to see
+// WHICH car.
+//
+// Prefer the frame the plate was READ from. It is the only wide image
+// guaranteed to hold the car the number belongs to: /evidence and
+// /scene-evidence are the visit's best-thumbnail moment, and a merged
+// track puts one car's plate on another car's best frame. Falling back
+// to those is still right for rows stored before the column existed —
+// a possibly-wrong car beats an empty box, and the dialog shows the
+// plate crop alongside for anyone checking.
+function rowThumbImage(e: PlateEvent) {
+  if (e.has_plate_frame) return plateFrameSource(e)
+  return vehicleFrameSource(e)
+}
+
+/** Is the picture on this row guaranteed to show the car the number
+ *  belongs to? Only the read frame is. A row that carries a plate but
+ *  no read frame (written by a path that held no image bytes) can only
+ *  offer the visit's vehicle-best frame — which on a merged track is
+ *  the NEXT car. That picture must never be presented as the read. */
+function readFrameIsMissing(e: PlateEvent): boolean {
+  return !!e.plate_text && !e.has_plate_frame
 }
 
 type PlateStats = {
@@ -65,7 +198,13 @@ type PlateStats = {
   per_day: { day: string; reads: number }[]
 }
 
-type CameraRow = { id: number; name: string }
+type CameraRow = {
+  id: number
+  name: string
+  // Which skills the camera is pointed at. [] / absent = unassigned:
+  // eligible for every picker, adopted by none, computing nothing.
+  assignments?: CameraAssignment[] | null
+}
 
 type PlateSummary = {
   plate: string
@@ -202,9 +341,10 @@ export function registryFromRows(rows: (string | number | null | undefined)[][])
   return out
 }
 
-/** Minimal CSV parse (quoted fields supported) → registry entries via
- * the shared row parser (header synonyms and all). */
-export function registryFromCsv(text: string): RegistryEntry[] {
+type SheetCell = string | number | null | undefined
+
+/** Minimal CSV parse (quoted fields supported) → rows of cells. */
+function csvRows(text: string): string[][] {
   const rows: string[][] = []
   let field = '', row: string[] = [], inQ = false
   for (let i = 0; i < text.length; i++) {
@@ -224,13 +364,12 @@ export function registryFromCsv(text: string): RegistryEntry[] {
   }
   row.push(field)
   if (row.some((f) => f.trim())) rows.push(row)
-  return registryFromRows(rows)
+  return rows
 }
 
-/** Excel (.xlsx/.xls) → registry entries. SheetJS is lazy-loaded so
- * the page's normal bundle doesn't carry it; the first sheet's rows
- * go through the same header matching as CSV. */
-export async function registryFromExcel(buf: ArrayBuffer): Promise<RegistryEntry[]> {
+/** Excel (.xlsx/.xls) → the first sheet's rows. SheetJS is lazy-loaded so
+ * the page's normal bundle doesn't carry it. */
+async function excelRows(buf: ArrayBuffer): Promise<SheetCell[][]> {
   const XLSX = await import('xlsx')
   // cellDates + dateNF: a date-TYPED "Valid Till" cell must land as
   // YYYY-MM-DD (what the app's expiry check parses), not the sheet's
@@ -238,17 +377,36 @@ export async function registryFromExcel(buf: ArrayBuffer): Promise<RegistryEntry
   const wb = XLSX.read(buf, { type: 'array', cellDates: true })
   const sheet = wb.Sheets[wb.SheetNames[0]]
   if (!sheet) return []
-  const rows = XLSX.utils.sheet_to_json(sheet, {
+  return XLSX.utils.sheet_to_json(sheet, {
     header: 1,
     raw: false,   // numbers come back as displayed strings
     dateNF: 'yyyy-mm-dd',
     defval: '',
-  }) as (string | number | null)[][]
-  return registryFromRows(rows)
+  }) as SheetCell[][]
 }
 
+/** A picked CSV or Excel file → rows, by its extension. */
+async function fileRows(file: File): Promise<SheetCell[][]> {
+  return /\.xlsx?$/i.test(file.name)
+    ? excelRows(await file.arrayBuffer())
+    : csvRows(await file.text())
+}
+
+/** CSV → registry entries via the shared row parser (header synonyms and all). */
+export function registryFromCsv(text: string): RegistryEntry[] {
+  return registryFromRows(csvRows(text))
+}
+
+/** Excel → registry entries, through the same header matching as CSV. */
+export async function registryFromExcel(buf: ArrayBuffer): Promise<RegistryEntry[]> {
+  return registryFromRows(await excelRows(buf))
+}
+
+/** One CSV cell, always quoted — owner names and notes carry commas. */
+const csvCell = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`
+
 function registryToCsv(entries: RegistryEntry[]): string {
-  const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`
+  const esc = csvCell
   return [
     'plate,owner,unit,type,model,note,expires',
     ...entries.map((e) =>
@@ -342,6 +500,108 @@ export function parseMonitors(cfg: any): Monitor[] {
   return [...out.values()]
 }
 
+// ── Monitor import / export ─────────────────────────────────────────
+// The same spreadsheet round trip as the register: a watch list often
+// arrives as a sheet from a security office, and export is the backup
+// before a bulk change.
+
+type MonitorColumn = 'plate' | 'note' | 'severity' | 'camera' | 'armed'
+
+const MONITOR_HEADER_SYNONYMS: Record<string, MonitorColumn> = {
+  // Plate headers are the register's: one vocabulary for "vehicle number".
+  ...(Object.fromEntries(
+    Object.entries(HEADER_SYNONYMS).filter(([, f]) => f === 'plate'),
+  ) as Record<string, 'plate'>),
+  note: 'note', notes: 'note', reason: 'note', remark: 'note', remarks: 'note',
+  description: 'note',
+  severity: 'severity', priority: 'severity', level: 'severity',
+  'alert severity': 'severity',
+  camera: 'camera', cameras: 'camera', where: 'camera', location: 'camera',
+  'camera name': 'camera',
+  armed: 'armed', active: 'armed', enabled: 'armed', status: 'armed',
+}
+
+const MONITOR_COLUMN_ORDER: MonitorColumn[] = ['plate', 'note', 'severity', 'camera', 'armed']
+
+/** A spreadsheet's "armed" cell → on/off. Empty means armed: a list of
+ *  plates to watch is a list of plates to watch. */
+function parseArmed(v: string | undefined): boolean {
+  return !/^(no|n|false|0|off|silenced|inactive|disabled)$/i.test((v ?? '').trim())
+}
+
+/** Rows → monitors. Cameras are matched by NAME (as the Cameras page shows
+ *  it) or by handle (`cam1`), and stored as handles — what the LPR app
+ *  matches reads against. Names that match no camera are returned so the
+ *  caller can say so: they are dropped, and a rule left with no camera
+ *  watches every camera — surveillance over-alerts, never under. */
+export function monitorsFromRows(
+  rows: SheetCell[][],
+  cameras: { id: number; name: string }[],
+): { monitors: Monitor[]; unknownCameras: string[] } {
+  const clean = rows
+    .map((r) => r.map((c) => String(c ?? '').trim()))
+    .filter((r) => r.some(Boolean))
+  if (!clean.length) return { monitors: [], unknownCameras: [] }
+
+  const header = clean[0].map((h) => MONITOR_HEADER_SYNONYMS[h.toLowerCase()] ?? null)
+  const hasHeader = header.includes('plate')
+  const cols: (MonitorColumn | null)[] = hasHeader ? header : MONITOR_COLUMN_ORDER
+  const body = hasHeader ? clean.slice(1) : clean
+
+  const handleOf = (token: string): string | null => {
+    const byName = cameras.find((c) => c.name.trim().toLowerCase() === token.toLowerCase())
+    if (byName) return `cam${byName.id}`
+    const m = /^cam-?(\d+)$/i.exec(token)
+    if (m && cameras.some((c) => c.id === Number(m[1]))) return `cam${Number(m[1])}`
+    return null
+  }
+
+  const unknown = new Set<string>()
+  const out = new Map<string, Monitor>()
+  for (const r of body) {
+    const rec: Partial<Record<MonitorColumn, string>> = {}
+    r.forEach((v, i) => {
+      const k = cols[i]
+      if (k && v) rec[k] = v
+    })
+    const plate = normalizePlate(rec.plate ?? '')
+    if (!plate) continue
+    const sev = (rec.severity ?? '').toLowerCase()
+    const handles: string[] = []
+    for (const token of (rec.camera ?? '').split(/[;|]/).map((s) => s.trim()).filter(Boolean)) {
+      if (/^(any|all|any camera|all cameras)$/i.test(token)) continue
+      const h = handleOf(token)
+      if (!h) unknown.add(token)
+      else if (!handles.includes(h)) handles.push(h)
+    }
+    out.set(plate, {
+      plate,
+      note: rec.note || undefined,
+      severity: (MONITOR_SEVERITIES as readonly string[]).includes(sev)
+        ? (sev as Monitor['severity']) : 'high',
+      active: parseArmed(rec.armed),
+      cameras: handles.length ? handles : undefined,
+    })
+  }
+  return { monitors: [...out.values()], unknownCameras: [...unknown] }
+}
+
+/** Monitors → CSV, cameras by NAME so the file reads like the screen and
+ *  imports straight back. */
+function monitorsToCsv(monitors: Monitor[], cameras: { id: number; name: string }[]): string {
+  const nameOf = (h: string) => cameras.find((c) => `cam${c.id}` === h)?.name ?? h
+  return [
+    MONITOR_COLUMN_ORDER.join(','),
+    ...[...monitors].sort((a, b) => a.plate.localeCompare(b.plate)).map((m) => [
+      m.plate,
+      m.note,
+      m.severity ?? 'high',
+      (m.cameras ?? []).map(nameOf).join('; '),
+      m.active === false ? 'no' : 'yes',
+    ].map(csvCell).join(',')),
+  ].join('\n')
+}
+
 function formatStay(seconds: number): string {
   const m = Math.round(seconds / 60)
   if (m < 60) return `${m}m`
@@ -356,23 +616,76 @@ const RANGE_PRESETS = [
   { key: '30d', label: '30 days', hours: 24 * 30 },
 ] as const
 
+// One request's worth of rows for the CSV, and the server's own ceiling
+// on /events. Beyond this the export says how much it left out rather
+// than pretending it is complete.
+const EXPORT_MAX = 500
+
+/** The app whose alarms the Vehicles tab shows. */
+const LPR_SOURCE = 'license-plate-recognition'
+
+// Where "Contact us" goes. Deliberately the project's own page rather
+// than the installed app's manifest `contact`/`website`: that field
+// describes the APP (its author, its repo), while this banner is the
+// platform offering to build a site solution. Reading the manifest also
+// meant the banner vanished entirely for any app that omitted the
+// field.
+const CONTACT_URL = 'https://opennvr.org/contact/'
+
+// When this row's plate was seen, as an ISO string - the ONE timestamp
+// a plate read is dated by.
+//
+// observed_at is the capture time of the look the read won on; it is the
+// only time on the row that provably belongs to the vehicle whose number
+// was read. started_at is the VISIT's start, and a visit is not always
+// one vehicle: track association merges a departing car with the one
+// arriving behind it, so on a merged track started_at is the moment a
+// different car arrived. It is the fallback only because rows written
+// before the platform recorded observed_at have nothing better (#451).
+function plateSeenIso(e: PlateEvent): string | null {
+  return e.observed_at ?? e.started_at ?? null
+}
+
+function plateSeenAt(e: PlateEvent, fmt: DateFormatters): string | null {
+  const iso = plateSeenIso(e)
+  return iso ? fmt.dateTime(iso) : null
+}
+
 function toCsv(rows: PlateEvent[], cameraName: (id: number) => string): string {
   const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`
   const head = 'plate,camera,seen_at,left_at,label'
+  // seen_at is the READ's time, not the visit's start: an export is
+  // evidence, and its timestamp has to scrub to the frame the plate is
+  // legible in.
   const body = rows.map((r) =>
-    [r.plate_text, cameraName(r.camera_id), r.started_at, r.ended_at, r.label]
+    [r.plate_text, cameraName(r.camera_id), plateSeenIso(r), r.ended_at, r.label]
       .map(esc).join(','))
   return [head, ...body].join('\n')
 }
 
 export function Vehicles() {
+  const { t } = useTranslation()
+  const confirm = useConfirm()
+  const fmt = useDateFormat()
   const queryClient = useQueryClient()
   const { showSuccess, showError } = useSnackbar()
+  const navigate = useNavigate()
   const [plate, setPlate] = useState('')
+  // The input stays instant; the QUERY waits. The table now keeps the
+  // previous page while the next one loads, so this is no longer load
+  // bearing for flicker — it still spares the server a request per
+  // keystroke.
+  const debouncedPlate = useDebounce(plate)
   const [cameraId, setCameraId] = useState<number | ''>('')
   const [range, setRange] = useState<(typeof RANGE_PRESETS)[number]>(RANGE_PRESETS[0])
+  const reads = usePagination(25, 'plate-reads')
   const [preview, setPreview] = useState<PlateEvent | null>(null)
-  const [tab, setTab] = useState<'reads' | 'registry' | 'monitoring'>('reads')
+  const [tab, setTab] = useState<'reads' | 'report' | 'registry' | 'monitoring' | 'alarms' | 'gate'>('reads')
+  // The register, monitors, barrier and alarm mode are the LPR app's
+  // SITE-WIDE config — superuser-only on the server. Everyone else
+  // gets the reads and alarms for their own cameras.
+  const { user: me } = useAuth()
+  const canConfigure = !!me?.is_superuser
   const [historyPlate, setHistoryPlate] = useState<string | null>(null)
   const [reportOpen, setReportOpen] = useState(false)
   const [registerPrefill, setRegisterPrefill] = useState('')
@@ -386,6 +699,28 @@ export function Vehicles() {
     },
     retry: 0,
   })
+  // Counts for the Alarms tab label. Two limit=1 requests rather than
+  // reading a loaded page: the tab has to be right even when the Alarms
+  // tab has never been opened, and `unacked_count` on the response is
+  // deliberately filter-blind (it is the bell's badge, every source), so
+  // it cannot answer "unacknowledged VEHICLE alarms".
+  const alarmCounts = useQuery({
+    queryKey: ['vehicle-alarm-counts'],
+    queryFn: async () => {
+      const [all, unacked] = await Promise.all([
+        alertsInboxService.listInboxAlerts({ source_name: LPR_SOURCE, limit: 1 }),
+        alertsInboxService.listInboxAlerts({ source_name: LPR_SOURCE, unacked: true, limit: 1 }),
+      ])
+      return {
+        total: (all.data as any)?.total as number | undefined,
+        unacked: (unacked.data as any)?.total as number | undefined,
+      }
+    },
+    retry: 0,
+    refetchInterval: 30_000,
+    placeholderData: keepPreviousData,
+  })
+
   const appsQuery = useQuery({
     queryKey: ['apps'],
     queryFn: async () => {
@@ -402,33 +737,81 @@ export function Vehicles() {
     [range]
   )
 
+  const readFilters = {
+    plate: debouncedPlate.trim() || undefined,
+    camera_id: cameraId === '' ? undefined : cameraId,
+    from: fromIso,
+  }
   const eventsQuery = useQuery({
-    queryKey: ['plate-events', plate, cameraId, range.key],
+    queryKey: ['plate-events', debouncedPlate, cameraId, range.key,
+               reads.page, reads.pageSize],
     queryFn: async () => {
       const { data } = await apiService.getPlateEvents({
-        plate: plate.trim() || undefined,
-        camera_id: cameraId === '' ? undefined : cameraId,
-        from: fromIso,
-        limit: 200,
+        ...readFilters, skip: reads.skip, limit: reads.pageSize,
       })
-      return ((data as any)?.events ?? []) as PlateEvent[]
+      const body = data as { events?: PlateEvent[]; total?: number }
+      return { rows: body?.events ?? [], total: body?.total }
     },
     retry: 0,
-    refetchInterval: 30_000,
+    // Page 1 is a live view of the gate and should keep refreshing.
+    // Deeper pages are someone reading history, and refreshing under
+    // them shifts every row down as new reads arrive.
+    refetchInterval: reads.page === 1 ? 30_000 : false,
+    // Without this the table empties on every page change and every
+    // poll, remounting each row's thumbnail.
+    placeholderData: keepPreviousData,
   })
 
+  // The tiles follow the SAME range selector as the reads list — a 7d
+  // number over a 24h list read as a bug in the field ("figures always
+  // keep showing the 7d"). 24h maps to days=1, the API's floor.
+  const rangeDays = Math.max(1, Math.round(range.hours / 24))
   const statsQuery = useQuery({
-    queryKey: ['plate-stats'],
+    queryKey: ['plate-stats', range.key],
     queryFn: async () => {
-      const { data } = await apiService.getPlateStats(7)
+      const { data } = await apiService.getPlateStats(rangeDays)
       return data as PlateStats
     },
     retry: 0,
     refetchInterval: 60_000,
+    // Keep the last figures up while a new range loads, as the reads list
+    // does. Without it every first visit to a range blanked the tiles to
+    // "…" and back — a flicker that read as the numbers being unstable.
+    placeholderData: keepPreviousData,
   })
 
   const lprApp = findLprApp(appsQuery.data)
   const allow: string[] = (lprApp?.config as any)?.allowlist ?? []
+
+  // Giving a camera a gate role is the operator saying "read plates
+  // here", so it is also the moment the camera is CLAIMED for LPR —
+  // one action, not a role here and an assignment on another page.
+  // Without the claim the server reads no plates on that camera at all,
+  // and the role would quietly do nothing.
+  const claimCamera = useMutation({
+    mutationFn: async ({ cameraId, adopt }: { cameraId: number; adopt: boolean }) => {
+      // The installed app's own id when we have it — the claim should
+      // name the thing that holds it, not a constant that happens to
+      // match today.
+      const consumer = `app:${lprApp?.id ?? LPR_SOURCE}`
+      if (adopt) await cameraService.declareSkillCamera(LPR_SKILL, cameraId, consumer)
+      else await cameraService.releaseSkillCamera(LPR_SKILL, cameraId, consumer)
+    },
+    // The picker reads eligibility off `assignments`, so it has to see
+    // the write it just made — and the app row's picked_cameras is what
+    // the header's "no camera selected" notice reads, so that too.
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ['cameras'] })
+      queryClient.invalidateQueries({ queryKey: ['apps'] })
+    },
+    onError: (e) => showError(extractApiError(e, 'Could not assign the camera.')),
+  })
+  // Cameras actually reading plates. Empty means the skill is dormant:
+  // reads stop, and the page has to say so rather than look broken.
+  const lprCameras = useMemo(
+    () => (camerasQuery.data ?? []).filter((c) => cameraAdopted(c, LPR_SKILL)),
+    [camerasQuery.data]
+  )
 
   // The society register + alarm mode live in the providing app's
   // config, exactly like the watchlists (live-applied by the app).
@@ -503,17 +886,63 @@ export function Vehicles() {
     retry: 0,
   })
 
-  const saveConfig = useMutation({
-    mutationFn: async (patch: Record<string, any>) => {
-      if (!lprApp) throw new Error('No enabled LPR app to hold the register.')
-      await apiService.updateAppConfig(lprApp.id, {
-        ...((lprApp.config ?? {}) as Record<string, any>),
-        ...patch,
-      })
-    },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['apps'] }),
-    onError: (e) => showError(extractApiError(e, 'Could not save the register.')),
-  })
+  // ── Writing the app's config ────────────────────────────────────
+  // Every write sends the WHOLE config, so each has to be built on the
+  // latest one — writes still in flight included. Built from what the page
+  // last fetched, a second quick change (flip one switch, then another)
+  // silently undid the first; the controls were disabled during a save to
+  // stop that, which is what made them flicker, and it still left a gap
+  // between the save returning and the refetch landing.
+  //
+  // So every write: applies its change to the cached config at once (the
+  // page shows it immediately, and the next change builds on it); goes out
+  // in order behind any write before it (one scope); re-applies its change
+  // to the config as it stands when its turn comes, so an earlier write
+  // that failed and rolled back cannot take this one with it; and refetches
+  // only after the last queued write, so the server's older copy never
+  // flashes up in between.
+  function lprConfigWrite<V>(
+    build: (cfg: Record<string, any>, vars: V) => Record<string, any>,
+    errorText: string,
+    onDone?: (vars: V) => void,
+  ) {
+    const cfgOf = (app: RegisteredApp) => ({ ...((app.config ?? {}) as Record<string, any>) })
+    return {
+      mutationKey: ['lpr-config'],
+      scope: { id: 'lpr-config' },
+      mutationFn: async (vars: V) => {
+        const app = findLprApp(queryClient.getQueryData<RegisteredApp[]>(['apps']))
+        if (!app) throw new Error('No enabled LPR app to hold the register.')
+        await apiService.updateAppConfig(app.id, build(cfgOf(app), vars))
+      },
+      onMutate: async (vars: V) => {
+        await queryClient.cancelQueries({ queryKey: ['apps'] })
+        const prev = queryClient.getQueryData<RegisteredApp[]>(['apps'])
+        const app = findLprApp(prev)
+        if (prev && app) {
+          queryClient.setQueryData<RegisteredApp[]>(['apps'], prev.map((a) =>
+            a === app ? { ...a, config: build(cfgOf(a), vars) } : a))
+        }
+        return { prev }
+      },
+      onSuccess: (_data: void, vars: V) => onDone?.(vars),
+      onError: (e: unknown, _vars: V, ctx: { prev?: RegisteredApp[] } | undefined) => {
+        if (ctx?.prev) queryClient.setQueryData(['apps'], ctx.prev)
+        showError(extractApiError(e, errorText))
+      },
+      onSettled: () => {
+        // This write still counts as pending here, so 1 means "the last".
+        if (queryClient.isMutating({ mutationKey: ['lpr-config'] }) <= 1) {
+          void queryClient.invalidateQueries({ queryKey: ['apps'] })
+        }
+      },
+    }
+  }
+
+  const saveConfig = useMutation(lprConfigWrite<Record<string, any>>(
+    (cfg, patch) => ({ ...cfg, ...patch }),
+    'Could not save the register.',
+  ))
 
   // The providing app's live state: the review queue (reads a human
   // should look at) and the inside-visitors count for overstay.
@@ -546,31 +975,64 @@ export function Vehicles() {
   // Quick actions off the reads table: allowlist stays a plain list;
   // "monitor this plate" writes a monitor rule (the denylist's
   // successor — same live-update path, per-plate alert config).
-  const watchlist = useMutation({
-    mutationFn: async ({ plateText, list }: { plateText: string; list: 'allowlist' | 'monitor' }) => {
-      if (!lprApp) throw new Error('No enabled LPR app to hold the watchlist.')
-      const cfg = { ...(lprApp.config ?? {}) } as Record<string, any>
+  const watchlist = useMutation(lprConfigWrite<{ plateText: string; list: 'allowlist' | 'monitor' }>(
+    (cfg, { plateText, list }) => {
       if (list === 'allowlist') {
         const current: string[] = Array.isArray(cfg.allowlist) ? cfg.allowlist : []
-        if (current.includes(plateText)) return
-        cfg.allowlist = [...current, plateText]
-      } else {
-        if (monitoredPlates.has(plateText)) return
-        cfg.monitors = [
-          ...monitors,
-          { plate: plateText, severity: 'high', active: true },
-        ]
+        return current.includes(plateText) ? cfg : { ...cfg, allowlist: [...current, plateText] }
       }
-      await apiService.updateAppConfig(lprApp.id, cfg)
+      const current = parseMonitors(cfg)
+      if (current.some((m) => m.plate === plateText)) return cfg
+      return { ...cfg, monitors: [...current, { plate: plateText, severity: 'high', active: true }] }
     },
-    onSuccess: (_d, vars) => {
-      queryClient.invalidateQueries({ queryKey: ['apps'] })
-      showSuccess(vars.list === 'monitor'
-        ? `${vars.plateText} is now monitored — configure its alert in the Monitoring tab`
-        : `${vars.plateText} added to the allowlist`)
+    'Could not update the watchlist.',
+    (vars) => showSuccess(vars.list === 'monitor'
+      ? `${vars.plateText} is now monitored — configure its alert in the Monitoring tab`
+      : `${vars.plateText} added to the allowlist`),
+  ))
+
+  // Register and monitor are SEPARATE lists on the app's config, so they
+  // are separate toggles: a resident's car can be registered and also
+  // worth alerting on. The Status badge still shows one value because it
+  // ranks them, but the underlying state is two booleans and pretending
+  // otherwise (an exclusive dropdown) meant setting one silently cleared
+  // the other.
+  //
+  // Turning a plate OFF the register discards owner/unit/model details
+  // that nothing else on the platform holds, so that direction asks
+  // first. Everything else here is retypable.
+  const toggleList = useMutation(lprConfigWrite<{
+    plateText: string
+    list: 'registry' | 'monitor'
+    on: boolean
+  }>(
+    (cfg, { plateText, list, on }) => {
+      const without = <T,>(entries: T[]) => entries.filter((entry: any) => {
+        const plate = typeof entry === 'string' ? entry : entry?.plate
+        return String(plate ?? '').toUpperCase() !== plateText
+      })
+      const next = { ...cfg }
+      if (list === 'registry') {
+        const current = parseRegistry(cfg.registry)
+        next.registry = on ? [...without(current), { plate: plateText }] : without(current)
+      } else {
+        const current = parseMonitors(cfg)
+        next.monitors = on
+          ? [...without(current), { plate: plateText, severity: 'high', active: true }]
+          : without(current)
+        // The legacy denylist is monitor shorthand — a plate leaving the
+        // monitored state has to leave there too, or it comes straight back.
+        if (Array.isArray(cfg.denylist)) next.denylist = without(cfg.denylist)
+      }
+      return next
     },
-    onError: (e) => showError(extractApiError(e, 'Could not update the watchlist.')),
-  })
+    'Could not update the watchlist.',
+    (v) => showSuccess(v.list === 'registry'
+      ? (v.on ? `${v.plateText} registered — add owner details in the Vehicle register tab`
+        : `${v.plateText} removed from the vehicle register`)
+      : (v.on ? `${v.plateText} is now monitored — configure its alert in the Monitoring tab`
+        : `${v.plateText} is no longer monitored`)),
+  ))
 
   // Replace the whole monitors list (Monitoring tab edits). The tab
   // edits the MERGED view (explicit monitors + denylist shorthand), so
@@ -583,94 +1045,433 @@ export function Vehicles() {
   const cameraName = (id: number) =>
     camerasQuery.data?.find((c) => c.id === id)?.name ?? `cam${id}`
 
-  const exportCsv = () => {
-    const rows = eventsQuery.data ?? []
-    const blob = new Blob([toCsv(rows, cameraName)], { type: 'text/csv' })
-    const a = document.createElement('a')
-    a.href = URL.createObjectURL(blob)
-    a.download = `plate-reads-${new Date().toISOString().slice(0, 10)}.csv`
-    a.click()
-    URL.revokeObjectURL(a.href)
+  // Fetches its own rows rather than exporting what is on screen. The
+  // table now holds ONE PAGE, and an export that quietly contained 25 of
+  // 312 reads would be worse than no export at all — this file is the
+  // evidence trail an operator hands to someone else.
+  const [exporting, setExporting] = useState(false)
+  const exportCsv = async () => {
+    setExporting(true)
+    try {
+      const { data } = await apiService.getPlateEvents({
+        ...readFilters, limit: EXPORT_MAX,
+      })
+      const rows = ((data as any)?.events ?? []) as PlateEvent[]
+      const total = (data as any)?.total as number | undefined
+      const blob = new Blob([toCsv(rows, cameraName)], { type: 'text/csv' })
+      const a = document.createElement('a')
+      a.href = URL.createObjectURL(blob)
+      a.download = `plate-reads-${new Date().toISOString().slice(0, 10)}.csv`
+      a.click()
+      URL.revokeObjectURL(a.href)
+      // Say so rather than truncating in silence.
+      if (typeof total === 'number' && total > rows.length) {
+        showError(`Exported the newest ${rows.length} of ${total} reads — narrow the window for the rest.`)
+      } else {
+        showSuccess(`Exported ${rows.length} read${rows.length === 1 ? '' : 's'}.`)
+      }
+    } catch (e) {
+      showError(extractApiError(e, 'Could not export the reads.'))
+    } finally {
+      setExporting(false)
+    }
   }
 
   const stats = statsQuery.data
-  const events = eventsQuery.data ?? []
+  const events = eventsQuery.data?.rows ?? []
+  const eventsTotal = eventsQuery.data?.total
+
+  const readColumns: Column<PlateEvent>[] = ([
+    {
+      // FIRST column: the row's controls live in a left gutter, always
+      // visible. They are dim icons that brighten on approach — quiet
+      // enough not to crowd the data, present enough that nobody has to
+      // discover them by hovering.
+      key: 'watchlist', header: '', srHeader: 'Watchlist actions',
+      width: 'w-[72px]', className: 'whitespace-nowrap',
+      isAction: true,
+      cell: (e) => {
+        const p = (e.plate_text ?? '').toUpperCase()
+        if (!lprApp || !canConfigure) return null
+        const registered = registryPlates.has(p)
+        const monitored = monitoredPlates.has(p)
+        const entry = registry.find((r) => r.plate === p)
+        const hasDetails = !!(entry?.owner || entry?.unit || entry?.expires
+          || entry?.model || entry?.note)
+
+        // BOTH icons on every row, always. They used to appear only when
+        // the plate was NOT on that list, so a row's gutter changed shape
+        // depending on state — the control you wanted was missing exactly
+        // when you wanted to undo something. Now the icon is the state:
+        // lit means on, dim means off, and clicking it flips that.
+        const toggle = async (list: 'registry' | 'monitor', on: boolean) => {
+          if (list === 'registry' && !on && hasDetails
+            && !(await confirm({
+              title: `${p} has owner or unit details in the vehicle register.`,
+              message: 'Removing it discards that entry and those details.',
+              confirmLabel: 'Remove',
+              danger: true,
+            }))) {
+            return
+          }
+          toggleList.mutate({ plateText: p, list, on })
+        }
+
+        return (
+          <>
+            <button
+              aria-pressed={registered}
+              disabled={toggleList.isPending}
+              title={registered
+                ? `${p} is in the vehicle register — click to remove`
+                : 'Register this vehicle — add owner details in the Vehicle register tab'}
+              aria-label={registered ? `Remove ${p} from the register` : `Register ${p}`}
+              className={`mr-2 rounded p-0.5 ${registered
+                ? 'text-[var(--badge-success-text)]'
+                : 'text-[var(--text-dim)] hover:text-[var(--text)]'}`}
+              onClick={() => toggle('registry', !registered)}
+            >
+              <BookUser size={15} />
+            </button>
+            <button
+              aria-pressed={monitored}
+              disabled={toggleList.isPending}
+              title={monitored
+                ? `${p} is monitored — click to stop alerting on it`
+                : 'Monitor this plate — alert whenever it is seen'}
+              aria-label={monitored ? `Stop monitoring ${p}` : `Monitor ${p}`}
+              className={`rounded p-0.5 ${monitored
+                ? 'text-[var(--badge-destructive-text)]'
+                : 'text-[var(--text-dim)] hover:text-[var(--text)]'}`}
+              onClick={() => toggle('monitor', !monitored)}
+            >
+              <ShieldAlert size={15} />
+            </button>
+          </>
+        )
+      },
+    },
+    {
+      key: 'photo', header: 'Photo', width: 'w-20',
+      cell: (e) => (e.has_plate_evidence || e.has_evidence)
+        ? <RowThumb e={e} plate={(e.plate_text ?? '').toUpperCase()} onOpen={() => setPreview(e)} />
+        : <div className="h-8 w-14 grid place-items-center text-[10px] text-[var(--text-dim)] bg-[var(--bg-2)]">—</div>,
+    },
+    {
+      key: 'plate', header: 'Plate', width: 'w-[148px]',
+      cellClassName: 'font-mono font-semibold',
+      cell: (e) => {
+        const p = (e.plate_text ?? '').toUpperCase()
+        return (
+          <button
+            className="hover:underline inline-flex items-center gap-1"
+            title={t('vehicles.historyTooltip')}
+            onClick={() => setHistoryPlate(p)}
+          >
+            {p} <History size={12} className="text-[var(--text-dim)]" />
+          </button>
+        )
+      },
+    },
+    {
+      key: 'camera', header: 'Camera',
+      // The one column with no width — it absorbs the slack. Under
+      // table-fixed an over-long name WRAPS rather than widening, and an
+      // uneven row height is exactly what the thumbnail rules exist to
+      // prevent, so it truncates with the full name on hover.
+      cellClassName: 'truncate',
+      cell: (e) => {
+        const r = cameraRoles[String(e.camera_id)]
+        // roleLabel falls back to "Other" for any role that is not a
+        // gate or parking, so every ordinary camera wore a grey badge
+        // saying nothing. Badge only what an operator can act on: a
+        // gate direction, parking, or a label someone actually chose.
+        const named = !!r && (r.role === 'gate_in' || r.role === 'gate_out'
+          || r.role === 'parking' || !!r.label)
+        const label = named ? roleLabel(r) : null
+        const name = cameraName(e.camera_id)
+        return (
+          <span className="flex items-center gap-1.5 min-w-0" title={name}>
+            <span className="truncate">{name}</span>
+            {label && (
+              <Badge variant={r!.role === 'gate_in' ? 'success' : 'neutral'} className="shrink-0">
+                {label}
+              </Badge>
+            )}
+          </span>
+        )
+      },
+    },
+    {
+      key: 'seen', header: 'Date & time', width: 'w-[184px]',
+      className: 'whitespace-nowrap',
+      // Colour and numerals belong to the DATA, not the header — putting
+      // them on `className` dimmed this column's header and made it the
+      // odd one out.
+      cellClassName: 'text-[var(--text-dim)] tabular-nums',
+      cell: (e) => {
+        const iso = plateSeenIso(e)
+        return <span title={seenAtTitle(iso, fmt)}>{formatSeenAt(iso, fmt) || '—'}</span>
+      },
+    },
+    {
+      key: 'status', header: 'Status', width: 'w-[120px]',
+      // Read-only again. A <select> in a data row was heavier than the
+      // thing it described and put a second, differently-shaped control
+      // next to the gutter toggles that already do this. The badge
+      // reports; the icons act.
+      cell: (e) => {
+        const p = (e.plate_text ?? '').toUpperCase()
+        if (monitoredPlates.has(p)) {
+          return (
+            <Badge variant="destructive" title={monitors.find((m) => m.plate === p)?.note}>
+              Monitored
+            </Badge>
+          )
+        }
+        if (registryPlates.has(p)) return <Badge variant="success">Registered</Badge>
+        if (expiredPlates.has(p)) return <Badge variant="warning">Pass expired</Badge>
+        if (allow.includes(p)) return <Badge variant="success">Expected</Badge>
+        if (alarmOnUnknown) return <Badge variant="warning">Unknown</Badge>
+        return <span className="text-[var(--text-dim)]">—</span>
+      },
+    },
+  ] as Column<PlateEvent>[])
+    // With one camera in play (the filter picks one, or only one camera
+    // reads plates) every row names the same camera: the column was a
+    // third of the table repeating one word. Its gate-role badge goes
+    // with it — the role is the camera's, and the camera is known.
+    .filter((c) => c.key !== 'camera' || (cameraId === '' && lprCameras.length > 1))
 
   return (
-    <section className="space-y-4">
-      <PageHeader
-        title="Vehicles"
-        description="License plate reads across your cameras — searched from the evidence store, whichever part of the platform ran the OCR. Watchlists apply live."
-        actions={
-          <div className="flex items-center gap-2">
-            <Button variant="outline" onClick={() => setReportOpen(true)}>
-              <FileText size={14} /> Monthly report
-            </Button>
-            <Button variant="outline" onClick={exportCsv} disabled={!events.length}>
-              <Download size={14} /> Export CSV
-            </Button>
-            <Button onClick={() => eventsQuery.refetch()} disabled={eventsQuery.isFetching}>
-              <RefreshCw size={14} className={eventsQuery.isFetching ? 'animate-spin' : ''} /> Refresh
-            </Button>
+    <section className="space-y-3">
+      <div>
+        {/* The description dropped "searched from the evidence store,
+            whichever part of the platform ran the OCR" — an implementation
+            note, not something an operator needs on every visit, and it
+            cost a second line. */}
+        <AppPageHeader
+          app={lprApp}
+          title={t('vehicles.title')}
+          description={t('vehicles.description')}
+          actions={
+            <>
+              {/* A status, not a filter: whether a stranger's plate raises
+                  an alarm is a site setting (Gate settings). It sat among
+                  the reads filters looking like one; here it is visible
+                  from every tab, beside the actions that change things. */}
+              {alarmOnUnknown && (
+                <span
+                  className="inline-flex items-center gap-1.5 text-[11px] text-[var(--badge-warning-text)]"
+                  title={t('vehicles.unknownHighAlert')}
+                >
+                  <BellRing size={12} aria-hidden="true" /> {t('vehicles.unknownAlarm')}
+                </span>
+              )}
+              <AppConfigureButton app={lprApp} size="sm" className="h-7" />
+              <button
+                type="button"
+                onClick={() => eventsQuery.refetch()}
+                disabled={eventsQuery.isFetching}
+                title={t('vehicles.refresh')}
+                aria-label={t('vehicles.refresh')}
+                className="grid h-7 w-7 place-items-center border border-[var(--border)] text-[var(--text-dim)] transition-colors hover:bg-[var(--panel)] hover:text-[var(--text)] disabled:cursor-not-allowed"
+              >
+                <RefreshCw size={13} className={eventsQuery.isFetching ? 'animate-spin' : ''} />
+              </button>
+              {/* The occasional actions, folded: five equal buttons read as
+                  five primary actions. An empty PAGE is not an empty result
+                  set, so the export's guard is its own state, not the row
+                  count. Sound is on every tab — how the site SOUNDS is
+                  something you go and set, not only think about while
+                  looking at alarms. */}
+              <MoreMenu
+                items={[
+                  { key: 'report', label: t('vehicles.report'), icon: <FileText size={13} />, onClick: () => setReportOpen(true) },
+                  {
+                    key: 'export',
+                    label: exporting ? 'Exporting…' : t('vehicles.export'),
+                    icon: <Download size={13} />,
+                    onClick: exportCsv,
+                    disabled: exporting,
+                  },
+                  {
+                    key: 'sound',
+                    label: t('vehicles.sound'),
+                    icon: <Volume2 size={13} />,
+                    onClick: () => navigate('/alerts-incidents'),
+                    title: t('vehicles.soundTooltip'),
+                  },
+                ]}
+              />
+            </>
+          }
+        >
+          {/* Which cameras this app reads, as a row of the header panel —
+              a fact about the page, not a separate card. */}
+          <AppCamerasCard app={lprApp} embedded />
+
+          {/* What else can be built for a site. One line, one point of
+              colour: an accent edge and glyph so the eye catches it, a bold
+              lead-in so it is read, the rest dim so it does not compete with
+              the work. It was two lines of copy and the page's one filled
+              button — the loudest thing on a screen people use all day.
+              Always shown: it is small enough not to need a way to hide it. */}
+          <div className="flex items-center gap-2 border-t border-[var(--border)] border-l-2 border-l-[var(--accent)] bg-[color-mix(in_oklab,var(--accent)_6%,transparent)] px-3 py-1.5 text-xs">
+            <Sparkles size={13} className="shrink-0 text-[var(--accent)]" aria-hidden="true" />
+            <span
+              className="min-w-0 truncate text-[var(--text-dim)]"
+              title="Housing societies, industrial estates, factories, campuses, warehouses and logistics yards — phone-number & SMS alerts, WhatsApp notifications, gate & process automation, scheduled reports, or any custom feature."
+            >
+              <span className="font-semibold text-[var(--text)]">Need more for your site?</span>{' '}
+              SMS &amp; WhatsApp alerts, gate automation, custom features — built per site.
+            </span>
+            <a
+              href={CONTACT_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="ml-auto inline-flex shrink-0 items-center gap-1 pl-2 text-xs font-medium text-[var(--accent)] hover:underline"
+            >
+              {t('vehicles.contact')} <ArrowRight size={12} />
+            </a>
           </div>
-        }
-      />
+        </AppPageHeader>
 
-      {/* ── Stat tiles (7-day window) ─────────────────────────────── */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        {[
-          { label: 'Reads (7d)', value: stats?.total_reads },
-          { label: 'Unique plates (7d)', value: stats?.unique_plates },
-          gatesConfigured
-            ? { label: 'Inside now', value: occupancyQuery.data?.inside }
-            : { label: 'Busiest camera (7d)', value: stats?.per_camera?.length
-                ? cameraName([...stats.per_camera].sort((a, b) => b.reads - a.reads)[0].camera_id)
-                : '—' },
-          { label: 'Registered vehicles', value: lprApp ? registry.length : '—' },
-        ].map((t) => (
-          <Card key={t.label}>
-            <CardContent className="py-3">
-              <div className="text-2xl font-semibold">{t.value ?? '…'}</div>
-              <div className="text-xs text-[var(--text-dim)]">{t.label}</div>
-            </CardContent>
-          </Card>
-        ))}
+        {/* Header and tabs are ONE block. PageHeader carries its own mb-4
+            and the section's space-y-4 was stacking a second 16px on top,
+            so the tab bar floated 32px under the title looking unrelated to
+            it. Wrapped together, the tab rule reads as the bottom edge of
+            the page header — which is what a tab bar is.
+            Tabs scope the CONTENT; the filter bar below scopes the rows.
+            They stayed separate rows on purpose — hanging the reads
+            filters off the tab rule would leave them sitting live above the
+            Vehicle register, where they do nothing. */}
+        <Tabs
+          tabs={([
+            { key: 'reads', label: t('vehicles.plateReads') },
+            { key: 'report', label: t('vehicles.reportTab') },
+            { key: 'registry', label: `${t('vehicles.register')} (${registry.length})` },
+            { key: 'monitoring', label: `${t('vehicles.monitoring')} (${monitors.length})` },
+            {
+            key: 'alarms',
+            // "Alarms (318)" and, only when some are unacknowledged, a small
+            // "N new" beside it. "(0/318)" asked the reader to know which
+            // number was which; the word says it.
+            label: (
+              <span className="inline-flex items-center gap-1.5">
+                {t('vehicles.alarms')}
+                {typeof alarmCounts.data?.total === 'number' && (
+                  <span className="text-[var(--text-dim)]">({alarmCounts.data.total})</span>
+                )}
+                {(alarmCounts.data?.unacked ?? 0) > 0 && (
+                  <span
+                    className="bg-[var(--badge-warning-bg)] px-1.5 text-[10px] font-semibold leading-4 text-[var(--badge-warning-text)]"
+                    title={`${alarmCounts.data!.unacked} not yet acknowledged`}
+                  >
+                    {alarmCounts.data!.unacked} new
+                  </span>
+                )}
+              </span>
+            ),
+          },
+          // Gate Settings last, and a TAB rather than a fold under the
+          // register table. Folded, it read as part of the register and
+          // the camera-role table inside it — the thing that starts plate
+          // reading at all — sat below four other rows inside a collapsed
+          // card. Operators went to the App Catalog to assign a camera
+          // instead, which is a different screen for the same setting.
+          { key: 'gate', label: t('vehicles.gateSettings') },
+          ] as const)
+            .filter((t) => canConfigure || t.key === 'reads' || t.key === 'alarms')
+            .map((t) => ({ key: t.key, label: t.label }))}
+          active={tab}
+          onChange={(k: string) => setTab(k as typeof tab)}
+        />
       </div>
 
-      {/* ── Tabs: live reads vs the vehicle register ─────────────── */}
-      <div className="flex items-center gap-1 border-b border-[var(--border)]">
-        {([
-          { key: 'reads', label: 'Plate reads' },
-          { key: 'registry', label: `Vehicle register (${registry.length})` },
-          { key: 'monitoring', label: `Monitoring (${monitors.length})` },
-        ] as const).map((t) => (
-          <button
-            key={t.key}
-            onClick={() => setTab(t.key)}
-            className={`px-3 py-2 text-sm -mb-px border-b-2 ${tab === t.key
-              ? 'border-[var(--accent,var(--text))] text-[var(--text)] font-medium'
-              : 'border-transparent text-[var(--text-dim)] hover:text-[var(--text)]'}`}
-          >
-            {t.label}
-          </button>
-        ))}
-        {alarmOnUnknown && (
-          <span className="ml-auto inline-flex items-center gap-1 text-xs text-[var(--warning,#b7791f)]">
-            <BellRing size={13} /> Unknown-vehicle alarm is ON
-          </span>
-        )}
-      </div>
-
-      {tab === 'monitoring' ? (
+      {tab === 'alarms' ? (
+        <VehicleAlarmsTab cameraName={cameraName} />
+      ) : tab === 'report' ? (
+        <VehicleReportTab cameraName={cameraName} />
+      ) : tab === 'monitoring' ? (
         <MonitoringTab
           monitors={monitors}
-          canEdit={Boolean(lprApp)}
+          canEdit={Boolean(lprApp) && canConfigure}
           saving={saveConfig.isPending}
           cameras={camerasQuery.data ?? []}
           onSave={saveMonitors}
         />
-      ) : tab === 'registry' ? (
+      ) : tab === 'registry' || tab === 'gate' ? (
+        <>
+        {/* The legacy allowlist belongs to the register, not the gate. */}
+        {tab === 'registry' && allow.length > 0 && (
+          <Card className="mb-3">
+            <CardContent className="p-3 space-y-2">
+              <div className="flex items-center gap-2 font-medium text-sm">
+                <ShieldCheck size={14} /> {t('vehicles.legacyAllowlist')}
+              </div>
+              <div className="text-[12px] text-[var(--text-dim)]">
+                These plates were marked "expected" before the register
+                unified the two lists: they suppress nothing beyond
+                lowering their read severity. Move them into the register
+                (recommended — one list, suppresses the unknown-vehicle
+                alarm too) or remove them.
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {allow.map((plate) => (
+                  <span
+                    key={plate}
+                    className="inline-flex items-center gap-1.5 px-2 py-0.5 border border-[var(--border)] bg-[var(--bg-2)] text-sm"
+                  >
+                    <span className="font-mono">{plate}</span>
+                    {!registryPlates.has(plate.toUpperCase()) && (
+                      <button
+                        title={t('vehicles.moveRegister')}
+                        className="text-[var(--text-dim)] hover:text-[var(--text)]"
+                        onClick={() =>
+                          saveConfig.mutate(
+                            {
+                              registry: [...registry, { plate: normalizePlate(plate) }],
+                              allowlist: allow.filter((x) => x !== plate),
+                            },
+                            {
+                              onSuccess: () => showSuccess(
+                                `${plate} moved to the vehicle register`),
+                            },
+                          )
+                        }
+                      >
+                        <BookUser size={13} />
+                      </button>
+                    )}
+                    <button
+                      title={t('vehicles.removeExpected')}
+                      className="text-[var(--text-dim)] hover:text-[var(--danger)]"
+                      onClick={() =>
+                        saveConfig.mutate(
+                          { allowlist: allow.filter((x) => x !== plate) },
+                          {
+                            onSuccess: () => showSuccess(
+                              `${plate} removed from expected vehicles`),
+                          },
+                        )
+                      }
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        )}
         <RegistryTab
+          /* Same component, same props, two tabs — the register table
+             and the settings that govern it. Rendering a second copy
+             with its own handlers would be two places to keep in step,
+             which is the defect this file has already been bitten by. */
+          view={tab === 'gate' ? 'gate' : 'registry'}
+          onOpenGate={() => setTab('gate')}
           registry={registry}
           alarmOnUnknown={alarmOnUnknown}
           barrierMode={barrierMode}
@@ -689,7 +1490,7 @@ export function Vehicles() {
                    : 'Automatic barrier off'),
             })
           }}
-          canEdit={Boolean(lprApp)}
+          canEdit={Boolean(lprApp) && canConfigure}
           saving={saveConfig.isPending}
           cameras={camerasQuery.data ?? []}
           cameraRoles={cameraRoles}
@@ -697,12 +1498,21 @@ export function Vehicles() {
             const next = { ...cameraRoles }
             if (!role) delete next[String(cameraId)]
             else next[String(cameraId)] = label ? { role, label } : { role }
+            // Adopt on set, release on clear. Releasing drops only this
+            // app's claim — an operator who assigned LPR on the Cameras
+            // page keeps their assignment, and the camera keeps reading.
+            const camera = (camerasQuery.data ?? []).find((c) => c.id === cameraId)
+            const adopt = Boolean(role)
+            if (camera && adopt !== cameraAdopted(camera, LPR_SKILL)) {
+              claimCamera.mutate({ cameraId, adopt })
+            }
             // Only declared manifest params may be written — the server
             // rejects unknown config keys. camera_roles is declared;
             // the legacy gate_directions map is read-only fallback.
             saveConfig.mutate({ camera_roles: next })
           }}
           initialPlate={registerPrefill}
+          onPrefillConsumed={() => setRegisterPrefill('')}
           onSaveRegistry={(entries) => {
             saveConfig.mutate({ registry: entries }, {
               onSuccess: () => showSuccess(`Register saved — ${entries.length} vehicles`),
@@ -716,6 +1526,7 @@ export function Vehicles() {
             })
           }}
         />
+        </>
       ) : (
       <>
       {/* ── Needs review (bad format / low confidence reads) ──────── */}
@@ -745,9 +1556,10 @@ export function Vehicles() {
                         </Badge>
                       </td>
                       <td className="py-1 pr-3 text-[var(--text-dim)]">
-                        {new Date(r.time * 1000).toLocaleTimeString()}
+                        {fmt.time(r.time * 1000, {})}
                       </td>
                       <td className="py-1 text-right">
+                        {canConfigure && (
                         <Button
                           variant="outline"
                           onClick={() => {
@@ -757,6 +1569,7 @@ export function Vehicles() {
                         >
                           <Plus size={13} /> Register
                         </Button>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -767,195 +1580,118 @@ export function Vehicles() {
         </Card>
       )}
 
-      {/* ── Filters ───────────────────────────────────────────────── */}
-      <Card>
-        <CardContent className="py-3 flex flex-wrap items-center gap-2">
-          <div className="relative">
-            <Search size={14} className="absolute left-2 top-1/2 -translate-y-1/2 text-[var(--text-dim)]" />
-            <input
-              value={plate}
-              onChange={(e) => setPlate(e.target.value)}
-              placeholder="Plate contains… (e.g. 1234)"
-              className="pl-7 pr-2 py-1.5 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm w-56"
-            />
-          </div>
-          <select
-            value={cameraId}
-            onChange={(e) => setCameraId(e.target.value === '' ? '' : Number(e.target.value))}
-            className="py-1.5 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm"
-          >
-            <option value="">All cameras</option>
-            {(camerasQuery.data ?? []).map((c) => (
-              <option key={c.id} value={c.id}>{c.name}</option>
-            ))}
-          </select>
-          <div className="flex rounded border border-[var(--border)] overflow-hidden">
-            {RANGE_PRESETS.map((r) => (
-              <button
-                key={r.key}
-                onClick={() => setRange(r)}
-                className={`px-3 py-1.5 text-sm ${range.key === r.key
-                  ? 'bg-[var(--accent,var(--bg-2))] text-white'
-                  : 'bg-[var(--bg-2)] text-[var(--text-dim)]'}`}
-              >
-                {r.label}
-              </button>
-            ))}
-          </div>
-          {!lprApp && (
-            <span className="text-xs text-[var(--text-dim)] ml-auto">
-              No enabled LPR app — reads still collect; watchlists need the app.
-            </span>
-          )}
-        </CardContent>
-      </Card>
-
       {/* ── Reads table ───────────────────────────────────────────── */}
-      {eventsQuery.isPending ? (
-        <Skeleton className="h-64" />
-      ) : eventsQuery.isError ? (
-        <ErrorCard
-          title="Could not load plate reads"
-          message={extractApiError(eventsQuery.error, 'The events store is unreachable.')}
-          onRetry={() => eventsQuery.refetch()}
-        />
-      ) : events.length === 0 ? (
-        <EmptyState
-          icon={<Car size={28} />}
-          title="No plate reads in this window"
-          description="Assign cameras the License Plate Recognition skill (Cameras → edit → Assignments) and vehicle visits will appear here with their evidence photos."
-        />
-      ) : (
-        <Card>
-          <CardContent className="p-0 overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-xs text-[var(--text-dim)] border-b border-[var(--border)]">
-                  <th className="px-3 py-2">Photo</th>
-                  <th className="px-3 py-2">Plate</th>
-                  <th className="px-3 py-2">Camera</th>
-                  <th className="px-3 py-2">Seen</th>
-                  <th className="px-3 py-2">Status</th>
-                  <th className="px-3 py-2 text-right pr-4">Watchlist</th>
-                </tr>
-              </thead>
-              <tbody>
-                {events.map((e) => {
-                  const p = (e.plate_text ?? '').toUpperCase()
-                  const inDeny = monitoredPlates.has(p)
-                  const inAllow = allow.includes(p)
-                  const registered = registryPlates.has(p)
-                  return (
-                    <tr key={e.id} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--bg-2)]">
-                      <td className="px-3 py-1.5">
-                        {e.has_evidence ? (
-                          <AuthedImage
-                            queryKey={['evidence', e.id]}
-                            fetchBlob={() => apiService.getEventEvidence(e.id)}
-                            alt={`evidence for ${p}`}
-                            className="h-10 w-16 object-cover rounded cursor-zoom-in"
-                            onClick={() => setPreview(e)}
-                          />
-                        ) : (
-                          <div className="h-10 w-16 grid place-items-center text-[10px] text-[var(--text-dim)] bg-[var(--bg-2)] rounded">—</div>
-                        )}
-                      </td>
-                      <td className="px-3 py-1.5 font-mono font-semibold">
-                        <button
-                          className="hover:underline inline-flex items-center gap-1"
-                          title="Vehicle history — every time this plate was seen"
-                          onClick={() => setHistoryPlate(p)}
-                        >
-                          {p} <History size={12} className="text-[var(--text-dim)]" />
-                        </button>
-                      </td>
-                      <td className="px-3 py-1.5">
-                        {cameraName(e.camera_id)}
-                        {(() => {
-                          const r = cameraRoles[String(e.camera_id)]
-                          const label = roleLabel(r)
-                          if (!label) return null
-                          return (
-                            <Badge
-                              variant={r!.role === 'gate_in' ? 'success' : 'neutral'}
-                              className="ml-1.5"
-                            >
-                              {label}
-                            </Badge>
-                          )
-                        })()}
-                      </td>
-                      <td className="px-3 py-1.5 text-[var(--text-dim)]">
-                        {e.started_at ? new Date(e.started_at).toLocaleString() : '—'}
-                      </td>
-                      <td className="px-3 py-1.5">
-                        {inDeny ? <Badge variant="destructive" title={monitors.find((m) => m.plate === p)?.note}>monitored</Badge>
-                          : registered ? <Badge variant="success">registered</Badge>
-                          : expiredPlates.has(p) ? <Badge variant="warning">pass expired</Badge>
-                          : inAllow ? <Badge variant="success">expected</Badge>
-                          : alarmOnUnknown ? <Badge variant="warning">unknown</Badge>
-                          : <Badge variant="neutral">{e.label || 'vehicle'}</Badge>}
-                      </td>
-                      <td className="px-3 py-1.5 text-right pr-4 whitespace-nowrap">
-                        {lprApp && !inDeny && (
-                          <button
-                            title="Monitor this plate — alert whenever it is seen (configure in the Monitoring tab)"
-                            className="text-[var(--text-dim)] hover:text-[var(--text)] mr-2"
-                            onClick={() => watchlist.mutate({ plateText: p, list: 'monitor' })}
-                          >
-                            <ShieldAlert size={15} />
-                          </button>
-                        )}
-                        {lprApp && !inAllow && (
-                          <button
-                            title="Mark as an expected vehicle (low-severity reads)"
-                            className="text-[var(--text-dim)] hover:text-[var(--text)]"
-                            onClick={() => watchlist.mutate({ plateText: p, list: 'allowlist' })}
-                          >
-                            <ShieldCheck size={15} />
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </CardContent>
-        </Card>
-      )}
+      <DataTable<PlateEvent>
+        caption="Plate reads"
+        columns={readColumns}
+        rows={events}
+        rowKey={(e) => e.id}
+        isPending={eventsQuery.isPending}
+        isFetching={eventsQuery.isFetching}
+        isError={eventsQuery.isError}
+        error={eventsQuery.error}
+        errorTitle="Could not load plate reads"
+        onRetry={() => eventsQuery.refetch()}
+        fillHeight
+        fixed
+        dense
+        minWidth="min-w-[720px]"
+        // The row IS the record: clicking anywhere on it opens the
+        // evidence, the way a mail row opens the mail. The photo keeps
+        // its own handler for the zoom affordance.
+        onRowClick={(e) => setPreview(e)}
+        // No zebra. Striping earns its place on a wide numeric grid; on
+        // a short row with a photo it is visual noise, and a plain hover
+        // reads cleaner and makes the hovered row unmistakable.
+        striped={false}
+        empty={
+          <EmptyState
+            icon={<Car size={28} />}
+            title={debouncedPlate || cameraId !== ''
+              ? t('vehicles.noMatch')
+              : t('vehicles.noReads')}
+            description={lprCameras.length === 0
+              ? 'No camera is reading plates yet. Give a camera a role under Gate settings → Camera roles (or pick it under Configure → Cameras) and visits will appear here with their evidence photos.'
+              : 'Vehicle visits appear here with their evidence photos.'}
+            action={(debouncedPlate || cameraId !== '') ? (
+              <Button variant="outline" onClick={() => {
+                setPlate(''); setCameraId(''); reads.setPage(1)
+              }}>{t('vehicles.clearFilters')}</Button>
+            ) : undefined}
+          />
+        }
+        // Filters and paging share ONE bar inside the table's own border.
+        // They used to be three separately-bordered controls floating
+        // above a separately-bordered table, so the eye counted four
+        // rectangles before reaching a row of data. Controls belong to
+        // the thing they control.
+        toolbar={
+          <div className="flex flex-wrap items-center gap-2 py-1.5 pl-3">
+            <div className="relative">
+              <Search size={14} className="absolute left-2 top-1/2 -translate-y-1/2 text-[var(--text-dim)]" />
+              <input
+                value={plate}
+                onChange={(e) => { setPlate(e.target.value); reads.setPage(1) }}
+                placeholder="Plate contains… (e.g. 1234)"
+                aria-label="Filter by plate"
+                className="w-48 border border-[var(--border)] bg-[var(--bg-2)] py-1 pl-7 pr-2 text-xs"
+              />
+            </div>
+            <select
+              value={cameraId}
+              onChange={(e) => {
+                setCameraId(e.target.value === '' ? '' : Number(e.target.value))
+                reads.setPage(1)
+              }}
+              aria-label="Filter by camera"
+              className="border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 text-xs"
+            >
+              <option value="">{t('vehicles.allCameras')}</option>
+              {(camerasQuery.data ?? []).map((c) => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
+            <SegmentedControl
+              label={t('vehicles.timeRange')}
+              options={RANGE_PRESETS.map((r) => ({ value: r.key, label: r.label }))}
+              value={range.key}
+              onChange={(key) => {
+                setRange(RANGE_PRESETS.find((r) => r.key === key) ?? RANGE_PRESETS[0])
+                reads.setPage(1)
+              }}
+            />
+            {/* The figures the stat boxes carried, minus the two the tabs
+                already show and the read count the pager already says. */}
+            {lprApp && (stats?.unique_plates != null || (gatesConfigured && occupancyQuery.data?.inside != null)) && (
+              <span className="font-mono text-[11px] tabular-nums text-[var(--text-dim)]">
+                {stats?.unique_plates != null && `${stats.unique_plates} unique plates`}
+                {stats?.unique_plates != null && gatesConfigured && occupancyQuery.data?.inside != null && ' · '}
+                {gatesConfigured && occupancyQuery.data?.inside != null && `${occupancyQuery.data.inside} inside now`}
+              </span>
+            )}
+            {!lprApp && (
+              <span className="text-xs text-[var(--text-dim)]">
+                {t('vehicles.noLpr')}
+              </span>
+            )}
+            <div className="ml-auto">
+              <Pagination
+                page={reads.page}
+                pageSize={reads.pageSize}
+                total={eventsTotal}
+                rowCount={events.length}
+                hasNext={events.length === reads.pageSize}
+                isFetching={eventsQuery.isFetching}
+                label="reads"
+                onPageChange={reads.setPage}
+                onPageSizeChange={reads.setPageSize}
+              />
+            </div>
+          </div>
+        }
+      />
       </>
       )}
-
-      {/* ── Custom solutions (the providing app's contact) ────────── */}
-      {(() => {
-        const contact =
-          (lprApp?.manifest as any)?.contact || (lprApp?.manifest as any)?.website
-        if (!contact) return null
-        return (
-          <Card>
-            <CardContent className="py-3 flex flex-wrap items-center gap-3">
-              <PhoneCall size={18} className="text-[var(--text-dim)] shrink-0" />
-              <div className="min-w-0 flex-1 text-sm">
-                <span className="font-medium">Need more for your site?</span>{' '}
-                <span className="text-[var(--text-dim)]">
-                  Housing societies, industrial estates, factories, company campuses,
-                  warehouses and logistics yards — phone-number &amp; SMS alerts, WhatsApp
-                  notifications, complete gate &amp; process automation (barrier lift for
-                  registered vehicles, truck-bay logging), scheduled reports, or any
-                  custom feature. We build per-site solutions.
-                </span>
-              </div>
-              <Button
-                variant="outline"
-                onClick={() => window.open(contact, '_blank', 'noopener,noreferrer')}
-              >
-                Contact us
-              </Button>
-            </CardContent>
-          </Card>
-        )
-      })()}
 
       {/* ── Printable monthly report ──────────────────────────────── */}
       {reportOpen && (
@@ -970,7 +1706,7 @@ export function Vehicles() {
 
       {/* ── Per-plate history (all-time) ──────────────────────────── */}
       {historyPlate && (
-        <Modal open onClose={() => setHistoryPlate(null)} title={`${historyPlate} — vehicle history`}>
+      <Modal open onClose={() => setHistoryPlate(null)} title={`${historyPlate} — ${t('vehicles.history')}`}>
           {historyQuery.isPending ? (
             <Skeleton className="h-24" />
           ) : historyQuery.isError ? (
@@ -982,7 +1718,7 @@ export function Vehicles() {
               {(() => {
                 const reg = registry.find((r) => r.plate === historyPlate)
                 return reg && (reg.owner || reg.unit || reg.type || reg.model || reg.note) ? (
-                  <div className="rounded border border-[var(--border)] bg-[var(--bg-2)] px-3 py-2">
+                  <div className="border border-[var(--border)] bg-[var(--bg-2)] px-3 py-2">
                     Registered{reg.owner ? ` to ${reg.owner}` : ''}
                     {reg.unit ? ` · ${reg.unit}` : ''}
                     {reg.model ? ` · ${reg.model}` : reg.type ? ` · ${reg.type}` : ''}
@@ -995,21 +1731,21 @@ export function Vehicles() {
               <div className="grid grid-cols-3 gap-3">
                 <div>
                   <div className="text-xl font-semibold">{historyQuery.data?.total_reads ?? 0}</div>
-                  <div className="text-xs text-[var(--text-dim)]">total reads</div>
+                  <div className="text-xs text-[var(--text-dim)]">{t('vehicles.totalReads')}</div>
                 </div>
                 <div>
                   <div className="font-medium">
                     {historyQuery.data?.first_seen
-                      ? new Date(historyQuery.data.first_seen).toLocaleString() : '—'}
+                      ? fmt.dateTime(historyQuery.data.first_seen) : '—'}
                   </div>
-                  <div className="text-xs text-[var(--text-dim)]">first seen</div>
+                  <div className="text-xs text-[var(--text-dim)]">{t('vehicles.firstSeen')}</div>
                 </div>
                 <div>
                   <div className="font-medium">
                     {historyQuery.data?.last_seen
-                      ? new Date(historyQuery.data.last_seen).toLocaleString() : '—'}
+                      ? fmt.dateTime(historyQuery.data.last_seen) : '—'}
                   </div>
-                  <div className="text-xs text-[var(--text-dim)]">last seen</div>
+                  <div className="text-xs text-[var(--text-dim)]">{t('vehicles.lastSeen')}</div>
                 </div>
               </div>
               {gatesConfigured && sessionsQuery.data && (
@@ -1017,11 +1753,11 @@ export function Vehicles() {
                   <div className="text-xs text-[var(--text-dim)] mb-1 flex items-center gap-2">
                     Gate in / gate out
                     {sessionsQuery.data.inside_now && (
-                      <Badge variant="success">inside now</Badge>
+                      <Badge variant="success">{t('vehicles.insideNow')}</Badge>
                     )}
                   </div>
                   {sessionsQuery.data.sessions.length === 0 ? (
-                    <div className="text-xs text-[var(--text-dim)]">No gate passages yet.</div>
+                    <div className="text-xs text-[var(--text-dim)]">{t('vehicles.noGatePassages')}</div>
                   ) : (
                     <div className="max-h-48 overflow-y-auto">
                       <table className="w-full text-xs">
@@ -1037,12 +1773,12 @@ export function Vehicles() {
                             <tr key={i} className="border-t border-[var(--border)]">
                               <td className="py-1 pr-2">
                                 {s.entered_at
-                                  ? `${new Date(s.entered_at).toLocaleString()} · ${cameraName(s.entry_camera_id as number)}`
+                                  ? `${fmt.dateTime(s.entered_at)} · ${cameraName(s.entry_camera_id as number)}`
                                   : <span className="text-[var(--text-dim)]">missed</span>}
                               </td>
                               <td className="py-1 pr-2">
                                 {s.exited_at
-                                  ? `${new Date(s.exited_at).toLocaleString()} · ${cameraName(s.exit_camera_id as number)}`
+                                  ? `${fmt.dateTime(s.exited_at)} · ${cameraName(s.exit_camera_id as number)}`
                                   : <span className="text-[var(--text-dim)]">{i === 0 && sessionsQuery.data!.inside_now ? 'still inside' : 'missed'}</span>}
                               </td>
                               <td className="py-1 text-right font-mono">
@@ -1058,7 +1794,7 @@ export function Vehicles() {
               )}
               {(historyQuery.data?.per_camera ?? []).length > 0 && (
                 <div>
-                  <div className="text-xs text-[var(--text-dim)] mb-1">By camera</div>
+                  <div className="text-xs text-[var(--text-dim)] mb-1">{t('vehicles.byCamera')}</div>
                   {(historyQuery.data?.per_camera ?? []).map((c) => (
                     <div key={c.camera_id} className="flex justify-between border-b border-[var(--border)] last:border-0 py-1">
                       <span>{cameraName(c.camera_id)}</span>
@@ -1075,28 +1811,266 @@ export function Vehicles() {
                   setHistoryPlate(null)
                 }}
               >
-                <Search size={14} /> Show these reads
+                <Search size={14} /> {t('vehicles.showReads')}
               </Button>
             </div>
           )}
         </Modal>
       )}
 
-      {/* ── Evidence preview ──────────────────────────────────────── */}
+      {/* ── Evidence preview ─────────────────────── */}
+      {/* Keyed by id so the stage/zoom toggles reset with the row, and
+          extracted so that state lives with the dialog rather than in
+          this 600-line component. */}
       {preview && (
-        <Modal open onClose={() => setPreview(null)} title={`${(preview.plate_text ?? '').toUpperCase()} — ${cameraName(preview.camera_id)}`}>
-          <AuthedImage
-            queryKey={['evidence', preview.id]}
-            fetchBlob={() => apiService.getEventEvidence(preview.id)}
-            alt="evidence"
-            className="max-h-[70vh] w-auto rounded"
-          />
-          <div className="text-xs text-[var(--text-dim)] mt-2">
-            {preview.started_at ? new Date(preview.started_at).toLocaleString() : ''}
-          </div>
-        </Modal>
+        <EvidenceDialog
+          key={preview.id}
+          e={preview}
+          cameraLabel={cameraName(preview.camera_id)}
+          onClose={() => setPreview(null)}
+        />
       )}
     </section>
+  )
+}
+
+/** The Photo cell: reserves its box, fetches only once on screen.
+ *
+ *  An auth-gated image cannot use <img loading="lazy"> — it has to come
+ *  through the api client as a blob — so before this every rendered row
+ *  fired a request the instant the table painted. At 200 rows over HTTP/2
+ *  that is ~200 at once, each holding a server-side DB connection while it
+ *  runs, which is precisely what exhausted core's pool.
+ *
+ *  The placeholder is the SAME h-8 w-14 box as the image: anything else
+ *  and rows resize as they scroll in, which moves the very elements the
+ *  observer is measuring.
+ */
+function RowThumb({ e, plate, onOpen }: {
+  e: PlateEvent
+  plate: string
+  onOpen: () => void
+}) {
+  const { t } = useTranslation()
+  const [ref, seen] = useInView<HTMLDivElement>()
+  if (readFrameIsMissing(e)) {
+    // No read frame: the only image available is from a different
+    // moment and possibly a different car. A neutral tile is honest;
+    // the dialog explains, and can still show that photo on request.
+    return (
+      <button
+        type="button"
+        onClick={onOpen}
+        title={t('vehicles.readFrameMissing')}
+        className="h-8 w-14 bg-[var(--bg-2)] grid place-items-center text-[9px] leading-tight text-[var(--text-dim)] cursor-zoom-in"
+      >
+        no read
+        <br />frame
+      </button>
+    )
+  }
+  return (
+    <div ref={ref} className="h-8 w-14">
+      {seen ? (
+        <AuthedImage
+          {...rowThumbImage(e)}
+          alt={`vehicle for ${plate}`}
+          // A camera frame is 16:9 against a 1.6:1 cell — close enough
+          // that object-cover trims the sides rather than letterboxing a
+          // already-small picture. Nothing here has to stay legible the
+          // way the plate crop did (#385); it is a "which car" glance,
+          // and the dialog is one click away.
+          className="h-8 w-14 cursor-zoom-in object-cover"
+          onClick={onOpen}
+        />
+      ) : (
+        <div className="h-8 w-14 bg-[var(--bg-2)]" />
+      )}
+    </div>
+  )
+}
+
+// ── Evidence preview ───────────────────────────────────
+
+/** One read, shown the way an operator reads it.
+ *
+ *  The stage is the frame the plate was READ from — the whole frame, so
+ *  it still answers "what lane, whose gate, next to what", but of the
+ *  car this number actually came off. The plate crop is the proof the
+ *  number was read off that moment, so it rides ON the stage as a card
+ *  rather than competing with it for the 85vh budget the stacked layout
+ *  fought over.
+ *
+ *  There is deliberately no second view. The scene (/scene-evidence) is
+ *  the visit's best-thumbnail moment, and track association merges a
+ *  departing car with the one behind it — so on a merged visit the scene
+ *  shows a different vehicle under this row's number. A caption saying
+ *  so was not enough: the picture is more convincing than the warning.
+ *  Older reads that predate plate_frame_path fall back to the vehicle
+ *  crop, and say so in the caveats.
+ */
+function EvidenceDialog({
+  e, cameraLabel, onClose,
+}: {
+  e: PlateEvent
+  cameraLabel: string
+  onClose: () => void
+}) {
+  const { t } = useTranslation()
+  const fmt = useDateFormat()
+  const plate = (e.plate_text ?? '').toUpperCase()
+  const hasRead = !!e.has_plate_frame
+  const hasFrame = hasRead || !!e.has_evidence
+  // Hover handles the mouse; this handles touch (where hover does not
+  // exist) and the keyboard, which is why the card is a real <button>.
+  const [zoomed, setZoomed] = useState(false)
+  // A plated row without its read frame does NOT get the vehicle-best
+  // frame as its picture by default: that frame is the visit's
+  // best-thumbnail moment, which on a merged track is the next car —
+  // and a convincing photo of the wrong car under this number is worse
+  // than no photo. The operator can still ask for it, labelled.
+  const readMissing = readFrameIsMissing(e)
+  const [showVehicleAnyway, setShowVehicleAnyway] = useState(false)
+  const reads = e.payload?.plate_reads
+  const singleRead = !!plate && (reads === 1 || reads === undefined)
+  const seen = plateSeenAt(e, fmt)
+  // One stage, no chooser: the frame the plate was READ from. The scene
+  // is the visit's best-thumbnail moment, which a merged track can take
+  // off a DIFFERENT car, so offering it just gave the operator a
+  // convincing picture of the wrong vehicle. The vehicle crop is the
+  // fallback for rows stored before plate_frame_path existed.
+  const stageSource = hasRead ? plateFrameSource(e) : vehicleFrameSource(e)
+
+  const caveats = [
+    e.payload?.plate_merged &&
+      'read reconstructed from more than one frame — the crop shown is the clearer of them',
+    typeof reads === 'number' && reads >= 2 &&
+      `confirmed by ${reads} separate looks at the car`,
+    singleRead && hasRead &&
+      'single-frame read — no second look confirmed this number',
+    // Says WHY an old read looks different from a new one, which is
+    // otherwise indistinguishable from the feature being broken.
+    readMissing && e.has_evidence &&
+      'the frame this plate was read from was not stored — the vehicle photo is from a different moment of the visit and may show another car',
+    readMissing && !e.has_evidence &&
+      'the frame this plate was read from was not stored',
+    !e.has_plate_evidence && (hasRead || e.has_evidence) &&
+      'no separate plate crop stored',
+  ].filter(Boolean) as string[]
+
+  // Anchored top-left so the card grows OVER the stage without moving:
+  // a centred transform would slide the plate out from under the cursor.
+  // 176px x 2.2 = ~390px, comfortably inside the stage, and the figure's
+  // overflow-hidden clips it rather than bursting the dialog on a short
+  // viewport.
+  const card = (
+    <button
+      type="button"
+      onClick={() => setZoomed((z) => !z)}
+      aria-pressed={zoomed}
+      aria-label={zoomed ? 'Shrink plate crop' : 'Enlarge plate crop'}
+      className={`absolute top-2 left-2 z-20 w-[176px] origin-top-left text-left
+        border border-white/20 bg-black/65 backdrop-blur-sm shadow-lg
+        transition-transform duration-200 ease-out ${
+          zoomed ? 'scale-[2.2]' : 'hover:scale-[2.2] focus-visible:scale-[2.2]'
+        }`}
+    >
+      {e.has_plate_evidence && (
+        // Size the SLOT, never the <img>: AuthedImage puts its className
+        // on the loading pulse and the "no photo" tile too, so a
+        // height-less class collapses both to 0px and the card jumps
+        // when the blob lands.
+        <div className="w-full aspect-[26/10] bg-black/40">
+          <AuthedImage
+            {...plateCropSource(e)}
+            alt={`plate crop for ${plate}`}
+            className="h-full w-full object-contain"
+          />
+        </div>
+      )}
+      <div className="px-2 py-1 border-t border-white/10">
+        <div className="text-[11px] font-semibold leading-4 tracking-wide text-white">
+          {plate || 'plate not read'}
+        </div>
+        {/* The read time lives here, on the image, not in a footnote: it
+            is the second thing anyone checks after the number itself. */}
+        <div className="text-[10px] leading-4 text-white/70">
+          {seen ? `Seen ${seen}` : 'Read time not recorded'}
+        </div>
+      </div>
+    </button>
+  )
+
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title={`${plate} — ${cameraLabel}`}
+      // The default w-[720px] is a FIXED width that overflows a phone;
+      // same inset-fit pattern as AddCameraDialog.
+      widthClassName="w-full max-w-[860px] mx-4"
+    >
+      {readMissing && !showVehicleAnyway ? (
+        // The honest stage for a number with no read frame: say so,
+        // and offer the (unrelated-moment) vehicle photo on request.
+        <div className="relative border border-[var(--border)] bg-[var(--bg-2)] min-h-[220px] grid place-items-center text-center px-6 py-10">
+          <div className="max-w-md space-y-3">
+            <div className="text-sm font-medium">{t('vehicles.frameMissing')}</div>
+            <div className="text-xs text-[var(--text-dim)]">
+              This number was written without the frame it was read from,
+              so there is no photo that is guaranteed to show the car it
+              belongs to.
+            </div>
+            {e.has_evidence && (
+              <Button variant="outline" onClick={() => setShowVehicleAnyway(true)}>
+                Show the visit&apos;s vehicle photo anyway
+              </Button>
+            )}
+          </div>
+          {card}
+        </div>
+      ) : hasFrame ? (
+        <figure className="relative border border-[var(--border)] bg-[var(--bg-2)] overflow-hidden">
+          {readMissing && (
+            <div className="absolute bottom-2 right-2 z-20 px-2 py-1 text-[11px] bg-black/70 text-white border border-white/20">
+              vehicle photo from another moment — may be a different car
+            </div>
+          )}
+          {/* 16/9 is nominal — object-contain letterboxes anything else
+              rather than distorting it — and max-h keeps the whole dialog
+              inside Modal's 85vh without the two-slot arithmetic the
+              stacked layout needed. */}
+          <div className="w-full aspect-[16/9] min-h-[180px] max-h-[calc(85vh_-_150px)]">
+            <AuthedImage
+              {...stageSource}
+              alt={
+                hasRead
+                  ? `the frame ${plate} was read from`
+                  : `vehicle frame for ${plate}`
+              }
+              className="h-full w-full object-contain"
+            />
+          </div>
+          {card}
+        </figure>
+      ) : (
+        // No frame of any kind — a plate crop with nothing to pin it on.
+        // The card needs a positioned parent, so give it a plain one.
+        <div className="relative min-h-[120px] border border-[var(--border)] bg-[var(--bg-2)]">
+          {card}
+        </div>
+      )}
+
+      {/* Caveats only. The time moved onto the image, and an empty strip
+          below a full-bleed photo reads as a rendering bug. */}
+      {caveats.length > 0 && (
+        <div className="text-xs text-[var(--text-dim)] mt-3 space-y-0.5">
+          {caveats.map((c) => (
+            <div key={c}>· {c}</div>
+          ))}
+        </div>
+      )}
+    </Modal>
   )
 }
 
@@ -1106,6 +2080,14 @@ export function Vehicles() {
 // deliberate: a society secretary has 300 plates in a spreadsheet, and
 // "export" doubles as the import template.
 
+// The register's type column is free text (CSV imports carry whatever a
+// spreadsheet said), so these are the dialog's choices, not a closed set:
+// an existing value outside the list is kept and offered as-is.
+const VEHICLE_TYPES = ['Car', 'Two-wheeler', 'Truck', 'Van', 'Bus', 'Other']
+
+/** Where the overstay alert starts when it is switched on. */
+const OVERSTAY_DEFAULT_HOURS = 4
+
 function RegistryTab({
   registry,
   alarmOnUnknown,
@@ -1114,6 +2096,7 @@ function RegistryTab({
   overstayHours,
   onSetOverstay,
   initialPlate,
+  onPrefillConsumed,
   canEdit,
   saving,
   cameras,
@@ -1121,6 +2104,8 @@ function RegistryTab({
   onSetRole,
   onSaveRegistry,
   onToggleAlarm,
+  view = 'registry',
+  onOpenGate,
 }: {
   registry: RegistryEntry[]
   alarmOnUnknown: boolean
@@ -1129,6 +2114,8 @@ function RegistryTab({
   overstayHours: number
   onSetOverstay: (hours: number) => void
   initialPlate?: string
+  /** Called once `initialPlate` has opened the dialog, so it opens once. */
+  onPrefillConsumed: () => void
   canEdit: boolean
   saving: boolean
   cameras: CameraRow[]
@@ -1136,23 +2123,54 @@ function RegistryTab({
   onSetRole: (cameraId: number, role: CameraRole | '', label?: string) => void
   onSaveRegistry: (entries: RegistryEntry[]) => void
   onToggleAlarm: (on: boolean) => void
+  /** Which half of this component the caller wants: the register table,
+      or the settings that govern it. They were one screen, with the
+      settings folded under the table — so the camera-role table that
+      starts plate reading sat inside a collapsed card below four other
+      rows, and operators went to the App Catalog instead. */
+  view?: 'registry' | 'gate'
+  /** Take the operator to the Gate Settings tab. The register keeps the
+      two affordances that used to unfold the panel in place — the setup
+      banner and the toolbar button — because they are how somebody with
+      no camera reading plates finds the one setting that matters. */
+  onOpenGate?: () => void
 }) {
-  const [draft, setDraft] = useState<RegistryEntry>({ plate: initialPlate ?? '' })
+  const { t } = useTranslation()
+  // The dialog's subject: a new entry to add, or an existing plate to edit.
+  const [dialog, setDialog] = useState<{ entry: RegistryEntry; editing: string | null } | null>(null)
+  const [query, setQuery] = useState('')
   const [overstayDraft, setOverstayDraft] = useState<string | null>(null)
+  const [importOpen, setImportOpen] = useState(false)
+  const pager = usePagination(25, 'vehicle-register')
+  const reading = cameras.filter((c) => cameraAdopted(c, LPR_SKILL))
+  // Settings are set once and then left alone, so they fold away under the
+  // list — except while nothing is set up, when they are the only useful
+  // thing on the tab.
+  // On its own tab there is nothing to fold it under, so it opens.
+  const settingsRef = useRef<HTMLDivElement | null>(null)
+  const settingsHeadingRef = useRef<HTMLHeadingElement | null>(null)
+  // Gate settings is its own tab now, so its body scrolls inside the page
+  // the way the reads table does: tabs and header stay put, the settings
+  // move. Measured, like the table, rather than a tuned calc(100vh - N).
+  const settingsBodyRef = useRef<HTMLDivElement | null>(null)
+  const noFooterRef = useRef<HTMLDivElement | null>(null)
+  const settingsMaxHeight = useAvailableHeight(view === 'gate', settingsBodyRef, noFooterRef, 240)
+  const settingsPanelId = useId()
+  const [settingsFlash, setSettingsFlash] = useState(false)
   const fileRef = useRef<HTMLInputElement | null>(null)
   const { showError, showSuccess } = useSnackbar()
 
-  const addDraft = () => {
-    const plate = normalizePlate(draft.plate)
-    if (!plate) return
-    const entry: RegistryEntry = { plate }
-    for (const k of REGISTRY_FIELDS) {
-      const v = (draft[k] ?? '').trim()
-      if (v) entry[k] = v
-    }
-    onSaveRegistry([...registry.filter((r) => r.plate !== plate), entry])
-    setDraft({ plate: '' })
-  }
+  // A plate handed over from elsewhere on the page ("Register" on a
+  // vehicle's history) opens the dialog once, then is spent — otherwise
+  // every later visit to this tab would pop it up again. Only a NEW
+  // hand-over re-runs this; registry edits must not re-open it.
+  useEffect(() => {
+    if (!initialPlate) return
+    const plate = normalizePlate(initialPlate)
+    const existing = registry.find((r) => r.plate === plate)
+    setDialog(existing ? { entry: existing, editing: plate } : { entry: { plate }, editing: null })
+    onPrefillConsumed()
+  }, [initialPlate])
 
   // CSV or Excel — a society's list usually already exists as a sheet.
   const importFile = async (file: File) => {
@@ -1175,298 +2193,727 @@ function RegistryTab({
     }
   }
 
-  const exportCsv = () => {
-    const blob = new Blob([registryToCsv(registry)], { type: 'text/csv' })
-    const a = document.createElement('a')
-    a.href = URL.createObjectURL(blob)
-    a.download = 'vehicle-register.csv'
-    a.click()
-    URL.revokeObjectURL(a.href)
-  }
+  const exportCsv = () => downloadCsv(registryToCsv(registry), 'vehicle-register.csv')
 
   if (!canEdit) {
     return (
       <EmptyState
         icon={<Car size={28} />}
         title="The register needs an enabled LPR app"
-        description="Install and enable a License Plate Recognition app from the App Catalog — the vehicle register and the unknown-vehicle alarm live in that app and apply live."
+        description="Install and enable an ANPR — License Plate Recognition app from the App Catalog — the vehicle register and the unknown-vehicle alarm live in that app and apply live."
       />
     )
   }
 
+  const saveEntry = (entry: RegistryEntry, replaces: string | null) => {
+    // An edit can change the plate itself, so the old key goes too.
+    onSaveRegistry([
+      ...registry.filter((r) => r.plate !== entry.plate && r.plate !== replaces),
+      entry,
+    ])
+    setDialog(null)
+  }
+
+  // Saved on blur or Enter — no separate Save button to find. 0 turns the
+  // alert off, the same as the switch.
+  const commitOverstay = () => {
+    if (overstayDraft === null) return
+    const h = Number(overstayDraft)
+    setOverstayDraft(null)
+    if (Number.isFinite(h) && h >= 0 && h !== overstayHours) onSetOverstay(h)
+  }
+
+  // Opens the panel AND brings it into view. It sits under a table that
+  // takes every pixel the screen has left, so opening it in place changed
+  // nothing the operator could see. Two frames, not one: the table shrinks
+  // to make room only after the panel renders, and a scroll taken before
+  // that lands short of a panel the shrink then moves.
+  const openSettings = ({ highlight = false }: { highlight?: boolean } = {}) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      settingsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      // Focus follows, so a keyboard user lands where the page went.
+      settingsHeadingRef.current?.focus({ preventScroll: true })
+      if (highlight) {
+        setSettingsFlash(true)
+        window.setTimeout(() => setSettingsFlash(false), 1500)
+      }
+    }))
+  }
+
+  const q = query.trim().toLowerCase()
+  const rows = registry
+    .filter((r) => !q || [r.plate, r.owner, r.unit, r.model, r.note]
+      .some((v) => v?.toLowerCase().includes(q)))
+    .sort((a, b) => a.plate.localeCompare(b.plate))
+
+  // Paged in the browser — the whole register is already here, as app
+  // config — but through the same pager as the server-paged tables, so
+  // every list on the page moves the same way. Clamped rather than reset
+  // by an effect: deleting the last row of the last page must not strand
+  // the operator on an empty page.
+  const pageCount = Math.max(1, Math.ceil(rows.length / pager.pageSize))
+  const page = Math.min(pager.page, pageCount)
+  const pageRows = rows.slice((page - 1) * pager.pageSize, page * pager.pageSize)
+  const editRow = (r: RegistryEntry) => setDialog({ entry: r, editing: r.plate })
+
+  const registerColumns: Column<RegistryEntry>[] = [
+    {
+      key: 'plate', header: 'Plate', width: 'w-[160px]',
+      cellClassName: 'font-mono font-semibold whitespace-nowrap',
+      cell: (r) => (
+        <>
+          {r.plate}
+          {!entryActive(r) && <Badge variant="warning" className="ml-1.5">expired</Badge>}
+        </>
+      ),
+    },
+    { key: 'owner', header: 'Owner', width: 'w-[180px]', cellClassName: 'truncate', cell: (r) => r.owner || '—' },
+    { key: 'unit', header: 'Flat / unit', width: 'w-[110px]', cellClassName: 'truncate', cell: (r) => r.unit || '—' },
+    {
+      key: 'type', header: 'Type', width: 'w-[110px]', hideBelow: 'md',
+      cellClassName: 'truncate', cell: (r) => r.type || '—',
+    },
+    {
+      key: 'model', header: 'Model', width: 'w-[150px]', hideBelow: 'lg',
+      cellClassName: 'truncate', cell: (r) => r.model || '—',
+    },
+    {
+      key: 'expires', header: 'Valid till', width: 'w-[120px]',
+      cellClassName: 'whitespace-nowrap tabular-nums', cell: (r) => r.expires || '—',
+    },
+    // The flexible column — no width, so it takes the slack.
+    {
+      key: 'note', header: 'Note', cellClassName: 'truncate text-[var(--text-dim)]',
+      cell: (r) => <span title={r.note || undefined}>{r.note || ''}</span>,
+    },
+    {
+      key: 'actions', header: '', srHeader: 'Actions', width: 'w-[84px]',
+      align: 'right', className: 'whitespace-nowrap', isAction: true,
+      cell: (r) => (
+        <>
+          <button
+            title={`Edit ${r.plate}`}
+            aria-label={`Edit ${r.plate}`}
+            className="mr-3 text-[var(--text-dim)] hover:text-[var(--text)]"
+            onClick={() => editRow(r)}
+          >
+            <Pencil size={15} />
+          </button>
+          <button
+            title="Remove from the register"
+            aria-label={`Remove ${r.plate} from the register`}
+            className="text-[var(--text-dim)] hover:text-[var(--danger,#e5484d)]"
+            onClick={() => onSaveRegistry(registry.filter((x) => x.plate !== r.plate))}
+          >
+            <Trash2 size={15} />
+          </button>
+        </>
+      ),
+    },
+  ]
+
+  const roles = Object.values(cameraRoles)
+  const hasIn = roles.some((r) => r.role === 'gate_in')
+  const hasOut = roles.some((r) => r.role === 'gate_out')
+  const addButton = (
+    <Button
+      variant="primary" size="sm"
+      onClick={() => setDialog({ entry: { plate: '' }, editing: null })}
+    >
+      <Plus size={14} /> {t('vehicles.add')}
+    </Button>
+  )
+  const importButton = (
+    <Button variant="outline" size="sm" onClick={() => setImportOpen(true)}>
+      <Upload size={14} /> {t('vehicles.import')}
+    </Button>
+  )
+
   return (
     <div className="space-y-4">
-      {/* Alarm mode */}
-      <Card>
-        <CardContent className="py-3 flex flex-wrap items-center gap-3">
-          <BellRing size={18} className={alarmOnUnknown ? 'text-[var(--warning,#b7791f)]' : 'text-[var(--text-dim)]'} />
-          <div className="min-w-0 flex-1">
-            <div className="text-sm font-medium">Alarm on unknown vehicles</div>
-            <div className="text-xs text-[var(--text-dim)]">
-              Any plate not in this register (or the allowlist) raises a high-severity
-              alert the moment it is read — one alarm per stranger, across all gate
-              cameras. Watchlisted plates keep their own alarm.
-            </div>
-          </div>
-          <Button
-            // The shared 'danger' variant is dark-theme-tuned and washes
-            // out on light; an outlined red reads in both themes.
-            variant={alarmOnUnknown ? 'outline' : 'primary'}
-            className={alarmOnUnknown
-              ? 'text-[var(--danger,#e5484d)] border-[var(--danger,#e5484d)]' : ''}
-            onClick={() => onToggleAlarm(!alarmOnUnknown)}
-            disabled={saving}
-          >
-            {alarmOnUnknown ? 'Turn off' : 'Turn on'}
-          </Button>
-        </CardContent>
-      </Card>
+      <input
+        ref={fileRef}
+        type="file"
+        accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0]
+          if (f) {
+            setImportOpen(false)
+            void importFile(f)
+          }
+          e.target.value = ''
+        }}
+      />
 
-      {/* Automatic barrier — the decision half of gate automation */}
-      <Card>
-        <CardContent className="py-3 flex flex-wrap items-center gap-3">
-          <Car size={18} className={barrierMode === 'registered' ? 'text-[var(--success,#46a758)]' : 'text-[var(--text-dim)]'} />
-          <div className="min-w-0 flex-1">
-            <div className="text-sm font-medium">Automatic barrier</div>
-            <div className="text-xs text-[var(--text-dim)]">
-              Publish an allow/deny decision for every read on a Gate IN camera —
-              registered and allowlisted vehicles allow, everything else denies.
-              Install the <b>Gate Controller</b> app from the catalog to wire the
-              decisions to your relay; it ships in dry-run so nothing moves until
-              you say so.
-              {!Object.values(cameraRoles).some((r) => r.role === 'gate_in') &&
-                ' Needs at least one Gate IN camera below.'}
-            </div>
-          </div>
-          <Button
-            variant={barrierMode === 'registered' ? 'outline' : 'primary'}
-            className={barrierMode === 'registered'
-              ? 'text-[var(--danger,#e5484d)] border-[var(--danger,#e5484d)]' : ''}
-            onClick={() => onToggleBarrier(barrierMode !== 'registered')}
-            disabled={saving}
-          >
-            {barrierMode === 'registered' ? 'Turn off' : 'Turn on'}
-          </Button>
-        </CardContent>
-      </Card>
 
-      {/* Visitor overstay */}
-      <Card>
-        <CardContent className="py-3 flex flex-wrap items-center gap-3">
-          <History size={18} className={overstayHours > 0 ? 'text-[var(--warning,#b7791f)]' : 'text-[var(--text-dim)]'} />
-          <div className="min-w-0 flex-1">
-            <div className="text-sm font-medium">Visitor overstay alert</div>
-            <div className="text-xs text-[var(--text-dim)]">
-              Alert when a visitor (not registered or allowlisted) has been inside
-              longer than this many hours — one alert per visit, checked as reads
-              arrive. Needs a Gate IN camera; a Gate OUT camera clears visitors on exit.
-            </div>
-          </div>
-          <label className="text-xs text-[var(--text-dim)]">
-            Hours (0 = off)
-            <input
-              type="number"
-              min={0}
-              step={0.5}
-              value={overstayDraft ?? String(overstayHours || 0)}
-              onChange={(e) => setOverstayDraft(e.target.value)}
-              className="block mt-0.5 py-1.5 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm text-[var(--text)] w-28"
+      {/* The register is what this tab is for, so it comes first — on the
+          same table as the plate reads: header pinned, rows scrolling in
+          whatever height the screen has left, pager in the toolbar. Import
+          and export act on the whole list, so they sit here too. */}
+      {view === 'registry' && (
+        registry.length === 0 ? (
+          <Card>
+            <EmptyState
+              icon={<Car size={28} />}
+              title={t('vehicles.noRegistered')}
+              description={t('vehicles.registerDescription')}
+              action={<div className="flex flex-wrap justify-center gap-2">{addButton}{importButton}</div>}
             />
-          </label>
-          <Button
-            onClick={() => {
-              const h = Number(overstayDraft ?? overstayHours)
-              if (Number.isFinite(h) && h >= 0) {
-                onSetOverstay(h)
-                setOverstayDraft(null)
-              }
-            }}
-            disabled={saving || overstayDraft === null}
-          >
-            Save
-          </Button>
-        </CardContent>
-      </Card>
+          </Card>
+        ) : (
+          <DataTable<RegistryEntry>
+            caption={t('vehicles.vehicleRegister')}
+            columns={registerColumns}
+            rows={pageRows}
+            rowKey={(r) => r.plate}
+            fillHeight
+            fixed
+            dense
+            minWidth="min-w-[720px]"
+            // The row IS the record, as on the plate reads: clicking it opens
+            // the entry to edit. The action cell keeps its own buttons.
+            onRowClick={editRow}
+            striped={false}
+            empty={
+              <EmptyState
+                icon={<Search size={28} />}
+                title={`${t('vehicles.noMatchRegister')} “${query.trim()}”`}
+                description={t('vehicles.searchFields')}
+              />
+            }
+            toolbar={
+              <div className="flex flex-wrap items-center gap-2 py-1.5 pl-3">
+                <div className="relative">
+                  <Search size={14} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--text-dim)]" />
+                  <input
+                    value={query}
+                    onChange={(e) => { setQuery(e.target.value); pager.setPage(1) }}
+                    placeholder="Search plate, owner, flat…"
+                    aria-label={t('vehicles.searchRegister')}
+                    className="w-56 border border-[var(--border)] bg-[var(--bg-2)] py-1 pl-7 pr-2 text-xs"
+                  />
+                </div>
+                {importButton}
+                <Button variant="outline" size="sm" onClick={exportCsv}>
+                  <Download size={14} /> {t('vehicles.export')}
+                </Button>
+                {addButton}
+                {/* Always opens (never closes) the panel under the table and
+                    takes the page to it — the panel's own header toggles. */}
+                <Button
+                  variant="outline" size="sm"
+                  aria-controls={onOpenGate ? undefined : settingsPanelId}
+                  onClick={() => (onOpenGate ? onOpenGate() : openSettings({ highlight: true }))}
+                >
+                  <SlidersHorizontal size={14} /> {t('vehicles.gateSettings')}
+                </Button>
+                <div className="ml-auto">
+                  <Pagination
+                    page={page}
+                    pageSize={pager.pageSize}
+                    total={rows.length}
+                    rowCount={pageRows.length}
+                    label="vehicles"
+                    onPageChange={pager.setPage}
+                    onPageSizeChange={pager.setPageSize}
+                  />
+                </div>
+              </div>
+            }
+          />
+        )
+      )}
 
-      {/* Camera roles — the site's layout in the vehicle story */}
-      <Card>
-        <CardContent className="py-3">
-          <div className="text-sm font-medium mb-1">Camera roles</div>
-          <div className="text-xs text-[var(--text-dim)] mb-2">
-            Give each camera its place: <b>Gate IN</b> (required for gate features),
-            <b> Gate OUT</b> (optional — unlocks exits, stay durations and "inside now"),
-            <b> Parking</b>, or a named location of your own — every role enriches the
-            per-vehicle history.
-          </div>
-          {(() => {
-            const hasIn = Object.values(cameraRoles).some((r) => r.role === 'gate_in')
-            const hasOut = Object.values(cameraRoles).some((r) => r.role === 'gate_out')
-            if (!hasIn) {
-              return (
-                <div className="text-xs rounded border border-[var(--warning,#b7791f)] text-[var(--warning,#b7791f)] px-3 py-2 mb-2">
-                  No Gate IN camera yet — mark at least one. Until then there is no gate
-                  history and no "inside now"; reads still collect normally.
-                </div>
-              )
-            }
-            if (!hasOut) {
-              return (
-                <div className="text-xs rounded border border-[var(--border)] text-[var(--text-dim)] px-3 py-2 mb-2">
-                  No Gate OUT camera — entries are recorded, but exit times, stay
-                  durations and "inside now" stay off until you mark one.
-                </div>
-              )
-            }
-            return null
-          })()}
-          <div className="flex flex-wrap gap-3">
-            {cameras.map((c) => {
-              const entry = cameraRoles[String(c.id)]
-              return (
-                <label key={c.id} className="inline-flex items-center gap-2 text-sm">
-                  <span>{c.name}</span>
-                  <select
-                    value={entry?.role ?? ''}
-                    onChange={(e) => {
-                      const role = e.target.value as CameraRole | ''
-                      onSetRole(c.id, role, role === 'other' ? (entry?.label ?? '') : undefined)
-                    }}
-                    disabled={saving}
-                    className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm"
-                  >
-                    <option value="">no role</option>
-                    <option value="gate_in">Gate IN</option>
-                    <option value="gate_out">Gate OUT</option>
-                    <option value="parking">Parking</option>
-                    <option value="other">Other…</option>
-                  </select>
-                  {entry?.role === 'other' && (
+      {/* Gate settings. Its own TAB now, rather than a fold under the
+          register: collapsed down there, the camera-role table that
+          actually starts plate reading sat below four other rows inside a
+          closed card, and operators went to the App Catalog to assign a
+          camera instead — a different screen for the same setting. */}
+      {view === 'gate' && (
+        <div ref={settingsRef} className="scroll-mt-4">
+          {/* A brief accent ring when opened from elsewhere, so the eye lands
+              on the panel the page just scrolled to. */}
+          <Card className={`transition-shadow duration-300 ${settingsFlash ? 'ring-2 ring-[var(--accent)]' : ''}`}>
+            {/* A heading, not a fold: on its own tab there is nothing to
+                collapse it into. Focusable (not tabbable) so a jump here
+                from elsewhere lands a keyboard user on it. */}
+            <h3
+              ref={settingsHeadingRef}
+              tabIndex={-1}
+              className="flex items-center gap-2 px-4 py-3 text-sm font-medium outline-none"
+            >
+              <SlidersHorizontal size={15} className="shrink-0 text-[var(--text-dim)]" aria-hidden="true" />
+              {t('vehicles.gateSettings')}
+            </h3>
+            <div
+              id={settingsPanelId}
+              ref={settingsBodyRef}
+              className="divide-y divide-[var(--border)] overflow-y-auto border-t border-[var(--border)] thin-scroll"
+              style={settingsMaxHeight ? { maxHeight: settingsMaxHeight } : undefined}
+            >
+              <SettingRow
+                icon={<BellRing size={18} className={alarmOnUnknown ? 'text-[var(--warning,#b7791f)]' : 'text-[var(--text-dim)]'} />}
+                title={t('vehicles.alarmUnknown')}
+                summary={t('vehicles.alarmSummary')}
+                info={t('vehicles.alarmInfo')}
+              >
+                <Switch
+                  checked={alarmOnUnknown}
+                  onChange={onToggleAlarm}
+                  label={t('vehicles.alarmUnknown')}
+                />
+              </SettingRow>
+              <SettingRow
+                icon={<Car size={18} className={barrierMode === 'registered' ? 'text-[var(--success,#46a758)]' : 'text-[var(--text-dim)]'} />}
+                title={t('vehicles.automaticBarrier')}
+                summary={hasIn
+                  ? 'Registered vehicles are allowed at Gate IN; everything else is denied.'
+                  : (
+                    <span className="text-[var(--warning,#b7791f)]">
+                      Needs a Gate IN camera — set one under Camera roles below.
+                    </span>
+                  )}
+                info={
+                  <>
+                    Publishes an allow/deny decision for every read on a Gate IN
+                    camera. Install the <b>Gate Controller</b> app from the App
+                    Catalog to wire those decisions to your relay — it ships in
+                    dry-run, so nothing moves until you say so.
+                  </>
+                }
+              >
+                <Switch
+                  checked={barrierMode === 'registered'}
+                  onChange={onToggleBarrier}
+                  label={t('vehicles.automaticBarrier')}
+                />
+              </SettingRow>
+              <SettingRow
+                icon={<History size={18} className={overstayHours > 0 ? 'text-[var(--warning,#b7791f)]' : 'text-[var(--text-dim)]'} />}
+                title={t('vehicles.overstay')}
+                summary={t('vehicles.overstaySummary')}
+                info={t('vehicles.overstayInfo')}
+              >
+                {overstayHours > 0 && (
+                  <label className="flex items-center gap-1.5 text-xs text-[var(--text-dim)]">
+                    after
                     <input
-                      defaultValue={entry.label ?? ''}
-                      placeholder="name it (e.g. Basement)"
-                      onBlur={(e) => onSetRole(c.id, 'other', e.target.value.trim())}
+                      type="number"
+                      min={0}
+                      step={0.5}
+                      aria-label="Overstay threshold in hours"
+                      value={overstayDraft ?? String(overstayHours)}
+                      onChange={(e) => setOverstayDraft(e.target.value)}
+                      onBlur={commitOverstay}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+                        if (e.key === 'Escape') setOverstayDraft(null)
                       }}
-                      disabled={saving}
-                      className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm w-36"
+                      className="w-16 border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 text-sm text-[var(--text)]"
                     />
-                  )}
-                </label>
-              )
-            })}
-            {cameras.length === 0 && (
-              <span className="text-xs text-[var(--text-dim)]">No cameras yet.</span>
-            )}
-          </div>
-        </CardContent>
-      </Card>
+                    hours
+                  </label>
+                )}
+                <Switch
+                  checked={overstayHours > 0}
+                  onChange={(on) => {
+                    setOverstayDraft(null)
+                    onSetOverstay(on ? OVERSTAY_DEFAULT_HOURS : 0)
+                  }}
+                  label={t('vehicles.overstay')}
+                />
+              </SettingRow>
 
-      {/* Add + import */}
-      <Card>
-        <CardContent className="py-3 flex flex-wrap items-end gap-2">
-          {([
-            ['plate', 'Plate *', 'MH12DE1433', 'text'],
-            ['owner', 'Owner', 'A. Sharma', 'text'],
-            ['unit', 'Flat / unit', 'B-402', 'text'],
-            ['type', 'Type', 'car / truck', 'text'],
-            ['model', 'Model', 'Honda City', 'text'],
-            ['note', 'Note', '', 'text'],
-            ['expires', 'Valid till', '', 'date'],
-          ] as const).map(([k, label, ph, kind]) => (
-            <label key={k} className="text-xs text-[var(--text-dim)]">
-              {label}
-              <input
-                type={kind}
-                value={draft[k] ?? ''}
-                onChange={(e) => setDraft((d) => ({ ...d, [k]: e.target.value }))}
-                onKeyDown={(e) => { if (e.key === 'Enter') addDraft() }}
-                placeholder={ph}
-                className="block mt-0.5 py-1.5 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm text-[var(--text)] w-32"
-              />
-            </label>
-          ))}
-          <Button onClick={addDraft} disabled={saving || !normalizePlate(draft.plate)}>
-            <Plus size={14} /> Add vehicle
-          </Button>
-          <div className="ml-auto flex items-center gap-2">
-            <input
-              ref={fileRef}
-              type="file"
-              accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-              className="hidden"
-              onChange={(e) => {
-                const f = e.target.files?.[0]
-                if (f) void importFile(f)
-                e.target.value = ''
-              }}
-            />
-            <Button variant="outline" onClick={() => fileRef.current?.click()} disabled={saving}>
-              <Upload size={14} /> Import CSV / Excel
-            </Button>
-            <Button variant="outline" onClick={exportCsv} disabled={!registry.length}>
-              <Download size={14} /> Export CSV
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
+              {/* Camera roles — the site's layout in the vehicle story */}
+              <div className="space-y-2 px-4 py-3">
+                <div className="flex items-center gap-1.5 text-sm font-medium">
+                  {t('vehicles.cameraRoles')}
+                  <InfoTip label={t('vehicles.aboutRoles')}>
+                    <b>Gate IN</b> is required for gate features. <b>Gate OUT</b>{' '}
+                    unlocks exit times, stay durations and “inside now”.{' '}
+                    <b>Parking</b>, or a named location of your own, enriches each
+                    vehicle’s history.
+                  </InfoTip>
+                </div>
+                <div className="text-xs text-[var(--text-dim)]">
+                  Assign a location role to each camera selected for ANPR.
+                </div>
+                {reading.length > 0 && !hasIn && (
+                  <div className="border border-[var(--warning,#b7791f)] px-3 py-2 text-xs text-[var(--warning,#b7791f)]">
+                    No Gate IN camera yet — mark at least one. Until then there is no gate
+                    history and no “inside now”; reads still collect normally.
+                  </div>
+                )}
+                {reading.length > 0 && hasIn && !hasOut && (
+                  <div className="border border-[var(--border)] px-3 py-2 text-xs text-[var(--text-dim)]">
+                    No Gate OUT camera — entries are recorded, but exit times, stay
+                    durations and “inside now” stay off until you mark one.
+                  </div>
+                )}
+                {reading.length === 0 ? (
+                  <div role="status" className="text-xs text-[var(--text-dim)]">
+                    No cameras selected for ANPR yet. Select cameras using Configure → Cameras; selected cameras will appear here.
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="text-left text-xs text-[var(--text-dim)] border-b border-[var(--border)]">
+                          <th className="py-1.5 pr-4 font-normal">Camera</th>
+                          <th className="py-1.5 pr-4 font-normal">Role</th>
+                          <th className="py-1.5 font-normal">Plate reading</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {reading.map((c) => {
+                          const entry = cameraRoles[String(c.id)]
+                          return (
+                            <tr
+                              key={c.id}
+                              className="border-b border-[var(--border)] last:border-0"
+                            >
+                              <td className="py-1.5 pr-4">{c.name}</td>
+                              <td className="py-1.5 pr-4">
+                                <div className="flex items-center gap-2">
+                                  <select
+                                    value={entry?.role ?? ''}
+                                    aria-label={`Role of ${c.name}`}
+                                    onChange={(e) => {
+                                      const role = e.target.value as CameraRole | ''
+                                      onSetRole(c.id, role, role === 'other' ? (entry?.label ?? '') : undefined)
+                                    }}
+                                    className="py-1 px-2 border border-[var(--border)] bg-[var(--bg-2)] text-sm"
+                                  >
+                                    <option value="">{t('vehicles.noRole')}</option>
+                                    <option value="gate_in">Gate IN</option>
+                                    <option value="gate_out">Gate OUT</option>
+                                    <option value="parking">Parking</option>
+                                    <option value="other">Other…</option>
+                                  </select>
+                                  {entry?.role === 'other' && (
+                                    <input
+                                      defaultValue={entry.label ?? ''}
+                                      placeholder="e.g. Basement"
+                                      aria-label={`Location name for ${c.name}`}
+                                      onBlur={(e) => onSetRole(c.id, 'other', e.target.value.trim())}
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+                                      }}
+                                      className="py-1 px-2 border border-[var(--border)] bg-[var(--bg-2)] text-sm w-36"
+                                    />
+                                  )}
+                                </div>
+                              </td>
+                              <td className="py-1.5 text-xs">
+                                {cameraAdopted(c, LPR_SKILL) ? (
+                                  <span className="inline-flex items-center gap-1.5 text-[var(--success,#46a758)]">
+                                    <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-current" />
+                                    {t('vehicles.reading')}
+                                  </span>
+                                ) : (
+                                  <span className="text-[var(--text-dim)]">{t('vehicles.notReading')}</span>
+                                )}
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          </Card>
+        </div>
+      )}
 
-      {/* The register */}
-      {registry.length === 0 ? (
-        <EmptyState
-          icon={<Car size={28} />}
-          title="No vehicles registered yet"
-          description="Add each resident vehicle above, or import the whole list from a CSV (columns: plate, owner, unit, type, note). Then turn on the unknown-vehicle alarm and any stranger raises an alert."
+      {importOpen && (
+        <ImportDialog
+          title="Import vehicles"
+          noun="vehicle"
+          columns={REGISTER_IMPORT_COLUMNS}
+          notes={REGISTER_IMPORT_NOTES}
+          onClose={() => setImportOpen(false)}
+          onChooseFile={() => fileRef.current?.click()}
+          // Header row only, no sample vehicles: a sample plate left in by
+          // mistake would be REGISTERED — and the barrier opens for those.
+          onDownloadTemplate={() => downloadCsv(registryToCsv([]), 'vehicle-register-template.csv')}
         />
-      ) : (
-        <Card>
-          <CardContent className="p-0 overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-xs text-[var(--text-dim)] border-b border-[var(--border)]">
-                  <th className="px-3 py-2">Plate</th>
-                  <th className="px-3 py-2">Owner</th>
-                  <th className="px-3 py-2">Flat / unit</th>
-                  <th className="px-3 py-2">Type</th>
-                  <th className="px-3 py-2">Model</th>
-                  <th className="px-3 py-2">Valid till</th>
-                  <th className="px-3 py-2">Note</th>
-                  <th className="px-3 py-2 text-right pr-4" />
-                </tr>
-              </thead>
-              <tbody>
-                {[...registry].sort((a, b) => a.plate.localeCompare(b.plate)).map((r) => (
-                  <tr key={r.plate} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--bg-2)]">
-                    <td className="px-3 py-1.5 font-mono font-semibold">
-                      {r.plate}
-                      {!entryActive(r) && (
-                        <Badge variant="warning" className="ml-1.5">expired</Badge>
-                      )}
-                    </td>
-                    <td className="px-3 py-1.5">{r.owner || '—'}</td>
-                    <td className="px-3 py-1.5">{r.unit || '—'}</td>
-                    <td className="px-3 py-1.5">{r.type || '—'}</td>
-                    <td className="px-3 py-1.5">{r.model || '—'}</td>
-                    <td className="px-3 py-1.5">{r.expires || '—'}</td>
-                    <td className="px-3 py-1.5 text-[var(--text-dim)]">{r.note || ''}</td>
-                    <td className="px-3 py-1.5 text-right pr-4">
-                      <button
-                        title="Remove from the register"
-                        className="text-[var(--text-dim)] hover:text-[var(--danger,#e5484d)]"
-                        onClick={() => onSaveRegistry(registry.filter((x) => x.plate !== r.plate))}
-                        disabled={saving}
-                      >
-                        <Trash2 size={15} />
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </CardContent>
-        </Card>
+      )}
+      {dialog && (
+        <VehicleDialog
+          initial={dialog.entry}
+          editing={dialog.editing}
+          registry={registry}
+          saving={saving}
+          onClose={() => setDialog(null)}
+          onSave={saveEntry}
+        />
       )}
     </div>
+  )
+}
+
+function downloadCsv(text: string, filename: string) {
+  const blob = new Blob([text], { type: 'text/csv' })
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(a.href)
+}
+
+// What an import file must look like, beside the button that takes one. A
+// bare file picker left the operator guessing at column names — and a plate
+// header we don't recognise silently turns the header row into a record.
+type ImportColumn = {
+  field: string
+  meaning: string
+  example: string
+  required?: boolean
+  /** Other header names the parser maps to this column. */
+  synonyms: string[]
+}
+
+/** The other header names a parser's table maps to `field` — read from the
+ *  table itself, so the dialog can never promise a name the parser ignores. */
+function headerSynonyms(table: Record<string, string>, field: string): string[] {
+  return Object.entries(table)
+    .filter(([header, f]) => f === field && header !== field)
+    .map(([header]) => header)
+}
+
+const REGISTER_IMPORT_COLUMNS: ImportColumn[] = ([
+  ['plate', 'Vehicle number', 'MH12DE1433'],
+  ['owner', 'Owner or resident', 'A. Sharma'],
+  ['unit', 'Flat / unit', 'B-402'],
+  ['type', 'Vehicle type', 'Car'],
+  ['model', 'Make / model', 'Honda City'],
+  ['note', 'Anything else', 'Second car'],
+  ['expires', 'Valid till — visitor pass', '2026-12-31'],
+] as const).map(([field, meaning, example]) => ({
+  field, meaning, example,
+  required: field === 'plate',
+  synonyms: headerSynonyms(HEADER_SYNONYMS, field),
+}))
+
+const REGISTER_IMPORT_NOTES: ReactNode[] = [
+  <>
+    Only <span className="font-mono">plate</span> is required. Column order doesn’t
+    matter and names aren’t case-sensitive, but each must be one of the names above.
+  </>,
+  <>
+    <span className="font-mono">expires</span> is a date written YYYY-MM-DD. Leave it
+    empty for a resident; a date makes the row a visitor pass that lapses after that
+    day. Date-formatted Excel cells are converted for you.
+  </>,
+  'A plate already in the register is replaced by the file’s row; every other vehicle stays.',
+  'If the plate column’s name isn’t recognised, the first row is read as a vehicle and the columns are taken in the order above.',
+]
+
+function ImportDialog({
+  title, noun, columns, notes, onClose, onChooseFile, onDownloadTemplate,
+}: {
+  title: string
+  /** What one row is, for the intro: "vehicle", "monitored plate". */
+  noun: string
+  columns: ImportColumn[]
+  notes: ReactNode[]
+  onClose: () => void
+  onChooseFile: () => void
+  onDownloadTemplate: () => void
+}) {
+  const { t } = useTranslation()
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title={title}
+      widthClassName="w-full max-w-2xl mx-4"
+      footer={
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="outline" size="sm" onClick={onDownloadTemplate}>
+            <Download size={14} /> {t('vehicles.downloadTemplate')}
+          </Button>
+          <div className="ml-auto flex gap-2">
+            <Button variant="outline" size="sm" onClick={onClose}>{t('vehicles.close')}</Button>
+            <Button variant="primary" size="sm" onClick={onChooseFile}>
+              <Upload size={14} /> {t('vehicles.chooseFile')}
+            </Button>
+          </div>
+        </div>
+      }
+    >
+      <div className="space-y-3 text-sm">
+        <p className="text-[var(--text-dim)]">
+          A CSV or Excel file (.csv, .xlsx, .xls) with one {noun} per row and the
+          column names in the first row. From Excel, the first sheet is read.
+        </p>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-xs text-[var(--text-dim)] border-b border-[var(--border)]">
+                <th className="py-1.5 pr-4 font-normal">{t('vehicles.column')}</th>
+                <th className="py-1.5 pr-4 font-normal">{t('vehicles.example')}</th>
+                <th className="py-1.5 font-normal">{t('vehicles.acceptedAs')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {columns.map((c) => (
+                <tr key={c.field} className="border-b border-[var(--border)] last:border-0 align-top">
+                  <td className="py-1.5 pr-4 whitespace-nowrap">
+                    <span className="font-mono">{c.field}</span>
+                    {c.required && (
+                      <span className="ml-1 text-xs text-[var(--warning,#b7791f)]">{t('vehicles.required')}</span>
+                    )}
+                    <div className="text-xs text-[var(--text-dim)]">{c.meaning}</div>
+                  </td>
+                  <td className="py-1.5 pr-4 font-mono text-xs whitespace-nowrap">{c.example}</td>
+                  <td className="py-1.5 text-xs text-[var(--text-dim)]">
+                    {c.synonyms.join(', ') || '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <ul className="list-disc space-y-1 pl-5 text-xs text-[var(--text-dim)]">
+          {notes.map((n, i) => <li key={i}>{n}</li>)}
+        </ul>
+      </div>
+    </Modal>
+  )
+}
+
+/** One setting: what it is in a line, the detail behind an ⓘ, its control. */
+function SettingRow({
+  icon, title, summary, info, children,
+}: {
+  icon: ReactNode
+  title: string
+  summary: ReactNode
+  info?: ReactNode
+  children?: ReactNode
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3">
+      <span className="shrink-0">{icon}</span>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5 text-sm font-medium">
+          {title}
+          {info && <InfoTip label={`About ${title.toLowerCase()}`}>{info}</InfoTip>}
+        </div>
+        <div className="text-xs text-[var(--text-dim)]">{summary}</div>
+      </div>
+      {children && <div className="flex items-center gap-3">{children}</div>}
+    </div>
+  )
+}
+
+// Adding a vehicle is a dialog, not a form left open above the list: seven
+// always-visible inputs pushed the register itself below the fold, and
+// their example placeholders read like a row already filled in.
+function VehicleDialog({
+  initial, editing, registry, saving, onClose, onSave,
+}: {
+  initial: RegistryEntry
+  /** The plate being edited, or null when adding. */
+  editing: string | null
+  registry: RegistryEntry[]
+  saving: boolean
+  onClose: () => void
+  onSave: (entry: RegistryEntry, replaces: string | null) => void
+}) {
+  const formId = useId()
+  const [draft, setDraft] = useState<RegistryEntry>(initial)
+  const plate = normalizePlate(draft.plate)
+  // Saving over another vehicle's plate replaces it — say so before, not after.
+  const clash = Boolean(plate) && plate !== editing && registry.some((r) => r.plate === plate)
+  const set = (k: keyof RegistryEntry) =>
+    (e: ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
+      setDraft((d) => ({ ...d, [k]: e.target.value }))
+
+  const type = draft.type ?? ''
+  const knownType = VEHICLE_TYPES.find((t) => t.toLowerCase() === type.toLowerCase())
+  const typeOptions = type && !knownType ? [...VEHICLE_TYPES, type] : VEHICLE_TYPES
+
+  const submit = (e: FormEvent) => {
+    e.preventDefault()
+    if (!plate || saving) return
+    const entry: RegistryEntry = { plate }
+    for (const k of REGISTRY_FIELDS) {
+      const v = (draft[k] ?? '').trim()
+      if (v) entry[k] = v
+    }
+    onSave(entry, editing)
+  }
+
+  const labelCls = 'text-xs text-[var(--text-dim)]'
+  const inputCls = 'mt-1 block w-full  border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1.5 text-sm text-[var(--text)]'
+
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title={editing ? `Edit ${editing}` : 'Add vehicle'}
+      widthClassName="w-full max-w-lg mx-4"
+      footer={
+        <div className="flex justify-end gap-2">
+          <Button variant="outline" size="sm" onClick={onClose}>Cancel</Button>
+          <Button variant="primary" size="sm" type="submit" form={formId} disabled={!plate || saving}>
+            {editing ? 'Save changes' : 'Add vehicle'}
+          </Button>
+        </div>
+      }
+    >
+      <form id={formId} onSubmit={submit} className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <label className={labelCls}>
+          Plate <span aria-hidden>*</span>
+          <input
+            autoFocus
+            required
+            value={draft.plate}
+            onChange={set('plate')}
+            placeholder="e.g. MH12DE1433"
+            className={`${inputCls} font-mono uppercase`}
+          />
+          {clash && (
+            <span className="mt-1 block text-[var(--warning,#b7791f)]">
+              Already registered — saving replaces that entry.
+            </span>
+          )}
+        </label>
+        <label className={labelCls}>
+          Owner
+          <input value={draft.owner ?? ''} onChange={set('owner')} placeholder="e.g. A. Sharma" className={inputCls} />
+        </label>
+        <label className={labelCls}>
+          Flat / unit
+          <input value={draft.unit ?? ''} onChange={set('unit')} placeholder="e.g. B-402" className={inputCls} />
+        </label>
+        <label className={labelCls}>
+          Type
+          <select value={knownType ?? type} onChange={set('type')} className={inputCls}>
+            <option value="">—</option>
+            {typeOptions.map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+        </label>
+        <label className={labelCls}>
+          Model
+          <input value={draft.model ?? ''} onChange={set('model')} placeholder="e.g. Honda City" className={inputCls} />
+        </label>
+        <label className={labelCls}>
+          Valid till
+          <input type="date" value={draft.expires ?? ''} onChange={set('expires')} className={inputCls} />
+          <span className="mt-1 block">Empty for a resident; a date makes it a visitor pass.</span>
+        </label>
+        <label className={`${labelCls} sm:col-span-2`}>
+          Note
+          <input value={draft.note ?? ''} onChange={set('note')} placeholder="e.g. second car, parks in B2" className={inputCls} />
+        </label>
+      </form>
+    </Modal>
   )
 }
 
@@ -1475,6 +2922,40 @@ function RegistryTab({
 // alert is, whether it's currently armed, and (optionally) at which
 // camera it matters. Edits write through the app's config and apply
 // live — the same path as the register and the watchlists.
+
+const MONITOR_IMPORT_COLUMNS: ImportColumn[] = ([
+  ['plate', 'Vehicle number', 'MH12DE1433'],
+  ['note', 'Why it is watched', 'Reported stolen'],
+  ['severity', 'info, low, medium, high or critical', 'high'],
+  ['camera', 'Camera name; several split by ;', 'Gate IN'],
+  ['armed', 'yes or no', 'yes'],
+] as const).map(([field, meaning, example]) => ({
+  field, meaning, example,
+  required: field === 'plate',
+  synonyms: headerSynonyms(MONITOR_HEADER_SYNONYMS, field),
+}))
+
+const MONITOR_IMPORT_NOTES: ReactNode[] = [
+  <>
+    Only <span className="font-mono">plate</span> is required. Column order doesn’t
+    matter and names aren’t case-sensitive, but each must be one of the names above.
+  </>,
+  <>
+    <span className="font-mono">severity</span>: anything else, or empty, becomes high.
+  </>,
+  <>
+    <span className="font-mono">camera</span> is the camera’s name as on the Cameras
+    page, or its handle (cam1); separate several with “;”. Empty — or “any” — watches
+    every camera. A name that matches no camera is skipped and reported, and a rule
+    left with none watches every camera.
+  </>,
+  <>
+    <span className="font-mono">armed</span>: empty means armed; no, false, off or
+    silenced keeps the rule without alerting.
+  </>,
+  'A plate already monitored is replaced by the file’s row; every other rule stays.',
+  'If the plate column’s name isn’t recognised, the first row is read as a plate and the columns are taken in the order above.',
+]
 
 function MonitoringTab({
   monitors,
@@ -1489,173 +2970,394 @@ function MonitoringTab({
   cameras: CameraRow[]
   onSave: (next: Monitor[]) => void
 }) {
-  const [draft, setDraft] = useState<{ plate: string; note: string; severity: Monitor['severity'] }>({
-    plate: '', note: '', severity: 'high',
-  })
+  const { t } = useTranslation()
+  // The dialog's subject: a new rule to add, or an existing plate to edit.
+  const [dialog, setDialog] = useState<{ monitor: Monitor; editing: string | null } | null>(null)
+  const [query, setQuery] = useState('')
+  const [importOpen, setImportOpen] = useState(false)
+  const pager = usePagination(25, 'vehicle-monitors')
+  const fileRef = useRef<HTMLInputElement | null>(null)
+  const { showError, showSuccess } = useSnackbar()
 
   if (!canEdit) {
     return (
       <EmptyState
         icon={<ShieldAlert size={28} />}
-        title="Monitoring needs an enabled LPR app"
-        description="Install and enable a License Plate Recognition app from the App Catalog — monitors live in that app and apply live."
+        title={t('vehicles.monitorNeedsLpr')}
+        description="Install and enable an ANPR — License Plate Recognition app from the App Catalog — monitors live in that app and apply live."
       />
     )
   }
 
-  const upsert = (m: Monitor) => {
-    onSave([...monitors.filter((x) => x.plate !== m.plate), m])
+  const save = (m: Monitor, replaces: string | null = null) => {
+    // An edit can change the plate itself, so the old key goes too.
+    onSave([...monitors.filter((x) => x.plate !== m.plate && x.plate !== replaces), m])
   }
 
-  const addDraft = () => {
-    const plate = normalizePlate(draft.plate)
-    if (!plate) return
-    upsert({
-      plate,
-      note: draft.note.trim() || undefined,
-      severity: draft.severity ?? 'high',
-      active: true,
-    })
-    setDraft({ plate: '', note: '', severity: 'high' })
+  const cameraLabel = (handle: string) =>
+    cameras.find((c) => `cam${c.id}` === handle)?.name ?? handle
+
+  const importFile = async (file: File) => {
+    try {
+      const { monitors: imported, unknownCameras } = monitorsFromRows(await fileRows(file), cameras)
+      if (!imported.length) {
+        showError('No plates found in that file — the plate column was not recognised.')
+        return
+      }
+      // Imported rows win over existing rules for the same plate.
+      const merged = new Map(monitors.map((m) => [m.plate, m] as const))
+      for (const m of imported) merged.set(m.plate, m)
+      onSave([...merged.values()])
+      showSuccess(
+        `Imported ${imported.length} monitored plate${imported.length === 1 ? '' : 's'} from ${file.name}`
+        + (unknownCameras.length
+          ? ` — no camera named ${unknownCameras.map((c) => `“${c}”`).join(', ')}, skipped`
+          : ''),
+      )
+    } catch (e: any) {
+      showError(e?.message || 'Could not read that file.')
+    }
   }
+
+  const exportCsv = () => downloadCsv(monitorsToCsv(monitors, cameras), 'monitored-plates.csv')
+
+  const q = query.trim().toLowerCase()
+  const rows = monitors
+    .filter((m) => !q || [m.plate, m.note].some((v) => v?.toLowerCase().includes(q)))
+    .sort((a, b) => a.plate.localeCompare(b.plate))
+
+  // Paged in the browser, clamped like the register's.
+  const pageCount = Math.max(1, Math.ceil(rows.length / pager.pageSize))
+  const page = Math.min(pager.page, pageCount)
+  const pageRows = rows.slice((page - 1) * pager.pageSize, page * pager.pageSize)
+  const editRow = (m: Monitor) => setDialog({ monitor: m, editing: m.plate })
+
+  const columns: Column<Monitor>[] = [
+    {
+      key: 'plate', header: 'Plate', width: 'w-[160px]',
+      cellClassName: 'font-mono font-semibold whitespace-nowrap', cell: (m) => m.plate,
+    },
+    // The flexible column — no width, so it takes the slack.
+    {
+      key: 'note', header: t('vehicles.reason'), cellClassName: 'truncate',
+      cell: (m) => m.note
+        ? <span title={m.note}>{m.note}</span>
+        : <span className="text-[var(--text-dim)]">—</span>,
+    },
+    {
+      key: 'severity', header: 'Severity', width: 'w-[110px]',
+      cell: (m) => <SeverityBadge severity={m.severity ?? 'high'} />,
+    },
+    {
+      key: 'where', header: 'Where', width: 'w-[180px]', hideBelow: 'md', cellClassName: 'truncate',
+      cell: (m) => m.cameras?.length
+        ? <span title={m.cameras.map(cameraLabel).join(', ')}>{m.cameras.map(cameraLabel).join(', ')}</span>
+        : <span className="text-[var(--text-dim)]">{t('vehicles.anyCamera')}</span>,
+    },
+    {
+      // A switch in the row: silencing a rule for a while is the everyday
+      // change, and it should not take a dialog.
+      key: 'armed', header: 'Armed', width: 'w-[130px]', className: 'whitespace-nowrap',
+      isAction: true,
+      cell: (m) => (
+        <span className="inline-flex items-center gap-2">
+          <Switch
+            checked={m.active !== false}
+            onChange={(on) => save({ ...m, active: on })}
+            label={`${m.plate} armed`}
+          />
+          <span className="text-xs text-[var(--text-dim)]">{m.active !== false ? t('vehicles.armed') : t('vehicles.silenced')}</span>
+        </span>
+      ),
+    },
+    {
+      key: 'actions', header: '', srHeader: 'Actions', width: 'w-[84px]',
+      align: 'right', className: 'whitespace-nowrap', isAction: true,
+      cell: (m) => (
+        <>
+          <button
+            title={`Edit ${m.plate}`}
+            aria-label={`Edit ${m.plate}`}
+            className="mr-3 text-[var(--text-dim)] hover:text-[var(--text)]"
+            onClick={() => editRow(m)}
+          >
+            <Pencil size={15} />
+          </button>
+          <button
+            title={t('vehicles.stopMonitoring')}
+            aria-label={`Stop monitoring ${m.plate}`}
+            className="text-[var(--text-dim)] hover:text-[var(--danger,#e5484d)]"
+            onClick={() => onSave(monitors.filter((x) => x.plate !== m.plate))}
+          >
+            <Trash2 size={15} />
+          </button>
+        </>
+      ),
+    },
+  ]
+
+  const addButton = (
+    <Button
+      variant="primary" size="sm"
+      onClick={() => setDialog({ monitor: { plate: '', severity: 'high', active: true }, editing: null })}
+    >
+      <Plus size={14} /> {t('vehicles.monitorAdd')}
+    </Button>
+  )
+  const importButton = (
+    <Button variant="outline" size="sm" onClick={() => setImportOpen(true)}>
+      <Upload size={14} /> Import CSV / Excel
+    </Button>
+  )
 
   return (
     <div className="space-y-4">
-      <Card>
-        <CardContent className="py-3 flex flex-wrap items-end gap-2">
-          <label className="text-xs text-[var(--text-dim)]">
-            Plate *
-            <input
-              value={draft.plate}
-              onChange={(e) => setDraft((d) => ({ ...d, plate: e.target.value }))}
-              onKeyDown={(e) => { if (e.key === 'Enter') addDraft() }}
-              placeholder="MH12DE1433"
-              className="block mt-0.5 py-1.5 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm text-[var(--text)] w-36"
-            />
-          </label>
-          <label className="text-xs text-[var(--text-dim)]">
-            Reason / note
-            <input
-              value={draft.note}
-              onChange={(e) => setDraft((d) => ({ ...d, note: e.target.value }))}
-              onKeyDown={(e) => { if (e.key === 'Enter') addDraft() }}
-              placeholder="reported stolen — FIR 42/2026"
-              className="block mt-0.5 py-1.5 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm text-[var(--text)] w-64"
-            />
-          </label>
-          <label className="text-xs text-[var(--text-dim)]">
-            Alert severity
-            <select
-              value={draft.severity}
-              onChange={(e) => setDraft((d) => ({ ...d, severity: e.target.value as Monitor['severity'] }))}
-              className="block mt-0.5 py-1.5 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm"
-            >
-              {MONITOR_SEVERITIES.map((s) => <option key={s} value={s}>{s}</option>)}
-            </select>
-          </label>
-          <Button onClick={addDraft} disabled={saving || !normalizePlate(draft.plate)}>
-            <Plus size={14} /> Monitor plate
-          </Button>
-        </CardContent>
-      </Card>
+      <input
+        ref={fileRef}
+        type="file"
+        accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0]
+          if (f) {
+            setImportOpen(false)
+            void importFile(f)
+          }
+          e.target.value = ''
+        }}
+      />
 
+      {/* Same table as the register and the plate reads: header pinned,
+          rows scrolling in the height left, pager in the toolbar. */}
       {monitors.length === 0 ? (
-        <EmptyState
-          icon={<ShieldAlert size={28} />}
-          title="No plates under monitoring"
-          description="Add a plate above — or use the shield button on any read — and you'll be alerted the moment it passes a camera, at the severity you choose."
-        />
-      ) : (
         <Card>
-          <CardContent className="p-0 overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-xs text-[var(--text-dim)] border-b border-[var(--border)]">
-                  <th className="px-3 py-2">Plate</th>
-                  <th className="px-3 py-2">Reason / note</th>
-                  <th className="px-3 py-2">Severity</th>
-                  <th className="px-3 py-2">Where</th>
-                  <th className="px-3 py-2">Armed</th>
-                  <th className="px-3 py-2 text-right pr-4" />
-                </tr>
-              </thead>
-              <tbody>
-                {[...monitors].sort((a, b) => a.plate.localeCompare(b.plate)).map((m) => (
-                  <tr key={m.plate} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--bg-2)]">
-                    <td className="px-3 py-1.5 font-mono font-semibold">{m.plate}</td>
-                    <td className="px-3 py-1.5">
-                      <input
-                        defaultValue={m.note ?? ''}
-                        placeholder="add a reason…"
-                        onBlur={(e) => {
-                          const v = e.target.value.trim()
-                          if (v !== (m.note ?? '')) upsert({ ...m, note: v || undefined })
-                        }}
-                        disabled={saving}
-                        className="w-full bg-transparent border-0 border-b border-transparent focus:border-[var(--border)] outline-none text-sm py-0.5"
-                      />
-                    </td>
-                    <td className="px-3 py-1.5">
-                      <select
-                        value={m.severity ?? 'high'}
-                        onChange={(e) => upsert({ ...m, severity: e.target.value as Monitor['severity'] })}
-                        disabled={saving}
-                        className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm"
-                      >
-                        {MONITOR_SEVERITIES.map((s) => <option key={s} value={s}>{s}</option>)}
-                      </select>
-                    </td>
-                    <td className="px-3 py-1.5">
-                      <select
-                        value={(m.cameras ?? [])[0] ?? ''}
-                        onChange={(e) => upsert({
-                          ...m,
-                          cameras: e.target.value ? [e.target.value] : undefined,
-                        })}
-                        disabled={saving}
-                        className="py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg-2)] text-sm"
-                      >
-                        <option value="">any camera</option>
-                        {cameras.map((c) => (
-                          <option key={c.id} value={`cam${c.id}`}>{c.name} only</option>
-                        ))}
-                      </select>
-                    </td>
-                    <td className="px-3 py-1.5">
-                      <button
-                        onClick={() => upsert({ ...m, active: m.active === false })}
-                        disabled={saving}
-                        title={m.active !== false
-                          ? 'Armed — click to silence without deleting'
-                          : 'Silenced — click to re-arm'}
-                      >
-                        {m.active !== false
-                          ? <Badge variant="destructive">armed</Badge>
-                          : <Badge variant="neutral">silenced</Badge>}
-                      </button>
-                    </td>
-                    <td className="px-3 py-1.5 text-right pr-4">
-                      <button
-                        title="Stop monitoring this plate"
-                        className="text-[var(--text-dim)] hover:text-[var(--danger,#e5484d)]"
-                        onClick={() => onSave(monitors.filter((x) => x.plate !== m.plate))}
-                        disabled={saving}
-                      >
-                        <Trash2 size={15} />
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </CardContent>
+          <EmptyState
+            icon={<ShieldAlert size={28} />}
+            title={t('vehicles.noMonitored')}
+            description="Monitor a plate — or use the shield button on any read — and you'll be alerted the moment it passes a camera, at the severity you choose."
+            action={<div className="flex flex-wrap justify-center gap-2">{addButton}{importButton}</div>}
+          />
         </Card>
+      ) : (
+        <DataTable<Monitor>
+          caption={t('vehicles.monitored')}
+          columns={columns}
+          rows={pageRows}
+          rowKey={(m) => m.plate}
+          fillHeight
+          fixed
+          dense
+          minWidth="min-w-[720px]"
+          // The row IS the rule: clicking it opens the rule to edit.
+          onRowClick={editRow}
+          striped={false}
+          // A silenced rule recedes, the way an acknowledged alarm does.
+          rowClassName={(m) => (m.active === false ? 'opacity-70' : '')}
+          empty={
+            <EmptyState
+              icon={<Search size={28} />}
+              title={`No monitored plate matches “${query.trim()}”`}
+              description="Search looks at the plate and the reason."
+            />
+          }
+          toolbar={
+            <div className="flex flex-wrap items-center gap-2 py-1.5 pl-3">
+              <div className="relative">
+                <Search size={14} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--text-dim)]" />
+                <input
+                  value={query}
+                  onChange={(e) => { setQuery(e.target.value); pager.setPage(1) }}
+                  placeholder="Search plate or reason…"
+                  aria-label={t('vehicles.searchMonitored')}
+                  className="w-56 border border-[var(--border)] bg-[var(--bg-2)] py-1 pl-7 pr-2 text-xs"
+                />
+              </div>
+              {importButton}
+              <Button variant="outline" size="sm" onClick={exportCsv}>
+                <Download size={14} /> Export CSV
+              </Button>
+              {addButton}
+              <div className="ml-auto">
+                <Pagination
+                  page={page}
+                  pageSize={pager.pageSize}
+                  total={rows.length}
+                  rowCount={pageRows.length}
+                  label="plates"
+                  onPageChange={pager.setPage}
+                  onPageSizeChange={pager.setPageSize}
+                />
+              </div>
+            </div>
+          }
+        />
       )}
       <div className="text-xs text-[var(--text-dim)]">
         Monitored plates never trigger the unknown-vehicle alarm — they fire their own
-        alert at the severity set here, and "silenced" keeps the rule without alerting.
+        alert at the severity set here, and a silenced rule is kept without alerting.
       </div>
+
+      {importOpen && (
+        <ImportDialog
+          title="Import monitored plates"
+          noun="monitored plate"
+          columns={MONITOR_IMPORT_COLUMNS}
+          notes={MONITOR_IMPORT_NOTES}
+          onClose={() => setImportOpen(false)}
+          onChooseFile={() => fileRef.current?.click()}
+          onDownloadTemplate={() => downloadCsv(monitorsToCsv([], cameras), 'monitored-plates-template.csv')}
+        />
+      )}
+      {dialog && (
+        <MonitorDialog
+          initial={dialog.monitor}
+          editing={dialog.editing}
+          monitors={monitors}
+          cameras={cameras}
+          saving={saving}
+          onClose={() => setDialog(null)}
+          onSave={(m, replaces) => {
+            save(m, replaces)
+            setDialog(null)
+          }}
+        />
+      )}
     </div>
+  )
+}
+
+function MonitorDialog({
+  initial, editing, monitors, cameras, saving, onClose, onSave,
+}: {
+  initial: Monitor
+  /** The plate being edited, or null when adding. */
+  editing: string | null
+  monitors: Monitor[]
+  cameras: CameraRow[]
+  saving: boolean
+  onClose: () => void
+  onSave: (m: Monitor, replaces: string | null) => void
+}) {
+  const formId = useId()
+  const [plate, setPlate] = useState(initial.plate)
+  const [note, setNote] = useState(initial.note ?? '')
+  const [severity, setSeverity] = useState<NonNullable<Monitor['severity']>>(initial.severity ?? 'high')
+  const [where, setWhere] = useState<string[]>(initial.cameras ?? [])
+  const [armed, setArmed] = useState(initial.active !== false)
+  const norm = normalizePlate(plate)
+  // Saving over another rule's plate replaces it — say so before, not after.
+  const clash = Boolean(norm) && norm !== editing && monitors.some((m) => m.plate === norm)
+
+  // Checkboxes, not one select: a rule can watch several cameras (imports
+  // carry them), and a single select silently dropped all but the first.
+  // A handle whose camera is gone stays listed, so it can be unticked.
+  const options = [
+    ...cameras.map((c) => ({ handle: `cam${c.id}`, name: c.name })),
+    ...(initial.cameras ?? [])
+      .filter((h) => !cameras.some((c) => `cam${c.id}` === h))
+      .map((h) => ({ handle: h, name: `${h} (not found)` })),
+  ]
+  const toggleWhere = (handle: string, on: boolean) =>
+    setWhere((w) => (on ? [...w, handle] : w.filter((x) => x !== handle)))
+
+  const submit = (e: FormEvent) => {
+    e.preventDefault()
+    if (!norm || saving) return
+    onSave({
+      plate: norm,
+      note: note.trim() || undefined,
+      severity,
+      active: armed,
+      cameras: where.length ? where : undefined,
+    }, editing)
+  }
+
+  const labelCls = 'text-xs text-[var(--text-dim)]'
+  const inputCls = 'mt-1 block w-full  border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1.5 text-sm text-[var(--text)]'
+
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title={editing ? `Edit ${editing}` : 'Monitor a plate'}
+      widthClassName="w-full max-w-lg mx-4"
+      footer={
+        <div className="flex justify-end gap-2">
+          <Button variant="outline" size="sm" onClick={onClose}>Cancel</Button>
+          <Button variant="primary" size="sm" type="submit" form={formId} disabled={!norm || saving}>
+            {editing ? 'Save changes' : 'Monitor plate'}
+          </Button>
+        </div>
+      }
+    >
+      <form id={formId} onSubmit={submit} className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <label className={labelCls}>
+          Plate <span aria-hidden>*</span>
+          <input
+            autoFocus
+            required
+            value={plate}
+            onChange={(e) => setPlate(e.target.value)}
+            placeholder="e.g. MH12DE1433"
+            className={`${inputCls} font-mono uppercase`}
+          />
+          {clash && (
+            <span className="mt-1 block text-[var(--warning,#b7791f)]">
+              Already monitored — saving replaces that rule.
+            </span>
+          )}
+        </label>
+        <label className={labelCls}>
+          Alert severity
+          <select
+            value={severity}
+            onChange={(e) => setSeverity(e.target.value as NonNullable<Monitor['severity']>)}
+            className={inputCls}
+          >
+            {MONITOR_SEVERITIES.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </label>
+        <label className={`${labelCls} sm:col-span-2`}>
+          Reason / note
+          <input
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="e.g. reported stolen — FIR 42/2026"
+            className={inputCls}
+          />
+        </label>
+        <fieldset className={`${labelCls} sm:col-span-2`}>
+          <legend>Where</legend>
+          <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1.5 border border-[var(--border)] bg-[var(--bg-2)] px-3 py-2 text-sm text-[var(--text)]">
+            {options.length === 0 && (
+              <span className="text-xs text-[var(--text-dim)]">No cameras yet.</span>
+            )}
+            {options.map((o) => (
+              <label key={o.handle} className="inline-flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  className="accent-[var(--accent)]"
+                  checked={where.includes(o.handle)}
+                  onChange={(e) => toggleWhere(o.handle, e.target.checked)}
+                />
+                {o.name}
+              </label>
+            ))}
+          </div>
+          <span className="mt-1 block">
+            {where.length
+              ? `Alerts only on ${where.length === 1 ? 'this camera' : 'these cameras'}.`
+              : 'None ticked — alerts on every camera.'}
+          </span>
+        </fieldset>
+        <div className="flex items-center gap-3 sm:col-span-2">
+          <Switch checked={armed} onChange={setArmed} label="Armed" />
+          <span className="text-sm">
+            {armed ? 'Armed — alerts when this plate is read' : 'Silenced — the rule is kept without alerting'}
+          </span>
+        </div>
+      </form>
+    </Modal>
   )
 }
 
@@ -1666,8 +3368,8 @@ function MonitoringTab({
 // browser's print dialog — zero dependencies, works everywhere. The
 // print CSS isolates .print-report so only the document prints.
 
-function monthLabel(year: number, month: number): string {
-  return new Date(year, month - 1, 1).toLocaleString(undefined, {
+function monthLabel(year: number, month: number, fmt: DateFormatters): string {
+  return fmt.dateTime(new Date(year, month - 1, 1), {
     month: 'long', year: 'numeric',
   })
 }
@@ -1682,6 +3384,7 @@ function lastMonths(n: number): { year: number; month: number }[] {
   return out
 }
 
+/* eslint-disable no-restricted-syntax -- a paper print sheet: black on white in every theme */
 function ReportOverlay({
   registry,
   monitors,
@@ -1695,6 +3398,8 @@ function ReportOverlay({
   cameraName: (id: number) => string
   onClose: () => void
 }) {
+  const { t } = useTranslation()
+  const fmt = useDateFormat()
   const months = useMemo(() => lastMonths(12), [])
   const [sel, setSel] = useState(months[0])
 
@@ -1744,7 +3449,7 @@ function ReportOverlay({
   }, [report])
 
   const dt = (v: string | null | undefined) =>
-    v ? new Date(v).toLocaleString(undefined, {
+    v ? fmt.dateTime(v, {
       day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
     }) : '—'
 
@@ -1773,18 +3478,18 @@ function ReportOverlay({
           >
             {months.map((m) => (
               <option key={`${m.year}-${m.month}`} value={`${m.year}-${m.month}`}>
-                {monthLabel(m.year, m.month)}
+                {monthLabel(m.year, m.month, fmt)}
               </option>
             ))}
           </select>
           <Button onClick={() => window.print()} disabled={!report}>
-            <FileText size={14} /> Print / Save as PDF
+            <FileText size={14} /> {t('vehicles.printPdf')}
           </Button>
           <button
             className="ml-auto text-neutral-500 hover:text-neutral-900 text-sm"
             onClick={onClose}
           >
-            ✕ Close
+            ✕ {t('vehicles.close')}
           </button>
         </div>
 
@@ -1798,19 +3503,19 @@ function ReportOverlay({
           <div className="text-sm leading-relaxed">
             {/* header */}
             <div className="mb-6">
-              <div className="text-2xl font-semibold">Vehicle Movement Report</div>
+              <div className="text-2xl font-semibold">{t('vehicles.reportTitle')}</div>
               <div className="text-neutral-500">
-                {monthLabel(report.year, report.month)} · generated {new Date().toLocaleDateString()} · OpenNVR
+                {monthLabel(report.year, report.month, fmt)} · generated {fmt.date(new Date())} · OpenNVR
               </div>
             </div>
 
             {/* summary */}
             <div className="grid grid-cols-4 gap-3 mb-6">
               {[
-                ['Total reads', report.total_reads],
-                ['Unique vehicles', report.unique_plates],
-                ['Registered seen', registered.length],
-                ['Visitors / unknown', visitors.length],
+                [t('vehicles.total'), report.total_reads],
+                [t('vehicles.unique'), report.unique_plates],
+                [t('vehicles.registeredSeen'), registered.length],
+                [t('vehicles.visitorsUnknown'), visitors.length],
               ].map(([label, value]) => (
                 <div key={String(label)} className="border border-neutral-200 rounded p-3">
                   <div className="text-xl font-semibold">{value}</div>
@@ -1827,7 +3532,7 @@ function ReportOverlay({
             </div>
 
             {/* registered by unit */}
-            <div className="text-base font-semibold mb-1 mt-6">Registered vehicles</div>
+            <div className="text-base font-semibold mb-1 mt-6">{t('vehicles.registeredVehicles')}</div>
             {registered.length === 0 ? (
               <div className="text-neutral-500">No registered vehicle was seen this month.</div>
             ) : (
@@ -1858,7 +3563,7 @@ function ReportOverlay({
             )}
 
             {/* visitors */}
-            <div className="text-base font-semibold mb-1 mt-6">Visitors &amp; unknown vehicles</div>
+            <div className="text-base font-semibold mb-1 mt-6">{t('vehicles.visitorsVehicles')}</div>
             {visitors.length === 0 ? (
               <div className="text-neutral-500">No unregistered vehicle was seen this month.</div>
             ) : (
@@ -1887,7 +3592,7 @@ function ReportOverlay({
             {/* monitored */}
             {monitored.length > 0 && (
               <>
-                <div className="text-base font-semibold mb-1 mt-6">Monitored plate sightings</div>
+                <div className="text-base font-semibold mb-1 mt-6">{t('vehicles.monitoredSightings')}</div>
                 <table className="w-full border-collapse mb-2">
                   <thead>
                     <tr className="text-left text-xs text-neutral-500 border-b border-neutral-300">
@@ -1918,6 +3623,226 @@ function ReportOverlay({
           </div>
         )}
       </div>
+    </div>
+  )
+}
+
+// ── Vehicle alarms — the LPR app's slice of the platform inbox ─────
+//
+// Vehicles is self-contained for the daily loop: arm alarms (register /
+// monitoring tabs), SEE them fire here, acknowledge here. The rows are
+// the same platform inbox the bell rings — an ack here silences every
+// open browser — filtered to this app's alarms. Sound, phone-call and
+// hooter configuration stay site-wide (one guard phone for every app's
+// alarms), linked below.
+
+/* eslint-enable no-restricted-syntax */
+
+function VehicleAlarmsTab({ cameraName }: { cameraName: (id: number) => string }) {
+  const [onlyUnacked, setOnlyUnacked] = useState(false)
+  const [severityFilter, setSeverityFilter] = useState<string | null>(null)
+  const pager = usePagination(25, 'vehicle-alarms')
+
+  const list = useAlarmsList({
+    queryKeyPrefix: 'vehicle-alarms',
+    sourceName: LPR_SOURCE,
+    unacked: onlyUnacked,
+    severity: severityFilter,
+    page: pager.page,
+    pageSize: pager.pageSize,
+    skip: pager.skip,
+  })
+  const sel = useRowSelection<number>({
+    unacked: onlyUnacked, severity: severityFilter,
+    page: pager.page, size: pager.pageSize,
+  })
+  const ack = useAckAlarms(() => {
+    sel.clear()
+    if (list.rows.length <= 1 && pager.page > 1) pager.setPage(pager.page - 1)
+  })
+
+  // Belt and braces: the server already filters by source_name. Note
+  // this now runs AFTER paging, so a server that ignored the parameter
+  // would show short pages rather than other apps' alarms — a visible
+  // symptom instead of silently wrong data.
+  const rows = list.rows.filter((a) => a.source_name === LPR_SOURCE)
+
+  return (
+    // No Card. This tab used to sit on a panel ground while the
+    // site-wide alarms page rendered bare, so the same table looked like
+    // two different components depending on where you opened it.
+    <>
+      <AlarmsTable
+          caption="Vehicle alarms"
+          rows={rows}
+          selected={sel.selected}
+          onToggle={sel.toggle}
+          onToggleAll={(on) => sel.toggleMany(rows.map((a) => a.id), on)}
+          cameraLabel={(handle) => {
+            const id = cameraIdFromHandle(handle)
+            return id === null ? (handle || '—') : cameraName(id)
+          }}
+          onAck={(ids) => ack.mutate(ids)}
+          isPending={list.isPending}
+          isFetching={list.isFetching}
+          isError={list.isError}
+          error={list.error}
+          onRetry={() => list.refetch()}
+          emptyTitle={onlyUnacked ? 'No unacknowledged vehicle alarms' : 'No vehicle alarms yet'}
+          emptyDescription="Arm the unknown-vehicle alarm in the Vehicle register tab, or monitor a plate."
+          toolbar={
+            <>
+              <div className="flex flex-wrap items-center gap-2 py-1.5 pl-3">
+                <AlarmsFilters
+                  onlyUnacked={onlyUnacked}
+                  onUnacked={(only) => { setOnlyUnacked(only); pager.setPage(1) }}
+                  severity={severityFilter}
+                  onSeverity={(sev) => { setSeverityFilter(sev); pager.setPage(1) }}
+                />
+                <AlarmsSelectionBar
+                  count={sel.count}
+                  allOnPage={rows.length > 0 && rows.every((a) => sel.has(a.id))}
+                  allMatching={sel.allMatching}
+                  matchingTotal={list.total}
+                  label="vehicle alarms"
+                  onSelectAllMatching={sel.selectAllMatching}
+                  onClear={sel.clear}
+                  onAck={() => ack.mutate(
+                    sel.allMatching ? { source_name: LPR_SOURCE } : [...sel.selected],
+                  )}
+                />
+                <div className="ml-auto">
+                  <Pagination
+                    page={pager.page}
+                    pageSize={pager.pageSize}
+                    total={list.total}
+                    rowCount={rows.length}
+                    hasNext={rows.length === pager.pageSize}
+                    isFetching={list.isFetching}
+                    label="alarms"
+                    onPageChange={pager.setPage}
+                    onPageSizeChange={pager.setPageSize}
+                  />
+                </div>
+              </div>
+            </>
+          }
+      />
+    </>
+  )
+}
+
+// ── Report: vehicles per camera per hour, by type and colour ─────────
+//
+// The count / type / colour view: every vehicle Tier-0 tracked, with the
+// type and colour the enrichment claimed (the detector's label and
+// "unknown" when it did not). Hourly over a day, daily over longer. The
+// CSV is the same rows, for an evidence pack or a spreadsheet.
+
+type VehicleCountCell = { total: number; by_type: Record<string, number>; by_colour: Record<string, number> }
+type VehicleCounts = {
+  hours: number
+  bucket: 'hour' | 'day'
+  total: number
+  per_camera: Array<VehicleCountCell & { camera_id: number }>
+  buckets: Array<VehicleCountCell & { camera_id: number; bucket: string }>
+}
+
+function breakdown(m: Record<string, number>): string {
+  return Object.entries(m).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v}`).join(' · ') || '—'
+}
+
+function topOf(m: Record<string, number>): string {
+  const [k, v] = Object.entries(m).sort((a, b) => b[1] - a[1])[0] ?? ['—', 0]
+  return v ? `${k} (${v})` : '—'
+}
+
+function VehicleReportTab({ cameraName }: { cameraName: (id: number) => string }) {
+  const { t } = useTranslation()
+  const [range, setRange] = useState<(typeof RANGE_PRESETS)[number]>(RANGE_PRESETS[0])
+  const bucket: 'hour' | 'day' = range.hours > 48 ? 'day' : 'hour'
+  const query = useQuery({
+    queryKey: ['vehicle-counts', range.key],
+    queryFn: async () => {
+      const { data } = await apiService.getVehicleCounts(range.hours, bucket)
+      return data as VehicleCounts
+    },
+    retry: 0,
+    refetchInterval: 60_000,
+    placeholderData: keepPreviousData,
+  })
+  const data = query.data
+  const totals: VehicleCountCell = { total: 0, by_type: {}, by_colour: {} }
+  for (const c of data?.per_camera ?? []) {
+    totals.total += c.total
+    for (const [k, v] of Object.entries(c.by_type)) totals.by_type[k] = (totals.by_type[k] ?? 0) + v
+    for (const [k, v] of Object.entries(c.by_colour)) totals.by_colour[k] = (totals.by_colour[k] ?? 0) + v
+  }
+  const fmt = useDateFormat()
+  const fmtBucket = (iso: string) => bucket === 'day'
+    ? fmt.date(iso, { day: '2-digit', month: 'short' })
+    : fmt.dateTime(iso, { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
+  type Row = VehicleCounts['buckets'][number]
+  const columns: Column<Row>[] = [
+    { key: 'bucket', header: bucket === 'day' ? t('vehicles.reportDay') : t('vehicles.reportHour'), width: 'w-[150px]',
+      cellClassName: 'whitespace-nowrap', cell: (r) => fmtBucket(r.bucket) },
+    { key: 'camera', header: t('vehicles.reportCamera'), width: 'w-[180px]', cellClassName: 'truncate',
+      cell: (r) => cameraName(r.camera_id) },
+    { key: 'total', header: t('vehicles.reportVehicles'), width: 'w-[100px]',
+      cellClassName: 'font-semibold tabular-nums', cell: (r) => r.total },
+    { key: 'types', header: t('vehicles.reportByType'), cellClassName: 'truncate',
+      cell: (r) => <span title={breakdown(r.by_type)}>{breakdown(r.by_type)}</span> },
+    { key: 'colours', header: t('vehicles.reportByColour'), cellClassName: 'truncate',
+      cell: (r) => <span title={breakdown(r.by_colour)}>{breakdown(r.by_colour)}</span> },
+  ]
+  const exportCsv = () => {
+    const rows = data?.buckets ?? []
+    const head = [bucket, 'camera', 'vehicles', 'by_type', 'by_colour']
+    const body = rows.map((r) => [r.bucket, cameraName(r.camera_id), String(r.total),
+      breakdown(r.by_type), breakdown(r.by_colour)])
+    const esc = (v: string) => /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v
+    downloadCsv([head, ...body].map((r) => r.map(esc).join(',')).join('\n'),
+      `vehicle-counts-${range.key}.csv`)
+  }
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <SegmentedControl
+          label={t('vehicles.timeRange')}
+          options={RANGE_PRESETS.map((r) => ({ value: r.key, label: r.label }))}
+          value={range.key}
+          onChange={(key) => setRange(RANGE_PRESETS.find((r) => r.key === key) ?? RANGE_PRESETS[0])}
+        />
+        <button
+          type="button"
+          onClick={exportCsv}
+          disabled={!data?.buckets.length}
+          className="inline-flex items-center gap-1.5 rounded-md border border-[var(--border)] px-3 py-1.5 text-sm hover:bg-[var(--surface-2)] disabled:opacity-50"
+        >
+          <Download size={14} /> {t('vehicles.export')}
+        </button>
+      </div>
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+        <StatTile label={t('vehicles.reportVehicles')} value={data ? totals.total : '…'} sub={range.label} />
+        <StatTile label={t('vehicles.reportCameras')} value={data ? data.per_camera.length : '…'} />
+        <StatTile label={t('vehicles.reportTopType')} value={data ? topOf(totals.by_type) : '…'} />
+        <StatTile label={t('vehicles.reportTopColour')} value={data ? topOf(totals.by_colour) : '…'} />
+      </div>
+      <p className="text-xs text-[var(--text-dim)]">{t('vehicles.reportHint')}</p>
+      <DataTable<Row>
+        caption={t('vehicles.reportTab')}
+        columns={columns}
+        rows={data?.buckets ?? []}
+        rowKey={(r) => `${r.camera_id}-${r.bucket}`}
+        isPending={query.isPending}
+        isFetching={query.isFetching}
+        isError={query.isError}
+        error={query.error}
+        errorTitle={t('vehicles.reportError')}
+        onRetry={() => query.refetch()}
+        empty={t('vehicles.reportEmpty')}
+        fillHeight
+      />
     </div>
   )
 }

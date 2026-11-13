@@ -102,6 +102,10 @@ GRANT_RESULT = {**VIEW, "approval_status": "approved", "granted": ["gpu"],
 class _StubUser:
     id = 1
     username = "tester"
+    # Grant/revoke/approve-all are gated on ai.manage (superusers hold
+    # every permission); the gate itself is covered structurally in
+    # test_user_superuser_flag.py — these tests exercise the proxying.
+    is_superuser = True
 
 
 class _StubKaiCService:

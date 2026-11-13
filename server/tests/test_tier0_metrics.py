@@ -94,6 +94,8 @@ ENFORCE_TEXT = "\n".join([
     'gate_suppressions_total{camera="cam1",reason="stationary"} 20',
     "# TYPE tier0_process_cpu_percent gauge",
     "tier0_process_cpu_percent 42.5",
+    "# TYPE tier0_detector_backend gauge",
+    'tier0_detector_backend{backend="ort",requested="QNNExecutionProvider(htp), CPUExecutionProvider",effective="CPUExecutionProvider"} 1',
     "# TYPE tier0_process_resident_memory_bytes gauge",
     "tier0_process_resident_memory_bytes 123456789",
     "# TYPE tier1_dispatch_total counter",
@@ -103,6 +105,11 @@ ENFORCE_TEXT = "\n".join([
     # operator health: 2 cams, one behind (cam2 at 2/5 fps)
     "# TYPE tier0_worker_up gauge",
     'tier0_worker_up{camera="cam1"} 1',
+    "# TYPE tier0_motion_latched_open gauge",
+    'tier0_motion_latched_open{camera="cam1"} 0',
+    'tier0_motion_latched_open{camera="cam2"} 1',
+    "# TYPE tier0_motion_forced_exits_total counter",
+    'tier0_motion_forced_exits_total{camera="cam2"} 2',
     'tier0_worker_up{camera="cam2"} 1',
     "# TYPE tier0_target_fps gauge",
     'tier0_target_fps{camera="cam1"} 5',
@@ -162,6 +169,14 @@ def test_reduce_enforce_rollup():
     assert abs(r["health"]["min_fps_ratio"] - 0.4) < 1e-9
     assert r["health"]["worst_camera"] == "cam2"
     assert r["health"]["restarts_total"] == 3
+    assert r["health"]["frames_dropped_total"] == 0, "absent metric reads as none dropped"
+    # motion gate verdict per camera: cam2's scene never calibrated, so the
+    # gate is latched open there — the 0% it contributes has a reason
+    cams = {c["camera"]: c for c in r["cameras"]}
+    assert cams["cam1"]["motion_latched_open"] is False
+    assert cams["cam2"]["motion_latched_open"] is True
+    assert cams["cam2"]["motion_forced_exits"] == 2
+    assert r["frames"]["motion_latched_cameras"] == ["cam2"]
 
 
 def test_mode_off_when_no_gate_metrics():
@@ -324,6 +339,7 @@ tier0_tracks_active{camera="cam1"} 2
 tier0_mainstream_fallback{camera="cam1"} 1
 tier0_visits_posted_total{camera="cam1"} 7
 tier0_visits_dropped_total{camera="cam1"} 1
+tier0_frames_dropped_total{camera="cam1"} 41
 tier0_events_published_total{camera="cam1"} 292
 tier0_sink_errors_total{camera="cam1"} 3
 tier0_stationary_skipped_total{camera="cam1"} 44
@@ -346,6 +362,8 @@ def test_per_camera_rows_surface_the_struggling_camera():
     assert c1["regions_capped_total"] == 415
     assert c1["tracks_active"] == 2
     assert c1["visits_posted"] == 7 and c1["visits_dropped"] == 1
+    assert c1["frames_dropped"] == 41, "the #507 capacity signal, per camera"
+    assert r["health"]["frames_dropped_total"] == 41
     assert c1["mainstream_fallback"] is True
 
     c2 = cams["cam2"]
@@ -420,3 +438,69 @@ def test_decode_config_survives_a_malformed_thread_count():
     (cam,) = snap["cameras"]
     assert cam["decode"]["threads"] == 0        # degraded, not a 500
     assert cam["decode"]["fast"] is True
+
+
+def test_backend_row_shows_an_accelerator_fallback():
+    """The dashboard's one question about the detector: is the accelerator
+    it asked for the one doing the work? The fixture requests QNN on the HTP
+    and runs on CPU — the pipeline-recreated-without-its-NPU case."""
+    r = reduce_metrics(parse_prometheus_text(ENFORCE_TEXT))
+    b = r["backend"]
+    assert b["backend"] == "ort"
+    assert b["requested"].startswith("QNNExecutionProvider(htp)")
+    assert b["effective"] == "CPUExecutionProvider"
+    assert b["accelerated"] is False and b["fallback"] is True
+
+
+def test_backend_row_accelerated_and_plain_cpu():
+    text = ENFORCE_TEXT.replace(
+        'effective="CPUExecutionProvider"} 1', 'effective="QNNExecutionProvider, CPUExecutionProvider"} 1')
+    b = reduce_metrics(parse_prometheus_text(text))["backend"]
+    assert b["accelerated"] is True and b["fallback"] is False
+    # nothing requested: CPU is not a fallback, it is the plan
+    text = ENFORCE_TEXT.replace(
+        'requested="QNNExecutionProvider(htp), CPUExecutionProvider"', 'requested=""')
+    b = reduce_metrics(parse_prometheus_text(text))["backend"]
+    assert b["accelerated"] is False and b["fallback"] is False
+    # no info-metric at all (an older pipeline): absent, not an error
+    text = "\n".join(l for l in ENFORCE_TEXT.splitlines() if "tier0_detector_backend" not in l)
+    assert reduce_metrics(parse_prometheus_text(text))["backend"] is None
+
+
+EVIDENCE_TEXT = """
+tier0_worker_up{camera="cam1"} 1
+tier0_worker_up{camera="cam2"} 1
+tier0_evidence_crops_total{camera="cam1",source="main"} 30
+tier0_evidence_crops_total{camera="cam1",source="detect"} 10
+tier0_evidence_mismatch_total{camera="cam1"} 6
+tier0_evidence_gop_seconds{camera="cam1"} 1.02
+tier0_evidence_keyframes_only{camera="cam1"} 1
+"""
+
+
+def test_camera_row_carries_the_evidence_split_and_mismatches():
+    r = reduce_metrics(parse_prometheus_text(EVIDENCE_TEXT))
+    cams = {c["camera"]: c for c in r["cameras"]}
+    assert cams["cam1"]["evidence"] == {
+        "main": 30, "detect": 10, "playback": 0, "mismatch": 6,
+        "low_res_ratio": 0.25, "gop_s": 1.02, "keyframes_only": True,
+    }
+    # No evidence series at all (older pipeline, or no second stream):
+    # absent, never a fabricated zero.
+    assert cams["cam2"]["evidence"] is None
+
+
+DETECT_STREAM_TEXT = """
+tier0_worker_up{camera="cam1"} 1
+tier0_worker_up{camera="cam2"} 1
+tier0_worker_up{camera="cam3"} 1
+tier0_detect_on_main{camera="cam1"} 0
+tier0_detect_on_main{camera="cam2"} 4
+"""
+
+
+def test_camera_row_says_which_stream_is_detected_on_and_why():
+    cams = {c["camera"]: c for c in reduce_metrics(parse_prometheus_text(DETECT_STREAM_TEXT))["cameras"]}
+    assert cams["cam1"]["detect_stream"] == {"stream": "sub", "reason": ""}
+    assert cams["cam2"]["detect_stream"] == {"stream": "main", "reason": "sub_too_small"}
+    assert cams["cam3"]["detect_stream"] is None, "an older pipeline reads as unknown, not as sub"

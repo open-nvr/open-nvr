@@ -156,24 +156,23 @@ def test_dormant_in_the_registry_when_union_empties(db):
     assert view["sources"]["assignments"] == {"implemented": False, "phase": 2}
 
 
-def test_operator_replace_touches_only_operator_claims(db):
+def test_retiring_the_camera_pages_rows_leaves_app_claims_alone(db):
+    """The camera page's editor is gone; its rows (consumer "operator")
+    are retired at startup. An app's claim on the same camera survives."""
     s, (gate, yard) = db
-    cam = s.query(models.Camera).get(gate)
     svc.declare(s, skill=LPR, camera_id=gate, consumer="app:lpr")
-    svc.set_operator_assignments(s, cam, [
-        {"skill": "object_detection", "labels": ["person"]},
-    ])
+    svc.declare(s, skill="object_detection", camera_id=gate, consumer=svc.OPERATOR_CONSUMER,
+                params={"labels": ["person"]})
+    svc.declare(s, skill="embed", camera_id=yard, consumer=svc.OPERATOR_CONSUMER)
     s.commit()
-    assert _assignments_of(s, gate) == [
-        {"skill": LPR},
-        {"skill": "object_detection", "labels": ["person"]},
-    ]
-    # The editor's full-replace clears ONLY operator claims: the app's
-    # LPR claim survives an operator submitting a list without it.
-    svc.set_operator_assignments(s, cam, [])
+    assert svc.retire_operator_claims(s) == 2
+    s.commit()
+    for cam in (gate, yard):
+        svc.project_camera(s, s.query(models.Camera).get(cam))
     s.commit()
     assert _assignments_of(s, gate) == [{"skill": LPR}]
-    assert svc.assignments_by_skill(s) == {LPR: [gate]}
+    assert _assignments_of(s, yard) is None or _assignments_of(s, yard) == []
+    assert svc.retire_operator_claims(s) == 0          # idempotent
 
 
 def test_labels_merge_additively_and_unrestricted_wins(db):
@@ -192,6 +191,142 @@ def test_labels_merge_additively_and_unrestricted_wins(db):
                 consumer="operator")
     s.commit()
     assert _assignments_of(s, gate) == [{"skill": "object_detection"}]
+
+
+# ── App widening: a pick carries the app's manifest tier0_labels ────
+#
+# Tier-0 tracks only the global DETECT_LABELS, so an app that rides it
+# for other classes sees nothing on a stock install. The manifest names
+# the classes; the pick names the cameras; declare() joins them so the
+# projection entry Tier-0 reads carries the labels to ADD.
+
+
+def _install(s, app_id, **manifest_extra):
+    manifest = {"id": app_id, "name": app_id, "version": "1.0.0", **manifest_extra}
+    s.add(models.InstalledApp(id=app_id, name=app_id, version="1.0.0",
+                              url=f"http://{app_id}:9200", enabled=True,
+                              manifest_json=manifest, config_json={}))
+    s.commit()
+
+
+def _pick(s, app_id, cam_id, params=None):
+    svc.declare(s, skill=svc.app_pick_skill(app_id), camera_id=cam_id,
+                consumer=svc.app_consumer(app_id), params=params)
+    s.commit()
+
+
+def test_a_pick_carries_the_apps_tier0_labels(db):
+    s, (gate, _) = db
+    _install(s, "abandoned-object", tier0_labels=["Suitcase", "backpack", " handbag "])
+    _pick(s, "abandoned-object", gate)
+    # Cleaned like every other label set: lowercased, trimmed, sorted.
+    assert _assignments_of(s, gate) == [
+        {"skill": "abandoned_object", "labels": ["backpack", "handbag", "suitcase"]},
+    ]
+    # ...and stored on the row, not just projected, so the skill view
+    # shows why the camera tracks bags.
+    row = s.query(models.SkillAssignment).one()
+    assert row.params == {"labels": ["backpack", "handbag", "suitcase"]}
+
+
+def test_a_caller_naming_labels_keeps_them(db):
+    """Filled in only when the caller passed none: a claim that names
+    its own labels is not second-guessed against the manifest."""
+    s, (gate, _) = db
+    _install(s, "abandoned-object", tier0_labels=["backpack"])
+    _pick(s, "abandoned-object", gate, params={"labels": ["suitcase"], "note": 1})
+    assert _assignments_of(s, gate) == [
+        {"skill": "abandoned_object", "labels": ["suitcase"]},
+    ]
+    assert s.query(models.SkillAssignment).one().params == {
+        "labels": ["suitcase"], "note": 1}
+
+
+def test_an_app_without_tier0_labels_picks_plainly(db):
+    s, (gate, _) = db
+    _install(s, "loitering-detection")                 # no tier0_labels at all
+    _pick(s, "loitering-detection", gate)
+    _pick(s, "not-installed", gate)                    # unknown app: untouched
+    assert _assignments_of(s, gate) == [
+        {"skill": "loitering_detection"}, {"skill": "not_installed"},
+    ]
+
+
+def test_reregistering_with_new_labels_refreshes_existing_picks(db):
+    """A manifest that gains tier0_labels after the cameras were picked
+    must reach those cameras, or the upgrade changes nothing until every
+    camera is unpicked and re-picked. The manifest is the truth both
+    ways: dropping the field takes the labels off again."""
+    s, (gate, yard) = db
+    _install(s, "package-delivery")
+    _pick(s, "package-delivery", gate)
+    _pick(s, "package-delivery", yard)
+    assert _assignments_of(s, gate) == [{"skill": "package_delivery"}]
+
+    app = s.query(models.InstalledApp).get("package-delivery")
+    app.manifest_json = {**app.manifest_json, "tier0_labels": ["suitcase", "handbag"]}
+    s.commit()
+    assert svc.sync_app_pick_labels(s, "package-delivery") == 2
+    s.commit()
+    for cam in (gate, yard):
+        assert _assignments_of(s, cam) == [
+            {"skill": "package_delivery", "labels": ["handbag", "suitcase"]},
+        ]
+    # Idempotent: the same manifest again changes no row.
+    assert svc.sync_app_pick_labels(s, "package-delivery") == 0
+
+    app.manifest_json = {k: v for k, v in app.manifest_json.items() if k != "tier0_labels"}
+    s.commit()
+    assert svc.sync_app_pick_labels(s, "package-delivery") == 2
+    s.commit()
+    assert _assignments_of(s, gate) == [{"skill": "package_delivery"}]
+
+
+def test_a_pick_brings_the_apps_tasks_and_a_disable_takes_them_away(db):
+    """Skills follow apps. Picking a camera for an app puts the model
+    skills its manifest declares (requires_tasks + enrich_tasks,
+    canonical) in the camera's set; disabling the app removes them;
+    a task another enabled app also brings stays."""
+    s, (gate, _) = db
+    _install(s, "smart-doorbell", requires_tasks=["face_recognition"])
+    _install(s, "footage-search", enrich_tasks=["scene_caption", "embed"])   # alias → canonical
+    _pick(s, "smart-doorbell", gate)
+    _pick(s, "footage-search", gate)
+    assert _assignments_of(s, gate) == [
+        {"skill": "embed"},
+        {"skill": "face_recognition"},
+        {"skill": "footage_search"},
+        {"skill": "image_captioning"},
+        {"skill": "smart_doorbell"},
+    ]
+    assert svc.camera_adopted(s.query(models.Camera).get(gate), "face_recognition")
+    assert svc.assignments_by_skill(s)["image_captioning"] == [gate]
+    # Disable the doorbell: its pick and its task leave the set.
+    s.query(models.InstalledApp).filter_by(id="smart-doorbell").update({"enabled": False})
+    s.commit()
+    svc.reproject_app_cameras(s, "smart-doorbell")
+    s.commit()
+    assert "face_recognition" not in svc.camera_skills(s.query(models.Camera).get(gate))
+    assert "smart_doorbell" not in svc.camera_skills(s.query(models.Camera).get(gate))
+    assert "image_captioning" in svc.camera_skills(s.query(models.Camera).get(gate))
+    # Release the last app bringing a task: the task goes with it.
+    svc.release_app_picks(s, "footage-search")
+    s.commit()
+    assert svc.camera_skills(s.query(models.Camera).get(gate)) == set()
+
+
+def test_two_apps_sharing_a_task_keep_it_until_the_last_release(db):
+    s, (gate, _) = db
+    _install(s, "intrusion", requires_tasks=["object_detection"])
+    _install(s, "loitering", requires_tasks=["object_detection"])
+    _pick(s, "intrusion", gate)
+    _pick(s, "loitering", gate)
+    svc.release_app_picks(s, "intrusion")
+    s.commit()
+    assert "object_detection" in svc.camera_skills(s.query(models.Camera).get(gate))
+    svc.release_app_picks(s, "loitering")
+    s.commit()
+    assert "object_detection" not in svc.camera_skills(s.query(models.Camera).get(gate))
 
 
 def test_declare_is_idempotent_and_updates_params(db):
@@ -355,3 +490,35 @@ def test_migration_sweep_matches_the_query_filter(db):
 
     left = s.query(models.SkillAssignment).all()
     assert [(r.skill, r.camera_id) for r in left] == [(LPR, gate)]
+
+
+# -- A claim names its adapter (the face route) ------------------------------
+#
+# Each face app keeps its own gallery, so a face_recognition claim says
+# which adapter answers for it on that camera; Tier-0 routes people there.
+
+
+def test_a_claim_can_name_its_adapter_and_names_merge(db):
+    s, (gate, yard) = db
+    svc.declare(s, skill="face_recognition", camera_id=gate,
+                consumer="app:attendly", params={"adapters": ["insightface_attendly"]})
+    s.commit()
+    assert _assignments_of(s, gate) == [
+        {"skill": "face_recognition", "adapters": ["insightface_attendly"]},
+    ]
+    svc.declare(s, skill="face_recognition", camera_id=gate,
+                consumer="app:doorbell", params={"adapters": ["insightface", " "]})
+    s.commit()
+    assert _assignments_of(s, gate) == [
+        {"skill": "face_recognition", "adapters": ["insightface", "insightface_attendly"]},
+    ]
+    # Releasing one app's claim drops its adapter with it.
+    svc.release(s, skill="face_recognition", camera_id=gate, consumer="app:doorbell")
+    s.commit()
+    assert _assignments_of(s, gate) == [
+        {"skill": "face_recognition", "adapters": ["insightface_attendly"]},
+    ]
+    # Entries naming no adapter stay exactly as before.
+    svc.declare(s, skill=LPR, camera_id=yard, consumer="operator")
+    s.commit()
+    assert _assignments_of(s, yard) == [{"skill": LPR}]

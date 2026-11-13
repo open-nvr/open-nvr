@@ -22,16 +22,34 @@ Handles CRUD operations for cameras with proper authentication and ownership che
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
+from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
 from core.auth import get_current_active_user, get_current_superuser
-from core.config import settings
+from core.client_ip import get_client_ip
+from urllib.parse import urlparse
+
+from core.camera_source import SOURCE_PUBLISHER, is_publisher
+from core.config import _host_is_internal, settings
 from core.database import get_db
 from core.logging_config import camera_logger
-from core.permissions import get_camera_or_403
+from core.permissions import RequirePermission, get_camera_or_403
 from models import (
     Camera,
     CameraConfig,
@@ -46,6 +64,7 @@ from schemas import (
     CameraHardDeleteRequest,
     CameraList,
     CameraPermissionAssign,
+    CameraPermissionEntry,
     CameraPermissionResponse,
     CameraResponse,
     CameraUpdate,
@@ -53,9 +72,9 @@ from schemas import (
     DeletedCameraList,
     TransportSecurityUpdate,
 )
-from services.audit_service import write_audit_log
+from services.audit_service import audit_request, write_audit_log
 from services.camera_identity import path_name_for_camera, read_marker
-from services.camera_service import CameraService
+from services.camera_service import CameraService, camera_location_filter, camera_search_filter
 from services.camera_status_service import get_camera_status_service
 from services.mediamtx_admin_service import MediaMtxAdminService
 from services.recording_watchdog import (
@@ -77,8 +96,15 @@ def _derive_recording_state(
     now: datetime,
     live_online: bool | None = None,
     online_since: datetime | None = None,
+    degraded: bool = False,
 ) -> str:
     """Observed recording health for one camera.
+
+    ``degraded``: the segment-health check (services.segment_health) has an
+    active ``recording_degraded`` alarm on this camera — segments keep
+    landing, so every rule below says "recording", but they hold no
+    playable video. That outranks "recording" and nothing else: a dead
+    stream is still "not_recording" / "stalled".
 
     ``recording_enabled`` only says recording is configured — on an NVR that
     is true for everything provisioned and cannot be turned off, so it can sit
@@ -151,7 +177,7 @@ def _derive_recording_state(
         # which is exactly what the watchdog alarms on. "never" stays "never":
         # nothing was ever written, and saying so is more use than "stalled".
         return "stalled" if latest_recording is not None else "never"
-    return "recording"
+    return "degraded" if degraded else "recording"
 
 
 def _log_camera_creation_start(
@@ -275,6 +301,110 @@ def _check_duplicate_ips(db: Session, user_id: int, cam: Camera):
         )
 
 
+#: Adding a camera makes the caller its OWNER — and an owner sees that
+#: camera everywhere (timeline, alerts, apps). Left open to any active
+#: user, "add a camera" was a self-service way to widen one's own scope.
+#: ``cameras.manage`` is the seeded permission the operator role holds
+#: and the viewer role does not (scripts/init_db.py), and the one the
+#: UI already keys its Add Camera button on.
+require_cameras_manage = RequirePermission("cameras.manage")
+# PTZ needs the permission AND the camera (ownership, via get_camera_by_id).
+# HA-004 granted ptz.control to every role that had live.view, so nobody who
+# could steer a camera before lost that.
+require_ptz_control = RequirePermission("ptz.control")
+
+
+def _reject_external_camera_hosts(camera_create) -> None:
+    """403 unless every host this create would dial is on the operator's
+    own network. Covers ``ip_address`` and the host inside ``rtsp_url``,
+    which are separate caller-controlled inputs reached by different code
+    paths.
+
+    A webcam has no host: CameraCreate refuses an address or URL for one
+    and stores the placeholder, which is never dialled."""
+    if getattr(camera_create, "source_type", None) == SOURCE_PUBLISHER:
+        return
+    hosts: list[tuple[str, str]] = []
+    if camera_create.ip_address:
+        hosts.append(("ip_address", str(camera_create.ip_address)))
+    if camera_create.rtsp_url:
+        try:
+            parsed = urlparse(str(camera_create.rtsp_url))
+        except Exception:
+            raise HTTPException(status_code=400, detail="rtsp_url is not a valid URL")
+        if parsed.hostname:
+            hosts.append(("rtsp_url", parsed.hostname))
+
+    for field, host in hosts:
+        if not _host_is_internal(host):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"Refusing to reach non-internal address {host!r} "
+                    f"({field}); cameras are reached on the local network."
+                ),
+            )
+
+
+async def _discover_substream_for_create(camera_create):
+    """Store the camera's substream on creation when one can be found AND
+    answers (services.substream_discovery): the device's ONVIF profiles
+    first, then the vendor-convention URL derived from the main one. This
+    is what lets Tier-0 detect on the cheap stream from the first minute
+    on every hardware flavour, with evidence still cut from the main
+    stream. Best-effort: nothing found or no network means the camera is
+    added exactly as before, on its main stream."""
+    from services.substream_discovery import discover_substream
+
+    try:
+        found = await discover_substream(
+            camera_create.rtsp_url, camera_create.ip_address,
+            camera_create.username, camera_create.password,
+        )
+    except Exception:
+        camera_logger.debug("substream discovery failed for camera %s",
+                            camera_create.name, exc_info=True)
+        return camera_create
+    if found is None:
+        return camera_create
+    camera_logger.info(
+        "camera %s: substream discovered via %s (%s) — Tier-0 will detect on it",
+        camera_create.name, found.source, found.resolution,
+    )
+    return camera_create.model_copy(update={"substream_url": found.url})
+
+
+async def _discover_substream_for_update(camera) -> str | None:
+    """The update-path twin of the above: the camera row's main URL and
+    credentials, guarded on the URL's host being internal. Returns the URL
+    to store, or None."""
+    from urllib.parse import urlsplit
+
+    from services.substream_discovery import discover_substream
+
+    try:
+        host = urlsplit(camera.rtsp_url or "").hostname
+    except ValueError:
+        return None
+    if not _host_is_internal(host):
+        return None
+    try:
+        found = await discover_substream(
+            camera.rtsp_url, camera.ip_address, camera.username, camera.password,
+        )
+    except Exception:
+        camera_logger.debug("substream discovery failed for camera %s",
+                            getattr(camera, "id", "?"), exc_info=True)
+        return None
+    if found is None:
+        return None
+    camera_logger.info(
+        "camera %s: substream discovered via %s (%s) — Tier-0 will detect on it",
+        getattr(camera, "id", "?"), found.source, found.resolution,
+    )
+    return found.url
+
+
 @router.post("/", response_model=CameraResponse)
 async def create_camera(
     camera_create: CameraCreate,
@@ -283,17 +413,97 @@ async def create_camera(
         description="Add the camera even when its IP or RTSP URL matches an existing one.",
     ),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_cameras_manage),
     request: Request = None,
 ):
-    """Create a new camera.
+    """Create a new camera. Requires the ``cameras.manage`` permission
+    (superusers hold it implicitly).
 
     When no RTSP URL is supplied but credentials are, the server derives it
     from the IP + credentials (ONVIF direct-connect, then vendor RTSP
     templates) and back-fills the camera's identity — so operators normally
     only need IP + username + password.
     """
+    return await create_camera_checked(
+        camera_create, force=force, db=db, current_user=current_user, request=request
+    )
+
+
+async def create_camera_checked(
+    camera_create: CameraCreate,
+    *,
+    force: bool,
+    db: Session,
+    current_user: User,
+    request: Request | None,
+    probe: bool = True,
+    duplicate_check: bool = True,
+) -> CameraResponse:
+    """Everything POST /cameras/ does, callable from the camera import
+    (services/camera_import.py) so an imported camera goes through the same
+    SSRF guard, RTSP derivation, duplicate check and provisioning as one
+    added by hand. ``probe=False`` skips reading the device's identity and
+    setting its clock for a camera whose RTSP URL is given — seconds per
+    camera that a thousand-camera import would otherwise spend; a camera
+    without an RTSP URL is still resolved, as it cannot be added otherwise.
+    ``duplicate_check=False`` is for the import, which matches cameras itself:
+    the owner-wide IP check here would refuse every channel of an NVR after
+    the first, as they all share its address.
+    """
     _log_camera_creation_start(current_user.id, camera_create, request)
+
+    # A webcam (core/camera_source.py) has no address: nothing below dials
+    # anything for it (the schema refused credentials and URLs), and every
+    # webcam shares the placeholder IP, so the IP-based duplicate checks
+    # would only ever match other webcams.
+    webcam = camera_create.source_type == SOURCE_PUBLISHER
+    if webcam:
+        if (settings.mediamtx_path_mode or "id").lower() == "ip":
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Webcam cameras need MediaMTX paths named by camera id "
+                    "(MEDIAMTX_PATH_MODE=id); this server names them by IP."
+                ),
+            )
+        duplicate_check = False
+        # A USB webcam MediaMTX serves itself names its device by the stable
+        # /dev/v4l/by-id entry; it has to be one this machine shows right
+        # now, or the path would run a capture of nothing forever.
+        from services.local_webcams import available as _webcams_available, find_local_webcam, is_local_device
+        _dev = getattr(camera_create, "source_device", None)
+        if is_local_device(_dev):
+            if not _webcams_available():
+                raise HTTPException(
+                    status_code=422,
+                    detail="USB webcams are not enabled on this server (WEBCAMS=on in .env, Linux only).")
+            if find_local_webcam(str(_dev)) is None:
+                raise HTTPException(status_code=422, detail="That webcam is not plugged into this server.")
+        # One webcam, one camera: a second capture of the same device fails
+        # "device busy" for ever. Not bypassed by ``force`` or the import's
+        # duplicate_check=False: those are about addresses, this is hardware.
+        _owner = CameraService.webcam_device_owner(db, _dev)
+        if _owner is not None:
+            raise HTTPException(status_code=409, detail=_webcam_taken_detail(_owner))
+
+    # SSRF guard, mirroring routers/onvif.py:83, which has always had it —
+    # camera-create did not. It runs FIRST, before any branch, because
+    # this handler dials the caller's input from four places and they do
+    # not share a condition:
+    #   resolve_source()          ip_address, when no rtsp_url was given
+    #   fetch_identity()          ip_address, when one WAS given
+    #   sync_camera_time()        ip_address
+    #   TransportProbeService     the rtsp_url HOST — and this one runs
+    #                             even with no credentials at all
+    # Guarding inside the credentials branch (as the first cut of this fix
+    # did) left that last path wide open: post a camera with no username
+    # and an rtsp_url of your choosing and the server still opens a TCP +
+    # TLS connection to it.
+    #
+    # Blind — nothing is reflected — but it is still this server's network
+    # being used as someone else's port scanner, or as an out-of-band
+    # beacon to a host they control.
+    _reject_external_camera_hosts(camera_create)
 
     # Referenced after creation regardless of the credentials branch below —
     # without these initializers a credential-less create crashed with
@@ -374,7 +584,7 @@ async def create_camera(
                 camera_create.ip_address,
                 camera_create.username,
                 camera_create.password,
-            )
+            ) if probe else None
             if identity:
                 onvif_port = identity.get("onvif_port")
                 control_scheme = identity.get("control_scheme")
@@ -394,13 +604,22 @@ async def create_camera(
 
         # Correct the camera clock (fixes the timestamp burned into the video).
         # sync_camera_time is self-guarding — it returns False rather than raising.
-        await sync_camera_time(
-            camera_create.ip_address,
-            camera_create.username,
-            camera_create.password,
-            onvif_port,
-            control_scheme,
-        )
+        if probe:
+            await sync_camera_time(
+                camera_create.ip_address,
+                camera_create.username,
+                camera_create.password,
+                onvif_port,
+                control_scheme,
+            )
+
+    # The camera's substream, found and verified rather than typed. Only
+    # when the caller gave none (the ONVIF-resolved branch above already
+    # stores the device's own), and only when this call may touch the
+    # network (``probe``). The main stream's host is the only host dialled,
+    # and it passed the internal-host guard above like every other probe.
+    if probe and camera_create.rtsp_url and not camera_create.substream_url:
+        camera_create = await _discover_substream_for_create(camera_create)
 
     # Keep the stored RTSP port in step with the URL that will actually be
     # pulled. `port` defaults to 554, so a camera added with an explicit URL on
@@ -425,7 +644,7 @@ async def create_camera(
     # can show "already added — add anyway?" and retry with ?force=true.
     duplicates = _find_duplicate_cameras(
         db, current_user.id, camera_create.ip_address, camera_create.rtsp_url
-    )
+    ) if duplicate_check else []
     if duplicates and not force:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -472,7 +691,8 @@ async def create_camera(
 
         _log_camera_creation_success(current_user.id, cam, request)
         _record_audit_log(db, current_user.id, cam, request)
-        _check_duplicate_ips(db, current_user.id, cam)
+        if not webcam:
+            _check_duplicate_ips(db, current_user.id, cam)
 
         # Helper to construct response with computed fields
         # Ideally this should be in a schema converter or helper
@@ -494,6 +714,8 @@ async def create_camera(
             "owner_id": cam.owner_id,
             "mediamtx_provisioned": cam.status == "provisioned",
             "recording_enabled": False,
+            "source_type": cam.source_type,
+            "source_device": cam.source_device,
         }
 
         return CameraResponse(**response_data)
@@ -521,11 +743,26 @@ def get_cameras(
     skip: int = 0,
     limit: int = 100,
     active_only: bool = True,
+    # Name/IP search for the Cameras page. The UI always sent it; the endpoint
+    # never declared it, so FastAPI dropped it and the search box filtered
+    # nothing. Missing or empty = the unfiltered list, exactly as before.
+    q: str | None = Query(None, max_length=100),
+    # The Cameras page's Location filter: one location (trimmed, any case),
+    # or no_location for cameras with none. Missing = every location.
+    location: str | None = Query(None, max_length=100),
+    no_location: bool = False,
+    # The Cameras page's All / Active / Inactive switch. Given, it replaces
+    # active_only (kept for every older caller).
+    status: Literal["all", "active", "inactive"] | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
     request: Request = None,
 ):
-    """Get list of cameras (user's own cameras + permitted cameras; superusers see all)."""
+    """Get list of cameras (user's own cameras + permitted cameras; superusers see all).
+
+    ``counts`` is how many cameras are active and inactive under the same
+    search, location and permissions, whatever ``status`` picked, so the
+    page can label its switch without a second request."""
     camera_logger.log_action(
         "camera.list_request",
         user_id=current_user.id,
@@ -540,56 +777,51 @@ def get_cameras(
         user_agent=request.headers.get("user-agent") if request else None,
     )
 
-    if current_user.is_superuser:
-        cameras = CameraService.get_all_cameras(
-            db=db, skip=skip, limit=limit, active_only=active_only
-        )
-        # Binned cameras never count; active_only additionally hides paused ones.
-        total_query = db.query(Camera).filter(Camera.deleted_at.is_(None))
-        if active_only:
-            total_query = total_query.filter(Camera.is_active == True)
-        total = total_query.count()
-        camera_logger.log_action(
-            "camera.list_success_admin",
-            user_id=current_user.id,
-            message=f"Superuser retrieved {len(cameras)} cameras (total: {total})",
-            extra_data={"camera_count": len(cameras), "total": total},
-            ip_address=request.client.host if request and request.client else None,
-        )
-    else:
-        own = CameraService.get_cameras_by_owner(
-            db=db,
-            owner_id=current_user.id,
-            skip=skip,
-            limit=limit,
-            active_only=active_only,
-        )
-        permitted = CameraService.get_cameras_permitted(
-            db=db,
-            user_id=current_user.id,
-            skip=skip,
-            limit=limit,
-            active_only=active_only,
-        )
-        # Merge unique by id
-        seen = set()
-        cameras = []
-        for c in own + permitted:
-            if c.id not in seen:
-                seen.add(c.id)
-                cameras.append(c)
-        total = len(cameras)
-        camera_logger.log_action(
-            "camera.list_success_user",
-            user_id=current_user.id,
-            message=f"User retrieved {len(cameras)} cameras ({len(own)} owned, {len(permitted)} permitted)",
-            extra_data={
-                "camera_count": len(cameras),
-                "own_count": len(own),
-                "permitted_count": len(permitted),
-            },
-            ip_address=request.client.host if request and request.client else None,
-        )
+    from services.camera_scope import visible_camera_ids
+
+    # One query for every caller, narrowed to what they may see: a superuser
+    # everything, a user own + can_view grants, an API token its owner's view
+    # cut to its allow-list (camera_scope does all three). Users used to page
+    # their owned and granted cameras separately and merge the two pages,
+    # which skipped rows on later pages and put the page size in `total`
+    # (#671). Ordered by id so skip/limit pages are stable.
+    scope = visible_camera_ids(db, current_user)
+    query = db.query(Camera).filter(Camera.deleted_at.is_(None))
+    if scope is not None:
+        query = query.filter(Camera.id.in_(scope or {-1}))
+    match = camera_search_filter(q)
+    if match is not None:
+        query = query.filter(match)
+    place = camera_location_filter(location, no_location)
+    if place is not None:
+        query = query.filter(place)
+    # Counted before the status filter: the switch shows all three numbers.
+    # NULL is_active reads as active, as everywhere else.
+    by_state = dict(
+        query.with_entities(func.coalesce(Camera.is_active, True), func.count(Camera.id))
+        .group_by(func.coalesce(Camera.is_active, True))
+        .all()
+    )
+    counts = {
+        "active": int(by_state.get(True, 0)),
+        "inactive": int(by_state.get(False, 0)),
+    }
+    counts["all"] = counts["active"] + counts["inactive"]
+    if status is None:
+        status = "active" if active_only else "all"
+    if status == "active":
+        query = query.filter(Camera.is_active.isnot(False))
+    elif status == "inactive":
+        query = query.filter(Camera.is_active.is_(False))
+    total = query.count()
+    cameras = query.order_by(Camera.id).offset(skip).limit(limit).all()
+    camera_logger.log_action(
+        "camera.list_success",
+        user_id=current_user.id,
+        message=f"Retrieved {len(cameras)} cameras (total: {total})",
+        extra_data={"camera_count": len(cameras), "total": total},
+        ip_address=request.client.host if request and request.client else None,
+    )
 
     # Two page-scoped grouped queries before the loop, never per-camera — this
     # list serves up to `limit` rows.
@@ -623,6 +855,25 @@ def get_cameras(
         )
 
     now = datetime.now(UTC)
+    # One settings read for the page: who paused what, and until when.
+    from services import recording_pause
+
+    pauses = recording_pause.paused(db) if camera_ids else {}
+    # One query for the page: whose segments arrive but hold no video.
+    try:
+        from services.segment_health import degraded_cameras
+
+        degraded_ids = degraded_cameras(db, camera_ids) if camera_ids else set()
+    except Exception:  # noqa: BLE001 - a badge must never cost the list
+        degraded_ids = set()
+    # One evaluation for the page: which cameras have a proposal or a
+    # decision about detecting on the main stream (cached a minute).
+    try:
+        from services import evidence_escalation
+
+        escalations = evidence_escalation.summary(db, list(camera_ids)) if camera_ids else {}
+    except Exception:  # noqa: BLE001 - a badge must never cost the list
+        escalations = {}
 
     # Populate extra fields for response
     results = []
@@ -651,12 +902,14 @@ def get_cameras(
         # recording, however recently the last segment landed.
         c_resp.recording_state = _derive_recording_state(
             c, c_resp.recording_enabled, latest, now, c_resp.live_online,
-            online_since.get(c.id),
+            online_since.get(c.id), degraded=c.id in degraded_ids,
         )
+        c_resp.recording_pause = pauses.get(str(c.id))
+        c_resp.escalation = escalations.get(c.id)
 
         results.append(c_resp)
 
-    return CameraList(cameras=results, total=total)
+    return CameraList(cameras=results, total=total, counts=counts)
 
 
 @router.get("/by-ip/{ip_address}", response_model=list[CameraResponse])
@@ -748,6 +1001,196 @@ def get_cameras_by_ip(
     return cameras
 
 
+# ── Import and export (the Cameras page's spreadsheet round trip) ──────
+# Registered before GET /{camera_id}, which would otherwise take "export" and
+# "import" for a camera id. The work is services/camera_io.py (reading,
+# checking, writing) and services/camera_import.py (applying).
+
+_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _sheet_response(body: bytes, fmt: str, stem: str) -> Response:
+    ext, media = ("xlsx", _XLSX) if fmt == "xlsx" else ("csv", "text/csv; charset=utf-8")
+    return Response(content=body, media_type=media, headers={
+        "Content-Disposition": f'attachment; filename="{stem}.{ext}"',
+        "Cache-Control": "no-store",
+    })
+
+
+@router.get("/export")
+def export_cameras(
+    format: Literal["csv", "xlsx"] = "csv",
+    include_passwords: bool = False,
+    active_only: bool = False,
+    q: str | None = Query(None, max_length=100),
+    location: str | None = Query(None, max_length=100),
+    no_location: bool = False,
+    mfa_code: str | None = Header(None, alias="X-MFA-Code"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_cameras_manage),
+    request: Request = None,
+):
+    """The cameras the caller manages as a spreadsheet, filtered as the
+    Cameras page is. Passwords, and the logins inside RTSP URLs, are left
+    out unless ``include_passwords``, which needs the caller's MFA code
+    (X-MFA-Code) and is audited either way."""
+    from services import camera_io
+    from services.camera_scope import manageable_camera_ids
+
+    if include_passwords:
+        require_mfa_code(current_user, mfa_code)
+    scope = manageable_camera_ids(db, current_user)
+    query = db.query(Camera).filter(Camera.deleted_at.is_(None))
+    if active_only:
+        query = query.filter(Camera.is_active == True)  # noqa: E712
+    if scope is not None:
+        query = query.filter(Camera.id.in_(scope or {-1}))
+    for cond in (camera_search_filter(q), camera_location_filter(location, no_location)):
+        if cond is not None:
+            query = query.filter(cond)
+    cameras = query.order_by(
+        func.lower(func.coalesce(Camera.location, "")), func.lower(Camera.name), Camera.id
+    ).all()
+    rows = camera_io.export_rows(cameras, include_passwords)
+    body = camera_io.to_xlsx(rows) if format == "xlsx" else camera_io.to_csv(rows)
+    write_audit_log(
+        db, action="camera.export", user_id=current_user.id, entity_type="camera",
+        details={"count": len(rows), "format": format, "include_passwords": include_passwords},
+        ip=request.client.host if request and request.client else None,
+        user_agent=request.headers.get("user-agent") if request else None,
+    )
+    return _sheet_response(body, format, f"cameras-{datetime.now(UTC):%Y%m%d}")
+
+
+@router.get("/import/template")
+def camera_import_template(
+    format: Literal["csv", "xlsx"] = "xlsx",
+    current_user: User = Depends(require_cameras_manage),
+):
+    """An empty import file with example rows (and, as Excel, a sheet
+    explaining every column)."""
+    from services import camera_io
+
+    rows = camera_io.TEMPLATE_EXAMPLES
+    body = camera_io.to_xlsx(rows, with_help=True) if format == "xlsx" else camera_io.to_csv(rows)
+    return _sheet_response(body, format, "camera-import-template")
+
+
+async def _read_upload(file: UploadFile) -> bytes:
+    from services.camera_io import MAX_FILE_BYTES
+
+    data = await file.read(MAX_FILE_BYTES + 1)
+    if len(data) > MAX_FILE_BYTES:
+        raise HTTPException(status_code=413, detail="The file is larger than 5 MB.")
+    return data
+
+
+def _plan_upload(db: Session, current_user: User, data: bytes, filename: str):
+    from services import camera_io
+    from services.camera_scope import manageable_camera_ids
+
+    try:
+        planned = camera_io.plan_rows(camera_io.read_table(data, filename))
+    except camera_io.ImportFileError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    # Matched against every camera on the system, not only the caller's: an
+    # NVR channel someone else added is "already here", not a second copy.
+    existing = db.query(Camera).filter(Camera.deleted_at.is_(None)).all()
+    camera_io.match_existing(planned, existing, manageable_camera_ids(db, current_user))
+    return planned
+
+
+@router.post("/import/preview")
+async def preview_camera_import(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_cameras_manage),
+):
+    """What importing ``file`` would do, row by row; nothing is saved."""
+    from services import camera_io
+
+    planned = _plan_upload(db, current_user, await _read_upload(file), file.filename or "")
+    return {
+        "filename": file.filename,
+        "summary": camera_io.summary(planned),
+        "rows": [camera_io.preview_row(p) for p in planned],
+    }
+
+
+@router.post("/import")
+async def run_camera_import(
+    file: UploadFile = File(...),
+    mode: Literal["add", "add_update"] = Form("add"),
+    probe: bool = Form(False),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_cameras_manage),
+):
+    """Import ``file``: add its new cameras and, with mode=add_update, change
+    the ones it matches. The file is checked again here, so it is applied
+    as it is now, not as it was at preview. Runs in the background; poll
+    GET /cameras/import/jobs/{id}. ``probe`` also reads each camera's
+    identity and sets its clock (slower)."""
+    from services import camera_import
+
+    if camera_import.running_job(current_user.id):
+        raise HTTPException(status_code=409, detail="An import of yours is still running.")
+    planned = _plan_upload(db, current_user, await _read_upload(file), file.filename or "")
+    job = camera_import.start_import(
+        current_user.id, file.filename or "", planned, mode=mode, probe=probe
+    )
+    return job.as_dict()
+
+
+@router.get("/import/jobs/{job_id}")
+def camera_import_job(job_id: str, current_user: User = Depends(require_cameras_manage)):
+    """An import's progress and, row by row, what it did."""
+    from services import camera_import
+
+    job = camera_import.get_job(job_id, current_user.id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="No such import (results are kept two hours).")
+    return job.as_dict()
+
+
+# NOTE: must be registered before GET /{camera_id} — otherwise "locations"
+# would be parsed as the int camera_id and 422.
+@router.get("/locations")
+def get_camera_locations(
+    active_only: bool = True,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Every Location among the cameras the caller can see, with how many
+    cameras each has, for the Cameras page's Location filter. Spellings that
+    differ only in case are one location (the filter treats them alike),
+    named by its most common spelling. Cameras with no location are counted
+    in ``none``, not listed."""
+    from services.camera_scope import visible_camera_ids
+
+    scope = visible_camera_ids(db, current_user)
+    place = func.trim(Camera.location)
+    query = db.query(place, func.count(Camera.id)).filter(Camera.deleted_at.is_(None))
+    if active_only:
+        query = query.filter(Camera.is_active == True)  # noqa: E712
+    if scope is not None:
+        query = query.filter(Camera.id.in_(scope or {-1}))
+    merged: dict[str, dict] = {}
+    none = 0
+    for name, count in query.group_by(place).all():
+        if not name:
+            none += count
+            continue
+        row = merged.setdefault(name.lower(), {"location": name, "count": 0, "_top": 0})
+        row["count"] += count
+        # Most cameras wins; a tie goes to the one sorting first, which puts
+        # "North Zone" before "north zone" whatever order the rows come in.
+        if count > row["_top"] or (count == row["_top"] and name < row["location"]):
+            row["location"], row["_top"] = name, count
+    locations = [{"location": r["location"], "count": r["count"]} for r in merged.values()]
+    locations.sort(key=lambda row: row["location"].lower())
+    return {"locations": locations, "none": none}
+
+
 # NOTE: must be registered before GET /{camera_id} — otherwise "deleted"
 # would be parsed as the int camera_id and 422.
 @router.get("/deleted", response_model=DeletedCameraList)
@@ -782,110 +1225,28 @@ def get_deleted_cameras(
     return DeletedCameraList(cameras=items, total=len(items))
 
 
-# ── Assignable skills (per-camera assignment, consumer 3) ───────────
-#
-# The camera edit dialog's Assignments editor asks this endpoint what
-# skills EXIST and whether each is actually served right now, so it can
-# offer suggestions and flag "LPR needs the plate adapter — not
-# installed" instead of leaving the operator to guess spellings.
-# Composed from three sources, none authoritative over the others:
-#   * the canonical task registry (server/config/tasks.yml) — every
-#     adapter-shaped capability, available when a registered adapter
-#     advertises the task (or an alias). object_detection is special:
-#     the always-on Tier-0 detector provides it on every install.
-#   * the installed-apps registry — every registered catalog app is a
-#     skill (id with '-' -> '_'), available when enabled.
-# ``available`` is a TRI-STATE: true / false / null, where null means
-# "couldn't tell" (KAI-C unreachable) — the UI must never grey a skill
-# on null, the same advisory rule the agent's skills panel follows.
-# The vocabulary stays OPEN: this endpoint suggests and annotates; it
-# never becomes a validation gate (an assignment may be declared before
-# its capability is installed).
-
-
-def _assignable_task_entries(tasks_advertised: set[str] | None) -> list[dict]:
-    import yaml as _yaml
-
-    registry_path = Path(__file__).resolve().parents[1] / "config" / "tasks.yml"
-    try:
-        registry = _yaml.safe_load(registry_path.read_text()) or []
-    except Exception:
-        camera_logger.warning("assignable-skills: tasks.yml unreadable", exc_info=True)
-        registry = []
-    out: list[dict] = []
-    for entry in registry:
-        if not isinstance(entry, dict) or not entry.get("task"):
-            continue
-        task = str(entry["task"])
-        names = {task, *(str(a) for a in entry.get("aliases") or [])}
-        if task == "object_detection":
-            available: bool | None = True
-            hint = "Provided by the built-in Tier-0 detector on every install."
-        elif tasks_advertised is None:
-            available = None
-            hint = "Adapter status unknown (KAI-C unreachable) — not greyed out."
-        elif names & tasks_advertised:
-            available = True
-            hint = "An installed adapter advertises this task."
-        else:
-            available = False
-            suggested = ", ".join(entry.get("suggested_adapters") or []) or "an adapter"
-            hint = (
-                f"No registered adapter advertises {task!r} — register one "
-                f"(suggested: {suggested}) on the AI Adapters page."
-            )
-        out.append({
-            "skill": task,
-            "label": str(entry.get("label") or task),
-            "source": "tier0" if task == "object_detection" else "adapter",
-            "available": available,
-            "hint": hint,
-        })
-    return out
-
-
-@router.get("/assignable-skills")
-async def assignable_skills(
-    current_user: User = Depends(get_current_active_user),
+@router.get("/{camera_id}/used-by")
+def camera_used_by(
+    camera_id: int,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
 ):
-    """Suggestions + live availability for the Assignments editor."""
-    # Adapter tasks via KAI-C — advisory: unreachable = unknown, not empty.
-    tasks_advertised: set[str] | None = None
-    try:
-        from services.kai_c_service import get_kai_c_service
+    """The apps that picked this camera — read-only, for the camera page.
 
-        capabilities = await get_kai_c_service().get_capabilities()
-        tasks_advertised = set()
-        for entry in (capabilities.get("adapters") or {}).values():
-            caps = (entry or {}).get("capabilities") or {}
-            tasks_advertised.update(str(t) for t in caps.get("tasks_advertised") or [])
-    except Exception:
-        camera_logger.info("assignable-skills: KAI-C unreachable; availability unknown")
-
-    skills = _assignable_task_entries(tasks_advertised)
-
-    # Installed catalog apps — each is a skill; available when enabled.
+    Picks are made in each app's configuration; this only answers "what
+    is this camera being used for" from the camera's side."""
     from models import InstalledApp
+    from services.camera_scope import in_scope, visible_camera_ids
+    from services.skill_assignments import apps_using_camera
 
-    for app_row in db.query(InstalledApp).all():
-        skill = str(app_row.id).replace("-", "_")
-        skills.append({
-            "skill": skill,
-            "label": str(app_row.name or skill),
-            "source": "app",
-            "available": bool(app_row.enabled),
-            "hint": (
-                "App installed and enabled." if app_row.enabled
-                else "App installed but disabled — enable it in the App Catalog."
-            ),
-        })
-
-    # One entry per skill; a later (app) entry wins over a task twin.
-    merged: dict[str, dict] = {}
-    for entry in skills:
-        merged[entry["skill"]] = entry
-    return {"skills": sorted(merged.values(), key=lambda e: e["skill"])}
+    if not in_scope(visible_camera_ids(db, current_user), camera_id):
+        raise HTTPException(status_code=404, detail="Camera not found")
+    app_ids = apps_using_camera(db, camera_id)
+    names = {
+        row.id: row.name
+        for row in db.query(InstalledApp).filter(InstalledApp.id.in_(app_ids)).all()
+    } if app_ids else {}
+    return {"apps": [{"app_id": a, "name": names.get(a) or a} for a in app_ids]}
 
 
 @router.get("/{camera_id}", response_model=CameraResponse)
@@ -980,13 +1341,55 @@ def get_camera(
         raise
 
 
+#: Fields that describe where an IP camera is. A webcam has none of them.
+_WEBCAM_ABSENT_FIELDS = (
+    "ip_address", "port", "username", "password", "rtsp_url", "substream_url",
+)
+
+
+def _webcam_taken_detail(owner: Camera) -> str:
+    """The 409 for a webcam that already feeds another camera."""
+    return (
+        f"That webcam already feeds the camera “{owner.name}”. "
+        "A webcam can feed only one camera: use that one, or pick another webcam."
+    )
+
+
+def _strip_webcam_stream_fields(camera: Camera, update_fields: dict) -> None:
+    """Drop the address/stream fields an edit form re-sends for a webcam.
+
+    Empty or unchanged values are dropped silently, which matters: the form
+    sends ``rtsp_url: ""``, and "" against the stored NULL would read as
+    "source removed" below and tear the webcam's path down. A real value is
+    refused, since a webcam cannot become an IP camera by edit.
+    """
+    from core.camera_source import PUBLISHER_IP_SENTINEL
+
+    refused = []
+    for field in _WEBCAM_ABSENT_FIELDS:
+        if field not in update_fields:
+            continue
+        value = update_fields.pop(field)
+        if value in (None, "", PUBLISHER_IP_SENTINEL) or value == getattr(camera, field, None):
+            continue
+        refused.append(field)
+    if refused:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "A webcam camera has no address, stream URL or credentials "
+                f"to change (got: {', '.join(refused)})"
+            ),
+        )
+
+
 @router.put("/{camera_id}", response_model=CameraResponse)
 async def update_camera(
     camera_id: int,
     camera_update: CameraUpdate,
     camera: Camera = Depends(get_camera_or_403),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_cameras_manage),
     request: Request = None,
 ):
     """Update camera information (owner or superuser).
@@ -1034,16 +1437,67 @@ async def update_camera(
         )
 
         update_fields = camera_update.model_dump(exclude_unset=True)
-        # RFC-0002 Phase 2: the editor's assignments write routes through
-        # the assignment TABLE as the 'operator' consumer — full-replace
-        # of the operator's claims only, so app/agent claims survive an
-        # operator edit (union semantics, decision 8). Camera.assignments
-        # itself becomes the table's projection, recomputed inside.
-        operator_assignments = update_fields.pop("assignments", None)
-        if operator_assignments is not None:
-            from services.skill_assignments import set_operator_assignments
+        # Audit-only, never a camera column: take it out before setattr.
+        reason = update_fields.pop("reason", None)
+        if is_publisher(camera):
+            _strip_webcam_stream_fields(camera, update_fields)
+            if "source_device" in update_fields:
+                update_fields["source_device"] = update_fields["source_device"] or None
+                # Switching to a webcam another camera already uses: refused,
+                # as on create (one webcam, one camera).
+                _owner = CameraService.webcam_device_owner(
+                    db, update_fields["source_device"], exclude_camera_id=camera.id
+                )
+                if _owner is not None:
+                    raise HTTPException(status_code=409, detail=_webcam_taken_detail(_owner))
+        elif update_fields.get("source_device"):
+            raise HTTPException(
+                status_code=422,
+                detail="source_device is only for a webcam camera",
+            )
+        else:
+            update_fields.pop("source_device", None)
+        from services import api_tokens
 
-            set_operator_assignments(db, camera, operator_assignments)
+        if api_tokens.is_token_principal(current_user):
+            allowed = set(api_tokens.TOKEN_CAMERA_FIELDS)
+            if "is_active" in update_fields:
+                # Turning a camera off also stops its recording, so a token
+                # may only do it where recording may be paused at all.
+                from services.site_settings import recording_pause_enabled
+
+                if not recording_pause_enabled(db):
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Turning a camera off stops recording, which this "
+                               "site does not allow API tokens to do",
+                    )
+                allowed.add("is_active")
+            refused = sorted(set(update_fields) - allowed)
+            if refused:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"An API token cannot change these camera fields: {refused}",
+                )
+        was_detecting = camera.detection_enabled is not False
+        # Skills follow apps. The camera page used to write skill rows of
+        # its own; now a camera carries exactly the skills the enabled
+        # apps using it bring, so there is nothing to set here — refuse
+        # before any other field of this edit is applied.
+        if update_fields.pop("assignments", None) is not None:
+            raise HTTPException(
+                status_code=422,
+                detail="Skills are brought by apps: to run a skill on this "
+                       "camera, select the camera in that app's configuration "
+                       "(App Catalog → Configure → Cameras).",
+            )
+        source_change = None
+        if "analytics_source" in update_fields:
+            # The source decides detection_enabled for camera-only mode; set
+            # it through the service so the two never contradict each other.
+            from services.native_analytics import apply_source
+            source_change = apply_source(camera, update_fields.pop("analytics_source"))
+            update_fields.pop("detection_enabled", None)
         for field, value in update_fields.items():
             setattr(camera, field, value)
 
@@ -1060,6 +1514,20 @@ async def update_camera(
             camera.substream_url = replace_credentials(
                 camera.substream_url, camera.username, camera.password
             )
+
+        # A main URL or credentials that changed, and no substream stored:
+        # find one, as creation does. Only when the caller did not set
+        # substream_url themselves (an explicit null is their decision), and
+        # only for a host inside the trust zone — the update route never
+        # dialled the camera before, and must not start dialling anything.
+        creds_changed = (camera.username != before_username
+                         or camera.password != before_password)
+        if (camera.rtsp_url and not camera.substream_url
+                and "substream_url" not in update_fields
+                and (camera.rtsp_url != before_rtsp_url or creds_changed)):
+            found_sub = await _discover_substream_for_update(camera)
+            if found_sub:
+                camera.substream_url = found_sub
 
         # Re-point `port` whenever the stream URL moves, for the same reason the
         # create path derives it: MediaMTX pulls `rtsp_url`, so that URL's port
@@ -1379,6 +1847,15 @@ async def update_camera(
             ip_address=request.client.host if request and request.client else None,
         )
 
+        if source_change:
+            # Listen to the camera when its events are wanted, stop when not —
+            # after the commit, so a failure here cannot undo the edit.
+            from services.native_analytics import sync_subscription
+            try:
+                await sync_subscription(camera.id, camera.analytics_source)
+            except Exception as exc:
+                camera_logger.warning("camera %s: event subscription sync failed: %s", camera.id, exc)
+
         # Legacy audit log
         try:
             write_audit_log(
@@ -1390,7 +1867,13 @@ async def update_camera(
                 details={
                     "updated_fields": [
                         k for k in camera_update.model_dump(exclude_unset=True).keys()
+                        if k != "reason"
                     ],
+                    **({"reason": reason} if reason else {}),
+                    **({"detection_enabled": {"from": was_detecting,
+                                              "to": camera.detection_enabled is not False}}
+                       if "detection_enabled" in update_fields else {}),
+                    **({"analytics_source": source_change} if source_change else {}),
                     **({"stream_action": stream_action} if stream_action else {}),
                     **({"stream_warning": stream_warning} if stream_warning else {}),
                 },
@@ -1432,7 +1915,7 @@ async def delete_camera(
     camera_id: int,
     camera: Camera = Depends(get_camera_or_403),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_cameras_manage),
     request: Request = None,
 ):
     """Delete a camera (irreversible soft delete).
@@ -1707,6 +2190,39 @@ def assign_camera_permission(
     return perm
 
 
+@router.get("/{camera_id}/permissions", response_model=list[CameraPermissionEntry])
+def list_camera_permissions(
+    camera_id: int,
+    camera: Camera = Depends(get_camera_or_403),
+    db: Session = Depends(get_db),
+):
+    """Every grant on a camera — who may view it, who may manage it —
+    with the owner listed first. Owner or superuser (the same gate as
+    assigning); the assignment API was write-only before this, so an
+    admin could grant but never audit."""
+    rows = (
+        db.query(CameraPermission, User.username)
+        .join(User, User.id == CameraPermission.user_id)
+        .filter(CameraPermission.camera_id == camera.id)
+        .order_by(User.username.asc())
+        .all()
+    )
+    out: list[CameraPermissionEntry] = []
+    if camera.owner_id is not None:
+        owner = db.query(User).filter(User.id == camera.owner_id).first()
+        out.append(CameraPermissionEntry(
+            user_id=camera.owner_id, username=owner.username if owner else None,
+            can_view=True, can_manage=True, is_owner=True))
+    for perm, username in rows:
+        if perm.user_id == camera.owner_id:
+            continue
+        out.append(CameraPermissionEntry(
+            user_id=perm.user_id, username=username,
+            can_view=bool(perm.can_view), can_manage=bool(perm.can_manage),
+            is_owner=False))
+    return out
+
+
 @router.delete("/{camera_id}/permissions/{user_id}")
 def revoke_camera_permission(
     camera_id: int,
@@ -1888,6 +2404,33 @@ async def provision_camera_mediamtx(
         if not camera:
             raise HTTPException(status_code=404, detail="Camera not found")
 
+        if is_publisher(camera):
+            # A webcam: a path for a publisher, no source to pull — plus the
+            # capture command and sub path its kind needs, as camera create
+            # and the startup reconcile provision it (#900).
+            from services.local_webcams import provisioning_for
+
+            extra = provisioning_for(camera)
+            result = await MediaMtxAdminService.push_publisher_path(
+                camera_id=camera.id,
+                camera_ip=camera.ip_address,
+                enable_recording=enable_recording,
+                recording_segment_seconds=recording_segment_seconds,
+                recording_path=recording_path,
+                run_on_init=extra.get("run_on_init"),
+                substream=bool(extra.get("substream")),
+            )
+            if result.get("status") == "ok":
+                camera.status = "provisioned"
+                db.commit()
+            _log_provision_result(current_user.id, camera_id, result, enable_recording)
+            return {
+                "camera_id": camera_id,
+                "mediamtx_result": result,
+                "recording_enabled": enable_recording,
+                "recording_path": recording_path,
+            }
+
         if not camera.rtsp_url:
             raise HTTPException(
                 status_code=400, detail="Camera has no RTSP URL configured"
@@ -1996,38 +2539,84 @@ def test_camera_connection(
 
 
 def _update_camera_recording_config(db: Session, camera_id: int, enable: bool):
-    from sqlalchemy.sql import func
+    from services.recording_pause import set_recording_config
 
-    from models import Camera, CameraConfig
+    set_recording_config(db, camera_id, enable)
 
-    config = db.query(CameraConfig).filter(CameraConfig.camera_id == camera_id).first()
-    if config:
-        config.recording_enabled = enable
-    else:
-        # Create config if it doesn't exist
-        cam = db.query(Camera).filter(Camera.id == camera_id).first()
-        if cam and cam.rtsp_url:
-            config = CameraConfig(
-                camera_id=camera_id,
-                stream_protocol="rtsp",
-                source_url=cam.rtsp_url,
-                recording_enabled=enable,
-                rtsp_transport="tcp",
-                recording_segment_seconds=settings.recording_segment_seconds,
-                last_provisioned_at=func.now(),
+
+class RecordingSwitch(BaseModel):
+    enabled: bool
+    #: Pause only: resume automatically after this many seconds.
+    resume_after_s: int | None = Field(None, ge=60, le=7 * 24 * 3600)
+    #: Why, for the audit log (e.g. the Home Assistant automation).
+    reason: str | None = Field(None, max_length=200)
+
+
+@router.post("/{camera_id}/recording")
+async def set_camera_recording(
+    camera_id: int,
+    payload: RecordingSwitch,
+    request: Request,
+    camera: Camera = Depends(get_camera_or_403),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Pause or resume recording on one camera (HA-108).
+
+    Recording is always on unless a site admin has allowed pausing
+    (``PUT /system/settings/recording-pause``); with that off, pausing is
+    refused (403) and the rule below stands. Resuming is always allowed.
+    Pausing needs ``recordings.pause``. A pause survives a restart, and an
+    automatic resume (``resume_after_s``) is rescheduled at boot.
+    """
+    from core.permissions import user_has_permission
+    from core.request_context import current as current_ctx
+    from services import recording_pause, site_settings
+
+    if not payload.enabled:
+        # The site flag first: its message is the one that tells an admin
+        # what to change.
+        if not site_settings.recording_pause_enabled(db):
+            raise HTTPException(
+                status_code=403,
+                detail="Pausing recording is not allowed on this site "
+                       "(Settings > Recording > Allow pausing recording)",
             )
-            db.add(config)
+        if not user_has_permission(current_user, "recordings.pause"):
+            raise HTTPException(status_code=403, detail="Needs the recordings.pause permission")
+        if not camera.is_active:
+            raise HTTPException(status_code=409, detail="Camera is turned off")
+    elif not user_has_permission(current_user, "recordings.pause") and \
+            not user_has_permission(current_user, "cameras.manage"):
+        raise HTTPException(status_code=403, detail="Needs recordings.pause or cameras.manage")
 
-    db.commit()
+    ctx = current_ctx()
+    actor = (ctx.actor if ctx is not None and ctx.actor else None) or f"user:{current_user.username}"
+    try:
+        if payload.enabled:
+            await recording_pause.resume(db, camera.id, actor=actor, reason=payload.reason)
+            state = None
+        else:
+            state = await recording_pause.pause(
+                db, camera.id, actor=actor, reason=payload.reason,
+                resume_after_s=payload.resume_after_s)
+    except recording_pause.PauseError as exc:
+        raise HTTPException(status_code=502, detail=f"Media server refused: {exc}") from exc
+    audit_request(
+        db, request, action="recording.resume" if payload.enabled else "recording.pause",
+        user_id=current_user.id, entity_type="camera", entity_id=camera.id,
+        details={"reason": payload.reason,
+                 "resume_at": (state or {}).get("resume_at")},
+    )
+    return {"camera_id": camera.id, "recording": payload.enabled, "paused": state}
 
 
-# DISABLED — this is a Network Video RECORDER: recording is automatic and must
-# not be switchable off by anyone, including via the API. The route is
-# intentionally commented out so a direct `curl` cannot enable/disable
-# recording. Recording is turned on once at camera-configure time (see
-# CameraService, enable_recording=True). The handler is kept (not deleted) so
-# the behaviour can be restored by re-enabling the decorator if the product
-# decision ever changes.
+# DISABLED — this is a Network Video RECORDER: recording is automatic. This
+# old toggle stays unrouted so a direct `curl` cannot switch recording off.
+# The one supported way to pause is POST /{camera_id}/recording above, which
+# only works when a site admin has allowed it (recording_pause_enabled, off
+# by default), is audited, and can resume on its own. The handler is kept for
+# reference.
 # @router.post("/{camera_id}/toggle-recording")
 async def toggle_camera_recording(
     camera_id: int,
@@ -2118,6 +2707,34 @@ def stream_urls(
     return {"whep": whep, "hls": hls}
 
 
+@router.get("/{camera_id}/stats")
+async def get_camera_stats(
+    camera_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Health numbers for one camera: stream up, bitrate, detection fps,
+    inference time, skipped frames, recording state, days of footage kept.
+
+    Any user who can view the camera may read them. Sources that are absent
+    (detect-pipeline not deployed, camera paused) read as null, not errors.
+    Bitrate is measured between two reads, so the first call returns null.
+    """
+    from services.camera_scope import can_view_camera
+    from services.camera_stats import get_camera_stats as _stats
+
+    cam = (
+        db.query(Camera)
+        .filter(Camera.id == camera_id, Camera.deleted_at.is_(None))
+        .first()
+    )
+    if cam is None:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    if not can_view_camera(db, current_user, camera_id):
+        raise HTTPException(status_code=403, detail="Not allowed to view this camera")
+    return await _stats(db, cam)
+
+
 # ============================================================================
 # PTZ Control Endpoints - Uses camera credentials from database
 # ============================================================================
@@ -2129,8 +2746,9 @@ async def ptz_move(
     x: float = Query(0.0, ge=-1.0, le=1.0),
     y: float = Query(0.0, ge=-1.0, le=1.0),
     z: float = Query(0.0, ge=-1.0, le=1.0),
+    request: Request = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_ptz_control),
 ):
     """
     PTZ continuous move for a camera.
@@ -2160,7 +2778,7 @@ async def ptz_move(
 
     from services.ptz_service import PTZService
 
-    return await PTZService.move(
+    result = await PTZService.move(
         camera_id=cam.id,
         ip=cam.ip_address,
         username=cam.username,
@@ -2170,13 +2788,21 @@ async def ptz_move(
         y=y,
         z=z,
     )
+    audit_request(
+        db, request, action="ptz.move", user_id=current_user.id,
+        entity_type="camera", entity_id=cam.id,
+        details={"x": x, "y": y, "z": z,
+                 "success": bool(isinstance(result, dict) and result.get("success"))},
+    )
+    return result
 
 
 @router.post("/{camera_id}/ptz/stop")
 async def ptz_stop(
     camera_id: int,
+    request: Request = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_ptz_control),
 ):
     """
     Stop PTZ movement for a camera.
@@ -2194,13 +2820,103 @@ async def ptz_stop(
 
     from services.ptz_service import PTZService
 
-    return await PTZService.stop(
+    result = await PTZService.stop(
         camera_id=cam.id,
         ip=cam.ip_address,
         username=cam.username,
         password=cam.password,
         camera_port=cam.port,
     )
+    audit_request(
+        db, request, action="ptz.stop", user_id=current_user.id,
+        entity_type="camera", entity_id=cam.id,
+        details={"success": bool(isinstance(result, dict) and result.get("success"))},
+    )
+    return result
+
+
+def _ptz_camera(db: Session, camera_id: int, current_user) -> Camera:
+    cam = CameraService.get_camera_by_id(db, camera_id, current_user.id)
+    if not cam:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    if not cam.username or not cam.password:
+        raise HTTPException(
+            status_code=400, detail="Camera ONVIF credentials not configured"
+        )
+    return cam
+
+
+class PTZPresetSave(BaseModel):
+    name: str = Field(..., min_length=1, max_length=64)
+    #: Overwrite this preset; omit to let the camera allocate a new one.
+    token: str | None = Field(None, max_length=64)
+
+
+@router.get("/{camera_id}/ptz/presets")
+async def ptz_list_presets(
+    camera_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_ptz_control),
+):
+    """The camera's stored PTZ presets: ``{"presets": [{"token", "name"}]}``."""
+    from services.ptz_service import PTZService
+
+    cam = _ptz_camera(db, camera_id, current_user)
+    presets = await PTZService.presets(
+        camera_id=cam.id, ip=cam.ip_address, username=cam.username,
+        password=cam.password, camera_port=cam.port,
+    )
+    return {"camera_id": cam.id, "presets": presets}
+
+
+@router.post("/{camera_id}/ptz/presets")
+async def ptz_save_preset(
+    camera_id: int,
+    payload: PTZPresetSave,
+    request: Request = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_ptz_control),
+):
+    """Store the camera's current position as a preset (new, or overwrite
+    ``token``). The camera keeps the preset; OpenNVR stores nothing."""
+    from services.ptz_service import PTZService
+
+    cam = _ptz_camera(db, camera_id, current_user)
+    result = await PTZService.set_preset(
+        camera_id=cam.id, ip=cam.ip_address, username=cam.username,
+        password=cam.password, camera_port=cam.port,
+        name=payload.name.strip(), preset_token=payload.token,
+    )
+    audit_request(
+        db, request, action="ptz.preset_save", user_id=current_user.id,
+        entity_type="camera", entity_id=cam.id,
+        details={"name": payload.name.strip(), "token": result.get("token"),
+                 "overwrite": payload.token is not None},
+    )
+    return {"camera_id": cam.id, **result}
+
+
+@router.post("/{camera_id}/ptz/presets/{preset_token}/goto")
+async def ptz_goto_preset(
+    camera_id: int,
+    preset_token: str,
+    request: Request = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_ptz_control),
+):
+    """Move the camera to a stored preset."""
+    from services.ptz_service import PTZService
+
+    cam = _ptz_camera(db, camera_id, current_user)
+    result = await PTZService.goto_preset(
+        camera_id=cam.id, ip=cam.ip_address, username=cam.username,
+        password=cam.password, camera_port=cam.port, preset_token=preset_token,
+    )
+    audit_request(
+        db, request, action="ptz.preset_goto", user_id=current_user.id,
+        entity_type="camera", entity_id=cam.id, details={"token": preset_token},
+    )
+    return {"camera_id": cam.id, **result}
 
 
 # Proxy restart/status and publish URL endpoints removed (FFmpeg proxy eliminated)
@@ -2266,7 +2982,11 @@ async def probe_camera_transport(
     if not camera.rtsp_url:
         raise HTTPException(
             status_code=400,
-            detail="Camera has no RTSP URL configured; cannot probe",
+            detail=(
+                "A webcam has no RTSP source to probe"
+                if is_publisher(camera)
+                else "Camera has no RTSP URL configured; cannot probe"
+            ),
         )
 
     config = (
@@ -2436,14 +3156,15 @@ async def get_camera_snapshot(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Camera not found"
         )
-    if not camera.rtsp_url:
+    if not camera.rtsp_url and not is_publisher(camera):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Camera has no stream URL configured",
         )
 
+    # A webcam has no URL; "" makes the capture read its MediaMTX path.
     jpeg = await get_kai_c_service().capture_frame_bytes(
-        camera.rtsp_url, camera.id
+        camera.rtsp_url or "", camera.id
     )
     if not jpeg:
         raise HTTPException(
@@ -2457,3 +3178,63 @@ async def get_camera_snapshot(
         # aggressively cache image GETs otherwise.
         headers={"Cache-Control": "no-store"},
     )
+
+
+class DescribeIn(BaseModel):
+    question: str | None = Field(None, max_length=300)
+
+
+@router.post("/{camera_id}/describe")
+async def describe_camera(
+    camera_id: int,
+    request: Request,
+    body: DescribeIn | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """The camera's current view in words, from a caption or visual-QA
+    adapter through KAI-C (services/scene_description.py); with
+    ``question``, its answer. ``available: false`` when no such adapter is
+    installed or it declined. Audited: a frame went to a model. 429 past a
+    few a minute; 503 when no frame can be captured."""
+    from types import SimpleNamespace
+
+    from core.database import SessionLocal, release
+    from services import scene_description
+    from services.camera_scope import can_view_camera
+
+    row = db.query(Camera).filter(Camera.id == camera_id, Camera.deleted_at.is_(None)).first()
+    if row is None or not can_view_camera(db, current_user, camera_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Camera not found")
+    camera = SimpleNamespace(id=row.id, rtsp_url=row.rtsp_url)
+    question = ((body.question or "").strip() or None) if body is not None else None
+    user_id = current_user.id   # a token's owner: the limit is per person
+    # The real client, not the reverse proxy: this row is read after the
+    # fact by a person, and every other audit site resolves it the same way.
+    ip = get_client_ip(request) or None
+    agent = request.headers.get("user-agent")
+    # Nothing below needs this session: the frame grab and the model take up
+    # to a minute, and a connection must not sit idle in a transaction.
+    release(db)
+    try:
+        result = await scene_description.describe(camera, f"user:{user_id}", question)
+    except scene_description.RateLimited:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                            detail="Too many descriptions; try again in a minute",
+                            headers={"Retry-After": "60"})
+    except scene_description.Busy:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="The image model is busy; try again shortly",
+                            headers={"Retry-After": "30"})
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+    with SessionLocal() as audit_db:
+        write_audit_log(
+            audit_db, action="camera.describe", user_id=user_id, entity_type="camera",
+            entity_id=camera.id,
+            # Not the question or the answer: they may describe people.
+            details={"model": result["model"], "task": result["task"],
+                     "answered": result["available"], "question": question is not None},
+            ip=ip, user_agent=agent,
+        )
+    return {"camera_id": camera.id, "at": datetime.now(UTC).isoformat(), **result}

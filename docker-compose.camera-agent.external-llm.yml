@@ -17,7 +17,7 @@
 # Usage (the installer wires this automatically when you pick an
 # external LLM; manual form):
 #
-#   1. On the host:  install Ollama, then `ollama pull qwen2.5:1.5b`
+#   1. On the host:  install Ollama, then `ollama pull granite4:micro`
 #      (or whatever OLLAMA_MODEL is set to in .env)
 #   2. In .env:      OLLAMA_EXTERNAL_URL=http://host.docker.internal:11434
 #   3. Start with BOTH files + the profile, e.g.:

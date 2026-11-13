@@ -1,0 +1,43 @@
+# The App Catalog listing for __APP_NAME__ — ONE entry, appended to
+# server/config/apps_index.yml in the open-nvr/open-nvr repository by a
+# PR (docs/CONTRIBUTING_APPS.md). Kept here so it is reviewed with the
+# code and ci.yml checks the required fields.
+#
+# Fill in author, contact and network_egress before the listing PR.
+# image_digest comes from the publish workflow's job summary after a
+# v* tag (or: scripts/pin_apps_index.py in the platform repository).
+- id: __APP_ID__
+  name: __APP_NAME__
+  summary: "What __APP_NAME__ does, in one operator-facing sentence."
+  category: analytics                # perimeter | analytics | vehicle | doorstep | forensics | integration
+  version: "0.1.0"                   # = AppManifest.version — quoted
+  kind: installable
+  pricing: free
+  author: "Your Name"                # shown on the card
+  contact: "you@example.com"         # email or https:// URL that reaches you
+  source: https://github.com/open-nvr/app-__APP_ID__
+  network_egress: []                 # every host the app reaches outside the stack; [] = never
+  image: ghcr.io/open-nvr/__APP_ID__:latest
+  # image_digest: sha256:<64-hex>    # from the publish workflow summary — pins the install
+  requires_tasks: [__TASK__]
+  emits: [__APP_ID__]
+  docs_url: https://github.com/open-nvr/app-__APP_ID__/blob/main/README.md
+  install:
+    compose: |
+      services:
+        __APP_ID__:
+          image: ${__APP_ENV___IMAGE:-ghcr.io/open-nvr/__APP_ID__:latest}
+          container_name: opennvr___APP_MODULE__
+          restart: unless-stopped
+          environment:
+            - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
+            - NATS_URL=nats://nats:4222
+            - OPENNVR_URL=http://opennvr-core:8000
+            - HTTP_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+            - HTTPS_PROXY=${APPS_EGRESS_PROXY_URL-http://egress-proxy:3128}
+            - NO_PROXY=opennvr-core,nats,nats-apps,egress-proxy,localhost,127.0.0.1
+          volumes:
+            - ./config.yml:/app/config.yml:ro
+          networks:
+            - opennvr_apps
+    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d __APP_ID__

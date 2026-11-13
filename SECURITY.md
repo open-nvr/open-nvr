@@ -18,6 +18,62 @@ A useful report identifies the OpenNVR version (`git describe` output or release
 
 We acknowledge receipt within 48 hours and complete initial triage within seven days — confirmed, unable-to-reproduce, or asking for more information. At fix time we coordinate disclosure on a 30-day default window, extended for severe issues that need an ecosystem-wide fix. Reporters who want public credit get it in the advisory; reporters who want to stay anonymous do. Advisories are published on the [GitHub Security Advisories](https://github.com/open-nvr/open-nvr/security/advisories) tab with CVE assignment where applicable.
 
+## Acknowledgements
+
+OpenNVR's security architecture was built against a documented threat model and hardened through 22 tracked findings (V-001..V-022) before the first public release. That work is in [`docs/SECURITY_ARCHITECTURE.md`](docs/SECURITY_ARCHITECTURE.md), and it is the floor, not the ceiling — an internal audit finds what its authors thought to look for.
+
+The researchers below found what we did not. Both reports landed one layer inside the perimeter we had built: not a broken lock, but a door that checked *whether you had a key* and never *whose key it was*. That is the class of issue an architecture review is worst at catching and an outside reader is best at, and every one of these has made the product measurably harder to attack.
+
+We are grateful to them, and we would like there to be more.
+
+### Reporters
+
+*Most recent first. Fixed releases are linked once shipped.*
+
+---
+
+**Artur Chlebicki** · [@Artur12555](https://github.com/Artur12555) · 2026
+
+**Missing authorization on the AI detection results** (CWE-862 / CWE-639, [GHSA-fpp6-xfgg-f4h3](https://github.com/open-nvr/open-nvr/security/advisories/GHSA-fpp6-xfgg-f4h3)). `/api/v1/ai-detection-results` checked that the caller was signed in and nothing else, so any account could list every camera's detections and scene captions, read or delete any result by id, and delete the whole history in one request. The router had been left out of the per-camera scoping consolidation that every other read surface went through.
+
+The report traced each route from the tainted parameter to the query, cited the project's own `SECURITY.md` and `camera_scope` docstring for why the surface should have been covered, and rated itself conservatively. Triaging it turned up two more routes of the same class, the camera configuration (which carries the camera's credentials) and the AI recording listings; all three are fixed together. *Fixed in [PR #635](https://github.com/open-nvr/open-nvr/pull/635), 0.1.7.*
+
+---
+
+**Kamal Sentassi** · [S9S – Security Electronic Service](https://s9s.de/research.html) · 2026
+
+Five access-control and SSRF issues in a single coordinated report, each verified against the code before a line was changed:
+
+- **Cross-camera event disclosure** over the live-event WebSocket — the subscription was never authorized, only the connection, so any authenticated account could omit a query parameter and stream every camera's detections, alarms and system alerts. The highest-impact of the five.
+- **Blind SSRF in camera onboarding** — the create endpoint dialled caller-supplied hosts with none of the guarding the ONVIF router already had.
+- **Cloud instance metadata classified as "internal"** by the SSRF guard, making 169.254.169.254 reachable wherever internal hosts were allowed.
+- **An unauthenticated health endpoint** publishing the internal MediaMTX admin URL.
+- **An unrestricted integration webhook** whose error text distinguished *refused* from *timed out* — an internal port scanner that reported its own findings.
+
+The report named files and line numbers, rated its own findings conservatively, and included a list of what it had checked and found sound. *Fixed in [PR #450](https://github.com/open-nvr/open-nvr/pull/450), 0.1.5.*
+
+---
+
+**Furkan Arslan** · 2026
+
+**Missing authorization on the IP-keyed ONVIF routes** (CWE-862 / CWE-639). `/connect` and every `/camera/{ip}/…` route checked that the address lay inside the camera LAN but never the caller's relationship to the camera at that address — so any authenticated user could pan, tilt and zoom, or read the stream URI of, any camera on the network. The sibling `/cameras/{id}/…` routes had always required ownership; these had been written to a different rule and nobody had noticed.
+
+The report arrived with a proof of concept that included a negative control and an owner sanity check in the same script, which turned confirmation into a five-minute job. It also pointed out that private vulnerability reporting was not enabled on the repository despite this page pointing there — since fixed. *Fixed in [PR #398](https://github.com/open-nvr/open-nvr/pull/398), 0.1.5.*
+
+---
+
+### If you are thinking about looking
+
+There is no bug bounty. This is an AGPL project without a security budget, and saying so plainly beats implying a reward that does not exist. What we offer instead is a technical reply from people who read the same code you are reading, a fix that lands with your name on it, a GitHub Security Advisory with a CVE where one applies, and a permanent entry above.
+
+Credit is yours to shape: named, named with a link to your site or profile, under a handle, or anonymous — we ask before publishing anything and take the answer as given.
+
+These are the areas where a finding is most likely to be real:
+
+- **Authorization rather than authentication.** Authentication has had the most attention — that is not a claim it is perfect, only where the effort went. Both reports above landed one layer in: what an *authenticated* user may reach. Per-camera scoping across the newer read surfaces, WebSocket and streaming subscriptions, and anywhere an id or an IP arrives from a client and is trusted.
+- **Outbound request paths.** Anything that takes a caller-supplied host and connects to it — camera onboarding, ONVIF, adapters, webhooks, the app registry.
+- **The app and adapter boundary.** Third-party apps run on an internal network behind an egress proxy that asks core, per connection, whether a host is permitted. Ways around that are interesting.
+
 ## Security architecture
 
 OpenNVR is designed so the operator does not configure security — they configure exceptions. Every protection is on by default, and explicitly turning one off lands an audit-log entry.
@@ -26,7 +82,7 @@ There are no shipped default credentials. First boot prints a one-time setup tok
 
 Two independent default-deny gates govern what crosses the network boundary. `DEPLOYMENT_MODE=offline` is the default — cloud routes return HTTP 403 unless the operator explicitly switches it to `hybrid` or `cloud`, and that switch is audit-logged at boot. `AI_SOVEREIGNTY=local_only` is the default — adapters that declare `network_egress` are refused registration outright. Both gates fail closed, so a configuration error never silently widens the perimeter.
 
-End to end, every inference carries an `X-Correlation-Id` threading alert → middleware → adapter, model weights are fingerprinted with sha256 and polled for drift, and the resulting events land in an append-only log. The full threat model and control mapping are in [`docs/SECURITY_ARCHITECTURE.md`](docs/SECURITY_ARCHITECTURE.md); the architectural foundation is published in [Singh et al., 2025](https://doi.org/10.5281/zenodo.17261761).
+End to end, every inference carries an `X-Correlation-Id` threading alert → middleware → adapter, model weights are fingerprinted with sha256 and polled for drift, and the resulting events land in an append-only log. The full threat model and control mapping are in [`docs/SECURITY_ARCHITECTURE.md`](docs/SECURITY_ARCHITECTURE.md); the architectural foundation is published in [Singh et al., 2025](https://doi.org/10.5281/zenodo.22804254).
 
 ## Operator checklist
 

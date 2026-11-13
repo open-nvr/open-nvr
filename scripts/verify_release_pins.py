@@ -78,15 +78,59 @@ def substitute(ref: str, pins: dict[str, str]) -> str:
     return ref
 
 
-def collect_image_refs() -> list[str]:
+def collect_image_refs() -> tuple[list[str], set[str]]:
+    """Every ``image:`` in the compose files, plus the subset that a
+    service can BUILD if the pull fails.
+
+    The buildable set matters because this script's whole premise is
+    "a fresh install would die on ``docker pull``" — and for a service
+    carrying a ``build:`` section that premise is false. Compose builds
+    it instead, which is exactly why the fallback is there. Failing the
+    release on such an image would block publishing the very first
+    version of an image that is designed to survive not being published.
+
+    Parsed with an indentation walk rather than a YAML load on purpose:
+    this script is stdlib-only so CI can run it with bare python3, and
+    adding PyYAML to make a release gate work is a worse trade than
+    twenty lines of scanning.
+    """
     refs: set[str] = set()
+    buildable: set[str] = set()
     for pattern in COMPOSE_GLOBS:
         for f in sorted(REPO_ROOT.glob(pattern)):
-            for line in f.read_text().splitlines():
-                line = line.strip()
-                if line.startswith("image:"):
-                    refs.add(line.split("image:", 1)[1].strip().strip('"').strip("'"))
-    return sorted(refs)
+            in_services = False
+            svc_image: str | None = None
+            svc_builds = False
+
+            def flush() -> None:
+                if svc_image is not None:
+                    refs.add(svc_image)
+                    if svc_builds:
+                        buildable.add(svc_image)
+
+            for raw in f.read_text().splitlines():
+                if not raw.strip() or raw.lstrip().startswith("#"):
+                    continue
+                indent = len(raw) - len(raw.lstrip())
+                if indent == 0:
+                    flush()
+                    svc_image, svc_builds = None, False
+                    in_services = raw.split(":", 1)[0].strip() == "services"
+                    continue
+                if not in_services:
+                    continue
+                if indent == 2 and raw.rstrip().endswith(":"):
+                    # Next service block begins.
+                    flush()
+                    svc_image, svc_builds = None, False
+                    continue
+                stripped = raw.strip()
+                if stripped.startswith("image:"):
+                    svc_image = stripped.split("image:", 1)[1].strip().strip('"').strip("'")
+                elif stripped.startswith("build:") or stripped == "build:":
+                    svc_builds = True
+            flush()
+    return sorted(refs), buildable
 
 
 def ghcr_manifest_exists(image: str, tag: str) -> bool:
@@ -116,11 +160,48 @@ def ghcr_manifest_exists(image: str, tag: str) -> bool:
         raise
 
 
+#: Images this repository's own release tag publishes (publish-images,
+#: publish-detect-pipeline). On a release PR they cannot exist yet: the
+#: PR sets CORE_TAG to the version whose tag builds them, and the tag is
+#: pushed after the merge. Treating them as missing made every release
+#: PR red on the one check that was meant to protect fresh installs, and
+#: twice the tag was pushed before the merge to get around it. So: a core
+#: image at a CORE_TAG whose git tag does not exist yet is "built by this
+#: release", reported and not failed. Once the tag exists the exemption
+#: ends, and a core image missing at a tagged version is a failure again.
+CORE_IMAGES = ("core", "detect-pipeline", "camera-agent")
+# OpenNVR Accelerate flavours: the same release publishes ``<tag>-<flavour>``
+# beside ``<tag>`` for the images that have flavours (core images and the
+# ONNX adapters). A flavour tag that is missing is NOT an install killer the
+# way a plain pin is: start.sh checks the flavour image is pullable before
+# selecting it and stays on cpu (with a message) when it is not. So it is
+# reported, never failed — and counted as "release" while the release that
+# publishes it is still pending.
+FLAVOUR_SUFFIXES = ("-intel", "-qualcomm", "-nvidia", "-rocm")
+
+
+def release_tag_exists(version: str) -> bool:
+    """Does ``v<version>`` exist on origin? Asked over the network, not
+    the local tag list, so a stale checkout cannot answer."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["git", "ls-remote", "--tags", "origin", f"refs/tags/v{version}"],
+            capture_output=True, text=True, timeout=30, check=False,
+        ).stdout
+        return bool(out.strip())
+    except (OSError, subprocess.SubprocessError):
+        return True  # cannot tell: do not exempt
+
+
 def main() -> int:
     pins = load_env_pins(ENV_EXAMPLE)
     failures: list[str] = []
     checked = 0
-    for raw in collect_image_refs():
+    all_refs, buildable = collect_image_refs()
+    core_tag = pins.get("CORE_TAG", "")
+    pending_release = bool(core_tag) and not release_tag_exists(core_tag)
+    for raw in all_refs:
         resolved = substitute(raw, pins)
         if not resolved.startswith(GHCR_PREFIX):
             continue  # upstream image; not this release's job
@@ -136,9 +217,30 @@ def main() -> int:
         tag = tag or "latest"
         checked += 1
         exists = ghcr_manifest_exists(image, tag)
-        status = "ok " if exists else "MISSING"
+        if exists:
+            status = "ok "
+        elif (pending_release and tag == core_tag
+              and image.rsplit("/", 1)[-1] in CORE_IMAGES):
+            # Built by the release this PR is: the v{CORE_TAG} tag does
+            # not exist yet, and pushing it is what publishes these.
+            status = "release"
+        elif any(tag.endswith(sfx) for sfx in FLAVOUR_SUFFIXES):
+            # A hardware flavour (see FLAVOUR_SUFFIXES) of a core image or
+            # an adapter: published beside the plain tag by the same
+            # release, and gated by start.sh at run time, so a miss is
+            # informational.
+            status = "release" if pending_release and tag.startswith(core_tag) else "flavour"
+        elif raw in buildable:
+            # Not a release blocker: this service declares a `build:`,
+            # so compose builds the image when the pull fails and the
+            # install still comes up. Reported, not failed — the pull is
+            # still the fast path we WANT published, so a missing one is
+            # worth seeing on every run.
+            status = "build"
+        else:
+            status = "MISSING"
         print(f"  [{status}] {image}:{tag}    (from {raw})")
-        if not exists:
+        if status == "MISSING":
             failures.append(f"{image}:{tag}")
     if failures:
         print(
@@ -149,6 +251,10 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+    if pending_release:
+        print(f"\nAll {checked} pinned GHCR images exist or are built by the "
+              f"v{core_tag} tag this release pushes. Install path is pullable once it is.")
+        return 0
     print(f"\nAll {checked} pinned GHCR images exist. Install path is pullable.")
     return 0
 

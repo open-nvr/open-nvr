@@ -113,6 +113,13 @@ work is unifying the fragments and closing seven gaps.
    a skill is a **capability path activated** (detector class × cameras
    × consumer), not a container started.
 
+   *Addendum (2026-09-25): the consumer is always an app.* The camera
+   page no longer writes claims. A pick records the app as consumer and
+   projects the model skills its manifest brings (`requires_tasks` +
+   `enrich_tasks`); the camera's skill set is that union over enabled
+   apps, and the platform's enrichers gate on it. An `all_cameras` app
+   holds a platform-written pick on every live camera.
+
 9. **Standard chains are declarative routes, executed by Tier-1
    dispatch — not by apps.** The mechanism already exists
    (`detect-pipeline/dispatch.py`): a class→adapter routing map; on a

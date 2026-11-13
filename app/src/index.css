@@ -2,6 +2,12 @@
 
 /* App theme tokens - modern dark slate + blue accent */
 :root {
+  /* Tells the browser the page is dark, so the controls it draws itself —
+     checkboxes, scrollbars, date pickers — are dark too; without it they
+     stayed light on a dark page. It does NOT fix an open <select> list:
+     see the option rule below. */
+  color-scheme: dark;
+  --select-arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239ca3af' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E"); /* --text-dim; a data: URI cannot read a var() */
   --bg: #0b1220;          /* page background */
   --bg-2: #111827;        /* secondary panels */
   --panel: #0f172a;       /* main content surface */
@@ -10,6 +16,46 @@
   --text-dim: #9ca3af;    /* secondary text */
   --accent: #3b82f6;      /* blue-500 */
   --border: #293241;      /* subtle border color */
+  /* Status inks. Distinct from the --badge-* PAIRS above: those are a
+     background+foreground pair for a pill, these are a single ink for a
+     chart band, a tile figure or a word of inline status sitting
+     directly on the page. Matched to the badge text colours so one
+     status looks like itself in either form.
+     These were referenced by four views before they existed, so every
+     `var(--ok, #hex)` silently fell back to a hard-coded dark-theme hex
+     that did not flip in light mode. */
+  --ok: #4ade80;          /* green-400  */
+  --warn: #facc15;        /* yellow-400 */
+  --danger: #f87171;      /* red-400    */
+  --critical: #dc2626;    /* red-600, solid in both themes */
+  /* Chart series inks, in fixed order (never cycled): the first three
+     slots of the validated categorical palette, stepped for the dark
+     surface. Status meaning stays with --ok/--warn/--danger; these carry
+     identity only. */
+  --series-1: #3987e5;    /* blue   */
+  --series-2: #d95926;    /* orange */
+  --series-3: #199e70;    /* aqua   */
+  --series-4: #8e5bd9;    /* violet: NPU */
+  --series-5: #c9a227;    /* gold: GPU */
+  /* Aliases for names some views reached for that were never defined. An
+     undefined var() with no fallback resolves to nothing (Cameras' --muted
+     text, Updates' --bg-sub), and one with a hex fallback ignores the light
+     theme. Pointing them at the real tokens fixes both at once; new code
+     should use the real names. */
+  --success: var(--ok);
+  --warning: var(--warn);
+  --muted: var(--text-dim);
+  --bg-sub: var(--bg-2);
+  --bg-1: var(--panel);
+  --bg-3: var(--panel-2);
+  /* Colours for things drawn ON VIDEO. A video surface is black in both
+     themes, so these deliberately have no light-theme override: theme text
+     tokens would turn near-black in the light theme, black on black. */
+  --on-video: #ffffff;
+  --on-video-dim: rgb(255 255 255 / 0.62);
+  --on-video-ok: #4ade80;
+  --on-video-warn: #facc15;
+  --on-video-danger: #f87171;
   --radius: 0px;          /* global corner radius for sharp UI */
   --radius-card: 0px;
   --radius-input: 0px;
@@ -21,6 +67,11 @@
   --badge-warning-text: #facc15;                /* yellow-400 */
   --badge-destructive-bg: rgba(127, 29, 29, 0.5); /* red-900/50 */
   --badge-destructive-text: #f87171;            /* red-400 */
+  /* Critical is the one badge that stays SOLID in both themes: it has to
+     out-shout `destructive` on a wall display, and a translucent tint
+     cannot. */
+  --badge-critical-bg: #dc2626;                 /* red-600 */
+  --badge-critical-text: #ffffff;
   --badge-neutral-bg: rgba(17, 24, 39, 0.5);    /* gray-900/50 */
   --badge-neutral-text: #9ca3af;                /* gray-400 */
   --badge-info-bg: rgba(30, 58, 138, 0.5);      /* blue-900/50 */
@@ -29,6 +80,8 @@
 
 /* Light theme overrides */
 [data-theme="light"] {
+  color-scheme: light;
+  --select-arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23334155' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
   --bg: #f8fafc;          /* slate-50 */
   --bg-2: #e5e7eb;        /* gray-200 */
   --panel: #ffffff;       /* white */
@@ -37,6 +90,17 @@
   --text-dim: #334155;    /* slate-700 */
   --accent: #2563eb;      /* blue-600 */
   --border: #d1d5db;      /* gray-300 */
+  /* Status inks — light theme: darkened so they stay legible on white.
+     The dark-theme green/amber would fail contrast here. */
+  --ok: #15803d;          /* green-700  */
+  --warn: #a16207;        /* yellow-700 */
+  --danger: #b91c1c;      /* red-700    */
+  --critical: #dc2626;    /* red-600    */
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #9b6ee8;
+  --series-5: #d9b23a;
   --radius: 0px;
   --radius-card: 0px;
   --radius-input: 0px;
@@ -48,6 +112,8 @@
   --badge-warning-text: #a16207;                /* yellow-700 */
   --badge-destructive-bg: #fee2e2;              /* red-100 */
   --badge-destructive-text: #b91c1c;            /* red-700 */
+  --badge-critical-bg: #dc2626;                 /* red-600 */
+  --badge-critical-text: #ffffff;
   --badge-neutral-bg: #f3f4f6;                  /* gray-100 */
   --badge-neutral-text: #374151;                /* gray-700 */
   --badge-info-bg: #dbeafe;                     /* blue-100 */
@@ -64,6 +130,45 @@ body { background: var(--bg); color: var(--text); -webkit-font-smoothing: antial
    not-allowed for disabled ones. */
 button:not(:disabled) { cursor: pointer; }
 button:disabled { cursor: not-allowed; }
+
+/* The OPEN list of a <select> is drawn by the browser, not the page.
+   Chrome paints it with the <select>'s own background — and preflight
+   makes every <select> transparent with inherited text, so the page-size
+   picker opened a white list of light-grey options nobody could read.
+   color-scheme doesn't help: Chrome copies a transparent background
+   as-is, with no themed fallback. What it DOES honour is each option's
+   own background and colour (internal_popup_menu.cc, AddElementStyle),
+   so every select gets a themed list whatever the select itself looks
+   like. */
+select option,
+select optgroup {
+  background-color: var(--panel);
+  color: var(--text);
+}
+
+/* Every dropdown's arrow. The browser's own sits wherever the select's
+   padding happens to leave it, jammed against the border on most of them,
+   and each select used to pick its own padding. So draw one arrow, one inset,
+   for all. Outside any layer on purpose, so a px-* or pr-* utility on a select
+   cannot put the text back under the arrow. No select needs its own arrow. */
+select:not([multiple], [size]) {
+  appearance: none;
+  background-image: var(--select-arrow);
+  background-repeat: no-repeat;
+  background-position: right 0.5rem center;
+  background-size: 14px;
+  padding-right: 1.75rem;
+}
+
+/* Placeholders are EXAMPLES and must not pass for values. Preflight draws
+   them at half the input's text colour, which on the register's add form
+   made "MH12DE1433 / A. Sharma / B-402" read like a row already filled
+   in. In the base layer, so a placeholder: utility can still win. */
+@layer base {
+  ::placeholder {
+    color: color-mix(in oklab, var(--text-dim) 55%, transparent);
+  }
+}
 
 /* Reusable UI primitives for consistent styling */
 .card {
@@ -197,4 +302,77 @@ button:disabled { cursor: not-allowed; }
 }
 .animate-slide-in-right {
   animation: slide-in-right 0.3s ease-out;
+}
+
+/* ---------------- Dashboard widget grid (react-grid-layout) ----------------
+   The library's own stylesheet paints a red drop placeholder and a
+   black-on-transparent resize corner that vanishes on the dark theme. */
+.dash-grid .react-grid-item.react-grid-placeholder {
+  background: var(--accent);
+  opacity: 0.14;
+  border: 1px dashed var(--accent);
+  border-radius: 0;
+}
+.dash-grid .react-grid-item > .react-resizable-handle {
+  width: 16px;
+  height: 16px;
+  z-index: 5;
+}
+.dash-grid .react-grid-item > .react-resizable-handle::after {
+  right: 3px;
+  bottom: 3px;
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid var(--accent);
+  border-bottom: 2px solid var(--accent);
+}
+.dash-editing .react-grid-item > .react-resizable-handle { opacity: 1; }
+/* Outside edit mode nothing moves: no animated reflow on window resize. */
+.dash-grid:not(.dash-editing) .react-grid-item { transition: none; }
+
+/* Vitals tiles on a short screen: the detail line is the first thing to
+   go, so the figure and its bar never collide. */
+.vital-tile { container-type: size; }
+@container (max-height: 84px) {
+  .vital-sub { display: none; }
+}
+@container (max-height: 64px) {
+  .vital-value { font-size: 18px !important; }
+}
+/* Too short for the bars and sparklines: keep the label and the figure. */
+@container (max-height: 50px) {
+  .vital-extra { display: none; }
+  .vital-value { font-size: 16px !important; }
+}
+
+/* Scrolls, but draws no bar: a strip of status chips that is merely a
+   little too wide for the row should not grow a scrollbar across it. */
+.no-scrollbar { scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
+
+/* Live-wall tour: a hairline that fills over one tour interval. */
+@keyframes dash-tour-fill {
+  from { width: 0; }
+  to   { width: 100%; }
+}
+.dash-tour-progress {
+  animation-name: dash-tour-fill;
+  animation-timing-function: linear;
+  animation-fill-mode: forwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .dash-tour-progress { animation: none; width: 0; }
+}
+
+/* A camera tour's crossfade: the page that is leaving fades out over the
+   one that is already playing underneath (views/TourView.tsx). */
+@keyframes tour-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+.tour-fade-out {
+  animation: tour-fade-out 600ms ease-in-out forwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tour-fade-out { animation-duration: 1ms; }
 }

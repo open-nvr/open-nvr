@@ -27,7 +27,18 @@ dependencies = [
     "SQLAlchemy>=2.0.23",
     "uvicorn[standard]>=0.27.0",
     "WSDiscovery>=2.0.0",
+    "aiomqtt>=2.3",
+    # The Agentic Workflows engine's AI step (opennvr_app_sdk.agent): model
+    # clients now, the tool loop in Phase 2. From the in-repo path, so core
+    # never waits on a PyPI release (RFC #620).
+    "opennvr-app-sdk",
+    "openpyxl>=3.1",
 ]
+
+[tool.uv.sources]
+# Editable for local work; the Dockerfile syncs with --no-editable so the
+# image carries a real install, not a link to /build.
+opennvr-app-sdk = { path = "../sdk/opennvr-app-sdk", editable = true }
 
 [dependency-groups]
 dev = [

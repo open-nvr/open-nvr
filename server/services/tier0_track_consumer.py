@@ -1,0 +1,509 @@
+# Copyright (c) 2026 OpenNVR
+# Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0)
+"""Bridge Tier-0 tracks from the NATS bus to the in-process event bus.
+
+Tier-0 (``detect-pipeline``) runs YOLO + ByteTrack on every camera and
+publishes each frame's tracks to ``opennvr.inference.tier0.<cam>.completed``
+(``opennvr.tier0.v1``). Until this consumer existed nothing carried those
+tracks to the browser: the only NATS→bus bridge was the BYOM inference
+path, so the live view had detections happening behind it and no way to
+draw them. This is the missing hop — it is what puts bounding boxes on
+the video.
+
+It does three things and nothing else:
+
+* maps the bus camera handle (``"cam3"``) to core's integer id, because
+  the WebSocket entitlement check is a set of ints and an unmapped
+  event would be dropped for every scoped user;
+* normalizes the pixel-space ``[x1, y1, x2, y2]`` boxes into
+  ``[x, y, w, h]`` in 0..1, using the frame size the producer ships —
+  the overlay must not care what resolution the detector ran at;
+* republishes on the in-process bus as ``event_type="tracks"``, which
+  the WebSocket streams to entitled subscribers.
+
+Best-effort like its siblings: no NATS URL, no nats-py, or a down
+broker degrades to "no overlay", never to a crashed process. Payloads
+that fail to parse are counted and dropped, not raised.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+SUBJECT = "opennvr.inference.tier0.*.completed"
+#: Apps publish their own boxes here (SDK OverlayBoxes / overlay.boxes.v1):
+#: ANPR's plate localisations, occupancy's zones. Same wire shape out —
+#: the browser draws one kind of thing — but forwarded ONLY for apps the
+#: operator switched on in the catalog (installed_apps.overlay_enabled).
+APP_SUBJECT = "opennvr.events.overlay.boxes.v1.>"
+#: How long a "may this app draw?" answer is trusted before the DB is
+#: asked again. Overlay frames arrive many times a second; the toggle
+#: changes a few times a year.
+_APP_ALLOW_TTL_S = 15.0
+_app_allow_cache: dict[str, tuple[float, bool]] = {}
+#: app id -> (fetched at, camera ids picked for it). Same TTL: a pick made
+#: in the catalog reaches the overlay within one cache window.
+_app_picks_cache: dict[str, tuple[float, frozenset[int]]] = {}
+
+#: Reconnect cadence after a connect/subscribe failure — one warning a
+#: minute for a down bus, not a hot loop.
+_RETRY_SECONDS = 60.0
+
+#: Below this the tracker is guessing; the overlay would just flicker.
+DEFAULT_MIN_SCORE = 0.25
+
+#: Default for settings.detection_overlay_draw_window_s — see the
+#: comment there for the measurement behind it (p90 re-match gap 5.9 s
+#: on a busy scene at DETECT_FPS=2). A phantom — a passed vehicle's
+#: track parked on the sky — is never re-matched, so its age climbs to
+#: minutes and drops out regardless.
+DRAW_WINDOW_S = 8.0
+
+
+def _draw_window_s() -> float:
+    """The configured window, falling back to the default when settings
+    cannot be constructed (tests) or the value is junk."""
+    try:
+        from core.config import settings
+
+        v = float(getattr(settings, "detection_overlay_draw_window_s", DRAW_WINDOW_S))
+        return v if v > 0 else DRAW_WINDOW_S
+    except Exception:  # noqa: BLE001
+        return DRAW_WINDOW_S
+
+_dropped = 0
+
+
+def normalize_box(box: Any, frame_w: Any, frame_h: Any) -> list[float] | None:
+    """``[x1, y1, x2, y2]`` (pixels, or already 0..1) → ``[x, y, w, h]`` in
+    0..1, clamped. ``None`` when it cannot be made sense of.
+
+    Tier-0 boxes are pixels of the frame it ran on (bus.py ships
+    ``frame.w/h`` precisely so consumers can do this). A box whose every
+    coordinate is already ≤ 1 is taken as normalized — a producer that
+    normalized upstream must not be squashed into the corner by dividing
+    again.
+    """
+    try:
+        x1, y1, x2, y2 = (float(v) for v in box)
+    except (TypeError, ValueError):
+        return None
+    if not all(v == v for v in (x1, y1, x2, y2)):   # NaN
+        return None
+    if max(x1, y1, x2, y2) > 1.0:
+        try:
+            fw, fh = float(frame_w), float(frame_h)
+        except (TypeError, ValueError):
+            return None
+        if fw <= 0 or fh <= 0:
+            return None
+        x1, x2 = x1 / fw, x2 / fw
+        y1, y2 = y1 / fh, y2 / fh
+    x1, x2 = sorted((x1, x2))
+    y1, y2 = sorted((y1, y2))
+    clamp = lambda v: min(1.0, max(0.0, v))  # noqa: E731
+    x1, y1, x2, y2 = clamp(x1), clamp(y1), clamp(x2), clamp(y2)
+    w, h = x2 - x1, y2 - y1
+    if w <= 0 or h <= 0:
+        return None
+    return [round(x1, 4), round(y1, 4), round(w, 4), round(h, 4)]
+
+
+def track_is_drawable(t: dict[str, Any], window_s: float | None = None) -> bool:
+    """Should the live overlay draw this track right now?
+
+    The tracker keeps an unmatched track alive at its last box for up to
+    coast_ttl_seconds (five minutes) — right for visit continuity, wrong
+    to draw: on a moving scene every vehicle that passed left a phantom
+    on the sky. So `matched` (detected in THIS frame) is the first test.
+
+    It cannot be the only one. Tier-0 runs the detector on a per-frame
+    region BUDGET and round-robins re-verification across tracks (and
+    skips stationary ones on purpose), so a present object is matched
+    every few frames, not every frame — on a live probe 79% of track
+    instances were unmatched, including the car filling the screen.
+    "Matched this frame" alone made real objects blink or vanish. So:
+    a track that was looked for and missed is hidden at once
+    (`misses > 0`); one not looked for this frame is drawn while its
+    last match is recent (`since_match_s` within DRAW_WINDOW_S). A
+    phantom is never re-found, so its age climbs past the window and it
+    drops out — which is the original report, fixed without hiding
+    anything real.
+
+    Absent fields (an older producer) are read permissively — matched,
+    not coasting — so a bus without them keeps drawing rather than
+    going dark.
+    """
+    if t.get("matched") is not False:
+        return True
+    # Looked for it and did not find it: gone until re-found, whatever
+    # the age. (A confirmed track survives a few misses in the tracker
+    # for continuity; the overlay does not wait.)
+    try:
+        if int(t.get("misses", 0) or 0) > 0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    # Not looked for this frame (budget, or stationary skipping). Present
+    # if it was found recently; a phantom's age only ever grows.
+    age = t.get("since_match_s")
+    if age is None:
+        # Older producer: only `matched`/`stationary` to go on. A skipped
+        # stationary track with no misses is the one case that is safe.
+        return t.get("stationary") is True
+    try:
+        return float(age) <= (window_s if window_s is not None else _draw_window_s())
+    except (TypeError, ValueError):
+        return False
+
+
+def to_overlay_payload(
+    raw: dict[str, Any], *, min_score: float = DEFAULT_MIN_SCORE
+) -> dict[str, Any] | None:
+    """The browser-facing payload for one Tier-0 frame, or ``None`` when
+    nothing drawable survives. Pure, so it is testable without a bus."""
+    frame = raw.get("frame") or {}
+    fw, fh = frame.get("w"), frame.get("h")
+    tracks_out: list[dict[str, Any]] = []
+    for t in raw.get("tracks") or []:
+        if not isinstance(t, dict):
+            continue
+        if not track_is_drawable(t):
+            continue
+        try:
+            score = float(t.get("score", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if score < min_score:
+            continue
+        box = normalize_box(t.get("box"), fw, fh)
+        if box is None:
+            continue
+        tracks_out.append({
+            "id": t.get("id"),
+            "label": str(t.get("label") or "object"),
+            "score": round(score, 3),
+            "box": box,
+            "stationary": bool(t.get("stationary", False)),
+        })
+    if not tracks_out:
+        return None
+    return {
+        "schema": "opennvr.overlay.tracks.v1",
+        "seq": raw.get("seq"),
+        "wall_ts": raw.get("wall_ts"),
+        "calibrating": bool(raw.get("calibrating", False)),
+        "frame": {"w": fw, "h": fh},
+        "tracks": tracks_out,
+    }
+
+
+def _overlay_enabled() -> bool:
+    from core.config import settings
+
+    return bool(getattr(settings, "detection_overlay_enabled", True))
+
+
+async def _update_live_state(camera_id: int, raw: dict[str, Any]) -> None:
+    from services.live_state import claim_zones_refresh, get_live_state, load_zones
+
+    # Due-ness is a dict lookup, decided here on the loop; only the DB read
+    # itself (once per camera per TTL) is worth a worker-thread hop. Hopping
+    # for every frame cost a thread hand-off per detection at 5 fps per
+    # camera for a call that returned at once.
+    if claim_zones_refresh(camera_id):
+        await asyncio.to_thread(load_zones, camera_id)
+    live = get_live_state()
+    delta = live.update(camera_id, raw)
+    if delta["changed"] or delta["started"] or delta["ended"]:
+        from services.event_bus_service import publish_entity_state, publish_live_state
+
+        await publish_live_state(camera_id=camera_id, state=live.camera(camera_id),
+                                 started=delta["started"], ended=delta["ended"])
+        # The detection event entities (HA-114): camera-wide and per zone.
+        for s in delta["started"]:
+            attrs = {"track_id": s["track_id"], "zones": s["zones"]}
+            for key in [f"camera.{camera_id}.detections"] + [
+                    f"zone.{z}.detections" for z in s["zones"]]:
+                await publish_entity_state(
+                    key=key, camera_id=camera_id, required_scope="cameras.view",
+                    payload={"key": key, "event": {"type": s["label"], "attributes": attrs}})
+
+
+#: How often the sweeper drops live-state entries of cameras no longer in
+#: the database. A deleted camera simply stops sending frames, so nothing
+#: else would ever notice; one cheap id query a minute is the price of not
+#: growing a dict for the life of the process.
+PRUNE_EVERY_S = 60.0
+
+
+def _existing_camera_ids() -> set[int]:
+    """Ids of the cameras that still exist (soft-deleted ones excluded)."""
+    from core.database import SessionLocal
+    from models import Camera
+
+    with SessionLocal() as db:
+        return {cid for (cid,) in db.query(Camera.id).filter(Camera.deleted_at.is_(None)).all()}
+
+
+async def prune_live_state() -> list[int]:
+    """Forget cameras that were deleted since the last pass. Returns them."""
+    from services.live_state import get_live_state
+
+    ids = await asyncio.to_thread(_existing_camera_ids)
+    return get_live_state().retain(ids)
+
+
+async def run_live_state_sweeper(interval_s: float = 1.0,
+                                 prune_every_s: float = PRUNE_EVERY_S) -> None:
+    """Tier-0 sends no frame when nothing is detected, so a camera that goes
+    quiet is noticed here: its tracks end and its counts drop to zero. Every
+    ``prune_every_s`` it also evicts cameras that no longer exist."""
+    import time
+
+    from services.event_bus_service import publish_live_state
+    from services.live_state import get_live_state
+
+    live = get_live_state()
+    next_prune = time.monotonic() + prune_every_s
+    while True:
+        await asyncio.sleep(interval_s)
+        try:
+            for camera_id, ended in live.sweep():
+                await publish_live_state(camera_id=camera_id, state=live.camera(camera_id),
+                                         ended=ended)
+            if time.monotonic() >= next_prune:
+                next_prune = time.monotonic() + prune_every_s
+                await prune_live_state()
+        except Exception:  # noqa: BLE001 - the sweeper must outlive one bad pass
+            logger.warning("live-state sweep failed", exc_info=True)
+
+
+async def _handle_message(msg) -> None:
+    global _dropped
+    try:
+        raw = json.loads(msg.data)
+        if not isinstance(raw, dict):
+            raise ValueError("payload is not an object")
+        from services.camera_scope import camera_id_from_handle
+
+        camera_id = camera_id_from_handle(raw.get("camera_id"))
+        if camera_id is None:
+            # Also try the subject — opennvr.inference.tier0.<cam>.completed
+            parts = str(getattr(msg, "subject", "")).split(".")
+            camera_id = camera_id_from_handle(parts[3]) if len(parts) >= 5 else None
+        if camera_id is None:
+            raise ValueError(f"unmappable camera_id {raw.get('camera_id')!r}")
+        # Live state first, from the raw frame and whether or not the
+        # overlay is on: counts must not depend on what is being drawn.
+        await _update_live_state(camera_id, raw)
+        if not _overlay_enabled():
+            return
+        payload = to_overlay_payload(raw)
+        if payload is None:
+            return   # nothing drawable this frame; not an error
+        from services.event_bus_service import publish_tracks
+
+        await publish_tracks(camera_id=camera_id, payload=payload)
+    except Exception as exc:  # noqa: BLE001
+        _dropped += 1
+        if _dropped in (1, 10, 100) or _dropped % 1000 == 0:
+            logger.warning(
+                "tier0 track consumer: dropped payload #%d (%s)", _dropped, exc)
+
+
+def _app_may_draw(app_id: str, now: float | None = None) -> bool:
+    """installed_apps.overlay_enabled for ``app_id``, cached briefly. A
+    missing row, a DB error, or a blank id all answer False — an app
+    draws only when the operator demonstrably said so."""
+    import time as _time
+
+    key = str(app_id or "").strip().lower()
+    if not key:
+        return False
+    now = _time.monotonic() if now is None else now
+    hit = _app_allow_cache.get(key)
+    if hit and now - hit[0] < _APP_ALLOW_TTL_S:
+        return hit[1]
+    allowed = False
+    try:
+        from core.database import SessionLocal
+        from models import InstalledApp
+
+        db = SessionLocal()
+        try:
+            row = db.query(InstalledApp.overlay_enabled, InstalledApp.enabled).filter(
+                InstalledApp.id == key).first()
+            allowed = bool(row and row[0] and row[1])
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001
+        logger.debug("overlay: could not read overlay_enabled for %s", key,
+                     exc_info=True)
+        allowed = False
+    _app_allow_cache[key] = (now, allowed)
+    return allowed
+
+
+def _app_picked_cameras(app_id: str, now: float | None = None) -> frozenset[int]:
+    """Camera ids picked for ``app_id``, cached briefly. An app may draw
+    only on its own cameras — the boxes are its view of the cameras it
+    works on, and a camera it never picked is not one of them. A DB error
+    answers "none", like the permission check above: a camera is drawn on
+    only when the operator demonstrably picked it."""
+    import time as _time
+
+    key = str(app_id or "").strip()
+    if not key:
+        return frozenset()
+    now = _time.monotonic() if now is None else now
+    hit = _app_picks_cache.get(key)
+    if hit and now - hit[0] < _APP_ALLOW_TTL_S:
+        return hit[1]
+    picked: frozenset[int] = frozenset()
+    try:
+        from core.database import SessionLocal
+        from services.skill_assignments import picked_camera_ids
+
+        db = SessionLocal()
+        try:
+            picked = frozenset(picked_camera_ids(db, key))
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001
+        logger.debug("overlay: could not read camera picks for %s", key, exc_info=True)
+    _app_picks_cache[key] = (now, picked)
+    return picked
+
+
+def _invalidate_app_allow_cache() -> None:
+    _app_allow_cache.clear()
+    _app_picks_cache.clear()
+
+
+def _xywh_to_xyxy(box: Any) -> list[float] | None:
+    """``[x, y, w, h]`` → ``[x1, y1, x2, y2]`` in the same units; None if
+    it is not four numbers. Width/height ≤ 0 stays and is rejected by
+    normalize_box as zero-area."""
+    try:
+        x, y, w, h = (float(v) for v in box)
+    except (TypeError, ValueError):
+        return None
+    return [x, y, x + w, y + h]
+
+
+async def _handle_app_message(msg) -> None:
+    """An app's overlay.boxes.v1 envelope → the same `tracks` event the
+    Tier-0 path emits, tagged with its source, if the operator allowed
+    that app to draw. Boxes arrive already normalized per the contract;
+    normalize_box still runs so a pixel-space slip is caught, not drawn."""
+    global _dropped
+    try:
+        env = json.loads(msg.data)
+        if not isinstance(env, dict):
+            raise ValueError("envelope is not an object")
+        payload = env.get("payload") if isinstance(env.get("payload"), dict) else env
+        app_id = str(env.get("producer") or payload.get("app_id") or "").strip()
+        # Producer id may arrive as "app:<id>" from the SDK envelope.
+        if app_id.startswith("app:"):
+            app_id = app_id[4:]
+        if not _app_may_draw(app_id):
+            return
+        from services.camera_scope import camera_id_from_handle
+
+        camera_id = camera_id_from_handle(env.get("camera_id") or payload.get("camera_id"))
+        if camera_id is None:
+            parts = str(getattr(msg, "subject", "")).split(".")
+            camera_id = camera_id_from_handle(parts[-1]) if parts else None
+        if camera_id is None:
+            raise ValueError("unmappable camera_id")
+        if camera_id not in _app_picked_cameras(app_id):
+            # Not a camera picked for this app: it has no business drawing
+            # on it, whatever it publishes.
+            return
+        raw = {"frame": payload.get("frame") or {},
+               "calibrating": False,
+               "seq": payload.get("seq"), "wall_ts": env.get("ts") or payload.get("wall_ts"),
+               # The app contract is [x, y, w, h]; Tier-0's is [x1, y1, x2, y2]
+               # and normalize_box speaks the latter. Convert here — feeding
+               # xywh straight in silently produced boxes of the wrong size.
+               "tracks": [{"id": b.get("id"), "label": b.get("label"),
+                           "score": b.get("score", 1.0),
+                           "box": _xywh_to_xyxy(b.get("box"))}
+                          for b in (payload.get("boxes") or []) if isinstance(b, dict)]}
+        out = to_overlay_payload(raw, min_score=0.0)
+        if out is None:
+            return
+        out["source"] = f"app:{app_id}"
+        from services.event_bus_service import publish_tracks
+
+        await publish_tracks(camera_id=camera_id, payload=out, task="overlay")
+    except Exception as exc:  # noqa: BLE001
+        _dropped += 1
+        if _dropped in (1, 10, 100) or _dropped % 1000 == 0:
+            logger.warning("overlay consumer: dropped app payload #%d (%s)", _dropped, exc)
+
+
+async def run_consumer_loop() -> None:
+    """Subscribe to Tier-0 completions for the process lifetime. Returns
+    immediately when no NATS URL is configured; retries slowly otherwise."""
+    from core.config import settings
+
+    if not _overlay_enabled():
+        # Unchanged from before HA-110: off means no track data reaches ANY
+        # consumer, which now includes live counts (HA-110) and the entity
+        # states built on them. An operator who switched this off for
+        # privacy or load gets exactly that.
+        logger.info("detection overlay disabled by DETECTION_OVERLAY_ENABLED "
+                    "— no track data will reach any consumer (no live counts)")
+        return
+    url = (getattr(settings, "nats_url", "") or "").strip()
+    if not url:
+        logger.info("tier0 track consumer disabled (no NATS_URL) — "
+                    "no live detection overlay")
+        return
+    try:
+        import nats
+    except ImportError:
+        logger.warning("tier0 track consumer disabled: nats-py not installed")
+        return
+
+    token = (getattr(settings, "internal_api_key", "") or "").strip() or None
+
+    while True:
+        client = sub = app_sub = None
+        try:
+            client = await nats.connect(url, connect_timeout=5, token=token)
+            sub = await client.subscribe(SUBJECT, cb=_handle_message)
+            app_sub = await client.subscribe(APP_SUBJECT, cb=_handle_app_message)
+            logger.info("tier0 track consumer subscribed to %s and %s",
+                        SUBJECT, APP_SUBJECT)
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await _teardown(app_sub, None)
+            await _teardown(sub, client)
+            raise
+        except Exception as exc:  # noqa: BLE001
+            await _teardown(app_sub, None)
+            await _teardown(sub, client)
+            logger.warning(
+                "tier0 track consumer: connect/subscribe failed (%s); "
+                "retrying in %.0fs", exc, _RETRY_SECONDS)
+            await asyncio.sleep(_RETRY_SECONDS)
+
+
+async def _teardown(sub, client) -> None:
+    try:
+        if sub is not None:
+            await sub.unsubscribe()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        if client is not None:
+            await client.drain()
+    except Exception:  # noqa: BLE001
+        pass

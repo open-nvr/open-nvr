@@ -18,7 +18,10 @@
 
 import { useEffect, useState } from 'react'
 import { apiService } from '../lib/apiService'
-import { Play, Square, Server, Plus, Trash2, AlertCircle, CheckCircle, Loader2, Info, X, Shield, Pencil } from 'lucide-react'
+import { useTranslation } from '../i18n'
+import { Play, Square, Server, Plus, Trash2, AlertCircle, CheckCircle, Loader2, Info, Shield, Pencil } from 'lucide-react'
+import { useConfirm } from '../components/ui/ConfirmDialog'
+import { Modal } from '../components/Modal'
 
 type CloudSettings = {
   streaming: {
@@ -81,6 +84,8 @@ const DEFAULT_CLOUD: CloudSettings = {
 }
 
 export function Cloud() {
+  const { t } = useTranslation()
+  const confirm = useConfirm()
   const [activeTab, setActiveTab] = useState<'streaming' | 's3'>('streaming')
   const [cfg, setCfg] = useState<CloudSettings>(DEFAULT_CLOUD)
   const [loading, setLoading] = useState(true)
@@ -191,7 +196,7 @@ export function Cloud() {
   }
 
   async function deleteStreamTarget(targetId: string) {
-    if (!confirm('Delete this stream target?')) return
+    if (!(await confirm({ title: 'Delete this stream target?', danger: true }))) return
     try {
       setLoading(true)
       await apiService.deleteStreamTarget(targetId)
@@ -290,20 +295,15 @@ export function Cloud() {
     <section className="space-y-4">
       {/* Info Dialog */}
       {showInfo && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-[var(--panel)] border border-neutral-700 p-6 max-w-lg w-full mx-4">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold flex items-center gap-2">
-                <Info size={20} className="text-[var(--accent)]" />
-                About Cloud Streaming
-              </h3>
-              <button onClick={() => setShowInfo(false)} className="text-[var(--text-dim)] hover:text-[var(--text)]">
-                <X size={20} />
-              </button>
-            </div>
+        <Modal
+          open
+          title={<><Info size={18} className="text-[var(--accent)]" /> About Cloud Streaming</>}
+          onClose={() => setShowInfo(false)}
+          widthClassName="w-[calc(100vw-2rem)] max-w-lg"
+        >
             <div className="space-y-4 text-sm">
               <div>
-                <h4 className="font-medium text-[var(--text)] mb-1">What is Cloud Streaming?</h4>
+                <h4 className="font-medium text-[var(--text)] mb-1">{t('cloud.whatIs')}</h4>
                 <p className="text-[var(--text-dim)]">
                   Push camera streams to your own streaming servers for real-time viewing 
                   on mobile apps, web dashboards, or other locations.
@@ -336,21 +336,24 @@ export function Cloud() {
             </div>
             <div className="mt-6 flex justify-end">
               <button onClick={() => setShowInfo(false)} className="px-4 py-2 bg-[var(--accent)] text-white">
-                Got it
+                {t('cloud.gotIt')}
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
 
       {/* Add/Edit Stream Target Dialog */}
       {showAddDialog && editingTarget && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-[var(--panel)] border border-neutral-700 p-6 max-w-md w-full mx-4">
-            <h3 className="text-lg font-semibold mb-4">{editingTarget.is_edit ? 'Edit Stream Target' : 'Configure Stream Target'}</h3>
+        <Modal
+          open
+          title={editingTarget.is_edit ? 'Edit Stream Target' : 'Configure Stream Target'}
+          onClose={() => { setShowAddDialog(false); setEditingTarget(null) }}
+          widthClassName="w-[calc(100vw-2rem)] max-w-md"
+          closeOnBackdrop={false}
+        >
             <div className="space-y-4">
               <label className="flex flex-col gap-1">
-                <span className="text-[var(--text-dim)] text-sm">Camera</span>
+                <span className="text-[var(--text-dim)] text-sm">{t('cloud.camera')}</span>
                 <select 
                   className="select" 
                   value={editingTarget.camera_id}
@@ -363,7 +366,7 @@ export function Cloud() {
               </label>
 
               <label className="flex flex-col gap-1">
-                <span className="text-[var(--text-dim)] text-sm">Protocol</span>
+                <span className="text-[var(--text-dim)] text-sm">{t('cloud.protocol')}</span>
                 <select 
                   className="select" 
                   value={editingTarget.protocol}
@@ -376,7 +379,7 @@ export function Cloud() {
               </label>
 
               <label className="flex flex-col gap-1">
-                <span className="text-[var(--text-dim)] text-sm">Server URL</span>
+                <span className="text-[var(--text-dim)] text-sm">{t('cloud.serverUrl')}</span>
                 <input 
                   className="input" 
                   value={editingTarget.server_url}
@@ -443,7 +446,7 @@ export function Cloud() {
 
             <div className="flex justify-end gap-2 mt-6">
               <button 
-                className="px-4 py-2 border border-neutral-600 text-[var(--text-dim)]"
+                className="px-4 py-2 border border-[var(--border)] text-[var(--text-dim)]"
                 onClick={() => { setShowAddDialog(false); setEditingTarget(null) }}
               >
                 Cancel
@@ -456,8 +459,7 @@ export function Cloud() {
                 {loading ? <Loader2 className="animate-spin" size={16} /> : 'Save'}
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
 
       {/* Header */}
@@ -475,29 +477,29 @@ export function Cloud() {
       </div>
 
       {notice && (
-        <div className="p-2 bg-green-500/10 border border-green-500/30 text-green-300 text-sm flex items-center gap-2">
+        <div className="p-2 bg-[color-mix(in_oklab,var(--ok)_14%,transparent)] border border-[color-mix(in_oklab,var(--ok)_45%,var(--border))] text-[var(--ok)] text-sm flex items-center gap-2">
           <CheckCircle size={16} /> {notice}
         </div>
       )}
       {error && (
-        <div className="p-2 bg-red-500/10 border border-red-500/30 text-red-300 text-sm flex items-center gap-2">
+        <div className="p-2 bg-[color-mix(in_oklab,var(--danger)_14%,transparent)] border border-[color-mix(in_oklab,var(--danger)_45%,var(--border))] text-[var(--danger)] text-sm flex items-center gap-2">
           <AlertCircle size={16} /> {error}
         </div>
       )}
 
       {/* Tabs */}
-      <div className="flex border-b border-neutral-700">
+      <div className="flex border-b border-[var(--border)]">
         <button
           className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px ${activeTab === 'streaming' ? 'border-[var(--accent)] text-[var(--accent)]' : 'border-transparent text-[var(--text-dim)]'}`}
           onClick={() => setActiveTab('streaming')}
         >
-          Stream to Server
+          {t('cloud.streamToServer')}
         </button>
         <button
           className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px ${activeTab === 's3' ? 'border-[var(--accent)] text-[var(--accent)]' : 'border-transparent text-[var(--text-dim)]'}`}
           onClick={() => setActiveTab('s3')}
         >
-          Cloud Recording Server
+          {t('cloud.recordingServer')}
         </button>
       </div>
 
@@ -513,7 +515,7 @@ export function Cloud() {
               onClick={openAddDialog}
               disabled={cameras.length === 0}
             >
-              <Plus size={16} /> Add Stream
+              <Plus size={16} /> {t('cloud.addStream')}
             </button>
           </div>
 
@@ -528,7 +530,7 @@ export function Cloud() {
           ) : (
             <div className="space-y-2">
               {streamTargets.map(target => (
-                <div key={target.target_id} className="bg-[var(--panel-2)] border border-neutral-700 p-4">
+                <div key={target.target_id} className="bg-[var(--panel-2)] border border-[var(--border)] p-4">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3">
                       <Server size={20} className="text-[var(--accent)]" />
@@ -536,7 +538,7 @@ export function Cloud() {
                         <div className="font-medium">{getCameraName(target)}</div>
                         <div className="text-sm text-[var(--text-dim)]">
                           {target.protocol.toUpperCase()} • {target.server_url}
-                          {target.use_custom_ca && <span className="ml-2 text-xs text-amber-400">(BYOK CA)</span>}
+                          {target.use_custom_ca && <span className="ml-2 text-xs text-[var(--warn)]">(BYOK CA)</span>}
                         </div>
                       </div>
                     </div>
@@ -544,10 +546,10 @@ export function Cloud() {
                       {/* Status indicator */}
                       <span className={`px-2 py-1 text-xs ${
                         target.running 
-                          ? 'bg-green-500/20 text-green-400 border border-green-500/30' 
+                          ? 'bg-[color-mix(in_oklab,var(--ok)_14%,transparent)] text-[var(--ok)] border border-[color-mix(in_oklab,var(--ok)_45%,var(--border))]' 
                           : target.status === 'error'
-                          ? 'bg-red-500/20 text-red-400 border border-red-500/30'
-                          : 'bg-neutral-500/20 text-neutral-400 border border-neutral-500/30'
+                          ? 'bg-[color-mix(in_oklab,var(--danger)_14%,transparent)] text-[var(--danger)] border border-[color-mix(in_oklab,var(--danger)_45%,var(--border))]'
+                          : 'bg-[var(--badge-neutral-bg)] text-[var(--text-dim)] border border-[var(--border)]'
                       }`}>
                         {target.running ? 'Streaming' : target.status || 'stopped'}
                       </span>
@@ -555,7 +557,7 @@ export function Cloud() {
                       {/* Control buttons */}
                       {target.running ? (
                         <button
-                          className="p-2 bg-red-500/20 text-red-400 hover:bg-red-500/30"
+                          className="p-2 bg-[color-mix(in_oklab,var(--danger)_14%,transparent)] text-[var(--danger)] hover:bg-[color-mix(in_oklab,var(--danger)_14%,transparent)]"
                           onClick={() => stopStream(target.target_id)}
                           title="Stop Stream"
                         >
@@ -563,7 +565,7 @@ export function Cloud() {
                         </button>
                       ) : (
                         <button
-                          className="p-2 bg-green-500/20 text-green-400 hover:bg-green-500/30"
+                          className="p-2 bg-[color-mix(in_oklab,var(--ok)_14%,transparent)] text-[var(--ok)] hover:bg-[color-mix(in_oklab,var(--ok)_14%,transparent)]"
                           onClick={() => startStream(target.target_id)}
                           title="Start Stream"
                         >
@@ -572,7 +574,7 @@ export function Cloud() {
                       )}
 
                       <button
-                        className="p-2 bg-[var(--panel)] border border-neutral-700 text-[var(--text-dim)] hover:text-[var(--text)] hover:border-neutral-600"
+                        className="p-2 bg-[var(--panel)] border border-[var(--border)] text-[var(--text-dim)] hover:text-[var(--text)] hover:border-[var(--border)]"
                         onClick={() => openEditDialog(target)}
                         title="Edit"
                         disabled={loading}
@@ -581,7 +583,7 @@ export function Cloud() {
                       </button>
 
                       <button
-                        className="p-2 bg-red-500/10 text-red-400 hover:bg-red-500/20"
+                        className="p-2 bg-[color-mix(in_oklab,var(--danger)_14%,transparent)] text-[var(--danger)] hover:bg-[color-mix(in_oklab,var(--danger)_14%,transparent)]"
                         onClick={() => deleteStreamTarget(target.target_id)}
                         title="Delete"
                       >
@@ -605,7 +607,7 @@ export function Cloud() {
             </button>
           </div>
 
-          <div className="bg-[var(--panel-2)] border border-neutral-700 p-4 space-y-4">
+          <div className="bg-[var(--panel-2)] border border-[var(--border)] p-4 space-y-4">
             <div className="font-medium">Cloud Recording Server</div>
             <p className="text-sm text-[var(--text-dim)]">
               Upload recordings to your cloud recording endpoint (AWS S3, MinIO, DigitalOcean Spaces, or other S3-compatible storage).

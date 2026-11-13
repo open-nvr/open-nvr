@@ -1,0 +1,32 @@
+[project]
+name = "opennvr-example-ppe-check"
+version = "1.0.0"
+description = "OpenNVR ppe-check example app (Tier-0 subscriber: a person missing required safety kit, judged from the best crop by open-vocabulary detection through KAI-C)"
+requires-python = ">=3.11"
+license = { text = "AGPL-3.0" }
+dependencies = [
+    "opennvr-app-sdk",
+]
+
+[tool.uv.sources]
+opennvr-app-sdk = { path = "../../sdk/opennvr-app-sdk", editable = true }
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+ppe-check = "ppe_check:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"

@@ -19,6 +19,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import { api, setAuthToken as apiSetToken, setDeviceToken } from '../lib/api'
 import { apiService } from '../lib/apiService'
+import { stopAllSessions } from '../lib/webcamSessions'
 
 type User = {
   id: number
@@ -27,6 +28,7 @@ type User = {
   role_id: number
   is_superuser: boolean
   mfa_enabled: boolean
+  auth_provider?: string | null
 }
 
 type AuthState = {
@@ -35,10 +37,15 @@ type AuthState = {
   loading: boolean
   error: string | null
   setupRequired: boolean
+  // The pending admin account's username (DEFAULT_ADMIN_USERNAME), from
+  // check-setup. The setup form must submit this name, not assume 'admin'.
+  setupUsername: string | null
 }
 
 type AuthContextType = AuthState & {
   login: (username: string, password: string, code?: string) => Promise<void>
+  // A session issued elsewhere (single sign-on): store the pair and load the user.
+  loginWithTokens: (data: { access_token: string; refresh_token: string; device_token?: string | null }) => Promise<void>
   logout: () => void
   register: (username: string, email: string, password: string) => Promise<void>
   refreshUser: () => Promise<void>
@@ -72,7 +79,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<AuthState>(() => {
     const saved = localStorage.getItem(TOKEN_KEY)
     if (saved) apiSetToken(saved)
-    return { user: null, token: saved, loading: true, error: null, setupRequired: false }
+    return { user: null, token: saved, loading: true, error: null, setupRequired: false, setupUsername: null }
   })
 
   // Bootstrap: check-setup and /me used to run serially, blanking the app for
@@ -86,7 +93,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       ])
 
       if (setupRes.status === 'fulfilled' && setupRes.value.data.setup_required) {
-        setState((s) => ({ ...s, setupRequired: true, loading: false }))
+        setState((s) => ({ ...s, setupRequired: true, setupUsername: setupRes.value.data.username ?? null, loading: false }))
         return
       }
 
@@ -110,6 +117,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setState((s) => ({ ...s, token }))
   }, [])
 
+  const loginWithTokens = useCallback(async (data: { access_token: string; refresh_token: string; device_token?: string | null }) => {
+    setState((s) => ({ ...s, loading: true, error: null }))
+    try {
+      setDeviceToken(data.device_token)
+      setToken(data.access_token, data.refresh_token)
+      const me = await apiService.me()
+      setState({ user: me.data, token: data.access_token, loading: false, error: null, setupRequired: false, setupUsername: null })
+    } catch (e: any) {
+      setToken(null, null)
+      setState((s) => ({ ...s, loading: false, error: e?.data?.detail || e?.message || 'Sign-in failed' }))
+      throw e
+    }
+  }, [setToken])
+
   const login = useCallback(async (username: string, password: string, code?: string) => {
     setState((s) => ({ ...s, loading: true, error: null }))
     try {
@@ -122,7 +143,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setDeviceToken(data.device_token)
       setToken(token, refreshToken)
       const me = await apiService.me()
-      setState({ user: me.data, token, loading: false, error: null, setupRequired: false })
+      setState({ user: me.data, token, loading: false, error: null, setupRequired: false, setupUsername: null })
     } catch (e: any) {
       const payload = getErrorPayload(e)
       const detail = payload?.message || e?.data?.detail || ''
@@ -173,8 +194,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [login])
 
   const logout = useCallback(() => {
+    // A webcam this tab is publishing stops with the session that started it.
+    stopAllSessions()
     setToken(null, null)
-    setState({ user: null, token: null, loading: false, error: null, setupRequired: false })
+    setState({ user: null, token: null, loading: false, error: null, setupRequired: false, setupUsername: null })
   }, [setToken])
 
   const refreshUser = useCallback(async () => {
@@ -191,14 +214,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const checkSetupStatus = useCallback(async () => {
     try {
       const { data } = await apiService.checkSetup()
-      setState((s) => ({ ...s, setupRequired: data.setup_required }))
+      setState((s) => ({ ...s, setupRequired: data.setup_required, setupUsername: data.username ?? null }))
       return data.setup_required
     } catch (e) {
       return false
     }
   }, [])
 
-  const value = useMemo<AuthContextType>(() => ({ ...state, login, logout, register, refreshUser, checkSetupStatus }), [state, login, logout, register, refreshUser, checkSetupStatus])
+  const value = useMemo<AuthContextType>(() => ({ ...state, login, loginWithTokens, logout, register, refreshUser, checkSetupStatus }), [state, login, loginWithTokens, logout, register, refreshUser, checkSetupStatus])
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }

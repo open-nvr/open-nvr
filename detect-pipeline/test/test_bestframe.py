@@ -171,3 +171,97 @@ def test_explicit_global_cap_is_still_honoured():
             clk.t += 1
             s.put(f"cam{cam}", f"t{t}", [f"{cam}-{t}"])
     assert len(s) <= 10
+
+
+# ── scene encoding (needs cv2 + numpy; the store above does not) ─────
+
+
+def _noise(h, w):
+    import numpy as np
+    rng = np.random.default_rng(7)
+    return rng.integers(0, 255, (h, w, 3), dtype=np.uint8)
+
+
+def _decoded_shape(jpeg: bytes):
+    import cv2
+    import numpy as np
+    img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+    return img.shape[:2]
+
+
+def test_encode_scene_downscales_the_long_edge():
+    """The scene is context, not the record: 1280px is already 2x the dialog
+    it is shown in, and it keeps the file well under core's 2 MiB cap."""
+    from detect_pipeline.bestframe import encode_scene_jpeg
+
+    jpeg = encode_scene_jpeg(_noise(1080, 1920), max_px=1280)
+    assert _decoded_shape(jpeg) == (720, 1280)
+
+
+def test_encode_scene_never_upscales():
+    """A 640x360 substream frame is stored as-is rather than interpolated
+    into a bigger lie about how much detail the camera gave us."""
+    from detect_pipeline.bestframe import encode_scene_jpeg
+
+    jpeg = encode_scene_jpeg(_noise(360, 640), max_px=1280)
+    assert _decoded_shape(jpeg) == (360, 640)
+
+
+def test_encode_scene_stays_under_the_core_evidence_cap():
+    """The worker clamps the knobs to 1920px / q95, and that is NOT enough on
+    its own: noise at the ceiling measures 2.4 MB, over core's 2 MiB cap. The
+    encoder must degrade quality until it fits, because a rejected scene is
+    one the operator never sees."""
+    from detect_pipeline.bestframe import encode_scene_jpeg
+
+    jpeg = encode_scene_jpeg(_noise(1080, 1920), max_px=1920, quality=95)
+    assert len(jpeg) < 2 * 1024 * 1024, f"{len(jpeg)} bytes at the clamp ceiling"
+
+
+# ── LatestFrameStore: the newest decoded frame, on demand ─────────────
+
+from detect_pipeline.bestframe import LatestFrameStore
+
+
+class _Frame:
+    def __init__(self, seq, data=b"yuv"):
+        self.seq, self.data, self.width, self.height = seq, data, 4, 2
+
+
+def _latest():
+    calls = {"bgr": 0, "enc": 0}
+
+    def to_bgr(data, w, h):
+        calls["bgr"] += 1
+        return ("bgr", data)
+
+    def enc(img, q):
+        calls["enc"] += 1
+        return b"JPEG:" + img[1]
+    clk = _Clock()
+    return LatestFrameStore(_clock=clk, _to_bgr=to_bgr, _encode=enc), clk, calls
+
+
+def test_latest_frame_is_encoded_once_and_reports_its_age():
+    s, clk, calls = _latest()
+    s.put("cam1", _Frame(1, b"a"))
+    assert calls["enc"] == 0                     # put is a reference, no work
+    clk.t = 0.5
+    jpeg, age = s.jpeg("cam1")
+    assert jpeg == b"JPEG:a" and age == 0.5 and calls["enc"] == 1
+    jpeg2, _ = s.jpeg("cam1")
+    assert jpeg2 == b"JPEG:a" and calls["enc"] == 1   # cached by frame
+
+
+def test_latest_frame_follows_the_newest_put_and_goes_stale():
+    s, clk, calls = _latest()
+    s.put("cam1", _Frame(1, b"a"))
+    s.put("cam1", _Frame(2, b"b"))
+    assert s.jpeg("cam1")[0] == b"JPEG:b" and calls["enc"] == 1
+    clk.t = 10.0
+    assert s.jpeg("cam1") is None                # older than max_age: the caller falls back
+    assert s.jpeg("cam1", max_age_s=60) is not None
+    assert s.jpeg("cam2") is None                # never seen
+    s.drop("cam1")
+    assert s.jpeg("cam1", max_age_s=60) is None
+

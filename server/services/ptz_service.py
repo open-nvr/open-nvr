@@ -27,6 +27,9 @@ from core.logging_config import camera_logger
 from services.onvif_digest_service import (
     fetch_profiles_digest,
     ptz_continuous_move_digest,
+    ptz_get_presets_digest,
+    ptz_goto_preset_digest,
+    ptz_set_preset_digest,
     ptz_stop_digest,
     resolve_control_endpoint,
 )
@@ -159,6 +162,66 @@ class PTZService:
                     f"PTZ: Retry failed for camera {camera_id}: {final_e}"
                 )
                 raise HTTPException(status_code=500, detail=f"PTZ failed: {final_e}")
+
+    @staticmethod
+    async def _run(
+        camera_id: int, ip: str, username: str, password: str, camera_port: int, op,
+    ):
+        """Run ``op(config)`` against the cached ONVIF config, re-resolving
+        it once if the cached one fails (credentials or port changed). An
+        HTTPException the camera answered with (e.g. 422 for a bad preset
+        token) is not a config problem and is raised as-is."""
+        config = PTZService._get_cached_config(camera_id)
+        if not config:
+            config = await PTZService._find_working_config(ip, username, password, camera_port)
+            PTZService._update_cache(camera_id, config)
+        try:
+            return await op(config)
+        except HTTPException as e:
+            if e.status_code == 422:
+                raise
+            first_error: Exception = e
+        except Exception as e:  # noqa: BLE001 - retried below
+            first_error = e
+        camera_logger.warning(
+            f"PTZ: Cached config failed for camera {camera_id}: {first_error}. Retrying scan."
+        )
+        PTZService._invalidate_cache(camera_id)
+        config = await PTZService._find_working_config(ip, username, password, camera_port)
+        PTZService._update_cache(camera_id, config)
+        return await op(config)
+
+    @staticmethod
+    async def presets(
+        camera_id: int, ip: str, username: str, password: str, camera_port: int
+    ) -> list[dict[str, str]]:
+        async def op(cfg):
+            return await ptz_get_presets_digest(
+                ip, username, password, cfg["profile_token"], cfg["port"],
+                cfg.get("scheme", "http"))
+        return await PTZService._run(camera_id, ip, username, password, camera_port, op)
+
+    @staticmethod
+    async def goto_preset(
+        camera_id: int, ip: str, username: str, password: str, camera_port: int,
+        preset_token: str,
+    ) -> dict[str, Any]:
+        async def op(cfg):
+            return await ptz_goto_preset_digest(
+                ip, username, password, cfg["profile_token"], preset_token,
+                cfg["port"], cfg.get("scheme", "http"))
+        return await PTZService._run(camera_id, ip, username, password, camera_port, op)
+
+    @staticmethod
+    async def set_preset(
+        camera_id: int, ip: str, username: str, password: str, camera_port: int,
+        name: str, preset_token: str | None = None,
+    ) -> dict[str, Any]:
+        async def op(cfg):
+            return await ptz_set_preset_digest(
+                ip, username, password, cfg["profile_token"], name, preset_token,
+                cfg["port"], cfg.get("scheme", "http"))
+        return await PTZService._run(camera_id, ip, username, password, camera_port, op)
 
     @staticmethod
     async def stop(

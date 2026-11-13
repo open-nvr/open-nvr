@@ -23,6 +23,7 @@ from core.auth import get_current_superuser
 from core.database import get_db
 from models import Integration
 from schemas import IntegrationCreate, IntegrationRead, IntegrationUpdate
+from core.sealed_json import merge_masked, redact
 from services.integration_service import IntegrationService
 
 router = APIRouter(
@@ -34,12 +35,56 @@ router = APIRouter(
 logger = logging.getLogger(__name__)
 
 
+def _is_mqtt(value) -> bool:
+    return str(getattr(value, "value", value)) == "mqtt"
+
+
+def _public(row: Integration) -> IntegrationRead:
+    """The row as the API shows it: secrets masked. The stored value
+    never leaves the server; the edit form echoes the mask back and the
+    update keeps what is stored (merge_masked)."""
+    return IntegrationRead.model_validate(row).model_copy(
+        update={"config": redact(row.config)})
+
+
+def _check_mqtt(db: Session, config: dict | None) -> None:
+    """422 for an MQTT config that can't work: a bad broker URL or prefix,
+    or Home Assistant discovery without a live API token to act as."""
+    from models import ApiToken
+    from services.mqtt_settings import MqttSettings
+
+    try:
+        settings = MqttSettings.from_config(config)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if settings.api_token_id is not None:
+        row = db.query(ApiToken).filter(ApiToken.id == settings.api_token_id,
+                                        ApiToken.parent_id.is_(None)).first()
+        if row is None or row.revoked_at is not None:
+            raise HTTPException(status_code=422, detail="api_token_id: no such live API token")
+        if row.allowed_cidrs:
+            raise HTTPException(
+                status_code=422,
+                detail="api_token_id: this token is limited to certain addresses, and MQTT "
+                       "commands arrive from the broker, not an address. Use a token "
+                       "without address restrictions, made for MQTT.")
+
+
+def _reload_mqtt() -> None:
+    """Restart the MQTT bridges in the background (never blocks the reply)."""
+    from core.background_tasks import spawn_background
+    from services.ha_mqtt_discovery import manager
+
+    spawn_background(manager.reload(), name="mqtt-bridges-reload")
+
+
+
 @router.get("", response_model=list[IntegrationRead])
 async def get_integrations(
     skip: int = 0, limit: int = 100, db: Session = Depends(get_db)
 ):
     """List all configured integrations."""
-    return db.query(Integration).offset(skip).limit(limit).all()
+    return [_public(r) for r in db.query(Integration).offset(skip).limit(limit).all()]
 
 
 @router.post("", response_model=IntegrationRead)
@@ -47,6 +92,8 @@ async def create_integration(
     integration: IntegrationCreate, db: Session = Depends(get_db)
 ):
     """Create a new integration."""
+    if _is_mqtt(integration.type):
+        _check_mqtt(db, integration.config)
     db_integration = Integration(
         name=integration.name,
         type=integration.type,
@@ -56,7 +103,9 @@ async def create_integration(
     db.add(db_integration)
     db.commit()
     db.refresh(db_integration)
-    return db_integration
+    if _is_mqtt(db_integration.type):
+        _reload_mqtt()
+    return _public(db_integration)
 
 
 @router.get("/{integration_id}", response_model=IntegrationRead)
@@ -67,7 +116,7 @@ async def get_integration(integration_id: int, db: Session = Depends(get_db)):
     )
     if not db_integration:
         raise HTTPException(status_code=404, detail="Integration not found")
-    return db_integration
+    return _public(db_integration)
 
 
 @router.put("/{integration_id}", response_model=IntegrationRead)
@@ -86,15 +135,17 @@ async def update_integration(
     if integration.enabled is not None:
         db_integration.enabled = integration.enabled
     if integration.config is not None:
-        # Deep merge or replace? For simplicity, we assume full config replacement or careful partial update by client.
-        # But we'll just replace the whole dict usually.
-        # If we really want to merge, we need to implement it.
-        # Here we substitute.
-        db_integration.config = integration.config
-
+        # Full replacement of the config — except a secret sent back as the
+        # mask the API showed, which keeps the stored value.
+        new_config = merge_masked(db_integration.config, integration.config)
+        if _is_mqtt(db_integration.type):
+            _check_mqtt(db, new_config)
+        db_integration.config = new_config
     db.commit()
     db.refresh(db_integration)
-    return db_integration
+    if _is_mqtt(db_integration.type):
+        _reload_mqtt()
+    return _public(db_integration)
 
 
 @router.delete("/{integration_id}")
@@ -106,8 +157,11 @@ async def delete_integration(integration_id: int, db: Session = Depends(get_db))
     if not db_integration:
         raise HTTPException(status_code=404, detail="Integration not found")
 
+    was_mqtt = _is_mqtt(db_integration.type)
     db.delete(db_integration)
     db.commit()
+    if was_mqtt:
+        _reload_mqtt()
     return {"status": "ok"}
 
 

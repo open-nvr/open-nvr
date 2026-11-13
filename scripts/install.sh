@@ -289,8 +289,13 @@ prepare_environment() {
         [[ -f .env.example ]] || die ".env.example is missing"
         cp .env.example .env
         ok "Created .env from .env.example"
+        # Everything in .env right now is the example file's default, not
+        # an answer the operator gave. Prompts that "keep the current
+        # value" must know the difference (configure_enrichment_flags).
+        FRESH_ENV=true
     else
         ok "Using existing .env; existing values will be preserved"
+        FRESH_ENV=false
     fi
 
     # Secrets — generated automatically. Never prompted unless the value is
@@ -338,6 +343,36 @@ find_example_compose() {
         [[ -f "$candidate" ]] && { printf '%s' "$candidate"; return 0; }
     done
     return 1
+}
+
+# The App Catalog as the installer sees it: one "id<TAB>name<TAB>summary"
+# line per server/config/apps_index.yml entry whose id is a service in
+# docker-compose.apps.yml -- the same "installable by construction" rule
+# scripts/validate_apps_index.py enforces for the catalog UI. awk, not
+# python or yq: the installer runs before anything is installed.
+catalog_apps() {
+    local index="server/config/apps_index.yml" overlay="docker-compose.apps.yml"
+    [[ -f "$index" && -f "$overlay" ]] || return 0
+    awk -v overlay="$overlay" '
+        BEGIN {
+            while ((getline line < overlay) > 0)
+                if (match(line, /^  [a-z0-9-]+:$/)) svc[substr(line, 3, RLENGTH - 3)] = 1
+        }
+        function flush() {
+            if (id != "" && (id in svc)) printf "%s\t%s\t%s\n", id, name, summary
+            id = ""; name = ""; summary = ""
+        }
+        /^- id: / { flush(); id = $3; next }
+        /^  name: / { name = $0; sub(/^  name: /, "", name); next }
+        /^  summary: / {
+            summary = $0; sub(/^  summary: /, "", summary)
+            if (summary == ">-" || summary == ">" || summary == "|") { getline; summary = $0; sub(/^ +/, "", summary) }
+            gsub(/^["\047]|["\047]$/, "", summary)
+            if (length(summary) > 72) summary = substr(summary, 1, 71) "…"
+            next
+        }
+        END { flush() }
+    ' "$index"
 }
 
 prompt_overlay_defaults() {
@@ -397,6 +432,13 @@ detect_llm_hardware() {
             # away from a GPU — the field report this came from had a
             # 30 GB CUDA box suggesting qwen3:1.7b.
             HW_ACCEL="cuda"
+        elif [[ "$(uname -m)" == "aarch64" && -e /dev/fastrpc-cdsp ]]; then
+            # Qualcomm Dragonwing / Snapdragon with the Hexagon NPU (the
+            # same test start.sh's OPENNVR_ACCEL=auto makes). The LLM still
+            # runs on the ARM cores — Ollama has no Hexagon backend — so the
+            # LLM tier is sized like a CPU box; what the NPU changes is the
+            # captioner (suggest_models).
+            HW_ACCEL="qualcomm"
         fi
     fi
 }
@@ -463,9 +505,11 @@ catalog_pick() {
 suggest_models() {
     compute_model_budget
     local cap_llm
-    if [[ "$HW_ACCEL" != "cpu" ]]; then cap_llm=4        # GPU: up to qwen2.5:3b
-    elif (( HW_CORES >= 8 )); then      cap_llm=3        # strong CPU: qwen3:1.7b
-    elif (( HW_CORES >= 4 )); then      cap_llm=2        # modest CPU: qwen2.5:1.5b
+    if [[ "$HW_ACCEL" != "cpu" ]]; then cap_llm=4        # GPU: the default too; nothing tested sits above it
+    # 4+ cores: granite4:micro. Measured (MODELS_AND_LATENCY.md, "Measured
+    # again"): 44/60 on the Investigate step where qwen3:1.7b scored 21/60,
+    # because it looks before it decides; about twice the seconds a turn.
+    elif (( HW_CORES >= 4 )); then      cap_llm=3        # CPU: granite4:micro
     else                                cap_llm=1        # weak CPU: the tiny tier
     fi
     (( cap_llm > HW_MODEL_BUDGET_GB )) && cap_llm=$HW_MODEL_BUDGET_GB
@@ -484,6 +528,16 @@ suggest_models() {
     # is worse than a smaller one: it evicts the LLM on every question.
     local remaining=$(( HW_MODEL_BUDGET_GB - llm_ram ))
     (( remaining < 0 )) && remaining=0
+    # What to PRESELECT if the operator chooses ollamavlm against the
+    # advice below (a Mac, say): the largest tested vision model the
+    # leftover budget holds, speed be damned — they have already decided
+    # to serve vision through Ollama — else the tested low-RAM pick, and
+    # the menu's own fit warning speaks. Without this the vision menu
+    # opened with a blank default, and Enter wrote an EMPTY
+    # OLLAMA_VLM_MODEL into .env.
+    picked=$(catalog_pick vlm "$remaining")
+    SUGGEST_VLM_IF_CHOSEN="${picked%%|*}"
+    [[ -z "$SUGGEST_VLM_IF_CHOSEN" ]] && SUGGEST_VLM_IF_CHOSEN="moondream"
     # On a weak CPU, serving vision through Ollama is slow enough to be a
     # worse experience than the small in-container model, whatever fits.
     if [[ "$HW_ACCEL" == "cpu" ]] && (( HW_CORES < 4 )); then remaining=0; fi
@@ -493,17 +547,115 @@ suggest_models() {
     # against ~1-2 s on a GPU. Fitting in RAM and answering before the
     # operator gives up are different questions.
     local vlm_speed_cap=9
-    [[ "$HW_ACCEL" == "cpu" ]] && vlm_speed_cap=1        # CPU: the fast tier only
+    [[ "$HW_ACCEL" == "cpu" || "$HW_ACCEL" == "qualcomm" ]] && vlm_speed_cap=1        # CPU: the fast tier only
     picked=$(catalog_pick vlm "$remaining" "$vlm_speed_cap")
     SUGGEST_VLM="${picked%%|*}"
-    if [[ -n "$SUGGEST_VLM" ]]; then
+    # Vision through Ollama is a GPU path, full stop. Ollama's `moondream`
+    # is the 1.8B checkpoint; served on a CPU it takes 30 s+ per image,
+    # and core's enrichers give up at 15-20 s — so every visit cost the box
+    # two cores of compute and saved nothing (#583). The moondream ADAPTER
+    # is a 0.5B int8 build on onnxruntime in its own container: the same
+    # VQA answers, roughly ten times faster on the same cores. Apple
+    # Silicon is deliberately on the CPU side of this line: Metal makes
+    # the LLM fast, but the adapter container runs in the Docker VM with
+    # no GPU either way, and the 0.5B build is what fits that VM.
+    if [[ "$HW_ACCEL" == "cuda" && -n "$SUGGEST_VLM" ]]; then
         SUGGEST_CAPTION_ADAPTER="ollamavlm"
-    else
-        # No room to serve vision from Ollama: fall back to the moondream
-        # ADAPTER, a ~0.5b-int8 build in its own container — far smaller than
-        # anything in the Ollama catalog, and still a real VQA answer.
+        SUGGEST_CAPTION_REASON="an NVIDIA GPU serves vision through Ollama at ~1-2 s a frame"
+    elif [[ "$HW_ACCEL" == "cuda" ]]; then
         SUGGEST_CAPTION_ADAPTER="moondream"
+        SUGGEST_CAPTION_REASON="too little RAM left for an Ollama vision model beside the LLM"
         SUGGEST_VLM=""
+    elif [[ "$HW_ACCEL" == "qualcomm" ]]; then
+        # The Hexagon NPU runs Gemma 4 E2B through LiteRT-LM: 2.5 s a photo
+        # warm on a Ventuno Q, where Ollama's qwen3-vl 2B on the same ARM
+        # cores took 60–90 s and every caption outran core's deadline
+        # (2026-11-05). start.sh's qualcomm flavour fills the same pick and
+        # the -qualcomm tag; this keeps the installer's story consistent.
+        SUGGEST_CAPTION_ADAPTER="litertlm"
+        SUGGEST_CAPTION_REASON="the Qualcomm NPU runs Gemma 4 E2B at ~2.5 s a photo; a CPU vision model here takes a minute"
+        SUGGEST_VLM=""
+    else
+        SUGGEST_CAPTION_ADAPTER="moondream"
+        SUGGEST_CAPTION_REASON="no CUDA GPU: the in-container 0.5B moondream answers in seconds where Ollama's 1.8B takes 30 s+ a frame on CPU"
+        SUGGEST_VLM=""
+    fi
+}
+
+# suggest_enrichment_default <caption_adapter> → "true" | "false": should
+# core describe every recorded visit (captions + colour/type descriptors)
+# on this machine, with this captioner?
+#
+# The enrichers are ON by default in code, which is right when the
+# captioner runs on a GPU and wrong when it runs on CPU: every finished
+# visit is one caption plus two VQA questions, and a captioner that takes
+# seconds per image on the cores the detector and recorder also need
+# cannot keep up with a busy camera. The result on the field box was ~2
+# cores burnt continuously for zero captions saved (#583). Frigate ships
+# its equivalent off and per-camera opt-in for the same reason.
+#
+# "On a GPU" means the RESOLVED adapter, not the box: the only captioner
+# that uses the GPU is ollamavlm proxying to a CUDA Ollama. A CUDA box
+# that got the in-container moondream (too little RAM beside the LLM) or
+# whose operator typed blip runs its captions on CPU like any other, and
+# gets the CPU answer. Everything recorded while the flags are off is
+# still describable later: turn both back on together with
+# EVENTS_ENRICHMENT_BACKFILL=true and the sweep works through it.
+suggest_enrichment_default() {
+    local adapter="${1:-}"
+    if [[ "$HW_ACCEL" == "cuda" && "$adapter" == "ollamavlm" ]]; then
+        echo "true"
+    elif [[ "$HW_ACCEL" == "qualcomm" && "$adapter" == "litertlm" ]]; then
+        echo "true"            # the NPU captioner: seconds a photo, off the ARM cores
+    else
+        echo "false"
+    fi
+}
+
+# configure_enrichment_flags → writes EVENTS_CAPTION_ENRICHMENT and
+# EVENTS_DESCRIPTOR_ENRICHMENT. One question, both flags: they ride the
+# same adapter and fail the same way, and an operator asked twice about
+# "descriptors" and "captions" cannot tell them apart.
+#
+# What counts as "the operator's last answer": a value in a .env that
+# existed before this run. On a fresh install .env was just copied from
+# .env.example (prepare_environment sets FRESH_ENV), so the "true" found
+# there is the example file's default and is ignored — otherwise the
+# hardware default would never apply to the one install it was written
+# for. A deliberately split pair (captions on, descriptors off) is kept
+# as it is and said so; one yes/no cannot express it, and a reconfigure
+# must not flatten a choice it cannot ask about. A GPU captioner is not
+# asked at all: on is right there, and a prompt would only invite
+# turning off the thing that makes search work.
+configure_enrichment_flags() {
+    local adapter suggested cur_c cur_d default
+    adapter=$(env_get CAPTION_ADAPTER)
+    suggested=$(suggest_enrichment_default "$adapter")
+    cur_c=$(env_get EVENTS_CAPTION_ENRICHMENT)
+    cur_d=$(env_get EVENTS_DESCRIPTOR_ENRICHMENT)
+    if [[ "${FRESH_ENV:-false}" == "true" ]]; then cur_c=""; cur_d=""; fi
+    if [[ -n "$cur_c" && -n "$cur_d" && "$cur_c" != "$cur_d" ]]; then
+        ok "Keeping your split setting: captions=${cur_c}, descriptors=${cur_d} (edit .env to change)"
+        return 0
+    fi
+    if [[ "$suggested" == "true" && -z "$cur_c" ]]; then
+        env_set EVENTS_CAPTION_ENRICHMENT true
+        env_set EVENTS_DESCRIPTOR_ENRICHMENT true
+        ok "Visit descriptions (captions + colour/type) ON — ${adapter} on the GPU keeps up with the visit rate"
+        return 0
+    fi
+    default="n"
+    [[ "${cur_c:-$suggested}" == "true" ]] && default="y"
+    printf '\n'
+    explain "Describe every recorded visit in the background (a caption plus colour/type questions per visit) so search matches words like 'white van'. Here the captioner (${adapter:-moondream}) runs on the CPU: it takes seconds per image and a busy camera outruns it, so the work burns CPU the detector and recorder need and saves nothing. Leave it off unless traffic is light. Anything recorded meanwhile can be described later: set both flags to true together with EVENTS_ENRICHMENT_BACKFILL=true." \
+        "no" "$default" \
+        "Hardware detected: ${HW_ACCEL}, captioner: ${adapter:-moondream}. Turn on later by setting EVENTS_CAPTION_ENRICHMENT=true and EVENTS_DESCRIPTOR_ENRICHMENT=true in .env."
+    if ask_yes_no "Describe every recorded visit in the background?" "$default"; then
+        env_set EVENTS_CAPTION_ENRICHMENT true
+        env_set EVENTS_DESCRIPTOR_ENRICHMENT true
+    else
+        env_set EVENTS_CAPTION_ENRICHMENT false
+        env_set EVENTS_DESCRIPTOR_ENRICHMENT false
     fi
 }
 
@@ -551,6 +703,12 @@ pick_model_from_catalog() {
             "$([[ "$tested" == yes ]] && echo tested || echo untested)" \
             "$summary" "$fit" "$mark"
     done < <(grep -v '^#' "$catalog")
+    # No suggestion matched a row (or none was given): default to the
+    # first entry rather than show "[]" and accept an empty answer.
+    if [[ -z "$default_idx" && -z "$suggest" && idx -ge 1 ]]; then
+        default_idx=1
+        PICKED_MODEL="${names[1]}"
+    fi
     read -r -p "  ${label} [${default_idx:-$suggest}]: " REPLY || true
     REPLY="${REPLY:-${default_idx:-$suggest}}"
     if [[ "$REPLY" =~ ^[0-9]+$ ]] && (( REPLY >= 1 && REPLY <= idx )); then
@@ -774,60 +932,82 @@ choose_example() {
     env_set OPENNVR_EXAMPLE_COMPOSE ""
     env_set OPENNVR_EXAMPLE_PROFILE ""
 
-    printf '\n  ── Example app ────────────────────────────────────────\n'
-    info "Examples add an AI app on top of the core NVR. The Camera Agent lets you"
-    info "ask your cameras questions out loud or by chat. Everything runs locally."
-    ask_yes_no "Set up an example app now?" n || return 0
-    local names=() dir name manifest choice index
-    while IFS= read -r dir; do names+=("$(basename "$dir")"); done < <(find examples -mindepth 1 -maxdepth 1 -type d | sort)
-    [[ ${#names[@]} -gt 0 ]] || { warn "No examples were found"; return 0; }
+    printf '\n  ── Apps ───────────────────────────────────────────────\n'
+    info "Apps add AI on top of the core NVR. Two run on every install already --"
+    info "occupancy-counting and footage-search (opt out: OPENNVR_DEFAULT_APPS=off)."
+    info "The Camera Agent lets you ask your cameras questions out loud or by chat."
+    info "Everything listed here can also be installed later from Settings -> App Catalog."
+    ask_yes_no "Pick apps to run from the first start?" n || return 0
 
-    # Default to the Camera Agent: it is the example this installer is
-    # built around -- the mode, LLM-runtime and model prompts below all
-    # exist to serve it -- and the only one shipping a Compose manifest
-    # today, so a default of 0 made Enter decline the very thing this
-    # section had just finished pitching. Its NUMBER moves whenever an
-    # example directory is added, so look it up by name; if it is ever
-    # missing or unshippable the default falls back to 0 (core only).
-    local default_choice=0 mark
-    index=1
-    for name in "${names[@]}"; do
-        if [[ "$name" == "camera-agent" ]] && find_example_compose "$name" >/dev/null; then
-            default_choice="$index"
-        fi
-        index=$((index + 1))
-    done
+    # The menu IS the App Catalog, not a directory listing. An earlier
+    # version walked examples/*/ and stamped "[no Compose manifest]" on
+    # anything without its own compose file -- which was every catalog
+    # app (they share docker-compose.apps.yml), two weight-baking helper
+    # images and two SDK tutorials that are not apps at all. Only the
+    # Camera Agent, which has its own overlay, ever showed as installable.
+    local ids=() names=() summaries=() composes=() id title summary
+    local name manifest choice index mark
+    if manifest=$(find_example_compose camera-agent); then
+        ids+=("camera-agent"); composes+=("$manifest")
+        names+=("Camera Agent"); summaries+=("Ask your cameras questions -- voice or chat, on a local LLM.")
+    fi
+    while IFS=$'\t' read -r id title summary; do
+        [[ -n "$id" ]] || continue
+        ids+=("$id"); composes+=("docker-compose.apps.yml"); names+=("$title"); summaries+=("$summary")
+    done < <(catalog_apps)
+    [[ ${#ids[@]} -gt 0 ]] || { warn "No installable apps were found"; return 0; }
 
-    printf '\n  Available examples:\n'
+    # Default to the Camera Agent: the mode, LLM-runtime and model prompts
+    # below all exist to serve it, and a default of 0 made Enter decline
+    # the very thing this section had just finished pitching.
+    local default_choice=0
+    [[ "${ids[0]}" == "camera-agent" ]] && default_choice=1
+
+    printf '\n  Available apps:\n'
     index=1
-    for name in "${names[@]}"; do
+    for id in "${ids[@]}"; do
         mark=""
-        if (( index == default_choice )); then
-            mark="  <- default"
-        fi
-        if manifest=$(find_example_compose "$name"); then
-            printf '  %2d. %-30s [installable: %s]%s\n' "$index" "$name" "$manifest" "$mark"
-        else
-            printf '  %2d. %-30s [no Compose manifest]\n' "$index" "$name"
-        fi
+        (( index == default_choice )) && mark="  <- default"
+        case "$id" in occupancy-counting|footage-search) mark="  [on by default]" ;; esac
+        printf '  %2d. %-27s %s%s\n' "$index" "$id" "${names[$((index - 1))]}" "$mark"
+        printf '      %-27s %s\n' "" "${summaries[$((index - 1))]}"
         index=$((index + 1))
     done
-    printf '   0. Core stack only\n\n'
-    read -r -p "  Select an example [$default_choice]: " choice || true  # EOF-safe under set -e (see ask_* note)
+    printf '   0. Core stack and the default apps only\n\n'
+    read -r -p "  Select apps, comma-separated [$default_choice]: " choice || true  # EOF-safe under set -e (see ask_* note)
     choice="${choice:-$default_choice}"
-    [[ "$choice" =~ ^[0-9]+$ ]] || die "Invalid selection"
-    (( choice == 0 )) && return 0
-    (( choice >= 1 && choice <= ${#names[@]} )) || die "Selection out of range"
+    choice="${choice//[[:space:]]/}"
+    [[ "$choice" =~ ^[0-9]+(,[0-9]+)*$ ]] || die "Invalid selection"
 
-    name="${names[$((choice - 1))]}"
-    manifest=$(find_example_compose "$name") || die "The '$name' example has no Docker Compose manifest"
-    EXAMPLE_NAME="$name"; EXAMPLE_COMPOSE="$manifest"; EXAMPLE_PROFILE="$name"
+    # Several apps may be picked at once. They are persisted the way
+    # start.sh reads them back: comma-separated compose files (deduplicated
+    # -- every catalog app is the one apps overlay) and comma-separated
+    # profiles, one per app (each catalog app carries its own id as a
+    # profile in docker-compose.apps.yml, so a pick starts that app and its
+    # adapters and nothing else).
+    local picked=() n seen=","
+    IFS=',' read -r -a picked <<< "$choice"
+    for n in "${picked[@]}"; do
+        (( n == 0 )) && continue
+        (( n >= 1 && n <= ${#ids[@]} )) || die "Selection out of range: $n"
+        id="${ids[$((n - 1))]}"
+        [[ "$seen" == *",$id,"* ]] && continue
+        seen="$seen$id,"
+        EXAMPLE_NAME="${EXAMPLE_NAME:+$EXAMPLE_NAME,}$id"
+        EXAMPLE_PROFILE="${EXAMPLE_PROFILE:+$EXAMPLE_PROFILE,}$id"
+        manifest="${composes[$((n - 1))]}"
+        [[ ",$EXAMPLE_COMPOSE," == *",$manifest,"* ]] || EXAMPLE_COMPOSE="${EXAMPLE_COMPOSE:+$EXAMPLE_COMPOSE,}$manifest"
+    done
+    [[ -n "$EXAMPLE_NAME" ]] || return 0
+    # The Camera Agent is the one app with prompts of its own below.
+    name=""
+    [[ ",$EXAMPLE_NAME," == *",camera-agent,"* ]] && name="camera-agent"
     if [[ "$name" == "camera-agent" ]]; then
         printf '\n'
         explain "Camera Agent runs in VOICE mode (speak, hear spoken answers) or CHAT mode (type, read answers). Voice adds Whisper speech-to-text and Piper text-to-speech; chat is lighter." \
             "pick one" "1 (voice)"
         ask_value "Camera Agent mode: 1=voice, 2=chat" "1"
-        [[ "$REPLY" == "2" ]] && EXAMPLE_PROFILE="camera-agent-chat" || EXAMPLE_PROFILE="camera-agent"
+        [[ "$REPLY" == "2" ]] && EXAMPLE_PROFILE="${EXAMPLE_PROFILE/camera-agent/camera-agent-chat}"
 
         printf '\n'
         # ── LLM runtime: bundled container vs the host machine ─────
@@ -1066,7 +1246,7 @@ choose_example() {
         if [[ -n "$vlm_suggest" ]]; then
             ok "Suggesting ${llm_suggest} + ${vlm_suggest} (both stay resident)"
         else
-            ok "Suggesting ${llm_suggest}; too little left for an Ollama vision model, so scene description falls back to the small in-container moondream"
+            ok "Suggesting ${llm_suggest}; scene description via the in-container moondream adapter — ${SUGGEST_CAPTION_REASON}"
         fi
 
         printf '\n  ── Camera Agent models (all local, no API keys) ───────\n'
@@ -1074,6 +1254,9 @@ choose_example() {
             "yes" "$llm_suggest"
         pick_model_from_catalog llm "$llm_suggest" "Local LLM model (Ollama)"
         env_set OLLAMA_MODEL "$PICKED_MODEL"
+        # The agent's start-up pre-warm (prompt + tools through the LLM once)
+        # is seconds on a GPU and minutes of every core on a CPU box: off there.
+        if [[ "$HW_ACCEL" == "cuda" ]]; then env_set LLM_PREWARM true; else env_set LLM_PREWARM false; fi
         # Pull offer AFTER the model choice, so it pulls what was chosen.
         if [[ "$llm_where" == "host" ]]; then
             local ext_model
@@ -1109,33 +1292,65 @@ choose_example() {
                 "Transcribes your spoken questions (voice mode only). Sized for this machine — transcription is on the voice critical path, so weak boxes get the fast tier." "yes" \
                 "tiny.en (fastest) | base.en (balanced) | small.en (most accurate)."
         fi
-        # When the LLM already runs on the host Ollama, the VLM belongs there
-        # too: the ollamavlm adapter proxies scene questions to the same
-        # GPU-fast Ollama (a caption costs ~1-2 s on Metal vs ~25 s of VM
-        # CPU with the in-container weights). Same adapter contract, same
-        # audited KAI-C path — only where the weights execute changes. On
-        # the bundled-container path the in-VM moondream stays the default
-        # (there may be no host Ollama at all on a Linux server).
-        # ...but only if there is RAM for it. Both Ollama models stay
-        # resident, so proxying vision to Ollama on a machine that cannot
-        # hold both means every scene question evicts the chat model.
+        # When the LLM runs on a host Ollama WITH A CUDA GPU, the VLM belongs
+        # there too: the ollamavlm adapter proxies scene questions to the
+        # same GPU-fast Ollama. Same adapter contract, same audited KAI-C
+        # path — only where the weights execute changes. Everywhere else —
+        # CPU, Apple Silicon, the bundled container — the in-container
+        # moondream adapter is the default: suggest_models explains why
+        # (Ollama's 1.8B moondream on CPU is what burnt two cores for
+        # nothing in #583). ...and only if there is RAM for it: both
+        # Ollama models stay resident, so proxying vision to an Ollama that
+        # cannot hold both means every scene question evicts the chat model.
         local caption_default="moondream"
         if [[ "$llm_where" == "host" && "$SUGGEST_CAPTION_ADAPTER" == "ollamavlm" ]]; then
             caption_default="ollamavlm"
+        elif [[ "$SUGGEST_CAPTION_ADAPTER" == "litertlm" ]]; then
+            caption_default="litertlm"
         fi
         configure_value CAPTION_ADAPTER "Scene-description model" "$caption_default" \
-            "Describes what a camera sees. ollamavlm proxies to your Ollama (GPU-fast when the LLM runs on this machine — the default in that case; needs an adapter tag newer than 0.1.3); moondream/blip run inside Docker (moondream answers questions, blip writes plain captions)." "yes" \
-            "moondream | blip | ollamavlm — all local."
+            "Describes what a camera sees. moondream runs inside Docker (0.5B, answers questions, the right pick without a CUDA GPU — on CPU it is ~10x faster than Ollama's 1.8B moondream); blip runs inside Docker (plain captions only, fastest); ollamavlm proxies to your Ollama (only worth it on an NVIDIA GPU; needs an adapter tag newer than 0.1.3); litertlm runs Gemma 4 E2B on the Qualcomm Hexagon NPU (Dragonwing / Snapdragon boards only; a 2.7 GB one-time download; the -qualcomm image tag, which start.sh fills in)." "yes" \
+            "moondream | blip | ollamavlm | litertlm — all local."
+        if [[ "$(env_get CAPTION_ADAPTER)" == "litertlm" && -z "$(env_get CAPTION_ADAPTER_TAG)" ]]; then
+            # The NPU captioner is published only as a -qualcomm image; its
+            # first release is after ADAPTER_TAG's pin, so start.sh resolves
+            # the exact tag (ADAPTER_TAG-qualcomm, else latest-qualcomm) at
+            # every start. Nothing to pin here.
+            info "litertlm rides the -qualcomm image tag; start.sh fills CAPTION_ADAPTER_TAG on the first start."
+        fi
         # ollamavlm chosen → suggest a VLM sized like the LLM was.
         if [[ "$(env_get CAPTION_ADAPTER)" == "ollamavlm" ]]; then
-            explain "Multimodal Ollama model the ollamavlm adapter uses for scene questions; the adapter auto-pulls it. gemma3:4b (tested — clearly better answers) is suggested where RAM allows; moondream is the tested low-RAM pick." \
+            # Chosen where it was not suggested (no CUDA GPU, or no RAM
+            # left): still preselect something real, sized to what is
+            # left, so Enter never writes an empty model name.
+            [[ -z "$vlm_suggest" ]] && vlm_suggest="$SUGGEST_VLM_IF_CHOSEN"
+            explain "Multimodal Ollama model the ollamavlm adapter uses for scene questions; the adapter auto-pulls it. qwen3-vl:2b-instruct (measured: no false yeses, the best counter) is suggested on an accelerator; moondream is the tested CPU pick." \
                 "yes" "$vlm_suggest"
             pick_model_from_catalog vlm "$vlm_suggest" "Vision model (Ollama)"
             env_set OLLAMA_VLM_MODEL "$PICKED_MODEL"
         fi
-    else
-        # Generic examples: prompt for any ${VAR:-default} the overlay exposes.
-        prompt_overlay_defaults "$manifest"
+
+        # ── Describing every recorded visit: on for a GPU, asked on CPU ──
+        # The captioner just chosen is also what core calls, in the
+        # background, for EVERY finished visit (a caption + two colour/type
+        # questions) so search can match "white van" and the agent can
+        # answer "did a blue car come?". On a CUDA box that costs ~1-2 s a
+        # visit and stays on. With a CPU captioner — which is every
+        # adapter except ollamavlm on a CUDA Ollama — the same work takes
+        # seconds per image and cannot keep up with a busy camera: the
+        # field box spent two cores on it, continuously, and saved
+        # nothing (#583). So it is offered here with the reason,
+        # defaulting off, and a pre-existing .env keeps the last answer.
+        # After CAPTION_ADAPTER on purpose: the answer depends on it.
+        configure_enrichment_flags
+    fi
+    if [[ "$EXAMPLE_NAME" != "camera-agent" ]]; then
+        # Catalog apps are not prompted here: their knobs (cameras, zones,
+        # thresholds) live in the App Catalog's config form after start,
+        # and prompt_overlay_defaults over the shared apps overlay would
+        # ask about every image tag of every app, chosen or not.
+        info "Catalog apps take their cameras, zones and thresholds from"
+        info "Settings -> App Catalog once the stack is up."
     fi
     env_set OPENNVR_EXAMPLE "$EXAMPLE_NAME"
     env_set OPENNVR_EXAMPLE_COMPOSE "$EXAMPLE_COMPOSE"
@@ -1167,7 +1382,7 @@ check_docker_vm_allowance() {
     (( vm_mem_gb > 0 && vm_cpus > 0 )) || return 0
 
     local need_mem=6
-    if [[ -n "$EXAMPLE_NAME" && -z "$(env_get OLLAMA_EXTERNAL_URL)" ]]; then
+    if [[ ",$EXAMPLE_NAME," == *",camera-agent,"* && -z "$(env_get OLLAMA_EXTERNAL_URL)" ]]; then
         need_mem=8
     fi
     info "Docker VM allowance: ${vm_cpus} CPUs / ${vm_mem_gb} GB (this machine has ${host_cpus} CPUs / ${host_mem_gb} GB)."
@@ -1198,15 +1413,16 @@ pull_and_build() {
     check_docker_vm_allowance
     COMPOSE_ARGS=(-f "$BASE_COMPOSE")
     if [[ -n "$EXAMPLE_COMPOSE" ]]; then
-        COMPOSE_ARGS+=(-f "$EXAMPLE_COMPOSE")
+        local f p
+        for f in ${EXAMPLE_COMPOSE//,/ }; do COMPOSE_ARGS+=(-f "$f"); done
         # External-LLM overlay, same condition as compose_args in start.sh.
         # Without it the bundled ollama/ollama-model-pull services are still
         # in an ACTIVE profile here, so `pull` downloads the 3.7 GB
         # ollama/ollama image for containers the launcher then never starts.
-        if [[ -n "$(env_get OLLAMA_EXTERNAL_URL)" && "$EXAMPLE_COMPOSE" == *camera-agent.yml ]]; then
+        if [[ -n "$(env_get OLLAMA_EXTERNAL_URL)" && "$EXAMPLE_COMPOSE" == *camera-agent.yml* ]]; then
             COMPOSE_ARGS+=(-f docker-compose.camera-agent.external-llm.yml)
         fi
-        COMPOSE_ARGS+=(--profile "$EXAMPLE_PROFILE")
+        for p in ${EXAMPLE_PROFILE//,/ }; do COMPOSE_ARGS+=(--profile "$p"); done
         info "Pulling images for $EXAMPLE_NAME..."
         docker compose "${COMPOSE_ARGS[@]}" pull --ignore-buildable
     fi
@@ -1221,6 +1437,45 @@ main() {
     check_prerequisites
     prepare_environment
     pull_and_build
+    # The host agent (docs/HOST_AGENT.md): USB webcams on this machine and its
+    # own CPU/memory/disk/temperature readings. `up` installs it when
+    # HOST_AGENT=on (on Linux it asks for sudo once, for the systemd unit).
+    if [[ "$(uname -s)" == "Linux" ]]; then
+        # On Linux a webcam needs no host install: MediaMTX serves it with the
+        # device passed into its container (docker-compose.webcams.yml).
+        # Yes by default (#904): a webcam plugged in later just works. Only an
+        # .env that already says off keeps no as its answer.
+        local wc_default=y
+        [[ "$(env_get WEBCAMS)" == "off" ]] && wc_default=n
+        if ask_yes_no "Use USB webcams plugged into this machine as cameras?" "$wc_default"; then
+            env_set WEBCAMS on; ok "USB webcams: on (Add Camera → Webcam lists them)"
+        else
+            env_set WEBCAMS off; info "USB webcams: off (later: WEBCAMS=on in .env, then ./start.sh up)"
+        fi
+        env_set HOST_AGENT off
+        # Discovery by multicast needs the host's network; a small container
+        # on it does that on Linux with nothing to install.
+        env_set LAN_DISCOVERY on; ok "Camera discovery by multicast: on (a prober on the host's network)"
+    else
+        # Docker Desktop cannot see USB: the host agent streams webcams from
+        # the host and reports the machine's own CPU/memory/disk readings.
+        local ha_default=y
+        [[ "$(env_get HOST_AGENT)" == "off" ]] && ha_default=n
+        if ask_yes_no "Install the OpenNVR host agent (USB webcams on this machine, its real CPU/memory/disk readings)?" "$ha_default"; then
+            env_set HOST_AGENT on; ok "Host agent: installed when OpenNVR starts"
+        else
+            env_set HOST_AGENT off; info "Host agent: off (later: ./start.sh host-agent install)"
+        fi
+    fi
+    # The runner behind OpenNVR Updates in the app: `up` installs it (one
+    # sudo on Linux). It only checks in until an update policy is chosen in
+    # the app, and the policy starts off, so nothing is fetched unasked.
+    if [[ "$(env_get UPDATE_RUNNER)" == "off" ]]; then
+        info "Update runner: off (later: ./start.sh auto-update enable)"
+    else
+        env_set UPDATE_RUNNER on
+        ok "Update runner: installed when OpenNVR starts; choose an update policy in Configuration → OpenNVR Updates"
+    fi
     printf '\n  Configuration and images are ready. Starting OpenNVR...\n\n'
     # Last word before exec — after this, compose owns the terminal and a
     # notice printed 200 lines ago is gone.

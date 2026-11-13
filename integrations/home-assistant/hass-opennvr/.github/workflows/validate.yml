@@ -1,0 +1,34 @@
+# CI of the hass-opennvr repository (after the split from open-nvr; inert
+# inside the monorepo, where .github/workflows/ci.yml runs these checks).
+name: Validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 4 * * 1"
+
+jobs:
+  hassfest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: home-assistant/actions/hassfest@master
+  hacs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: hacs/action@main
+        with:
+          category: integration
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: |
+          pip install "pytest-homeassistant-custom-component==0.13.365" "PyTurboJPEG==1.8.3"
+          pip install "$(python -c 'import json; print(json.load(open("custom_components/opennvr/manifest.json"))["requirements"][0])')"
+      - run: python -m pytest -q -p no:cacheprovider --cov=custom_components.opennvr --cov-fail-under=95

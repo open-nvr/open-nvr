@@ -145,3 +145,199 @@ async def test_publish_domain_event_failure_counts_never_raises():
     ) is False
     assert pub.failed_count == 1
     assert pub._client is None  # forced rebuild on next call
+
+
+def test_plate_box_is_forwarded_when_the_adapter_localised_the_plate():
+    """The consumer that stores the plate needs the geometry to reject
+    PARTIAL reads — a crop whose edge cuts the plate still OCRs the
+    surviving characters at high confidence. KAI-C forwards, never judges:
+    it does not hold the crop the box is measured against."""
+    result = dict(PLATE_RESULT, plate_detection={
+        "found": True, "confidence": 0.87, "box": [847, 463, 1076, 550],
+    })
+    out = normalise_completion("fast_plate_ocr", result, camera_id="cam1",
+                               correlation_id=None, event_id=7)
+    assert out is not None
+    _, env = out
+    assert env["payload"]["plate_box"] == [847, 463, 1076, 550]
+
+
+def test_plate_box_is_omitted_when_absent_or_malformed():
+    """Additive-only: the field simply does not appear, so a consumer on
+    the old contract sees exactly what it saw before."""
+    _, env = normalise_completion("fast_plate_ocr", PLATE_RESULT,
+                                  camera_id="cam1", correlation_id=None,
+                                  event_id=7)
+    assert "plate_box" not in env["payload"]
+    for bad in ({"found": False}, {"box": None}, {"box": [1, 2, 3]}, {"box": "x"}):
+        _, env = normalise_completion(
+            "fast_plate_ocr", dict(PLATE_RESULT, plate_detection=bad),
+            camera_id="cam1", correlation_id=None, event_id=7)
+        assert "plate_box" not in env["payload"]
+
+
+def test_plate_box_confidence_is_forwarded_for_false_localisations(monkeypatch):
+    """#386: the localiser's own doubt is the only signal that separates
+    a plate from a manufacturer badge. The badge OCRs into plausible
+    characters, from a box nowhere near a crop edge, so the consumer
+    cannot reconstruct this from anything else we send. With the
+    publish-side floor disabled the doubt is forwarded for the consumer
+    to judge; with it on (the default) the read is not published at all."""
+    result = dict(PLATE_RESULT, plate_detection={
+        "attempted": True, "found": True, "confidence": 0.3756,
+        "box": [121, 229, 233, 267],
+    })
+    monkeypatch.setenv("KAI_C_PLATE_MIN_DETECTION_CONFIDENCE", "0")
+    _, env = normalise_completion("fast_plate_ocr", result, camera_id="cam1",
+                                  correlation_id=None, event_id=7)
+    assert env["payload"]["plate_box_confidence"] == 0.3756
+    assert env["payload"]["plate_text"] == "ABC1234"
+    monkeypatch.delenv("KAI_C_PLATE_MIN_DETECTION_CONFIDENCE")
+    assert normalise_completion("fast_plate_ocr", result, camera_id="cam1",
+                                correlation_id=None, event_id=7) is None
+
+
+def test_junk_reads_are_never_published():
+    """A subscriber acting on plate.recognized.v1 (the LPR app's
+    "Unknown vehicle" alarm, a barrier) must never see a fragment, a
+    badge, or a read off the car body. Each was previously published and
+    filtered by ONE consumer while the others alerted on it."""
+    def _out(detection):
+        return normalise_completion(
+            "fast_plate_ocr", dict(PLATE_RESULT, plate_detection=detection),
+            camera_id="cam1", correlation_id=None, event_id=7)
+
+    # clipped: box abuts the crop edge (x1 == 0)
+    assert _out({"attempted": True, "found": True, "confidence": 0.9,
+                 "box": [0, 40, 120, 70], "image_size": [400, 300]}) is None
+    # clipped on the far edge (x2 == width)
+    assert _out({"attempted": True, "found": True, "confidence": 0.9,
+                 "box": [300, 40, 400, 70], "image_size": [400, 300]}) is None
+    # weak localisation: a badge
+    assert _out({"attempted": True, "found": True, "confidence": 0.37,
+                 "box": [100, 100, 200, 130], "image_size": [400, 300]}) is None
+    # not localised: the localiser looked and found nothing
+    assert _out({"attempted": True, "found": False, "confidence": None,
+                 "box": None, "image_size": [400, 300]}) is None
+    # a whole, well-localised plate still flows
+    out = _out({"attempted": True, "found": True, "confidence": 0.9,
+                "box": [100, 100, 200, 130], "image_size": [400, 300]})
+    assert out is not None and out[1]["payload"]["plate_text"] == "ABC1234"
+    # no opinion at all (OCR-only adapter) still flows, exactly as before
+    assert _out({"attempted": False, "found": False}) is not None
+
+
+def test_require_localisation_is_operator_tunable(monkeypatch):
+    monkeypatch.setenv("KAI_C_PLATE_REQUIRE_LOCALISATION", "0")
+    out = normalise_completion(
+        "fast_plate_ocr", dict(PLATE_RESULT, plate_detection={
+            "attempted": True, "found": False}),
+        camera_id="cam1", correlation_id=None, event_id=7)
+    assert out is not None
+
+
+def test_plate_box_confidence_is_omitted_when_absent_or_malformed():
+    """Additive-only, like plate_box: an OCR-only adapter that never
+    localises must not start looking like a low-confidence one."""
+    _, env = normalise_completion("fast_plate_ocr", PLATE_RESULT,
+                                  camera_id="cam1", correlation_id=None,
+                                  event_id=7)
+    assert "plate_box_confidence" not in env["payload"]
+    for bad in ({"found": False}, {"confidence": None},
+                {"confidence": "0.9"}, {"confidence": True}):
+        _, env = normalise_completion(
+            "fast_plate_ocr", dict(PLATE_RESULT, plate_detection=bad),
+            camera_id="cam1", correlation_id=None, event_id=7)
+        assert "plate_box_confidence" not in env["payload"], bad
+
+
+# ── observed_at: the read's own time, echoed (#451) ────────────────
+
+
+def test_observed_at_is_echoed_into_the_payload():
+    """The envelope's ts is PUBLISH time, so a consumer could only date a
+    read by when the message reached it — which drifts with OCR backlog.
+    observed_at is when the look was captured, passed by the initiator
+    and echoed verbatim, exactly like event_id."""
+    out = normalise_completion(
+        "fast_plate_ocr", PLATE_RESULT,
+        camera_id="cam-front", correlation_id="corr-1", event_id=42,
+        observed_at="2026-09-03T09:59:52+00:00",
+    )
+    assert out is not None
+    _subject, env = out
+    assert env["payload"]["observed_at"] == "2026-09-03T09:59:52+00:00"
+    # Publish time is still its own field, and is NOT the same moment.
+    assert env["ts"] != env["payload"]["observed_at"]
+
+
+def test_observed_at_is_omitted_when_the_initiator_sent_none():
+    """Additive-only: a producer that does not know the capture time
+    publishes a payload without the key, and KAI-C must not invent one —
+    it has no idea what this system's clocks say."""
+    out = normalise_completion(
+        "fast_plate_ocr", PLATE_RESULT,
+        camera_id="cam-front", correlation_id="corr-1", event_id=42,
+    )
+    assert out is not None
+    assert "observed_at" not in out[1]["payload"]
+
+
+@pytest.mark.parametrize("junk", [123, "", None, {"a": 1}, []])
+def test_junk_observed_at_is_dropped_not_published(junk):
+    out = normalise_completion(
+        "fast_plate_ocr", PLATE_RESULT,
+        camera_id="cam-front", correlation_id="corr-1", event_id=42,
+        observed_at=junk,
+    )
+    assert out is not None
+    assert "observed_at" not in out[1]["payload"]
+
+
+# ── face.recognized.v1 (the platform face route) ──────────────────────
+
+def _face(**kw):
+    base = {"task": "face_recognition", "recognized": True, "person_id": "S1", "category": "student",
+            "similarity": 0.71, "face_bbox": [10, 12, 60, 70], "threshold": 0.5}
+    base.update(kw)
+    return base
+
+
+def test_face_route_result_becomes_face_recognized():
+    from kai_c.domain_events import normalise_completion
+    out = normalise_completion("insightface_school", _face(), camera_id="cam4",
+                               correlation_id="c1", track_id=17, label="person",
+                               observed_at="2026-11-11T10:00:00+00:00")
+    assert out is not None
+    subject, env = out
+    assert subject == "opennvr.events.face.recognized.v1.cam4"
+    assert env["schema"] == "face.recognized.v1" and env["camera_id"] == "cam4"
+    p = env["payload"]
+    assert p == {"adapter": "insightface_school", "track_id": 17, "label": "person", "recognized": True,
+                 "person_id": "S1", "category": "student", "similarity": 0.71, "threshold": 0.5,
+                 "face_box": [10, 12, 60, 70], "observed_at": "2026-11-11T10:00:00+00:00"}
+
+
+def test_an_unknown_face_is_published_without_a_person():
+    from kai_c.domain_events import normalise_completion
+    _, env = normalise_completion("insightface_school", _face(recognized=False, person_id=None, similarity=None),
+                                  camera_id="cam4", track_id=3)
+    assert env["payload"]["recognized"] is False and env["payload"]["person_id"] is None
+
+
+def test_no_event_without_a_track_or_a_face():
+    from kai_c.domain_events import normalise_completion
+    # An app's own call (no track) is the app's business.
+    assert normalise_completion("insightface_school", _face(), camera_id="cam4") is None
+    # A crop with no face says nothing.
+    assert normalise_completion("insightface_school", _face(recognized=False, face_bbox=None),
+                                camera_id="cam4", track_id=3) is None
+    # No camera, no contract.
+    assert normalise_completion("insightface_school", _face(), camera_id=None, track_id=3) is None
+
+
+def test_completion_event_echoes_the_track():
+    from kai_c.events import InferenceCompletedEvent
+    e = InferenceCompletedEvent(correlation_id="c", adapter="a", model_name="m", model_version="v",
+                                inference_ms=1, result={}, track_id=5, label="person")
+    assert e.track_id == 5 and e.label == "person"

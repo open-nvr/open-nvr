@@ -24,7 +24,7 @@ import binascii
 import ipaddress
 import os
 import socket
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 from pydantic import ValidationInfo, field_validator, model_validator
@@ -44,13 +44,33 @@ _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 _DNS_RESOLVE_TIMEOUT_SECONDS = 2.0
 
 
+#: Cloud instance-metadata services, denied outright on every path that
+#: reaches _ip_is_internal. 169.254.169.254 (AWS/GCP/Azure/DO) and
+#: fd00:ec2::254 (AWS IPv6) are link-local, so "internal" used to admit
+#: them — and "internal" is exactly what an SSRF guard permits. Reading
+#: instance metadata yields cloud credentials, which is a far worse
+#: outcome than reaching a camera on the LAN.
+#:
+#: validate_app_url() in routers/apps.py already refuses this range; this
+#: brings the MediaMTX/ONVIF trust zone in line with that precedent.
+_METADATA_ADDRESSES = frozenset({
+    ipaddress.ip_address("169.254.169.254"),
+    ipaddress.ip_address("169.254.170.2"),      # ECS task metadata
+    ipaddress.ip_address("fd00:ec2::254"),
+})
+
+
 def _ip_is_internal(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """True if ``addr`` is inside the MediaMTX trust zone: loopback, RFC1918,
-    IPv6 ULA, or link-local. Public addresses and the 0.0.0.0 wildcard are
-    rejected. See V-015.
+    IPv6 ULA, or link-local. Public addresses, the 0.0.0.0 wildcard and the
+    cloud metadata endpoints are rejected. See V-015.
     """
     # is_private also matches 0.0.0.0/8, so exclude the wildcard explicitly.
     if addr.is_unspecified:
+        return False
+    # Denied BEFORE the allow rules below, so no later clause can
+    # re-admit it: metadata is never "internal" for our purposes.
+    if addr in _METADATA_ADDRESSES:
         return False
     return bool(
         addr.is_loopback
@@ -184,6 +204,16 @@ class Settings(BaseSettings):
     # services/webrtc_ice_host_service.py for why the env var alone is not
     # enough (it is baked in at container-create time and silently lost).
     mediamtx_webrtc_hosts: str = ""
+    #: Optional comma-separated allowlist of hosts an integration webhook
+    #: may POST to (e.g. "hooks.slack.com,ntfy.local"). Empty = no
+    #: restriction beyond the cloud-metadata deny that always applies.
+    #:
+    #: Deliberately opt-in: a webhook's whole job is to reach an outside
+    #: endpoint, so unlike the camera/ONVIF probes there is no safe
+    #: default set — locking it down by default would break every working
+    #: Slack and Teams integration on upgrade. Operators who want the
+    #: tighter posture set this.
+    webhook_allowed_hosts: str = ""
 
     # Default recording segment length (seconds) the backend sends to MediaMTX
     # when provisioning a camera that has no explicit value of its own. Env var:
@@ -296,6 +326,12 @@ class Settings(BaseSettings):
     #   cloud             - unrestricted
     # See V-009 / V-022.
     deployment_mode: Literal["offline", "hybrid", "cloud"] = "offline"
+    # Opt-in check for a newer OpenNVR release (GET api.github.com once per
+    # UPDATE_CHECK_TTL_HOURS), surfaced by /system/info for Home Assistant's
+    # update entity. OFF by default: an offline-first NVR makes no outbound
+    # call unless the operator asks for it.
+    update_check: bool = False
+    update_check_ttl_hours: float = 6.0
 
     # AI egress posture (env-only):
     #   local_only (default) - KAI-C refuses non-local adapters; cloud infer 403
@@ -314,6 +350,29 @@ class Settings(BaseSettings):
     # when on, the web app never runs Docker: it writes a desired-state row and
     # a separate reconciler applies it. See docs/APPS_INSTALL.md.
     apps_install_enabled: bool = False
+    # Live detection overlay: bridge Tier-0 tracks (and any app that
+    # publishes overlay.boxes.v1) onto the WebSocket so the UI can draw
+    # boxes over the video. ON by default — the picture is unchanged
+    # either way, this only decides whether the DATA flows. Off silences
+    # it for every consumer at once: the Live View, the agent, the API.
+    # Whether a given screen DRAWS it is a per-viewer choice on that
+    # screen. Audit-logged at boot with the rest of the posture.
+    detection_overlay_enabled: bool = True
+    # How long after its last positive match a coasting track is still
+    # drawn on the live overlay. Tier-0 re-verifies tracks on a per-frame
+    # region budget, so a present object is re-matched every few frames,
+    # not every frame — measured on a busy dashcam scene at DETECT_FPS=2:
+    # median 1.2 s, p90 5.9 s. Below the tail, real objects blink; far
+    # above it, a departed object's box lingers. 8 s clears the measured
+    # tail; a phantom (never re-scanned) ages to minutes and drops out.
+    # Widen on sites with many tracks per camera or a low DETECT_FPS.
+    detection_overlay_draw_window_s: float = 8.0
+
+    # Self-service sign-up (``POST /auth/register`` → a viewer account).
+    # Off by default: an NVR's users are created by its administrator
+    # (``POST /users``), and an open sign-up door on a LAN-exposed box is
+    # an account for anyone who can reach it. Opt in for kiosk/demo use.
+    public_registration_enabled: bool = False
 
     # Logging settings
     log_level: str = "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
@@ -342,11 +401,333 @@ class Settings(BaseSettings):
     # PR-C: OCR the best frame of vehicle visits (fast_plate_ocr via KAI-C)
     # and store plate_text on the event row. Best-effort; off = rows only.
     events_plate_enrichment: bool = True
+    # Caption the best frame of a visit (a scene_caption adapter via
+    # KAI-C) and store the words in event_text — what core's search
+    # matches "red" or "delivery van" against. Best-effort, and gated
+    # per camera by the image_captioning skill assignment exactly as the
+    # plate sweep is, so a site that has not asked for it pays no
+    # inference; off = no captions at all and search stays label-and-time.
+    events_caption_enrichment: bool = True
+    # Ask the box's own skills what they can say about a visit (colour,
+    # vehicle type) and store each answer as a claim in visit_descriptors
+    # — what search's attr filter matches. Plan-driven: it runs only what
+    # KAI-C reports registered and healthy. Gated per camera by the vqa
+    # skill assignment, so a site that has not asked for it pays nothing;
+    # off = no claims and the attr filter stays empty.
+    events_descriptor_enrichment: bool = True
+    # Ask the same two questions about PEOPLE (what colour is their top,
+    # what are they carrying) — the kinds the plan advertises and, until
+    # this flag, nobody produced, which left person visits with no
+    # evidence at all for search or for cross-camera journey matching.
+    # Off by default, and separate from the flag above on purpose:
+    # person is the most common class on a camera by a wide margin, so
+    # widening the label set silently would multiply the inference bill
+    # of every site that had already assigned vqa for its vehicles. The
+    # per-camera assignment cannot say "for vehicles, not for everyone
+    # who walks past"; this can. Still gated by that assignment on top.
+    events_descriptor_people: bool = False
+    # With people admitted, also ask who they are in three more words:
+    # gender, the colour of what they wear below the waist, headwear.
+    # Five questions a person visit instead of two, so a second opt-in:
+    # a site that wants "woman in a red top with a helmet" searchable
+    # pays for it knowingly. Off, people keep the two-question ceiling.
+    events_descriptor_people_extended: bool = False
+    # From how many descriptor kinds a visit's questions go to the model
+    # as ONE call (a JSON answer) instead of one call a kind. Measured on
+    # a Ventuno Q (2026-11-13): two kinds cost the same either way; the
+    # five extended person kinds cost 2.2 s as one call against 3.7 s as
+    # five. 0 never batches.
+    events_descriptor_batch_min_kinds: int = 3
+    # A visit whose evidence frame is byte-identical to an earlier visit's
+    # (the store is content-addressed) takes that visit's caption and
+    # descriptor claims instead of calling the model: same pixels, same
+    # answer. Measured on a Ventuno Q (2026-11-13): 91 % of a day's
+    # captioner calls on a looping test input, none on a real camera.
+    events_enrichment_reuse_same_frame: bool = True
+    # After this many consecutive visits whose evidence frame is one
+    # already seen, the camera's picture is declared frozen (a per-camera
+    # alarm like the recording watchdog's; the agent's status says so).
+    # A live camera never repeats a frame; a frozen stream, a stuck relay
+    # or a looping file does nothing else. 0 disables.
+    events_frozen_picture_repeats: int = 5
+    # Ask an adapter advertising `embed` for a vector of the visit's best
+    # frame and store it in event_embeddings, so search can rank by
+    # meaning as well as by words (services/search_service.py fuses the
+    # two with RRF). Gated per camera by the `embed` skill assignment,
+    # exactly like the two above.
+    #
+    # OFF BY DEFAULT — and the honest version of why, because the
+    # obvious argument for it is weaker than it looks.
+    #
+    # THE ARGUMENT THAT HOLDS: an embedding model is the heaviest
+    # per-visit inference in the stack and the one most likely to want a
+    # GPU. Getting this wrong does not produce a worse search result, it
+    # produces dropped frames — the detector falls behind, the box gets
+    # worse at the thing it exists for, and nobody asked for that trade.
+    # A site that upgrades on a Tuesday and finds its mini-PC running a
+    # vision transformer on every passing car has been handed a
+    # regression however much better the search got.
+    #
+    # THE ARGUMENT THAT DOES NOT: "off by default keeps the box safe".
+    # It does not, and it is not what keeps the box safe. The per-camera
+    # skill assignment is the real gate — `wants_embedding` fails closed
+    # when it cannot resolve the camera, and the `embed` skill did not
+    # exist before this release, so no camera anywhere has it assigned.
+    # This flag could default true and still cause exactly nothing to
+    # happen until somebody deliberately assigned the skill. That is
+    # precisely the reasoning under which `events_caption_enrichment`
+    # defaults TRUE and leans entirely on its assignment gate.
+    #
+    # So what this default actually buys is narrower than "safety": a
+    # site-wide off switch that does not require unassigning the skill
+    # on thirty cameras, starting in the position where turning it on is
+    # a decision somebody made rather than one they inherited. That is
+    # defence in depth. The assignment is the defence.
+    #
+    # If a later release decides the captioner's precedent should win
+    # here too, flipping this is a one-line change and is not dangerous
+    # for the reason above — but it should be flipped deliberately, with
+    # that reasoning in hand, not because the default looked timid.
+    #
+    # Off is a COMPLETE state, not a pending one: no vectors means
+    # capability() reports none and search matches words, exactly as it
+    # did before any of this existed. Nothing degrades, nothing warns,
+    # and no response shape changes.
+    #
+    # Note that search does not read this flag at all. capability() asks
+    # the STORE whether any vectors exist, so a flag set true over an
+    # empty table cannot produce an adapter round trip per query — which
+    # is why flipping it has no effect on query behaviour until
+    # something has actually been embedded.
+    events_embed_enrichment: bool = False
+    # Sweep visits recorded BEFORE the two enrichers above were deployed,
+    # handing each to the same enricher the ingest path calls. Off by
+    # default and the only enrichment path that is: upgrading a running
+    # site must never quietly start working through its back catalogue on
+    # the GPU the live cameras are using. Switch it on once, let it finish
+    # (it stops by itself at the oldest visit), switch it back off. Still
+    # gated per camera by the same skill assignments, so turning it on
+    # without them costs nothing.
+    events_enrichment_backfill: bool = False
+    # Admission control for the three enrichers above (services/
+    # enrichment_gate.py, #583). An adapter takes `scheduling.max_inflight`
+    # requests at once — its own declaration in adapters_index.yml, not a
+    # knob here. Beyond that, this many visits may WAIT for a slot; the
+    # next one is dropped (and described later by the backfill, when the
+    # box is idle) rather than queued without bound. 0 = no waiting at all.
+    events_enrichment_queue_depth: int = 8
+    # How long one adapter call may take before core gives up. High on
+    # purpose: with the gate bounding what is in flight, this is a guard
+    # against a HUNG adapter, not the load control it used to be — a slow
+    # model that does finish gets its answer saved instead of thrown away
+    # at 15 s while it kept computing.
+    events_enrichment_timeout_s: float = 90.0
+    # This many timeouts in a row on one adapter pauses enrichment for it
+    # (60 s, doubling to 10 min, one probe per cooldown) and records the
+    # `enrichment_adapter_too_slow` system event so the UI says why.
+    events_enrichment_breaker_timeouts: int = 5
+    # A visit whose caption call failed (timed out, adapter unreachable)
+    # is not asked about again by the on-demand lane for this long. The
+    # failure is not recorded as "looked and found nothing" — that would
+    # hide the visit from every later pass — but asking again at once was
+    # how one Search kept a slow captioner computing the same photo for
+    # an hour. 0 = ask again every time.
+    events_caption_retry_cooldown_s: float = 600.0
+    # The governor (services/enrichment_governor.py): whether the box can
+    # afford enrichment at all right now, from the host monitor's CPU
+    # sample and each adapter's smoothed latency. Above this CPU% the
+    # live path goes LIVE-ONLY (captions/embeddings only when a slot is
+    # free, VQA keeps a short line, backfill held); the monitor's own
+    # cpu_high alert or an open breaker PAUSES it entirely. Busy is load,
+    # not clock — "busy hours" happen on their own.
+    events_enrichment_governor_cpu_percent: int = 65
+    # An adapter averaging more than this per call is behind the camera
+    # whatever the CPU figure says (a slow GPU model looks idle to
+    # psutil), and also throttles to LIVE-ONLY.
+    events_enrichment_slow_call_s: float = 20.0
+    # The detector's latency against its own floor (the lowest per-window
+    # mean the monitor has seen, drifting slowly), on boards where it
+    # shares one accelerator with the captioner. At `slow_factor` the
+    # live path goes LIVE-ONLY in its accelerator form — embeddings as
+    # before, captions at most one per `pressure_gap_s`, descriptor
+    # questions dropped — and at `pause_factor` nothing is sent. Measured
+    # on a Ventuno Q (2026-11-12): the description questions held the
+    # Hexagon 70 % of the time and the detector ran 2.7–4.8× its floor.
+    events_enrichment_detector_slow_factor: float = 2.0
+    events_enrichment_detector_pause_factor: float = 4.0
+    events_enrichment_pressure_gap_s: float = 6.0
+    # The share of the accelerator held by the enrichment adapters the
+    # governor paces (captioner, VQA, embedder; the monitor's per-user
+    # shares, not the device total) above which background enrichment
+    # does not START a new call — the device-side trigger beside the
+    # detector-latency one. A running inference cannot be pre-empted on an
+    # NPU; this keeps new ones from starting while the work the governor
+    # can defer already fills the device. The detector's and the plate
+    # reader's shares are left out: they cannot be deferred, and counting
+    # them paced captions for no detector gain (Ventuno Q, 2026-11-13).
+    # Measured: the description questions held 48–70 % (2026-11-12), the
+    # single structured call 24 % (2026-11-13).
+    events_enrichment_device_busy_percent: float = 60.0
+    # The backfill sweeps history only after the governor has been NORMAL
+    # this long with nothing live in hand — "when it finds resources".
+    events_enrichment_backfill_idle_s: int = 120
+    # Optional clock window for the backfill ONLY, "HH:MM-HH:MM" local
+    # time (may wrap midnight: "22:00-06:00"). Empty = whenever idle.
+    # Malformed = ignored with one warning, never silently off.
+    events_enrichment_backfill_window: str = ""
+    # The backfill is opportunistic, not a batch job: after each visit it
+    # sleeps long enough that its own inference time is at most this
+    # share of the wall clock (0.5 = half the adapters' time, measured
+    # per visit, so a 5 s visit is followed by a 5 s pause). It took the
+    # whole NPU on the Ventuno Q the morning embeddings came on
+    # (2026-11-10) and the camera agent had to queue behind it. 1 = no
+    # pacing beyond the fixed pause; 0.1 = a tenth.
+    events_enrichment_backfill_share: float = 0.5
+    # And it stands aside for people: a search or a camera-agent turn
+    # holds the backfill for this many seconds after the last one, so a
+    # conversation never queues behind history. 0 = off.
+    events_enrichment_backfill_interactive_hold_s: int = 90
+    # The requested lane (services/enrichment_requests.py): a search whose
+    # question needs a caption or a claim the matching visits do not have
+    # yet queues up to this many of them, newest first, and says so in
+    # its answer. "Last month" on a busy site is thousands; the answer to
+    # that is a narrower window, not a queue that runs until tomorrow.
+    events_enrichment_request_cap: int = 50
+    # Apps allowed to run on EVERY camera without an operator pick
+    # (manifest all_cameras: true). A pick is also what an app may READ,
+    # so honouring the flag from any manifest would let a third-party
+    # app grant itself every camera on its first registration. Only ids
+    # listed here get it; anyone else asking is logged and ignored.
+    all_cameras_apps: str = "camera-agent"
+    # How long visit rows in the events store are kept. 0 (default) means
+    # "the same window as the recordings retention" — the evidence JPEG
+    # and the row that points at it age out together, so a row never
+    # outlives its photo and the store cannot grow without bound. Set it
+    # to keep history longer or shorter than the video; with recordings
+    # kept forever, 0 keeps the rows forever too.
+    events_retention_days: int = 0
+    # The operator inbox (app_alerts). Alerts are small but a busy site
+    # rings thousands a day, and nothing pruned them before this: rows
+    # older than this are dropped, and APP_ALERTS_MAX_ROWS caps the
+    # table inside the window. 0 disables age-based pruning.
+    alerts_inbox_retention_days: int = 90
+    # The least cosine similarity a visit needs to be RETURNED by the
+    # vector arm of search. Without a floor the arm always hands back
+    # its top-N, so "a person in a red shirt" on a box that never saw
+    # one answered with fifty visits that merely contained a person.
+    # Measured on CLIP ViT-B/32 text→frame: on-topic best matches score
+    # 0.25-0.29, off-topic ones 0.19-0.22, so 0.22 keeps the former and
+    # drops the latter. 0 disables the floor (the old behaviour).
+    # Measured on the Ventuno Q with SigLIP2 (2026-11-10, 103 visits,
+    # bench/ventuno-q-npu-embedder-2026-11-10.md): a query that describes
+    # a visit scores 0.11–0.14 against its frame, one that describes
+    # nothing on the site tops out at 0.056. SigLIP-family models are
+    # trained with a sigmoid loss whose scale and bias make 0.13 a
+    # confident match; the 0.22 this was before (never measured against
+    # real vectors) rejected every frame.
+    # 0.08 let every true match through (0.11–0.14 on the probe) and
+    # fifty near-misses with it; the labelled eval's fusion sweep
+    # (bench/ventuno-q-text-embed-2026-11-10.md) put 0.12 ahead on every
+    # metric — the rows between 0.08 and 0.12 were the ones outvoting
+    # the words.
+    search_vector_min_similarity: float = 0.12
+    # The floor for search's CAPTION arm — the query against each visit's
+    # caption vector (caption + attribute words). With a `text_embed`
+    # adapter registered (bge-small, the sentence encoder) both go
+    # through it. Measured twice on the Ventuno Q
+    # (bench/ventuno-q-text-embed-2026-11-10.md): queries phrased like
+    # the captioner put hits at 0.75–0.83 and noise under 0.75, but the
+    # labelled eval's operator phrasing ("hooded sweatshirt", "light blue
+    # kurta") puts hits as low as 0.63–0.69, and at 0.75 the arm sat out
+    # of a quarter of the cases. The sweep over the labelled pool: the
+    # arm alone scores hit@5 0.82 at 0.65 against 0.64 at 0.75, while
+    # 0.65 still cuts what nobody saw ("a cat on the roof" 0.57, "a dog"
+    # 0.64). Fusion ranks by agreement, so a looser floor costs little.
+    # Without a text_embed adapter the arm uses the embed adapter's text
+    # tower, where SigLIP2's irrelevant pairs reach 0.75 — raise it
+    # there. 0 disables it; `semantic.caption.best` in a search's answer
+    # shows the scale a box is seeing.
+    search_caption_min_similarity: float = 0.65
+    # How much each arm's vote counts in the fusion (reciprocal rank,
+    # k=60): the words 1, the frame vectors 1, the caption vectors 0.5.
+    # Measured on the labelled eval: with the caption arm at a full vote
+    # two vector arms agreeing on a near-miss outvoted the words that
+    # named the thing (MRR 0.755 → 0.815 with these, frame floor 0.12).
+    # A bounded yes/no re-rank of the first page by the box's own language
+    # model (the litertlm captioner's chat on the NPU): the top N captions
+    # in one call, the ones it says match moved to the front. 0 = off
+    # (every search pays its latency); a caller may ask per request with
+    # ?rerank=N. See services/search_rerank.py and the bench report.
+    search_rerank_top: int = 0
+    search_rerank_timeout_s: float = 8.0
+    search_text_arm_weight: float = 1.0
+    search_vector_arm_weight: float = 1.0
+    search_caption_arm_weight: float = 0.5
+    # Relearn the camera graph nightly from the journeys the site is
+    # already certain about (same plate or same recognised face on two
+    # cameras). ON by default, unlike the backfill above, because it
+    # spends no inference at all — it is one indexed scan of claims
+    # already stored — and without it camera_transitions stays empty,
+    # which makes every cross-camera route answer "no learned route
+    # between these cameras yet" and score on time alone. Off means the
+    # graph freezes as it is; it does not disable route-following.
+    journey_transition_learning: bool = True
     # RFC-0002 Phase 0: NATS URL for core's domain-event consumers
     # (plate.recognized.v1 today). Compose sets NATS_URL=nats://nats:4222;
     # empty disables consumption (enrichment's synchronous fallback still
     # writes plate_text).
     nats_url: str = ""
+    # Agentic Workflows (RFC #620): the language/vision model AI steps run
+    # on. Empty URL = AI steps answer "unsure" (llm_down) and rule-based
+    # workflows still run. The model must see pictures for Look.
+    workflows_llm_url: str = ""
+    workflows_llm_model: str = "qwen3-vl:2b-instruct"
+    workflows_llm_api: str = "ollama"  # ollama | openai (an OpenAI-compatible server)
+    #: A Look step's picture is shrunk to this long side first: on CPU a
+    #: 1080p picture alone used most of a step's 120 s (#741). 0 = as is.
+    workflows_look_max_side: int = 768
+    # Per-app bus credentials (services/nats_users.py): the users file the
+    # nats-apps leaf server includes (a shared volume; empty = feature
+    # off), and the URL apps are told to join with their own key.
+    nats_users_conf: str = ""
+    nats_apps_url: str = ""
+    # Where nats-apps publishes /leafz (services/apps_bus_watch.py checks
+    # the leaf link to the platform bus is up). Empty = derived from
+    # nats_apps_url's host on the standard monitoring port 8222.
+    nats_apps_monitor_url: str = ""
+    # Certificates core trusts when it calls an app's contract over
+    # https (services/app_tls.py): every *.crt under this directory, one
+    # subdirectory per app, mounted read-only by the overlay that runs
+    # the app. Empty directory = default trust store only.
+    app_trusted_certs_dir: str = "/etc/opennvr/app-certs"
+
+    @field_validator("database_url")
+    @classmethod
+    def name_the_postgres_driver(cls, v: str) -> str:
+        """``postgresql://`` means psycopg2 HERE, not whatever SQLAlchemy
+        defaults to this year.
+
+        SQLAlchemy 2.1.0 changed the DBAPI a bare ``postgresql://`` URL
+        resolves to, from psycopg2 to psycopg 3. This project installs
+        ``psycopg2-binary`` and not psycopg 3, so on that version the
+        backend cannot import at all — and the failure arrives as
+        ``ModuleNotFoundError: No module named 'psycopg'`` from inside
+        ``create_engine``, which reads like a missing package rather
+        than a default that moved under it.
+
+        The lockfile is the real defence and is now actually used by the
+        image. This is the second one: a dependency bump should not be
+        able to silently change which driver talks to the database.
+
+        Only the bare form is rewritten. ``postgresql+psycopg://`` is
+        somebody asking for psycopg 3 on purpose and is left alone.
+        """
+        url = (v or "").strip()
+        if url.startswith("postgresql://"):
+            return "postgresql+psycopg2://" + url[len("postgresql://"):]
+        if url.startswith("postgres://"):  # the older alias, same meaning
+            return "postgresql+psycopg2://" + url[len("postgres://"):]
+        return v
 
     @field_validator("trusted_proxy_cidrs", "internal_service_cidrs")
     @classmethod
@@ -468,6 +849,53 @@ class Settings(BaseSettings):
                 "Must be a valid Fernet key."
             )
         return v
+
+    @model_validator(mode="before")
+    @classmethod
+    def _empty_env_var_means_unset(cls, data: Any) -> Any:
+        """An empty environment variable means the operator did not set it.
+
+        ``docker-compose.yml`` has no ``env_file:`` — every service
+        enumerates its environment by hand, as
+
+            - EVENTS_CAPTION_ENRICHMENT=${EVENTS_CAPTION_ENRICHMENT:-}
+
+        Compose substitutes an unset variable with the EMPTY STRING and
+        still passes the variable, so a knob the operator never
+        mentioned in ``.env`` does not arrive here absent. It arrives as
+        ``''``. Pydantic will not read ``''`` as a bool, and this class
+        is instantiated at module import, so the failure lands before
+        uvicorn has a logger: supervisord restarts the backend forever,
+        the container never reports healthy, and every dependent service
+        dies with ``dependency failed to start`` while the only readable
+        trace is a file inside the container (#547).
+
+        Dropping the key restores the field's DOCUMENTED default, which
+        is what "I did not set this" means everywhere else an operator
+        looks — a commented-out line in ``.env.example``, an absent
+        ``-e`` on the command line, a variable the shell never exported.
+
+        Only fields that HAVE a default are dropped, and the distinction
+        is the point rather than caution. A REQUIRED field arriving
+        empty is a real misconfiguration with an error message written
+        for it — ``secret_key`` tells the operator to run ``make
+        secrets`` — and swallowing ``''`` there would replace that with
+        pydantic's bare "Field required". Empty means unset only where
+        unset is a thing the field knows how to be.
+        """
+        if not isinstance(data, dict):
+            return data
+
+        optional = {
+            name
+            for name, field in cls.model_fields.items()
+            if not field.is_required()
+        }
+        return {
+            key: value
+            for key, value in data.items()
+            if not (isinstance(value, str) and value == "" and key.lower() in optional)
+        }
 
     @model_validator(mode="after")
     def _enforce_mediamtx_internal(self) -> "Settings":

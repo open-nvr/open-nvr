@@ -1,0 +1,28 @@
+{
+  "from": "2026-09-18T00:00:00+00:00",
+  "to": "2026-09-19T00:00:00+00:00",
+  "cameras": [
+    {
+      "camera_id": 1,
+      "name": "Gate",
+      "events": {
+        "car": 3,
+        "person": 5
+      },
+      "event_count": 8,
+      "first_event": "2026-09-18T07:02:11+00:00",
+      "last_event": "2026-09-18T21:40:03+00:00",
+      "alerts": {
+        "high": 1
+      },
+      "alert_count": 1
+    }
+  ],
+  "site_alerts": {
+    "medium": 1
+  },
+  "totals": {
+    "events": 8,
+    "alerts": 2
+  }
+}

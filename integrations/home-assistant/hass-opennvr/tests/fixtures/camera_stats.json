@@ -1,0 +1,16 @@
+{
+  "camera_id": 1,
+  "is_active": true,
+  "stream_ready": true,
+  "bitrate_kbps": 1050.4,
+  "detect_up": true,
+  "detect_fps": 1.49,
+  "target_fps": 2.0,
+  "inference_ms": 742.46,
+  "skipped_total": 12,
+  "tracks_active": 2,
+  "frame_age_s": 0.4,
+  "recording_state": "recording",
+  "recording_paused": null,
+  "days_retained": 6.2
+}

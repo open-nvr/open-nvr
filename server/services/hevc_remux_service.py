@@ -158,9 +158,9 @@ def _find_all(buf: bytes, start: int, end: int, want: bytes):
 # ---------------------------------------------------------------------------
 
 
-def probe_video_codec(path: str | Path) -> str | None:
-    """Return the video sample-entry fourcc lowercased (``hev1``/``hvc1``/``avc1``
-    …) or None. Cheap: reads only the moov box."""
+def _probe_codec(path: str | Path, handler: bytes) -> str | None:
+    """Sample-entry fourcc (lowercased) of the first ``handler`` track, or None.
+    Cheap: reads only the moov box."""
     try:
         with open(path, "rb") as f:
             for typ, pos, hdr, size in _iter_top_level(f):
@@ -168,13 +168,12 @@ def probe_video_codec(path: str | Path) -> str | None:
                     continue
                 f.seek(pos)
                 moov = f.read(size)
-                # find the VIDEO track's stsd sample entry
                 for to, th, ts in _find_all(moov, hdr, size, b"trak"):
                     hd = _find(moov, to + th, to + ts, (b"mdia", b"hdlr"))
                     if not hd:
                         continue
                     ho, hh, _hs = hd
-                    if moov[ho + hh + 8:ho + hh + 12] != b"vide":
+                    if moov[ho + hh + 8:ho + hh + 12] != handler:
                         continue
                     stsd = _find(moov, to + th, to + ts,
                                  (b"mdia", b"minf", b"stbl", b"stsd"))
@@ -185,8 +184,28 @@ def probe_video_codec(path: str | Path) -> str | None:
                     return moov[e + 4:e + 8].decode("latin-1", "replace").lower()
                 return None
     except Exception as e:
-        recording_logger.warning("probe_video_codec(%s) failed: %s", path, e)
+        recording_logger.warning(
+            "probe %s codec(%s) failed: %s", handler.decode(), path, e
+        )
     return None
+
+
+def probe_video_codec(path: str | Path) -> str | None:
+    """Return the video sample-entry fourcc lowercased (``hev1``/``hvc1``/``avc1``
+    …) or None. Cheap: reads only the moov box."""
+    return _probe_codec(path, b"vide")
+
+
+def probe_audio_codec(path: str | Path) -> str | None:
+    """Return the audio sample-entry fourcc lowercased (``mp4a``/``opus``/``ipcm``
+    …) or None when the recording has no audio track."""
+    return _probe_codec(path, b"soun")
+
+
+# Audio the browser MSE pipeline decodes. MediaMTX writes G.711 (and any other
+# PCM) as ``ipcm``, which no browser decodes; one undecodable track makes MSE
+# reject the whole clip, video included.
+_BROWSER_AUDIO = ("mp4a", "opus")
 
 
 def is_browser_incompatible_video(codec: str | None) -> bool:
@@ -194,9 +213,26 @@ def is_browser_incompatible_video(codec: str | None) -> bool:
 
     All HEVC flavors are remuxed: ``hev1`` needs the ``hvc1`` retag, and even an
     ``hvc1`` recording still carries the raw-PCM audio track MSE can't decode.
-    ``avc1`` (H.264) plays as-is through the byte-range HLS path.
+    ``avc1`` (H.264) video plays as recorded; see ``needs_browser_remux`` for
+    the audio side.
     """
     return (codec or "") in ("hev1", "hvc1", "hevc")
+
+
+def is_browser_incompatible_audio(codec: str | None) -> bool:
+    """True for an audio track MSE can't decode (no audio track -> False)."""
+    return bool(codec) and codec not in _BROWSER_AUDIO
+
+
+def needs_browser_remux(video_codec: str | None, audio_codec: str | None) -> bool:
+    """Whether a recording must go through the video-only remux to play.
+
+    H.264 with G.711 audio is the common case here: the video is fine, but the
+    ``ipcm`` track stalls MSE, so the remux drops it.
+    """
+    return is_browser_incompatible_video(video_codec) or is_browser_incompatible_audio(
+        audio_codec
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +269,8 @@ class RemuxIndex:
 
 def build_remux_index(src_path: str | Path) -> RemuxIndex:
     """Scan ``src_path`` (headers only — sample payloads are never read) and
-    build the :class:`RemuxIndex` for its flat, video-only, ``hvc1`` remux.
+    build the :class:`RemuxIndex` for its flat, video-only remux
+    (``hev1`` retagged to ``hvc1``, any other sample entry kept).
 
     Raises on structural failure (caller treats the file as unplayable).
     """
@@ -270,7 +307,8 @@ def build_remux_index(src_path: str | Path) -> RemuxIndex:
             e = stsd[0] + stsd[1] + 8
             esize = struct.unpack(">I", moov[e:e + 4])[0]
             stsd_entry = bytearray(moov[e:e + esize])
-            stsd_entry[4:8] = b"hvc1"  # retag hev1 -> hvc1 (params already in hvcC)
+            if stsd_entry[4:8] == b"hev1":
+                stsd_entry[4:8] = b"hvc1"  # retag (params already in hvcC)
             break
         if video_track_id is None or stsd_entry is None:
             raise ValueError("no video track / sample entry")
@@ -414,17 +452,22 @@ def build_remux_index(src_path: str | Path) -> RemuxIndex:
     mdhd = _fullbox(b"mdhd", 0, 0, struct.pack(">IIII", 0, 0, timescale, total_dur)
                     + struct.pack(">HH", 0x55C4, 0))
     mdia = _box(b"mdia", mdhd + hdlr + minf)
+    # Display size, 16.16 fixed point, from the visual sample entry (width and
+    # height sit 24 bytes into its body). Firefox rejects a 0x0 video track
+    # with NS_ERROR_DOM_MEDIA_METADATA_ERR; Chromium ignores the field.
+    width, height = struct.unpack(">HH", bytes(stsd_entry[32:36]))
     tkhd = _fullbox(b"tkhd", 0, 7, struct.pack(">IIIII", 0, 0, 1, 0, total_dur)
                     + b"\x00" * 8 + struct.pack(">hhhh", 0, 0, 0, 0)
                     + struct.pack(">IIIIIIIII", 0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000)
-                    + struct.pack(">II", 0, 0))
+                    + struct.pack(">II", width << 16, height << 16))
     trak = _box(b"trak", tkhd + mdia)
     mvhd = _fullbox(b"mvhd", 0, 0, struct.pack(">IIII", 0, 0, timescale, total_dur)
                     + struct.pack(">IH", 0x10000, 0x0100) + b"\x00" * 10
                     + struct.pack(">IIIIIIIII", 0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000)
                     + b"\x00" * 24 + struct.pack(">I", 2))
     moov_out = _box(b"moov", mvhd + trak)
-    ftyp = _box(b"ftyp", b"isom" + struct.pack(">I", 0x200) + b"isomiso2mp41hvc1")
+    ftyp = _box(b"ftyp", b"isom" + struct.pack(">I", 0x200)
+                + b"isomiso2mp41" + bytes(stsd_entry[4:8]))
 
     mdat_size = sum(rl for _, rl in runs)
     # 64-bit mdat if needed

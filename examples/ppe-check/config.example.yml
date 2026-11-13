@@ -1,0 +1,50 @@
+# ppe-check — operator config (standalone run). On a compose install the
+# config-init container renders config.docker.yml instead.
+
+# The input is Tier-0's tracked people on the bus.
+nats_url: "nats://localhost:4222"
+nats_token: null
+subject_pattern: "opennvr.inference.tier0.>"
+consume_tier0: true
+# Where the detect-pipeline serves each track's best crop (its metrics port).
+best_frame_url: "http://localhost:9109"
+
+webhook_url: null
+nats_alerts_url: null
+nats_alerts_token: null
+
+# The kit everyone must wear. Each item is a set of phrases the detector
+# looks for; add an item (or reword one for the site) under item_phrases.
+required_items: ["helmet", "vest"]
+item_phrases:
+  helmet: ["hard hat", "safety helmet"]
+  vest: ["safety vest", "high-visibility vest"]
+  gloves: ["work gloves", "safety gloves"]
+  boots: ["safety boots", "work boots"]
+# An item counts as worn when one of its phrases scores at least this.
+min_item_score: 0.3
+# Tier-0 person tracks below this score, or shorter than this fraction of
+# the frame, are not checked: the kit is a few pixels on a distant person.
+min_person_score: 0.5
+min_person_height: 0.25
+# An item must be missing in this many checks in a row before it alerts.
+confirm_checks: 2
+# How soon a person with something missing is checked again, and how often
+# a compliant person is checked again while still in view. Each check is
+# one open-vocabulary detection through KAI-C: about ten seconds on CPU.
+recheck_seconds: 15
+check_interval_seconds: 120
+# After an alert, further violations on the same camera stay quiet this long.
+alert_cooldown_seconds: 120
+# How long one detection may take; keep it above a CPU look.
+look_timeout_seconds: 90
+# Which KAI-C adapter runs the detection. Empty = the first registered one
+# advertising open_vocab_detection (the shipped open-vocab adapter).
+detector_adapter: ""
+
+alert_severity: "high"
+attach_snapshot: true
+
+# Standalone: KAI-C directly, since there is no core to ask.
+kaic_url: "http://localhost:8100"
+kaic_api_key: null

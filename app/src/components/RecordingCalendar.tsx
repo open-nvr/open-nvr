@@ -18,6 +18,7 @@
 
 import { useMemo, useState } from 'react'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
+import { useTranslation } from '../i18n'
 
 interface RecordingCalendarProps {
   /** Selected day, YYYY-MM-DD (same UTC-day strings the recordings API returns). */
@@ -27,12 +28,6 @@ interface RecordingCalendarProps {
   markedDates: Set<string>
   className?: string
 }
-
-const WEEKDAYS = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa']
-const MONTHS = [
-  'January', 'February', 'March', 'April', 'May', 'June',
-  'July', 'August', 'September', 'October', 'November', 'December',
-]
 
 /** Format y/m(0-based)/d as YYYY-MM-DD without touching timezones. */
 const key = (y: number, m: number, d: number) =>
@@ -51,6 +46,9 @@ function parseKey(s: string | null): { y: number; m: number } | null {
  * Day keys are plain date-string arithmetic — no Date/timezone conversion.
  */
 export function RecordingCalendar({ selected, onSelect, markedDates, className = '' }: RecordingCalendarProps) {
+  const { t } = useTranslation()
+  const WEEKDAYS = t('calendar.weekdays').split(',')
+  const MONTHS = t('calendar.months').split(',')
   const today = new Date()
   const todayKey = key(today.getFullYear(), today.getMonth(), today.getDate())
 
@@ -100,7 +98,7 @@ export function RecordingCalendar({ selected, onSelect, markedDates, className =
         <button
           onClick={() => step(-1)}
           className="p-1 text-[var(--text-dim)] hover:text-[var(--text)] hover:bg-[var(--panel-2)]"
-          aria-label="Previous month"
+          aria-label={t('calendar.previousMonth')}
         >
           <ChevronLeft size={15} />
         </button>
@@ -110,7 +108,7 @@ export function RecordingCalendar({ selected, onSelect, markedDates, className =
         <button
           onClick={() => step(1)}
           className="p-1 text-[var(--text-dim)] hover:text-[var(--text)] hover:bg-[var(--panel-2)]"
-          aria-label="Next month"
+          aria-label={t('calendar.nextMonth')}
         >
           <ChevronRight size={15} />
         </button>
@@ -136,7 +134,7 @@ export function RecordingCalendar({ selected, onSelect, markedDates, className =
             <button
               key={i}
               onClick={() => onSelect(k)}
-              title={marked ? `${k} · has recordings` : k}
+              title={marked ? `${k} · ${t('calendar.hasRecordings')}` : k}
               className={`relative mx-auto w-7 h-7 flex items-center justify-center text-[11px] transition-colors ${
                 isSelected
                   ? 'bg-[var(--accent)] text-white font-semibold'
@@ -159,10 +157,10 @@ export function RecordingCalendar({ selected, onSelect, markedDates, className =
       {/* Legend */}
       <div className="mt-1.5 flex items-center gap-3 text-[10px] text-[var(--text-dim)]">
         <span className="inline-flex items-center gap-1">
-          <span className="w-1 h-1 rounded-full bg-[var(--accent)]" /> has recordings
+          <span className="w-1 h-1 rounded-full bg-[var(--accent)]" /> {t('calendar.hasRecordings')}
         </span>
         <span className="inline-flex items-center gap-1">
-          <span className="w-2.5 h-2.5 outline outline-1 outline-[var(--accent)]/60" /> today
+          <span className="w-2.5 h-2.5 outline outline-1 outline-[var(--accent)]/60" /> {t('calendar.today')}
         </span>
       </div>
     </div>

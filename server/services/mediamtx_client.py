@@ -31,6 +31,7 @@ Provides:
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -115,6 +116,49 @@ async def check_available() -> bool:
     return available
 
 
+#: Cached playback JWT and when it stops being usable (monotonic).
+_playback_token: str | None = None
+_playback_token_until: float = 0.0
+_playback_token_lock = threading.Lock()
+
+
+def playback_auth() -> dict[str, str]:
+    """Query params that authorise a server-side playback request.
+
+    MediaMTX's playback server used to be excluded from JWT auth, on the
+    written grounds that it was "already protected by localhost binding"
+    — which was never true container-to-container and became actively
+    false when mediamtx joined the apps network, where any app could
+    fetch any camera's footage by editing ``path=``. It is authenticated
+    now, so core has to say who it is.
+
+    Returned as params rather than a header because ``authJWTInHTTPQuery``
+    is already on for HLS, and because nginx forwards the query string
+    untouched while it adds no headers of its own.
+
+    Empty dict when no token can be minted (the first seconds after boot,
+    before core has written its signing key) — the request then fails at
+    MediaMTX with a 401 that the caller already handles as "unavailable",
+    rather than here with an exception it does not.
+    """
+    global _playback_token, _playback_token_until
+    now = time.monotonic()
+    with _playback_token_lock:
+        if _playback_token and now < _playback_token_until:
+            return {"jwt": _playback_token}
+        try:
+            from services.mediamtx_jwt_service import MediaMtxJwtService
+
+            _playback_token = MediaMtxJwtService.create_admin_token(expiry_minutes=5)
+            _playback_token_until = now + 240.0
+        except Exception as exc:  # noqa: BLE001
+            recording_logger.warning(
+                f"could not mint a MediaMTX playback token: {exc}")
+            _playback_token, _playback_token_until = None, 0.0
+            return {}
+        return {"jwt": _playback_token}
+
+
 def _fmt_rfc3339(dt: datetime) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
@@ -143,7 +187,7 @@ async def list_segments(
     live_range = end is None or end >= now_wall
     ttl = _LIST_TTL_LIVE_SECONDS if live_range else _LIST_TTL_HISTORIC_SECONDS
 
-    params: dict[str, str] = {"path": path}
+    params: dict[str, str] = {"path": path, **playback_auth()}
     if start is not None:
         params["start"] = _fmt_rfc3339(start)
     if end is not None:

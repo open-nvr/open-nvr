@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import io
+import threading
 import time
 
 from detect_pipeline.ffmpeg_presets import HwAccel, frame_size_bytes
@@ -69,6 +70,9 @@ def test_frame_source_streams_then_stops_and_terminates():
     fs = FrameSource(
         "rtsp://h:8554/cam_sub", width=W, height=H, fps=5,
         spawn=spawn, max_restarts=0, backoff_seconds=0, _sleep=lambda s: None,
+        # A BytesIO "decoder" delivers instantly; this test counts the
+        # restart loop's frames, not the drain's drops (those have their own).
+        drop_late_frames=False,
     )
     frames = list(fs.stream())
     assert len(frames) == 3
@@ -86,6 +90,7 @@ def test_frame_source_restarts_up_to_cap():
     fs = FrameSource(
         "rtsp://h:8554/cam_sub", width=W, height=H, fps=5,
         spawn=spawn, max_restarts=1, backoff_seconds=0, _sleep=lambda s: None,
+        drop_late_frames=False,
     )
     frames = list(fs.stream())
     # 2 drains (initial + 1 restart) × 2 frames each = 4
@@ -155,6 +160,7 @@ def test_fruitless_counter_resets_after_a_good_cycle():
         # min_healthy_seconds=0 → any frame counts as a healthy session, the
         # rule this test was written for. The duration rule has its own test.
         max_fruitless_restarts=3, min_healthy_seconds=0, _sleep=lambda s: None,
+        drop_late_frames=False,
     )
     frames = list(src.stream())
     assert len(frames) == 2
@@ -186,7 +192,7 @@ def test_short_sessions_do_not_reset_the_giveup_counter():
         spawn=lambda cmd: (spawns.append(1), _BlipProc())[1],
         max_fruitless_restarts=3,
         min_healthy_seconds=5.0,      # instant blips are below this
-        _sleep=lambda s: None,
+        _sleep=lambda s: None, drop_late_frames=False,
     )
     frames = list(src.stream())
     # Each blip yields its one frame, but none resets the counter, so the
@@ -597,3 +603,170 @@ def test_child_process_output_is_scrubbed_of_credentials():
             break
         time.sleep(0.01)
     assert "SECRETPAYLOAD" not in tail.text()
+
+
+# ── #507: the decoder is drained on its own thread ──────────────────
+
+def _frame(seq: int, deliberate: bool = False) -> Frame:
+    return Frame(bytes(SIZE), W, H, seq, float(seq), deliberate)
+
+
+def test_a_slow_consumer_gets_the_newest_frame_and_the_count_of_what_it_missed():
+    """Detection is busy; the decoder keeps going; the consumer comes back
+    to the NEWEST frame, and the frames in between are counted, not
+    queued."""
+    from detect_pipeline.frame_source import _FrameSlot
+
+    slot = _FrameSlot(drop=True)
+    done = threading.Event()
+
+    def produce():
+        for i in range(4):
+            slot.put(_frame(i))
+        done.set()
+
+    threading.Thread(target=produce, daemon=True).start()
+    first = slot.take()
+    assert first is not None and first.seq == 0
+    assert done.wait(2), "the drain must never wait on a busy consumer"
+    time.sleep(0.02)                                   # detection, busy
+    newest = slot.take()
+    assert newest is not None and newest.seq == 3, "the newest frame, not the oldest"
+    assert slot.dropped == 2, "seq 1 and 2 were overwritten — and counted"
+
+
+def test_seq_zero_is_never_overwritten():
+    """seq 0 is the worker's restart signal and carries deliberate_restart;
+    the drain waits for the consumer to take it rather than replace it."""
+    from detect_pipeline.frame_source import _FrameSlot
+
+    slot = _FrameSlot(drop=True)
+    slot.put(_frame(0, deliberate=True))
+    blocked = threading.Event()
+
+    def put_next():
+        slot.put(_frame(1))
+        blocked.set()
+
+    threading.Thread(target=put_next, daemon=True).start()
+    assert not blocked.wait(0.1), "seq 1 must wait behind an unconsumed seq 0"
+    first = slot.take()
+    assert first is not None and first.seq == 0 and first.deliberate_restart
+    assert blocked.wait(2)
+    nxt = slot.take()
+    assert nxt is not None and nxt.seq == 1 and slot.dropped == 0
+
+
+class _PacedStdout:
+    """A decoder that says when the drain has read it to EOF — so 'was the
+    decoder blocked by detection?' is a fact the test can wait on, not a
+    race it has to time."""
+
+    def __init__(self, n: int):
+        self.buf = io.BytesIO(_synthetic(n))
+        self.eof = threading.Event()
+
+    def read(self, k: int) -> bytes:
+        chunk = self.buf.read(k)
+        if not chunk:
+            self.eof.set()
+        return chunk
+
+
+def test_the_decoder_is_never_blocked_by_a_slow_detector():
+    """The whole point of #507: ffmpeg's stdout is read to EOF while the
+    consumer is still 'detecting' on the first frame. Before, the decoder
+    sat on a full 64 KiB pipe until MediaMTX dropped the session."""
+    stdout = _PacedStdout(6)
+
+    class _Proc(_FakeProc):
+        def __init__(self):
+            super().__init__(b"")
+            self.stdout = stdout
+
+    fs = FrameSource("rtsp://h:8554/cam_sub", width=W, height=H, fps=5,
+                     spawn=lambda argv: _Proc(), max_restarts=0,
+                     backoff_seconds=0, _sleep=lambda s: None)
+    it = fs.stream()
+    first = next(it)
+    assert first.seq == 0
+    assert stdout.eof.wait(2), "the drain reached EOF while the consumer held frame 0"
+    rest = list(it)
+    assert [f.seq for f in rest] == [5], "the newest frame, once the consumer returned (1-4 dropped)"
+
+
+def test_a_consumer_that_leaves_releases_a_blocked_drain():
+    """Lossless mode blocks the drain in put(); the consumer closing its
+    generator must let that thread finish, not leak it holding a frame."""
+    stdout = _PacedStdout(5)
+
+    class _Proc(_FakeProc):
+        def __init__(self):
+            super().__init__(b"")
+            self.stdout = stdout
+
+    fs = FrameSource("rtsp://h:8554/cam_sub", width=W, height=H, fps=5,
+                     spawn=lambda argv: _Proc(), max_restarts=0,
+                     backoff_seconds=0, _sleep=lambda s: None,
+                     drop_late_frames=False)
+    def drain_alive() -> bool:
+        return any(t.name == "ffmpeg-stdout" and t.is_alive() for t in threading.enumerate())
+
+    it = fs.stream()
+    next(it)
+    time.sleep(0.05)                                   # the drain is now blocked
+    assert drain_alive()
+    it.close()
+    deadline = time.monotonic() + 2
+    while drain_alive() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not drain_alive(), "the ffmpeg-stdout thread did not exit"
+
+
+def test_slot_take_times_out_as_a_stall_until_closed():
+    from detect_pipeline.frame_source import STALLED, _FrameSlot
+
+    slot = _FrameSlot()
+    assert slot.take(timeout=0.02) is STALLED      # open, empty, nothing came
+    slot.close()
+    assert slot.take(timeout=0.02) is None         # closed and empty: the end
+
+
+def test_a_live_but_silent_decoder_is_restarted_not_waited_on(caplog):
+    """A REAL child that stays alive and never writes a frame. That is what a
+    stream whose timestamps stopped advancing looks like (an RTP clock wrap
+    behind a relay, Ventuno Q 2026-11-09): packets keep coming, the fps
+    filter never sees time move, and the reader sat in stdout.read() for
+    hours while /health said stale. The source must end that session after
+    stall_seconds and respawn."""
+    import subprocess
+    import sys
+
+    spawns: list[int] = []
+
+    def spawn(argv):
+        spawns.append(1)
+        return subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+
+    src = FrameSource("rtsp://cam/frozen-clock", width=4, height=4, fps=5,
+                      spawn=spawn, stall_seconds=0.2, max_restarts=1,
+                      backoff_seconds=0, _sleep=lambda s: None)
+    t0 = time.monotonic()
+    with caplog.at_level("WARNING", logger="detect_pipeline.frame_source"):
+        frames = list(src.stream())
+    assert frames == []
+    assert len(spawns) == 2, "the stalled session was not ended and respawned"
+    assert time.monotonic() - t0 < 10.0
+    assert any("no decoded frame for" in r.getMessage() for r in caplog.records)
+
+
+def test_stall_watchdog_leaves_a_flowing_decoder_alone():
+    """Frames arriving well within stall_seconds never trip it."""
+    src = FrameSource("rtsp://cam/fine", width=W, height=H, fps=5,
+                      spawn=lambda cmd: _FakeProc(_synthetic(3)), stall_seconds=5.0,
+                      drop_late_frames=False,     # count exact frames
+                      max_restarts=0, backoff_seconds=0, _sleep=lambda s: None)
+    assert [f.seq for f in src.stream()] == [0, 1, 2]

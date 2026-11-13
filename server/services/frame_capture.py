@@ -51,6 +51,7 @@ stream or OpenCV build required.
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -86,6 +87,15 @@ def _default_encode_jpeg(frame: object, quality: int) -> Optional[bytes]:
     if not ok:
         return None
     return bytes(buf.tobytes())
+
+
+#: Draining stops at the first grab that took this long: a grab that had
+#: to wait is one the stream delivered just now. Shorter than any camera's
+#: frame interval (25 fps = 40 ms), longer than a queued grab (<1 ms).
+DRAIN_LIVE_EDGE_SECONDS = 0.015
+#: And never more than this many grabs per call, so a stream that keeps a
+#: deep queue (or lies about timing) costs a bounded amount per request.
+DRAIN_MAX_GRABS = 150
 
 
 @dataclass
@@ -184,10 +194,38 @@ class PersistentCapturePool:
 
     def _read_locked(self, entry: _CameraEntry):
         # Caller holds entry.lock.
-        if entry.capture is None:
+        cap = entry.capture
+        if cap is None:
             return None
+        if not (hasattr(cap, "grab") and hasattr(cap, "retrieve")):
+            try:
+                ok, frame = cap.read()
+            except Exception:
+                return None
+            return frame if ok and frame is not None else None
+        # Drain to the live edge. A persistent RTSP capture read once every
+        # few seconds does not return the current picture: FFmpeg queues
+        # the frames that arrived meanwhile (CAP_PROP_BUFFERSIZE is a
+        # V4L/GStreamer knob and does nothing here), so one read() per
+        # call walks through the past a frame at a time and falls ever
+        # further behind — a frame-polling app at 5 s on a 25 fps camera
+        # was two minutes stale within a minute. grab() decodes nothing
+        # and returns at once while frames are queued; the first grab
+        # that has to WAIT is the one that fetched a frame the camera
+        # produced just now. Bounded, so a stalled stream cannot spin.
         try:
-            ok, frame = entry.capture.read()
+            started = time.monotonic()
+            if not cap.grab():
+                return None
+            waited = time.monotonic() - started >= DRAIN_LIVE_EDGE_SECONDS
+            for _ in range(DRAIN_MAX_GRABS):
+                if waited:
+                    break                       # that grab was the live one
+                started = time.monotonic()
+                if not cap.grab():
+                    break                       # keep the last good grab
+                waited = time.monotonic() - started >= DRAIN_LIVE_EDGE_SECONDS
+            ok, frame = cap.retrieve()
         except Exception:
             return None
         if not ok or frame is None:

@@ -18,9 +18,12 @@
 
 import { useEffect, useState } from 'react'
 import { apiService } from '../../lib/apiService'
+import { extractApiError } from '../../lib/apiError'
 import { useAuth } from '../../auth/AuthContext'
+import { useTranslation } from '../../i18n'
 
 export function MediaSourceSettings() {
+  const { t } = useTranslation()
   const { user: me } = useAuth()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -52,7 +55,7 @@ export function MediaSourceSettings() {
         const { data } = await apiService.getMediaSourceSettings()
         setCfg(data)
       } catch (e: any) {
-        setError(e?.data?.detail || e?.message || 'Failed to load media source settings')
+        setError(extractApiError(e, t('settings.failedLoadMediaSource')))
       } finally {
         setLoading(false)
       }
@@ -68,43 +71,43 @@ export function MediaSourceSettings() {
       const { data } = await apiService.getMediaSourceSettings()
       setCfg(data)
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to save media source settings')
+      setError(extractApiError(e, t('settings.failedSaveMediaSource')))
     } finally {
       setLoading(false)
     }
   }
 
-  if (!canAdmin) return <div className="text-sm text-amber-400">Admin only.</div>
+  if (!canAdmin) return <div className="text-sm text-[var(--warn)]">{t('admin.only')}</div>
 
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2">
-  <h2 className="text-base font-semibold">Media Source Settings</h2>
-        <button className="ml-auto px-2 py-1 bg-[var(--accent)] text-white" onClick={save} disabled={loading}>Save</button>
+    <h2 className="text-base font-semibold">{t('settings.mediaSourceTitle')}</h2>
+      <button className="ml-auto px-2 py-1 bg-[var(--accent)] text-white" onClick={save} disabled={loading}>{loading ? t('common.saving') : t('common.save')}</button>
       </div>
-      {error && <div className="text-sm text-red-400">{error}</div>}
+      {error && <div className="text-sm text-[var(--danger)]">{error}</div>}
 
       <div className="grid grid-cols-2 gap-3 text-sm">
-        <div className="border border-neutral-700 bg-[var(--panel-2)] p-2 space-y-2">
-          <div className="text-[var(--text-dim)]">Playback Base</div>
+        <div className="border border-[var(--border)] bg-[var(--panel-2)] p-2 space-y-2">
+          <div className="text-[var(--text-dim)]">{t('settings.playbackBase')}</div>
           <label className="flex items-center justify-between gap-2">
-            <span>Base URL</span>
-            <input className="w-80 bg-[var(--panel)] border border-neutral-700 px-2 py-1" value={cfg.mediamtx_base_url}
+            <span>{t('settings.baseUrl')}</span>
+            <input className="w-80 bg-[var(--panel)] border border-[var(--border)] px-2 py-1" value={cfg.mediamtx_base_url}
               onChange={(e)=>setCfg({...cfg, mediamtx_base_url:e.target.value})} />
           </label>
           <label className="flex items-center justify-between gap-2">
-            <span>Access Token (query/bearer)</span>
-            <input className="w-80 bg-[var(--panel)] border border-neutral-700 px-2 py-1" value={cfg.mediamtx_token||''}
+            <span>{t('settings.accessToken')}</span>
+            <input className="w-80 bg-[var(--panel)] border border-[var(--border)] px-2 py-1" value={cfg.mediamtx_token||''}
               onChange={(e)=>setCfg({...cfg, mediamtx_token:e.target.value})} />
           </label>
           <label className="flex items-center justify-between gap-2">
-            <span>Stream prefix</span>
-            <input className="w-40 bg-[var(--panel)] border border-neutral-700 px-2 py-1" value={cfg.mediamtx_stream_prefix}
+            <span>{t('settings.streamPrefix')}</span>
+            <input className="w-40 bg-[var(--panel)] border border-[var(--border)] px-2 py-1" value={cfg.mediamtx_stream_prefix}
               onChange={(e)=>setCfg({...cfg, mediamtx_stream_prefix:e.target.value})} />
           </label>
           <label className="flex items-center justify-between gap-2">
-            <span>Path mode</span>
-            <select className="w-40 bg-[var(--panel)] border border-neutral-700 px-2 py-1" value={cfg.mediamtx_path_mode}
+            <span>{t('settings.pathMode')}</span>
+            <select className="w-40 bg-[var(--panel)] border border-[var(--border)] px-2 py-1" value={cfg.mediamtx_path_mode}
               onChange={(e)=>setCfg({...cfg, mediamtx_path_mode:e.target.value})}>
               <option value="id">id</option>
               <option value="ip">ip</option>
@@ -112,75 +115,78 @@ export function MediaSourceSettings() {
           </label>
         </div>
 
-        <div className="border border-neutral-700 bg-[var(--panel-2)] p-2 space-y-2">
-          <div className="text-[var(--text-dim)]">Publishing / RTSP Proxy</div>
+        <div className="border border-[var(--border)] bg-[var(--panel-2)] p-2 space-y-2">
+          <div className="text-[var(--text-dim)]">{t('settings.publishingProxy')}</div>
           <label className="flex items-center justify-between gap-2">
-            <span>RTSP Publish URL</span>
-            <input className="w-80 bg-[var(--panel)] border border-neutral-700 px-2 py-1" value={cfg.mediamtx_rtsp_publish_url}
+            <span>{t('settings.rtspPublishUrl')}</span>
+            <input className="w-80 bg-[var(--panel)] border border-[var(--border)] px-2 py-1" value={cfg.mediamtx_rtsp_publish_url}
               onChange={(e)=>setCfg({...cfg, mediamtx_rtsp_publish_url:e.target.value})} />
           </label>
           <label className="flex items-center justify-between gap-2">
-            <span>RTSP proxy enabled</span>
+            <span>{t('settings.rtspProxyEnabled')}</span>
             <input type="checkbox" className="accent-[var(--accent)]" checked={!!cfg.rtsp_proxy_enabled}
               onChange={(e)=>setCfg({...cfg, rtsp_proxy_enabled:e.target.checked})} />
           </label>
           <label className="flex items-center justify-between gap-2">
-            <span>FFmpeg binary</span>
-            <input className="w-60 bg-[var(--panel)] border border-neutral-700 px-2 py-1" value={cfg.ffmpeg_binary_path||''}
+            <span>{t('settings.ffmpegBinary')}</span>
+            <input className="w-60 bg-[var(--panel)] border border-[var(--border)] px-2 py-1" value={cfg.ffmpeg_binary_path||''}
               onChange={(e)=>setCfg({...cfg, ffmpeg_binary_path:e.target.value})} />
           </label>
         </div>
 
-        <div className="border border-neutral-700 bg-[var(--panel-2)] p-2 space-y-2">
-          <div className="text-[var(--text-dim)]">Media Server Admin API</div>
+        <div className="border border-[var(--border)] bg-[var(--panel-2)] p-2 space-y-2">
+          <div className="text-[var(--text-dim)]">{t('settings.mediaServerApi')}</div>
           <label className="flex items-center justify-between gap-2">
             <span>Base (with /v3)</span>
-            <input className="w-80 bg-[var(--panel)] border border-neutral-700 px-2 py-1" value={cfg.mediamtx_admin_api||''}
+            <input className="w-80 bg-[var(--panel)] border border-[var(--border)] px-2 py-1" value={cfg.mediamtx_admin_api||''}
               onChange={(e)=>setCfg({...cfg, mediamtx_admin_api:e.target.value})} />
           </label>
           <label className="flex items-center justify-between gap-2">
             <span>Token</span>
-            <input className="w-80 bg-[var(--panel)] border border-neutral-700 px-2 py-1" value={cfg.mediamtx_admin_token||''}
+            <input className="w-80 bg-[var(--panel)] border border-[var(--border)] px-2 py-1" value={cfg.mediamtx_admin_token||''}
               onChange={(e)=>setCfg({...cfg, mediamtx_admin_token:e.target.value})} />
           </label>
           <label className="flex items-center justify-between gap-2">
             <span>Webhook Token</span>
-            <input className="w-80 bg-[var(--panel)] border border-neutral-700 px-2 py-1" value={cfg.mediamtx_webhook_token||''}
+            <input className="w-80 bg-[var(--panel)] border border-[var(--border)] px-2 py-1" value={cfg.mediamtx_webhook_token||''}
               onChange={(e)=>setCfg({...cfg, mediamtx_webhook_token:e.target.value})} />
           </label>
           <label className="flex items-center justify-between gap-2">
-            <span>Recordings Path</span>
-            <input className="w-80 bg-[var(--panel)] border border-neutral-700 px-2 py-1" value={cfg.recordings_base_path||''}
+            <span>{t('settings.recordingsPath')}</span>
+            <input className="w-80 bg-[var(--panel)] border border-[var(--border)] px-2 py-1" value={cfg.recordings_base_path||''}
               onChange={(e)=>setCfg({...cfg, recordings_base_path:e.target.value})} />
           </label>
           <div className="text-[var(--text-dim)] text-xs">Used to provision media-server paths.</div>
         </div>
 
-        <div className="border border-neutral-700 bg-[var(--panel-2)] p-2 space-y-2">
-          <div className="text-[var(--text-dim)]">Playback protocols</div>
+        <div className="border border-[var(--border)] bg-[var(--panel-2)] p-2 space-y-2">
+          <div className="text-[var(--text-dim)]">{t('settings.playbackProtocols')}</div>
           <label className="flex items-center justify-between gap-2">
-            <span>Enable HLS</span>
+            <span>{t('settings.enableHls')}</span>
             <input type="checkbox" className="accent-[var(--accent)]" checked={!!cfg.hls_enabled}
               onChange={(e)=>setCfg({...cfg, hls_enabled:e.target.checked})} />
           </label>
           <label className="flex items-center justify-between gap-2">
-            <span>Enable Low-Latency HLS</span>
+            <span>{t('settings.enableLlHls')}</span>
             <input type="checkbox" className="accent-[var(--accent)]" checked={!!cfg.ll_hls_enabled}
               onChange={(e)=>setCfg({...cfg, ll_hls_enabled:e.target.checked})} />
           </label>
         </div>
 
-        <div className="border border-neutral-700 bg-[var(--panel-2)] p-2 space-y-2">
-          <div className="text-[var(--text-dim)]">Transcoding</div>
+        {/* Stored only: nothing in recording, playback or the media server reads
+            these yet, so the controls stay disabled rather than look like a fix. */}
+        <fieldset disabled className="border border-[var(--border)] bg-[var(--panel-2)] p-2 space-y-2">
+          <div className="text-[var(--text-dim)]">{t('settings.transcoding')}</div>
+          <p className="text-[var(--text-dim)]">{t('settings.transcodingNotWired')}</p>
           <label className="flex items-center justify-between gap-2">
-            <span>Enable transcoding</span>
+            <span>{t('settings.enableTranscoding')}</span>
             <input type="checkbox" className="accent-[var(--accent)]" checked={!!cfg.transcoding_enabled}
               onChange={(e)=>setCfg({...cfg, transcoding_enabled:e.target.checked})} />
           </label>
           <div className="grid grid-cols-2 gap-2">
             <label className="flex items-center justify-between gap-2">
               <span>Video codec</span>
-              <select className="w-40 bg-[var(--panel)] border border-neutral-700 px-2 py-1" value={cfg.transcode_video_codec||''}
+              <select className="w-40 bg-[var(--panel)] border border-[var(--border)] px-2 py-1" value={cfg.transcode_video_codec||''}
                 onChange={(e)=>setCfg({...cfg, transcode_video_codec:e.target.value||null})}>
                 <option value="">(auto)</option>
                 <option value="h264">h264</option>
@@ -189,7 +195,7 @@ export function MediaSourceSettings() {
             </label>
             <label className="flex items-center justify-between gap-2">
               <span>Audio codec</span>
-              <select className="w-40 bg-[var(--panel)] border border-neutral-700 px-2 py-1" value={cfg.transcode_audio_codec||''}
+              <select className="w-40 bg-[var(--panel)] border border-[var(--border)] px-2 py-1" value={cfg.transcode_audio_codec||''}
                 onChange={(e)=>setCfg({...cfg, transcode_audio_codec:e.target.value||null})}>
                 <option value="">(auto)</option>
                 <option value="aac">aac</option>
@@ -198,31 +204,31 @@ export function MediaSourceSettings() {
             </label>
             <label className="flex items-center justify-between gap-2">
               <span>Video bitrate (kbps)</span>
-              <input type="number" className="w-36 bg-[var(--panel)] border border-neutral-700 px-2 py-1" value={cfg.video_bitrate_kbps??''}
+              <input type="number" className="w-36 bg-[var(--panel)] border border-[var(--border)] px-2 py-1" value={cfg.video_bitrate_kbps??''}
                 onChange={(e)=>setCfg({...cfg, video_bitrate_kbps:e.target.value?Number(e.target.value):null})} />
             </label>
             <label className="flex items-center justify-between gap-2">
               <span>Audio bitrate (kbps)</span>
-              <input type="number" className="w-36 bg-[var(--panel)] border border-neutral-700 px-2 py-1" value={cfg.audio_bitrate_kbps??''}
+              <input type="number" className="w-36 bg-[var(--panel)] border border-[var(--border)] px-2 py-1" value={cfg.audio_bitrate_kbps??''}
                 onChange={(e)=>setCfg({...cfg, audio_bitrate_kbps:e.target.value?Number(e.target.value):null})} />
             </label>
             <label className="flex items-center justify-between gap-2">
               <span>Max FPS</span>
-              <input type="number" className="w-28 bg-[var(--panel)] border border-neutral-700 px-2 py-1" value={cfg.max_fps??''}
+              <input type="number" className="w-28 bg-[var(--panel)] border border-[var(--border)] px-2 py-1" value={cfg.max_fps??''}
                 onChange={(e)=>setCfg({...cfg, max_fps:e.target.value?Number(e.target.value):null})} />
             </label>
             <label className="flex items-center justify-between gap-2">
               <span>Scale</span>
               <div className="flex items-center gap-2">
-                <input type="number" className="w-24 bg-[var(--panel)] border border-neutral-700 px-2 py-1" value={cfg.scale_width??''}
+                <input type="number" className="w-24 bg-[var(--panel)] border border-[var(--border)] px-2 py-1" value={cfg.scale_width??''}
                   onChange={(e)=>setCfg({...cfg, scale_width:e.target.value?Number(e.target.value):null})} />
                 <span>×</span>
-                <input type="number" className="w-24 bg-[var(--panel)] border border-neutral-700 px-2 py-1" value={cfg.scale_height??''}
+                <input type="number" className="w-24 bg-[var(--panel)] border border-[var(--border)] px-2 py-1" value={cfg.scale_height??''}
                   onChange={(e)=>setCfg({...cfg, scale_height:e.target.value?Number(e.target.value):null})} />
               </div>
             </label>
           </div>
-        </div>
+        </fieldset>
       </div>
     </div>
   )

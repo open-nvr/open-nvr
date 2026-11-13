@@ -85,6 +85,9 @@ logger = logging.getLogger("home-assistant-relay")
 
 MANIFEST = AppManifest(
     id="home-assistant-relay",
+    # No camera picker: this app acts on other apps' alerts/events,
+    # which those apps have already limited to the cameras they picked.
+    camera_picker=False,
     name="Home Assistant Relay",
     version="1.0.0",
     category="integration",
@@ -364,6 +367,11 @@ class HomeAssistantRelay(AlertSubscriber):
         # ``once`` onto that instead of the loop-level stop.
         if once:
             self._once_mode = True
+        logger.warning(
+            "home-assistant-relay is deprecated: use the OpenNVR Home Assistant "
+            "integration, or turn on Home Assistant discovery on an MQTT "
+            "integration (Settings > Integrations). See docs/HOME_ASSISTANT.md."
+        )
         logger.info(
             "subscribing to %r on %s (backend=%s)",
             self.cfg.subject_pattern,

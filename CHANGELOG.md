@@ -4,6 +4,4439 @@ All notable changes to OpenNVR are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+### Changed
+
+### Fixed
+
+## [0.1.11] — 2026-11-14
+
+The Qualcomm NPU release. On the qualcomm flavour the detector, the captions (Gemma), the camera agent's LLM, the search embeddings (SigLIP 2 and a sentence model), speech to text (Whisper) and the plate reader all run on the Hexagon HTP, and a fresh install on a Dragonwing board starts with one setting: the flavour overlays are split per compose file so Compose 2.24 accepts a plain install, the tag the embedder fill finds is the tag asked for, and the discovery prober's Dockerfile reaches Docker intact. Detection boxes are on by default on every live picture. Search gained weighted fusion, synonyms and typo reading, a caption arm with its own model, voice search and a bounded re-rank, off by default. The workflow engine runs workflows and has an API. ANPR on a Qualcomm box: plate candidates at full resolution, consensus across looks, per-camera scan policy. USB webcams are cameras, served by MediaMTX on Linux; Add Camera finds ONVIF cameras by multicast. The camera agent serves OpenNVR Mirror. The dashboard shows the NPU and GPU beside CPU, memory and disk, and says when requests are queued. Adapter pins at `0.1.11` (`text_embed` on its own tag). App SDK 0.12.0 (`sdk-v0.12.0`).
+
+Between the release candidate and the tag, the enrichment tier was
+measured on the Ventuno Q and changed by the measurements: the governor
+yields to the detector on a shared accelerator and counts only the work
+it can defer; three or more descriptor questions go as one call; the
+same frame is never described twice and a camera whose picture has
+stopped changing is said so; visits and their enrichment are published
+on the bus; the agent's live look and the Mirror's subtitle come from one
+shared whole-frame description instead of their own model calls. One
+idea — the caption and the attributes in one call — was built, measured
+to cost caption words, and removed: no optimisation may lower the
+quality of an answer. The update runner is installed with OpenNVR, and a
+USB webcam on Windows goes live.
+
+### Added
+
+- **App SDK 0.12.0.** Publishes what `main` carried since 0.11.0: the
+  typed `visit.enriched.v1` payload (`VisitEnriched`) and `face.recognized.v1`
+  (`FaceRecognized`), `BestFrameClient.fetch_latest` for the pipeline's
+  newest decoded frame, the workflow file validator
+  (`opennvr_app_sdk.workflows.validate`) and the scaffold's use of it.
+  Additive; nothing in 0.11.0 changes.
+
+- **Add Camera → Discover finds ONVIF cameras by multicast.** Core runs on
+  a Docker bridge, where WS-Discovery never reaches the LAN, so Discover
+  could only sweep subnets address by address. The probe now runs where
+  multicast works: on Linux a small `lan-probe` container on the host's
+  network (`LAN_DISCOVERY=on`, the installer's default), with nothing to
+  install; on Docker Desktop the host agent. One probe, every camera on the
+  segment answers within seconds, with its name and model, and no subnet
+  has to be configured; the sweep still covers routed subnets and the two
+  merge by address. Replies are unauthenticated UDP and are treated so:
+  bounded, cleaned, and never able to list a camera under another host.
+  The request/answer handshake is a sequence number, not a comparison of
+  two machines' clocks; the probe sets its multicast egress per interface
+  and probes every up interface, letting the Camera LAN check decide.
+
+- **USB webcams as cameras.** Add Camera → Manual → Webcam, two sources:
+  this browser (WHIP, while the tab is open) and the OpenNVR server. On
+  Linux the server path needs no install: `WEBCAMS=on` adds
+  `docker-compose.webcams.yml`, MediaMTX gets the host's video devices and
+  an ffmpeg, and a webcam camera's path runs its own capture (`runOnInit`,
+  restarted on unplug/replug), with a `-sub` stream for detection like an
+  IP camera. On macOS and Windows, where Docker Desktop cannot see USB, a
+  small host agent (`./start.sh host-agent install`) streams the webcam and
+  reports the machine's own CPU, memory, disk and temperatures. A webcam is
+  `source_type = publisher`: recording, live view, playback, snapshots and
+  detection read its path as for any camera. See docs/WEBCAM.md.
+
+- **OpenNVR Mirror: the booth page.** The camera agent serves `/mirror`,
+  a kiosk page for a show floor: live video full screen, Tier-0 boxes with
+  label and confidence, one sentence about the scene every few seconds
+  from the vision model, spoken through Piper, and a card per person
+  (clothing, what they carry, an apparent age range) that follows their
+  box. All on the box; nothing stored. The loop behind it (`mirror.py`)
+  makes one model call at a time — a person nobody has described yet
+  before a scene refresh, a scene refresh before re-describing someone —
+  speaks only what is new, greets a newcomer, and stops itself when no
+  page has been heard from for 45 s. Reuses the agent's WebRTC stream,
+  `/updates` socket, vision path and voice, behind the same login.
+
+- **A bounded LLM re-rank of the first page, off by default.** The
+  captioner's model (Gemma on the Hexagon, through the litertlm adapter's
+  OpenAI-shaped chat) reads the first N captions in one call and says
+  which show what was asked; those move to the front in their fused
+  order, nothing is dropped. One call, a few tokens, a hard timeout, one
+  in flight at a time. Measured on the labelled eval (Ventuno Q,
+  2026-11-11, N=10): the first prompt made it worse (MRR 0.762 → 0.731,
+  the model said yes to nearly everything); the strict prompt shipped
+  here gains a little (0.762 → 0.775, P@5 0.450 → 0.457) for a median
+  234 ms a search — so `SEARCH_RERANK_TOP` defaults to 0 and a caller
+  can ask per request with `?rerank=N`. `semantic.rerank` reports what
+  was asked, kept and how long it took. (`server/services/search_rerank.py`,
+  `server/routers/search.py`)
+
+- **Voice search.** A microphone button in the search box: click, speak,
+  click again, and the clip is transcribed on the box by the same
+  speech-to-text adapter the camera agent uses (whisper on the Hexagon,
+  Parakeet on the CPU), reached through KAI-C — nothing leaves the box,
+  and the browser's own cloud speech recognition is not used. The
+  transcript is read back as a typed query — number words to digits
+  ("cam twenty three" → cam 23), spelled-out plates to one token
+  ("k a zero one a b one two three four" → KA01AB1234), the "show me" of
+  a spoken request dropped — and the box says what it changed under the
+  field before searching exactly as if typed. `POST /api/v1/search/transcribe`
+  (`audio_b64`, a short 16 kHz WAV the browser packs itself; 503
+  `no-stt` with no adapter). The microphone needs a secure context
+  (localhost or the HTTPS front); on plain http the button says so.
+  (`server/services/search_voice.py`, `server/routers/search.py`,
+  `app/src/lib/voiceCapture.ts`, `app/src/views/Search.tsx`)
+
+- **Search's caption arm has its own model.** The caption arm compares a
+  query with each visit's caption, text against text, and it was using
+  the frame embedder's text tower for both — an image-text model that is
+  a poor judge of that pair: on the Ventuno Q SigLIP2's text-to-text
+  cosines for relevant and irrelevant caption/query pairs overlap
+  (0.76–0.87 against 0.59–0.75, 2026-11-10), so no floor could separate a
+  hit from noise. Core now looks for an adapter advertising `text_embed`
+  (ai-adapter's new `text-embed` container: `BAAI/bge-small-en-v1.5`,
+  384-d, MIT, CPU, a few milliseconds a caption — same compose profiles
+  as the embedder) and sends caption vectors and the caption arm's query
+  through it; the frame arm keeps the embed adapter. Without one, the
+  embed adapter's text tower carries on as before. The store judges each
+  kind against its own producer and size (a 384-d caption space beside a
+  768-d frame space is the intended arrangement, not a "mixed store"),
+  the re-embed walk counts stale rows per kind, the search routes pass a
+  caption query vector of its own (`caption_query_vector` in
+  `search_page`), and `SEARCH_CAPTION_MIN_SIMILARITY` now reaches the
+  core container — at a default of 0.75, measured on the Ventuno Q's 805
+  captions through the new adapter (a matching caption 0.75–0.83, the
+  best unrelated one 0.57–0.74; `bench/ventuno-q-text-embed-2026-11-10.md`;
+  37.6 ms a caption batched, 10 ms a query, on two ARM cores). A box
+  with the old 0.22 written in `.env` must change it. (`server/services/embed_enrichment.py`,
+  `embedding_store.py`, `search_service.py`, `routers/search.py`,
+  `routers/app_platform.py`, `enrichment_backfill.py`,
+  `docker-compose.apps.yml`, `config/tasks.yml`, `config/adapters_index.yml`)
+
+- **Sweeping older visits is a switch in the Footage Search app, off by
+  default.** Enrichment describes and embeds *new* visits as they happen;
+  the backfill — the sweep of everything recorded before — used to be
+  `EVENTS_ENRICHMENT_BACKFILL=true` in `.env`, and `./start.sh` turned it
+  on by itself on the qualcomm flavour, so the Ventuno Q spent its first
+  morning with embeddings on chewing through months of history nobody had
+  asked for. Now the choice is **Apps → Footage Search → Configure →
+  Backfill history**: on and saved, core sweeps older visits newest-first
+  in the gaps when the box is idle (the same governor as before, #583);
+  off, only new visits are described, and turning it off stops the sweep
+  at the next pass with its place kept. The save applies at once (the
+  config PUT drops the 30 s cache). The env flag remains as a force-on
+  for headless installs; `./start.sh` no longer writes it. Operator
+  messages that said "set EVENTS_ENRICHMENT_BACKFILL=true" now point at
+  the switch. (`examples/footage-search`, `server/services/
+  enrichment_backfill.py`, `server/routers/apps.py`, `start.sh`,
+  `docs/ENRICHMENT.md`)
+
+- **Search's embedding lane on the Qualcomm NPU.** On the qualcomm
+  flavour the `embeddings` profile now runs SigLIP2 (`google/siglip2-
+  base-patch16-224`, Apache-2.0, Qualcomm AI Hub's w8a16 export) on the
+  Hexagon through ai-adapter's new `siglip_qnn` image in place of the CPU
+  clip adapter — the same 768-dimensional image + text space, the same
+  `embed` request and answer, the same port, so nothing else changes.
+  `./start.sh` turns `EVENTS_EMBED_ENRICHMENT` on and adds the profile
+  when the image exists (and puts both back on leaving the flavour); the
+  compiled HTP graphs live in a volume so a recreate does not compile
+  again; `SIGLIP_QNN_TEXT_PROVIDERS=CPUExecutionProvider` keeps the text
+  tower on the CPU where its HTP build is too slow. The per-camera `embed`
+  skill remains the operator's gate. This is what makes the frame arm
+  and the caption-embedding arm of search (both already built) actually
+  run on a Qualcomm box, where no embedder existed before.
+
+- **Search reads a typo as the word it is one letter from, and says so.**
+  "persn at the dok" used to fall through to the caption text and match
+  nothing, silently. A word that is none of the box's own vocabulary — the
+  class synonyms, the camera names, the people it knows, the colours and
+  kinds its description skills write — and one letter off one of them is
+  now read as that word (`difflib` over a few hundred words, no model, no
+  database extension): `interpretation.corrections` carries
+  `{"persn": "person"}`, the page shows "Read persn as person" with a
+  *Search as typed* button, and `correct=false` searches the letters.
+  Short words need a near-identical match and two equally close words are
+  never guessed between. **Number plates match by OCR-equivalence class**:
+  a plate typed from memory with an 8 for a B, an O for a 0, an I for a 1
+  still finds the read, and a read that confused one of them is still
+  found (O/Q/D→0, I/L→1, Z→2, S→5, G→6, B→8, on both sides). Still a
+  substring match, so "1234" finds KA01AB1234.
+
+- **Camera agent: `GET /turn-stats`, and footage review that captions only
+  what changed.** `/turn-stats` reports what the last thousand turns cost
+  in this process — p50/p95 wall time, LLM time and tool time by router
+  tier, calls, failures and latency by tool, where answers came from, and
+  the last few turns — from the traces the agent already keeps, so
+  latency is readable without pulling an eval log off the box.
+  `describe_window` fetches its five sample frames together and captions
+  a frame only when the scene changed since the last captioned one (a
+  32×18 grey-thumbnail difference): a one-hour window of an empty office
+  cost five captions and 12 s on the Ventuno Q; it now costs one. The
+  eval harness takes `--refresh-token` and exchanges it on a 401 so a run
+  longer than the 30-minute access token finishes, and
+  `tools/box_eval.sh` runs the live eval on the box as deployed, with
+  `--cpu` to run it against the CPU brain and put the NPU settings back.
+
+- **The camera agent knows about itself and the system: `list_standing`,
+  `system_status`, `show_camera`.** "What alarms do I have?" used to be
+  answered by arming another one (the words matched a standing request);
+  `list_standing` reads back the armed alarms, the standing watches and the
+  scheduled reports with their numbers, cameras and windows. "Is everything
+  okay?", "is the gate recording?", "how much disk is left?" used to get a
+  description of the live frame; `system_status` reads core's new
+  `GET /api/v1/internal/camera-agent/status` — each camera's connectivity
+  and observed recording state (the same derivation as the camera list's
+  badge) and the recording disk against its purge floor — and names the
+  offline or stalled cameras by their roles (Ventuno Q, 2026-11-09: camera
+  23's recordings froze for hours while the agent could only describe the
+  picture). "Show me the gate" switches the page's live view instead of
+  captioning it. All three are read-only, viewer-safe, routed without the
+  model (Tier 0), and in the stock Docker configs. The router also gained a
+  golden set (`tests/test_router_golden.py`, 60 phrasings with the decision
+  each must get) that found and fixed three misses: a roster question
+  ("how many cameras do you have") was hinted to the people counter, "what
+  happened in the last ten minutes" needed the number as a digit, and
+  "any visitors last night" was not a camera question.
+
+- **Attendly: classroom attendance as an OpenNVR application.** The
+  attendance app that ran on AWS Rekognition and DynamoDB now runs beside
+  OpenNVR the way the Camera Agent does — its own container
+  (a signed image, `ghcr.io/open-nvr/attendly`; a first-party app whose
+  source is not published — docs in `docs/apps/attendly.md`; a service in
+  `docker-compose.apps.yml` and an App Catalog entry, profile `attendly`,
+  port 9300), its own web UI, OpenNVR login, and a card in the
+  App Catalog whose "Open app" opens that UI in a new tab. Rooms are OpenNVR
+  cameras; frames come from core's snapshot path; detection and recognition
+  go through KAI-C to the InsightFace adapter, which the profile starts.
+  Enrol students by photo or webcam, plan rooms, courses and a weekly
+  timetable; each class takes recognition snapshots that finalise into a
+  PRESENT/ABSENT roster. The installer lists it next to the Camera Agent.
+  It also runs the campus's flap barriers and staff attendance: students
+  enrol as day scholars or hostlers of a block, and a *hostel* gate admits
+  only that block's hostlers; a *mess* gate admits a student once per meal
+  against the day's meal bookings (booked on the page, by CSV, or by the
+  existing booking system through `POST /meals/bookings`); departments are
+  a camera plus a working window whose first and last sightings of each
+  staff member are the day's check-in and check-out. Gate decisions are
+  published as `access.decided.v1`, so the gate-controller app drives the
+  barriers exactly as it does for the licence-plate app. A gate with no
+  barrier runs in monitor mode: each student seen is logged as in or out,
+  a who-is-in list is kept per block, and an OpenNVR alert names them
+  (`hostel_in`, `hostel_out`, `gate_denied`, `mess_served`).
+  Review fixes (#798): the last slot of every class is counted
+  (finalisation waits a grace period and reruns when the worker exits);
+  a slot the camera could not be watched in counts against nobody and a
+  class with none finalises as "Not watched" instead of all-absent;
+  attendance rows are looked up by class and student rather than a
+  31-bit hash that let two classes overwrite each other; a student may
+  be enrolled in several course/section pairs; the 100-student limit is
+  off unless configured; the overlay defaults to Asia/Kolkata as the
+  README says; and slash-less `POST`/`PUT` calls from the UI (creating a
+  course) are redirected instead of answered 405. Attendly is a regular
+  catalog app: a service in `docker-compose.apps.yml` with an
+  `apps_index.yml` entry, so the installer's app menu and the App
+  Catalog's Install button both offer it; its contract surface rides the
+  SDK's `ContractApp`; and a browser refresh on a UI page whose path
+  shares an API prefix (`/attendance`, `/gates`…) serves the page.
+  From PR #791 and ai-adapter#81: Attendly runs its own InsightFace
+  instance (`insightface_attendly`, own face database and queue, detector
+  at 1280), uses `face_identify` when the adapter answers it (one call
+  per frame, a margin against the runner-up) with detect-then-crop as
+  the fallback, and gives the adapter codes only, never names. Marks:
+  LATE after a grace, a person's corrections (with EXCUSED and a note)
+  that survive a recompute, a coverage floor, a frozen roster, call-off
+  and restore, one-off classes, an evidence frame per slot, and a class
+  review on the Attendance page. Enrolment: consent first, the webcam
+  that takes the photos itself with on-screen and spoken guidance and a
+  duplicate told at the first photo, a picture per student, consent
+  withdrawal that deletes the faces, and erasure. A Report page:
+  student × class with totals and a rate, Excel and CSV.
+
+- **`STT_ADAPTER=whisper_qnn`: the camera agent's speech to text on the
+  Hexagon NPU (opt-in).** On a Qualcomm board the qualcomm flavour turns
+  that one word into the image, module, tag and provider the
+  `whisper-adapter` service needs for ai-adapter's new `whisper_qnn`
+  (Whisper-Small w8a16 as Qualcomm's QNN context binaries for the
+  QCS8275), lends it the DSP, groups and fastrpc libraries the detector
+  gets, and puts parakeet back when the flavour is left or the image is
+  not available. Parakeet stays the default: the NPU adapter is built
+  and unit-tested but not yet measured against it on the Ventuno Q, and
+  nothing here changes a box that did not ask.
+
+- **Search compares the question with what each caption means, not only
+  with its words.** "Man in a blue kurta" found nothing when the captioner
+  had written "person wearing a light blue tunic": the word arm needs the
+  exact term and the frame arm sees pixels, not phrasing. With
+  `EVENTS_EMBED_ENRICHMENT` on, each caption (plus its projected attribute
+  words) is now put through the embedding model's text tower the moment it
+  lands — and from the backfill for captions written earlier — and stored
+  as the visit's `caption` vector beside its `image` vector
+  (`event_embeddings.kind`, migration `b3c9e5f7a1d2`; existing rows are
+  `image`). Search ranks the query vector against those caption vectors as
+  a third arm, floored by `SEARCH_CAPTION_MIN_SIMILARITY` (0.22, same
+  scale as the image floor), and fuses it with the word and frame arms by
+  the same RRF. The response's `semantic` block lists every arm that ran
+  with its count, `added_by_caption` says how many results only this arm
+  found, and `semantic.caption` carries the arm's own scan and floor
+  numbers. A visit with no caption vector is skipped by this arm, not
+  scored as zero; an empty caption is never embedded; a failed embedding
+  never costs the caption; a model change re-embeds caption vectors with
+  the frame vectors. The text tower is SigLIP's, trained to align with
+  images rather than with other sentences, so this is the cheap option
+  (no second model) and not a sentence encoder.
+
+- **The detect-pipeline says where a dropped frame's time went.** The
+  capacity warning ("N of M decoded frames were never detected on") now
+  ends with the window's per-frame split: waited for the next frame, in
+  the detection stages, after them (publish, gate, evidence, stores). The
+  last two are exported as `tier0_stage_latency_seconds{stage="wait"|"post"}`
+  beside the existing stages. On the Ventuno Q (2026-11-09) camera 23
+  dropped a quarter of its frames in some minutes while its detector took
+  40 ms and the stage timers summed to 4 ms; nothing said where the other
+  200 ms per frame was.
+
+- **Core alarms when a camera records segments that hold no video.** On the
+  Ventuno Q (2026-11-09) a camera's RTP clock wrapped and the relay in front
+  of it clamped every timestamp, so MediaMTX closed a 50 MB segment every
+  seven minutes with 0.07 s of playable video in it — segments kept arriving,
+  the recording watchdog stayed quiet, and hours of footage were garbage. The
+  segment-complete hook now judges each closed segment by bytes against
+  duration (`services/segment_health.py`: an implied bitrate no camera can
+  produce, or a segment far shorter than configured yet heavy for its length)
+  and raises a `recording_degraded` camera event, cleared by the first healthy
+  segment; it is stored, published and shown exactly like `recording_stalled`
+  (Alerts view, toast, not an alarm on tour). Tails written at stop or
+  reconnect are too small to be judged and never alarm.
+
+- **The camera agent's demo talks over the streaming pipeline.** Talk
+  mode now streams the microphone to `/ws` (16 kHz PCM from an
+  AudioWorklet) and plays each sentence as it is synthesised, so the first
+  words come back while the rest of the answer is still being made and
+  you can talk over it; the pipeline's Silero VAD plus Smart Turn v3
+  decide when you have finished (silence fallback 1.0 s, was 2.0) instead
+  of the page's 0.9 s volume timer. The pipeline sends the transcript,
+  each spoken sentence, the turn state and interruptions as JSON beside
+  the audio (`StreamEvents`, `RawPcmSerializer`), and the streaming LLM
+  service answers with the agent's own turn — router, forced grounding,
+  window fit, backup model, reply guards — instead of a separate loop.
+  "Turn by turn" (record, then answer) stays as a setting and is the
+  fallback where AudioWorklet is missing.
+
+- **The camera agent keeps answering when its NPU brain is away.** With
+  `llm_provider: openai` and a `llm_fallback_url` (an Ollama), a connection
+  refused, a timeout or a 5xx from the endpoint (the adapter restarting, its
+  model reloading) sends the same request to the fallback model, slower,
+  with one spoken notice per episode ("I'm on my slower backup model for
+  now"); the primary is tried again every minute and taken back when it
+  answers; `/health` reports the episode (`llm_degraded`, and the LLM
+  check says which model is answering). A bad request is not an outage and
+  fails as before; with no fallback configured nothing changes. The
+  qualcomm fill points the fallback at the host Ollama when `.env` names
+  one (`LLM_FALLBACK_URL` from `OLLAMA_EXTERNAL_URL`, `LLM_FALLBACK_MODEL`).
+
+- **People descriptions come on with the NPU captioner.** On the qualcomm
+  flavour `start.sh` now also fills `EVENTS_DESCRIPTOR_PEOPLE=true` when
+  it puts the captioner on the Hexagon, the same way as captions and
+  vehicle descriptors: filled at the switch, an operator's own value never
+  touched, reset to false on leaving the flavour. A person visit then costs
+  two extra questions to the captioner (top clothing, carrying), a second
+  or two of NPU on an image it already holds, and "person in a blue kurta"
+  becomes an exact claim instead of only a caption word. On the CPU the
+  same questions are tens of seconds each, so the default there stays
+  false. `.env.example` says what it records and where.
+
+- **The camera agent's live look is a memory read, not an RTSP session.**
+  detect-pipeline keeps the newest frame each camera's worker decoded and
+  serves it at `/latest_frame?camera=&max_age=` (JPEG, `X-Frame-Age-Seconds`;
+  404 when nothing is fresher than `max_age`, default 3 s). The SDK gains
+  `make_latest_frame_fetch`, and the agent's frame cache asks it before the
+  camera's own frame source, falling back to that source when the pipeline
+  has nothing fresh. Measured on a Ventuno Q (the 32-case eval, 2026-11-08):
+  a live look cost 5.6–6.2 s, of which the RTSP grab was all but the
+  detector's 0.1 s and the answer's 0.5 s.
+
+- **The camera agent's LLM runs on the NPU on the qualcomm flavour.** The
+  litertlm caption adapter answers `/v1/chat/completions` on the same
+  Gemma engine (ai-adapter #83), and `start.sh` points the agent at it:
+  `LLM_PROVIDER=openai`, `LLM_BASE_URL=http://caption-adapter:9006`,
+  `LLM_MODEL`, `LLM_WINDOW_TOKENS=4096`, the pre-warm back on (seconds on
+  the NPU), the bundled Ollama skipped; leaving the flavour resets them,
+  an operator's own provider is kept. Measured on a Ventuno Q with the
+  agent's real prompt: 10 of 10 right tool choices on its evaluation
+  questions at 0.8–2.0 s a turn, against 20–25 s for granite4:micro on
+  the CPU (`bench/ventuno-q-npu-agent-llm-2026-11-07.md`). The same
+  `.env` keys put the agent on any OpenAI-compatible endpoint. New
+  `llm_window_tokens` (agent config): a window the runtime cannot grow
+  — the bundle's 4,096 tokens hold the system prompt and thirteen of the
+  fourteen schemas, or seven and eight turns of history — so each turn
+  sends only the tool schemas the question is likely to need (the
+  router's hint first, then what the words point at, then a fixed
+  priority) and the newest history, whole pairs, two turns at least; a
+  prompt the runtime still refuses mid-turn is retried without history,
+  then with three tools. `/health` probes an OpenAI-compatible endpoint's
+  `/v1/models` instead of reporting it unprobed.
+
+- **The dashboard shows the NPU and the GPU beside CPU, memory and disk.**
+  The host monitor's sample carries `accelerators`: the device the
+  detector runs on (from its own backend gauge: Hexagon, Intel NPU or
+  GPU, CUDA) and how busy it is, as the share of the sample window its
+  users spent computing, from the inference time the detector and KAI-C
+  already report, per user (detector, captioner, the ONNX adapters on the
+  qualcomm flavour). Most boards expose no utilisation counter a
+  container can read, so the number is labelled as an inference-time
+  share; where Intel's NPU driver exports its busy counter that is used
+  and labelled sysfs. The trend chart gains NPU and GPU lines when the
+  box has one in use, the vitals card a tile with the users, and the
+  history keeps `npu_percent` and `gpu_percent`.
+
+- **Ask a person, and the gate opens on a person's word.** A workflow's
+  Ask a person step creates an approval (`workflow_approvals`) and the run
+  waits; `GET /api/v1/approvals` and `POST /api/v1/approvals/{id}` (#773,
+  `workflows.approve` and the run's camera) answer it, and the run carries
+  on down that reply's path, after a restart too. A timeout takes the
+  `no_answer` path, never a reply's; Test asks nobody and takes the
+  default. The `app` action calls an installed app's action as the person
+  who answered, audited as the workflow's (the Gate concierge's
+  `open_now`), and `notify` puts a message in the inbox for `who`.
+
+- **The workflow engine runs workflows.** An app's alert starts every
+  On or Test workflow it triggers (`when: alert`), after the file's `if:`
+  guards and its limits (cooldown, one at a time, per hour, AI per hour);
+  the run walks its steps and records each one: If, For each, the AI step
+  (Look sees the alert's picture, shrunk with ffmpeg; the model is
+  `WORKFLOWS_LLM_URL` / `WORKFLOWS_LLM_MODEL`, loaded at start so the first
+  alert does not run out of time), and the actions `log`, `alert` (into the
+  inbox as the workflow, AI-decided `high` capped at `medium`), `site_mode`
+  and `wait`. Test records every action as "would have". A workflow never
+  triggers on a workflow's alert; a run a restart interrupted is marked
+  failed, not redone. Ask a person, app actions and `notify` are recorded
+  as "not available yet" until approvals land.
+
+- **Captions on the Qualcomm NPU.** The qualcomm flavour now runs the
+  captioner on the Hexagon too: `start.sh` fills `CAPTION_ADAPTER=litertlm`
+  (ai-adapter's new LiteRT-LM adapter: Gemma 4 E2B compiled for the
+  QCS8275) and the `-qualcomm` image tag when `.env` still named a CPU
+  captioner with no tag of its own, the overlay lends the service the DSP
+  and two volumes (the 2.7 GB model, downloaded once from Hugging Face;
+  Qualcomm's runtime libraries, fetched once), and the installer suggests
+  it and defaults visit descriptions on there. Measured on a Ventuno Q
+  (2026-11-05): 2.5 s a photo warm, 4.3 s cold, the detector sharing the
+  NPU 38 → 44 ms an inference. Why: a Search "describe" on the field box
+  went to qwen3-vl 2B through Ollama on the ARM cores — 60–90 s a photo
+  against a 30 s deadline, so every caption was computed, discarded and
+  requested again, and the box sat at 100 % CPU. Moving the flavour back
+  to cpu resets the pick to moondream.
+
+- **The workflows API (#773).** `workflows` and `workflow_versions`
+  tables, the permissions `workflows.view`, `.manage` and `.approve`
+  (granted on upgrade to the roles RFC #620 names, through `cameras.view`
+  and `cameras.manage`), and `/api/v1/workflows`: list, save a file (checked
+  by the SDK's validator against this site; `422` with each error at its
+  key), every save a new version, Off / Test / On, three templates (Gate
+  concierge, Safety gear check, Night intrusion triage), and a workflow's
+  runs, step by step with an AI step's calls. New workflows start in Test;
+  only an admin turns On one that moves things, and a new version whose AI
+  steps changed goes back to Test.
+
+- **The escalation proposal: weak evidence on the sub stream → detect on
+  the main stream, by consent.** Every posted visit now says where its crop
+  came from (sub-sized fallback, keyframe path, or the recording) and how
+  big the subject was on the detect frame. Core reads a day of those per
+  camera: when fewer than half the visits got a full-resolution crop, or
+  more than half had a subject under 48 px, over at least 20 visits, the
+  camera gets a proposal — a badge on the Cameras page and a card in
+  Settings → Detection with the numbers and the cost. Accept switches that
+  camera's detection to the main stream (the other overrides untouched, the
+  previous choice remembered); Not now puts it away for 7 days and it is
+  looked at again after; Reset puts the previous setting back. A week after
+  accepting, the badge asks for a review. `GET/POST
+  /api/v1/cameras/{id}/escalation[/accept|/dismiss|/reset]`, audited;
+  thresholds via `OPENNVR_ESCALATION_*`. The adapters page's evidence badge
+  now counts recording crops as full-resolution.
+
+- **Best frame: a blur veto.** A candidate much blurrier than the current
+  best (sharpness under `DETECT_BEST_FRAME_BLUR_VETO` = 0.5 of it, measured
+  at one scale so a subject walking closer is not mistaken for a softer one)
+  no longer wins on score or area alone. The recording is asked for the best
+  frame's moment, so the pick decides how sharp the evidence is.
+  `tier0_best_frame_blur_vetoes_total` counts refusals.
+
+- **Plate candidates at full resolution.** A plate candidate cut at the
+  moment the recording was asked for takes that result's full-resolution
+  pixels (same frame, same score, same order), so the OCR looks come from
+  the main stream. `tier0_plate_candidates_upgraded_total` counts them.
+
+- **Evidence of the moment, fetched from the recording.** The nearest
+  decoded keyframe was a GOP older than its stamp (ffmpeg holds one frame
+  in its output path; with keyframes only, the next keyframe releases it),
+  so main-stream crops of a moving subject were of where it *was* and the
+  guard refused most of them. The pipeline now asks MediaMTX's playback
+  server for the main-stream frames around the detect frame's time once a
+  track's best crop improves, decodes that one clip, keeps the frame that
+  matches the detect crop, and gives it to the live track or to the visit
+  held for it (`DETECT_EVIDENCE_PLAYBACK`, `DETECT_EVIDENCE_HOLD_S`,
+  `DETECT_EVIDENCE_FETCH_MIN_INTERVAL_S`, `DETECT_EVIDENCE_FETCH_PARALLEL`;
+  core adds `playback_url` to the camera listing). Costs are metered per
+  camera (`tier0_evidence_fetch_total{outcome}`, fetch and decode seconds,
+  visits held). Keyframe evidence remains the synchronous fallback.
+
+- **The evidence crop-match guard, measured and tightened.** Refusals are
+  split by reason (`tier0_evidence_refused_total{reason}`: `low_corr`, the
+  main crop does not look like the detect crop; `flat_main`, the sub saw a
+  textured subject where the main shows a blank — which the old rule
+  accepted as undecidable), every attempt's score and main-to-detect time
+  gap go to histograms (`tier0_evidence_match_score`,
+  `tier0_evidence_skew_seconds`), and a reference similarity against the
+  scene a few seconds earlier is recorded for the rule to come.
+  `DETECT_EVIDENCE_DEBUG_DIR` writes each attempt's crops and numbers;
+  `tools/evidence_guard_report.py` reads a dump back: outcome split, score
+  and gap distributions, what each floor would refuse, a contact sheet.
+
+- **Per-camera detect stream, with a floor on the sub stream.** Detection
+  settings gain *Detect on*: `auto` (default), `sub` or `main`. `main`
+  detects on the full-resolution stream, with full-resolution evidence
+  from the same frame, at full decode cost — the per-camera switch that
+  lets the two approaches be compared on one scene and the instant
+  fallback when sub-stream detection is not enough. On `auto` a sub stream
+  shorter than `DETECT_SUB_MIN_HEIGHT` (480 px; a 352x288 "D1" sub shows a
+  person at 10 m as ~15 px, below what the detector resolves) makes the
+  camera detect on its main stream instead; `sub` pins the sub regardless.
+  The pipeline reports which stream it detects on and why
+  (`tier0_detect_on_main{camera}`), the AI Adapters page shows it, and the
+  camera acceptance suite applies the same floor.
+
+- **`opennvr_app_sdk.workflows.validate`: the whole workflow file,
+  `workflow: v1`.** The check the engine, the builder and outside tools
+  share (RFC #620): the trigger, the guards, every step and path, with
+  each problem at its key (`then[0].ai.rules`). It enforces the safety
+  rule (an action that moves things only after a person's reply or a plain
+  rule, never straight under an AI outcome or a timeout), refuses
+  AI-decided critical alerts, catches YAML's unquoted `Yes`, requires
+  cameras by role, and resolves skills, apps, webhooks and lists against
+  the site when given. `Report.needs` lists what a file uses.
+
+- **Acceptance suites** (`tools/acceptance.py`, docs/ACCEPTANCE.md): scored,
+  on-demand, customer-runnable checks for a new box (`hardware`: detector
+  backend really accelerated, detector latency as cameras-at-DETECT_FPS,
+  software decode cost per stream, CPU/thermal/memory/fps over a live
+  window) and for a new camera model (`camera`: streams and sub-stream
+  fit, keyframe interval against the keyframe-evidence limit, main/sub
+  field-of-view agreement, the motion gate replayed on a still scene with
+  a burned-in-clock finder that prints the mask polygon, and the
+  pipeline's own counters for that camera: feed restarts, gate share,
+  evidence crops refused). Each check is pass/warn/fail with the number
+  beside it, unknown never passes, grade A–F; reports land in
+  `acceptance-reports/` without credentials. Not CI: the measurements need
+  the real hardware or camera.
+
+- **Per-camera detection settings and object filters** (Settings →
+  Camera-Config → Detection). The detect-pipeline's `DETECT_*` knobs were
+  one value for every camera; a camera can now override the analysis fps,
+  the motion gate (on/off, threshold, smallest motion area), the score a
+  track needs to start and the stationary re-check interval, and carry
+  per-label **object filters** — a detection is dropped when its box is
+  too small or too large for that camera (fractions of the frame, so the
+  same numbers hold on the substream and the main stream), the wrong
+  width/height ratio, or below a score. Empty = inherit the system value,
+  so nothing changes for cameras with no overrides. Stored on the camera
+  (`/cameras/{id}/detection-settings`, audited), delivered to the pipeline
+  as `detection` in the sources listing, picked up on the next reconcile
+  tick; `tier0_object_filtered_total{camera}` counts what the filters
+  dropped.
+
+- **Keyframe-only main-stream evidence** (`DETECT_EVIDENCE_DECODE=nokey`).
+  With detection on the substream, the main decode while something is in
+  front of the camera was the remaining cost on a CPU-only box. The new
+  mode decodes only the main stream's keyframes (the `-skip_frame nokey`
+  adaptive idle already uses, measured at roughly a tenth of a full
+  decode) at the price of a crop up to half a GOP from the detect frame;
+  the skew window is widened to at least 2 s so lookups still hit, and the
+  `fps` filter is left out so a keyframe is never duplicated and stamped
+  as fresh. Default stays `full`.
+
+- **Keyframe evidence guarded against the wrong moment and the wrong
+  place.** A crop cut from a main-stream keyframe can be up to a GOP old,
+  and on a long-GOP camera a walking person has left the box by then —
+  the Frigate objection to mixing two streams. The pipeline now measures
+  each camera's keyframe interval and switches that camera to full decode
+  by itself above `DETECT_EVIDENCE_NOKEY_MAX_GOP_S` (2 s; "smart codec"
+  cameras run to tens of seconds), and compares every main crop with the
+  detect crop of the same box before using it (`DETECT_EVIDENCE_MATCH_MIN`,
+  Pearson 0.5 — the same place on the two streams measured 0.83–1.00, a
+  shifted one under 0.5), keeping the detect crop otherwise. Refusals are
+  `tier0_evidence_mismatch_total`; the measured GOP and decode mode are
+  `tier0_evidence_gop_seconds` / `tier0_evidence_keyframes_only`; core's
+  tier0 metrics carry a per-camera `evidence` block and the AI Adapters
+  page flags a camera whose evidence is going low-res.
+
+- **Motion masks and object masks per camera** (Settings → Camera-Config →
+  Masks). A motion mask is a polygon under which nothing counts as motion
+  — a clock burned into the picture, a tree in the wind, a road at the
+  edge of the frame — so it never wakes the object detector and a camera
+  with a ticking OSD clock can finally idle between visitors (the docs used
+  to say "disable the overlay in the camera"). An object mask drops a
+  detection standing inside it (the bottom-centre of its box) before it can
+  start a track — the TV screen, the poster, the cars parked across the
+  street — optionally for some labels only. Both are drawn on a live
+  snapshot like zones, stored in `camera_masks`
+  (`/cameras/{id}/masks`), delivered to the detect-pipeline in the
+  camera-agent sources listing as `motion_masks` / `object_masks`, and
+  picked up on the next reconcile tick. `tier0_object_masked_total{camera}`
+  counts what the object masks dropped. Recording is never affected.
+
+- **`./start.sh prune`** removes image tags from earlier releases (every tag
+  of the release in `.env` is kept, in every flavour, plus the weights images
+  and anything a container still references) and dangling layers. An upgrade
+  pulled the new tags next to the old and nothing removed the old; a 55 GB
+  eMMC held 23 GB of images, nine of them unreachable.
+
+- **Disk-space preflight in `start.sh`.** Below 8 GB free where the images
+  land is a warning, below 2 GB an error, both naming `prune`. A full disk
+  was the failure that left half a stack behind: a model pull died with "no
+  space left on device", four containers stayed in Created, and every health
+  check read green around the hole.
+
+- **A Detection chip on the dashboard's health bar.** The detect-pipeline
+  sat in Created for an hour on a test box while every chip read green,
+  and later ran on CPU after being rebuilt without its NPU while the bar
+  said the same. The bar now asks core's Tier-0 scrape: unreachable is an
+  outage (alarms, apps and search ride on it), no frames is a warning,
+  and an accelerator requested but not in use shows **CPU fallback**; a
+  healthy pipeline reads `16/16 · NPU`. The scrape (`/ai-models/tier0-metrics`)
+  gains a `backend` block with the request, the effective providers and
+  `fallback`.
+
+- **Detect on the substream, keep the evidence from the main stream.**
+  Tier-0 already detects on a camera's low-res substream when one is
+  stored (the ~5-10x decode saving), at the price of every crop, scene,
+  plate candidate and Tier-1 escalation being cut from the same 640x360
+  frame. The detect-pipeline now runs a second ffmpeg on the camera's MAIN
+  stream only while something is in front of the camera and cuts its
+  evidence from the main frame captured at the same moment as the detect
+  frame (`evidence.py`; a main frame further than
+  `DETECT_EVIDENCE_MAX_SKEW_S` away is refused and the detect crop kept).
+  Core offers the main tap as `evidence_url` beside a sub `frame_url`;
+  `DETECT_EVIDENCE_STREAM=detect` restores the old behaviour.
+  `tier0_evidence_crops_total{source}` and `tier0_evidence_active` show
+  what each camera's evidence came from. A camera moving between the main
+  and sub taps (an operator storing a substream URL) now restarts its
+  worker on the next reconcile tick instead of on its next ffmpeg respawn.
+  The fake-camera rig can publish a `<name>-sub` substream per clip
+  (`FAKECAM_SUBSTREAM=360`), which `register_fake_cameras.py` stores as the
+  camera's `substream_url`, so the whole path is testable without a camera.
+
+- **A camera's substream is found and verified when the camera is added.**
+  Tier-0 only detects on a STORED substream, and a camera added with its
+  main URL had none unless somebody typed it. On creation core now tries
+  the device's own ONVIF sub profile, then the vendor-convention URL
+  (Hikvision/Uniview `/102`, Dahua/CP Plus `subtype=1`), probes each with
+  ffprobe and stores the first that answers (`services/substream_discovery.py`).
+  A guess the camera refuses is never stored; a device-reported sub that
+  could not be checked is, because the pipeline falls back to the main
+  stream if it turns out dead. The same runs when a camera's main URL or
+  credentials are edited and no substream is stored, and once per startup
+  for every active camera still without one (`services/substream_sweep.py`,
+  background, three at a time, trust-zone hosts only), with the `-sub`
+  path provisioned on each hit — so an existing install converges on
+  substream detection without anyone revisiting its cameras. Same on every
+  hardware flavour: a CPU, Qualcomm or Pi box detects on the cheap stream
+  from the first minute; an Intel or NVIDIA box with hardware decode keeps
+  the main stream by the existing `auto` tap policy.
+
+- **`opennvr-app ai try`: a workflow's Look step on your own pictures.**
+  Write the step as it goes in a workflow file, point it at snapshots and
+  a local model, and see each decision, the facts, the rule that fired,
+  the reason and the seconds, before any engine or workflow UI exists.
+  Checked and run by the same code the engine uses; pictures shrunk to
+  768 px first when Pillow is installed. For the next SDK release.
+
+### Changed
+
+- **Detection boxes are on by default on every live picture.** The Live
+  view, the dashboard's live wall, the camera peek, the tour, the guard-scan
+  panel, the camera agent's camera screen and the Mirror all draw boxes
+  unless the viewer turns them off; the Live view's toggle governs the web
+  app's pages, the agent page keeps its own switch. A page without a live
+  player (the ANPR register shows the read's photo) is unchanged.
+
+- **Camera agent: the chat is the conversation; events stay in Activity.**
+  A watch hit or an app alert (a plate read, an occupancy change) used to be
+  posted into the transcript as an agent message as well as listed in the
+  Activity feed. It now chimes, is spoken under the site's policy, and
+  appears once, in Activity, with its camera and time.
+
+- **Detections are drawn on every live picture, under one switch.** The
+  dashboard's live wall, the camera peek and the tour now carry the same
+  box overlay as the Live view, following the Live view's per-browser
+  preference (on unless turned off there).
+
+- **Voice search looks and behaves like voice search.** The first cut was
+  a small pulsing icon, which read as nothing happening. Now, while
+  listening, the whole field glows in the accent colour, live level bars
+  driven by the microphone replace the search icon, the placeholder
+  says "Listening…", the words appear in the field as they are heard
+  (an interim transcription of the clip so far every two seconds, grey
+  until final) and the one button on the right becomes a large accent
+  **Search**. Listening ends on that click, on Escape (cancel), or by
+  itself after 1.8 s of quiet once something was said (the end-pointing
+  phones use), with a 20 s cap; then the read-back query runs and the
+  button returns to the microphone. (`app/src/views/Search.tsx`,
+  `app/src/lib/voiceCapture.ts`)
+
+- **Search's fusion is weighted, and the frame floor is 0.12.** The
+  labelled eval's sweep over the Ventuno Q's visits (bench/ventuno-q-
+  text-embed-2026-11-10.md) found the frame arm at its 0.08 floor was
+  the arm costing precision, and that two vector arms with a full vote
+  each could agree on a near-miss and outvote the words that named the
+  thing. Reciprocal-rank fusion now takes a vote per arm
+  (`SEARCH_TEXT_ARM_WEIGHT` 1, `SEARCH_VECTOR_ARM_WEIGHT` 1,
+  `SEARCH_CAPTION_ARM_WEIGHT` 0.5) and `SEARCH_VECTOR_MIN_SIMILARITY`
+  defaults to 0.12 (the bottom of the measured match band): MRR 0.755 →
+  0.815, hit@5 0.857 → 0.893, P@5 0.486 → 0.536 offline. The app
+  platform's search now applies the same floors and votes as the
+  operator route. A box with 0.08 written in `.env` should change it.
+  (`server/services/search_service.py`, `server/routers/search.py`,
+  `server/routers/app_platform.py`, `server/core/config.py`)
+
+- **The enrichment backfill is opportunistic, not a batch job.** The
+  morning embeddings came on the Ventuno Q it swept history at full tilt
+  — captions, descriptions and vectors for 14,000 old visits — and held
+  the NPU at 100 % while the operator was talking to the camera agent and
+  searching. Two things changed. After each visit the backfill now rests
+  for as long as that visit cost in the adapters (times
+  `(1-share)/share`; `EVENTS_ENRICHMENT_BACKFILL_SHARE`, default 0.5, so
+  history takes at most half the clock), and it stands aside for people:
+  a search, or a camera-agent turn (the agent now tells core, one beacon
+  per turn, through a new internal route), holds it for
+  `EVENTS_ENRICHMENT_BACKFILL_INTERACTIVE_HOLD_S` (default 90 s) after the
+  last one. The CPU, slow-call, breaker and clock-window rules are
+  unchanged; "holding — someone is using the box" is the new log line.
+
+- **`STT_ADAPTER=auto` is the default, and on a Qualcomm board it is the
+  NPU.** Measured on a Ventuno Q (`bench/ventuno-q-stt-2026-11-09.md`):
+  the `whisper_qnn` adapter answers in 361 ms an utterance against
+  parakeet's 774 ms on the same box's ARM cores, with the same accuracy on
+  clean speech and a no-speech probability that drops silence and noise
+  clips parakeet transcribes as words. `auto` resolves on every start —
+  whisper_qnn where the board is Qualcomm and the NPU image is available,
+  parakeet everywhere else — and start.sh now writes the derived image and
+  module for every flavour, so the word itself never reaches compose. An
+  explicit `STT_ADAPTER=parakeet` in an existing `.env` is kept as typed.
+
+- **The camera agent no longer says "Let me check the office camera"
+  before answering.** Thinking aloud (`thinking_aloud`, fillers.py) is off
+  by default. It was built for the CPU-only box, where a tool turn took
+  5–10 s and the silence needed filling; on the NPU the answer lands in a
+  second or two and the line arrived as an unexpected extra reply right
+  before the real one (morning test, 2026-11-09). The feature stays for
+  slow boxes: `thinking_aloud: true` in the agent config brings it back.
+
+- **Disk rotation instead of a purge that empties the box.** The free-space
+  floor now defaults to 2 GB, or 2 % of the recordings volume if that is
+  more (it used to be off, and installs that had set 10 GB on a small disk
+  could never reach it: core deleted every recording and every event photo,
+  forever). Below the floor core rotates: the oldest recordings go, oldest
+  first, in steps of a quarter of the floor rather than a flat 5 GB, and
+  recording never stops. Event photos are never deleted for space. While
+  rotation is on the dashboard says so, with the effective retention in
+  hours; when the floor cannot be reached even with no recordings left, it
+  says the disk is full of other data and by how much. The setting now
+  shows what "automatic" means on this disk; 0 turns rotation off.
+
+- **Smart Doorbell: `min_face_px` defaults to 100 (was 40), and a name is
+  a vote.** The frames are the camera's main stream, so 100 px is a face
+  within a few metres of the door; below it a miss says distance, not
+  stranger (a match is never gated by size). Each matching frame now adds
+  its similarity, weighted by face size, to that person's tally; the new
+  `min_match_reads` (default 1, so the first match still decides at once)
+  is how many matching frames a name needs. With 2, a lone match is
+  recorded as unclear, leaning to that name, and the next match upgrades it.
+
+- **`DETECT_EVIDENCE_HOLD_S` defaults to 6 s** (was 3). A result from the
+  recording takes the freshness wait, its turn behind the fetch interval
+  and the decode, about 4 s at worst; with a 3 s hold four crops in one
+  walk-through arrived after their visit had gone. Holds that run out are
+  now counted (`tier0_evidence_visits_hold_expired_total`).
+
+- **Evidence from the recording asks for the right moment.** A detect
+  frame's stamp is later than the recorder's clock for the same picture by
+  the sub stream's own path (measured: median 0.56 s on a CP Plus through
+  the Qualcomm box), so the fetched clip was centred half a second late
+  and a walking subject's best candidate sat at the edge of the window.
+  The request now subtracts `DETECT_EVIDENCE_STAMP_LEAD_S` (0.5 s), each
+  camera calibrates its own lead from the frames it accepts
+  (`tier0_evidence_stamp_lead_seconds`), and the candidate window is
+  ±0.5 s.
+
+- **Evidence from the recording, measured and trimmed.** Two more counters
+  say whether the visit hold is long enough (`tier0_evidence_visits_patched_total`,
+  `tier0_evidence_results_late_total`); the guard histograms and the debug
+  dump carry a `source` label so the keyframe and recording paths can be
+  compared on one walk-through; the fetched clip is short (the recorder
+  serves from the keyframe before it anyway) and decoded with four threads
+  and the fast flags — about 0.65 s instead of 1.1 s per request on the
+  Qualcomm box.
+
+- **`DETECT_FPS` defaults to 5** (was 2), Frigate's default and what the
+  tracker, the motion gate and the plate reader were tuned against: a
+  person is seen sooner, a fast subject keeps its track, plates get more
+  reads. The per-camera *Frames analysed per second* override is
+  unchanged, so a quiet indoor camera can still run at 2, and a CPU-only
+  box short of headroom can set `DETECT_FPS=2` system-wide as before. The
+  frame-counted dials keep their values and get shorter in seconds: the
+  motion calibration deadline (150 frames) is now ~30 s, the stationary
+  re-check (50 frames) ~10 s. The detector-latency check in the hardware
+  acceptance suite converts to cameras at the new rate.
+
+- **Keyframe-only main-stream evidence is now the default**
+  (`DETECT_EVIDENCE_DECODE=nokey`; set `full` for the previous behaviour).
+  Measured on the Ventuno Q with a CP Plus H.265 960x1080 main stream
+  (1 s GOP): the evidence decode while something is in front of the
+  camera fell from ~27 % of a core to ~5 %, and the camera as a whole
+  (sub-stream detection plus evidence) from about half a core to about a
+  fifth. The crop can be up to half a GOP (0.5–1 s on most cameras) from
+  the detect frame; the skew window widens to at least 2 s to match.
+  `full` remains for long-GOP cameras or where decode is free and exact
+  timing matters.
+- **One call for the caption and the attributes was built, measured and
+  removed.** It halved the model's time per visit and, measured on the
+  labelled search set, lost the specific words search depends on:
+  "camouflage" became "beige patterned", glasses and gestures went
+  missing, recall@10 fell by a third. An optimisation that lowers the
+  quality of answers is the wrong path whatever it saves, so it is gone
+  rather than off. The measurements are in
+  `bench/rfc-0004-infer-once-log.md`.
+- **Three or more descriptor questions go to the model as one call.** With
+  the extended person questions on, a person visit cost the captioner one
+  call a kind — five calls, 3.7 s on a Ventuno Q. From
+  `EVENTS_DESCRIPTOR_BATCH_MIN_KINDS` kinds (3) the questions go as one
+  call with a JSON answer, 2.2 s for the same five, with the same answers
+  where the crop allows one (paired runs 5 and 5b in
+  `bench/rfc-0004-infer-once-log.md`); two kinds cost the same either way
+  and stay single. A reply that is not JSON falls back to the single
+  questions. The caption call is untouched. The headwear question no
+  longer leads with "such as helmet, cap, …", which put a cap on bare
+  heads and on crops too small to tell; it now offers "nothing" and
+  "unknown" plainly.
+
+- **The camera agent's live look and the Mirror's scene line ask core,
+  not the caption model (RFC-0004, step 4).** "What do you see on the
+  gate" and the Mirror's running subtitle now come from core's one shared
+  description: the visit the enrichment tier just described, or one gated
+  look shared with every other asker, or the last thing known stamped
+  with its age. Neither calls the captioner for the scene any more; the
+  Mirror still makes its own confirmation look when a new person appears,
+  and a question about a frame still goes to the VQA model. When core
+  does not answer, the agent takes its own look and says so in its path.
+
+- **One shared "what is on this camera now".** Core answers
+  `GET /internal/camera-agent/cameras/{id}/description?max_age_s=N` from
+  one path (RFC-0004, step 3): one caption of the pipeline's current full
+  frame through the enrichment gate at the requested priority, shared by
+  every asker that arrives while it runs and kept for N seconds; with
+  `prefer_store=true` the newest described visit answers first when it is
+  younger than N and nothing newer has started (for an app that wants
+  "what was just seen" — a visit's caption is one object's crop, not the
+  frame, so a live question never gets it unasked); when no fresh look
+  can be made, the newest thing known, stamped with its age and the
+  reason. The camera agent's live look and the Mirror's scene line move
+  onto it next: the same whole-frame answer as before, once per interval
+  instead of once per asker.
+
+- **Visits and their enrichment are on the bus.** `visit.recorded.v1` has
+  been in the contracts and the SDK since RFC-0002 with core as its
+  producer, and nothing published it; it goes out now the moment a visit
+  row is committed. `visit.enriched.v1` (RFC-0004, step 2) goes out each
+  time a visit's caption or claims land — fresh or copied from an earlier
+  visit of the same frame — carrying the whole current state (caption,
+  every claim as `kind: value`, producer, `enriched_by`, `reused_from`),
+  so the agent, the Mirror and apps can subscribe to what the store knows
+  instead of asking the caption model for it. The SDK types it
+  (`VisitEnriched`). Without `NATS_URL` nothing changes.
+
+- **A camera whose picture has stopped changing is said so.** The
+  enrichment tier knows per visit whether the evidence frame is one it has
+  seen before (the store is content-addressed); a live camera never
+  repeats a frame, a frozen stream, a stuck relay or a looping file does
+  nothing else. After `EVENTS_FROZEN_PICTURE_REPEATS` (5) such visits in a
+  row the camera gets a `picture_frozen` alarm like the recording
+  watchdog's, cleared by the first new frame; the agent's status read
+  carries `picture: frozen` and says "the picture has not changed on the
+  gate camera". Camera 23 fed the same frame for hours on 2026-11-09 and
+  nothing said so.
+
+- **The same frame is not described twice.** The evidence store is
+  content-addressed, so two visits with the same evidence path are the
+  same pixels; the later one now takes the earlier one's caption and
+  descriptor claims instead of calling the model, and says so on the
+  visit (`reused_from`). Measured on a Ventuno Q: 9,921 of a day's 10,892
+  captioner calls went to a frame already captioned (a looping test clip
+  re-detecting the same frames), none on the real office camera — so it
+  costs a real camera nothing and removes nine calls in ten on a loop, a
+  static scene re-detected or a replayed recording, with no quality
+  question. Near-repeats (the same person in the same chair, a different
+  JPEG) are deliberately not reused: at a similarity safe enough to trust
+  a real camera offers 3 % of its visits. `EVENTS_ENRICHMENT_REUSE_SAME_FRAME`
+  turns it off; `events.evidence_path` gains an index for the lookup.
+
+- **The governor's device-busy trigger counts only the work it can defer.**
+  It read the accelerator's total share, and on a box with a plate reader
+  the total is mostly the detector and the plate reader: measured on a
+  Ventuno Q (window C in `bench/rfc-0004-infer-once-log.md`), 77–139 %
+  busy with the captioner at 24 %, so captions were paced to one per 6 s,
+  a quarter of the visits in a burst got no caption inside the window, and
+  the detector gained nothing, because neither the detector nor the plate
+  reader is something the governor can pace. The trigger now compares
+  `EVENTS_ENRICHMENT_DEVICE_BUSY_PERCENT` with the share held by the
+  enrichment adapters it admits calls to (the monitor's per-user shares
+  filtered by the gates that exist). The reason line and the snapshot
+  say both figures: "enrichment holds 24% of Qualcomm Hexagon NPU
+  (device 112% busy)". The latency trigger is unchanged and still
+  covers the queue a share cannot see.
+
+- **Enrichment yields to the detector on a shared accelerator.** On the
+  Ventuno Q the per-visit description questions (one for a vehicle, up to
+  five for a person, about 2 s each on Gemma) held the Hexagon 70 % of the
+  time during a busy hour, and the always-on detector, which needs 9 ms of
+  the device per frame, waited behind them: 67–119 ms a frame against a
+  25 ms floor, with the host CPU looking fine, so the CPU-shaped governor
+  never moved. The monitor's accelerator sample now carries the detector's
+  per-window mean latency and its floor (the lowest window seen, drifting
+  slowly so a lasting change re-baselines), and the governor reads the
+  ratio: at `EVENTS_ENRICHMENT_DETECTOR_SLOW_FACTOR` (2×) the live path
+  goes LIVE-ONLY in its accelerator form — embeddings as before, captions
+  at most one per `EVENTS_ENRICHMENT_PRESSURE_GAP_S` (6 s), descriptor
+  questions dropped — and at `EVENTS_ENRICHMENT_DETECTOR_PAUSE_FACTOR`
+  (4×) nothing is sent; it steps back after the usual calm period. The
+  device's own busy share is the second trigger: at
+  `EVENTS_ENRICHMENT_DEVICE_BUSY_PERCENT` (60, where the detector alone
+  measured 10–37 % and the questions pushed the sum to 85–100 %) no new
+  background call starts, since a running inference cannot be pre-empted
+  on an NPU and the only lever is not to start the next one. A dropped
+  visit keeps no caption row, which is what the backfill looks for.
+  The governor's snapshot and each `enrichment_throttled` event say the
+  detector's latency, its floor and the ratio, so the operator reads
+  "detector 67 ms a frame, 2.7× its 25 ms floor" rather than a tile at 100 %.
+
+- **The update runner is installed with OpenNVR.** Configuration → OpenNVR
+  Updates did nothing until someone ran `auto-update enable` on the host,
+  which few did. Now `up` installs the runner unless `UPDATE_RUNNER=off` in
+  `.env`, on a fresh install and on an existing site alike: on Linux it asks
+  for sudo once at a terminal, on macOS it needs nothing, on Windows it
+  needs an administrator PowerShell (a non-admin task would flash a console
+  every minute). The update policy still starts off: until it is changed in
+  the app the runner only checks in and fetches nothing.
+  `auto-update disable` turns it off and keeps it off.
+
+
+- **USB webcams are on by default on Linux (#904).** `.env.example` ships
+  `WEBCAMS=on` and the installer's question defaults to yes; an `.env` that
+  says `off` keeps it. MediaMTX then runs the `-ffmpeg` image with the
+  host's video devices (only video4linux, major 81) and the `video` group.
+  `start.sh` leaves the overlay out on a kernel with no video4linux yet,
+  where Docker could not mount `/sys/class/video4linux` and core would not
+  start, and says so.
+- **Add Camera → Manual is one row of tabs: IP camera, Browser webcam,
+  Server webcam.** It was a Webcam tab with a second row of sub-tabs
+  inside it. Each webcam tab says in one line what that kind is; the steps
+  are numbered (pick the webcam, name it, picture and sound); webcam names
+  drop the USB ids; the preview says it is not recording yet and what Add
+  will do. The three webcam lists (this browser, the server's Linux
+  webcams, the host agent's) share one row design.
+
+
+### Fixed
+
+- **A fresh Linux install could not start: the discovery prober's build
+  failed.** `docker-compose.lan-discovery.yml` builds the multicast prober
+  from an inline Dockerfile that named `${CORE_IMAGE}` and `${TARGETARCH}`
+  for Docker to expand; Compose interpolated them first, to blanks, and the
+  build died at `FROM  AS core` ("FROM requires either one or three
+  arguments"). The installer never builds that service (it pulls the base
+  set), so the failure arrived at `./start.sh up` and took every service
+  with it; LAN_DISCOVERY is on by default on Linux since 0.1.11's main. The
+  two are now `$${...}`, which Compose passes through. And since the prober
+  copies the host-agent binary out of the core image, which only 0.1.11
+  and newer carry, `start.sh` leaves the overlay out with a notice when
+  CORE_TAG pins an older release instead of failing the whole start.
+  Found by a fresh install on a Ventuno Q (2026-11-12).
+
+- **A plain Qualcomm install said captions were on when nothing captioned.**
+  The qualcomm flavour switched EVENTS_CAPTION_ENRICHMENT and the descriptor
+  flags on whenever the NPU captioner image existed, but the captioner
+  service is defined by `docker-compose.camera-agent.yml`; an install
+  without the Camera Agent had the flags on and no captioner, so search by
+  caption silently had nothing to search. The flags now turn on only when
+  that file is in the install; otherwise `start.sh` says the captioner is
+  available and how to get it. The adapter pick and tag are still filled.
+
+- **A fresh install on a Qualcomm board could not start.** The qualcomm
+  overlay overrode the captioner and the speech adapter, which only
+  `docker-compose.camera-agent.yml` defines, so a plain install (no camera
+  agent) handed Compose two services with no image and Compose 2.24, the
+  package on the board's Ubuntu, rejected the whole project; newer Compose
+  skips a service whose profile is off, which is how it passed every test.
+  Each flavour overlay now overrides only services of `docker-compose.yml`,
+  and its overrides of other files' services are fragments beside it
+  (`-apps.yml`, `-agent.yml`) that `start.sh` appends only when that file is
+  in the set. The intel overlay is split the same way for the same rule
+  (its adapters live in `docker-compose.apps.yml`; they carried an image,
+  so it did not fail, but it defined services no file in the set had). The
+  merged configuration is byte-for-byte what the single overlays produced
+  (Compose 2.22, every profile on), and a test holds every overlay to the
+  rule.
+
+- **The NPU embedder asked for an image that did not exist.** `start.sh`
+  found `siglip-qnn-adapter:latest-qualcomm` when the pinned release had no
+  such image, but never wrote the tag it found; the overlay then requested
+  `<ADAPTER_TAG>-qualcomm`, which was not on the registry, and Compose
+  cancelled every other pull of the project. The fill now writes
+  `EMBED_ADAPTER_TAG` and the overlay uses it; leaving the flavour clears it.
+
+- **A plate read in fast mode no longer arrives without its photo.** In
+  fast scan mode the bus consumer does not defer to the sweep, so the
+  echo of the sweep's own read could land on a visit after the sweep had
+  folded it as a duplicate sighting and thrown its crop away: a number
+  with "no read frame" in the register (every such row on the test box
+  was one of these). The fold now leaves the row its crop and frame,
+  paths only; the number that may follow has its proof. Accurate mode
+  is unchanged.
+
+- **Camera agent: the app-alert subscriber no longer trips over itself on
+  a clean stop.** Its stop path unsubscribed a plate subscription that
+  only the inference subscriber holds; the `NameError` was logged as an
+  error and the subscriber reconnected for nothing.
+
+- **The live detection overlay moves with the object, and is on by
+  default.** Tier-0 publishes about five frames a second; the boxes used
+  to jump between them. Each track's box now glides toward its latest
+  position on the display's frame clock (90 ms time constant), a new
+  track fades in, a lost one fades out instead of vanishing, and a moving
+  track draws its last 1.5 s of path. The box is corner brackets with a
+  faint outline and tint rather than a solid rectangle, so the subject
+  stays visible; the label pill carries the class, the track id and the
+  score as a number and a bar. A small badge in the corner counts the
+  objects and the detector's publishing rate. Detections are on by
+  default in the Live view; the toggle still turns them off per browser.
+
+- **The server can start on a read-only source tree.** The logs
+  directory is resolved from the source-tree location and created at
+  import time, so an install that cannot create a `logs/` directory
+  next to its sources (e.g. a NixOS package) died on `mkdir` before the
+  app could start. Setting `OPENNVR_LOGS_DIR` to a writable
+  directory moves the log file there; the default stays
+  `<repo>/logs/`, so Docker and bare-metal dev installs are
+  unchanged.
+
+- **Search says when a class was never detected and the page is
+  lookalikes.** Since #873 a parsed class word no longer walls off the
+  vector arms, so "a dog" on a site with no dog detections returns the
+  visits whose frames or captions look most like one — the honest best
+  answer, but a page of cars under "a dog" with no word reads as a wrong
+  one. The response now carries `lookalike` (`classes`, `what`) when the
+  class had zero detections in the window and the vectors answered
+  anyway, and the Search page shows it as a warning with "Only detected
+  <class>" one click away (a `label=` chip, which is a wall). Not raised
+  when the class was detected, when the chip was explicit, or past the
+  first page. (`server/routers/search.py`, `app/src/views/Search.tsx`)
+
+- **A typed synonym filters by the value the store holds, and the
+  vocabularies know the words operators here use.** "gray car" promoted
+  to a `colour:gray` claim, and the store says `grey` — the writer
+  canonicalises a VLM's "gray" to "grey", the filter did not — so a
+  typed synonym matched nothing, silently; the promoted claim now carries
+  the canonical value. The colour maps gain the shades people type (navy,
+  crimson, tan, khaki, cream, charcoal, golden, violet, olive…), the
+  vehicle kinds gain `rickshaw` with auto / tuk-tuk / scooty / jeep /
+  tempo as synonyms, the garments that make a colour clothing gain
+  kurta, saree, salwar, kameez, sherwani, dhoti, hooded, sweatshirt, tee,
+  and the class words gain cop, police, guard, watchman, courier,
+  worker, toddler, elderly (people), scooty and moped (motorcycle), an
+  auto or rickshaw (a car or a motorcycle to the detector), jeep / suv /
+  sedan / taxi (car), pickup (truck or car) — and "bike" now means a
+  bicycle or a motorcycle, which on most roads here it does. Words of
+  three or four letters that the typo corrector would read real words
+  into (baby for bay, cab for cam) were deliberately left out.
+  (`server/services/search_intent.py`, `server/services/search_query.py`,
+  `server/services/descriptor_enrichment.py`)
+
+- **ANPR on a Qualcomm box: the plate reader's compiled graphs survive a
+  recreate, and two scan-mode knobs reach core.** On the Ventuno Q the
+  plate reader's HTP graph for the baked `indian-plates-v1` model was
+  written inside the image's own path and compiled again on every
+  recreate (the detector's landed on the cache volume by luck of its
+  download path); the qualcomm overlay now points `ADAPTER_ACCEL_CACHE_DIR`
+  at the cache volume. `OPENNVR_PLATE_FAST_DEDUP_WINDOW_S` and
+  `OPENNVR_PLATE_AUTO_BACKLOG`, documented since 0.1.6, never reached
+  the core container; they do now. The dispatch route no longer offers
+  bicycles to the plate reader. And the catalogue and docs stop
+  describing a "YOLOv8 → crop → fast-plate-ocr chain" that does not
+  exist: the reader localises the plate in the vehicle crop itself; the
+  app entry says version 2.5.0 and lists all five alert types, the
+  adapter entry says 1.1.0 and where it runs, the app's README counts
+  its 77 tests and describes the fuzzy matching it has.
+  (`docker-compose.accel-qualcomm.yml`, `docker-compose.yml`,
+  `server/config/apps_index.yml`, `server/config/adapters_index.yml`,
+  `detect-pipeline/detect_pipeline/dispatch.py`, docs)
+
+- **Search finds what the detector misnamed, and "two men" no longer
+  means "counted as two".** Two walls the labelled eval exposed. A class
+  word the parser produced ("pickup truck" → `truck`) restricted every
+  arm, so a pickup the detector had called a `car` was unreachable even
+  though its caption says pickup and its frame looks like one; parsed
+  class words are now a hint for the word arm and no wall for the vector
+  arms (`labels_soft`; an explicit `label=` chip stays a wall, and the
+  `semantic` block says when the softening applied). And "two men",
+  "three people together" became a people-count filter that excluded
+  every visit with no count — all of them, before the pipeline counted —
+  so "two men looking at a laptop" found nothing; an unknown count now
+  passes and the captions and vectors decide. Offline over the labelled
+  pool: MRR 0.786 → 0.911, hit@5 0.857 → 1.0, P@5 0.493 → 0.586.
+  (`server/services/search_service.py`, `server/services/timeline_service.py`,
+  `server/routers/search.py`)
+
+- **Camera agent: "remove that alarm" stops the watch that is standing.**
+  People call a watch an alarm and an alarm a reminder; "I remove that
+  alarm" for a watch on a person at camera 24 left the watch running and
+  the operator removing it by hand (Ventuno Q, 2026-11-10). When the kind
+  a stop request names has nothing standing and exactly one thing of any
+  kind does, the agent stops that and says so ("There's no alarm set up —
+  the one thing standing is watch #1 … Stopped and removed watch #1");
+  with several standing it lists them by kind and number and asks;
+  "silence" still means a ringing alarm and never touches a watch.
+  (`examples/camera-agent/camera_agent.py`)
+
+- **The embedders are not skipped while KAI-C has yet to probe them.**
+  KAI-C reports an adapter's health as "unknown" from registration until
+  its next poll, and after a core restart every adapter re-registers at
+  once; the embed producer resolution skipped any adapter not reported
+  "ok", so for those minutes search ran words-only and said so only in
+  its `semantic` block (a whole eval run on the Ventuno Q, 2026-11-10).
+  Only a REPORTED failure skips an adapter now; one nobody has asked yet
+  is tried. (`server/services/embed_enrichment.py`)
+
+- **Search's caption floor, measured against the labelled eval: 0.65.**
+  The 0.75 set earlier today came from queries phrased the way the
+  captioner writes; the relevance eval's operator phrasing scores lower
+  ("hooded sweatshirt" 0.63, "light blue kurta" 0.67), and at 0.75 the
+  caption arm sat out of a quarter of the cases. A sweep of the arm
+  alone over the labelled pool gives hit@5 0.82 at 0.65 against 0.64 at
+  0.75, and 0.65 still cuts what nobody saw. `SEARCH_CAPTION_MIN_SIMILARITY`
+  default 0.65; a box on the fallback text tower should set 0.75.
+  (`bench/ventuno-q-text-embed-2026-11-10.md`)
+
+- **Search's vector arms hear the whole question, and typos are read
+  against the captions' own words.** The relevance eval on the Ventuno Q
+  (`tools/search_eval.py`, baseline 2026-11-10) showed two gaps. A query
+  whose every word the parser turns into a filter — "pink car", "a bus",
+  "three people together" — left nothing for the word arm, and the
+  embedders were handed that same nothing, so no semantic arm ran at all.
+  The parser now also keeps `question`: the corrected sentence with the
+  time phrase and camera names removed and everything else kept, and the
+  route embeds that (explicit `text=` is embedded as given). And a typo
+  of a word that is neither a filter nor a skill's vocabulary — "camoflage",
+  "pikup" on a site whose captions say camouflage and pickup all day —
+  was never corrected; the correction vocabulary now includes the words
+  the box's newest four thousand captions use at least twice, read at
+  most every ten minutes. (`server/services/search_query.py`,
+  `server/routers/search.py`)
+
+- **detect-pipeline memory grew with every evidence fetch.** The main
+  `opennvr-tier0` process went from 256 MiB to 932 MiB over a morning of
+  ~200 evidence fetches on the Ventuno Q with every buffer bounded and no
+  track live: each fetch decodes a 1080p main-stream clip in a worker
+  thread, and glibc's per-thread malloc arenas keep what they grew to.
+  The image now sets `MALLOC_ARENA_MAX=2`, the standard cap for threaded
+  numpy work; the growth becomes a plateau.
+
+- **Search's frame arm rejected every match.** `SEARCH_VECTOR_MIN_SIMILARITY`
+  defaulted to 0.22, a floor never measured against real vectors. With
+  SigLIP2 on the Ventuno Q a query that describes a visit scores
+  0.11–0.14 against its frame and one that describes nothing on the site
+  tops out at 0.056 (`bench/ventuno-q-npu-embedder-2026-11-10.md`): the
+  SigLIP family's sigmoid training makes 0.13 a confident match. The
+  default is 0.08; a box with the old value written in `.env` must change
+  it. The caption arm's floor is left alone: text-to-text cosines from an
+  image-text model's text tower overlap for relevant and irrelevant
+  queries, so no floor separates them, and a text-embedding model is the
+  next step for that arm.
+
+- **Camera agent voice: a sentence paused mid-way is answered once, whole.**
+  Smart Turn cuts an utterance at a pause of `turn_stop_secs`; a speaker
+  who pauses to think ("I remove that alarm." … "for cam 24 person.",
+  Ventuno Q 2026-11-10) got two turns, the first answered before the second
+  arrived. A transcript that reads as half a sentence — it ends on a word
+  that needs the next one, or is a lone word that is not an answer — is now
+  held up to 2.5 s for its continuation, which joins it; a complete sentence
+  is answered at once. First-person stop requests ("I remove that alarm",
+  "I want to remove this", "let me cancel it") are routed straight to the
+  stop tool like the imperative ones.
+
+- **The accelerator overlay lost every override of an app-file service.**
+  `start.sh` appended `docker-compose.accel-*.yml` before
+  `docker-compose.apps.yml`, and Compose lets the last definition of a
+  service win, so on a Qualcomm box the NPU images the overlay names for
+  the embedder, insightface, the plate reader and package detection were
+  replaced by their CPU images (Ventuno Q, 2026-11-10: `clip-adapter:main`
+  came up where `siglip-qnn-adapter` was asked for). The overlay is now
+  the last file in the set; the detector, captioner and speech adapters
+  it overrides from the base and example files were never affected.
+
+- **Camera agent: the two misses of the CPU-brain eval on the Ventuno Q
+  (granite4:micro, 50 of 52, `bench/ventuno-q-eval-cpu-vs-npu-2026-11-10.md`).**
+  A routed stop or view switch now speaks the tool's own sentence with no
+  compose call: granite restated "Stopped and removed watch 'cars'" as
+  "I'm watching for cars" (19 s to say the opposite). A report request
+  that names an interval ("every hour") keeps that interval even when the
+  model put a clock time in `at` (granite wrote 03:00), and a query the
+  model copied from the schema's example is replaced by the question.
+
+- **Every recording segment was indexed with no size and no codec.** The
+  segment-complete hook stat'ed MTX_SEGMENT_PATH as MediaMTX spells it
+  (relative to its own working directory, `./app/recordings/…`), resolved
+  from core's `/app` — a path that does not exist — so `file_size` and
+  `codec` landed NULL on every row (9,400 of 9,400 on the Ventuno Q,
+  2026-11-09) and the reconciler back-filled them fifteen minutes later,
+  too late for the segment-health check, which judges a segment by its
+  size at the moment it closes. The hook now opens the path the way the
+  record-start hook already did. **The recording badge shows "Degraded".**
+  When that check has an active `recording_degraded` alarm — segments keep
+  landing but hold no playable video — the camera list, the dashboard
+  widgets, the live wall and the agent's `system_status` now say
+  *Degraded* instead of *Recording*; the badge refreshes live off the
+  event the UI already listens for.
+
+- **Camera agent: the two misses of eval run 5 on the Ventuno Q (151 of
+  156, 2026-11-09).** A report whose schedule the model left blank ("every
+  hour tell me what you see" came back with the word `every_minutes` in
+  `at` and no minutes, 3 of 3) now takes its schedule from the question's
+  own words — every N minutes/hours, hourly, every morning/evening at X,
+  daily at X — the way an alarm takes its window. A long stop request
+  ("okay then remove it, I don't need any notification when a car
+  arrives") is judged by its first clause, so it runs the stop tool
+  directly instead of waiting on the hinted model (skipped 2 of 3).
+
+- **Camera agent: the three misses of the 52-case live eval on the Ventuno
+  Q (149 of 156 turns, 2026-11-09).** A bare stop request ("stop watching
+  for that", "cancel alarm 2", "remove it", "silence the alarm") is now
+  routed straight to its stop tool, the number said as the id and
+  silence/mute as the alarm's action — the stop tools already pick the item
+  themselves, and the hinted model still skipped the call 1 time in 3;
+  "stop talking" and "stop the recording" are left alone. "What happened
+  between 2pm and 3pm" with nothing named goes to `describe_window` for that
+  window (the hinted model called `recent_events` with a `start_time` it did
+  not take, 3 of 3; `recent_events` now also accepts one as "since then").
+  `system_status` says a disk warning first, since the compose model kept
+  the opening and dropped the tail: "everything is fine" with the disk
+  0.7 GB from the purge floor.
+
+- **The camera agent can actually schedule the reports its greeting
+  offers.** `create_report` / `stop_report` were missing from the Docker
+  config's `enabled_tools`, so "every ten minutes give me a report" could
+  only become a people-count watch (Ventuno Q, 2026-11-09). Also, a
+  goodbye anywhere in a pure small-talk utterance ("Bye. Thank you.") now
+  ends the session; before, only a goodbye at the end did.
+
+- **The detect-pipeline no longer reports a quiet camera as over
+  capacity.** With adaptive decode idling on keyframes only, the `fps`
+  filter fills the rate with copies of each keyframe, and they arrive in a
+  burst when the next keyframe does; the worker takes the newest and the
+  copies are skipped. Those skips were counted as dropped frames and
+  raised "detection exceeds this box's capacity" — 28 % of frames in idle
+  minutes on the Ventuno Q (2026-11-09) — while the new per-frame split
+  showed 280 ms waiting for the next frame and 5 ms detecting. They are
+  now `tier0_frames_idle_duplicates_total{camera}`, apart from drops, and
+  never the warning.
+
+- **The camera agent stops describing the room when nobody asked.** From
+  the Ventuno Q session of 2026-11-09: a greeting, a weather question and
+  "remove the alarms" all came back as "I see a wooden desk and two black
+  office chairs". The anti-fabrication guard forced a look whenever the
+  model's reply mentioned a camera; now a standing request (alarm, watch,
+  report, "remove it") is never forced, and a reply to a non-camera
+  question is forced only when it claims a sighting. Spoken check-ins and
+  fillers ("how are you doing?", "do you hear me?", "um okay") are small
+  talk, so none of them reaches the describe tool; a turn that ends in a
+  goodbye ("yeah, I'm good. okay. thank you. bye") is a closing; taking a
+  standing thing down ("remove it for person, I don't need any
+  notification") is a standing request, not a detection. The identity
+  line no longer tells the model to open every answer with "I see…".
+
+- **"Remove it" works without an alarm number.** `stop_alarm`,
+  `stop_monitor` and `stop_report` no longer require an id: without one
+  they take the thing set up most recently, the only one there is, or all
+  of them when the question says so, and otherwise answer with a numbered
+  list to choose from. The router's stop hint picks the tool for the kind
+  set up last. The session had armed an alarm and then answered "can you
+  remove it?" with "I need an alarm number to stop it" three times.
+
+- **Talk mode shows what you said and keeps answers apart.** The page
+  never received the transcript over the stream (the user aggregator
+  consumes it upstream), so no user bubble appeared and every answer was
+  appended to the first one. The streaming service now sends the
+  transcript before the answer and a `turn_end` after it, and a streamed
+  turn publishes its frames and cameras the way a text turn returns them,
+  so the evidence image is back beside the answer.
+
+- **Hourly "what you see" reports look at the cameras.** A scheduled
+  report whose query asks to see or describe the cameras and names no
+  object runs as a scene round (describe each camera, then the hour's
+  visits) instead of the history tools' default people count.
+
+- **The Hardware panel no longer names moondream and advises a GPU for
+  visual questions on a box where Gemma answers them on the Hexagon.**
+  The caption and visual-question rows of an NPU captioner are marked
+  accelerated with the configured adapter named, whether or not the
+  detector's own gauge could be read.
+
+- **Core stops minting a stream token on every roster request.** The
+  detect-pipeline and the camera agent each re-read the camera roster every
+  30 s, and every call signed a fresh wildcard MediaMTX token and logged it
+  — 240 identical tokens and log lines an hour on the Ventuno Q
+  (2026-11-09). Platform callers now share one token reused for half its
+  60-minute life; apps keep their per-camera tokens. The storage service's
+  "Using default recording path" line, written by the 15 s system monitor
+  on every tick, is now logged once per path.
+
+- **CI signs images without depending on anonymous GitHub release
+  downloads.** On 2026-11-09 GitHub's anonymous release downloads returned
+  504 for hours and every image job that signs (detect-pipeline, core, the
+  agents, the apps) failed in `sigstore/cosign-installer`, which fetches
+  cosign from `github.com/…/releases/download`. A composite action
+  (`.github/actions/install-cosign`) now downloads the pinned release
+  through the GitHub API with the job's own token (three tries, the
+  anonymous URL as a last resort), verifies the pinned sha256, and installs
+  it; the four signing workflows use it.
+
+- **A detect-pipeline reader whose ffmpeg is alive but decodes nothing now
+  restarts itself.** The office camera on the Ventuno Q (2026-11-09) had
+  its RTP clock wrap after 13 h 15 min; the relay in front of it clamped
+  every timestamp to "previous + 1 tick", MediaMTX could no longer close a
+  60 s segment (50 MB files with a 0.07 s duration) and the pipeline's
+  substream reader — fed 15 packets a second that never advanced in time —
+  sat in a blocking read for hours while `/health` reported the camera
+  stale. The frame source now ends a session that has produced no frame
+  for 60 s (`stall_seconds`, `DEFAULT_STALL_SECONDS`) with a warning
+  naming the likely causes, and respawns it under the existing restart and
+  give-up rules, so the worker is resurrected with a fresh tap URL instead
+  of waiting for ffmpeg to die.
+
+- **Camera agent: a goodbye ends talk mode, Stop really stops, and the
+  Hardware panel tells the truth.** From the morning test of 2026-11-09:
+  "thank you, end the conversation" reached the model, which called
+  `stop_alarm` and said "I have stopped any currently ringing alarms.
+  Goodbye." — goodbyes ("bye", "end the conversation", "see you", "good
+  night", …) are now closings: a fixed goodbye, no tool, and the voice and
+  text endpoints say `end`, so the page leaves talk mode once the reply has
+  played (the streaming path sends `session_end`). Stop pressed while the
+  page was still recording left "Thinking…" on screen next to a Talk
+  button, because the recorder's last utterance was still answered after
+  the session ended; it is dropped now. The Hardware panel read "Running on
+  CPU only — a CUDA GPU would speed up…" on a box whose detector, captioner
+  and language model all run on the Hexagon: it now asks the detector which
+  accelerator it runs on (its own backend gauge), marks the detection,
+  caption and language-model rows as accelerated with no GPU advice, and
+  names the model's endpoint instead of "ollama".
+
+- **The camera agent no longer agrees with the user against its own
+  detector, invents actions, or answers garbled speech.** From the office
+  voice session of 2026-11-08: told "there are three chairs" it called the
+  detector, was told one, and said "I see three chairs" — a count the model
+  states against the detector's is now the detector's count, hedged ("I can
+  make out a chair; the detector can miss things that are partly hidden");
+  a reply that claims to have set, stopped or armed something when no tool
+  ran is replaced by a plain line; "there should be more than that", "are
+  you sure", "look again" repeat the last look and answer from it with no
+  model; "I don't want to talk more" and its kin get a goodbye with no
+  model; and a transcript the speech model hallucinated in another language,
+  or with no English word in it, is dropped as noise instead of triggering a
+  look at the camera.
+
+- **The camera agent no longer answers for the first camera when none
+  was named.** With several cameras and no camera named or selected, a
+  detection, count or history question now goes to every camera (and
+  the answer says which camera each finding is on); a description goes
+  to every camera up to four and, above that, the agent asks which one,
+  by location, with no model or tool run. The forced grounding picks
+  "all" the same way. Prompt fixes from the review: Qwen's `/no_think`
+  switch is sent to Qwen only (granite and Gemma read it as text);
+  relative times are counted from the clock in the user turn, never
+  from memory; the operator block and the spoken rules no longer repeat
+  each other (first person, 1-2 sentences, never invent — each once);
+  "home security camera system" is "camera system"; and the voice-mode
+  "say what you are about to check" sentence no longer contradicts the
+  no-filler rule.
+
+- **The camera agent's live look now really reads the pipeline's frame.**
+  The agent resolved a camera to its bare server id ("23") for Tier-0's
+  endpoints and event ring, while the pipeline knows it as `cam23`, so
+  every `/best_frame` and `/latest_frame` fetch was a 404 and every live
+  look a 6 s RTSP grab (the second NPU eval, 2026-11-08: still 5.8 s a
+  look after #822). A separate pipeline-id resolver (`cam<server id>`)
+  now serves the two fetches and the Tier-0 lookups; the platform's own
+  endpoints keep the server id. Also `recent_events` takes `all` for every
+  camera like the other tools (Gemma chose it three times of three and
+  was refused), and the `before` argument's description says plainly that
+  "before 6am" is `before='06:00'`.
+
+- **The camera agent no longer arms an alarm when asked for a notification,
+  nor at hours nobody named.** From the first 32-case eval of the agent on
+  the Ventuno Q's NPU (Gemma 4 E2B, 85 of 96 turns right): "let me know
+  when a car arrives" and "notify me when a person shows up" became alarms
+  with an invented "after midnight" window, and "before 6am" arrived as an
+  `after` time. Now a standing request is hinted by its words (alarm words
+  → `create_alarm`, notify/watch words → `create_monitor`, a stop word →
+  the matching stop tool, report words → `create_report`); the alarm
+  handler takes the window from the question's own clock words and drops a
+  window the question never named (a turn's question only: the UI's and
+  the API's arguments stay as given); and a full timestamp is read as its
+  time of day. "wake me if…" is a standing request, not a live look.
+
+- **Search no longer says a colour "can't be searched yet" when the
+  scene description already holds it.** With a captioner on the box the
+  notice is an info line that leads with the match ("blue" is matched
+  from scene descriptions) and then names what would make it exact. A
+  clothing colour on a box that describes vehicles only is its own state,
+  `people-off`, naming the setting (`EVENTS_DESCRIPTOR_PEOPLE`) instead of
+  sending the operator to turn on the Agent app's scene description that
+  was already on (Ventuno Q, 2026-11-07: "light blue kurta" in the
+  caption, found, and the notice saying blue could not be searched).
+
+- **The Vitals card with an NPU tile no longer puts one tile alone on a
+  second row.** Seven tiles fill one row when the card is wide, and 4+3
+  when it is narrow with the last tile spanning the gap, so no empty cell
+  shows the border colour (#813 added the tile, the grid still counted six).
+
+- **Search reads months, years and dates, and says when it searched all
+  time.** "in January", "January or February", "last month", "this year",
+  "two months ago", "last 6 months", "5th November 2025", "nov 5" all
+  become windows now (a month alone is the most recent one that has
+  started; a "last year" in the sentence sets the year of the month it
+  qualifies). A question with no time still searches everything, because
+  a plate or a name is usually wanted wherever it is and the index makes
+  that cheap; the page now says how many days and visits that covered and
+  offers last 24 hours, 7 days and 30 days in one click. Nothing is
+  withheld and nobody is asked to retype.
+
+- **The tracker predicts motion and assigns globally, in two stages.**
+  Each track now carries a constant-velocity Kalman filter over its box
+  centre; detections are assigned to tracks by overlap with the predicted
+  box (or the last box, for someone who stops short), solved globally
+  (Hungarian) rather than nearest-first, in ByteTrack's two stages:
+  confident boxes against every track, then the detector's unsure boxes
+  (below 0.5) against the tracks seen last frame, so a person half hidden
+  behind a colleague keeps their track. The width-growth gate measures
+  against the track's widest box of the last second, not the narrow box
+  of a moment behind someone, and a box under half the predicted height
+  (a torso) never matches. The size-aware distance remains the coasting
+  fallback; `motion=False` on the TrackConfig restores the old matcher.
+  Why: with nearest-first on the distance, three people crossing swapped
+  identities (one track jumped 140 px to another person) and every swap
+  left a fresh track to confirm beside the live ones. Replayed on the
+  Ventuno Q from a three-person, seven-pass walk (2026-11-05): 27 visits
+  → 24, five of seven passes posting exactly three; replay wall time
+  unchanged (no scipy, a few lines of numpy).
+
+- **Search understands counts and groups, and says loudly when it fell
+  back.** "Did you see the 3 persons together" used to parse to the words
+  "persons together", match no caption, and quietly show every visit.
+  Now: every visit carries the most people the detector had in frame with
+  it at once (detect-pipeline counts confirmed tracks per frame; core
+  keeps it as ``payload["people"]``), the parser reads "3 persons",
+  "two men", "a group", "together" as *at least N people in frame*
+  (``min_people``, also a query parameter), the search filters on it and
+  shows a "3+ people together" chip, and the parser knows "persons",
+  "men", "women", "guys", "kids", "visitors" and the rest of the words
+  people type. When words still match nothing and search shows the rest,
+  the notice is a warning that starts "These are not what you searched
+  for" and gives the count. Visits recorded before this release carry no
+  count and never match a group query.
+
+- **The camera agent's start-up LLM pre-warm is a setting, off on CPU
+  boxes.** At start the agent sent its system prompt and tool schemas
+  through the LLM once so the first question skips the cold prefill. On a
+  GPU that is seconds; on an 8-core ARM box it was one chat call of 3 min
+  50 s at every restart, six cores busy for nothing a person asked for
+  (Ventuno Q, 2026-11-06). `LLM_PREWARM` in .env (`llm_prewarm` in the
+  agent config) turns it off; the installer writes false wherever the LLM
+  runs on the CPU and true on a CUDA box. Off, the first question pays the
+  prefill instead, and the log says so.
+
+- **Search uses the claims other apps wrote, and finds app alerts.** A
+  typed "red van" or "person in a blue shirt" now filters on the colour,
+  vehicle-type, clothing, carrying or headwear claim where this box holds
+  claims of that kind (the description questions, the plate and face
+  apps write them), which is exact, and stays a caption word where it
+  does not. The chip is the same one the picker makes and drops the same
+  way. And a question that names an alert's subject (loitering,
+  occupancy, a package, an intruder, "any alerts") brings the matching
+  app alerts in the same window and cameras beside the visits, newest
+  first, with severity, camera and source, for callers with
+  `alerts.view`; the page shows them above the results and says when
+  none fired. Search still starts no model: it reads what the running
+  apps already stored.
+
+- **A slow captioner no longer computes captions nobody saves.** One
+  Search "describe" on the field box sent the visit's photo to qwen3-vl
+  2B through Ollama on the ARM cores: 60–90 s a caption against KAI-C's
+  fixed 30 s proxy timeout, so every call was cut off, core read the
+  502 as a plain failure (not a timeout, so the breaker never tripped),
+  the visit stayed "missing a caption", and the next question asked for
+  it again — the box sat at 100 % CPU for an hour with zero captions
+  written. Three fixes: KAI-C's proxy wait is `KAI_C_INFER_TIMEOUT_S`
+  (default 90 s, the same as core's enrichment timeout) and a timeout is
+  a 504 of its own; core counts that 504 as a timeout, so repeated ones
+  trip the adapter's breaker; and a visit whose caption call failed is
+  stamped and left alone by the on-demand lane for
+  `EVENTS_CAPTION_RETRY_COOLDOWN_S` (default 10 min) — not recorded as
+  "looked and found nothing", so later passes still get to it.
+
+- **Groups of people no longer post two or three visits per person.** Five
+  changes to the tracker and the visit lifecycle, measured by replaying
+  the recordings of three walk-throughs with three people through the
+  pipeline's own gate, detector and tracker on the Ventuno Q: 194 visits
+  over 22 passes became 101. A part box (torso, upper or lower body) 70 %
+  inside the whole is dropped whatever its width; a detection much wider
+  (over 1.6×) or narrower (under 0.4×) than a track's box never matches
+  it, so a person's track does not take the box drawn around a group and a
+  group track does not steal a member; a track that missed the last frames
+  is matched with a gate that grows a quarter per miss, so someone who
+  steps behind a colleague rejoins their track; a visit ends when the
+  object was last seen, not when its track expired, so a fragment seen for
+  a second is too short to count; and a track needs three hits at 5 fps
+  to confirm (`min_initialized`), a visit 1.5 s. A track whose box holds
+  two or more others is a group box and its visit is dropped
+  (`visits_dropped{reason="group"}`).
+
+- **A box around a group of people is the duplicate, not the people.**
+  When the detector draws one box around people crossing together beside
+  the box per person, that group box now goes and the people stay (a box
+  with two or more same-label boxes inside it is a group; one that holds
+  exactly one, about as wide, is a whole with its part).
+
+- **A person inside a group box is not a part of it.** With three people
+  crossing together the detector also drew one wide box around the group,
+  and the part rule dropped the person in the middle as a part of it. A
+  part is as wide as its whole; a box narrower than 60 % of the one around
+  it is a separate object and is kept, both in overlap suppression and in
+  the tracker's spawn guard.
+
+- **The part-box rule now holds when the part scores higher than the
+  whole, and on frames where only the part was detected.** Overlap
+  suppression applies the containment rule by size, largest first, so an
+  upper-body box with a better score than the full body no longer survives;
+  and the tracker absorbs an unmatched detection that lies mostly inside a
+  live track of the same label instead of starting a second track from it
+  (`tier0_track_spawns_absorbed_total`). One walk past the camera is one
+  visit.
+
+- **The pipeline's CPU gauge no longer spikes when two scrapers coincide.**
+  `tier0_process_cpu_percent` is CPU time over the window since the previous
+  scrape; a window of a few hundred milliseconds that caught one keyframe
+  cycle read 60 to 140 % against a real load of 9 %. A window shorter than
+  2 s now keeps the previous reading and keeps accumulating.
+
+- **One person no longer becomes two or three visits per pass.** The
+  detector sometimes boxes a person's upper body beside the full body; the
+  part's overlap ratio with the whole is low, so overlap suppression kept
+  both, and since the recording-request change each confirmed its own
+  track and posted its own visit, photo and fetch. A same-label box that
+  lies 85 % or more inside a larger box (`DETECT_NMS_CONTAINMENT`, 0 or 1
+  turns it off) is now dropped as a part of that object.
+
+- **A search result's "play the recording" lands where the subject is.**
+  The playhead now opens 3 s before the event's instant, inside the same
+  segment, so the entry is on screen (an event starts when the detector
+  first saw the object, which is after it entered the frame). When the
+  camera has no footage at that instant, the player used to jump silently
+  to the next recording of the day and play it as if it were the moment
+  asked for; it now says so in the playback header, with the time it is
+  playing from instead.
+
+- **Core no longer hangs at boot on "Fixing ownership of non-opennvr files
+  in recordings tree...".** Core's entrypoint chowned the recordings
+  archive in the foreground, before anything else started. On a mount where
+  ownership does not stick (NFS with root_squash, SMB/CIFS, some NTFS and
+  exFAT disks), every file was re-chowned on every start, so core sat there
+  until its healthcheck marked it unhealthy. The entrypoint now checks once
+  whether chown works on the mount, skips the step if it does not, and
+  otherwise runs it in the background. An operator who mounted their own
+  entrypoint to get around this can go back to the stock one.
+
+- **A tentative track no longer asks the recording for its crop.** It
+  dies on a single miss, and a duplicate box on one person spawns such a
+  track every few frames; each result came back for a visit that never
+  existed (counted late) and cost a fetch and a decode. The request waits
+  until the track is confirmed and is then filed for its best moment so far.
+
+- **A recording crop that landed between two frames no longer misses its
+  visit.** The playback thread could serve a result just before the track
+  ended; the visit saw nothing pending, was posted as it was, and the crop
+  was counted late. A served, uncollected result now keeps the track
+  pending, so the visit is held and patched on the next drain.
+
+- **"Sign in with <provider>" no longer lands on a 404.** The app's
+  service worker answered every page visit with the app itself, so
+  `/api/v1/auth/oidc/start` (and the provider's return to `/callback`) never
+  reached the server, and single sign-on could not work in a browser that
+  had loaded the app before. Server paths (`/api/`, `/webrtc/`, `/hls/`,
+  `/playback/get|list`, `/healthz`) are now left to the network. A browser
+  picks this up after one reload following the upgrade.
+
+- **Saving the single sign-on settings no longer shows "Something went
+  wrong".** The save worked, but its answer lacked the role list the page
+  redraws from; it now returns the same settings and roles as loading them.
+
+- **Single sign-on roles from Zitadel and Keycloak are applied.** A role
+  claim was read only as a flat list or a single value, so Zitadel's
+  (`urn:zitadel:iam:org:project:roles`, a map keyed by role) and Keycloak's
+  nested `realm_access.roles` matched nothing and every user got the default
+  role. A map's keys are now the roles, and the claim may be a dotted path
+  into nested claims. Zitadel needs "Assert Roles on Authentication" on the
+  project.
+
+- **A nominal 2 s GOP no longer trips the keyframe-evidence guard.** The
+  guard compared the measured keyframe interval against
+  `DETECT_EVIDENCE_NOKEY_MAX_GOP_S` (2 s) with no slack, and cameras set
+  their GOP in frames while running a little under nominal fps: a CP Plus
+  at "2 s" measured 2.03 s and was switched to full decode nine seconds
+  after start, the most common default pushed onto the expensive path by
+  timestamp jitter. The limit now carries a 15 % allowance (2.3 s switches,
+  2.1 s does not) and the warning prints the measured interval to two
+  decimals.
+
+- **Adaptive-decode flips no longer count as feed restarts.** The frame
+  source cleared the "this stop was deliberate" flag when the flipped
+  ffmpeg session ended, one step before the respawn read it, so the
+  respawn's first frame reached the worker unmarked and every
+  idle↔active flip was booked in `tier0_worker_restarts_total` (17 on a
+  healthy camera in one morning) while
+  `tier0_decode_mode_changes_total` never moved. The respawn now carries
+  the flag itself; a session that ends on its own still counts as a
+  restart.
+
+- **Keyframe-only evidence decode (`DETECT_EVIDENCE_DECODE=nokey`) no
+  longer floods the worker with duplicate frames.** Dropping the `fps`
+  filter was only half the fix: ffmpeg's rawvideo output has no
+  timestamps, so its default constant-rate sync padded the keyframes
+  back to the stream's nominal rate with copies. On a CP Plus H.265 main
+  stream (1 keyframe/s, nominal 100 fps) the evidence ffmpeg sat at ~45 %
+  of a core and the worker at ~43 % reading ~100 duplicate 960x1080
+  frames a second — more than the full decode the mode exists to
+  replace. The decode command now pins `-fps_mode passthrough` whenever
+  the rate filter is out, so exactly one frame per keyframe crosses the
+  pipe; a real-ffmpeg test counts them.
+
+- **`start.sh` refuses to run under `sudo`.** A `sudo ./start.sh` left
+  `.env` (0600, root) and parts of the checkout owned by root, and every
+  later `./start.sh` as the normal user failed with `.env: Permission
+  denied` until someone with sudo chowned the files (seen on a test box).
+  The script now stops before doing anything, names the user that invoked
+  it, and prints the two repair commands (join the docker group, chown the
+  checkout back). A plain root login is unaffected; `OPENNVR_ALLOW_SUDO=1`
+  skips the check.
+
+- **`start.sh`'s network re-attach now carries the service's DNS names.**
+  On Docker Compose 2.24 (Ubuntu 24.04) a recreate can drop a container's
+  secondary network; `start.sh` re-attaches it, but a bare `docker network
+  connect` registers no alias, so the re-attached core answered on
+  `opennvr_internal` by IP only and nothing on that network could resolve
+  `opennvr-core`: the detect-pipeline lost camera discovery and MediaMTX
+  the recording path for ten minutes on a test box. The re-attach now
+  passes `--alias` for the service name, the container name and any
+  aliases declared in the compose file.
+
+- **MediaMTX no longer restarts its RTSP listener on every camera change.**
+  The shipped MediaMTX templates set the deprecated `rtspUDPReadBufferSize: 0`.
+  In MediaMTX 1.15 that key is a pointer field; the config clone MediaMTX
+  makes on every API change gives it a new address and the reload logic
+  compares it by identity, so every camera add, edit or delete restarted
+  the RTSP, RTSPS and API listeners — every detect-pipeline and recorder
+  reader was dropped (`closed: terminated`) and, when the new listener
+  bound before the old one was released, MediaMTX died with
+  `listen tcp :8554: bind: address already in use` (two crashes in an hour
+  of camera edits on the Ventuno Q loaner). The key is removed from
+  `mediamtx.docker.yml`, `mediamtx.yml` and `mediamtx.local.yml`; a test
+  keeps it out. Existing installs pick the fix up with `git pull` and a
+  MediaMTX restart (`./start.sh up` or `docker compose restart mediamtx`).
+
+- **A deleted camera no longer counts as a down detection worker.** The
+  detect-pipeline dropped a removed camera's metric series and *then*
+  stopped its worker, whose teardown wrote `tier0_worker_up=0` back, so the
+  camera stayed in `/metrics` as a dead worker until the pipeline restarted
+  (the dashboard showed "Detection 1/2 — Degraded" on a box with one
+  camera). Removed workers are now marked superseded before they are
+  stopped and their series are dropped after the stop.
+
+- **Storing a substream URL on an existing camera now creates its `-sub`
+  MediaMTX path at once.** The update took the "main path unchanged" branch
+  of the provisioner, which skipped the substream entirely, while the
+  Tier-0 tap listing already handed `cam-N-sub` to the detect-pipeline:
+  that camera's detection died with "path not configured" every tick
+  until the next core restart. The unchanged branch now refreshes the sub
+  path like the replace branch does.
+
+- **A detect-pipeline worker whose substream tap cannot be opened detects
+  on the main stream instead of going dark.** With the main URL in hand
+  (core's `evidence_url`) it probes that, warns that it is decoding full
+  resolution, and runs no evidence source; without one it fails as before.
+
+- **The detect-pipeline refuses QNN on the HTP, out loud, when the DSP node
+  is not in its container.** ORT's QNN plugin lists an HTP device on any
+  Qualcomm host and compiles the graph without opening it, so a pipeline
+  recreated without the Qualcomm overlay built a session that named QNN and
+  ran every node on CPU: 18 cameras "over capacity" with nothing saying why
+  (Ventuno Q, 2026-11-01). The node is checked before the plugin is
+  attached; without it the detector runs on the classic CPU list,
+  `tier0_detector_backend` shows `requested != effective`, and the log names
+  the missing file and the overlay. The startup line now carries
+  `flavour=` and `providers=`, and the capacity warning says what the
+  detector runs on.
+
+- **A plain `docker compose up -d <service>` no longer drops the hardware
+  flavour.** `start.sh` resolved `OPENNVR_ACCEL=auto` into overlays and
+  `DETECT_*` values that lived only in its own environment, so any compose
+  command run by hand in the checkout — adding the fake-camera rig,
+  restarting one app — rebuilt every service whose config differed as the
+  plain cpu image with no NPU device. `start.sh` now writes `COMPOSE_FILE`,
+  `COMPOSE_PROFILES`, the values the flavour filled and the device group ids
+  into `.env`, which Compose reads on every invocation; a value a previous
+  flavour filled is reset when the flavour changes, and an operator's own
+  value is never overwritten. Passing `-f` by hand still replaces the set
+  (README and `docs/HARDWARE.md` say so).
+
+- **Camera agent: a selected camera no longer breaks the LLM's cached
+  prompt prefix.** The UI's selected camera went in as a second system
+  message; Ollama collates system messages ahead of the tool schemas, so
+  every turn with a camera selected re-prefilled ~4k tokens (measured:
+  1,267 of 4,958 reused, 288 s of eight ARM cores). The hint now rides in
+  the user turn with the clock and the router's hint. The pre-warm records
+  a fingerprint of what it cached; a turn whose prefix differs logs which
+  part (system prompt or tool schemas) and marks the trace; a tool rebuild
+  that changes the prefix re-warms it; the voice pipeline keeps the clock
+  out of the system prompt too. A caller whose camera scope differs from
+  the full roster still misses, and the warning now says so.
+
+- **Smart Doorbell no longer announces a known person as a stranger first.**
+  Every polled frame used to be judged alone, so the side-on, blurred first
+  frame of an approach fired `unknown_visitor` and the clean frame a second
+  later fired the name. The doorbell now decides per visit (`visits.py`): a
+  face opens a visit, a match ends it at once, and only a visit that runs
+  `decision_hold_seconds` (4 s) without a match is called a stranger, from
+  its largest face. A miss whose nearest enrolled face came within
+  `unknown_score` (0.35) of the threshold is recorded as "unclear" on the
+  wall and not alerted; faces narrower than `min_face_px` or below
+  `min_face_confidence` are not decided from. A stranger that matches later
+  is upgraded in place: the `known_visitor` alert carries
+  `evidence.supersedes` and a `supersedes:<id>` tag, the tile leaves the
+  wall, the feed line is corrected, and the bell does not ring twice. All
+  five knobs are catalog params and apply live. Needs ai-adapter 0.1.11 for
+  the band and the gate (the InsightFace miss reply now carries
+  `similarity` and `confidence`); the hold works with any adapter.
+- **`auto-update enable` works on Linux.** The command the app and the
+  script showed was `sudo ./start.sh auto-update enable`, which start.sh
+  refuses (it never runs under sudo), and without sudo the script refused
+  too. It now runs as the normal user and writes only the systemd unit
+  through sudo, like the host agent.
+
+
+- **Add Camera no longer prints a SOAP fault, and a camera whose clock is
+  off can still be added.** When a camera refused the ONVIF login the
+  dialog showed the raw `<s:Envelope … ter:NotAuthorized …>` text. A camera
+  answers the same fault to a correct password when its clock is more than
+  a few minutes from ours (WS-Security checks the `Created` timestamp), so
+  core now reads the camera's clock with the unauthenticated
+  GetSystemDateAndTime after both schemes refuse, retries once with the
+  timestamp in the camera's time when the clock is off, remembers the
+  offset for that camera, and otherwise answers a 401 that says what to
+  check: the ONVIF account (often separate from the web login, or ONVIF
+  turned off) and, when measured, the clock skew in minutes. The dialog
+  shows that sentence; any other camera error is reduced to its fault code.
+
+- **A USB webcam on a Docker Desktop machine goes live (#900).** The host
+  agent's ffmpeg publishes the camera's path and its `-sub` from one
+  capture, but core only created the sub path for a webcam MediaMTX serves
+  itself on Linux. MediaMTX refused the sub, ffmpeg exited a second after
+  starting, and the camera stayed "Disconnected", retrying every minute.
+  Every provisioner now asks `local_webcams.provisioning_for` what a webcam
+  needs and creates the sub through the one place that makes sub paths:
+  camera create and edit, `POST /cameras/{id}/provision-mediamtx`, the
+  startup reconcile, and core's boot loop. The last two also stop a core
+  restart from replacing a Linux USB webcam's path without its capture
+  command.
+- **One webcam feeds one camera.** A server webcam already feeding a camera
+  is refused with a 409 on create and on edit, whatever `force` says (a
+  second capture of the device fails "device busy" for ever); the Linux
+  webcam list now says which camera a webcam feeds, as the host agent's
+  did, and needs `cameras.manage`. In the browser, a camera this tab
+  already publishes is shown "in use" and cannot be added or started for
+  a second camera.
+- **Deleting a browser webcam lets the webcam go.** Its publishing session
+  kept retrying against the deleted camera, holding the webcam open with
+  its light on, until the tab closed. Deleting stops it, and a session
+  whose camera is gone (deleted in another tab or on another device) ends
+  instead of retrying.
+- **Turning USB webcams on on Linux actually gives MediaMTX ffmpeg (#904).**
+  The webcam overlay's MediaMTX built under the same image name as the
+  default one, so `WEBCAMS=on` reused the image already on disk and every
+  webcam path failed with `exec: "ffmpeg": executable file not found`. It
+  is now its own image, `opennvr/mediamtx-webcams:local-build`.
+- **Add Camera → Webcam → OpenNVR server says what to do on that server
+  (#904).** A Linux server with webcams off was told to install the host
+  agent with `.\start.ps1`, guessed from the browser's OS. It now says to set
+  `WEBCAMS=on`; on Docker Desktop the agent's install command is the
+  server's own (`OPENNVR_HOST_OS`, written by the launchers), or both when
+  unknown. With the overlay in place and no webcam plugged in, the dialog
+  says "plug one in" instead of offering the agent.
+- **`VIDEO_GID` reaches Compose.** `start.sh` exported it from inside
+  `$(compose_args)`, a subshell, so it never left; it is now written to
+  `.env` with the other host values. Hosts whose `video` group is not 44
+  could not open the webcam.
+
+
+## [0.1.10] — 2026-10-31
+
+### Added
+
+- **Per-device detector benchmark.** `python -m detect_pipeline.bench
+  --latency N` times the Tier-0 detector on whole frames and reports
+  ms/frame (median, p90, min) after untimed warm-up runs. `--providers`
+  takes the `DETECT_ONNX_PROVIDERS` syntax (`OpenVINOExecutionProvider:NPU`,
+  `:GPU`, `:CPU`), so one model on one clip gives a row per device. Each row
+  names the provider ONNX Runtime really ran on, and a run whose accelerator
+  fell back to CPU prints a warning and exits 2. Also `--backend`,
+  `--input`, `--threads` (ORT CPU pool for a baseline) and `--max-frames`
+  (bounds a live RTSP source). The gated run now builds the detector
+  outside its timer, so an NPU's graph compile no longer counts against
+  its fps. `docs/HARDWARE.md` has the command for an NPU host.
+
+### Fixed
+
+- **`tier0_detector_backend` now shows an accelerator fallback.** `requested`
+  was taken after ONNX Runtime had dropped a provider the wheel lacks, or
+  after a session that failed to build had been rebuilt on CPU, so in exactly
+  the two cases the metric exists for it read `requested=CPU, effective=CPU`
+  and the documented `requested != effective` check never fired. The original
+  request is kept; the startup log warns once in both cases.
+
+## [0.1.9] — 2026-10-31
+
+### Added
+
+- **Public night-yard Look cases.** 58 `yard_threat` cases from openly
+  licensed datasets (ENA24 animals, MEVA CCTV people and empty scenes),
+  listed in `examples/camera-agent/tools/look_cases_public.csv` and
+  fetched by `tools/fetch_look_public.py`; no picture is in the repo.
+  `look_eval.py --max-side` shrinks pictures before the model sees them.
+  First run, `qwen3-vl:2b-instruct` on CPU: 26/58 at full size (18 steps
+  out of time), 35/58 at 768 px with p95 52 s; strangers taken for guards
+  is the failure to fix (MODELS_AND_LATENCY.md).
+
+- **Tour editor redesign.** The tour's name, on/off and summary sit on one
+  row, and its settings open in a dialog. Each page shows how many of its tiles
+  have cameras, the top bar counts how many of your cameras are on the tour, and
+  **Save tour** warns when some are left out. The camera list says where each
+  camera is used, marks those **Not on tour**, and highlights the camera on a
+  clicked tile. **Add remaining** replaces **Add all**, so adding never repeats
+  a camera. A full page offers to put the camera on a new page, removing a page
+  with cameras asks first, and the preview is drawn as the screen it stands for.
+  From 1280 px wide the editor fits the window and its lists scroll inside
+  themselves. A running wall has one **Edit this page** button in place of
+  **Arrange** and **Edit this tour**: it opens that page in the same editor,
+  with **Edit whole tour** for the rest, and comes back to the wall on that page.
+
+- **Accelerate: safe defaults and no crash on a missing accelerator.** On the
+  `intel` flavour each adapter follows its own `<NAME>_ONNX_PROVIDERS`, then
+  `ADAPTER_ONNX_PROVIDERS`, then a default that is an accelerator only where
+  the model is proven: yolov8 on the iGPU, the pose adapter on the NPU,
+  InsightFace / plate OCR / package detection on CPU. The Tier-0 detector
+  falls back to CPU, with an error and `requested != effective` in
+  `tier0_detector_backend`, when ONNX Runtime cannot start on the requested
+  device instead of leaving detect-pipeline in a restart loop
+  (the adapters do the same, ai-adapter #74). `docs/HARDWARE.md` gains a
+  "What runs where" table.
+
+- **OpenNVR Accelerate: Qualcomm Hexagon NPU (`-qualcomm` flavour).** A
+  third hardware flavour of the detect-pipeline image: `ACCEL=qualcomm`
+  adds `onnxruntime-qnn`, the Qualcomm AI Runtime *plugin* execution
+  provider, next to plain ONNX Runtime. `start.sh` picks it on `auto` when
+  an arm64 host has the Hexagon compute DSP (`/dev/fastrpc-cdsp`) —
+  Dragonwing IQ8 / QCS8275 and Snapdragon boards on Qualcomm's Ubuntu —
+  via `docker-compose.accel-qualcomm.yml`, which lends the container the
+  DSP node and the host's two fastrpc libraries. The Tier-0 detector then
+  runs on the HTP (`DETECT_ONNX_PROVIDERS=QNNExecutionProvider:htp`); the
+  service registers the plugin library itself (`onnx_detector
+  .register_plugin_providers`), so a plugin provider is no longer dropped by
+  the "requested ∩ available" filter, attaches it by device, and caches
+  its compiled graph next to the model (`<model>.QNNExecutionProvider
+  .ctx.onnx`) so the detector pool's sessions after the first skip the
+  ~6 s compile; that cache is also how `tier0_detector_backend{effective}`
+  tells an NPU that took the graph from one whose device failed (the
+  session keeps listing the provider either way). New
+  `DETECT_ONNX_PROVIDER_OPTIONS=key=value,…` passes any provider option
+  through. Decode stays in
+  software; adapters stay on their cpu images. Measured on an Arduino
+  Ventuno Q (QCS8275): see `docs/HARDWARE.md`.
+
+- **Cameras page: bulk actions, grid view, pause recording.** Tick
+  cameras (or "Select all", then "Select all N cameras" across every page
+  matching the filters) and use **Actions** to set or clear location, turn
+  detection on/off, activate/deactivate, pause or resume recording, assign
+  permissions or delete. An **All / Active / Inactive** switch with counts
+  replaces "Active only" (`GET /cameras/` takes `status=` and returns
+  `counts`; `active_only` still works), and the table has a Status column.
+  A **Grid** view shows each camera's still with its stream and recording
+  state, in S/M/L tiles; clicking a card selects it, and **Live** opens the
+  camera in a dialog over the page. Recording can now be paused from the
+  page (per camera or in bulk, for 15 min to 24 h or until resumed) where
+  Settings → Recording allows pausing; the list shows who paused it and
+  until when (`recording_pause` on each camera). Live View's Tours menu
+  gains **New tour**.
+
+- **OpenNVR Accelerate: hardware flavours.** The detect-pipeline image now
+  builds in flavours from one Dockerfile (`ACCEL=cpu|intel`); the `-intel`
+  tags carry `onnxruntime-openvino` plus Intel's VA-API, OpenCL and NPU
+  user-space, so an Intel iGPU decodes the cameras and the Tier-0 detector
+  runs on the NPU or iGPU through OpenVINO. One setting selects it:
+  `OPENNVR_ACCEL=auto|cpu|intel` in `.env` (auto finds an Intel render
+  node), which makes `start.sh` add `docker-compose.accel-intel.yml` (and
+  the NPU device overlay when `/dev/accel/accel0` exists) and fill the
+  decode/detector defaults (the NPU when the host has one, else the iGPU —
+  pinned, not AUTO, which warms up on CPU). `DETECT_ONNX_PROVIDERS` takes a `:device` per
+  provider (`OpenVINOExecutionProvider:AUTO:NPU,GPU,CPU`, `:NPU`, `:GPU`,
+  `CUDAExecutionProvider:1`). ORT's silent fallback to CPU is now logged
+  and exported as `tier0_detector_backend{backend,requested,effective}`.
+  Support matrix and benchmark protocol: `docs/HARDWARE.md`.
+
+- **OpenNVR updates itself, if you let it.** Each release now ships a
+  signed manifest (`release-manifest.json`, Ed25519, keys in
+  `server/updater/keys.json`) naming its commit, image digests, pins and
+  database revisions. `./start.sh update` (`.\start.ps1 update`) checks
+  it, downloads everything first, backs up the database, keys and `.env`
+  under `backups/`, switches, checks the new version is healthy and rolls
+  back (database included) if not; `update --restore <backup>` is the
+  escape hatch. Settings → OpenNVR Updates shows what was found, the
+  release notes, history and progress, has **Update now**
+  (`system.update`, admins only, new) and the policy: off (default),
+  notify, manual, or automatic in a maintenance window, patch releases
+  only unless widened, after a per-site delay that urgent releases skip.
+  `start.sh auto-update enable` installs the host runner (systemd,
+  launchd or a Scheduled Task) that does the work; the app only leaves it
+  a request in `data/update-requests/`. Air-gapped sites: offline
+  bundles (`scripts/make-offline-bundle.py`, also as deltas against a
+  base version) applied with `update --bundle`, or one internal mirror
+  for many NVRs via `UPDATE_SOURCE_URL`. A withdrawn release is never
+  offered (signed `release/revocations.json`). Results and new versions
+  arrive as alerts. An `edge` channel follows `main` for test sites.
+  Home Assistant's update entity can install, with a token that has the
+  new `system.update` scope (contract 1.2.0, feature `update_install`).
+
+- **Camera tours are pages.** A tour is now a list of pages, each one
+  screenful: a layout, the camera on each tile, and how long it shows.
+  What the editor shows as a page is exactly what the wall shows, and the
+  wall reads "Page 2/5". Steps that paged through more cameras than their
+  layout held are gone: adding more cameras than fit (e.g. **Add all 20
+  from North** on a 9-tile page) fills the page and puts the rest on new
+  pages right after it, and choosing a smaller layout moves the cameras
+  that no longer fit the same way; the editor says how many went where.
+  The API takes and returns `pages` (`steps` is still accepted, and still
+  returned alongside for one release, for walls running the older app); a
+  page with more cameras than its layout has tiles, including every tour
+  saved as steps, is split into consecutive pages with the same label,
+  layout and time on save and on read, exactly as the wall showed it. No
+  schema change: the `camera_tours.steps` column now holds pages.
+
+- **Camera tours: empty tiles, placing on a tile, a tours table.** Taking a
+  camera out of a tour page (in the editor, in Arrange, or by binning it)
+  now leaves its tile empty instead of moving every later camera up, so a
+  wall keeps its arrangement; **Close gaps** packs the cameras again. A
+  page's `camera_ids` may hold `null` for an empty tile (trailing ones are
+  trimmed; a duplicate's second tile is left empty). The editor's preview
+  places cameras like Arrange: click a tile then a camera, or drag a camera
+  onto a tile; both say when the camera was already on the page and moved.
+  The tours settings page has a cards/table switch and a search, with only
+  the list scrolling, and Live View's Tours menu scrolls and searches.
+
+- **Camera tours for display boards.** A tour cycles a screen through
+  sets of cameras: 20 North cameras for a minute, then 20 South, and
+  round again. Build them under Settings → More Settings → Camera Tours
+  (`cameras.manage`); run one from Live View's **Tours** button or open
+  its display link (`/display/tour/<id>`, the wall with no app shell) on
+  the board. A page can use any Live View layout or a plain grid up to
+  8×8, and a whole camera Location can be added at once. An alert on a tour camera can take over
+  the wall for a set time and then hand back to the tour (per tour: which
+  alerts, which cameras, how long, a cool-down); a chip always shows what
+  comes next and when. The editor is a page of its own with camera
+  pictures, drag-to-reorder and a page preview, and opens from a running
+  wall; **Arrange** on a running wall (in the app) removes, swaps and
+  replaces cameras on the page on screen. The next page starts early,
+  hidden, so it is playing when it shows, with a crossfade or a cut (per
+  tour), and a tile waiting for its video shows the camera's last frame.
+  Every viewer sees only their own cameras. Tiles play the
+  substream and fall back to the main stream per camera. New table
+  `camera_tours` and its `settings` column (two additive Alembic
+  revisions); `GET /tours/thumbnails/{id}` serves small cached stills for
+  the editor without holding a stream open; `GET /streams/{id}/info`
+  takes an opt-in `include_sub=true` and is unchanged without it. Live
+  View's own grid and the dashboard wall are untouched.
+
+- **Camera import and export.** Cameras → Import takes a CSV or Excel
+  file: one row per camera, or one row per NVR/DVR with `channels` and a
+  `vendor` (Hikvision, Uniview, Dahua, CP Plus, or an RTSP URL with `{ch}`)
+  that becomes a camera per channel. A preview shows what every row would
+  do (new, update, unchanged, duplicate, error and why) before anything is
+  saved; the import then runs in the background through the same create
+  and update code as the Cameras page, a few cameras at a time, and is
+  audited. Re-importing a file changes nothing and nothing is ever deleted.
+  Cameras → Export writes the cameras the operator manages, filtered as
+  the list is, in the same columns; passwords and RTSP logins only with
+  the operator's MFA code. Template in both formats. New endpoints under
+  `/cameras/export` and `/cameras/import`; `openpyxl` added to the server.
+
+- **The Look eval.** `examples/camera-agent/tools/look_eval.py` runs a
+  site's labelled pictures through the workflow's Look step (the SDK's
+  `run_ai_step`, two templates in `tools/look_templates.yml`: who is at
+  the gate, and what is in the yard at night) and gates each template on
+  the Wilson lower bound of its pass rate and its p95 seconds. The labels
+  are a CSV kept in a spreadsheet, checked before any model runs. No
+  accuracy until the site pictures arrive; a 4-frame plumbing check on
+  CPU put a vision Look step at 13-53 s (MODELS_AND_LATENCY.md).
+
+- **Workflow runs are recorded.** Three tables, one Alembic revision:
+  `workflow_runs`, `workflow_run_steps` and `workflow_tool_calls` (RFC
+  #620, §8). `server/workflows/ai_steps.py` runs an AI step inside a run:
+  the step's row and inputs are written before the model is called, then
+  its outcome, the rule that decided and every model and tool call. A step
+  waiting on an `ask` tool keeps its state on the row and resumes from it
+  after a restart. Steps that set no limits get the box's hardware class
+  (GPU when `DETECT_HWACCEL` is an accelerator, else CPU).
+
+- **The workflow file's `ai:` step, checked and run.**
+  `opennvr_app_sdk.workflows`: `check_ai_step()` lists everything wrong
+  with a step (an actuator or unknown skill as a tool, a rule naming an
+  unknown field or outcome, an outcome with no path, a placeholder in the
+  instructions, YAML's unquoted yes/no), and `run_ai_step()` runs a Look or
+  Investigate step to its outcome, its path, the `workflow_run_steps` row
+  and the trace rows; an `ask` tool suspends into the row and
+  `resume_ai_step()` carries on. Defaults for #620's open questions: rules
+  required in Investigate, optional in Look; the hardware class comes from
+  the engine (CPU when unset); the severity cap is the `alert` action's.
+  `Decision.rule` now says which rule fired.
+
+- **Rule tables in AI steps.** `DecisionSpec(rules=...)`: the model reports
+  typed facts, a reason and a confidence, and the first matching `Rule`
+  decides; no match is `unsure` (`no_rule`). The Investigate eval gains
+  `--rules`, a rule table frozen before 20 new held-out cases were written,
+  and the raw runs. On the held-out cases the rules did not raise the pass
+  rate (granite4:micro 29 → 30/60), and the original cases overstate the
+  models (45/60 there); see MODELS_AND_LATENCY.md.
+
+- **App SDK 0.9.0.** Publishes the Look step of an AI workflow —
+  `opennvr_app_sdk.agent.run_look()` with `DecisionSpec`, `Decision`,
+  `Limits` and the trace rows (#651, by @Emart29) — and the registry's
+  `open_vocab_detection` task in the validator's known set, both of which
+  0.1.8 shipped on `main` without a PyPI release. Additive; nothing in
+  0.8.0 changes.
+
+- **App SDK 0.10.0.** Publishes the Investigate step:
+  `opennvr_app_sdk.agent.run_investigate()`, `resume()`, `Suspended` and
+  `Tool` (#670, #674, by @Emart29), which `main` carried since 0.9.0
+  without a PyPI release. Additive; nothing in 0.9.0 changes.
+
+- **App SDK 0.11.0.** Publishes what `main` carried since 0.10.0 without a
+  PyPI release: rule tables (`DecisionSpec(rules=...)`, `Decision.rule`
+  says which rule decided), the workflow file's `ai:` step checked and run,
+  and a failing first NATS connect logged as one warning instead of a
+  traceback per attempt. Additive; nothing in 0.10.0 changes.
+
+- **The SDK runs an Investigate step.** `run_investigate()` calls the
+  step's tools, then decides in a separate call (RFC #620). Every call goes
+  through one gate: tools off the step's list or `unavailable` are refused,
+  bad arguments go back to the model, and a tool that moves things cannot be
+  built at all. A tool in `ask` mode suspends the step with its state as
+  plain JSON; `resume()` carries on, after a restart if need be, and the
+  time spent waiting for a person is not counted.
+
+### Changed
+
+- **`:latest` is the last release.** The core, detect-pipeline and
+  camera-agent images now move `:latest` only on a `v*` release tag; it
+  used to follow every merge to `main` as well, so an install with no
+  `CORE_TAG` pin could pick up untested builds on its next pull. Use
+  `:main` for the bleeding edge. Catalog app images keep their old policy,
+  because the app catalog advertises `:latest`.
+
+- **The Investigate cases answer like the real tools.** A failure analysis
+  of granite4:micro's failing runs found fixtures that answered made-up event
+  ids and a search default that hid visits; both now behave as the tools do,
+  with a test. granite4:micro stays at 45/60; qwen3:1.7b goes from 21 to 16,
+  having been rewarded for inventing ids. The remaining failures are the
+  model deciding against its own evidence (MODELS_AND_LATENCY.md).
+
+- **The Investigate eval runs the SDK's `run_investigate()`.** The harness
+  kept its own copy of the step loop, and the two drifted: a rewording in
+  the library cost granite4:micro 7 runs in 60 before the copy could show
+  it (#674). Now the gate measures the code that ships; the harness keeps
+  only the fixture tools and the scoring. `--combined` is gone (its finding,
+  that the decision needs its own call, is in MODELS_AND_LATENCY.md).
+
+### Fixed
+
+- **Dropdown arrows sat flush against the right edge** on every page. One
+  global rule now draws them, in place of the per-page workarounds.
+
+- **`start.sh` checks the Compose version and puts every container back on
+  every network it declares.** Compose 2.24.x — what Ubuntu 24.04's
+  `docker-compose-v2` package ships — attaches a container's networks one at
+  a time after creating it and randomly drops one (docker/compose#11533,
+  fixed in 2.26.1). On the Ventuno Q benchmark board `opennvr-core` came up
+  on `opennvr_apps` only: 1,900 "could not translate host name db" errors in
+  45 minutes while its health check stayed green, and `nats` lost
+  `opennvr_apps` the same way. Pre-flight now warns below 2.26.1 with the
+  upgrade path, and after every `up` the resolved config is compared with
+  what Docker actually attached; a missing secondary network is reconnected
+  and said out loud. Services with a single network, in a profile or overlay
+  this run was not told about, or in `network_mode`, are left alone.
+  `tests/host-hardening/test_compose_networks.sh` (12 checks, fake `docker`
+  on PATH).
+
+- **The MediaMTX signing key pair no longer tears itself on first start.**
+  On a fresh install MediaMTX fetched the JWKS while the first stream token
+  was minted; both threads saw no key files, both generated a pair, and the
+  two unlocked writes interleaved — the public key on disk belonged to a
+  private key that no longer existed, so every live view was rejected until
+  someone rewrote the file by hand (hit on the Ventuno Q benchmark board).
+  Key creation now runs under a thread lock plus a file lock on the keys
+  volume, each file is written to a temp name and renamed into place, and a
+  pair that is already torn (or a public file that is missing or corrupt) is
+  repaired from the private key on load instead of minting tokens MediaMTX
+  rejects. `server/services/mediamtx_jwt_service.py`, nine tests in
+  `server/tests/test_mediamtx_jwt_keys.py`.
+
+- **`start.sh` read `.env` values with their inline comments.** `get_env_var`
+  returned `auto   # auto (cvdnn …)` for the `DETECT_ONNX_BACKEND=auto` line
+  `.env.example` ships, so the accelerator flavours' `""|auto)` match never
+  fired and the Tier-0 detector stayed on the OpenCV path with the NPU
+  passed through and idle. The reader now strips unquoted inline comments
+  and surrounding whitespace, as compose does. Belt and braces: with
+  `DETECT_ONNX_BACKEND=auto`, requesting execution providers now resolves to
+  the `ort` backend by itself — an accelerator is only reachable through it.
+
+- **VAAPI decode on Intel iGPUs actually works.** The detect-pipeline image
+  carried only Mesa's AMD VA-API driver, so `DETECT_HWACCEL=vaapi` on any
+  Intel box (N100, Core Ultra, …) failed libva init and silently fell back
+  to software decode — while core promoted those cameras to the main
+  stream. The image now ships Debian's `intel-media-va-driver` (iHD);
+  verified H264/HEVC hardware decode on Arrow Lake.
+
+- **The "today" search tests no longer fail just after midnight.** The API
+  parsed "today" against the wall clock while the rows were stamped a few
+  minutes earlier, so a run near local midnight put them on yesterday
+  (`[] == [1]` in CI). The tests now pin the search parser's clock to the
+  rows' and keep that clock clear of midnight; checked with the local time
+  set to 23:59:50, 00:00:30, 00:01:30, 00:04 and 00:39.
+
+## [0.1.8] — 2026-10-17
+
+Better defaults, each one measured. The agent's model, its speech to
+text, the always-on detector, the vision model on a GPU and the
+embedding model all change, and
+every change is a number in `examples/camera-agent/MODELS_AND_LATENCY.md`
+with the harness that produced it beside it. The catalog says what
+hardware an app or an adapter needs and whether this box has it.
+Adapter release 0.1.8 ships alongside with the same version number.
+
+Upgrading: set `CORE_TAG=0.1.8`, `ADAPTER_TAG=0.1.8`,
+`YOLO_POSE_ADAPTER_TAG=0.1.8`, `OPEN_VOCAB_ADAPTER_TAG=0.1.8` and
+`STT_ADAPTER_TAG=0.1.8` in `.env`; `docker compose pull && ./start.sh
+up`. The detector's weights-init copies `yolo26n.onnx` beside your
+volume's `yolov8n.onnx`; the embedding store re-embeds history by
+itself; `OLLAMA_MODEL` and `STT_ADAPTER` only change for installs that
+take the new `.env.example` defaults.
+
+### Added
+
+- **Hardware requirements on the catalog, derived from the tasks.** Every
+  task in `tasks.yml` now carries its bar as numbers (`hardware.cores`,
+  `ram_gb`, `gpu`) beside the prose; an app's bar is derived from its
+  `requires_tasks` and an adapter's from its `tasks_advertised`
+  (`services/hardware_profile.py`), and the box's own cores (after the
+  cgroup quota), RAM and accelerator decide a verdict: fits, fits
+  tightly, or short, with reasons. Shown as a badge on the App Catalog
+  cards and detail pages and on the AI Adapters page; served on
+  `GET /api/v1/apps/index`, `/api/v1/apps`, `/api/v1/adapters/index`,
+  `/api/v1/ai-models/capabilities` and the new
+  `GET /api/v1/system/hardware`. Advisory, never a gate.
+
+- **Three more measurement harnesses** beside the camera agent, with
+  their October 2026 results in `MODELS_AND_LATENCY.md`:
+  `tools/stt_eval.py` (+ `stt_synthesise.sh`) for speech to text on the
+  agent's own phrasings, `tools/tts_eval.py` for the voice (real-time
+  factor and intelligibility), `tools/retrieval_eval.py` for an OpenCLIP
+  embedding checkpoint on coco128. They are what chose Parakeet, kept
+  Piper, and chose SigLIP 2.
+
+- **The SDK runs a Look step.** `opennvr_app_sdk.agent.run_look()` asks a
+  model once, with the output constrained to the step's options, and returns
+  a typed `Decision` (RFC #620). It never raises: a model that is down, a
+  step out of time or an answer the step does not allow decide "unsure"
+  with the reason. With `DecisionSpec`, hardware `Limits`, and `TraceRow`
+  for the workflow trace. Images work over Ollama and OpenAI-compatible
+  servers.
+
+- **Investigate eval cases.** `examples/camera-agent/tools/investigate_eval.py`
+  runs 20 Agentic Workflows AI steps (RFC #620) with recorded tool results,
+  scores decisions against the Wilson-bound gate, and measures confidence
+  signals. First result, in MODELS_AND_LATENCY.md: no CPU model qualifies
+  for Investigate, and the decision needs its own call.
+
+- **App SDK 0.8.0.** Publishes `opennvr_app_sdk.agent`, which 0.1.7
+  added on `main` (the model clients with schema-constrained output and
+  the read tools' shared definitions, #636 and #637), so an app can
+  `pip install opennvr-app-sdk` and get it. Additive; nothing in 0.7.0
+  changes.
+
+- **Open-vocabulary detection in the catalog.** A new task,
+  `open_vocab_detection`: a box and a score for any phrase the caller
+  writes — "red truck", "forklift", "person wearing a hard hat" — where
+  the always-on detector knows only its eighty classes. The adapter
+  (OWL-ViT v2, `ghcr.io/open-nvr/open-vocab-adapter`, ai-adapter #60)
+  is listed in `adapters_index.yml` and composed under the `open-vocab`
+  profile in `docker-compose.apps.yml`; weights baked into the image,
+  no network egress, boots on a sealed box. On demand, not per frame: seconds a
+  frame on CPU. An app declares `requires_tasks: [open_vocab_detection]`
+  and asks it a phrase; the App SDK's validator knows the task.
+
+### Changed
+
+- **`qwen3-vl:2b-instruct` is the vision model on an accelerator**, in
+  place of `gemma3:4b`. Measured on coco128 through the adapter's own
+  call path: no false yes in 126 absent-object questions, the best
+  people counter (within one 50/61), nothing unanswered, 3 s a frame on
+  a GPU with every further question on that frame free; a gigabyte
+  smaller than gemma. Moondream keeps CPU: Qwen takes ~18 s to encode a
+  frame on four cores. The plain `qwen3-vl:2b` tag is the thinking
+  build and the reason the first run looked worse.
+
+- **A model change behind the embedding adapter re-embeds the store.**
+  `event_embeddings.model` now records the producer as
+  `<adapter>:<model version>`; a vector from another producer is
+  replaced by the enricher, and the backfill walks history again when
+  any such vector exists, at its own pace. Written for the move from
+  CLIP ViT-B/32 (512-d) to SigLIP 2 B/16 (768-d) in the `clip` adapter
+  (ai-adapter, measured mAP 0.672 vs 0.571 on coco128 retrieval), which
+  search would otherwise have skipped row by row.
+
+- **Parakeet is the agent's speech-to-text.** `STT_ADAPTER` picks the
+  image in the whisper slot (`parakeet`, the default, or `whisper`); the
+  service name, port and result shape are unchanged, so the agent's
+  `whisper_url` is untouched. Measured on the agent's own phrasings:
+  Parakeet TDT 0.6B v3 (onnx-asr, int8) WER 1.4 % at 0.31 s an utterance
+  on four cores, faster-whisper base.en 3.3 % at 1.42 s. Parakeet does
+  not translate and has no Hindi; `STT_ADAPTER=whisper` keeps those.
+  Catalog entry `parakeet-asr`.
+
+- **`granite4:micro` is the agent's default model.** Measured on both
+  harnesses against the catalog's candidates: 44/60 on the Investigate
+  step where `qwen3:1.7b` scores 21/60, because it calls the tools it is
+  given before deciding; 45/45 on the chat cases with the router. About
+  twice the seconds a turn on CPU. The installer suggests it on any box
+  with 4+ cores or a GPU; `qwen2.5:0.5b` stays the floor and `qwen3:1.7b`
+  the fast pick. The model catalog is the measured top five
+  (`qwen2.5:0.5b`, `granite4:micro`, `qwen3:1.7b`, `granite4:micro-h`,
+  `granite4:tiny-h`); `qwen2.5:1.5b`, `qwen2.5:3b`, `qwen2.5:7b` and
+  `llama3.2:3b` are dropped. Numbers in
+  `examples/camera-agent/MODELS_AND_LATENCY.md`, "Measured again".
+
+- **The always-on detector is YOLO26n.** The weights image bakes
+  `yolo26n.onnx` (ultralytics 8.4.177, assets v8.4.0) exported with the
+  same flags as before, so it emits the same `(1, 84, 8400)` tensor and
+  the decode in the detect pipeline and the yolov8 adapter is untouched;
+  verified on real frames. Measured on a 4-thread CPU: 62 ms a frame
+  against yolov8n's 75, official COCO mAP 40.9 against 37.3, 9 MB. The
+  weights-init copies the new file beside an older volume's
+  `yolov8n.onnx`; the adapter is told the name through
+  `YOLOV8_WEIGHTS_FILE` (adapter release 0.1.7). Same AGPL-3.0 licence.
+
+- **The embedding model is SigLIP 2.** Adapter release 0.1.8 moves the
+  `clip` adapter from CLIP ViT-B/32 (512-d) to SigLIP 2 B/16 (768-d,
+  Apache-2.0): coco128 text-to-image retrieval mAP 0.672 against 0.571.
+  The store re-embeds itself on upgrade (above), at the backfill's own
+  pace; search's `semantic.note` says "Mixed producers" while it does.
+
+## [0.1.7] — 2026-10-13
+
+A security release: **upgrade every install that has more than one
+user.** Five surfaces checked that the caller was signed in but not which
+cameras they may see. A site with a single administrator
+was not exposed, since that account can already see every camera.
+
+Upgrading: `.env.example` pins `CORE_TAG=0.1.7`; copy it into your `.env`,
+then `docker compose pull && ./start.sh up`. The adapter images are
+unchanged at 0.1.6 (`ADAPTER_TAG`, `YOLO_POSE_ADAPTER_TAG`). No migration.
+The core image now carries the App SDK (see Added); nothing to configure.
+
+### Security
+
+- **AI detection results are scoped to the caller's cameras
+  (GHSA-fpp6-xfgg-f4h3).** `/api/v1/ai-detection-results` let any
+  signed-in user list every camera's detections and captions, read or
+  delete any result by id, write results onto any camera, and delete the
+  whole history with `DELETE /bulk/older-than/0`. Reading now needs view
+  on the result's camera and writing or deleting needs manage; a result
+  with no camera is visible to superusers only; an id the caller cannot
+  see answers 404. The bulk delete covers only the cameras the caller
+  manages and takes at least one day. Reported by Artur Chlebicki
+  ([@Artur12555](https://github.com/Artur12555)).
+- **A camera's configuration needs view on that camera.**
+  `GET /api/v1/camera-config/{camera_id}` skipped the check the rest of
+  that router applies, and the configuration holds the camera's source
+  URL, credentials included, so any signed-in user could read any
+  camera's username and password. Should the route ever be opened to API
+  tokens, they receive the URL with its credentials redacted, the rule
+  `rtsp_url` already follows. Found by the OpenNVR team while triaging the
+  report above.
+- **The AI recording listings are scoped to the caller's cameras.**
+  `/api/v1/ai-models/recording-sessions` and `/api/v1/ai-models/recordings`
+  listed every camera's recordings (times and file paths; playback itself
+  was already scoped). A camera the caller cannot see answers 404. Found
+  by the OpenNVR team while triaging.
+- **Running inference needs view on the camera.** `POST
+  /api/v1/ai-models/inference` captured a live frame from any camera and
+  returned what the model saw, and `/inference/recording` analysed any
+  camera's footage and filed the results under a camera of the caller's
+  choosing. Both answer 404 for a camera the caller cannot see, and every
+  recording segment must lie in a visible camera's folder. Found in
+  review.
+- **The compliance pages are scoped.** The security check and summary
+  listed every camera's address, vendor and credential weakness to any
+  signed-in user, and recording coverage every camera's recording counts;
+  they now cover the caller's cameras. The access audit, which lists every
+  user's actions and addresses, is a superuser's, as the audit log's own
+  route already was. Found in review.
+
+### Added
+
+- **The read tools' definitions are shared between the camera agent and
+  core.** The names, descriptions and argument schemas of the ten read
+  tools (describe, snapshot, detect, faces, footage and history search,
+  events, plates) now live in `opennvr_app_sdk.agent.tool_definitions`,
+  moved verbatim from the camera agent. The agent and core's workflow
+  engine each implement the tools, but advertise the same text, and a
+  parity test fails if the agent's ever differs.
+
+- **The SDK has model clients for AI steps, and core depends on the SDK.**
+  `opennvr_app_sdk.agent` gives one `chat()` over Ollama and any
+  OpenAI-compatible endpoint, with schema-constrained output (`format`) so
+  an AI step's decision can only be one of the author's options, tool calls
+  with parsed arguments, token counts, and errors that name the URL and the
+  runtime's own diagnosis. It is the base of the Agentic Workflows AI step
+  (RFC #620), shared by Phase 1's Look and Phase 2's Investigate. Core now
+  takes the SDK from the repository (`server/pyproject.toml`, installed into
+  the image by the Dockerfile).
+
+### Fixed
+
+- **Camera agent: `camera_ids` sent as text now works.** llama3.2:1b sends
+  `"['front_door']"`, the tool description's own example copied as a
+  string, and the whole string was looked up as one camera name, so every
+  such call failed (43 times in the October benchmark). A JSON or Python
+  list literal, or a comma list, is now read as the cameras it names. Only
+  literals are read; nothing is evaluated.
+- **The App SDK's source files all say Apache-2.0.** Nine files carried
+  an AGPL header copied from core by mistake; the package was always
+  Apache-2.0, as LICENSING.md says. A test now checks every file. The
+  app template still writes the licence a developer picks.
+- **User management names the field that failed validation**
+  ("Username: String should have at least 3 characters"), and the form
+  enforces the three-character minimum before submitting (#634, by
+  [@KeuqS](https://github.com/KeuqS)).
+- **Guard Scan Compliance installs from the App Catalog.** Its image was
+  missing from the publish workflow, so the catalog's pull failed; a test
+  now fails when a catalog app has no publish entry (#629).
+
+## [0.1.6] — 2026-10-11
+
+Search your footage in a sentence, and apps that became products. The
+event store every visit lands in can now be searched in plain words, by a
+person's name, by colour and vehicle type, and across cameras ("where did
+it go?"), with semantic ranking once a CLIP adapter is installed. Nine
+catalog apps gained their own pages (Tripwires, Loitering, Perimeter,
+Left Items, Deliveries, Gates, Notifications, People, Entry Screening),
+Guard Scan Compliance is new, and a camera's AI skills now follow the apps
+selected for it.
+
+Each component keeps its own version line: the platform and the adapter
+images at 0.1.6, `opennvr-app-sdk` at **0.7.0** (its first publish since
+0.5.0) and `opennvr-adapter-sdk` at **1.3.0** (its first publish since
+1.2.0, with the `opennvr-adapter` CLI).
+
+Upgrading: `.env.example` pins `CORE_TAG=0.1.6`, `ADAPTER_TAG=0.1.6` and
+`YOLO_POSE_ADAPTER_TAG=0.1.6`; copy those three lines into your `.env`,
+then `docker compose pull && ./start.sh up`. Footage Search 2.0 no longer
+keeps its own index: reclaim the old volume with `docker volume rm
+opennvr_footage_search_data`. PTZ now needs `ptz.control`, granted on
+upgrade to every role that can view live.
+
+The headline work, at a glance — every entry is below:
+
+- **Search your footage in a sentence.** A Search page over the event
+  store, people by name, routes across cameras, and semantic ranking.
+- **Visits are described.** Captions, colours, vehicle types and plates
+  become searchable; enrichment backs off when the box is busy, and search
+  says "not yet" instead of "no".
+- **Apps became products,** each with its own page, configured there
+  rather than in the catalog, running only on the cameras picked for it.
+- **Home Assistant:** built-in MQTT discovery now; a native integration
+  built and tested, installable once `pyopennvr` is on PyPI.
+- **Detections on the live view,** one box per object.
+- **A faster, measured camera agent:** simple questions routed before the
+  model, quicker CPU turns, Pipecat 1.12, `qwen3:1.7b` on 4-core CPUs.
+- **A redesigned dashboard and interface, in English or French.**
+- **Security:** MediaMTX's control plane authenticated, forged
+  `X-Forwarded-For` ignored, integration secrets encrypted at rest.
+
+### Security
+
+- **MediaMTX's Control API and playback require a token.** They were
+  exempt from JWT auth "behind localhost" while listening on all
+  interfaces. Once MediaMTX joined the apps network, any app container
+  could read hook secrets, add paths with `runOnInit` commands, or
+  fetch any camera's footage. Core now sends a short-lived admin JWT,
+  and playback URLs carry `?jwt=`. (#471)
+
+- **A forged `X-Forwarded-For` no longer chooses the client IP.** The
+  left-most hop, which the client writes, was trusted. That bypassed
+  the device firewall, defeated the WebSocket ticket's IP binding and
+  set the IP in audit rows. The header is now read from the right,
+  past trusted proxies. The device firewall now also covers the events
+  WebSocket handshake. (#491)
+
+- **Integration secrets are encrypted at rest and masked.** MQTT, SMTP
+  and webhook secrets in `integrations.config` were stored as plain
+  JSON and returned verbatim by `GET /api/v1/integrations`. They are now
+  encrypted with `CREDENTIAL_ENCRYPTION_KEY` and shown as `••••••••`.
+  An edit that echoes the mask keeps the stored value, and existing
+  rows are sealed at start-up. (#578)
+
+- **An app could attach a claim to any visit.** `POST
+  /internal/camera-agent/events/descriptors` accepted app keys without
+  checking the app's cameras, and a claim can be a person's name. An
+  app is now limited to its own cameras. (#542)
+
+### Added
+
+- **A live-eval harness for the camera agent.** `tools/eval_harness.py`
+  runs a case file (`tools/eval_cases.yml`: the five cases in
+  `AGENT_DESIGN.md` plus multi-turn and past-tense ones) against a running
+  agent and scores, without an LLM judge, whether the right tool ran with
+  the right arguments, who chose it, what it created and where the reply
+  came from. Each case reports a pass rate and a model-only rate with a
+  95% interval over `--repeat` runs, grouped by router tier, and `--out`
+  writes the raw turns plus the model and router settings as JSON, so
+  runs are only compared when configured alike. `/health` now reports
+  `llm_temperature`, `llm_max_tokens` and the router settings for this.
+  Needs a real model, so it is not run in CI; it refuses to start without
+  `--throwaway`, since cases arm real alarms and clear the chat history.
+  It only ever deletes what a case created: a collection it cannot read
+  ends the case rather than reading as empty, a turn whose `/ask` failed
+  is still diffed and cleaned up, and what is left is confirmed by
+  reading back, not by the DELETE's status. Nothing from one case runs
+  into the next: a background task is waited for after the turn that
+  queued it (and what it creates is cleaned up), and a request that times
+  out, drops mid-response, or a task
+  that does not finish stops the run. A case whose expected item already
+  exists is not run, since the agent would reuse it. A tool call that
+  never ran, raised, answered "ERROR: …", or was a create that answered
+  with a question does not count as the right tool; each trace step now
+  says so in an `ok` field. Unquoted times in a YAML case file stay times
+  (YAML 1.1 would read `18:00` as 1080). Clock times match
+  by the agent's own parsing rules ("6pm" = "18:00", but "after 6pm" as
+  an `after` value does not, since the agent rejects it), and a window's
+  direction must agree ("before 18:00" is not "after 18:00").
+
+- **The camera agent's turn trace says who chose each tool.** Every tool
+  step in the trace `/ask` returns now carries `args` (as asked, before
+  the handler normalises them) and `by`: `model`, `router` or `forced`
+  (the anti-fabrication grounding, also marked in `detail`); a model
+  call to the tool a tier-1 router hint named is also marked `hinted`,
+  so an eval does not credit the model with a choice it was nudged to.
+  Traced arguments are bounded: strings at 500 characters, lists and
+  objects at 50 entries. A final `reply` step names where the answer
+  came from (`llm`, `tool_fallback`, `roster` or `none`). A malformed or
+  unregistered tool call — including arguments that arrive as a
+  non-empty list or a number — is now traced instead of vanishing; an
+  empty map sent as `[]` or `null` still runs. A `describe_camera` step
+  names how it was answered (`vlm`, `detector-fallback` or `no-frame`)
+  from that call alone, every path for a multi-camera call
+  (`detector-fallback+vlm`), and none for a call that raised, never ran
+  or named an unknown camera.
+  Each turn now owns its trace: a background task or scheduled report
+  running alongside a person's turn used to share one trace slot, so
+  tool steps — and the vision label — could land in the wrong turn.
+  `/ask` and `/converse` now return, and feed the latency medians from,
+  their own turn's trace, and a bare wake word no longer re-records the
+  previous turn's stages. Groundwork for the live-eval harness
+  (Discussion #607).
+
+- **ANPR scan mode: accurate, fast or auto, per camera.** The plate
+  sweep OCRs up to four looks per visit and writes only when two agree
+  — right for a gate, a minutes-long backlog on a road camera or a weak
+  CPU, where the ANPR app had already alarmed on the first read while
+  the Plates Read table stayed empty or late. The app's config form now
+  carries `scan_mode` (`accurate` | `fast` | `auto`) and per-camera
+  `scan_mode_overrides`; core's sweep reads them from the registry
+  (`services/plate_policy.py`). `fast` = first accepted read wins, two
+  looks at most, an 8 s re-sighting window, and the bus consumer writes
+  the read at once instead of deferring to the sweep. `auto` is
+  accurate while the sweep keeps up and fast while more visits are
+  waiting for OCR than the box can run at once
+  (`OPENNVR_PLATE_AUTO_BACKLOG`, default 3). Nothing changes for an
+  install that does not touch the form.
+
+- **Home Assistant.** OpenNVR now works with Home Assistant in two ways
+  ([docs/HOME_ASSISTANT.md](docs/HOME_ASSISTANT.md)):
+  - a **native integration** plus its `pyopennvr` client library, under
+    `integrations/home-assistant/` and not yet on HACS or PyPI. It offers
+    cameras with WebRTC live view, controls, health sensors, alerts, the
+    media browser, actions, notifications (media relayed through Home
+    Assistant) and a dashboard card session;
+  - **built-in MQTT discovery**: the MQTT integration type now works. With
+    discovery on, it publishes the same devices and entities to Home
+    Assistant's MQTT integration and runs commands as the API token it is
+    bound to.
+
+  The core changes behind them:
+  - **API tokens** (`onvr_…`), limited by scopes, cameras and source
+    addresses. A token never passes as a superuser;
+  - correlation ids on requests and audit rows;
+  - `/system/info` and a versioned contract (`server/contract/`);
+  - camera stats, zones, live state, events WebSocket v2 with resume;
+  - signed media links, and entity descriptors with typed commands;
+  - site mode, search, PTZ presets and manual events;
+  - recording pause, behind a site flag that is off by default.
+  Design: `docs/design/home-assistant-integration.md`.
+
+- **Bounding boxes on the live view.** Tracked objects are outlined over
+  the video with their label, confidence and track id, one colour per
+  class, drawn client-side on a canvas over the player — the stream is
+  untouched and the recording stays clean. Toggled with a **Detections**
+  button in the Live View toolbar (off by default; remembered per
+  browser). Live only. Behind it, Tier-0's per-frame tracks now reach
+  the browser at all: a new `tier0_track_consumer` bridges the NATS
+  `opennvr.inference.tier0.<cam>.completed` subject onto the in-process
+  bus as a `tracks` WebSocket event with boxes normalized to 0..1, and
+  those events are subject to the same per-camera entitlement as the
+  video. One shared socket serves every tile on the page.
+
+  Three controls, at three grains. **Viewer:** the Boxes button, per
+  browser. **Site:** `DETECTION_OVERLAY_ENABLED` (default on) gates the
+  bridge for every consumer at once and is logged with the boot posture.
+  **Per app:** apps can publish `overlay.boxes.v1` (SDK
+  `publish_overlay`) — plate outlines, zones — and the catalog shows an
+  Overlay switch for apps that declare it, off by default; the bridge
+  forwards an app's boxes only when that switch is on. The camera-agent
+  demo draws the same boxes over its own player (Boxes button on the
+  camera screen): the agent consumes core's `/events/ws` as a platform
+  service — so the site switch, each app's permission and the box maths
+  are decided in exactly one place — and re-scopes every frame to the
+  viewer's own cameras before it reaches the page. `POST
+  /events/ws-ticket` now mints an unscoped *service* ticket for the
+  `INTERNAL_API_KEY`; user tickets are unchanged and an app key is
+  refused.
+
+- **App SDK: the `App` facade — apps in one function.** Writing a first
+  app required knowing about NATS subjects, inference envelopes,
+  normalized bboxes, alert dispatchers and keyed TTL state before
+  writing a line of the rule. `App` collapses that into a declaration
+  and a decorated function:
+
+  ```python
+  app = App("driveway-watch", name="Driveway Watch", category="perimeter")
+
+  @app.on_detection("person", zone="driveway", dwell=30)
+  def loitering(event):
+      event.alert(f"Person loitering on {event.camera}", severity="high")
+  ```
+
+  The facade owns the manifest (a `zone=` anywhere adds the per-camera
+  zone editor on the app's page), the config dataclass (from
+  `app.param(...)`, so `config.yml` and `event.config` cannot drift),
+  per-detection fan-out, `dwell=`/`cooldown=` keyed per
+  camera/label/track, and an `event.alert()` that fills in camera,
+  correlation id, label, confidence, track, zone and dwell.
+  `@app.on_event()` is the whole-frame escape hatch; `@app.on_setup()`
+  runs once with the parsed config.
+
+  It is additive: `App.detector_class()` compiles to an ordinary
+  `Detector`, so the process, the manifest, the alerts and the contract
+  surface are unchanged, and `Detector`, `FrameApp`, `AlertSubscriber`
+  and `DomainEventSubscriber` remain the documented path for rules that
+  outgrow the decorators. Every app already in the catalog keeps working
+  without a change.
+
+- **`opennvr-app dev` — run an app against a simulated camera.** Between
+  `opennvr-app new` and a working stack there used to be Docker, a NATS
+  broker, a KAI-C adapter and a real camera, which is a long way to go
+  to find out whether a rule fires. `opennvr-app dev` walks a simulated
+  object across the frame in-process and prints the alerts as they fire,
+  annotating zone entry and exit, with `--label`, `--camera`, `--rate`,
+  `--count`, `--still` and `--fast`. It drives the same `handle_event`
+  path a real subscription uses, so what fires there fires in
+  production. Works for facade apps and for plain `Detector` apps alike.
+
+- **Every app now self-describes in OpenAPI 3.1 and AsyncAPI 3.0.** Core,
+  KAI-C and the AI adapters are FastAPI and have always published
+  OpenAPI at `/openapi.json`; the two surfaces that had no machine-
+  readable spec were the app contract server (a stdlib HTTP server) and
+  the event bus (not HTTP at all). Both are now generated from the app's
+  own `AppManifest`, so they cannot drift from the app: a declared
+  `Action` is a `POST /actions/{name}` path with a typed request body, a
+  declared `Param` is a JSON Schema (with `x-opennvr-ui` for the
+  catalog's geometry types), `has_ui` adds `GET /ui`, and
+  `entitlement: license_key` adds `POST /entitlement/verify`. The
+  contract server serves them at `/openapi.json` and `/asyncapi.json`,
+  and `opennvr-app spec [--format asyncapi] [--yaml] [-o FILE]` prints
+  them without running the app. Every example app in this repository
+  generates a document that passes `openapi-spec-validator`.
+
+- **A published API reference — [opennvr.org/sdk](https://opennvr.org/sdk).**
+  mkdocs-material + mkdocstrings, so the site *is* the docstrings: there
+  is no second copy of the API to keep current. `make sdk-site` builds
+  it, `make sdk-site-serve` serves it with live reload. Alongside the
+  generated reference it carries a quickstart, a concepts page (the four
+  archetypes and how to pick one), six guides (rules, platform,
+  surfaces, events, testing, selling), the cookbook index, the specs
+  page and the licensing statement.
+
+- **The SDK's 98 exports now have a documented front door.**
+  `opennvr_app_sdk.API_TIERS` orders the public surface into seven tiers
+  — front door (six names, the whole of a first app), archetypes, rules,
+  platform, surfaces, events, config — and `__all__` is *assembled from
+  it*, so the tiers cannot fall out of step with the exports. The site's
+  navigation and its reference pages are generated from the same tuples
+  by `scripts/gen_reference.py`. `tests/test_public_api.py` fails on a
+  name in two tiers, in none, reachable but untiered, or exported
+  without a docstring; `tests/test_docs_site.py` fails on a stale
+  generated page, a dead nav link, an orphaned page or a broken code
+  snippet.
+
+- **A runnable example per SDK class** —
+  [`sdk/opennvr-app-sdk/cookbook/`](sdk/opennvr-app-sdk/cookbook/), 19
+  files covering `App`, `Detector`, `FrameApp`, `AlertSubscriber`,
+  `DomainEventSubscriber`, `OpenNVR`, `AsyncOpenNVR`, `EventsClient`,
+  `InferStream`, `ContractServer`, `DomainEventPublisher`, Tier-0,
+  `keyed_state` / `Zone` / `Tripwire`, alerts and channels, the
+  manifest's full vocabulary, selling an app, credentials and the
+  roster, egress, and the testing helpers. Each says in its docstring
+  what it demonstrates, and every one is imported and exercised by
+  `tests/test_cookbook.py` — an example that references a name the SDK
+  no longer exports fails in CI rather than misleading a reader.
+
+- `AlertDispatcher.channels` — a read-only view of the delivery chain,
+  for tests and for a "where do my alerts go?" state view.
+
+- **[API_STANDARDS.md](docs/API_STANDARDS.md)** — the map of every API
+  surface and the open specification that describes it, including what
+  is deliberately *not* adopted and why.
+
+- **Licensing is now legible from inside the SDK package.**
+  `sdk/opennvr-app-sdk/LICENSING.md` and a `NOTICE` state the app
+  boundary — an app talks to the AGPL core over NATS and HTTP and never
+  links it, so a closed app carries no AGPL obligation — and both are
+  installed with the wheel rather than living only on GitHub.
+
+- **Footage search over the event store, with a Search page.** A
+  sentence ("red truck at the dock yesterday") becomes editable chips —
+  classes, window, cameras, plate — and is answered from the visit rows
+  Tier-0 already writes, scoped to the operator's cameras
+  (`GET /api/v1/search`; `parse=false` for chip-driven callers). Results
+  are evidence thumbnails that open Recordings at that instant
+  (`?camera=&at=`), every skill claim is a one-click filter, and an
+  answer block counts the cameras, claims and plates on the page.
+  (#490, #500, #525, #544)
+
+- **An empty search says why.** It names the chip that emptied it
+  ("Without the words (chartreuse): 126 results"). Leftover question
+  words that would empty the page ("did you see", "number") are set
+  aside and reported, with one click back to the strict search. The
+  empty state names the descriptions this box can actually produce.
+  (#500, #550, #556, #560)
+
+- **Search finds a person by name.** Names are kept out of the search
+  words on purpose, so typing one used to match nothing. `GET
+  /search/people` lists the names visits in scope were attributed to,
+  and the Search page offers them as a picker, one person at a time. The
+  parser also turns a known name, or a plate question ("what is the
+  plate of the white car"), into the right filter. Words that need a
+  skill this box lacks are listed under the chips. (#559, #560, #572)
+
+- **Semantic search, once an embedding adapter is installed.** Word
+  matches and image–text similarity over a new `event_embeddings` table
+  are ranked together with Reciprocal Rank Fusion. Nothing changes
+  without an adapter that advertises `embed`; the CLIP adapter is now in
+  the adapter catalog. `EVENTS_EMBED_ENRICHMENT` (default off) embeds
+  visits, the backfill covers history too, and
+  `SEARCH_VECTOR_MIN_SIMILARITY` (0.22) stops unrelated near-misses
+  being returned. (#544, #546, #566, #572)
+
+- **"Where did it go?" on every search result.** A side panel follows a
+  visit across cameras (`GET /search/journey`). Each hop shows its
+  score, its method (exact identity, inferred or time only) and every
+  reason for and against it. The camera graph behind it is relearnt
+  nightly from plate and face claims, with no inference
+  (`JOURNEY_TRANSITION_LEARNING`, default on). Routes nothing supports
+  any more are dropped. (#490, #512, #513)
+
+- **Visits are described, and the descriptions are searchable.** Core
+  captions each visit's best frame and asks a VQA skill for `colour` and
+  `vehicle_type` on vehicles (`EVENTS_CAPTION_ENRICHMENT`,
+  `EVENTS_DESCRIPTOR_ENRICHMENT`). With `EVENTS_DESCRIPTOR_PEOPLE`
+  (default off) it also asks people's top colour and what they carry.
+  Answers are reduced to a fixed vocabulary and become search words.
+  Every plate read becomes a claim with its measured confidence.
+  `EVENTS_ENRICHMENT_BACKFILL` (default off) works through history,
+  newest first. (#503, #506, #508, #509, #510, #511, #570)
+
+- **Compose profiles start the enrichment adapters.** `enrichment`
+  starts the captioner and the CLIP embedder, `descriptions` the
+  captioner alone (it also answers `visual_qa`), and `embeddings` CLIP
+  alone. Each profile registers its adapters with KAI-C, and no profile
+  starts two adapters for one task; `CAPTION_ADAPTER` picks the
+  captioner. Most catalogued adapters previously had no compose service
+  at all. `docs/ENRICHMENT.md` is the operator recipe. (#562, #564, #565)
+
+- **An adapter catalog.** `server/config/adapters_index.yml` lists the
+  first-party adapters with their tasks, hardware, egress and
+  scheduling. `GET /api/v1/adapters/index` serves it, with `?task=`
+  matched by canonical name or alias. `tasks.yml` gains the aliases that
+  make the Whisper and Moondream adapters routable. (#463)
+
+- **Smart Doorbell: a People page, durable visits and a real chime.**
+  The People page enrols faces from an upload, a door snapshot or this
+  browser's camera (four poses), several photos per person. It holds
+  categories (family to watchlist), notes, `valid_until`, and a
+  strangers wall to enrol from, even after a restart. Visits are kept
+  (`history_days`, `history_max`), and each name is written to the
+  visit as a `face_id` claim. A chime decision rides each alert, by
+  category with `quiet_hours` and `rechime_seconds`.
+  `unknown_severity` / `known_severity` set how loud a face is.
+  (#475, #476, #478, #502, #514, #515, #518, #542, #554)
+
+- **Line Crossing 1.1 and a Tripwires page.** The app now runs on
+  Tier-0, so it fires on a stock install; before, it waited for a
+  ByteTrack adapter that nothing started. It counts in, out and net per
+  camera and direction, publishes `occupancy.footfall.v1`, and gains
+  `alert_mode`, `active_hours`, `alert_cooldown` and size filters. The
+  Tripwires page shows today by hour or seven days, the alarms and a
+  CSV export. (#477)
+
+- **Loitering Detection 1.1 and a Loitering page.** Dwell is measured
+  per tracked object off Tier-0, so two people taking turns at a door
+  are no longer one stay. Alerts are staged: a first one at
+  `threshold_seconds`, an escalation after `escalate_after_seconds`, an
+  after-hours threshold, a `gathering` alert at `group_size`, and a
+  Dismiss action. The page shows who is dwelling now, per-camera
+  statistics and seven days of history. (#486)
+
+- **Intrusion Detection 1.1: an arming panel and a Perimeter page.**
+  The app runs on Tier-0 instead of its own poll, so nothing crossing
+  between polls is missed. Each camera holds a state — disarmed, arming,
+  armed, breach, alarm or bypassed — with exit and entry delays and
+  schedule, always or manual arming. Operators arm, disarm, bypass and
+  acknowledge from the page, and overrides expire on their own. An
+  alarm raised during a status poll or an operator action is delivered,
+  not dropped. (#488, #516)
+
+- **Abandoned Object 1.1: owner attribution and a Left Items page.**
+  Each item is followed through moving, with owner, unattended,
+  abandoned, escalated and reclaimed, and the alert says who left it and
+  when they walked off. A spot can be marked as a fixture (a bin, a
+  planter) so it stops alerting there. Distances are fractions of the
+  frame width. The page is a triage queue: acknowledge, resolve or
+  fixture each row. (#489)
+
+- **Package Delivery 1.1, a Deliveries page and a parcel detector.**
+  Tier-0 decides who came and when, and a KAI-C skill counts parcels on
+  demand. The new events are `package_delivered`, `package_picked_up`,
+  `package_taken` and `package_reminder`. The package-detection adapter
+  (`package_detection` task) runs on the `package-delivery` profile with
+  a weights volume (`PACKAGE_DETECTION_MODEL_URL`). With it, counts grade
+  "good" rather than a VQA model's "fair". (#492, #496, #501)
+
+- **Gate Controller 1.1: five transports, gate state and a Gates
+  page.** Dry contact (GPIO), HTTP with vendor profiles (Shelly,
+  Tasmota, ESPHome, ControlByWeb), Modbus TCP, ONVIF Profile C and MQTT.
+  The gate's position is read back where the wiring reports one. Holds
+  are refused on momentary-only wiring and always capped. Optional
+  guards: a confidence floor and a repeat-plate rate limit. The 1.0
+  config still loads, and `HARDWARE.md` carries per-vendor terminal
+  tables. (#498)
+
+- **Alert Notifier 2.0: ten channels, ordered routing, burst
+  grouping.** 1.0 subscribed to a subject nothing publishes and never
+  delivered an alert; 2.0 listens on `opennvr.alerts.>`. Channels:
+  ntfy, Telegram, Pushover, Discord, Slack, Teams (Workflows webhook),
+  Gotify, Matrix, SMTP and webhooks. Rules are a first-match list with
+  backtest counts, alongside grouping, inhibition and quiet hours that
+  hold and summarise. A Notifications page shows channel health and why
+  an alert was held. 1.0 config still loads. (#499, #542, #568)
+
+- **Guard Scan Compliance, an Entry Screening page and a pose
+  adapter.** The new app (0.1.0) checks that a guard actually wanded
+  each person, from pose keypoints, and raises `scanner_flag`,
+  `improper_scan` and `no_scan`. The Entry Screening page lists
+  screenings with clips, a report, a print sheet and CSV export. A
+  `yolo-pose` adapter (`pose_estimation` task) and its weights image
+  join the compose files. (#471, #485)
+
+- **Alerts carry evidence photos.** An app can store a JPEG
+  (`POST /internal/app/evidence`, SDK `save_evidence`) and cite it on an
+  alert with `images` and an `alert_type`. The Alarms table shows a
+  thumbnail and an evidence viewer. The inbox filters by `alert_type`,
+  camera, time and text, and arriving alerts are pushed on the event
+  bus. (#471)
+
+- **The web app in French.** English and French catalogues cover the
+  main views, shared components, alerts, RBAC and configuration screens,
+  with a language switcher. Dates, times and numbers follow the chosen
+  language, not the browser; two Recordings views had `en-US`
+  hard-coded. A server test fails on a `t()` key missing from either
+  language or a dropped `{{placeholder}}`. (#474, #522, #526, #527,
+  #528, #581)
+
+- **The installer offers the App Catalog.** The app step of `install.sh`
+  and `install.ps1` lists every catalog app with a compose service, plus
+  the Camera Agent, and several can be picked at once
+  (`OPENNVR_EXAMPLE` and friends take comma-separated lists). Each app
+  service also carries its own id as a compose profile, for example
+  `--profile license-plate-recognition`. (#475)
+
+- **Fake cameras for development and demos.** `docker-compose.fakecams.yml`
+  (profile `fakecams`) loops the MP4s in `data/fake-cameras/` as RTSP
+  cameras, one per subfolder, and can register them with core. Folders
+  of mismatched clips, and clips with B-frames, are rendered once, so
+  they play over WebRTC instead of being transcoded live.
+  `docs/FAKE_CAMERAS.md` lists the `FAKECAM_*` settings. (#472, #479,
+  #585)
+
+- **Apps can search the event store, read back photos and attach
+  claims to visits.** New app routes are scoped to the app's cameras
+  and wrapped in both SDK clients: `timeline.find` (search),
+  `plates_inside` (who is inside, with entry times), `read_evidence`, and
+  RFC-0003's `visit_at` / `add_claims`. Those last two bind a frame to a
+  visit and record how (`direct`, `window` or `nearest`); an ambiguous
+  bind attaches nothing. `site_mode()`, `attrs` on search, and
+  `AppManifest.tier0_labels` (widen Tier-0's classes) are new as well.
+  (#492, #517, #534, #537, #542, #544, #552)
+
+- **The camera agent can ask for a blue car, or for a person by
+  name.** `search_history` takes `attr` — a bare value such as `blue`,
+  or `face_id:<name>` — and "did you see a blue car" questions now carry
+  the colour. A bare attribute word also matches captions. An empty
+  answer says whether nothing matched or nothing was ever described,
+  and a car on camera now is no longer offered as an answer about a red
+  one. (#552, #553, #561, #577)
+
+### Changed
+
+- **A 4-core CPU box now defaults to `qwen3:1.7b`.** The installer gave
+  4–7 core CPU-only machines `qwen2.5:1.5b` and kept `qwen3:1.7b` for 8+
+  cores. Measured on 4 vCPU (`MODELS_AND_LATENCY.md`, "Measured"),
+  `qwen3:1.7b` armed 10/10 alarms at ~9 s a turn where `qwen2.5:1.5b` armed
+  none at ~6 s, so every CPU box with 4+ cores and the RAM for it now gets
+  `qwen3:1.7b` (`install.sh` and `install.ps1`). A box whose model budget is
+  under 3 GB still falls back to `qwen2.5:1.5b`.
+
+- **Camera-agent model advice is measured, not remembered.** Ten small
+  LLMs (qwen2.5 0.5–3b, qwen3 0.6–4b, llama3.2 1–3b, granite3.3:2b,
+  phi4-mini) ran the live-eval harness on a 4-vCPU CPU-only VM, router on
+  and off; `MODELS_AND_LATENCY.md` carries the table and
+  `examples/camera-agent/benchmarks/` the numbers. The catalog notes follow
+  them: `qwen2.5:1.5b` loses "reliable tool routing" (it chose the right tool
+  itself 8/45 and never armed an alarm), `llama3.2:3b` becomes tested (30/45,
+  the best at choosing tools itself — the pick for an accelerator), and
+  `qwen3:4b` is recorded as unusable as Ollama ships it (it reasons in its
+  answer with thinking off). The installer's 4-core default follows the measurement (see the entry
+  above); the other tiers are unchanged.
+
+- **Enrichment never slows the box (#583).** A CPU captioner taking
+  seconds per image was outrun by one busy camera; core timed out at
+  15 s, released its slot and kept feeding the model, and the box lost
+  ~2 cores for zero captions saved. Now: honest logs (a timeout says
+  "still answering", not "failed"); a per-adapter gate sized by the
+  registry's `max_inflight` with a short wait line, a **drop** past it
+  (`EVENTS_ENRICHMENT_QUEUE_DEPTH`, `_TIMEOUT_S`, `_BREAKER_TIMEOUTS`) and
+  a breaker that pauses a stalled adapter; a **governor** that reads CPU
+  and adapter latency and steps NORMAL → LIVE-ONLY → PAUSED
+  (`EVENTS_ENRICHMENT_GOVERNOR_CPU_PERCENT`, `_SLOW_CALL_S`,
+  `_BACKFILL_IDLE_S`, `_BACKFILL_WINDOW`), each change an
+  `enrichment_throttled` system event; the backfill runs only when idle
+  and, once history is done, catches up on what the gate dropped. Without
+  a CUDA GPU the installer now defaults both description flags **off**
+  and asks; on CPU and Apple Silicon it suggests `CAPTION_ADAPTER=moondream`
+  (native 0.5B), never `ollamavlm`. `docs/ENRICHMENT.md` covers it.
+- **Search says "not yet", not "no".** A question that needs a caption or
+  a claim the matching visits lack answers from what exists and queues
+  the rest for description now (`EVENTS_ENRICHMENT_REQUEST_CAP`, 50 per
+  question) — even with the description flags off, since the operator
+  asked. `GET /api/v1/search` gains `describe` and a `pending` block; the
+  Search page shows it with *Check again*; the agent says it in words;
+  the App SDK returns it on the rows (`SearchResult.pending`). A caption
+  the model answered with nothing is marked so nobody re-asks forever; a
+  failed call is not.
+- **The camera-agent's voice turn on CPU: four rules** (a 71 s field
+  trace). The prompt's static prefix is byte-identical across turns —
+  the clock rides in the user turn, since Ollama hoists every system
+  message ahead of the tool schemas and re-prefilled ~3.5k tokens a
+  minute; Whisper decodes greedy (`beam_size` 1); the Piper voice is a
+  medium tier (`PIPER_VOICE`, `en_US-lessac-medium`, sent per request;
+  `PIPER_THREADS`, `WHISPER_CPU_THREADS` reach the adapters); each
+  photo is fetched once and face matching runs only when the question
+  asks who.
+- **The camera-agent routes simple questions before the model sees
+  them** (`router.py`; `router_tier0`, `router_hints`). Every slot
+  resolves — camera, tool, object, window; one question; no side effect;
+  not about who — and the tool runs at once with the model asked only to
+  say the answer (~200-token prompt, no tools); a near-miss gets a
+  one-line hint in the user turn; everything else is the loop as before.
+  The trace starts with `route: tierN`.
+- **The camera-agent moved to Pipecat 1.12** (from 1.8.1, pinned in
+  `pyproject.toml`, `uv.lock` and the Dockerfile alike — a test fails
+  when they disagree). What it brings: Whisper transcription runs off
+  the pipeline's path (audio and turn-taking keep flowing during a
+  two-second CPU transcription), each utterance is padded with
+  `stt_trailing_silence_secs` (0.5 s) so the last word is not clipped,
+  the TTS sentence splitter needs no NLTK data (the image downloads
+  nothing at build or run time), and the websocket transport fixes of
+  1.10/1.11 (speech dropped on a TTS pause over 200 ms; frames treated
+  as unsent on empty serializer output). The image now installs exactly
+  what `uv.lock` says, hashes verified — the hand-kept list had shipped
+  numpy 2 / opencv 5 against a lock that said 1.26 / 4.11.
+- **Disabling an app in the catalog now stops it.** `enabled` gated one
+  route (invoking an app's actions) and nothing the app itself could
+  feel: a disabled app kept its cameras, kept pulling their streams and
+  kept driving its adapters, so the only real off switch was
+  `docker stop`. A disabled app now has no camera roster — it reads no
+  frames, gets no stream grants and uses no compute — and the flag rides
+  its live config poll, so an SDK app stops within ~10s and says why on
+  `/health` instead of going quiet. Because of that enforcement, an app
+  is switched ON when it first registers (its container was deployed:
+  that is the intent) rather than being born off; a licensed app still
+  has to clear its entitlement, the operator's Disable survives every
+  later registration, and a migration switches on the apps that
+  registered under the old meaning so an upgrade does not stop them.
+
+- **App SDK 0.7.0, its first publish since 0.5.0.** 0.6.0 was cut on
+  `main` but never published, so both versions' additions reach PyPI
+  together. Not a patch. From 0.6.0: `rtsp.py` is a new module,
+  `PLATFORM` gained five names, and `OpenNVR` gained `save_evidence` /
+  `stream` / `stream_grant` (with async twins). `Alert` gained
+  `alert_type` and `images`, `Param` gained `label` / `group` /
+  `advanced` / `choices`, and `ContractMixin` gained
+  `not_ready_reason`. 0.7.0 adds `Entity` and `AppManifest.entities`
+  for Home Assistant. The same release also brings the per-app camera
+  roster (`roster()`, `on_cameras_update()`, `camera_picked()`,
+  `AppManifest.camera_picker`), `site_mode()`,
+  `AppManifest.tier0_labels`, `enrich_tasks` and `all_cameras`, and the
+  timeline calls `find`, `plates_inside`, `visit_at`, `add_claims` and
+  `read_evidence`. Search gains `attrs`, `SearchResult` gains
+  `pending`, and `ContractApp` is new. The App facade, `opennvr-app
+  dev` and the specs are listed separately. Two wheels claiming one
+  version with different public surfaces leave an app that calls
+  `nvr.stream()` with an AttributeError and no way to say what it
+  needed. `scaffold.sdk_requirement()` pins the floor from this
+  string, and `installed_apps.sdk_version` records it per app.
+
+- **`build_frame_source("rtsp://…")` now returns a source instead of
+  raising.** Behavioural change on a public function: an app that caught
+  `FrameSourceError` to fall back to a snapshot URL now silently takes
+  the RTSP path, which needs **ffmpeg on PATH in its image**. Older app
+  images have no reason to have it.
+
+- **The facade now covers a whole app, not just its rule.** Every
+  surface that used to be a base-class method override — and so could be
+  *declared* through the facade but never *implemented* — has a
+  decorator that registers the manifest entry and the implementation
+  together: `@app.state` with `app.metric` / `gauge` / `table` / `log` /
+  `gallery` (all fourteen example apps declare a dashboard),
+  `@app.action`, `@app.ui`, `@app.on_license` (so a facade app can be a
+  paid app at all — `validate` errors on a licence gate with no
+  verifier), `@app.on_config`, `@app.on_setup`, `@app.on_shutdown`.
+  `app.store` is a plain dict merged into `GET /state`, so a counter and
+  one `app.metric(...)` are a complete dashboard.
+- **A rule can reach the platform and the bus.** `event.nvr` /
+  `app.nvr` is the `OpenNVR` client, built once from the app's own
+  config and credential and closed at shutdown; `event.snapshot()` is
+  this event's camera; `event.publish(schema, payload)` emits a
+  contracted domain event with the envelope, producer and correlation id
+  filled in, and `app.publishes(...)` puts it in the app's AsyncAPI
+  document.
+- **Rule filters can read operator config.** A decorator argument is
+  fixed at import, which made the config form useless for the one number
+  an app is about. `dwell="$dwell_s"` (or `setting("dwell_s")`) resolves
+  from the declared param at start-up.
+- **The hidden 0.35 confidence floor is gone.** A rule that declares no
+  `min_confidence` now sees every detection, so the only threshold in an
+  app is the one it wrote down.
+- **`config.yml` no longer has to restate what the deployment knows.**
+  `BaseAppConfig` reads `NATS_URL`, `OPENNVR_URL` and
+  `OPENNVR_INTERNAL_API_KEY` — which the app installer already exports
+  into every app container — so `nats_url` is optional and a config file
+  reduces to the app's own params. An explicit value in the file always
+  wins; an empty one is still an error.
+- **A scaffolded app sees events on a stock install.** Tier-0 is the
+  only detection stream on the bus out of the box, so an app that
+  ignored it registered, showed a green dot and fired nothing, forever.
+  `consume_tier0` is a real `BaseAppConfig` field now (setting it in
+  `config.yml` used to do nothing) and the facade turns it on by
+  default; `App(consume_tier0=False)` opts out.
+- **`opennvr-app dev` draws a stand-in polygon** for a zone the app
+  declares but nobody has configured, so the `zone=` example every
+  quickstart leads with is reproducible from `opennvr-app new`
+  (`--no-zones` to skip). A zone with no polygon in a real deployment
+  now logs one actionable warning per rule per camera instead of going
+  silent.
+- The scaffold template, its README and its smoke tests lead with the
+  facade, and `opennvr-app validate` discovers a facade app (its
+  manifest, compiled class and generated config class) alongside the
+  existing archetypes.
+
+- **An app runs only on the cameras selected in its own settings.**
+  Each app's form gains a Cameras section with a thumbnail picker.
+  Several apps can share a camera, and an app with none selected does
+  not run. The camera form refuses an assignment that names an
+  installed app (422). `GET /apps/{app_id}/cameras` and
+  `GET /cameras/{camera_id}/used-by` say who uses what. Zones,
+  tripwires and ROIs are drawn per camera from the camera card's Set up
+  dialog. (#482, #485)
+
+- **A camera's AI skills are the ones its apps bring.** Selecting
+  cameras for an enabled app adds the tasks its manifest declares
+  (`requires_tasks`, and the new soft `enrich_tasks`). Disabling or
+  unselecting removes them unless another app still brings them, and an
+  `all_cameras` app (the agent) covers every camera. The camera page's
+  Skills editor and `GET /cameras/assignable-skills` are removed; old
+  rows are retired at start-up. Captions, VQA, faces and plates now
+  switch on from the apps that need them. (#573)
+
+- **An app is configured on its own page, not in the catalog.** Every
+  app page has Configure at top right, a cameras card listing its
+  cameras and the skills it brings, and one "No camera selected" notice.
+  The catalog installs, enables and removes; its card's Configure
+  becomes Open & configure. (#555, #574)
+
+- **Footage Search 2.0 and the camera agent search the event store.**
+  The app's private SQLite index is deleted (`db_path`,
+  `retention_days` and the other index keys are gone; `opennvr_url` is
+  required). The agent's `search_footage` asks core and, when core is
+  unreachable, says it cannot tell rather than answer from a frozen
+  copy. `footage_index_path` is ignored with a warning. Reclaim the old
+  volume with `docker volume rm opennvr_footage_search_data`. (#504,
+  #524, #533, #534, #535, #536)
+
+- **Visit rows and the alert inbox now age out.** Visits, with their
+  text, embeddings and claims, follow the recordings window
+  (`EVENTS_RETENTION_DAYS` overrides it). The inbox keeps
+  `ALERTS_INBOX_RETENTION_DAYS` (90) under a row cap. Before, evidence
+  files were deleted but the rows that pointed at them stayed for ever.
+  Plate reads keep their `correlation_id`, which joins them to KAI-C's
+  audit log. (#571)
+
+- **The dashboard fits one screen and can be rearranged.** A pinned
+  health bar covers core, the media server, the AI engine, live events,
+  recording and storage. Below it is a widget grid: vitals, a live
+  camera wall (1/4/6/9 tiles, tour, spotlight, substream), open alarms,
+  camera status, host trend, footage per day and network IDS.
+  Customise mode drags, resizes, adds and removes widgets, and the
+  layout is saved per user in the browser. (#582)
+
+- **The interface was reworked across the app.** About 780 hard-coded
+  colours became theme tokens, so every screen works in the light
+  theme, and browser dialogs became themed modals. Seven irreversible
+  actions now ask first, and the sidebar is a drawer below 1024 px.
+  Sign-in, the top bar, the app headers, Search, Live View, Synced
+  Playback and Cameras share one panel style. The Live View overlay
+  button is now "Detections". (#580, #588, #604)
+
+- **PTZ needs the `ptz.control` permission.** Anyone who could watch a
+  camera could steer it; PTZ is now checked against `ptz.control`.
+  Upgrading grants it to every role that holds `live.view`, so no one
+  loses access. (#491)
+
+- **Home Assistant: alerts share the bridge's MQTT connection.** Alerts
+  to an MQTT integration used to open one broker connection per alert;
+  they now go through the discovery bridge's connection.
+  `/system/info` reports `relay_installed`, and the native integration
+  raises a repair ("alerts may appear twice") while
+  `home-assistant-relay` is enabled. (#578)
+
+- **ANPR's Gate Settings is a tab.** The camera roles were the last
+  section of a collapsed card below the register. They are now a tab
+  beside Plate reads and Vehicle register, opened by the "no camera is
+  reading plates" banner and the toolbar button. (#551)
+
+- **The Motion-gate tile says why it reads 0%.** A camera whose scene
+  never calibrates leaves the motion gate latched open. The tile now
+  reads "gate latched open on cam1 — no static background" instead of
+  an unexplained 0%. (#569)
+
+### Deprecated
+
+- **`examples/home-assistant-relay`.** It turns alerts into binary sensors
+  and nothing more. Both Home Assistant paths below cover it and much more.
+  It keeps working, and now logs a deprecation warning at start.
+
+### Removed
+
+- **The AI Engine page, ONVIF Tools page and Logs & Forensics menu
+  entry.** AI Engine was a browser-only mock-up; `/ai-engine` now
+  redirects to `/ai-adapters`. ONVIF Tools' server endpoints are
+  unchanged. Live View's Image Search opens Search. (#555, #588, #604)
+
+### Fixed
+
+- **"Tell me when more than 3 people gather" works.** The camera agent's
+  `create_monitor` tool had no way to say "more than 3": the occupancy rule
+  behind `kind='count'` always had edge-triggered over/under thresholds,
+  but the tool never exposed them, so the request could not be expressed and
+  small models put the camera in `target` instead (5/50 runs passed across
+  ten models). The tool now takes `max_count` / `min_count`, says `target` is
+  an object label and never a camera, and gives this request as its
+  example; a `notify` call that carries a threshold becomes a count watch.
+  Thresholds are kept on the watch, so they show in `/monitors`, survive a
+  restart and count in duplicate detection.
+
+- **"Thanks" no longer makes the camera agent look at a camera.** When the
+  model answered without calling a tool, the anti-fabrication guard forced a
+  look if the model's reply mentioned the camera or the scene — so small
+  models answering "thanks, that's all" or "hi, what can you do?" with "I can
+  watch the cameras for you…" got a forced look, and a goodbye came back as
+  "I can't see anything right now". After pure small talk the reply now has
+  to claim a sighting ("I see the front door…", "there's a person…") to
+  trigger the look; a question about the scene, or a reply to anything else
+  that mentions it (the STT-garbled "what's on hammer 2" case), still does.
+
+- **The installer's vision-model menu no longer opens blank.** On a
+  machine where vision through Ollama is not suggested (no CUDA GPU, or
+  no RAM left beside the LLM), choosing `ollamavlm` anyway showed
+  `Vision model (Ollama) []:` and Enter wrote an empty
+  `OLLAMA_VLM_MODEL` into `.env`. Both installers now preselect the
+  largest tested vision model the leftover budget holds, else the
+  low-RAM `moondream`, and a catalog menu with no matching suggestion
+  defaults to its first row. The menu's own wording also said
+  `qwen3:1.7b` was "the default where RAM allows" while the sizing rule
+  gives a GPU (CUDA or Apple Silicon) `qwen2.5:3b`; the catalog and the
+  models table now say which hardware each default is for.
+- **The camera agent reads its files correctly on Windows.** The agent
+  read its config and its task registry in the system code page, so on
+  Windows any non-ASCII character in a prompt or a camera role was
+  silently mis-decoded; both are now read as UTF-8. A `file://` frame
+  URL with a drive letter (`file:///C:/frame.jpg`, `file://C:\frame.jpg`)
+  resolved to an empty path and was refused; it now opens the file. The
+  agent's test suite passes on Windows (12 tests failed and 4 files would
+  not load).
+- **One object, one box on the live overlay.** Tier-0's non-maximum
+  suppression ran per label, so a vehicle the detector read as both
+  "car" and "truck" drew two near-identical boxes — and, because the
+  tracker matches per label too, spawned two tracks for it. Boxes of
+  different labels that nearly coincide (IoU > 0.85) now collapse to the
+  stronger one; partial overlaps (a person in front of a car) still keep
+  both. The tracker matches car/truck/bus detections to one track and
+  lets the label follow the majority vote, so a vehicle the model reads
+  both ways no longer alternates between two starving tracks.
+  `DETECT_NMS_CROSS_LABEL_IOU` (default 0.85; 0 or 1 = off) tunes or
+  disables the rule — off for per-label model benchmarking, whose recall
+  numbers would otherwise measure this policy too. The camera-agent's
+  own de-duplication (its `detect_objects` counts) applies the same
+  rule, and now reads boxes as the contract's top-left `{x, y, w, h}`
+  rather than centre-form, so its overlap test matches what it counts.
+- **Tier-0 no longer stalls the decoder when detection falls behind
+  (#507).** The worker read ffmpeg's stdout in the same loop that ran
+  detection, so detector latency was backpressure on the decoder: with a
+  64 KiB pipe (~2% of one 1080p frame) a camera over its frame budget
+  blocked ffmpeg almost at once, MediaMTX dropped the reader, and the
+  session died — logged as a flaky camera (`Failed reading RTSP data:
+  End of file`) when the cause was us, while the region budget shed
+  accuracy in exactly the busy scenes that blew the budget. The decoder
+  is now drained on its own thread into a single-slot handoff; the
+  detect loop takes the newest frame and what it did not get to is
+  dropped and counted — `tier0_frames_dropped_total{camera}`, exact from
+  the seq gaps — with a once-a-minute WARNING naming the camera when
+  drops are a quarter or more of what it decoded. Frames are dropped;
+  sessions are not. Restart accounting is unchanged (seq 0 is never
+  overwritten). Known trade: the tracker's coast TTL is wall time, but
+  its other lifecycle knobs (confirm, disappear, stationary) are frame
+  counts sized from the configured fps, so a camera dropping most of its
+  frames tracks proportionally slower — where before it tracked nothing,
+  its session being dead. Deriving those from the observed rate is a
+  follow-up; the AI page shows the dropped count per camera.
+- **A test-harness race, not a product bug, went red on `main`.** The
+  shared server test fixture handed every thread one SQLite connection
+  (`StaticPool`); a `session.close()` from the MQTT bridge's thread could
+  roll back a test's not-yet-committed delete. The fixture is a file
+  with per-thread connections now, like production.
+- **A slow core signed the camera agent's operators out mid-session**
+  (#540). The agent validates every request by asking core `GET
+  /api/v1/auth/me`, and a timeout on that call was swallowed into the
+  same answer core gives for a rejected token — then cached as a verdict
+  for a full minute, so one five-second hiccup 401'd every gated
+  endpoint behind it. The page tried its one silent refresh, the refresh
+  proxy answered `502` for the same reason, and the login card came up
+  while the operator's token was still perfectly good. "Could not ask"
+  is now distinct from "was refused": the gate answers `503` with
+  `Retry-After` (a WebSocket closes 1013), a token core validated
+  recently rides out a blip, a transport failure is never cached as a
+  verdict, and the page shows a reconnecting pill instead of logging
+  anyone out. A token core actually rejected is still rejected — an
+  outage never upgrades it.
+
+- **A disabled app kept its camera picks switched on, so plate OCR went
+  on burning compute after ANPR was disabled** (#539). Disable flipped
+  `installed_apps.enabled` and nothing else: the app's picks stayed in
+  the assignment table and stayed in the `cameras.assignments`
+  projection, and everything that reads that projection kept working. A
+  disabled ANPR app still bought an inference on every vehicle, both in
+  Tier-1 dispatch and in core's visit enrichment — invisibly, since the
+  app itself had gone quiet. A disabled app is no longer a consumer: its
+  claims drop out of each camera's union, and enable/disable re-project
+  the cameras it picked. The picks themselves are untouched, so enabling
+  restores the operator's selection exactly, and a migration heals the
+  installs that disabled an app before this release.
+
+- **An app that built its platform client before registering ran on
+  every camera.** An app holds more than one credential — the contract's
+  and one per client it builds — and only the contract's was handed the
+  key core issues at registration; the others resolved the key file once,
+  at construction, so a client built in an app's `__init__` presented the
+  deployment's site key for the life of the process. To core a site-key
+  caller is a platform component, so the app was handed the whole fleet
+  and could mint a stream grant for any camera: with nothing selected and
+  the app disabled, guard-scan was still decoding two streams and running
+  pose on every frame. The app key is now resolved per call (and shared
+  in-process when it cannot be persisted), so construction order no
+  longer decides whether an app is scoped to its cameras.
+
+- **Tapo ONVIF authentication fallback.** Cameras such as the TP-Link Tapo
+  C520WS that return an ONVIF `NotAuthorized` SOAP fault instead of an HTTP
+  Digest challenge are retried once with WS-Security UsernameToken
+  PasswordDigest. HTTP Digest remains the primary authentication method, and
+  unrelated HTTP and SOAP failures are returned without a retry.
+  Follow-up: a host that accepted the WS-Security retry is remembered for
+  the rest of the process, so later calls to it — PTZ moves above all —
+  are one request instead of a rejected Digest round trip plus a retry
+  (and a remembered host that later rejects WS-Security is retried with
+  Digest and forgotten). The auth-fault check now reads the SOAP body
+  alone, so firmware that returns faults with HTTP 200 is retried too, and
+  the WS-Security fault codes (`FailedAuthentication`,
+  `InvalidSecurityToken`) count alongside `NotAuthorized`. When both
+  schemes refuse the credentials the log now points at the camera clock,
+  which WS-Security also rejects when it drifts.
+
+- **Live overlay: phantoms gone, real objects steady.** Two field
+  reports, one root cause. Tier-0's tracker keeps an unmatched track
+  alive at its last box for up to `DETECT_TRACK_TTL` (five minutes) so a
+  visit survives a skipped frame; the overlay drew every one of them, so
+  a moving scene piled up ghosts on the sky while the car in shot went
+  unboxed. The first fix drew only tracks matched *this frame* — and that
+  made real objects blink or vanish, because Tier-0 re-verifies tracks on
+  a per-frame region budget: measured on a busy scene at `DETECT_FPS=2`,
+  a present car was re-matched every 1.2 s typically and up to 5.9 s. Each
+  published track now carries `matched`, `misses` and `since_match_s`;
+  the overlay hides a track the detector looked for and missed, and
+  otherwise draws it while its last match is within
+  `DETECTION_OVERLAY_DRAW_WINDOW_S` (default 8 s, above the measured
+  tail). A phantom is never re-found, ages past the window, and drops
+  out. Coasting itself is unchanged for visits, occupancy and plates.
+  Additive on the bus; an older producer keeps drawing matched tracks.
+  Tier-0 also now re-verifies the tracks that have waited *longest*
+  first: the old frame-index round-robin aliased as the candidate count
+  changed frame to frame, and under a shed budget present objects went
+  6–11 s between re-checks. Oldest-first bounds the wait at roughly
+  tracks ÷ reserve frames for every track.
+
+- **A `zone=` rule could never fire once an operator drew the zone.** The
+  facade invented a config shape (`zones: {driveway: [...]}`) that core's
+  config validator rejects and the app page's zone editor cannot
+  produce. The platform's shape for a per-camera `geometry.polygon` param
+  is `{camera_id: [[x, y], …]}` — one polygon per param — so each
+  `zone="driveway"` now declares **its own param named `driveway`**,
+  which also tells the operator which zones an app expects and where
+  each one goes. Previously every camera also inherited every other
+  camera's polygon.
+- **`dwell` counted time on camera, not time in the zone.** The presence
+  clock started before the rule's filters ran, so
+  `zone="driveway", dwell=30` meant "thirty seconds on camera, then one
+  frame in the driveway". Presence now accrues per rule, and only while
+  that rule's zone, camera, label and confidence filters all hold.
+- **A presence episode never ended**, so the second person of the day
+  never alerted and `dwell_s` was measured from the first person's
+  arrival. A gap longer than `forget=` (default `max(30s, dwell)`) now
+  ends the episode and re-arms the once-per-episode latch, while the
+  cooldown's memory survives a brief occlusion.
+- **Two handlers sharing a `__name__`** — two lambdas, or two functions
+  a factory built — shared one dwell latch and one cooldown, so the
+  second was suppressed forever, and their alert types collapsed into
+  one. Rule identity is positional now.
+- **`return event.alert(...)` dispatched the alert twice**, which the
+  method's own docstring invited.
+- **One event with a missing `completed_at` wiped every other camera's
+  presence state**: the wall-clock fallback fed the garbage collector.
+  Event time is now per camera and non-decreasing, so cameras with a few
+  seconds of skew no longer read as out-of-order either.
+- **A capitalised or lambda handler produced an alert-type name that
+  `opennvr-app validate` rejects**; names are slugified.
+- **A rule that raised never marked its cooldown**, so it re-raised on
+  every event.
+- **Redrawn zones needed a restart** — the zone cache was never
+  invalidated on a live config update.
+- **`opennvr-app dev` crashed on an app whose manifest is only a class
+  attribute**, a shape `validate` has always accepted. The two commands
+  no longer disagree about the same app, and an archetype `dev` cannot
+  simulate now says so instead of leaking a `TypeError`.
+- Nested mutable param defaults were shallow-copied and therefore shared
+  between config instances.
+- `App("Gate Watch")` was accepted and only failed later at `validate`;
+  the id is checked at the source, with the message the scaffold uses.
+- Passing a manifest field the decorators derive (`params`, `actions`,
+  `entitlement`, …) to `App(...)` silently lost it; it is now refused
+  with a pointer to the decorator that owns it.
+
+- **Core starts when an optional variable is empty (#547).** Compose
+  passes an unset `${VAR:-}` as an empty string. Pydantic refused that
+  for a bool, so core died at import and never became healthy. An empty
+  value now falls back to the setting's default, and a required secret
+  left empty still gets its own message. `.env.example` documents all
+  six enrichment flags. (#548)
+
+- **A process that dies at start-up says so in `docker logs`.** The core
+  container now copies each supervised program's stderr (backend and
+  KAI-C) to its own output, tagged. Before, the cause sat in a log file
+  inside the container. (#549)
+
+- **Images install what the lock file says.** The core and KAI-C builds
+  never copied `uv.lock`, and `|| uv sync` quietly resolved the newest
+  of everything. SQLAlchemy 2.1 then switched `postgresql://` to psycopg
+  3, which is not installed, and core crash-looped. The lock is now
+  copied and enforced, and `postgresql://` is pinned to
+  `postgresql+psycopg2://`. (#555, #557)
+
+- **KAI-C reports every registered adapter.** `/capabilities` and
+  `/adapters/health` read a static one-entry table, so core saw one
+  adapter however many were registered, and caption and descriptor
+  enrichment never ran. Both now read the live registry and return
+  error rows for unreachable adapters. They also stop making one
+  blocking request per adapter. (#563)
+
+- **Silent failures in KAI-C and enrichment are now reported.** KAI-C's
+  audit log was dropped on a stock image (`/var/log/opennvr` was not
+  writable); the entrypoint now creates it, and a failed write is
+  reported once at ERROR. A deferred adapter registration that keeps
+  failing logs a WARNING. Enrichment warns, naming the camera, when it
+  skips a visit because no app brings the skill. (#565, #567)
+
+- **A site key that starts with a digit no longer stops the bus.**
+  nats-server read `$INTERNAL_API_KEY` as a number and refused to
+  start, so core never came up. Compose now passes the key quoted, and
+  no rotation is needed. (#575)
+
+- **Installing an app no longer prints "pull access denied".** Services
+  built from the checkout carry `pull_policy:
+  ${APPS_PULL_POLICY:-build}`. Digest-pinned installs set `missing`
+  and still pull. (#576)
+
+- **Live view closes its WebRTC sessions.** Teardown requests went to
+  core and got 405 instead of going through the `/webrtc` proxy, so
+  MediaMTX kept each session until ICE timed out. (#487)
+
+- **Recordings with G.711 audio play, in Firefox too, and across
+  files.** H.264 with audio other than AAC or Opus is now remuxed
+  video-only, as H.265 already was. The remux declares its real frame
+  size, which Firefox needs, and playback no longer loops at the end of
+  the first file. Docs now say to set `MEDIAMTX_WEBRTC_HOSTS` without
+  `start.sh`. The unused Transcoding settings are disabled. (#600, #605)
+
+- **ANPR overstay alerts survive a restart.** The app kept who was
+  inside in memory, so a vehicle that entered before a redeploy could
+  never overstay. It now asks core, which returns entry times, and
+  records what it has already announced, so a restart neither loses
+  nor repeats an alert. (#537)
+
+- **A still from a recording no longer fails with 502.**
+  `/recordings/frame` and the camera agent's copy call ffmpeg, which
+  the core image never installed. It is now installed. (#491)
+
+- **Network settings show what was saved.** The LAN and Uplink forms
+  opened blank, so saving wrote blanks. The Cameras search box now
+  filters (`GET /cameras/?q=`). `GET /ai-model-management/inference/running`
+  and `GET /ai-models/adapters-metrics` no longer answer 500. (#588)
+
+- **`apps.view` can be granted from the API token form.** The server
+  enforced the scope on app entities, but the form had no checkbox for
+  it. (#523)
+
+## [0.1.5] — 2026-09-10
+
+The largest release since 0.1.0, and the one where the app platform grew
+up: apps stop sharing the deployment's site key, the App Catalog becomes
+a product surface rather than a list, and the camera-agent moves to
+Pipecat 1.8 with a real end-of-turn model.
+
+Each component keeps its own version line, because each is versioned by
+what consumes it: the platform and the adapter images at 0.1.5,
+`opennvr-app-sdk` at **0.5.0** (its first publish since 0.4.0 — see
+below), `opennvr-adapter-sdk` unchanged at 1.2.0, and the app contract's
+own `api_version`.
+
+Upgrading: `.env.example` now pins `CORE_TAG=0.1.5` and
+`ADAPTER_TAG=0.1.5`. There is no migration beyond the usual `docker
+compose pull && docker compose up -d`; the apps-bus and per-app
+credential work below converges on its own at start-up.
+
+The headline work in this release, at a glance — every entry is below:
+
+- **Apps stopped sharing the site key.** Each installed app now holds its
+  own credential, joins its own NATS server with permissions derived
+  from its manifest, and reaches the network only through an enforced
+  egress proxy. Catalog images are signed and verified at install.
+- **The App Catalog became a product surface** — search, category
+  filters, its own `apps.view` permission, detail pages for apps you
+  have not installed, screenshots and editorial rank.
+- **The camera-agent moved to Pipecat 1.8 with Smart Turn v3** —
+  semantic end-of-turn instead of a silence timer, turn-taking sized to
+  the hardware it runs on, interruptions that ignore a cough or a remark
+  to someone else, and it says what it is checking while it checks.
+- **A security sweep** closed cross-camera event disclosure, a blind
+  SSRF on camera create, cloud-metadata access, an anonymous MediaMTX
+  health route and unrestricted integration webhooks.
+
+
+### Security
+
+Five findings from a coordinated disclosure by Kamal Sentassi (S9S
+Security Research), each verified against the code before fixing.
+Reporters are credited in [SECURITY.md](SECURITY.md#reporters).
+
+- **Cross-camera event disclosure over the live-event WebSocket.**
+  `/events/ws` authenticated the connection but not the subscription:
+  `camera_id` came off the query string unchecked, and omitting it made
+  the bus match every event — so any active account could stream every
+  camera's detections, alarms and system alerts. Entitlement is now
+  resolved with `visible_camera_ids()` and enforced per event inside the
+  bus, where a client-supplied filter cannot widen it.
+
+- **Camera-create probed arbitrary hosts (blind SSRF).** `POST /cameras`
+  dialled the caller's address with none of the `_host_is_internal`
+  guarding the ONVIF router has always had. Every host the handler
+  reaches is now checked before any branch runs — `ip_address` for
+  `resolve_source`, `fetch_identity` and `sync_camera_time`, and the host
+  inside `rtsp_url`, which `TransportProbeService` connects to even when
+  no credentials are supplied. *Adding a camera by a public IP or DDNS
+  hostname now returns 403.*
+
+- **Cloud metadata counted as "internal".** `_ip_is_internal` admitted
+  169.254.0.0/16 via `is_link_local`, so 169.254.169.254 was reachable
+  on SSRF-gated paths. The metadata addresses are denied before the
+  allow rules; ordinary link-local stays internal.
+
+- **MediaMTX health answered anonymously**, publishing the internal
+  admin API URL and raw exception text. It now needs a signed-in user;
+  the address and error detail are superuser-only.
+
+- **Integration webhooks had no target restriction.** Cloud metadata is
+  refused outright and a new, empty-by-default `webhook_allowed_hosts`
+  allowlist is available; delivery errors no longer distinguish refused
+  from timed-out, which made a webhook test an internal port scanner.
+
+### Changed
+
+- **BREAKING — a camera is now used by the apps it is assigned to, and
+  no others.** Assignment used to be advisory: "nothing assigned" meant
+  "no restriction declared", so an app nobody had pointed at a camera
+  watched the entire fleet, and plate OCR ran on every vehicle on every
+  camera whether or not that camera was for LPR — `wants_plate` took no
+  camera argument, so it could not consult an assignment even in
+  principle. The least-configured install was the most expensive one.
+
+  Closed by default now. A camera with no assignments is *eligible*
+  everywhere — it appears in every app's picker — and *adopted* nowhere,
+  so no app inference runs on it and it costs nothing. Streaming,
+  recording and the always-on Tier-0 detection behind the timeline are
+  unchanged on every camera, assigned or not; history and recordings
+  already captured stay exactly where they are.
+
+  **After upgrading, assign your cameras.** Apps that were watching the
+  whole fleet by default now watch nothing until an operator points them
+  somewhere, and plate reads stop on unassigned cameras. The Vehicles
+  page says so in place of an empty table, and giving a camera a gate
+  role there assigns it to LPR as part of the same action. See
+  [CAMERA_ASSIGNMENTS.md](docs/CAMERA_ASSIGNMENTS.md).
+
+  For app authors: `filter_cameras_for_skill()` now returns `[]`, not
+  `None`, when no camera carries the skill — an empty roster means watch
+  nothing. `cameras_for_skill()` still returns `None`, but only when
+  core could not be *asked*: unknown, so keep the roster you had rather
+  than acting on a network blip in either direction.
+
+- **Changing a camera's skill assignment now needs permission to
+  configure that camera.** `PUT`/`DELETE /api/v1/skills/{skill}/cameras/
+  {camera_id}` accepted any active user's JWT while the camera editor
+  they duplicate went through camera-update checks. Since assignment is
+  what turns an app's inference on or off, a viewer could start or stop
+  compute on any camera in the site. `GET .../cameras` is scoped to the
+  caller's visible cameras for the same reason.
+
+- **camera-agent: installed apps no longer speak unless asked.**
+  `announce_app_alerts` defaulted to `important`, which speaks
+  high/critical — and app alerts are mostly exactly that, so ANPR read
+  out every plate and occupancy called every count, over the top of the
+  conversation. It defaults to `none` now, and speech is set per app
+  from the Skills panel: a per-app decision beats the site policy in
+  both directions, so the doorbell can speak while ANPR stays quiet.
+  Persisted, so a silenced app stays silent across a restart.
+
+- **camera-agent: the Skills panel is one tappable list.** Every skill
+  the agent could carry is shown — on ones green at the top, the rest
+  grey below — and a tap moves a skill between them. Previously only
+  enabled skills were listed and the rest hid behind a "browse to add"
+  panel, so "what else can this do?" was invisible. Search filters the
+  whole list; `+` now means "get more from the App Catalog". The confirm
+  before turning off a core skill and the greyed-skill on-ramp (name the
+  adapter, deep-link AI Adapters or the catalog) are unchanged; a skill
+  whose backend is missing stays untappable rather than failing silently.
+
+### Fixed
+
+- **A plate read showed two different times (#451).** The Vehicles page
+  dated a read by `events.started_at` — the *visit's* start — while the
+  Alarms inbox dated the same read by the app's `fired_at`, stamped when
+  the LPR app finished deciding. The gap was the rest of the track plus
+  OCR, the agreement vote, the bus hop and dispatch: seconds, growing
+  with backlog, so the two pages disagreed by more the busier a gate got.
+  Neither value scrubbed to the frame the plate is legible in, and on a
+  merged track `started_at` is the moment a *different* car arrived.
+
+  A plate read is now dated once, by the capture time of the look the
+  read won on, carried end to end: Tier-0 converts the candidate's
+  monotonic frame stamp to wall clock (`detect_pipeline/captime.py`) and
+  ships it with the crop; core stores it as `events.observed_at` and
+  passes it to KAI-C, which echoes it into `plate.recognized.v1` as the
+  additive `observed_at`; the LPR app forwards it in its alert evidence
+  and core's inbox keeps it as `app_alerts.observed_at`. Both pages, the
+  CSV export and the app-facing events query now read it, falling back
+  to the old fields only for rows that predate it.
+
+  `fired_at` is kept and still orders the alarm inbox — sorting by
+  observed time would stop the inbox being append-only, letting a slow
+  read insert its alarm above ones already on the guard's screen. Where
+  the two differ by a second or more, the lag is shown in the row's
+  tooltip rather than hidden. No backfill: a swept frame's capture time
+  is not recoverable, and inventing one would put a processing time in
+  the column that exists to not be one.
+
+- **camera-agent: ⚙ on an app skill muted the app instead of opening the
+  App Catalog.** The ⚙ link and the ✕ button both carried `sk-x`, and ⚙
+  was rendered first, so `querySelector(".sk-x")` bound the "mute"
+  handler to the link — ⚙ removed the skill and ✕ did nothing.
+
+### Added
+
+- **App Catalog: sorting.** Recommended (editorial shelf, then rank, then
+  name), Name A-Z, and Most popular — the last offered only when a listing
+  actually carries an editorial rank, since with none set it collapses to
+  alphabetical and a control that silently does nothing is worse than one
+  that is absent. Unranked apps sort last rather than lowest: an app
+  nobody ranked is an unknown, not the least popular.
+
+- **App Catalog: a detail page for apps you have NOT installed.**
+  `/app-catalog/<id>` used to dead-end with "App <id> is not installed",
+  which is backwards — the moment you most want to read about an app is
+  before installing it. Listings now open a full page: screenshots,
+  what it needs (checked against THIS deployment's adapters), what it
+  publishes, the hosts it declares, provenance and licensing, with
+  Install on it.
+
+- **App listings can carry screenshots and an editorial rank.**
+  `screenshots` are local files under `app/public/app-screenshots/<id>/`
+  — remote URLs are refused because they leak viewer IPs and break
+  air-gapped installs. `popularity` is a maintainer's 0-100 judgement,
+  explicitly not an install count: nothing phones home, so there is no
+  telemetry to count with and no number is invented. Both are validated
+  in CI, screenshots down to the file existing on disk.
+
+### Changed
+
+- **The App Catalog has its own `apps.view` permission** instead of
+  riding `ai.view`. Installing still requires `apps.install`. The boot
+  that creates the permission grants it to every role already holding
+  `ai.view`, so nobody loses a surface they could use yesterday — and it
+  runs only on that boot, so a deliberate revoke stays revoked.
+
+### Added
+
+- **App Catalog: search and category filter.** One box filters installed
+  and available apps together (name, id, summary, category, author; all
+  terms must match, so a second word narrows), with category chips built
+  from whatever the index and the registry actually carry. The Featured
+  shelf hides while filtering rather than showing the same cards twice.
+
+### Fixed
+
+- **App Catalog: Refresh left half the page stale.** It refetched the two
+  app lists but not KAI-C capabilities, Tier-0 or the skills registry —
+  the very things behind "requires X — nothing provides it" and the
+  per-app skill line. Registering the missing adapter and pressing
+  Refresh left the warning sitting there until a full page reload.
+
+- **App Catalog: a failed index looked like an empty one.** When
+  `/apps/index` errored, both Featured and "Available to install"
+  vanished with no message, so an index that was down was
+  indistinguishable from having nothing left to install. It now says so,
+  with a retry.
+
+- **App Catalog: the page called itself "App Store"** while the sidebar
+  said "App Catalog". Both now say App Catalog.
+
+- **App Catalog: available-app cards clipped their header badges.** The
+  same non-wrapping header fixed on installed cards, missed on the
+  listing cards, where name + category + version + pricing + licence +
+  "third-party" is six items in a narrow column.
+
+### Fixed
+
+- **App Catalog is its own item in the sidebar.** It sat under "AI &
+  Detections", which miscategorised it — plenty of apps are not AI (the
+  notifier, the barrier, the agent) — and buried the place apps come
+  from inside a collapsed section. It now renders as a flat link
+  directly below Applications, or immediately under Cameras when no app
+  vertical is enabled, so it is one click precisely when nothing is
+  installed yet. Nav groups gained a `flat` mode for a destination that
+  is one page rather than a section; sticky header offsets count headers
+  instead of groups so a flat entry leaves no gap in the stack.
+
+- **The app card's "Network" panel never said what it was.** It showed a
+  bare list of hostnames and an input, with the guarantee behind it —
+  apps run on an isolated network and reach the outside only through
+  OpenNVR's egress proxy, which refuses and reports anything not
+  declared or allowed — left entirely implicit. The panel now explains
+  that in two lines, and the pre-install provenance line says "no
+  outside connections" with a tooltip covering the same ground instead
+  of the jargon "no network egress" / "outside the stack".
+
+- **The plate app and the page it lights up had unrelated names.** The App
+  Catalog said "License Plate Recognition" and the sidebar said
+  "Vehicles", with nothing to connect them. Both now carry ANPR — the
+  name most of the world uses (UK, EU, India, AU; the US says LPR/ALPR) —
+  as "ANPR — License Plate Recognition" in the catalog and the app's own
+  dashboard, and "Vehicles (ANPR)" in the nav and page header. "Vehicles"
+  stays the head noun because the page is wider than the OCR: plate reads,
+  the vehicle register, monitoring and alarms. The app id, the
+  `license_plate_recognition` AI task and its skill label are unchanged —
+  those are keys and the technical capability, not product names.
+
+- **A running app was reported "skill: degraded — app unreachable at last
+  contact".** `installed_apps.status` and `last_seen` were only ever
+  written by boot registration and the on-demand "Check" probe, and
+  nothing re-runs that probe — so one failure (an app still starting, a
+  blip) pinned the skill badge to degraded for as long as the app ran,
+  and an app nobody probed decayed to "no recent contact" after ten
+  minutes. Meanwhile the SDK polls `GET /apps/{id}/config` every ~10s from
+  inside the running app and core discarded that. That poll is now a
+  heartbeat (throttled to one write per 30s, and only for the app's own
+  key — the site's internal key is held by companion services too), and
+  the skill view trusts contact newer than 60s over an older failed
+  probe. A genuinely dead app still degrades: the live window is far
+  tighter than the ten-minute staleness cutoff.
+
+- **App Catalog: "Check" could never report a healthy app.** The chip read
+  `health.status`, but the SDK's `health_snapshot()` speaks `ready` (spec
+  §03) and never sets a `status` string — so every SDK-built app came back
+  "unknown", and "unreachable" only ever appeared because core writes that
+  string itself on a failed probe. The one app that looked healthy was the
+  hand-written camera-agent, which happens to emit `status`. `GET
+  /apps/{id}/status` now publishes the verdict it was already computing
+  (`ok`, or `degraded` when reachable but not ready), leaving an app's own
+  `status` untouched when it sets one; the chip falls back to `ready` for
+  older cores. A non-object `/health` body no longer 500s the probe, and
+  the button reads "Check health" with a tooltip saying what it does and
+  why it is on demand.
+
+- **A freshly installed app needed a manual Refresh to appear under
+  Installed.** The poll that watches the reconciler and invalidates
+  `['apps']` lived inside the install dialog, so dismissing the dialog —
+  the natural thing to do while the reconciler works — killed the only
+  thing that would have refreshed the groups. Accepted intents are now
+  tracked by the page and keep polling after the dialog closes. The
+  invalidation also moved out of `refetchInterval` (an observer computing
+  its next delay, with no promise about terminal states) into an effect
+  keyed on the status transition.
+
+- **Enabling an app did not say where it had gone.** It redirected to the
+  app's own page, which answered "what does it do" but not "where do I
+  find this again". Enable now leaves you on the catalog and states the
+  surface: an external app shows the URL it runs at, as a link; an app
+  providing a vertical says it is listed under Applications and links to
+  the page; anything else points at its own dashboard. The nav and the
+  catalog read one shared `APP_VERTICALS` table, so the promise and the
+  menu entry cannot disagree.
+
+- **App Catalog cards: clipped status pill, and results that were not
+  the catalog's to show.** The action row was a non-wrapping flex with
+  the enabled/disabled badge pinned to it by `ml-auto`, so a card
+  carrying several manifest actions pushed the badge past the card edge
+  and collided it with Uninstall. Status is state, not an action: it now
+  sits beside the health chip in the (wrapping) header, and the button
+  row wraps. The card also no longer renders `LiveStateViews` — an app's
+  output belongs to the app, and `/app-catalog/<id>` already renders the
+  same `state_schema` as a polling dashboard, with first-class verticals
+  on top of that. Because the card shared the `['app-status', id]` query
+  key with those pages, visiting Vehicles or Occupancy filled the cache
+  and the catalog sprouted plate tables nobody asked for.
+
+- **Alarms stayed silent while the tab was in the background.** A
+  high or critical alarm rings `continuous` by default, but the bell's
+  inbox poll used React Query's `refetchInterval` without
+  `refetchIntervalInBackground`, and the library gates interval
+  refetches on `focusManager.isFocused()` — i.e.
+  `document.visibilityState !== 'hidden'`. Switch to another tab and
+  the poll stopped dead: the bell never learned an alarm had arrived,
+  so nothing sounded until the operator came back and looked, which
+  is the one moment an alarm is not needed. The poll now runs in the
+  background, so a plate that trips an alarm sounds it while OpenNVR
+  sits behind another tab.
+
+- **Occupancy: the Configure button did nothing.** Moving the
+  action from a link to the catalog into an in-place modal wired up
+  the state and the import but never rendered `AppConfigModal`, so
+  the click flipped a flag nothing read and the bundler tree-shook
+  the unused import away. The modal is rendered now, and closing it
+  invalidates `apps` and `app-status` so a new zone, entry line or
+  watch label shows on the board without a reload. Same fix revives
+  "Add car / truck to watch labels" in the vehicle-skill hint,
+  which was dead for the same reason.
+
+- **AI Adapters metrics: an idle adapter looked broken.** The panel
+  printed "60 samples" next to all-dash percentiles — the samples were
+  the once-a-minute `/metrics` scrapes, not inferences, and the dashes
+  meant the adapter had served nothing in the window. KAI-C's rollup
+  now reports `requests` (the +Inf bucket delta over the window), the
+  header reads "60 scrapes · 0 requests", and the latency card says
+  "No inference requests in this window — nothing to measure yet"
+  instead of dashes.
+
+### Added
+
+- **camera-agent: thinks aloud before a slow tool.** When a voice
+  question needs a slow tool the agent says what it is about to do —
+  "Let me check the gate camera for vehicles between 2 and 3", "Let me
+  check the plate reads for 6 6 H H 0 7 in the last hour" — built from
+  the tool call's own arguments (no LLM), Piper-synthesised in parallel
+  with the tool and cached by text, pushed over the page's `/updates`
+  socket the moment the tool is known; the answer cuts it if it lands
+  first. At most once per turn, never for instant lookups, and only when
+  the expected wait (the agent's own recent stage timings) is at least
+  `filler_min_ms`. Typed questions get the line as a status only.
+  `thinking_aloud`, `filler_min_ms`, `filler_source: template | model`
+  (the model writes the line in the same first pass, template as
+  fallback); `GET /thinking-aloud` shows the decisions. `/updates` now
+  wakes immediately for pushed lines instead of only on its 2 s tick.
+
+### Changed
+
+- **camera-agent: greets when the page opens, with the time of day.**
+  The introduction used to wait for Talk; now it plays as soon as the
+  page has loaded (after auth resolves) — text at once and, because
+  browsers refuse audio before a gesture, the spoken greeting is held
+  and played on the first tap, click, or Talk when autoplay is blocked.
+  It opens "Good morning / afternoon / evening" from the operator's own
+  clock (`GET /intro?hour=`), falling back to the site's; 22:00–05:00
+  says "Hello".
+
+- **camera-agent demo: the ⛓ pipeline line under each reply now shows
+  what every stage cost** — `stt 0.4s → llm 1.2s → search_history (cam1)
+  35ms → llm 0.9s → tts 0.3s · 2.9s`, slowest stage emphasised, total at
+  the end — from the timings the server already records (the trace's
+  per-step `ms`, `/converse`'s `timings_ms`, `/ask`'s `latency_ms`);
+  nothing new is measured.
+
+### Added
+
+- **camera-agent: interruptions like a person's on the streaming
+  pipeline.** New `turns.py` start strategy for the 1.8 user aggregator:
+  while the agent speaks, a phrase interrupts it only if it is real
+  speech (a Silero VAD pair) of at least `interrupt_min_ms`, holds at
+  least `interrupt_min_words` words once backchannels ("yeah", "okay",
+  "mm-hm") are stripped, and reads as addressed to the agent (its name,
+  a question, a request or correction, the site's own vocabulary —
+  camera names, gate, plate) rather than a remark to someone else;
+  anything else is dropped and the agent keeps talking. While the agent
+  is silent the first sound of speech opens the turn as before, so
+  Smart Turn end-of-turn is untouched. `interruptions: gated` (default)
+  | `eager` | `off`; every decision with its reason at
+  `GET /interruptions`. Proven through the real pipeline: "yeah okay"
+  over the speaking agent → no interruption, no LLM turn; "no wait,
+  show the gate camera" → InterruptionFrame and the turn.
+
+### Fixed
+
+- **camera-agent demo: a couple of words from anyone cut the agent off.**
+  The page's barge-in stopped playback after ~70 ms of mic above the
+  gate — a cough or an aside to someone in the room. Now *firm* by
+  default: ~550 ms of sustained speech well above the noise floor,
+  short dips tolerated; *eager* (the old rule) and *off* selectable
+  under the header, persisted per browser. MODELS_AND_LATENCY.md now
+  says plainly which voice path uses what: the demo page's Talk mode is
+  the browser's energy detector + `/converse`; Silero + Smart Turn v3
+  (and model-backed interruptions) live on the `/ws` streaming pipeline,
+  which the demo page does not use yet.
+
+### Added
+
+- **camera-agent: mute an installed app in the agent.** ✕ on an app
+  entry in the skills rail now mutes it *in the agent only* — its
+  alerts are not relayed or spoken, it is not listed by `list_apps`,
+  and `app_status` / `recent_app_alerts` say so — while the app keeps
+  running for the rest of OpenNVR. Add it back from **+** any time;
+  persisted like every other toggle, cleared by Restore defaults. ⚙
+  still opens the app in the App Catalog for the real enable/disable/
+  uninstall. (`disabled_skills` accepts `app:<id>`.)
+
+### Fixed
+
+- **camera-agent: removing an installed app's skill said "skill can't
+  be enabled yet".** Installed catalog apps appear in the skills rail
+  read-only — they are enabled/disabled in the App Catalog — but the
+  rail offered ✕ and the server answered with the enable-time message.
+  The rail now shows ⚙ linking to the app's catalog page, and
+  `POST /skills/app:<id>/disable` answers 409 naming the app and where
+  it is managed (`manage_url` on the skill entry).
+- **camera-agent: every relayed app alert was read aloud.** New
+  `announce_app_alerts` policy — `important` (default: high/critical
+  only), `all`, `none` — settable in the UI (Automations → ⚙, persisted)
+  or config; every alert still lands in the feed with a chime, the
+  voice UI speaks only those the server marks `announce`. Relayed text
+  no longer repeats the title when the summary already starts with it.
+
+- **OpenNVR Agent showed "unreachable" in the App Catalog while it
+  worked.** It registered its contract URL as
+  `https://<container id>:9100` — under compose the container's
+  hostname is its bare id, which other containers cannot resolve — and
+  core's probe could not verify its self-signed certificate either. New
+  `agent_contract_url` (compose config: `https://camera-agent:9100`),
+  `hostname: camera-agent` on the service, and core now trusts app
+  certificates mounted read-only under `/etc/opennvr/app-certs/`
+  (`services/app_tls.py`; the overlay mounts `agent-certs/camera-agent`
+  there; hostname must still match the SAN — verified end to end
+  against a real TLS server in tests). `agent_public_url` is no longer
+  used as the contract URL — it is for the browser only. The agent's
+  manifest now declares its external web UI (`ui_mode: external`,
+  `ui_url: https://{host}:9100/demo`), so the catalog card and app page
+  show **Open app**; the chat variant gets `DNS:camera-agent-chat` in
+  new certificates. GUIDE.md explains the two URLs.
+
+- **Apps bus refused every app: core could never write the users
+  file.** The `opennvr_nats_auth` volume is created root-owned by
+  `nats-apps` when it seeds `users.conf`, and core runs as `opennvr`
+  (uid 1000) — so its atomic tempfile-and-rename in that directory
+  failed on every start and every key issue, the bus only ever knew
+  the `_no_apps_yet` seed user, and logged `authentication error -
+  User "license-plate-recognition"` (and the same for every other app)
+  once the server was actually up. Core's `docker-entrypoint.sh` now
+  takes ownership of `/var/lib/opennvr/nats` like the other shared
+  volumes, `apps-entrypoint.sh` hands the directory and the seed to
+  uid 1000 from its side (so start order never matters), and a failed
+  write is an ERROR naming the cause instead of a warning. Also: the
+  rendered `apps.conf` no longer repeats the key inside a comment.
+
+- **Apps bus never started: `nats-apps` restart-looped on its `include`
+  path, and every app failed to resolve it.** nats-server joins *every*
+  `include` onto the config file's own directory — an absolute path
+  included — so `include "/var/lib/opennvr/nats/users.conf"` from
+  `/etc/nats/apps.conf` opened `/etc/nats/var/lib/…/users.conf`, the
+  server exited on parse, and `restart: unless-stopped` looped it
+  forever. A container that never comes up has no DNS entry, which is
+  the `socket.gaierror: Temporary failure in name resolution` for
+  `nats-apps` every SDK app logged while reconnecting without end, and
+  why no alert has reached the inbox since the apps bus landed. The
+  entrypoint now renders the config *next to* the users file
+  (`/var/lib/opennvr/nats/apps.conf`, mode 600) and the template
+  includes a bare `users.conf`; a test pins the include relative.
+  Verified against nats-server 2.10 in the container's exact layout
+  from an empty volume: server up, leaf link up, users-file reload, an
+  LPR alert crossing to the platform bus. The core watchdog now treats
+  `nats-apps` not answering its monitoring endpoint for two minutes as
+  the same outage as a dead leaf link (log error + high inbox alert
+  "Apps bus is down"), instead of a debug line.
+
+- **Apps bus: the leaf link to the platform bus never authenticated —
+  app alerts stopped.** `nats/apps.conf` put `$INTERNAL_API_KEY` inside
+  the leaf remote URL; nats-server expands `$VAR` only as a whole
+  value, never inside a URL, so `nats-apps` presented the literal
+  string as its password and the platform server refused it forever.
+  Both servers were healthy and every app logged "connected", but
+  nothing crossed: no app alert reached the inbox, no detection reached
+  an app (reproduced against nats-server 2.10 — an LPR alert published
+  on the apps bus never arrived on the platform bus; with the fix it
+  does). `apps-entrypoint.sh` now renders the key (percent-encoded, so
+  a base64 key with `/`, `+`, `=` works) into the config before start
+  and refuses to start with the placeholder in place. And the failure
+  is loud from now on: core polls `nats-apps`' `/leafz` and, after two
+  minutes without a leaf connection, logs an error, raises a high
+  inbox alert (hourly while it lasts) and reports it at
+  `GET /api/v1/apps/bus`; `NATS_APPS_MONITOR_URL` overrides the
+  derived monitoring URL. docs/APP_CREDENTIALS.md → "When alerts stop".
+
+### Changed
+
+- **camera-agent on Pipecat 1.8 with Smart Turn v3.** The agent moves
+  from the 0.0.5x API it was born on to `pipecat-ai 1.8.1`: the
+  universal `LLMContext` + `LLMContextAggregatorPair`, services under
+  `pipecat.services.*_service`, the `pipecat.transports.websocket.fastapi`
+  transport, `WorkerRunner`. Turn-taking is now the aggregator's user-turn
+  strategies — Silero VAD opens a turn, **Smart Turn v3** (Pipecat's
+  semantic end-of-turn model, bundled in the wheel, CPU via onnxruntime)
+  closes it — so a pause mid-sentence no longer ends the question the
+  way the 0.7 s silence timer did, and the STT-side force-stop timers
+  that compensated for it are gone. New `vad_*` / `turn_*` config knobs;
+  interruptions stay off for the demo client. The image bundles NLTK's
+  `punkt_tab` so a sovereign site never downloads at first reply.
+  `RawPcmSerializer` follows the 1.x `FrameSerializer` (BaseObject,
+  `setup(FrameProcessorSetup)`, no `type`).
+- **camera-agent turn-taking sized to the hardware.** Smart Turn v3's
+  cost was measured on a CPU-only 4-core box (one ~60–90 ms verdict per
+  pause, Silero ≈0.7 % of a core) and the agent now fits itself to what
+  it runs on: numpy's BLAS/OpenMP pools are capped to one thread before
+  the model loads (uncapped, the 8 s log-mel fanned out across every core
+  and was *slower*, 90–130 ms), onnxruntime's thread count follows the
+  cores the process may actually use (scheduler affinity and cgroup CPU
+  quotas, not `os.cpu_count()`), and a single-core box gets a plain
+  silence timer instead of the model. New `turn_detector` (auto | smart
+  | timer), `turn_cpu_threads` and `turn_timer_secs` knobs;
+  `turn_max_secs` defaults to the model's 8 s window. The resolved
+  profile is logged at startup and returned by `GET /hardware` under
+  `turn`. MODELS_AND_LATENCY.md gains "Turn detection on CPU".
+
+### Added
+
+- **OpenNVR Models — design.** `docs/design/models-service.md`: site-
+  tuned detection models delivered as Ed25519-signed, licensed weight
+  bundles to the adapters a site already runs, under a flat per-site
+  subscription; the "OpenNVR Models" catalog app (open source,
+  `entitlement: license_key`, one declared egress host) as the licence
+  holder, dataset exporter and installer; the bundle format; the
+  adapter path (shipped in the ai-adapter repository — `licensed_model`,
+  pure-Python Ed25519, `ModelInfo.license`, yolov8 as the reference);
+  the service's routes; keys and rotation; offline behaviour and
+  grace; what it is not. `AI_ADAPTER_CONTRACT.md` documents the
+  additive `model.license` field.
+
+- **Enterprise: the offer, the appliance, the evidence pack.**
+  `docs/ENTERPRISE.md` states what an enterprise engagement includes
+  (reference-appliance deployment, the evidence pack reviewed against
+  the customer's framework, §889 via Scout, support with response
+  times, custom AI) and what it never includes. `docs/REFERENCE_APPLIANCE.md`
+  is the known-good site: three sizes with hardware, the storage
+  arithmetic, the three network segments and exposed ports, host
+  hardening, and the checklist the evidence pack scores.
+  `scripts/evidence_pack.py` generates that pack from a running
+  deployment, read-only: posture, the camera security check, recording
+  coverage against retention, adapters with fingerprints and declared
+  egress, installed apps with signer and egress, firewall rules,
+  retention, the audit log for the period — plus `EVIDENCE.md`
+  (PASS / ATTENTION / UNKNOWN per check, framework → files) and a
+  `manifest.json` of SHA-256 hashes. Stream URLs and secrets are
+  redacted; missing routes are recorded, never fatal.
+
+- **SDK toward 1.0.**
+  `opennvr_app_sdk.testing` — `RecorderChannel`, `app_config`,
+  `detection` / `inference_event` / `tier0_event` / `domain_event`
+  builders, `feed(app, *events)` through the real decode → rule →
+  dispatch path, `FakeCore` (a loopback core: cameras, snapshots,
+  state, alerts, register), and a pytest plugin with the same as
+  fixtures; the scaffold's smoke test now uses them. The v1 domain
+  events as typed classes (`PlateRecognized`, `AccessDecided`,
+  `OccupancyChanged`, `OccupancyHeatmap`, `OccupancyFootfall`,
+  `VisitRecorded`, `DetectionObserved`): `DomainEvent.typed()` parses
+  with required fields enforced and additive fields kept,
+  `DomainEventPublisher.publish_typed()` writes. `opennvr-app validate
+  [path]` checks the manifest, `config.example.yml` through the app's
+  own `AppConfig`, `apps-index-entry.yml` against the manifest and the
+  catalog policy, and the repository shape. `AsyncOpenNVR().ai.stream()`
+  (`AsyncInferStream`) closes the last sync/async gap; the parity test
+  now has no exceptions. Found by `validate`: occupancy-counting's
+  `config.example.yml` did not load (no `opennvr_url`) — fixed.
+
+- **Build from source for every app repository.** A reusable workflow,
+  `.github/workflows/build-catalog-app.yml` (`workflow_call`): an
+  `open-nvr/app-*` repository calls it with its `app_id`, and it checks
+  that repository out at the pushed ref, builds the Dockerfile for
+  amd64 + arm64, pushes `ghcr.io/open-nvr/<id>`, signs the digest
+  (Sigstore keyless — the certificate names this workflow, so the
+  installer's existing identity check covers third-party apps) and
+  prints the `image_digest:` line in the job summary. It refuses any
+  caller outside the org. `opennvr-app new <id> --repo` scaffolds the
+  repository files — `ci.yml`, a four-line `publish.yml` that calls the
+  workflow, `apps-index-entry.yml` (the listing, reviewed with the
+  code), `.gitignore`/`.dockerignore` — and pins the published SDK.
+  `scripts/pin_apps_index.py` / `make pin-apps-index` is the release
+  step that writes every catalog entry's current digest into the index
+  (from GHCR, cosign-verified, textually so comments survive; `--check`
+  reports drift). `CONTRIBUTING_APPS.md` §2 now describes this path
+  instead of author-pushed images.
+
+- **Signed catalog images, verified at install.**
+  `publish-app-images.yml` now signs every image it pushes with
+  Sigstore keyless signing (cosign + the workflow's GitHub OIDC
+  identity — no key to keep), and the one-click installer runs
+  `cosign verify` on every pinned image before `docker compose up`:
+  a `ghcr.io/open-nvr` image must have been signed by a workflow in an
+  `open-nvr` repository on `main` or a `v*` tag; any other image must
+  name its signer in the index entry (`signing: {identity, issuer}`,
+  validated) or is refused as *no known signer*. A failed signature is
+  a failed intent with the reason in the catalog; compose never runs.
+  `INSTALLER_SIGNATURES=off` for air-gapped deployments (logged loudly).
+  The installer image ships cosign; the catalog card shows **signed**
+  and the index API carries `signed_by`. Also: alert-notifier and
+  gate-controller were listed with `ghcr.io/open-nvr` images that no
+  workflow published — both are now in the publish and smoke matrices.
+  `docs/APPS_INSTALL.md` → Image signing.
+
+- **Enforced app egress.** Apps now run on `opennvr_apps`, an internal
+  compose network with no route to the LAN or the internet, and leave
+  it only through the new `egress-proxy` service (`scripts/egress-proxy`,
+  standard library), which every app container receives as
+  `HTTP_PROXY` / `HTTPS_PROXY`. Per connection the proxy asks core
+  (`POST /apps/egress/check`) whether the calling app — identified by
+  the address its contract URL resolves to, never by a secret it
+  carries — may open the host; core answers from the listing's declared
+  `network_egress` plus an operator allow list per install
+  (`installed_apps.egress_allow`, `GET`/`PUT /apps/{id}/egress`,
+  superuser, audit-logged). A refusal is logged, counted on the app,
+  and raised once per app and destination per hour as an inbox alert
+  naming the host; the catalog card's new **Network** line shows
+  declared, allowed and refused hosts with an **Allow** button. Core,
+  `nats` and `nats-apps` join the apps network; the one-click installer
+  ups the proxy with every app; `ollama` joins it for footage-search.
+  Plain-TCP clients tunnel through the proxy with the SDK's new
+  `opennvr_app_sdk.egress` (`connect_via_proxy`, `proxy_address`) — the
+  Home Assistant relay does so for MQTT (paho + PySocks).
+  `APPS_EGRESS_ENFORCED=false` / `APPS_EGRESS_PROXY_URL=` switch it off
+  (stack down first). `api_version` 1.4 (additive: `egress` on the app
+  record). `docs/APP_NETWORK.md` is the whole story.
+
+- **Catalog policy: open source under the org, built from source,
+  author on the card.** Installable apps must be open source (AGPL-3.0
+  or Apache-2.0, author's copyright) in a repository under the `open-nvr`
+  organisation, name their author and a contact, and declare
+  `network_egress` (every host they talk to, or `[]`); the validator
+  enforces all four and the shipped index carries them. Closed software
+  lists as `kind: external` ("not reviewed by OpenNVR", never
+  installed). Paid stays possible in one shape — open code gating a
+  licensed model or service — and OpenNVR takes no fee. The catalog card
+  shows a provenance line (open source · built from source, contact,
+  "no network egress" / "connects to: …"); `verified` now means
+  *maintainer-verified* (the maintainers run it in production).
+  `docs/DEVELOPER_PROGRAM.md` rewritten around the deal;
+  `docs/APP_LISTING_TERMS.md` (what you keep, what you promise, removal,
+  liability, trademarks) is new; `CONTRIBUTING_APPS.md` carries the
+  policy, the review SLA (five working days) and the abandonment rule.
+
+- **List params offer one-click values.** SDK `Param(suggestions=[…])`
+  rides the manifest; the catalog's chip editor shows them under the
+  input, and for any `*_labels` param puts the labels Tier-0 has
+  actually detected on this site first (from its metrics), then the
+  manifest's suggestions, then the stock COCO vocabulary
+  (`opennvr_app_sdk.DETECTION_LABELS`). Occupancy Counting and the app
+  template declare suggestions; the field also explains what a label
+  is.
+- **Occupancy page, reworked around how occupancy products are read.**
+  One time window (Last hour / Today / 7 days) drives the tiles, the
+  flow chart, the zone cards and the heatmap's default, instead of a
+  fixed 24 h here and a per-dialog range there. The headline is
+  capacity: people now with an over / near / within-limit badge, the
+  peak seen in a zone over the window, zones over limit, zones watched
+  — and every empty tile says why ("app unreachable", "no limit set",
+  "assign the occupancy skill"). Zone cards show which way an entry
+  line counts (entries A→B / B→A; the app now reports
+  `entry_direction`). A setup hint appears when cameras carry a vehicle
+  skill but Occupancy watches only `person`, with a one-click path to
+  the config form; non-superusers see a "showing the cameras you have
+  access to" note.
+
+- **App Catalog: licence hint, verified badge, Featured row.** A
+  listing with `entitlement: license_key` now says so *before* install
+  ("licence key required" badge + one line on what happens next), so
+  the 402 on enable is never a surprise. Two reviewer-set index flags,
+  `verified` (identity confirmed, image reproducible from source —
+  must name an `author`) and `featured` (a row at the top of the
+  catalog), with validator rules and the review policy in
+  CONTRIBUTING_APPS.md. `GET /apps/index` returns both.
+- **Less boilerplate for every app.** The three
+  on-ramp gaps the outside-the-repo walk left open, closed:
+  `BaseAppConfig` + `load_app_config(path, cls)` replace the config
+  block every app re-typed (the template's went from ~70 lines to 12);
+  `DomainEventSubscriber` gets `self.dispatcher` / `self.fire(alert)`
+  with the app's identity, like `Detector`; and the generator ships in
+  the wheel as `opennvr-app new <id>` — no checkout needed, PyPI-pinned
+  by default, template moved to `opennvr_app_sdk/templates/app`
+  (`scripts/create_opennvr_app.py` is now a wrapper that keeps in-tree
+  examples on the editable SDK). Additive; server `api_version` stays
+  1.2.
+- **The out-of-tree developer path works end to end.** A paid,
+  `license_key` app was built in its own repository on nothing but the
+  PyPI wheel (`docs/EXTERNAL_APP_WALKTHROUGH.md`); the platform surface
+  held, the on-ramp did not: `scripts/create_opennvr_app.py` now takes
+  `--sdk auto|path|pypi` and, for a `--dest` outside this repository,
+  pins `opennvr-app-sdk>=<version>,<1.0` with a Dockerfile that builds
+  without a checkout (before, it wrote an editable path into a tree the
+  developer does not have). Server tests no longer assume every index
+  entry is installable, so the first real `kind: external` listing will
+  not break CI. Remaining findings are listed in the walkthrough.
+- **The App SDK is released to PyPI.** `pip install opennvr-app-sdk`
+  is now the on-ramp: `.github/workflows/publish-sdk.yml` tests the
+  package on 3.11–3.13, builds and `twine check`s the sdist + wheel,
+  installs the wheel in a clean venv, and on a `sdk-v<version>` tag
+  publishes through PyPI trusted publishing (the tag must match
+  `_version.py` and `pyproject.toml`). The package gains a README (the
+  PyPI page), its own Apache-2.0 `LICENSE` file, classifiers and project
+  URLs. `ci.yml` now runs the SDK's own suite, which it never did.
+- **SDK 0.4.0: an async platform client.** `opennvr_app_sdk.aio.AsyncOpenNVR`
+  is `OpenNVR` `await`-ed — same methods, arguments, return types and
+  degrade/raise rules — for apps that serve a `/ui`, run on
+  FastAPI/Starlette, or drive an agent loop that must never block. It
+  shares the route paths, KAI-C request builder and response parsers
+  with the sync client and a parity test pins the two surfaces
+  together; `http_client=` shares an existing `httpx.AsyncClient`.
+  `ai.stream()` has no async form yet. The OpenNVR Agent's KAI-C
+  capabilities probe now rides it. See `docs/APP_PLATFORM.md`.
+
+### Security
+
+- **Apps join the event bus as themselves.** A second NATS server,
+  `nats-apps`, runs as a leaf of the platform bus; every SDK app joins
+  it as user = app id, password = its own key, with publish/subscribe
+  permissions derived from its manifest (`server/services/nats_users.py`:
+  inference broadcasts and the alert stream for all; a domain-event
+  family only via `requires_scopes`; publishing limited to the app's own
+  alert subjects, plus domain events for apps that `provides` a skill).
+  Core renders the users file (bcrypt of each key) on boot and on every
+  key issue / rotate / revoke; `nats-apps` reloads it; revoking a key
+  disconnects the app. Core advertises the bus in the register response
+  (`registry.bus`), the SDK (0.6) remembers it next to the key and uses
+  it for the subscribe loop, alert fan-out and domain-event publishing.
+  Apps on older SDKs, or with no bus advertised, keep the configured
+  `nats_url` + token. New compose service `nats-apps`, volume
+  `opennvr_nats_auth`, `NATS_APPS_URL` / `NATS_USERS_CONF` on core;
+  the platform `nats` now runs from `nats/nats.conf` (same token auth,
+  plus the leaf port). `requires_scopes` is now enforced.
+
+- **The site key no longer reaches apps.** Core used to forward
+  `INTERNAL_API_KEY` on every action invocation and licence check
+  because the SDK's write surfaces were gated on it — so every app held
+  the site-wide credential. Core now sends `X-OpenNVR-Call`, a
+  60-second HS256 token signed with the app's own secret (the sha256 of
+  its key, as for `X-OpenNVR-User`), bound to the app id and a purpose;
+  SDK 0.6 verifies it (`verify_call_token`) before `on_action` /
+  `verify_license` and refuses a token for another app, another purpose
+  or an old window. Apps registered with SDK < 0.6 (`installed_apps.
+  sdk_version`, new column) still receive the site key until they
+  upgrade; an SDK 0.6 app on an older core accepts the legacy gate with
+  one warning. `api_version` 1.3 (additive). Removal of the legacy
+  forward is scheduled for 2.0.
+
+- **Every app gets its own credential.** SDK apps used to boot with the
+  deployment's `INTERNAL_API_KEY` and could read every camera and every
+  other app's config and live state. `POST /apps/register` now mints an
+  app-scoped key (`oak_<app-id>_…`), returned once and persisted by the
+  SDK (`OPENNVR_APP_KEY_FILE` / `OPENNVR_APP_KEY`); with it an app reads
+  only its own config/status and only the cameras the operator assigned
+  to it (its manifest `provides` in `Camera.assignments`; every camera
+  when none is assigned). The pipeline's write routes refuse app keys.
+  Superusers rotate (`POST /apps/{id}/key/rotate`) or revoke
+  (`DELETE /apps/{id}/key`) without touching the site key. The register
+  exchange also carries `sdk_version` and returns
+  `registry.{server_version, api_version, min_sdk_version}`; the SDK
+  warns when it is older than the server supports. See
+  `docs/APP_CREDENTIALS.md`. SDK: `discover_cameras`, `cameras_for_skill`,
+  `AppCredentials` are now top-level exports.
+- **Writes that any signed-in user could make now require the seeded
+  permission.** Creating/editing/deleting AI models and starting or
+  stopping their inference (`/ai-model-management`) need `byom.manage`;
+  granting, revoking or approving an adapter's permission keys
+  (`/ai-models/adapters/{name}/permissions/*`) need `ai.manage`; editing
+  or deleting a camera needs `cameras.manage` on top of ownership. The
+  admin role holds all of these (`scripts/init_db.py`); superusers
+  implicitly.
+- **Self-service ways into the camera scope closed.** With per-camera
+  RBAC as the boundary, two routes let a user widen it themselves:
+  `POST /cameras/` made any active user the OWNER of the camera it
+  added (and an owner sees that camera everywhere), and
+  `POST /auth/register` minted a viewer account for anyone who could
+  reach the box. Adding a camera now requires the seeded
+  `cameras.manage` permission (operator/admin roles hold it, viewers do
+  not; superusers implicitly), and self-registration is off unless
+  `PUBLIC_REGISTRATION_ENABLED=true` (`/auth/check-setup` reports
+  `registration_open`). New `GET /cameras/{id}/permissions` lists a
+  camera's grants (owner first) so assignments can be audited, not only
+  written.
+- **Missing authorization on the IP-keyed ONVIF routes** (CWE-862 /
+  CWE-639). `/connect` and every `/camera/{ip}/...` route (profiles,
+  stream URI, PTZ move/stop/presets, clock) checked only that the IP lay
+  inside the camera LAN, so any authenticated user could PTZ, read the
+  stream URI of, or relay credentials at any camera on the LAN — the
+  sibling `/cameras/{id}/ptz/...` routes required ownership. They now
+  require ownership, a camera permission grant (`can_view` for reads,
+  `can_manage` for PTZ/presets) or superuser on a registered camera;
+  onboarding an unregistered device (Add Camera wizard) still works, but
+  PTZ against an unregistered IP is refused. Reported by Furkan Arslan.
+- **Per-camera RBAC now covers every surface, not just the camera list.**
+  Camera assignments (ownership + `CameraPermission` grants) scoped the
+  camera routes, streams and recordings, but the newer read surfaces
+  either copied the owner-only rule (timeline, plates, occupancy history
+  — a user *granted* a camera saw its stream but none of its history) or
+  scoped nothing (the alerts inbox rang every alarm on the site for every
+  user; app `/status` state and per-camera config were fleet-wide). One
+  `services/camera_scope` rule (owned + `can_view` to see, owned +
+  `can_manage` to control, superuser everything, owner-less cameras
+  superuser-only) now applies to: timeline/plate/vehicle-report queries
+  and evidence photos; occupancy history/heatmap/footfall/report; the
+  alerts inbox (list, unacked count, ack — camera-less alerts reach
+  everyone; ring policy, alarm actions and test alarms are superuser
+  only); app `/status` state and per-camera config entries (a
+  non-superuser may edit only the per-camera geometry of cameras they
+  manage, site-wide app settings and enable/disable are superuser only;
+  camera-targeted actions need `can_manage`); and the camera-agent
+  example in `auth_mode: opennvr` (roster, frames, rings, prompt roster,
+  tool camera resolver, alarms/monitors/events feed follow the caller's
+  server-side assignment). The UI hides the site-wide controls from
+  non-superusers; enforcement is server-side.
+
+### Changed
+
+- **The example apps ride the SDK's KAI-C clients.** intrusion-detection
+  (HTTP and the §6 WebSocket session), package-delivery and
+  smart-doorbell each carried a hand-written KAI-C client "to preserve a
+  historical wire body"; they are now thin spellings over
+  `opennvr_app_sdk.KaiCClient` / `InferStream` and send the contract-v1
+  body (`task`, and `camera_id` where the frame belongs to a camera —
+  `KaiCClient.infer` now takes `camera_id` optionally, as KAI-C does).
+  The camera-agent loads its OpenNVR roster through the SDK's
+  `discover_cameras`. `websockets` is no longer an app-level dependency.
+
+### Added
+
+- **The developer program is written down.** `docs/DEVELOPER_PROGRAM.md`
+  is the deal for third-party developers — no fee, your licence, the
+  platform surface in one table, and a **compatibility promise** for the
+  app-registry contract (versioned `api_version`, `min_sdk_version` moves
+  only for misbehaviour, additive event schemas, deprecations announced a
+  minor release ahead) now pinned by `server/tests/test_registry_contract.py`.
+  New references: `docs/SDK_REFERENCE.md` (every public
+  `opennvr_app_sdk` name, by task) and `docs/PLATFORM_API.md` (the
+  operator API: users incl. superusers + MFA, roles and the permission
+  catalogue, cameras, assignments, per-camera access, apps and licences).
+  `make sdk-docs` renders the SDK docstrings with pdoc.
+  `FIRST_DETECTOR.md` and `CONTRIBUTING_APPS.md` cover the app key, the
+  `OpenNVR()` client, and paid / external listings.
+- **Apps can be sold.** The manifest and the App Store index carry
+  `pricing` (free | paid | subscription | contact), `price_note` and
+  `entitlement` (none | license_key); the catalog shows the badge on
+  cards and listings. A licensed app cannot be enabled until an
+  administrator enters a key (`PUT /apps/{id}/license`, encrypted at
+  rest, never returned) **and the app itself accepts it** — core calls
+  the app's `POST /entitlement/verify` (SDK: override
+  `ContractMixin.verify_license` → `Entitlement`) and records the
+  verdict (status, plan, expiry, message, limits), re-delivered on the
+  app's config poll as `self.entitlement`. Re-check and forget routes;
+  402 on enable with the reason. Index entries may also be
+  `kind: external` — a third-party listing that links out
+  (`external_url`) with "Learn more" instead of Install; the validator
+  understands both kinds. `docs/APP_SURFACES.md` §5b.
+- **One platform client for apps.** `opennvr_app_sdk.OpenNVR` wraps
+  everything an app reads from core and KAI-C — the camera roster,
+  current snapshots, recordings (list / playback URL / frame at an
+  instant), the events store and evidence photos, plate statistics,
+  the app's own inbox rows, and inference (HTTP `infer` and a
+  persistent WebSocket `stream`, contract §6) — plus durable per-app
+  key/value **state** in core (`app_state` table; 200-char keys,
+  256 KB values, 2000 keys per app) so apps stop inventing SQLite.
+  Server: new `/api/v1/internal/app/*` router (snapshot, recordings,
+  plates, alerts, state), app-key scoped like the rest of the internal
+  door. `DomainEventSubscriber` / `domain_event_app` consume contracted
+  domain events (`plate.recognized.v1`, …) with the same isolation as
+  `AlertSubscriber`; the shared NATS loop subscribes to several
+  subjects. `websockets` becomes an SDK dependency. `docs/APP_PLATFORM.md`.
+- **Apps know who is asking.** Core now attaches `X-OpenNVR-User` — a
+  60-second JWT naming the operator (id, username, superuser flag, the
+  camera ids they may view and manage), signed with the SHA-256 of the
+  app's own key — to every proxied `GET /apps/{id}/ui` and
+  `POST /apps/{id}/actions/{name}`. The SDK verifies it (stdlib only)
+  and exposes `current_user()` / `self.current_user` inside `ui_html()`
+  and `on_action()`, with `can_see()` / `can_manage()` / `visible()`
+  helpers, so an app renders per user and refuses actions on cameras
+  the caller may not control without a login of its own. Absent or
+  invalid → `None`, never partial trust. `docs/APP_SURFACES.md` §5.
+- **Superusers can be created and managed through the API.**
+  `POST /users` and `PUT /users/{id}` accept `is_superuser`; creating,
+  promoting or demoting a superuser requires the caller's TOTP code in
+  `X-MFA-Code` (like delete). You cannot demote yourself, and the last
+  active superuser cannot be demoted, deactivated or deleted. Until now
+  the first-time-setup admin was the only superuser a deployment could
+  have without a database edit. The Users page gains the checkbox.
+
+- **Occupancy heatmap.** The occupancy app bins where watched entities
+  stand (foot point of every detection) into a per-camera grid and ships
+  sparse deltas as `occupancy.heatmap.v1`; core sums them per camera-hour
+  and the Occupancy page paints the last hour / today / 7 days over a
+  still of the camera. Zero extra inference — it rides the boxes the app
+  already receives. `heatmap_enabled` / `heatmap_publish_seconds` in the
+  app's config.
+- **Footfall and dwell.** Draw an entry line on a camera (catalog →
+  Configure) and the app counts entries and exits through it per tracked
+  visitor; every tracked stay inside the zone is timed. Shipped as
+  `occupancy.footfall.v1`, kept per camera-hour, and shown on the
+  Occupancy page as 24 h tiles (entered / exited / average / longest
+  stay), an hourly flow chart, and per-zone in/out, average stay and
+  "inside now". `max_dwell_seconds` raises a medium alert when one visitor
+  stays too long.
+- **Occupancy report.** A printable period report (7 / 14 / 30 days) from
+  the Occupancy page: peak occupancy and when, average occupancy, busiest
+  hour, limit exceedances, footfall by day and per camera, average and
+  longest stay — bucketed in the browser's local time. Print → PDF, like
+  the vehicle movement report.
+
+### Fixed
+
+- **Every app said "requires object_detection — not installed".** The
+  catalog, the app page and the AI Adapters page read each adapter's
+  tasks from `adapters[name].tasks_advertised`, but KAI-C nests the
+  contract under `adapters[name].capabilities` (which the server's
+  skills registry already read correctly) — so no task was ever found.
+  One shared reader (`app/src/lib/kaic.ts`) now handles the real shape,
+  and the platform's Tier-0 detect-pipeline counts as providing
+  `object_detection` when it is running (it is what Detector apps
+  consume; no adapter needed). The badge says "provided by Tier-0" /
+  "available" / "nothing provides it" accordingly.
+- **Occupancy heatmap rendered as speckle, not heat.** Every grid cell
+  with a single stray detection was painted as a visible square (an
+  alpha floor of 18% plus square-root scaling), and the only smoothing
+  was a bilinear upscale, so a day of foot points over a road scene
+  looked like blue confetti. The canvas now blurs the 48×27 grid
+  (separable 5-tap Gaussian) into a density field before colouring,
+  scales against the blurred peak, and ramps alpha from zero — isolated
+  hits fade into the still, dwell areas reinforce.
+- **Occupancy entry lines could not be saved.** The catalog editor
+  writes a tripwire as `{a, b, count_direction}`, but config validation
+  demanded a list for every `geometry.*` type, so every entry line ever
+  drawn was refused with "must be of type geometry.tripwire". Geometry
+  params are now validated for their real shape (polygon = list of
+  `[x, y]` points, any count; tripwire = `{a, b, count_direction}` or
+  null). The occupancy app also ignored the direction picked in the
+  editor (hard-coded `both`) and did not apply a direction-only change;
+  both fixed.
+- **Occupancy → Configure opens in place.** The page opened the app's
+  detail view in the catalog; it now opens the same config form as a
+  modal over the live page and refreshes the board on close, so an
+  operator draws a zone and watches the counts move.
+- **Frontend typecheck in CI.** `vite build` strips types without
+  checking them, so `DeviceFirewall` shipped a `variant="secondary"`
+  that no `Button` variant accepts (now `outline`). `npm run
+  typecheck` (`tsc --noEmit`) runs before the build in `ci.yml`.
+
+- **Test suites no longer leak swapped `core.*` modules into each
+  other.** `server/tests/conftest.py` snapshots the `core` namespace of
+  `sys.modules` per test module and restores it, so a suite that purges
+  `core.config` to re-validate `Settings` (`test_m1b`, `test_m1c`) no
+  longer leaves later modules monkeypatching a stale `settings` object
+  — the pass-alone / fail-in-suite 401s.
+- **App-images CI retries the Buildx setup once.** Docker Hub 502s while
+  pulling `moby/buildkit` failed PR runs unrelated to the change; there
+  is no non-Hub mirror to pin, so the setup step is `continue-on-error`
+  with a single retry.
+- **camera-agent `/health` no longer lists camera handles.** The open
+  health probe now reports `camera_count`; the roster stays behind the
+  authenticated `/cameras` route and the contract `/state` door the App
+  Catalog scopes per viewer.
+
+- `PUT /users/me` was unreachable for non-superusers (declared after
+  `PUT /users/{user_id}`, which captured it and demanded superuser), and
+  its "strip admin-only fields" logic wrote NULL into `is_active` /
+  `role_id` instead of dropping them — `{"is_active": false}` locked the
+  caller out of their own account.
+
+- **The occupancy app now applies its configuration.** It never overrode
+  the SDK's live-config hook, so thresholds saved on the Occupancy page
+  ("applied live"), watch labels, and every zone drawn in the catalog were
+  ignored until a restart — and drawn zones were never read even then.
+  All of them apply live now; erasing a drawn zone returns the camera to
+  the whole frame. The page also shows why a board is empty (which labels
+  are watched; whether core can reach the app) instead of a blank grid.
+- **Occupancy alert storm.** A zone hovering at its limit flipped
+  over/normal on almost every frame, and with the return-to-normal silent
+  each upward flip fired a fresh HIGH alert — one every second or two. The
+  app now holds a per-zone `alert_cooldown_seconds` (default 120) between
+  repeats of the same over/under alert, and the shipped config debounces
+  a new band over 3 frames instead of 1. The live level on the page still
+  tracks every flip.
+- **Plate reads are written by agreement, not by whoever read first.**
+  The early track-confirm read (taken when the car is smallest) used to be
+  final, and on blurry footage it put a hallucination into the register at
+  "conf=1.00" — per-character probabilities saturate on motion blur, so
+  the confidence floor filtered nothing. Core now OCRs every look at the
+  car (the early read plus the candidate crops) and writes a plate only
+  when `OPENNVR_PLATE_MIN_AGREEING_READS` (default 2) looks agree within
+  one character; a consensus outranks any single read, an earlier
+  consensus is never overwritten, and a visit that only ever had one look
+  still writes it, marked "single-frame read" in the Vehicles dialog.
+- **Every plate keeps the frame it was read from.** KAI-C republishes each
+  accepted read core's own sweep makes as `plate.recognized.v1`, and the
+  bus consumer — which holds no image bytes — won the write race, leaving
+  rows with a number but no plate crop and no read frame ("no full frame
+  stored for this read"). The consumer now defers to a sweep that owns the
+  row, and a sweep that finds the same plate already written attaches the
+  crop and frame instead of dropping them.
+- **No more photos of the wrong car.** A plated row without its read
+  frame no longer shows the visit's vehicle-best frame as if it were the
+  read — on a merged track that frame is the NEXT car. The row thumbnail
+  is a neutral tile and the dialog says the read frame was not stored,
+  offering the vehicle photo only on request and labelled.
+- **Junk reads never reach the bus.** Clipped fragments (`K884` of
+  `K884RS`), weak localisations (a badge), and reads where the localiser
+  found no plate at all were published and then filtered by one consumer
+  while the LPR app alerted "Unknown vehicle K884" on them. KAI-C now
+  applies those gates before publishing, and core rejects
+  not-localised reads (`OPENNVR_PLATE_REQUIRE_LOCALISATION`).
+- **Fuzzy duplicate-sighting dedup.** Plates within
+  `OPENNVR_PLATE_DEDUP_DISTANCE` (default 1) of a plate seen inside the
+  window on the same camera are the same car read slightly differently,
+  not a new vehicle.
+
+### Changed
+
+- The fast-plate-ocr adapter overlay now takes `OPENNVR_LPR_MODEL`
+  (default `cct-s-v2-global-model`), `OPENNVR_LPR_MIN_PLATE_PX`
+  (default 80 — a narrower plate is a guess, not a read) and
+  `OPENNVR_LPR_MIN_CONFIDENCE` from `.env`.
+
 ## [0.1.4] — 2026-08-26
 
 The Tier-0 detect pipeline gets a CPU budget it actually respects, the
@@ -511,7 +4944,7 @@ test suite designed to be read in five minutes.
   adapter authors.
 - [`docs/SECURITY_ARCHITECTURE.md`](docs/SECURITY_ARCHITECTURE.md) — threat
   model, control mapping, and the academic paper that informs the architecture
-  ([Zenodo DOI 10.5281/zenodo.17261761](https://doi.org/10.5281/zenodo.17261761)).
+  ([Zenodo DOI 10.5281/zenodo.22804254](https://doi.org/10.5281/zenodo.22804254)).
 - [`docs/COMPLIANCE.md`](docs/COMPLIANCE.md) — paper §3 → §4 → code mapping
   plus framework alignment table (CISA Secure-by-Design, NIST CSF 2.0,
   NIST AI RMF, ISO/IEC 27001, ETSI EN 303 645, GDPR, India's DPDP Act).
@@ -1902,7 +6335,10 @@ address in the README.
 
 ---
 
-[Unreleased]: https://github.com/open-nvr/open-nvr/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/open-nvr/open-nvr/compare/v0.1.11...HEAD
+[0.1.11]: https://github.com/open-nvr/open-nvr/compare/v0.1.10...v0.1.11
+[0.1.10]: https://github.com/open-nvr/open-nvr/compare/v0.1.9...v0.1.10
+[0.1.9]: https://github.com/open-nvr/open-nvr/compare/v0.1.8...v0.1.9
 [0.1.4]: https://github.com/open-nvr/open-nvr/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/open-nvr/open-nvr/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/open-nvr/open-nvr/compare/v0.1.1...v0.1.2

@@ -18,13 +18,31 @@ nats_url: "nats://nats:4222"
 # The standard stack runs NATS with ``--auth INTERNAL_API_KEY``.
 nats_token: "${INTERNAL_API_KEY}"
 
-subject_pattern: "opennvr.inference.>"
+# Tier-0 publishes tracked detections (a stable track_id per object) on
+# opennvr.inference.tier0.> — one detector, every app subscribes. Dwell
+# is measured per tracked object, so this is the stream to consume.
+subject_pattern: "opennvr.inference.tier0.>"
+consume_tier0: true
 
-# ── Detection filter / thresholds — EDIT for your scene ────────────
+# ── Rule — every value below is also editable live in the App Catalog ──
 watch_labels:
   - "person"
-threshold_seconds: 60
-grace_period_seconds: 5
+threshold_seconds: 60          # dwell that counts as loitering
+escalate_after_seconds: 0      # >0: second, higher-severity alert if still there
+alert_severity: "medium"
+active_hours:                  # empty = alerts always; else HH:MM window
+  start: ""
+  end: ""
+after_hours_threshold_seconds: 0   # outside active_hours: 0 = quiet, >0 = alert after this
+group_size: 0                  # >0: 'gathering' alert when this many dwell together
+group_seconds: 30
+alert_cooldown_seconds: 0
+grace_period_seconds: 5        # detection gap absorbed inside one stay
+min_bbox_height: 0             # ignore boxes shorter than this fraction of the frame
+daily_reset_hour: 0
+attach_snapshot: true
+publish_dwell: true            # finished stays → footfall dwell history (7-day chart)
+dwell_period_seconds: 60
 
 # ── Alert delivery ─────────────────────────────────────────────────
 # Alerts always go to stdout (``docker compose logs loitering-detection``).
@@ -34,17 +52,14 @@ webhook_url: null
 nats_alerts_url: "nats://nats:4222"
 nats_alerts_token: "${INTERNAL_API_KEY}"
 
-# ── Cameras — EDIT: camera_id must match KAI-C's event subjects ────
-cameras:
-  - camera_id: "cam-1"
-    frame_width: 1920
-    frame_height: 1080
-    zone_name: "full-frame"
-    zone:
-      - [0, 0]
-      - [1920, 0]
-      - [1920, 1080]
-      - [0, 1080]
+# ── Cameras ──────────────────────────────────────────────────────
+# None listed here, on purpose. Select the cameras this app works on in
+# the App Catalog → Configure → Cameras; Zones are drawn there too. Frames come
+# from OpenNVR itself, so there is no camera URL to copy, and nothing
+# selected means the app does nothing and uses no compute.
+#
+# (A `cameras:` list still works when running this app standalone,
+# without opennvr_url — see config.example.yml.)
 
 # ── App contract (spec §03) — powers the App Catalog ───────────────
 # The SDK serves /health /manifest /state on contract_port and

@@ -83,9 +83,12 @@ def test_build_command_rejects_non_rtsp_url():
         build_decode_command("http://x/y", width=640, height=360, fps=5)
 
 
-def test_scale_rejects_nonpositive_fps():
+def test_scale_rejects_negative_fps_and_zero_means_no_rate_filter():
     with pytest.raises(ValueError):
-        scale_filter(HwAccel.CPU, width=640, height=360, fps=0)
+        scale_filter(HwAccel.CPU, width=640, height=360, fps=-1)
+    # 0 is a deliberate "every frame at its own time" (keyframe-only
+    # evidence), not a mistake — see test_fps_zero_leaves_the_rate_filter_out.
+    assert "fps=" not in scale_filter(HwAccel.CPU, width=640, height=360, fps=0)
 
 
 # ── decode-side frame skip (DETECT_DECODE_SKIP) ────────────────────────
@@ -310,3 +313,67 @@ def test_decode_command_carries_hwaccel_args_when_resolved():
     assert "-hwaccel" in cmd and cmd[cmd.index("-hwaccel") + 1] == "vaapi"
     assert "/dev/dri/renderD128" in cmd
     assert "scale_vaapi" in cmd[cmd.index("-vf") + 1]
+
+
+def test_fps_zero_leaves_the_rate_filter_out_on_every_backend():
+    """Keyframe-only evidence needs frames at their own time: an ``fps``
+    stage would fill the rate with duplicates of each keyframe."""
+    import pytest
+
+    from detect_pipeline.ffmpeg_presets import HwAccel, build_decode_command, scale_filter
+    for accel in HwAccel:
+        vf = scale_filter(accel, width=640, height=360, fps=0)
+        assert "fps=" not in vf, (accel, vf)
+        assert not vf.startswith(",") and ",," not in vf and not vf.endswith(","), (accel, vf)
+    assert scale_filter(HwAccel.CPU, width=640, height=360, fps=0) == "scale=640:360,format=yuv420p"
+    argv = build_decode_command("rtsp://m/cam-1", width=1920, height=1080, fps=0,
+                                decode_skip="nokey")
+    assert "nokey" in argv and "fps=" not in argv[argv.index("-vf") + 1]
+    # The muxer must not pad the rate back either (an OUTPUT option: after
+    # -i, before the format).
+    i = argv.index("-fps_mode")
+    assert argv[i + 1] == "passthrough"
+    assert argv.index("-i") < i < argv.index("-f")
+    with pytest.raises(ValueError):
+        scale_filter(HwAccel.CPU, width=640, height=360, fps=-1)
+
+
+def test_fps_filter_path_leaves_video_sync_alone():
+    """With an ``fps=N`` stage the filter already emits a constant rate;
+    passthrough there would change nothing, so it is not emitted."""
+    from detect_pipeline.ffmpeg_presets import build_decode_command
+    argv = build_decode_command("rtsp://m/cam-1", width=640, height=360, fps=5,
+                                decode_skip="nokey")
+    assert "-fps_mode" not in argv
+
+
+@pytest.mark.skipif(_shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
+def test_real_ffmpeg_keyframe_only_emits_one_frame_per_keyframe(tmp_path):
+    """Keyframe-only decode with the rate filter out must yield ONE raw
+    frame per keyframe. Without ``-fps_mode passthrough`` the rawvideo
+    muxer (no timestamps → CFR sync) pads the output back to the nominal
+    rate with copies of each keyframe: 59 frames for a 2 s / 30 fps clip
+    with 4 keyframes, which is what the field pipeline was reading at
+    ~100 fps from a 1 keyframe/s camera."""
+    from detect_pipeline.ffmpeg_presets import build_decode_command, frame_size_bytes
+
+    clip = tmp_path / "gop.avi"
+    enc = _subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+         "-f", "lavfi", "-i", "testsrc=duration=2:size=64x64:rate=30",
+         "-c:v", "mpeg4", "-g", "15", "-pix_fmt", "yuv420p", str(clip)],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert enc.returncode == 0, enc.stderr
+
+    argv = build_decode_command("rtsp://m/cam-1", width=64, height=64, fps=0,
+                                decode_skip="nokey", rtsp_timeout_s=0)
+    # Same argv with the RTSP input swapped for the file; ``-rtsp_transport``
+    # is an rtsp-demuxer option the file demuxer rejects, so it goes.
+    i = argv.index("-rtsp_transport")
+    del argv[i:i + 2]
+    argv[argv.index("-i") + 1] = str(clip)
+    proc = _subprocess.run(argv, capture_output=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr.decode()
+    frames = len(proc.stdout) // frame_size_bytes(64, 64)
+    assert frames == 4, f"expected one frame per keyframe (4), got {frames}"

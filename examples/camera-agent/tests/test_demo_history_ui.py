@@ -148,7 +148,7 @@ def test_health_carries_vision_error_and_history_flag():
 
 # ── demo page: the new UI surfaces exist and are wired safely ───────────
 
-_HTML = (Path(__file__).resolve().parents[1] / "demo" / "index.html").read_text()
+_HTML = (Path(__file__).resolve().parents[1] / "demo" / "index.html").read_text(encoding="utf-8")
 
 
 def test_demo_has_history_card_and_filters():

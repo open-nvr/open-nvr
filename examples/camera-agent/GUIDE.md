@@ -286,6 +286,71 @@ healthy?", "any alerts from the loitering detector?". Strictly
 **read-only** — the agent reports on apps; enabling, disabling, or
 configuring one stays in the OpenNVR App Catalog UI.
 
+## The agent about itself, and the system
+
+Three read-only tools that need no model decision (the router answers
+them directly) and that every access tier may use:
+
+* **What is set up** — "What alarms do I have?", "Which reports are
+  scheduled?", "What are you watching for?" read back the armed alarms,
+  the standing watches and the scheduled reports with their numbers,
+  cameras and windows (`list_standing`). Before this, the words matched
+  a standing *request* and the agent armed another alarm.
+* **Is the system okay** — "Is everything okay?", "Is any camera
+  offline?", "Is the gate recording?", "How much disk space is left?"
+  read core's own view of each camera (online or not, and whether it is
+  actually writing segments: recording, stalled, never recorded, turned
+  off) and the recording disk against its purge floor (`system_status`;
+  needs `opennvr_api_url`, like the apps door). The cameras are named
+  by their roles. For what a camera *sees*, ask about the scene as usual.
+* **Show a camera** — "Show me the gate", "open the front door camera",
+  "switch to the yard" put that camera's live view on the demo page
+  (`show_camera`). It only changes the view; "show me what's happening
+  at the gate" is still a look.
+
+## The agent in the App Catalog
+
+On boot the agent registers itself with the App Catalog the way every
+SDK app does (`POST /api/v1/apps/register`), so it appears under
+**Installed** with a status chip, a skill entry and an **Open app**
+button. Two URLs are involved, and they are different things:
+
+* **Contract URL** (`agent_contract_url`) — where *core* reaches the
+  agent on the compose network to probe `/health` and `/state` ("Check"
+  in the catalog). It must be the compose service name,
+  `https://camera-agent:9100`, which other containers can resolve and
+  which is in the agent's TLS certificate SAN. Left unset, the agent
+  would register its own hostname — under compose the bare container
+  id, which neither resolves nor matches the certificate, and the
+  catalog would show it "unreachable" while it works fine in a browser.
+  Because the agent terminates TLS itself with a self-signed
+  certificate, the compose overlay also mounts `agent-certs/camera-agent`
+  read-only into core under `/etc/opennvr/app-certs/` so core can verify
+  it (`server/services/app_tls.py`; hostname still has to match).
+* **Public URL** (`agent_public_url`, optional) — where the *operator's
+  browser* reaches the agent: deep links in notifications and the
+  catalog's **Open app** button (`manifest.ui_url`). Unset, the button
+  uses the hostname you are browsing OpenNVR from on port 9100 — which
+  is how the overlay publishes it.
+
+The agent is a full application, not a sandboxed `/ui` dashboard, so its
+manifest declares `ui_mode: external`; the catalog links out instead of
+embedding. It is not listed under the sidebar's **Applications** group —
+that group holds the first-class pages (Vehicles, Occupancy) an app
+*provides*; the agent's page is its own.
+
+## Muting an app in the agent
+
+Installed catalog apps show in the skills rail next to the agent's own
+skills. ✕ on one **mutes it in the agent only**: its alerts are no
+longer relayed into the feed or spoken, it drops out of `list_apps`, and
+`app_status` / `recent_app_alerts` answer "muted in this agent". The app
+itself keeps running for the rest of OpenNVR — its own page, the inbox,
+other consumers. Add it back from **+** at any time; the mute is
+persisted like every other toggle and cleared by **Restore defaults**.
+The ⚙ next to it opens the app in the App Catalog, which remains the
+place to enable, disable or uninstall the app for real.
+
 ## Faces
 
 Off by default — it needs the InsightFace recognition adapter, which
@@ -342,6 +407,8 @@ Say it and it works, no configuration:
 * "Watch the driveway and tell me if more than 3 cars show up." (watch)
 * "Is the occupancy counter healthy?" · "Any occupancy alerts this
   morning?" (apps)
+* "What alarms do I have?" · "Is everything okay?" · "Is the gate
+  recording?" · "Show me the gate." (the agent about itself, the system)
 
 One config line away: background tasks, reports. One adapter away:
 faces, and the Fire / Smoke / Gas-leak alarm presets.

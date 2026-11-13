@@ -11,6 +11,7 @@ stub the pipeline.
 from __future__ import annotations
 
 import base64
+import dataclasses
 from pathlib import Path
 from typing import Iterable
 from unittest.mock import MagicMock
@@ -36,6 +37,9 @@ def _app_config(**overrides) -> AppConfig:
         cameras=[CameraConfig(camera_id="front-door", frame_url="http://example.invalid/snap.jpg")],
         poll_interval_seconds=0.0,
         request_timeout_seconds=1.0,
+        # These tests are about what a verdict DOES, not when it is
+        # reached: decide on the first frame. The hold has its own tests.
+        decision_hold_seconds=0.0,
     )
     for k, v in overrides.items():
         setattr(base, k, v)
@@ -134,13 +138,55 @@ def test_known_family_fires_low_severity():
     assert "Alice Smith" in alert.title
 
 
+def test_alerts_carry_the_manifest_alert_type():
+    """The inbox and the harness key on alert_type; every doorbell alert
+    names its kind from the manifest's emits."""
+    for category, kind in (("family", "known_visitor"), ("watchlist", "watchlist_visitor")):
+        doorbell, _pipeline, dispatcher = _build_doorbell([_known_read(category=category)])
+        doorbell.step()
+        alert = dispatcher.dispatch.call_args.args[0]
+        assert alert.alert_type == kind and alert.evidence["kind"] == kind
+
+
 def test_known_non_family_fires_info_severity():
-    """A registered face under e.g. category=friend isn't a family
-    member — info level."""
-    doorbell, _pipeline, dispatcher = _build_doorbell([_known_read(category="friend")])
+    """A registered face under a workplace category (staff, contractor,
+    visitor) is a notice, not a greeting — info level."""
+    doorbell, _pipeline, dispatcher = _build_doorbell([_known_read(category="staff")])
     doorbell.step()
     alert = dispatcher.dispatch.call_args.args[0]
     assert alert.severity == "info"
+    assert alert.evidence["kind"] == "known_visitor"
+
+
+def test_watchlist_match_alarms_high():
+    """The one recognised face that must alarm louder than a stranger."""
+    doorbell, _pipeline, dispatcher = _build_doorbell([_known_read(category="watchlist")])
+    doorbell.step()
+    alert = dispatcher.dispatch.call_args.args[0]
+    assert alert.severity == "high"
+    assert alert.evidence["kind"] == "watchlist_visitor"
+    assert "Watchlist" in alert.title
+
+
+def test_expired_pass_alarms_high_and_names_the_date():
+    read = _known_read(category="contractor")
+    read = dataclasses.replace(read, raw={"metadata": {"valid_until": "2020-01-31"}})
+    doorbell, _pipeline, dispatcher = _build_doorbell([read])
+    doorbell.step()
+    alert = dispatcher.dispatch.call_args.args[0]
+    assert alert.severity == "high"
+    assert alert.evidence["kind"] == "expired_pass"
+    assert "2020-01-31" in alert.description
+
+
+def test_unexpired_pass_is_a_normal_known_visitor():
+    read = _known_read(category="contractor")
+    read = dataclasses.replace(read, raw={"metadata": {"valid_until": "2999-12-31"}})
+    doorbell, _pipeline, dispatcher = _build_doorbell([read])
+    doorbell.step()
+    alert = dispatcher.dispatch.call_args.args[0]
+    assert alert.severity == "info"
+    assert alert.evidence["kind"] == "known_visitor"
 
 
 def test_unknown_face_fires_high_severity():
@@ -313,7 +359,7 @@ def _doorbell_with_faces_stub(monkeypatch, *, calls):
             calls.append(("delete", person_id))
             return {"deleted": person_id}
 
-    monkeypatch.setattr(doorbell, "_face_admin", lambda: _FakeAdmin())
+    monkeypatch.setattr(doorbell, "_face_admin", lambda **kw: _FakeAdmin())
     return doorbell
 
 
@@ -327,11 +373,43 @@ def test_enroll_face_decodes_image_and_registers(monkeypatch):
     out = doorbell.on_action("enroll_face", {"name": "Alex Rivera", "image": img})
 
     assert out["enrolled"]["person_id"] == "alex-rivera"       # slug of the name
-    assert out["enrolled"]["category"] == "known"              # default
+    assert out["enrolled"]["category"] == "family"             # default
     (verb, kw) = calls[0]
     assert verb == "register"
     assert kw["name"] == "Alex Rivera"
     assert kw["image_bytes"] == b"\xff\xd8realish-jpeg-bytes"  # decoded
+
+
+def test_enroll_turns_an_adapter_refusal_into_a_readable_error(monkeypatch):
+    """A crop the adapter finds no face in (a side view off the strangers
+    wall) is the operator's to fix: a 400 with the adapter's reason, not
+    an 'internal error' 500."""
+    import base64 as _b64
+
+    import httpx
+
+    doorbell, _p, _d = _build_doorbell([])
+
+    class _RefusingAdmin:
+        def register(self, **kw):
+            req = httpx.Request("POST", "http://adapter/faces/register")
+            resp = httpx.Response(422, json={"detail": "no face detected in the supplied image"}, request=req)
+            raise httpx.HTTPStatusError("422", request=req, response=resp)
+
+    monkeypatch.setattr(doorbell, "_face_admin", lambda **kw: _RefusingAdmin())
+    img = _b64.b64encode(b"\xff\xd8side-view").decode()
+    with pytest.raises(ValueError) as ei:
+        doorbell.on_action("enroll_face", {"name": "Side View", "image": img})
+    assert "no face detected" in str(ei.value)
+
+    class _BrokenAdmin:
+        def register(self, **kw):
+            req = httpx.Request("POST", "http://adapter/faces/register")
+            raise httpx.HTTPStatusError("500", request=req, response=httpx.Response(500, request=req))
+
+    monkeypatch.setattr(doorbell, "_face_admin", lambda **kw: _BrokenAdmin())
+    with pytest.raises(httpx.HTTPStatusError):            # the adapter's fault stays a 500
+        doorbell.on_action("enroll_face", {"name": "Side View", "image": img})
 
 
 def test_enroll_face_strips_data_url_prefix(monkeypatch):
@@ -384,3 +462,726 @@ def test_unknown_action_raises_keyerror(monkeypatch):
     doorbell = _doorbell_with_faces_stub(monkeypatch, calls=[])
     with _pytest.raises(KeyError):
         doorbell.on_action("nope", {})
+
+
+# ── Dashboard surfaces: /state views, /ui, live config ─────────────
+
+
+def _real_jpeg(w: int = 640, h: int = 480) -> bytes:
+    from PIL import Image
+    import io
+    buf = io.BytesIO()
+    Image.new("RGB", (w, h), (120, 60, 30)).save(buf, "JPEG", quality=90)
+    return buf.getvalue()
+
+
+def test_state_carries_the_views_the_manifest_declares(monkeypatch):
+    """Every state_schema path resolves in state_snapshot — a declared view
+    whose path is missing renders as an em-dash forever and nobody notices."""
+    doorbell, _, _ = _build_doorbell([_known_read(), _unknown_read()])
+    monkeypatch.setattr(doorbell, "_face_admin",
+                        lambda **kw: MagicMock(list_faces=lambda: {"faces": [{}, {}, {}]}))
+    advance = _ticking(doorbell)
+    # Two VISITS: a miss a second after Alice would be Alice turning her
+    # head, so the stranger comes after the visit gap.
+    doorbell.step(); advance(30); doorbell.step()
+    state = doorbell.state_snapshot()
+    from smart_doorbell import MANIFEST
+    for view in MANIFEST.state_schema:
+        node = state
+        for part in view.path.split("."):
+            assert part in node, f"view {view.name!r}: path {view.path!r} missing from /state"
+            node = node[part]
+    assert state["enrolled_faces"] == 3
+    assert state["visits"] == {"known": 1, "unknown": 1, "uncertain": 0}
+    assert [r["camera_id"] for r in state["camera_health"]] == ["front-door"]
+    assert state["camera_health"][0]["status"] == "ok"
+    assert state["recent"][-1]["camera"] == "front-door"
+    assert state["recent"][0]["name"] == "Alice Smith"
+    assert state["recent"][0]["category"] == "family"
+
+
+def test_stranger_gallery_holds_a_thumbnail_not_the_frame():
+    """A 640x480 frame becomes a ~190px data: URI; /state is polled every
+    few seconds, so the wall must stay cheap."""
+    doorbell, _, _ = _build_doorbell([_unknown_read()])
+    frame = _real_jpeg()
+
+    class _Src:
+        def fetch(self) -> bytes:
+            return frame
+    doorbell._frame_sources["front-door"] = _Src()
+    doorbell.step()
+    gallery = doorbell.state_snapshot()["stranger_gallery"]
+    assert len(gallery) == 1
+    uri = gallery[0]["image"]
+    assert uri.startswith("data:image/jpeg;base64,")
+    assert len(uri) < len(frame)  # shrunk, not merely re-encoded
+    assert gallery[0]["label"] == "front-door"
+
+
+def test_known_visitor_never_lands_on_the_stranger_wall():
+    doorbell, _, _ = _build_doorbell([_known_read()])
+    doorbell.step()
+    assert doorbell.state_snapshot()["stranger_gallery"] == []
+
+
+def test_enrolled_count_is_cached_and_survives_an_unreachable_adapter(monkeypatch):
+    doorbell, _, _ = _build_doorbell([])
+    calls = []
+
+    def _admin(**kw):
+        calls.append(1)
+        raise ConnectionError("adapter down")
+    monkeypatch.setattr(doorbell, "_face_admin", _admin)
+    assert doorbell.state_snapshot()["enrolled_faces"] is None
+    assert doorbell.state_snapshot()["enrolled_faces"] is None
+    assert len(calls) == 1, "a failed lookup must not be retried on every poll"
+
+
+def test_camera_health_reports_a_dead_camera():
+    doorbell, _, _ = _build_doorbell([])
+
+    class _Dead:
+        def fetch(self) -> bytes:
+            raise RuntimeError("connection refused")
+    doorbell._frame_sources["front-door"] = _Dead()
+    doorbell.step()
+    row = doorbell.state_snapshot()["camera_health"][0]
+    assert row["status"] == "error"
+    assert "connection refused" in row["error"]
+
+
+def test_ui_html_is_static_and_escapes_operator_data(monkeypatch):
+    doorbell, _, _ = _build_doorbell([_known_read(name="<b>Mallory</b>")])
+    monkeypatch.setattr(doorbell, "_face_admin",
+                        lambda **kw: MagicMock(list_faces=lambda: {"faces": []}))
+    doorbell.step()
+    page = doorbell.ui_html()
+    assert "<script" not in page.lower()
+    assert "&lt;b&gt;Mallory&lt;/b&gt;" in page
+    assert "<b>Mallory</b>" not in page
+    assert "front-door" in page
+
+
+def test_config_form_edits_apply_live():
+    from face_recognition_pipeline import FaceRecognitionPipelineConfig
+    doorbell, pipeline, _ = _build_doorbell([])
+    pipeline.config = FaceRecognitionPipelineConfig(recognition_threshold=0.5)
+    doorbell.on_config_update({"recognition_threshold": 0.8, "dedup_window_seconds": 5})
+    assert pipeline.config.recognition_threshold == 0.8
+    assert doorbell.config.recognition_threshold == 0.8
+    assert doorbell.config.dedup_window_seconds == 5.0
+    # Idempotent: re-delivering the same values changes nothing.
+    doorbell.on_config_update({"recognition_threshold": 0.8})
+    assert pipeline.config.recognition_threshold == 0.8
+
+
+def test_enroll_rejects_a_category_outside_the_vocabulary(monkeypatch):
+    import base64 as _b64
+    doorbell = _doorbell_with_faces_stub(monkeypatch, calls=[])
+    img = _b64.b64encode(b"\xff\xd8jpeg").decode()
+    with pytest.raises(ValueError, match="category"):
+        doorbell.on_action("enroll_face", {"name": "A", "image": img, "category": "boss"})
+    with pytest.raises(ValueError, match="YYYY-MM-DD"):
+        doorbell.on_action("enroll_face", {"name": "A", "image": img, "valid_until": "31/12/2026"})
+
+
+def test_enroll_stores_notes_expiry_and_a_thumbnail_in_metadata(monkeypatch):
+    import base64 as _b64
+    calls: list = []
+    doorbell = _doorbell_with_faces_stub(monkeypatch, calls=calls)
+    img = _b64.b64encode(_real_jpeg(320, 320)).decode()
+    out = doorbell.on_action("enroll_face", {
+        "name": "Priya Nair", "image": img, "category": "contractor",
+        "notes": "Lift maintenance, Otis", "valid_until": "2026-12-31",
+    })
+    verb, kw = calls[0]
+    assert verb == "register"
+    assert kw["category"] == "contractor"
+    assert kw["metadata"]["notes"] == "Lift maintenance, Otis"
+    assert kw["metadata"]["valid_until"] == "2026-12-31"
+    assert kw["metadata"]["thumbnail"].startswith("data:image/jpeg;base64,")
+    assert out["enrolled"]["valid_until"] == "2026-12-31"
+
+
+def test_enroll_from_the_strangers_wall_uses_the_door_crop(monkeypatch):
+    calls: list = []
+    doorbell, _, _ = _build_doorbell([_unknown_read()])
+    frame = _real_jpeg()
+
+    class _Src:
+        def fetch(self) -> bytes:
+            return frame
+    doorbell._frame_sources["front-door"] = _Src()
+    doorbell.step()
+    sid = doorbell.state_snapshot()["stranger_gallery"][0]["id"]
+
+    class _FakeAdmin:
+        def register(self, **kw):
+            calls.append(kw); return {"ok": True}
+    monkeypatch.setattr(doorbell, "_face_admin", lambda **kw: _FakeAdmin())
+
+    img = doorbell.on_action("stranger_image", {"stranger_id": sid})
+    assert img["mime"] == "image/jpeg" and len(img["image"]) > 100
+
+    out = doorbell.on_action("enroll_stranger", {"stranger_id": sid, "name": "Courier Dev", "category": "visitor"})
+    assert out["enrolled"]["person_id"] == "courier-dev"
+    assert calls[0]["image_bytes"]  # the crop, not the operator's upload
+    assert len(calls[0]["image_bytes"]) < len(frame)
+
+    with pytest.raises(KeyError):
+        doorbell.on_action("enroll_stranger", {"stranger_id": "nope", "name": "X"})
+
+
+def test_list_faces_merges_metadata_and_last_seen(monkeypatch):
+    doorbell, _, _ = _build_doorbell([_known_read(person_id="sam-lee")])
+    doorbell.step()
+
+    class _FakeAdmin:
+        def list_faces(self, category=None):
+            return {"faces": [{"person_id": "sam-lee", "name": "Sam Lee", "category": "family",
+                               "metadata": {"notes": "Flat 4B", "valid_until": "2020-01-01"}}]}
+    monkeypatch.setattr(doorbell, "_face_admin", lambda **kw: _FakeAdmin())
+    out = doorbell.on_action("list_faces", {})
+    row = out["results"][0]
+    assert row["notes"] == "Flat 4B"
+    assert row["expired"] is True
+    assert row["last_seen"] is not None
+    assert "watchlist" in out["categories"]
+
+
+def test_update_face_sends_only_the_changed_fields(monkeypatch):
+    calls: list = []
+    doorbell, _, _ = _build_doorbell([])
+
+    class _FakeAdmin:
+        def update(self, person_id, **changes):
+            calls.append((person_id, changes)); return {"ok": True}
+    monkeypatch.setattr(doorbell, "_face_admin", lambda **kw: _FakeAdmin())
+    doorbell.on_action("update_face", {"person_id": "sam-lee", "category": "staff", "notes": "Night shift"})
+    pid, changes = calls[0]
+    assert pid == "sam-lee"
+    assert changes == {"category": "staff", "metadata": {"notes": "Night shift"}}
+    with pytest.raises(ValueError, match="nothing to change"):
+        doorbell.on_action("update_face", {"person_id": "sam-lee"})
+
+
+def test_expiry_is_looked_up_from_the_directory_when_the_match_lacks_it(monkeypatch):
+    """The adapter's recognition reply has no metadata; the app must still
+    know a contractor's pass ran out."""
+    doorbell, _pipeline, dispatcher = _build_doorbell([_known_read(person_id="otis-1", category="contractor")])
+
+    class _FakeAdmin:
+        def list_faces(self, category=None):
+            return {"faces": [{"person_id": "otis-1", "name": "Otis", "category": "contractor",
+                               "metadata": {"valid_until": "2020-01-31"}}]}
+    monkeypatch.setattr(doorbell, "_face_admin", lambda **kw: _FakeAdmin())
+    doorbell.step()
+    alert = dispatcher.dispatch.call_args.args[0]
+    assert alert.evidence["kind"] == "expired_pass"
+
+
+def test_directory_refresh_uses_a_short_timeout_not_the_enrolment_budget(monkeypatch):
+    """/state and the run loop both refresh the directory; a silent
+    adapter must cost them seconds, not the 30 s a photo upload may take."""
+    doorbell, _, _ = _build_doorbell([])
+    seen: list = []
+    real = doorbell._face_admin
+
+    def spy(*, timeout_seconds=None):
+        seen.append(timeout_seconds)
+        return real(timeout_seconds=timeout_seconds)
+    monkeypatch.setattr(doorbell, "_face_admin", spy)
+    monkeypatch.setattr("smart_doorbell._FaceAdminClient.list_faces", lambda self: {"faces": []})
+    doorbell.state_snapshot()
+    assert seen == [doorbell._DIRECTORY_TIMEOUT_S]
+    assert doorbell._DIRECTORY_TIMEOUT_S < doorbell.config.request_timeout_seconds or doorbell.config.request_timeout_seconds <= 3
+
+
+def test_stranger_thumbnail_is_the_face_not_the_porch():
+    """The wall tile is built from the face crop, so a wide porch camera
+    still shows a face at 120 px."""
+    doorbell, _, _ = _build_doorbell([_unknown_read()])
+    frame = _real_jpeg(1280, 720)
+
+    class _Src:
+        def fetch(self) -> bytes:
+            return frame
+    doorbell._frame_sources["front-door"] = _Src()
+    doorbell.step()
+    from PIL import Image
+    import base64 as _b64, io as _io
+    tile = doorbell.state_snapshot()["stranger_gallery"][0]["image"].split(",", 1)[1]
+    with Image.open(_io.BytesIO(_b64.b64decode(tile))) as im:
+        w, h = im.size
+    # _unknown_read's bbox is 140x160 with half-face margins → roughly square,
+    # nothing like the 16:9 frame.
+    assert 0.7 < w / h < 1.4
+
+
+# ── Multi-photo enrolment ───────────────────────────────────────────
+
+
+def test_append_adds_a_photo_to_an_existing_person_without_touching_their_details(monkeypatch):
+    import base64 as _b64
+    calls: list = []
+    doorbell = _doorbell_with_faces_stub(monkeypatch, calls=calls)
+    img = _b64.b64encode(_real_jpeg(320, 320)).decode()
+    out = doorbell.on_action("enroll_face", {"person_id": "alice-rivera", "image": img, "append": True})
+    verb, kw = calls[0]
+    assert kw["append"] is True and kw["person_id"] == "alice-rivera"
+    assert kw["name"] == "" and kw["category"] == ""          # unchanged on the adapter side
+    assert kw["metadata"] == {}                                 # no blank notes, no new avatar
+    assert out["enrolled"]["appended"] is True
+    # Notes given on an append DO update; a bad date is still refused.
+    doorbell.on_action("enroll_face", {"person_id": "alice-rivera", "image": img, "append": True, "notes": "Flat 4B"})
+    assert calls[1][1]["metadata"] == {"notes": "Flat 4B"}
+    with pytest.raises(ValueError, match="person_id"):
+        doorbell.on_action("enroll_face", {"image": img, "append": True})
+
+
+def test_stranger_assigned_to_a_person_becomes_their_sample_and_leaves_the_wall(monkeypatch):
+    calls: list = []
+    doorbell, _, _ = _build_doorbell([_unknown_read(), _unknown_read()])
+    frame = _real_jpeg()
+
+    class _Src:
+        def fetch(self) -> bytes:
+            return frame
+    doorbell._frame_sources["front-door"] = _Src()
+    doorbell.config.dedup_window_seconds = 0
+    doorbell.step(); doorbell.step()
+    wall = doorbell.state_snapshot()["stranger_gallery"]
+    assert len(wall) == 2
+    sid = wall[0]["id"]
+
+    class _FakeAdmin:
+        def register(self, **kw):
+            calls.append(kw); return {"ok": True, "face": {"name": "Alice Rivera", "category": "family", "samples": 3, "metadata": {}}}
+    monkeypatch.setattr(doorbell, "_face_admin", lambda **kw: _FakeAdmin())
+
+    out = doorbell.on_action("enroll_stranger", {"stranger_id": sid, "person_id": "alice-rivera"})
+    assert calls[0]["append"] is True and calls[0]["person_id"] == "alice-rivera"
+    assert out["enrolled"]["name"] == "Alice Rivera" and out["enrolled"]["samples"] == 3
+    remaining = doorbell.state_snapshot()["stranger_gallery"]
+    assert [g["id"] for g in remaining] == [wall[1]["id"]]       # the assigned capture is gone
+    with pytest.raises(KeyError):
+        doorbell.on_action("stranger_image", {"stranger_id": sid})
+
+
+def test_list_faces_reports_sample_counts(monkeypatch):
+    doorbell, _, _ = _build_doorbell([])
+
+    class _FakeAdmin:
+        def list_faces(self, category=None):
+            return {"faces": [{"person_id": "a", "name": "A", "category": "family", "samples": 4},
+                              {"person_id": "b", "name": "B", "category": "staff"}]}   # older adapter
+    monkeypatch.setattr(doorbell, "_face_admin", lambda **kw: _FakeAdmin())
+    rows = doorbell.on_action("list_faces", {})["results"]
+    assert [r["samples"] for r in rows] == [4, 1]
+
+
+# ── Connected: cameras picked in the catalog ───────────────────────
+
+
+def test_a_picked_camera_is_watched_through_core_and_reported_on_the_dashboard():
+    doorbell, pipeline, _ = _build_doorbell([_known_read()], _app_config(cameras=[]))
+    doorbell._config_poll_thread = object()   # picks arrive on the config poll
+
+    class _Core:
+        def get_frame(self, camera_id):
+            return b"\xff\xd8jpeg"
+
+    doorbell._source._core = _Core()
+    doorbell.on_cameras_update(frozenset({5}))
+    doorbell.step()
+    assert pipeline.process_frame.call_count == 1
+    state = doorbell.state_snapshot()
+    assert state["cameras"] == ["cam5"]
+    assert [row["camera_id"] for row in state["camera_health"]] == ["cam5"]
+    assert state["camera_health"][0]["status"] == "ok"
+
+
+def test_nothing_picked_watches_nothing():
+    doorbell, pipeline, _ = _build_doorbell([_known_read()], _app_config(cameras=[]))
+    doorbell._config_poll_thread = object()
+    doorbell.on_cameras_update(frozenset())
+    doorbell.step()
+    assert pipeline.process_frame.call_count == 0
+    assert doorbell.state_snapshot()["cameras"] == []
+
+
+# ── How loud a face is, is the site's decision ───────────────────────
+#
+# A stranger at a family front door and a stranger at a depot gate are
+# the same event and not the same emergency. The severities were hard
+# coded at "high", which is neither the loudest the platform offers nor
+# adjustable — so a site that wanted a stranger to actually alarm had no
+# way to say so, and a site that found it shrill had no way to soften
+# it. Defaults are unchanged, so an existing install hears no difference.
+
+
+def test_a_stranger_can_be_made_critical():
+    """The ask: unknown faces should be able to alarm at the top level."""
+    cfg = _app_config(unknown_severity="critical")
+    doorbell, _p, dispatcher = _build_doorbell([_unknown_read()], config=cfg)
+    doorbell.step()
+    alert = dispatcher.dispatch.call_args.args[0]
+
+    assert alert.severity == "critical"
+    assert alert.evidence["kind"] == "unknown_visitor"
+
+
+def test_the_stranger_default_is_unchanged():
+    """A shipped default getting louder without being asked is its own
+    kind of bug — somebody's night gets interrupted by an upgrade."""
+    doorbell, _p, dispatcher = _build_doorbell([_unknown_read()])
+    doorbell.step()
+    assert dispatcher.dispatch.call_args.args[0].severity == "high"
+
+
+def test_known_severity_overrides_the_category_table():
+    cfg = _app_config(known_severity="medium")
+    doorbell, _p, dispatcher = _build_doorbell(
+        [_known_read(category="family")], config=cfg)
+    doorbell.step()
+    alert = dispatcher.dispatch.call_args.args[0]
+
+    assert alert.severity == "medium"
+    assert alert.evidence["kind"] == "known_visitor"
+
+
+def test_a_watchlist_match_is_never_quietened_by_it():
+    """The knob is for ordinary visitors. A watchlist face and an
+    expired pass are the two recognised people who must stay loud, so
+    they are decided BEFORE it is read — otherwise softening the
+    doorbell would silently soften the alarm it exists for.
+    """
+    cfg = _app_config(known_severity="info")
+    doorbell, _p, dispatcher = _build_doorbell(
+        [_known_read(category="watchlist")], config=cfg)
+    doorbell.step()
+    alert = dispatcher.dispatch.call_args.args[0]
+
+    assert alert.severity == "high"
+    assert alert.evidence["kind"] == "watchlist_visitor"
+
+
+def test_an_expired_pass_is_never_quietened_by_it():
+    cfg = _app_config(known_severity="info")
+    read = dataclasses.replace(_known_read(category="contractor"),
+                               raw={"metadata": {"valid_until": "2020-01-31"}})
+    doorbell, _p, dispatcher = _build_doorbell([read], config=cfg)
+    doorbell.step()
+    alert = dispatcher.dispatch.call_args.args[0]
+
+    assert alert.severity == "high"
+    assert alert.evidence["kind"] == "expired_pass"
+
+
+def test_a_misspelled_severity_falls_back_and_says_so(caplog):
+    """Silently ignoring a typo is the wrong failure: the operator sets
+    `critcal`, hears no change, and concludes the setting does nothing —
+    which is true, and invisible."""
+    from smart_doorbell import _severity
+
+    with caplog.at_level("WARNING"):
+        assert _severity("critcal", "high") == "high"
+    assert "critcal" in caplog.text, caplog.text
+
+    # An empty value is not a typo — it is the documented way to say
+    # "use the default" — so it must not warn.
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        assert _severity("", "high") == "high"
+        assert _severity(None, "high") == "high"
+    assert caplog.text == "", "an unset value is not a mistake"
+
+    # Case and whitespace are an operator typing, not an error.
+    assert _severity("  CRITICAL ", "high") == "critical"
+
+
+# ── Deciding per visit, not per frame ─────────────────────────────
+#
+# The first frame of an approach is the worst one. These pin the rule
+# that stops it becoming a stranger alert: hold, match-ends-the-hold,
+# the near-miss band, the quality gate, and the upgrade in place.
+
+
+def _miss(similarity=None, bbox=(80, 60, 220, 220), confidence=0.9) -> FaceRead:
+    return FaceRead(face_detected=True, recognized=False, similarity=similarity,
+                    face_bbox=bbox, confidence=confidence, threshold=0.5,
+                    correlation_id="cid-1")
+
+
+def _ticking(doorbell):
+    """A clock the test moves. Each call to ``advance`` is a second."""
+    t = [1000.0]
+    doorbell._clock = lambda: t[0]
+
+    def advance(seconds: float = 1.0) -> None:
+        t[0] += seconds
+    return advance
+
+
+def test_a_miss_is_held_not_announced():
+    """One bad frame is not a stranger. With the default hold nothing
+    fires on it; the visit is open and waiting."""
+    cfg = _app_config(decision_hold_seconds=4.0)
+    doorbell, _, dispatcher = _build_doorbell([_miss()], config=cfg)
+    _ticking(doorbell)
+    doorbell.step()
+    dispatcher.dispatch.assert_not_called()
+    assert doorbell.state_snapshot()["open_visits"] == 1
+
+
+def test_a_match_during_the_hold_is_the_only_announcement():
+    """Side-on at 0.45, then a clean match: the name, once. No stranger
+    first — the thing this whole change exists to stop."""
+    cfg = _app_config(decision_hold_seconds=4.0)
+    doorbell, _, dispatcher = _build_doorbell(
+        [_miss(similarity=0.45), _known_read(person_id="alice")], config=cfg)
+    advance = _ticking(doorbell)
+    doorbell.step(); advance(); doorbell.step()
+    assert dispatcher.dispatch.call_count == 1
+    alert = dispatcher.dispatch.call_args.args[0]
+    assert alert.alert_type == "known_visitor"
+    assert "supersedes" not in alert.evidence
+    state = doorbell.state_snapshot()
+    assert state["visits"] == {"known": 1, "unknown": 0, "uncertain": 0}
+    assert state["stranger_gallery"] == []
+    assert [v["name"] for v in state["recent"]] == ["Alice Smith"]
+
+
+def test_a_stranger_is_announced_when_the_hold_runs_out():
+    """Nobody enrolled came close for four seconds: a stranger, from the
+    best frame, even though no frame arrived on the tick that decided."""
+    cfg = _app_config(decision_hold_seconds=4.0)
+    reads = [_miss(similarity=0.10, bbox=(0, 0, 120, 120)),
+             _miss(similarity=0.12, bbox=(0, 0, 160, 160)), None, None, None]
+    doorbell, _, dispatcher = _build_doorbell(reads, config=cfg)
+    advance = _ticking(doorbell)
+    for _ in range(4):
+        doorbell.step(); advance()
+        dispatcher.dispatch.assert_not_called()
+    doorbell.step()
+    assert dispatcher.dispatch.call_count == 1
+    alert = dispatcher.dispatch.call_args.args[0]
+    assert alert.alert_type == "unknown_visitor"
+    # Decided from the LARGER face, not the first one.
+    assert alert.evidence["face_bbox"] == [0, 0, 160, 160]
+    assert doorbell.state_snapshot()["visits"]["unknown"] == 1
+
+
+def test_the_hold_runs_out_without_a_frame():
+    """The camera stopped answering mid-visit. The verdict is still
+    reached: a hold is time, not frames."""
+    cfg = _app_config(decision_hold_seconds=4.0)
+    doorbell, _, dispatcher = _build_doorbell([_miss(similarity=0.1)], config=cfg)
+    advance = _ticking(doorbell)
+    doorbell.step()
+
+    class _Dead:
+        def fetch(self) -> bytes:
+            raise RuntimeError("camera gone")
+    doorbell._frame_sources["front-door"] = _Dead()
+    advance(4.0)
+    doorbell.step()
+    assert dispatcher.dispatch.call_count == 1
+
+
+def test_a_near_miss_is_recorded_not_alerted():
+    """Nearest enrolled face at 0.45 against a 0.5 threshold, for the
+    whole hold: that is Alice seen badly, not a stranger. On the wall so
+    the missing angle can be enrolled; no alert; counted as uncertain."""
+    cfg = _app_config(decision_hold_seconds=4.0, unknown_score=0.35)
+    doorbell, _, dispatcher = _build_doorbell(
+        [_miss(similarity=0.45), _miss(similarity=0.30), None], config=cfg)
+    advance = _ticking(doorbell)
+    doorbell.step(); advance(); doorbell.step(); advance(4.0); doorbell.step()
+    dispatcher.dispatch.assert_not_called()
+    state = doorbell.state_snapshot()
+    assert state["visits"] == {"known": 0, "unknown": 0, "uncertain": 1}
+    assert state["stranger_gallery"] == [] or state["stranger_gallery"][0].get("uncertain") is True
+    line = state["recent"][-1]
+    assert line["uncertain"] is True and line["level"] == "medium" and line["name"] is None
+
+
+def test_the_band_can_be_switched_off():
+    cfg = _app_config(decision_hold_seconds=0.0, unknown_score=0.0)
+    doorbell, _, dispatcher = _build_doorbell([_miss(similarity=0.49)], config=cfg)
+    doorbell.step()
+    assert dispatcher.dispatch.call_args.args[0].alert_type == "unknown_visitor"
+
+
+def test_small_or_unsure_faces_do_not_open_a_visit():
+    """A 30-pixel face at the edge of the frame, or one the detector
+    only half believed, is not evidence of anybody."""
+    cfg = _app_config(decision_hold_seconds=0.0)
+    doorbell, _, dispatcher = _build_doorbell(
+        [_miss(bbox=(0, 0, 30, 30)), _miss(confidence=0.4)], config=cfg)
+    doorbell.step(); doorbell.step()
+    dispatcher.dispatch.assert_not_called()
+    assert doorbell.state_snapshot()["open_visits"] == 0
+
+
+def test_a_match_is_never_gated():
+    """The adapter matched above the threshold; a small face that IS
+    Alice is still Alice."""
+    cfg = _app_config(decision_hold_seconds=0.0)
+    read = dataclasses.replace(_known_read(), face_bbox=(0, 0, 20, 20), confidence=0.3)
+    doorbell, _, dispatcher = _build_doorbell([read], config=cfg)
+    doorbell.step()
+    assert dispatcher.dispatch.call_count == 1
+
+
+def test_an_older_adapter_without_the_numbers_still_works():
+    """No similarity, no confidence on the wire: the gate passes what it
+    was not told, and a miss is a plain stranger."""
+    cfg = _app_config(decision_hold_seconds=0.0)
+    doorbell, _, dispatcher = _build_doorbell([_unknown_read()], config=cfg)
+    doorbell.step()
+    assert dispatcher.dispatch.call_args.args[0].alert_type == "unknown_visitor"
+
+
+def test_a_late_match_upgrades_the_stranger_in_place():
+    """Hold set to 0 (or a slow walker): the stranger went out, then the
+    face matched. The name goes out saying which alert it supersedes,
+    the tile comes off the wall, the feed line is corrected, and the
+    counters move from stranger to known. No second ring."""
+    cfg = _app_config(decision_hold_seconds=0.0, dedup_window_seconds=60.0)
+    doorbell, _, dispatcher = _build_doorbell(
+        [_miss(similarity=0.2), _known_read(person_id="alice")], config=cfg)
+    advance = _ticking(doorbell)
+    frame = _real_jpeg()
+
+    class _Src:
+        def fetch(self) -> bytes:
+            return frame
+    doorbell._frame_sources["front-door"] = _Src()
+
+    doorbell.step()
+    first = dispatcher.dispatch.call_args.args[0]
+    assert first.alert_type == "unknown_visitor"
+    assert first.evidence["chime"]["ring"] is True
+    assert len(doorbell.state_snapshot()["stranger_gallery"]) == 1
+
+    advance(); doorbell.step()
+    assert dispatcher.dispatch.call_count == 2
+    second = dispatcher.dispatch.call_args.args[0]
+    assert second.alert_type == "known_visitor"
+    assert second.evidence["supersedes"] == first.alert_id
+    assert f"supersedes:{first.alert_id}" in second.tags
+    assert second.evidence["chime"]["ring"] is False
+    assert "already rang" in second.evidence["chime"]["reason"]
+
+    state = doorbell.state_snapshot()
+    assert state["stranger_gallery"] == []
+    assert state["visits"] == {"known": 1, "unknown": 0, "uncertain": 0}
+    assert len(state["recent"]) == 1
+    line = state["recent"][0]
+    assert line["name"] == "Alice Smith" and line["corrected"] is True
+
+
+def test_an_upgrade_is_not_deduped_but_a_repeat_is():
+    """Alice was announced 10 s ago on this door. A stranger visit that
+    turns out to be Alice is still corrected — new information is never
+    deduped — while Alice again, plainly, is."""
+    cfg = _app_config(decision_hold_seconds=0.0, dedup_window_seconds=60.0,
+                      visit_gap_seconds=2.0)
+    reads = [_known_read(person_id="alice"), None, None,
+             _miss(similarity=0.2), _known_read(person_id="alice"),
+             _known_read(person_id="alice")]
+    doorbell, _, dispatcher = _build_doorbell(reads, config=cfg)
+    advance = _ticking(doorbell)
+    for _ in range(6):
+        doorbell.step(); advance()
+    kinds = [c.args[0].alert_type for c in dispatcher.dispatch.call_args_list]
+    assert kinds == ["known_visitor", "unknown_visitor", "known_visitor"]
+    assert "supersedes" in dispatcher.dispatch.call_args_list[-1].args[0].evidence
+
+
+def test_a_second_person_at_the_door_is_a_second_visit():
+    cfg = _app_config(decision_hold_seconds=4.0)
+    doorbell, _, dispatcher = _build_doorbell(
+        [_known_read(person_id="alice"), _known_read(person_id="bob", name="Bob")],
+        config=cfg)
+    advance = _ticking(doorbell)
+    doorbell.step(); advance(); doorbell.step()
+    names = [c.args[0].evidence["name"] for c in dispatcher.dispatch.call_args_list]
+    assert names == ["Alice Smith", "Bob"]
+
+
+def test_the_deciding_knobs_apply_live():
+    doorbell, _, _ = _build_doorbell([])
+    doorbell.on_config_update({"decision_hold_seconds": 2.5, "unknown_score": 0.4,
+                               "min_face_px": 64, "visit_gap_seconds": 20})
+    d = doorbell.state_snapshot()["decision"]
+    assert d["hold_seconds"] == 2.5 and d["unknown_score"] == 0.4
+    assert d["min_face_px"] == 64 and d["gap_seconds"] == 20.0
+
+
+# ── A name is a vote ──────────────────────────────────────────────
+
+def _vt(**kw):
+    from visits import VisitTracker
+    return VisitTracker(hold_seconds=4.0, **kw)
+
+
+def _match(pid, sim, side=150):
+    return FaceRead(face_detected=True, recognized=True, person_id=pid, name=pid.title(),
+                    similarity=sim, face_bbox=(0, 0, side, side), confidence=0.9, threshold=0.5)
+
+
+def test_with_min_match_reads_2_the_second_matching_frame_announces_once():
+    vt = _vt(min_match_reads=2)
+    assert vt.observe("door", _match("alice", 0.6), b"f1", now=10.0, wall=1.0) == []
+    assert vt.open_visits[0].leader == "alice" and vt.open_visits[0].decided is None
+    out = vt.observe("door", _match("alice", 0.8), b"f2", now=11.0, wall=2.0)
+    assert [d.kind for d in out] == ["known"] and out[0].visit.person_id == "alice"
+    assert out[0].obs.frame == b"f2", "announced from the closest match"
+    again = vt.observe("door", _match("alice", 0.7), b"f3", now=12.0, wall=3.0)
+    assert [(d.kind, d.repeat) for d in again] == [("known", True)]
+
+
+def test_a_lone_match_is_recorded_leaning_and_the_next_one_upgrades_it():
+    vt = _vt(min_match_reads=2)
+    vt.observe("door", _match("alice", 0.6), b"f1", now=10.0, wall=1.0)
+    assert vt.settle(13.9) == []
+    out = vt.settle(14.0)
+    assert [d.kind for d in out] == ["uncertain"]
+    assert out[0].visit.extra["leaning"] == "alice" and out[0].visit.person_id is None
+    out = vt.observe("door", _match("alice", 0.7), b"f2", now=15.0, wall=6.0)
+    assert [d.kind for d in out] == ["upgrade"] and out[0].visit.person_id == "alice"
+
+
+def test_the_leader_is_the_person_with_the_best_size_weighted_similarity():
+    """Bob matched once at 0.9 on a tiny face; Alice twice at 0.6 on big
+    ones. Two big frames outweigh one small one: Alice is announced."""
+    vt = _vt(min_match_reads=2)
+    vt.observe("door", _match("bob", 0.9, side=40), b"b", now=10.0, wall=1.0)
+    vt.observe("door", _match("alice", 0.6, side=200), b"a1", now=11.0, wall=2.0)
+    v = vt.open_visits[0]
+    assert v.leader == "bob", "one 0.9 against one 0.6: Bob leads by mean"
+    out = vt.observe("door", _match("alice", 0.6, side=200), b"a2", now=12.0, wall=3.0)
+    assert v.tallies["alice"].reads == 2 and v.tallies["bob"].reads == 1
+    # Bob still leads by mean (0.9 > 0.6) but has one frame; Alice has two
+    # yet is not the leader, so nothing is announced until the hold ends.
+    assert out == []
+    out = vt.settle(14.0)
+    assert [d.kind for d in out] == ["uncertain"] and out[0].visit.extra["leaning"] == "bob"
+
+
+def test_default_min_match_reads_keeps_the_first_match_deciding():
+    vt = _vt()
+    out = vt.observe("door", _match("alice", 0.6), b"f1", now=10.0, wall=1.0)
+    assert [d.kind for d in out] == ["known"]
+
+
+def test_min_match_reads_is_a_live_setting():
+    cfg = _app_config(min_match_reads=2)
+    doorbell, _, _ = _build_doorbell([], config=cfg)
+    assert doorbell._tracker.min_match_reads == 2
+    doorbell.on_config_update({"min_match_reads": 3})
+    assert doorbell._tracker.settings()["min_match_reads"] == 3

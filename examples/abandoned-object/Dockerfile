@@ -3,13 +3,13 @@
 #
 # Build (from the open-nvr repo root — the context must include
 # sdk/opennvr-app-sdk, which this app depends on):
-#   docker build -f examples/abandoned-object/Dockerfile -t opennvr/abandoned-object:1.0.0 .
+#   docker build -f examples/abandoned-object/Dockerfile -t opennvr/abandoned-object:1.1.0 .
 #
 # Run (subscribes to the NATS event bus on the compose network):
 #   docker run --rm \
 #     --network opennvr_internal \
 #     -v $(pwd)/config.yml:/app/config.yml:ro \
-#     opennvr/abandoned-object:1.0.0 \
+#     opennvr/abandoned-object:1.1.0 \
 #     --config /app/config.yml
 #
 # Or use the repo-root docker-compose.apps.yml overlay, which builds
@@ -25,8 +25,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # The SDK owns the runtime stack (nats-py subscribe loop, httpx alert
-# webhooks, PyYAML config) — install it from the repo checkout so the
-# image always matches the in-tree contract surface.
+# webhooks and snapshot fetches, PyYAML config, zone geometry) —
+# install it from the repo checkout so the image always matches the
+# in-tree contract surface. This app drives no inference of its own: it
+# rides the Tier-0 detection stream.
 COPY sdk/opennvr-app-sdk /opt/opennvr-app-sdk
 RUN pip install --no-cache-dir /opt/opennvr-app-sdk
 
@@ -37,8 +39,8 @@ COPY examples/abandoned-object/config.example.yml  ./config.example.yml
 
 ENV PYTHONUNBUFFERED=1
 
-# No HEALTHCHECK — liveness is Docker's "process is alive"; this app's
-# AppConfig has no contract_port field, so no contract server runs.
+# No HEALTHCHECK — liveness is Docker's "process is alive"; readiness
+# is the SDK contract server (/health on contract_port when enabled).
 
 ENTRYPOINT ["python", "abandoned_object.py"]
 CMD ["--config", "config.yml"]

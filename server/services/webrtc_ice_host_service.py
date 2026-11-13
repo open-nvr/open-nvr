@@ -35,6 +35,9 @@ start. Two consequences:
   seconds regardless of what the container's environment says.
 * The set can be *learned*. ``learn()`` records the address a browser actually
   reached this server on, so a DHCP move repairs itself on the next page load.
+  That only works when nginx sees a host address. In the stock compose layout
+  nginx is on the Docker bridge, so it reports a bridge address, which is
+  never advertisable; there the ``MEDIAMTX_WEBRTC_HOSTS`` seed is required.
 
 Storage is its own ``SecuritySetting`` row rather than a field inside the
 ``webrtc`` row: ``PUT /webrtc/settings`` rewrites that row from a Pydantic
@@ -161,11 +164,15 @@ class WebRTCIceHostService:
             # The failure this whole module exists to prevent, made loud: with
             # no advertisable host every WHEP session dies on a 10s ICE
             # timeout and the UI quietly degrades to HLS.
+            # Don't point the operator at learning: in the stock compose layout
+            # nginx sits on the Docker bridge, its $server_addr is a bridge
+            # address, and is_advertisable() drops it, so nothing is learned.
             logger.warning(
                 "No WebRTC ICE host to advertise — MediaMTX will offer only "
-                "container-local candidates and live WebRTC will fail (HLS "
-                "still works). Set MEDIAMTX_WEBRTC_HOSTS in .env, or open Live "
-                "View once so the address can be learned."
+                "container-local candidates and live WebRTC from other "
+                "machines will fail (HLS still works). Set "
+                "MEDIAMTX_WEBRTC_HOSTS in .env to this server's LAN IP "
+                "(start.sh does this for you), then run `docker compose up -d`."
             )
             return False
         result = await MediaMtxAdminService.set_webrtc_additional_hosts(hosts)

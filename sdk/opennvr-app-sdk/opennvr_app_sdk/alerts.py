@@ -173,12 +173,27 @@ class Alert:
     correlation_id: str | None = None
     evidence: dict[str, Any] = field(default_factory=dict)
     tags: list[str] = field(default_factory=list)
+    #: What KIND of alert this is, in your own vocabulary
+    #: ("scanner_flag", "package_taken"). Severity says how loudly the
+    #: inbox rings; this says what happened, and is what an operator
+    #: filters history by.
+    alert_type: str | None = None
+    #: Evidence photos as ``{name: rel_path}`` — paths from
+    #: ``nvr.save_evidence()``, never image bytes. An alert is a NATS
+    #: message with a 1 MB ceiling; base64 crops blow past it and the
+    #: whole alert is dropped by the broker.
+    images: dict[str, str] = field(default_factory=dict)
     alert_id: str = field(default_factory=lambda: f"alrt_{uuid.uuid4().hex[:12]}")
     fired_at: str = field(default_factory=lambda: _utcnow_iso())
 
     def to_wire(self) -> dict[str, Any]:
         """Serialize to the §11.5 JSON shape."""
-        return {
+        evidence = dict(self.evidence)
+        if self.images:
+            # Inside evidence, so an inbox that predates the images
+            # column still receives the paths rather than nothing.
+            evidence["images"] = dict(self.images)
+        wire = {
             "alert_id": self.alert_id,
             "fired_at": self.fired_at,
             "title": self.title,
@@ -187,9 +202,12 @@ class Alert:
             "source": asdict(self.source),
             "camera_id": self.camera_id,
             "correlation_id": self.correlation_id,
-            "evidence": dict(self.evidence),
+            "evidence": evidence,
             "tags": list(self.tags),
         }
+        if self.alert_type:
+            wire["alert_type"] = self.alert_type
+        return wire
 
 
 def _utcnow_iso() -> str:
@@ -503,16 +521,29 @@ class NatsAlertChannel:
         kwargs: dict[str, Any] = {
             "servers": [self._url],
             "connect_timeout": self._connect_timeout,
-            "reconnect_time_wait": 1.0,
-            "max_reconnect_attempts": 5,
+            "reconnect_time_wait": 2.0,
+            # -1 = retry FOREVER. Field outage (2026-09-04): the broker
+            # restarted during a stack rebuild and was back in ~95s, but
+            # with max_reconnect_attempts=5 this client exhausted its
+            # retries in ~5s and closed for good — and because nats-py
+            # BUFFERS publishes silently while reconnecting, nothing
+            # errored until it was already dead. Every alarm for the
+            # next two days was published into a zombie channel. A bus
+            # channel owned by a long-lived daemon must never give up
+            # on the bus; the publish-failure heal below remains the
+            # backstop for the truly-closed case.
+            "max_reconnect_attempts": -1,
         }
-        if self._token:
-            kwargs["token"] = self._token
+        # The apps bus as this app when core has told us where it is
+        # (credentials.py); the configured URL + token otherwise.
+        from .credentials import bus_connection
+
+        kwargs.update(bus_connection(None, self._url, self._token))
         self._nc = await nats.connect(**kwargs)
         logger.info(
-            "NATS alert channel connected to %s (token=%s, prefix=%s)",
-            self._url,
-            "set" if self._token else "none",
+            "NATS alert channel connected to %s (as=%s, prefix=%s)",
+            kwargs.get("servers"),
+            kwargs.get("user") or ("site token" if kwargs.get("token") else "none"),
             self._subject_prefix,
         )
 
@@ -533,6 +564,12 @@ class AlertDispatcher:
         if not channels:
             raise ValueError("AlertDispatcher requires at least one channel.")
         self._channels = channels
+
+    @property
+    def channels(self) -> tuple[AlertChannel, ...]:
+        """The channels, in delivery order — read-only. Handy in tests
+        and in a ``/state`` view ("where do my alerts go?")."""
+        return tuple(self._channels)
 
     def fire(self, alert: Alert) -> dict[str, bool]:
         results: dict[str, bool] = {}

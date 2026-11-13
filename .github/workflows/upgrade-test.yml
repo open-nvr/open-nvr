@@ -1,0 +1,52 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: Apache-2.0
+#
+# The upgrade test (tests/upgrade/run.sh, UPD-207): three releases made
+# from the change under test, installed and updated through
+# ./start.sh update with data in the database: a good update, a broken one
+# rolled back with the database restored, and a tampered bundle refused.
+#
+# It builds core three times and pulls the stack's other images, so it
+# runs only when what it guards changes, and on demand.
+
+name: upgrade-test
+
+on:
+  pull_request:
+    paths:
+      - "server/updater/**"
+      - "scripts/update-host.sh"
+      - "start.sh"
+      - "docker-compose.yml"
+      - "docker-entrypoint.sh"
+      - "Dockerfile"
+      - "server/core/database.py"
+      - "tests/upgrade/**"
+      - ".github/workflows/upgrade-test.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upgrade-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  upgrade:
+    name: update, roll back, refuse a tampered bundle
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run the upgrade test
+        run: |
+          pip install --quiet "cryptography>=46"
+          bash tests/upgrade/run.sh

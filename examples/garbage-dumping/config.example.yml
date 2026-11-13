@@ -1,0 +1,32 @@
+# garbage-dumping — operator config (standalone run). On a compose install
+# the config-init container renders config.docker.yml instead.
+
+webhook_url: null
+nats_alerts_url: null
+nats_alerts_token: null
+
+# How often each zone is looked at. Each look is one open-vocabulary
+# detection through KAI-C: about ten seconds on CPU, so 60 s is the floor
+# there; 15 s on a GPU box.
+poll_interval_seconds: 60
+# What counts as garbage. Phrases, not classes: change them for the site.
+queries: ["garbage bag", "trash bag", "pile of rubbish", "litter", "cardboard box", "sack"]
+min_score: 0.2
+# New garbage must be seen in this many looks in a row before it alerts.
+confirm_looks: 2
+# After an alert, more dumping in the same zone stays quiet this long.
+cooldown_seconds: 600
+# How long one detection may take; keep it above a CPU look.
+look_timeout_seconds: 90
+# Which KAI-C adapter runs the detection. Empty = the first registered one
+# advertising open_vocab_detection (the shipped open-vocab adapter).
+detector_adapter: ""
+
+alert_severity: "medium"
+attach_snapshot: true
+
+# Standalone only: cameras with a frame_url and the no-dumping zone.
+cameras: []
+#  - camera_id: "corner"
+#    frame_url: "http://192.168.1.10/snapshot.jpg"
+#    zone: [[0.10, 0.50], [0.60, 0.50], [0.60, 0.95], [0.10, 0.95]]

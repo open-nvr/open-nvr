@@ -141,10 +141,13 @@ def get_camera_by_id(camera_id: int, db: Session) -> Optional[Camera]:
 ### TypeScript (`app/`)
 
 - **ESLint** configured in `app/eslint.config.js`. `npm run lint` and
-  `npm run type-check`.
+  `npm run typecheck`; CI runs both before the build.
 - **No `any`** unless absolutely necessary (and noted in a comment).
 - **Functional components with hooks.** PascalCase files for components,
   camelCase for utilities.
+- **Screens use the shared components** — page header, buttons, dialogs,
+  confirmations, form fields, tables — and theme tokens only. See
+  [docs/UI_GUIDELINES.md](docs/UI_GUIDELINES.md) for which to use when.
 
 ### Commit messages
 
@@ -284,16 +287,30 @@ cd kai-c && pytest
 cd examples/intrusion-detection && pytest
 cd examples/camera-agent && uv sync --extra dev && pytest
 
-# Frontend
-cd app && npm test
+# Frontend: type-check and build. There is no unit-test runner here yet;
+# frontend behaviour is covered by the end-to-end suite's `ui` tier.
+cd app && npm run typecheck && npm run build
 ```
 
-Coverage reports: `pytest --cov=.` (Python) or `npm test -- --coverage`
-(frontend).
+Coverage reports: `pytest --cov=.`
 
 CI runs the full matrix on every PR. Local green is a strong signal but not
 a guarantee — CI also runs the smoke matrix that boots each adapter image
 end-to-end, which won't run on your laptop without Docker.
+
+## End-to-end tests
+
+The suites above test components in isolation. `tests/e2e/` drives a real,
+isolated stack through real user journeys — the failures that live *between*
+components, which nothing else catches:
+
+```bash
+python tests/e2e/run.py            # smoke tier, ~40s
+python tests/e2e/run.py -m ""      # everything
+```
+
+It runs alongside your normal stack without touching it. See
+[docs/TESTING.md](docs/TESTING.md).
 
 ## PR checklist
 

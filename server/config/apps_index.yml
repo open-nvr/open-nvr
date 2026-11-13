@@ -53,14 +53,18 @@
 
 - id: loitering-detection
   name: Loitering Detection
-  summary: Alerts when a watched object dwells in a zone beyond a threshold.
+  summary: Alerts when a tracked person or vehicle stays in a drawn zone beyond a dwell threshold, escalates if they remain, alerts sooner after hours, flags gatherings, and keeps dwell history per camera.
   category: perimeter
-  version: 1.0.0
+  version: "1.1.0"
   image: ghcr.io/open-nvr/loitering-detection:latest
   build_context: examples/loitering-detection
-  requires_tasks: [object_detection]
-  emits: [loitering]
+  requires_tasks: [object_detection, multi_object_tracking]
+  emits: [loitering, loitering-escalated, gathering]
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/loitering-detection/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/loitering-detection
+  network_egress: []
   install:
     compose: |
       # INFORMATIONAL — this service already ships in
@@ -92,6 +96,10 @@
   requires_tasks: [object_detection]
   emits: [occupancy_over, occupancy_under, occupancy_cleared]
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/occupancy-counting/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/occupancy-counting
+  network_egress: []
   install:
     compose: |
       # INFORMATIONAL — this service already ships in
@@ -115,14 +123,18 @@
 
 - id: line-crossing
   name: Line Crossing
-  summary: Alerts when a tracked object crosses an oriented tripwire in a counted direction.
+  summary: Tripwire counting and alerts — tallies every tracked object crossing a drawn line per direction and hour, and alarms on each crossing, on a count threshold, or only at night.
   category: perimeter
-  version: "1.0.0"
+  version: "1.1.0"
   image: ghcr.io/open-nvr/line-crossing:latest
   build_context: examples/line-crossing
   requires_tasks: [object_detection, multi_object_tracking]
-  emits: [line-crossing]
+  emits: [line-crossing, passthrough]
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/line-crossing/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/line-crossing
+  network_egress: []
   install:
     compose: |
       # INFORMATIONAL — this service already ships in
@@ -146,14 +158,18 @@
 
 - id: abandoned-object
   name: Abandoned Object
-  summary: Alerts when a watched object sits stationary in a zone past a dwell threshold with no person nearby.
+  summary: Follows every item left in a zone — who was with it, how long it has been alone, whether anyone came back — alerting when one is unattended past the threshold and closing itself when it is reclaimed.
   category: perimeter
-  version: "1.0.0"
+  version: "1.1.0"
   image: ghcr.io/open-nvr/abandoned-object:latest
   build_context: examples/abandoned-object
   requires_tasks: [object_detection, multi_object_tracking]
-  emits: [abandoned-object]
+  emits: [abandoned-object, abandoned-object-escalated]
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/abandoned-object/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/abandoned-object
+  network_egress: []
   install:
     compose: |
       # INFORMATIONAL — this service already ships in
@@ -177,14 +193,18 @@
 
 - id: intrusion-detection
   name: Intrusion Detection
-  summary: Alerts when a watched object enters a restricted zone during restricted hours.
+  summary: Arms a drawn zone on a schedule and alerts when a watched object breaches it — exit and entry delays, one alarm per intruder, escalation if they stay, bypass and manual arm/disarm from the Perimeter page.
   category: perimeter
-  version: "1.0.0"
+  version: "1.1.0"
   image: ghcr.io/open-nvr/intrusion-detection:latest
   build_context: examples/intrusion-detection
-  requires_tasks: [object_detection]
-  emits: [intrusion]
+  requires_tasks: [object_detection, multi_object_tracking]
+  emits: [intrusion, intrusion-escalated]
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/intrusion-detection/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/intrusion-detection
+  network_egress: []
   install:
     compose: |
       # INFORMATIONAL — this service already ships in
@@ -206,11 +226,201 @@
             - opennvr_internal
     command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d intrusion-detection
 
-- id: license-plate-recognition
-  name: License Plate Recognition
-  summary: Reads license plates via a YOLOv8 to crop to fast-plate-ocr chain and routes severity through allow/deny watchlists.
-  category: vehicle
+- id: camera-tamper
+  name: Camera Tamper
+  summary: Alerts when a camera is covered, defocused, moved or its stream freezes — judged against a reference view learned from the camera itself, with no model to run; clears when the view comes back.
+  category: perimeter
   version: "1.0.0"
+  image: ghcr.io/open-nvr/camera-tamper:latest
+  build_context: examples/camera-tamper
+  requires_tasks: []
+  emits: [tamper_covered, tamper_defocused, tamper_moved, tamper_frozen, tamper_cleared]
+  docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/camera-tamper/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/camera-tamper
+  network_egress: []
+  install:
+    compose: |
+      # INFORMATIONAL — this service already ships in
+      # docker-compose.apps.yml (with its config-init companion and
+      # named config volume); you do NOT paste this anywhere. Run the
+      # command below and compose brings it up from the shipped overlay.
+      services:
+        camera-tamper:
+          profiles: [apps]
+          image: ${CAMERA_TAMPER_IMAGE:-opennvr/camera-tamper:local-build}
+          restart: unless-stopped
+          environment:
+            - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
+            - NATS_URL=nats://nats:4222
+            - OPENNVR_URL=http://opennvr-core:8000
+          expose:
+            - "9212"
+          networks:
+            - opennvr_internal
+    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d camera-tamper
+
+- id: garbage-dumping
+  name: Garbage Dumping
+  summary: Alerts when garbage is dumped in a watched zone — every look asks the site's open-vocabulary detector for what the operator calls garbage, and more of it than the zone held before raises the alert; it clears when the zone is empty again.
+  category: perimeter
+  version: "1.0.0"
+  image: ghcr.io/open-nvr/garbage-dumping:latest
+  build_context: examples/garbage-dumping
+  requires_tasks: [open_vocab_detection]
+  requires_adapters: [open_vocab]
+  emits: [garbage_dumped, garbage_cleared]
+  docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/garbage-dumping/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/garbage-dumping
+  network_egress: []
+  install:
+    compose: |
+      # INFORMATIONAL — this service already ships in
+      # docker-compose.apps.yml (with its config-init companion and
+      # named config volume); you do NOT paste this anywhere. Run the
+      # command below and compose brings it up from the shipped overlay.
+      services:
+        garbage-dumping:
+          profiles: [apps]
+          image: ${GARBAGE_DUMPING_IMAGE:-opennvr/garbage-dumping:local-build}
+          restart: unless-stopped
+          environment:
+            - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
+            - NATS_URL=nats://nats:4222
+            - OPENNVR_URL=http://opennvr-core:8000
+          expose:
+            - "9215"
+          networks:
+            - opennvr_internal
+    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d garbage-dumping
+
+- id: ppe-check
+  name: PPE Check
+  summary: Alerts when a person on camera is missing required safety kit — every person Tier-0 tracks is checked once, from its best crop, by the site's open-vocabulary detector for the helmet, vest, gloves or boots the operator requires.
+  category: safety
+  version: "1.0.0"
+  image: ghcr.io/open-nvr/ppe-check:latest
+  build_context: examples/ppe-check
+  requires_tasks: [object_detection, multi_object_tracking, open_vocab_detection]
+  requires_adapters: [open_vocab]
+  emits: [ppe_missing]
+  docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/ppe-check/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/ppe-check
+  network_egress: []
+  install:
+    compose: |
+      # INFORMATIONAL — this service already ships in
+      # docker-compose.apps.yml (with its config-init companion and
+      # named config volume); you do NOT paste this anywhere. Run the
+      # command below and compose brings it up from the shipped overlay.
+      services:
+        ppe-check:
+          profiles: [apps]
+          image: ${PPE_CHECK_IMAGE:-opennvr/ppe-check:local-build}
+          restart: unless-stopped
+          environment:
+            - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
+            - NATS_URL=nats://nats:4222
+            - OPENNVR_URL=http://opennvr-core:8000
+          expose:
+            - "9216"
+          networks:
+            - opennvr_internal
+    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d ppe-check
+
+- id: gate-watch
+  name: Gate Watch
+  summary: Alerts when a gate has been left open — every look asks the site's vision model one question about the gate the operator drew, and a gate open past the threshold raises the alert; it clears when the gate closes.
+  category: perimeter
+  version: "1.0.0"
+  image: ghcr.io/open-nvr/gate-watch:latest
+  build_context: examples/gate-watch
+  requires_tasks: [vqa]
+  requires_adapters: [moondream]
+  emits: [gate_left_open, gate_closed, gate_unknown]
+  docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/gate-watch/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/gate-watch
+  network_egress: []
+  install:
+    compose: |
+      # INFORMATIONAL — this service already ships in
+      # docker-compose.apps.yml (with its config-init companion and
+      # named config volume); you do NOT paste this anywhere. Run the
+      # command below and compose brings it up from the shipped overlay.
+      services:
+        gate-watch:
+          profiles: [apps]
+          image: ${GATE_WATCH_IMAGE:-opennvr/gate-watch:local-build}
+          restart: unless-stopped
+          environment:
+            - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
+            - NATS_URL=nats://nats:4222
+            - OPENNVR_URL=http://opennvr-core:8000
+          expose:
+            - "9214"
+          networks:
+            - opennvr_internal
+    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d gate-watch
+
+- id: guard-scan-compliance
+  name: Guard Scan Compliance
+  summary: Checks that the guard wands every person entering — left arm, right arm, front, back — and flags what the scanner finds.
+  category: safety
+  version: "0.1.0"
+  image: ghcr.io/open-nvr/guard-scan-compliance:latest
+  build_context: examples/guard-scan-compliance
+  requires_tasks: [pose_estimation]
+  # Provisioned with the app and refcounted on uninstall (RFC-0002
+  # decision 7). yolo-pose is not part of the standard stack.
+  requires_adapters: [yolo_pose]
+  emits: [scanner_flag, improper_scan, no_scan]
+  docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/guard-scan-compliance/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/guard-scan-compliance
+  network_egress: []
+  install:
+    compose: |
+      # INFORMATIONAL — this service already ships in
+      # docker-compose.apps.yml (with its config-init companion and
+      # named config volume); you do NOT paste this anywhere. Run the
+      # command below and compose brings it up from the shipped overlay.
+      services:
+        guard-scan-compliance:
+          profiles: [apps]
+          image: ${GUARD_SCAN_COMPLIANCE_IMAGE:-opennvr/guard-scan-compliance:local-build}
+          restart: unless-stopped
+          environment:
+            - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
+            - OPENNVR_URL=http://opennvr-core:8000
+            - KAIC_URL=http://opennvr-core:8100
+          expose:
+            - "9210"
+          networks:
+            - opennvr_apps
+    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d guard-scan-compliance
+
+- id: license-plate-recognition
+  # ANPR leads: it is the name most of the world uses for this (UK, EU,
+  # India, AU), with the spelled-out term kept for newcomers and for US
+  # readers who know it as LPR/ALPR. The nav page carries the same token
+  # ("Vehicles (ANPR)") so the app and the surface it lights up read as
+  # one thing. The id is unchanged — it is a key, not a label.
+  name: ANPR — License Plate Recognition
+  summary: >-
+    Reads the number plates of the vehicles the cameras you pick see — the
+    plate reader localises the plate in each vehicle crop and reads it, on
+    the CPU or the NPU — and routes severity through allow/deny watchlists,
+    monitors, a registry and overstay alerts.
+  category: vehicle
+  version: "2.5.0"
   image: ghcr.io/open-nvr/license-plate-recognition:latest
   build_context: examples/license-plate-recognition
   requires_tasks: [object_detection, license_plate_recognition]
@@ -219,8 +429,12 @@
   # register sidecar; the one-click reconciler ups it alongside the app
   # and refcounts it across apps on uninstall. yolov8 = standard stack.
   requires_adapters: [fast_plate_ocr]
-  emits: [plate_read, plate_expected, plate_watchlist]
+  emits: [plate_read, plate_expected, plate_watchlist, vehicle_overstay, plate_unknown]
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/license-plate-recognition/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/license-plate-recognition
+  network_egress: []
   install:
     compose: |
       # INFORMATIONAL — this service already ships in
@@ -244,16 +458,23 @@
 
 - id: gate-controller
   name: Gate Controller
-  summary: Opens the barrier for allowed vehicles — pulses an HTTP relay per gate camera on the LPR app's access.decided.v1 allow decisions; deny and unknown fail closed.
+  summary: Opens the barrier for allowed vehicles. Drives dry contact (GPIO), an IP relay (Shelly, Tasmota, ESPHome), Modbus or an ONVIF Profile C door controller from the LPR app's access.decided.v1 allow decisions; deny and unknown fail closed. Live gate state, hold-open schedules, manual control and a line for every decision.
   category: automation
-  version: "1.0.0"
+  version: "1.1.0"
   image: ghcr.io/open-nvr/gate-controller:latest
   build_context: examples/gate-controller
-  # No inference and no adapters — this app is bus + relay only. Pair
+  # No inference and no adapters — this app is bus + wiring only. Pair
   # it with license-plate-recognition (barrier_mode: registered).
   requires_tasks: []
-  emits: [barrier_opened, barrier_fault]
+  emits: [barrier_opened, barrier_fault, barrier_held_open, barrier_refused]
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/gate-controller/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/gate-controller
+  # The wiring reaches the site's own barrier hardware on the LAN, which
+  # is not internet egress: the transports talk to a relay, a PLC or a
+  # door controller the operator already owns.
+  network_egress: []
   install:
     compose: |
       # INFORMATIONAL — this service already ships in
@@ -277,15 +498,29 @@
 
 - id: alert-notifier
   name: Alert Notifier
-  summary: "The guard's phone: pushes alerts at/above a severity bar to Telegram and/or any webhook (SMS gateways, Slack, sirens) — one alarm, one push, flood-safe."
+  summary: "The guard's phone: alerts on ntfy, Telegram, Pushover, Discord, Slack, Teams, Gotify, Matrix, email or any webhook — routed by ordered rules, collapsed per burst, quiet-hours aware, and checked so a revoked token is found in daylight."
   category: notifications
-  version: "1.0.0"
+  version: "2.0.0"
   image: ghcr.io/open-nvr/alert-notifier:latest
   build_context: examples/alert-notifier
   # No inference and no adapters — bus in, push out.
   requires_tasks: []
-  emits: []
+  emits: [notification_channel_failing, notification_channel_recovered]
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/alert-notifier/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/alert-notifier
+  # The public services' own hosts. A self-hosted ntfy or Gotify, a
+  # Matrix homeserver, an SMTP server or a webhook target is a host only
+  # the operator knows, so those are added per-install from the catalog.
+  # SMTP cannot go through the egress proxy at all (it speaks HTTP
+  # CONNECT) — see examples/alert-notifier/CHANNELS.md → "Getting out".
+  network_egress:
+    - ntfy.sh
+    - api.telegram.org
+    - api.pushover.net
+    - discord.com
+    - hooks.slack.com
   install:
     compose: |
       # INFORMATIONAL — this service already ships in
@@ -307,9 +542,52 @@
             - opennvr_internal
     command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d alert-notifier
 
+- id: attendly
+  name: Attendly
+  summary: Attendance by face on your cameras — classroom rosters from a weekly timetable, hostel and mess flap barriers (or in/out alerts without one), meal bookings, and staff check-in/out per department. A full application with its own web UI (opens in a new tab) and OpenNVR login.
+  category: attendance
+  version: "1.1.0"
+  image: ghcr.io/open-nvr/attendly:1.1.0
+  # First-party, closed source (docs/APP_LISTING_TERMS.md §1): no
+  # build_context and no source — the image is built and signed by
+  # OpenNVR's CI in a private open-nvr repository.
+  license: proprietary
+  requires_tasks: [face_detection, face_recognition]
+  requires_adapters: [insightface_attendly]
+  emits: [hostel_in, hostel_out, gate_denied, mess_served]
+  docs_url: https://github.com/open-nvr/open-nvr/blob/main/docs/apps/attendly.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  network_egress: []
+  install:
+    compose: |
+      # INFORMATIONAL — this service already ships in
+      # docker-compose.apps.yml (with its data volume); you do NOT paste
+      # this anywhere. Run the command below and compose brings it up
+      # from the shipped overlay, which also publishes the app's web UI
+      # on host port 9300 (the catalog card opens it).
+      services:
+        attendly:
+          profiles: [apps]
+          image: ${ATTENDLY_IMAGE:-ghcr.io/open-nvr/attendly:1.1.0}
+          restart: unless-stopped
+          environment:
+            - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
+            - NATS_URL=nats://nats:4222
+            - OPENNVR_URL=http://opennvr-core:8000
+            - KAIC_URL=http://opennvr-core:8100
+            - ATTENDLY_FACES_URL=http://insightface-attendly-adapter:9005
+          expose:
+            - "9300"
+          volumes:
+            - opennvr_attendly_data:/data
+          networks:
+            - opennvr_internal
+    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d attendly
+
 - id: smart-doorbell
   name: Smart Doorbell
-  summary: Recognises faces at the door via InsightFace through KAI-C; known visitors ride low-severity, strangers high with a snapshot.
+  summary: Recognises faces at the door and keeps the People directory — family, residents, staff, contractors with expiry dates, a watchlist; strangers alert with a snapshot you can enrol from.
   category: doorstep
   version: "1.0.0"
   image: ghcr.io/open-nvr/smart-doorbell:latest
@@ -321,8 +599,12 @@
   # its unavailable face_recognition task, and an install without the
   # adapter degrades exactly as the app's README documents.
   requires_adapters: [insightface]
-  emits: [known_visitor, unknown_visitor]
+  emits: [known_visitor, unknown_visitor, watchlist_visitor, expired_pass]
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/smart-doorbell/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/smart-doorbell
+  network_egress: []
   install:
     compose: |
       # INFORMATIONAL — this service already ships in
@@ -346,14 +628,18 @@
 
 - id: package-delivery
   name: Package Delivery
-  summary: Watches a porch ROI for package arrivals, lingering boxes, and pick-ups with an owner-vs-stranger severity heuristic.
+  summary: What is waiting at each door, who brought it and who took it. Triggered by the people and vehicles Tier-0 already sees, with the parcels counted on demand by the best skill the box has; every pick-up is rated by evidence (a known face, the courier, a vehicle, the hours, the site mode) and reminders run until it is collected.
   category: doorstep
-  version: "1.0.0"
+  version: "1.1.0"
   image: ghcr.io/open-nvr/package-delivery:latest
   build_context: examples/package-delivery
-  requires_tasks: [object_detection]
-  emits: [package_arrived, package_lingering, package_picked_up, package_taken]
+  requires_tasks: [object_detection, multi_object_tracking]
+  emits: [package_delivered, package_picked_up, package_taken, package_reminder]
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/package-delivery/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/package-delivery
+  network_egress: []
   install:
     compose: |
       # INFORMATIONAL — this service already ships in
@@ -369,6 +655,7 @@
             - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
             - NATS_URL=nats://nats:4222
             - OPENNVR_URL=http://opennvr-core:8000
+            - KAIC_URL=http://opennvr-core:8100
           expose:
             - "9207"
           networks:
@@ -377,21 +664,30 @@
 
 - id: footage-search
   name: Footage Search
-  summary: Indexes inference events (labels + captions) into SQLite and answers natural-language footage queries like 'red truck at the dock yesterday'.
+  summary: Answers natural-language footage queries like 'red truck at the dock yesterday' against the platform's event store.
   category: forensics
-  version: "1.0.0"
+  version: "2.0.0"
   image: ghcr.io/open-nvr/footage-search:latest
   build_context: examples/footage-search
   requires_tasks: []
   emits: []
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/footage-search/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/footage-search
+  network_egress: []
   install:
     compose: |
       # INFORMATIONAL — this service already ships in
-      # docker-compose.apps.yml (with its config-init companion, named
-      # config volume, and a persistent data volume for the SQLite
-      # index); you do NOT paste this anywhere. Run the command below
-      # and compose brings it up from the shipped overlay.
+      # docker-compose.apps.yml (with its config-init companion and
+      # named config volume); you do NOT paste this anywhere. Run the
+      # command below and compose brings it up from the shipped
+      # overlay.
+      #
+      # No data volume and no NATS: as of 2.0.0 this app keeps no index
+      # of its own and searches the platform's event store, so
+      # OPENNVR_URL is what it needs and the rest was upkeep on a second
+      # copy of the same footage.
       services:
         footage-search:
           profiles: [apps]
@@ -399,7 +695,6 @@
           restart: unless-stopped
           environment:
             - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}
-            - NATS_URL=nats://nats:4222
             - OPENNVR_URL=http://opennvr-core:8000
           expose:
             - "9208"
@@ -409,7 +704,7 @@
 
 - id: home-assistant-relay
   name: Home Assistant Relay
-  summary: Bridges the opennvr.alerts.* fan-out into Home Assistant entities via MQTT discovery or the HA REST API, with auto-off windows so sensors read like an event log.
+  summary: "Deprecated: use the native Home Assistant integration or the built-in MQTT discovery (docs/HOME_ASSISTANT.md), which cover cameras, controls, media and every app's entities. This bridges only alerts into binary sensors; kept for existing installs."
   category: integration
   version: "1.0.0"
   image: ghcr.io/open-nvr/home-assistant-relay:latest
@@ -417,6 +712,10 @@
   requires_tasks: []
   emits: []
   docs_url: https://github.com/open-nvr/open-nvr/blob/main/examples/home-assistant-relay/README.md
+  author: OpenNVR
+  contact: https://github.com/open-nvr/open-nvr/issues
+  source: https://github.com/open-nvr/open-nvr/tree/main/examples/home-assistant-relay
+  network_egress: ["the Home Assistant host the operator configures"]
   install:
     compose: |
       # INFORMATIONAL — this service already ships in

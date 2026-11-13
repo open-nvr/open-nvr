@@ -24,6 +24,7 @@ import uuid
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     Column,
     DateTime,
@@ -32,15 +33,19 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
+    text,
+    true as sa_true,
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
 from core.config import settings
 from core.database import Base
+from core.sealed_json import SealedJSON
 
 
 class Role(Base):
@@ -62,6 +67,54 @@ class Role(Base):
     permissions = relationship(
         "Permission", secondary="role_permissions", back_populates="roles"
     )
+
+
+class UserMfaFactor(Base):
+    """One second factor of an account: today an authenticator app (TOTP).
+
+    An account may hold several (an old phone and a new one while it
+    switches). ``confirmed_at`` NULL is an enrolment in progress: the QR code
+    was shown but no code from it has been verified yet; such a row never
+    verifies a sign-in. All changes go through services.mfa_service.
+    """
+
+    __tablename__ = "user_mfa_factors"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"),
+                     nullable=False, index=True)
+    kind = Column(String(16), nullable=False, default="totp", server_default="totp")
+    label = Column(String(64), nullable=False, default="Authenticator",
+                   server_default="Authenticator")
+    encrypted_secret = Column(String(500), nullable=False)
+    enabled = Column(Boolean, nullable=False, default=True, server_default=sa_true())
+    confirmed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    last_used_at = Column(DateTime(timezone=True), nullable=True)
+    # TOTP time step of the last code accepted at sign-in: the same code is
+    # never accepted for a second sign-in.
+    last_used_step = Column(BigInteger, nullable=True)
+
+    @property
+    def secret(self) -> str:
+        from utils.encryption import decrypt_value
+
+        return decrypt_value(self.encrypted_secret)
+
+
+class UserRecoveryCode(Base):
+    """A one-time recovery code: signs its account in once when no
+    authenticator app is at hand. Only a hash is stored; the codes are shown
+    once, when generated. A new set replaces the old one."""
+
+    __tablename__ = "user_recovery_codes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"),
+                     nullable=False, index=True)
+    code_hash = Column(String(64), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    used_at = Column(DateTime(timezone=True), nullable=True)
 
 
 class User(Base):
@@ -86,8 +139,37 @@ class User(Base):
     # account owner on first login, not assumed at creation.
     mfa_enabled = Column(Boolean, default=False)
 
-    # Store encrypted MFA secret
+    # The account's second factors live in user_mfa_factors (UserMfaFactor).
+    # This column is kept equal to the oldest confirmed, enabled factor's
+    # ciphertext (NULL when there is none) by services.mfa_service, so an
+    # older core started on this database still verifies the right secret.
+    # Nothing in this version verifies codes against it.
     encrypted_mfa_secret = Column(String(500), nullable=True)
+    # Bumped on every password change or reset; tokens carry it as ``ver``
+    # and stop working when it moves, so a reset ends the old sessions.
+    token_version = Column(Integer, default=0, nullable=False, server_default="0")
+    # "local" (NULL) or "oidc": an account that signs in through the
+    # site's identity provider has no usable password here and skips the
+    # TOTP wall (the provider owns MFA).
+    auth_provider = Column(String(16), nullable=True)
+    oidc_issuer = Column(String(255), nullable=True)
+    oidc_subject = Column(String(255), nullable=True, index=True)
+
+    @property
+    def mfa_factor_count(self) -> int:
+        """How many working authenticators the account has (confirmed and
+        enabled). Read for the users list; changes go through mfa_service."""
+        from sqlalchemy.orm import object_session
+
+        db = object_session(self)
+        if db is None or self.id is None:
+            return 0
+        n = (db.query(UserMfaFactor.id)
+             .filter(UserMfaFactor.user_id == self.id, UserMfaFactor.enabled.is_(True),
+                     UserMfaFactor.confirmed_at.isnot(None))
+             .count())
+        # A secret only in the legacy column (written by an older core) is one.
+        return n or (1 if self.mfa_enabled and self.encrypted_mfa_secret else 0)
 
     @property
     def mfa_secret(self):
@@ -153,9 +235,10 @@ class Integration(Base):
     name = Column(String(100), nullable=False)
     type = Column(SAEnum(IntegrationType), nullable=False)
     enabled = Column(Boolean, default=True)
-    config = Column(
-        JSON, nullable=False
-    )  # Stores type-specific settings and event subscriptions
+    # Type-specific settings and event subscriptions. Secret values
+    # (broker/SMTP passwords, webhook secrets) are encrypted at rest and
+    # masked on the API — core/sealed_json.py.
+    config = Column(SealedJSON, nullable=False)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
@@ -236,6 +319,15 @@ class Camera(Base):
     # table of known anamorphic encoder modes. Nullable so the additive column
     # self-heal can add it to old create_all databases.
     display_aspect_ratio = Column(String(16), nullable=True)
+    # Where the video comes from (core/camera_source.py): "rtsp" (MediaMTX
+    # pulls rtsp_url) or "publisher" (a webcam publishes into the path —
+    # browser WHIP or the host helper). NULL = "rtsp", for every camera from
+    # before the column; nullable so the additive self-heal can add it.
+    source_type = Column(String(16), nullable=True, default="rtsp")
+    # For a webcam fed by the host agent (services/host_agent.py): the
+    # agent's stable id of the USB webcam on the OpenNVR machine. NULL for a
+    # browser webcam and for every IP camera.
+    source_device = Column(String(300), nullable=True)
     is_active = Column(Boolean, default=True)
     # Tombstone for irreversible soft delete. NULL = live (active or paused);
     # set = camera is in the bin: hidden from every normal list, not editable,
@@ -252,14 +344,34 @@ class Camera(Base):
     # A list of {"skill": "<capability>", "labels": [..]?} entries, e.g.
     # [{"skill": "license_plate_recognition"},
     #  {"skill": "object_detection", "labels": ["person", "truck"]}].
-    # Written ONLY by the camera settings surface; served additively on the
-    # internal camera-agent endpoint so consumers (Tier-0 reconcile, the
-    # App SDK's cameras_for_skill, the catalog UI) can opt in one by one.
-    # NULL/[] = nothing assigned — every consumer must treat that as
-    # "no restriction declared", never as "do nothing" (back-compat).
+    # Written by the camera settings surface and by an app adopting a
+    # camera in its own config; served on the internal camera-agent
+    # endpoint to Tier-0 reconcile, the App SDK's cameras_for_skill and
+    # the catalog UI.
+    # NULL/[] = nothing assigned. That camera is ELIGIBLE for every
+    # skill's picker and ADOPTED by none: it keeps streaming, recording
+    # and Tier-0 detection, and no app inference runs on it.
     # Nullable so the additive column self-heal can add it to old
     # create_all databases.
     assignments = Column(JSON, nullable=True)
+    # Tier-0 object detection on this camera. Off keeps streaming and
+    # recording; detect-pipeline just stops analysing it (the camera-agent
+    # roster's ``analyze``). NULL = on: nullable so the additive column
+    # self-heal can add it, and so every existing camera keeps detecting.
+    detection_enabled = Column(Boolean, nullable=True, default=True)
+    # This camera's overrides of the pipeline's global DETECT_* knobs
+    # (services/detection_settings.py): analysis fps, motion gate, spawn
+    # score, stationary interval and per-label object filters. NULL / {} =
+    # inherit everything. Nullable so the additive column self-heal can
+    # add it. Handed to the detect-pipeline as ``detection`` in the
+    # camera-agent sources listing.
+    detection_settings = Column(JSON, nullable=True)
+    # Where detections come from: NULL/'opennvr' (ours; native events are
+    # history only), 'camera' (the camera's own analytics become alerts,
+    # Tier-0 paused here) or 'both'. See services/native_analytics.py.
+    analytics_source = Column(String(8), nullable=True)
+    # Optional allowlist of the alert types native events may become.
+    native_event_types = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
@@ -485,10 +597,33 @@ class TimelineEvent(Base):
     __tablename__ = "events"
     __table_args__ = (
         Index("ix_events_cam_start", "camera_id", "started_at"),
+        # The plate aggregations range over WHEN A READ HAPPENED, which is
+        # coalesce(observed_at, started_at) (services.timeline_service.
+        # SEEN_AT). That expression cannot use the index above — the planner
+        # matched camera_id and then filtered the range against every row the
+        # camera ever recorded, and this table holds every track, people
+        # included. Mirrors ix_events_cam_start so the same queries seek the
+        # same way (#451).
+        Index("ix_events_cam_seen", "camera_id",
+              text("coalesce(observed_at, started_at)")),
+        # Search without a camera — "trucks yesterday", fleet-wide — matches
+        # a class and then a range. On ix_events_label alone that range is
+        # filtered against every row the class ever produced, which for
+        # "person" is most of the table (migration c1d2e3f4a5b6).
+        Index("ix_events_label_start", "label", "started_at"),
         # One visit = one (camera, track, start): ingest retries are
         # idempotent. NULLs (alarm/alert rows) never collide by SQL semantics.
         Index("uq_events_visit", "camera_id", "track_id", "started_at",
               unique=True),
+        # NOT DECLARED HERE, deliberately: ix_events_started_brin, a BRIN
+        # index on started_at alone, created by migration d3a8b1c5e9f2.
+        # It serves the query naming neither a camera nor a class —
+        # "everything between 2am and 4am" — which every index above
+        # leaves to a scan. BRIN has no SQLite equivalent, and declaring
+        # it here would quietly create a BTREE on the test dialect: the
+        # most expensive index on the fastest-growing table, measuring
+        # something production does not do. If a btree on started_at is
+        # ever wanted, it should be added on purpose.
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -501,10 +636,249 @@ class TimelineEvent(Base):
     started_at = Column(DateTime(timezone=True), nullable=False)
     ended_at = Column(DateTime(timezone=True), nullable=True)
     recording_ref = Column(String(500), nullable=True)
-    evidence_path = Column(String(500), nullable=True)
+    evidence_path = Column(String(500), nullable=True, index=True)
     plate_text = Column(String(32), nullable=True)
+    # The crop the plate was actually READ from (#382). Multi-frame OCR
+    # reads plate-candidate crops, not the visit's vehicle-best frame —
+    # the two are anti-correlated by construction (a car is biggest when
+    # closest, which is when its plate leaves the crop), so showing
+    # evidence_path beside plate_text shows a photo that often does not
+    # contain the plate. NULL for rows read from the evidence crop
+    # itself, and for every row enriched before this column existed:
+    # readers fall back to evidence_path.
+    plate_evidence_path = Column(String(500), nullable=True)
+    # The WHOLE camera frame the best crop was taken from. evidence_path is
+    # framed for the SUBJECT — detection box plus a quarter-box margin —
+    # which is precisely what stops it answering "where was this, what else
+    # was in shot, was the gate open". Widening that crop would ruin the one
+    # thing it is good at, so the scene is a second content-addressed JPEG
+    # instead. NULL for rows written before this column and for pipelines
+    # running with DETECT_SCENE_EVIDENCE off; readers fall back to
+    # evidence_path.
+    scene_evidence_path = Column(String(500), nullable=True)
+    # The UNCROPPED attempt plate_evidence_path was cut out of: a crop of
+    # the vehicle, at the moment its plate was read. Needed because a
+    # visit is not always one vehicle — track association merges a
+    # departing car with the one arriving behind it, and the visit's
+    # best-thumbnail frame is then a DIFFERENT car from the one the
+    # plate came off. This image is the only one on the row that is
+    # guaranteed to show the car the number belongs to.
+    plate_frame_path = Column(String(500), nullable=True)
+    # When the plate was SEEN — the capture time of the frame the winning
+    # read came from, as opposed to when any part of the platform got
+    # round to processing it.
+    #
+    # started_at cannot answer this. It is the visit's start, and a visit
+    # is not always one vehicle: track association merges a departing car
+    # with the one arriving behind it, so on a merged track started_at is
+    # the moment a DIFFERENT car arrived — the same defect that makes
+    # plate_frame_path the only trustworthy image on the row. This column
+    # is that image's timestamp, so the picture and the time agree.
+    #
+    # Why it is not a processing time: OCR latency varies with backlog and
+    # track length, so a processing stamp is wrong by an amount that grows
+    # exactly when the gate is busiest; it does not scrub to the right
+    # second of recording; and re-running the enrichment sweep would
+    # restamp history as "now". This value is stable under reprocessing.
+    #
+    # NULL for non-plate rows, for rows read from the evidence frame
+    # (no candidate stamp to inherit), and for every row written before
+    # this column existed: readers fall back to started_at.
+    observed_at = Column(DateTime(timezone=True), nullable=True)
     payload = Column(JSON, nullable=True)
+    # Ids of the CameraZones this visit passed through (HA-109), computed at
+    # ingest from the track's path. NULL = not computed (no path sent, or a
+    # row from before zones); [] = computed, in no zone.
+    zone_ids = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class EventText(Base):
+    """The searchable words attached to one visit — what search matches
+    "red" or "delivery van" against, since the visit row itself carries a
+    class label and a plate, not a description.
+
+    A sidecar, not columns on ``events``, because enrichment is optional,
+    arrives later than the visit, and is re-runnable: rewriting a caption
+    must not touch the row that alarms and reports point at. Most visits
+    never get text, so the cost is paid only by the ones that do. On
+    Postgres a GIN index over ``to_tsvector('simple', caption ||
+    attributes)`` serves the match; on SQLite (tests) the same query
+    degrades to LIKE — see services/search_service.py."""
+
+    __tablename__ = "event_text"
+
+    event_id = Column(
+        Integer, ForeignKey("events.id", ondelete="CASCADE"), primary_key=True
+    )
+    #: Free description of the frame, from a captioner.
+    caption = Column(Text, nullable=True)
+    #: Space-joined attribute words ("red van rear-door") from any
+    #: enricher that classifies rather than describes.
+    attributes = Column(Text, nullable=True)
+    #: Which enricher wrote this, so a bad one can be found and re-run.
+    source = Column(String(60), nullable=True)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class EventEmbedding(Base):
+    """One visit's vector — the sibling of :class:`EventText`.
+
+    Words and vectors are two views of the same enrichment, so they sit
+    side by side, keyed the same way, cascading the same way. Search
+    fuses them; neither is required for the other to work.
+
+    In the MAIN database, deliberately, not a vector service. Every
+    query here is already filtered — this camera, this window, this
+    class — and a vector store on the other side of a network call
+    cannot see that filter, so it either returns candidates the filter
+    then throws away or asks for an id list it has no index on. Frigate
+    reached the same conclusion with ``sqlite-vec``. Keeping the vectors
+    next to the rows also means one backup, one retention policy, and
+    one place a deleted camera's data actually disappears from.
+
+    ``vector`` is float32 little-endian bytes, NORMALISED ON WRITE so
+    similarity is a dot product (services/embedding_store.py). A plain
+    BLOB rather than a native vector type because OpenNVR has to run
+    where pgvector is not installed and where the database is SQLite,
+    and a schema that only loads on the better machine is the thing this
+    project does not do. An ANN index is an addition on top of this
+    column, not a replacement for it.
+
+    ``dim`` and ``model`` are stored rather than assumed: vectors from
+    two different adapters are not comparable, and a half-migrated store
+    should be diagnosable from the table rather than from the ranking
+    looking odd.
+
+    ``kind`` says WHAT was embedded. ``image`` is the visit's evidence
+    frame; ``caption`` is the words a captioner wrote about it (plus the
+    projected attribute words), put through the same model's text tower.
+    Both live in one table, keyed ``(event_id, kind)``, because search
+    scopes them identically and a model change must re-embed both — a
+    second table would be a second ``stale_rows`` to forget."""
+
+    __tablename__ = "event_embeddings"
+    __table_args__ = (
+        # "which visits still need embedding" and "re-run everything that
+        # came from the old adapter" are both this index.
+        Index("ix_event_embeddings_model", "model"),
+    )
+
+    event_id = Column(
+        Integer, ForeignKey("events.id", ondelete="CASCADE"), primary_key=True
+    )
+    #: ``image`` or ``caption`` — see embedding_store.KIND_IMAGE/KIND_CAPTION.
+    #: Defaults to ``image`` so every pre-existing row and every caller
+    #: written before captions were embedded keeps meaning what it meant.
+    kind = Column(String(16), primary_key=True, nullable=False,
+                  default="image", server_default="image")
+    #: float32 little-endian, unit length. See embedding_store.pack().
+    vector = Column(LargeBinary, nullable=False)
+    #: Length of the vector. Stored because a mismatch is a
+    #: misconfiguration worth naming, not a comparison worth attempting.
+    dim = Column(Integer, nullable=False)
+    #: Which adapter produced it, for targeted re-runs.
+    model = Column(String(120), nullable=True)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class VisitDescriptor(Base):
+    """One thing a skill said about one visit.
+
+    ``EventText`` holds words; this holds claims — kind, value, the
+    confidence the skill gave it, and which task and adapter produced it.
+    Rows rather than columns because the set of claims depends on what is
+    registered and healthy in KAI-C when the visit is enriched: a site
+    with LPR and a colour classifier writes different kinds from one with
+    a captioner, and neither should need a migration.
+
+    Uniqueness is (event, kind, task): re-running a skill replaces what
+    IT said, while two different tasks may still disagree — which is
+    information about the skills, not a conflict to resolve in the
+    schema."""
+
+    __tablename__ = "visit_descriptors"
+    __table_args__ = (
+        UniqueConstraint("event_id", "kind", "source_task", name="uq_descriptor_claim"),
+        Index("ix_descriptor_event", "event_id"),
+        # Filtering ("every red van") and counting — how common a value is
+        # in this deployment is what decides whether it is weak evidence
+        # or nearly an identifier.
+        Index("ix_descriptor_kind_value", "kind", "value"),
+        # "everything not bound by a timestamp" is a filter a cautious
+        # reader applies to the largest table in the store.
+        Index("ix_descriptor_binding", "binding"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    event_id = Column(
+        Integer, ForeignKey("events.id", ondelete="CASCADE"), nullable=False
+    )
+    #: colour | vehicle_type | face_id | plate | clothing_top | carrying …
+    #: An open vocabulary: a new skill must not need a migration.
+    kind = Column(String(40), nullable=False)
+    #: Lowercased by the writer, so "Red" and "red" are one value and can
+    #: be counted as one.
+    value = Column(String(120), nullable=False)
+    #: What the skill thought of its own claim — without it a 0.51 guess
+    #: weighs the same as a 0.99 read.
+    confidence = Column(Float, nullable=True)
+    source_task = Column(String(40), nullable=True)
+    source_adapter = Column(String(60), nullable=True)
+    model_fingerprint = Column(String(120), nullable=True)
+    #: How the SUBJECT was determined — which visit this claim is about.
+    #: Everything else here qualifies the claim; this qualifies the
+    #: binding, and without it a guessed subject is indistinguishable
+    #: from a measured one once written down.
+    #:
+    #:   direct   the producer held the event_id
+    #:   window   core matched camera + instant inside the visit's span
+    #:   nearest  nothing covered the instant; the closest within a
+    #:            bounded tolerance was used — a guess, and named one
+    #:
+    #: A reader that must not act on a guess filters on this. An
+    #: ambiguous instant binds NOTHING rather than picking, so there is
+    #: no fourth value for "we chose between two".
+    binding = Column(String(16), nullable=False, server_default="direct")
+    #: The KAI-C correlation id of the inference behind this claim — the
+    #: join back to KAI-C's audit line, and so to the adapter and model
+    #: version that made it. It is the difference between a descriptor
+    #: being an assertion and being evidence.
+    correlation_id = Column(String(64), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class CameraTransition(Base):
+    """How long it takes to get from one camera to the next, learned.
+
+    Cross-camera questions ("where did it go after the dock?") are only
+    tractable if you know which cameras can follow which, and how long
+    that takes. Nobody wants to survey that by hand, and it changes when
+    a gate is closed or a camera is re-aimed.
+
+    So it is learned from the journeys the system is already certain
+    about: two visits carrying the SAME exact identity — a plate read or
+    a recognised face, both of which come from KAI-C adapters — are one
+    observed trip from A to B. Those trips give the median and the spread
+    that later let an object with NO exact identity be followed: the
+    topology says where to look and how long to allow, and the
+    descriptors say which candidate fits."""
+
+    __tablename__ = "camera_transitions"
+    __table_args__ = (
+        UniqueConstraint("from_camera_id", "to_camera_id", name="uq_transition_pair"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    from_camera_id = Column(Integer, ForeignKey("cameras.id"), nullable=False)
+    to_camera_id = Column(Integer, ForeignKey("cameras.id"), nullable=False)
+    #: How many confirmed trips this edge is built from. A one-sample
+    #: edge is a coincidence; the score says so.
+    samples = Column(Integer, nullable=False, default=0)
+    median_seconds = Column(Float, nullable=True)
+    #: The slow tail, so a legitimate dawdle is not scored as impossible.
+    p90_seconds = Column(Float, nullable=True)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
 class CameraEvent(Base):
@@ -751,6 +1125,124 @@ class SecuritySetting(Base):
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
 
+class AppAlert(Base):
+    """Operator-facing alert inbox (§11.5 app-emitted alerts).
+
+    Apps publish alerts onto ``opennvr.alerts.>`` (the SDK's
+    NatsAlertChannel); until this table nothing consumed them — alerts
+    reached stdout and the bus and stopped there, so "alarm on unknown
+    vehicle" fired into a log nobody watches. One row per fired alert;
+    the UI polls unacknowledged rows, rings per severity, and writes the
+    acknowledgement back here so every open browser stops ringing at
+    once.
+
+    ``camera_id`` is the wire HANDLE (``cam3``) exactly as the producer
+    sent it — alerts must survive producers the core doesn't know
+    (adapters, future kai-c policy alerts), so no FK.
+    """
+
+    __tablename__ = "app_alerts"
+    __table_args__ = (
+        Index("ix_app_alerts_unacked", "acknowledged_at", "fired_at"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    # Producer-assigned id — the dedup key for at-least-once delivery.
+    alert_id = Column(String(64), unique=True, nullable=False, index=True)
+    fired_at = Column(DateTime(timezone=True), nullable=False)
+    severity = Column(String(16), nullable=False)   # low|medium|high|critical
+    title = Column(String(200), nullable=False)
+    description = Column(Text, nullable=True)
+    source_kind = Column(String(30), nullable=True)     # app|adapter|kai-c
+    source_name = Column(String(100), nullable=True, index=True)
+    camera_id = Column(String(60), nullable=True, index=True)
+    correlation_id = Column(String(64), nullable=True)
+    evidence = Column(Text, nullable=True)              # JSON, as received
+    tags = Column(Text, nullable=True)                  # JSON list
+    # What KIND of alert this is, in the producer's own vocabulary
+    # ("scanner_flag", "no_scan", "package_taken"). Severity says how
+    # loudly to ring; this says what happened, and is what an operator
+    # filters a month of history by. Indexed for exactly that.
+    alert_type = Column(String(40), nullable=True, index=True)
+    # Evidence PHOTOS, as relative paths into the evidence store — never
+    # the image bytes. Apps upload each JPEG first (see the app-platform
+    # evidence endpoint) and send only paths, because the alert itself
+    # travels over NATS, whose default payload ceiling is 1 MB: a couple
+    # of base64 crops exceed it and the broker drops the whole alert.
+    images = Column(Text, nullable=True)                # JSON {name: rel_path}
+    # When the thing the alert is ABOUT was seen, as opposed to fired_at,
+    # which is when the app got round to deciding. Producers that know it
+    # send it in the alert's evidence; NULL for everyone else, and
+    # readers fall back to fired_at.
+    #
+    # fired_at stays the sort key. An inbox ordered by observed time is
+    # not append-only — a read that took longer to OCR would insert its
+    # alarm ABOVE ones already on the guard's screen, where it is
+    # scrolled past rather than seen. So: order by arrival, display when
+    # it happened.
+    observed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    acknowledged_at = Column(DateTime(timezone=True), nullable=True)
+    acknowledged_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+
+class GuardScreening(Base):
+    """One entry screening, as ruled on by the guard-scan app.
+
+    EVERY screening lands here, the clean ones included. That is the
+    point of the table: compliance is complete scans over all
+    screenings, and a store of only the failures can tell you how many
+    alerts there were but never what share of the day went right.
+
+    Written by ``services/guardscan_event_consumer.py`` from contracted
+    ``screening.completed.v1`` events. The app measures; core remembers —
+    so the app can restart, or be reinstalled, without losing the record.
+    Retention: the consumer prunes rows older than RETENTION_DAYS.
+    """
+
+    __tablename__ = "guard_screenings"
+    __table_args__ = (
+        Index("ix_guard_screenings_cam_ts", "camera_id", "ended_at"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    #: Producer-assigned, and the dedup key: the bus is at-least-once,
+    #: so a redelivered screening must not become a second row and a
+    #: second entry in the day's denominator.
+    session_id = Column(String(40), unique=True, nullable=False, index=True)
+    #: Core camera id, parsed from the platform handle ("cam3" → 3), so
+    #: reads owner-scope through the cameras table like every other
+    #: surface. NULL when the producer used a handle core doesn't know.
+    camera_id = Column(Integer, nullable=True, index=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    ended_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    #: compliant | partial | incomplete | no_scan
+    verdict = Column(String(20), nullable=False, index=True)
+    score = Column(Float, nullable=False, default=0.0)
+    coverage = Column(Float, nullable=True)
+    order_score = Column(Float, nullable=True)
+    #: Which surfaces were covered, and which were not (JSON lists).
+    steps_done = Column(Text, nullable=True)
+    steps_missing = Column(Text, nullable=True)
+    #: Whether the wand's indicator lit during this screening.
+    flagged = Column(Boolean, nullable=False, default=False)
+    #: How the screening ended — left, complete, timeout, feed_lost.
+    ended_by = Column(String(30), nullable=True)
+    duration_s = Column(Float, nullable=True)
+    engaged_s = Column(Float, nullable=True)
+    #: Who was on duty. The app supplies a stable key per guard it can
+    #: tell apart; the name is resolved from the roster at write time,
+    #: and stays NULL until someone says who that is.
+    guard_key = Column(String(64), nullable=True, index=True)
+    guard_name = Column(String(100), nullable=True)
+    #: Evidence photos (JSON {name: relative path}), so the screening
+    #: list can show who was scanned without going via the alert.
+    images = Column(Text, nullable=True)
+    #: The alert this screening raised, if it raised one.
+    alert_id = Column(String(64), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 class AuditLog(Base):
     """Audit log of significant user and system actions.
 
@@ -772,6 +1264,11 @@ class AuditLog(Base):
 
     # Actor
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+
+    # Correlation id of the request that caused this row: the client's
+    # X-Correlation-Id when it sent a valid one (e.g. Home Assistant's context
+    # id), else the request's own id. Joins an external action to our audit trail.
+    correlation_id = Column(String(64), nullable=True, index=True)
 
 
 class AIModel(Base):
@@ -1002,6 +1499,45 @@ class TenantQuota(Base):
     )
 
 
+class ApiToken(Base):
+    """A long-lived API credential for a non-browser client (HA-101).
+
+    Created by a user for, typically, the Home Assistant integration. The
+    secret (``onvr_<prefix>_<random>``) is shown once and only its SHA-256 is
+    stored. A token acts as its owner but can never exceed them: its
+    effective permissions are its ``scopes`` intersected with the owner's,
+    and its cameras are ``camera_ids`` intersected with the owner's visible
+    cameras. It is also limited to the API routes listed in
+    ``services.api_tokens.TOKEN_ROUTES``, and it never counts as a superuser.
+    """
+
+    __tablename__ = "api_tokens"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(64), nullable=False)
+    #: Public, non-secret part of the token, for display and lookup.
+    prefix = Column(String(16), nullable=False, unique=True, index=True)
+    token_hash = Column(String(64), nullable=False)
+    owner_user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"),
+                           nullable=False, index=True)
+    #: Permission names this token may use (JSON list).
+    scopes = Column(JSON, nullable=False)
+    #: Camera ids this token may touch (JSON list); NULL = all the owner can see.
+    camera_ids = Column(JSON, nullable=True)
+    #: CIDRs the token may be used from (JSON list); NULL = anywhere.
+    allowed_cidrs = Column(JSON, nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    last_used_at = Column(DateTime(timezone=True), nullable=True)
+    last_used_ip = Column(String(64), nullable=True)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    #: Set on a short-lived, read-only session token minted BY another token
+    #: (``POST /api-tokens/session``, a dashboard card): it never outlives,
+    #: and is revoked with, its parent.
+    parent_id = Column(Integer, ForeignKey("api_tokens.id", ondelete="CASCADE"),
+                       nullable=True, index=True)
+
+
 class InstalledApp(Base):
     """One registered vertical-detector app (App SDK spec §05).
 
@@ -1022,11 +1558,67 @@ class InstalledApp(Base):
     manifest_json = Column(JSON, nullable=False)
     config_json = Column(JSON, nullable=False, default=dict)
     enabled = Column(Boolean, default=False, nullable=False)
+    # Operator opt-in: may this app's overlay.boxes.v1 events be drawn
+    # over the live video? Off by default — an app drawing on the
+    # operator's screen is a privilege the operator grants, per app.
+    overlay_enabled = Column(Boolean, default=False, nullable=False, server_default="0")
     # registered | ok | unreachable
     status = Column(String(20), nullable=False, default="registered")
     last_seen = Column(DateTime(timezone=True), nullable=True)
+    # The app's OWN credential (services/app_keys.py): SHA-256 of the
+    # ``oak_…`` key minted at registration and handed back exactly once.
+    # NULL = no key issued (a pre-credential registration, or revoked).
+    # With it the app reads only its own config/status and its own
+    # camera roster; the deployment's INTERNAL_API_KEY stays for
+    # platform components (detect-pipeline, KAI-C, the agent).
+    api_key_hash = Column(String(64), nullable=True, index=True)
+    api_key_issued_at = Column(DateTime(timezone=True), nullable=True)
+    # The SDK version the app last registered with — decides whether core
+    # may still forward the site key on the action / entitlement calls
+    # (SDK < 0.6 gates them on it) or signs them per app instead.
+    sdk_version = Column(String(32), nullable=True)
+    # bcrypt of the app key, for the apps bus (nats-apps): the app joins
+    # NATS as user=<app id>, password=<its key>; core renders this into
+    # the bus's users file (services/nats_users.py). Cleared on revoke.
+    nats_password_bcrypt = Column(String(80), nullable=True)
+    # Hosts the operator allowed this install to reach through the egress
+    # proxy, on top of what its catalog listing declared
+    # (services/app_egress.py). A JSON list of host rules.
+    egress_allow = Column(JSON, nullable=True)
+    # Licensed apps (manifest ``entitlement: license_key``): the key the
+    # administrator entered, Fernet-encrypted at rest and never returned;
+    # and the app's own verdict on it (services/app_entitlements.py).
+    # status: none | unverified | valid | invalid.
+    license_key_encrypted = Column(Text, nullable=True)
+    entitlement_status = Column(String(16), nullable=False, default="none",
+                                server_default="none")
+    entitlement_plan = Column(String(100), nullable=True)
+    entitlement_expires_at = Column(DateTime(timezone=True), nullable=True)
+    entitlement_message = Column(String(500), nullable=True)
+    entitlement_limits = Column(JSON, nullable=True)
+    entitlement_checked_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class AppState(Base):
+    """Durable per-app key/value state (the SDK's ``client.state``).
+
+    Apps kept everything in memory (``KeyedState``) or invented a SQLite
+    file each; a restart forgot the register, the cooldowns, the last
+    seen plate. One small table, namespaced by app id, readable and
+    writable only with that app's key (or the site key naming the app):
+    a JSON value per key, last-write-wins.
+    """
+
+    __tablename__ = "app_state"
+
+    app_id = Column(String(100), ForeignKey("installed_apps.id", ondelete="CASCADE"),
+                    primary_key=True)
+    key = Column(String(200), primary_key=True)
+    value = Column(JSON, nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(),
+                        onupdate=func.now())
 
 
 class AppInstallIntent(Base):
@@ -1095,3 +1687,316 @@ class OccupancySample(Base):
     # (additive — future producers may add bands).
     level = Column(String(16), nullable=False, default="normal")
     ts = Column(DateTime(timezone=True), nullable=False, index=True)
+
+
+class OccupancyHeatmap(Base):
+    """One camera-hour of the spatial heatmap (``occupancy.heatmap.v1``).
+
+    The occupancy app bins every watched detection's FOOT point into a
+    fixed unit-space grid and ships sparse deltas every minute or so;
+    the consumer sums them into the row for that camera and hour. The
+    Occupancy page sums rows over any window (last hour, today, 7 days)
+    and paints the grid over a still of the camera. ``cells`` is a flat
+    ``cols * rows`` list of ints, row-major, top-left first — small
+    enough (48x27 = 1296 ints) that JSON beats a bytes column for
+    dialect portability. Retention: pruned with the samples (90 days).
+    """
+
+    __tablename__ = "occupancy_heatmaps"
+
+    id = Column(Integer, primary_key=True, index=True)
+    camera_id = Column(Integer, nullable=False, index=True)
+    # The hour bucket the deltas fell in (UTC, minute/second zeroed).
+    hour_start = Column(DateTime(timezone=True), nullable=False, index=True)
+    cols = Column(Integer, nullable=False)
+    rows = Column(Integer, nullable=False)
+    cells = Column(JSON, nullable=False)
+    # Frames that contributed — lets the page normalise "hits per frame"
+    # so a busy hour and a quiet hour paint on the same scale.
+    frames = Column(Integer, nullable=False, default=0)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class OccupancyFootfall(Base):
+    """One camera-hour of footfall and dwell (``occupancy.footfall.v1``).
+
+    Entries/exits are crossings of the camera's entry line (a→b in,
+    b→a out); dwell is per finished stay inside the zone. Deltas are
+    summed into the row for that camera and hour, like the heatmap;
+    the page reads any window as sums and averages. Pruned with the
+    samples (90 days)."""
+
+    __tablename__ = "occupancy_footfall"
+
+    id = Column(Integer, primary_key=True, index=True)
+    camera_id = Column(Integer, nullable=False, index=True)
+    hour_start = Column(DateTime(timezone=True), nullable=False, index=True)
+    entries = Column(Integer, nullable=False, default=0)
+    exits = Column(Integer, nullable=False, default=0)
+    dwell_count = Column(Integer, nullable=False, default=0)
+    dwell_seconds = Column(Float, nullable=False, default=0.0)
+    dwell_max_seconds = Column(Float, nullable=False, default=0.0)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class CameraZone(Base):
+    """A named area of one camera's picture (HA-109).
+
+    ``polygon`` is ``[[x, y], ...]`` normalised to 0..1 of the frame, the
+    same space as the overlay boxes. A visit is "in" a zone when a point of
+    its path (the bottom-centre of the box: where the object stands) falls
+    inside. ``labels`` optionally limits the zone to some object labels.
+    """
+
+    __tablename__ = "camera_zones"
+    __table_args__ = (
+        UniqueConstraint("camera_id", "name", name="uq_camera_zone_name"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    camera_id = Column(
+        Integer, ForeignKey("cameras.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name = Column(String(60), nullable=False)
+    polygon = Column(JSON, nullable=False)
+    labels = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class CameraMask(Base):
+    """A part of one camera's picture Tier-0 must ignore.
+
+    ``kind`` is ``motion`` (pixels under it never count as motion, so a
+    burned-in clock or a tree in the wind never wakes the detector) or
+    ``object`` (a detection standing inside it — the bottom-centre of its
+    box — is dropped before it can start a track; ``labels`` optionally
+    limits that to some object labels). ``polygon`` is ``[[x, y], ...]``
+    normalised to 0..1 of the frame, the same space as CameraZone. The
+    detect-pipeline reads them from the camera-agent sources listing.
+    """
+
+    __tablename__ = "camera_masks"
+    __table_args__ = (
+        UniqueConstraint("camera_id", "name", name="uq_camera_mask_name"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    camera_id = Column(
+        Integer, ForeignKey("cameras.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name = Column(String(60), nullable=False)
+    kind = Column(String(16), nullable=False, default="motion")
+    polygon = Column(JSON, nullable=False)
+    labels = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class CameraTour(Base):
+    """A Live View tour: camera sets a display board cycles through.
+
+    ``pages`` is ``[{label, layout_id, duration_s, camera_ids}, ...]``, one
+    entry per screenful. The column is still named ``steps``: tours began
+    as steps that paged through more cameras than their layout held, and
+    such a row is split into pages when it is read (routers/tours.py).
+    Camera ids are kept as plain JSON, not a join table: a camera can be
+    hard-deleted, and a tour must survive that by simply dropping it on
+    read (routers/tours.py filters every page to the viewer's cameras).
+    Global like the window layouts it references; seeing one needs
+    ``live.view``, changing one needs ``cameras.manage``.
+    """
+
+    __tablename__ = "camera_tours"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False)
+    description = Column(Text, nullable=True)
+    pages = Column("steps", JSON, nullable=False)
+    # How the wall draws and reacts: {"fit": "fit"|"fill", "alerts": {...}};
+    # see routers/tours.py TourSettings. NULL = the defaults.
+    settings = Column(JSON, nullable=True)
+    enabled = Column(Boolean, nullable=False, default=True, server_default="true")
+    # Bumped on every save; an edit names the revision it started from so
+    # two admins cannot silently overwrite each other (409 instead).
+    revision = Column(Integer, nullable=False, default=1, server_default="1")
+    created_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class WorkflowRun(Base):
+    """One run of a workflow (RFC #620, §8): created when a trigger
+    matches, then each step is written before the next starts.
+
+    ``workflow_id`` and ``workflow_version`` point at the ``workflows`` and
+    ``workflow_versions`` tables once the engine adds them; plain columns
+    until then. ``correlation_id`` goes on every alert, notification and
+    action the run causes. ``test`` runs perform no action."""
+
+    __tablename__ = "workflow_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    workflow_id = Column(Integer, nullable=True, index=True)
+    workflow_version = Column(Integer, nullable=True)
+    correlation_id = Column(String(32), nullable=False, unique=True,
+                            default=lambda: uuid.uuid4().hex)
+    chain_depth = Column(Integer, nullable=False, default=0)
+    test = Column(Boolean, nullable=False, default=True)
+    # The event that fired it, as received.
+    trigger = Column(JSON, nullable=True)
+    # running | waiting (a step waits for a person) | done | failed
+    status = Column(String(16), nullable=False, default="running", index=True)
+    started_at = Column(DateTime(timezone=True), server_default=func.now())
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+
+    steps = relationship("WorkflowRunStep", back_populates="run",
+                         cascade="all, delete-orphan", order_by="WorkflowRunStep.seq")
+
+
+class WorkflowRunStep(Base):
+    """One step of a run, written before the next step starts.
+
+    ``step_path`` is the step's place in the file (``then[0]``). The AI step's
+    columns are ``opennvr_app_sdk.workflows.StepResult.row()`` as it is:
+    ``outcome`` is null while the step waits for a person, and ``state``
+    holds what resuming needs, only while it waits."""
+
+    __tablename__ = "workflow_run_steps"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_id = Column(Integer, ForeignKey("workflow_runs.id", ondelete="CASCADE"),
+                    nullable=False, index=True)
+    seq = Column(Integer, nullable=False)
+    step_path = Column(String(120), nullable=False)
+    kind = Column(String(16), nullable=False)          # ai | if | action | ...
+    # running | waiting | done
+    status = Column(String(16), nullable=False, default="running")
+    inputs = Column(JSON, nullable=True)
+    # The AI step's result.
+    mode = Column(String(16), nullable=True)           # look | investigate
+    outcome = Column(String(64), nullable=True)
+    fields = Column(JSON, nullable=True)
+    reason = Column(Text, nullable=True)
+    confidence = Column(Float, nullable=True)
+    confidence_source = Column(String(32), nullable=True)
+    self_reported = Column(Float, nullable=True)
+    unsure_reason = Column(String(32), nullable=True)
+    proposed = Column(String(64), nullable=True)
+    rule = Column(Integer, nullable=True)              # which rule decided, from 1
+    evidence = Column(JSON, nullable=True)             # workflow_tool_calls ids
+    model = Column(String(120), nullable=True)
+    usage = Column(JSON, nullable=True)
+    state = Column(JSON, nullable=True)
+    started_at = Column(DateTime(timezone=True), server_default=func.now())
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+
+    run = relationship("WorkflowRun", back_populates="steps")
+    tool_calls = relationship("WorkflowToolCall", back_populates="step",
+                              cascade="all, delete-orphan", order_by="WorkflowToolCall.seq")
+
+    __table_args__ = (UniqueConstraint("run_id", "seq", name="uq_workflow_run_step_seq"),)
+
+
+class WorkflowToolCall(Base):
+    """One model call or tool call of an AI step: the SDK's
+    ``TraceRow.as_row()`` as it is, so a run explains itself. ``args_asked``
+    is what the model asked for, before any handler normalised it."""
+
+    __tablename__ = "workflow_tool_calls"
+
+    id = Column(String(32), primary_key=True)          # the TraceRow id
+    run_step_id = Column(Integer, ForeignKey("workflow_run_steps.id", ondelete="CASCADE"),
+                         nullable=False, index=True)
+    seq = Column(Integer, nullable=False)
+    kind = Column(String(8), nullable=False)           # llm | tool
+    name = Column(String(120), nullable=False)
+    status = Column(String(16), nullable=False)        # ok | failed | refused | suspended
+    mode = Column(String(16), nullable=True)
+    args_asked = Column(JSON, nullable=True)
+    result = Column(Text, nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=False)
+    ms = Column(Integer, nullable=False, default=0)
+    tokens_in = Column(Integer, nullable=True)
+    tokens_out = Column(Integer, nullable=True)
+
+    step = relationship("WorkflowRunStep", back_populates="tool_calls")
+
+
+class Workflow(Base):
+    """A workflow (RFC #620): its name, its state and its current version.
+
+    The file itself is in :class:`WorkflowVersion`; every save is a new
+    version, so each run records which version decided it. ``state`` is
+    the product's, not the file's: ``off``, ``test`` (everything runs,
+    actions are recorded as "would have"), or ``on``. New workflows start
+    in Test. ``needs_attention`` says why a workflow stopped (a step lost
+    its provider), or is null."""
+
+    __tablename__ = "workflows"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(200), nullable=False)
+    state = Column(String(8), nullable=False, default="test")
+    needs_attention = Column(String(300), nullable=True)
+    current_version = Column(Integer, nullable=False, default=1)
+    #: Whether the current version has an action that moves things; such a
+    #: workflow is turned On by an admin only.
+    moves_things = Column(Boolean, nullable=False, default=False)
+    created_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    versions = relationship("WorkflowVersion", back_populates="workflow",
+                            cascade="all, delete-orphan", order_by="WorkflowVersion.version")
+
+
+class WorkflowVersion(Base):
+    """One saved version of a workflow file, as written (``workflow: v1``),
+    with what it needs (skills, apps, camera roles) as the validator found."""
+
+    __tablename__ = "workflow_versions"
+    __table_args__ = (UniqueConstraint("workflow_id", "version", name="uq_workflow_version"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    workflow_id = Column(Integer, ForeignKey("workflows.id", ondelete="CASCADE"),
+                         nullable=False, index=True)
+    version = Column(Integer, nullable=False)
+    yaml = Column(Text, nullable=False)
+    needs = Column(JSON, nullable=True)
+    created_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    workflow = relationship("Workflow", back_populates="versions")
+
+
+class WorkflowApproval(Base):
+    """An Ask a person step waiting for, or given, an answer (RFC #620).
+
+    Its own record, with its own permission (``workflows.approve``), so
+    acknowledging alerts never clears one. ``resume`` is where the run
+    carries on once answered: the enclosing paths and the run's values,
+    so a reply after a restart resumes the run where it stopped. A
+    timeout takes the step's ``no_answer`` path, never a reply's: nobody
+    chose it."""
+
+    __tablename__ = "workflow_approvals"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_id = Column(Integer, ForeignKey("workflow_runs.id", ondelete="CASCADE"),
+                    nullable=False, index=True)
+    step_id = Column(Integer, ForeignKey("workflow_run_steps.id", ondelete="CASCADE"),
+                     nullable=True)
+    step_path = Column(String(120), nullable=False)
+    question = Column(Text, nullable=False)
+    who = Column(String(120), nullable=False)
+    replies = Column(JSON, nullable=False)
+    default_reply = Column(String(120), nullable=True)
+    # open | answered | timed_out
+    state = Column(String(16), nullable=False, default="open", index=True)
+    reply = Column(String(120), nullable=True)
+    answered_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    timeout_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    answered_at = Column(DateTime(timezone=True), nullable=True)
+    resume = Column(JSON, nullable=True)

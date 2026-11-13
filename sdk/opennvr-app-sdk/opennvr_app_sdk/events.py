@@ -1,18 +1,5 @@
 # Copyright (c) 2026 OpenNVR
-# This file is part of OpenNVR.
-#
-# OpenNVR is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Affero General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# OpenNVR is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU Affero General Public License
-# along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
+# SPDX-License-Identifier: Apache-2.0
 
 """
 Events-store client — query the platform's memory (RFC-0001 C1).
@@ -61,13 +48,28 @@ class StoredEvent:
     has_evidence: bool
 
 
+class SearchResult(list):
+    """The rows ``EventsClient.search`` returns — a plain list, plus
+    ``pending``: core's account of what it is describing now because the
+    query asked for a claim the matching visits did not have yet."""
+
+    pending: dict | None = None
+
+
 class EventsClient:
     """Query visits and fetch their evidence photos from core."""
 
-    def __init__(self, core_url: str, api_key: str | None, *,
+    def __init__(self, core_url: str, api_key: str | None = None, *,
                  http_get: HttpGetH | None = None) -> None:
+        #: The `pending` block of the last search that answered (see search()).
+        self.last_pending: dict | None = None
         self._base = core_url.rstrip("/")
-        self._headers = {"X-Internal-Api-Key": api_key} if api_key else {}
+        # The app's own key when it has one (scoped to its cameras), else
+        # the explicit/site key — see credentials.py.
+        from .credentials import AppCredentials
+
+        key = AppCredentials(api_key).token()
+        self._headers = {"X-Internal-Api-Key": key} if key else {}
         self._get = http_get or _default_http_get
 
     async def search(
@@ -79,13 +81,26 @@ class EventsClient:
         start: datetime | str | None = None,
         end: datetime | str | None = None,
         limit: int = 50,
+        attrs: list[str] | None = None,
     ) -> list[StoredEvent] | None:
         """Visits overlapping [start, end), newest first.
 
         Returns ``[]`` for a genuinely empty window and ``None`` on ANY
         failure (transport, auth, or a rejected query) — the caller must be
         able to say "nothing came" and "I couldn't check" differently; in a
-        security product those are different answers."""
+        security product those are different answers.
+
+        **"Not yet" is not "no".** When ``attrs`` asks for a claim ("blue")
+        that some matching visits do not carry yet, core answers from what
+        exists and queues the rest for description now. The returned list
+        is a :class:`SearchResult` whose ``.pending`` says so — ``None``
+        when nothing was needed, else ``{"missing": n, "requested": n,
+        "already_queued": n, "eta_s": s, "request_id": ...}`` — and the
+        same block is mirrored on ``self.last_pending`` (cleared at the
+        start of every call). Tell the user: "N visits in that window have
+        not been described yet — about T; ask again then." The
+        ``enrichment_request_done`` system alert on the bus announces the
+        request's completion."""
         params: dict[str, Any] = {"limit": limit}
         if label:
             params["label"] = label
@@ -93,20 +108,43 @@ class EventsClient:
             params["camera_id"] = camera_id
         if plate:
             params["plate"] = plate
+        # What a skill SAID about the visit — "blue", "van", "hi-vis" —
+        # as opposed to what the detector classified it as. Repeatable
+        # and ANDed server-side.
+        #
+        # Bare values are the documented spelling. "kind:value" scopes to
+        # one kind and is exact, which means `color:blue` finds nothing
+        # because the kind is spelled `colour` — a wrong answer that
+        # looks precisely like "there were no blue cars". Send `blue`.
+        attr_list = [a.strip() for a in (attrs or []) if str(a).strip()]
         if start is not None:
             params["from"] = start.isoformat() if isinstance(start, datetime) else start
         if end is not None:
             params["to"] = end.isoformat() if isinstance(end, datetime) else end
-        url = f"{self._base}/api/v1/internal/camera-agent/events?{urlencode(params)}"
+        # doseq: the endpoint takes `attr` repeated, and urlencode would
+        # otherwise send one param whose value is the string "['blue']".
+        url = (f"{self._base}/api/v1/internal/camera-agent/events?"
+               f"{urlencode({**params, 'attr': attr_list}, doseq=True)}")
+        self.last_pending = None          # never a previous question's answer
         try:
             status, body = await self._get(url, self._headers)
             if status != 200:
                 return None
             import json
-            rows = json.loads(body.decode("utf-8")).get("events", [])
+            payload = json.loads(body.decode("utf-8"))
+            rows = payload.get("events", [])
+            # What core is describing NOW because this query asked for a
+            # claim the visits did not have yet (core's `pending`). It
+            # rides on the returned list (`.pending`), which is still a
+            # list — an app built against the list-of-events contract
+            # keeps working — and is mirrored on `last_pending` for
+            # callers that hold the client rather than the rows.
+            pending = payload.get("pending") if isinstance(payload, dict) else None
+            self.last_pending = pending
         except Exception:
             return None
-        out = []
+        out = SearchResult()
+        out.pending = pending
         for r in rows:
             try:
                 out.append(StoredEvent(

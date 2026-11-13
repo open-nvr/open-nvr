@@ -249,3 +249,34 @@ async def test_register_tolerates_unknown_capability_fields(audit):
         assert adapter.fingerprint == "sha256:aaa"
     finally:
         await reg.aclose()
+
+
+# ── Proxy timeout ──────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_slow_adapter_is_a_timeout_not_unreachable(audit, adapter_stub, monkeypatch):
+    """The proxy's wait is configurable and a timeout is its own error:
+    the caller answers 504 and counts it on its breaker. With a fixed
+    30 s and a plain 502, a CPU captioner taking a minute was cut off on
+    every call and asked again (Ventuno Q, 2026-11-05)."""
+    from kai_c.registry import AdapterTimeout, infer_timeout_s
+
+    def respond(request):
+        if request.url.path == "/infer":
+            raise httpx.ReadTimeout("slow model", request=request)
+        return adapter_stub.respond(request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    reg = AdapterRegistry(sovereignty_mode="local_only", audit=audit, http_client=client,
+                          poll_interval_seconds=999)
+    try:
+        await reg.register("test-adapter", adapter_stub.url)
+        with pytest.raises(AdapterTimeout):
+            await reg.proxy_infer("test-adapter", {"task": "scene_caption"}, "cid-1")
+    finally:
+        await reg.aclose()
+    monkeypatch.setenv("KAI_C_INFER_TIMEOUT_S", "120")
+    assert infer_timeout_s() == 120.0
+    monkeypatch.setenv("KAI_C_INFER_TIMEOUT_S", "nonsense")
+    assert infer_timeout_s() == 90.0

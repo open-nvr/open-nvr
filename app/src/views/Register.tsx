@@ -46,25 +46,25 @@ export function Register() {
 
   return (
     <div className="min-h-screen grid place-items-center bg-[var(--bg)] text-[var(--text)] p-4">
-      <form onSubmit={onSubmit} className="w-full max-w-sm bg-[var(--panel)] border border-neutral-700 p-4 space-y-3">
+      <form onSubmit={onSubmit} className="w-full max-w-sm bg-[var(--panel)] border border-[var(--border)] p-4 space-y-3">
         <h1 className="text-lg font-semibold">Create account</h1>
-        {error && <div className="text-sm text-red-400">{error}</div>}
-        {msg && <div className="text-sm text-amber-400">{msg}</div>}
+        {error && <div className="text-sm text-[var(--danger)]">{error}</div>}
+        {msg && <div className="text-sm text-[var(--warn)]">{msg}</div>}
         <label className="block text-sm">
           <span className="block mb-1">Username</span>
-          <input className="w-full bg-[var(--panel-2)] border border-neutral-700 px-2 py-1" value={username} onChange={(e) => setUsername(e.target.value)} required minLength={3} />
+          <input className="w-full bg-[var(--panel-2)] border border-[var(--border)] px-2 py-1" value={username} onChange={(e) => setUsername(e.target.value)} required minLength={3} />
         </label>
         <label className="block text-sm">
           <span className="block mb-1">Email</span>
-          <input type="email" className="w-full bg-[var(--panel-2)] border border-neutral-700 px-2 py-1" value={email} onChange={(e) => setEmail(e.target.value)} required />
+          <input type="email" className="w-full bg-[var(--panel-2)] border border-[var(--border)] px-2 py-1" value={email} onChange={(e) => setEmail(e.target.value)} required />
         </label>
         <label className="block text-sm">
           <span className="block mb-1">Password</span>
-          <input type="password" className="w-full bg-[var(--panel-2)] border border-neutral-700 px-2 py-1" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={8} />
+          <input type="password" className="w-full bg-[var(--panel-2)] border border-[var(--border)] px-2 py-1" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={8} />
         </label>
         <label className="block text-sm">
           <span className="block mb-1">Confirm password</span>
-          <input type="password" className="w-full bg-[var(--panel-2)] border border-neutral-700 px-2 py-1" value={confirm} onChange={(e) => setConfirm(e.target.value)} required minLength={8} />
+          <input type="password" className="w-full bg-[var(--panel-2)] border border-[var(--border)] px-2 py-1" value={confirm} onChange={(e) => setConfirm(e.target.value)} required minLength={8} />
         </label>
         <button disabled={loading} className="w-full px-3 py-2 bg-[var(--accent)]/90 text-white disabled:opacity-60">
           {loading ? 'Creating…' : 'Create account'}

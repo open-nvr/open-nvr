@@ -17,7 +17,9 @@
 #   - Push to main          → build + push :main and :sha-<short>.
 #     Tier 0 compose can pin :main for the bleeding-edge install path.
 #   - Tag matching ``v*``    → build + push :<version>, :latest,
-#     :sha-<short>. The release path.
+#     :sha-<short>. The release path, and the ONLY one that moves
+#     :latest: an install that pins nothing gets the last release,
+#     never an untested main build.
 #
 # Architecture: linux/amd64 + linux/arm64. Apple Silicon Macs and
 # Raspberry Pi 5 class hardware are a primary Tier 0 target, and an
@@ -61,6 +63,9 @@ on:
       - "app/**"
       - "docker-entrypoint.sh"
       - "examples/camera-agent/**"
+      # Core and the camera agent install the in-repo App SDK (#636), so an
+      # SDK-only change can break either image; build them on the PR.
+      - "sdk/opennvr-app-sdk/**"
       - "supervisord.conf"
       - ".github/workflows/publish-images.yml"
   workflow_dispatch:
@@ -79,6 +84,9 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Sigstore keyless signing (same as publish-app-images.yml): the
+      # certificate names this workflow, ref and repository.
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -90,6 +98,12 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Install cosign
+        if: github.event_name != 'pull_request'
+        uses: ./.github/actions/install-cosign
+        with:
+          cosign-release: "v2.4.1"
 
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
@@ -110,14 +124,12 @@ jobs:
             type=sha,format=short
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            # :latest tracks the most recent build on the default branch
-            # (main) AND any subsequent release tag. Tier 0 compose pins
-            # :latest, so operators trying the project before the first
-            # ``v*`` tag still get a working image. Once we cross v1.0
-            # the policy may tighten to "release tags only" — for v0.1
-            # we keep this loose because the Tier 0 promise depends on
-            # :latest existing the moment the project is announced.
-            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/v') }}
+            # :latest is the last release, nothing else. It used to follow
+            # main too, so that :latest existed before the first ``v*`` tag;
+            # releases exist now, and a site that pins nothing (compose
+            # defaults CORE_TAG to latest) must not pick up untested main
+            # builds on its next pull. Bleeding edge is :main.
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
           labels: |
             org.opencontainers.image.title=OpenNVR Core
             org.opencontainers.image.description=OpenNVR backend + frontend + KAI-C connector. Tier 0 install ships this as a single container.
@@ -126,6 +138,7 @@ jobs:
             org.opencontainers.image.documentation=https://github.com/open-nvr/open-nvr/blob/main/README.md
 
       - name: Build${{ github.event_name != 'pull_request' && ' + push' || ' (no push)' }}
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -139,6 +152,9 @@ jobs:
           platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
           push: ${{ github.event_name != 'pull_request' }}
           load: ${{ github.event_name == 'pull_request' }}
+          # Reported by /health and system info (Dockerfile, last lines).
+          build-args: |
+            GIT_COMMIT=${{ github.sha }}
           tags: |
             ${{ steps.meta.outputs.tags }}
             ${{ github.event_name == 'pull_request' && 'ghcr.io/open-nvr/core:local-smoke' || '' }}
@@ -148,6 +164,20 @@ jobs:
           # heavy ``uv sync`` layer.
           cache-from: type=gha,scope=opennvr-core
           cache-to: type=gha,scope=opennvr-core,mode=max
+
+      # Sign the multi-arch manifest digest (never a tag: tags move). Check with
+      #   cosign verify --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+      #     --certificate-identity-regexp '^https://github.com/open-nvr/' ghcr.io/open-nvr/core@<digest>
+      # The updater trusts the signed release manifest; this is defence in depth.
+      - name: Sign (Sigstore keyless)
+        if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          test -n "$DIGEST"
+          cosign sign --yes "ghcr.io/open-nvr/core@${DIGEST}"
+          echo "signed ghcr.io/open-nvr/core@${DIGEST}" >> "$GITHUB_STEP_SUMMARY"
 
       # On PR we verify the image at least boots far enough to start
       # listening. We can't run the full stack here (no mediamtx, no
@@ -266,7 +296,7 @@ jobs:
   # ------------------------------------------------------------------
   # Example agent apps (work item C + PR #168): the camera-agent
   # image. Same trigger/tag policy as opennvr-core:
-  # every branch push publishes :<branch> + :sha-<short>; main/release
+  # every branch push publishes :<branch> + :sha-<short>; only release
   # tags publish :latest. PRs build without pushing.
   # ------------------------------------------------------------------
   build-and-push-agents:
@@ -275,6 +305,9 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Sigstore keyless signing (same as publish-app-images.yml): the
+      # certificate names this workflow, ref and repository.
+      id-token: write
     strategy:
       # One agent failing must not cancel the other's build.
       fail-fast: false
@@ -292,6 +325,12 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Install cosign
+        if: github.event_name != 'pull_request'
+        uses: ./.github/actions/install-cosign
+        with:
+          cosign-release: "v2.4.1"
 
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
@@ -312,8 +351,8 @@ jobs:
             type=sha,format=short
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            # Same :latest policy as opennvr-core — tracks main + release tags.
-            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/v') }}
+            # Same :latest policy as opennvr-core: release tags only.
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
           labels: |
             org.opencontainers.image.title=OpenNVR ${{ matrix.agent.image }}
             org.opencontainers.image.description=OpenNVR ${{ matrix.agent.image }} example app (built from ${{ matrix.agent.dir }})
@@ -322,6 +361,7 @@ jobs:
             org.opencontainers.image.documentation=https://github.com/open-nvr/open-nvr/blob/main/${{ matrix.agent.dir }}/README.md
 
       - name: Build${{ github.event_name != 'pull_request' && ' + push' || ' (no push)' }}
+        id: build
         uses: docker/build-push-action@v5
         with:
           # Repo root context — both Dockerfiles COPY from the repo root
@@ -339,3 +379,17 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.agent.image }}
           cache-to: type=gha,scope=${{ matrix.agent.image }},mode=max
+
+      # Sign the multi-arch manifest digest (never a tag: tags move). Check with
+      #   cosign verify --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+      #     --certificate-identity-regexp '^https://github.com/open-nvr/' ghcr.io/open-nvr/${{ matrix.agent.image }}@<digest>
+      # The updater trusts the signed release manifest; this is defence in depth.
+      - name: Sign (Sigstore keyless)
+        if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          test -n "$DIGEST"
+          cosign sign --yes "ghcr.io/open-nvr/${{ matrix.agent.image }}@${DIGEST}"
+          echo "signed ghcr.io/open-nvr/${{ matrix.agent.image }}@${DIGEST}" >> "$GITHUB_STEP_SUMMARY"

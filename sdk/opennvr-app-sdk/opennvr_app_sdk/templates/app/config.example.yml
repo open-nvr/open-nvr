@@ -1,0 +1,71 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# __APP_NAME__ — config template.
+#
+# Copy this file to ``config.yml``, fill in the values for your
+# deployment, and run:
+#
+#   python __APP_MODULE__.py --config config.yml
+
+# ── The deployment (usually leave these out) ───────────────────────
+#
+# The app installer exports NATS_URL, OPENNVR_URL and
+# OPENNVR_INTERNAL_API_KEY into every app container, and the SDK reads
+# them — so in a real deployment this whole section is unnecessary.
+# Set a value here only to override what the deployment says.
+#
+# nats_url: "nats://nats:4222"       # "nats://127.0.0.1:4222" host-mode
+# nats_token: null                   # the stack's INTERNAL_API_KEY
+# opennvr_url: "http://opennvr-core:8000"
+#
+# Subject pattern. ``opennvr.inference.>`` catches the always-on Tier-0
+# detector AND every adapter; narrow to e.g. ``opennvr.inference.yolov8.>``
+# to see one adapter only.
+# subject_pattern: "opennvr.inference.>"
+#
+# Tier-0 is the detector every camera runs all the time, and on a stock
+# install it is the ONLY detection stream on the bus. The App facade
+# consumes it by default; set this false if this app also drives a
+# heavy adapter and would otherwise see every object twice.
+# consume_tier0: true
+
+# ── The rule's knobs ──────────────────────────────────────────────
+#
+# One entry per ``app.param(...)`` in __APP_MODULE__.py.
+min_confidence: 0.5
+dwell_s: 0.0
+
+# Zones. Each ``zone="driveway"`` in a rule becomes a config key of
+# that name, mapping camera id → polygon. Coordinates are normalized
+# (0–1 of the frame) so they survive a resolution change, and the App
+# Catalog's geometry editor writes them for you — you rarely type this
+# by hand.
+#
+# driveway:
+#   cam-front: [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]]
+
+# ── Webhook (optional) ────────────────────────────────────────────
+#
+# Alerts always go to stdout. If you set ``webhook_url``, they're also
+# POSTed as JSON to that URL — Slack, Discord, Teams, PagerDuty, etc.
+webhook_url: null
+
+# ── NATS alert fan-out (optional) ─────────────────────────────────
+#
+# When set, every fired alert is also published as JSON to
+#   opennvr.alerts.app.__APP_ID__.{camera_id}
+# so the operator-UI alerts inbox or any other subscriber can pick it
+# up off the bus instead of needing a per-app webhook.
+nats_alerts_url: null
+nats_alerts_token: null
+
+# ── App contract (spec §03) — powers the App Catalog ───────────────
+#
+# Uncomment to serve /health /manifest /state on contract_port and
+# self-register with the OpenNVR app registry on boot (so the app shows
+# up in Settings → App Catalog with a live status dot).
+# contract_port: 9210
+# contract_bind_host: "0.0.0.0"
+# contract_host: "__APP_ID__"
+# opennvr_url: "http://opennvr-core:8000"

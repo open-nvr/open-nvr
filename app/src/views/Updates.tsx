@@ -18,8 +18,11 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 import { apiService } from '../lib/apiService'
+import { useTranslation } from '../i18n'
 import { useAuth } from '../auth/AuthContext'
-import { ChevronDown, Check, X, RotateCcw, AlertTriangle, FileText, Settings } from 'lucide-react'
+import { durationFieldError } from '../utils/mediamtxDuration'
+import { Link } from 'react-router-dom'
+import { Check, X, RotateCcw, AlertTriangle, FileText, Settings } from 'lucide-react'
 
 type Jsonish = any
 type ConfigSection = 'global' | 'defaults' | 'streams'
@@ -27,7 +30,7 @@ type ConfigSection = 'global' | 'defaults' | 'streams'
 function TextAreaJson({ value, onChange, disabled }: { value: string; onChange: (v: string) => void; disabled?: boolean }) {
   return (
     <textarea
-      className="w-full h-96 font-mono text-xs p-3 rounded border border-[var(--border)] bg-[var(--bg)] focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none transition-colors"
+      className="w-full h-96 font-mono text-xs p-3 border border-[var(--border)] bg-[var(--bg)] focus:border-[var(--accent)] focus:ring-1 focus:ring-[var(--accent)] outline-none transition-colors"
       value={value}
       onChange={(e) => onChange(e.target.value)}
       disabled={disabled}
@@ -42,7 +45,7 @@ function Switch({ label, checked, onChange, disabled }: { label: string; checked
       <span className="text-sm font-medium">{label}</span>
       <button
         type="button"
-        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 ${checked ? 'bg-blue-600' : 'bg-gray-700'} ${disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--accent)] focus:ring-offset-2 ${checked ? 'bg-[var(--accent)]' : 'bg-[var(--panel-2)]'} ${disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
         onClick={() => !disabled && onChange(!checked)}
         disabled={disabled}
       >
@@ -54,18 +57,20 @@ function Switch({ label, checked, onChange, disabled }: { label: string; checked
   )
 }
 
-function Input({ label, value, onChange, disabled, placeholder = '' }: { label: string; value: string; onChange: (v: string) => void; disabled?: boolean; placeholder?: string }) {
+function Input({ label, value, onChange, disabled, placeholder = '', error }: { label: string; value: string; onChange: (v: string) => void; disabled?: boolean; placeholder?: string; error?: string }) {
   return (
     <div className="py-2">
       <label className="block text-sm font-medium mb-1">{label}</label>
       <input
         type="text"
-        className="w-full rounded border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50"
+        className={`w-full border ${error ? 'border-[var(--danger)]' : 'border-[var(--border)]'} bg-[var(--bg)] px-3 py-2 text-sm focus:border-[var(--accent)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)] disabled:opacity-50`}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         disabled={disabled}
         placeholder={placeholder}
+        aria-invalid={!!error}
       />
+      {error && <div role="alert" className="mt-1 text-xs text-[var(--danger)]">{error}</div>}
     </div>
   )
 }
@@ -76,7 +81,7 @@ function Select({ label, value, onChange, options, disabled }: { label: string; 
       <label className="block text-sm font-medium mb-1">{label}</label>
       <div className="relative">
         <select
-          className="w-full appearance-none rounded border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50"
+          className="w-full border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm focus:border-[var(--accent)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)] disabled:opacity-50"
           value={value}
           onChange={(e) => onChange(e.target.value)}
           disabled={disabled}
@@ -87,15 +92,12 @@ function Select({ label, value, onChange, options, disabled }: { label: string; 
             </option>
           ))}
         </select>
-        <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-[var(--text-dim)]">
-          <ChevronDown size={14} />
-        </div>
       </div>
     </div>
   )
 }
 
-function PathDefaultsForm({ config, onChange, disabled }: { config: any; onChange: (newConfig: any) => void; disabled?: boolean }) {
+function PathDefaultsForm({ config, onChange, disabled, durationErrors }: { config: any; onChange: (newConfig: any) => void; disabled?: boolean; durationErrors: Record<string, string | undefined> }) {
   const handleChange = (key: string, value: any) => {
     onChange({ ...config, [key]: value })
   }
@@ -145,6 +147,7 @@ function PathDefaultsForm({ config, onChange, disabled }: { config: any; onChang
         onChange={(v) => handleChange('recordSegmentDuration', v)} 
         disabled={disabled} 
         placeholder="1h0m0s"
+        error={durationErrors.recordSegmentDuration}
       />
       <Input 
         label="Part Duration" 
@@ -152,6 +155,7 @@ function PathDefaultsForm({ config, onChange, disabled }: { config: any; onChang
         onChange={(v) => handleChange('recordPartDuration', v)} 
         disabled={disabled} 
         placeholder="1s"
+        error={durationErrors.recordPartDuration}
       />
       <Input 
         label="Retention (Delete After)" 
@@ -183,12 +187,14 @@ function PathDefaultsForm({ config, onChange, disabled }: { config: any; onChang
         value={config.sourceOnDemandStartTimeout ?? '10s'} 
         onChange={(v) => handleChange('sourceOnDemandStartTimeout', v)} 
         disabled={disabled} 
+        error={durationErrors.sourceOnDemandStartTimeout}
       />
        <Input 
         label="Source On Demand Close After" 
         value={config.sourceOnDemandCloseAfter ?? '10s'} 
         onChange={(v) => handleChange('sourceOnDemandCloseAfter', v)} 
         disabled={disabled} 
+        error={durationErrors.sourceOnDemandCloseAfter}
       />
       <Input 
         label="Max Viewers (0 = unlimited)" 
@@ -234,6 +240,7 @@ function GlobalForm({ config, onChange, disabled }: { config: any; onChange: (ne
 }
 
 export function Updates() {
+  const { t } = useTranslation()
   const { user } = useAuth()
   const canAdmin = !!user?.is_superuser
   const [loading, setLoading] = useState(true)
@@ -312,6 +319,14 @@ export function Updates() {
      try { return JSON.parse(pdDraft || '{}') } catch { return pdCfg || {} }
   }, [pdDraft, pdCfg])
 
+  const pathDefaultsDurationErrors = useMemo(() => ({
+    recordSegmentDuration: durationFieldError('recordSegmentDuration', currentPdObj.recordSegmentDuration),
+    recordPartDuration: durationFieldError('recordPartDuration', currentPdObj.recordPartDuration),
+    sourceOnDemandStartTimeout: durationFieldError('sourceOnDemandStartTimeout', currentPdObj.sourceOnDemandStartTimeout),
+    sourceOnDemandCloseAfter: durationFieldError('sourceOnDemandCloseAfter', currentPdObj.sourceOnDemandCloseAfter),
+  }), [currentPdObj])
+  const pathDefaultsDurationsValid = Object.values(pathDefaultsDurationErrors).every((error) => !error)
+
 
   async function saveGlobal() {
     try {
@@ -377,70 +392,70 @@ export function Updates() {
     <div className="space-y-6 max-w-5xl mx-auto pb-10">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Media Server Configuration</h1>
-          <p className="text-[var(--text-dim)] mt-1">Manage core settings, protocols, and stream behaviors.</p>
+          <h1 className="text-2xl font-bold tracking-tight">{t('updates.title')}</h1>
+          <p className="text-[var(--text-dim)] mt-1">{t('updates.description')}</p>
+          <p className="text-xs text-[var(--text-dim)] mt-1">
+            Setup, active streams and recordings are under <Link to="/settings/media-source/media-server-manager" className="text-[var(--accent)] hover:underline">Settings &rsaquo; Media-Source &rsaquo; Media Server Manager</Link>.
+          </p>
         </div>
         <div className="text-xs text-[var(--text-dim)] bg-white/5 px-3 py-1.5 rounded-full border border-white/10 flex items-center gap-2">
-            <span className={`w-2 h-2 rounded-full ${health ? 'bg-green-500' : 'bg-amber-500'}`}></span>
-            {health?.version ? <>Server v{health.version}</> : 'Connecting...'}
+            <span className={`w-2 h-2 rounded-full ${health ? 'bg-[var(--ok)]' : 'bg-[var(--warn)]'}`}></span>
+            {health?.version ? <>Server v{health.version}</> : t('updates.connecting')}
         </div>
       </div>
 
       {!canAdmin && (
-        <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-300 text-sm flex items-center gap-2">
+        <div className="p-3 bg-[color-mix(in_oklab,var(--warn)_14%,transparent)] border border-[color-mix(in_oklab,var(--warn)_45%,var(--border))] text-[var(--warn)] text-sm flex items-center gap-2">
            <AlertTriangle size={16} />
           Restricted Access: Read-only mode enabled.
         </div>
       )}
 
       {notice && (
-        <div className="p-3 rounded-lg bg-green-500/10 border border-green-500/20 text-green-300 text-sm flex items-center gap-2 animate-pulse">
+        <div className="p-3 bg-[color-mix(in_oklab,var(--ok)_14%,transparent)] border border-[color-mix(in_oklab,var(--ok)_45%,var(--border))] text-[var(--ok)] text-sm flex items-center gap-2 animate-pulse">
            <Check size={16} />
           {notice}
         </div>
       )}
       {error && (
-        <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-300 text-sm flex items-center gap-2">
+        <div className="p-3 bg-[color-mix(in_oklab,var(--danger)_14%,transparent)] border border-[color-mix(in_oklab,var(--danger)_45%,var(--border))] text-[var(--danger)] text-sm flex items-center gap-2">
            <X size={16} />
           {error}
         </div>
       )}
 
       {/* Control Bar */}
-      <div className="flex items-center gap-4 bg-[var(--card-bg)] p-4 rounded-xl border border-[var(--border)] shadow-sm flex-wrap">
+      <div className="flex items-center gap-4 bg-[var(--panel-2)] p-4 border border-[var(--border)] shadow-sm flex-wrap">
         <div className="flex-1 min-w-[200px]">
-        <label className="text-xs font-semibold text-[var(--text-dim)] uppercase tracking-wider mb-1 block">Configuration Section</label>
+        <label className="text-xs font-semibold text-[var(--text-dim)] uppercase tracking-wider mb-1 block">{t('updates.section')}</label>
         <div className="relative">
           <select 
-            className="w-full appearance-none bg-[var(--bg)] border border-[var(--border)] rounded-lg py-2 pl-3 pr-10 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+            className="w-full bg-[var(--bg)] border border-[var(--border)] py-2 pl-3 text-sm focus:outline-none focus:ring-2 focus:ring-[color-mix(in_oklab,var(--accent)_45%,var(--border))]"
             value={activeSection}
             onChange={(e) => setActiveSection(e.target.value as ConfigSection)}
           >
-            <option value="defaults">Path Defaults (Recording & Streams)</option>
-            <option value="global">Global Settings (Protocols & Logging)</option>
-            <option value="streams">Active Streams Monitor</option>
+            <option value="defaults">{t('updates.defaults')}</option>
+            <option value="global">{t('updates.global')}</option>
+            <option value="streams">{t('updates.streams')}</option>
           </select>
-          <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-[var(--text-dim)]">
-             <ChevronDown size={14} />
-          </div>
         </div>
         </div>
 
         {activeSection !== 'streams' && (
              <div className="min-w-[150px]">
-                <label className="text-xs font-semibold text-[var(--text-dim)] uppercase tracking-wider mb-1 block">Edit Mode</label>
-                 <div className="flex bg-[var(--bg)] rounded-lg p-1 border border-[var(--border)]">
+                <label className="text-xs font-semibold text-[var(--text-dim)] uppercase tracking-wider mb-1 block">{t('updates.editMode')}</label>
+                 <div className="flex bg-[var(--bg)] p-1 border border-[var(--border)]">
                     <button 
-                        className={`flex-1 flex items-center justify-center py-1 px-3 text-xs rounded-md transition-colors ${viewMode === 'form' ? 'bg-[var(--panel-2)] text-white shadow-sm' : 'text-[var(--text-dim)] hover:text-[var(--text)]'}`}
+                        className={`flex-1 flex items-center justify-center py-1 px-3 text-xs  transition-colors ${viewMode === 'form' ? 'bg-[var(--panel-2)] text-[var(--text)] shadow-sm' : 'text-[var(--text-dim)] hover:text-[var(--text)]'}`}
                         onClick={() => setViewMode('form')}
                     >
-                        <Settings size={12} className="mr-1" /> Easy
+                        <Settings size={12} className="mr-1" /> {t('updates.easy')}
                     </button>
                     <button 
-                        className={`flex-1 flex items-center justify-center py-1 px-3 text-xs rounded-md transition-colors ${viewMode === 'json' ? 'bg-[var(--panel-2)] text-white shadow-sm' : 'text-[var(--text-dim)] hover:text-[var(--text)]'}`}
+                        className={`flex-1 flex items-center justify-center py-1 px-3 text-xs  transition-colors ${viewMode === 'json' ? 'bg-[var(--panel-2)] text-[var(--text)] shadow-sm' : 'text-[var(--text-dim)] hover:text-[var(--text)]'}`}
                         onClick={() => setViewMode('json')}
                     >
-                         <FileText size={12} className="mr-1" /> JSON
+                         <FileText size={12} className="mr-1" /> {t('updates.json')}
                     </button>
                  </div>
              </div>
@@ -453,20 +468,20 @@ export function Updates() {
           <div className="card p-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
             <div className="flex items-center justify-between mb-6 pb-4 border-b border-[var(--border)]">
               <div>
-                <h2 className="text-lg font-medium">Global Settings</h2>
+                <h2 className="text-lg font-medium">{t('updates.globalTitle')}</h2>
                 <p className="text-xs text-[var(--text-dim)]">Configure protocols, logging, and system timeouts.</p>
               </div>
               <div className="flex items-center gap-3">
                 <button
-                  className="btn bg-[var(--bg)] hover:bg-[var(--bg-hover)] border border-[var(--border)]"
+                  className="btn bg-[var(--bg)] hover:bg-[var(--panel-2)] border border-[var(--border)]"
                   onClick={() => setGlobalDraft(JSON.stringify(globalCfg ?? {}, null, 2))}
                   disabled={loading}
-                ><RotateCcw size={14} className="mr-2" /> Revert</button>
+                ><RotateCcw size={14} className="mr-2" /> {t('updates.revert')}</button>
                 <button
                   className="btn btn-primary min-w-[100px]"
                   disabled={!canAdmin || !globalValid || globalSaving}
                   onClick={saveGlobal}
-                >{globalSaving ? 'Saving…' : 'Save Changes'}</button>
+                >{globalSaving ? 'Saving…' : t('updates.save')}</button>
               </div>
             </div>
             
@@ -475,12 +490,12 @@ export function Updates() {
             ) : (
                 <>
                     <TextAreaJson value={globalDraft} onChange={setGlobalDraft} disabled={loading || !canAdmin} />
-                    {!globalValid && <div className="mt-2 text-xs text-red-400 font-medium">⚠ Invalid JSON: Please fix syntax errors before saving.</div>}
+                    {!globalValid && <div className="mt-2 text-xs text-[var(--danger)] font-medium">⚠ Invalid JSON: Please fix syntax errors before saving.</div>}
                 </>
             )}
             
-            <div className="mt-6 text-xs text-[var(--text-dim)] bg-[var(--bg)] p-3 rounded border border-[var(--border)]">
-              <span className="font-semibold text-amber-500 mr-1">Note:</span> 
+            <div className="mt-6 text-xs text-[var(--text-dim)] bg-[var(--bg)] p-3 border border-[var(--border)]">
+              <span className="font-semibold text-[var(--warn)] mr-1">Note:</span> 
               Modifying protocol ports or addresses may require a full server restart to take effect.
             </div>
           </div>
@@ -491,33 +506,36 @@ export function Updates() {
           <div className="card p-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
              <div className="flex items-center justify-between mb-6 pb-4 border-b border-[var(--border)]">
               <div>
-                <h2 className="text-lg font-medium">Path Defaults</h2>
+                <h2 className="text-lg font-medium">{t('updates.pathTitle')}</h2>
                 <p className="text-xs text-[var(--text-dim)]">These settings apply to all cameras unless specifically overridden in the camera configuration.</p>
               </div>
               <div className="flex items-center gap-3">
                 <button
-                  className="btn bg-[var(--bg)] hover:bg-[var(--bg-hover)] border border-[var(--border)]"
+                  className="btn bg-[var(--bg)] hover:bg-[var(--panel-2)] border border-[var(--border)]"
                   onClick={() => setPdDraft(JSON.stringify(pdCfg ?? {}, null, 2))}
                   disabled={loading}
-                ><RotateCcw size={14} className="mr-2" /> Revert</button>
+                ><RotateCcw size={14} className="mr-2" /> {t('updates.revert')}</button>
                 <button
                   className="btn btn-primary min-w-[100px]"
-                  disabled={!canAdmin || !pdValid || pdSaving}
+                  disabled={!canAdmin || !pdValid || !pathDefaultsDurationsValid || pdSaving}
                   onClick={savePathDefaults}
-                >{pdSaving ? 'Saving…' : 'Save Changes'}</button>
+                >{pdSaving ? 'Saving…' : t('updates.save')}</button>
               </div>
             </div>
 
             {viewMode === 'form' ? (
-                <PathDefaultsForm config={currentPdObj} onChange={handlePdFormChange} disabled={loading || !canAdmin} />
+                <PathDefaultsForm config={currentPdObj} onChange={handlePdFormChange} disabled={loading || !canAdmin} durationErrors={pathDefaultsDurationErrors} />
             ) : (
                 <>
                     <TextAreaJson value={pdDraft} onChange={setPdDraft} disabled={loading || !canAdmin} />
-                    {!pdValid && <div className="mt-2 text-xs text-red-400 font-medium">⚠ Invalid JSON: Please fix syntax errors before saving.</div>}
+                    {!pdValid && <div className="mt-2 text-xs text-[var(--danger)] font-medium">⚠ Invalid JSON: Please fix syntax errors before saving.</div>}
+                    {Object.values(pathDefaultsDurationErrors).filter(Boolean).map((message) => (
+                      <div key={message} role="alert" className="mt-2 text-xs text-[var(--danger)] font-medium">{message}</div>
+                    ))}
                 </>
             )}
-             <div className="mt-6 text-xs text-[var(--text-dim)] bg-[var(--bg)] p-3 rounded border border-[var(--border)]">
-              <span className="font-semibold text-blue-400 mr-1">Info:</span> 
+             <div className="mt-6 text-xs text-[var(--text-dim)] bg-[var(--bg)] p-3 border border-[var(--border)]">
+              <span className="font-semibold text-[var(--accent)] mr-1">Info:</span> 
               Changes to recording settings usually take effect immediately for new segments.
             </div>
           </div>
@@ -528,7 +546,7 @@ export function Updates() {
           <div className="card p-0 overflow-hidden animate-in fade-in slide-in-from-bottom-2 duration-300">
             <div className="flex items-center justify-between p-4 border-b border-[var(--border)] bg-[var(--bg-sub)]">
               <div>
-                <h2 className="text-lg font-medium">Active Streams</h2>
+                <h2 className="text-lg font-medium">{t('updates.activeTitle')}</h2>
                 <p className="text-xs text-[var(--text-dim)]">Real-time status of all active media paths.</p>
               </div>
               <button 
@@ -537,22 +555,22 @@ export function Updates() {
                 disabled={pathsLoading}
               >
                 <RotateCcw className={`w-3.5 h-3.5 mr-2 ${pathsLoading ? 'animate-spin' : ''}`} />
-                {pathsLoading ? 'Refreshing…' : 'Refresh List'}
+                {pathsLoading ? 'Refreshing…' : t('updates.refresh')}
               </button>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="text-left text-[var(--text-dim)] bg-[var(--bg)] border-b border-[var(--border)]">
-                    <th className="py-3 pl-4 pr-2 font-medium">Path Name</th>
-                    <th className="py-3 px-2 font-medium">Active Readers</th>
-                    <th className="py-3 px-2 font-medium">Recording Status</th>
-                    <th className="py-3 px-2 font-medium text-right pr-4">Actions</th>
+                    <th className="py-3 pl-4 pr-2 font-medium">{t('updates.pathName')}</th>
+                    <th className="py-3 px-2 font-medium">{t('updates.activeReaders')}</th>
+                    <th className="py-3 px-2 font-medium">{t('updates.recordingStatus')}</th>
+                    <th className="py-3 px-2 font-medium text-right pr-4">{t('updates.actions')}</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[var(--border)]/50">
                   {paths.length === 0 && (
-                    <tr><td className="py-8 text-center text-[var(--text-dim)]" colSpan={4}>No active streams found.</td></tr>
+                    <tr><td className="py-8 text-center text-[var(--text-dim)]" colSpan={4}>{t('updates.noStreams')}</td></tr>
                   )}
                   {paths.map((p: any) => {
                     const name = p?.name || p?.path || '-'
@@ -564,22 +582,22 @@ export function Updates() {
                     const m = String(name).match(/-(\d+)$/)
                     if (m) camId = Number(m[1])
                     return (
-                      <tr key={name} className="hover:bg-[var(--bg-hover)] transition-colors">
-                        <td className="py-3 pl-4 pr-2 font-mono text-xs text-blue-400">{name}</td>
+                      <tr key={name} className="hover:bg-[var(--panel-2)] transition-colors">
+                        <td className="py-3 pl-4 pr-2 font-mono text-xs text-[var(--accent)]">{name}</td>
                         <td className="py-3 px-2">
-                          <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-500/10 text-blue-400 border border-blue-500/20">
+                          <span className="inline-flex items-center px-2 py-0.5 text-xs font-medium bg-[color-mix(in_oklab,var(--accent)_14%,transparent)] text-[var(--accent)] border border-[color-mix(in_oklab,var(--accent)_45%,var(--border))]">
                             {readers} Clients
                           </span>
                         </td>
                         <td className="py-3 px-2">
-                           <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border ${rec ? 'bg-green-500/10 text-green-400 border-green-500/20' : 'bg-gray-500/10 text-gray-400 border-gray-500/20'}`}>
+                           <span className={`inline-flex items-center px-2 py-0.5  text-xs font-medium border ${rec ? 'bg-[color-mix(in_oklab,var(--ok)_14%,transparent)] text-[var(--ok)] border-[color-mix(in_oklab,var(--ok)_45%,var(--border))]' : 'bg-[var(--badge-neutral-bg)] text-[var(--text-dim)] border-[var(--border)]'}`}>
                             {rec ? '● Recording' : '○ Idle'}
                           </span>
                         </td>
                         <td className="py-3 px-2 text-right pr-4">
                           {camId ? (
                             <button 
-                              className={`btn text-xs py-1 px-3 ${rec ? 'bg-red-500/10 text-red-400 hover:bg-red-500/20 border-red-500/20' : 'bg-green-500/10 text-green-400 hover:bg-green-500/20 border-green-500/20'}`} 
+                              className={`btn text-xs py-1 px-3 ${rec ? 'bg-[color-mix(in_oklab,var(--danger)_14%,transparent)] text-[var(--danger)] hover:bg-[color-mix(in_oklab,var(--danger)_14%,transparent)] border-[color-mix(in_oklab,var(--danger)_45%,var(--border))]' : 'bg-[color-mix(in_oklab,var(--ok)_14%,transparent)] text-[var(--ok)] hover:bg-[color-mix(in_oklab,var(--ok)_14%,transparent)] border-[color-mix(in_oklab,var(--ok)_45%,var(--border))]'}`} 
                               disabled={!canAdmin} 
                               onClick={() => toggleRecording(camId!, !rec)}
                             >

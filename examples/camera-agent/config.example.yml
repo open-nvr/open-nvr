@@ -70,14 +70,89 @@ caption_adapter: blip
 # reads the Tier-0 event stream and only needs nats_inference_url below.)
 # bestframe_base_url: http://tier0:9109
 
-# LLM model + sampling. Default qwen2.5:1.5b (~1GB RAM, Apache-2.0,
-# non-thinking) is the sweet spot for tool-calling on CPU. Drop to
-# qwen2.5:0.5b on very low RAM, or use qwen2.5:3b for better grounding
-# at more RAM and slower inference. The model MUST support tools —
-# see https://ollama.com/blog/tool-support for the current list.
-llm_model: qwen2.5:1.5b
+# LLM model + sampling. Default granite4:micro (~3 GB RAM, Apache-2.0,
+# non-thinking): the best measured small model at calling the tools
+# before it answers (MODELS_AND_LATENCY.md). qwen3:1.7b answers in about
+# half the time; qwen2.5:0.5b is the floor on very low RAM. The model
+# MUST support tools — see https://ollama.com/blog/tool-support.
+llm_model: granite4:micro
 llm_temperature: 0.4
 llm_max_tokens: 256
+# A context window the runtime cannot grow (a model compiled for an NPU:
+# 4096 on the Ventuno Q's Gemma bundle). Each turn then sends only the
+# tool schemas the question is likely to need and the newest history, so
+# the prompt and the answer fit. 0 = the runtime manages the window.
+llm_window_tokens: 0
+# With llm_provider: openai, an Ollama to answer from when that endpoint is
+# unreachable (slower; one spoken notice per episode). Empty = no fallback.
+# llm_fallback_url: http://host.docker.internal:11434
+# llm_fallback_model: granite4:micro
+
+# ── Turn-taking ───────────────────────────────────────────────────
+# Silero VAD opens a turn; Smart Turn v3 (Pipecat's semantic end-of-turn
+# model, bundled, CPU) closes it — a pause mid-sentence no longer ends
+# the turn. The VAD stop window is short on purpose (the model judges
+# the pause). Raise turn_stop_secs on slow speakers; lower it for snappier
+# replies at the cost of occasional early cut-offs.
+vad_confidence: 0.55
+vad_start_secs: 0.15
+vad_stop_secs: 0.2
+# Silence appended to each utterance before Whisper hears it, so the last
+# word is not clipped. A few percent of the transcription time; 0 = off.
+stt_trailing_silence_secs: 0.5
+turn_stop_secs: 1.0
+# Smart Turn only ever looks at the last 8 s of a turn; buffering more is
+# pure cost.
+turn_max_secs: 8.0
+# Hardware fit (see MODELS_AND_LATENCY.md → "Turn detection on CPU").
+#   turn_detector: auto | smart | timer — auto runs Smart Turn v3 whenever
+#     this process has ≥2 cores and falls back to a plain silence timer
+#     (turn_timer_secs, no model) on a single core.
+#   turn_cpu_threads: onnxruntime threads for one verdict; leave unset for
+#     auto (1 thread — measured fastest up to 7 cores — 2 from 8 cores).
+turn_detector: auto
+# Interruptions on the streaming (/ws) pipeline — like a person's. While the
+# agent speaks, only a phrase that is real speech of ≥ interrupt_min_ms,
+# holds ≥ interrupt_min_words words once backchannels ("mm-hm", "okay") are
+# stripped, and reads as said TO the agent (its name, a question, a
+# request or correction, the site's own words — cameras, gate, plate…)
+# cuts it off; a cough, "yeah", or a remark to someone else does not.
+# GET /interruptions lists every decision with its reason — tune from that.
+#   interruptions: gated (default) | eager (any speech interrupts) | off
+interruptions: gated
+interrupt_min_ms: 300
+interrupt_min_words: 2
+interrupt_addressee: true
+# Thinking aloud: when a voice question needs a slow tool, the agent says
+# what it is about to do while it does it — "Let me check the gate camera
+# for vehicles between 2 and 3" — built from the tool call's own arguments
+# (no LLM), Piper-synthesised in parallel with the tool and cached by
+# text, at most once per turn, and only when the expected wait (this
+# site's own recent stage timings) is at least filler_min_ms. Typed
+# questions get the line as a status only. GET /thinking-aloud shows the
+# decisions. filler_source "model" asks the LLM to write the line in the
+# same first pass (a few extra tokens) with the template as fallback.
+# Off by default: built for a CPU-only box where a tool turn took 5-10 s;
+# on an NPU the answer lands in a second or two and the line reads as an
+# unexpected extra reply. Set true on a slow box.
+thinking_aloud: false
+filler_min_ms: 1500
+filler_source: template
+# The router (router.py) decides simple camera questions BEFORE the LLM
+# sees them. router_tier0: when every slot resolves — which camera (named,
+# "all", the one the UI is on, or the only one), which tool, which object,
+# which window — the tool runs at once and the model is asked only to SAY
+# the answer with a ~200-token prompt and no tool schemas; that skips the
+# tool-calling iteration (17 s of a 71 s field turn on CPU). Anything with
+# a side effect (alarms, monitors, reports, stop…) or about WHO always
+# goes to the model. router_hints: otherwise, a short system message
+# names the tool the question most resembles; the prompt is unchanged so
+# the cache holds. Every turn logs "router: tier=…" — grow the phrasings
+# in router.py from the misses, not from imagination.
+router_tier0: true
+router_hints: true
+# turn_cpu_threads: 1
+# turn_timer_secs: 0.8
 
 # How long Ollama keeps the model resident. Sent on every request, so a
 # host-run `ollama serve` stays warm even without OLLAMA_KEEP_ALIVE in its
@@ -104,14 +179,12 @@ event_ring_size: 256
 # nats_inference_url: nats://127.0.0.1:4222
 # nats_inference_token: # leave unset for anonymous
 
-# Optional: path to the footage-search SQLite index. When set (and the
-# index has been built by the footage-search example's `index`
-# subcommand), the agent gains a `search_footage` tool so the user can
-# ask about the recorded past in natural language — "did a red truck
-# come by the dock earlier?". Without it, that tool reports it's
-# unavailable. Point this at the same db_path the footage-search
-# indexer writes to.
-# footage_index_path: /data/footage_index.sqlite3
+# `search_footage` — "did a red truck come by the dock earlier?" — is
+# answered from the OpenNVR event store, so it needs opennvr_api_url
+# and nothing else. It used to need footage_index_path as well, a
+# read-only view of footage-search's SQLite index; that index was
+# deleted in footage-search 2.0.0 and the key is now ignored (the
+# agent warns at startup if it is still set). Remove it.
 
 # Labels your detection adapter can see BEYOND the standard YOLOv8/COCO-80
 # set. Alarm presets (the demo's one-click Fire / Smoke / Gas leak buttons)
@@ -193,6 +266,13 @@ event_ring_size: 256
 # your reverse proxy; localhost only by default.
 host: 127.0.0.1
 port: 9100
+# agent_contract_url — the base URL OpenNVR core reaches THIS agent at,
+# registered with the App Catalog as the agent's contract URL (core probes
+# <url>/health and <url>/state from there). Under compose it is the
+# service name, https://camera-agent:9100 (in the TLS certificate's SAN);
+# on a bare host, wherever core can reach this process. Unset = this
+# machine's hostname on `port`.
+# agent_contract_url: http://127.0.0.1:9100
 
 # Cameras the agent knows about. Each entry contributes a sentence
 # to the LLM's system prompt ("front-porch is the main entrance...")
@@ -210,12 +290,11 @@ cameras:
 # short — the model sees it on every turn. Per-camera ``role``
 # fields above are appended automatically.
 system_prompt: |
-  You are a helpful, concise voice assistant for a home with security
-  cameras. The user asks questions about what's happening on those
-  cameras. Always use your tools to ground answers in live camera
-  data — don't guess. Respond in 1-2 short sentences because your
-  reply is spoken aloud. If the user's question can't be answered
-  from the cameras, say so briefly.
+  You are a helpful, concise voice assistant for a camera system. The
+  user asks questions about what's happening on those cameras. Always
+  use your tools to ground answers in live camera data — don't guess.
+  If the user's question can't be answered from the cameras, say so
+  briefly.
 
 # External notifications (see NOTIFICATIONS.md). Webhooks take a JSON POST
 # (Slack / Discord / Teams / Home Assistant / n8n); Apprise URLs cover
@@ -245,6 +324,16 @@ system_prompt: |
 #   - camera_id: front-porch
 #     frame_url: http://192.168.1.50/cgi-bin/snapshot.cgi
 #     opennvr_camera_id: 3
+
+# Which alerts relayed from INSTALLED APPS the voice UI speaks aloud. They
+# always land in the feed with a chime; this only decides narration:
+#   important — high & critical only (default: a plate reader's every read
+#               is shown, not read out loud)
+#   all       — every app alert
+#   none      — never speak app alerts
+# The operator can change it live (Automations → ⚙); that choice persists
+# in the state file and wins over this value.
+announce_app_alerts: important
 
 # Per-site alert-level defaults by target (merged over the built-ins:
 # fire/smoke/flame/gas → siren). Levels: siren = CRITICAL, rings until

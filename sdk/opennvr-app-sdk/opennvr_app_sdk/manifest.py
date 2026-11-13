@@ -33,6 +33,24 @@ def _type_name(t: Any) -> str:
     return str(t)
 
 
+#: Manifest ``pricing`` values the catalog understands.
+#: The detection-label vocabulary the platform's Tier-0 detector and the
+#: stock object-detection adapters emit (COCO-80). Apps that take a
+#: ``watch_labels`` list offer these as suggestions; operators can still
+#: type any label a custom model advertises.
+DETECTION_LABELS: tuple[str, ...] = (
+    "person", "bicycle", "car", "motorcycle", "bus", "truck", "boat", "train",
+    "airplane", "traffic light", "fire hydrant", "stop sign", "bench",
+    "backpack", "umbrella", "handbag", "suitcase", "dog", "cat", "bird",
+    "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe",
+    "bottle", "cup", "knife", "laptop", "cell phone", "chair", "couch",
+    "potted plant", "bed", "dining table", "tv", "book", "clock",
+)
+
+PRICING_MODELS = frozenset({"free", "paid", "subscription", "contact"})
+#: Manifest ``entitlement`` values: how enabling is gated.
+ENTITLEMENT_MODES = frozenset({"none", "license_key"})
+
 @dataclass
 class Param:
     """One typed, declarative config knob.
@@ -48,9 +66,32 @@ class Param:
     # Required params have no usable default; the future PUT /config
     # validator and the catalog form both need the distinction.
     required: bool = False
+    # Values the catalog offers as one-click chips for a ``list`` (or
+    # ``str``) param — a detection-label vocabulary, plate formats, …
+    # Advisory: the operator may still type anything.
+    suggestions: list[str] = field(default_factory=list)
+    #: What to CALL this in the form. Without it the catalog has nothing
+    #: to show but the wire name, so an operator configures a system
+    #: through ``no_scan_engaged`` and ``led_window_s``. Optional, and
+    #: the form falls back to the name, so apps adopt it one at a time.
+    label: str = ""
+    #: Heading to file this under in the form. Params with no group, or
+    #: an unrecognised one, keep their declared order at the top.
+    group: str = ""
+    #: Real but rarely touched. The form collapses these behind a
+    #: disclosure so the handful that matter are not buried among
+    #: sixteen that do not — a knob nobody should turn is still worth
+    #: reaching, which is why this hides it rather than dropping it.
+    advanced: bool = False
+    #: A closed set of values, as ``(value, label)`` pairs or bare
+    #: values. Turns a number nobody can interpret into the decision it
+    #: actually encodes: ``order_weight`` 0 / 0.3 / 1.0 is really
+    #: "doesn't count / counts a little / counts fully". The server
+    #: rejects anything outside the set.
+    choices: list[Any] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "name": self.name,
             "required": self.required,
             "type": _type_name(self.type),
@@ -58,6 +99,31 @@ class Param:
             "per_camera": self.per_camera,
             "description": self.description,
         }
+        if self.suggestions:
+            out["suggestions"] = [str(s) for s in self.suggestions]
+        if self.label:
+            out["label"] = self.label
+        if self.group:
+            out["group"] = self.group
+        if self.advanced:
+            out["advanced"] = True
+        if self.choices:
+            out["choices"] = [_choice(c) for c in self.choices]
+        return out
+
+
+def _choice(entry: Any) -> dict[str, Any]:
+    """One option, as ``{value, label}``.
+
+    Accepts ``(value, label)`` or a bare value that labels itself, so
+    the common case stays short and the readable case stays possible.
+    """
+    if isinstance(entry, dict) and "value" in entry:
+        return {"value": entry["value"],
+                "label": str(entry.get("label", entry["value"]))}
+    if isinstance(entry, (tuple, list)) and len(entry) == 2:
+        return {"value": entry[0], "label": str(entry[1])}
+    return {"value": entry, "label": str(entry)}
 
 
 @dataclass
@@ -166,6 +232,65 @@ class Action:
         }
 
 
+#: Platforms an app may declare an entity on (HA-114). Unknown platforms
+#: are skipped by core, never an error, so newer ones can be added later.
+ENTITY_PLATFORMS = ("sensor", "binary_sensor", "button", "switch", "select",
+                    "number", "event")
+#: Platforms that DO something, and therefore need ``action``.
+ENTITY_CONTROL_PLATFORMS = ("button", "switch", "select", "number")
+
+
+@dataclass
+class Entity:
+    """One entity the app wants in Home Assistant (and MQTT discovery).
+
+    Core turns it into an entity descriptor, resolves its value from the
+    app's ``/state`` and pushes changes; the Home Assistant integration
+    renders it with no app-specific code.
+
+    ``state_path`` is a dot path into ``/state`` (like ``StateView.path``),
+    with list indexes and ``[field=value]`` row selectors. With
+    ``per_camera=True`` there is one entity per camera the app was given,
+    on that camera's device, and ``{camera}`` in the path becomes the
+    camera's handle (``cam3``): ``per_camera[camera={camera}].unattended``.
+
+    Controls (button, switch, select, number) name one of the app's own
+    declared ``actions``; core calls it with ``camera`` (per-camera) and
+    ``value`` (switch/select/number) when the action declares those params.
+    """
+
+    key: str
+    platform: str
+    name: str
+    state_path: str = ""
+    per_camera: bool = False
+    action: str = ""
+    device_class: str = ""
+    unit: str = ""
+    state_class: str = ""
+    icon: str = ""
+    entity_category: str = ""
+    enabled_default: bool = True
+    #: select: the choices; number: {"min", "max", "step"}.
+    options: Any = None
+    #: event platform: the event types it can fire.
+    event_types: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {"key": self.key, "platform": self.platform, "name": self.name,
+                             "per_camera": bool(self.per_camera),
+                             "enabled_default": bool(self.enabled_default)}
+        for k in ("state_path", "action", "device_class", "unit", "state_class",
+                  "icon", "entity_category"):
+            if getattr(self, k):
+                d[k] = getattr(self, k)
+        if self.options is not None:
+            d["options"] = self.options
+        if self.event_types:
+            d["event_types"] = list(self.event_types)
+        return d
+
+
 @dataclass
 class AppManifest:
     """The static identity + schema of one app.
@@ -186,6 +311,13 @@ class AppManifest:
     category: str
     summary: str = ""
     requires_tasks: list[str] = field(default_factory=list)
+    # Tasks this app USES when the box has them and runs without when it
+    # does not (a captioner, an embedder, a VQA model). Skills follow
+    # apps: picking a camera for this app puts these — and
+    # requires_tasks — in that camera's skill set, which is what switches
+    # the platform's enrichers on for it. requires_tasks are refused at
+    # install when absent; enrich_tasks never are.
+    enrich_tasks: list[str] = field(default_factory=list)
     requires_adapters: list[str] = field(default_factory=list)
     # RFC-0002 Phase 5: event scopes this app requests, e.g.
     # ["events:plate.recognized"]. Scopes name DOMAIN events (the
@@ -210,10 +342,42 @@ class AppManifest:
     # this app's GET /state payload. Empty ⇒ the catalog shows raw
     # state JSON as before.
     state_schema: list[StateView] = field(default_factory=list)
+    # Declares that this app publishes overlay.boxes.v1 (boxes to draw
+    # over the live video). Informational: the catalog shows an Overlay
+    # switch for apps that declare it. The switch, not the flag, decides
+    # whether anything is drawn — that is the operator's, per app.
+    overlay: bool = False
+    # Does this app work on cameras an operator picks for it? True for
+    # nearly every app: the catalog shows a Cameras section, core serves
+    # the app only its picks, and the SDK's Detector drops events from
+    # cameras that weren't picked. False for apps that read no camera
+    # data at all — they act on OTHER apps' alerts (a notifier, a gate
+    # relay), which are already limited to the cameras those apps picked.
+    camera_picker: bool = True
+    # True ⇒ the app runs on EVERY live camera and takes no pick: the
+    # platform holds a pick for it on each camera (written on
+    # registration and on camera creation, released with the camera), so
+    # its skills ride the same table and the same enable/disable rules as
+    # everyone else's. Only meaningful with camera_picker=False. The agent
+    # declares it; an app that reads a camera's stream should not.
+    all_cameras: bool = False
+    # Object classes this app needs Tier-0 to TRACK on the cameras picked
+    # for it (COCO names: "backpack", "suitcase", …). Tier-0 tracks only
+    # the deployment's DETECT_LABELS by default (person, vehicles, pets),
+    # so an app riding it for anything else sees nothing on a stock
+    # install and no operator knows why. When the app is picked for a
+    # camera, the platform WIDENS Tier-0's per-camera label set with
+    # these — added on top of whatever the global set or an operator's
+    # narrowing names, never replacing either. Empty ⇒ the app is happy
+    # with the default set (or drives its own inference).
+    tier0_labels: list[str] = field(default_factory=list)
     # Declarative operator actions (optional) — verbs the catalog can
     # invoke on the app's contract surface via the server's JWT-only
     # proxy. Empty ⇒ no Actions section renders.
     actions: list[Action] = field(default_factory=list)
+    # Entities for Home Assistant (HA-114): values from /state, controls
+    # through the actions above. Empty ⇒ the app shows no entities.
+    entities: list[Entity] = field(default_factory=list)
     # RFC-0002 Phase 4 app-surface convention: True ⇒ the app serves an
     # HTML dashboard at GET /ui on its contract port, and core proxies
     # it at /api/v1/apps/{id}/ui (the catalog renders it sandboxed).
@@ -251,7 +415,28 @@ class AppManifest:
     # as a "contact" action. Empty = no contact surface shown.
     contact: str = ""
 
+    # ── Commerce (the catalog's pricing badge and the licence gate) ─
+    # ``pricing``: "free" (default) | "paid" | "subscription" | "contact".
+    # ``price_note``: the human line under the badge — "$29 / camera /
+    # year", "free for 2 cameras". ``entitlement``: how the platform
+    # decides the app may be enabled — "none" (default: always) or
+    # "license_key": an administrator enters a key in the catalog, core
+    # asks the app to verify it (``ContractMixin.verify_license``) and
+    # refuses to enable the app until the app says the key is valid.
+    # The verdict is the app's — core stores the key (encrypted) and
+    # the verdict, and re-delivers both on the live config poll.
+    pricing: str = "free"
+    price_note: str = ""
+    entitlement: str = "none"
+
     def __post_init__(self) -> None:
+        if self.pricing not in PRICING_MODELS:
+            raise ValueError(
+                f"pricing must be one of {sorted(PRICING_MODELS)}, got {self.pricing!r}")
+        if self.entitlement not in ENTITLEMENT_MODES:
+            raise ValueError(
+                f"entitlement must be one of {sorted(ENTITLEMENT_MODES)}, "
+                f"got {self.entitlement!r}")
         if self.ui_mode not in ("internal", "external"):
             raise ValueError(
                 f"ui_mode must be 'internal' or 'external', got {self.ui_mode!r}"
@@ -272,6 +457,7 @@ class AppManifest:
             "category": self.category,
             "summary": self.summary,
             "requires_tasks": list(self.requires_tasks),
+            "enrich_tasks": list(self.enrich_tasks),
             "requires_adapters": list(self.requires_adapters),
             "requires_scopes": list(self.requires_scopes),
             "provides": list(self.provides),
@@ -280,6 +466,11 @@ class AppManifest:
             "emits": [a.to_dict() for a in self.emits],
             "state_schema": [v.to_dict() for v in self.state_schema],
             "actions": [a.to_dict() for a in self.actions],
+            "entities": [e.to_dict() for e in self.entities],
+            "overlay": bool(self.overlay),
+            "camera_picker": bool(self.camera_picker),
+            "all_cameras": bool(self.all_cameras),
+            "tier0_labels": list(self.tier0_labels),
             "has_ui": bool(self.has_ui),
             "ui_mode": self.ui_mode,
             "ui_url": self.ui_url,
@@ -289,4 +480,7 @@ class AppManifest:
             "license": self.license,
             "use_cases": list(self.use_cases),
             "contact": self.contact,
+            "pricing": self.pricing,
+            "price_note": self.price_note,
+            "entitlement": self.entitlement,
         }

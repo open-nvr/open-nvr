@@ -106,7 +106,7 @@ def test_provider_maps_camera_agent_endpoint_to_specs():
     assert specs[0].name == "Front"
     assert specs[0].substream_url == "rtsp://mediamtx:8554/cam-1?jwt=x"   # MediaMTX tap
     assert all(s.analyze for s in specs)                                 # on by default
-    assert all(s.fps == 2 for s in specs)                                # default rate
+    assert all(s.fps == 5 for s in specs)                                # default rate
 
 
 def test_detect_fps_env_sets_default_rate(monkeypatch):
@@ -118,7 +118,7 @@ def test_detect_fps_env_sets_default_rate(monkeypatch):
 
     cam = {"camera_id": "c1", "frame_url": "rtsp://x/main"}
 
-    monkeypatch.setenv("DETECT_FPS", "3")   # ≠ the built-in default (2), so this proves env wins
+    monkeypatch.setenv("DETECT_FPS", "3")   # ≠ the built-in default (5), so this proves env wins
     assert _to_spec(cam).fps == 3
     # explicit per-camera fps beats the env default
     assert _to_spec({**cam, "fps": 7}).fps == 7
@@ -127,11 +127,11 @@ def test_detect_fps_env_sets_default_rate(monkeypatch):
     assert _to_spec(cam).fps == 1
     monkeypatch.setenv("DETECT_FPS", "99")
     assert _to_spec(cam).fps == 30
-    # non-integer falls back to the default (2), never raises
+    # non-integer falls back to the default (5), never raises
     monkeypatch.setenv("DETECT_FPS", "fast")
-    assert _to_spec(cam).fps == 2
+    assert _to_spec(cam).fps == 5
     monkeypatch.delenv("DETECT_FPS")
-    assert _to_spec(cam).fps == 2
+    assert _to_spec(cam).fps == 5
 
 
 def test_provider_returns_none_on_failure():
@@ -174,6 +174,61 @@ def test_no_assignments_means_global_labels_and_analyze(monkeypatch):
     # narrowing — global DETECT_LABELS still applies.
     spec = _to_spec(_cam(assignments=[{"skill": "object_detection"}]))
     assert spec.labels is None and spec.analyze is True
+
+
+# ── App widening: labels on a NON-object_detection entry are ADDED ──
+#
+# Core fills an app pick's labels from the app manifest's tier0_labels
+# (the classes the app needs Tier-0 to track that the global set does
+# not name). They widen; only the object_detection entry narrows.
+
+
+def test_app_claim_labels_widen_the_global_set(monkeypatch):
+    from detect_pipeline.providers import _to_spec
+    from detect_pipeline.service import allowed_labels_for
+
+    monkeypatch.setenv("DETECT_LABELS", "person,car")
+    spec = _to_spec(_cam(assignments=[
+        {"skill": "abandoned_object", "labels": ["Backpack", "suitcase", ""]},
+    ]))
+    # No narrowing declared: labels stays None ("the global set")...
+    assert spec.labels is None
+    assert spec.extra_labels == frozenset({"backpack", "suitcase"})
+    # ...and the worker's allowlist is global ∪ app labels.
+    assert allowed_labels_for(spec) == frozenset({"person", "car", "backpack", "suitcase"})
+
+
+def test_operator_narrowing_plus_app_widening_is_the_union(monkeypatch):
+    from detect_pipeline.providers import _to_spec
+    from detect_pipeline.service import allowed_labels_for
+
+    monkeypatch.setenv("DETECT_LABELS", "person,car,truck,bus")
+    spec = _to_spec(_cam(assignments=[
+        {"skill": "object_detection", "labels": ["person"]},
+        {"skill": "abandoned_object", "labels": ["backpack"]},
+        {"skill": "package_delivery", "labels": ["suitcase", "backpack"]},
+    ]))
+    assert spec.labels == frozenset({"person"})
+    assert spec.extra_labels == frozenset({"backpack", "suitcase"})
+    # The operator's narrowing still wins for what it names (no car/truck/
+    # bus), and every app's classes ride on top of it.
+    assert allowed_labels_for(spec) == frozenset({"person", "backpack", "suitcase"})
+
+
+def test_no_labels_anywhere_is_unchanged(monkeypatch):
+    from detect_pipeline.providers import _to_spec
+    from detect_pipeline.service import allowed_labels_for
+
+    monkeypatch.setenv("DETECT_LABELS", "person,car")
+    spec = _to_spec(_cam(assignments=[
+        {"skill": "abandoned_object"}, {"skill": "object_detection"},
+    ]))
+    assert spec.labels is None and spec.extra_labels is None
+    assert allowed_labels_for(spec) == frozenset({"person", "car"})
+    # A global "all" already tracks everything; nothing to add to it.
+    monkeypatch.setenv("DETECT_LABELS", "all")
+    widened = _to_spec(_cam(assignments=[{"skill": "abandoned_object", "labels": ["backpack"]}]))
+    assert allowed_labels_for(widened) is None
 
 
 def test_skip_unassigned_is_opt_in(monkeypatch):

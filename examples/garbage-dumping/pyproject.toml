@@ -1,0 +1,33 @@
+[project]
+name = "opennvr-example-garbage-dumping"
+version = "1.0.0"
+description = "OpenNVR garbage-dumping example app (frame-polling: garbage dumped in a watched zone, found by open-vocabulary detection through KAI-C)"
+requires-python = ">=3.11"
+license = { text = "AGPL-3.0" }
+dependencies = [
+    "opennvr-app-sdk",
+    "Pillow>=10,<12",
+]
+
+[tool.uv.sources]
+opennvr-app-sdk = { path = "../../sdk/opennvr-app-sdk", editable = true }
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+garbage-dumping = "garbage_dumping:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"

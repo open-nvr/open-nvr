@@ -19,14 +19,18 @@ What stays here — deliberately:
   ahead of time via the ``enroll`` CLI subcommand below, which talks
   directly to the InsightFace adapter's ``/faces/register`` route
   (KAI-C does not proxy that surface, so neither does the SDK);
-* ``KaicRecognitionClient`` — this app's recognition call carries its
-  own body shape (``task`` + ``threshold``, no ``camera_id``); the SDK
-  ``KaiCClient`` would add ``camera_id``, changing the wire body
-  deployed adapters see;
+* ``KaicRecognitionClient`` — the SDK's ``KaiCClient`` behind this
+  app's ``recognize`` spelling (``task="face_recognition"`` with the
+  match ``threshold`` as a contract param);
 * the recognised/unknown severity routing, the snapshot-for-strangers
   policy, and the dedup ledger (a plain dict keyed by
   ``(camera, person-or-unknown-bucket)`` — its shape is pinned by this
-  app's tests).
+  app's tests);
+* the per-VISIT decision (``visits.py``): a face opens a visit, a match
+  ends it at once, and only a visit that ran its hold without a match
+  is called a stranger — from its best frame, and never when the
+  nearest enrolled face came close. A stranger that matches later is
+  upgraded in place rather than announced twice.
 
 Run as a daemon:
     python smart_doorbell.py daemon --config config.yml
@@ -48,6 +52,9 @@ import argparse
 import asyncio
 import base64
 import binascii
+import datetime as dt
+import html as _html
+import io
 import json
 import logging
 import re
@@ -55,6 +62,7 @@ import signal
 import sys
 import time
 import uuid
+from types import SimpleNamespace
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -77,9 +85,23 @@ from face_recognition_pipeline import (
     FaceRecognitionPipelineConfig,
     RecognitionClient,
 )
+from chime import ChimeDecision, ChimePolicy
 from frame_sources import FrameSource, FrameSourceError, build_frame_source
-from opennvr_app_sdk import Action, AlertType, AppManifest, FrameApp, Param, StateView
-from opennvr_app_sdk.frame_sources import DictFrameSource
+from visit_log import VisitLog
+from visits import (
+    DEFAULT_GAP_SECONDS,
+    DEFAULT_HOLD_SECONDS,
+    DEFAULT_MIN_FACE_CONFIDENCE,
+    DEFAULT_MIN_FACE_PX,
+    DEFAULT_MIN_MATCH_READS,
+    DEFAULT_UNKNOWN_SCORE,
+    Decision,
+    VisitTracker,
+)
+from opennvr_app_sdk import (
+    Action, AlertType, AppManifest, FrameApp, KaiCClient, Param, StateView,
+)
+from opennvr_app_sdk.frame_sources import CoreSnapshotSource, DictFrameSource
 
 logger = logging.getLogger("smart-doorbell")
 
@@ -94,6 +116,41 @@ CORRELATION_ID_HEADER = "X-Correlation-Id"
 # line names the camera so the operator can shrink the source.
 _DEFAULT_SNAPSHOT_MAX_BYTES: int = 700 * 1024
 
+# Who a face can be. One vocabulary for homes (family, friend), premises
+# (resident, staff, contractor) and organisations (staff, contractor,
+# visitor, watchlist), because the People page, the alert severity and
+# the adapter's ``category`` field all read the same word.
+PERSON_CATEGORIES: tuple[str, ...] = (
+    "family", "resident", "friend", "staff", "contractor", "visitor", "watchlist",
+)
+# Alert severity per category. A watchlist match is the one recognised
+# face that must alarm louder than a stranger.
+_CATEGORY_SEVERITY: dict[str, str] = {
+    "family": "low", "resident": "low", "friend": "low",
+    "staff": "info", "contractor": "info", "visitor": "info",
+    "watchlist": "high",
+}
+
+#: Severities the platform understands, weakest first.
+_SEVERITIES: tuple[str, ...] = ("info", "low", "medium", "high", "critical")
+
+
+def _severity(value: Any, fallback: str) -> str:
+    """A configured severity, or the default when it is not one.
+
+    Silently ignoring a typo would be the wrong failure here: an
+    operator who sets ``critcal`` and sees nothing change concludes the
+    setting does nothing, which is true and invisible. The WARN says
+    which word was not understood and what is being used instead.
+    """
+    word = str(value or "").strip().lower()
+    if word in _SEVERITIES:
+        return word
+    if word:
+        logger.warning("unknown severity %r — using %r. One of: %s",
+                       value, fallback, ", ".join(_SEVERITIES))
+    return fallback
+
 # The SDK FrameApp rejects a non-positive poll interval (its sleep is
 # the shutdown-interruptible kind). This app historically accepted 0
 # ("poll as fast as the cameras answer"); map that to a near-zero
@@ -107,29 +164,123 @@ MANIFEST = AppManifest(
     version="1.0.0",
     category="doorstep",
     summary=(
-        "Recognises faces at the door via InsightFace through KAI-C; "
-        "known visitors ride low-severity, strangers high with a snapshot."
+        "Recognises faces at the door and keeps the People directory — family, "
+        "residents, staff, contractors with expiry dates, a watchlist; strangers "
+        "alert with a snapshot you can enrol from."
     ),
     requires_tasks=["face_recognition"],  # checked vs GET /api/v1/adapters
+    # Lights the first-class People page (app/src/lib/appVerticals.ts):
+    # the face directory, enrolment from door snapshots, visit history.
+    provides=["people"],
     subscribes=None,  # FrameApp: drives inference itself via KAI-C
     params=[
         Param("poll_interval_seconds", float, default=1.0),
         Param("recognition_threshold", float, default=DEFAULT_RECOGNITION_THRESHOLD),
         Param("dedup_window_seconds", float, default=60.0,
               description="Per-(camera, person) re-fire suppression; 0 fires every read."),
+        # WHEN A FACE BECOMES A VERDICT. The first frame of an approach
+        # is the worst one; these decide how long the door waits for a
+        # better one before calling anybody a stranger.
+        Param("decision_hold_seconds", float, default=DEFAULT_HOLD_SECONDS,
+              label="Hold before calling a face unknown", group="Deciding",
+              description=(
+                  "Seconds a visit keeps looking for a match before it is "
+                  "decided from its best frame. A match ends the wait at "
+                  "once. 0 decides on the first frame, with corrections "
+                  "after.")),
+        Param("unknown_score", float, default=DEFAULT_UNKNOWN_SCORE,
+              label="Near-miss floor", group="Deciding",
+              description=(
+                  "A miss whose nearest enrolled face scored at or above "
+                  "this (and below the threshold) is recorded as unclear, "
+                  "not alerted as a stranger. 0 alerts on every miss.")),
+        Param("min_face_px", int, default=DEFAULT_MIN_FACE_PX,
+              label="Smallest face to judge", group="Deciding", advanced=True,
+              description=(
+                  "Faces narrower than this many pixels are not decided "
+                  "from: below it a miss says distance, not stranger. A "
+                  "match is never gated by size.")),
+        Param("min_match_reads", int, default=DEFAULT_MIN_MATCH_READS,
+              label="Matching frames before a name", group="Deciding", advanced=True,
+              description=(
+                  "Frames that must match the same person before the "
+                  "visit is announced as known. 1 announces on the first "
+                  "match; 2 trades a second of delay for a second look.")),
+        Param("min_face_confidence", float, default=DEFAULT_MIN_FACE_CONFIDENCE,
+              label="Least detector confidence to judge", group="Deciding",
+              advanced=True,
+              description="Faces the detector scored below this are not decided from."),
+        Param("visit_gap_seconds", float, default=DEFAULT_GAP_SECONDS,
+              label="Gap that ends a visit", group="Deciding", advanced=True,
+              description="No face for this long and the next face is a new visit."),
         Param("attach_snapshot_for_unknowns", bool, default=True,
               description="Embed a base64 JPEG in unknown-face alerts only."),
         Param("snapshot_max_bytes", int, default=_DEFAULT_SNAPSHOT_MAX_BYTES,
               description="Pre-base64 snapshot cap; 0 disables the limit."),
+        Param("history_days", int, default=30,
+              description="How long a visit stays in the door's history."),
+        Param("history_max", int, default=200,
+              description="Hard cap on remembered visits, whatever the age."),
+        # HOW LOUD A FACE IS. Declared rather than hard-coded because
+        # the right answer is the site's, not ours: a stranger at a
+        # family front door and a stranger at a depot gate are the same
+        # event and not the same emergency. Defaults are today's
+        # behaviour, so an existing install hears no change.
+        Param("unknown_severity", str, default="high",
+              label="Stranger alert level", group="Alerting",
+              suggestions=list(_SEVERITIES),
+              description=(
+                  "Level for an unrecognised face. 'critical' is the "
+                  "loudest the platform has.")),
+        Param("known_severity", str, default="",
+              label="Recognised visitor alert level", group="Alerting",
+              advanced=True,
+              suggestions=list(_SEVERITIES),
+              description=(
+                  "Override the level for a RECOGNISED person. Empty "
+                  "keeps the per-category default — family/resident/"
+                  "friend low, staff/contractor/visitor info — which is "
+                  "usually what you want, since the point of enrolling "
+                  "someone is that they are not an alarm. A watchlist "
+                  "match is never lowered by this.")),
+        Param("chime_enabled", bool, default=True,
+              description="Ring for callers. Off still alerts and records."),
+        Param("quiet_hours", str, default="",
+              description="HH:MM-HH:MM in which only an alarm tone rings."),
+        Param("rechime_seconds", int, default=300,
+              description="Least gap between rings for the same caller."),
     ],
     emits=[
         AlertType("known_visitor", severity="low"),
+        # The severity here is the DEFAULT. `unknown_severity` and
+        # `known_severity` move the actual level at fire time, so the
+        # catalog shows what a fresh install does rather than a promise
+        # this app cannot keep.
         AlertType("unknown_visitor", severity="high",
                   description="Unrecognised face; carries a snapshot when enabled."),
+        AlertType("watchlist_visitor", severity="high",
+                  description="A face enrolled in the watchlist category was recognised."),
+        AlertType("expired_pass", severity="high",
+                  description="A recognised visitor or contractor whose valid_until date has passed."),
     ],
+    has_ui=True,   # GET /ui dashboard, proxied at /api/v1/apps/{id}/ui
     state_schema=[
+        StateView(name="enrolled", label="Enrolled faces", kind="metric",
+                  path="enrolled_faces",
+                  description="Faces in the adapter's DB (refreshed every minute)."),
+        StateView(name="known", label="Known visitors", kind="metric",
+                  path="visits.known", description="Since the app started."),
+        StateView(name="strangers", label="Strangers", kind="metric",
+                  path="visits.unknown", description="Since the app started."),
         StateView(name="deduped", label="Visitors tracked", kind="metric",
                   path="deduped_visitors_tracked"),
+        StateView(name="cameras", label="Cameras", kind="table",
+                  path="camera_health",
+                  columns=["camera_id", "status", "last_frame_age_s", "error"],
+                  description="Whether each door camera is answering."),
+        StateView(name="strangers_wall", label="Latest strangers", kind="gallery",
+                  path="stranger_gallery", limit=8,
+                  description="Snapshots of unrecognised faces, newest first."),
         StateView(name="recent", label="Recent visitors", kind="log",
                   path="recent", limit=12,
                   description="Latest faces at the door; strangers show red."),
@@ -144,16 +295,62 @@ MANIFEST = AppManifest(
                 Param("name", str, required=True,
                       description="Display name (e.g. 'Alex Rivera')."),
                 Param("image", "image", required=True,
-                      description="A clear, front-facing photo of the person."),
-                Param("category", str, default="known",
-                      description="known / family / staff / … (drives alert severity)."),
+                      description="A clear, front-facing photo: good light, no sunglasses or hat, "
+                                  "face at least a third of the frame."),
+                Param("category", str, default="family", choices=list(PERSON_CATEGORIES),
+                      description="Who they are; sets the alert level (watchlist alarms high)."),
+                Param("notes", str, default="",
+                      description="Flat / unit, department, vehicle — anything the guard should see."),
+                Param("valid_until", str, default="",
+                      description="YYYY-MM-DD. After this date a contractor or visitor pass "
+                                  "raises an expired-pass alert instead of a greeting."),
+                Param("person_id", str, default="",
+                      description="Leave blank to derive from the name; set to re-enrol an existing person."),
+                Param("append", bool, default=False,
+                      description="Add this photo to the person's existing samples instead of replacing "
+                                  "them. More angles and lighting = fewer false strangers."),
             ],
             description="Register a known face so the doorbell greets them "
                         "instead of flagging a stranger.",
         ),
         Action(
+            "enroll_stranger", "Enroll from a door snapshot",
+            params=[
+                Param("stranger_id", str, required=True,
+                      description="The id of a snapshot on the strangers wall."),
+                Param("name", str, default="",
+                      description="For a new person. Leave blank when adding to an existing one."),
+                Param("category", str, default="visitor", choices=list(PERSON_CATEGORIES)),
+                Param("notes", str, default=""),
+                Param("valid_until", str, default=""),
+                Param("person_id", str, default="",
+                      description="An enrolled person this face belongs to — the capture is added "
+                                  "to their samples (the door learns its own angle and light)."),
+            ],
+            description="Turn a face the camera already saw into an enrolled person, or "
+                        "add it to someone already enrolled — no photo to find, the door "
+                        "just took it.",
+        ),
+        Action(
+            "update_face", "Edit a person",
+            params=[
+                Param("person_id", str, required=True),
+                Param("name", str, default=""),
+                Param("category", str, default="", choices=[""] + list(PERSON_CATEGORIES)),
+                Param("notes", str, default=""),
+                Param("valid_until", str, default=""),
+            ],
+            description="Change name, category, notes or expiry without a new photo. "
+                        "Blank fields are left as they are.",
+        ),
+        Action(
             "list_faces", "Enrolled faces", params=[],
-            description="Show everyone currently enrolled.",
+            description="Everyone currently enrolled, with when they were last seen.",
+        ),
+        Action(
+            "stranger_image", "Door snapshot",
+            params=[Param("stranger_id", str, required=True)],
+            description="The face crop behind a strangers-wall thumbnail, for review or enrolment.",
         ),
         Action(
             "delete_face", "Remove a face",
@@ -184,6 +381,13 @@ class AppConfig:
     kaic_url: str
     kaic_api_key: str
     recognition_adapter: str = "insightface"
+    #: How far outside a visit's span the frame's instant may fall and
+    #: still attach the name (RFC-0003). Small on purpose: a doorbell
+    #: frame is taken within a second or two of the person being there,
+    #: and a window wide enough to feel safe is wide enough to attach a
+    #: name to the wrong visitor. 0 refuses to guess at all — only a
+    #: frame taken DURING a visit produces a claim.
+    bind_tolerance_seconds: float = 5.0
 
     # The InsightFace adapter's direct URL for face-DB CRUD. KAI-C
     # does not proxy the /faces/* routes, so the enroll subcommand
@@ -200,6 +404,17 @@ class AppConfig:
     # alert within this window. Set 0 to fire every read.
     dedup_window_seconds: float = 60.0
 
+    # The per-visit decision (see visits.py). A face opens a visit; a
+    # match ends it; a visit that runs its hold without one is decided
+    # from its best frame — a stranger, or merely unclear when the
+    # nearest enrolled face came within the band.
+    decision_hold_seconds: float = DEFAULT_HOLD_SECONDS
+    unknown_score: float = DEFAULT_UNKNOWN_SCORE
+    min_face_px: int = DEFAULT_MIN_FACE_PX
+    min_face_confidence: float = DEFAULT_MIN_FACE_CONFIDENCE
+    visit_gap_seconds: float = DEFAULT_GAP_SECONDS
+    min_match_reads: int = DEFAULT_MIN_MATCH_READS
+
     # If True, embed a base64 JPEG snapshot in UNKNOWN-face alert
     # envelopes only. A small downstream relay (see alerts-subscriber/)
     # can then forward the photo to Telegram / ntfy / Discord without
@@ -213,6 +428,30 @@ class AppConfig:
     # A snapshot larger than this is dropped from the envelope
     # (the alert still fires) with a WARN log line.
     snapshot_max_bytes: int = _DEFAULT_SNAPSHOT_MAX_BYTES
+
+    # How long the door remembers. The whole point of keeping a history
+    # is "who came three days ago", so the default is a month rather
+    # than the handful of entries a deque held — and it is bounded by a
+    # count as well, because the log is one JSON value rewritten per
+    # visit and a busy porch must not turn that into a megabyte.
+    history_days: int = 30
+    history_max: int = 200
+
+    # The bell. An alert fires for every visit whatever these say —
+    # these decide only whether something RINGS, which is a different
+    # question and the one every annoying doorbell gets wrong.
+    unknown_severity: str = "high"
+    known_severity: str = ""
+    chime_enabled: bool = True
+    # HH:MM-HH:MM. Inside it only the alarm tone rings: a delivery at
+    # 03:00 goes in the log, a stranger at 03:00 still wakes the house.
+    quiet_hours: str = ""
+    # Longer than the alert dedup on purpose. Being told again in a feed
+    # costs nothing; being rung at again costs attention.
+    rechime_seconds: int = 300
+    # category -> tone, overriding chime.DEFAULT_TONES. YAML rather than
+    # a catalog Param because it is a mapping, not a value.
+    chime_tones: dict[str, str] = field(default_factory=dict)
 
     # Alert delivery channels.
     webhook_url: str | None = None
@@ -266,6 +505,8 @@ def load_config(path: str | Path) -> AppConfig:
         kaic_url=str(kaic_url),
         kaic_api_key=str(kaic_api_key),
         recognition_adapter=str(raw.get("recognition_adapter", "insightface")),
+        bind_tolerance_seconds=max(
+            0.0, float(raw.get("bind_tolerance_seconds", 5.0))),
         adapter_url=str(raw.get("adapter_url", "http://127.0.0.1:9005")),
         adapter_token=str(raw.get("adapter_token", "") or ""),
         cameras=cameras,
@@ -275,12 +516,31 @@ def load_config(path: str | Path) -> AppConfig:
             raw.get("recognition_threshold", DEFAULT_RECOGNITION_THRESHOLD)
         ),
         dedup_window_seconds=float(raw.get("dedup_window_seconds", 60.0)),
+        decision_hold_seconds=max(0.0, float(
+            raw.get("decision_hold_seconds", DEFAULT_HOLD_SECONDS))),
+        unknown_score=max(0.0, float(raw.get("unknown_score", DEFAULT_UNKNOWN_SCORE))),
+        min_face_px=max(0, int(raw.get("min_face_px", DEFAULT_MIN_FACE_PX))),
+        min_face_confidence=max(0.0, float(
+            raw.get("min_face_confidence", DEFAULT_MIN_FACE_CONFIDENCE))),
+        visit_gap_seconds=max(0.0, float(
+            raw.get("visit_gap_seconds", DEFAULT_GAP_SECONDS))),
+        min_match_reads=max(1, int(raw.get("min_match_reads", DEFAULT_MIN_MATCH_READS))),
         attach_snapshot_for_unknowns=bool(
             raw.get("attach_snapshot_for_unknowns", True)
         ),
         snapshot_max_bytes=int(
             raw.get("snapshot_max_bytes", _DEFAULT_SNAPSHOT_MAX_BYTES)
         ),
+        history_days=int(raw.get("history_days", 30)),
+        history_max=int(raw.get("history_max", 200)),
+        unknown_severity=_severity(raw.get("unknown_severity"), "high"),
+        known_severity=(_severity(raw.get("known_severity"), "")
+                        if str(raw.get("known_severity") or "").strip() else ""),
+        chime_enabled=bool(raw.get("chime_enabled", True)),
+        quiet_hours=str(raw.get("quiet_hours") or ""),
+        rechime_seconds=int(raw.get("rechime_seconds", 300)),
+        chime_tones={str(k): str(v) for k, v
+                     in (raw.get("chime_tones") or {}).items()},
         webhook_url=raw.get("webhook_url"),
         nats_alerts_url=raw.get("nats_alerts_url"),
         nats_alerts_token=raw.get("nats_alerts_token"),
@@ -298,21 +558,10 @@ def load_config(path: str | Path) -> AppConfig:
 # ── KAI-C recognition client ───────────────────────────────────────
 
 
-class KaicRecognitionClient:
-    """JSON POST to KAI-C's /api/v1/infer/{adapter} → InsightFace
-    /infer. KAI-C audits the call and threads the correlation_id
-    through to the adapter.
-
-    KAI-C only proxies application/json (multipart proxying is a
-    planned follow-up), so the frame ships base64-encoded inside the
-    JSON body. The SDK's body parser unwraps ``frame_b64`` into the
-    binary payload and lifts the remaining keys (``task``,
-    ``threshold``) into the top-level payload the service sees.
-
-    Kept app-side (rather than swapping to the SDK ``KaiCClient``) to
-    preserve this app's historical wire body — ``task`` + ``threshold``
-    with no ``camera_id`` field.
-    """
+class KaicRecognitionClient(KaiCClient):
+    """The SDK's KAI-C client behind this app's ``recognize`` spelling:
+    ``task="face_recognition"`` with the match ``threshold`` as a
+    contract-v1 param the adapter reads."""
 
     def __init__(
         self,
@@ -321,9 +570,8 @@ class KaicRecognitionClient:
         adapter_name: str,
         timeout_seconds: float,
     ) -> None:
-        self._url = f"{kaic_url.rstrip('/')}/api/v1/infer/{adapter_name}"
-        self._api_key = api_key
-        self._timeout = timeout_seconds
+        super().__init__(kaic_url, adapter_name, api_key=api_key,
+                         timeout_seconds=timeout_seconds)
 
     def recognize(
         self,
@@ -332,28 +580,143 @@ class KaicRecognitionClient:
         threshold: float,
         correlation_id: str | None = None,
     ) -> dict[str, Any]:
-        headers = {
-            "X-Internal-Api-Key": self._api_key,
-            "Content-Type": "application/json",
-        }
-        if correlation_id:
-            headers[CORRELATION_ID_HEADER] = correlation_id
-        body: dict[str, Any] = {
-            "frame_b64": base64.b64encode(frame_jpeg).decode("ascii"),
-            "task": "face_recognition",
-            "threshold": threshold,
-        }
-        resp = httpx.post(
-            self._url,
-            json=body,
-            headers=headers,
-            timeout=self._timeout,
-        )
-        resp.raise_for_status()
-        return resp.json()
+        return self.infer(frame_jpeg, task="face_recognition",
+                          params={"threshold": threshold},
+                          correlation_id=correlation_id)
 
 
 # ── The orchestrator ───────────────────────────────────────────────
+
+
+_THUMB_MAX_PX = 192
+# Without Pillow (optional) the raw JPEG is embedded as-is, but only
+# when it is small enough that eight of them in /state stay cheap to
+# poll every few seconds; anything bigger is skipped, never shrunk badly.
+_THUMB_RAW_CAP_BYTES = 24 * 1024
+
+
+def _thumbnail_data_uri(frame: bytes) -> str | None:
+    """A small ``data:image/jpeg`` URI for the dashboard's stranger wall
+    and the directory avatars. Pillow shrinks the frame to ~190 px when
+    it is installed (the image ships it); otherwise the raw JPEG is used
+    only if it is already small."""
+    data = _shrink_jpeg(frame, None, _THUMB_MAX_PX, quality=70)
+    if data is None:
+        if len(frame) > _THUMB_RAW_CAP_BYTES:
+            return None
+        data = frame
+    return "data:image/jpeg;base64," + base64.b64encode(data).decode("ascii")
+
+
+def _shrink_jpeg(frame: bytes, bbox: tuple[int, int, int, int] | None,
+                 max_px: int, *, quality: int) -> bytes | None:
+    """Decode once, optionally crop to the face (with half a face of
+    margin each side: hair, chin and ears are what a person recognises
+    in a review), bound the longer side to ``max_px``, re-encode. None
+    without Pillow or on a frame that does not decode."""
+    try:
+        from PIL import Image  # optional dependency
+    except ImportError:  # pragma: no cover — depends on the environment
+        return None
+    try:
+        with Image.open(io.BytesIO(frame)) as im:
+            im = im.convert("RGB")
+            if bbox:
+                x1, y1, x2, y2 = (int(v) for v in bbox)
+                w, h = max(1, x2 - x1), max(1, y2 - y1)
+                mx, my = int(w * 0.5), int(h * 0.5)
+                im = im.crop((max(0, x1 - mx), max(0, y1 - my),
+                              min(im.width, x2 + mx), min(im.height, y2 + my)))
+            im.thumbnail((max_px, max_px))
+            buf = io.BytesIO()
+            im.save(buf, "JPEG", quality=quality, optimize=True)
+            return buf.getvalue()
+    except Exception:
+        return None
+
+
+_CROP_MAX_PX = 320
+
+
+def _adapter_detail(exc: "httpx.HTTPStatusError") -> str:
+    """The adapter's own reason for a refusal, for the operator's eyes."""
+    try:
+        body = exc.response.json()
+        detail = body.get("detail") if isinstance(body, dict) else None
+        if isinstance(detail, str) and detail.strip():
+            return detail.strip()
+    except ValueError:
+        pass
+    return f"HTTP {exc.response.status_code}"
+
+
+def _face_crop_jpeg(frame: bytes, bbox: tuple[int, int, int, int] | None) -> bytes | None:
+    """The face with generous margin, at most 320 px, as JPEG bytes — what
+    the People page shows behind a stranger thumbnail and what enrolment
+    from the wall sends to the adapter. Without Pillow the raw frame is
+    kept when small, else nothing (never a bad enrolment)."""
+    data = _shrink_jpeg(frame, bbox, _CROP_MAX_PX, quality=82)
+    if data is not None:
+        return data
+    return frame if len(frame) <= 6 * _THUMB_RAW_CAP_BYTES else None
+
+
+def _parse_date(value: str | None) -> str:
+    """Validate a YYYY-MM-DD string; blank stays blank."""
+    v = (value or "").strip()
+    if not v:
+        return ""
+    try:
+        dt.date.fromisoformat(v)
+    except ValueError:
+        raise ValueError("'valid_until' must be YYYY-MM-DD") from None
+    return v
+
+
+def _pass_expired(valid_until: str | None, today: "dt.date | None" = None) -> bool:
+    v = (valid_until or "").strip()
+    if not v:
+        return False
+    try:
+        return dt.date.fromisoformat(v) < (today or dt.date.today())
+    except ValueError:
+        return False
+
+
+class _TrackedFrameSource(DictFrameSource):
+    """The by-reference camera map, plus a per-camera health record the
+    dashboard reads. The SDK loop isolates fetch failures per camera and
+    logs them, which is right for the loop and invisible to an operator;
+    this is the one place a dead doorbell camera becomes a red row."""
+
+    def __init__(self, sources, health: dict[str, dict[str, Any]]) -> None:
+        super().__init__(sources)
+        self._health = health
+        # A camera picked in the catalog has no YAML frame_url: its frames
+        # come from core's snapshot route, which serves only this app's picks.
+        self._core = CoreSnapshotSource()
+
+    def get_frame(self, camera_id: str) -> bytes | None:
+        rec = self._health.setdefault(camera_id, {
+            "last_frame": None, "last_error": None, "error": None, "frames": 0,
+        })
+        try:
+            if camera_id in self._sources:
+                frame = super().get_frame(camera_id)
+            else:
+                frame = self._core.get_frame(camera_id)
+        except Exception as exc:
+            rec["last_error"] = time.time()
+            rec["error"] = f"{type(exc).__name__}: {exc}"[:200]
+            raise
+        if frame:
+            rec["last_frame"] = time.time()
+            rec["frames"] += 1
+            rec["error"] = None
+        else:
+            rec["last_error"] = time.time()
+            rec["error"] = "camera returned no frame"
+        return frame
 
 
 def _slug(name: str) -> str:
@@ -362,6 +725,25 @@ def _slug(name: str) -> str:
     face (the adapter keys on person_id)."""
     s = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
     return s or "face"
+
+
+class _LazyNvr:
+    """What :class:`VisitLog` needs, resolved at CALL time.
+
+    The log is built in the constructor and the platform client is not
+    available until after registration, so handing it ``app.nvr`` there
+    would capture ``None`` — or worse, force the client to be built
+    early, before core has minted this app's key (see the ``nvr``
+    property). This forwards each attribute when it is actually used.
+    """
+
+    __slots__ = ("_app",)
+
+    def __init__(self, app: Any) -> None:
+        self._app = app
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._app.nvr, name)
 
 
 class SmartDoorbell(FrameApp):
@@ -396,6 +778,8 @@ class SmartDoorbell(FrameApp):
             self._frame_sources[cam.camera_id] = build_frame_source(
                 camera_id=cam.camera_id, url=cam.frame_url,
             )
+        # Per-camera fetch health, filled by _TrackedFrameSource.
+        self._camera_health: dict[str, dict[str, Any]] = {}
 
         super().__init__(
             config,
@@ -403,7 +787,7 @@ class SmartDoorbell(FrameApp):
             # By-reference bridge: swapping an entry in
             # ``self._frame_sources`` (test stubs, camera reconfig) is
             # picked up on the next tick.
-            frame_source=DictFrameSource(self._frame_sources),
+            frame_source=_TrackedFrameSource(self._frame_sources, self._camera_health),
             cameras=[cam.camera_id for cam in config.cameras],
             poll_interval_seconds=(
                 config.poll_interval_seconds
@@ -424,10 +808,180 @@ class SmartDoorbell(FrameApp):
         # "last actually-fired", never refreshes on suppression, and
         # its shape is pinned by this app's test suite.
         self._last_fired: dict[tuple[str, Any], float] = {}
+        # Open visits and the rule that decides them. Fed every face
+        # and the time; what it returns is what gets published.
+        self._tracker = VisitTracker(
+            hold_seconds=self.config.decision_hold_seconds,
+            unknown_score=self.config.unknown_score,
+            min_face_px=self.config.min_face_px,
+            min_face_confidence=self.config.min_face_confidence,
+            gap_seconds=self.config.visit_gap_seconds,
+            min_match_reads=self.config.min_match_reads,
+        )
+        # Monotonic, and an attribute so a test can move it.
+        self._clock = time.monotonic
         # Rolling feed of the most recent visitors — powers the "Recent
         # visitors" log on the app's dashboard. Kept lightweight (no
         # embedded snapshots) since /state is polled frequently.
         self._recent: deque[dict[str, Any]] = deque(maxlen=25)
+        # Visits since start, by outcome — the two headline numbers.
+        self._visits: dict[str, int] = {"known": 0, "unknown": 0, "uncertain": 0}
+        self._started_at = time.time()
+        # Thumbnails of the latest strangers for the gallery view — small
+        # (see _thumbnail_data_uri) because /state is polled every few s.
+        self._stranger_gallery: deque[dict[str, Any]] = deque(maxlen=8)
+        # Full face crops behind the wall, by stranger id — served through
+        # the stranger_image action, never through /state.
+        self._stranger_crops: dict[str, bytes] = {}
+        self._stranger_seq = 0
+        # person_id -> last recognition wall time, merged into list_faces.
+        self._last_seen: dict[str, float] = {}
+        # Enrolled-face count from the adapter, refreshed at most once a
+        # minute so /state never turns into an adapter round-trip per poll.
+        self._enrolled_cache: tuple[float, int | None] = (0.0, None)
+        # person_id -> metadata from the same refresh, so an expiry date
+        # is known at recognition time without a second adapter call.
+        self._people_meta: dict[str, dict[str, Any]] = {}
+        #: The platform client, built on FIRST USE — core mints this
+        #: app's key during registration, which the base class does in
+        #: start(), after this constructor has run. A client built here
+        #: would resolve its credential before the app key exists and
+        #: fall back to the deployment's site key, which core reads as a
+        #: platform component: unscoped, every camera in the building.
+        self._nvr: Any = None
+        #: Stranger TILES, kept across restarts — a thumbnail, a camera
+        #: and a time. Presentation state for the wall, carrying no name:
+        #: identities live in the platform's store now (RFC-0003), where
+        #: they are scoped, auditable, and visible to the operator's own
+        #: pages rather than only to this app.
+        self._tiles = VisitLog(
+            _LazyNvr(self),
+            max_entries=self.config.history_max,
+            max_days=self.config.history_days,
+        )
+        self._history_restored = False
+        self._visit_seq = 0
+        #: How the identities this app wrote were bound — on /state, so
+        #: "is it guessing?" is answerable without reading a log. A
+        #: deployment where `nearest` climbs is one where the doorbell
+        #: sees faces between visits rather than during them.
+        self._claims: dict[str, int] = {
+            "window": 0, "nearest": 0, "ambiguous": 0,
+            "no visit": 0, "unreachable": 0, "failed": 0,
+        }
+        #: Does anything ring, and with what. Separate from the alert
+        #: path on purpose: every visit alerts, only some interrupt
+        #: somebody.
+        self._chime = ChimePolicy(
+            tones=self.config.chime_tones,
+            quiet_hours=self.config.quiet_hours,
+            rechime_seconds=self.config.rechime_seconds,
+            enabled=self.config.chime_enabled,
+        )
+        #: Rings since start, and the last decision — both on /state so
+        #: "why didn't it ring?" is answerable without reading a log.
+        self._rings = 0
+        self._last_chime: dict[str, Any] | None = None
+
+    @property
+    def nvr(self):
+        """The client this app talks to core with, built on first use."""
+        if self._nvr is None:
+            from opennvr_app_sdk import OpenNVR
+
+            self._nvr = OpenNVR()
+        return self._nvr
+
+    @nvr.setter
+    def nvr(self, client) -> None:
+        self._nvr = client
+
+    def _recent_visits_from_core(self) -> list[dict[str, Any]]:
+        """The feed, read back from the platform's store.
+
+        One query, not one per visit. Names come from the ``face_id``
+        claims this app wrote, so a visit nobody recognised shows as
+        "Unknown visitor" because there IS no claim — not because a
+        field was blank.
+
+        Returns ``[]`` on any failure. That is a display list; an empty
+        feed on a doorbell that cannot reach core is a cosmetic gap,
+        and the alerting path above does not depend on it.
+        """
+        try:
+            answer = self.nvr.timeline.find(
+                "", label=["person"],
+                camera=[c.camera_id for c in self.config.cameras] or None,
+                limit=self._recent.maxlen or 25)
+        except Exception:  # noqa: BLE001
+            logger.debug("feed could not be restored", exc_info=True)
+            return []
+        if answer is None:
+            logger.info("feed not restored: core unreachable")
+            return []
+        out: list[dict[str, Any]] = []
+        for row in answer.get("results") or []:
+            name = next((str(c.get("value")) for c in (row.get("claims") or [])
+                         if c.get("kind") == "face_id" and c.get("value")), None)
+            out.append({
+                "message": (f"{name} recognised" if name
+                            else "Unknown visitor")
+                           + f" at {row.get('camera_name') or row.get('camera_id')}",
+                "time": row.get("started_at"),
+                "level": "low" if name else "high",
+                "camera": row.get("camera_name") or row.get("camera_id"),
+                "name": name,
+            })
+        return out
+
+    def _restore_history(self) -> None:
+        """Put yesterday's visitors back on the feed and the wall, once.
+
+        The FEED now comes from the platform: recent person visits on
+        this app's cameras, with the name read from the ``face_id``
+        claim this app wrote. That is the whole point of RFC-0003 —
+        the answer to "who came to my door on Tuesday" is the same
+        whether the doorbell, the operator's timeline or another app
+        asks it.
+
+        The WALL comes from the local tiles, because a thumbnail is
+        presentation state and the store holds evidence paths rather
+        than 190-pixel images.
+
+        Lazily rather than in the constructor: reading either needs the
+        platform client, which needs the app key core mints during
+        registration — and a doorbell must come up and start watching
+        the door whether or not its history can be read.
+        """
+        if self._history_restored:
+            return
+        self._history_restored = True
+        for item in reversed(self._recent_visits_from_core()):
+            self._recent.appendleft(item)
+        try:
+            entries = self._tiles.entries
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("stranger tiles could not be restored (%s)", exc)
+            return
+        if not entries:
+            return
+        for item in reversed(self._tiles.strangers(
+                self._stranger_gallery.maxlen or 8)):
+            self._stranger_gallery.appendleft({
+                "id": item.get("id"),
+                "image": item.get("thumb"),
+                # Two different absences, and the wall must not call them
+                # the same thing. No inline thumbnail but the platform
+                # still holds the crop means the face is there to enrol
+                # from, just not drawn — the log keeps a thumbnail only
+                # for the newest few. No crop either means the picture
+                # really is gone.
+                "photo_kept": bool(item.get("evidence_path")),
+                "aged_out": not (item.get("thumb") or item.get("evidence_path")),
+                "label": item.get("camera"),
+                "time": item.get("at"),
+            })
+        logger.info("restored %d visits from history", len(entries))
 
     def request_stop(self) -> None:
         """Historical name — the SDK base spells it ``stop()``."""
@@ -439,11 +993,20 @@ class SmartDoorbell(FrameApp):
 
     # ── The rule (one camera × one fetched frame) ──────────────────
 
+    def _cam(self, camera_id: str) -> CameraConfig:
+        # A YAML camera, or — connected to OpenNVR — a camera picked for
+        # this app in the catalog, which needs no YAML entry at all.
+        return self._cameras_by_id.get(camera_id) or CameraConfig(
+            camera_id=camera_id, frame_url="opennvr:core")
+
     def on_frame(
         self, camera_id: str, frame_bytes: bytes
     ) -> Iterable[Alert] | None:
-        cam = self._cameras_by_id[camera_id]
+        cam = self._cam(camera_id)
         correlation_id = uuid.uuid4().hex
+        # First frame after a start: put yesterday's visitors back on the
+        # feed and the wall before this one joins them.
+        self._restore_history()
 
         read = self.pipeline.process_frame(frame_bytes, correlation_id=correlation_id)
         if read is None or not read.face_detected:
@@ -452,14 +1015,80 @@ class SmartDoorbell(FrameApp):
             # example app — keep this one focused on the doorbell.)
             return None
 
+        # The frame goes to the visit, and the VISIT decides. A match
+        # comes straight back; a miss comes back when the hold runs
+        # out, as a stranger or merely unclear; a miss that was already
+        # announced and matches now comes back as an upgrade.
+        now = self._clock()
+        decisions = self._tracker.observe(
+            cam.camera_id, read, frame_bytes, now=now, wall=time.time())
+        decisions += self._tracker.settle(now)
+        for decision in decisions:
+            self._publish(decision, now=now)
+        return None
+
+    def handle_tick(self) -> list[Alert]:
+        fired = super().handle_tick()
+        # A hold runs out whether or not the camera answered this tick,
+        # and whether or not the visitor is still in shot.
+        now = self._clock()
+        for decision in self._tracker.settle(now):
+            self._publish(decision, now=now)
+        return fired
+
+    # ── Publishing a decision ────────────────────────────────────────
+
+    def _publish(self, decision: Decision, *, now: float) -> None:
+        """Act on one visit decision: alert, ring, feed, wall, history.
+
+        ``known`` and ``unknown`` are the two announcements. ``uncertain``
+        is a record and a wall tile with no alert — a known face seen
+        badly far more often than a stranger, and the tile is where the
+        missing angle gets enrolled from. ``upgrade`` is a name for a
+        visit already announced as a stranger: the alert goes out
+        saying which one it supersedes, the stranger tile comes down,
+        the feed line is corrected, and the bell does not ring twice.
+        """
+        visit, read, frame = decision.visit, decision.read, decision.obs.frame
+        cam = self._cam(visit.camera_id)
+        if decision.kind == "uncertain":
+            self._record_uncertain(cam, visit, read, frame)
+            return
+
+        upgrade = decision.kind == "upgrade"
+        if upgrade:
+            self._retract_stranger(visit)
+
         bucket = read.person_id or self._UNKNOWN_BUCKET
         plate_key = (cam.camera_id, bucket)
-        now = time.monotonic()
-        if self.config.dedup_window_seconds > 0:
+        if self.config.dedup_window_seconds > 0 and not upgrade:
+            # A correction is new information and is never deduped;
+            # a repeat of the same verdict is.
             last = self._last_fired.get(plate_key)
             if last is not None and (now - last) < self.config.dedup_window_seconds:
-                return None
-            self._last_fired[plate_key] = now
+                return
+        self._last_fired[plate_key] = now
+
+        # Decided BEFORE the alert is built, because the decision rides
+        # in the envelope: whatever actually rings — a relay into ntfy,
+        # a Home Assistant automation, a smart speaker — reads it from
+        # there, and reads the reason when nothing rang.
+        if upgrade and visit.rang:
+            # The visitor was rung for as a stranger seconds ago. The
+            # name is a correction, not a second caller.
+            chime = ChimeDecision(
+                self._chime.tone_for(read.category, read.recognized), False,
+                "already rang for this visit")
+        else:
+            chime = self._chime.decide(
+                key=f"{cam.camera_id}|{read.person_id or '?'}",
+                category=read.category, recognized=read.recognized, now=now,
+            )
+        self._last_chime = {**chime.as_dict(), "at": time.time(),
+                            "camera": cam.camera_id}
+        if chime.ring:
+            self._rings += 1
+            visit.rang = True
 
         attach_snapshot = (
             self.config.attach_snapshot_for_unknowns and not read.recognized
@@ -467,45 +1096,534 @@ class SmartDoorbell(FrameApp):
         snapshot_bytes: bytes | None = None
         if attach_snapshot:
             cap = max(0, int(self.config.snapshot_max_bytes))
-            if cap == 0 or len(frame_bytes) <= cap:
-                snapshot_bytes = frame_bytes
+            if cap == 0 or len(frame) <= cap:
+                snapshot_bytes = frame
             else:
                 logger.warning(
                     "camera=%s: snapshot %d bytes exceeds snapshot_max_bytes=%d; "
                     "dropping from alert envelope correlation_id=%s",
-                    cam.camera_id, len(frame_bytes), cap, read.correlation_id,
+                    cam.camera_id, len(frame), cap, read.correlation_id,
                 )
-        alert = self._build_alert(cam, read, snapshot_bytes)
+        alert = self._build_alert(
+            cam, read, snapshot_bytes, chime,
+            supersedes=visit.alert_id if upgrade else None)
         self.dispatcher.dispatch(alert)
-        self._recent.append({
-            "message": (f"{read.person_id} recognised" if read.recognized
+        visit.alert_id = alert.alert_id
+        now_wall = time.time()
+        display = read.name or read.person_id or "?"
+        entry = {
+            "message": (f"{display} recognised" if read.recognized
                         else "Unknown visitor")
                        + f" at {cam.camera_id}",
-            "time": time.time(),
+            "time": now_wall,
             "level": "low" if read.recognized else "high",
-        })
+            "camera": cam.camera_id,
+            "name": display if read.recognized else None,
+            "category": read.category if read.recognized else None,
+            "similarity": read.similarity,
+            "visit": visit.key,
+        }
+        if upgrade:
+            # The line the stranger got is corrected in place: one visit,
+            # one line, now with the name. It keeps the visit's time.
+            line = next((e for e in self._recent if e.get("visit") == visit.key), None)
+            if line is not None:
+                entry["time"] = line.get("time", now_wall)
+                line.clear()
+                line.update(entry, corrected=True)
+            else:
+                self._recent.append({**entry, "corrected": True})
+            counted = visit.extra.pop("counted", None)
+            if counted in self._visits and self._visits[counted] > 0:
+                self._visits[counted] -= 1
+        else:
+            self._recent.append(entry)
+        self._visits["known" if read.recognized else "unknown"] += 1
+        if read.recognized and read.person_id:
+            self._last_seen[read.person_id] = now_wall
+        crop: bytes | None = None
+        thumb: str | None = None
+        sid: str | None = None
+        if not read.recognized:
+            visit.extra["counted"] = "unknown"
+            sid, thumb, crop = self._add_stranger_tile(cam, read, frame, now_wall)
+            visit.tile_id = sid
+
+        # Durable, and LAST: the alert has already gone out and the
+        # dashboard is already right. A doorbell that failed to ring
+        # because a key/value write timed out would be a worse doorbell
+        # than one with a gap in its history.
+        self._remember(cam, read, now_wall, visit_id=sid, thumb=thumb, crop=crop)
         # Wire the app-dispatched alert into the SDK contract counters
         # (/health's alerts_fired) — the base loop can't see it because
         # on_frame returns None.
         self._contract_note_alerts(1)
-        return None
+
+    def _record_uncertain(self, cam: CameraConfig, visit: Any, read: FaceRead,
+                          frame: bytes) -> None:
+        """A visit that ran its hold with a near miss and no match.
+        Recorded and put on the wall, so the operator can enrol the
+        angle that was missing; not alerted, because "somebody who
+        looks a lot like Alice" is not a stranger at the door."""
+        now_wall = time.time()
+        self._visits["uncertain"] += 1
+        visit.extra["counted"] = "uncertain"
+        sid, thumb, crop = self._add_stranger_tile(
+            cam, read, frame, now_wall, uncertain=True)
+        visit.tile_id = sid
+        self._recent.append({
+            "message": f"Unclear face at {cam.camera_id}",
+            "time": now_wall,
+            "level": "medium",
+            "camera": cam.camera_id,
+            "name": None,
+            "category": None,
+            "similarity": read.similarity,
+            "uncertain": True,
+            "visit": visit.key,
+        })
+        logger.info("camera=%s: unclear face (nearest %s, threshold %s) — "
+                    "recorded, not alerted", cam.camera_id,
+                    f"{read.similarity:.2f}" if read.similarity is not None else "n/a",
+                    read.threshold)
+        self._remember(cam, read, now_wall, visit_id=sid, thumb=thumb, crop=crop)
+
+    def _add_stranger_tile(self, cam: CameraConfig, read: FaceRead, frame: bytes,
+                           at: float, *, uncertain: bool = False
+                           ) -> tuple[str | None, str | None, bytes | None]:
+        """The wall tile for a face nobody matched. One full-frame decode:
+        the 320 px crop, then the ~190 px wall thumbnail from the crop —
+        a face, not a whole porch, in a tile 120 px wide."""
+        crop = _face_crop_jpeg(frame, read.face_bbox)
+        thumb = _thumbnail_data_uri(crop if crop is not None else frame)
+        if thumb is None:
+            return None, None, crop
+        self._stranger_seq += 1
+        sid = f"s{self._stranger_seq}"
+        if crop is not None:
+            self._stranger_crops[sid] = crop
+        tile = {"id": sid, "image": thumb, "label": cam.camera_id, "time": at}
+        if uncertain:
+            tile["uncertain"] = True
+        self._stranger_gallery.append(tile)
+        # Keep the crop store in step with the wall (deque drops the
+        # oldest silently).
+        live = {g["id"] for g in self._stranger_gallery}
+        for old in [k for k in self._stranger_crops if k not in live]:
+            self._stranger_crops.pop(old, None)
+        return sid, thumb, crop
+
+    def _retract_stranger(self, visit: Any) -> None:
+        """The visit has a name now; the stranger it was shown as goes."""
+        sid = visit.tile_id
+        if not sid:
+            return
+        visit.tile_id = None
+        kept = [g for g in self._stranger_gallery if g.get("id") != sid]
+        self._stranger_gallery.clear()
+        self._stranger_gallery.extend(kept)
+        self._stranger_crops.pop(sid, None)
+        try:
+            self._tiles.forget(sid)
+        except Exception:  # noqa: BLE001 — a tile is not worth a miss
+            logger.debug("stranger tile %s not forgotten", sid, exc_info=True)
+
+    def _remember(self, cam: Any, read: Any, at: float, *,
+                  visit_id: str | None, thumb: str | None,
+                  crop: bytes | None) -> None:
+        """Record this visit. Never raises.
+
+        The identity goes to the PLATFORM now, not to a log of our own.
+
+        This app used to keep its whole visit history in the SDK's
+        key/value store, and argued for it: a ``FrameApp`` has a frame
+        and a face but no ``event_id``, so attaching a name to a
+        platform visit meant guessing which visit by timestamp, and a
+        guessed identity is indistinguishable afterwards from a
+        measured one. The argument was right and the conclusion was
+        wrong — indistinguishable is a property of the record, so
+        RFC-0003 put the binding IN the record. ``visit_at`` says
+        whether the instant fell inside a visit's own span (``window``)
+        or merely near one (``nearest``), and refuses to choose when
+        two visits could be meant.
+
+        What stays local is the wall tile: a thumbnail, a camera and a
+        time. That is presentation state, the same category as the
+        ``_recent`` deque above it, and it carries no name.
+        """
+        if visit_id is None:
+            self._visit_seq += 1
+            visit_id = f"v{int(at)}-{self._visit_seq}"
+        self._claim_identity(cam, read, at)
+        try:
+            self._tiles.record({
+                "id": visit_id,
+                "at": at,
+                "camera": cam.camera_id,
+                "recognized": bool(read.recognized),
+                **({"thumb": thumb} if thumb and not read.recognized else {}),
+            }, crop=crop if not read.recognized else None)
+        except Exception:  # noqa: BLE001 — a tile is not worth a miss
+            logger.debug("stranger tile not stored", exc_info=True)
+
+    def _claim_identity(self, cam: Any, read: Any, at: float) -> None:
+        """Attach the name to the platform's visit, saying how it bound.
+
+        Only a RECOGNISED face produces a claim. "Somebody unknown was
+        here" is already a visit in the store; writing ``face_id:
+        unknown`` would turn the absence of an identity into an
+        assertion about one, and every reader counting faces would
+        count it.
+
+        Best-effort, and last: an alert that already went out must not
+        be undone by a write that timed out. But the failure is LOGGED
+        at warning rather than swallowed, because "the name was not
+        recorded" is not a quieter version of "there was no name".
+        """
+        if not (read.recognized and read.person_id):
+            return
+        name = (read.name or read.person_id or "").strip()
+        if not name:
+            return
+        try:
+            client = self.nvr
+            bound = client.timeline.visit_at(
+                cam.camera_id, dt.datetime.fromtimestamp(at, dt.timezone.utc),
+                label="person", tolerance_s=self.config.bind_tolerance_seconds)
+            if bound is None:
+                logger.warning("face %s not recorded: core unreachable", name)
+                self._claims["unreachable"] += 1
+                return
+            event_id = bound.get("event_id")
+            if not event_id:
+                # Ambiguous, or no visit at all. Both mean this frame
+                # does not identify a visit, and a doorbell frame taken
+                # while two people are at the door genuinely does not
+                # say whose face it is.
+                self._claims[bound.get("reason") or "unbound"] += 1
+                return
+            binding = bound.get("binding") or "nearest"
+            client.timeline.add_claims(
+                event_id,
+                [{"kind": "face_id", "value": name,
+                  "confidence": read.similarity,
+                  "source_task": "face_recognition",
+                  "source_adapter": self.config.recognition_adapter,
+                  "correlation_id": read.correlation_id}],
+                binding=binding)
+            self._claims[binding] += 1
+        except Exception:  # noqa: BLE001
+            logger.warning("face %s not recorded", name, exc_info=True)
+            self._claims["failed"] += 1
+
+    def _enrolled_count(self) -> int | None:
+        """How many faces the adapter holds, cached for a minute. None when
+        the adapter cannot be reached — the dashboard says so rather than
+        showing a zero that looks like an empty DB."""
+        fetched_at, count = self._enrolled_cache
+        if time.time() - fetched_at < 60.0:
+            return count
+        try:
+            faces = self._face_admin(timeout_seconds=self._DIRECTORY_TIMEOUT_S).list_faces()
+            rows = faces.get("faces", faces) if isinstance(faces, dict) else faces
+            count = len(rows) if isinstance(rows, list) else None
+            if isinstance(rows, list):
+                self._people_meta = {
+                    str(f.get("person_id") or f.get("id")): (
+                        f.get("metadata") if isinstance(f.get("metadata"), dict) else {})
+                    for f in rows if isinstance(f, dict)
+                }
+        except Exception as exc:
+            logger.warning("enrolled-face count unavailable: %s", exc)
+            count = None
+        self._enrolled_cache = (time.time(), count)
+        return count
+
+    def _camera_rows(self) -> list[dict[str, Any]]:
+        """One row per configured camera for the dashboard's table."""
+        now = time.time()
+        stall_after = max(30.0, 10 * float(self.config.poll_interval_seconds or 1.0))
+        rows = []
+        # The cameras actually being polled: the YAML list standalone, the
+        # cameras picked in the catalog when connected.
+        for camera_id in list(self._cameras):
+            cam = SimpleNamespace(camera_id=camera_id)
+            rec = self._camera_health.get(cam.camera_id) or {}
+            last = rec.get("last_frame")
+            age = int(now - last) if last else None
+            if rec.get("error") and (last is None or rec.get("last_error", 0) > last):
+                status = "error"
+            elif last is None:
+                status = "waiting"
+            elif age is not None and age > stall_after:
+                status = "stalled"
+            else:
+                status = "ok"
+            rows.append({
+                "camera_id": cam.camera_id,
+                "status": status,
+                "last_frame_age_s": age,
+                "error": rec.get("error"),
+            })
+        return rows
 
     def state_snapshot(self) -> dict[str, Any]:
-        """``GET /state`` — the dedup ledger size per camera."""
+        """``GET /state`` — what the catalog's live views and the /ui
+        dashboard render: counters, per-camera health, the stranger wall
+        and the recent-visitor feed."""
         return {
-            "cameras": [cam.camera_id for cam in self.config.cameras],
+            "cameras": list(self._cameras),
+            "camera_health": self._camera_rows(),
             "deduped_visitors_tracked": len(self._last_fired),
+            "enrolled_faces": self._enrolled_count(),
+            "visits": dict(self._visits),
+            # Visits still being decided, and the rule deciding them —
+            # "why did it take four seconds?" answered without a log.
+            "open_visits": len(self._tracker.open_visits),
+            "decision": self._tracker.settings(),
+            # How the names this app wrote were attached (RFC-0003).
+            # `nearest` climbing means it is seeing faces between
+            # visits rather than during them, which is a tuning signal
+            # long before it is a wrong name.
+            "identity_binding": dict(self._claims),
+            "since": self._started_at,
+            "stranger_gallery": list(self._stranger_gallery),
             "recent": list(self._recent),
+            "rings": self._rings,
+            # The last decision, including a suppressed one. "Why didn't
+            # it ring?" is the first question anyone asks a doorbell, and
+            # it should not need a log file to answer.
+            "last_chime": self._last_chime,
+            "chime": {
+                "enabled": self.config.chime_enabled,
+                "quiet_hours": self.config.quiet_hours,
+                "rechime_seconds": self.config.rechime_seconds,
+                "tones": dict(self._chime.tones),
+            },
         }
+
+    def on_config_update(self, config: dict[str, Any]) -> None:
+        """Live edits from the catalog's config form. Each knob is rebound
+        as a whole value, so the run loop sees old-or-new, never half.
+        Idempotent: the first delivery re-sends the boot config."""
+        if "recognition_threshold" in config:
+            thr = float(config["recognition_threshold"])
+            if thr != self.config.recognition_threshold:
+                self.pipeline.config = FaceRecognitionPipelineConfig(recognition_threshold=thr)
+                self.config.recognition_threshold = thr
+                logger.info("recognition_threshold updated live: %.2f", thr)
+        if "dedup_window_seconds" in config:
+            self.config.dedup_window_seconds = float(config["dedup_window_seconds"])
+        for key, attr, cast in (
+            ("decision_hold_seconds", "hold_seconds", float),
+            ("unknown_score", "unknown_score", float),
+            ("min_face_px", "min_face_px", int),
+            ("min_face_confidence", "min_face_confidence", float),
+            ("visit_gap_seconds", "gap_seconds", float),
+            ("min_match_reads", "min_match_reads", int),
+        ):
+            if key in config:
+                value = max(cast(0), cast(config[key]))
+                setattr(self.config, key, value)
+                setattr(self._tracker, attr, value)
+        if "attach_snapshot_for_unknowns" in config:
+            self.config.attach_snapshot_for_unknowns = bool(config["attach_snapshot_for_unknowns"])
+        if "snapshot_max_bytes" in config:
+            self.config.snapshot_max_bytes = int(config["snapshot_max_bytes"])
+        if any(k in config for k in
+               ("chime_enabled", "quiet_hours", "rechime_seconds", "chime_tones")):
+            self.config.chime_enabled = bool(
+                config.get("chime_enabled", self.config.chime_enabled))
+            self.config.quiet_hours = str(
+                config.get("quiet_hours", self.config.quiet_hours) or "")
+            self.config.rechime_seconds = int(
+                config.get("rechime_seconds", self.config.rechime_seconds))
+            if "chime_tones" in config:
+                self.config.chime_tones = {
+                    str(k): str(v) for k, v in (config["chime_tones"] or {}).items()}
+            # Rebuilt whole rather than mutated field by field, so the
+            # run loop never sees a policy with a new quiet window and
+            # an old tone table. The last-rang clock is deliberately
+            # NOT carried over: an operator who just changed the bell
+            # is entitled to hear the next caller.
+            self._chime = ChimePolicy(
+                tones=self.config.chime_tones,
+                quiet_hours=self.config.quiet_hours,
+                rechime_seconds=self.config.rechime_seconds,
+                enabled=self.config.chime_enabled,
+            )
+            logger.info("chime policy updated live (enabled=%s quiet=%r)",
+                        self.config.chime_enabled, self.config.quiet_hours)
+
+    def ui_html(self) -> str:
+        """The app dashboard (RFC-0002 Phase 4): ONE static, self-contained
+        HTML document, no scripts — core's catalog renders it sandboxed and
+        refetches on an interval. Same shape as the ANPR dashboard."""
+        snap = self.state_snapshot()
+        now = time.time()
+        esc = _html.escape
+
+        def ago(ts: float | None) -> str:
+            if not ts:
+                return "—"
+            m = max(0, int((now - ts) / 60))
+            return "just now" if m == 0 else f"{m}m ago" if m < 60 else f"{m // 60}h ago"
+
+        colour = {"ok": "#46a758", "waiting": "#8b8d98", "stalled": "#e5a000", "error": "#e5484d"}
+        cam_rows = "".join(
+            f"<tr><td>{esc(r['camera_id'])}</td>"
+            f"<td style='color:{colour.get(r['status'], '#8b8d98')};font-weight:600'>{esc(r['status'])}</td>"
+            f"<td>{'—' if r['last_frame_age_s'] is None else str(r['last_frame_age_s']) + 's'}</td>"
+            f"<td class='dim'>{esc(r['error'] or '')}</td></tr>"
+            for r in snap["camera_health"]
+        ) or "<tr><td colspan='4' class='dim'>No cameras configured.</td></tr>"
+
+        def _tile(item: dict[str, Any]) -> str:
+            # A visit whose picture the history no longer keeps still
+            # happened, and saying so beats a broken image: the caption
+            # is the answer to "who came on Tuesday", the photo was only
+            # ever the nicer half of it.
+            if item.get("image"):
+                face = f"<img src='{item['image']}' alt='stranger'>"
+            elif item.get("photo_kept"):
+                # The crop is in the platform's evidence store; the log
+                # just does not carry a thumbnail this far back. Saying
+                # "aged out" here would tell an operator the face is
+                # gone when they can still enrol from it.
+                face = "<div class='gone'>photo kept — open to enrol</div>"
+            else:
+                face = "<div class='gone'>snapshot aged out</div>"
+            return (f"<figure>{face}<figcaption>{esc(str(item.get('label') or '?'))}"
+                    f" · {ago(item.get('time'))}</figcaption></figure>")
+
+        wall = "".join(_tile(item) for item in reversed(snap["stranger_gallery"]))
+        wall_block = (f"<div class='wall'>{wall}</div>" if wall
+                      else "<p class='dim'>No strangers seen yet.</p>")
+
+        visit_rows = []
+        for item in reversed(snap["recent"][-12:]):
+            known = item.get("level") == "low"
+            who = esc(item.get("name") or "Unknown visitor")
+            cat = esc(item.get("category") or "")
+            sim = item.get("similarity")
+            visit_rows.append(
+                f"<tr><td style='color:{'#46a758' if known else '#e5484d'};font-weight:600'>{who}</td>"
+                f"<td>{cat}</td><td>{esc(str(item.get('camera', '')))}</td>"
+                f"<td>{'' if sim is None else f'{float(sim):.2f}'}</td><td>{ago(item.get('time'))}</td></tr>"
+            )
+        visits_table = (
+            "<table><tr><th>Visitor</th><th>Category</th><th>Camera</th><th>Match</th><th>When</th></tr>"
+            + "".join(visit_rows) + "</table>" if visit_rows
+            else "<p class='dim'>No visitors yet.</p>"
+        )
+        enrolled = snap["enrolled_faces"]
+        enrolled_txt = "?" if enrolled is None else str(enrolled)
+        enrolled_note = (" <span class='warn'>(face adapter unreachable)</span>"
+                         if enrolled is None else "")
+        # Why the last caller did or did not ring, in the operator's own
+        # words rather than in a log they would have to go and find.
+        last_chime = snap.get("last_chime") or {}
+        if not snap["chime"]["enabled"]:
+            chime_note = " <span class='warn'>(chime off)</span>"
+        elif last_chime.get("ring"):
+            chime_note = (f" <span class='dim'>(last: {esc(str(last_chime.get('tone')))}"
+                          f")</span>")
+        elif last_chime.get("reason"):
+            chime_note = (f" <span class='dim'>(silent: "
+                          f"{esc(str(last_chime['reason']))})</span>")
+        else:
+            chime_note = ""
+        return f"""<title>Smart Doorbell</title>
+<style>
+ body {{ font: 14px system-ui, sans-serif; margin: 1.2rem; color: #1a1a1a;
+        background: #fafafa; }}
+ h1 {{ font-size: 1.1rem; margin: 0 0 .2rem }}
+ h2 {{ font-size: .95rem; margin: 1.1rem 0 .4rem; color: #3a3d44 }}
+ .dim {{ color: #6b6f76 }}
+ .warn {{ color: #e5a000 }}
+ .stats {{ display: flex; gap: 1.5rem; margin: .8rem 0; flex-wrap: wrap }}
+ .stats b {{ font-size: 1.3rem; display: block }}
+ table {{ border-collapse: collapse; width: 100% }}
+ th, td {{ text-align: left; padding: .3rem .6rem;
+          border-bottom: 1px solid #e0e0e0; font-size: .9rem }}
+ th {{ color: #6b6f76; font-weight: 500 }}
+ .wall {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: .6rem }}
+ figure {{ margin: 0; border: 1px solid #e0e0e0; border-radius: 6px; overflow: hidden; background: #fff }}
+ figure img {{ width: 100%; height: 96px; object-fit: cover; display: block }}
+ .gone {{ height: 96px; display: flex; align-items: center; justify-content: center;
+          background: #f2f3f5; color: #6b6f76; font-size: .72rem; text-align: center }}
+ figcaption {{ font-size: .78rem; padding: .25rem .4rem; color: #3a3d44 }}
+ .note {{ margin-top: 1rem; font-size: .85rem; color: #6b6f76 }}
+</style>
+<h1>Smart Doorbell</h1>
+<div class="dim">Since {ago(snap["since"])} · threshold {self.config.recognition_threshold:.2f}
+ · re-fire window {int(self.config.dedup_window_seconds)}s</div>
+<div class="stats">
+ <div><b>{enrolled_txt}</b><span class="dim">enrolled faces</span>{enrolled_note}</div>
+ <div><b>{snap["visits"]["known"]}</b><span class="dim">known visitors</span></div>
+ <div><b>{snap["visits"]["unknown"]}</b><span class="dim">strangers</span></div>
+ <div><b>{snap["deduped_visitors_tracked"]}</b><span class="dim">visitors tracked</span></div>
+ <div><b>{snap["rings"]}</b><span class="dim">rings</span>{chime_note}</div>
+</div>
+<h2>Cameras</h2>
+<table><tr><th>Camera</th><th>Status</th><th>Last frame</th><th>Error</th></tr>{cam_rows}</table>
+<h2>Latest strangers</h2>
+{wall_block}
+<h2>Recent visitors</h2>
+{visits_table}
+<div class="note">Enrol, list and remove faces with the Quick actions on this
+page. Threshold and re-fire window are edited in the config form and apply live.</div>
+"""
 
     # ── Operator actions (App Catalog face-enrollment UI) ──────────────
 
-    def _face_admin(self) -> "_FaceAdminClient":
+    def _face_admin(self, *, timeout_seconds: float | None = None) -> "_FaceAdminClient":
         return _FaceAdminClient(
             self.config.adapter_url,
             self.config.adapter_token,
-            self.config.request_timeout_seconds,
+            self.config.request_timeout_seconds if timeout_seconds is None else timeout_seconds,
         )
+
+    # The directory refresh runs on the contract thread (/state) and, when
+    # its minute is up, on the run loop at recognition time. Neither may
+    # wait out the 30 s enrolment budget on a silent adapter: a dead
+    # adapter would then freeze /state for the catalog and stall the
+    # camera loop once a minute.
+    _DIRECTORY_TIMEOUT_S = 3.0
+
+    def _crop_for(self, stranger_id: str) -> bytes | None:
+        """This stranger's full-size face crop, from memory or history.
+
+        A tile the wall restored after a restart has no crop in this
+        process — it was uploaded by the process that saw the face. The
+        platform kept it, so fetch it back rather than refusing: "the
+        doorbell was restarted" is not a reason an operator should have
+        to care about when they click Enrol on a face from Tuesday.
+
+        What is deliberately NOT done is enrolling from the wall
+        thumbnail. That is a ~190px image kept for drawing the tile, and
+        feeding it to the adapter would teach it a worse face than the
+        operator believes they handed over — a silently poor enrolment
+        is worse than an honest "no longer available", which is what a
+        None here still produces.
+        """
+        sid = (stranger_id or "").strip()
+        if not sid:
+            return None
+        crop = self._stranger_crops.get(sid)
+        if crop is not None:
+            return crop
+        try:
+            crop = self._tiles.crop(sid)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("crop for %s unreadable (%s)", sid, exc)
+            return None
+        if crop:
+            # Hold it for the rest of this process: enrolling usually
+            # means looking at the face first, so the operator has
+            # already fetched it once through stranger_image.
+            self._stranger_crops[sid] = crop
+        return crop
 
     def on_action(self, name: str, params: dict[str, Any]) -> dict[str, Any]:
         """enroll_face / list_faces / delete_face — the catalog's
@@ -518,12 +1636,74 @@ class SmartDoorbell(FrameApp):
             rows = faces.get("faces", faces) if isinstance(faces, dict) else faces
             out = []
             for f in rows if isinstance(rows, list) else []:
+                pid = f.get("person_id") or f.get("id")
+                meta = f.get("metadata") if isinstance(f.get("metadata"), dict) else {}
                 out.append({
-                    "person_id": f.get("person_id") or f.get("id"),
+                    "person_id": pid,
                     "name": f.get("name"),
                     "category": f.get("category"),
+                    "notes": meta.get("notes", ""),
+                    "valid_until": meta.get("valid_until", ""),
+                    "expired": _pass_expired(meta.get("valid_until")),
+                    "thumbnail": meta.get("thumbnail"),
+                    "samples": f.get("samples", 1),
+                    "registered_at": f.get("registered_at"),
+                    "last_seen": self._last_seen.get(pid) if pid else None,
                 })
-            return {"results": out}
+            return {"results": out, "categories": list(PERSON_CATEGORIES)}
+
+        if name == "stranger_image":
+            sid = str(params.get("stranger_id") or "").strip()
+            crop = self._crop_for(sid)
+            if crop is None:
+                raise KeyError(sid or "stranger_id")
+            return {"stranger_id": sid, "image": base64.b64encode(crop).decode("ascii"),
+                    "mime": "image/jpeg"}
+
+        if name == "enroll_stranger":
+            sid = str(params.get("stranger_id") or "").strip()
+            crop = self._crop_for(sid)
+            if crop is None:
+                raise KeyError(sid or "stranger_id")
+            # A capture assigned to someone already enrolled is an added
+            # sample; the wall tile then disappears (it is no longer a stranger).
+            add_to = bool(str(params.get("person_id") or "").strip()) and not str(params.get("name") or "").strip()
+            out = self._enroll(image_bytes=crop, params=params, append=add_to or bool(params.get("append")))
+            self._stranger_crops.pop(sid, None)
+            self._stranger_gallery = deque((g for g in self._stranger_gallery if g.get("id") != sid),
+                                           maxlen=self._stranger_gallery.maxlen)
+            # And out of the durable history, or the tile reappears on
+            # the next restart for somebody who is now enrolled.
+            try:
+                self._tiles.forget(sid)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("enrolled stranger %s not removed from "
+                               "history (%s)", sid, exc)
+            return out
+
+        if name == "update_face":
+            person_id = str(params.get("person_id") or "").strip()
+            if not person_id:
+                raise ValueError("'person_id' is required")
+            changes: dict[str, Any] = {}
+            if str(params.get("name") or "").strip():
+                changes["name"] = str(params["name"]).strip()
+            cat = str(params.get("category") or "").strip().lower()
+            if cat:
+                if cat not in PERSON_CATEGORIES:
+                    raise ValueError(f"'category' must be one of {', '.join(PERSON_CATEGORIES)}")
+                changes["category"] = cat
+            meta: dict[str, Any] = {}
+            if "notes" in params and params.get("notes") is not None:
+                meta["notes"] = str(params.get("notes") or "").strip()
+            if "valid_until" in params and params.get("valid_until") is not None:
+                meta["valid_until"] = _parse_date(str(params.get("valid_until") or ""))
+            if meta:
+                changes["metadata"] = meta
+            if not changes:
+                raise ValueError("nothing to change")
+            result = self._face_admin().update(person_id, **changes)
+            return {"updated": person_id, "adapter": result}
 
         if name == "delete_face":
             person_id = str(params.get("person_id") or "").strip()
@@ -533,8 +1713,7 @@ class SmartDoorbell(FrameApp):
             return {"deleted": person_id}
 
         if name == "enroll_face":
-            display = str(params.get("name") or "").strip()
-            if not display:
+            if not params.get("append") and not str(params.get("name") or "").strip():
                 raise ValueError("'name' is required")
             image_b64 = str(params.get("image") or "").strip()
             if not image_b64:
@@ -549,39 +1728,133 @@ class SmartDoorbell(FrameApp):
                 raise ValueError(f"'image' is not valid base64: {exc}") from None
             if not image_bytes:
                 raise ValueError("'image' decoded to empty bytes")
-            category = str(params.get("category") or "known").strip() or "known"
-            # Deterministic id from the name (the CLI does the same); the
-            # adapter upserts, so re-enrolling a name refreshes the face.
-            person_id = _slug(display)
+            return self._enroll(image_bytes=image_bytes, params=params)
+
+        raise KeyError(name)
+
+    def _enroll(self, *, image_bytes: bytes, params: dict[str, Any],
+                append: bool | None = None) -> dict[str, Any]:
+        """Shared by enroll_face (a photo the operator supplied) and
+        enroll_stranger (a crop the door camera took).
+
+        Two shapes. A NEW person needs a name; the id derives from it
+        unless pinned. ADDING to a person (``append``, or a stranger
+        capture with a ``person_id``) needs only the id: the sample joins
+        their set and the adapter matches against the best of them —
+        which is how the porch camera's own angle and light get learnt,
+        one "this is Alice" at a time. Name / category / notes / expiry
+        are then optional and only change what is given."""
+        display = str(params.get("name") or "").strip()
+        pinned = str(params.get("person_id") or "").strip()
+        if append is None:
+            append = bool(params.get("append"))
+        if append and not pinned:
+            raise ValueError("'person_id' is required when adding a photo to an existing person")
+        if not append and not display:
+            raise ValueError("'name' is required")
+        category = str(params.get("category") or "").strip().lower()
+        if not append and not category:
+            category = "family"
+        if category and category not in PERSON_CATEGORIES:
+            raise ValueError(f"'category' must be one of {', '.join(PERSON_CATEGORIES)}")
+        person_id = pinned or _slug(display)
+        metadata: dict[str, Any]
+        if append:
+            # Adding a sample never wipes what was written about the person:
+            # blank notes / expiry mean "unchanged", and the avatar stays.
+            metadata = {}
+            if str(params.get("notes") or "").strip():
+                metadata["notes"] = str(params["notes"]).strip()
+            if str(params.get("valid_until") or "").strip():
+                metadata["valid_until"] = _parse_date(str(params["valid_until"]))
+        else:
+            metadata = {
+                "notes": str(params.get("notes") or "").strip(),
+                "valid_until": _parse_date(str(params.get("valid_until") or "")),
+                "enrolled_at": time.time(),
+            }
+            thumb = _thumbnail_data_uri(image_bytes)
+            if thumb is not None:
+                metadata["thumbnail"] = thumb
+        try:
             result = self._face_admin().register(
                 image_bytes=image_bytes,
                 person_id=person_id,
                 name=display,
                 category=category,
+                metadata=metadata,
+                append=append,
             )
-            return {
-                "enrolled": {"person_id": person_id, "name": display, "category": category},
-                "adapter": result,
-            }
-
-        raise KeyError(name)
+        except httpx.HTTPStatusError as exc:
+            # The adapter refused the photo (no face in it, too large, a bad
+            # id): that is the operator's to fix, so say what it said rather
+            # than a 500. A 5xx from the adapter stays an internal error.
+            if 400 <= exc.response.status_code < 500:
+                raise ValueError(f"the face adapter refused the photo: {_adapter_detail(exc)}") from None
+            raise
+        face = result.get("face") if isinstance(result, dict) else None
+        return {
+            "enrolled": {
+                "person_id": person_id,
+                "name": display or (face or {}).get("name"),
+                "category": category or (face or {}).get("category"),
+                "notes": metadata.get("notes", ((face or {}).get("metadata") or {}).get("notes", "")),
+                "valid_until": metadata.get("valid_until", ((face or {}).get("metadata") or {}).get("valid_until", "")),
+                "samples": (face or {}).get("samples"),
+                "appended": append,
+            },
+            "adapter": result,
+        }
 
     def _build_alert(
         self,
         cam: CameraConfig,
         read: FaceRead,
         snapshot: bytes | None,
+        chime: Any = None,
+        supersedes: str | None = None,
     ) -> Alert:
+        kind = "unknown_visitor"
         if read.recognized:
-            severity = "low" if (read.category or "").lower() == "family" else "info"
+            category = (read.category or "").lower()
             display = read.name or read.person_id or "?"
-            title = f"Known visitor at {cam.camera_id}: {display}"
-            description = (
-                f"Recognised {display!r} (similarity "
-                f"{read.similarity:.2f}) on {cam.camera_id}."
-            )
+            # The adapter's match reply carries no metadata; the directory
+            # refresh that feeds the enrolled count keeps a copy per person.
+            meta = read.raw.get("metadata") if isinstance(read.raw, dict) else None
+            if not isinstance(meta, dict) and read.person_id:
+                self._enrolled_count()
+                meta = self._people_meta.get(read.person_id)
+            valid_until = (meta or {}).get("valid_until") if isinstance(meta, dict) else None
+            if category == "watchlist":
+                kind, severity = "watchlist_visitor", "high"
+                title = f"Watchlist match at {cam.camera_id}: {display}"
+                description = (
+                    f"{display!r} is on the watchlist (similarity "
+                    f"{read.similarity:.2f}) on {cam.camera_id}."
+                )
+            elif _pass_expired(valid_until):
+                kind, severity = "expired_pass", "high"
+                title = f"Expired pass at {cam.camera_id}: {display}"
+                description = (
+                    f"{display!r} ({category}) was recognised on {cam.camera_id} but their "
+                    f"pass expired on {valid_until}."
+                )
+            else:
+                kind = "known_visitor"
+                # The category table is the default; an explicit
+                # known_severity overrides it. Deliberately BELOW the
+                # watchlist and expired-pass branches, so neither can be
+                # quietened by a knob meant for ordinary visitors — the
+                # two recognised faces that must stay loud stay loud.
+                severity = (self.config.known_severity
+                            or _CATEGORY_SEVERITY.get(category, "info"))
+                title = f"Known visitor at {cam.camera_id}: {display}"
+                description = (
+                    f"Recognised {display!r} (similarity "
+                    f"{read.similarity:.2f}) on {cam.camera_id}."
+                )
         else:
-            severity = "high"
+            severity = self.config.unknown_severity
             title = f"Unknown visitor at {cam.camera_id}"
             description = (
                 f"Unrecognised face on {cam.camera_id}. "
@@ -589,6 +1862,7 @@ class SmartDoorbell(FrameApp):
             )
 
         evidence: dict[str, Any] = {
+            "kind": kind,
             "recognized": read.recognized,
             "person_id": read.person_id,
             "name": read.name,
@@ -601,14 +1875,32 @@ class SmartDoorbell(FrameApp):
             evidence["snapshot_b64"] = base64.b64encode(snapshot).decode("ascii")
             evidence["snapshot_mime"] = "image/jpeg"
 
+        # What to ring, or why nothing did. In the envelope rather than
+        # acted on here: an app that owned the speaker would work on
+        # exactly one deployment, and a suppressed ring with no stated
+        # reason is indistinguishable from a broken doorbell.
+        tags: list[str] = []
+        if chime is not None:
+            evidence["chime"] = chime.as_dict()
+            tags.append(f"chime:{chime.tone}" if chime.ring else "chime:silent")
+        if supersedes:
+            # The same visit, announced as a stranger first. A relay that
+            # can replace a notification replaces it by this id; one that
+            # cannot at least says which alert this corrects.
+            evidence["supersedes"] = supersedes
+            tags.append(f"supersedes:{supersedes}")
+            description += " Supersedes the unknown-visitor alert for this visit."
+
         return Alert(
             severity=severity,
+            alert_type=kind,
             title=title,
             description=description,
             camera_id=cam.camera_id,
             source=AlertSource(),
             correlation_id=read.correlation_id,
             evidence=evidence,
+            tags=tags,
         )
 
 
@@ -633,6 +1925,7 @@ class _FaceAdminClient:
         name: str,
         category: str,
         metadata: dict[str, Any] | None = None,
+        append: bool = False,
     ) -> dict[str, Any]:
         files = {"frame": ("face.jpg", image_bytes, "image/jpeg")}
         data = {
@@ -641,6 +1934,8 @@ class _FaceAdminClient:
             "category": category,
             "metadata": json.dumps(metadata or {}),
         }
+        if append:
+            data["append"] = "true"
         resp = httpx.post(
             f"{self._base}/faces/register",
             files=files, data=data,
@@ -667,6 +1962,33 @@ class _FaceAdminClient:
             headers=self._headers,
             timeout=self._timeout,
         )
+        resp.raise_for_status()
+        return resp.json()
+
+    def update(self, person_id: str, **changes: Any) -> dict[str, Any]:
+        """PATCH /faces/{id} — name / category / metadata without a new
+        photo. Adapters older than the route answer 404 or 405; say so
+        rather than letting the operator think the edit failed for a
+        reason of their own."""
+        resp = httpx.patch(
+            f"{self._base}/faces/{person_id}",
+            json=changes,
+            headers=self._headers,
+            timeout=self._timeout,
+        )
+        if resp.status_code in (404, 405):
+            detail = ""
+            try:
+                detail = str(resp.json().get("detail", ""))
+            except Exception:
+                pass
+            if resp.status_code == 405 or "Not Found" in detail or not detail:
+                raise ValueError(
+                    "the InsightFace adapter does not support editing yet — "
+                    "update the adapter image (ghcr.io/open-nvr/insightface-adapter) "
+                    "or re-enrol with a photo"
+                )
+            raise KeyError(person_id)
         resp.raise_for_status()
         return resp.json()
 
@@ -788,9 +2110,13 @@ def _cmd_daemon(config: AppConfig, args: argparse.Namespace) -> int:
             dispatcher.close()
         return 0
 
-    if not config.cameras:
+    if not config.cameras and not config.opennvr_url:
+        # Connected to OpenNVR the cameras are PICKED in the App Catalog,
+        # so an empty YAML list is normal. Standalone there is nowhere
+        # else to get them from.
         raise SystemExit(
-            "config: at least one camera is required for the daemon"
+            "config: at least one camera is required for the daemon "
+            "(or set opennvr_url and select cameras in the App Catalog)"
         )
 
     # The SDK FrameApp loop is async; drive it the same way the SDK

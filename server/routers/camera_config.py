@@ -117,6 +117,9 @@ async def get_config(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    # View permission on the camera, like every other camera surface: the
+    # config carries the camera's source URL, credentials included.
+    CameraConfigService._ensure_camera_access(db, camera_id, current_user, manage_required=False)
     cfg = CameraConfigService.get_config(db, camera_id)
     if not cfg:
         raise HTTPException(status_code=404, detail="Config not found")

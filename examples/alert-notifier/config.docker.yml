@@ -5,18 +5,45 @@
 # ${INTERNAL_API_KEY} is substituted by the config-init container at
 # compose-up time (same pattern as the other shipped apps).
 #
-# Channels are OPERATOR CONFIG: set the Telegram bot token / chat id
-# (or a webhook) from the App Catalog's Configure form — applied live.
+# Channels and rules are OPERATOR CONFIG: set them from the App
+# Catalog's Configure form or the Notifications page — applied live,
+# no restart. This file only has to boot the app.
+#
+# One thing needs doing outside this file: apps run on an internal
+# network whose only way out is a proxy that asks core whether THIS app
+# may reach THIS host. ntfy.sh, api.telegram.org, api.pushover.net,
+# discord.com, hooks.slack.com and prod-*.logic.azure.com are declared
+# in the catalog listing; a self-hosted ntfy, Gotify, Matrix, SMTP
+# server or webhook is a host only you know, so add it to this app's
+# allowed hosts in the App Catalog. CHANNELS.md → "Getting out".
 
 nats_url: "nats://nats:4222"
 nats_token: "${INTERNAL_API_KEY}"
 
+# Nothing is delivered until a channel is configured — a fresh install
+# cannot start pushing to somewhere the operator did not choose.
+channels: {}
+rules: []
+
 min_severity: high
-telegram_bot_token: ""
-telegram_chat_id: ""
-notify_webhook_url: ""
-repeat_cooldown_seconds: 300.0
-max_per_minute: 20
+group_wait_seconds: 20.0
+inhibit_seconds: 60.0
+respect_site_mode: true
+timezone: "UTC"
+probe_hours: 12.0
+dry_run: false
+
+quiet_hours:
+  enabled: false
+  windows: []
+  mode: hold
+  breakthrough: critical
+
+# Set this to how a PHONE reaches OpenNVR (https://nvr.example.com) to
+# make notifications tappable. Empty by default: on most installs
+# OpenNVR is not reachable from the internet, and a dead link in a 3am
+# notification is worse than no link.
+base_url: ""
 
 contract_port: 9211
 contract_bind_host: "0.0.0.0"

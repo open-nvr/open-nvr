@@ -21,6 +21,7 @@ class _Tr:
     stationary: bool = False
     confirmed: bool = True
     best_crop: object = field(default=None)
+    best_scene_jpeg: object = field(default=None)
 
 
 # ── lifecycle ───────────────────────────────────────────────────────
@@ -260,3 +261,284 @@ def test_drain_thread_survives_a_failure_inside_its_own_handler():
 
     assert seen["handler_calls"] >= 3, "drain stopped after the first failure"
     assert p.is_alive(), "drain thread died and took all persistence with it"
+
+
+# ── scene evidence ──────────────────────────────────────────────────
+
+
+def test_scene_rides_the_visit_without_being_re_encoded(monkeypatch):
+    """The tracker already encoded it (eagerly, to avoid holding 6 MB of
+    pixels per track), so _finish must carry the bytes through untouched —
+    unlike crop and the candidates, which arrive as pixels."""
+    import detect_pipeline.bestframe as bf
+    calls = {"n": 0}
+
+    def enc(crop, quality=85):
+        calls["n"] += 1
+        return b"CROPJPEG"
+
+    monkeypatch.setattr(bf, "_encode_jpeg", enc)
+    lc = VisitLifecycle("3")
+    tr = _Tr(1, best_crop=object(), best_scene_jpeg=b"SCENEJPEG")
+    lc.observe([tr], T0)
+    lc.observe([tr], T0 + 2)                       # a visit needs duration
+    done = lc.observe([], T0 + 3)
+    assert done[0].scene_jpeg == b"SCENEJPEG"
+    assert calls["n"] == 1, "the scene was re-encoded"
+
+
+def test_a_tracker_without_the_field_still_finishes_visits():
+    """getattr with a default, like best_crop: older trackers and every test
+    double that predates the field must not break the lifecycle."""
+    @dataclass
+    class _Old:
+        id: int
+        label: str = "person"
+        score: float = 0.8
+        stationary: bool = False
+        confirmed: bool = True
+
+    lc = VisitLifecycle("3")
+    lc.observe([_Old(1)], T0)
+    lc.observe([_Old(1)], T0 + 2)
+    done = lc.observe([], T0 + 3)
+    assert len(done) == 1 and done[0].scene_jpeg is None
+
+
+def test_post_carries_the_scene():
+    posted = {}
+
+    def opener(req, timeout=None):
+        posted["body"] = json.loads(req.data.decode())
+        return _Resp()
+
+    p = VisitPoster("http://core", api_key="k", opener=opener)
+    p._post(replace(_visit(b"crop"), scene_jpeg=b"scene"))
+    import base64
+    assert base64.b64decode(posted["body"]["scene_jpeg_b64"]) == b"scene"
+
+
+def test_post_omits_the_scene_when_absent():
+    """Omitted, not null: a core that predates the field never sees a key it
+    has no opinion about."""
+    posted = {}
+
+    def opener(req, timeout=None):
+        posted["body"] = json.loads(req.data.decode())
+        return _Resp()
+
+    p = VisitPoster("http://core", api_key="k", opener=opener)
+    p._post(_visit(b"crop"))
+    assert "scene_jpeg_b64" not in posted["body"]
+
+
+def test_visit_still_takes_its_original_positional_arguments():
+    """scene_jpeg was appended LAST for this reason — the dataclass is frozen
+    and constructed positionally in this file and in the bench."""
+    v = _visit(b"crop")
+    assert v.camera_id == "3" and v.jpeg == b"crop"
+    assert v.scene_jpeg is None and v.candidate_jpegs == ()
+
+
+# ── candidate capture times (#451) ─────────────────────────────────
+
+
+def test_post_carries_the_candidates_capture_times():
+    """Core dates the winning read by these — without them a plate row
+    falls back to the visit's START, which on a merged track is when a
+    DIFFERENT car arrived."""
+    posted = {}
+
+    def opener(req, timeout=None):
+        posted["body"] = json.loads(req.data.decode())
+        return _Resp()
+
+    p = VisitPoster("http://core", api_key="k", opener=opener)
+    p._post(replace(_visit(b"crop"),
+                    candidate_jpegs=(b"a", b"b"),
+                    candidate_ts=(11.5, 12.5)))
+    assert posted["body"]["candidate_ts"] == [11.5, 12.5]
+    assert len(posted["body"]["candidate_jpegs_b64"]) == 2
+
+
+def test_post_drops_stamps_that_do_not_line_up_with_the_crops():
+    """A short list is worse than none: core zips the two, so every read
+    past the gap would inherit a different look's timestamp."""
+    posted = {}
+
+    def opener(req, timeout=None):
+        posted["body"] = json.loads(req.data.decode())
+        return _Resp()
+
+    p = VisitPoster("http://core", api_key="k", opener=opener)
+    p._post(replace(_visit(b"crop"),
+                    candidate_jpegs=(b"a", b"b"),
+                    candidate_ts=(11.5,)))
+    assert "candidate_ts" not in posted["body"]
+    assert len(posted["body"]["candidate_jpegs_b64"]) == 2
+
+
+def test_finished_visit_dates_each_candidate_it_ships():
+    """The stamps come off the ring, so they describe the LOOK, not the
+    moment the visit closed."""
+    import numpy as np
+
+    from detect_pipeline.platecands import CandidateRing
+
+    ring = CandidateRing(min_gap_s=0.0)
+    ring.offer(T0 + 1, 10.0, np.zeros((8, 8, 3), np.uint8))
+    ring.offer(T0 + 2, 90.0, np.zeros((8, 8, 3), np.uint8))
+
+    class _Car:
+        id = 1
+        label = "car"
+        score = 0.9
+        confirmed = True
+        best_crop = None
+        plate_ring = ring
+
+    lc = VisitLifecycle("3")
+    lc.observe([_Car()], T0)
+    lc.observe([_Car()], T0 + 3)
+    done = lc.observe([], T0 + 4)
+    assert len(done) == 1
+    v = done[0]
+    # One stamp per shipped crop, and none of them is the visit's end.
+    assert len(v.candidate_ts) == len(v.candidate_jpegs) == 2
+    assert all(isinstance(t, float) for t in v.candidate_ts)
+
+
+# ── zone path (HA-109) ──────────────────────────────────────────────
+
+@dataclass
+class _BoxTr(_Tr):
+    box: tuple = (0, 0, 10, 10)
+
+
+def test_foot_point_is_the_normalised_bottom_centre():
+    from detect_pipeline.events_poster import foot_point
+
+    assert foot_point((100, 50, 300, 250), 400, 500) == (0.5, 0.5)
+    assert foot_point((380, 0, 500, 600), 400, 500) == (1.0, 1.0)   # clamped
+    assert foot_point((0, 0, 1, 1), 0, 500) is None
+    assert foot_point(None, 400, 500) is None
+
+
+def test_a_visit_carries_its_path_thinned_over_the_whole_visit():
+    from detect_pipeline.events_poster import PATH_MAX_POINTS
+
+    lc = VisitLifecycle("3")
+    n = 200
+    for i in range(n):
+        x = i * 4  # walks left to right across a 1000 px frame
+        lc.observe([_BoxTr(1, box=(x, 100, x + 20, 200))], T0 + i * 0.2, (1000, 500))
+    (v,) = lc.observe([], T0 + n)
+    assert 2 <= len(v.path) <= PATH_MAX_POINTS
+    xs = [p[0] for p in v.path]
+    assert xs == sorted(xs)
+    assert xs[0] < 0.05 and xs[-1] > 0.6      # spans the visit, not just its start
+    assert all(p[1] == 0.4 for p in v.path)
+
+
+def test_no_frame_size_means_no_path():
+    lc = VisitLifecycle("3")
+    lc.observe([_BoxTr(1)], T0)
+    lc.observe([_BoxTr(1)], T0 + 5)
+    (v,) = lc.observe([], T0 + 6)
+    assert v.path == ()
+
+
+def test_post_carries_the_path_only_when_there_is_one():
+    assert "path" not in _post_body(_visit())
+    body = _post_body(replace(_visit(), path=((0.1, 0.9), (0.2, 0.8))))
+    assert body["path"] == [[0.1, 0.9], [0.2, 0.8]]
+
+
+# ── evidence facts (escalation proposal) ────────────────────────────
+
+def test_finished_visit_carries_where_its_crop_came_from_and_how_big_the_look_was():
+    from types import SimpleNamespace
+    import numpy as np
+
+    @dataclass
+    class _EvTr(_Tr):
+        best: object = None
+        best_crop_source: str | None = None
+        best_crop_skew_s: float | None = None
+        box: tuple = (100, 50, 160, 230)
+
+    tr = _EvTr(1, best_crop=np.zeros((8, 8, 3), np.uint8), best_crop_source="playback",
+               best_crop_skew_s=0.05, best=SimpleNamespace(box=(100, 50, 160, 230)))
+    lc = VisitLifecycle("3")
+    lc.observe([tr], T0, (640, 360))
+    lc.observe([tr], T0 + 3, (640, 360))
+    (v,) = lc.observe([], T0 + 4, (640, 360))
+    assert v.evidence_source == "playback" and v.evidence_box_px == 60
+    assert v.evidence_frame_px == 360 and v.evidence_skew_s == 0.05
+    # a visit without a crop carries no provenance, only the frame size
+    lc.observe([_Tr(2)], T0, (640, 360))
+    lc.observe([_Tr(2)], T0 + 3, (640, 360))
+    (v2,) = lc.observe([], T0 + 4, (640, 360))
+    assert v2.evidence_source is None and v2.evidence_box_px is None and v2.evidence_frame_px == 360
+
+
+def test_post_carries_the_evidence_facts_only_when_present():
+    body = _post_body(_visit())
+    assert not {"evidence_source", "evidence_box_px", "evidence_frame_px", "evidence_skew_s"} & body.keys()
+    body = _post_body(replace(_visit(), evidence_source="detect", evidence_box_px=42,
+                              evidence_frame_px=576, evidence_skew_s=0.1))
+    assert (body["evidence_source"], body["evidence_box_px"], body["evidence_frame_px"],
+            body["evidence_skew_s"]) == ("detect", 42, 576, 0.1)
+
+
+def test_a_visit_that_was_a_group_box_for_most_of_its_frames_is_dropped():
+    @dataclass
+    class _G(_Tr):
+        group_now: bool = False
+    lc = VisitLifecycle("3")
+    lc.observe([_G(1, group_now=True)], T0)
+    lc.observe([_G(1, group_now=True)], T0 + 2)
+    lc.observe([_G(1, group_now=False)], T0 + 4)
+    assert lc.observe([], T0 + 5) == [], "two of three frames a group: dropped"
+    lc.observe([_G(2, group_now=True)], T0)
+    lc.observe([_G(2)], T0 + 2)
+    lc.observe([_G(2)], T0 + 4)
+    (v,) = lc.observe([], T0 + 5)
+    assert v.track_id == "2", "one of three frames a group: a visit"
+
+
+def test_a_visit_ends_when_the_object_was_last_seen_not_when_its_track_expired():
+    @dataclass
+    class _M(_Tr):
+        matched_now: bool = True
+    lc = VisitLifecycle("3")
+    lc.observe([_M(1)], T0)
+    lc.observe([_M(1)], T0 + 3)
+    for k in range(1, 6):                                    # coasting for five seconds
+        lc.observe([_M(1, matched_now=False)], T0 + 3 + k)
+    (v,) = lc.observe([], T0 + 9)
+    assert v.ended_at.timestamp() == T0 + 3
+    # a fragment seen for 0.6 s then coasting: too short, never a visit
+    lc.observe([_M(2)], T0)
+    lc.observe([_M(2)], T0 + 0.6)
+    for k in range(1, 6):
+        lc.observe([_M(2, matched_now=False)], T0 + 0.6 + k)
+    assert lc.observe([], T0 + 7) == []
+
+
+def test_a_visit_records_the_most_people_in_frame_with_it():
+    """Three confirmed people seen together on one frame: each visit says 3,
+    whatever company it had later. A tentative track, or a coasting one,
+    is not company — it was not SEEN that frame."""
+    lc = VisitLifecycle("23", min_duration_s=0.0)
+    a, b, c = _Tr(1), _Tr(2), _Tr(3)
+    lc.observe([a], T0)
+    lc.observe([a, b, c], T0 + 1)                          # three at once
+    lc.observe([a, b, c, _Tr(4, confirmed=False), _Tr(5, label="car")], T0 + 2)   # a fragment and a car: not people
+    done = {v.track_id: v for v in lc.observe([], T0 + 3)}
+    assert done["1"].people_in_frame == 3 and done["2"].people_in_frame == 3 and done["3"].people_in_frame == 3
+    assert "4" not in done and done["5"].people_in_frame == 1
+    lc2 = VisitLifecycle("23", min_duration_s=0.0)
+    lc2.observe([_Tr(7)], T0)
+    alone = lc2.observe([], T0 + 2)[0]
+    assert alone.people_in_frame == 1

@@ -13,6 +13,8 @@ license = { text = "AGPL-3.0" }
 dependencies = [
     "opennvr-app-sdk",
     "paho-mqtt>=2.0,<3.0",
+    # paho's proxy_set() — MQTT through the stack's egress proxy.
+    "pysocks>=1.7,<2.0",
 ]
 
 [tool.uv.sources]

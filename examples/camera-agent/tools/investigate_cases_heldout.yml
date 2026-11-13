@@ -1,0 +1,426 @@
+# Held-out Investigate cases (RFC #620), written AFTER the rule tables in
+# investigate_rules.yml were frozen: the rules never saw these cases. The
+# order is in git (authored 22 Oct 2026, 10:23 UTC for the rules, 10:25 for
+# this file): git log --follow --format='%ad %s' on both files. Same format and the same four templates as
+# investigate_cases.yml, with new scenes, sites and wording. Scored the
+# same way; see that file for the keys.
+#
+# Fixtures answer like the real tools: describe_event answers only the
+# event ids the case's other results printed, "no stored photo" otherwise.
+
+# ── night intrusion triage ──────────────────────────────────────────────
+
+- id: ho-night-unregistered-vest
+  template: night_intrusion_triage
+  note: "A vest says guard, the face says nobody we know. Not settled either way."
+  goal: &night_goal >-
+    A person was detected on site after hours. Decide whether to ignore it,
+    keep watching, or alert the night supervisor.
+  instructions: &night_instr >-
+    Guards on patrol are not intruders. Look at the camera before deciding.
+    Alert only when someone who should not be there is on site.
+  site_facts: &depot_facts >-
+    The depot closes at 19:00. One night guard, Chidi, patrols from 21:00 to
+    05:00 in a high-visibility vest. Nobody else is on site at night.
+  cameras: [car_park, warehouse, gatehouse]
+  event: {type: person_detected, camera: warehouse, at: "2026-10-20T01:32:00+01:00"}
+  options: [ignore, watch, alert]
+  fields: {who: [staff, visitor, intruder, animal, unknown]}
+  tools: [describe_camera, recognize_faces]
+  fixtures:
+    describe_camera: "warehouse: One person in a high-visibility vest walking between the racks, carrying a toolbox."
+    recognize_faces: "warehouse: a face is visible but not registered"
+  expect:
+    decision: [watch, alert]
+    fields: {who: [unknown, intruder]}
+    needs: [describe_camera, recognize_faces]
+
+- id: ho-night-cat-on-wall
+  template: night_intrusion_triage
+  goal: *night_goal
+  instructions: *night_instr
+  site_facts: *depot_facts
+  cameras: [car_park, warehouse, gatehouse]
+  event: {type: person_detected, camera: car_park, at: "2026-10-20T03:48:00+01:00", score: 0.37}
+  options: [ignore, watch, alert]
+  fields: {who: [staff, visitor, intruder, animal, unknown]}
+  tools: [describe_camera, camera_snapshot]
+  fixtures:
+    describe_camera: "car_park: A cat walking along the top of the boundary wall. The car park is empty."
+    camera_snapshot: "car_park: nothing detected right now"
+  expect:
+    decision: ignore
+    fields: {who: animal}
+    needs: [describe_camera]
+
+- id: ho-night-bolt-cutters
+  template: night_intrusion_triage
+  goal: *night_goal
+  instructions: *night_instr
+  site_facts: *depot_facts
+  cameras: [car_park, warehouse, gatehouse]
+  event: {type: person_detected, camera: car_park, at: "2026-10-20T02:05:00+01:00", zone: perimeter}
+  options: [ignore, watch, alert]
+  fields: {who: [staff, visitor, intruder, animal, unknown]}
+  tools: [describe_camera, recognize_faces, recent_events]
+  fixtures:
+    describe_camera: "car_park: Two people in dark clothing cutting through the chain-link fence with bolt cutters."
+    recognize_faces: "car_park: no face detected"
+    recent_events: "Recent events:\n30s ago — car_park: person (0.93)\n31s ago — car_park: person (0.89)"
+  expect:
+    decision: alert
+    fields: {who: intruder}
+    needs: [describe_camera]
+
+- id: ho-night-guard-in-the-dark
+  template: night_intrusion_triage
+  note: "No vest visible in the dark, but the face match is the guard."
+  goal: *night_goal
+  instructions: *night_instr
+  site_facts: *depot_facts
+  cameras: [car_park, warehouse, gatehouse]
+  event: {type: person_detected, camera: gatehouse, at: "2026-10-20T23:15:00+01:00"}
+  options: [ignore, watch, alert]
+  fields: {who: [staff, visitor, intruder, animal, unknown]}
+  tools: [describe_camera, recognize_faces]
+  fixtures:
+    describe_camera: "gatehouse: A person shining a torch at the gate padlock; their clothing is hard to make out in the dark."
+    recognize_faces: "gatehouse: recognised Chidi (staff, 91% match)"
+  expect:
+    decision: ignore
+    fields: {who: staff}
+    needs: [recognize_faces]
+
+- id: ho-night-dog-walker-outside
+  template: night_intrusion_triage
+  note: "On the public pavement outside the fence, not on site."
+  goal: *night_goal
+  instructions: *night_instr
+  site_facts: *depot_facts
+  cameras: [car_park, warehouse, gatehouse]
+  event: {type: person_detected, camera: gatehouse, at: "2026-10-20T22:40:00+01:00"}
+  options: [ignore, watch, alert]
+  fields: {who: [staff, visitor, intruder, animal, unknown]}
+  tools: [describe_camera, camera_snapshot]
+  fixtures:
+    describe_camera: "gatehouse: A person walking a dog along the public pavement outside the closed gate; they do not stop."
+    camera_snapshot: "gatehouse: 1 person, 1 dog (from live detection 4s ago)"
+  expect:
+    decision: [ignore, watch]
+    fields: {who: [visitor, unknown]}
+    needs: [describe_camera]
+
+- id: ho-night-too-dark
+  template: night_intrusion_triage
+  note: "The camera cannot settle it; neither can the face tool."
+  goal: *night_goal
+  instructions: *night_instr
+  site_facts: *depot_facts
+  cameras: [car_park, warehouse, gatehouse]
+  event: {type: person_detected, camera: car_park, at: "2026-10-20T04:10:00+01:00", score: 0.52}
+  options: [ignore, watch, alert]
+  fields: {who: [staff, visitor, intruder, animal, unknown]}
+  tools: [describe_camera, recognize_faces]
+  fixtures:
+    describe_camera: "car_park: The image is too dark to make anything out; a faint shape near the far corner."
+    recognize_faces: "car_park: no face detected"
+  expect:
+    decision: [unsure, watch]
+    fields: {who: unknown}
+    needs: [describe_camera]
+
+# ── camera offline triage ───────────────────────────────────────────────
+
+- id: ho-offline-firmware-reboot
+  template: camera_offline_triage
+  goal: &offline_goal >-
+    A camera stopped sending video. Decide whether to wait, ask maintenance
+    to look at it, or alert the supervisor, and say what most likely caused it.
+  instructions: &offline_instr >-
+    A short drop that has recovered needs nothing. A camera that is still
+    down needs maintenance. Signs of tampering are an alert.
+  site_facts: &depot_offline_facts >-
+    Cameras are powered from the gatehouse switch. Updates install
+    themselves overnight. Maintenance works weekdays.
+  cameras: [car_park, warehouse, gatehouse]
+  event: {type: camera_offline, camera: warehouse, at: "2026-10-20T03:00:30+01:00", down_for_seconds: 95}
+  options: [wait, notify_maintenance, alert]
+  fields: {cause: [network, power, tamper, obstruction, unknown]}
+  tools: [describe_camera, recent_events]
+  fixtures:
+    describe_camera: "warehouse: The warehouse aisles under night lighting; nobody about."
+    recent_events: "Recent events:\n20s ago — warehouse: stream reconnected\n95s ago — warehouse: firmware update applied, camera rebooting\n96s ago — warehouse: stream lost"
+  expect:
+    decision: wait
+    fields: {cause: [power, network, unknown]}
+    needs: [[describe_camera, recent_events]]
+
+- id: ho-offline-cable-cut
+  template: camera_offline_triage
+  goal: *offline_goal
+  instructions: *offline_instr
+  site_facts: *depot_offline_facts
+  cameras: [car_park, warehouse, gatehouse]
+  event: {type: camera_offline, camera: car_park, at: "2026-10-21T01:20:00+01:00", down_for_seconds: 600}
+  options: [wait, notify_maintenance, alert]
+  fields: {cause: [network, power, tamper, obstruction, unknown]}
+  tools: [describe_camera, search_history, describe_event]
+  fixtures:
+    describe_camera: "car_park appears to be offline"
+    search_history: "I remember 1 person visit(s) between 01:00 and 01:20: [#4410] 01:08–01:10 on camera car_park (photo kept)."
+    describe_event:
+      - when: {event_id: 4410}
+        result: "Event 4410: A person in a hood at the foot of the camera pole, cutting a cable with pliers."
+      - result: "I don't have a stored photo for that event."
+  expect:
+    decision: alert
+    fields: {cause: tamper}
+    needs: [describe_event]
+
+- id: ho-offline-site-power-cut
+  template: camera_offline_triage
+  goal: *offline_goal
+  instructions: *offline_instr
+  site_facts: *depot_offline_facts
+  cameras: [car_park, warehouse, gatehouse]
+  event: {type: camera_offline, camera: gatehouse, at: "2026-10-21T14:30:00+01:00", down_for_seconds: 1800}
+  options: [wait, notify_maintenance, alert]
+  fields: {cause: [network, power, tamper, obstruction, unknown]}
+  tools: [describe_camera, recent_events]
+  fixtures:
+    describe_camera: "gatehouse appears to be offline"
+    recent_events: "Recent events:\n1800s ago — gatehouse: stream lost\n1800s ago — warehouse: stream lost\n1800s ago — car_park: stream lost\n1802s ago — gatehouse switch: mains power lost, running on UPS battery"
+  expect:
+    decision: notify_maintenance
+    fields: {cause: power}
+    needs: [recent_events]
+
+- id: ho-offline-fogged-dome
+  template: camera_offline_triage
+  goal: *offline_goal
+  instructions: *offline_instr
+  site_facts: *depot_offline_facts
+  cameras: [car_park, warehouse, gatehouse]
+  event: {type: camera_view_lost, camera: car_park, at: "2026-10-21T06:15:00+01:00"}
+  options: [wait, notify_maintenance, alert]
+  fields: {cause: [network, power, tamper, obstruction, unknown]}
+  tools: [describe_camera, search_history]
+  fixtures:
+    describe_camera: "car_park: The image is milky white; condensation has formed on the inside of the dome."
+    search_history: "No person visits remembered between 05:00 and 06:15."
+  expect:
+    decision: notify_maintenance
+    fields: {cause: obstruction}
+    needs: [describe_camera]
+
+- id: ho-offline-turned-to-the-sky
+  template: camera_offline_triage
+  goal: *offline_goal
+  instructions: *offline_instr
+  site_facts: *depot_offline_facts
+  cameras: [car_park, warehouse, gatehouse]
+  event: {type: camera_view_lost, camera: gatehouse, at: "2026-10-21T02:30:00+01:00"}
+  options: [wait, notify_maintenance, alert]
+  fields: {cause: [network, power, tamper, obstruction, unknown]}
+  tools: [describe_camera, search_history, describe_event]
+  fixtures:
+    describe_camera: "gatehouse: The camera now shows only the night sky and the top of a lamp post."
+    search_history: "I remember 1 person visit(s) between 02:00 and 02:30: [#4502] 02:14–02:17 on camera gatehouse (photo kept)."
+    describe_event:
+      - when: {event_id: 4502}
+        result: "Event 4502: A person on a ladder twisting the camera housing upwards."
+      - result: "I don't have a stored photo for that event."
+  expect:
+    decision: alert
+    fields: {cause: tamper}
+    needs: [describe_camera]
+
+# ── morning site report ─────────────────────────────────────────────────
+
+- id: ho-morning-guard-and-a-fox
+  template: morning_site_report
+  goal: &morning_goal >-
+    Write the morning check on last night (19:00 to 06:00). Decide whether the
+    night was all clear or something needs a person to review it.
+  instructions: &morning_instr >-
+    Guards' patrols are normal. Anyone else on site at night, or anything
+    left open, needs review.
+  site_facts: *depot_facts
+  cameras: [car_park, warehouse, gatehouse]
+  event: {type: schedule, at: "2026-10-21T06:30:00+01:00"}
+  options: [all_clear, review]
+  tools: [search_history, describe_event, describe_camera]
+  fixtures:
+    search_history:
+      - when: {label: [car, vehicle, truck]}
+        result: "No car visits remembered between 19:00 and 06:00."
+      - result: "I remember 3 visit(s) between 19:00 and 06:00: [#5001] 21:30–21:36 person on camera warehouse (photo kept); [#5002] 01:10–01:11 dog on camera car_park (photo kept); [#5003] 03:40–03:46 person on camera gatehouse (photo kept). Faces matched: Chidi (staff) at 21:30, Chidi (staff) at 03:40."
+    describe_event:
+      - when: {event_id: 5002}
+        result: "Event 5002: A fox trotting across the empty car park."
+      - when: {event_id: [5001, 5003]}
+        result: "A guard in a high-visibility vest checking doors with a torch."
+      - result: "I don't have a stored photo for that event."
+    describe_camera: "gatehouse: The gate is closed and padlocked at dawn."
+  expect:
+    decision: all_clear
+    needs: [search_history]
+
+- id: ho-morning-stranger-at-3am
+  template: morning_site_report
+  goal: *morning_goal
+  instructions: *morning_instr
+  site_facts: *depot_facts
+  cameras: [car_park, warehouse, gatehouse]
+  event: {type: schedule, at: "2026-10-22T06:30:00+01:00"}
+  options: [all_clear, review]
+  tools: [search_history, describe_event, recognize_faces]
+  fixtures:
+    search_history:
+      - when: {label: [car, vehicle, truck]}
+        result: "No car visits remembered between 19:00 and 06:00."
+      - result: "I remember 2 visit(s) between 19:00 and 06:00, all people: [#5101] 22:05–22:10 on camera warehouse (photo kept); [#5102] 03:12–03:15 on camera gatehouse (photo kept). Faces matched: Chidi (staff) at 22:05; 03:12 not recognised."
+    describe_event:
+      - when: {event_id: 5102}
+        result: "Event 5102: A person in dark clothes trying the gatehouse door handle, then walking away."
+      - when: {event_id: 5101}
+        result: "A guard in a high-visibility vest on patrol."
+      - result: "I don't have a stored photo for that event."
+    recognize_faces: "gatehouse: no face detected"
+  expect:
+    decision: review
+    needs: [search_history]
+
+- id: ho-morning-shutter-half-open
+  template: morning_site_report
+  goal: *morning_goal
+  instructions: *morning_instr
+  site_facts: *depot_facts
+  cameras: [car_park, warehouse, gatehouse]
+  event: {type: schedule, at: "2026-10-23T06:30:00+01:00"}
+  options: [all_clear, review]
+  tools: [search_history, describe_camera]
+  fixtures:
+    search_history: "I remember 2 visit(s) between 19:00 and 06:00, all people: [#5201] 21:40–21:45 on camera warehouse (photo kept); [#5202] 02:30–02:34 on camera warehouse (photo kept). Faces matched: Chidi (staff) at 21:40, Chidi (staff) at 02:30."
+    describe_camera:
+      - when: {camera_id: warehouse}
+        result: "warehouse: The loading shutter is half open; nobody is near it."
+      - result: "The yard and car park are empty at dawn; the gate is closed."
+  expect:
+    decision: review
+    needs: [describe_camera]
+
+- id: ho-morning-staff-not-on-the-rota
+  template: morning_site_report
+  note: "Recognised, but not a guard: 'anyone else on site at night' includes staff off the rota."
+  goal: *morning_goal
+  instructions: *morning_instr
+  site_facts: *depot_facts
+  cameras: [car_park, warehouse, gatehouse]
+  event: {type: schedule, at: "2026-10-24T06:30:00+01:00"}
+  options: [all_clear, review]
+  tools: [search_history, describe_event]
+  fixtures:
+    search_history: "I remember 2 visit(s) between 19:00 and 06:00, all people: [#5301] 21:35–21:40 on camera warehouse (photo kept); [#5302] 23:50–00:20 on camera warehouse (photo kept). Faces matched: Chidi (staff) at 21:35, Priya (staff, office manager) at 23:50."
+    describe_event:
+      - when: {event_id: 5302}
+        result: "Event 5302: A person without a vest using a laptop at a desk in the warehouse office."
+      - when: {event_id: 5301}
+        result: "A guard in a high-visibility vest on patrol."
+      - result: "I don't have a stored photo for that event."
+  expect:
+    decision: review
+    needs: [search_history]
+
+- id: ho-morning-gate-opened-and-closed
+  template: morning_site_report
+  note: "The guard opened the gate and closed it again; nothing is left open."
+  goal: *morning_goal
+  instructions: *morning_instr
+  site_facts: *depot_facts
+  cameras: [car_park, warehouse, gatehouse]
+  event: {type: schedule, at: "2026-10-25T06:30:00+01:00"}
+  options: [all_clear, review]
+  tools: [search_history, describe_event, describe_camera]
+  fixtures:
+    search_history: "I remember 1 visit(s) between 19:00 and 06:00, all people: [#5401] 02:00–02:06 on camera gatehouse (photo kept). Faces matched: Chidi (staff) at 02:00."
+    describe_event:
+      - when: {event_id: 5401}
+        result: "Event 5401: A guard in a high-visibility vest opening the gate for a minute, then closing and padlocking it."
+      - result: "I don't have a stored photo for that event."
+    describe_camera: "gatehouse: The gate is closed and padlocked; the yard is empty at dawn."
+  expect:
+    decision: all_clear
+    needs: [search_history]
+
+# ── investigate on request ──────────────────────────────────────────────
+
+- id: ho-request-three-cars
+  template: investigate_on_request
+  goal: &request_goal >-
+    An operator asked a question about the site. Find out, then answer yes,
+    no, or unsure.
+  site_facts: &depot_request_facts >-
+    The depot has three cameras: car_park, warehouse and gatehouse. Vehicles
+    enter only past the gatehouse.
+  cameras: [car_park, warehouse, gatehouse]
+  event: {type: operator_request, at: "2026-10-21T17:00:00+01:00", question: "Did more than two vehicles come in today?"}
+  options: ["yes", "no"]
+  tools: [search_history, recent_plates]
+  fixtures:
+    search_history: "I remember 3 car visit(s) between 00:00 and 17:00: [#6001] 08:10–08:11 on camera gatehouse, plate AB12 CDE; [#6002] 11:45–11:46 on camera gatehouse, plate FG34 HIJ; [#6003] 15:20–15:21 on camera gatehouse."
+    recent_plates: "Plates on gatehouse in the last 600 minute(s):\n31800s ago — gatehouse: AB12 CDE (0.91)\n18900s ago — gatehouse: FG34 HIJ (0.88)"
+  expect:
+    decision: "yes"
+    needs: [search_history]
+
+- id: ho-request-was-chidi-on-shift
+  template: investigate_on_request
+  goal: *request_goal
+  site_facts: *depot_request_facts
+  cameras: [car_park, warehouse, gatehouse]
+  event: {type: operator_request, at: "2026-10-21T09:00:00+01:00", question: "Was Chidi on site last night?"}
+  options: ["yes", "no"]
+  tools: [search_history, recognize_faces]
+  fixtures:
+    search_history: "I remember 2 visit(s) between 19:00 and 06:00, all people: [#6101] 22:00–22:05 on camera warehouse (photo kept); [#6102] 03:30–03:34 on camera gatehouse (photo kept). Faces matched: Tunde (staff, relief guard) at 22:00, Tunde (staff, relief guard) at 03:30."
+    recognize_faces: "gatehouse: no face detected"
+  expect:
+    decision: ["no", unsure]
+    needs: [search_history]
+
+- id: ho-request-plate-this-week
+  template: investigate_on_request
+  goal: *request_goal
+  site_facts: *depot_request_facts
+  cameras: [car_park, warehouse, gatehouse]
+  event: {type: operator_request, at: "2026-10-23T12:00:00+01:00", question: "Has the van with plate KX20 TRK been here this week?"}
+  options: ["yes", "no"]
+  tools: [search_history, recent_plates]
+  fixtures:
+    search_history: "I remember 1 car visit(s) with plate KX20 TRK this week: [#6201] Monday 10:15–10:16 on camera gatehouse, plate KX20 TRK."
+    recent_plates: "No plates matching KX20 TRK on gatehouse in the last 120 minute(s)."
+  expect:
+    decision: "yes"
+    needs: [search_history]
+
+- id: ho-request-warehouse-offline
+  template: investigate_on_request
+  note: "The only camera that could answer is offline."
+  goal: *request_goal
+  site_facts: *depot_request_facts
+  cameras: [car_park, warehouse, gatehouse]
+  event: {type: operator_request, at: "2026-10-23T20:00:00+01:00", question: "Is anyone in the warehouse right now?"}
+  options: ["yes", "no"]
+  tools: [camera_snapshot, describe_camera]
+  fixtures:
+    camera_snapshot:
+      - when: {camera_id: warehouse}
+        error: "warehouse appears to be offline"
+      - result: "No people detected right now (from live detection 3s ago)."
+    describe_camera:
+      - when: {camera_id: warehouse}
+        error: "warehouse appears to be offline"
+      - result: "The car park and gate are empty."
+  expect:
+    decision: unsure

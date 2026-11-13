@@ -21,6 +21,11 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { apiService } from '../lib/apiService'
 import { useSystemAlerts, type SystemAlertEvent } from '../hooks/useCameraStatus'
+import { useTranslation, useDateFormat, type DateFormatters } from '../i18n'
+import { Alarms } from './Alarms'
+import { PageHeader } from '../components/ui'
+import { Tabs } from '../components/ui/Tabs'
+import { extractApiError } from '../lib/apiError'
 
 type EveAlert = any
 
@@ -32,13 +37,19 @@ function useQuery() {
 export function AlertsIncidents() {
   const query = useQuery()
   const navigate = useNavigate()
+  const { t } = useTranslation()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [items, setItems] = useState<EveAlert[]>([])
 
   // 'network' (Suricata IDS, the original view — default so existing deep
   // links keep working) or 'system' (host/recording alerts).
-  const source = query.get('source') === 'system' ? 'system' : 'network'
+  const raw = query.get('source')
+  // Alarms is the default view — operational alarms are what most
+  // operators mean by "alerts"; the IDS and system streams keep their
+  // tabs.
+  const source: 'alarms' | 'network' | 'system' =
+    raw === 'system' ? 'system' : raw === 'network' ? 'network' : 'alarms'
   const onlyAlerts = query.get('only_alerts') === '1' || query.get('only_alerts') === 'true'
   const severity = query.get('severity') // Suricata: 1=high, 2=med, 3=low
   const category = query.get('category')
@@ -94,7 +105,7 @@ export function AlertsIncidents() {
         f = f.slice().sort((a: any, b: any) => Date.parse(a.timestamp || '0') - Date.parse(b.timestamp || '0')).reverse()
         if (!cancelled) setItems(f)
       } catch (e: any) {
-        if (!cancelled) setError(e?.message || 'Failed to load alerts')
+        if (!cancelled) setError(extractApiError(e, t('alerts.failedLoad')))
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -112,70 +123,74 @@ export function AlertsIncidents() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2">
-        <h1 className="text-xl font-semibold">Alerts &amp; Incidents</h1>
-        {loading && <span className="text-xs text-[var(--text-dim)]">Loading…</span>}
-        {error && <span className="text-xs text-red-400">{error}</span>}
-      </div>
+      <PageHeader
+        title={t('alerts.title')}
+        actions={
+          <>
+            {loading && <span className="text-xs text-[var(--text-dim)]">{t('alerts.loading')}</span>}
+            {error && <span className="text-xs text-[var(--danger)]">{error}</span>}
+          </>
+        }
+        tabs={
+          // The source is a query parameter (?source=), so links from the
+          // dashboard and the bell land on the right tab; Alarms is the
+          // default and needs no parameter.
+          <Tabs
+            tabs={[
+              { key: 'alarms', label: t('alerts.alarms') },
+              { key: 'network', label: t('alerts.network') },
+              { key: 'system', label: t('alerts.system') },
+            ]}
+            active={source}
+            onChange={(key) => setParam('source', key === 'alarms' ? null : key)}
+          />
+        }
+      />
 
-      <div className="flex flex-wrap items-center gap-2 text-sm">
-        <span className="text-[var(--text-dim)]">Source:</span>
-        <button
-          className={`px-2 py-1 rounded border ${source === 'network' ? 'bg-[var(--panel-2)] border-[var(--border)]' : 'border-neutral-700'}`}
-          onClick={() => setParam('source', null)}
-        >
-          Network (IDS)
-        </button>
-        <button
-          className={`px-2 py-1 rounded border ${source === 'system' ? 'bg-[var(--panel-2)] border-[var(--border)]' : 'border-neutral-700'}`}
-          onClick={() => setParam('source', 'system')}
-        >
-          System
-        </button>
-      </div>
-
-      {source === 'system' ? (
+      {source === 'alarms' ? (
+        <Alarms embedded />
+      ) : source === 'system' ? (
         <SystemAlertsView />
       ) : (
       <>
       <div className="flex flex-wrap items-center gap-2 text-sm">
-        <span className="text-[var(--text-dim)]">Filters:</span>
+        <span className="text-[var(--text-dim)]">{t('alerts.filters')}:</span>
         <button
-          className={`px-2 py-1 rounded border ${onlyAlerts ? 'bg-[var(--panel-2)] border-[var(--border)]' : 'border-neutral-700'}`}
+          className={`px-2 py-1  border ${onlyAlerts ? 'bg-[var(--panel-2)] border-[var(--border)]' : 'border-[var(--border)]'}`}
           onClick={() => setParam('only_alerts', onlyAlerts ? null : '1')}
         >
-          Alerts only
+          {t('alerts.onlyAlerts')}
         </button>
         <button
-          className={`px-2 py-1 rounded border ${severity === '1' ? 'bg-[var(--panel-2)] border-[var(--border)]' : 'border-neutral-700'}`}
+          className={`px-2 py-1  border ${severity === '1' ? 'bg-[var(--panel-2)] border-[var(--border)]' : 'border-[var(--border)]'}`}
           onClick={() => setParam('severity', severity === '1' ? null : '1')}
         >
-          High
+          {t('alerts.high')}
         </button>
         <button
-          className={`px-2 py-1 rounded border ${severity === '2' ? 'bg-[var(--panel-2)] border-[var(--border)]' : 'border-neutral-700'}`}
+          className={`px-2 py-1  border ${severity === '2' ? 'bg-[var(--panel-2)] border-[var(--border)]' : 'border-[var(--border)]'}`}
           onClick={() => setParam('severity', severity === '2' ? null : '2')}
         >
-          Medium
+          {t('alerts.medium')}
         </button>
         <button
-          className={`px-2 py-1 rounded border ${severity === '3' ? 'bg-[var(--panel-2)] border-[var(--border)]' : 'border-neutral-700'}`}
+          className={`px-2 py-1  border ${severity === '3' ? 'bg-[var(--panel-2)] border-[var(--border)]' : 'border-[var(--border)]'}`}
           onClick={() => setParam('severity', severity === '3' ? null : '3')}
         >
-          Low
+          {t('alerts.low')}
         </button>
         {category && (
           <button
-            className="px-2 py-1 rounded border border-neutral-700"
+            className="px-2 py-1 border border-[var(--border)]"
             onClick={() => setParam('category', null)}
           >
-            Category: {category} ×
+            {t('alerts.category')}: {category} ×
           </button>
         )}
       </div>
 
       <div className="flex items-center justify-between text-xs text-[var(--text-dim)]">
-        <span>Showing {items.length} alert{items.length === 1 ? '' : 's'}</span>
+        <span>{t('alerts.showing', { count: items.length, suffix: items.length === 1 ? '' : 's' })}</span>
         {(severity || category) && <span>Active filters: {severity ? `severity=${severity}` : ''} {category ? `category=${category}` : ''}</span>}
       </div>
 
@@ -200,8 +215,8 @@ type SystemEventRow = {
 }
 
 const SEVERITY_LABEL: Record<string, { text: string; className: string }> = {
-  critical: { text: 'Critical', className: 'text-red-400' },
-  warning: { text: 'Warning', className: 'text-amber-400' },
+  critical: { text: 'Critical', className: 'text-[var(--danger)]' },
+  warning: { text: 'Warning', className: 'text-[var(--warn)]' },
   info: { text: 'Info', className: 'text-[var(--text-dim)]' },
 }
 
@@ -215,6 +230,8 @@ function humanAlertType(t: string): string {
  * shared events socket. Low-volume — a plain table, no virtualization.
  */
 function SystemAlertsView() {
+  const fmt = useDateFormat()
+  const { t } = useTranslation()
   const [rows, setRows] = useState<SystemEventRow[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -233,7 +250,7 @@ function SystemAlertsView() {
         setRows((data?.events || []) as SystemEventRow[])
         setError(null)
       })
-      .catch((e: any) => { if (!cancelled) setError(e?.message || 'Failed to load system alerts') })
+      .catch((e: any) => { if (!cancelled) setError(extractApiError(e, t('alerts.failedLoad'))) })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
   }, [])
@@ -258,27 +275,27 @@ function SystemAlertsView() {
   return (
     <div className="space-y-2">
       <div className="text-xs text-[var(--text-dim)]">
-        {loading ? 'Loading…' : error ? <span className="text-red-400">{error}</span> : `Showing ${all.length} system alert${all.length === 1 ? '' : 's'}`}
+        {loading ? t('alerts.loading') : error ? <span className="text-[var(--danger)]">{error}</span> : t('alerts.showingSystem', { count: all.length, suffix: all.length === 1 ? '' : 's' })}
       </div>
-      <div className="overflow-auto border border-[var(--border)] bg-[var(--panel-2)] rounded max-h-[calc(100vh-19rem)] min-h-48">
+      <div className="overflow-auto border border-[var(--border)] bg-[var(--panel-2)] max-h-[calc(100vh-19rem)] min-h-48">
         <table className="w-full text-xs min-w-[760px]">
           <thead>
             <tr className="text-left text-[var(--text-dim)] bg-[var(--bg-2)] border-b border-[var(--border)] sticky top-0 z-10">
-              <th className="p-2 font-medium">Time</th>
-              <th className="p-2 font-medium">Severity</th>
-              <th className="p-2 font-medium">Type</th>
-              <th className="p-2 font-medium">Message</th>
-              <th className="p-2 font-medium">Camera</th>
+              <th className="p-2 font-medium">{t('alerts.time')}</th>
+              <th className="p-2 font-medium">{t('alerts.severity')}</th>
+              <th className="p-2 font-medium">{t('alerts.type')}</th>
+              <th className="p-2 font-medium">{t('alerts.message')}</th>
+              <th className="p-2 font-medium">{t('alerts.camera')}</th>
             </tr>
           </thead>
           <tbody>
             {all.length === 0 && !loading ? (
-              <tr><td colSpan={5} className="text-center text-[var(--text-dim)] py-6">No system alerts recorded.</td></tr>
+              <tr><td colSpan={5} className="text-center text-[var(--text-dim)] py-6">{t('alerts.noSystemAlerts')}</td></tr>
             ) : all.map((r, i) => {
               const sev = SEVERITY_LABEL[r.severity] || SEVERITY_LABEL.info
               return (
                 <tr key={r.id} className={i % 2 === 0 ? 'bg-[var(--bg-2)]' : 'bg-[var(--panel)]'}>
-                  <td className="p-2 whitespace-nowrap">{r.occurred_at ? new Date(r.occurred_at).toLocaleString() : '—'}</td>
+                  <td className="p-2 whitespace-nowrap">{r.occurred_at ? fmt.dateTime(r.occurred_at) : '—'}</td>
                   <td className={`p-2 ${sev.className}`}>{sev.text}</td>
                   <td className="p-2 whitespace-nowrap capitalize">
                     {humanAlertType(r.event_type)}
@@ -301,6 +318,8 @@ const GRID_COLS = 'grid grid-cols-[170px_90px_200px_minmax(240px,1fr)_160px_160p
 const ROW_HEIGHT = 33
 
 function VirtualAlertTable({ items, loading, onCategoryClick }: { items: EveAlert[]; loading: boolean; onCategoryClick: (category: string) => void }) {
+  const fmt = useDateFormat()
+  const { t } = useTranslation()
   const scrollRef = useRef<HTMLDivElement>(null)
   const rowVirtualizer = useVirtualizer({
     count: items.length,
@@ -310,18 +329,18 @@ function VirtualAlertTable({ items, loading, onCategoryClick }: { items: EveAler
   })
 
   return (
-    <div ref={scrollRef} className="overflow-auto border border-[var(--border)] bg-[var(--panel-2)] rounded max-h-[calc(100vh-19rem)] min-h-48">
+    <div ref={scrollRef} className="overflow-auto border border-[var(--border)] bg-[var(--panel-2)] max-h-[calc(100vh-19rem)] min-h-48">
       <div className="min-w-[1020px] text-xs">
         <div className={`${GRID_COLS} sticky top-0 z-10 bg-[var(--bg-2)] text-[var(--text-dim)] border-b border-[var(--border)]`}>
-          <div className="p-2 font-medium">Time</div>
-          <div className="p-2 font-medium">Severity</div>
-          <div className="p-2 font-medium">Category</div>
-          <div className="p-2 font-medium">Signature</div>
-          <div className="p-2 font-medium">Source</div>
-          <div className="p-2 font-medium">Destination</div>
+          <div className="p-2 font-medium">{t('alerts.time')}</div>
+          <div className="p-2 font-medium">{t('alerts.severity')}</div>
+          <div className="p-2 font-medium">{t('alerts.category')}</div>
+          <div className="p-2 font-medium">{t('alerts.signature')}</div>
+          <div className="p-2 font-medium">{t('alerts.sourceName')}</div>
+          <div className="p-2 font-medium">{t('alerts.destination')}</div>
         </div>
         {items.length === 0 && !loading ? (
-          <div className="text-center text-[var(--text-dim)] py-6">No alerts found for current filters.</div>
+          <div className="text-center text-[var(--text-dim)] py-6">{t('alerts.noFilteredAlerts')}</div>
         ) : (
           <div style={{ height: rowVirtualizer.getTotalSize(), position: 'relative' }}>
             {rowVirtualizer.getVirtualItems().map((vRow) => {
@@ -332,7 +351,7 @@ function VirtualAlertTable({ items, loading, onCategoryClick }: { items: EveAler
                   className={`${GRID_COLS} ${vRow.index % 2 === 0 ? 'bg-[var(--bg-2)]' : 'bg-[var(--panel)]'}`}
                   style={{ position: 'absolute', top: 0, left: 0, right: 0, height: vRow.size, transform: `translateY(${vRow.start}px)` }}
                 >
-                  <div className="p-2 whitespace-nowrap truncate">{e?.timestamp ? new Date(String(e.timestamp).replace('+0000', '+00:00')).toLocaleString() : '-'}</div>
+                  <div className="p-2 whitespace-nowrap truncate">{e?.timestamp ? fmt.dateTime(String(e.timestamp).replace('+0000', '+00:00')) : '-'}</div>
                   <div className="p-2">
                     {typeof e?.alert?.severity !== 'undefined' ? (
                       e.alert.severity === 1 ? 'High' : e.alert.severity === 2 ? 'Medium' : e.alert.severity === 3 ? 'Low' : String(e.alert.severity)

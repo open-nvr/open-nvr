@@ -25,6 +25,7 @@ Deferred follow-ups:
 from __future__ import annotations
 
 import logging
+import os
 import pathlib
 import re
 import subprocess
@@ -456,7 +457,15 @@ def build_frame_source(*, camera_id: str, url: str) -> FrameSource:
     scheme = parsed.scheme.lower()
     if scheme == "file":
         # urlparse("file:///path") → path is in parsed.path
-        return FileFrameSource(camera_id=camera_id, path=parsed.path)
+        path = parsed.path
+        if os.name == "nt":
+            # A drive path lands in the netloc (file://C:\x.jpg) or behind
+            # a leading slash (file:///C:/x.jpg).
+            if re.match(r"[A-Za-z]:", parsed.netloc):
+                path = parsed.netloc + path
+            elif re.match(r"/[A-Za-z]:", path):
+                path = path[1:]
+        return FileFrameSource(camera_id=camera_id, path=path)
     if scheme in ("http", "https"):
         return HttpSnapshotSource(camera_id=camera_id, url=url)
     if scheme == "opennvr":

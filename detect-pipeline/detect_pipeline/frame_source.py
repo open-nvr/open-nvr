@@ -173,6 +173,123 @@ class _StderrTail:
         return scrub_secrets(" | ".join(self._lines))
 
 
+#: Returned by ``_FrameSlot.take(timeout)`` when the wait ran out with the
+#: slot still open and empty: the decoder is alive but has produced nothing.
+STALLED = object()
+
+#: How long a running ffmpeg may go without decoding a single frame before
+#: the source gives up on that session and respawns it. A stream can keep
+#: FLOWING while nothing decodes: the Ventuno Q's office camera (2026-11-09)
+#: had its RTP clock wrap after 13 h 15 min and the relay in front of it
+#: clamped every timestamp to "previous + 1 tick", so ffmpeg received 15
+#: packets a second, the fps filter never saw time advance, and the reader
+#: sat in a blocking read for hours — /health said "stale", nothing
+#: recovered. Keyframe-only decode of a stream without keyframes looks the
+#: same. 60 s is far above any GOP (keyframe-only idle decode yields a frame
+#: per GOP, 1–4 s) and the RTSP socket timeout (10 s), so it only ever fires
+#: when ffmpeg truly decodes nothing.
+DEFAULT_STALL_SECONDS = 60.0
+
+
+class _FrameSlot:
+    """Single-slot handoff between the stdout drain thread and the detect loop.
+
+    Why a thread at all: the detect loop used to read ffmpeg's stdout
+    itself, so detection latency was backpressure on the decoder. The only
+    slack was the kernel pipe — 64 KiB on Linux, ~2% of one 1080p I420
+    frame — so a detector over its frame budget stalled ffmpeg almost at
+    once, MediaMTX dropped the reader, and the session died: a "flaky
+    camera" (``Failed reading RTSP data: End of file``) that was really us,
+    and the region budget shedding accuracy in the busiest scenes to avoid
+    it (#507). Now a drain thread reads at line rate into THIS slot and the
+    detect loop takes the newest frame; what the detector did not get to is
+    overwritten and counted. Frames are dropped; sessions are not.
+
+    One slot, so memory stays O(1) per camera: a queue that grows under
+    load would only move the stall into RAM.
+
+    Two rules keep the contract the worker relies on:
+
+    * **seq 0 is never overwritten.** ``Frame.seq`` resetting to 0 is how the
+      worker sees a restart (and ``deliberate_restart`` rides on that frame).
+      The drain waits for the consumer to take it — one frame of the old
+      blocking behaviour, at session start only.
+    * ``drop=False`` blocks the drain whenever the slot is full — the
+      pre-#507 behaviour, kept for tests that count exact frames and for
+      a caller that would rather stall the decoder than lose frames.
+    """
+
+    def __init__(self, *, drop: bool = True) -> None:
+        self._cond = threading.Condition()
+        self._frame: Frame | None = None
+        self._closed = False
+        self._drop = drop
+        self.dropped = 0
+
+    def put(self, frame: Frame) -> None:
+        with self._cond:
+            while not self._closed and self._frame is not None and (
+                not self._drop or self._frame.seq == 0
+            ):
+                self._cond.wait()
+            if self._closed:
+                return
+            if self._frame is not None:
+                self.dropped += 1
+            self._frame = frame
+            self._cond.notify_all()
+
+    def take(self, timeout: float | None = None) -> "Frame | None | object":
+        """The newest frame, blocking until one arrives; None once closed
+        and empty; ``STALLED`` when ``timeout`` seconds pass with neither.
+
+        The timeout is what lets the source notice a decoder that is alive
+        but silent. Without it the consumer parks here for as long as
+        ffmpeg lives, and a stream that keeps flowing without ever decoding
+        (see FrameSource.stall_seconds) keeps it parked for hours."""
+        with self._cond:
+            deadline = None if timeout is None else time.monotonic() + timeout
+            while self._frame is None and not self._closed:
+                if deadline is None:
+                    self._cond.wait()
+                    continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not self._cond.wait(remaining):
+                    if self._frame is None and not self._closed:
+                        return STALLED
+            frame, self._frame = self._frame, None
+            self._cond.notify_all()
+            return frame
+
+    def close(self) -> None:
+        """No more frames will come (EOF, or the consumer is gone). A frame
+        already in the slot is still delivered; a blocked put returns."""
+        with self._cond:
+            self._closed = True
+            self._cond.notify_all()
+
+
+def _drain_frames(stream, width: int, height: int, slot: _FrameSlot, *,
+                  deliberate: bool, proc=None) -> None:
+    """The drain thread: read frames at line rate into the slot until EOF.
+
+    A read error while ffmpeg is still running is a real fault and is
+    logged as one; the same error after the process was terminated is the
+    pipe being torn down and is not worth a line. Either way the session
+    ends the way EOF ends it — the consumer sees None and restarts.
+    """
+    try:
+        for frame in read_frames(stream, width, height, deliberate=deliberate):
+            slot.put(frame)
+    except Exception:
+        alive = proc is not None and proc.poll() is None
+        log.log(logging.WARNING if alive else logging.DEBUG,
+                "frame source: reading the decoder's output failed%s",
+                "" if alive else " (process already gone)", exc_info=True)
+    finally:
+        slot.close()
+
+
 def _terminate(proc) -> None:
     """Best-effort teardown of an ffmpeg process."""
     try:
@@ -211,10 +328,17 @@ class FrameSource:
         backoff_seconds: float = 1.0,
         max_backoff_seconds: float = 8.0,
         min_healthy_seconds: float = 5.0,
+        stall_seconds: float | None = DEFAULT_STALL_SECONDS,
+        drop_late_frames: bool = True,
         _sleep: Callable[[float], None] | None = None,
         _rand: Callable[[], float] | None = None,
     ) -> None:
         self.rtsp_url = rtsp_url
+        # The decoder is drained on its own thread and the consumer takes the
+        # newest frame; a frame the consumer did not get to is dropped — the
+        # worker counts those exactly from the gaps in Frame.seq (see
+        # _FrameSlot). False stalls the decoder instead.
+        self.drop_late_frames = drop_late_frames
         self.width = width
         self.height = height
         self.fps = fps
@@ -249,6 +373,10 @@ class FrameSource:
         # How long a session must last to count as "the stream works". Below
         # this, a restart is treated as fruitless (see stream()).
         self.min_healthy_seconds = min_healthy_seconds
+        # A session whose ffmpeg is alive but has decoded nothing for this
+        # long is ended and respawned (DEFAULT_STALL_SECONDS explains why a
+        # live process can be silent). None or <= 0 disables the watchdog.
+        self.stall_seconds = stall_seconds
         # Set by close(): ends the restart loop and interrupts the backoff
         # sleep, so a worker parked in backoff stops in milliseconds instead
         # of holding its caller's join() open for the full delay.
@@ -354,7 +482,12 @@ class FrameSource:
     def stream(self) -> Iterator[Frame]:
         """Yield frames until the source is unrecoverable.
 
-        Restarts ffmpeg on exit (camera/stream drops are normal). Ends the
+        Restarts ffmpeg on exit (camera/stream drops are normal) and on a
+        stall: a running ffmpeg that has decoded nothing for
+        ``stall_seconds`` is terminated and respawned, since a blocked read
+        would otherwise hold the session for as long as the process lives.
+        A stalled session counts like any other for the give-up rule
+        below (no frame in it = fruitless). Ends the
         stream after ``max_fruitless_restarts`` consecutive restarts that
         produced no frames at all — the signature of a dead credential (e.g.
         an expired signed tap URL), which no amount of restarting with the
@@ -363,25 +496,67 @@ class FrameSource:
         """
         restarts = 0
         fruitless = 0
+        # True while respawning after a deliberate decode flip: the flag that
+        # requested the flip is cleared when that session ends, so the
+        # respawn has to be told on its own — otherwise its first frame is
+        # unmarked and the worker counts every idle<->active flip as a feed
+        # restart (the metric operators are told to alert on).
+        flipped = False
         while True:
             if self._closing:
                 return
             self._refresh_url()
-            was_deliberate = self._skip_backoff_once
+            was_deliberate = flipped or self._skip_backoff_once
+            flipped = False
             proc = self._spawn(self.command())
             self._current_proc = proc
             stderr_tail = _StderrTail(getattr(proc, "stderr", None))
             got_frame = False
             started = time.monotonic()
+            # Decode and detect are decoupled here: the drain thread keeps
+            # ffmpeg's stdout moving whatever the detector is doing, and the
+            # loop below takes whatever is newest when it comes back. The
+            # session ends when the drain sees EOF (ffmpeg exited or was
+            # terminated), never because the detector was slow.
+            slot = _FrameSlot(drop=self.drop_late_frames)
             try:
-                for frame in read_frames(
-                    proc.stdout, self.width, self.height,
-                    deliberate=was_deliberate,
-                ):
+                # Inside the try: a thread that cannot start (a box at its
+                # thread limit — the overloaded box this exists for) must
+                # still reach the finally and reap the ffmpeg it spawned.
+                threading.Thread(
+                    target=_drain_frames,
+                    args=(proc.stdout, self.width, self.height, slot),
+                    kwargs={"deliberate": was_deliberate, "proc": proc},
+                    name="ffmpeg-stdout", daemon=True,
+                ).start()
+                wait = (self.stall_seconds
+                        if self.stall_seconds and self.stall_seconds > 0 else None)
+                while True:
+                    frame = slot.take(timeout=wait)
+                    if frame is None:
+                        break
+                    if frame is STALLED:
+                        if proc.poll() is not None:
+                            # ffmpeg has exited; the drain is about to see
+                            # EOF and close the slot. Let it end the session.
+                            continue
+                        log.warning(
+                            "frame source for %s: no decoded frame for %.0fs while "
+                            "ffmpeg is still running — the stream flows but nothing "
+                            "decodes (timestamps that stopped advancing, as after an "
+                            "RTP clock wrap, or no keyframes in a keyframe-only "
+                            "mode); restarting the reader%s",
+                            redact_url(self.rtsp_url), wait,
+                            f"; ffmpeg said: {stderr_tail.text()}" if stderr_tail.text() else "",
+                        )
+                        break
                     got_frame = True
                     yield frame
             finally:
                 self._current_proc = None
+                # Release a drain blocked in put() (the consumer is gone)
+                # before the reap, so the thread never outlives its session.
+                slot.close()
                 _terminate(proc)
             if self._closing:      # closed mid-session: do not respawn
                 return
@@ -417,6 +592,7 @@ class FrameSource:
             if deliberate:
                 # Restart immediately, quietly — no backoff, no penalty.
                 self._skip_backoff_once = False
+                flipped = True
                 log.info("frame source for %s: decode mode -> %s",
                          redact_url(self.rtsp_url), self.decode_skip)
                 continue

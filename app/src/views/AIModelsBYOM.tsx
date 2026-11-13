@@ -19,8 +19,12 @@
 import { useEffect, useState } from 'react'
 import { apiService } from '../lib/apiService'
 import { useAuth } from '../auth/AuthContext'
+import { useTranslation, useDateFormat } from '../i18n'
+import { extractApiError } from '../lib/apiError'
 import { RecordingBrowser } from '../components/RecordingBrowser'
 import { Cloud } from 'lucide-react'
+import { useConfirm } from '../components/ui/ConfirmDialog'
+import { Modal } from '../components/Modal'
 
 type AIModel = {
   id: number
@@ -85,7 +89,10 @@ const AVAILABLE_TASKS = [
 ]
 
 export function AIModelsBYOM() {
+  const fmt = useDateFormat()
   const { user } = useAuth()
+  const { t } = useTranslation()
+  const confirm = useConfirm()
   const canAdmin = !!user?.is_superuser
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -172,7 +179,7 @@ export function AIModelsBYOM() {
       const res = await apiService.getAIModels({ limit: 200 })
       setModels(res.data)
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to load AI models')
+      setError(extractApiError(e, t('models.failedLoad')))
     } finally {
       setLoading(false)
     }
@@ -180,7 +187,7 @@ export function AIModelsBYOM() {
 
   async function loadCameras() {
     try {
-      const { data } = await apiService.getCameras({ limit: 200, active_only: true })
+      const { data } = await apiService.getCameras({ active_only: true })
       const cameraList = Array.isArray(data?.cameras) ? data.cameras : []
       
       // Fetch camera configs to get RTSP URLs
@@ -229,7 +236,7 @@ export function AIModelsBYOM() {
       setNotice(res.data.message)
       await loadRunningInference() // Refresh status
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to stop inference')
+      setError(extractApiError(e, 'Failed to stop inference'))
     } finally {
       setInferenceLoading(prev => {
         const next = new Set(prev)
@@ -322,8 +329,8 @@ export function AIModelsBYOM() {
       }
       
       if (data.time_range?.start && data.time_range?.end) {
-        const start = new Date(data.time_range.start).toLocaleTimeString();
-        const end = new Date(data.time_range.end).toLocaleTimeString();
+        const start = fmt.time(data.time_range.start, {});
+        const end = fmt.time(data.time_range.end, {});
         message += ` (${start} - ${end})`;
       }
       
@@ -335,7 +342,7 @@ export function AIModelsBYOM() {
       // Poll for completion
       pollRecordingCompletion(model.id);
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to start recording analysis')
+      setError(extractApiError(e, 'Failed to start recording analysis'))
     } finally {
       setInferenceLoading(prev => {
         const next = new Set(prev)
@@ -410,7 +417,7 @@ export function AIModelsBYOM() {
       // Reload models
       await loadModels()
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to save model')
+      setError(extractApiError(e, 'Failed to save model'))
     } finally {
       setLoading(false)
     }
@@ -418,7 +425,7 @@ export function AIModelsBYOM() {
 
   async function handleDelete(id: number, name: string) {
     if (!canAdmin) return
-    if (!confirm(`Are you sure you want to delete "${name}"?`)) return
+    if (!(await confirm({ title: `Are you sure you want to delete "${name}"?`, danger: true }))) return
 
     // Stop inference if running
     if (runningModels.has(id)) {
@@ -432,7 +439,7 @@ export function AIModelsBYOM() {
       setNotice(`Model "${name}" deleted successfully`)
       await loadModels()
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to delete model')
+      setError(extractApiError(e, 'Failed to delete model'))
     } finally {
       setLoading(false)
     }
@@ -477,7 +484,7 @@ export function AIModelsBYOM() {
       setNotice('Model status updated')
       await loadModels()
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to update model status')
+      setError(extractApiError(e, 'Failed to update model status'))
     }
   }
 
@@ -488,7 +495,7 @@ export function AIModelsBYOM() {
       const { data } = await apiService.getCloudCredentials()
       setCloudCredentials(data)
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to load cloud credentials')
+      setError(extractApiError(e, 'Failed to load cloud credentials'))
     } finally {
       setCloudLoading(false)
     }
@@ -500,7 +507,7 @@ export function AIModelsBYOM() {
       const { data } = await apiService.getCloudModels()
       setCloudModels(data)
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to load cloud models')
+      setError(extractApiError(e, t('models.failedCloudLoad')))
     } finally {
       setCloudLoading(false)
     }
@@ -520,14 +527,14 @@ export function AIModelsBYOM() {
       setNewCredential({ provider: 'huggingface', token: '', account_info: '' })
       loadCloudCredentials()
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to add credential')
+      setError(extractApiError(e, 'Failed to add credential'))
     } finally {
       setCloudLoading(false)
     }
   }
 
   async function deleteCloudCredential(id: string) {
-    if (!confirm('Delete this credential? Associated models will also be deleted.')) return
+    if (!(await confirm({ title: 'Delete this credential? Associated models will also be deleted.', danger: true }))) return
     try {
       setCloudLoading(true)
       await apiService.deleteCloudCredential(id)
@@ -535,7 +542,7 @@ export function AIModelsBYOM() {
       loadCloudCredentials()
       loadCloudModels()
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to delete credential')
+      setError(extractApiError(e, 'Failed to delete credential'))
     } finally {
       setCloudLoading(false)
     }
@@ -558,21 +565,21 @@ export function AIModelsBYOM() {
       setNewCloudModel({ name: '', provider: 'huggingface', credential_id: '', model_id: '', task: 'image-to-text', config: '{}', enabled: true })
       loadCloudModels()
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to add cloud model')
+      setError(extractApiError(e, 'Failed to add cloud model'))
     } finally {
       setCloudLoading(false)
     }
   }
 
   async function deleteCloudModel(id: number) {
-    if (!confirm('Delete this cloud model configuration?')) return
+    if (!(await confirm({ title: 'Delete this cloud model configuration?', danger: true }))) return
     try {
       setCloudLoading(true)
       await apiService.deleteCloudModel(id)
       setNotice('Cloud model deleted')
       loadCloudModels()
     } catch (e: any) {
-      setError(e?.data?.detail || e?.message || 'Failed to delete cloud model')
+      setError(extractApiError(e, 'Failed to delete cloud model'))
     } finally {
       setCloudLoading(false)
     }
@@ -587,10 +594,10 @@ export function AIModelsBYOM() {
   return (
     <section className="space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-lg font-semibold">AI Models</h1>
+        <h1 className="text-lg font-semibold">{t('models.title')}</h1>
         <button
           onClick={openCloudDialog}
-          className="flex items-center gap-2 px-3 py-2 rounded bg-blue-500/10 text-blue-400 border border-blue-500/30 hover:bg-blue-500/20 text-sm"
+          className="flex items-center gap-2 px-3 py-2 bg-[color-mix(in_oklab,var(--accent)_14%,transparent)] text-[var(--accent)] border border-[color-mix(in_oklab,var(--accent)_45%,var(--border))] hover:bg-[color-mix(in_oklab,var(--accent)_14%,transparent)] text-sm"
         >
           <Cloud size={16} />
           Cloud AI
@@ -598,26 +605,26 @@ export function AIModelsBYOM() {
       </div>
 
       {notice && (
-        <div className="p-2 rounded bg-green-500/10 border border-green-500/30 text-green-300 text-sm">
+        <div className="p-2 bg-[color-mix(in_oklab,var(--ok)_14%,transparent)] border border-[color-mix(in_oklab,var(--ok)_45%,var(--border))] text-[var(--ok)] text-sm">
           {notice}
         </div>
       )}
       {error && (
-        <div className="p-2 rounded bg-red-500/10 border border-red-500/30 text-red-300 text-sm">
+        <div className="p-2 bg-[color-mix(in_oklab,var(--danger)_14%,transparent)] border border-[color-mix(in_oklab,var(--danger)_45%,var(--border))] text-[var(--danger)] text-sm">
           {error}
         </div>
       )}
 
       {/* Add/Edit Model Form */}
-      <div className="border border-neutral-700 bg-[var(--panel-2)] p-4 rounded">
+      <div className="border border-[var(--border)] bg-[var(--panel-2)] p-4">
         <h2 className="text-md font-medium mb-3">
-          {editingId ? 'Edit Model' : 'Add New Model'}
+          {editingId ? t('models.edit') : t('models.add')}
         </h2>
         <form onSubmit={handleSubmit} className="space-y-3">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div>
               <label className="block text-sm text-[var(--text-dim)] mb-1">
-                Model Name <span className="text-red-400">*</span>
+                {t('models.name')} <span className="text-[var(--danger)]">*</span>
               </label>
               <input
                 type="text"
@@ -632,7 +639,7 @@ export function AIModelsBYOM() {
 
             <div>
               <label className="block text-sm text-[var(--text-dim)] mb-1">
-                AI Model <span className="text-red-400">*</span>
+                {t('models.model')} <span className="text-[var(--danger)]">*</span>
               </label>
               <select
                 className="select w-full"
@@ -663,7 +670,7 @@ export function AIModelsBYOM() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div>
               <label className="block text-sm text-[var(--text-dim)] mb-1">
-                Task <span className="text-red-400">*</span>
+                {t('models.task')} <span className="text-[var(--danger)]">*</span>
               </label>
               <select
                 className="select w-full"
@@ -688,7 +695,7 @@ export function AIModelsBYOM() {
                   onChange={(e) => setFormData({ ...formData, enabled: e.target.checked })}
                   disabled={!canAdmin || loading}
                 />
-                <span>Enabled</span>
+                <span>{t('models.enabled')}</span>
               </label>
             </div>
           </div>
@@ -696,7 +703,7 @@ export function AIModelsBYOM() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div>
               <label className="block text-sm text-[var(--text-dim)] mb-1">
-                Source Type <span className="text-red-400">*</span>
+                {t('models.sourceType')} <span className="text-[var(--danger)]">*</span>
               </label>
               <select
                 className="select w-full"
@@ -709,22 +716,9 @@ export function AIModelsBYOM() {
                 })}
                 disabled={!canAdmin || loading}
               >
-                <option value="live">Live Camera Feed</option>
-                <option value="recording">Recorded Video</option>
+                <option value="live">{t('models.live')}</option>
+                <option value="recording">{t('models.recording')}</option>
               </select>
-            </div>
-
-            <div className="flex items-end">
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  className="accent-[var(--accent)]"
-                  checked={formData.enabled}
-                  onChange={(e) => setFormData({ ...formData, enabled: e.target.checked })}
-                  disabled={!canAdmin || loading}
-                />
-                <span>Enabled</span>
-              </label>
             </div>
           </div>
 
@@ -733,7 +727,7 @@ export function AIModelsBYOM() {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <div>
                 <label className="block text-sm text-[var(--text-dim)] mb-1">
-                  Assigned Camera <span className="text-red-400">*</span>
+                  {t('models.assignedCamera')} <span className="text-[var(--danger)]">*</span>
                 </label>
                 <select
                   className="select w-full"
@@ -746,7 +740,7 @@ export function AIModelsBYOM() {
                   }
                   disabled={!canAdmin || loading}
                 >
-                  <option value="">Select a camera...</option>
+                  <option value="">{t('models.selectCamera')}</option>
                 {cameras.map((cam) => (
                   <option key={cam.id} value={cam.id}>
                     {cam.name} {cam.source_url ? '' : '(No RTSP URL)'}
@@ -754,13 +748,13 @@ export function AIModelsBYOM() {
                 ))}
               </select>
               <div className="text-xs text-[var(--text-dim)] mt-1">
-                Select a camera to enable automatic inference
+                {t('models.selectCameraInference')}
               </div>
             </div>
 
             <div>
               <label className="block text-sm text-[var(--text-dim)] mb-1">
-                Inference Interval (seconds)
+                {t('models.intervalSeconds')}
               </label>
               <input
                 type="number"
@@ -774,7 +768,7 @@ export function AIModelsBYOM() {
                 disabled={!canAdmin || loading}
               />
               <div className="text-xs text-[var(--text-dim)] mt-1">
-                How often to run inference (1-60 seconds)
+                {t('models.intervalHelp')}
               </div>
             </div>
           </div>
@@ -784,7 +778,7 @@ export function AIModelsBYOM() {
           {formData.source_type === 'recording' && (
             <div>
               <label className="block text-sm text-[var(--text-dim)] mb-1">
-                Recording File <span className="text-red-400">*</span>
+                {t('models.recordingFile')} <span className="text-[var(--danger)]">*</span>
               </label>
               <div className="flex gap-2">
                 <input
@@ -803,11 +797,11 @@ export function AIModelsBYOM() {
                   }}
                   disabled={!canAdmin || loading}
                 >
-                  Browse
+                  {t('models.browse')}
                 </button>
               </div>
               {formData.recording_path && (
-                <div className="text-xs text-green-400 mt-1">
+                <div className="text-xs text-[var(--ok)] mt-1">
                   ✓ Recording selected: {formData.recording_path}
                 </div>
               )}
@@ -816,7 +810,7 @@ export function AIModelsBYOM() {
 
           <div>
             <label className="block text-sm text-[var(--text-dim)] mb-1">
-              Additional Config (JSON)
+              {t('models.additionalConfig')}
             </label>
             <textarea
               className="textarea w-full h-20"
@@ -826,23 +820,23 @@ export function AIModelsBYOM() {
               disabled={!canAdmin || loading}
             />
             <div className="text-xs text-[var(--text-dim)] mt-1">
-              Optional: JSON object with additional parameters
+              {t('models.additionalConfigHelp')}
             </div>
           </div>
 
           <div className="flex gap-2">
             <button
               type="submit"
-              className="px-4 py-2 bg-[var(--accent)] text-white rounded disabled:opacity-50"
+              className="px-4 py-2 bg-[var(--accent)] text-white disabled:opacity-50"
               disabled={!canAdmin || loading || !formData.name}
             >
-              {editingId ? 'Update Model' : 'Add Model'}
+              {editingId ? t('models.update') : t('models.add')}
             </button>
             {editingId && (
               <button
                 type="button"
                 onClick={handleCancelEdit}
-                className="px-4 py-2 bg-[var(--panel)] border border-neutral-700 rounded"
+                className="px-4 py-2 bg-[var(--panel)] border border-[var(--border)]"
               >
                 Cancel
               </button>
@@ -852,41 +846,41 @@ export function AIModelsBYOM() {
       </div>
 
       {/* Models Table */}
-      <div className="border border-neutral-700 bg-[var(--panel-2)] rounded overflow-hidden">
-        <div className="p-3 border-b border-neutral-700">
-          <h2 className="text-md font-medium">Configured Models ({models.length})</h2>
+      <div className="border border-[var(--border)] bg-[var(--panel-2)] overflow-hidden">
+        <div className="p-3 border-b border-[var(--border)]">
+          <h2 className="text-md font-medium">{t('models.configured')} ({models.length})</h2>
         </div>
 
         {loading && models.length === 0 ? (
-          <div className="p-4 text-center text-sm text-[var(--text-dim)]">Loading...</div>
+          <div className="p-4 text-center text-sm text-[var(--text-dim)]">{t('models.loading')}</div>
         ) : models.length === 0 ? (
           <div className="p-4 text-center text-sm text-[var(--text-dim)]">
-            No models configured yet. Add one using the form above.
+            {t('models.noModels')}
           </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="bg-[var(--panel)] text-[var(--text-dim)]">
                 <tr>
-                  <th className="text-left p-3">Name</th>
-                  <th className="text-left p-3">Model</th>
-                  <th className="text-left p-3">Task</th>
-                  <th className="text-left p-3">Source</th>
-                  <th className="text-center p-3">Interval</th>
-                  <th className="text-center p-3">Status</th>
-                  <th className="text-center p-3">Inference</th>
-                  <th className="text-center p-3">Actions</th>
+                  <th className="text-left p-3">{t('models.name')}</th>
+                  <th className="text-left p-3">{t('models.model')}</th>
+                  <th className="text-left p-3">{t('models.task')}</th>
+                  <th className="text-left p-3">{t('models.source')}</th>
+                  <th className="text-center p-3">{t('models.interval')}</th>
+                  <th className="text-center p-3">{t('models.status')}</th>
+                  <th className="text-center p-3">{t('models.inference')}</th>
+                  <th className="text-center p-3">{t('models.actions')}</th>
                 </tr>
               </thead>
               <tbody>
                 {models.map((model) => (
                   <tr
                     key={model.id}
-                    className="border-t border-neutral-700 hover:bg-[var(--panel)]/50"
+                    className="border-t border-[var(--border)] hover:bg-[var(--panel)]/50"
                   >
                     <td className="p-3 font-medium">{model.name}</td>
                     <td className="p-3">
-                      <span className="text-xs bg-blue-500/20 text-blue-300 px-2 py-1 rounded">
+                      <span className="text-xs bg-[color-mix(in_oklab,var(--accent)_14%,transparent)] text-[var(--accent)] px-2 py-1">
                         {model.model_name}
                       </span>
                     </td>
@@ -902,11 +896,11 @@ export function AIModelsBYOM() {
                             </div>
                           </div>
                         ) : (
-                          <span className="text-xs text-neutral-500">No camera</span>
+                          <span className="text-xs text-[var(--text-dim)]">No camera</span>
                         )
                       ) : (
                         <div className="text-xs">
-                          <div className="text-purple-400 font-medium">🎬 Recording</div>
+                          <div className="text-[var(--accent)] font-medium">🎬 Recording</div>
                           <div className="text-[var(--text-dim)] truncate max-w-[150px]" title={model.recording_path || ''}>
                             {model.recording_path ? model.recording_path.split('/').pop() : 'Not selected'}
                           </div>
@@ -922,11 +916,11 @@ export function AIModelsBYOM() {
                         disabled={!canAdmin}
                         className={`px-2 py-1 rounded text-xs font-medium ${
                           model.enabled
-                            ? 'bg-green-500/20 text-green-300'
-                            : 'bg-red-500/20 text-red-300'
+                            ? 'bg-[color-mix(in_oklab,var(--ok)_14%,transparent)] text-[var(--ok)]'
+                            : 'bg-[color-mix(in_oklab,var(--danger)_14%,transparent)] text-[var(--danger)]'
                         } disabled:opacity-50`}
                       >
-                        {model.enabled ? 'Enabled' : 'Disabled'}
+                        {model.enabled ? t('models.enabled') : t('models.disabled')}
                       </button>
                     </td>
                     <td className="p-3 text-center">
@@ -936,7 +930,7 @@ export function AIModelsBYOM() {
                         // the event bus. Point the capability at cameras via
                         // Cameras → edit → Assignments instead of a per-model
                         // Start button (docs/CAMERA_ASSIGNMENTS.md).
-                        <span className="text-xs text-neutral-500" title="Live detection runs continuously through the built-in Tier-0 detector. Give the camera a job under Cameras → edit → Assignments.">
+                        <span className="text-xs text-[var(--text-dim)]" title="Live detection runs continuously through the built-in Tier-0 detector. Give the camera a job under Cameras → edit → Assignments.">
                           via Tier-0 + assignments
                         </span>
                       ) : (
@@ -946,10 +940,10 @@ export function AIModelsBYOM() {
                             <button
                               onClick={() => runningModels.has(model.id) ? stopInference(model.id) : analyzeRecording(model)}
                               disabled={!canAdmin || inferenceLoading.has(model.id)}
-                              className={`px-3 py-1 rounded text-xs font-medium disabled:opacity-50 ${
+                              className={`px-3 py-1 text-xs font-medium disabled:opacity-50 ${
                                 runningModels.has(model.id)
-                                  ? 'bg-red-600 hover:bg-red-700 text-white'
-                                  : 'bg-purple-600 hover:bg-purple-700 text-white'
+                                  ? 'bg-[var(--critical)] hover:bg-[var(--critical)] text-white'
+                                  : 'bg-[var(--accent)] hover:opacity-90 text-white'
                               }`}
                             >
                               {inferenceLoading.has(model.id) ? (
@@ -961,12 +955,12 @@ export function AIModelsBYOM() {
                               )}
                             </button>
                             {runningModels.has(model.id) && !inferenceLoading.has(model.id) && (
-                              <div className="text-[10px] text-purple-400 mt-1">● Processing</div>
+                              <div className="text-[10px] text-[var(--accent)] mt-1">● Processing</div>
                             )}
                           </>
                         ) : (
-                          <span className="text-xs text-neutral-500">
-                            {!model.enabled ? 'Disabled' : 'No recording'}
+                          <span className="text-xs text-[var(--text-dim)]">
+                            {!model.enabled ? t('models.disabled') : t('models.noRecording')}
                           </span>
                         )
                       )}
@@ -976,16 +970,16 @@ export function AIModelsBYOM() {
                         <button
                           onClick={() => handleEdit(model)}
                           disabled={!canAdmin}
-                          className="px-2 py-1 bg-blue-600/20 border border-blue-600/50 rounded text-blue-300 hover:bg-blue-600/30 disabled:opacity-50 text-xs"
+                          className="px-2 py-1 bg-[color-mix(in_oklab,var(--accent)_14%,transparent)] border border-[color-mix(in_oklab,var(--accent)_45%,var(--border))] text-[var(--accent)] hover:bg-[color-mix(in_oklab,var(--accent)_14%,transparent)] disabled:opacity-50 text-xs"
                         >
-                          Edit
+                          {t('common.edit')}
                         </button>
                         <button
                           onClick={() => handleDelete(model.id, model.name)}
                           disabled={!canAdmin}
-                          className="px-2 py-1 bg-red-600/20 border border-red-600/50 rounded text-red-300 hover:bg-red-600/30 disabled:opacity-50 text-xs"
+                          className="px-2 py-1 bg-[color-mix(in_oklab,var(--danger)_14%,transparent)] border border-[color-mix(in_oklab,var(--danger)_45%,var(--border))] text-[var(--danger)] hover:bg-[color-mix(in_oklab,var(--danger)_14%,transparent)] disabled:opacity-50 text-xs"
                         >
-                          Delete
+                          {t('models.delete')}
                         </button>
                       </div>
                     </td>
@@ -1032,20 +1026,17 @@ export function AIModelsBYOM() {
 
       {/* Cloud AI Dialog */}
       {showCloudDialog && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-[var(--panel)] border border-neutral-700 rounded-lg max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col">
-            <div className="p-4 border-b border-neutral-700 flex justify-between items-center">
-              <h3 className="text-lg font-medium">Cloud AI Providers</h3>
-              <button
-                onClick={() => setShowCloudDialog(false)}
-                className="text-[var(--text-dim)] hover:text-[var(--text)]"
-              >
-                ✕
-              </button>
-            </div>
+        <Modal
+          open
+          title={t('models.cloudProviders')}
+          onClose={() => setShowCloudDialog(false)}
+          widthClassName="w-[calc(100vw-2rem)] max-w-4xl"
+          bodyClassName="p-0 flex flex-col"
+          closeOnBackdrop={false}
+        >
 
             {/* Tabs */}
-            <div className="flex gap-2 px-4 pt-4 border-b border-neutral-700">
+            <div className="flex gap-2 px-4 pt-4 border-b border-[var(--border)]">
               <button
                 onClick={() => setCloudTab('credentials')}
                 className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
@@ -1054,7 +1045,7 @@ export function AIModelsBYOM() {
                     : 'border-transparent text-[var(--text-dim)] hover:text-[var(--text)]'
                 }`}
               >
-                Credentials
+                {t('models.credentials')}
               </button>
               <button
                 onClick={() => setCloudTab('models')}
@@ -1074,19 +1065,19 @@ export function AIModelsBYOM() {
                 <div className="space-y-4">
                   <div className="flex justify-between items-center">
                     <p className="text-sm text-[var(--text-dim)]">
-                      Manage API credentials for cloud AI providers. Tokens are encrypted at rest.
+                      {t('models.manageCredentials')}
                     </p>
                     <button
                       onClick={() => setShowAddCredential(true)}
-                      className="px-3 py-1.5 bg-[var(--accent)] text-white rounded text-sm hover:opacity-90"
+                      className="px-3 py-1.5 bg-[var(--accent)] text-white text-sm hover:opacity-90"
                     >
-                      Add Credential
+                      {t('models.addCredential')}
                     </button>
                   </div>
 
                   {showAddCredential && (
-                    <div className="border border-neutral-700 bg-[var(--panel-2)] p-4 rounded space-y-3">
-                      <h4 className="font-medium text-sm">New Credential</h4>
+                    <div className="border border-[var(--border)] bg-[var(--panel-2)] p-4 space-y-3">
+                      <h4 className="font-medium text-sm">{t('models.newCredential')}</h4>
                       <div className="space-y-3">
                         <div>
                           <label className="block text-xs text-[var(--text-dim)] mb-1">Provider</label>
@@ -1099,7 +1090,7 @@ export function AIModelsBYOM() {
                           </select>
                         </div>
                         <div>
-                          <label className="block text-xs text-[var(--text-dim)] mb-1">API Token</label>
+                          <label className="block text-xs text-[var(--text-dim)] mb-1">{t('models.apiToken')}</label>
                           <input
                             type="password"
                             className="input w-full"
@@ -1123,15 +1114,15 @@ export function AIModelsBYOM() {
                           <button
                             onClick={addCloudCredential}
                             disabled={cloudLoading}
-                            className="px-3 py-1.5 bg-[var(--accent)] text-white rounded text-sm hover:opacity-90 disabled:opacity-50"
+                            className="px-3 py-1.5 bg-[var(--accent)] text-white text-sm hover:opacity-90 disabled:opacity-50"
                           >
                             {cloudLoading ? 'Adding...' : 'Add'}
                           </button>
                           <button
                             onClick={() => setShowAddCredential(false)}
-                            className="px-3 py-1.5 border border-neutral-700 rounded text-sm hover:bg-[var(--panel-2)]"
+                            className="px-3 py-1.5 border border-[var(--border)] text-sm hover:bg-[var(--panel-2)]"
                           >
-                            Cancel
+                            {t('models.cancel')}
                           </button>
                         </div>
                       </div>
@@ -1140,16 +1131,16 @@ export function AIModelsBYOM() {
 
                   <div className="space-y-2">
                     {cloudCredentials.length === 0 && !cloudLoading && (
-                      <div className="text-center py-8 text-sm text-[var(--text-dim)] border border-neutral-700 rounded">
-                        No credentials configured. Add your first credential to get started.
+                      <div className="text-center py-8 text-sm text-[var(--text-dim)] border border-[var(--border)]">
+                        {t('models.noCredentials')}
                       </div>
                     )}
                     {cloudCredentials.map((cred) => (
-                      <div key={cred.id} className="border border-neutral-700 bg-[var(--panel-2)] p-3 rounded flex justify-between items-center">
+                      <div key={cred.id} className="border border-[var(--border)] bg-[var(--panel-2)] p-3 flex justify-between items-center">
                         <div>
                           <div className="font-medium text-sm capitalize">{cred.provider}</div>
                           <div className="text-xs text-[var(--text-dim)]">
-                            ID: {cred.id.slice(0, 8)}... • Created: {new Date(cred.created_at).toLocaleDateString()}
+                            ID: {cred.id.slice(0, 8)}... • Created: {fmt.date(cred.created_at)}
                           </div>
                           {cred.account_info && (
                             <div className="text-xs text-[var(--text-dim)] mt-1">
@@ -1159,9 +1150,9 @@ export function AIModelsBYOM() {
                         </div>
                         <button
                           onClick={() => deleteCloudCredential(cred.id)}
-                          className="px-3 py-1 bg-red-500/10 text-red-400 border border-red-500/30 rounded text-xs hover:bg-red-500/20"
+                          className="px-3 py-1 bg-[color-mix(in_oklab,var(--danger)_14%,transparent)] text-[var(--danger)] border border-[color-mix(in_oklab,var(--danger)_45%,var(--border))] text-xs hover:bg-[color-mix(in_oklab,var(--danger)_14%,transparent)]"
                         >
-                          Delete
+                          {t('models.delete')}
                         </button>
                       </div>
                     ))}
@@ -1174,19 +1165,19 @@ export function AIModelsBYOM() {
                 <div className="space-y-4">
                   <div className="flex justify-between items-center">
                     <p className="text-sm text-[var(--text-dim)]">
-                      Configure cloud AI models linked to your credentials.
+                      {t('models.configureCloud')}
                     </p>
                     <button
                       onClick={() => setShowAddCloudModel(true)}
-                      className="px-3 py-1.5 bg-[var(--accent)] text-white rounded text-sm hover:opacity-90"
+                      className="px-3 py-1.5 bg-[var(--accent)] text-white text-sm hover:opacity-90"
                       disabled={cloudCredentials.length === 0}
                     >
-                      Add Model
+                          {t('models.add')}
                     </button>
                   </div>
 
                   {showAddCloudModel && (
-                    <div className="border border-neutral-700 bg-[var(--panel-2)] p-4 rounded space-y-3">
+                    <div className="border border-[var(--border)] bg-[var(--panel-2)] p-4 space-y-3">
                       <h4 className="font-medium text-sm">Configure Cloud Model</h4>
                       <div className="grid grid-cols-2 gap-3">
                         <div>
@@ -1253,7 +1244,7 @@ export function AIModelsBYOM() {
                               checked={newCloudModel.enabled}
                               onChange={(e) => setNewCloudModel({ ...newCloudModel, enabled: e.target.checked })}
                             />
-                            Enabled
+                            {t('models.enabled')}
                           </label>
                         </div>
                       </div>
@@ -1261,13 +1252,13 @@ export function AIModelsBYOM() {
                         <button
                           onClick={addCloudModel}
                           disabled={cloudLoading}
-                          className="px-3 py-1.5 bg-[var(--accent)] text-white rounded text-sm hover:opacity-90 disabled:opacity-50"
+                          className="px-3 py-1.5 bg-[var(--accent)] text-white text-sm hover:opacity-90 disabled:opacity-50"
                         >
                           {cloudLoading ? 'Adding...' : 'Add'}
                         </button>
                         <button
                           onClick={() => setShowAddCloudModel(false)}
-                          className="px-3 py-1.5 border border-neutral-700 rounded text-sm hover:bg-[var(--panel-2)]"
+                          className="px-3 py-1.5 border border-[var(--border)] text-sm hover:bg-[var(--panel-2)]"
                         >
                           Cancel
                         </button>
@@ -1277,14 +1268,14 @@ export function AIModelsBYOM() {
 
                   <div className="space-y-2">
                     {cloudModels.length === 0 && !cloudLoading && (
-                      <div className="text-center py-8 text-sm text-[var(--text-dim)] border border-neutral-700 rounded">
+                      <div className="text-center py-8 text-sm text-[var(--text-dim)] border border-[var(--border)]">
                         {cloudCredentials.length === 0
-                          ? 'Add credentials first, then configure your models.'
+                          ? t('models.addCredentialsFirst')
                           : 'No models configured. Add your first cloud model.'}
                       </div>
                     )}
                     {cloudModels.map((model) => (
-                      <div key={model.id} className="border border-neutral-700 bg-[var(--panel-2)] p-3 rounded">
+                      <div key={model.id} className="border border-[var(--border)] bg-[var(--panel-2)] p-3">
                         <div className="flex justify-between items-start">
                           <div className="flex-1">
                             <div className="font-medium text-sm">{model.name}</div>
@@ -1297,7 +1288,7 @@ export function AIModelsBYOM() {
                           </div>
                           <button
                             onClick={() => deleteCloudModel(model.id)}
-                            className="px-3 py-1 bg-red-500/10 text-red-400 border border-red-500/30 rounded text-xs hover:bg-red-500/20"
+                            className="px-3 py-1 bg-[color-mix(in_oklab,var(--danger)_14%,transparent)] text-[var(--danger)] border border-[color-mix(in_oklab,var(--danger)_45%,var(--border))] text-xs hover:bg-[color-mix(in_oklab,var(--danger)_14%,transparent)]"
                           >
                             Delete
                           </button>
@@ -1308,8 +1299,7 @@ export function AIModelsBYOM() {
                 </div>
               )}
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
     </section>
   )

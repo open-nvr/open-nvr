@@ -280,5 +280,5 @@ from core.logging_config import camera_logger, auth_logger
 ## 📚 **Related Documentation**
 
 - [Local Setup Guide](../../docs/LOCAL_SETUP.md) - Environment configuration
-- [API Documentation](../README.md) - Backend API overview
+- [API Documentation](../../docs/PLATFORM_API.md) - Backend API overview
 - [Database Migrations](../migrations/README.md) - Alembic migration guide

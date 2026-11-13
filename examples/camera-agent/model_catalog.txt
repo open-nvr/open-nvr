@@ -14,19 +14,19 @@
 #   summary   one line of honest editorial: what it is actually good at
 #
 # Ordering within a kind = menu order. Keep "tested" entries first.
-llm|qwen2.5:0.5b|1|yes|fastest|Snappy on any CPU; fine for simple questions; weakest at multi-step tool use
-llm|qwen2.5:1.5b|2|yes|fast|The balanced low-RAM default: reliable tool routing; good on CPU-only boxes
-llm|qwen3:1.7b|3|yes|fast|Field-tested with this agent: better answers than the qwen2.5 set at similar speed; the suggested default where RAM allows (the agent disables its thinking mode for snappy tool calls)
-llm|qwen2.5:3b|4|yes|medium|Best of the qwen2.5 family; strong reasoning and phrasing; wants GPU or a strong CPU
-llm|qwen2.5:7b|8|no|slower|Strongest reasoning in the family; ~2x slower per answer than 3b; untested with this agent
-llm|llama3.2:3b|4|no|medium|Different family, solid tool calling and a more conversational tone; untested with this agent
+llm|qwen2.5:0.5b|1|yes|fastest|The floor for a 2-core or 4 GB box: fastest answers, leans on the router; alone it chose the right tool 12/45 and armed no alarm
+llm|granite4:micro|3|yes|medium|The default. Best measured by a wide margin: the Investigate step 44/60 (qwen3:1.7b 21/60) because it looks before it decides, 35/45 on the chat cases with the router; about 2x qwen3:1.7b's seconds per answer on CPU
+llm|qwen3:1.7b|3|yes|fast|The fast pick where seconds matter more than the Investigate step: 45/45 on the chat cases with the router, 21/60 on Investigate; the agent disables its thinking mode
+llm|granite4:micro-h|3|no|medium|The hybrid (Mamba) build of the default: 34/60 on Investigate, same RAM; untested on the chat cases
+llm|granite4:tiny-h|5|no|medium|7B mixture of experts with 1B active: 35/60 on Investigate at 4.2 GB on disk; for a box with RAM to spare; untested on the chat cases
 # VLM entries apply to CAPTION_ADAPTER=ollamavlm (vision served by your
 # Ollama). Note: 'moondream' here is Ollama's moondream2 (~1.8b) — the
 # separate moondream-adapter container ships the smaller 0.5b-int8 build.
-vlm|moondream|3|yes|fast|Edge-optimized VQA: answers questions about the scene at low cost; the tested low-RAM default
-vlm|gemma3:4b|4|yes|medium|Field-tested with this agent: clearly better scene answers than moondream; the suggested default where RAM allows
+vlm|moondream|3|yes|fast|The CPU default. The shipped moondream-adapter (0.5b int8) measured on coco128: is-there right 117/126 when present, 104/126 when absent (22 false yeses), people within one 42/61, 7.6 s an answer on CPU
+vlm|qwen3-vl:2b-instruct|4|yes|medium|The GPU default. The non-thinking build (the plain qwen3-vl:2b tag thinks and cannot be told not to). Measured: 115/126 present, 126/126 absent (no false yes), the best counter (within one 50/61), nothing unanswered; 3 s a frame on a GPU then follow-ups free, but ~18 s to encode a frame on four CPU cores, which is why moondream keeps CPU
+vlm|gemma3:4b|4|yes|medium|The previous GPU default. Measured: 113/126 present, 118/126 absent (8 false yeses), within one 48/61; 17 s an answer on a 4-thread CPU, 5 s on a GPU, no cache between questions on a frame
+vlm|qwen3-vl:4b|5|no|medium|The thinking build at 4b: measured 111/126, 123/126, within one 39/61, with the thinking cost the 2b-instruct does not pay; not run through the agent
 vlm|qwen2.5vl:3b|5|no|medium|Strong scene understanding and the best READER of its size (signs, labels, plates); GPU recommended
-vlm|qwen3-vl:4b|5|no|medium|Newest Qwen vision family: strong all-round scene answers and text reading; untested with this agent
 vlm|minicpm-v|6|no|medium|OCR standout: reads dense or small text (delivery labels, screens) better than most; 8b-class
 vlm|llava:7b|6|no|slower|The classic general VQA: most descriptive free-form answers; weaker at reading text than qwen2.5vl
 vlm|llama3.2-vision:11b|9|no|slowest|Strongest scene reasoning of the set; heavy — really wants a GPU with headroom

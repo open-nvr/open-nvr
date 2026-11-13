@@ -41,7 +41,7 @@ from .detector import (
     detections_to_frame,
     to_bgr,
 )
-from .regions import Box, calculate_region, get_min_region_size, intersection_over_union
+from .regions import Box, calculate_region, contained_share, get_min_region_size, intersection_over_union
 from .tracking import Detection, Track, Tracker
 
 log = logging.getLogger("detect_pipeline.pipeline")
@@ -72,21 +72,126 @@ class FrameResult:
     # True when the per-frame region budget dropped at least one candidate
     # this frame (exported as tier0_regions_capped_total — no silent caps).
     regions_capped: bool = False
+    # Detections dropped THIS frame because they stood inside an object
+    # mask (exported as tier0_object_masked_total; see masks.py).
+    masked_detections: int = 0
+    # Detections dropped THIS frame by the camera's per-label size, shape
+    # or score filters (exported as tier0_object_filtered_total; tuning.py).
+    filtered_detections: int = 0
+    # Motion-gate state, for metrics. ``motion_forced_exit`` is a per-frame
+    # EDGE (did the calibration deadline fire on this frame?), not the
+    # detector's running total — a cumulative value fed to a Prometheus
+    # ``inc`` would compound every frame. ``motion_latched_open`` says the
+    # gate gave up on a scene with no static background.
+    motion_forced_exit: bool = False
+    motion_latched_open: bool = False
     # Per-stage wall time for the frame (decode/motion/region/detect/track) — lets
     # the test-bed see *where* time goes, not just the end-to-end total.
     stage_latency_s: dict[str, float] = field(default_factory=dict)
 
 
-def nms(dets: list[Detection], iou_threshold: float = 0.5) -> list[Detection]:
-    """Greedy per-label non-max suppression; keeps the highest score."""
+#: IoU above which two boxes of DIFFERENT labels are the same object.
+#: Well above the per-label threshold: a person standing in front of a car
+#: overlaps it partially and must keep both boxes; a vehicle the detector
+#: reads as "car" AND "truck" produces two near-identical boxes and must
+#: not — that double box was the most visible overlay inaccuracy, and the
+#: tracker (which matches per label) spawned two tracks for it.
+CROSS_LABEL_IOU = 0.85
+#: A same-label box with at least this share of its own area inside a larger
+#: kept box is a PART of that object (a head-and-shoulders box on a person
+#: whose full body is already boxed), not a second one. IoU never catches
+#: it: a part is small, so its IoU with the whole is low. 0 or 1 = off.
+CONTAINMENT = 0.7
+
+
+def nms(
+    dets: list[Detection],
+    iou_threshold: float = 0.5,
+    cross_label_iou: float | None = CROSS_LABEL_IOU,
+    containment: float | None = CONTAINMENT,
+) -> list[Detection]:
+    """Greedy non-max suppression; keeps the highest score.
+
+    Same-label boxes are suppressed above ``iou_threshold``. Boxes of a
+    different label are suppressed only above ``cross_label_iou`` — near
+    coincidence, i.e. one object the model labelled two ways. ``None``,
+    ``<= 0`` or ``>= 1`` disables the cross-label rule; a value below
+    ``iou_threshold`` is raised to it, since suppressing ACROSS labels
+    more eagerly than within one is never the intent.
+
+    A same-label box that is smaller than a kept box and lies at least
+    ``containment`` of its own area inside it is a part of that object —
+    the detector's second box on one person's upper body, lower body or
+    torso, which on a crowded frame it draws beside the whole person with
+    an IoU of 0.4 to 0.5 — and is dropped whatever its IoU. Measured on
+    the Ventuno Q (2026-11-05, replayed from the recordings): with IoU
+    alone a pass of three people posted up to eighteen visits. The one
+    shape of containment that is NOT a part is the group box, a box the
+    detector draws around several people beside their own boxes: it holds
+    two or more same-label boxes, and it is the group box that goes.
+    ``None``, ``<= 0`` or ``>= 1`` disables the rule. A person in front of
+    a car is a different label and never affected.
+
+    The losing label is gone from ``FrameResult.detections`` too, so a
+    benchmark scoring per-label recall (evalcmp) measures this policy as
+    well as the model; run such comparisons with the rule off
+    (``DETECT_NMS_CROSS_LABEL_IOU=0``).
+    """
+    cross: float | None = None
+    if cross_label_iou is not None and 0.0 < cross_label_iou < 1.0:
+        cross = max(cross_label_iou, iou_threshold)
+    contain: float | None = None
+    if containment is not None and 0.0 < containment < 1.0:
+        contain = containment
     kept: list[Detection] = []
     for d in sorted(dets, key=lambda x: x.score, reverse=True):
-        if all(
-            not (k.label == d.label and intersection_over_union(d.box, k.box) > iou_threshold)
-            for k in kept
-        ):
+        duplicate = False
+        for k in kept:
+            limit = iou_threshold if k.label == d.label else cross
+            if limit is not None and intersection_over_union(d.box, k.box) > limit:
+                duplicate = True
+                break
+        if not duplicate:
             kept.append(d)
-    return kept
+    if contain is None or len(kept) < 2:
+        return kept
+    # The part rule, by SIZE rather than score: the detector often scores
+    # the upper body higher than the whole person (the face is the clearest
+    # part), so a score-ordered pass would keep the part and let the whole
+    # through. Largest first; a same-label box mostly inside a larger
+    # survivor is a part of it.
+    # Two shapes of containment, told apart by COUNT. A box with two or
+    # more same-label boxes inside it is a GROUP box: the detector drew one
+    # box around people crossing together (three of them, Ventuno Q
+    # 2026-11-05) beside the box per person; the group box is the duplicate
+    # and the people are kept. A box with exactly one same-label box inside
+    # it is a whole with its PART (an upper body, a torso); the part is the
+    # duplicate. (A person inside a group box whose other members were
+    # missed on this frame reads as a part too and loses this frame; their
+    # track coasts, and the tracker marks the group box's track by the
+    # members it holds over time.)
+    by_size = sorted(kept, key=lambda x: _area(x.box), reverse=True)
+    dropped: set[int] = set()
+    for i, outer in enumerate(by_size):
+        if i in dropped:
+            continue
+        inside = [j for j in range(i + 1, len(by_size))
+                  if j not in dropped and by_size[j].label == outer.label
+                  and contained_share(by_size[j].box, outer.box) >= contain]
+        if len(inside) >= 2:
+            dropped.add(i)                            # a group box
+        elif len(inside) == 1:
+            dropped.add(inside[0])                    # a part of this one
+    whole = [d for j, d in enumerate(by_size) if j not in dropped]
+    # back in score order, as callers expect
+    return [d for d in kept if any(d is w for w in whole)]
+
+
+def _area(b: Box) -> float:
+    return max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+
+
+
 
 
 def select_regions(
@@ -163,8 +268,18 @@ class DetectPipeline:
         stationary_interval: int = 10,
         max_regions: int = 8,
         allowed_labels: frozenset[str] | set[str] | None = None,
+        cross_label_iou: float | None = CROSS_LABEL_IOU,
+        containment: float | None = CONTAINMENT,
+        object_mask: Callable[[list[Detection]], list[Detection]] | None = None,
+        object_filter: Callable[[list[Detection]], list[Detection]] | None = None,
     ) -> None:
         self.frame_source = frame_source
+        # The camera's per-label size/shape/score filters (tuning.py), run
+        # after NMS and the object mask so one object is judged once.
+        self.object_filter = object_filter
+        # The operator's object masks (masks.ObjectMaskFilter): detections
+        # standing inside one are dropped before they can start a track.
+        self.object_mask = object_mask
         self.motion = motion
         self.detector = detector
         self.tracker = tracker
@@ -185,6 +300,12 @@ class DetectPipeline:
         # business confirming tracks for "kite"/"banana" wire false
         # positives — every phantom is a standing re-verify cost. None = all.
         self.allowed_labels = frozenset(allowed_labels) if allowed_labels else None
+        # See nms(): one object the model labels two ways is one box.
+        # DETECT_NMS_CROSS_LABEL_IOU; 0 or 1 turns the rule off.
+        self.cross_label_iou = cross_label_iou
+        # See nms(): a same-label box mostly inside a larger one is a part.
+        # DETECT_NMS_CONTAINMENT; 0 or 1 turns the rule off.
+        self.containment = containment
         self._frame_idx = 0
 
     def process_frame(self, frame) -> FrameResult:
@@ -201,11 +322,18 @@ class DetectPipeline:
             _t = time.monotonic()
             tracks = self.tracker.update([])
             stages["track"] = time.monotonic() - _t
-            return FrameResult(tracks, motion_boxes, [], True, stage_latency_s=stages)
+            return FrameResult(
+                tracks, motion_boxes, [], True, stage_latency_s=stages,
+                motion_forced_exit=getattr(
+                    self.motion, "forced_exit_this_frame", False),
+                motion_latched_open=getattr(
+                    self.motion, "latched_open", False),
+            )
 
         frame_shape = (frame.height, frame.width)
         self._frame_idx += 1
-        track_boxes: list[Box] = []
+        # (last_matched, id, box): the order the budget will consider them in.
+        candidates: list[tuple[float, int, Box]] = []
         skipped = 0
         for t in self.tracker.tracks:
             if (
@@ -221,12 +349,20 @@ class DetectPipeline:
             ):
                 skipped += 1
                 continue
-            track_boxes.append(t.box)
-        # Rotate the track-region candidates by frame index so the per-frame
-        # budget round-robins across tracks instead of starving the tail.
-        if self.max_regions > 0 and len(track_boxes) > 1:
-            off = self._frame_idx % len(track_boxes)
-            track_boxes = track_boxes[off:] + track_boxes[:off]
+            candidates.append((getattr(t, "last_matched", 0.0), t.id, t.box))
+        # Under a region budget the reserve goes to the tracks that have
+        # WAITED LONGEST since their last positive match. This used to be a
+        # round-robin by frame index (`frame_idx % len(track_boxes)`), but
+        # the candidate count changes every frame as tracks spawn, expire
+        # and get stationary-skipped, so the modulo aliased and some tracks
+        # were skipped again and again: measured on a busy dashcam scene
+        # with the budget shed to 4 regions, present objects went 6–11 s
+        # between re-verifications while the median was under 3 s. Oldest
+        # first is deterministic and bounds the wait at ~(tracks / reserve)
+        # frames for everyone; the id breaks ties so equal ages stay stable.
+        if self.max_regions > 0 and len(candidates) > 1:
+            candidates.sort(key=lambda c: (c[0], c[1]))
+        track_boxes: list[Box] = [c[2] for c in candidates]
         _t = time.monotonic()
         regions, regions_capped = select_regions(
             motion_boxes, track_boxes, frame_shape, self.min_region, self.region_multiplier,
@@ -236,6 +372,8 @@ class DetectPipeline:
 
         dets: list[Detection] = []
         bgr = None
+        masked = 0
+        filtered = 0
         detect_latency_s: float | None = None
         if regions:
             _t = time.monotonic()
@@ -258,20 +396,35 @@ class DetectPipeline:
                 dets.extend(detections_to_frame(raws, region))
             if self.allowed_labels is not None:
                 dets = [d for d in dets if d.label in self.allowed_labels]
-            dets = nms(dets)
+            if self.object_mask is not None and dets:
+                before = len(dets)
+                dets = self.object_mask(dets)
+                masked = before - len(dets)
+            dets = nms(dets, cross_label_iou=self.cross_label_iou, containment=self.containment)
+            if self.object_filter is not None and dets:
+                before = len(dets)
+                dets = self.object_filter(dets)
+                filtered = before - len(dets)
             detect_latency_s = time.monotonic() - _t   # pure detector time (this model)
             stages["detect"] = detect_latency_s
 
         # bgr is passed so the tracker can retain each track's best-frame crop
         # for Tier-1 dispatch (#10); None on frames with no detections.
         _t = time.monotonic()
-        tracks = self.tracker.update(dets, bgr, scanned_regions=regions)
+        tracks = self.tracker.update(
+            dets, bgr, scanned_regions=regions,
+            frame_ts=getattr(frame, "ts", None),   # the evidence lookup's key
+        )
         stages["track"] = time.monotonic() - _t
         return FrameResult(
             tracks, motion_boxes, regions, False,
             detections=dets, detect_latency_s=detect_latency_s, stage_latency_s=stages,
             skipped_stationary=skipped, regions_capped=regions_capped,
+            masked_detections=masked, filtered_detections=filtered,
             track_population=self.tracker.population,
+            motion_forced_exit=getattr(
+                self.motion, "forced_exit_this_frame", False),
+            motion_latched_open=getattr(self.motion, "latched_open", False),
         )
 
     def run(self, on_tracks: OnTracks | None = None) -> None:
@@ -288,11 +441,16 @@ class RegionBudgetController:
     Tier-0's cost is dominated by inference, and the region budget is what
     multiplies it: ``max_regions`` crops per frame. On hardware where a single
     inference is slower than the whole frame budget, the worker simply falls
-    further behind every frame — and it has no way to notice. The consequence
-    is not just late detections: the worker stops draining ffmpeg's stdout,
-    ffmpeg blocks on the full pipe, MediaMTX drops the reader, and the session
-    dies. The camera then looks flaky ("Failed reading RTSP data: End of file")
-    when the real cause is us.
+    further behind every frame — and it has no way to notice. Until #507 the
+    consequence was not just late detections: the worker stopped draining
+    ffmpeg's stdout, ffmpeg blocked on the full pipe, MediaMTX dropped the
+    reader, and the session died — a camera that looked flaky ("Failed
+    reading RTSP data: End of file") when the real cause was us. The decoder
+    is drained on its own thread now (frame_source._FrameSlot): a slow
+    detector drops frames, counted in ``tier0_frames_dropped_total``, and
+    never the session. What this controller buys is detecting on MORE of the
+    frames the camera decodes, and not spending CPU on regions the box
+    cannot afford.
 
     Measured on a live 1080p camera with the shipped defaults (8 regions,
     640px input, 2 fps): 3.07s of inference against a 500ms budget — six times

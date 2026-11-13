@@ -3,10 +3,25 @@
 
 [project]
 name = "opennvr-app-sdk"
-version = "0.2.0"
+version = "0.12.0"
 description = "Shared SDK for OpenNVR monitoring apps: §11.5 alert dispatch, zone geometry, keyed TTL state, app manifests, and the Detector / FrameApp base loops."
+readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
+authors = [{ name = "OpenNVR contributors" }]
+keywords = ["opennvr", "nvr", "video", "computer-vision", "surveillance", "sdk"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+    "Topic :: Software Development :: Libraries",
+]
 
 # The SDK owns the dependencies every app used to re-declare:
 # nats-py for the inference-subscribe loop + alert fan-out, httpx for
@@ -15,12 +30,33 @@ dependencies = [
     "PyYAML>=6.0,<7.0",
     "nats-py>=2.6",
     "httpx>=0.27,<1.0",
+    # Streaming inference sessions (InferStream) — KAI-C contract §6.
+    "websockets>=13.0",
 ]
+
+[project.urls]
+Homepage = "https://opennvr.org"
+Documentation = "https://github.com/open-nvr/open-nvr/blob/main/docs/SDK_REFERENCE.md"
+"Developer program" = "https://github.com/open-nvr/open-nvr/blob/main/docs/DEVELOPER_PROGRAM.md"
+Source = "https://github.com/open-nvr/open-nvr/tree/main/sdk/opennvr-app-sdk"
+Changelog = "https://github.com/open-nvr/open-nvr/blob/main/CHANGELOG.md"
+Licensing = "https://github.com/open-nvr/open-nvr/blob/main/sdk/opennvr-app-sdk/LICENSING.md"
+Cookbook = "https://github.com/open-nvr/open-nvr/tree/main/sdk/opennvr-app-sdk/cookbook"
+Issues = "https://github.com/open-nvr/open-nvr/issues?q=label%3Asdk"
+
+[project.scripts]
+opennvr-app = "opennvr_app_sdk.scaffold:main"
 
 [dependency-groups]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23",
+    # Asserts the generated app-contract documents really are OpenAPI 3.1
+    # (tests/test_openapi.py skips without it).
+    "openapi-spec-validator>=0.7",
+    # `opennvr-app ai try` shrinks pictures with Pillow when it is there;
+    # the SDK itself does not need it (tests/test_ai_try.py).
+    "pillow>=10.0",
 ]
 
 [build-system]
@@ -29,6 +65,14 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["opennvr_app_sdk"]
+
+# The Apache NOTICE and the app-boundary statement travel with the
+# installed package, not just with the repository — the reader who has
+# to answer "does my closed app become AGPL?" is usually looking at a
+# site-packages directory, not at GitHub.
+[tool.hatch.build.targets.wheel.force-include]
+"NOTICE" = "opennvr_app_sdk/NOTICE"
+"LICENSING.md" = "opennvr_app_sdk/LICENSING.md"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

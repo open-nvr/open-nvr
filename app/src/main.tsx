@@ -25,11 +25,15 @@ import { queryClient } from './lib/queries'
 import { AppShell } from './shell/AppShell'
 import { AuthProvider, useAuth } from './auth/AuthContext'
 import { PermissionsProvider } from './hooks/usePermissions'
+import { CameraStatusProvider } from './hooks/useCameraStatus'
 import { SnackbarProvider } from './components/Snackbar'
+import { ConfirmProvider } from './components/ui/ConfirmDialog'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { Login } from './views/Login'
 import { MFASetup } from './views/MFASetup'
 import { MFAVerify } from './views/MFAVerify'
+import { ResetPassword } from './views/ResetPassword'
+import { I18nProvider } from './i18n'
 
 // Views are lazy-loaded so each route becomes its own chunk instead of one
 // monolithic bundle. Auth/MFA stay eager: they gate first paint.
@@ -71,21 +75,31 @@ function reloadOnStale<T>(importer: () => Promise<T>): () => Promise<T> {
 
 const importDashboard = reloadOnStale(() => import('./views/Dashboard'))
 const importLiveView = reloadOnStale(() => import('./views/LiveView'))
-const importPlaybackView = reloadOnStale(() => import('./views/PlaybackView'))
 const importSyncPlayback = reloadOnStale(() => import('./views/SyncPlayback'))
 
 const Dashboard = lazy(() => importDashboard().then((m) => ({ default: m.Dashboard })))
 const LiveView = lazy(() => importLiveView().then((m) => ({ default: m.LiveView })))
-const PlaybackView = lazy(() => importPlaybackView().then((m) => ({ default: m.PlaybackView })))
 const SyncPlayback = lazy(() => importSyncPlayback().then((m) => ({ default: m.SyncPlayback })))
+const TourView = lazy(reloadOnStale(() => import('./views/TourView').then((m) => ({ default: m.TourView }))))
+const TourEditor = lazy(reloadOnStale(() => import('./views/TourEditor').then((m) => ({ default: m.TourEditor }))))
 const Cameras = lazy(reloadOnStale(() => import('./views/Cameras').then((m) => ({ default: m.Cameras }))))
+const WebcamPublisher = lazy(reloadOnStale(() => import('./views/WebcamPublisher').then((m) => ({ default: m.WebcamPublisher }))))
 const Vehicles = lazy(reloadOnStale(() => import('./views/Vehicles').then((m) => ({ default: m.Vehicles }))))
 const Occupancy = lazy(reloadOnStale(() => import('./views/Occupancy').then((m) => ({ default: m.Occupancy }))))
+const People = lazy(reloadOnStale(() => import('./views/People').then((m) => ({ default: m.People }))))
+const Tripwires = lazy(reloadOnStale(() => import('./views/Tripwires').then((m) => ({ default: m.Tripwires }))))
+const Loitering = lazy(reloadOnStale(() => import('./views/Loitering').then((m) => ({ default: m.Loitering }))))
+const Perimeter = lazy(reloadOnStale(() => import('./views/Perimeter').then((m) => ({ default: m.Perimeter }))))
+const LeftItems = lazy(reloadOnStale(() => import('./views/LeftItems').then((m) => ({ default: m.LeftItems }))))
+const Deliveries = lazy(reloadOnStale(() => import('./views/Deliveries').then((m) => ({ default: m.Deliveries }))))
+const Gates = lazy(reloadOnStale(() => import('./views/Gates').then((m) => ({ default: m.Gates }))))
+const Notifications = lazy(reloadOnStale(() => import('./views/Notifications').then((m) => ({ default: m.Notifications }))))
+const Search =lazy(reloadOnStale(() => import('./views/Search').then((m) => ({ default: m.Search }))))
+const GuardCompliance = lazy(reloadOnStale(() => import('./views/GuardCompliance')))
 const Settings = lazy(reloadOnStale(() => import('./views/Settings').then((m) => ({ default: m.Settings }))))
 const Events = lazy(reloadOnStale(() => import('./views/Events').then((m) => ({ default: m.Events }))))
 const Updates = lazy(reloadOnStale(() => import('./views/Updates').then((m) => ({ default: m.Updates }))))
 const Logs = lazy(reloadOnStale(() => import('./views/Logs').then((m) => ({ default: m.Logs }))))
-const AIEngine = lazy(reloadOnStale(() => import('./views/AIEngine').then((m) => ({ default: m.AIEngine }))))
 const Compliance = lazy(reloadOnStale(() => import('./views/Compliance').then((m) => ({ default: m.Compliance }))))
 const AlertsIncidents = lazy(reloadOnStale(() => import('./views/AlertsIncidents').then((m) => ({ default: m.AlertsIncidents }))))
 const Integrations = lazy(reloadOnStale(() => import('./views/Integrations').then((m) => ({ default: m.Integrations }))))
@@ -100,7 +114,6 @@ const AIAdapters = lazy(reloadOnStale(() => import('./views/AIAdapters').then((m
 const AppCatalog = lazy(reloadOnStale(() => import('./views/AppCatalog').then((m) => ({ default: m.AppCatalog }))))
 const AppView = lazy(reloadOnStale(() => import('./views/AppView').then((m) => ({ default: m.AppView }))))
 const Cloud = lazy(reloadOnStale(() => import('./views/Cloud').then((m) => ({ default: m.Cloud }))))
-const OnvifTools = lazy(reloadOnStale(() => import('./views/OnvifTools').then((m) => ({ default: m.OnvifTools }))))
 const Register = lazy(reloadOnStale(() => import('./views/Register').then((m) => ({ default: m.Register }))))
 const FirstTimeSetup = lazy(reloadOnStale(() => import('./views/FirstTimeSetup').then((m) => ({ default: m.FirstTimeSetup }))))
 
@@ -109,7 +122,6 @@ const FirstTimeSetup = lazy(reloadOnStale(() => import('./views/FirstTimeSetup')
 // idle-prefetch the other top routes so in-app navigation is instant.
 const routeWarmups: Array<[RegExp, () => Promise<unknown>]> = [
   [/^\/playback\/sync/, importSyncPlayback],
-  [/^\/playback/, importPlaybackView],
   [/^\/live/, importLiveView],
   [/^\/$/, importDashboard],
 ]
@@ -134,12 +146,14 @@ function lazyRoute(element: React.ReactNode) {
   return <Suspense fallback={<RouteFallback />}>{element}</Suspense>
 }
 
-function ProtectedShell() {
+// The same sign-in and MFA gate for every protected page; `children` stand in
+// for the app shell (the bare display route below).
+function ProtectedShell({ children }: { children?: React.ReactNode }) {
   const { user, loading } = useAuth()
   if (loading) return <div className="p-4 text-sm">Loading…</div>
   if (!user) return <Login />
-  if (!user.mfa_enabled) return <MFASetup />
-  return <AppShell />
+  if (!user.mfa_enabled && user.auth_provider !== 'oidc') return <MFASetup />   // the provider owns MFA for SSO accounts
+  return children ?? <AppShell />
 }
 
 function SuspenseOutlet() {
@@ -160,27 +174,48 @@ const router = createBrowserRouter([
         children: [
           { index: true, element: <Dashboard /> },
           { path: 'live', element: <LiveView /> },
-          { path: 'playback', element: <PlaybackView /> },
+          { path: 'live/tour/:tourId', element: <TourView /> },
+          { path: 'tours/new', element: <TourEditor /> },
+          { path: 'tours/:tourId/edit', element: <TourEditor /> },
+          // The old per-camera list; recordings live on the multi-camera page.
+          { path: 'playback', element: <Navigate to="/playback/sync" replace /> },
           { path: 'playback/sync', element: <SyncPlayback /> },
+          { path: 'search', element: <Search /> },
           { path: 'cameras', element: <Cameras /> },
+          { path: 'cameras/:cameraId/publish', element: <WebcamPublisher /> },
           { path: 'vehicles', element: <Vehicles /> },
           { path: 'occupancy', element: <Occupancy /> },
+          { path: 'people', element: <People /> },
+          { path: 'tripwires', element: <Tripwires /> },
+          { path: 'loitering', element: <Loitering /> },
+          { path: 'perimeter', element: <Perimeter /> },
+          { path: 'left-items', element: <LeftItems /> },
+          { path: 'deliveries', element: <Deliveries /> },
+          { path: 'gates', element: <Gates /> },
+          { path: 'notifications', element: <Notifications /> },
+          { path: 'guard-compliance', element: <GuardCompliance /> },
           { path: 'rbac/*', element: <AccessControl /> },
           { path: 'byok', element: <BYOK /> },
           { path: 'network/*', element: <NetworkView /> },
           { path: 'firmware', element: <FirmwareView /> },
           { path: 'updates', element: <Updates /> },
           { path: 'logs', element: <Logs /> },
-          { path: 'ai-engine', element: <AIEngine /> },
+          { path: 'ai-engine', element: <Navigate to="/ai-adapters" replace /> },
           { path: 'byom', element: <AIModelsBYOM /> },
           { path: 'ai-detection-results', element: <AIDetectionResults /> },
           { path: 'ai-adapters', element: <AIAdapters /> },
           { path: 'app-catalog', element: <AppCatalog /> },
           { path: 'app-catalog/:appId', element: <AppView /> },
+          // The same page under Applications: an app with no first-class
+          // vertical (Footage Search, the Agent) is still an application, not
+          // a catalog entry, and is configured here like every other one.
+          { path: 'apps/:appId', element: <AppView /> },
           { path: 'compliance', element: <Compliance /> },
           { path: 'alerts-incidents', element: <AlertsIncidents /> },
+          // One alarms page: Alerts & Incidents opens on its Alarms tab, which
+          // renders this same view. /alarms stays valid for old links.
+          { path: 'alarms', element: <Navigate to="/alerts-incidents" replace /> },
           { path: 'integrations', element: <Integrations /> },
-          { path: 'onvif-tools', element: <OnvifTools /> },
           { path: 'cloud', element: <Cloud /> },
           { path: 'support', element: <Support /> },
           { path: 'settings/*', element: <Settings /> },
@@ -190,24 +225,40 @@ const router = createBrowserRouter([
       },
     ],
   },
+  // A tour on a display board: the whole window, no app shell, so a kiosk
+  // browser shows nothing but the wall. AppShell normally provides the
+  // camera-status socket, so it is provided here.
+  {
+    path: '/display/tour/:tourId',
+    element: (
+      <ProtectedShell>
+        <CameraStatusProvider>{lazyRoute(<TourView display />)}</CameraStatusProvider>
+      </ProtectedShell>
+    ),
+  },
   { path: '/login', element: <Login /> },
   { path: '/first-time-setup', element: lazyRoute(<FirstTimeSetup />) },
   { path: '/register', element: lazyRoute(<Register />) },
   { path: '/mfa-setup', element: <MFASetup /> },
   { path: '/mfa-verify', element: <MFAVerify /> },
+  { path: '/reset-password', element: lazyRoute(<ResetPassword />) },
 ])
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <ErrorBoundary title="OpenNVR hit an unexpected error">
-    <QueryClientProvider client={queryClient}>
-      <AuthProvider>
-        <PermissionsProvider>
-          <SnackbarProvider>
-            <RouterProvider router={router} />
-          </SnackbarProvider>
-        </PermissionsProvider>
-      </AuthProvider>
-    </QueryClientProvider>
+    <I18nProvider>
+      <QueryClientProvider client={queryClient}>
+        <AuthProvider>
+          <PermissionsProvider>
+            <SnackbarProvider>
+              <ConfirmProvider>
+                <RouterProvider router={router} />
+              </ConfirmProvider>
+            </SnackbarProvider>
+          </PermissionsProvider>
+        </AuthProvider>
+      </QueryClientProvider>
+    </I18nProvider>
   </ErrorBoundary>
 )
 

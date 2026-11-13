@@ -53,6 +53,32 @@ recognition_threshold: 0.5
 # per known person, or unknown bucket) within this window.
 dedup_window_seconds: 60.0
 
+# ── Deciding per visit ───────────────────────────────────────────
+# A face opens a visit; a match ends it at once; a visit that runs its
+# hold without a match is decided from its best frame. Without the
+# hold, the first (side-on, blurred) frame of every approach is a
+# stranger alert, corrected one frame later by the name.
+decision_hold_seconds: 4.0     # 0 decides on the first frame, with corrections after
+# A miss whose nearest enrolled face scored at or above this (and
+# below recognition_threshold) is recorded as "unclear" on the wall,
+# not alerted: a known person seen badly, far more often than not.
+# 0 switches the band off and alerts on every miss.
+unknown_score: 0.35
+# Frames not worth deciding from. Faces narrower than min_face_px, or
+# scored below min_face_confidence by the detector, neither open nor
+# decide a visit. The frames are the camera's main stream, so 100 px
+# is a face within a few metres of the door; below it a miss says
+# distance, not stranger. A match is never gated by size.
+min_face_px: 100
+min_face_confidence: 0.6
+# Matching frames the same person needs before the visit is announced
+# as known. 1 announces on the first match; 2 trades a second of delay
+# for a second look (a lone match is then recorded as unclear, leaning
+# to that name, and the next matching frame upgrades it).
+min_match_reads: 1
+# No face for this long and the next face is a new visit.
+visit_gap_seconds: 10.0
+
 # Attach a base64 JPEG of the camera frame to alerts when an
 # UNKNOWN face is detected. A small downstream relay can forward
 # the snapshot to Telegram / ntfy / Discord. Known-face alerts
@@ -65,6 +91,58 @@ attach_snapshot_for_unknowns: true
 # configured for >1 MB payloads). A snapshot above the cap is
 # dropped from the envelope; the alert still fires.
 snapshot_max_bytes: 716800
+
+# How long the door remembers who called. The history lives in this
+# app's durable store in core, so it survives restarts and redeploys —
+# which is what makes "who came three days ago" answerable at all.
+# Bounded by a count as well as an age: the log is one value rewritten
+# on every visit, and a busy porch must not turn that into a megabyte.
+history_days: 30
+history_max: 200
+
+# How loud a face is. A stranger at a family front door and a stranger
+# at a depot gate are the same event and not the same emergency, so the
+# level is the site's to set. `critical` is the loudest the platform
+# has; the others are high, medium, low and info.
+unknown_severity: high
+
+# Recognised people keep their per-category level unless this is set —
+# family/resident/friend low, staff/contractor/visitor info. The point
+# of enrolling somebody is that they are not an alarm, so leaving this
+# empty is usually right. A watchlist match and an expired pass are
+# decided before it and are never quietened by it.
+#known_severity: low
+
+# The bell. An alert fires for every visit whatever these say — these
+# decide only whether something RINGS. This app does not make the
+# noise: the decision rides in the alert envelope, so a relay into
+# ntfy/Telegram, a Home Assistant automation or a smart speaker plays
+# the tone. When nothing rings, the envelope says why.
+chime_enabled: true
+
+# HH:MM-HH:MM. Inside it only the `alarm` tone rings: a delivery at
+# 03:00 goes in the log, a stranger at 03:00 still wakes the house.
+# Empty disables quiet hours entirely.
+quiet_hours: ""
+
+# Least gap between rings for the same caller at the same door.
+# Deliberately longer than dedup_window_seconds: being told again in a
+# feed costs nothing, being rung at again costs attention.
+rechime_seconds: 300
+
+# Tone per person category, overriding the shipped defaults.
+# One of: none | chime | ding_dong | alarm.
+# The people who live here are announced WITHOUT ringing — a bell that
+# rings when the family comes home is the bell people stop hearing.
+# chime_tones:
+#   family: none
+#   resident: none
+#   friend: chime
+#   staff: chime
+#   contractor: ding_dong
+#   visitor: ding_dong
+#   watchlist: alarm
+#   unknown: ding_dong
 
 # Alert delivery channels — webhook + NATS. Both independent of
 # the always-on stdout channel.

@@ -1,0 +1,50 @@
+# Rule tables for the Investigate cases (RFC #620, facts + rules).
+#
+# With a rule table the model never chooses the outcome: it reports the
+# template's facts (plus a reason and a confidence), and the first rule
+# whose `when` matches gives the outcome; no match is "unsure" (no_rule).
+# An empty `when` matches everything: the default, last.
+#
+# Each table is the template's own instructions, written as rules, and
+# nothing else:
+#   night intrusion  "Guards on patrol are not intruders. ... Alert only when
+#                     someone who should not be there is on site."
+#   camera offline   "A short drop that has recovered needs nothing. A camera
+#                     that is still down needs maintenance. Signs of tampering
+#                     are an alert."
+#   morning report   "Guards' patrols are normal. Anyone else on site at
+#                     night, or anything left open, needs review."
+# Investigate-on-request steps answer a question; the answer is itself the
+# fact, so they have no table.
+#
+# FROZEN before the held-out cases were written (#620): changing a rule
+# after seeing results on cases would let the rules learn the cases. A new
+# rule needs new cases it has not seen.
+#
+# Quote "yes" and "no": YAML reads them as booleans otherwise.
+
+night_intrusion_triage:
+  facts:
+    who: [staff, visitor, intruder, animal, unknown]
+  rules:
+    - {when: {who: intruder}, then: alert}
+    - {when: {who: [staff, animal]}, then: ignore}
+    - {when: {who: [visitor, unknown]}, then: watch}
+
+camera_offline_triage:
+  facts:
+    cause: [network, power, tamper, obstruction, unknown]
+    recovered: ["yes", "no"]
+  rules:
+    - {when: {cause: tamper}, then: alert}
+    - {when: {recovered: "yes"}, then: wait}
+    - {then: notify_maintenance}
+
+morning_site_report:
+  facts:
+    unrecognised_person_on_site: ["yes", "no"]
+    anything_left_open: ["yes", "no"]
+  rules:
+    - {when: {unrecognised_person_on_site: "yes"}, then: review}
+    - {when: {anything_left_open: "yes"}, then: review}
+    - {then: all_clear}

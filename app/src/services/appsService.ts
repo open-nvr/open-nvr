@@ -28,9 +28,27 @@ export const appsService = {
   // the skill each installed app provides (status + published events).
   getSkills: () => api.get('/api/v1/skills'),
   enableApp: (id: string) => api.post(`/api/v1/apps/${id}/enable`),
+  // Licensed apps (manifest entitlement: license_key): store a key and
+  // have the app verify it; re-check; forget it. Superuser only.
+  setAppLicense: (id: string, licenseKey: string) =>
+    api.put(`/api/v1/apps/${id}/license`, { license_key: licenseKey }),
+  verifyAppLicense: (id: string) => api.post(`/api/v1/apps/${id}/license/verify`),
+  clearAppLicense: (id: string) => api.delete(`/api/v1/apps/${id}/license`),
+  // Network egress: what the listing declared, what the operator allowed,
+  // what the proxy refused; replace the operator's allow list (superuser).
+  getAppEgress: (id: string) => api.get(`/api/v1/apps/${id}/egress`),
+  setAppEgress: (id: string, allow: string[]) =>
+    api.put(`/api/v1/apps/${id}/egress`, { allow }),
+  // May this app's overlay.boxes.v1 be drawn over the live video? (superuser)
+  setAppOverlay: (id: string, enabled: boolean) =>
+    api.put(`/api/v1/apps/${id}/overlay`, { enabled }),
   disableApp: (id: string) => api.post(`/api/v1/apps/${id}/disable`),
   updateAppConfig: (id: string, config: Record<string, any>) =>
     api.put(`/api/v1/apps/${id}/config`, config),
+  // The camera picker: every camera the user can see, whether this app
+  // picked it, and the skill/consumer a pick is written under (picks go
+  // through cameraService.declareSkillCamera / releaseSkillCamera).
+  getAppCameras: (id: string) => api.get(`/api/v1/apps/${id}/cameras`),
   getAppStatus: (id: string) => api.get(`/api/v1/apps/${id}/status`),
   // RFC-0002 Phase 4 app-surface convention: the app's self-contained
   // HTML dashboard, proxied off its contract port. Rendered in a

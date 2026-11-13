@@ -45,15 +45,18 @@ If you read the doc that should answer your question and it doesn't, that's a si
 
 ### Real-time channels
 
-Coming with the v0.1 launch wave: a community chat (Discord or Matrix —
-to be announced when set up). Until then, Discussions is the right
-synchronous-feeling channel; maintainers watch it actively.
+**Discord** — [join the OpenNVR server](https://opennvr.org/discord). Questions,
+"is this expected?", showing what you built. Maintainers are there; for
+anything that needs tracking, they will ask you to open an Issue or a
+Discussion so it does not get lost in chat.
 
 ---
 
 ## Commercial support (paid)
 
-Contact: **[contact@opennvr.org](mailto:contact@opennvr.org)**
+Contact: **[contact@opennvr.org](mailto:contact@opennvr.org)** — the
+enterprise offer as a whole (appliance, evidence pack, §889, support,
+custom AI) is on one page: [ENTERPRISE.md](ENTERPRISE.md).
 
 Commercial support exists because some deployments need things community
 volunteers can't offer at scale: response-time guarantees, deployment
@@ -92,6 +95,8 @@ ISO 27001 / SOC 2 / HIPAA / FedRAMP / similar — we deliver the audit
 artefacts mapped to your specific framework, including the audit-log
 queries, control-mapping spreadsheets, and operator-runbook templates
 the auditor will want. Builds on the public [COMPLIANCE.md](COMPLIANCE.md)
+and on the pack any deployment can generate itself
+(`scripts/evidence_pack.py`, see [ENTERPRISE.md](ENTERPRISE.md#the-evidence-pack)),
 but tailored to your control framework.
 
 #### SLA-backed incident response

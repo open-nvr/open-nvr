@@ -47,6 +47,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+import os
+
 import httpx
 
 from kai_c.audit import AuditEventType, AuditStore
@@ -206,6 +208,30 @@ def _capabilities_diff(
     return diff
 
 
+#: How long the proxy waits for one adapter answer. A caption on a CPU
+#: vision model can take a minute; the hard-coded 30 s this replaced cut
+#: every such call off, the caller read the 502 as a plain failure rather
+#: than a timeout, and asked again — the box computed captions nobody
+#: ever saved (Ventuno Q, 2026-11-05). Core's own enrichment timeout is
+#: 90 s by default; this default matches it so core, not the proxy, is the
+#: one that decides.
+DEFAULT_INFER_TIMEOUT_SECONDS = 90.0
+
+
+def infer_timeout_s() -> float:
+    raw = os.environ.get("KAI_C_INFER_TIMEOUT_S", "").strip()
+    try:
+        return max(1.0, float(raw)) if raw else DEFAULT_INFER_TIMEOUT_SECONDS
+    except ValueError:
+        return DEFAULT_INFER_TIMEOUT_SECONDS
+
+
+class AdapterTimeout(Exception):
+    """The adapter accepted the call and did not answer in time: a 504 to
+    the caller, which counts it as a timeout (its breaker), not as the
+    adapter being unreachable."""
+
+
 # ── Registry state ─────────────────────────────────────────────────
 
 
@@ -345,6 +371,15 @@ class AdapterRegistry:
         # queue for adapters that SHOULD register but couldn't yet.
         self._state_store = state_store or RegistryStateStore(None)
         self._pending: dict[str, PendingRegistration] = {}
+        # Read the receipts NOW, at construction, not in
+        # ``restore_persisted``. The lifespan handler runs the
+        # ADAPTER_REGISTRY seed loop first, and every registration
+        # persists — so by the time restore runs, the file has already
+        # been rewritten from a registry that holds no runtime adapters
+        # yet. Snapshotting here (plus the ``_restored`` carry-over in
+        # ``_persist_locked``) makes those writes lossless.
+        self._boot_receipts: list[dict[str, Any]] = self._state_store.load()
+        self._restored = False
         self._lock = threading.Lock()
         # §05 observability — bounded per-adapter rollups fed by the
         # /metrics scrape on the same 60s poll (see refresh()).
@@ -774,6 +809,21 @@ class AdapterRegistry:
                     "url": p.url,
                     "granted_permissions": sorted(p.granted_keys),
                 })
+        # Receipts read at construction that ``restore_persisted`` has
+        # not consumed yet are still ours to keep. Without this, the
+        # first seed registration of the boot — ADAPTER_REGISTRY always
+        # holds at least ``default`` — serialises an EMPTY runtime set
+        # over the file, and the restore that follows reads back the
+        # receipts it just destroyed. That silently unregistered
+        # fast_plate_ocr on every restart: the exact #371 hole this
+        # file exists to close. A name a seed has since claimed is
+        # dropped on purpose — configuration beats history.
+        if not self._restored:
+            known = {e["name"] for e in entries}
+            for receipt in self._boot_receipts:
+                if receipt["name"] in known or receipt["name"] in self._adapters:
+                    continue
+                entries.append(dict(receipt))
         entries.sort(key=lambda e: e["name"])
         self._state_store.save(entries)
 
@@ -832,9 +882,12 @@ class AdapterRegistry:
         seed — configuration wins over history). Returns what was
         queued, for the boot log. Actual registration happens on the
         first ``retry_pending`` pass, so an unreachable adapter can
-        never slow down boot."""
+        never slow down boot.
+
+        Reads the snapshot taken at construction, not the file: the
+        seed loop that ran first has already rewritten it."""
         queued: list[PendingRegistration] = []
-        for entry in self._state_store.load():
+        for entry in self._boot_receipts:
             name = entry["name"]
             with self._lock:
                 if name in self._adapters or name in self._pending:
@@ -853,6 +906,13 @@ class AdapterRegistry:
                 "restoring %d persisted adapter registration(s): %s",
                 len(queued), ", ".join(p.name for p in queued),
             )
+        # The snapshot has been consumed — every entry worth keeping is
+        # now in ``_pending``. Flip the flag and write once, so a
+        # receipt a seed claimed (or one that was never restorable)
+        # leaves the file instead of lingering forever.
+        with self._lock:
+            self._restored = True
+            self._persist_locked()
         return queued
 
     async def retry_pending(self) -> None:
@@ -888,10 +948,27 @@ class AdapterRegistry:
                     if current is not None:
                         current.attempts += 1
                         current.last_error = str(exc)
-                logger.debug(
-                    "registration retry failed for %s @ %s: %s",
-                    p.name, p.url, exc,
-                )
+                    attempts = current.attempts if current is not None else 0
+                # WARNING on the first failure and every twentieth after,
+                # not DEBUG on all of them. A persisted adapter whose
+                # registration keeps failing is the thing an operator most
+                # needs to hear about — the plate reader that answered 401
+                # for an hour after a secret changed was invisible in the
+                # logs precisely because this line was DEBUG, and it took
+                # a manual poll of KAI-C to find out why plates stopped.
+                if attempts == 1 or attempts % 20 == 0:
+                    logger.warning(
+                        "adapter %s is still not registered after %d "
+                        "attempt(s) — %s (url %s). It stays queued and is "
+                        "retried every poll; see the `deferred` list on "
+                        "GET /api/v1/adapters.",
+                        p.name, attempts, exc, p.url,
+                    )
+                else:
+                    logger.debug(
+                        "registration retry failed for %s @ %s: %s",
+                        p.name, p.url, exc,
+                    )
                 continue
             # Registered. Re-apply the recorded consent through the
             # NORMAL grant paths (audited, drift-safe): seeds get the
@@ -1037,8 +1114,13 @@ class AdapterRegistry:
                 f"{adapter.url}/infer",
                 json=payload,
                 headers={"X-Correlation-Id": correlation_id},
-                timeout=30.0,
+                timeout=infer_timeout_s(),
             )
+        except httpx.TimeoutException as exc:
+            proxy_metrics.record(
+                adapter_name, "timeout", time.monotonic() - started)
+            raise AdapterTimeout(
+                f"{adapter_name} gave no answer within {infer_timeout_s():.0f} s") from exc
         except Exception:
             proxy_metrics.record(
                 adapter_name, "exception", time.monotonic() - started)

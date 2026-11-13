@@ -42,6 +42,14 @@ PLACEHOLDER_FRAGMENTS: tuple[str, ...] = (
     "replace-me",
     "replaceme",
     "example",
+    # The values .env.example ships with. They are public, and nothing
+    # above matches them, so a .env copied from the example and never
+    # edited (BSD sed made generate-secrets.sh a no-op on macOS) booted.
+    "dev_postgres",
+    "dev_jwt_secret",
+    "dev_internal_api",
+    "dev_mediamtx",
+    "cklghtp4rwz8j9",
 )
 
 # Private alias kept for older import sites.

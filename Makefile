@@ -7,7 +7,7 @@
 
 PY ?= python3
 
-.PHONY: help secrets secrets-env check-secrets sync-agent-tasks validate-apps-index
+.PHONY: help secrets secrets-env check-secrets sync-agent-tasks validate-apps-index validate-adapters-index pin-apps-index sdk-docs sdk-site sdk-site-serve
 
 help:
 	@echo "OpenNVR Makefile targets:"
@@ -21,6 +21,14 @@ help:
 	@echo "                           camera-agent bundle (keeps the parity test green)."
 	@echo "  make validate-apps-index Validate server/config/apps_index.yml (App"
 	@echo "                           Store submission gate — run before opening a PR)."
+	@echo "  make pin-apps-index      Release step: write every catalog app's current"
+	@echo "                           image digest into apps_index.yml (cosign-verified)."
+	@echo "  make sdk-site            Build the published App SDK reference site"
+	@echo "                           (mkdocs-material + mkdocstrings) to"
+	@echo "                           sdk/opennvr-app-sdk/site/."
+	@echo "  make sdk-site-serve      Serve it with live reload on :8001."
+	@echo "  make sdk-docs            Render the App SDK's public API (docstrings) to"
+	@echo "                           sdk/opennvr-app-sdk/docs/api/ with pdoc."
 
 # --------------------------------------------------------------------------
 # make sync-agent-tasks
@@ -103,3 +111,48 @@ sys.exit('server/.env still contains placeholder values:') if errs else print('s
 # See docs/CONTRIBUTING_APPS.md.
 validate-apps-index:
 	@$(PY) scripts/validate_apps_index.py
+
+# --------------------------------------------------------------------------
+# make pin-apps-index
+# --------------------------------------------------------------------------
+# The release step that makes one-click installs deploy exact, signed
+# bytes: asks GHCR what each catalog image's tag resolves to, verifies the
+# signature with cosign, and writes image_digest into apps_index.yml
+# (textually — the comments survive). Then validate, commit, tag.
+validate-adapters-index:
+	@$(PY) scripts/validate_adapters_index.py
+
+pin-apps-index:
+	@$(PY) scripts/pin_apps_index.py --verify
+	@$(PY) scripts/validate_apps_index.py
+
+# --------------------------------------------------------------------------
+# make sdk-site / sdk-site-serve / sdk-docs
+# --------------------------------------------------------------------------
+# The published API reference (opennvr.org/sdk): mkdocs-material +
+# mkdocstrings, so the site IS the docstrings. Navigation and the reference
+# pages come from opennvr_app_sdk.API_TIERS via scripts/gen_reference.py —
+# tests/test_docs_site.py fails if the generated pages are stale.
+#
+# Generated HTML is not committed. Needs uv (throwaway installs); mkdocs is
+# pinned below 2.0, which removes the plugin system this site depends on.
+SDK_DOCS_DEPS = --with "mkdocs<2" --with mkdocs-material --with mkdocstrings-python \
+	--with pymdown-extensions --with ruff --python 3.12
+
+# Both steps run inside the SAME uv environment: gen_reference.py imports
+# the SDK to read API_TIERS, so a bare system python3 fails on httpx.
+sdk-site:
+	@cd sdk/opennvr-app-sdk && uv run $(SDK_DOCS_DEPS) python scripts/gen_reference.py \
+		&& uv run $(SDK_DOCS_DEPS) mkdocs build --strict
+	@echo "→ sdk/opennvr-app-sdk/site/index.html"
+
+sdk-site-serve:
+	@cd sdk/opennvr-app-sdk && uv run $(SDK_DOCS_DEPS) python scripts/gen_reference.py \
+		&& uv run $(SDK_DOCS_DEPS) mkdocs serve -a 127.0.0.1:8001
+
+# The older flat pdoc dump. Kept for a quick local look at one module;
+# `make sdk-site` is what gets published.
+sdk-docs:
+	@cd sdk/opennvr-app-sdk && uv run --with pdoc --python 3.12 \
+		pdoc opennvr_app_sdk -o docs/api --docformat restructuredtext
+	@echo "→ sdk/opennvr-app-sdk/docs/api/index.html"

@@ -1,0 +1,470 @@
+# Copyright (c) 2026 OpenNVR
+# This file is part of OpenNVR.
+#
+# OpenNVR is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# OpenNVR is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
+
+"""Alerts-inbox consumer — lands §11.5 app alerts in the operator inbox.
+
+Every app built on the SDK publishes its alerts to
+``opennvr.alerts.{source.kind}.{source.name}.{camera_id}``; the LPR
+app's shipped config even points ``nats_alerts_url`` at the compose
+broker "so the operator-UI alerts inbox ... pick[s] them up". Until this
+module, nothing did: alerts reached stdout and the bus and stopped, so
+an armed "alarm on unknown vehicle" fired into a log nobody watches.
+
+One consumer, wildcard subscription, one row per alert in ``app_alerts``
+(the inbox the UI polls, rings, and acknowledges). Dedup is the
+producer's ``alert_id`` — NATS is at-least-once and this process
+reconnects, so a redelivered alert must never become a second ringing
+row.
+
+Same best-effort posture as ``plate_event_consumer``: no NATS URL or no
+nats-py degrades to "alerts stay in the app logs", and the loop never
+raises into the task runner.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from datetime import UTC
+
+logger = logging.getLogger(__name__)
+
+SUBJECT = "opennvr.alerts.>"
+
+#: Reconnect cadence after a connect/subscribe failure (see
+#: plate_event_consumer for the rationale — slow on purpose).
+_RETRY_SECONDS = 60.0
+
+_SEVERITIES = ("low", "medium", "high", "critical")
+#: Levels apps use that map onto ours. Anything not listed here or in
+#: _SEVERITIES is an unknown value and surfaces as "high" (see below).
+_SEVERITY_ALIASES = {"info": "low", "notice": "low", "debug": "low",
+                     "warning": "medium", "warn": "medium", "error": "high"}
+
+#: Ring configuration lives in SecuritySetting under this key. The UI
+#: reads it to decide what each severity does in the browser:
+#:   "none"       — badge only, no sound
+#:   "ping"       — one chime when the alert arrives
+#:   "continuous" — rings until every alert of that severity is
+#:                  acknowledged (the camera-agent's "siren" behaviour)
+RING_CONFIG_KEY = "alert_ring_config"
+RING_MODES = ("none", "ping", "continuous")
+DEFAULT_RING_CONFIG = {
+    "low": "none",
+    "medium": "ping",
+    "high": "continuous",
+    "critical": "continuous",
+}
+
+
+def normalize_ring_config(raw: object) -> dict[str, str]:
+    """Overlay ``raw`` on the defaults, dropping unknown severities and
+    unknown modes — a corrupt stored value must never silence critical
+    alerts OR make 'low' scream; it degrades to the defaults."""
+    merged = dict(DEFAULT_RING_CONFIG)
+    if isinstance(raw, dict):
+        for sev, mode in raw.items():
+            if sev in _SEVERITIES and mode in RING_MODES:
+                merged[sev] = mode
+    return merged
+
+
+def apply_alert(envelope: object, db=None, out: dict | None = None) -> str:
+    """Store one §11.5 alert envelope into the inbox.
+
+    ``db``: an open session to write through (core raising its own
+    alerts inside a request, e.g. an egress denial); by default a fresh
+    one is opened and closed here.
+
+    Pure-decision core, unit-testable without a bus. Status tokens:
+
+    * ``"stored"``     — new row in ``app_alerts``.
+    * ``"duplicate"``  — this ``alert_id`` is already in the inbox
+      (at-least-once redelivery); left untouched.
+    * ``"malformed"``  — not a dict, or missing/empty ``title`` or
+      ``alert_id``; dropped with a debug line.
+    """
+    if not isinstance(envelope, dict):
+        return "malformed"
+    alert_id = envelope.get("alert_id")
+    title = envelope.get("title")
+    if not isinstance(alert_id, str) or not alert_id.strip():
+        return "malformed"
+    if not isinstance(title, str) or not title.strip():
+        return "malformed"
+
+    severity = envelope.get("severity")
+    if isinstance(severity, str):
+        severity = severity.strip().lower()
+    # Apps (the LPR example among them) fire routine notices at "info",
+    # a level below "low" that the inbox does not have. Field bug: every
+    # plain "Plate X read" was promoted to HIGH by the fallback below and
+    # rang the beep — and turning off the unknown-vehicle alarm changed
+    # nothing, because those were never unknown-vehicle alerts. Notices
+    # are the lowest tier we have, never the second-highest.
+    severity = _SEVERITY_ALIASES.get(severity, severity)
+    if severity not in _SEVERITIES:
+        # Unknown severity must still SURFACE — an app bug in one field
+        # cannot be allowed to hide a fired alert. High, not critical:
+        # never escalate by accident either.
+        severity = "high"
+
+    fired_at = _parse_fired_at(envelope.get("fired_at"))
+    # When the thing this alert is ABOUT was seen. Producers that know it
+    # put it in the alert's evidence (the LPR app forwards the plate
+    # event's observed_at); everyone else leaves the row undated and the
+    # UI falls back to fired_at. Evidence is free-form by contract, so a
+    # non-dict or a junk string is simply "not sent".
+    evidence = envelope.get("evidence")
+    observed_at = _parse_fired_at(
+        evidence.get("observed_at") if isinstance(evidence, dict) else None
+    )
+    source = envelope.get("source")
+    source_kind = source_name = None
+    if isinstance(source, dict):
+        source_kind = _clip(source.get("kind"), 30)
+        source_name = _clip(source.get("name"), 100)
+
+    # Photos come out of the evidence dict and into their own column, so
+    # that what remains is small enough to survive _json_or_none.
+    evidence, images = _split_images(evidence)
+    alert_type = _clip(envelope.get("alert_type"), 40) or _type_from_tags(
+        envelope.get("tags"))
+
+    from datetime import datetime
+
+    from models import AppAlert
+
+    own_session = db is None
+    if own_session:
+        from core.database import SessionLocal
+
+        db = SessionLocal()
+    try:
+        exists = (
+            db.query(AppAlert.id)
+            .filter(AppAlert.alert_id == alert_id.strip()[:64])
+            .first()
+        )
+        if exists is not None:
+            return "duplicate"
+        row = AppAlert(
+            alert_id=alert_id.strip()[:64],
+            fired_at=fired_at or datetime.now(UTC),
+            severity=severity,
+            title=title.strip()[:200],
+            description=_clip(envelope.get("description"), 4000),
+            source_kind=source_kind,
+            source_name=source_name,
+            camera_id=_clip(envelope.get("camera_id"), 60),
+            correlation_id=_clip(envelope.get("correlation_id"), 64),
+            evidence=_json_or_none(evidence),
+            tags=_json_or_none(envelope.get("tags")),
+            alert_type=alert_type,
+            images=_json_or_none(images) if images else None,
+            observed_at=observed_at,
+        )
+        # Snapshot BEFORE commit: commit expires the instance, and every
+        # attribute read after it is a fresh SELECT the write path has no
+        # reason to depend on.
+        stored = {
+            "alert_id": row.alert_id, "severity": severity,
+            "title": row.title, "description": row.description,
+            "camera_id": row.camera_id, "fired_at": str(row.fired_at),
+        }
+        db.add(row)
+        db.commit()
+        if out is not None:
+            # For the live push (HA-111): what was STORED, normalised,
+            # rather than the raw envelope.
+            out.update(stored, id=row.id, source_kind=source_kind,
+                       source_name=source_name, alert_type=alert_type,
+                       correlation_id=row.correlation_id,
+                       image_names=sorted(images) if images else [],
+                       at=observed_at or row.fired_at)
+        logger.info(
+            "alert inbox: [%s] %s (camera=%s source=%s alert_id=%s)",
+            severity.upper(), stored["title"], stored["camera_id"],
+            source_name or "?", stored["alert_id"],
+        )
+        # Beyond the browser: phone call / SMS / hooter relay per the
+        # configured alarm actions — fire-and-forget, the inbox write
+        # must never wait on a phone network (see alarm_actions).
+        try:
+            from services.alarm_actions import dispatch_in_background
+
+            dispatch_in_background(stored)
+        except Exception:  # noqa: BLE001
+            logger.debug("alarm action dispatch failed to start",
+                         exc_info=True)
+        return "stored"
+    finally:
+        if own_session:
+            db.close()
+
+
+def _clip(value: object, limit: int) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value[:limit] if value else None
+
+
+#: Evidence keys an app may hang a photo on. ``images`` is the shape to
+#: use; the rest are what the apps written before this column existed
+#: send, kept working rather than broken.
+_IMAGE_KEYS = ("images", "snapshot_b64", "face_b64", "body_b64", "scene_b64")
+_JSON_MAX = 8000
+
+
+def _split_images(evidence: object) -> tuple[object, dict[str, str]]:
+    """Pull photos out of an evidence dict into ``{name: rel_path}``.
+
+    Two forms arrive here. Apps on the current SDK upload their JPEGs to
+    the evidence store first and send ``images: {name: rel_path}`` —
+    nothing to do but lift it out. Older apps inline base64 (the
+    doorbell's ``snapshot_b64``), which is what made the whole evidence
+    field unreadable; those are written to the store HERE so they behave
+    like the new shape instead of being lost.
+    """
+    if not isinstance(evidence, dict):
+        return evidence, {}
+    rest = {k: v for k, v in evidence.items() if k not in _IMAGE_KEYS}
+    images: dict[str, str] = {}
+
+    declared = evidence.get("images")
+    if isinstance(declared, dict):
+        for name, rel in declared.items():
+            if isinstance(rel, str) and rel.strip():
+                images[str(name)[:32]] = rel.strip()[:200]
+
+    for key in _IMAGE_KEYS[1:]:
+        raw = evidence.get(key)
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        name = key.removesuffix("_b64")
+        if name in images:
+            continue
+        rel = _store_b64_jpeg(raw)
+        if rel:
+            images[name] = rel
+    return rest, images
+
+
+def _store_b64_jpeg(raw: str) -> str | None:
+    """A base64 JPEG into the evidence store; None if it isn't one.
+
+    Never raises: an app sending a truncated or non-JPEG string must
+    lose its photo, not its alert.
+    """
+    import base64
+
+    try:
+        from services.evidence_store import save_evidence_jpeg
+
+        payload = raw.split(",", 1)[1] if raw.startswith("data:") else raw
+        return save_evidence_jpeg(base64.b64decode(payload, validate=False))
+    except Exception:  # noqa: BLE001
+        logger.debug("alert evidence image rejected", exc_info=True)
+        return None
+
+
+def _type_from_tags(tags: object) -> str | None:
+    """``tags: ["type:no_scan"]`` as an alert_type, for producers that
+    tagged a kind before the column existed."""
+    if not isinstance(tags, list):
+        return None
+    for tag in tags:
+        if isinstance(tag, str) and tag.startswith("type:") and tag[5:].strip():
+            return tag[5:].strip()[:40]
+    return None
+
+
+def _json_or_none(value: object) -> str | None:
+    if value in (None, {}, []):
+        return None
+    try:
+        text = json.dumps(value)
+    except (TypeError, ValueError):
+        return None
+    if len(text) <= _JSON_MAX:
+        return text
+    # Over the ceiling. Slicing the string here is what lost evidence
+    # entirely: a cut in the middle of JSON does not parse, so a single
+    # oversized field took every other field down with it. Drop the
+    # offending values instead and keep the rest readable.
+    if isinstance(value, dict):
+        kept = {k: v for k, v in value.items()
+                if len(json.dumps({k: v}, default=str)) <= _JSON_MAX // 4}
+        kept["_dropped"] = sorted(set(value) - set(kept))
+        try:
+            text = json.dumps(kept, default=str)
+            if len(text) <= _JSON_MAX:
+                return text
+        except (TypeError, ValueError):
+            pass
+    return json.dumps({"_dropped": "oversized"})
+
+
+def _parse_fired_at(value: object):
+    """An ISO-8601 wire timestamp as a datetime, or None.
+
+    Used for both ``fired_at`` (when the app decided) and the evidence's
+    ``observed_at`` (when the thing happened). Anything unparseable is
+    None — a producer's bad timestamp must never cost us the alert.
+    """
+    from datetime import datetime
+
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+async def _handle_message(msg) -> None:
+    """One bus message → one ``apply_alert``. Never raises — a bad
+    message is a debug line, not a dead subscription."""
+    try:
+        envelope = json.loads(msg.data.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        logger.debug("alert inbox: undecodable message on %s", msg.subject)
+        return
+    stored: dict = {}
+    try:
+        status = await asyncio.to_thread(apply_alert, envelope, None, stored)
+        if status != "stored":
+            logger.debug("alert inbox: %s for %s", status, msg.subject)
+            return
+    except Exception:
+        logger.warning("alert inbox: apply failed", exc_info=True)
+        return
+    # Stored. Nudge the open browsers rather than leaving them to notice
+    # on the next 10s poll — and never let a socket problem undo a row
+    # that is already committed.
+    try:
+        from services.event_bus_service import publish_app_alert
+
+        # The stored (normalised) values: an "info" alert is stored as
+        # "low", and a push saying "info" would disagree with the inbox.
+        await publish_app_alert(
+            camera_id=_camera_num(envelope.get("camera_id")),
+            severity=stored.get("severity") or "high",
+            alert_type=stored.get("alert_type") or envelope.get("alert_type"),
+            payload={"title": stored.get("title") or envelope.get("title"),
+                     "alert_id": stored.get("alert_id") or envelope.get("alert_id"),
+                     "id": stored.get("id"),
+                     "source": {"kind": stored.get("source_kind"),
+                                "name": stored.get("source_name")},
+                     "correlation_id": stored.get("correlation_id"),
+                     # Stored with the alert, so ready now: sign them with
+                     # POST /media/sign {kind: alert_image} (HA-113).
+                     "images": stored.get("image_names") or []},
+        )
+        cam_num = _camera_num(envelope.get("camera_id"))
+        if cam_num is not None:
+            # The camera's "alert" event entity (HA-114).
+            from services.event_bus_service import publish_entity_state
+
+            key = f"camera.{cam_num}.alerts"
+            await publish_entity_state(
+                key=key, camera_id=cam_num, required_scope="alerts.view",
+                payload={"key": key, "event": {"type": "alert", "attributes": {
+                    "id": stored.get("id"), "alert_id": stored.get("alert_id"),
+                    "severity": stored.get("severity"), "title": stored.get("title"),
+                    "source": stored.get("source_name"),
+                    "correlation_id": stored.get("correlation_id"),
+                    "images": stored.get("image_names") or []}}})
+        from services.media_ready import schedule_for_alert
+
+        schedule_for_alert(stored, _camera_num(envelope.get("camera_id")), stored.get("at"))
+    except Exception:  # noqa: BLE001
+        logger.debug("alert inbox: live push failed", exc_info=True)
+
+
+def _camera_num(handle: object) -> int | None:
+    """``"cam3"`` / ``"cam-3"`` / ``"3"`` → ``3``; anything else None.
+
+    The inbox stores the producer's handle verbatim (alerts must survive
+    producers core doesn't know), but the event bus scopes on numeric
+    camera ids, so the push needs the number or nothing.
+    """
+    text = str(handle or "").strip().lower()
+    if text.startswith("cam"):
+        text = text[3:].lstrip("-")
+    return int(text) if text.isdigit() else None
+
+
+async def run_consumer_loop() -> None:
+    """Subscribe to ``opennvr.alerts.>`` for the process lifetime.
+
+    Returns immediately when no NATS URL is configured; retries
+    (slowly) on every other failure — mirrors plate_event_consumer."""
+    from core.config import settings
+
+    url = (getattr(settings, "nats_url", "") or "").strip()
+    if not url:
+        logger.info("alert inbox consumer disabled (no NATS_URL) — "
+                    "app alerts stay in the app containers' logs")
+        return
+    try:
+        import nats
+    except ImportError:
+        logger.warning("alert inbox consumer disabled: nats-py not installed")
+        return
+
+    # Compose broker runs token auth (--auth $INTERNAL_API_KEY) — same
+    # lesson as every other consumer in this stack.
+    token = (getattr(settings, "internal_api_key", "") or "").strip() or None
+
+    # No ``finally`` with an await anywhere on this path. A finally that
+    # awaits runs during GeneratorExit if the coroutine is ever closed
+    # (task GC'd, coro.close()) — and an await under GeneratorExit is
+    # "coroutine ignored GeneratorExit": the exact error that killed this
+    # consumer in the field one second after it subscribed. Teardown is
+    # therefore explicit, on the two exception paths that can await.
+    while True:
+        client = sub = None
+        try:
+            client = await nats.connect(url, connect_timeout=5, token=token)
+            sub = await client.subscribe(SUBJECT, cb=_handle_message)
+            logger.info("alert inbox consumer subscribed to %s", SUBJECT)
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await _teardown(sub, client)
+            raise
+        except Exception as exc:
+            await _teardown(sub, client)
+            logger.warning(
+                "alert inbox consumer: connect/subscribe failed (%s); "
+                "retrying in %.0fs", exc, _RETRY_SECONDS)
+            await asyncio.sleep(_RETRY_SECONDS)
+
+
+async def _teardown(sub, client) -> None:
+    """Best-effort unsubscribe + drain; every failure swallowed."""
+    try:
+        if sub is not None:
+            await sub.unsubscribe()
+    except Exception:
+        pass
+    try:
+        if client is not None:
+            await client.drain()
+    except Exception:
+        pass

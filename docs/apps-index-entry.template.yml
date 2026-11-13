@@ -21,6 +21,38 @@
                                    #   forensics | integration. Reuse an existing one.
   version: "1.0.0"                 # REQUIRED. Matches AppManifest.version. QUOTE IT — a bare 1.0 parses as a YAML float and the validator rejects it.
 
+  # ── Kind & commerce (all OPTIONAL; defaults shown) ──────────────────
+  kind: installable                # installable (image + compose service below) or
+                                   #   external: a listing that links out — your app is
+                                   #   distributed elsewhere; the catalog shows "Learn more"
+                                   #   and never offers Install. External entries carry
+                                   #   external_url (https://) and NO image / install block.
+  # external_url: https://example.com/my-app
+  pricing: free                    # free | paid | subscription | contact — the badge on the card.
+  price_note: ""                   # The human line under it: "$29 / camera / year".
+  entitlement: none                # none | license_key. license_key = an administrator enters
+                                   #   a key in the catalog, core asks YOUR app to verify it
+                                   #   (ContractMixin.verify_license) and refuses to enable the
+                                   #   app until it says yes. Mirror these three in AppManifest.
+  author: ""                       # REQUIRED for catalog apps. Shown as "by <author>".
+  contact: ""                      # REQUIRED for catalog apps: an email or https:// URL
+                                   #   that reaches the maintainer (security reports go here).
+  source: https://github.com/open-nvr/app-my-app   # REQUIRED for catalog apps: the
+                                   #   open-source repository under the open-nvr org that CI
+                                   #   builds the image from (docs/APP_LISTING_TERMS.md).
+  network_egress: []               # REQUIRED. Every host the app connects to outside the
+                                   #   stack ("licence.vendor.com", "api.telegram.org"), or []
+                                   #   for "never leaves the site". Shown on the card AND
+                                   #   enforced: host-shaped entries (name, *.domain, IPv4,
+                                   #   CIDR, optional :port) are the only hosts the egress
+                                   #   proxy lets the app reach; prose entries ("the webhook
+                                   #   URL the operator configures") are notes — the operator
+                                   #   allows those hosts on the card. docs/APP_NETWORK.md.
+  # verified: true                 # REVIEWERS ONLY — the maintainers vouch for the author
+                                   #   (identity confirmed, image reproducible from the linked
+                                   #   source). Leave out of a submission; a reviewer adds it.
+  # featured: true                 # REVIEWERS ONLY — shown in the Featured row.
+
   image: ghcr.io/<you>/my-app:latest   # REQUIRED. Well-formed ref — ghcr.io/... or
                                        #   opennvr/... . This is the canonical pull ref
                                        #   the one-click installer deploys.
@@ -29,6 +61,14 @@
                                    #   A pinned digest is what makes one-click install
                                    #   trustworthy (supply-chain integrity). Omit only for
                                    #   a local `build:`-overlay app; unpinned = dev only.
+  # signing:                       # ONLY for an image NOT built by the org's CI (not
+  #   identity: '^https://github.com/<you>/<repo>/\.github/workflows/.*$'
+  #   issuer: https://token.actions.githubusercontent.com
+                                   #   Who signed the image (Sigstore keyless): the OIDC
+                                   #   certificate identity the installer verifies with
+                                   #   cosign before a pinned install. ghcr.io/open-nvr
+                                   #   images are signed by OpenNVR CI and need nothing
+                                   #   here. docs/APPS_INSTALL.md → Image signing.
 
   requires_tasks: [object_detection]   # REQUIRED (may be []). Adapter task types your app
                                        #   depends on. Prefer canonical names from

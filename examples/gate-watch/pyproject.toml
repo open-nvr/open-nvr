@@ -1,0 +1,33 @@
+[project]
+name = "opennvr-example-gate-watch"
+version = "1.0.0"
+description = "OpenNVR gate-watch example app (frame-polling: a gate left open, judged by a vision model through KAI-C)"
+requires-python = ">=3.11"
+license = { text = "AGPL-3.0" }
+dependencies = [
+    "opennvr-app-sdk",
+    "Pillow>=10,<12",
+]
+
+[tool.uv.sources]
+opennvr-app-sdk = { path = "../../sdk/opennvr-app-sdk", editable = true }
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+gate-watch = "gate_watch:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"

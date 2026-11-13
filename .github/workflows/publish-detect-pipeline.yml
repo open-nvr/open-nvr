@@ -11,7 +11,11 @@
 #     plus a container smoke that proves the import graph + ffmpeg resolve
 #     inside the real /app layout (the "green tests, crashes on deploy" class).
 #   - Push to any branch → build + push :<branch> and :sha-<short>.
-#   - Tag v* / default branch → also :latest + semver tags (compose pins :latest).
+#   - Tag v* → also :latest + semver tags. Only a release moves :latest
+#     (compose defaults to it when CORE_TAG is unset); main is :main.
+#   - OpenNVR Accelerate flavours: the same Dockerfile built with ACCEL=intel
+#     publishes every tag again with an -intel suffix (0.2.0-intel, main-intel,
+#     latest-intel), amd64 only. docker-compose.accel-intel.yml pulls it.
 
 name: publish-detect-pipeline
 
@@ -59,6 +63,9 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Sigstore keyless signing (same as publish-app-images.yml): the
+      # certificate names this workflow, ref and repository.
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -70,6 +77,12 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Install cosign
+        if: github.event_name != 'pull_request'
+        uses: ./.github/actions/install-cosign
+        with:
+          cosign-release: "v2.4.1"
 
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
@@ -90,7 +103,7 @@ jobs:
             type=sha,format=short
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
           labels: |
             org.opencontainers.image.title=OpenNVR detect-pipeline
             org.opencontainers.image.description=Always-on Tier-0 detection (motion, region, detect, track) per camera. Additive consumer of MediaMTX; publishes to the OpenNVR inference event bus.
@@ -98,6 +111,7 @@ jobs:
             org.opencontainers.image.vendor=OpenNVR
 
       - name: Build${{ github.event_name != 'pull_request' && ' + push' || ' (no push)' }}
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: ./detect-pipeline
@@ -117,6 +131,20 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=detect-pipeline
           cache-to: type=gha,scope=detect-pipeline,mode=max
+
+      # Sign the multi-arch manifest digest (never a tag: tags move). Check with
+      #   cosign verify --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+      #     --certificate-identity-regexp '^https://github.com/open-nvr/' ghcr.io/open-nvr/detect-pipeline@<digest>
+      # The updater trusts the signed release manifest; this is defence in depth.
+      - name: Sign (Sigstore keyless)
+        if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          test -n "$DIGEST"
+          cosign sign --yes "ghcr.io/open-nvr/detect-pipeline@${DIGEST}"
+          echo "signed ghcr.io/open-nvr/detect-pipeline@${DIGEST}" >> "$GITHUB_STEP_SUMMARY"
 
       # Prove the container's import graph + entrypoint + ffmpeg resolve inside
       # the real /app layout (catches a module missing from COPY, or ffmpeg not
@@ -140,3 +168,232 @@ jobs:
           "
           echo "== console entrypoint is installed =="
           docker run --rm "$IMAGE" sh -c "command -v opennvr-tier0"
+
+  # Intel flavour: same source, ACCEL=intel (onnxruntime-openvino + Intel
+  # OpenCL/NPU user-space, see detect-pipeline/scripts/install-intel-runtime.sh).
+  # A separate job rather than a matrix so the required check keeps its name.
+  build-and-push-intel:
+    name: detect-pipeline image (intel)
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Install cosign
+        if: github.event_name != 'pull_request'
+        uses: ./.github/actions/install-cosign
+        with:
+          cosign-release: "v2.4.1"
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Compute tags + labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/open-nvr/detect-pipeline
+          flavor: |
+            suffix=-intel,onlatest=true
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+          labels: |
+            org.opencontainers.image.title=OpenNVR detect-pipeline (intel)
+            org.opencontainers.image.description=Tier-0 detection, Intel flavour: VA-API decode on the iGPU, OpenVINO detector on the NPU / iGPU.
+            org.opencontainers.image.licenses=AGPL-3.0-or-later
+            org.opencontainers.image.vendor=OpenNVR
+      - name: Build${{ github.event_name != 'pull_request' && ' + push' || ' (no push)' }}
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: ./detect-pipeline
+          file: detect-pipeline/Dockerfile
+          # amd64 only: there are no Intel iGPUs/NPUs on arm64 and Intel ships
+          # no arm64 user-space.
+          platforms: linux/amd64
+          build-args: |
+            ACCEL=intel
+          push: ${{ github.event_name != 'pull_request' }}
+          load: ${{ github.event_name == 'pull_request' }}
+          tags: |
+            ${{ steps.meta.outputs.tags }}
+            ${{ github.event_name == 'pull_request' && 'ghcr.io/open-nvr/detect-pipeline:local-smoke-intel' || '' }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=detect-pipeline-intel
+          cache-to: type=gha,scope=detect-pipeline-intel,mode=max
+      - name: Sign (Sigstore keyless)
+        if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          test -n "$DIGEST"
+          cosign sign --yes "ghcr.io/open-nvr/detect-pipeline@${DIGEST}"
+          echo "signed ghcr.io/open-nvr/detect-pipeline@${DIGEST} (intel)" >> "$GITHUB_STEP_SUMMARY"
+      # The runner has no Intel GPU, so this proves the flavour is *wired*:
+      # the OpenVINO provider is present, the Intel VA/OpenCL/NPU user-space
+      # is installed, and the service still boots. Device inference is the
+      # benchmark harness's job on real hardware (docs/HARDWARE.md).
+      - name: Smoke-test the built image (PR only)
+        if: github.event_name == 'pull_request'
+        env:
+          IMAGE: ghcr.io/open-nvr/detect-pipeline:local-smoke-intel
+        run: |
+          set -euo pipefail
+          echo "== Intel user-space present =="
+          docker run --rm "$IMAGE" sh -c "ls /usr/lib/x86_64-linux-gnu/dri/iHD_drv_video.so /etc/OpenCL/vendors/intel.icd /usr/local/lib/libigc.so.2 /usr/lib/x86_64-linux-gnu/libze_intel_npu.so.1 /usr/lib/x86_64-linux-gnu/libopenvino_intel_npu_compiler.so && clinfo --version"
+          echo "== OpenVINO execution provider available =="
+          docker run --rm "$IMAGE" python -c "
+          import onnxruntime as ort
+          provs = ort.get_available_providers()
+          assert 'OpenVINOExecutionProvider' in provs, provs
+          print('providers:', provs)
+          "
+          echo "== device shorthand resolves against the installed runtime =="
+          docker run --rm "$IMAGE" python -c "
+          import onnxruntime as ort
+          from detect_pipeline.onnx_detector import resolve_providers, describe_providers
+          p = resolve_providers('OpenVINOExecutionProvider:AUTO:NPU,GPU,CPU', ort.get_available_providers())
+          assert p[0] == ('OpenVINOExecutionProvider', {'device_type': 'AUTO:NPU,GPU,CPU'}), p
+          print(describe_providers(p))
+          "
+          echo "== boot graph (service disabled) =="
+          docker run --rm -e DETECT_PIPELINE_ENABLED=false "$IMAGE" python -c "
+          import detect_pipeline.run as r, detect_pipeline.bus as b
+          cfg = r.config_from_env({'DETECT_PIPELINE_ENABLED': 'false'})
+          mgr = r.build_manager(cfg, b.EventSink(lambda s, d: None))
+          mgr.reconcile()
+          assert mgr.running_ids() == set()
+          print('boot-graph ok')
+          "
+
+  # Qualcomm flavour: same source, ACCEL=qualcomm (plain onnxruntime plus the
+  # onnxruntime-qnn plugin provider, which bundles the Qualcomm AI Runtime).
+  # arm64 only — the Hexagon NPU lives in Dragonwing / Snapdragon SoCs.
+  build-and-push-qualcomm:
+    name: detect-pipeline image (qualcomm)
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Install cosign
+        if: github.event_name != 'pull_request'
+        uses: ./.github/actions/install-cosign
+        with:
+          cosign-release: "v2.4.1"
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Compute tags + labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/open-nvr/detect-pipeline
+          flavor: |
+            suffix=-qualcomm,onlatest=true
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+          labels: |
+            org.opencontainers.image.title=OpenNVR detect-pipeline (qualcomm)
+            org.opencontainers.image.description=Tier-0 detection, Qualcomm flavour: ONNX Runtime QNN detector on the Hexagon NPU (software decode).
+            org.opencontainers.image.licenses=AGPL-3.0-or-later
+            org.opencontainers.image.vendor=OpenNVR
+      - name: Build${{ github.event_name != 'pull_request' && ' + push' || ' (no push)' }}
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: ./detect-pipeline
+          file: detect-pipeline/Dockerfile
+          # arm64 only: onnxruntime-qnn ships Linux wheels for aarch64 (and
+          # x86_64 for AOT compilation only), and the NPU is in arm64 SoCs.
+          platforms: linux/arm64
+          build-args: |
+            ACCEL=qualcomm
+          push: ${{ github.event_name != 'pull_request' }}
+          load: ${{ github.event_name == 'pull_request' }}
+          tags: |
+            ${{ steps.meta.outputs.tags }}
+            ${{ github.event_name == 'pull_request' && 'ghcr.io/open-nvr/detect-pipeline:local-smoke-qualcomm' || '' }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=detect-pipeline-qualcomm
+          cache-to: type=gha,scope=detect-pipeline-qualcomm,mode=max
+      - name: Sign (Sigstore keyless)
+        if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          test -n "$DIGEST"
+          cosign sign --yes "ghcr.io/open-nvr/detect-pipeline@${DIGEST}"
+          echo "signed ghcr.io/open-nvr/detect-pipeline@${DIGEST} (qualcomm)" >> "$GITHUB_STEP_SUMMARY"
+      # The runner has no Hexagon DSP, and the image is arm64 (run under QEMU
+      # via buildx's binfmt), so this proves the flavour is *wired*: the QNN
+      # plugin wheel imports, the service registers it, and the device
+      # shorthand resolves. Inference on the NPU is the benchmark harness's
+      # job on real hardware (docs/HARDWARE.md).
+      - name: Set up QEMU (arm64 smoke)
+        if: github.event_name == 'pull_request'
+        uses: docker/setup-qemu-action@v3
+      - name: Smoke-test the built image (PR only)
+        if: github.event_name == 'pull_request'
+        env:
+          IMAGE: ghcr.io/open-nvr/detect-pipeline:local-smoke-qualcomm
+        run: |
+          set -euo pipefail
+          echo "== QNN plugin provider wheel present, with the HTP runtime =="
+          docker run --rm --platform linux/arm64 "$IMAGE" python -c "
+          import os, onnxruntime as ort, onnxruntime_qnn as q
+          print('onnxruntime', ort.__version__, 'onnxruntime-qnn', q.__version__)
+          for p in (q.get_library_path(), q.get_qnn_htp_path()):
+              assert os.path.exists(p), p
+          assert os.path.exists(os.path.join(os.path.dirname(q.get_qnn_htp_path()), 'libQnnHtpV73Skel.so'))
+          "
+          echo "== the service registers the plugin and resolves the shorthand =="
+          docker run --rm --platform linux/arm64 "$IMAGE" python -c "
+          import onnxruntime as ort
+          from detect_pipeline.onnx_detector import available_providers, resolve_providers, describe_providers
+          avail = available_providers(ort, 'QNNExecutionProvider:htp')
+          assert 'QNNExecutionProvider' in avail, avail
+          p = resolve_providers('QNNExecutionProvider:htp', avail)
+          assert p[0] == ('QNNExecutionProvider', {'backend_type': 'htp'}), p
+          print(describe_providers(p))
+          "
+          echo "== boot graph (service disabled) =="
+          docker run --rm --platform linux/arm64 -e DETECT_PIPELINE_ENABLED=false "$IMAGE" python -c "
+          import detect_pipeline.run as r, detect_pipeline.bus as b
+          cfg = r.config_from_env({'DETECT_PIPELINE_ENABLED': 'false'})
+          mgr = r.build_manager(cfg, b.EventSink(lambda s, d: None))
+          mgr.reconcile()
+          assert mgr.running_ids() == set()
+          print('boot-graph ok')
+          "

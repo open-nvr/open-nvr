@@ -1,102 +1,161 @@
-# Per-camera skill assignment — give each camera a job
+# Cameras and apps — each app has its selected cameras
 
-> Camera 1 reads license plates. Cameras 2 and 3 count people. Camera 4
-> watches for trucks. Declared once, on the camera's settings page, and
-> honoured by everything that cares.
+> Guard Scan screens the entrance. Occupancy counts the entrance and the
+> shop floor. ANPR reads plates at the gate. Each app's cameras are
+> selected **in its own configuration**, and any camera can serve several
+> apps at once.
 
-This is the operator guide to camera assignments. The engineering design
-behind it is [`docs/design/per-camera-assignment.md`](design/per-camera-assignment.md).
+This is the operator guide. The engineering design behind it is
+[`docs/design/per-camera-assignment.md`](design/per-camera-assignment.md).
 
-## What an assignment is — and is not
+## What never depends on this
 
-Every camera in OpenNVR always does the **default work**: live
-streaming, recording, and the always-on Tier-0 detection that feeds the
-event timeline. None of that ever depends on assignments.
+Every camera always does the **default work**: live streaming, recording,
+and the always-on Tier-0 detection that feeds the event timeline. Nothing
+on this page turns a camera off.
 
-An **assignment** is *additional, specialized attention* layered on top:
-it declares what a camera is *for*, so the capabilities ("skills") that
-can serve that purpose point themselves at the right cameras. Assigning
-camera 1 to `license_plate_recognition` doesn't change what camera 1
-records — it tells the LPR capability *this is your camera*. Assigning
-cameras 2–3 to `occupancy_counting` tells the counting app to watch
-exactly those two and ignore the rest.
+## The rule: every camera is available, an app uses only what is selected
 
-Think of skills as what the system **can do** (detect objects, read
-plates, count occupancy, recognise faces) and an assignment as **where
-each of those abilities should look**.
+* **Available** — every camera appears in every app's camera list.
+  Nothing is reserved, and one camera can be selected for as many apps as
+  you like: one detection stream feeds them all at the cost of one.
+* **Selected** — an app works on a camera *only* once that camera is
+  selected for it. Until then the app reads nothing from it and computes
+  nothing on it.
 
-## The one rule that keeps old setups working
+**No cameras selected means the app does not run.** That is where every
+newly installed app starts. The app card in the catalog says *No cameras*,
+and the app's own health line says *No cameras selected*, until you select
+one.
 
-**Nothing assigned means nothing restricted.** A skill with no camera
-assigned to it behaves exactly as before assignments existed: the
-occupancy app watches every camera, the indexer indexes everything.
-Restriction begins only when the *first* camera is assigned a given
-skill — from that moment, the assignment list for that skill is the
-whole truth. Un-assign the last camera and the restriction lifts again.
+## Skills follow apps
 
-This is why upgrading changes nothing until you choose to use the
-feature, and why an app never goes silently blind: "no assignment" can
-never be misread as "watch nothing".
+A camera carries **exactly the model skills the enabled apps using it
+bring** — nothing is assigned on the camera itself, and the camera page
+has no skills editor. Each app's manifest says what it brings:
+`requires_tasks` (what it cannot run without: the doorbell's
+`face_recognition`, ANPR's `license_plate_recognition`) and
+`enrich_tasks` (what it uses when the box has it: Footage Search's
+`image_captioning` and `embed`). Selecting a camera for the app puts
+those skills in the camera's set; several apps sharing a camera give it
+the union; disabling or uninstalling an app takes its skills out again,
+except a skill another enabled app still brings.
 
-## How to assign
+The platform's own enrichers (captions, embeddings, colour/type
+descriptors, plate reads) read that set, so they run on a camera because
+an app that needs them was pointed at it — and for no other reason.
 
-Open the camera's **edit dialog** (Cameras → ✎) and use the
-**Assignments** section: each row is a skill name, plus optional labels
-that narrow it.
+One app runs on every camera without a selection: the **OpenNVR Agent**
+declares `all_cameras`, and the platform selects every camera for it
+(new cameras included). Its `image_captioning` and `vqa` are therefore in
+every camera's set while the agent is enabled — the cost of being able to
+ask it about any camera. Disable the agent and they leave every set.
+
+## How to select cameras for an app
+
+**Applications → the app → Configure** (top right) → **Cameras** → **Select cameras**. The catalog only installs, enables and removes apps; everything about how an app works on your site is on its own page.
+The dialog shows every camera as a thumbnail, grouped by location, with
+search, an *Online only* filter and *Select all* per location; a camera
+another app already uses says so (that is fine — apps share cameras).
+Press **Done**, then **Save**; Cancel discards the change. The running
+app picks it up within a few seconds, with no restart.
+
+The Cameras section then lists just this app's cameras, each with its
+picture, whether it is online, and which of its zones or lines are drawn
+yet. The ✕ on a card removes that camera (again, on Save).
+
+**Set up** on a card (**Edit** once something is set) opens that camera
+with everything the app needs drawn or sampled on it — Guard Scan's scan
+zone, guard post and uniform colour, a line-crossing tripwire, an ROI —
+one tab each, on the camera's picture, with the camera's other shapes
+shown faintly for reference. A tab that is still empty offers **Copy from**
+another camera that has one, as a starting point. **Done** keeps them in
+the form; **Save** applies them.
+Removing a camera mid-screening drops the half-watched screening rather
+than reporting it as incomplete.
+
+* You need permission to **manage** a camera to add it to or remove it from
+  an app; cameras you can't manage are shown locked, with the reason.
+* Zones, tripwires, ROIs and sampled colours are set up per camera, from
+  its card — never on a camera the app doesn't use, where they would never
+  apply. A colour is per camera because lighting is.
+  Settings for the whole app (thresholds, alerts, schedules) stay in the
+  form below.
+* For **ANPR**, giving a camera a gate role on the **Vehicles** page
+  selects it too. The Cameras section shows those roles, and warns before
+  you remove a camera that has one.
+* **Uninstalling an app releases its selected cameras.**
+
+Some apps have no camera selection, because they read no camera data of
+their own (or, for the Agent, because they run on all of them): **alert-notifier**, **gate-controller** and
+**home-assistant-relay** act on other apps' alerts (already limited to the
+cameras selected for those apps), and the **OpenNVR Agent** shows each user
+their own cameras. These have no Cameras section.
+
+## What an app may read
+
+An app, using its own key, reads **only its selected cameras**: the camera
+list, snapshots, stream grants (each scoped to that one camera's path),
+recordings, events and evidence, plate data, its own per-camera settings,
+and the boxes it may draw on the live view. A camera's own RTSP URL, with
+its credentials, is never handed to an app.
+
+One gap remains: the event bus is not yet partitioned per camera, so an
+app can still *subscribe* to other cameras' inference events. The SDK
+drops them before an app's rules see them; per-camera bus permissions are
+a follow-up.
+
+## The camera's Assignments section
+
+The camera edit dialog (Cameras → ✎ → **Assignments**) tunes **platform
+detection** for that camera. It no longer points apps at cameras — a row
+naming an installed app is refused with a pointer to that app's
+configuration.
 
 | You type | It means |
 |---|---|
-| `license_plate_recognition` | this camera is for LPR |
-| `occupancy_counting` | this camera is counted by the occupancy app |
-| `object_detection` + labels `person, truck` | this camera cares specifically about people and trucks |
+| `object_detection` + labels `person, truck` | Tier-0 detects only people and trucks on this camera |
+| `license_plate_recognition` | plate OCR runs on this camera, whether or not it is selected for the ANPR app |
 
 Rules enforced by the server: skill names are lowercase snake_case, at
-most 8 assignments per camera, one row per skill, labels normalized and
-capped. The vocabulary is deliberately open — you can declare an
-assignment before its adapter or app is installed; validation against
-what's actually installed arrives with the catalog-UI integration.
+most 8 rows per camera, one row per skill, labels normalised and capped.
+The dialog's **Used by** line lists the apps this camera is selected for.
 
-## What honours assignments today
-
-* **occupancy-counting** (on by default): when at least one camera is
-  assigned `occupancy_counting`, the app scopes to exactly those
-  cameras — picked up at boot *and* on its 5-minute discovery refresh,
-  so assigning or un-assigning on the settings page takes effect within
-  minutes, no restart. An explicit `cameras:` list in the app's own
-  config always wins over assignments (the operator's written word is
-  never second-guessed).
-* **Any app built on the App SDK** can adopt the same behaviour with
-  one call — `filter_cameras_for_skill(discovered, "my_skill")` /
-  `cameras_for_skill(url, "my_skill")` — following the same
-  `None` = "no restriction declared" contract.
-* **Tier-0 (the always-on detector)**: an `object_detection` assignment
-  with labels narrows that camera's detected classes ("camera 4 wants
-  person + truck") — the global `DETECT_LABELS` still applies to every
-  camera without a declaration, and a label change on the settings page
-  restarts just that camera's worker within one reconcile tick. And with
-  `DETECT_SKIP_UNASSIGNED=true` in `.env` (off by default), a camera
-  whose assignments are all detection-free — say an LPR-only camera —
-  skips Tier-0 analysis entirely, a straight CPU saving. Cameras with no
-  assignments are never skipped.
-
-The Assignments editor also **suggests and annotates**: typing in a
-skill row offers every skill the install knows (canonical adapter tasks
-plus installed catalog apps), and a skill whose capability isn't
-actually served shows an amber note naming what to install ("no
-registered adapter advertises license_plate_recognition — register one
-on the AI Adapters page"). It annotates, it never blocks — the
-vocabulary stays open, and when adapter status can't be determined
-(KAI-C unreachable) nothing is flagged.
-
-(The old per-model polling loop — a Start button that drove live
-inference on a timer per camera — has been retired: live detection now
-flows one way, Tier-0 → event bus → apps, and assignments are how you
-point it. Recording analysis is unaffected.)
+* **Tier-0**: an `object_detection` row with labels narrows that camera's
+  detected classes — the global `DETECT_LABELS` applies everywhere else.
+  An app selected for the camera adds the classes its manifest's
+  `tier0_labels` names on top of either (the narrowing still stands for
+  what it names; see [tier0-consumption.md](tier0-consumption.md)).
+  With `DETECT_SKIP_UNASSIGNED=true` in `.env` (off by default), a camera
+  whose claims are all detection-free skips Tier-0 entirely. Cameras
+  selected for a detection app (occupancy, loitering, line-crossing,
+  intrusion, abandoned-object, package-delivery, smart-doorbell) are
+  never skipped. footage-search is NOT one of them: it drives no
+  inference and searches whatever the store already holds, so selecting
+  it for a camera does not by itself keep Tier-0 running there — which
+  also means a camera skipped this way has nothing to find.
+* **Plate OCR** runs on cameras carrying `license_plate_recognition` —
+  from this section, or from being selected for ANPR, which stores that
+  same name.
 
 ## For app developers
 
-Read the design doc for the invariants, then copy the occupancy
-pattern: fetch `discover_cameras()` once, pass the payload through
-`filter_cameras_for_skill(...)`, and re-run the same scoping on your
-refresh tick. Honour the contract: `None` from the filter means watch
-everything you'd otherwise watch — never treat it as an empty list.
+In code a selection is called a *pick* (`picked_cameras`,
+`camera_picked()`). Declare nothing and read them:
+
+* `OpenNVR().roster()` returns the selected cameras — `[]` when none are
+  selected (**do nothing**), `None` when core could not be asked (**keep
+  what you have**). Never treat those two alike.
+* Override `on_cameras_update(camera_ids)` to react when the selection
+  changes; it arrives on the live config poll, even though no config key
+  changed.
+* `Detector` subclasses get the filtering for free: events from cameras
+  that aren't selected are dropped before `on_detections`. `FrameApp`
+  polls exactly the selected cameras. Use `CoreSnapshotSource` for frames.
+* Per-camera settings arrive keyed by camera id (`"3"`); the bus names the
+  camera `"cam3"`. Look them up with `per_camera_value(mapping, camera)`.
+* An app that reads no camera data declares `AppManifest(camera_picker=False)`.
+
+`cameras_for_skill` / `filter_cameras_for_skill` still work — a selection
+is stored as a claim named after the app id — but new apps should start
+from `roster()`.

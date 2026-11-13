@@ -79,6 +79,25 @@ evidence blobs: content-addressed JPEG crops under the recordings root,
   SQLite.
 - Retention: one policy, tied to recordings retention.
 
+### As built (status note, 2026-09-25)
+
+The store exists and is the platform's memory, with two deliberate
+departures from the target above and one gap now closed:
+
+- **Ingest is an HTTP post, not a bus subscriber.** Tier-0 POSTs each
+  finished visit to `/api/v1/internal/camera-agent/events` from a
+  bounded queue (drop-oldest, counted). The unique key `uq_events_visit`
+  makes it idempotent — at-least-once with a key beats an ephemeral bus
+  subscription for the one write that must not be lost. Domain events
+  (`plate.recognized.v1`, `occupancy.*.v1`, `screening.completed.v1`)
+  and app alerts (`opennvr.alerts.>`) do land through consumers, as
+  planned.
+- **`camera_events` has not converged** into `events` yet; it keeps its
+  own table and its own prune.
+- **Retention** now covers the rows as well as the evidence JPEGs
+  (`RetentionService.cleanup_auxiliary`, `EVENTS_RETENTION_DAYS`), and
+  the operator inbox (`ALERTS_INBOX_RETENTION_DAYS`).
+
 ### Acceptance
 
 - One API (`GET /api/v1/events?camera=&from=&to=&label=`) answers every

@@ -1,0 +1,35 @@
+# opennvr.org builds the App SDK reference (/sdk/) from this repository's
+# sdk/opennvr-app-sdk at deploy time — but the site only deploys when ITS
+# repository changes. Without this, a docs change here reached the site
+# on the next unrelated site commit, whenever that was. On a push to main
+# that touches what the site renders, ask Cloudflare Pages to rebuild.
+#
+# OPENNVR_SITE_DEPLOY_HOOK is the Pages project's deploy-hook URL
+# (Cloudflare → Workers & Pages → opennvr-site → Settings → Builds &
+# deployments → Deploy hooks). Unset, this workflow says so and passes:
+# a missing hook is a configuration gap, not a broken build.
+name: site-rebuild
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "sdk/opennvr-app-sdk/**"
+      - "server/config/apps_index.yml"
+      - "server/config/adapters_index.yml"
+      - ".github/workflows/site-rebuild.yml"
+
+jobs:
+  rebuild:
+    name: ask opennvr.org to rebuild
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger the Pages deploy hook
+        env:
+          HOOK: ${{ secrets.OPENNVR_SITE_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "::warning::OPENNVR_SITE_DEPLOY_HOOK is not set — opennvr.org will pick this up on its next deploy."
+            exit 0
+          fi
+          curl -fsS -X POST "$HOOK" -o /dev/null && echo "opennvr.org rebuild requested."

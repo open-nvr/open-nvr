@@ -51,11 +51,28 @@ export const authService = {
   loginJson: (username: string, password: string, code?: string) =>
     api.post('/api/v1/auth/login-json', { username, password, code }),
   me: () => api.get('/api/v1/auth/me'),
+  // Ways in besides a password, for the login page: e-mailed reset, single sign-on.
+  recoveryOptions: () => api.get('/api/v1/auth/recovery-options'),
+  forgotPassword: (email: string) => api.post('/api/v1/auth/forgot', { email }),
+  resetPassword: (token: string, password: string) => api.post('/api/v1/auth/reset', { token, password }),
+  oidcExchange: (code: string) => api.post('/api/v1/auth/oidc/exchange', { code }),
   myPermissions: () => api.get('/api/v1/users/me/permissions'),
   mfaSetup: (responseType: 'json' | 'text' | 'blob' = 'json') =>
     api.post('/api/v1/auth/mfa/setup', '', { responseType }),
   mfaVerify: (code: string) => api.post('/api/v1/auth/mfa/verify', { code }),
-  mfaDisable: () => api.post('/api/v1/auth/mfa/disable', ''),
+  // Your own authenticators (Settings > Two-factor sign-in). Once you have a
+  // working one, changes need your password and a current code.
+  mfaFactors: () => api.get('/api/v1/auth/mfa/factors'),
+  mfaBeginTotp: (body: { label?: string; current_password?: string }, mfaCode?: string) =>
+    api.post('/api/v1/auth/mfa/factors/totp', body, mfaCode ? { headers: { 'X-MFA-Code': mfaCode } } : undefined),
+  mfaConfirmTotp: (factorId: number, body: { code: string; label?: string }) =>
+    api.post(`/api/v1/auth/mfa/factors/${factorId}/confirm`, body),
+  mfaUpdateFactor: (factorId: number, body: { label?: string; enabled?: boolean; current_password: string }, mfaCode: string) =>
+    api.patch(`/api/v1/auth/mfa/factors/${factorId}`, body, { headers: { 'X-MFA-Code': mfaCode } }),
+  mfaRegenerateRecoveryCodes: (currentPassword: string, mfaCode: string) =>
+    api.post('/api/v1/auth/mfa/recovery-codes', { current_password: currentPassword }, { headers: { 'X-MFA-Code': mfaCode } }),
+  mfaRemoveFactor: (factorId: number, currentPassword: string, mfaCode: string) =>
+    api.delete(`/api/v1/auth/mfa/factors/${factorId}`, { headers: { 'X-MFA-Code': mfaCode } }, { current_password: currentPassword }),
   logout: () => api.post('/api/v1/auth/logout', ''),
   refreshToken: (refresh_token: string) => api.post('/api/v1/auth/refresh', { refresh_token }),
 }

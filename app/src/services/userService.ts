@@ -22,11 +22,22 @@ export const userService = {
   // Users
   getUsers: (params: Record<string, any> = {}) => api.get('/api/v1/users/', { params }),
   getUser: (userId: number) => api.get(`/api/v1/users/${userId}`),
-  updateUser: (userId: number, payload: any) => api.put(`/api/v1/users/${userId}`, payload),
-  createUser: (payload: any) => api.post('/api/v1/users/', payload),
-  // Deleting or reactivating a user requires the caller's current TOTP code (X-MFA-Code).
-  deleteUser: (userId: number, mfaCode: string) => api.delete(`/api/v1/users/${userId}`, { headers: { 'X-MFA-Code': mfaCode } }),
+  // Changing is_superuser (or creating a superuser) requires current MFA.
+  updateUser: (userId: number, payload: any, mfaCode?: string) =>
+    api.put(`/api/v1/users/${userId}`, payload, mfaCode ? { headers: { 'X-MFA-Code': mfaCode } } : undefined),
+  createUser: (payload: any, mfaCode?: string) =>
+    api.post('/api/v1/users/', payload, mfaCode ? { headers: { 'X-MFA-Code': mfaCode } } : undefined),
+  // Soft deletion is reversible. Permanent deletion and reactivation require current MFA.
+  deleteUser: (userId: number) => api.delete(`/api/v1/users/${userId}`),
+  permanentlyDeleteUser: (userId: number, mfaCode: string) => api.delete(`/api/v1/users/${userId}/permanent`, { headers: { 'X-MFA-Code': mfaCode } }),
   activateUser: (userId: number, mfaCode: string) => api.post(`/api/v1/users/${userId}/activate`, undefined, { headers: { 'X-MFA-Code': mfaCode } }),
+  // Remove another user's second factor: they enrol a new authenticator at next sign-in.
+  resetUserMfa: (userId: number, mfaCode: string) => api.post(`/api/v1/users/${userId}/mfa/reset`, undefined, { headers: { 'X-MFA-Code': mfaCode } }),
+  userMfaFactors: (userId: number) => api.get(`/api/v1/users/${userId}/mfa/factors`),
+  setUserMfaFactor: (userId: number, factorId: number, enabled: boolean, mfaCode: string) =>
+    api.patch(`/api/v1/users/${userId}/mfa/factors/${factorId}`, { enabled }, { headers: { 'X-MFA-Code': mfaCode } }),
+  removeUserMfaFactor: (userId: number, factorId: number, mfaCode: string) =>
+    api.delete(`/api/v1/users/${userId}/mfa/factors/${factorId}`, { headers: { 'X-MFA-Code': mfaCode } }),
   
   // Roles
   getRoles: () => api.get('/api/v1/roles/'),

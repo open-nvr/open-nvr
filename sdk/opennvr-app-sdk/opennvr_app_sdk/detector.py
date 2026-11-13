@@ -192,6 +192,12 @@ class Detector(ContractMixin, NatsSubscriberMixin):
         camera_id = event.get("camera_id")
         if not camera_id:
             return []
+        if not self.camera_picked(camera_id):
+            # Not one of this app's cameras. The bus carries every
+            # camera's detections; acting only on picked ones is what
+            # "nothing picked = the app does nothing" means for a
+            # subscriber.
+            return []
         if is_tier0:
             from .tier0 import tier0_to_detections
 

@@ -168,6 +168,17 @@ class BestFrameClient:
         status, body = await self._get(url)
         return body if status == 200 and body else None
 
+    async def fetch_latest(self, camera_id: str, max_age_s: float = 3.0) -> bytes | None:
+        """The newest frame the pipeline decoded for the camera, as JPEG, or
+        None when it has none fresher than ``max_age_s`` (``/latest_frame``).
+        A live look without an RTSP session of its own: measured on a
+        Ventuno Q, the agent's own grab took 5.6–6.2 s a look."""
+        cam = self._resolve(camera_id) if self._resolve else camera_id
+        if not cam:
+            return None
+        status, body = await self._get(f"{self._base}/latest_frame?camera={cam}&max_age={max_age_s:g}")
+        return body if status == 200 and body else None
+
 
 def make_best_frame_fetch(base_url: str, *, resolve_camera: ResolveCamera | None = None,
                           http_get: HttpGet | None = None):
@@ -177,6 +188,19 @@ def make_best_frame_fetch(base_url: str, *, resolve_camera: ResolveCamera | None
 
     async def fetch(camera_id: str) -> bytes | None:
         return await client.fetch(camera_id)
+
+    return fetch
+
+
+def make_latest_frame_fetch(base_url: str, *, resolve_camera: ResolveCamera | None = None,
+                            http_get: HttpGet | None = None, max_age_s: float = 3.0):
+    """A bound ``async fetch(camera_id) -> bytes | None`` for the pipeline's
+    newest decoded frame — what a consumer plugs in ahead of its own live
+    grab (the camera-agent's CameraContext does)."""
+    client = BestFrameClient(base_url, resolve_camera=resolve_camera, http_get=http_get)
+
+    async def fetch(camera_id: str) -> bytes | None:
+        return await client.fetch_latest(camera_id, max_age_s=max_age_s)
 
     return fetch
 

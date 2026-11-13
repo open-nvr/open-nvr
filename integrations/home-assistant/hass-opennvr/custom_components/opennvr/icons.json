@@ -1,0 +1,37 @@
+{
+  "entity": {
+    "alarm_control_panel": {
+      "site_mode": {
+        "default": "mdi:shield-home"
+      }
+    },
+    "update": {
+      "server": {
+        "default": "mdi:cctv"
+      }
+    }
+  },
+  "services": {
+    "ptz": {
+      "service": "mdi:pan"
+    },
+    "create_event": {
+      "service": "mdi:bookmark-plus"
+    },
+    "end_event": {
+      "service": "mdi:bookmark-check"
+    },
+    "export_recording": {
+      "service": "mdi:movie-open-play"
+    },
+    "protect_recording": {
+      "service": "mdi:lock"
+    },
+    "ack_alerts": {
+      "service": "mdi:bell-check"
+    },
+    "search_events": {
+      "service": "mdi:magnify"
+    }
+  }
+}

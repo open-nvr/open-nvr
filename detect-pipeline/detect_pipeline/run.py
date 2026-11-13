@@ -20,10 +20,21 @@ Env:
   DETECT_DETECTOR           onnx (YOLO) | rfdetr (DETR) | hog | blob | stub
   DETECT_ONNX_BACKEND       auto (default: cvdnn for onnx, ort for rfdetr)
                             | cvdnn | ort
-  DETECT_ONNX_PROVIDERS     ort execution providers, comma-separated, e.g.
-                            "OpenVINOExecutionProvider" (Intel N100) or
+  DETECT_ONNX_PROVIDERS     ort execution providers, comma-separated, each with an
+                            optional ":device" (OpenVINOExecutionProvider:NPU,
+                            OpenVINOExecutionProvider:AUTO:NPU,GPU,CPU,
+                            CUDAExecutionProvider:1), e.g.
+                            "OpenVINOExecutionProvider" (Intel N100),
+                            "QNNExecutionProvider:htp" (Qualcomm Hexagon) or
                             "TensorrtExecutionProvider,CUDAExecutionProvider"
+  DETECT_ONNX_PROVIDER_OPTIONS  extra provider options, key=value,key=value
+                            (QNN: htp_performance_mode, vtcm_mb, ...)
   DETECT_HWACCEL            cpu | vaapi | nvidia | qsv | rpi | rkmpp | jetson
+  DETECT_NMS_CROSS_LABEL_IOU  IoU above which boxes of DIFFERENT labels are one
+                            object (default 0.85; 0 or 1 = off). Off for
+                            per-label benchmarking (evalcmp).
+  DETECT_NMS_CONTAINMENT  share of a same-label box inside a larger one above which
+                       it is a part of that object, not a second one (0.85; 0 or 1 = off)
   DETECT_DECODE_SKIP        nonref (default) | bidir | nokey | none (decode CPU dial)
   DETECT_DECODE_THREADS     ffmpeg decoder thread cap (default 2; 0 = auto)
   DETECT_BESTFRAME_PER_CAMERA  best-frame crops retained per camera (default 16)
@@ -40,7 +51,6 @@ Env:
   DETECT_DECODE_IDLE        adaptive decode while quiet (default nokey; none = off)
   DETECT_DECODE_IDLE_AFTER  quiet seconds before idling (default 60)
   DETECT_HWACCEL_DEVICE     e.g. /dev/dri/renderD128
-  DETECT_MODEL_SIZE         detector input square (default 320)
   DETECT_REFRESH_SECONDS    camera-list reconcile interval (default 30)
 """
 from __future__ import annotations
@@ -106,6 +116,12 @@ class ServiceConfig:
     # kites/bananas endlessly; each becomes a standing track. 0.4 keeps real
     # people/vehicles (typically >0.6) while starving the phantom supply.
     detect_conf: float = 0.4
+    # The face route's KAI-C (dispatch.FACE_SKILL), apart from
+    # dispatch_kaic_url on purpose: setting it runs ONLY the per-camera
+    # face route (cameras a face app claimed), never the default routes,
+    # whatever the gate mode, so shipping it on changes nothing for a
+    # site without a face app, nor for one whose gate is in enforce.
+    face_kaic_url: str = ""
     rtsp_timeout_s: float = DEFAULT_RTSP_TIMEOUT_S
     bestframe_per_camera: int = 16
     detector_pool: int = 0
@@ -113,6 +129,46 @@ class ServiceConfig:
     dispatch_max_inflight: int = 4
     bestframe_max_entries: int = 0
     visits_enabled: bool = True
+    # Main-stream evidence while detecting on the sub (evidence.py):
+    # "main" cuts crops/scenes/plate candidates from the camera's main
+    # stream when core offers it beside the sub tap; "detect" keeps them
+    # on the detect stream (the pre-feature behaviour).
+    evidence_stream: str = "main"
+    evidence_fps: int = 5
+    evidence_idle_after: float = 15.0
+    evidence_max_skew_s: float = 0.35
+    # "nokey" (default) decodes only the main stream's keyframes while
+    # active — a fraction of the cost, crops up to a GOP old (the skew
+    # window is widened to at least 2 s to match); "full" decodes every
+    # main-stream frame for a crop from the same instant as the detect
+    # frame. Measured on a 960x1080 H.265 camera with a 1 s GOP: full
+    # ~27 % of a core while active, nokey ~5 %.
+    evidence_decode: str = "nokey"
+    # nokey's two guards. The source measures the camera's keyframe
+    # interval and, above this many seconds, switches that camera to full
+    # decode on its own (a keyframe crop would be too old to be of the
+    # same moment); and a main crop is only kept when it looks at least
+    # this much like the detect crop of the same box (Pearson correlation
+    # of the two, 0 = off) — else the detect crop is used and the refusal
+    # counted (tier0_evidence_mismatch_total).
+    evidence_nokey_max_gop_s: float = 2.0
+    evidence_match_min: float = 0.5
+    # A sub stream shorter than this (px) cannot show the detector a person at
+    # mid-distance: 'auto' cameras then detect on the main stream instead.
+    sub_min_height: int = 480
+    # DETECT_EVIDENCE_DEBUG_DIR: write every evidence attempt (crops + numbers)
+    # under this folder for tools/evidence_guard_report.py. Empty = off.
+    evidence_debug_dir: str = ""
+    # Evidence of the moment from the recording (playback.py): on when core
+    # offers a playback URL; how long a finished visit waits for its crop;
+    # the minimum gap between fetches per camera; concurrent decodes per box.
+    evidence_playback: bool = True
+    evidence_hold_s: float = 6.0
+    evidence_fetch_min_interval_s: float = 2.0
+    evidence_fetch_parallel: int = 2
+    # How much later a detect frame's stamp is than the recorder's clock
+    # (the sub path's latency); the starting point of a per-camera calibration.
+    evidence_stamp_lead_s: float = 0.5
 
 
 def _clean_env(value: str | None) -> str:
@@ -165,7 +221,7 @@ def _derive_model_id(env: dict) -> str:
 
     Explicit ``DETECT_MODEL_ID`` wins (set it when A/B-ing two builds of the same
     family). Otherwise, for the onnx detector, use the model file's basename
-    (e.g. ``/app/model_weights/yolov8n.onnx`` → ``yolov8n``); else the detector
+    (e.g. ``/app/model_weights/yolo26n.onnx`` → ``yolo26n``); else the detector
     type. This is what labels ``tier0_detector_*`` so models are comparable.
     """
     explicit = (env.get("DETECT_MODEL_ID") or "").strip()
@@ -173,7 +229,7 @@ def _derive_model_id(env: dict) -> str:
         return explicit
     detector = env.get("DETECT_DETECTOR", "onnx")
     if detector == "onnx":
-        model_path = env.get("DETECT_ONNX_MODEL", "/app/model_weights/yolov8n.onnx")
+        model_path = env.get("DETECT_ONNX_MODEL", "/app/model_weights/yolo26n.onnx")
         base = os.path.basename(model_path)
         stem = base.rsplit(".", 1)[0] if "." in base else base
         return stem or "onnx"
@@ -204,6 +260,26 @@ def _detector_pool_from_env(env: dict) -> int:
     return max(2, min(8, cores // per_detector))
 
 
+def _evidence_stream_from_env(env: dict) -> str:
+    """DETECT_EVIDENCE_STREAM: ``main`` (default) or ``detect``; anything
+    else is named and treated as the default, never as "off"."""
+    raw = (env.get("DETECT_EVIDENCE_STREAM") or "main").strip().lower()
+    if raw in ("main", "detect"):
+        return raw
+    log.warning("DETECT_EVIDENCE_STREAM=%r is not main|detect; using main", raw)
+    return "main"
+
+
+def _evidence_decode_from_env(env: dict) -> str:
+    """DETECT_EVIDENCE_DECODE: ``nokey`` (default) or ``full``; anything
+    else is named and treated as the default."""
+    raw = (env.get("DETECT_EVIDENCE_DECODE") or "nokey").strip().lower()
+    if raw in ("full", "nokey"):
+        return raw
+    log.warning("DETECT_EVIDENCE_DECODE=%r is not nokey|full; using nokey", raw)
+    return "nokey"
+
+
 def config_from_env(env: dict) -> ServiceConfig:
     return ServiceConfig(
         enabled=_truthy(env.get("DETECT_PIPELINE_ENABLED", "true")),
@@ -211,7 +287,7 @@ def config_from_env(env: dict) -> ServiceConfig:
         api_key=env.get("INTERNAL_API_KEY") or None,
         nats_url=env.get("NATS_URL") or None,
         detector=env.get("DETECT_DETECTOR", "onnx"),
-        onnx_model=env.get("DETECT_ONNX_MODEL", "/app/model_weights/yolov8n.onnx"),
+        onnx_model=env.get("DETECT_ONNX_MODEL", "/app/model_weights/yolo26n.onnx"),
         onnx_input=_env_int(env, "DETECT_ONNX_INPUT", 640),
         onnx_backend=env.get("DETECT_ONNX_BACKEND", "auto"),
         onnx_providers=_clean_env(env.get("DETECT_ONNX_PROVIDERS")),
@@ -233,12 +309,27 @@ def config_from_env(env: dict) -> ServiceConfig:
         refresh_seconds=_env_float(env, "DETECT_REFRESH_SECONDS", 30.0),
         gate_mode=env.get("DETECT_GATE_MODE", "shadow").strip().lower(),
         visits_enabled=_truthy(env.get("DETECT_VISITS_ENABLED", "true")),
+        evidence_stream=_evidence_stream_from_env(env),
+        evidence_fps=_env_int(env, "DETECT_EVIDENCE_FPS", 5),
+        evidence_idle_after=_env_float(env, "DETECT_EVIDENCE_IDLE_AFTER", 15.0),
+        evidence_max_skew_s=_env_float(env, "DETECT_EVIDENCE_MAX_SKEW_S", 0.35),
+        evidence_decode=_evidence_decode_from_env(env),
+        evidence_nokey_max_gop_s=_env_float(env, "DETECT_EVIDENCE_NOKEY_MAX_GOP_S", 2.0),
+        evidence_match_min=_env_float(env, "DETECT_EVIDENCE_MATCH_MIN", 0.5),
+        sub_min_height=int(_env_float(env, "DETECT_SUB_MIN_HEIGHT", 480)),
+        evidence_debug_dir=(env.get("DETECT_EVIDENCE_DEBUG_DIR") or "").strip(),
+        evidence_playback=_env_bool(env, "DETECT_EVIDENCE_PLAYBACK", True),
+        evidence_hold_s=_env_float(env, "DETECT_EVIDENCE_HOLD_S", 6.0),
+        evidence_fetch_min_interval_s=_env_float(env, "DETECT_EVIDENCE_FETCH_MIN_INTERVAL_S", 2.0),
+        evidence_fetch_parallel=_env_int(env, "DETECT_EVIDENCE_FETCH_PARALLEL", 2),
+        evidence_stamp_lead_s=_env_float(env, "DETECT_EVIDENCE_STAMP_LEAD_S", 0.5),
         gate_heartbeat_s=_env_float(env, "DETECT_GATE_HEARTBEAT_S", 0.0),
         gate_critical_classes=env.get("DETECT_GATE_CRITICAL_CLASSES", ""),
         gate_cooldown_s=_env_float(env, "DETECT_GATE_COOLDOWN_S", 30.0),
         metrics_port=_env_int(env, "DETECT_METRICS_PORT", 9109),
         dispatch_kaic_url=_env_url(env, "DETECT_DISPATCH_KAIC_URL"),
         dispatch_task=env.get("DETECT_DISPATCH_TASK", "caption"),
+        face_kaic_url=_env_url(env, "DETECT_FACE_KAIC_URL"),
         detect_conf=_env_float(env, "DETECT_CONF", 0.4),
     )
 
@@ -261,6 +352,16 @@ def _decode_idle_from_env(env: dict) -> str:
         )
         return ""
     return value
+
+
+def _env_bool(env: dict, name: str, default: bool) -> bool:
+    """``true/1/yes/on`` → True, ``false/0/no/off`` → False, anything else → default."""
+    raw = (env.get(name) or "").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return default
 
 
 def _env_int(env: dict, name: str, default: int) -> int:
@@ -308,14 +409,54 @@ def _gate_factory(cfg: ServiceConfig):
     return lambda: Gate(gcfg)
 
 
-def _resolve_onnx_backend(configured: str, family_default: str) -> str:
+def _build_dispatch(cfg):
+    """(dispatcher, base router) for the gate mode, or (None, None).
+
+    No KAI-C URL: nothing (the default install). Enforce: the default
+    routes (caption) on every escalation, as before. Any other mode: the
+    dispatcher exists but the base router is EMPTY, so only the opt-in
+    per-camera routes that answer to their claim rather than the mode
+    (the face route) can run; every other camera dispatches nothing,
+    exactly as before. A gate mode of ``off`` builds no gate, so nothing
+    escalates and nothing runs.
+
+    No dispatch URL but a face URL (DETECT_FACE_KAIC_URL): the face route
+    only, in every mode."""
+    from .dispatch import DispatchRouter, KaicDispatcher
+
+    if not cfg.dispatch_kaic_url:
+        face_url = getattr(cfg, "face_kaic_url", "")
+        if not face_url:
+            return None, None
+        log.info("tier1 face route -> %s (cameras a face app claimed; nothing else)", face_url)
+        return (KaicDispatcher(face_url, api_key=cfg.api_key, task=cfg.dispatch_task,
+                               max_inflight=cfg.dispatch_max_inflight),
+                DispatchRouter(routes={}))
+
+    dispatcher = KaicDispatcher(
+        cfg.dispatch_kaic_url, api_key=cfg.api_key, task=cfg.dispatch_task,
+        max_inflight=cfg.dispatch_max_inflight,
+    )
+    if (cfg.gate_mode or "").lower() == "enforce":
+        log.info("tier1 dispatch enabled -> %s (task=%s)", cfg.dispatch_kaic_url, cfg.dispatch_task)
+        return dispatcher, DispatchRouter()
+    log.info("tier1 dispatch -> %s: gate mode=%s, so only claimed per-camera "
+             "routes (faces) run; default routes wait for enforce",
+             cfg.dispatch_kaic_url, cfg.gate_mode)
+    return dispatcher, DispatchRouter(routes={})
+
+
+def _resolve_onnx_backend(configured: str, family_default: str, providers=None) -> str:
     """DETECT_ONNX_BACKEND: '' / 'auto' resolve per detector family — cvdnn
     for the YOLO head (runs everywhere, zero deps), ort for the DETR head
-    (transformer exports exceed cv2.dnn's operator coverage). An explicit
+    (transformer exports exceed cv2.dnn's operator coverage) — unless
+    execution providers were requested: an accelerator is only reachable
+    through ort, so ``auto`` + DETECT_ONNX_PROVIDERS is ort (the flavour
+    overlays set the providers and leave the backend alone). An explicit
     cvdnn/ort is honored; anything else warns and uses the family default."""
     value = (configured or "auto").strip().lower()
     if value in ("", "auto"):
-        return family_default
+        return "ort" if providers else family_default
     if value in ("cvdnn", "ort"):
         return value
     log.warning("unknown DETECT_ONNX_BACKEND=%r; using %s", configured, family_default)
@@ -325,6 +466,17 @@ def _resolve_onnx_backend(configured: str, family_default: str) -> str:
 def _stub_factory():
     from .detector import StubDetector
     return StubDetector
+
+
+def _export_detector_backend(det) -> None:
+    """``tier0_detector_backend``: the providers the ORT session really got."""
+    from .metrics import record_detector_backend
+    from .onnx_detector import describe_providers
+
+    backend = getattr(det, "_backend", None)
+    requested = describe_providers(getattr(backend, "requested", None) or [])
+    effective = ", ".join(getattr(backend, "effective", None) or [])
+    record_detector_backend(getattr(det, "backend_name", "unknown"), requested, effective)
 
 
 def _detector_factory(cfg: ServiceConfig):
@@ -342,7 +494,7 @@ def _detector_factory(cfg: ServiceConfig):
         from .onnx_detector import OnnxYoloDetector
 
         providers = [p.strip() for p in cfg.onnx_providers.split(",") if p.strip()] or None
-        backend = _resolve_onnx_backend(cfg.onnx_backend, "cvdnn")
+        backend = _resolve_onnx_backend(cfg.onnx_backend, "cvdnn", providers)
         if providers and backend != "ort":
             log.warning(
                 "DETECT_ONNX_PROVIDERS is set but backend=%s ignores it "
@@ -360,6 +512,7 @@ def _detector_factory(cfg: ServiceConfig):
                     "tier0 detector loaded: family=yolo model=%s backend=%s input=%d",
                     os.path.basename(cfg.onnx_model), det.backend_name, cfg.onnx_input,
                 )
+                _export_detector_backend(det)
                 return det
             except Exception:
                 log.warning(
@@ -459,21 +612,8 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
         cfg.onnx_input if cfg.detector in ("onnx", "rfdetr") else cfg.model_size
     )
     # #10 Tier-1 dispatch: built only when a KAI-C URL is configured (off by
-    # default). It still only fires on enforce escalations (shadow/off = nothing).
-    dispatcher = router = None
-    if cfg.dispatch_kaic_url and (cfg.gate_mode or "").lower() == "enforce":
-        from .dispatch import DispatchRouter, KaicDispatcher
-        dispatcher = KaicDispatcher(
-            cfg.dispatch_kaic_url, api_key=cfg.api_key, task=cfg.dispatch_task,
-            max_inflight=cfg.dispatch_max_inflight,
-        )
-        router = DispatchRouter()
-        log.info("tier1 dispatch enabled -> %s (task=%s)", cfg.dispatch_kaic_url, cfg.dispatch_task)
-    elif cfg.dispatch_kaic_url:
-        # URL set but gate isn't enforcing -> dispatch would never fire; don't spin
-        # up an idle pool. (shadow measures; only enforce dispatches.)
-        log.info("tier1 dispatch URL set but gate mode=%s (not enforce); dispatch inactive",
-                 cfg.gate_mode)
+    # default); see _build_dispatch for what runs in which gate mode.
+    dispatcher, router = _build_dispatch(cfg)
     # Best-frame store: retains each track's best crop for on-demand fetch (served
     # on the metrics port at /best_frame). Only built when there's a metrics port to
     # serve it on — no point doing per-frame store work nothing can ever read.
@@ -489,13 +629,27 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
             # 256, so from camera 17 every put evicted someone.
             max_entries=cfg.bestframe_max_entries,
         )
+    # The newest decoded frame per camera, served at /latest_frame: the
+    # camera agent's live look reads it instead of opening its own RTSP
+    # session (5.6–6.2 s a look on a Ventuno Q; bestframe.LatestFrameStore).
+    latest_frames = None
+    if cfg.metrics_port:
+        from .bestframe import LatestFrameStore
+        latest_frames = LatestFrameStore()
     # Events store (RFC-0001 C1): post finished visits + best-frame evidence
     # to core. Best-effort by design — core down loses history, not detection.
     visit_poster = None
+    attempt_poster = None
     if cfg.visits_enabled and cfg.core_url:
         from .events_poster import VisitPoster
         visit_poster = VisitPoster(cfg.core_url, cfg.api_key)
         visit_poster.start()
+        # Multi-frame OCR: early plate attempts ride their own bounded
+        # queue to core's attempt endpoint. Same lifecycle as visits —
+        # no core_url, no attempts.
+        from .plate_attempts import AttemptPoster
+        attempt_poster = AttemptPoster(cfg.core_url, cfg.api_key)
+        attempt_poster.start()
     manager = WorkerManager(
         provider, sink,
         enabled=cfg.enabled,
@@ -503,6 +657,7 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
         model_size=model_size,
         model_id=cfg.model_id,
         best_frames=best_frames,
+        latest_frames=latest_frames,
         device=cfg.device,
         hwaccel=cfg.hwaccel,
         decode_skip=cfg.decode_skip,
@@ -519,8 +674,24 @@ def build_manager(cfg: ServiceConfig, sink, *, gate_sink=None) -> WorkerManager:
         dispatcher=dispatcher,
         router=router,
         visit_poster=visit_poster,
+        attempt_poster=attempt_poster,
+        evidence_stream=cfg.evidence_stream,
+        evidence_fps=cfg.evidence_fps,
+        evidence_idle_after=cfg.evidence_idle_after,
+        evidence_max_skew_s=cfg.evidence_max_skew_s,
+        evidence_decode=cfg.evidence_decode,
+        evidence_nokey_max_gop_s=cfg.evidence_nokey_max_gop_s,
+        evidence_match_min=cfg.evidence_match_min,
+        sub_min_height=cfg.sub_min_height,
+        evidence_debug_dir=cfg.evidence_debug_dir or None,
+        evidence_playback=cfg.evidence_playback,
+        evidence_hold_s=cfg.evidence_hold_s,
+        evidence_fetch_min_interval_s=cfg.evidence_fetch_min_interval_s,
+        evidence_fetch_parallel=cfg.evidence_fetch_parallel,
+        evidence_stamp_lead_s=cfg.evidence_stamp_lead_s,
     )
     manager.best_frames = best_frames            # expose so main() can serve it
+    manager.latest_frames = latest_frames
     # Same reason: main() wires this into /health. It is a LOCAL of this
     # function, so referring to it from main() is a NameError at startup.
     manager.visit_poster = visit_poster
@@ -686,8 +857,15 @@ def main() -> int:  # pragma: no cover - integration entrypoint
             cv2.setNumThreads(threads)
         except Exception:  # cv2 optional (stub/hog detectors)
             pass
-    log.info("tier0 service starting (enabled=%s, detector=%s, hwaccel=%s, cv_threads=%s)",
-             cfg.enabled, cfg.detector, cfg.hwaccel, threads or "uncapped")
+    # The flavour this image was built as and the providers it was asked
+    # for, on the first line: a `-qualcomm` image started without the
+    # overlay says "flavour=qualcomm providers=(default)" here, which is
+    # the whole diagnosis, instead of eighteen capacity warnings later.
+    log.info("tier0 service starting (enabled=%s, detector=%s, hwaccel=%s, cv_threads=%s, "
+             "flavour=%s, providers=%s)",
+             cfg.enabled, cfg.detector, cfg.hwaccel, threads or "uncapped",
+             os.environ.get("OPENNVR_ACCEL_FLAVOUR") or "cpu",
+             cfg.onnx_providers or "(default)")
 
     publish, close, nats_connected = _make_publisher(
         cfg.nats_url, os.environ.get("NATS_TOKEN") or cfg.api_key
@@ -737,7 +915,7 @@ def main() -> int:  # pragma: no cover - integration entrypoint
         cfg.gate_mode,
         cfg.dispatch_kaic_url or "off",
         cfg.nats_url or "unconfigured",
-        f":{cfg.metrics_port}/metrics,/health,/best_frame" if cfg.metrics_port else "off",
+        f":{cfg.metrics_port}/metrics,/health,/best_frame,/latest_frame" if cfg.metrics_port else "off",
         "on (events store)" if cfg.visits_enabled else "off",
         threads or "uncapped",
     )
@@ -747,9 +925,10 @@ def main() -> int:  # pragma: no cover - integration entrypoint
         serve_metrics(
             cfg.metrics_port,
             best_frames=getattr(manager, "best_frames", None),
+            latest_frames=getattr(manager, "latest_frames", None),
             health_fn=lambda: health_evaluate(hstate),
         )
-        log.info("tier0 metrics on :%d/metrics (+ /health, /best_frame)", cfg.metrics_port)
+        log.info("tier0 metrics on :%d/metrics (+ /health, /best_frame, /latest_frame)", cfg.metrics_port)
 
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
@@ -775,17 +954,7 @@ def main() -> int:  # pragma: no cover - integration entrypoint
             return
         log.info("tier0 gate mode change (managed): %s -> %s", effective_mode, override)
         cfg = replace(cfg, gate_mode=override)
-        dispatcher = router = None
-        if override == "enforce" and cfg.dispatch_kaic_url:
-            from .dispatch import DispatchRouter, KaicDispatcher
-
-            dispatcher = KaicDispatcher(
-                cfg.dispatch_kaic_url, api_key=cfg.api_key, task=cfg.dispatch_task,
-                max_inflight=cfg.dispatch_max_inflight,
-            )
-            router = DispatchRouter()
-            log.info("tier1 dispatch enabled -> %s (task=%s)",
-                     cfg.dispatch_kaic_url, cfg.dispatch_task)
+        dispatcher, router = _build_dispatch(cfg)
         manager.apply_gate_change(_gate_factory(cfg), dispatcher=dispatcher, router=router)
         effective_mode = override
 

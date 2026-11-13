@@ -31,8 +31,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from core.auth import get_current_active_user
+from core.camera_source import PUBLISH_TOKEN_MINUTES, is_publisher
 from core.config import settings
 from core.database import get_db
+from core.permissions import RequirePermission
 from models import Camera, User
 from services.camera_service import CameraService
 from services.mediamtx_jwt_service import MediaMtxJwtService
@@ -66,6 +68,30 @@ def _check_camera_permission(
             raise
 
     return camera
+
+
+def _has_substream_source(db: Session | None, camera: Camera) -> bool:
+    """Whether provisioning gives this camera a ``-sub`` path: a stored
+    substream URL, or one derivable from its main URL (the rule in
+    MediaMtxAdminService._provision_substream). Offering ``webrtc_sub`` for a
+    camera without one sends the player to a path MediaMTX answers with 400
+    "not configured" — which the player reads as an expired token."""
+    from services.camera_source_resolver import derive_substream_url
+
+    if getattr(camera, "substream_url", None):
+        return True
+    sources = [getattr(camera, "rtsp_url", None)]
+    if db is not None:
+        try:
+            from models import CameraConfig
+
+            cfg = db.query(CameraConfig.source_url).filter(
+                CameraConfig.camera_id == camera.id).first()
+            if cfg:
+                sources.append(cfg[0])
+        except Exception:
+            pass
+    return any(derive_substream_url(s) for s in sources if s)
 
 
 @router.get("/token/{camera_id}")
@@ -281,13 +307,19 @@ async def get_stream_info(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
     request: Request = None,
+    include_sub: bool = False,
 ):
     """
     Get comprehensive stream information and JWT token for a camera.
 
     Returns all stream URLs and a single token valid for all protocols.
+    ``include_sub=true`` also returns the low-res ``webrtc_sub`` URL (the
+    Live View tour plays it to keep a 20-tile wall cheap) when the camera has
+    a substream; without it the response is exactly what it was.
     """
     camera = _check_camera_permission(db, camera_id, current_user)
+    with_sub = settings.agent_live_use_substream or (
+        include_sub and _has_substream_source(db, camera))
 
     # Every WHEP attempt is preceded by this call, so it is where we learn the
     # address the browser actually reached us on and make sure MediaMTX
@@ -304,7 +336,7 @@ async def get_stream_info(
     # main path and its "-sub" sibling so the same token authorizes either WHEP
     # (the camera-agent's live view uses the sub; the main UI uses the main).
     # Off → an exact-match scope on the main path, unchanged.
-    if settings.agent_live_use_substream:
+    if with_sub:
         import re
 
         token_path = f"~^{re.escape(stream_name)}(-sub)?$"
@@ -375,7 +407,7 @@ async def get_stream_info(
             # UI ignores it and keeps using the full-res "webrtc" above.
             **(
                 {"webrtc_sub": f"{webrtc_base.rstrip('/')}/{substream_name(stream_name)}/whep"}
-                if settings.agent_live_use_substream else {}
+                if with_sub else {}
             ),
             "hls": f"{hls_base.rstrip('/')}/{stream_name}/index.m3u8",
             "rtsps": f"{rtsps_base.rstrip('/')}/{stream_name}",
@@ -392,4 +424,63 @@ async def get_stream_info(
             "status": camera.status,
         },
         "security_note": "All MediaMTX services are localhost-only. Access via backend proxy with JWT.",
+    }
+
+
+# ── Webcam publishing (core/camera_source.py) ──────────────────────────────
+#
+# A webcam camera's MediaMTX path has ``source: publisher``: video arrives by
+# being pushed into it. Two ways in, each handed a short publish-only token
+# scoped to that one path:
+#   * the SPA's publisher page (browser WHIP), as a signed-in manager — here;
+#   * the host agent (ffmpeg over RTSPS) for a USB webcam on the OpenNVR
+#     machine — routers/host_agent.py.
+
+_require_cameras_manage = RequirePermission("cameras.manage")
+
+
+def _webcam_or_404(camera: Camera | None) -> Camera:
+    if (
+        camera is None
+        or not is_publisher(camera)
+        or camera.deleted_at is not None
+        or not camera.is_active
+    ):
+        raise HTTPException(status_code=404, detail="Webcam camera not found")
+    return camera
+
+
+@router.post("/{camera_id}/whip")
+async def get_whip_session(
+    camera_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_cameras_manage),
+    request: Request = None,
+):
+    """A WHIP endpoint and publish token for publishing a browser's webcam.
+
+    The token may only publish, only to this camera's path, and expires in
+    a few minutes; the page asks again on every (re)connect.
+    """
+    camera = _webcam_or_404(
+        _check_camera_permission(db, camera_id, current_user, require_manage=True)
+    )
+    # Same reason as get_stream_info: the browser's ICE candidates must
+    # reach MediaMTX on the address the browser reached us on.
+    await _learn_ice_host(request, db)
+    from services.host_agent import publish_token
+
+    stream_name, token = publish_token(camera)
+    webrtc_base = (
+        settings.mediamtx_external_base_url
+        or settings.mediamtx_base_url
+        or "http://127.0.0.1:8889"
+    )
+    return {
+        "camera_id": camera_id,
+        "stream_name": stream_name,
+        "whip_url": f"{webrtc_base.rstrip('/')}/{stream_name}/whip",
+        "token": token,
+        "token_type": "Bearer",
+        "expires_in_seconds": PUBLISH_TOKEN_MINUTES * 60,
     }

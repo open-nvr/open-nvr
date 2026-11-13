@@ -1,0 +1,14 @@
+# OpenNVR Accelerate — Intel NPU device (Core Ultra "AI Boost"). Added by
+# start.sh next to docker-compose.accel-intel.yml when /dev/accel/accel0
+# exists; kept separate because compose refuses a device the host lacks.
+# Overrides only docker-compose.yml's detect-pipeline; the pose adapter's
+# NPU bit (docker-compose.apps.yml) is docker-compose.accel-intel-npu-apps.yml,
+# appended when that file is in the set.
+services:
+  detect-pipeline:
+    devices:
+      - /dev/accel:/dev/accel
+    environment:
+      # The NPU is the fastest device for the Tier-0 detector and leaves the
+      # iGPU free to decode, at almost no CPU.
+      - DETECT_ONNX_PROVIDERS=${DETECT_ONNX_PROVIDERS:-OpenVINOExecutionProvider:NPU}

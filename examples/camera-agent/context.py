@@ -23,16 +23,94 @@ LLM turn don't trip each other up.
 from __future__ import annotations
 
 import asyncio
+import re
 import json
 import logging
 import time
 from collections import deque
+from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Awaitable, Callable, Iterable
 
 from frame_sources import FrameSource, FrameSourceError
 
 logger = logging.getLogger(__name__)
+
+
+# ── Per-request camera scope (RBAC) ────────────────────────────────
+#
+# In ``auth_mode: opennvr`` every request is made by an OpenNVR user who
+# may see only SOME of the cameras this agent serves (the server's
+# per-camera assignments: ownership + CameraPermission grants). The auth
+# middleware resolves that user's visible set and stores it here for the
+# duration of the request; every roster read below — the tools' camera
+# resolver, the frame cache, the event/plate rings, the system-prompt
+# roster — filters through it, so "what's on the yard camera?" from a
+# guard who was never assigned the yard is answered "no such camera",
+# exactly as the main UI would. ``None`` = unrestricted: a superuser, a
+# background loop (alarms/monitors run for the whole fleet), or
+# ``auth_mode: none``. ContextVars follow the request into every task
+# and thread it spawns, so tools running under ``to_thread`` see it.
+CAMERA_SCOPE: ContextVar[frozenset[str] | None] = ContextVar(
+    "camera_scope", default=None)
+
+#: The pipeline trace of the conversation turn THIS asyncio task is
+#: running (camera_agent._run_conversation_turn sets it; _trace_tool
+#: appends to it). Not a slot on the runtime: turns are not serialised —
+#: a background task or a scheduled report runs its own turn while a
+#: person's is in flight — so a shared slot let one turn's tool steps
+#: land in another's trace. ``None`` = not inside a turn: nothing is
+#: traced. Cleared by ``spawn_unscoped`` for the same reason the camera
+#: scope is: a loop started from inside a turn must not keep appending to
+#: a trace that turn has already returned.
+TURN_TRACE: ContextVar[list[dict[str, Any]] | None] = ContextVar(
+    "camera_agent_turn_trace", default=None)
+
+
+def set_camera_scope(scope: Iterable[str] | None):
+    """Bind the caller's visible agent-camera ids (``None`` = all).
+    Returns the token for ``reset_camera_scope``."""
+    return CAMERA_SCOPE.set(None if scope is None else frozenset(scope))
+
+
+def reset_camera_scope(token) -> None:
+    CAMERA_SCOPE.reset(token)
+
+
+def camera_scope() -> frozenset[str] | None:
+    return CAMERA_SCOPE.get()
+
+
+def camera_in_scope(camera_id: str) -> bool:
+    scope = CAMERA_SCOPE.get()
+    return scope is None or camera_id in scope
+
+
+def spawn_unscoped(coro, *, name: str | None = None) -> asyncio.Task:
+    """``asyncio.create_task`` for the agent's own BACKGROUND work.
+
+    A task inherits the context it is created in, so a monitor or alarm
+    loop started from inside a scoped request would carry that caller's
+    camera scope for its whole life — an alarm the site admin later
+    widened would keep looking at one guard's cameras. Background loops
+    watch the fleet: this clears the scope — and the spawning turn's
+    trace — in the new task before the coroutine runs (the reset touches
+    only the new task's own context).
+    """
+    async def _run():
+        CAMERA_SCOPE.set(None)
+        TURN_TRACE.set(None)
+        return await coro
+
+    return asyncio.create_task(_run(), name=name)
+
+
+def scoped_cameras(cameras: Iterable["CameraSpec"]) -> list["CameraSpec"]:
+    """``cameras`` narrowed to the current scope (identity when unset)."""
+    scope = CAMERA_SCOPE.get()
+    if scope is None:
+        return list(cameras)
+    return [c for c in cameras if c.camera_id in scope]
 
 
 @dataclass
@@ -117,6 +195,11 @@ class CameraContext:
         }
         self._frame_sources: dict[str, FrameSource] = {}
         self._frame_cache: dict[str, _CachedFrame] = {}
+        # Tier-0's newest decoded frame, asked for ahead of the camera's own
+        # frame source: the pipeline decodes the stream all day, and a fresh
+        # RTSP session of our own cost 5.6–6.2 s a look on a Ventuno Q
+        # (the agent's 32-case eval, 2026-11-08). None → always the source.
+        self._latest_frame_fetch: Callable[[str], Awaitable[bytes | None]] | None = None
         self._cache_ttl = float(frame_cache_ttl_seconds)
         # Frames pinned by the operator ("ask about THIS frame") — served
         # by get_frame verbatim (conversation path only; autonomous pollers
@@ -182,6 +265,14 @@ class CameraContext:
 
     @property
     def cameras(self) -> list[CameraSpec]:
+        """The roster as the CURRENT CALLER may see it (see CAMERA_SCOPE);
+        the full fleet outside a scoped request."""
+        return scoped_cameras(self._cameras.values())
+
+    @property
+    def all_cameras(self) -> list[CameraSpec]:
+        """The whole fleet regardless of the caller — for the agent's own
+        background work (alarms, monitors, roster reconciliation)."""
         return list(self._cameras.values())
 
     def add_camera(self, spec: CameraSpec) -> None:
@@ -190,7 +281,10 @@ class CameraContext:
         self._cameras[spec.camera_id] = spec
 
     def known_camera(self, camera_id: str) -> bool:
-        return camera_id in self._cameras
+        """Configured AND visible to the current caller. Out of scope reads
+        as unknown on purpose — a camera you were not assigned must not be
+        confirmed to exist by the error message."""
+        return camera_id in self._cameras and camera_in_scope(camera_id)
 
     def remove_camera(self, camera_id: str) -> bool:
         """Forget a camera: its spec, frame source, and cached/pinned frames.
@@ -211,7 +305,14 @@ class CameraContext:
         return True
 
     def get_camera(self, camera_id: str) -> CameraSpec | None:
+        if not camera_in_scope(camera_id):
+            return None
         return self._cameras.get(camera_id)
+
+    def set_latest_frame_fetch(self, fetch: Callable[[str], Awaitable[bytes | None]] | None) -> None:
+        """A bound ``async fetch(camera_id) -> jpeg | None`` tried before the
+        camera's own frame source (the SDK's make_latest_frame_fetch)."""
+        self._latest_frame_fetch = fetch
 
     def register_frame_source(self, camera_id: str, source: FrameSource) -> None:
         """Called by camera_agent.py during startup so tests can
@@ -231,7 +332,7 @@ class CameraContext:
         always see the real current frame — an operator pinning a
         historical frame for a question must never ring an alarm or
         freeze a monitor on it."""
-        if camera_id not in self._cameras:
+        if camera_id not in self._cameras or not camera_in_scope(camera_id):
             raise LookupError(
                 f"camera_id {camera_id!r} is not configured; "
                 f"available: {sorted(self._cameras.keys())}"
@@ -259,14 +360,24 @@ class CameraContext:
             if cached is not None and (now - cached.fetched_at) < self._cache_ttl:
                 return cached.bytes_
 
+            # Tier-0's newest decoded frame first: a memory read on the
+            # pipeline, fresh within its frame interval. None (no pipeline,
+            # a camera it does not decode, a stale stream) → our own grab.
+            frame = None
+            if self._latest_frame_fetch is not None:
+                try:
+                    frame = await self._latest_frame_fetch(camera_id)
+                except Exception:  # noqa: BLE001 — best-effort, the source is the fallback
+                    frame = None
             # The fetch (RTSP keyframe wait: seconds) runs under this
             # camera's lock — deliberate, so concurrent callers coalesce on
             # one fetch instead of hammering the camera. Other cameras
             # proceed in parallel on their own locks.
-            try:
-                frame = await asyncio.to_thread(source.fetch)
-            except FrameSourceError:
-                raise
+            if frame is None:
+                try:
+                    frame = await asyncio.to_thread(source.fetch)
+                except FrameSourceError:
+                    raise
             self._frame_cache[camera_id] = _CachedFrame(
                 bytes_=frame, fetched_at=now
             )
@@ -376,9 +487,10 @@ class CameraContext:
         cutoff = time.time() - max(0.0, float(window_seconds))
         rings: list[deque[EventRecord]]
         if camera_id is None:
-            rings = list(self._events.values())
+            rings = [ring for cid, ring in self._events.items()
+                     if camera_in_scope(cid)]
         else:
-            ring = self._events.get(camera_id)
+            ring = self._events.get(camera_id) if camera_in_scope(camera_id) else None
             rings = [ring] if ring else []
         out: list[EventRecord] = []
         for ring in rings:
@@ -399,7 +511,7 @@ class CameraContext:
         Used by ``camera_snapshot`` to answer count/presence questions from the
         always-on Tier-0 stream with **no new inference** — the detection already
         ran; we just read its latest result off the ring."""
-        ring = self._events.get(camera_id)
+        ring = self._events.get(camera_id) if camera_in_scope(camera_id) else None
         if not ring:
             return None
         for ev in reversed(ring):            # newest-first
@@ -430,6 +542,7 @@ class CameraContext:
             r for r in self._plates
             if r.received_at >= cutoff
             and (camera_id is None or r.camera_id == camera_id)
+            and camera_in_scope(r.camera_id)
             and (needle is None or needle in r.plate_text)
         ]
         out.sort(key=lambda r: (r.received_at, r.seq), reverse=True)
@@ -477,10 +590,18 @@ class CameraContext:
         out: list[AlertRecord] = []
         for ring in rings:
             for al in ring:
-                if al.received_at >= cutoff:
+                if al.received_at >= cutoff and _alert_in_scope(al):
                     out.append(al)
         out.sort(key=lambda a: (a.received_at, a.seq), reverse=True)
         return out
+
+
+def _alert_in_scope(alert: "AlertRecord") -> bool:
+    """An app alert about a camera is visible only to callers who may see
+    that camera; an alert about nothing in particular (empty camera_id —
+    a site-wide notice) reaches everyone. Mirrors the server's inbox."""
+    cam = (getattr(alert, "camera_id", "") or "").strip()
+    return not cam or camera_in_scope(cam)
 
 
 # ── NATS subscriber ────────────────────────────────────────────────
@@ -675,6 +796,99 @@ def _summarise_event(payload: dict[str, Any]) -> str:
 # ── App alert relay (subscriber + parser) ──────────────────────────
 
 
+def core_tracks_frame(event: Any) -> tuple[int, dict] | None:
+    """One `tracks` event off core's /events/ws → ``(core_camera_id, frame)``
+    for the demo, or None. Pure, so it is tested without a socket.
+
+    Core has already done the work — the site switch, the per-app
+    permission, the box normalisation — so this only validates shape:
+    the right event type, an integer camera id, at least one track."""
+    if not isinstance(event, dict) or event.get("event_type") != "tracks":
+        return None
+    cam = event.get("camera_id")
+    if isinstance(cam, bool) or not isinstance(cam, int):
+        return None
+    p = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    tracks = [t for t in (p.get("tracks") or []) if isinstance(t, dict)]
+    if not tracks:
+        return None
+    frame: dict[str, Any] = {"calibrating": bool(p.get("calibrating", False)),
+                             "tracks": tracks}
+    if p.get("source"):
+        frame["source"] = str(p["source"])
+    return cam, frame
+
+
+async def run_core_tracks_subscriber(
+    *,
+    base_url: str,
+    api_key: str,
+    stop_event: asyncio.Event,
+    on_tracks,   # callback(core_camera_id: int, frame: dict) — the demo push
+) -> None:
+    """Consume core's overlay tracks over its /events/ws and hand each
+    frame to ``on_tracks``. ONE source of truth: core's bridge decides
+    what is drawable (DETECTION_OVERLAY_ENABLED, each app's overlay
+    permission, the box maths) and this only relays it — the agent
+    never re-derives any of that from the bus.
+
+    Authenticates with the deployment's INTERNAL_API_KEY, which core
+    turns into an unscoped SERVICE ticket; the agent applies its own
+    per-viewer camera scope before anything reaches a page (see the
+    /updates handler). Backs off on failure; a ticket is single-use and
+    30 s, so a fresh one is minted on every (re)connect. `websockets`
+    missing → quietly no overlay, like nats-py for the alert relay.
+    """
+    try:
+        import websockets  # type: ignore
+    except ImportError:
+        logger.warning("websockets not installed; no live detection overlay")
+        await stop_event.wait()
+        return
+    import httpx
+
+    base = base_url.rstrip("/")
+    ws_base = re.sub(r"^http", "ws", base, count=1)
+    backoff = 2.0
+    while not stop_event.is_set():
+        try:
+            async with httpx.AsyncClient(timeout=5.0, trust_env=False) as hc:
+                r = await hc.post(f"{base}/api/v1/events/ws-ticket",
+                                  headers={"X-Internal-Api-Key": api_key})
+                r.raise_for_status()
+                ticket = r.json()["ticket"]
+            url = (f"{ws_base}/api/v1/events/ws?ticket={ticket}"
+                   f"&task=tier0&task=overlay")
+            async with websockets.connect(url, max_queue=64) as ws:
+                logger.info("core tracks subscriber: connected to %s/api/v1/events/ws", base)
+                backoff = 2.0
+                while not stop_event.is_set():
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                    except asyncio.TimeoutError:
+                        continue
+                    try:
+                        parsed = core_tracks_frame(json.loads(raw))
+                    except Exception:
+                        continue
+                    if parsed is None:
+                        continue
+                    cam, frame = parsed
+                    try:
+                        on_tracks(cam, frame)
+                    except Exception:
+                        logger.debug("core tracks subscriber: on_tracks raised", exc_info=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("core tracks subscriber: %s; retrying in %.0fs", exc, backoff)
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=backoff)
+        except asyncio.TimeoutError:
+            pass
+        backoff = min(backoff * 2, 30.0)
+
+
 async def run_app_alert_subscriber(
     *,
     context: CameraContext,
@@ -762,7 +976,6 @@ async def run_app_alert_subscriber(
                 )
             else:
                 await sub.unsubscribe()
-                await plate_sub.unsubscribe()
         except Exception:
             logger.exception(
                 "app-alert subscriber: error in run loop; reconnecting"

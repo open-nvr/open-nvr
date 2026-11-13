@@ -1,0 +1,33 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# The Look steps tools/look_eval.py measures, written as a workflow's
+# `ai:` step (RFC #620; checked by opennvr_app_sdk.workflows). One per
+# question a site's pictures are labelled for. Paths are left out: the
+# eval scores the decision, so every outcome's path is filled in empty.
+#
+# A wording change here moves the score; run the cases before and after.
+
+gate_who:
+  mode: look
+  input: picture
+  prompt: >-
+    Someone is at the gate. Say who they are: a delivery rider (a courier
+    or food delivery, often with a branded bag, box or uniform), a cab
+    driver (a taxi or ride-hailing car), a visitor, or a resident or member
+    of staff. Name the delivery company if a logo, bag or uniform shows it.
+  decision: [delivery, cab, visitor, resident]
+  fields: { company: [amazon, flipkart, swiggy, zomato, dhl, other, none] }
+
+yard_threat:
+  mode: look
+  input: picture
+  prompt: >-
+    A camera in the yard detected a person at night. Say what is actually
+    there: a guard on patrol (uniform, reflective vest, torch), a stranger,
+    an animal, or nobody (a shadow, a bag, a reflection or an empty scene).
+  decision: [ignore, alert]
+  fields: { who: [guard, stranger, animal, nobody] }
+  rules:
+    - { when: { who: stranger }, then: alert }
+    - { when: { who: [guard, animal, nobody] }, then: ignore }

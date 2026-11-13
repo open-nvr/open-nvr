@@ -48,6 +48,11 @@ Design (desired-state + reconciler):
 * An index entry without a digest means UNPINNED — a loud warning is
   logged and the run is documented as dev-only (do not run unpinned in
   production).
+* A pinned image must carry a valid **Sigstore signature** from its
+  expected signer (the org's CI for ``ghcr.io/open-nvr`` images, or the
+  ``signing:`` identity the entry declares) — checked with ``cosign``
+  before compose runs, see ``signing.py``. ``INSTALLER_SIGNATURES=off``
+  disables it for air-gapped deployments.
 
 Testability: the docker/subprocess call is injected as a ``runner``
 callable so unit tests pass a fake runner and never touch real Docker.
@@ -65,6 +70,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
 
+from signing import Signer, SigningPolicy, parse_signer
+
 logger = logging.getLogger("opennvr.app-installer")
 
 # App ids are kebab-case by construction (the index validator enforces it
@@ -81,6 +88,10 @@ DEFAULT_COMPOSE_FILES = ("docker-compose.yml", "docker-compose.apps.yml")
 # Compose profile the app service blocks live under (see
 # docker-compose.apps.yml — every app service is ``profiles: [apps]``).
 DEFAULT_PROFILE = "apps"
+# The egress proxy (scripts/egress-proxy) is upped with every install:
+# apps live on the internal ``opennvr_apps`` network and it is their
+# only way out. An already-running proxy is a no-op for compose.
+EGRESS_PROXY_SERVICE = "egress-proxy"
 
 
 # ── Injected seams ─────────────────────────────────────────────────────
@@ -149,6 +160,10 @@ class CuratedApp:
     # app. Upped alongside it; refcounted across installed apps on
     # uninstall (released only when no other installed app requires it).
     requires_adapters: tuple[str, ...] = ()
+    # Who must have signed the image (``signing:`` in the entry). None →
+    # the org's CI for ghcr.io/open-nvr images, no known signer otherwise
+    # (see signing.expected_signer).
+    signer: Signer | None = None
 
 
 def load_curated_index(path: str | Path) -> dict[str, CuratedApp]:
@@ -191,6 +206,7 @@ def load_curated_index(path: str | Path) -> dict[str, CuratedApp]:
             image=image,
             image_digest=digest if isinstance(digest, str) else None,
             requires_adapters=adapters,
+            signer=parse_signer(entry.get("signing")),
         )
     return index
 
@@ -276,8 +292,11 @@ def build_up_argv(
     curated index) are upped in the same command, ahead of the app — an
     already-running adapter is a no-op (reuse), a missing service block
     fails the whole install LOUDLY (the "cannot be provisioned" refusal).
+
+    The egress proxy goes first, always: without it an app on the
+    internal network has no route anywhere but core and the buses.
     """
-    services = [
+    services = [EGRESS_PROXY_SERVICE] + [
         adapter_service_name(a) for a in (adapters or ())
     ] + [intent.id]
     return _compose_base(compose_files, profile) + ["up", "-d", *services]
@@ -338,7 +357,11 @@ def _run_env(intent: Intent) -> dict[str, str]:
     pin = pinned_image_ref(intent)
     if pin is None:
         return {}
-    return {image_env_key(intent.id): pin}
+    # The app services default to `pull_policy: build` (a checkout builds
+    # its own apps and must not ask a registry for `:local-build`). A pin
+    # is the one case where the image MUST come from the registry, so the
+    # policy rides along with the pin.
+    return {image_env_key(intent.id): pin, "APPS_PULL_POLICY": "missing"}
 
 
 def reconcile_intent(
@@ -349,8 +372,14 @@ def reconcile_intent(
     held_adapters: frozenset[str] = frozenset(),
     compose_files: tuple[str, ...] = DEFAULT_COMPOSE_FILES,
     profile: str = DEFAULT_PROFILE,
+    signing: SigningPolicy | None = None,
 ) -> tuple[str, str]:
     """Reconcile ONE intent. Returns ``(status, message)``.
+
+    ``signing``: the image-signature policy (signing.py). With one, a
+    pinned image must verify against its expected signer BEFORE compose
+    runs; a refusal is a ``failed`` intent with the reason. ``None``
+    (library default; main.py always passes one) skips the check.
 
     Pure except for the injected ``runner`` — no Docker, no DB. This is
     the function the unit tests drive with a fake runner.
@@ -412,6 +441,11 @@ def reconcile_intent(
             )
         else:
             logger.info("Pinning app %r to %s", intent.id, pin)
+            if signing is not None:
+                ok, why = signing.check(intent.id, pin, curated.signer)
+                if not ok:
+                    logger.error("app %r: %s", intent.id, why)
+                    return "failed", why
         argv = build_up_argv(
             intent, adapters=curated.requires_adapters,
             compose_files=compose_files, profile=profile,
@@ -456,6 +490,7 @@ def reconcile_once(
     skip_ids: frozenset[str] = frozenset(),
     compose_files: tuple[str, ...] = DEFAULT_COMPOSE_FILES,
     profile: str = DEFAULT_PROFILE,
+    signing: SigningPolicy | None = None,
 ) -> list[tuple[str, str, str]]:
     """One reconcile sweep over every pending intent.
 
@@ -495,7 +530,7 @@ def reconcile_once(
         status_, message = reconcile_intent(
             intent, runner,
             index=index, held_adapters=held,
-            compose_files=compose_files, profile=profile,
+            compose_files=compose_files, profile=profile, signing=signing,
         )
         store.set_status(intent.id, status_, message, desired=intent.desired)
         outcomes.append((intent.id, status_, message))

@@ -13,7 +13,7 @@ def test_defaults_are_enabled_with_onnx():
     cfg = config_from_env({})
     assert cfg.enabled is True                    # on by default
     assert cfg.detector == "onnx"                 # ONNX is the default detector
-    assert cfg.onnx_model.endswith("yolov8n.onnx")
+    assert cfg.onnx_model.endswith("yolo26n.onnx")
     assert cfg.onnx_input == 640
     assert cfg.onnx_backend == "auto"             # per-family resolution (onnx→cvdnn)
     assert cfg.onnx_providers == ""
@@ -52,7 +52,7 @@ def test_env_overrides():
 
 def test_model_id_derivation_for_benchmarking():
     # onnx default -> model file basename; explicit override wins; non-onnx -> type
-    assert config_from_env({}).model_id == "yolov8n"
+    assert config_from_env({}).model_id == "yolo26n"
     assert config_from_env({"DETECT_ONNX_MODEL": "/w/yolo11s.onnx"}).model_id == "yolo11s"
     assert config_from_env({"DETECT_MODEL_ID": "rfdetr-n-int8"}).model_id == "rfdetr-n-int8"
     assert config_from_env({"DETECT_DETECTOR": "blob"}).model_id == "blob"
@@ -289,6 +289,11 @@ def test_resolve_onnx_backend_auto_and_explicit():
     from detect_pipeline.run import _resolve_onnx_backend
 
     assert _resolve_onnx_backend("auto", "cvdnn") == "cvdnn"
+    # auto + execution providers is ort: the accelerator flavours set the
+    # providers and leave DETECT_ONNX_BACKEND=auto in .env
+    assert _resolve_onnx_backend("auto", "cvdnn", ["QNNExecutionProvider:htp"]) == "ort"
+    assert _resolve_onnx_backend("", "cvdnn", ["OpenVINOExecutionProvider:NPU"]) == "ort"
+    assert _resolve_onnx_backend("cvdnn", "cvdnn", ["QNNExecutionProvider:htp"]) == "cvdnn"  # explicit wins
     assert _resolve_onnx_backend("", "ort") == "ort"
     assert _resolve_onnx_backend("cvdnn", "ort") == "cvdnn"   # explicit wins
     assert _resolve_onnx_backend("tensorflow", "cvdnn") == "cvdnn"
@@ -357,3 +362,22 @@ def test_real_values_are_untouched():
     })
     assert cfg.dispatch_kaic_url == "http://kai-c:8100"
     assert cfg.onnx_providers == "OpenVINOExecutionProvider,CPUExecutionProvider"
+
+
+def test_detector_backend_metric_reports_requested_and_effective():
+    from detect_pipeline import metrics as m
+    from detect_pipeline.run import _export_detector_backend
+
+    class _B:
+        requested = [("OpenVINOExecutionProvider", {"device_type": "NPU"}), "CPUExecutionProvider"]
+        effective = ["CPUExecutionProvider"]
+
+    class _Det:
+        backend_name = "ort"
+        _backend = _B()
+
+    _export_detector_backend(_Det())
+    text = m.metrics.render() if hasattr(m.metrics, "render") else m.render()
+    assert 'tier0_detector_backend{' in text
+    assert 'requested="OpenVINOExecutionProvider(NPU), CPUExecutionProvider"' in text
+    assert 'effective="CPUExecutionProvider"' in text

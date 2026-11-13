@@ -29,6 +29,7 @@ import { useAuth } from '../../auth/AuthContext'
 import { useSnackbar } from '../../components/Snackbar'
 import { Modal } from '../../components/Modal'
 import { PlaybackConsole } from '../../components/PlaybackConsole'
+import { useDateFormat, type DateFormatters } from '../../i18n'
 
 type DeletedCamera = {
   id: number
@@ -43,6 +44,7 @@ type DeletedCamera = {
 type DayEntry = { date: string; total_duration?: number; segment_count?: number }
 
 export function DeletedCameras() {
+  const fmt = useDateFormat()
   const { user } = useAuth()
   const { showError, showSuccess } = useSnackbar()
   const isSuperuser = !!user?.is_superuser
@@ -127,7 +129,7 @@ export function DeletedCameras() {
   }
 
   const fmtWhen = (iso: string) => {
-    try { return new Date(iso).toLocaleString() } catch { return iso }
+    return fmt.dateTime(iso)
   }
   const fmtHours = (secs?: number) =>
     secs ? `${(secs / 3600).toFixed(1)} h` : ''
@@ -147,7 +149,7 @@ export function DeletedCameras() {
       ) : cameras.length === 0 ? (
         <div className="text-[var(--text-dim)]">The bin is empty.</div>
       ) : (
-        <div className="border border-neutral-700">
+        <div className="border border-[var(--border)]">
           <table className="w-full">
             <thead className="bg-[var(--panel-2)] text-left">
               <tr>
@@ -162,7 +164,7 @@ export function DeletedCameras() {
             <tbody>
               {cameras.map((c) => (
                 <>
-                  <tr key={c.id} className="border-t border-neutral-800">
+                  <tr key={c.id} className="border-t border-[var(--border)]">
                     <td className="p-2 align-top">
                       <button
                         className="text-[var(--text-dim)] hover:text-[var(--text)]"
@@ -179,14 +181,14 @@ export function DeletedCameras() {
                     <td className="p-2 align-top text-right">
                       <div className="inline-flex items-center gap-2">
                         <button
-                          className="px-2 py-1 border border-neutral-700 hover:bg-[var(--panel-2)] inline-flex items-center gap-1"
+                          className="px-2 py-1 border border-[var(--border)] hover:bg-[var(--panel-2)] inline-flex items-center gap-1"
                           onClick={() => toggleExpand(c)}
                         >
                           <Film size={14} /> Recordings
                         </button>
                         {isSuperuser && (
                           <button
-                            className="px-2 py-1 border border-red-800 text-red-400 hover:bg-red-950/40 inline-flex items-center gap-1"
+                            className="px-2 py-1 border border-[color-mix(in_oklab,var(--danger)_45%,var(--border))] text-[var(--danger)] hover:bg-[color-mix(in_oklab,var(--danger)_14%,transparent)] inline-flex items-center gap-1"
                             onClick={() => setPurging(c)}
                           >
                             <Trash2 size={14} /> Delete Permanently
@@ -196,7 +198,7 @@ export function DeletedCameras() {
                     </td>
                   </tr>
                   {expanded.has(c.id) && (
-                    <tr key={`${c.id}-days`} className="border-t border-neutral-800 bg-[var(--panel-2)]/50">
+                    <tr key={`${c.id}-days`} className="border-t border-[var(--border)] bg-[var(--panel-2)]/50">
                       <td></td>
                       <td colSpan={5} className="p-2">
                         {daysByCamera[c.id] === 'loading' ? (
@@ -208,7 +210,7 @@ export function DeletedCameras() {
                             {(daysByCamera[c.id] as DayEntry[]).map((d) => (
                               <button
                                 key={d.date}
-                                className="px-2 py-1 border border-neutral-700 hover:bg-[var(--panel)] inline-flex items-center gap-1"
+                                className="px-2 py-1 border border-[var(--border)] hover:bg-[var(--panel)] inline-flex items-center gap-1"
                                 title={`Play recordings of ${d.date}`}
                                 onClick={() => setConsoleTarget({ cameraId: c.id, cameraName: c.name, date: d.date })}
                               >
@@ -256,7 +258,7 @@ export function DeletedCameras() {
                 Type <span className="font-mono text-[var(--text)]">{expectedPhrase}</span> to confirm:
               </div>
               <input
-                className="w-full bg-[var(--panel-2)] border border-neutral-700 px-2 py-1 font-mono"
+                className="w-full bg-[var(--panel-2)] border border-[var(--border)] px-2 py-1 font-mono"
                 value={phrase}
                 onChange={(e) => setPhrase(e.target.value)}
                 placeholder={expectedPhrase}
@@ -266,7 +268,7 @@ export function DeletedCameras() {
             <div>
               <div className="mb-1 text-[var(--text-dim)]">Current MFA code:</div>
               <input
-                className="w-40 bg-[var(--panel-2)] border border-neutral-700 px-2 py-1"
+                className="w-40 bg-[var(--panel-2)] border border-[var(--border)] px-2 py-1"
                 value={mfaCode}
                 onChange={(e) => setMfaCode(e.target.value)}
                 placeholder="123456"
@@ -276,14 +278,14 @@ export function DeletedCameras() {
             </div>
             <div className="flex justify-end gap-2 pt-1">
               <button
-                className="px-3 py-1 border border-neutral-700 hover:bg-[var(--panel-2)]"
+                className="px-3 py-1 border border-[var(--border)] hover:bg-[var(--panel-2)]"
                 onClick={closePurgeDialog}
                 disabled={purgeBusy}
               >
                 Cancel
               </button>
               <button
-                className="px-3 py-1 bg-red-700 text-white disabled:opacity-50"
+                className="px-3 py-1 bg-[var(--critical)] text-white disabled:opacity-50"
                 onClick={onPurge}
                 disabled={purgeBusy || !phraseOk || !mfaCode.trim()}
               >

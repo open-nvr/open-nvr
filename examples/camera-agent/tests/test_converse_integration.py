@@ -78,6 +78,7 @@ def harness(monkeypatch):
     def set_chat(fn):
         monkeypatch.setattr(rt.ollama, "chat", fn)
     state["set_chat"] = set_chat
+    state["rt"] = rt
 
     # No context manager → skip startup() (NATS + LLM prewarm) which we
     # don't need for endpoint tests.
@@ -116,6 +117,9 @@ def test_converse_empty_body_400(harness):
 
 def test_converse_full_tool_turn(harness):
     client, state = harness
+    # A question the router leaves to the model (it asks WHO), so the
+    # model's own tool call is what gets exercised.
+    state["transcript"] = "who is on cam1"
 
     async def chat(*, messages, tools=None, temperature=0.4, max_tokens=256, **kw):
         # Second pass (tool result present) → final answer.
@@ -131,7 +135,7 @@ def test_converse_full_tool_turn(harness):
     resp = client.post("/converse", content=_wav_blob())
     assert resp.status_code == 200, resp.text
     data = resp.json()
-    assert data["transcript"] == "what do you see"
+    assert data["transcript"] == "who is on cam1"
     assert data["reply"] == "I see one person."
     assert data["audio_b64"] == base64.b64encode(b"FAKEWAVBYTES").decode()
     assert state["detect_args"] == {"camera_id": "cam1"}
@@ -192,10 +196,11 @@ def test_converse_bogus_camera_hint_falls_back(harness):
         return {"message": {"role": "assistant", "content": "There is a cat."}}
     state["set_chat"](chat)
 
-    # Unknown camera id is ignored → falls back to first camera (cam1).
+    # Unknown camera id is ignored → with no camera named, every camera
+    # (the first camera used to stand in for the fleet).
     resp = client.post("/converse?camera=does-not-exist", content=_wav_blob())
     assert resp.status_code == 200, resp.text
-    assert state["detect_args"] == {"camera_id": "cam1"}
+    assert state["detect_args"] == {"camera_id": "all"}
 
 
 # ── empty transcript short-circuits before the LLM ─────────────────────
@@ -247,7 +252,10 @@ def test_converse_wake_gate_answers_when_addressed(harness):
     async def chat(*, messages, tools=None, temperature=0.4, max_tokens=256, **kw):
         # The wake phrase must be stripped before the model sees the question.
         user = [m for m in messages if m.get("role") == "user"][-1]["content"].lower()
-        assert "camera agent" not in user and user.strip() == "what do you see"
+        # The user turn carries the clock above the user's words (see
+        # _user_turn); the words themselves are the last paragraph.
+        words = user.strip().split("\n\n")[-1].strip()
+        assert "camera agent" not in user and words == "what do you see"
         return {"message": {"role": "assistant", "content": "I see the front door."}}
     state["set_chat"](chat)
 
@@ -272,6 +280,24 @@ def test_converse_bare_wake_word_acks_without_llm(harness):
     assert data["armed"] is True         # bare wake word arms her (Hey-Siri style)
     assert data["reply"]                 # a spoken acknowledgement ("Yes?")
     assert called["chat"] is False       # but no LLM spend
+
+
+def test_a_bare_wake_word_records_no_stale_stages(harness):
+    """An armed turn runs no LLM, so it must not feed the PREVIOUS turn's
+    llm/tool latencies into the thinking-aloud medians a second time."""
+    client, state = harness
+    rt = state["rt"]
+    rt.last_turn_trace = [{"step": "llm", "detail": "iter 1", "ms": 9999}]
+    state["transcript"] = "Hey Camera Agent"
+
+    async def chat(**kw):
+        return {"message": {"role": "assistant", "content": "x"}}
+    state["set_chat"](chat)
+
+    data = client.post("/converse?wake=1", content=_wav_blob()).json()
+    assert data["armed"] is True
+    assert data["trace"] == []
+    assert 9999.0 not in rt.thinking.stage_ms.get("llm", ())
 
 
 # ── talking-avatar clips are served (whitelisted) ─────────────────────
@@ -403,3 +429,28 @@ def test_config_question_short_circuits_before_llm():
     reply = asyncio.run(ca._run_conversation_turn(
         rt, [], "how many cameras are configured right now?"))
     assert "camera" in reply.lower()   # deterministic roster answer, no LLM spend
+
+
+def test_converse_routed_turn_makes_one_compose_call_and_no_tool_loop(harness):
+    """The router (router.py): the UI is on cam1, the question is a count.
+    Every slot resolves, so the tool runs first and the model is asked
+    only to say the answer — one LLM call, no tool schemas."""
+    client, state = harness
+    state["transcript"] = "how many people are there"
+    calls = []
+
+    async def chat(*, messages, tools=None, temperature=0.4, max_tokens=256, **kw):
+        calls.append({"tools": tools, "roles": [m.get("role") for m in messages]})
+        if any(m.get("role") == "tool" for m in messages):
+            return {"message": {"role": "assistant", "content": "One person is at the front door."}}
+        return {"message": {"role": "assistant", "content": "",
+                            "tool_calls": [{"id": "c1", "type": "function",
+                                            "function": {"name": "detect_objects",
+                                                         "arguments": {"camera_id": "cam2"}}}]}}
+    state["set_chat"](chat)
+    data = client.post("/converse?camera=cam1", content=_wav_blob()).json()
+    assert state["detect_args"] == {"camera_id": "cam1"}, "the router picked the camera the UI is on"
+    assert data["reply"] == "One person is at the front door."
+    assert len(calls) == 1, "one compose call; the tool-calling iteration was skipped"
+    assert calls[0]["tools"] is None and "tool" in calls[0]["roles"]
+    assert [t["step"] for t in data["trace"]][:3] == ["route", "detect_objects", "compose"]

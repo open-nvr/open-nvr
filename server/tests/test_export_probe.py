@@ -118,3 +118,64 @@ def test_bad_ticket_is_403():
     with pytest.raises(HTTPException) as ei:
         asyncio.new_event_loop().run_until_complete(rr.export_clip("nope"))
     assert ei.value.status_code == 403
+
+
+# ── start before the first sample (#130) ───────────────────────────────
+class SeqClient(FakeClient):
+    """Answer the given statuses in order; remember the params of each call."""
+
+    def __init__(self, statuses):
+        super().__init__(statuses[0])
+        self._statuses = list(statuses)
+        self.params: list[dict] = []
+
+    def build_request(self, method, url, params=None, timeout=None):
+        self.params.append(dict(params or {}))
+        return object()
+
+    async def send(self, req, stream=False):
+        self.last_resp = FakeResp(self._statuses.pop(0) if self._statuses else 404)
+        return self.last_resp
+
+
+def _segments(*rows):
+    async def list_segments(path, start=None, end=None, *, timeout=3.0, use_cache=True):
+        return [{"start": s, "duration": d} for s, d in rows]
+    return list_segments
+
+
+def test_start_before_the_first_sample_is_moved_forward_and_retried(monkeypatch):
+    fake = SeqClient([404, 200])
+    rr.mediamtx_client.get_client = lambda: fake
+    monkeypatch.setattr(rr.mediamtx_client, "list_segments",
+                        _segments(("2026-08-14T13:00:00.420Z", 181.9)))
+    ticket = _mint_ticket()                     # asks from 13:00:00Z for 60 s
+    result = asyncio.new_event_loop().run_until_complete(rr.export_clip(ticket))
+    assert isinstance(result, StreamingResponse) and result.status_code == 200
+    assert len(fake.params) == 2
+    assert fake.params[0]["start"] == "2026-08-14T13:00:00Z"
+    assert fake.params[1]["start"] == "2026-08-14T13:00:00.470Z"      # first sample + 50 ms
+    assert abs(float(fake.params[1]["duration"]) - 59.53) < 0.01
+
+
+def test_nothing_recorded_in_the_range_is_still_a_404(monkeypatch):
+    fake = SeqClient([404, 404])
+    rr.mediamtx_client.get_client = lambda: fake
+    monkeypatch.setattr(rr.mediamtx_client, "list_segments",
+                        _segments(("2026-08-14T12:00:00Z", 60.0)))      # an hour earlier
+    ticket = _mint_ticket()
+    with pytest.raises(HTTPException) as ei:
+        asyncio.new_event_loop().run_until_complete(rr.export_clip(ticket))
+    assert ei.value.status_code == 404
+    assert len(fake.params) == 1                 # no second try without a candidate
+
+
+def test_a_range_inside_a_recording_is_not_clamped(monkeypatch):
+    fake = SeqClient([404])
+    rr.mediamtx_client.get_client = lambda: fake
+    monkeypatch.setattr(rr.mediamtx_client, "list_segments",
+                        _segments(("2026-08-14T12:59:00Z", 600.0)))      # covers the asked start
+    ticket = _mint_ticket()
+    with pytest.raises(HTTPException) as ei:
+        asyncio.new_event_loop().run_until_complete(rr.export_clip(ticket))
+    assert ei.value.status_code == 404 and len(fake.params) == 1

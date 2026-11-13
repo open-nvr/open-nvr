@@ -142,11 +142,23 @@ def decode_args(hwaccel: HwAccel, *, device: str = "/dev/dri/renderD128",
 
 
 def scale_filter(hwaccel: HwAccel, *, width: int, height: int, fps: int) -> str:
-    """The ``-vf`` value that scales, downloads to system memory, and yields I420."""
-    if fps <= 0:
-        raise ValueError(f"fps must be positive, got {fps}")
+    """The ``-vf`` value that scales, downloads to system memory, and yields I420.
+
+    ``fps=0`` leaves the ``fps`` stage out: every decoded frame is passed
+    through at its own time. That is what a keyframe-only decode needs —
+    the ``fps`` filter would otherwise DUPLICATE each keyframe to fill
+    the rate, and a reader stamping frames on arrival would take a copy
+    of a seconds-old picture for a fresh one. Leaving the filter out is
+    only half of it: ``build_decode_command`` must also pin the muxer's
+    ``-fps_mode passthrough`` (see there) or ffmpeg pads the rate itself.
+    """
+    if fps < 0:
+        raise ValueError(f"fps must be positive or 0 (no rate filter), got {fps}")
+    template = _SCALE[hwaccel]
+    if fps == 0:
+        template = template.replace("fps={fps},", "").replace(",fps={fps}", "")
     return (
-        _SCALE[hwaccel]
+        template
         .replace("{w}", str(width))
         .replace("{h}", str(height))
         .replace("{fps}", str(fps))
@@ -250,6 +262,19 @@ def build_decode_command(
         ["-skip_loop_filter", "all", "-flags2", "fast"]
         if fast_decode and hwaccel is HwAccel.CPU else []
     )
+    # ``fps=0`` (keyframe-only evidence) drops the ``fps`` filter so each
+    # keyframe comes out once, at its own time. That alone is NOT enough:
+    # the rawvideo muxer has no timestamps, so ffmpeg's default video sync
+    # is CFR and it pads the output back to the stream's nominal rate with
+    # copies of the last decoded frame. Measured on a CP Plus H.265 main
+    # stream (1 keyframe/s, nominal 100 fps): ~100 frames/s of 960x1080
+    # duplicates down the pipe, the evidence decoder at ~45 % of a core
+    # and the worker at ~43 % reading them — MORE than the full decode it
+    # was meant to replace. ``-fps_mode passthrough`` (ffmpeg >= 5.1; the
+    # shipped image is 7.1.5) writes exactly the decoded frames. Only set
+    # when the rate filter is out: with ``fps=N`` the filter already
+    # emits a clean constant rate.
+    sync_args = ["-fps_mode", "passthrough"] if fps == 0 else []
     return [
         "ffmpeg",
         "-hide_banner",
@@ -262,6 +287,7 @@ def build_decode_command(
         *decode_args(hwaccel, device=device, codec=codec, width=width, height=height),
         "-i", rtsp_url,
         "-vf", scale_filter(hwaccel, width=width, height=height, fps=fps),
+        *sync_args,
         "-f", "rawvideo",
         "-pix_fmt", "yuv420p",
         "pipe:1",

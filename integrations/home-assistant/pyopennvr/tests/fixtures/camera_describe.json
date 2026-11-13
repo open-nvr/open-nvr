@@ -1,0 +1,8 @@
+{
+  "camera_id": 1,
+  "at": "2026-09-18T10:00:00+00:00",
+  "available": true,
+  "description": "A white van is parked in front of the gate.",
+  "model": "ollamavlm",
+  "task": "visual_qa"
+}

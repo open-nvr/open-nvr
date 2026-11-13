@@ -92,47 +92,31 @@ function SnackbarContainer({ snackbars, onClose }: { snackbars: SnackbarMessage[
 function SnackbarItem({ snackbar, onClose }: { snackbar: SnackbarMessage, onClose: () => void }) {
   const { type, message } = snackbar
 
-  const styles: Record<SnackbarType, { bg: string, border: string, text: string, icon: ReactNode }> = {
-    error: {
-      bg: 'bg-red-900/90',
-      border: 'border-red-700',
-      text: 'text-red-100',
-      icon: <AlertCircle size={18} className="text-red-400 flex-shrink-0" />
-    },
-    success: {
-      bg: 'bg-green-900/90',
-      border: 'border-green-700',
-      text: 'text-green-100',
-      icon: <CheckCircle size={18} className="text-green-400 flex-shrink-0" />
-    },
-    info: {
-      bg: 'bg-blue-900/90',
-      border: 'border-blue-700',
-      text: 'text-blue-100',
-      icon: <Info size={18} className="text-blue-400 flex-shrink-0" />
-    },
-    warning: {
-      bg: 'bg-yellow-900/90',
-      border: 'border-yellow-700',
-      text: 'text-yellow-100',
-      icon: <AlertTriangle size={18} className="text-yellow-400 flex-shrink-0" />
-    }
+  // Theme tokens, so a toast reads correctly in the light theme too: a panel
+  // surface with the status carried by an inked edge and icon, not by a
+  // dark tinted background that turned into a smudge on white.
+  const styles: Record<SnackbarType, { ink: string, icon: ReactNode }> = {
+    error: { ink: 'var(--danger)', icon: <AlertCircle size={18} className="flex-shrink-0" /> },
+    success: { ink: 'var(--ok)', icon: <CheckCircle size={18} className="flex-shrink-0" /> },
+    info: { ink: 'var(--accent)', icon: <Info size={18} className="flex-shrink-0" /> },
+    warning: { ink: 'var(--warn)', icon: <AlertTriangle size={18} className="flex-shrink-0" /> },
   }
 
   const style = styles[type]
 
   return (
     <div
-      className={`${style.bg} ${style.border} ${style.text} border rounded-lg shadow-lg p-3 pr-10 relative animate-slide-in-right min-w-[280px]`}
+      className="bg-[var(--panel)] text-[var(--text)] border border-[var(--border)] shadow-lg p-3 pr-10 relative animate-slide-in-right min-w-[280px]"
+      style={{ boxShadow: `inset 3px 0 0 ${style.ink}, 0 10px 15px -3px rgb(0 0 0 / 0.25)` }}
       role="alert"
     >
       <div className="flex items-start gap-2">
-        {style.icon}
+        <span className="flex" style={{ color: style.ink }}>{style.icon}</span>
         <p className="text-sm">{message}</p>
       </div>
       <button
         onClick={onClose}
-        className="absolute top-2 right-2 p-1 hover:bg-white/10 rounded transition-colors"
+        className="absolute top-2 right-2 p-1 text-[var(--text-dim)] hover:text-[var(--text)] hover:bg-[var(--panel-2)] transition-colors"
         aria-label="Close"
       >
         <X size={14} />

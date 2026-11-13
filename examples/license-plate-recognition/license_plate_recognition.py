@@ -20,16 +20,37 @@ duplicating the detection Tier-0 already runs on the same vehicles
 vehicle visit on the best frame; this app consumes the result. Adding
 this app to an install adds **no** inference cost.
 
-Camera scope: the assignment table (Phase 2). Cameras assigned the
-``license_plate_recognition`` skill are the app's scope, fetched via
-the SDK's ``cameras_for_skill`` and refreshed periodically; an explicit
-``cameras:`` list in config overrides, and neither declared = alert on
-every camera's plate events (no restriction declared).
+Camera scope: the cameras picked for this app in its own configuration
+(App Catalog → Configure → Cameras, or a gate role on the Vehicles page —
+both write the same pick). They arrive on the SDK's live config poll, and
+an event from a camera that wasn't picked is ignored. Nothing picked =
+nothing alerted. An explicit ``cameras:`` list in config may narrow the
+picks further, never widen them; run standalone (no ``opennvr_url``) it
+is the whole scope.
 
 Run:
     python license_plate_recognition.py --config config.yml
 
 Foreground daemon; SIGINT/SIGTERM stops cleanly.
+
+Where "who is inside" comes from
+--------------------------------
+
+Overstay alerts need to know which visitor vehicles are on site and
+since when. This app used to work that out itself, building a ledger
+from gate reads as they arrived — which was correct while the process
+lived and empty the moment it restarted, so a vehicle that drove in
+before a redeploy could never trigger an overstay however long it
+stayed. The visits that matter most were the ones it could not see.
+
+The platform has had the answer all along: the operator's Vehicles page
+has shown gate occupancy since plate pairing landed. It was simply not
+reachable from an app. ``timeline.plates_inside()`` is that capability
+on the app door, and this app now asks rather than remembers.
+
+What stays here is the part the platform has no opinion about: which
+plates are residents (the register is this app's config, not core's)
+and which overstays have already been announced.
 """
 from __future__ import annotations
 
@@ -37,6 +58,7 @@ import logging
 import re
 import time
 from collections import deque
+import datetime as _dt
 from datetime import date
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -53,7 +75,7 @@ from opennvr_app_sdk import (
     AlertType, AppManifest, Detector, DomainEventPublisher, Param,
     StateView, app,
 )
-from opennvr_app_sdk.cameras import cameras_for_skill
+from opennvr_app_sdk.cameras import discover_cameras
 
 logger = logging.getLogger("license-plate-recognition")
 
@@ -61,6 +83,20 @@ SKILL = "license_plate_recognition"
 
 #: The contracted subject this app consumes (EVENT_CONTRACTS.md).
 PLATE_SUBJECT_PATTERN = "opennvr.events.plate.recognized.v1.>"
+
+#: How often the overstay sweep asks core who is inside. The sweep runs
+#: on every plate read and a busy gate reads constantly; the question it
+#: answers moves at the speed of a car park.
+OVERSTAY_POLL_SECONDS = 60.0
+#: How long a cached answer stays usable when core is unreachable. A
+#: vehicle parked six hours is still parked a few minutes later; past
+#: this the cache is dropped rather than aged into fiction.
+OVERSTAY_STALE_SECONDS = 15 * 60.0
+#: Window core applies so a missed exit read ages out instead of leaving
+#: a vehicle inside forever.
+OVERSTAY_WINDOW_HOURS = 24 * 7
+#: Cap on remembered announcements. A record of what was said, not a log.
+OVERSTAY_ALERTED_MAX = 2048
 
 #: The decision event this app publishes on gate-in reads while
 #: barrier mode is on (docs/EVENT_CONTRACTS.md `access.decided.v1`).
@@ -158,6 +194,33 @@ def parse_monitors(raw: Any) -> dict[str, dict[str, Any]]:
     return monitors
 
 
+SCAN_MODES: tuple[str, ...] = ("accurate", "fast", "auto")
+
+
+def normalize_scan_mode(value: Any, default: str = "accurate") -> str:
+    """``accurate`` | ``fast`` | ``auto``; anything else is the default.
+    Core applies the same rule when it reads this config, so a typo in
+    the form degrades to the accurate sweep on both sides."""
+    if isinstance(value, str) and value.strip().lower() in SCAN_MODES:
+        return value.strip().lower()
+    return default
+
+
+def normalize_scan_mode_overrides(value: Any) -> dict[str, str]:
+    """``{camera_id: mode}`` with junk modes dropped (an override that
+    is not a mode is no override, not an accidental 'accurate')."""
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, str] = {}
+    for cam, mode in value.items():
+        key = str(cam).strip()
+        if not key or not isinstance(mode, str):
+            continue
+        if mode.strip().lower() in SCAN_MODES:
+            out[key] = mode.strip().lower()
+    return out
+
+
 def gate_in_cameras(camera_roles: Any) -> frozenset[str]:
     """Platform handles of gate-IN cameras from the ``camera_roles``
     config map. Keys may be numeric core ids (``"3"`` — what the
@@ -229,6 +292,23 @@ def compile_plate_formats(raw: Any) -> list[re.Pattern[str]]:
     return out
 
 
+def _parse_iso(value: str) -> "_dt.datetime | None":
+    """An ISO timestamp from core → an aware datetime, or None.
+
+    Aware is the point. A naive value subtracted from an aware `now`
+    raises, and an overstay sweep that raises stops alerting for every
+    vehicle behind it, not just the one with the odd timestamp. A row
+    that cannot be parsed is skipped rather than guessed at.
+    """
+    try:
+        parsed = _dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_dt.timezone.utc)
+    return parsed
+
+
 def registry_entry_active(entry: dict[str, str] | None, *, today: date | None = None) -> bool:
     """True when a register entry currently counts as registered.
 
@@ -249,7 +329,11 @@ def registry_entry_active(entry: dict[str, str] | None, *, today: date | None = 
 
 MANIFEST = AppManifest(
     id="license-plate-recognition",
-    name="License Plate Recognition",
+    # ANPR is what most of the world calls this (UK, EU, India, AU; the
+    # US says LPR/ALPR), and the nav page it lights up carries the same
+    # token — "Vehicles (ANPR)". The spelled-out term stays for anyone
+    # who does not know the acronym. The id is a key and does not move.
+    name="ANPR — License Plate Recognition",
     version="2.5.0",
     category="vehicle",
     summary=(
@@ -314,8 +398,10 @@ MANIFEST = AppManifest(
               description=(
                   "Alert when a VISITOR (not registered/allowlisted) "
                   "has been inside longer than this many hours — needs "
-                  "gate IN (and ideally OUT) camera roles. 0 = off. "
-                  "Checked as reads arrive.")),
+                  "gate IN and OUT camera roles, and a connection to "
+                  "OpenNVR (who is inside comes from the event store, "
+                  "so it survives a restart). 0 = off. Checked as reads "
+                  "arrive.")),
         Param("barrier_mode", str, default="off",
               description=(
                   "Gate automation: 'off' publishes nothing; "
@@ -330,6 +416,22 @@ MANIFEST = AppManifest(
                   "role gate_in | gate_out | parking | other. Consumed "
                   "by the Vehicles page (gate history, inside-now); "
                   "declared here so config saves validate.")),
+        Param("scan_mode", str, default="accurate",
+              description=(
+                  "How hard the platform works for each plate: "
+                  "'accurate' (default) OCRs up to four looks per visit "
+                  "and writes a plate only when two agree — right for an "
+                  "entry gate; 'fast' takes the first accepted read, at "
+                  "most two looks, and a short re-sighting window — right "
+                  "for a road camera or a weak CPU where the queue of "
+                  "visits waiting for OCR grows into minutes; 'auto' is "
+                  "accurate while the sweep keeps up and fast while it is "
+                  "backlogged. Per-camera overrides below win.")),
+        Param("scan_mode_overrides", dict, default={},
+              description=(
+                  "{camera_id: scan_mode} — one mode per camera where the "
+                  "site mixes a gate and a road ('cam3': 'fast'). Cameras "
+                  "not listed use scan_mode.")),
         Param("unknown_cooldown_seconds", float, default=300.0,
               description=(
                   "Per-plate re-alarm suppression for unknown vehicles, "
@@ -461,6 +563,12 @@ class AppConfig:
     plate_formats: list[str] = field(default_factory=list)
     overstay_hours: float = 0.0
     unknown_cooldown_seconds: float = 300.0
+    # Scan policy (consumed by CORE's plate sweep, which reads this
+    # app's registry config): accurate | fast | auto, plus per-camera
+    # overrides. Declared here so the catalog form validates and shows
+    # it; the app itself only reports it.
+    scan_mode: str = "accurate"
+    scan_mode_overrides: dict[str, Any] = field(default_factory=dict)
 
     # Alert delivery channels (see alerts.py / the SDK alert stack).
     webhook_url: str | None = None
@@ -506,6 +614,9 @@ def load_config(path: str | Path) -> AppConfig:
         overstay_hours=float(raw.get("overstay_hours", 0.0)),
         alarm_on_unknown=bool(raw.get("alarm_on_unknown", False)),
         unknown_cooldown_seconds=float(raw.get("unknown_cooldown_seconds", 300.0)),
+        scan_mode=normalize_scan_mode(raw.get("scan_mode")),
+        scan_mode_overrides=normalize_scan_mode_overrides(
+            raw.get("scan_mode_overrides")),
         webhook_url=raw.get("webhook_url"),
         nats_alerts_url=raw.get("nats_alerts_url"),
         nats_alerts_token=raw.get("nats_alerts_token"),
@@ -558,6 +669,9 @@ class PlateAlerter(Detector):
             cfg.monitors, cfg.denylist)
         self._alarm_on_unknown: bool = bool(cfg.alarm_on_unknown)
         self._unknown_cooldown: float = max(0.0, float(cfg.unknown_cooldown_seconds))
+        self._scan_mode: str = normalize_scan_mode(cfg.scan_mode)
+        self._scan_mode_overrides: dict[str, str] = normalize_scan_mode_overrides(
+            cfg.scan_mode_overrides)
         self._unknown_last: dict[str, float] = {}
         self._unknown_alarms: int = 0
         # Gate automation (access.decided.v1). The publisher's channel
@@ -569,28 +683,55 @@ class PlateAlerter(Detector):
         self._gate_out: frozenset[str] = gate_out_cameras(cfg.camera_roles)
         # Trust round state. Review queue: reads we will NOT act on
         # (bad format / low confidence) surfaced for a human instead of
-        # silently dropped. Overstay ledger: visitor plates currently
-        # inside (entered at a gate-IN camera, not yet seen at gate-OUT).
+        # silently dropped.
         self._fuzzy_max: int = max(0, int(cfg.fuzzy_max_distance))
         self._formats: list[re.Pattern[str]] = compile_plate_formats(cfg.plate_formats)
         self._review: deque[dict[str, Any]] = deque(maxlen=50)
         self._review_last: dict[str, float] = {}
         self._reviews_total: int = 0
         self._overstay_hours: float = max(0.0, float(cfg.overstay_hours))
-        self._inside_visitors: dict[str, dict[str, Any]] = {}
         self._overstay_alerts: int = 0
+        # Who is inside, and since when, comes from the platform now.
+        #
+        # This used to be `_inside_visitors`: a dict rebuilt from gate
+        # reads as they arrived, in memory. It answered correctly while
+        # the process lived and forgot every open visit when it did not,
+        # so a vehicle that drove in before a redeploy could never
+        # trigger an overstay alert however long it stayed — the exact
+        # visits that matter most. The platform has had the answer all
+        # along; `plates/inside` is what finally let an app ask.
+        #
+        # What stays app-side is the one thing the platform cannot know:
+        # that this app has ALREADY told somebody. Keyed by plate AND
+        # entry time, so a vehicle that leaves and returns is a new
+        # visit and alerts again, and kept in core's durable per-app
+        # store so a redeploy does not re-alert about a van that has
+        # been parked since Tuesday.
+        self._overstay_alerted: set[tuple[str, str]] = set()
+        self._overstay_state_loaded = False
+        # Last SUCCESSFUL fetch, or None for "never asked". The two
+        # must not share a value: 0.0 meaning both made a first call
+        # during an outage look infinitely stale, which threw away a
+        # cache that was simply not filled yet.
+        self._inside_fetched_at: float | None = None
+        self._inside_cache: list[dict[str, Any]] = []
+        self._nvr: Any = None
         self._decision_publisher = DomainEventPublisher(
             cfg.nats_url, token=cfg.nats_token,
             producer="app:license-plate-recognition")
         self._decisions_published: int = 0
-        # Camera scope: explicit config wins and never refreshes; else
-        # the assignment table (refreshed lazily per SCOPE_REFRESH_
-        # SECONDS); None = no restriction declared.
+        # Which cameras this app works on is its picks (``camera_picked``,
+        # delivered on the config poll). A YAML ``cameras:`` list can only
+        # narrow that; standalone, with no core to pick from, it is the
+        # whole scope. None = no YAML narrowing.
         self._explicit_scope: frozenset[str] | None = (
             frozenset(cfg.cameras) if cfg.cameras else None
         )
-        self._assigned_scope: frozenset[str] | None = None
-        self._scope_fetched_at: float | None = None
+        # Camera display names, for the words in an alert. Fetched apart
+        # from the scope: an explicit config scope never asks core, but
+        # its alarms still have to say "Gate IN", not "cam1".
+        self._camera_names: dict[str, str] = {}
+        self._names_fetched_at: float | None = None
 
     @staticmethod
     def _merged_monitors(monitors_raw: Any, denylist: Any) -> dict[str, dict[str, Any]]:
@@ -664,56 +805,161 @@ class PlateAlerter(Detector):
                     break  # can't do better than distance-1 monitor
         return best
 
-    def _track_gates(self, camera_id: str, plate: str, *,
-                     visitor: bool) -> None:
-        """Maintain the inside-visitors ledger from gate reads."""
-        if camera_id in self._gate_out:
-            self._inside_visitors.pop(plate, None)
+    def _is_registered(self, plate: str) -> bool:
+        """A resident, not a visitor.
+
+        Only visitors overstay: a flat's own car being parked all week
+        is the normal case, and alerting on it is how an operator learns
+        to ignore this app. The register and the allowlist are this
+        app's CONFIG, so the judgement stays here — the platform knows
+        which vehicles came and went and has no opinion about which of
+        them live here.
+        """
+        if registry_entry_active(self._registry.get(plate)):
+            return True
+        allowlist, _denylist = self._watchlists
+        return plate in allowlist
+
+    @property
+    def nvr(self) -> Any:
+        """The platform client, built on first use.
+
+        Lazy because an app that cannot reach core must still start,
+        serve /health and say what is wrong — constructing this at
+        __init__ would turn a misconfigured URL into a boot loop.
+        """
+        if self._nvr is None and self.cfg.opennvr_url:
+            from opennvr_app_sdk.client import OpenNVR
+
+            self._nvr = OpenNVR(self.cfg.opennvr_url,
+                                token=self.cfg.opennvr_token)
+        return self._nvr
+
+    def _inside_now(self) -> list[dict[str, Any]] | None:
+        """Vehicles inside right now, with entry times, from core.
+
+        ``None`` means core could not be asked, which is NOT "nobody is
+        inside" — treating it that way would silence overstay alerts
+        during exactly the outage they should survive. The last good
+        answer is reused instead, and only for as long as it is
+        plausible: a stale list is fine for minutes (a vehicle parked
+        for six hours is still parked) and wrong for hours.
+
+        Throttled because the sweep runs on every plate read and a busy
+        gate reads constantly, while the question it answers moves at
+        the speed of a car park.
+        """
+        now = time.monotonic()
+        if (self._inside_fetched_at is not None
+                and now - self._inside_fetched_at < OVERSTAY_POLL_SECONDS):
+            return self._inside_cache
+        client = self.nvr
+        if client is None:
+            return None
+        answer = client.timeline.plates_inside(
+            in_cameras=sorted(self._gate_in),
+            out_cameras=sorted(self._gate_out),
+            hours=OVERSTAY_WINDOW_HOURS,
+        )
+        if answer is None:
+            # Keep what we had, but stop pretending it is fresh: if core
+            # stays down past the grace window the cache empties and the
+            # app reports that it cannot see the gates, rather than
+            # quietly alerting on a car park from this morning.
+            if (self._inside_fetched_at is None
+                    or now - self._inside_fetched_at > OVERSTAY_STALE_SECONDS):
+                self._inside_cache = []
+            return self._inside_cache or None
+        self._inside_fetched_at = now
+        self._inside_cache = list(answer.get("entries") or [])
+        return self._inside_cache
+
+    def _load_overstay_state(self) -> None:
+        """Which overstays this app has already announced, from core's
+        durable per-app store. Read once; a failure leaves the set empty,
+        which risks ONE duplicate alert per open visit — the safe
+        direction, since the alternative is silence about a vehicle that
+        has been inside all week."""
+        if self._overstay_state_loaded:
             return
-        if camera_id not in self._gate_in or not visitor:
+        self._overstay_state_loaded = True
+        client = self.nvr
+        if client is None:
             return
-        if plate not in self._inside_visitors:
-            if len(self._inside_visitors) > 4096:
-                for stale, rec in sorted(self._inside_visitors.items(),
-                                         key=lambda kv: kv[1]["entered"])[:2048]:
-                    self._inside_visitors.pop(stale, None)
-            self._inside_visitors[plate] = {
-                "entered": time.time(),
-                "camera_id": camera_id,
-                "alerted": False,
-            }
+        try:
+            saved = client.state.get("overstay_alerted") or []
+        except Exception:  # noqa: BLE001 — alerting must not depend on it
+            logger.warning("overstay: could not read alerted state", exc_info=True)
+            return
+        self._overstay_alerted = {
+            (str(r[0]), str(r[1])) for r in saved
+            if isinstance(r, (list, tuple)) and len(r) == 2
+        }
+
+    def _save_overstay_state(self) -> None:
+        client = self.nvr
+        if client is None:
+            return
+        try:
+            # Bounded: this is a record of announcements, not a log, and
+            # a visit nobody can still see inside is not coming back.
+            trimmed = sorted(self._overstay_alerted)[-OVERSTAY_ALERTED_MAX:]
+            self._overstay_alerted = set(trimmed)
+            client.state.set("overstay_alerted", [list(k) for k in trimmed])
+        except Exception:  # noqa: BLE001
+            logger.warning("overstay: could not save alerted state", exc_info=True)
 
     def _sweep_overstays(self) -> list[Alert]:
-        """Fire ONE overstay alert per visit for visitors inside longer
-        than the threshold. Event-driven by design (checked as reads
-        arrive — no timer thread); week-old entries age out as missed
-        exits."""
+        """Fire ONE alert per visit for visitors inside longer than the
+        threshold. Event-driven by design (checked as reads arrive — no
+        timer thread); the platform's window ages missed exits out."""
         if self._overstay_hours <= 0:
             return []
+        entries = self._inside_now()
+        if not entries:
+            return []
+        self._load_overstay_state()
+
         fired: list[Alert] = []
-        now = time.time()
+        now = _dt.datetime.now(_dt.timezone.utc)
         limit = self._overstay_hours * 3600.0
-        for plate, rec in list(self._inside_visitors.items()):
-            age = now - rec["entered"]
-            if age > 7 * 24 * 3600.0:
-                self._inside_visitors.pop(plate, None)  # missed exit
+        changed = False
+        for rec in entries:
+            plate = str(rec.get("plate") or "")
+            entered_at = str(rec.get("entered_at") or "")
+            if not plate or not entered_at:
                 continue
-            if rec["alerted"] or age < limit:
+            # Registered vehicles live here; only VISITORS overstay. The
+            # platform has no opinion about which is which — the register
+            # is this app's config — so the filter stays here.
+            if self._is_registered(plate):
                 continue
-            rec["alerted"] = True
+            key = (plate, entered_at)
+            if key in self._overstay_alerted:
+                continue
+            entered = _parse_iso(entered_at)
+            if entered is None:
+                continue
+            age = (now - entered).total_seconds()
+            if age < limit:
+                continue
+            self._overstay_alerted.add(key)
+            changed = True
             hours = age / 3600.0
+            camera_id = str(rec.get("camera_id") or "")
             alert = Alert(
                 severity="medium",
+                alert_type="vehicle_overstay",
                 title=f"Overstay: visitor {plate} inside {hours:.1f}h",
                 description=(
                     f"Visitor vehicle {plate} entered at "
-                    f"{rec['camera_id']} and has been inside "
+                    f"{self._camera_label(camera_id)} and has been inside "
                     f"{hours:.1f} hours (threshold "
                     f"{self._overstay_hours:g}h) with no gate-out read."),
-                camera_id=rec["camera_id"],
+                camera_id=camera_id,
                 source=AlertSource(),
                 evidence={"plate_text": plate,
-                          "entered_at": rec["entered"],
+                          "entered_at": entered_at,
                           "hours_inside": round(hours, 2),
                           "overstay": True},
             )
@@ -721,33 +967,45 @@ class PlateAlerter(Detector):
             self._overstay_alerts += 1
             self._contract_note_alerts(1)
             fired.append(alert)
+        if changed:
+            self._save_overstay_state()
         return fired
 
     # ── Camera scope (Phase 2 integration) ─────────────────────────
 
     def _scope(self) -> frozenset[str] | None:
-        """The camera-id set to alert on; ``None`` = every camera."""
-        if self._explicit_scope is not None:
-            return self._explicit_scope
-        if not self.cfg.opennvr_url:
-            return None
-        now = time.monotonic()
-        if (self._scope_fetched_at is None
-                or now - self._scope_fetched_at >= SCOPE_REFRESH_SECONDS):
-            self._scope_fetched_at = now
-            try:
-                assigned = cameras_for_skill(
-                    self.cfg.opennvr_url, SKILL,
-                    api_key=self.cfg.opennvr_token,
-                )
-            except Exception:  # noqa: BLE001 — scope is advisory, never fatal
-                assigned = None
-            # None = "no restriction declared / couldn't tell" — the SDK
-            # helper's contract. On failure keep the previous answer
-            # (advisory scope must never turn a hiccup into a policy).
-            if assigned is not None:
-                self._assigned_scope = frozenset(assigned)
-        return self._assigned_scope
+        """A YAML ``cameras:`` narrowing, or ``None`` for none.
+
+        Only a narrowing: whether the app works on a camera at all is
+        decided by its picks (``camera_picked``), checked first."""
+        return self._explicit_scope
+
+    def _camera_label(self, camera_id: str) -> str:
+        """The camera's name as the operator gave it, for alert TEXT.
+
+        The handle (``cam1``) is what OpenNVR routes on and stays in
+        ``camera_id``. Words meant for a person — the inbox, an SMS, a
+        spoken announcement — use the name the Cameras page shows, or the
+        same row reads ``cam1`` in its text and ``Gate IN`` in its Camera
+        column. Falls back to the handle when core can't say: a cosmetic
+        lookup must never cost an alarm."""
+        if self.cfg.opennvr_url:
+            now = time.monotonic()
+            if (self._names_fetched_at is None
+                    or now - self._names_fetched_at >= SCOPE_REFRESH_SECONDS):
+                self._names_fetched_at = now
+                try:
+                    roster = discover_cameras(
+                        self.cfg.opennvr_url, api_key=self.cfg.opennvr_token)
+                except Exception:  # noqa: BLE001 — names are cosmetic
+                    roster = []
+                names = {str(c["camera_id"]): str(c.get("name") or "").strip()
+                         for c in roster}
+                # [] is "could not ask" as often as "no cameras" — keep
+                # the names we had rather than forget them on a blip.
+                if names:
+                    self._camera_names = {k: v for k, v in names.items() if v}
+        return self._camera_names.get(camera_id) or camera_id
 
     # ── The rule (one domain envelope) ─────────────────────────────
 
@@ -771,6 +1029,11 @@ class PlateAlerter(Detector):
         # match regardless of which producer fired the event.
         plate = _normalize_plate(plate)
 
+        if not self.camera_picked(camera_id):
+            # Not a camera picked for this app (or picks not delivered
+            # yet — failing closed for one poll beats alerting on a camera
+            # nobody pointed this app at).
+            return []
         scope = self._scope()
         if scope is not None and camera_id not in scope:
             return []
@@ -850,6 +1113,7 @@ class PlateAlerter(Detector):
             camera_id, plate,
             confidence=confidence,
             vehicle_label=payload.get("vehicle_label"),
+            observed_at=payload.get("observed_at"),
             correlation_id=event.get("correlation_id"),
             monitor=monitor,
             registry_entry=registry_entry if registry_active else None,
@@ -895,20 +1159,16 @@ class PlateAlerter(Detector):
                 self._decisions_published += 1
 
         self._recent.append({
-            "message": f"{plate} on {camera_id}",
+            "message": f"{plate} on {self._camera_label(camera_id)}",
             "time": time.time(),
             "level": alert.severity,
         })
         self._contract_note_alerts(1)
 
-        # Overstay tracking: visitors (nothing that matched a list,
-        # exactly or fuzzily) enter the ledger at gate-IN and leave it
-        # at gate-OUT; the sweep fires due alerts as reads arrive.
-        is_visitor = (monitor is None and not registry_active
-                      and plate not in allowlist
-                      and plate not in self._monitors
-                      and fuzzy_match is None)
-        self._track_gates(camera_id, plate, visitor=is_visitor)
+        # Overstay: no ledger to maintain here any more. Who is inside
+        # and since when is the platform's answer (`plates/inside`), so
+        # a read is just the moment we take to go and ask — throttled,
+        # because the question moves at the speed of a car park.
         return [alert] + self._sweep_overstays()
 
     def _build_alert(
@@ -916,6 +1176,7 @@ class PlateAlerter(Detector):
         confidence: float | None,
         vehicle_label: str | None,
         correlation_id: str | None,
+        observed_at: str | None = None,
         monitor: dict[str, Any] | None = None,
         registry_entry: dict[str, str] | None = None,
         registry_expired: bool = False,
@@ -925,6 +1186,7 @@ class PlateAlerter(Detector):
         allowlist, _denylist = self._watchlists   # one read = one generation
         if monitor is not None:
             severity = str(monitor.get("severity") or "high")
+            alert_type = "plate_watchlist"
             note = str(monitor.get("note") or "")
             title = (f"Monitored plate {plate} seen — {note}" if note
                      else f"Monitored plate {plate} seen")
@@ -933,6 +1195,7 @@ class PlateAlerter(Detector):
         elif fuzzy_match is not None and fuzzy_match.get("kind") in ("registry", "allowlist"):
             canonical = str(fuzzy_match["plate"])
             severity = "low"
+            alert_type = "plate_expected"
             if fuzzy_match["kind"] == "registry":
                 entry = self._registry.get(canonical) or {}
                 owner = entry.get("owner", "")
@@ -944,6 +1207,7 @@ class PlateAlerter(Detector):
                          f"read {plate}")
         elif unknown_alarm:
             severity, title = "high", f"Unknown vehicle {plate}"
+            alert_type = "plate_unknown"
         elif registry_entry is not None:
             owner = registry_entry.get("owner", "")
             unit = registry_entry.get("unit", "")
@@ -954,18 +1218,23 @@ class PlateAlerter(Detector):
                 else ""
             )
             severity, title = "low", f"Registered vehicle {plate} seen{tag}"
+            alert_type = "plate_expected"
         elif plate in allowlist:
             severity, title = "low", f"Expected plate {plate} seen"
+            alert_type = "plate_expected"
         else:
             severity, title = "info", f"Plate {plate} read"
+            alert_type = "plate_read"
         conf_note = (
             f", confidence={confidence:.2f}" if confidence is not None else ""
         )
         return Alert(
             severity=severity,
+            alert_type=alert_type,
             title=title,
             description=(
-                f"License plate '{plate}' read on camera {camera_id} "
+                f"License plate '{plate}' read on camera "
+                f"{self._camera_label(camera_id)} "
                 f"({vehicle_label or 'vehicle'}{conf_note})."
             ),
             camera_id=camera_id,
@@ -975,6 +1244,14 @@ class PlateAlerter(Detector):
                 "plate_text": plate,
                 "confidence": confidence,
                 "vehicle_label": vehicle_label,
+                # WHEN the plate was seen, forwarded from the platform's
+                # event. fired_at is when THIS app got round to deciding,
+                # which lags the read by however long OCR and the bus
+                # took — so an operator comparing the alarm with the
+                # vehicle list saw two times for one read. Optional: an
+                # older platform sends nothing and the inbox falls back.
+                "observed_at": observed_at
+                if isinstance(observed_at, str) and observed_at else None,
                 "in_allowlist": plate in allowlist,
                 # Kept name for consumers: "on the bad list" now means
                 # "has a monitor rule" (denylist is monitor shorthand).
@@ -994,9 +1271,14 @@ class PlateAlerter(Detector):
     # ── Contract surface ───────────────────────────────────────────
 
     def state_snapshot(self) -> dict[str, Any]:
-        scope = self._explicit_scope or self._assigned_scope
+        if self.picked_cameras is not None:
+            cameras = sorted(f"cam{i}" for i in self.picked_cameras)
+            if self._explicit_scope is not None:
+                cameras = [c for c in cameras if c in self._explicit_scope]
+        else:
+            cameras = sorted(self._explicit_scope or [])
         return {
-            "cameras": sorted(scope) if scope is not None else [],
+            "cameras": cameras,
             "deduped_plates_tracked": len(self._last_fired),
             "allowlist_size": len(self._watchlists[0]),
             "denylist_size": len(self._watchlists[1]),
@@ -1006,13 +1288,22 @@ class PlateAlerter(Detector):
             "barrier_mode": self._barrier_mode,
             "review": list(self._review),
             "reviews_total": self._reviews_total,
-            "inside_visitors": len(self._inside_visitors),
+            # Visitors inside, as core last answered. The cached list is
+            # used rather than a fresh call: /state is polled by the
+            # catalog and must stay a cheap read of existing state, not
+            # a round trip to another service.
+            "inside_visitors": sum(
+                1 for r in self._inside_cache
+                if not self._is_registered(str(r.get("plate") or ""))
+            ),
             "overstay_hours": self._overstay_hours,
             "overstay_alerts": self._overstay_alerts,
             "fuzzy_max_distance": self._fuzzy_max,
             "gate_in_cameras": sorted(self._gate_in),
             "decisions_published": self._decisions_published,
             "unknown_alarms": self._unknown_alarms,
+            "scan_mode": self._scan_mode,
+            "scan_mode_overrides": dict(self._scan_mode_overrides),
             "recent": list(self._recent),
         }
 
@@ -1045,7 +1336,7 @@ class PlateAlerter(Detector):
             ", ".join(_html.escape(c) for c in scope)
             if scope else "all cameras (no assignment restriction)"
         )
-        return f"""<title>License Plate Recognition</title>
+        return f"""<title>ANPR — License Plate Recognition</title>
 <style>
  body {{ font: 14px system-ui, sans-serif; margin: 1.2rem; color: #1a1a1a;
         background: #fafafa; }}
@@ -1059,7 +1350,7 @@ class PlateAlerter(Detector):
  th {{ color: #6b6f76; font-weight: 500 }}
  .note {{ margin-top: 1rem; font-size: .85rem; color: #6b6f76 }}
 </style>
-<h1>License Plate Recognition</h1>
+<h1>ANPR — License Plate Recognition</h1>
 <div class="dim">Watching: {scope_line}</div>
 <div class="stats">
  <div><b>{len(allow)}</b><span class="dim">allowlist</span></div>
@@ -1070,7 +1361,8 @@ class PlateAlerter(Detector):
 </div>
 <div class="dim">Unknown-vehicle alarm: {"ON" if self._alarm_on_unknown else "off"}
  · Barrier: {"AUTO (registered vehicles)" if self._barrier_mode == "registered" else "off"}
- · Decisions published: {self._decisions_published}</div>
+ · Decisions published: {self._decisions_published}
+ · Scan mode: {self._scan_mode}{" (" + ", ".join(f"{c}: {m}" for c, m in sorted(self._scan_mode_overrides.items())) + ")" if self._scan_mode_overrides else ""}</div>
 {table}
 <div class="note">Watchlists are edited in the App Catalog's config
 form (applied live). Full history: the timeline's plate search.</div>
@@ -1137,6 +1429,14 @@ form (applied live). Full history: the timeline's plate search.</div>
                     0.0, float(config.get("unknown_cooldown_seconds", 300.0)))
             except (TypeError, ValueError):
                 pass
+        # Reported only: core's sweep reads these from the registry row
+        # itself (services/plate_policy.py), so the app and the platform
+        # can never disagree about which mode is in force.
+        if "scan_mode" in config:
+            self._scan_mode = normalize_scan_mode(config.get("scan_mode"))
+        if "scan_mode_overrides" in config:
+            self._scan_mode_overrides = normalize_scan_mode_overrides(
+                config.get("scan_mode_overrides"))
 
 
 # ── CLI ─────────────────────────────────────────────────────────────

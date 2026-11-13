@@ -40,6 +40,7 @@ from core.database import SessionLocal
 from core.logging_config import main_logger
 from models import SecuritySetting
 from schemas import SystemMonitoringSettings
+from services.accelerator_usage import AcceleratorUsage, fetch_text
 from services.storage_service import get_effective_recordings_base_path
 from services.system_events import latest_event_state, record_system_event
 
@@ -88,6 +89,9 @@ class SystemMonitorService:
 
     def __init__(self) -> None:
         self._fine: deque[dict[str, Any]] = deque(maxlen=_FINE_MAXLEN)
+        # NPU / GPU busy share from the inference time the detector and
+        # KAI-C already report (services/accelerator_usage.py).
+        self._accel = AcceleratorUsage()
         self._coarse: deque[dict[str, Any]] = deque(maxlen=_COARSE_MAXLEN)
         self._coarse_acc: list[dict[str, Any]] = []
         self._last_sample: dict[str, Any] | None = None
@@ -108,11 +112,22 @@ class SystemMonitorService:
             "sampled_at": now.isoformat(),
             "ts": now.timestamp(),
             "scope": "host",
+            # Who measured CPU and memory: "host-agent" (the host itself,
+            # services/host_agent.py) or "core" (psutil in this container —
+            # on Docker Desktop that is Docker's VM, not the machine).
+            "measured_by": "core",
             "cpu_percent": None,
             "load_avg": None,
             "memory": None,
             "disk": None,
             "disk_error": None,
+            # No GPU probe yet; the key is part of the API contract (HA-105)
+            # so clients can rely on it and read null as "unknown".
+            "gpu": None,
+            # The accelerators in use and how busy each is: a share of the
+            # device's time spent computing, from the inference time the
+            # detector and KAI-C report. [] when nothing runs on one.
+            "accelerators": [],
         }
         if psutil is not None:
             try:
@@ -132,6 +147,17 @@ class SystemMonitorService:
             except Exception as e:
                 main_logger.warning(f"psutil sampling failed: {e}")
 
+        self._apply_host_agent_metrics(out)
+
+        try:
+            from core.config import settings as _settings
+            out["accelerators"] = self._accel.update(
+                fetch_text(f"{_settings.detect_pipeline_metrics_url.rstrip('/')}/metrics"),
+                fetch_text(f"{_settings.kai_c_url.rstrip('/')}/metrics"),
+            )
+        except Exception as e:  # noqa: BLE001 — never fail the sample over a scrape
+            main_logger.debug(f"accelerator usage sampling failed: {e}")
+
         try:
             base_path = get_effective_recordings_base_path(db)
             stat = shutil.disk_usage(base_path)
@@ -148,16 +174,60 @@ class SystemMonitorService:
             out["disk_error"] = str(e)
         return out
 
+    @staticmethod
+    def _apply_host_agent_metrics(out: dict[str, Any]) -> None:
+        """Prefer the host agent's own measurements when they are fresh.
+
+        Only CPU, memory and load are replaced, plus the extras only the host
+        can see (every disk, temperatures, the recordings folder's host
+        volume). ``disk`` stays core's own reading of the recordings mount:
+        retention and the disk-low alert act on what core can write to.
+        """
+        try:
+            from services.host_agent import fresh_metrics
+
+            m = fresh_metrics()
+        except Exception:  # noqa: BLE001 - the agent is optional
+            m = None
+        if not m:
+            return
+        cpu = m.get("cpu_percent")
+        total = m.get("memory_total_bytes")
+        used = m.get("memory_used_bytes")
+        if cpu is None and not total:
+            return
+        out["measured_by"] = "host-agent"
+        if cpu is not None:
+            out["cpu_percent"] = round(float(cpu), 1)
+        if total:
+            used = int(used or 0)
+            out["memory"] = {
+                "total": int(total),
+                "used": used,
+                "percent": round(used / int(total) * 100, 1),
+            }
+        if m.get("load_avg"):
+            out["load_avg"] = list(m["load_avg"])
+        if m.get("cpu_count"):
+            out["cpu_count"] = int(m["cpu_count"])
+        out["host_disks"] = m.get("disks") or []
+        out["temperatures"] = m.get("temperatures") or []
+        if m.get("recordings_disk"):
+            out["host_recordings_disk"] = m["recordings_disk"]
+
     # ----------------------------------------------------------------- history
 
     def _record_sample(self, sample: dict[str, Any]) -> None:
         self._last_sample = sample
+        accel = {a["kind"]: a.get("busy_percent") for a in (sample.get("accelerators") or [])}
         point = {
             "ts": sample["ts"],
             "cpu_percent": sample.get("cpu_percent"),
             "memory_percent": (sample.get("memory") or {}).get("percent"),
             "disk_percent": (sample.get("disk") or {}).get("percent"),
             "disk_free": (sample.get("disk") or {}).get("free"),
+            "npu_percent": accel.get("npu"),
+            "gpu_percent": accel.get("gpu"),
         }
         self._fine.append(point)
         self._coarse_acc.append(point)
@@ -175,6 +245,8 @@ class SystemMonitorService:
                 "memory_percent": avg("memory_percent"),
                 "disk_percent": avg("disk_percent"),
                 "disk_free": acc[-1]["disk_free"],
+                "npu_percent": avg("npu_percent"),
+                "gpu_percent": avg("gpu_percent"),
             })
 
     def history(self, minutes: int) -> list[dict[str, Any]]:
@@ -183,6 +255,17 @@ class SystemMonitorService:
             return [p for p in self._fine if p["ts"] >= cutoff]
         cutoff = datetime.now(UTC).timestamp() - minutes * 60
         return [p for p in self._coarse if p["ts"] >= cutoff]
+
+    def latest_sample(self) -> dict[str, Any] | None:
+        """The most recent host sample, or None before the first tick.
+        For in-process readers (the enrichment governor) that want the
+        number the monitor already paid for rather than a second probe."""
+        return self._last_sample
+
+    def alert_active(self, alert_type: str) -> bool:
+        """Is this edge-triggered alert currently raised? False before
+        the state machine has been seeded."""
+        return bool((self._active or {}).get(alert_type, False))
 
     def snapshot(self, settings: SystemMonitoringSettings) -> dict[str, Any]:
         """Current state for GET /system/resources."""

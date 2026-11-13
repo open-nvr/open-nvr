@@ -68,6 +68,10 @@ _GOOD_ENTRY = {
     "image": "ghcr.io/open-nvr/sample-app:latest",
     "requires_tasks": ["object_detection"],
     "docs_url": "https://github.com/open-nvr/open-nvr/blob/main/examples/sample-app/README.md",
+    "author": "Sample Co.",
+    "contact": "maintainer@sample.example",
+    "source": "https://github.com/open-nvr/app-sample-app",
+    "network_egress": [],
     "install": {
         "compose": (
             "services:\n"
@@ -242,6 +246,8 @@ def test_real_overlay_has_every_shipped_service():
     assert _REAL_OVERLAY_SERVICES, "could not read docker-compose.apps.yml"
     shipped = yaml.safe_load(_SHIPPED_INDEX.read_text())
     for entry in shipped:
+        if entry.get("kind") == "external":
+            continue                   # link-out listing: no service by design
         assert entry["id"] in _REAL_OVERLAY_SERVICES, (
             f"shipped entry '{entry['id']}' has no compose service"
         )
@@ -399,3 +405,199 @@ def test_unparseable_snippet_fails(tmp_path):
     entry["install"] = dict(_GOOD_ENTRY["install"], compose="{ not: [valid")
     errors, _ = validator.validate_index(_write(tmp_path, [entry]))
     assert any("not valid YAML" in e for e in errors), errors
+
+
+# ─── Curation flags (verified / featured) ────────────────────────────────
+
+
+def test_curation_flags_are_booleans_and_verified_needs_an_author(tmp_path, monkeypatch):
+    monkeypatch.setattr(validator, "_load_overlay_services", lambda overlay=None: {"sample-app"})
+    ok = dict(_GOOD_ENTRY, author="Sample Co.", verified=True, featured=True)
+    errors, _ = validator.validate_index(_write(tmp_path, [ok]))
+    assert errors == []
+    bad_type = dict(_GOOD_ENTRY, verified="yes")
+    errors, _ = validator.validate_index(_write(tmp_path, [bad_type]))
+    assert any("verified must be true or false" in e for e in errors), errors
+    no_author = dict(_GOOD_ENTRY, verified=True, author="")
+    errors, _ = validator.validate_index(_write(tmp_path, [no_author]))
+    assert any("verified listing must name its author" in e for e in errors), errors
+
+
+# ─── Catalog policy: open source under the org, reachable, declared egress ──
+
+
+def test_catalog_apps_must_be_open_source_under_the_org(tmp_path, monkeypatch):
+    monkeypatch.setattr(validator, "_load_overlay_services", lambda overlay=None: {"sample-app"})
+    def errs(**over):
+        e = dict(_GOOD_ENTRY, **over)
+        for k, v in list(over.items()):
+            if v is None:
+                e.pop(k, None)
+        return validator.validate_index(_write(tmp_path, [e]))[0]
+    assert errs() == []
+    assert any("open-nvr organisation" in x for x in errs(source="https://github.com/acme/app"))
+    assert any("open-nvr organisation" in x for x in errs(source=None))
+    assert any("name their author" in x for x in errs(author=""))
+    assert any("'contact'" in x for x in errs(contact="call me"))
+    assert errs(contact="https://example.com/support") == []
+    assert any("network_egress" in x for x in errs(network_egress=None))
+    assert any("list of host names" in x for x in errs(network_egress="api.example.com"))
+    assert errs(network_egress=["licence.vendor.example"]) == []
+    # An external listing is exempt from source/author-under-org, but still declares egress.
+    ext = {k: v for k, v in _GOOD_ENTRY.items() if k not in ("image", "install", "source", "contact")}
+    ext.update(kind="external", external_url="https://vendor.example/app", author="Vendor")
+    assert validator.validate_index(_write(tmp_path, [ext]))[0] == []
+    ext.pop("network_egress")
+    assert any("network_egress" in x for x in validator.validate_index(_write(tmp_path, [ext]))[0])
+
+
+def test_only_first_party_apps_may_be_closed_source(tmp_path, monkeypatch):
+    """docs/APP_LISTING_TERMS.md §1: OpenNVR's own apps may ship as an
+    org-signed image with no published source; nobody else's may."""
+    monkeypatch.setattr(validator, "_load_overlay_services", lambda overlay=None: {"sample-app"})
+    def errs(**over):
+        e = dict(_GOOD_ENTRY, **over)
+        for k, v in list(over.items()):
+            if v is None:
+                e.pop(k, None)
+        return validator.validate_index(_write(tmp_path, [e]))[0]
+    first_party = dict(license="proprietary", author="OpenNVR", source=None)
+    assert errs(**first_party) == []
+    # Third-party closed source stays out: open source, or an external listing.
+    assert any("only first-party" in x for x in errs(**dict(first_party, author="Sample Co.")))
+    # Closed means closed: no source link, nothing to build here, org image only.
+    assert any("no public 'source'" in x
+               for x in errs(**dict(first_party, source="https://github.com/open-nvr/x")))
+    assert any("no 'build_context'" in x
+               for x in errs(**dict(first_party, build_context="examples/sample-app")))
+    assert any("ghcr.io/open-nvr/ image" in x
+               for x in errs(**dict(first_party, image="docker.io/acme/sample-app:1")))
+    # The field has two states, not free text.
+    assert any("'license' is either absent" in x for x in errs(license="MIT"))
+
+
+def test_images_outside_the_org_must_declare_their_signer(tmp_path, monkeypatch):
+    """The installer verifies a Sigstore signature before a pinned
+    install: org images are signed by the org's CI, anything else has
+    to say who signs it (scripts/app-installer/signing.py)."""
+    monkeypatch.setattr(validator, "_load_overlay_services", lambda overlay=None: {"sample-app"})
+    def errs(**over):
+        e = dict(_GOOD_ENTRY, **over)
+        for k, v in list(over.items()):
+            if v is None:
+                e.pop(k, None)
+        return validator.validate_index(_write(tmp_path, [e]))[0]
+    digest = "sha256:" + "a" * 64
+    vendor = dict(image="ghcr.io/vendor/app:1",
+                  install=dict(_GOOD_ENTRY["install"],
+                               compose=_GOOD_ENTRY["install"]["compose"].replace(
+                                   "ghcr.io/open-nvr/sample-app:latest", "ghcr.io/vendor/app:1")))
+    assert errs(image_digest=digest) == []                                     # org image: nothing to declare
+    assert any("needs 'signing" in x for x in errs(image_digest=digest, **vendor))
+    assert errs(**vendor) == []                                                # unpinned: dev-only anyway
+    good = {"identity": "^https://github.com/vendor/app/.*$"}
+    assert errs(image_digest=digest, signing=good, **vendor) == []
+    assert any("'signing'" in x for x in errs(signing="me"))
+    assert any("signing.identity" in x for x in errs(signing={"identity": ""}))
+    assert any("not a valid regexp" in x for x in errs(signing={"identity": "("}))
+    assert any("signing.issuer" in x for x in errs(signing={"identity": "^x$", "issuer": "http://x"}))
+    assert any("unknown keys" in x for x in errs(signing={"identity": "^x$", "key": "abc"}))
+
+
+def test_compose_snippet_may_default_the_pin_slot_to_the_published_image(tmp_path, monkeypatch):
+    """An app from its own repository (opennvr-app new --repo) has no
+    local build: its snippet's pin slot defaults to the published image."""
+    monkeypatch.setattr(validator, "_load_overlay_services", lambda overlay=None: {"sample-app"})
+    def with_image(img):
+        e = dict(_GOOD_ENTRY, install=dict(_GOOD_ENTRY["install"],
+                 compose=_GOOD_ENTRY["install"]["compose"].replace("ghcr.io/open-nvr/sample-app:latest", img)))
+        return validator.validate_index(_write(tmp_path, [e]))[0]
+    assert with_image("${SAMPLE_APP_IMAGE:-ghcr.io/open-nvr/sample-app:latest}") == []
+    assert with_image("${SAMPLE_APP_IMAGE:-opennvr/sample-app:local-build}") == []
+    assert any("does not match" in x for x in with_image("${SAMPLE_APP_IMAGE:-ghcr.io/evil/sample-app:latest}"))
+
+
+# ─── popularity: an editorial rank, not telemetry ───────────────────────
+
+
+def test_popularity_absent_passes(tmp_path):
+    errors, _ = validator.validate_index(_write(tmp_path, [dict(_GOOD_ENTRY)]))
+    assert errors == []
+
+
+@pytest.mark.parametrize("value", [0, 50, 100])
+def test_popularity_in_range_passes(tmp_path, value):
+    entry = dict(_GOOD_ENTRY, popularity=value)
+    errors, _ = validator.validate_index(_write(tmp_path, [entry]))
+    assert errors == []
+
+
+@pytest.mark.parametrize("value", [-1, 101, 1000])
+def test_popularity_out_of_range_fails(tmp_path, value):
+    entry = dict(_GOOD_ENTRY, popularity=value)
+    errors, _ = validator.validate_index(_write(tmp_path, [entry]))
+    assert any("popularity" in e and "0-100" in e for e in errors), errors
+
+
+@pytest.mark.parametrize("value", ["high", 3.5, True])
+def test_popularity_wrong_type_fails(tmp_path, value):
+    """`True` matters specifically: bool is an int subclass in Python, so a
+    naive isinstance check would let `popularity: yes` through as 1."""
+    entry = dict(_GOOD_ENTRY, popularity=value)
+    errors, _ = validator.validate_index(_write(tmp_path, [entry]))
+    assert any("popularity" in e and "integer" in e for e in errors), errors
+
+
+# ─── screenshots: local files only ──────────────────────────────────────
+
+
+@pytest.mark.parametrize("url", [
+    "https://cdn.example.com/shot.png",
+    "http://cdn.example.com/shot.png",
+    "//cdn.example.com/shot.png",
+])
+def test_remote_screenshot_is_refused(tmp_path, url):
+    """A remote image would leak every catalog viewer's IP to that host
+    and would not load on an air-gapped site — the two things this
+    product promises against elsewhere."""
+    entry = dict(_GOOD_ENTRY, screenshots=[url])
+    errors, _ = validator.validate_index(_write(tmp_path, [entry]))
+    assert any("remote URL" in e for e in errors), errors
+
+
+@pytest.mark.parametrize("path", [
+    "app-screenshots/../../../etc/passwd.png",
+    "/etc/passwd.png",
+    "elsewhere/sample-app/shot.png",
+    "app-screenshots/sample-app/shot.svg",
+    "app-screenshots/sample-app/shot",
+])
+def test_malformed_screenshot_path_is_refused(tmp_path, path):
+    entry = dict(_GOOD_ENTRY, screenshots=[path])
+    errors, _ = validator.validate_index(_write(tmp_path, [entry]))
+    assert any("screenshot" in e for e in errors), errors
+
+
+def test_screenshot_must_be_a_list_of_strings(tmp_path):
+    entry = dict(_GOOD_ENTRY, screenshots="app-screenshots/sample-app/shot.png")
+    errors, _ = validator.validate_index(_write(tmp_path, [entry]))
+    assert any("list of strings" in e for e in errors), errors
+
+
+def test_screenshot_that_does_not_exist_is_refused(tmp_path):
+    """A listing advertising a broken image is worse than one with none."""
+    entry = dict(_GOOD_ENTRY, screenshots=["app-screenshots/sample-app/nope.png"])
+    errors, _ = validator.validate_index(_write(tmp_path, [entry]))
+    assert any("does not exist" in e for e in errors), errors
+
+
+def test_existing_screenshot_passes(tmp_path, monkeypatch):
+    """The happy path, with the file actually present on disk."""
+    shot_root = tmp_path / "public"
+    (shot_root / "app-screenshots" / "sample-app").mkdir(parents=True)
+    (shot_root / "app-screenshots" / "sample-app" / "shot.png").write_bytes(b"x")
+    monkeypatch.setattr(validator, "SCREENSHOT_ROOT", shot_root)
+
+    entry = dict(_GOOD_ENTRY, screenshots=["app-screenshots/sample-app/shot.png"])
+    errors, _ = validator.validate_index(_write(tmp_path, [entry]))
+    assert errors == []

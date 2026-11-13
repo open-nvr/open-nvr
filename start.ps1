@@ -17,10 +17,16 @@
 #   .\start.ps1 status       # show container status
 #   .\start.ps1 validate     # run pre-flight checks only
 #   .\start.ps1 token        # re-print the first-time setup token
+#   .\start.ps1 update       # update to the latest release (scripts\update-host.ps1)
+#   .\start.ps1 auto-update enable|disable|status   # the runner for in-app updates
+#   .\start.ps1 host-agent install|uninstall|status|logs   # USB webcams + host monitoring
 # ============================================================
 
 param(
-    [string]$Command = "start"
+    [string]$Command = "start",
+    # The options of `update` (--to, --bundle, --dry-run, ...).
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$Rest = @()
 )
 
 $ComposeFile = "docker-compose.yml"
@@ -47,25 +53,31 @@ function Get-ComposeArgs {
     $args = @("-f", $ComposeFile)
     $exampleCompose = Get-EnvVar "OPENNVR_EXAMPLE_COMPOSE"
     $exampleProfile = Get-EnvVar "OPENNVR_EXAMPLE_PROFILE"
-    if ($exampleCompose) {
-        if (-not (Test-Path $exampleCompose)) {
-            if ($exampleCompose -like "*camera-agent-lite*") {
+    # Both OPENNVR_EXAMPLE_* values are comma-separated lists (several apps
+    # picked at install time); a single value is a list of one. Mirrors
+    # compose_args in start.sh.
+    $exampleComposeFiles = @($exampleCompose -split "," | Where-Object { $_ })
+    foreach ($f in $exampleComposeFiles) {
+        if (-not (Test-Path $f)) {
+            if ($f -like "*camera-agent-lite*") {
                 Write-Color "camera-agent-lite was removed - the camera-agent example (with OLLAMA_EXTERNAL_URL for host Ollama) replaces it." Yellow
                 Write-Color "Fix: re-run scripts\install.ps1 reconfigure, or clear the OPENNVR_EXAMPLE* lines in .env." Yellow
             }
-            throw "Configured example Compose file not found: $exampleCompose"
+            throw "Configured example Compose file not found: $f"
         }
-        $args += @("-f", $exampleCompose)
+        $args += @("-f", $f)
+    }
+    if ($exampleCompose) {
         # External LLM runtime (.env OLLAMA_EXTERNAL_URL): overlay that skips
         # the bundled ollama container and points the agent at the operator's
         # endpoint — the GPU path on macOS/Windows, where the in-VM container
         # is CPU-only. Mirrors compose_args in start.sh.
         $externalLlm = Get-EnvVar "OLLAMA_EXTERNAL_URL"
-        if ($externalLlm -and $exampleCompose -like "*camera-agent.yml") {
+        if ($externalLlm -and $exampleCompose -like "*camera-agent.yml*") {
             $args += @("-f", "docker-compose.camera-agent.external-llm.yml")
         }
     }
-    if ($exampleProfile) { $args += @("--profile", $exampleProfile) }
+    foreach ($p in @($exampleProfile -split "," | Where-Object { $_ })) { $args += @("--profile", $p) }
     # Default-on apps: occupancy-counting + footage-search ride the always-on
     # Tier-0 stream and need no extra adapter, model, or GPU, so a stock
     # install runs them (profile default-apps in docker-compose.apps.yml).
@@ -73,7 +85,7 @@ function Get-ComposeArgs {
     # in start.sh.
     $defaultApps = Get-EnvVar "OPENNVR_DEFAULT_APPS"
     if (@("off", "false", "0", "no") -notcontains "$defaultApps".ToLower()) {
-        if (-not ($exampleCompose -like "*docker-compose.apps.yml")) {
+        if ($exampleComposeFiles -notcontains "docker-compose.apps.yml") {
             $args += @("-f", "docker-compose.apps.yml")
         }
         $args += @("--profile", "default-apps")
@@ -532,6 +544,9 @@ function Show-FirstTimeSetupToken {
         foreach ($line in ($banner -split "
 ")) { Write-Color ("  " + $line) White }
         Write-Color ""
+        Write-Color "  Rejected as missing or invalid? It may already be used - run" DarkGray
+        Write-Color "  .\start.ps1 restart and paste the fresh token it prints." DarkGray
+        Write-Color ""
     } else {
         # Container healthy AND no banner = admin already activated on
         # a previous boot. Unambiguous now.
@@ -641,16 +656,26 @@ function Get-LanIPs {
             }
         } catch {}
     }
+    # Callers MUST wrap this in @(): PowerShell unrolls the returned list, so
+    # on a single-IP host the caller otherwise gets a bare [string] and
+    # $lanIps[0] is the character "1" of "192.168.1.5".
     return $found
 }
 
 function Set-HostIpEnv {
+    # The host's OS for core (docker-compose.yml OPENNVR_HOST_OS): Add Camera
+    # → Webcam then names the right install command for THIS machine (#904).
+    # $IsMacOS/$IsLinux exist only in PowerShell 7; on 5.1 they are $null.
+    if ([string]::IsNullOrWhiteSpace((Get-EnvVar "OPENNVR_HOST_OS"))) {
+        $env:OPENNVR_HOST_OS = if ($IsMacOS) { 'darwin' } elseif ($IsLinux) { 'linux' } else { 'windows' }
+    }
     $hostIpSet = -not [string]::IsNullOrWhiteSpace($env:OPENNVR_HOST_IP) -or
                  -not [string]::IsNullOrWhiteSpace((Get-EnvVar "OPENNVR_HOST_IP"))
     $lanIpsSet = -not [string]::IsNullOrWhiteSpace($env:OPENNVR_LAN_IPS) -or
                  -not [string]::IsNullOrWhiteSpace((Get-EnvVar "OPENNVR_LAN_IPS"))
     if ($hostIpSet -and $lanIpsSet) { return }
-    $lanIps = Get-LanIPs
+    # @() so a single detected IP stays an array (see Get-LanIPs).
+    $lanIps = @(Get-LanIPs)
     if ($lanIps.Count -eq 0) { return }
     # Process env feeds compose ${VAR:-} interpolation; operator .env wins.
     if (-not $hostIpSet) {
@@ -693,6 +718,66 @@ function Write-NetHints {
     } catch {}
 }
 
+# ── Front door reachability ────────────────────────────────
+# nginx's own healthcheck runs INSIDE its container, so it stays "healthy"
+# while the host cannot reach it at all. Docker Desktop's port forwarder
+# for a container can go stale (seen after a Docker backend hiccup, across
+# a stop/start): it still accepts on :443, then drops the connection before
+# nginx ever sees it. Every page fails, nothing reaches any log, and it
+# looks like nginx holding a stale address for opennvr-core - it is not;
+# nginx re-resolves upstreams per request. Restarting nginx makes Docker
+# rebuild the forward, so probe from the host the way a browser would and
+# do that restart here instead of leaving the operator to find it.
+function Test-EdgeHttps([string]$Url) {
+    $code = (& curl.exe -sk -o NUL -w "%{http_code}" --max-time 5 $Url 2>$null)
+    return ($code -eq "200")
+}
+
+function Test-EdgeReachable {
+    $container = "opennvr_nginx"            # container_name from compose
+    if (-not (Get-Command curl.exe -ErrorAction SilentlyContinue)) { return }
+    $state = ""
+    try { $state = (& docker inspect --format '{{.State.Status}}' $container 2>$null).Trim() } catch { }
+    # Not running = opennvr-core never got healthy (nginx waits on it), which
+    # Show-FirstTimeSetupToken has already reported. Nothing to probe.
+    if ($state -ne "running") { return }
+
+    $port = $env:NGINX_HOST_HTTPS_PORT
+    if ([string]::IsNullOrWhiteSpace($port)) { $port = Get-EnvVar "NGINX_HOST_HTTPS_PORT" }
+    if ([string]::IsNullOrWhiteSpace($port)) { $port = "443" }
+    $bindHost = $env:NGINX_BIND_HOST
+    if ([string]::IsNullOrWhiteSpace($bindHost)) { $bindHost = Get-EnvVar "NGINX_BIND_HOST" }
+    if ([string]::IsNullOrWhiteSpace($bindHost) -or $bindHost -eq "0.0.0.0") { $bindHost = "127.0.0.1" }
+    $url = "https://${bindHost}:${port}/healthz"
+
+    # A few tries: nginx may have been started a moment ago.
+    for ($i = 0; $i -lt 5; $i++) {
+        if (Test-EdgeHttps $url) { return }
+        Start-Sleep -Seconds 2
+    }
+
+    # Unreachable from here. Is nginx itself answering, inside Docker?
+    & docker exec $container wget -q -O - --no-check-certificate https://localhost/healthz *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Color "  nginx is running but not answering its own health check. Inspect:" Yellow
+        Write-Color "      docker logs --tail 50 $container" DarkGray
+        return
+    }
+
+    Write-Color "  nginx is healthy but $url is unreachable from this host -" Yellow
+    Write-Color "  Docker's port forward to it went stale. Restarting nginx ..." Yellow
+    & docker restart $container *> $null
+    for ($i = 0; $i -lt 10; $i++) {
+        Start-Sleep -Seconds 2
+        if (Test-EdgeHttps $url) {
+            Write-Color "  [OK] Web UI reachable again at https://${bindHost}:${port}/" Green
+            return
+        }
+    }
+    Write-Color "  The Web UI is still unreachable from this host after restarting nginx." Red
+    Write-Color "  Restart Docker Desktop, then run .\start.ps1 up again." DarkGray
+}
+
 # ── Raw start / build (no front-door prompt) ───────────────
 # These assume .env exists — the smart Invoke-Start and the installer
 # guarantee that before calling them. Kept separate so the installer can call
@@ -710,9 +795,25 @@ function Invoke-Up {
     $ca = Get-ComposeArgs
     if (-not (Invoke-PreflightPublishedPorts -ComposeArgs $ca)) { exit 1 }
     Write-Color "  Starting all services ..." Green
-    docker compose @ca up -d --remove-orphans
+    # The updater (scripts\update-host.ps1) runs `up` with KEEP_ORPHANS=1
+    # (containers from overlays this run was not told about are not
+    # removed) and UP_BUILD=1 (images the release builds are rebuilt).
+    # The updater's hand-off folders, bind-mounted into core.
+    New-Item -ItemType Directory -Force "data\updates", "data\update-requests" | Out-Null
+    $upFlags = @()
+    if ($env:KEEP_ORPHANS -ne "1") { $upFlags += "--remove-orphans" }
+    if ($env:UP_BUILD -eq "1") { $upFlags += "--build" }
+    docker compose @ca up -d @upFlags
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     Show-RunningInfo
     Show-FirstTimeSetupToken -ComposeArgs $ca
+    Test-EdgeReachable
+    # An installed host agent follows the core it talks to (scripts\host-agent.ps1).
+    . (Join-Path $PSScriptRoot "scripts\host-agent.ps1")
+    Update-HostAgent
+    # The runner behind OpenNVR Updates in the app (scripts\update-host.ps1).
+    . (Join-Path $PSScriptRoot "scripts\update-host.ps1")
+    Update-UpdateRunner
 }
 
 function Invoke-Build {
@@ -732,6 +833,7 @@ function Invoke-Build {
     docker compose @ca up -d --remove-orphans
     Show-RunningInfo
     Show-FirstTimeSetupToken -ComposeArgs $ca
+    Test-EdgeReachable
 }
 
 # ── Smart front door (bare .\start.ps1) ────────────────────
@@ -847,9 +949,30 @@ switch ($Command) {
         }
     }
 
+    "update" {
+        # Update to a newer release, safely: verify, back up, switch, check,
+        # roll back on failure. Options: see scripts\update-host.ps1.
+        . (Join-Path $PSScriptRoot "scripts\update-host.ps1")
+        Invoke-Update $Rest
+    }
+
+    "auto-update" {
+        # The Scheduled Task that lets the app's Update now and automatic updates work.
+        . (Join-Path $PSScriptRoot "scripts\update-host.ps1")
+        $action = if ($Rest.Count -gt 0) { $Rest[0] } else { "status" }
+        Set-AutoUpdate $action
+    }
+
+    "host-agent" {
+        # The agent on this machine: USB webcams and host monitoring.
+        . (Join-Path $PSScriptRoot "scripts\host-agent.ps1")
+        $action = if ($Rest.Count -gt 0) { $Rest[0] } else { "status" }
+        Invoke-HostAgent $action
+    }
+
     default {
         Write-Color "Unknown command: $Command" Red
-        Write-Color "Usage: .\start.ps1 [start|restart|up|build|down|logs|status|validate|token|refresh-net|install|reconfigure]"
+        Write-Color "Usage: .\start.ps1 [start|restart|up|build|down|logs|status|validate|token|refresh-net|install|reconfigure|update|auto-update|host-agent]"
         exit 1
     }
 }

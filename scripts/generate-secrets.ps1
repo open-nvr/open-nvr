@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 # OpenNVR - Secrets Generator (Windows PowerShell)
 # ============================================================
 # Generates cryptographically secure secrets and writes them

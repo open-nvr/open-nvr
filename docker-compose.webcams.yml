@@ -1,0 +1,59 @@
+# USB webcams served by MediaMTX itself — Linux only (docs/WEBCAM.md).
+#
+# `./start.sh` adds this overlay when WEBCAMS=on in .env (the default) on a
+# Linux host whose kernel has video4linux (/sys/class/video4linux: core
+# mounts it, and Docker cannot create a missing /sys path, so without it
+# core would not start — start.sh leaves the overlay out and says so).
+# It gives MediaMTX the host's video devices and an ffmpeg, so a
+# webcam camera's path runs its own capture (runOnInit, restarted on
+# unplug/replug) — no host install, no sudo, nothing outside Docker. Docker
+# Desktop on macOS/Windows cannot see USB; there the host agent does this job.
+#
+# What it changes, and why:
+#   mediamtx  built on the -ffmpeg image variant (the main compose file builds
+#             a shell-less image on purpose; a webcam needs ffmpeg next to
+#             MediaMTX, so this variant comes only with this overlay; WEBCAMS=off
+#             keeps the shell-less image). /dev is bind-mounted so a
+#             webcam plugged in AFTER the container started is still there,
+#             and a cgroup rule admits only video4linux devices (major 81).
+#             The container runs as 1000:1000 plus the host's `video` group.
+#   core      sees the stable device names (/dev/v4l/by-id) and their sysfs
+#             names, read-only, to list them in Add Camera → Webcam.
+services:
+  mediamtx:
+    # Its own image name. Without one, this build and the shell-less one in
+    # docker-compose.yml share the project's default name, so turning
+    # WEBCAMS on reused the image already on disk — no ffmpeg, and every
+    # webcam path failed with `exec: "ffmpeg": executable file not found`
+    # (#904). `build` = rebuild from cache on every up, never pull this tag.
+    image: opennvr/mediamtx-webcams:local-build
+    pull_policy: build
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM postgres:15-alpine AS tz-source
+        FROM bluenviron/mediamtx:1.15.4-ffmpeg
+        USER root
+        COPY --from=tz-source /usr/share/zoneinfo /usr/share/zoneinfo
+        RUN apk add --no-cache curl
+        ENTRYPOINT ["/mediamtx"]
+        CMD []
+    volumes:
+      - /dev:/dev
+    device_cgroup_rules:
+      - "c 81:* rmw"
+    group_add:
+      - "${VIDEO_GID:-44}"
+  opennvr-core:
+    volumes:
+      - /dev/v4l:/dev/v4l:ro
+      - /sys/class/video4linux:/sys/class/video4linux:ro
+    environment:
+      # This overlay is in place: the dialog lists local webcams (or says
+      # none is plugged in) rather than offering the host agent. The device
+      # directory alone can't tell — /dev/v4l/by-id exists only while a
+      # webcam is plugged in.
+      - OPENNVR_LOCAL_WEBCAMS=on
+      - WEBCAM_ENCODER=${WEBCAM_ENCODER:-libx264}
+      - WEBCAM_SIZE=${WEBCAM_SIZE:-1280x720}
+      - WEBCAM_FPS=${WEBCAM_FPS:-25}

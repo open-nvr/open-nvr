@@ -17,18 +17,23 @@ VAD, turn-taking, and pipeline coordination; the OpenNVR adapter
 clients in ``adapter_clients.py`` own the wire format. These classes
 are just the glue.
 
-Pipecat's service APIs evolve between minor versions. This file
-targets ``pipecat-ai >=0.0.55,<1.0``. If you upgrade Pipecat and see
-import errors at boot, check the new service base classes in
-``pipecat.services`` and adjust the imports below — the body of each
-``run_*`` method should still be portable since it's just an
+Pipecat's service APIs evolve between minor versions. This file is
+written against the version pinned in ``pyproject.toml`` (1.x: the
+``pipecat.services.*_service`` base classes, the universal
+``LLMContext``). If you bump Pipecat and see import errors at boot,
+check the new base classes and adjust the imports below — the body of
+each ``run_*`` method should still be portable since it's just an
 ``async def`` calling our adapter clients.
 """
 from __future__ import annotations
 
+import re
+
+import asyncio
+
 import json
 import logging
-from typing import Any, AsyncGenerator
+from typing import Callable, Any, AsyncGenerator
 
 # Pipecat frame + service imports.
 #
@@ -42,23 +47,25 @@ try:  # pragma: no cover — import-time only
         LLMFullResponseEndFrame,
         LLMFullResponseStartFrame,
         LLMTextFrame,
+        LLMUpdateSettingsFrame,
         TextFrame,
         TranscriptionFrame,
         TTSAudioRawFrame,
         TTSStartedFrame,
         TTSStoppedFrame,
+        TTSTextFrame,
+        UserStartedSpeakingFrame,
         UserStoppedSpeakingFrame,
+        InterruptionFrame,
+        OutputTransportMessageFrame,
+        OutputTransportMessageUrgentFrame,
     )
-    from pipecat.services.ai_services import (
-        LLMService,
-        SegmentedSTTService,
-        STTService,
-        TTSService,
-    )
-    from pipecat.processors.aggregators.openai_llm_context import (
-        OpenAILLMContext,
-        OpenAILLMContextFrame,
-    )
+    from pipecat.processors.frame_processor import FrameProcessor
+    from pipecat.services.llm_service import LLMService
+    from pipecat.services.stt_service import SegmentedSTTService, STTService
+    from pipecat.services.tts_service import TTSService
+    from pipecat.processors.aggregators.llm_context import LLMContext
+    from pipecat.frames.frames import LLMContextFrame
     from pipecat.utils.time import time_now_iso8601
 except Exception:  # pragma: no cover
     # Tests don't import this module directly; they stub Pipecat in
@@ -68,18 +75,25 @@ except Exception:  # pragma: no cover
     LLMFullResponseEndFrame = object  # type: ignore
     LLMFullResponseStartFrame = object  # type: ignore
     LLMTextFrame = object  # type: ignore
+    LLMUpdateSettingsFrame = object  # type: ignore
     TextFrame = object  # type: ignore
     TranscriptionFrame = object  # type: ignore
     TTSAudioRawFrame = object  # type: ignore
     TTSStartedFrame = object  # type: ignore
     TTSStoppedFrame = object  # type: ignore
+    TTSTextFrame = object  # type: ignore
+    UserStartedSpeakingFrame = object  # type: ignore
     UserStoppedSpeakingFrame = object  # type: ignore
+    InterruptionFrame = object  # type: ignore
+    OutputTransportMessageFrame = object  # type: ignore
+    OutputTransportMessageUrgentFrame = object  # type: ignore
+    FrameProcessor = object  # type: ignore
     LLMService = object  # type: ignore
     STTService = object  # type: ignore
     SegmentedSTTService = object  # type: ignore
     TTSService = object  # type: ignore
-    OpenAILLMContext = object  # type: ignore
-    OpenAILLMContextFrame = object  # type: ignore
+    LLMContext = object  # type: ignore
+    LLMContextFrame = object  # type: ignore
 
     def time_now_iso8601() -> str:  # type: ignore
         import datetime as _dt
@@ -104,6 +118,19 @@ class OpenNvrWhisperSTT(SegmentedSTTService):
     Whisper fragments and yielding empty/garbled transcripts. Our
     adapter is non-streaming, so one ``TranscriptionFrame`` per
     utterance is exactly the right shape.
+
+    Where the utterance ends is no longer this service's problem: the
+    user aggregator's turn strategies (Silero VAD to start, Smart Turn
+    v3 to stop — see ``build_pipeline_task``) decide, and the
+    ``max_duration_secs`` of the turn analyzer bounds a runaway
+    utterance. The pre-1.x force-stop timers that lived here are gone.
+
+    Since pipecat 1.10 the base is queue-based: ``run_stt`` runs in a
+    background task while audio and other frames keep flowing through
+    the pipeline, so a two-second Whisper call on CPU no longer stalls
+    the turn machinery behind it; and each segment is padded with
+    ``trailing_silence_secs`` of silence so the model hears the end of
+    speech (``stt_trailing_silence_secs`` in config).
     """
 
     def __init__(
@@ -111,74 +138,10 @@ class OpenNvrWhisperSTT(SegmentedSTTService):
         *,
         client: WhisperClient,
         sample_rate: int = 16000,
+        trailing_silence_secs: float = 0.5,
     ) -> None:
-        super().__init__(sample_rate=sample_rate)
+        super().__init__(sample_rate=sample_rate, trailing_silence_secs=trailing_silence_secs)
         self._client = client
-        self._trailing_silence_secs = 0.0
-        self._speaking_secs = 0.0
-        # RMS below which audio is treated as trailing silence for force-stop.
-        # 200 is well below normal speech (rms ~300-2000) but above true silence.
-        # The old value of 450 was mis-classifying real speech as silence and
-        # triggering force-stop after just 1 second, giving Whisper a 1s clip
-        # that it transcribes as 'You'.
-        self._silence_rms_threshold = 200
-        # Wait 2s of silence before force-stopping. 1.1s was too short — any
-        # brief pause mid-sentence triggered it.
-        self._force_stop_after_silence_secs = 2.0
-        self._force_stop_after_speech_secs = 14.0
-
-    async def _handle_user_started_speaking(self, frame):  # type: ignore[override]
-        self._trailing_silence_secs = 0.0
-        self._speaking_secs = 0.0
-        await super()._handle_user_started_speaking(frame)
-
-    async def _handle_user_stopped_speaking(self, frame):  # type: ignore[override]
-        self._trailing_silence_secs = 0.0
-        self._speaking_secs = 0.0
-        await super()._handle_user_stopped_speaking(frame)
-
-    async def process_audio_frame(self, frame, direction):  # type: ignore[override]
-        await super().process_audio_frame(frame, direction)
-
-        if not getattr(self, "_user_speaking", False):
-            self._trailing_silence_secs = 0.0
-            self._speaking_secs = 0.0
-            return
-
-        audio = getattr(frame, "audio", b"") or b""
-        sample_rate = int(getattr(frame, "sample_rate", self.sample_rate) or self.sample_rate)
-        channels = int(getattr(frame, "num_channels", 1) or 1)
-        if not audio or sample_rate <= 0:
-            return
-
-        seconds = len(audio) / float(sample_rate * channels * 2)
-        self._speaking_secs += seconds
-        try:
-            import audioop
-
-            rms = audioop.rms(audio, 2)
-        except Exception:
-            rms = self._silence_rms_threshold + 1
-
-        if rms < self._silence_rms_threshold:
-            self._trailing_silence_secs += seconds
-        else:
-            self._trailing_silence_secs = 0.0
-
-        should_force_stop = (
-            self._trailing_silence_secs >= self._force_stop_after_silence_secs
-            or self._speaking_secs >= self._force_stop_after_speech_secs
-        )
-        if should_force_stop:
-            logger.info(
-                "STT forcing utterance end: trailing_silence=%.2fs speech=%.2fs rms=%d",
-                self._trailing_silence_secs,
-                self._speaking_secs,
-                rms,
-            )
-            stop_frame = UserStoppedSpeakingFrame()
-            await self._handle_user_stopped_speaking(stop_frame)
-            await self.push_frame(stop_frame, direction)
 
     # Whisper hallucinates short tokens when fed near-silence or very short
     # noise bursts. Drop these so they don't loop the LLM indefinitely.
@@ -258,14 +221,114 @@ class OpenNvrWhisperSTT(SegmentedSTTService):
 # ── LLM: Ollama via OpenNVR adapter, with tool calling ─────────────
 
 
+def history_and_question(messages: list[dict[str, Any]]) -> tuple[list[dict[str, str]], str]:
+    """The agent's turn takes (history, the question): prior user and
+    assistant TEXT turns, and the last user message. System and tool
+    messages are the pipeline's business, not the turn's."""
+    turns = [m for m in messages
+             if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)]
+    if not turns or turns[-1].get("role") != "user":
+        return [{"role": m["role"], "content": m["content"]} for m in turns], ""
+    history = [{"role": m["role"], "content": m["content"]} for m in turns[:-1]]
+    return history, str(turns[-1]["content"]).strip()
+
+
+class StreamEvents(FrameProcessor):
+    """What the page needs to know besides the audio, as JSON messages on
+    the same WebSocket: the transcript of what was heard, each sentence as
+    it is spoken, when the user started and stopped, when the agent
+    started and stopped, and an interruption (so the page drops the audio
+    it has queued). Sits just before the transport's output; every frame
+    passes through untouched."""
+
+    _TEXT_TYPES: tuple = ()
+
+    async def process_frame(self, frame: "Frame", direction: Any) -> None:  # type: ignore[override]
+        await super().process_frame(frame, direction)
+        message = None
+        urgent = False
+        if isinstance(frame, TranscriptionFrame):
+            message = {"type": "transcript", "text": getattr(frame, "text", "")}
+        elif isinstance(frame, TTSTextFrame):
+            message = {"type": "reply", "text": getattr(frame, "text", "")}
+        elif isinstance(frame, UserStartedSpeakingFrame):
+            message = {"type": "user_started"}
+        elif isinstance(frame, UserStoppedSpeakingFrame):
+            message = {"type": "user_stopped"}
+        elif isinstance(frame, TTSStartedFrame):
+            message = {"type": "bot_started"}
+        elif isinstance(frame, TTSStoppedFrame):
+            message = {"type": "bot_stopped"}
+        elif isinstance(frame, InterruptionFrame):
+            message, urgent = {"type": "interrupted"}, True
+        if message is not None:
+            out = (OutputTransportMessageUrgentFrame if urgent else OutputTransportMessageFrame)(message=message)
+            await self.push_frame(out, direction)
+        await self.push_frame(frame, direction)
+
+
+def with_clock_in_user_turn(messages: list[dict[str, Any]],
+                            clock_line: Callable[[], str] | None) -> list[dict[str, Any]]:
+    """The per-turn clock, in front of the LAST user message — the one
+    message rendered after the system+tools prefix Ollama caches. A clock
+    in the system prompt changed every minute and re-prefilled ~4k tokens
+    on every voice turn. The context's own list is left alone; history
+    keeps the bare words."""
+    if not clock_line or not messages or messages[-1].get("role") != "user":
+        return messages
+    last = dict(messages[-1])
+    last["content"] = f"[{clock_line()}]\n\n{last.get('content') or ''}"
+    return messages[:-1] + [last]
+
+
+#: A transcript that stopped mid-sentence: it ends on a word that needs
+#: what comes next ("remove the", "alarm for", "I see that"), or it is a
+#: lone word that is not an answer in itself. Smart Turn cuts at a pause
+#: of turn_stop_secs; a person who pauses to think mid-sentence gets cut
+#: ("I remove that alarm." / "for cam 24 person." — Ventuno Q, 2026-11-10,
+#: two turns, the first answered before the second arrived).
+_UNFINISHED_TAIL_RE = re.compile(
+    r"\b(a|an|the|my|your|our|this|that|these|those|to|for|of|in|on|at|with|and|but|or|"
+    r"from|by|about|is|are|was|were|if|when|whenever|every|each|please|can|could|"
+    r"will|would|should|let|i|you|we|it)[\s.,!?]*$", re.IGNORECASE)
+_STANDALONE_WORDS = frozenset({
+    "yes", "yeah", "yep", "no", "nope", "ok", "okay", "thanks", "thank", "bye", "goodbye",
+    "hello", "hi", "hey", "stop", "cancel", "wait", "perfect", "great", "good", "fine", "sure",
+})
+#: How long an unfinished transcript waits for its continuation before it
+#: is answered as it stands.
+DEFAULT_CONTINUE_SECS = 2.5
+
+
+def looks_unfinished(text: str) -> bool:
+    """True when ``text`` reads as the first half of a sentence."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    words = re.findall(r"[A-Za-z']+", t)
+    if len(words) == 1 and words[0].lower() not in _STANDALONE_WORDS:
+        return True
+    return bool(_UNFINISHED_TAIL_RE.search(t))
+
+
+def join_transcripts(first: str, second: str) -> str:
+    """"I remove that alarm." + "for cam 24 person." → one sentence: the
+    first part's closing punctuation (Whisper's, not the speaker's) goes."""
+    a = (first or "").strip().rstrip(".,;:!?")
+    b = (second or "").strip()
+    if b[:1].isupper() and not (len(b) > 1 and b[1:2].isupper()):
+        b = b[0].lower() + b[1:]
+    return (a + " " + b).strip()
+
+
 class OpenNvrOllamaLLM(LLMService):
     """Bridges Pipecat's LLM contract to the Ollama adapter's
     OpenAI-style chat_completion task.
 
     Handles the full tool-calling loop inline:
 
-      1. Pipecat hands us an ``OpenAILLMContext`` carrying the
-         conversation history.
+      1. Pipecat hands us an ``LLMContextFrame`` carrying the
+         universal ``LLMContext`` (OpenAI-style message dicts).
       2. We POST ``messages`` + ``tools`` to the adapter.
       3. If the response carries ``tool_calls``, we invoke the
          registered handlers (via ``self._tool_handlers``), append
@@ -287,9 +350,23 @@ class OpenNvrOllamaLLM(LLMService):
         temperature: float = 0.4,
         max_tokens: int = 256,
         max_tool_iterations: int = 4,
+        clock_line: Callable[[], str] | None = None,
+        turn_runner: Callable[..., Any] | None = None,
     ) -> None:
         super().__init__()
         self._client = client
+        self._clock_line = clock_line
+        # The agent's own turn (router, forced grounding, the window fit,
+        # the backup model, the reply guards), ``async (history, text) ->
+        # reply``. With it the streaming path answers exactly as the
+        # request path does; without it (tests with bare fakes) the inline
+        # tool loop below runs.
+        self._turn_runner = turn_runner
+        # An unfinished transcript waiting for the rest of its sentence:
+        # (history, text, the timer that answers it as it stands).
+        self._pending: tuple[list[dict[str, str]], str] | None = None
+        self._pending_timer: asyncio.Task | None = None
+        self.continue_secs: float = DEFAULT_CONTINUE_SECS
         self._tools = list(tools)
         self._tool_handlers = dict(tool_handlers)
         self._temperature = temperature
@@ -306,15 +383,58 @@ class OpenNvrOllamaLLM(LLMService):
         # are silently swallowed and the pipeline locks up after the
         # first non-context frame.
         await super().process_frame(frame, direction)
-        if isinstance(frame, OpenAILLMContextFrame):
+        if isinstance(frame, LLMContextFrame):
             await self._handle_context(frame.context)
+        elif isinstance(frame, LLMUpdateSettingsFrame):
+            pass  # the base consumed it (ours) or already forwarded it (another service's)
         else:
             await self.push_frame(frame, direction)
 
-    async def _handle_context(self, context: OpenAILLMContext) -> None:
+    def _cancel_pending(self) -> None:
+        if self._pending_timer is not None and not self._pending_timer.done():
+            self._pending_timer.cancel()
+        self._pending_timer = None
+        self._pending = None
+
+    async def _answer_pending_later(self) -> None:
+        try:
+            await asyncio.sleep(self.continue_secs)
+        except asyncio.CancelledError:
+            return
+        pending, self._pending, self._pending_timer = self._pending, None, None
+        if pending is None:
+            return
+        history, text = pending
+        await self.push_frame(LLMFullResponseStartFrame())
+        try:
+            await self._answer(history, text)
+        finally:
+            await self.push_frame(LLMFullResponseEndFrame())
+
+    async def _answer(self, history: list[dict[str, str]], text: str) -> None:
+        """One turn over the agent's own runner: the transcript to the page
+        first, the reply, turn_end, and session_end after a goodbye."""
+        # The page never sees the TranscriptionFrame: the user aggregator
+        # upstream consumes it. So the transcript goes out from here,
+        # before the answer, and a turn_end after it — without them the
+        # page showed no user text and appended every answer to one
+        # bubble (2026-11-09).
+        await self.push_frame(OutputTransportMessageFrame(message={"type": "transcript", "text": text}))
+        out = await self._turn_runner(history, text)
+        reply, meta = (out if isinstance(out, tuple) else (out, {}))
+        if reply:
+            await self.push_frame(LLMTextFrame(str(reply)))
+        await self.push_frame(OutputTransportMessageFrame(message={"type": "turn_end"}))
+        if (meta or {}).get("end"):
+            # After the goodbye: the page leaves talk mode once the
+            # reply's audio has played.
+            await self.push_frame(OutputTransportMessageFrame(message={"type": "session_end"}))
+
+    async def _handle_context(self, context: LLMContext) -> None:
         # Snapshot the conversation messages; Pipecat's context
         # aggregator owns the canonical list.
-        messages = list(context.get_messages())
+        raw_messages = list(context.get_messages())
+        messages = with_clock_in_user_turn(raw_messages, self._clock_line)
         logger.info("LLM _handle_context fired with %d messages", len(messages))
 
         # Emit the "LLM is thinking" bracket so downstream TTS knows
@@ -322,6 +442,23 @@ class OpenNvrOllamaLLM(LLMService):
         await self.push_frame(LLMFullResponseStartFrame())
 
         try:
+            if self._turn_runner is not None:
+                history, text = history_and_question(raw_messages)
+                if text:
+                    # A continuation of a sentence held below joins it;
+                    # an unfinished sentence waits continue_secs for its
+                    # rest before it is answered as it stands.
+                    if self._pending is not None:
+                        prev_history, prev_text = self._pending
+                        self._cancel_pending()
+                        history, text = prev_history, join_transcripts(prev_text, text)
+                    if looks_unfinished(text) and self.continue_secs > 0:
+                        self._pending = (history, text)
+                        self._pending_timer = asyncio.get_running_loop().create_task(self._answer_pending_later())
+                        await self.push_frame(LLMFullResponseEndFrame())
+                        return
+                    await self._answer(history, text)
+                return
             for iteration in range(self._max_tool_iterations):
                 response = await self._client.chat(
                     messages=messages,
@@ -439,21 +576,21 @@ class OpenNvrPiperTTS(TTSService):
         super().__init__(sample_rate=sample_rate)
         self._client = client
 
-    async def run_tts(self, text: str) -> AsyncGenerator[Frame, None]:
+    async def run_tts(self, text: str, context_id: str | None = None) -> AsyncGenerator[Frame, None]:
         text = (text or "").strip()
         if not text:
             return
         logger.info("TTS synthesizing: %r", text[:120])
-        yield TTSStartedFrame()
+        yield TTSStartedFrame(context_id=context_id)
         try:
             audio_bytes = await self._client.synthesize(text)
         except Exception:
             logger.exception("Piper adapter synthesise failed")
-            yield TTSStoppedFrame()
+            yield TTSStoppedFrame(context_id=context_id)
             return
         logger.info("TTS got %d audio bytes from Piper", len(audio_bytes or b""))
         if not audio_bytes:
-            yield TTSStoppedFrame()
+            yield TTSStoppedFrame(context_id=context_id)
             return
         # WAV from Piper carries a 44-byte RIFF header; strip it so
         # we ship raw PCM frames the transport layer can chunk
@@ -462,10 +599,11 @@ class OpenNvrPiperTTS(TTSService):
         pcm = _strip_wav_header(audio_bytes)
         yield TTSAudioRawFrame(
             audio=pcm,
-            sample_rate=self._sample_rate,
+            sample_rate=self.sample_rate,
             num_channels=1,
+            context_id=context_id,
         )
-        yield TTSStoppedFrame()
+        yield TTSStoppedFrame(context_id=context_id)
 
 
 def _strip_wav_header(audio: bytes) -> bytes:

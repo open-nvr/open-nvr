@@ -27,8 +27,16 @@ from datetime import datetime
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import (
+    BaseModel,
+    EmailStr,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
+from core.camera_source import PUBLISHER_IP_SENTINEL, SOURCE_PUBLISHER
 from core.config import settings
 
 
@@ -101,6 +109,18 @@ class CameraBase(BaseModel):
     firmware_version: str | None = Field(None, max_length=100)
     serial_number: str | None = Field(None, max_length=100)
     hardware_id: str | None = Field(None, max_length=100)
+    # Where the video comes from (core/camera_source.py): "rtsp" pulls
+    # rtsp_url; "publisher" is a webcam that publishes into the camera's
+    # MediaMTX path. Fixed at creation.
+    source_type: Literal["rtsp", "publisher"] = "rtsp"
+    # For a webcam on the OpenNVR machine: the host agent's id of the USB
+    # webcam that feeds it (services/host_agent.py). None = a browser webcam.
+    source_device: str | None = Field(None, max_length=300)
+
+    @field_validator("source_type", mode="before")
+    @classmethod
+    def _null_source_means_rtsp(cls, v: str | None) -> str:
+        return v or "rtsp"
 
     @field_validator(
         "name",
@@ -186,6 +206,11 @@ class UserCreate(UserBase):
 
     password: str = Field(..., min_length=8)
     role_id: int
+    # Only ``POST /users`` (superuser) honours this; self-registration
+    # never passes it. A superuser holds every permission and sees every
+    # camera, so minting one is the most privileged write in the API —
+    # the route requires the caller's current TOTP code for it.
+    is_superuser: bool = False
 
     @field_validator("password")
     @classmethod
@@ -233,6 +258,36 @@ class CameraCreate(CameraBase):
     """Schema for creating a new camera."""
 
     password: str | None = Field(None, max_length=255)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _publisher_has_no_address(cls, data: Any) -> Any:
+        """A webcam has no address or stream URL of its own.
+
+        ``ip_address`` is filled with the sentinel (the column is NOT NULL);
+        anything that would make it look like an IP camera is refused rather
+        than silently dropped, so a client mixing the two finds out.
+        """
+        if not isinstance(data, dict):
+            return data
+        if data.get("source_type") != SOURCE_PUBLISHER:
+            if data.get("source_device"):
+                raise ValueError("source_device is only for a webcam camera (source_type 'publisher')")
+            return data
+        stray = [
+            k
+            for k in ("rtsp_url", "substream_url", "username", "password")
+            if data.get(k)
+        ]
+        ip = data.get("ip_address")
+        if ip and ip != PUBLISHER_IP_SENTINEL:
+            stray.insert(0, "ip_address")
+        if stray:
+            raise ValueError(
+                "A webcam camera takes no address, stream URL or credentials "
+                f"(got: {', '.join(stray)})"
+            )
+        return {**data, "ip_address": PUBLISHER_IP_SENTINEL}
 
 
 class RecordingCreate(RecordingBase):
@@ -298,6 +353,20 @@ class CameraConfigUpdate(BaseModel):
 class CameraConfigResponse(CameraConfigBase):
     id: int
     camera_id: int
+
+    @field_serializer("source_url")
+    def _no_credentials_for_tokens(self, value: str | None) -> str | None:
+        """The same rule as CameraResponse.rtsp_url: an API token streams
+        through OpenNVR and never gets the camera's credentials; a person
+        with access to the camera sees the URL they configured."""
+        from core.request_context import current
+
+        ctx = current()
+        if value and ctx is not None and (ctx.actor or "").startswith("token:"):
+            from utils.url_redaction import redact_url_credentials
+
+            return redact_url_credentials(value)
+        return value
     last_provisioned_at: datetime | None = None
     stream_active: bool = False
     last_stream_start: datetime | None = None
@@ -361,6 +430,16 @@ class UserUpdate(BaseModel):
     last_name: str | None = Field(None, max_length=50)
     is_active: bool | None = None
     role_id: int | None = None
+    # Promote/demote. Superuser-only route; changing it requires the
+    # caller's TOTP code (X-MFA-Code) like delete/reactivate, and the
+    # last active superuser can never be demoted (nor can you demote
+    # yourself) — a site with no superuser has no way back.
+    is_superuser: bool | None = None
+    # Set a new password for the user (an admin reset: there is no
+    # self-service recovery without mail). Superuser-only route; requires
+    # the caller's TOTP code (X-MFA-Code) like promote/demote. The site
+    # password policy applies.
+    password: str | None = Field(None, min_length=8, max_length=128)
 
 
 class CameraAssignment(BaseModel):
@@ -458,6 +537,19 @@ class CameraUpdate(BaseModel):
     vlan: str | None = Field(None, max_length=50)
     status: str | None = Field(None, max_length=20)
     is_active: bool | None = None
+    # Tier-0 object detection on/off; the camera keeps recording either way.
+    detection_enabled: bool | None = None
+    # Where detections come from: "opennvr", "camera" (its own analytics
+    # become alerts, Tier-0 paused on it) or "both".
+    analytics_source: Literal["opennvr", "camera", "both"] | None = None
+    # Alert types native events may become; [] or null = all.
+    native_event_types: list[str] | None = None
+    # Why, for the audit log only (e.g. the Home Assistant automation that
+    # asked). Never stored on the camera.
+    reason: str | None = Field(None, max_length=200)
+    # A webcam on the OpenNVR machine: switch it to another USB webcam, or
+    # "" / null for none (the router refuses it on any other camera).
+    source_device: str | None = Field(None, max_length=300)
     # Per-camera capability assignment (see CameraAssignment). Send the FULL
     # list each time — this replaces, it does not merge. [] clears.
     assignments: list[CameraAssignment] | None = None
@@ -548,6 +640,17 @@ class RolePermissionsSet(BaseModel):
     permission_ids: list[int]
 
 
+class CameraPermissionEntry(BaseModel):
+    """One row of ``GET /cameras/{id}/permissions``: a grant, or the
+    owner (who holds every right implicitly)."""
+
+    user_id: int
+    username: str | None = None
+    can_view: bool
+    can_manage: bool
+    is_owner: bool = False
+
+
 class CameraPermissionResponse(BaseModel):
     """Schema for camera permission response."""
 
@@ -568,6 +671,67 @@ class MfaSetupResponse(BaseModel):
 
 class MfaVerifyRequest(BaseModel):
     code: str = Field(..., min_length=6, max_length=8)
+
+
+class MfaFactorOut(BaseModel):
+    """One second factor, never with its secret."""
+    id: int
+    kind: str
+    label: str
+    enabled: bool
+    confirmed: bool
+    created_at: datetime | None = None
+    last_used_at: datetime | None = None
+
+
+class MfaFactorList(BaseModel):
+    factors: list[MfaFactorOut]
+    # Unused recovery codes (only on the account's own listing).
+    recovery_codes_remaining: int | None = None
+
+
+class MfaBeginRequest(BaseModel):
+    label: str | None = Field(None, max_length=64)
+    # Required once the account has a working authenticator.
+    current_password: str | None = None
+
+
+class MfaBeginResponse(BaseModel):
+    factor_id: int
+    otpauth_url: str
+    secret: str
+
+
+class MfaConfirmResponse(MfaFactorOut):
+    # Set when this was the account's first authenticator: shown once.
+    recovery_codes: list[str] | None = None
+
+
+class MfaRecoveryCodesRequest(BaseModel):
+    current_password: str | None = None
+
+
+class MfaRecoveryCodesResponse(BaseModel):
+    recovery_codes: list[str]
+
+
+class MfaConfirmRequest(BaseModel):
+    code: str = Field(..., min_length=6, max_length=8)
+    label: str | None = Field(None, max_length=64)
+
+
+class MfaFactorPatch(BaseModel):
+    label: str | None = Field(None, max_length=64)
+    enabled: bool | None = None
+    current_password: str | None = None
+
+
+class MfaFactorDelete(BaseModel):
+    current_password: str | None = None
+
+
+class MfaAdminFactorPatch(BaseModel):
+    enabled: bool
 
 
 # Response schemas
@@ -628,6 +792,9 @@ class UserResponse(UserBase):
     is_superuser: bool
     password_set: bool
     mfa_enabled: bool
+    # Working authenticators (confirmed, enabled) on the account.
+    mfa_factor_count: int = 0
+    auth_provider: str | None = None
     created_at: datetime
     updated_at: datetime | None = None
 
@@ -653,15 +820,36 @@ class FirstTimeSetupResponse(BaseModel):
 class FirstTimeSetupCheckResponse(BaseModel):
     setup_required: bool
     username: str | None = None
+    # Whether ``POST /auth/register`` (self-service viewer accounts) is
+    # open on this deployment — the login page shows the link only then.
+    registration_open: bool = False
 
 
 class CameraResponse(CameraBase):
     id: int
     owner_id: int
     is_active: bool
-    # Per-camera capability assignment; None and [] both mean "nothing
-    # assigned" (read as: no restriction declared).
+    # Per-camera capability assignment. None and [] both mean "nothing
+    # assigned": eligible for any skill's picker, adopted by none, so no
+    # app inference runs on it. The UI reads eligibility off this.
     assignments: list[CameraAssignment] | None = None
+    # NULL in the database means on (cameras from before the column).
+    detection_enabled: bool = True
+
+    @field_validator("detection_enabled", mode="before")
+    @classmethod
+    def _null_detection_means_on(cls, v: bool | None) -> bool:
+        return True if v is None else v
+
+    # NULL means OpenNVR's own detection (cameras from before the column).
+    analytics_source: str = "opennvr"
+    native_event_types: list[str] | None = None
+
+    @field_validator("analytics_source", mode="before")
+    @classmethod
+    def _null_source_means_opennvr(cls, v: str | None) -> str:
+        return v or "opennvr"
+
     deleted_at: datetime | None = None
     created_at: datetime
     updated_at: datetime | None = None
@@ -679,6 +867,16 @@ class CameraResponse(CameraBase):
     # endpoint does not compute it, which callers must read as "unknown".
     recording_state: str | None = None
     last_recording_at: datetime | None = None
+    # Set while recording is paused on this camera (HA-108): {"since",
+    # "resume_at" (None = until resumed), "by", "reason"}. recording_state
+    # reads 'off' meanwhile; this says it was deliberate, and by whom.
+    recording_pause: dict[str, Any] | None = None
+    # The escalation proposal (services/evidence_escalation.py): {"status":
+    # "proposed" | "accepted" | "dismissed", "reasons", "review_due"} when
+    # the camera's evidence on the sub stream is weak enough to propose
+    # detecting on the main stream, or a decision about that is in force.
+    # None = nothing to show. Only the camera list computes it.
+    escalation: dict[str, Any] | None = None
     # Live connectivity from the in-memory tracker (CameraStatusService:
     # MediaMTX path ready AND bytes flowing). None means UNKNOWN, not offline:
     # the backend restarted and the first reconcile pass has not landed yet,
@@ -695,6 +893,20 @@ class CameraResponse(CameraBase):
     # edit with 409/502 instead, so the DB and MediaMTX cannot disagree about
     # where a camera's video comes from.
     stream_warning: str | None = None
+
+    @field_serializer("rtsp_url", "substream_url")
+    def _no_credentials_for_tokens(self, value: str | None) -> str | None:
+        """An API token (Home Assistant, a dashboard card's session) never
+        gets the camera's stream credentials: it streams through OpenNVR.
+        Users keep seeing the URL they configured."""
+        from core.request_context import current
+
+        ctx = current()
+        if value and ctx is not None and (ctx.actor or "").startswith("token:"):
+            from utils.url_redaction import redact_url_credentials
+
+            return redact_url_credentials(value)
+        return value
 
     class Config:
         from_attributes = True
@@ -725,6 +937,7 @@ class Token(BaseModel):
 
 class TokenData(BaseModel):
     username: str | None = None
+    ver: int | None = None
 
 
 class UserLogin(BaseModel):
@@ -810,6 +1023,9 @@ class UserList(BaseModel):
 class CameraList(BaseModel):
     cameras: list[CameraResponse]
     total: int
+    # {"all", "active", "inactive"} under the same search/location/scope,
+    # ignoring the status filter. None from callers that do not compute it.
+    counts: dict[str, int] | None = None
 
 
 class RecordingList(BaseModel):
@@ -829,6 +1045,7 @@ class AuditLogResponse(BaseModel):
     details: dict | str | None = None
     ip: str | None = None
     user_agent: str | None = None
+    correlation_id: str | None = None
 
     class Config:
         from_attributes = True
@@ -1030,7 +1247,9 @@ class RecordingStorageSettings(BaseModel):
 class RecordingRetentionSettings(BaseModel):
     retention_days: int | None = Field(30, ge=0, le=3650)
     protect_flagged: bool = True
-    min_free_space_gb: int | None = Field(None, ge=1, le=100000)
+    # None = automatic (2 GB or 2 % of the recordings volume, whichever is
+    # more; see retention_service.effective_min_free_gb); 0 = off.
+    min_free_space_gb: int | None = Field(None, ge=0, le=100000)
     # Under disk pressure, also purge quarantined orphaned/ footage after all
     # indexed recordings are exhausted. Off by default: quarantine is meant to
     # stay recoverable (see retention_service._cleanup_orphans_by_age).

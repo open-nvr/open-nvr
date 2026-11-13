@@ -76,3 +76,27 @@ def test_backfill_skips_notnull_without_default(monkeypatch, tmp_path):
 
     cols = {c["name"] for c in inspect(eng).get_columns("cams")}
     assert cols == {"id"}  # NOT NULL-without-default left for a real migration
+
+
+def test_backfill_also_creates_the_index_of_an_indexed_column(monkeypatch, tmp_path):
+    """A create_all-bootstrapped DB is stamped to head, so the migration that
+    would create an index never runs; the backfill must create it (HA-002:
+    audit_logs.correlation_id is filtered on)."""
+    eng = create_engine(f"sqlite:///{tmp_path/'t.db'}")
+    reg_base = declarative_base()
+
+    class Log(reg_base):
+        __tablename__ = "audit_logs"
+        id = Column(Integer, primary_key=True)
+        correlation_id = Column(String(64), nullable=True, index=True)
+
+    with eng.begin() as c:
+        c.execute(text("CREATE TABLE audit_logs (id INTEGER PRIMARY KEY)"))
+    monkeypatch.setattr(database, "engine", eng)
+    monkeypatch.setattr(database, "Base", reg_base)
+
+    database._backfill_additive_columns()
+    database._backfill_additive_columns()  # idempotent: IF NOT EXISTS
+
+    names = {i["name"] for i in inspect(eng).get_indexes("audit_logs")}
+    assert "ix_audit_logs_correlation_id" in names

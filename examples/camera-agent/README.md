@@ -40,7 +40,7 @@ examples/camera-agent/quickstart.sh --chat   # chat   (type your question instea
 examples/camera-agent/quickstart.sh --down   # stop
 ```
 
-First boot pulls the small LLM (default `qwen2.5:1.5b`) and warms the adapters.
+First boot pulls the small LLM (default `granite4:micro`) and warms the adapters.
 On a low-RAM box: `OLLAMA_MODEL=qwen2.5:0.5b examples/camera-agent/quickstart.sh`.
 
 ### Read in detail
@@ -71,7 +71,7 @@ On a low-RAM box: `OLLAMA_MODEL=qwen2.5:0.5b examples/camera-agent/quickstart.sh
                                              │ audio frames
                                              ▼
                               ┌───────────────────────────────────┐
-                              │ Silero VAD (turn detection)       │
+                              │ Silero VAD → Smart Turn v3 (turn) │
                               └──────────────┬────────────────────┘
                                              │ utterance bytes
                                              ▼
@@ -81,7 +81,7 @@ On a low-RAM box: `OLLAMA_MODEL=qwen2.5:0.5b examples/camera-agent/quickstart.sh
                                              │ "what's at the porch?"
                                              ▼
                               ┌───────────────────────────────────┐
-                              │ Ollama adapter (qwen2.5:1.5b)     │
+                              │ Ollama adapter (granite4:micro)   │
                               │   5 registered tools              │
                               └──────────────┬────────────────────┘
                                              │ tool calls →
@@ -118,9 +118,15 @@ not "AGI for cameras":
 
 * The model has a small fixed toolset, no web access. It can
   describe what it sees, count objects, recognise faces, look back at
-  recent inference events, and — when a footage-search index is
-  configured (`footage_index_path`) — search keyframes via
-  `search_footage`.
+  recent inference events, and search recorded footage by words via
+  `search_footage` — answered from the platform's canonical event store
+  (the operator Search page's own query), so it works wherever the
+  server API origin is configured. There is no second source: when core
+  cannot be reached the tool says it cannot say, rather than answering
+  from a stale copy. (It used to fall back to footage-search's private
+  SQLite index. That index was deleted in 2.0.0, so the file is either
+  absent or frozen at the upgrade, and a months-old answer given during
+  an outage is worse than no answer.)
 * **It has a memory.** When the server API origin is configured
   (`opennvr_base_url`), the `search_history` tool reads the platform's
   canonical event store: every past visit of every detected object,
@@ -156,20 +162,28 @@ Real-world limitations the example does NOT yet handle:
   see the voice path in KAI-C's central history until v0.2. The
   tool calls into BLIP / YOLOv8 / InsightFace DO go through
   KAI-C and are fully audited.
-* **Model quality.** `qwen2.5:1.5b` (the default) is small, fast on
-  CPU, Apache-2.0, and non-thinking — the sweet spot for tool-calling
-  on a weak box. Drop to `qwen2.5:0.5b` on very low RAM, or bump to
-  `qwen2.5:3b` for better grounding at more RAM and slower inference.
+* **Model quality.** `granite4:micro` (the default) is the best
+  measured small model at calling the tools before it answers
+  (MODELS_AND_LATENCY.md), Apache-2.0 and non-thinking, at ~3 GB. Use
+  `qwen3:1.7b` for turns in about half the time, or `qwen2.5:0.5b` on
+  very low RAM.
   Set it via `OLLAMA_MODEL` in `.env` (or `llm_model` in your config).
 * **No memory across sessions.** Each new WebSocket connection
   starts fresh. "What did you tell me yesterday?" won't work.
   Use the `recent_events` tool with a long window for ad-hoc
   recall against NATS history.
-* **No real interrupts.** Pipecat's barge-in support is set up
-  (`allow_interruptions=True`), but the demo HTML client doesn't
-  yet send the right cancel frames when you start talking again.
-  Wait for the agent to finish before asking the next thing for
-  v0.1.
+* **No real interrupts.** Barge-in is switched off
+  (`VADUserTurnStartStrategy(enable_interruptions=False)`) because the
+  demo HTML client doesn't send cancel frames when you start talking
+  again. Wait for the agent to finish before asking the next thing.
+* **Turn-taking is semantic.** Pipecat's user aggregator runs
+  Silero VAD to open a turn and **Smart Turn v3.2** (the bundled,
+  CPU-only end-of-turn model) to close it, so a pause mid-sentence
+  no longer ends your question the way the old 0.7 s silence timer
+  did. Tune `vad_*` / `turn_*` in `config.yml` if your speakers pause
+  longer; the model and the VAD weights are in the image and the
+  sentence splitter needs no data files — nothing is downloaded at
+  runtime.
 * **Browser demo is minimal.** ~200 lines of vanilla JS. Audio
   worklets, jitter buffering, transcript display — none of it.
   The intent is to demonstrate the agent shape; production UIs
@@ -191,7 +205,7 @@ cd ai-adapter
 docker compose up -d whisper ollama piper blip yolov8 insightface
 
 # 2. Pull a tool-capable LLM into Ollama (one-time, ~1GB).
-docker exec ai-adapter-ollama-1 ollama pull qwen2.5:1.5b
+docker exec ai-adapter-ollama-1 ollama pull granite4:micro
 
 # 3. Start KAI-C and register the vision adapters. Ports come from
 #    the docker-compose service definitions in ai-adapter — adjust
@@ -227,6 +241,29 @@ python camera_agent.py --config config.yml
 # 6. Open https://localhost:9100/demo — type, tap the mic to dictate, or tap Talk.
 ```
 
+## OpenNVR Mirror — the booth page
+
+`https://<host>:9100/mirror` is a kiosk page for a show floor: the camera's
+live video full screen, a box with a label and a confidence on everything
+Tier-0 tracks, one sentence about the scene every few seconds from the
+vision model, spoken through the speaker, and a card per person — what
+they wear, what they carry, an apparent age range — that follows their
+box. Everything runs on the box; nothing is stored, nothing leaves.
+
+It is the agent's own pieces arranged for a visitor: the same WebRTC
+stream the Live view plays, the same `/updates` socket that carries the
+boxes, the same vision model (`describe_camera`'s path: Gemma on the
+Hexagon NPU on the qualcomm flavour) and the same Piper voice. The loop
+behind it (`mirror.py`) makes one model call at a time and chooses what to
+ask: a person nobody has described yet first, then a scene refresh, then a
+person seen a while ago. A sentence is spoken only when it says something
+new; a newcomer is greeted.
+
+Open the page, log in once (the demo's login), pick the camera, choose
+whether it speaks, and start. `?camera=cam1&autostart=1` skips the start
+card for a kiosk that boots into it. The loop stops itself when no page has
+been heard from for 45 s, so a closed tab does not keep the model busy.
+
 ## Try these
 
 * "What's on the front porch?"
@@ -241,7 +278,7 @@ See `config.example.yml` for the full set. Key knobs:
 
 | Field | Default | Effect |
 |---|---|---|
-| `llm_model` | `qwen2.5:1.5b` | Tool-capable Ollama model (Apache-2.0, non-thinking). `qwen2.5:0.5b` for low RAM, `qwen2.5:3b` for better grounding. |
+| `llm_model` | `granite4:micro` | Tool-capable Ollama model (Apache-2.0, non-thinking). `qwen3:1.7b` for faster turns, `qwen2.5:0.5b` for low RAM. |
 | `llm_temperature` | `0.4` | Tool calling works best at low-but-not-zero temperatures. |
 | `frame_cache_ttl_seconds` | `2.0` | How long to reuse one camera's frame across tool calls in a single LLM turn. |
 | `event_ring_size` | `256` | Per-camera ring buffer size for the `recent_events` tool. |

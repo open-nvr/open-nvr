@@ -25,6 +25,7 @@ import { QueryClient, keepPreviousData, useQueries, useQuery } from '@tanstack/r
 import { apiService } from './apiService'
 import type { AspectOverride } from './aspect'
 import { todayLocalKey } from './time'
+import { alertsInboxService, type InboxAlert } from '../services/alertsInboxService'
 
 export const queryClient = new QueryClient({
   defaultOptions: {
@@ -55,6 +56,11 @@ export type CameraItem = {
   last_recording_at?: string | null
   /** Operator's display-aspect override; null means auto-detect (#354). */
   display_aspect_ratio?: AspectOverride | null
+  /** Free-text site or zone ("North", "Branch 12"); tours group cameras by it. */
+  location?: string | null
+  /** The escalation proposal (weak evidence on the sub stream → detect on
+   *  main?) or the decision in force; absent when there is nothing to show. */
+  escalation?: { status: 'proposed' | 'accepted' | 'dismissed'; reasons: string[]; review_due: boolean } | null
 }
 
 /** What a video surface needs to render a camera at the right shape. A named
@@ -63,13 +69,23 @@ export type CameraAspect = {
   displayAspectOverride?: AspectOverride | null
 }
 
-export type CameraListResp = { cameras: CameraItem[]; total: number }
+export type CameraListResp = {
+  cameras: CameraItem[]
+  total: number
+  /** Active/inactive under the same search and location, whatever `status` picked. */
+  counts?: { all: number; active: number; inactive: number }
+}
 
 export type CameraListParams = {
   skip?: number
   limit?: number
   active_only?: boolean
+  /** All / active / inactive; overrides active_only when given. */
+  status?: 'all' | 'active' | 'inactive'
   q?: string
+  /** One location (any case), or no_location for cameras without one. */
+  location?: string
+  no_location?: boolean
 }
 
 /**
@@ -88,7 +104,7 @@ export type CameraListParams = {
  *   transition is ever published for it.
  */
 export function useCameras(
-  params: CameraListParams = { limit: 100, active_only: true },
+  params: CameraListParams = { active_only: true },
 ) {
   return useQuery({
     queryKey: ['cameras', params],
@@ -113,7 +129,7 @@ export function useCameras(
  * it means "auto", and the known-mode detection in lib/aspect.ts still runs.
  */
 export function useCameraAspects(): Record<number, CameraAspect> {
-  const { data } = useCameras({ limit: 200, active_only: false })
+  const { data } = useCameras({ active_only: false })
   return useMemo(() => {
     const out: Record<number, CameraAspect> = {}
     for (const c of data?.cameras ?? []) {
@@ -223,13 +239,32 @@ export function useSegmentsForCameras(
 export type SystemResourcesResp = {
   sampled_at?: string
   scope?: string
+  /** "host-agent": the machine's own numbers (services/host_agent.py);
+   *  "core": core's container — on Docker Desktop, Docker's VM. */
+  measured_by?: 'host-agent' | 'core'
+  temperatures?: { label: string; celsius: number }[]
+  host_disks?: { mount: string; total_bytes: number; free_bytes: number }[]
   monitoring_available?: boolean
   cpu_percent?: number | null
   load_avg?: number[] | null
   memory?: { total: number; used: number; percent: number } | null
   disk?: { path: string; total: number; used: number; free: number; percent: number } | null
   disk_error?: string | null
+  /** Accelerators in use (NPU, GPU) and how busy each is: a share of the device's
+   *  time spent computing, from the inference time the detector and the adapters
+   *  report (no kernel counter on most boards). [] when nothing runs on one. */
+  accelerators?: { kind: string; name: string; busy_percent: number | null; users: { name: string; percent: number }[]; source: string; inflight?: number | null }[]
   active_alerts?: { alert_type: string; severity: string; description: string; since?: string }[]
+  /** Disk rotation in force: core deletes the oldest recordings to keep its headroom (null when not). */
+  rotation?: {
+    active: boolean
+    description?: string
+    min_free_gb?: number
+    free_gb?: number | null
+    recordings_gb?: number
+    effective_retention_hours?: number | null
+    unreachable?: boolean
+  } | null
   thresholds?: {
     enabled?: boolean
     cpu_percent_threshold?: number | null
@@ -258,7 +293,125 @@ export function useSuricataStats(limit = 5000) {
     queryKey: ['suricata-stats', limit],
     queryFn: async () => {
       const { data } = await apiService.getSuricataStats({ limit })
-      return data as { by_severity?: Record<string, number> }
+      return data as {
+        by_severity?: Record<string, number>
+        total_alerts?: number
+        timeseries?: { ts: string; count: number }[]
+      }
     },
+  })
+}
+
+export type ResourceHistoryPoint = {
+  /** Unix seconds. */
+  ts: number
+  cpu_percent: number | null
+  memory_percent: number | null
+  npu_percent?: number | null
+  gpu_percent?: number | null
+  disk_percent: number | null
+  disk_free: number | null
+}
+
+/**
+ * Host resource trend from the monitor's in-memory ring buffers (15s grain
+ * up to an hour, 5-minute averages beyond). Empty after a core restart —
+ * render "collecting" rather than a flat line.
+ */
+export function useSystemResourcesHistory(minutes = 60) {
+  return useQuery({
+    queryKey: ['system-resources-history', minutes],
+    queryFn: async () => {
+      const { data } = await apiService.getSystemResourcesHistory({ minutes })
+      return (data?.samples ?? []) as ResourceHistoryPoint[]
+    },
+    refetchInterval: 30_000,
+    staleTime: 10_000,
+  })
+}
+
+/** Core API liveness, version and uptime. A failure here usually means the
+ *  whole backend is unreachable, so every other query is failing with it.
+ *  Uses /api/v1/system/info rather than the bare /health route: nginx and
+ *  the dev proxy only forward /api to the core, so /health answers with the
+ *  SPA (or a 404) and says nothing about the backend. */
+export function useCoreHealth() {
+  return useQuery({
+    queryKey: ['core-health'],
+    queryFn: async () => {
+      const { data } = await apiService.getSiteInfo()
+      return data as { version?: string; uptime_s?: number; name?: string | null }
+    },
+    refetchInterval: 30_000,
+    staleTime: 10_000,
+    retry: 0,
+  })
+}
+
+/** AI engine (KAI-C) reachability. `kai_c_status` is 'ok' when up; the
+ *  core reports 'error' with a message when it cannot reach it. */
+export type Tier0HealthResp = {
+  available: boolean
+  reason?: 'disabled' | 'unreachable' | 'parse_error'
+  mode?: 'not_running' | 'off' | 'shadow' | 'enforce'
+  health?: { workers_up: number; workers_total: number; frames_dropped_total?: number }
+  backend?: {
+    backend: string
+    requested: string
+    effective: string
+    accelerated: boolean
+    fallback: boolean
+  } | null
+}
+
+/**
+ * The detect-pipeline as the health bar reads it: reachable, decoding,
+ * and on the hardware it was asked for. Scraped by core from the
+ * pipeline's /metrics; `available: false` with a reason is a normal
+ * answer (gate off, not deployed, or — the one that matters — down).
+ */
+export function useTier0Health() {
+  return useQuery({
+    queryKey: ['tier0-health'],
+    queryFn: async () => {
+      const { data } = await apiService.getTier0Metrics()
+      return data as Tier0HealthResp
+    },
+    refetchInterval: 30_000,
+    staleTime: 15_000,
+    retry: 0,
+  })
+}
+
+export function useKaiCHealth() {
+  return useQuery({
+    queryKey: ['kaic-health'],
+    queryFn: async () => {
+      const { data } = await apiService.checkKaiCHealth()
+      return data as { kai_c_status?: string; adapters?: Record<string, unknown>; message?: string | null }
+    },
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+    retry: 0,
+  })
+}
+
+/**
+ * Unacknowledged operator alarms — the bell's badge and the dashboard's
+ * alarm feed read this one cache entry, so both agree and poll once.
+ *
+ * Keeps polling in a background tab: react-query otherwise pauses interval
+ * refetches while the document is hidden, and an alarm poll that stops when
+ * the operator switches tabs cannot ring the siren (see AlertBell).
+ */
+export function useUnackedAlerts() {
+  return useQuery({
+    queryKey: ['alerts-inbox-unacked'],
+    queryFn: async () => {
+      const { data } = await alertsInboxService.listInboxAlerts({ unacked: true, limit: 50 })
+      return data as { alerts: InboxAlert[]; unacked_count: number }
+    },
+    refetchInterval: 10_000,
+    refetchIntervalInBackground: true,
   })
 }

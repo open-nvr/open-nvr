@@ -174,6 +174,14 @@ override env var:
 The transform is unit-tested on both sides and the env-var name must
 match between the reconciler and compose — that is the whole contract.
 
+The app services default to `pull_policy: ${APPS_PULL_POLICY:-build}` —
+a checkout builds its own `:local-build` images and never asks Docker
+Hub for them first (the old `missing` default printed "pull access
+denied for opennvr/<id>, repository does not exist" on every install
+before falling back to the build). A pinned intent therefore also sets
+`APPS_PULL_POLICY=missing` in the same env, so the pinned digest is
+pulled, never built over.
+
 For a `desired="installed"` intent **without** a digest, no override is
 passed (compose falls back to the local build) and the loud UNPINNED
 warning above fires. Teardown (`desired="absent"`) passes no override —
@@ -198,10 +206,61 @@ registry the host can pull from. **The app images ARE now published**:
 `ghcr.io/open-nvr/<id>` on each main push and release tag (multi-arch,
 same tag policy as core), so the index's `image` refs resolve. What the
 index still ships WITHOUT is a per-entry `image_digest` — so an install
-today logs the UNPINNED warning and pulls the tag. Recording digests in
-the index at release time is the remaining step to make pinning bite;
-the mechanism itself is complete and tested, and the local `build:`
-overlay with `:local-build` tags remains the dev / air-gapped path.
+today logs the UNPINNED warning and pulls the tag. Recording digests is
+the release step `make pin-apps-index` (`scripts/pin_apps_index.py`):
+it asks GHCR what each entry's tag resolves to, cosign-verifies the
+digest against the org's CI identity, and writes `image_digest` into
+the index textually (comments survive); `--check` reports drift. The
+mechanism itself is complete and tested, and the local `build:` overlay
+with `:local-build` tags remains the dev / air-gapped path.
+
+## Image signing
+
+A digest pin says *these exact bytes*. It does not say *who built
+them*: a digest in a listing PR could point at anything its author
+pushed to a registry. Signing closes that gap.
+
+**Publishing signs.** `.github/workflows/publish-app-images.yml` signs
+every catalog image it pushes with **Sigstore keyless signing** — cosign
+plus the workflow's GitHub OIDC identity. There is no signing key to
+keep, leak or rotate: the signature's certificate names the repository,
+the workflow file and the ref (`main` or a `v*` tag) that produced the
+image, and Sigstore's transparency log records it. Anyone can check:
+
+```bash
+cosign verify \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github.com/open-nvr/' \
+  ghcr.io/open-nvr/loitering-detection@sha256:…
+```
+
+**Installing verifies.** Before `docker compose up`, the reconciler runs
+`cosign verify` on the pinned ref against its *expected signer*
+(`scripts/app-installer/signing.py`):
+
+* a `ghcr.io/open-nvr/…` image must have been signed by a workflow in
+  a repository under `github.com/open-nvr`, running on `main` or a
+  release tag — the org's own CI, nothing else;
+* an image from anywhere else must name its signer in the index entry
+  (`signing: {identity: <regexp>, issuer: <url>}`), reviewed with the
+  entry; without one it has *no known signer* and is refused.
+
+A failed or missing signature is a `failed` intent with the reason in
+`message` — visible in the catalog — and compose never runs. Unpinned
+(dev-only) installs are not verified: there is no digest to bind a
+signature to, and they already log the loud UNPINNED warning.
+
+`INSTALLER_SIGNATURES=off` (in `.env`, read by
+`docker-compose.installer.yml`) disables the check for an air-gapped
+deployment that cannot reach the Sigstore log; the installer logs
+`IMAGE SIGNATURES NOT CHECKED` at start-up so nobody forgets. In
+`require` mode the installer refuses to start if `cosign` is missing
+from its image. The catalog card shows **signed** on every listing the
+installer would verify.
+
+Between them, digest + signature give the sentence the catalog is built
+on: *what a reviewer read is what runs, and it was built by the org's
+CI from that source.*
 
 ---
 
@@ -219,8 +278,12 @@ component.
   that deploy come from it, never from the DB row.
   `reconcile_once(store, runner, index=…)` sweeps every pending intent
   (skips `applied`, plus any id the caller's failure backoff is holding),
-  calling `docker compose up -d <id>` for `installed` and
-  `docker compose rm -s -f <id>` for `absent` (teardown needs only the
+  calling `docker compose up -d egress-proxy [adapters…] <id>` for
+  `installed` (the egress proxy always rides along — apps live on the
+  internal network and it is their only way out, see
+  [APP_NETWORK.md](APP_NETWORK.md); an already-running proxy is a
+  compose no-op) and `docker compose rm -s -f <id>` for `absent`
+  (teardown needs only the
   kebab-case id check, so a de-listed app stays uninstallable). A
   non-zero exit → `status="failed"` with stderr in `message`. For a
   pinned entry the runner also receives the `{<ID>_IMAGE:

@@ -160,8 +160,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--backend", choices=["cvdnn", "ort"], default="cvdnn",
                    help="onnx inference backend: cvdnn (zero-dep CPU) or ort (ONNX Runtime)")
     p.add_argument("--providers", default=None,
-                   help="ort execution providers, comma-separated "
-                        "(e.g. OpenVINOExecutionProvider, TensorrtExecutionProvider)")
+                   help="ort execution providers, comma-separated, each with an "
+                        "optional :device (e.g. OpenVINOExecutionProvider:NPU, "
+                        "OpenVINOExecutionProvider:AUTO:NPU,GPU,CPU, TensorrtExecutionProvider)")
     p.add_argument("--fps", type=int, default=5)
     p.add_argument("--model-size", type=int, default=320)
     p.add_argument("--motion-height", type=int, default=180)

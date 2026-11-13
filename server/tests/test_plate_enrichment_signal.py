@@ -68,9 +68,11 @@ def test_warn_fires_again_after_the_window(caplog, monkeypatch):
 
 def test_enrichment_calls_the_warn_on_non_200():
     """Lockstep: the warn helper must actually be wired into the non-200
-    branch of enrich_event_plate — a helper nothing calls is the silence
-    bug back again. String-level (the function needs a live DB + httpx
-    stack to execute; the call-site is what we're pinning)."""
+    branch of the shared OCR client (_ocr_jpeg — used by both the
+    enrichment sweep and the early-attempt path) — a helper nothing
+    calls is the silence bug back again. String-level (the function
+    needs a live DB + httpx stack to execute; the call-site is what
+    we're pinning)."""
     src = (REPO_ROOT / "server" / "services" / "plate_enrichment.py").read_text()
-    body = src.split("async def enrich_event_plate", 1)[1]
+    body = src.split("async def _ocr_jpeg", 1)[1]
     assert "_warn_adapter_missing(resp.status_code)" in body

@@ -31,11 +31,38 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = REPO_ROOT / "examples"
 
-# The three SDK base classes an app may ride (sdk/opennvr-app-sdk).
-BASES = frozenset({"Detector", "FrameApp", "AlertSubscriber"})
+# The SDK base classes an app may ride (sdk/opennvr-app-sdk).
+#
+# ``ContractApp`` is the newest and the odd one out: the other three
+# are each driven by something arriving — NATS for Detector and
+# AlertSubscriber, a timer for FrameApp — and own a loop the contract
+# server rides on. ``ContractApp`` has no loop, because some apps have
+# nothing to consume: they exist so an operator has somewhere to ask a
+# question, and read what they need from core when asked.
+#
+# It was added for footage-search, which used to index every inference
+# event into its own SQLite database. Having deleted that index it had
+# nothing left to subscribe to, and keeping a NATS connection whose
+# only purpose was to satisfy a base class would have been the wrong
+# way to pass this test.
+BASES = frozenset({"Detector", "FrameApp", "AlertSubscriber", "ContractApp"})
 
 # Not apps at all: build-support directories with no Python entrypoint.
-EXCLUDED = frozenset({"yolov8-weights"})
+# Each is one Dockerfile that puts an ONNX graph into an image and ships
+# it, so there is no base class for them to ride — and no /manifest or
+# /state for one to provide, because nothing in them ever runs as a
+# service. yolov8 and yolo-pose export their graph from ultralytics at
+# build time; package-detection bakes in a pinned release asset instead,
+# because that model is ours and there is no upstream to export from.
+#
+# Unlike ALLOWLISTED this set is not debt and carries no shrink-only
+# rule: a directory belongs here when it is not an app, so it grows
+# whenever another weights image lands.
+EXCLUDED = frozenset({
+    "yolov8-weights",
+    "yolo-pose-weights",
+    "package-detection-weights",
+})
 
 # Gap 8's VISIBILITY debt is retired: the agent now serves /manifest and
 # /state and self-registers with the App Catalog (Phase 1 contract
@@ -134,3 +161,216 @@ def test_camera_agent_debt_is_still_open():
         "camera-agent no longer references opennvr_app_sdk at all — the "
         "gap-8 story in RFC-0002 (utilities without contracts) is out of "
         "date; re-audit before touching the allowlist")
+
+
+# ── the image must contain the modules the app imports ───────────────
+#
+# A separate failure from the SDK rule above, and a nastier one, because
+# the test suites cannot see it. `uv sync` installs each example as an
+# EDITABLE package, so every top-level module resolves from the source
+# tree whatever the Dockerfile copies — the app imports fine locally and
+# the IMAGE crashes on startup with ModuleNotFoundError. It happened
+# twice on smart-doorbell (visit_log.py, then chime.py) before the
+# app-images-smoke job caught it, which is a slow way to find out.
+
+
+def _copied_module_names(dockerfile: Path, app: str) -> tuple[set[str], bool]:
+    """Module basenames a Dockerfile copies, and whether it uses a glob.
+
+    A glob or a whole-directory COPY cannot fall behind the app, so it
+    satisfies this rule by construction and the name set is not used.
+    """
+    names: set[str] = set()
+    globbed = False
+    for raw in dockerfile.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line.upper().startswith("COPY "):
+            continue
+        for token in line.split()[1:]:
+            if token.startswith("--"):
+                continue
+            if f"examples/{app}" not in token:
+                continue
+            if "*" in token or token.rstrip("/").endswith(app):
+                globbed = True
+            if token.endswith(".py"):
+                names.add(token.rsplit("/", 1)[-1])
+    return names, globbed
+
+
+def _top_level_imports(app_dir: Path) -> set[str]:
+    """Sibling modules the app's own sources import from each other.
+
+    Only bare ``import x`` / ``from x import`` where ``x.py`` sits beside
+    them — those are the ones that must be in the image. Third-party and
+    SDK imports come from pip.
+    """
+    siblings = {p.stem for p in app_dir.glob("*.py")}
+    needed: set[str] = set()
+    for src in _python_sources(app_dir):
+        if src.parent != app_dir:
+            continue
+        tree = ast.parse(src.read_text(encoding="utf-8"), filename=str(src))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.level == 0:
+                root = (node.module or "").split(".")[0]
+                if root in siblings:
+                    needed.add(root)
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    root = alias.name.split(".")[0]
+                    if root in siblings:
+                        needed.add(root)
+    return needed
+
+
+def test_every_dockerfile_copies_the_modules_its_app_imports():
+    offenders: dict[str, list[str]] = {}
+    for app_dir in _app_dirs():
+        dockerfile = app_dir / "Dockerfile"
+        if not dockerfile.is_file():
+            continue
+        copied, globbed = _copied_module_names(dockerfile, app_dir.name)
+        if globbed:
+            continue
+        missing = sorted(
+            f"{m}.py" for m in _top_level_imports(app_dir)
+            if f"{m}.py" not in copied
+        )
+        if missing:
+            offenders[app_dir.name] = missing
+    assert not offenders, (
+        "these Dockerfiles enumerate their app's modules and have fallen "
+        f"behind it: {offenders}. The image would crash on startup with "
+        "ModuleNotFoundError while every test still passed, because uv "
+        "installs the app as an editable package and the import resolves "
+        "from the source tree. Copy the modules by glob "
+        "(COPY examples/<app>/*.py ./) rather than by name."
+    )
+
+
+# ── every app image is actually built by CI ──────────────────────────
+#
+# The companion to the rule above. A Dockerfile that has fallen behind
+# its app only fails when something BUILDS it, and the workflow that
+# does lists its apps in a matrix — another enumerated list that can
+# drift. guard-scan-compliance was missing from it, so that image was
+# never built on any PR; its Dockerfile happened to be fine, which is
+# luck rather than coverage.
+
+SMOKE_WORKFLOW = REPO_ROOT / ".github/workflows/app-images-smoke.yml"
+
+
+def _smoke_matrix_apps() -> set[str]:
+    """App names the image-smoke workflow builds.
+
+    Parsed with a regex rather than a YAML load: the file is a GitHub
+    Actions workflow full of ``${{ }}`` expressions, and this should not
+    need a yaml dependency to read two lists out of it. camera-agent has
+    a job of its own rather than a matrix row.
+    """
+    import re
+
+    text = SMOKE_WORKFLOW.read_text(encoding="utf-8")
+    apps = set(re.findall(r"\{\s*app:\s*([A-Za-z0-9._-]+)", text))
+    if re.search(r"^\s{2}camera-agent:\s*$", text, re.MULTILINE):
+        apps.add("camera-agent")
+    return apps
+
+
+def test_the_image_smoke_builds_every_app_that_has_a_dockerfile():
+    built = _smoke_matrix_apps()
+    missing = sorted(
+        app.name for app in _app_dirs()
+        if (app / "Dockerfile").is_file() and app.name not in built
+    )
+    assert not missing, (
+        f"{missing} ship a Dockerfile that no CI job ever builds, so a "
+        "Dockerfile that falls behind its app is found by whoever runs "
+        "the image next. Add a matrix row to "
+        ".github/workflows/app-images-smoke.yml."
+    )
+
+
+def test_the_smoke_matrix_has_no_stale_rows():
+    # A renamed or deleted app must not leave a row that builds nothing
+    # and passes, which reads on the PR exactly like coverage.
+    existing = {p.name for p in EXAMPLES.iterdir() if p.is_dir()}
+    stale = sorted(app for app in _smoke_matrix_apps() if app not in existing)
+    assert not stale, (
+        f"{stale} appear in the image-smoke matrix but examples/<name> "
+        "does not exist")
+
+
+def test_the_weights_images_are_not_expected_in_the_app_matrix():
+    # They have Dockerfiles but are not apps — EXCLUDED above says so,
+    # and each has its own build workflow. This pins the reason, so
+    # nobody "fixes" the matrix by adding them.
+    built = _smoke_matrix_apps()
+    for name in sorted(EXCLUDED):
+        assert (EXAMPLES / name / "Dockerfile").is_file(), (
+            f"{name} is EXCLUDED as a weights image but has no Dockerfile")
+        assert name not in built, (
+            f"{name} is a weights image, not an app — it is built by its "
+            "own workflow, not the app-image smoke")
+
+
+# The same drift one step later. The smoke matrix proves an image BUILDS;
+# publish-app-images is what PUSHES it, and it keeps its own enumerated
+# list. guard-scan-compliance reached the catalog (apps_index.yml points
+# at ghcr.io/open-nvr/guard-scan-compliance) and shipped in 0.1.6 without
+# a publish row, so the image never existed and installing the app from
+# the catalog failed on the pull.
+
+PUBLISH_WORKFLOW = REPO_ROOT / ".github/workflows/publish-app-images.yml"
+APPS_INDEX = REPO_ROOT / "server/config/apps_index.yml"
+
+
+def _publish_matrix_apps() -> set[str]:
+    import re
+
+    text = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
+    return set(re.findall(r"\{\s*app:\s*([A-Za-z0-9._-]+)", text))
+
+
+def _catalog_ghcr_apps() -> set[str]:
+    """Catalog entries whose image is published to the org's GHCR."""
+    import re
+
+    text = APPS_INDEX.read_text(encoding="utf-8")
+    return set(re.findall(r"^\s+image:\s*ghcr\.io/open-nvr/([a-z0-9._-]+)[:@]",
+                          text, re.MULTILINE))
+
+
+def _proprietary_images() -> set[str]:
+    """Images of first-party closed-source entries (``license:
+    proprietary``, docs/APP_LISTING_TERMS.md §1). Their source and their
+    publish workflow live in a private open-nvr repository, so this
+    repository's matrix has no row for them by design."""
+    import yaml
+
+    index = yaml.safe_load(APPS_INDEX.read_text(encoding="utf-8"))
+    entries = index["apps"] if isinstance(index, dict) else index
+    return {
+        e["image"].split("ghcr.io/open-nvr/", 1)[1].split(":", 1)[0].split("@", 1)[0]
+        for e in entries
+        if e.get("license") == "proprietary"
+        and str(e.get("image", "")).startswith("ghcr.io/open-nvr/")
+    }
+
+
+def test_every_catalog_image_has_a_publish_row():
+    missing = sorted(_catalog_ghcr_apps() - _publish_matrix_apps() - _proprietary_images())
+    assert not missing, (
+        f"{missing} are listed in apps_index.yml with a ghcr.io/open-nvr "
+        "image that no workflow publishes, so installing them from the "
+        "catalog fails on the pull. Add a matrix row to "
+        ".github/workflows/publish-app-images.yml.")
+
+
+def test_the_publish_matrix_has_no_stale_rows():
+    existing = {p.name for p in EXAMPLES.iterdir() if p.is_dir()}
+    stale = sorted(app for app in _publish_matrix_apps() if app not in existing)
+    assert not stale, (
+        f"{stale} appear in the publish matrix but examples/<name> "
+        "does not exist")

@@ -25,7 +25,10 @@ WORKDIR /app
 RUN pip install --no-cache-dir \
         "httpx>=0.27,<1.0" \
         "PyYAML>=6.0,<7.0" \
-        "nats-py>=2.6"
+        "nats-py>=2.6" \
+        "Pillow>=10,<12"
+# Pillow shrinks stranger snapshots to thumbnails for the dashboard's
+# gallery; the app runs without it (raw JPEGs are embedded only when small).
 
 # The OpenNVR App SDK — this app's modules import opennvr_app_sdk
 # (alerts/frame_sources) at top level, so it must be installed into the
@@ -34,12 +37,18 @@ RUN pip install --no-cache-dir \
 COPY sdk/opennvr-app-sdk /opt/opennvr-app-sdk
 RUN pip install --no-cache-dir /opt/opennvr-app-sdk
 
-COPY examples/smart-doorbell/__init__.py        ./__init__.py
-COPY examples/smart-doorbell/alerts.py          ./alerts.py
-COPY examples/smart-doorbell/frame_sources.py   ./frame_sources.py
-COPY examples/smart-doorbell/face_recognition_pipeline.py ./face_recognition_pipeline.py
-COPY examples/smart-doorbell/smart_doorbell.py  ./smart_doorbell.py
+# Every top-level module, by glob rather than by name. This used to list
+# them one per line, and twice a new module (visit_log.py, then
+# chime.py) landed without a matching COPY: the test suites passed
+# because `uv sync` installs the app as an EDITABLE package, so the
+# imports resolved from the source tree, and only the image — which has
+# nothing but what is copied here — crashed on startup with
+# ModuleNotFoundError. A glob cannot fall behind the app.
+#
+# `*.py` matches this directory only, so tests/ stays out of the image.
+COPY examples/smart-doorbell/*.py               ./
 COPY examples/smart-doorbell/config.example.yml ./config.example.yml
+COPY examples/smart-doorbell/config.docker.yml  ./config.docker.yml
 
 ENV PYTHONUNBUFFERED=1
 

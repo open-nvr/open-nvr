@@ -21,30 +21,33 @@ import { UsersManager } from './settings/UsersManager'
 import { RolesManager } from './settings/RolesManager'
 import { PermissionsManager } from './settings/PermissionsManager'
 import { PasswordPolicy } from './settings/PasswordPolicy'
-
-const SUBTABS = [
-  { key: 'users', label: 'Users' },
-  { key: 'roles', label: 'Roles' },
-  { key: 'permissions', label: 'Permissions' },
-  { key: 'password-policy', label: 'Password Policy' },
-]
+import { AuthenticationSettings } from './settings/AuthenticationSettings'
+import { useTranslation } from '../i18n'
 
 export function AccessControl() {
+  const { t } = useTranslation()
+  const subtabs = [
+    { key: 'users', label: t('admin.users') },
+    { key: 'roles', label: t('admin.roles') },
+    { key: 'permissions', label: t('admin.permissions') },
+    { key: 'password-policy', label: t('admin.passwordPolicy') },
+    { key: 'authentication', label: t('admin.authentication') },
+  ]
   const location = useLocation()
   const active = (location.pathname.split('/rbac/')[1] || '').replace(/\/$/, '') || 'users'
   return (
     <section className="space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-lg font-semibold">Access Control (RBAC)</h1>
+        <h1 className="text-lg font-semibold">{t('nav.accessControl')}</h1>
       </div>
 
       {/* Top-style navigation like Configuration tabs */}
       <div className="bg-[var(--accent)] text-white px-3 py-2 text-sm flex items-center gap-4">
-        {SUBTABS.map((s) => (
+        {subtabs.map((s) => (
           <NavLink
             key={s.key}
             to={`/rbac/${s.key}`}
-            className={({ isActive }) => `px-2 py-1 rounded ${isActive ? 'bg-white/15' : 'opacity-90 hover:opacity-100'}`}
+            className={({ isActive }) => `px-2 py-1  ${isActive ? 'bg-white/15' : 'opacity-90 hover:opacity-100'}`}
             end
           >
             {s.label}
@@ -61,8 +64,10 @@ export function AccessControl() {
           <PermissionsManager />
         ) : active === 'password-policy' ? (
           <PasswordPolicy />
+        ) : active === 'authentication' ? (
+          <AuthenticationSettings />
         ) : (
-          <div className="text-sm text-[var(--text-dim)]">Select a section.</div>
+          <div className="text-sm text-[var(--text-dim)]">{t('admin.selectSection')}</div>
         )}
       </div>
     </section>

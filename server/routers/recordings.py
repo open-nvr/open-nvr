@@ -325,15 +325,28 @@ def _get_or_init(db: Session, key: str, default_obj) -> SecuritySetting:
 def _can_view_camera(user: User, camera: Camera, db: Session) -> bool:
     """Camera-level view permission for recordings/playback.
 
-    Mirrors the ownership rule the camera routes enforce (superuser bypass,
-    else owner), extended with CameraPermission.can_view grants. Cameras with
-    no owner (legacy rows) stay visible to any authenticated user — matching
-    their pre-existing behaviour instead of suddenly locking them away.
+    The camera_scope rule (superuser bypass, else owner or a
+    CameraPermission.can_view grant), evaluated on the row rather than
+    through ``services.camera_scope`` because recordings outlive their
+    camera: a binned (soft-deleted) camera's history stays browsable by
+    the people who could see it, and the scope service excludes deleted
+    rows. Cameras with no owner (legacy rows) are superuser-only until an
+    owner or a grant is assigned — an unassigned camera must never be the
+    one everybody can see.
+
+    An API token is limited to its camera allow-list and otherwise sees
+    exactly what its owner sees.
     """
+    from services.api_tokens import is_token_principal
+
+    if is_token_principal(user):
+        if user.camera_ids is not None and camera.id not in user.camera_ids:
+            return False
+        user = user.user
     if getattr(user, "is_superuser", False):
         return True
     owner_id = getattr(camera, "owner_id", None)
-    if owner_id is None or owner_id == user.id:
+    if owner_id is not None and owner_id == user.id:
         return True
     from models import CameraPermission
 
@@ -406,6 +419,12 @@ async def _authenticate_request(request: Request, db: Session) -> User | None:
         auth_header = request.headers.get("authorization")
         if auth_header and auth_header.lower().startswith("bearer "):
             tok = auth_header.split(" ", 1)[1]
+            from services import api_tokens
+
+            if api_tokens.looks_like_token(tok):
+                # Same route table, permission and camera checks as
+                # core.auth; raises 401/403 itself.
+                return api_tokens.authorize_request(request, db, tok)
             td = verify_token(tok)
             if td:
                 user_obj = db.query(User).filter(User.username == td.username).first()
@@ -555,7 +574,17 @@ async def get_retention(
     obj = RecordingRetentionSettings(
         **{**RecordingRetentionSettings().model_dump(), **val}
     )
-    return obj.model_dump()
+    out = obj.model_dump()
+    # The floor in force, so the form can show what "automatic" means here.
+    try:
+        from services.retention_service import RetentionService
+        from services.storage_service import get_effective_recordings_base_path
+
+        out["effective_min_free_space_gb"] = RetentionService.effective_min_free_gb(
+            out, get_effective_recordings_base_path(db))
+    except Exception:  # noqa: BLE001 - informational
+        out["effective_min_free_space_gb"] = None
+    return out
 
 
 @router.put("/retention")
@@ -823,7 +852,7 @@ async def set_recording_flag(
     request: Request = None,
     db: Session = Depends(get_db),
 ):
-    """Flag (or unflag) every recording clip in a time range.
+    """Flag (or unflag) every recording clip that overlaps a time range.
 
     Flagged clips are skipped by retention's age and disk-pressure sweeps
     while ``protect_flagged`` is enabled — this is what makes "keep this
@@ -831,7 +860,7 @@ async def set_recording_flag(
     """
     from datetime import datetime
 
-    from models import Recording
+    from services.recording_protection import set_range_protection
 
     user_obj = await _authenticate_request(request, db)
     if not user_obj:
@@ -850,16 +879,18 @@ async def set_recording_flag(
     if end_dt <= start_dt:
         raise HTTPException(status_code=400, detail="End must be after start")
 
-    updated = (
-        db.query(Recording)
-        .filter(
-            Recording.camera_id == camera_id,
-            Recording.start_time >= start_dt,
-            Recording.start_time < end_dt,
-        )
-        .update({Recording.is_flagged: flagged}, synchronize_session=False)
+    updated = set_range_protection(db, camera_id, start_dt, end_dt, flagged)
+    # Protecting (or releasing) footage from retention is evidence handling:
+    # it must be attributable.
+    from services.audit_service import audit_request
+
+    audit_request(
+        db, request,
+        action="recording.protect" if flagged else "recording.unprotect",
+        user_id=getattr(user_obj, "id", None),
+        entity_type="camera", entity_id=camera_id,
+        details={"start": start, "end": end, "updated_clips": updated},
     )
-    db.commit()
     return {"camera_id": camera_id, "flagged": flagged, "updated_clips": updated}
 
 
@@ -923,6 +954,16 @@ async def create_export_ticket(
         "duration": duration,
         "filename": safe_name,
     }
+    # Every footage export is audited at mint time (the download itself is a
+    # ticketed GET with no session). Who took which minutes of which camera.
+    from services.audit_service import audit_request
+
+    audit_request(
+        db, request, action="recording.export",
+        user_id=getattr(user_obj, "id", None),
+        entity_type="camera", entity_id=camera.id,
+        details={"start": start, "duration": duration, "filename": safe_name},
+    )
     return {
         "ticket": ticket,
         "download_url": f"{settings.api_prefix}/recordings/export?ticket={ticket}",
@@ -943,17 +984,69 @@ async def export_clip(
     """
     import time as _time
 
-    from fastapi.responses import StreamingResponse
-
     entry = _export_tickets.pop(ticket, None)  # single-use
     if not entry or entry["expires"] < _time.time():
         raise HTTPException(status_code=403, detail="Invalid or expired ticket")
+    return await stream_playback_clip(
+        entry["path"], entry["start"], entry["duration"], entry["filename"])
+
+
+async def _clamp_to_recording(path: str, start: str, duration: float) -> tuple[str, float] | None:
+    """The first recorded sample at or after ``start`` within the asked
+    range, as (start, duration) for a second try — or None when nothing
+    is recorded in the range (a true 404) or the list is unavailable."""
+    try:
+        want = datetime.fromisoformat(str(start).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if want.tzinfo is None:
+        want = want.replace(tzinfo=UTC)
+    end = want + timedelta(seconds=float(duration))
+    segments = await mediamtx_client.list_segments(path, start=want, end=end, use_cache=False)
+    for seg in segments or []:
+        try:
+            seg_start = datetime.fromisoformat(str(seg.get("start")).replace("Z", "+00:00"))
+            seg_len = float(seg.get("duration") or 0)
+        except (TypeError, ValueError):
+            continue
+        if seg_start.tzinfo is None:
+            seg_start = seg_start.replace(tzinfo=UTC)
+        if seg_start + timedelta(seconds=seg_len) <= want:
+            continue                                     # ended before the range
+        if seg_start <= want:
+            return None                                  # the range IS inside a recording: not a boundary case
+        if seg_start >= end:
+            return None
+        shift = (seg_start - want).total_seconds() + 0.05   # a hair past the first sample
+        new_duration = max(1.0, float(duration) - shift)
+        return _fmt_rfc3339_ms(want + timedelta(seconds=shift)), round(new_duration, 3)
+    return None
+
+
+def _fmt_rfc3339_ms(dt: datetime) -> str:
+    dt = dt.astimezone(UTC)
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
+
+
+async def stream_playback_clip(
+    path: str, start: str, duration: float, filename: str, *, inline: bool = False
+):
+    """Stream ``duration`` seconds of a MediaMTX path from ``start`` as MP4.
+
+    Shared by the ticketed export and signed media URLs (HA-112). The
+    upstream status is probed BEFORE a response is committed: checking it
+    inside the generator would already have sent a 200 + attachment header,
+    turning an upstream failure into a silent zero-byte "clip.mp4".
+    """
+    from fastapi.responses import StreamingResponse
 
     url = f"{settings.mediamtx_playback_url}/get"  # url-internal-ok: server-side clip fetch from mediamtx playback server
     params = {
-        "path": entry["path"],
-        "start": entry["start"],
-        "duration": str(entry["duration"]),
+        "path": path,
+        "start": start,
+        "duration": str(duration),
+        # The playback server authenticates now; core says who it is.
+        **mediamtx_client.playback_auth(),
     }
 
     import httpx as _httpx
@@ -961,19 +1054,30 @@ async def export_clip(
     client = mediamtx_client.get_client()
     httpx_timeout = _httpx.Timeout(30.0, read=600.0)
 
-    # Probe the upstream status BEFORE committing a response: open the stream,
-    # read the status code, and only then hand the (still-open) body to
-    # StreamingResponse. Checking status inside the generator would already
-    # have sent a 200 + attachment header, turning an upstream failure into a
-    # silent, zero-byte "clip.mp4" download instead of a real error.
-    req = client.build_request("GET", url, params=params, timeout=httpx_timeout)
-    try:
-        resp = await client.send(req, stream=True)
-    except Exception as e:
-        recording_logger.warning(f"Clip export: MediaMTX unreachable: {e}")
-        raise HTTPException(
-            status_code=502, detail="Recording source unavailable"
-        )
+    async def _fetch(p: dict):
+        req = client.build_request("GET", url, params=p, timeout=httpx_timeout)
+        try:
+            return await client.send(req, stream=True)
+        except Exception as e:
+            recording_logger.warning(f"Clip export: MediaMTX unreachable: {e}")
+            raise HTTPException(
+                status_code=502, detail="Recording source unavailable"
+            )
+
+    resp = await _fetch(params)
+    if resp.status_code == 404:
+        # MediaMTX refuses a range that begins before its first sample, and
+        # the start a caller has (the segment list's minute-rounded start,
+        # the timeline's left edge) is routinely a fraction of a second
+        # earlier than that (#130). Move the start forward to the first
+        # recorded sample inside the asked range and ask once more.
+        await resp.aclose()
+        clamped = await _clamp_to_recording(path, start, duration)
+        if clamped is not None:
+            new_start, new_duration = clamped
+            recording_logger.info(
+                f"Clip export: start {start} moved to {new_start} (recording begins there)")
+            resp = await _fetch({**params, "start": new_start, "duration": str(new_duration)})
 
     if resp.status_code != 200:
         status = resp.status_code
@@ -991,11 +1095,12 @@ async def export_clip(
         finally:
             await resp.aclose()
 
+    disposition = "inline" if inline else "attachment"
     return StreamingResponse(
         _stream(),
         media_type="video/mp4",
         headers={
-            "Content-Disposition": f'attachment; filename="{entry["filename"]}"',
+            "Content-Disposition": f'{disposition}; filename="{filename}"',
             "Cache-Control": "no-store",
         },
     )
@@ -1204,12 +1309,10 @@ async def create_hls_session(
         f"{settings.api_prefix}/recordings/playback/hls/{session.session_id}/index.m3u8"
     )
 
-    # H.265 (hev1) recordings can't play through hls.js/MSE as recorded (browser
-    # rejects the hev1 tag + PCM audio). For those, the client should use the
-    # browser-remux endpoint instead of the HLS manifest.
-    from services.hevc_remux_service import is_browser_incompatible_video
-
-    needs_remux = is_browser_incompatible_video(session.video_codec)
+    # H.265 recordings, and H.264 ones carrying G.711/PCM audio, can't play
+    # through hls.js/MSE as recorded (the hev1 tag, the ipcm track). For those,
+    # the client uses the video-only browser-remux endpoint instead.
+    needs_remux = session.needs_remux
     browser_mp4_url = (
         f"{settings.api_prefix}/recordings/playback/hls/{session.session_id}/browser.mp4"
         if needs_remux
@@ -1398,13 +1501,15 @@ async def get_browser_playable_recording(
     session_id: str,
     request: Request = None,
 ):
-    """Serve an H.265 recording as a browser-playable ``hvc1`` video-only MP4.
+    """Serve a recording as a browser-playable, video-only MP4.
 
-    The MP4 is VIRTUAL: a small in-RAM index (built sub-second, headers-only
-    scan) maps every output byte to the original recording, and each HTTP
-    Range request is answered by streaming the mapped bytes straight from the
-    source file — no ffmpeg, no re-encode, no on-disk copy. H.264 recordings
-    never hit this route (they use the HLS byte-range path).
+    Used for H.265 (retagged ``hvc1``) and for H.264 recorded with G.711/PCM
+    audio, whose ``ipcm`` track MSE can't decode. The MP4 is VIRTUAL: a small
+    in-RAM index (built sub-second, headers-only scan) maps every output byte
+    to the original recording, and each HTTP Range request is answered by
+    streaming the mapped bytes straight from the source file — no ffmpeg, no
+    re-encode, no on-disk copy. Other H.264 recordings use the HLS byte-range
+    path.
     """
     from fastapi.responses import StreamingResponse
 

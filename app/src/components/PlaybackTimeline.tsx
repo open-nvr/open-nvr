@@ -18,6 +18,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useEdgeAutoPan } from '../hooks/useEdgeAutoPan'
+import { firstLocalTick } from '../lib/time'
+import { useTranslation, useDateFormat, type DateFormatters } from '../i18n'
 
 export interface TimelineSegment {
   /** epoch ms */
@@ -27,7 +29,7 @@ export interface TimelineSegment {
 }
 
 interface PlaybackTimelineProps {
-  /** Footage blocks (red). Everything else in the view is a grey gap. */
+  /** Footage blocks (accent blue). Everything else in the view is a grey gap. */
   segments: TimelineSegment[]
   /** Epoch ms where the still-recording file begins. Footage at/after this is
    *  rendered as a LIVE zone (green) — it is not reliably playable as VOD. */
@@ -70,8 +72,8 @@ function pickTickInterval(spanMs: number): number {
   return candidates[candidates.length - 1] * 1000
 }
 
-function fmtTick(ms: number, intervalMs: number): string {
-  return new Date(ms).toLocaleTimeString(undefined, {
+function fmtTick(ms: number, intervalMs: number, fmt: DateFormatters): string {
+  return fmt.time(ms, {
     hour: '2-digit',
     minute: '2-digit',
     ...(intervalMs < 60000 ? { second: '2-digit' } : {}),
@@ -79,8 +81,8 @@ function fmtTick(ms: number, intervalMs: number): string {
   })
 }
 
-function fmtFull(ms: number): string {
-  return new Date(ms).toLocaleString(undefined, {
+function fmtFull(ms: number, fmt: DateFormatters): string {
+  return fmt.dateTime(ms, {
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
@@ -105,6 +107,8 @@ export function PlaybackTimeline({
   onSelectionChange,
   className = '',
 }: PlaybackTimelineProps) {
+  const fmt = useDateFormat()
+  const { t } = useTranslation()
   const trackRef = useRef<HTMLDivElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
   const lastXRef = useRef(0)
@@ -167,7 +171,7 @@ export function PlaybackTimeline({
   )
 
   // The LIVE zone: footage at/after the still-recording file's start. Drawn
-  // over the red blocks so the red/green boundary is the exact live edge.
+  // over the footage blocks so the blue/green boundary is the exact live edge.
   const liveBlocks = useMemo(() => {
     if (liveEdgeMs == null) return []
     return segments
@@ -183,10 +187,10 @@ export function PlaybackTimeline({
 
   const ticks = useMemo(() => {
     const interval = pickTickInterval(span)
-    const first = Math.ceil(viewStart / interval) * interval
+    const first = firstLocalTick(viewStart, interval)
     const out: { ms: number; pct: number; label: string }[] = []
     for (let t = first; t <= viewEnd; t += interval) {
-      out.push({ ms: t, pct: toPct(t), label: fmtTick(t, interval) })
+      out.push({ ms: t, pct: toPct(t), label: fmtTick(t, interval, fmt) })
     }
     return out
   }, [span, viewStart, viewEnd, toPct])
@@ -311,10 +315,11 @@ export function PlaybackTimeline({
       <div className="h-5 relative text-[11px] font-mono">
         {currentVisible && hoverMs == null && (
           <span
-            className="absolute -translate-x-1/2 px-1 rounded bg-[var(--accent)] text-white whitespace-nowrap"
+            data-testid="playback-timeline-playhead"
+            className="absolute -translate-x-1/2 px-1 bg-[var(--accent)] text-white whitespace-nowrap"
             style={{ left: `clamp(3.5rem, ${currentPct}%, calc(100% - 3.5rem))` }}
           >
-            {fmtFull(currentTime)}
+            {fmtFull(currentTime, fmt)}
           </span>
         )}
       </div>
@@ -322,7 +327,8 @@ export function PlaybackTimeline({
       {/* Track */}
       <div
         ref={trackRef}
-        className={`relative h-9 bg-neutral-800 overflow-hidden rounded-sm touch-none ${
+        data-testid="playback-timeline-track"
+        className={`relative h-9 bg-[var(--panel-2)] overflow-hidden rounded-sm touch-none ${
           mode === 'clip' ? 'cursor-crosshair' : 'cursor-pointer'
         }`}
         onPointerDown={handleDown}
@@ -331,12 +337,13 @@ export function PlaybackTimeline({
         onPointerLeave={handleLeave}
         onPointerCancel={handleCancel}
       >
-        {/* Footage (red) */}
+        {/* Footage (accent blue) */}
         {blocks.map((b, i) => (
           <div
             key={i}
+            data-testid="playback-footage-block"
             className="absolute top-0 bottom-0"
-            style={{ left: `${b.left}%`, width: `${b.width}%`, background: '#dc2626' }}
+            style={{ left: `${b.left}%`, width: `${b.width}%`, background: 'var(--accent)' }}
           />
         ))}
 
@@ -345,7 +352,7 @@ export function PlaybackTimeline({
           <div
             key={`live-${i}`}
             className="absolute top-0 bottom-0 flex items-center overflow-hidden"
-            style={{ left: `${b.left}%`, width: `${b.width}%`, background: '#16a34a' }}
+            style={{ left: `${b.left}%`, width: `${b.width}%`, background: 'var(--ok)' }}
           >
             {b.width > 4 && (
               <span className="ml-1 flex items-center gap-1 text-[9px] font-semibold text-white/90 whitespace-nowrap">
@@ -359,7 +366,7 @@ export function PlaybackTimeline({
         {/* Clip selection band */}
         {selection && selection.outMs > selection.inMs && (
           <div
-            className="absolute top-0 bottom-0 bg-[var(--accent)]/35 border-x-2 border-[var(--accent)] pointer-events-none"
+            className="absolute top-0 bottom-0 bg-[color-mix(in_oklab,var(--warn)_35%,transparent)] border-x-2 border-[var(--warn)] pointer-events-none"
             style={{
               left: `${toPct(selection.inMs)}%`,
               width: `${toPct(selection.outMs) - toPct(selection.inMs)}%`,
@@ -414,8 +421,8 @@ export function PlaybackTimeline({
           className="pointer-events-none absolute top-0 z-20 px-1.5 py-0.5 bg-black/90 border border-white/15 text-white text-[10px] font-mono whitespace-nowrap"
           style={{ left: `clamp(3.5rem, ${hoverX}px, calc(100% - 3.5rem))`, transform: 'translate(-50%, -0.15rem)' }}
         >
-          {fmtFull(hoverMs)}
-          {hoverInGap && <span className="text-amber-400 ml-1">· no recording</span>}
+          {fmtFull(hoverMs, fmt)}
+          {hoverInGap && <span className="text-[var(--warn)] ml-1">· {t('shared.noRecordingLower')}</span>}
         </div>
       )}
     </div>

@@ -31,6 +31,7 @@ def test_load_carries_open_nvr_camera_id(monkeypatch):
     """The internal endpoint returns the server Camera.id as
     open_nvr_camera_id; it must land on the spec for recordings/live."""
     class _Resp:
+        status_code = 200
         def raise_for_status(self): pass
         def json(self):
             return {"cameras": [

@@ -19,6 +19,8 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { TimelineSegment } from './PlaybackTimeline'
 import { useEdgeAutoPan } from '../hooks/useEdgeAutoPan'
+import { firstLocalTick } from '../lib/time'
+import { useTranslation, useDateFormat, type DateFormatters } from '../i18n'
 
 export interface TimelineRow {
   id: number
@@ -45,6 +47,11 @@ interface MultiCamTimelineProps {
   /** Camera id whose row label is highlighted (audio/selection focus). */
   activeId?: number | null
   onRowClick?: (id: number) => void
+  /** Range-select mode (clip export): a drag marks a range instead of
+   *  seeking. The range is shaded across every row. */
+  selecting?: boolean
+  selection?: { startMs: number; endMs: number } | null
+  onSelectionChange?: (sel: { startMs: number; endMs: number }) => void
   className?: string
 }
 
@@ -58,8 +65,8 @@ function pickTickInterval(spanMs: number): number {
   return candidates[candidates.length - 1] * 1000
 }
 
-function fmtTick(ms: number, intervalMs: number): string {
-  return new Date(ms).toLocaleTimeString(undefined, {
+function fmtTick(ms: number, intervalMs: number, fmt: DateFormatters): string {
+  return fmt.time(ms, {
     hour: '2-digit',
     minute: '2-digit',
     ...(intervalMs < 60000 ? { second: '2-digit' } : {}),
@@ -67,8 +74,8 @@ function fmtTick(ms: number, intervalMs: number): string {
   })
 }
 
-function fmtFull(ms: number): string {
-  return new Date(ms).toLocaleString(undefined, {
+function fmtFull(ms: number, fmt: DateFormatters): string {
+  return fmt.dateTime(ms, {
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
@@ -139,19 +146,20 @@ const TrackRow = memo(function TrackRow({
       >
         {row.name}
       </button>
-      <div className={`flex-1 relative ${rowH} bg-neutral-800 overflow-hidden`}>
+      <div className={`flex-1 relative ${rowH} bg-[var(--panel-2)] overflow-hidden`}>
         {blocks.map((b, i) => (
           <div
             key={i}
+            data-testid="sync-footage-block"
             className="absolute top-0 bottom-0"
-            style={{ left: `${b.left}%`, width: `${b.width}%`, background: '#dc2626' }}
+            style={{ left: `${b.left}%`, width: `${b.width}%`, background: 'var(--accent)' }}
           />
         ))}
         {liveBlocks.map((b, i) => (
           <div
             key={`live-${i}`}
             className="absolute top-0 bottom-0"
-            style={{ left: `${b.left}%`, width: `${b.width}%`, background: '#16a34a' }}
+            style={{ left: `${b.left}%`, width: `${b.width}%`, background: 'var(--ok)' }}
           />
         ))}
       </div>
@@ -161,7 +169,7 @@ const TrackRow = memo(function TrackRow({
 
 /**
  * CP-Plus-style multi-camera timeline: one shared time axis, one track row per
- * camera (red = footage, green = still-recording live zone), and a single
+ * camera (accent = footage, green = still-recording live zone), and a single
  * playhead spanning every row. Click/drag anywhere in the track area to seek
  * all cameras to that wall-clock instant; wheel to zoom around the cursor.
  */
@@ -176,10 +184,17 @@ export function MultiCamTimeline({
   onPan,
   activeId = null,
   onRowClick,
+  selecting = false,
+  selection = null,
+  onSelectionChange,
   className = '',
 }: MultiCamTimelineProps) {
+  const fmt = useDateFormat()
+  const { t } = useTranslation()
   const overlayRef = useRef<HTMLDivElement>(null)
   const lastXRef = useRef(0)
+  // Where a range-select drag began (epoch ms).
+  const anchorRef = useRef<number | null>(null)
   const [dragging, setDragging] = useState(false)
   const [hoverMs, setHoverMs] = useState<number | null>(null)
 
@@ -227,10 +242,10 @@ export function MultiCamTimeline({
 
   const ticks = useMemo(() => {
     const interval = pickTickInterval(span)
-    const first = Math.ceil(viewStart / interval) * interval
+    const first = firstLocalTick(viewStart, interval)
     const out: { pct: number; label: string }[] = []
     for (let t = first; t <= viewEnd; t += interval) {
-      out.push({ pct: toPct(t), label: fmtTick(t, interval) })
+      out.push({ pct: toPct(t), label: fmtTick(t, interval, fmt) })
     }
     return out
   }, [span, viewStart, viewEnd, toPct])
@@ -254,6 +269,14 @@ export function MultiCamTimeline({
 
   // Pointer capture keeps the drag alive (and the seek committable) even when
   // the pointer leaves the overlay — routine while edge auto-panning.
+  // In range-select mode the drag spans anchor -> pointer; no seek, no snap
+  // (a range may start in a gap — export moves it to where footage begins).
+  const extendSelection = (ms: number) => {
+    const a = anchorRef.current
+    if (a == null) return
+    onSelectionChange?.({ startMs: Math.min(a, ms), endMs: Math.max(a, ms) })
+  }
+
   const handleDown = (e: React.PointerEvent) => {
     if (!e.isPrimary) return
     e.currentTarget.setPointerCapture(e.pointerId)
@@ -261,6 +284,10 @@ export function MultiCamTimeline({
     lastXRef.current = e.clientX
     autoPan.onDragStart(e.clientX)
     setHoverMs(xToMs(e.clientX))
+    if (selecting) {
+      anchorRef.current = xToMs(e.clientX)
+      return
+    }
     onScrubPreview?.(snap(xToMs(e.clientX)))
   }
   const handleMove = (e: React.PointerEvent) => {
@@ -269,13 +296,19 @@ export function MultiCamTimeline({
     setHoverMs(xToMs(e.clientX))
     if (dragging) {
       autoPan.onDragMove(e.clientX)
-      onScrubPreview?.(snap(xToMs(e.clientX)))
+      if (selecting) extendSelection(xToMs(e.clientX))
+      else onScrubPreview?.(snap(xToMs(e.clientX)))
     }
   }
   const handleUp = (e: React.PointerEvent) => {
     if (!dragging) return
     autoPan.onDragEnd()
     setDragging(false)
+    if (selecting) {
+      extendSelection(xToMs(e.clientX))
+      anchorRef.current = null
+      return
+    }
     onSeek(snap(xToMs(e.clientX)))
     onScrubPreview?.(null)
   }
@@ -289,6 +322,7 @@ export function MultiCamTimeline({
     autoPan.onDragEnd()
     setDragging(false)
     setHoverMs(null)
+    anchorRef.current = null
     onScrubPreview?.(null)
   }
 
@@ -299,9 +333,15 @@ export function MultiCamTimeline({
     if (!dragging) return
     const ms = xToMs(lastXRef.current)
     setHoverMs(ms)
-    onScrubPreview?.(snap(ms))
+    if (selecting) extendSelection(ms)
+    else onScrubPreview?.(snap(ms))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewStart, viewEnd])
+
+  const selVisible =
+    selecting && selection != null && selection.endMs > viewStart && selection.startMs < viewEnd
+  const selLeft = selVisible ? toPct(selection!.startMs) : 0
+  const selWidth = selVisible ? Math.max(0.3, toPct(selection!.endMs) - selLeft) : 0
 
   const currentPct = toPct(currentTime)
   const currentVisible = currentTime >= viewStart && currentTime <= viewEnd
@@ -319,10 +359,11 @@ export function MultiCamTimeline({
         <div className="flex-1 h-4 relative text-[10px] font-mono">
           {currentVisible && hoverMs == null && (
             <span
+              data-testid="sync-timeline-playhead"
               className="absolute -translate-x-1/2 px-1 bg-[var(--accent)] text-white whitespace-nowrap z-10"
               style={{ left: `clamp(3.5rem, ${currentPct}%, calc(100% - 3.5rem))` }}
             >
-              {fmtFull(currentTime)}
+              {fmtFull(currentTime, fmt)}
             </span>
           )}
           {hoverMs != null && (
@@ -330,8 +371,8 @@ export function MultiCamTimeline({
               className="pointer-events-none absolute -translate-x-1/2 z-20 px-1.5 bg-black/90 border border-white/15 text-white whitespace-nowrap"
               style={{ left: `clamp(3.5rem, ${toPct(hoverMs)}%, calc(100% - 3.5rem))` }}
             >
-              {fmtFull(hoverMs)}
-              {hoverInGap && <span className="text-amber-400 ml-1">· no recording</span>}
+              {fmtFull(hoverMs, fmt)}
+              {hoverInGap && <span className="text-[var(--warn)] ml-1">· {t('shared.noRecordingLower')}</span>}
             </span>
           )}
         </div>
@@ -368,7 +409,8 @@ export function MultiCamTimeline({
         {/* Interactive overlay spanning every track row (not the labels) */}
         <div
           ref={overlayRef}
-          className="absolute inset-y-0 left-16 sm:left-28 right-0 cursor-pointer touch-none"
+          data-testid="sync-timeline-track"
+          className={`absolute inset-y-0 left-16 sm:left-28 right-0 touch-none ${selecting ? 'cursor-crosshair' : 'cursor-pointer'}`}
           onPointerDown={handleDown}
           onPointerMove={handleMove}
           onPointerUp={handleUp}
@@ -383,6 +425,14 @@ export function MultiCamTimeline({
               style={{ left: `${t.pct}%` }}
             />
           ))}
+
+          {/* Export range, shaded across every row */}
+          {selVisible && (
+            <div
+              className="absolute top-0 bottom-3.5 pointer-events-none bg-[var(--warn)]/25 border-x-2 border-[var(--warn)]"
+              style={{ left: `${selLeft}%`, width: `${selWidth}%` }}
+            />
+          )}
 
           {/* Hover guide (time chip lives in the readout strip above) */}
           {hoverMs != null && (

@@ -135,3 +135,13 @@ def clipped(box: Box, region: Box, frame_shape: tuple[int, int]) -> bool:
         or (frame_shape[1] - region[2] > 5 and region[2] - box[2] <= 5)
         or (frame_shape[0] - region[3] > 5 and region[3] - box[3] <= 5)
     )
+
+
+def contained_share(inner: Box, outer: Box) -> float:
+    """The share of ``inner``'s area that lies inside ``outer`` (0..1): a
+    part of an object scores near 1 against the whole, whatever its IoU."""
+    x1, y1 = max(inner[0], outer[0]), max(inner[1], outer[1])
+    x2, y2 = min(inner[2], outer[2]), min(inner[3], outer[3])
+    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    a = max(0.0, inner[2] - inner[0]) * max(0.0, inner[3] - inner[1])
+    return inter / a if a > 0 else 0.0

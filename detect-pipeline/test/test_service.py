@@ -76,6 +76,49 @@ def test_reconcile_adds_and_removes_workers():
     assert mgr.running_ids() == {"b", "d"}
 
 
+def test_removed_camera_leaves_no_worker_gauge_behind():
+    """A deleted camera must not keep reporting tier0_worker_up=0.
+
+    reconcile() dropped the camera's series and THEN stopped its worker, whose
+    teardown wrote the DOWN gauge back — so a camera deleted from core counted
+    as a down worker forever (dashboard "Detection 1/2 — Degraded" on a box
+    with one camera) until the pipeline restarted.
+    """
+    from detect_pipeline import metrics as m
+
+    class _GaugeWorker(_FakeWorker):
+        # Mirrors CameraWorker: UP once at start, DOWN at teardown unless
+        # the manager marked it superseded.
+        def __init__(self, spec, sink):
+            super().__init__(spec, sink)
+            self._superseded = False
+
+        def start(self):
+            super().start()
+            m.record_worker_state(self.spec.camera_id, True, target_fps=self.spec.fps)
+
+        def mark_superseded(self):
+            self._superseded = True
+
+        def stop(self):
+            super().stop()
+            if not self._superseded:
+                m.record_worker_state(self.spec.camera_id, False)
+
+    m.metrics.reset()
+    prov = _FakeProvider([_spec("a"), _spec("b")])
+    mgr = WorkerManager(prov, _FakeSink(), worker_factory=_GaugeWorker)
+    mgr.reconcile()
+    assert 'tier0_worker_up{camera="a"} 1' in m.metrics.render()
+
+    prov.specs = [_spec("b")]                        # a deleted from core
+    mgr.reconcile()
+    out = m.metrics.render()
+    assert 'camera="a"' not in out, out
+    assert 'tier0_worker_up{camera="b"} 1' in out    # the survivor is untouched
+    m.metrics.reset()
+
+
 def test_disabled_manager_runs_nothing_and_stops_all():
     prov = _FakeProvider([_spec("a")])
     mgr = WorkerManager(prov, _FakeSink(), worker_factory=_FakeWorker)
@@ -149,6 +192,68 @@ def test_camera_worker_publishes_results(monkeypatch):
     assert len(sink.events) == 4
     assert all(cid == "cam-front" for cid, _ in sink.events)
     assert sink.events[-1][1] >= 1                   # a track was published
+
+
+class _GappySource:
+    """Emits seq 0,1,5,6 then 0,1: the source's drain overwrote 2-4 while
+    detection was busy (#507), and the second 0 is a restart, not a gap."""
+
+    def __init__(self):
+        self.width, self.height = W, H
+
+    def stream(self):
+        for i in (0, 1, 5, 6, 0, 1):
+            yield Frame(bytes(frame_size_bytes(W, H)), W, H, i, float(i))
+
+
+def test_dropped_frames_are_counted_from_seq_gaps_and_warned_about(monkeypatch, caplog):
+    import logging
+
+    import detect_pipeline.motion as motion_mod
+    import detect_pipeline.service as svc
+    from detect_pipeline.metrics import metrics
+
+    real_detect = motion_mod.MotionDetector.detect
+
+    def fake_detect(self, luma):
+        real_detect(self, luma)
+        self.calibrating = False
+        return [(80, 60, 160, 200)]
+
+    monkeypatch.setattr(motion_mod.MotionDetector, "detect", fake_detect)
+    monkeypatch.setattr(svc, "DROP_REPORT_WINDOW_S", 0.0)   # report every frame
+    before = metrics.value("tier0_frames_dropped_total", {"camera": "cam-gappy"})
+    restarts_before = metrics.value("tier0_worker_restarts_total", {"camera": "cam-gappy"})
+    sink = _FakeSink()
+    worker = CameraWorker(_spec("cam-gappy"), sink, detector=_MotionAllDetector(),
+                          frame_source=_GappySource())
+    with caplog.at_level(logging.WARNING, logger="detect_pipeline.service"):
+        worker.start()
+        for _ in range(100):
+            if len(sink.events) >= 6:
+                break
+            time.sleep(0.02)
+        worker.stop()
+    assert metrics.value("tier0_frames_dropped_total", {"camera": "cam-gappy"}) - before == 3
+    assert metrics.value("tier0_worker_restarts_total", {"camera": "cam-gappy"}) - restarts_before == 1, (
+        "seq back to 0 is a restart, never a drop")
+    assert "exceeds this box's capacity" in caplog.text
+    assert "3 of 4 decoded frames" in caplog.text
+    # The warning says where the frame's time went, not only that it was lost.
+    assert "Per frame this window: waited" in caplog.text
+    assert "in the detection stages" in caplog.text and "after them" in caplog.text
+
+
+def test_the_capacity_warning_is_a_share_of_what_was_decoded():
+    """25% of decoded frames — dropped / (dropped + detected), as the
+    knob's comment and the changelog say — not dropped / detected, which
+    fired at a 20% share."""
+    from detect_pipeline.service import DROP_WARN_SHARE
+    assert DROP_WARN_SHARE == 0.25
+    dropped, detected = 21, 79                       # 21% of 100 decoded
+    assert not (dropped >= (dropped + detected) * DROP_WARN_SHARE)
+    dropped, detected = 25, 75                       # exactly a quarter
+    assert dropped >= (dropped + detected) * DROP_WARN_SHARE
 
 
 class _RestartingFramesSource:
@@ -253,6 +358,17 @@ def test_reconcile_restarts_worker_when_labels_change():
     prov.specs = [_spec("a"), _spec("b")]
     mgr.reconcile()
     assert len(made) == 4 and made[3].spec.labels is None
+
+    # An app picked for camera b widens its set → b's worker is rebuilt
+    # with the wider allowlist; a is left alone.
+    prov.specs = [
+        _spec("a"),
+        CameraSpec("b", "b", "rtsp://h/b", extra_labels=frozenset({"backpack"})),
+    ]
+    mgr.reconcile()
+    assert len(made) == 5
+    assert made[4].spec.extra_labels == frozenset({"backpack"})
+    assert made[1].stopped and not made[3].stopped
 
 
 def test_reconcile_restarts_worker_when_nvr_camera_id_changes():
@@ -865,3 +981,196 @@ def test_decode_config_metric_reports_the_hwaccel_actually_used(monkeypatch):
         "the metric must report the EFFECTIVE backend after a downgrade — "
         "reporting the requested 'vaapi' hides the fallback it exists to show"
     )
+
+
+# ── scene evidence knobs ────────────────────────────────────────────
+
+
+def _tracker_from_a_worker_run(monkeypatch):
+    """Start a worker on fake frames and hand back the Tracker it built."""
+    import detect_pipeline.motion as motion_mod
+    import detect_pipeline.service as svc
+
+    real_detect = motion_mod.MotionDetector.detect
+
+    def fake_detect(self, luma):
+        real_detect(self, luma)
+        self.calibrating = False
+        return [(80, 60, 160, 200)]
+
+    monkeypatch.setattr(motion_mod.MotionDetector, "detect", fake_detect)
+
+    built = []
+    real_tracker = svc.Tracker
+
+    def spy(*a, **kw):
+        tk = real_tracker(*a, **kw)
+        built.append(tk)
+        return tk
+
+    monkeypatch.setattr(svc, "Tracker", spy)
+
+    sink = _FakeSink()
+    worker = CameraWorker(
+        _spec("cam-front"), sink,
+        detector=_MotionAllDetector(), frame_source=_FramesSource(4),
+    )
+    worker.start()
+    for _ in range(50):
+        if built and len(sink.events) >= 4:
+            break
+        time.sleep(0.02)
+    worker.stop()
+    assert built, "the worker never built a Tracker"
+    return built[0]
+
+
+def test_scene_evidence_is_on_by_default(monkeypatch):
+    monkeypatch.delenv("DETECT_SCENE_EVIDENCE", raising=False)
+    monkeypatch.delenv("DETECT_SCENE_MAX_PX", raising=False)
+    monkeypatch.delenv("DETECT_SCENE_JPEG_QUALITY", raising=False)
+    tk = _tracker_from_a_worker_run(monkeypatch)
+    assert tk.retain_scene is True
+    assert (tk.scene_max_px, tk.scene_quality) == (1280, 78)
+
+
+def test_scene_evidence_can_be_switched_off(monkeypatch):
+    """A full rollback must be an env change on the pipeline, with no core
+    redeploy: the column simply stays NULL and the dialog falls back."""
+    monkeypatch.setenv("DETECT_SCENE_EVIDENCE", "false")
+    tk = _tracker_from_a_worker_run(monkeypatch)
+    assert tk.retain_scene is False
+
+
+def test_scene_knobs_are_clamped_not_merely_parsed(monkeypatch):
+    """The clamp is a guard, not tidiness: an absurd setting would otherwise
+    produce a payload core rejects for size, silently losing every scene."""
+    monkeypatch.setenv("DETECT_SCENE_MAX_PX", "99999")
+    monkeypatch.setenv("DETECT_SCENE_JPEG_QUALITY", "100")
+    tk = _tracker_from_a_worker_run(monkeypatch)
+    assert (tk.scene_max_px, tk.scene_quality) == (1920, 95)
+
+    monkeypatch.setenv("DETECT_SCENE_MAX_PX", "16")
+    monkeypatch.setenv("DETECT_SCENE_JPEG_QUALITY", "1")
+    tk = _tracker_from_a_worker_run(monkeypatch)
+    assert (tk.scene_max_px, tk.scene_quality) == (320, 40)
+
+
+# ── detect stream: the sub-stream floor and the per-camera policy ──────
+
+def _probe_for(answers):
+    def probe(url, **_kw):
+        for key, dims in answers.items():
+            if key in url:
+                return dims
+        return None
+    return probe
+
+
+def test_a_sub_stream_under_the_floor_moves_detection_to_the_main_stream(monkeypatch):
+    """A 352x288 sub shows a person at 10 m as ~15 px: on 'auto' the worker
+    detects on the main stream instead, says why in the metric, and runs no
+    separate evidence source (detect and evidence are then one stream)."""
+    import detect_pipeline.service as svc
+    from detect_pipeline.metrics import metrics
+    monkeypatch.setattr(svc, "probe_stream", _probe_for({"-sub": (352, 288, 7.0), "/cam-small?": (1920, 1080, 15.0)}))
+    spec = CameraSpec("cam-small", "small", "rtsp://m/cam-small-sub?jwt=a",
+                      evidence_url="rtsp://m/cam-small?jwt=b")
+    w = CameraWorker(spec, _FakeSink(), sub_min_height=480)
+    src, width, height = w._make_source()
+    assert (width, height) == (1920, 1080) and w._detect_on_main
+    assert metrics.value("tier0_detect_on_main", {"camera": "cam-small"}) == 4.0   # sub_too_small
+    assert w._make_evidence(352, 288) is None, "detect and evidence are one stream now: no evidence source"
+
+
+def test_a_tall_enough_sub_stream_stays_and_a_pinned_sub_is_never_moved(monkeypatch):
+    import detect_pipeline.service as svc
+    from detect_pipeline.metrics import metrics
+    from detect_pipeline.tuning import parse_tuning
+    monkeypatch.setattr(svc, "probe_stream", _probe_for({"-sub": (704, 576, 10.0), "/cam-ok?": (1920, 1080, 15.0)}))
+    spec = CameraSpec("cam-ok", "ok", "rtsp://m/cam-ok-sub?jwt=a", evidence_url="rtsp://m/cam-ok?jwt=b")
+    _, _, height = CameraWorker(spec, _FakeSink(), sub_min_height=480)._make_source()
+    assert height == 576 and metrics.value("tier0_detect_on_main", {"camera": "cam-ok"}) == 0.0
+    monkeypatch.setattr(svc, "probe_stream", _probe_for({"-sub": (352, 288, 7.0), "/cam-pin?": (1920, 1080, 15.0)}))
+    pinned = CameraSpec("cam-pin", "pin", "rtsp://m/cam-pin-sub?jwt=a", evidence_url="rtsp://m/cam-pin?jwt=b",
+                        tuning=parse_tuning({"detect_stream": "sub"}))
+    _, _, height = CameraWorker(pinned, _FakeSink(), sub_min_height=480)._make_source()
+    assert height == 288, "the operator pinned the sub: the floor does not move it"
+
+
+def test_the_main_policy_detects_on_the_main_even_if_core_still_hands_the_sub(monkeypatch):
+    import detect_pipeline.service as svc
+    from detect_pipeline.metrics import metrics
+    from detect_pipeline.tuning import parse_tuning
+    monkeypatch.setattr(svc, "probe_stream", _probe_for({"-sub": (704, 576, 10.0), "/cam-main?": (1920, 1080, 15.0)}))
+    spec = CameraSpec("cam-main", "main", "rtsp://m/cam-main-sub?jwt=a", evidence_url="rtsp://m/cam-main?jwt=b",
+                      tuning=parse_tuning({"detect_stream": "main"}))
+    _, _, height = CameraWorker(spec, _FakeSink(), sub_min_height=480)._make_source()
+    assert height == 1080 and metrics.value("tier0_detect_on_main", {"camera": "cam-main"}) == 1.0   # policy
+
+
+def test_manager_keeps_the_freshest_playback_url_per_camera_like_the_tap_urls():
+    """The playback URL carries a rotating token like the tap URLs, so the
+    manager hands workers a provider that reads the latest listing. The map
+    was declared but never filled on the first deploy: every fetch failed
+    with no_playback_url while the listing carried the URL."""
+    spec = CameraSpec("a", "a", "rtsp://m/a-sub?jwt=1", evidence_url="rtsp://m/a?jwt=1",
+                      playback_url="http://mediamtx:9996/get?path=a&jwt=1")
+    prov = _FakeProvider([spec])
+    mgr = WorkerManager(prov, _FakeSink(), worker_factory=_FakeWorker)
+    mgr.reconcile()
+    assert mgr.current_playback_url("a") == "http://mediamtx:9996/get?path=a&jwt=1"
+    assert mgr.current_evidence_url("a") == "rtsp://m/a?jwt=1"
+    prov.specs = [CameraSpec("a", "a", "rtsp://m/a-sub?jwt=2", evidence_url="rtsp://m/a?jwt=2",
+                             playback_url="http://mediamtx:9996/get?path=a&jwt=2")]
+    mgr.reconcile()
+    assert mgr.current_playback_url("a").endswith("jwt=2"), "rotated token reaches the provider"
+    prov.specs = []
+    mgr.reconcile()
+    assert mgr.current_playback_url("a") is None
+
+
+def test_idle_keyframe_duplicates_are_not_drops_and_raise_no_warning(monkeypatch, caplog):
+    """Same gappy source, but the camera is idling on keyframe-only decode:
+    the gaps are the fps filter's fill copies the worker skipped, counted
+    apart from drops, and the capacity warning stays quiet. On the Ventuno
+    Q this read as a 28 % drop rate every idle minute (2026-11-09)."""
+    import logging
+
+    import detect_pipeline.motion as motion_mod
+    import detect_pipeline.service as svc
+    from detect_pipeline.metrics import metrics
+
+    real_detect = motion_mod.MotionDetector.detect
+
+    def fake_detect(self, luma):
+        real_detect(self, luma)
+        self.calibrating = False
+        return [(80, 60, 160, 200)]
+
+    monkeypatch.setattr(motion_mod.MotionDetector, "detect", fake_detect)
+    monkeypatch.setattr(svc, "DROP_REPORT_WINDOW_S", 0.0)
+
+    class _Idle:
+        mode = svc.AdaptiveDecode.IDLE
+        skip = "nokey"
+
+        def observe(self, result, now=None):
+            return False
+
+    cam = "cam-idle-gappy"
+    dropped_before = metrics.value("tier0_frames_dropped_total", {"camera": cam})
+    dups_before = metrics.value("tier0_frames_idle_duplicates_total", {"camera": cam})
+    sink = _FakeSink()
+    worker = CameraWorker(_spec(cam), sink, detector=_MotionAllDetector(), frame_source=_GappySource())
+    worker._make_adaptive = lambda: _Idle()
+    with caplog.at_level(logging.WARNING, logger="detect_pipeline.service"):
+        worker.start()
+        for _ in range(100):
+            if len(sink.events) >= 6:
+                break
+            time.sleep(0.02)
+        worker.stop()
+    assert metrics.value("tier0_frames_dropped_total", {"camera": cam}) - dropped_before == 0
+    assert metrics.value("tier0_frames_idle_duplicates_total", {"camera": cam}) - dups_before == 3
+    assert "exceeds this box's capacity" not in caplog.text

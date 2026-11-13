@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import UTC, datetime
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,63 @@ SUBJECT = "opennvr.events.plate.recognized.v1.>"
 #: Reconnect cadence after a connect/subscribe failure. Deliberately slow —
 #: a down bus should cost one warning line a minute, not a hot loop.
 _RETRY_SECONDS = 60.0
+
+
+def _read_is_clipped(box, evidence_path: str | None,
+                     box_image_size=None) -> bool:
+    """Partial-read guard for the bus path — see plate_box_is_clipped.
+
+    ``box_image_size`` is the event's own statement of which image the
+    box is measured in (``plate_box_image``, [w, h]). When present it is
+    the ONLY correct denominator: multi-frame OCR reads plate CANDIDATE
+    crops whose size differs from the visit's evidence frame, so judging
+    such a box against the evidence file measures in the wrong image.
+    Only without it do we fall back to the evidence file's size —
+    correct for the single-evidence producers that predate the field.
+
+    Best-effort by construction: no box, no usable size, or an
+    unreadable crop all answer False, so a missing optional field can
+    never start silently dropping good plates.
+    """
+    if box is None:
+        return False
+    try:
+        from services.plate_enrichment import (
+            jpeg_dimensions, plate_box_is_clipped,
+        )
+
+        if (isinstance(box_image_size, (list, tuple))
+                and len(box_image_size) == 2):
+            return plate_box_is_clipped(box, tuple(box_image_size))
+        if not evidence_path:
+            return False
+        from services.evidence_store import resolve_evidence
+
+        path = resolve_evidence(evidence_path)
+        if path is None:
+            return False
+        return plate_box_is_clipped(box, jpeg_dimensions(path.read_bytes()))
+    except Exception:  # noqa: BLE001
+        logger.debug("plate consumer: clipping check failed", exc_info=True)
+        return False
+
+
+def _observed_at_of(payload: dict):
+    """``observed_at`` off a plate event payload as an aware datetime.
+
+    The contract carries it as an ISO-8601 UTC string (additive and
+    optional — see EVENT_CONTRACTS.md). Anything unparseable is treated
+    as absent: a bad stamp must not cost us an otherwise good read, and a
+    row with no observed time falls back to started_at.
+    """
+    raw = payload.get("observed_at")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
 def apply_plate_event(envelope: object) -> str:
@@ -51,6 +109,20 @@ def apply_plate_event(envelope: object) -> str:
     * ``"no-plate"`` / ``"malformed"`` — nothing usable in the payload.
     * ``"not-found"``    — referenced row does not exist (deleted, or a
       foreign initiator's reference); nothing to do.
+    * ``"clipped"``      — the plate box abuts its crop's edge: a
+      partial read (#378); row left untouched.
+    * ``"weak-detection"`` — the adapter barely localised the plate it
+      read: a false localisation such as a manufacturer badge (#386);
+      row left untouched.
+    * ``"duplicate"``    — same plate seen on this camera within the
+      dedup window (a fragmented track re-reading the car we just
+      read); sighting folded, row left untouched.
+    * ``"deferred-to-sweep"`` — core's own enrichment sweep is still
+      working this row (this event is one of its attempts, echoed by
+      KAI-C); the sweep writes text AND evidence, so the row is left
+      to it. Not under a ``fast`` scan policy (plate_policy): there the
+      first accepted read is final, so it is written here at once and
+      the sweep spends nothing more on the row.
     """
     if not isinstance(envelope, dict):
         return "malformed"
@@ -78,7 +150,81 @@ def apply_plate_event(envelope: object) -> str:
             return "not-found"
         if row.plate_text:
             return "already-set"
+        # The sweep that initiated this very read still owns the row.
+        # KAI-C republishes every accepted read core asks for, so this
+        # event IS the sweep's own attempt coming back round the bus —
+        # and the sweep holds the bytes (plate crop + read frame) that
+        # this consumer does not. Writing here won the race and left
+        # the row a number with no proof; defer, and the sweep writes
+        # text and evidence together (with consensus, when several
+        # looks are in play). A state check on core itself, not a
+        # producer check — consumers must not branch on producer.
+        from services.plate_enrichment import sweep_is_pending
+        from services.plate_policy import policy_for
+
+        policy = policy_for(row.camera_id)
+        if sweep_is_pending(event_id) and not policy.first_read_wins:
+            return "deferred-to-sweep"
+        # Same partial-read rule as the synchronous producer. The two are
+        # racing writers for one column, so a guard on only one of them is
+        # no guard at all — a clipped read rejected by plate_enrichment
+        # would simply land here instead. KAI-C forwards the plate box
+        # (optional, additive); the crop it was measured in is this row's
+        # evidence, so the geometry is reproducible here.
+        if _read_is_clipped(payload.get("plate_box"), row.evidence_path,
+                            payload.get("plate_box_image")):
+            return "clipped"
+        # Same false-localisation rule as the synchronous producer, for
+        # the same reason the clip guard is duplicated here: two racing
+        # writers for one column, so a guard on one of them is no guard
+        # at all. Absent field = older producer = no opinion (#386).
+        from services.plate_enrichment import detection_confidence_is_weak
+
+        if detection_confidence_is_weak(payload.get("plate_box_confidence")):
+            return "weak-detection"
+        normalized = "".join(plate.split()).upper()[:32]
+        # Duplicate-sighting dedup — same rule as the synchronous
+        # writers (racing writers for one column need the same policy;
+        # see plate_enrichment). Folded, not an error.
+        from services.plate_enrichment import (
+            is_duplicate_sighting, note_sighting,
+        )
+
+        if is_duplicate_sighting(row.camera_id, normalized,
+                                 window_s=policy.dedup_window_s):
+            note_sighting(row.camera_id, normalized)
+            return "duplicate"
         row.plate_text = plate.strip()[:32]
+        # When the producer said the look was captured. Optional and
+        # additive: a producer that does not send it leaves the row
+        # undated, and readers fall back to started_at.
+        row.observed_at = _observed_at_of(payload)
+        # A single forwarded read: no images, one look. The sweep (if
+        # any) may attach evidence or, with several disagreeing looks,
+        # replace it — see plate_enrichment's precedence rules.
+        from services.plate_enrichment import stamp_plate_evidence
+
+        stamp_plate_evidence(row, None, reads=1, source="bus",
+                             confidence=payload.get("confidence")
+                             if isinstance(payload.get("confidence"), (int, float))
+                             else None)
+        note_sighting(row.camera_id, normalized)
+        # The plate is a claim as well as a column — the attr filter and
+        # journey.py's plate anchor both read descriptors, not the
+        # column. After the stamp above, so the claim carries the
+        # forwarded confidence.
+        # The envelope's correlation_id joins this read to KAI-C's audit
+        # line and to every other event in the chain. It used to stop at
+        # the log statement below; now it rides on the row and on the
+        # claim, so a reader of the store can reach the audit trail.
+        cid = envelope.get("correlation_id")
+        if isinstance(cid, str) and cid.strip():
+            payload_now = dict(row.payload or {})
+            payload_now["correlation_id"] = cid.strip()[:64]
+            row.payload = payload_now
+        from services.descriptor_store import sync_plate_claim
+
+        sync_plate_claim(db, row)
         db.commit()
         logger.info(
             "plate event applied: event %s -> %s [correlation_id=%s]",
@@ -131,25 +277,40 @@ async def run_consumer_loop() -> None:
     # documents the identical lesson).
     token = (getattr(settings, "internal_api_key", "") or "").strip() or None
 
+    # No awaiting ``finally`` on this path: it would run under
+    # GeneratorExit when the coroutine is closed (task GC'd) and blow up
+    # as "coroutine ignored GeneratorExit" — the failure that silently
+    # unsubscribed the alerts-inbox consumer in the field. Teardown is
+    # explicit on the exception paths instead (see alerts_inbox).
     while True:
+        client = sub = None
         try:
             client = await nats.connect(url, connect_timeout=5, token=token)
             sub = await client.subscribe(SUBJECT, cb=_handle_message)
             logger.info("plate event consumer subscribed to %s", SUBJECT)
-            try:
-                # nats-py reconnects transparently; this just parks the
-                # task until cancellation (shutdown) unwinds us.
-                await asyncio.Event().wait()
-            finally:
-                try:
-                    await sub.unsubscribe()
-                    await client.drain()
-                except Exception:  # noqa: BLE001
-                    pass
+            # nats-py reconnects transparently; this just parks the
+            # task until cancellation (shutdown) unwinds us.
+            await asyncio.Event().wait()
         except asyncio.CancelledError:
+            await _teardown(sub, client)
             raise
         except Exception as exc:  # noqa: BLE001
+            await _teardown(sub, client)
             logger.warning(
                 "plate event consumer: connect/subscribe failed (%s); "
                 "retrying in %.0fs", exc, _RETRY_SECONDS)
             await asyncio.sleep(_RETRY_SECONDS)
+
+
+async def _teardown(sub, client) -> None:
+    """Best-effort unsubscribe + drain; every failure swallowed."""
+    try:
+        if sub is not None:
+            await sub.unsubscribe()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        if client is not None:
+            await client.drain()
+    except Exception:  # noqa: BLE001
+        pass

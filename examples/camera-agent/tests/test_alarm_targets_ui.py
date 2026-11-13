@@ -61,7 +61,7 @@ def test_targets_special_intents_kept_separate():
 
 # ── demo page: the two arm surfaces agree ───────────────────────────────
 
-_HTML = (Path(__file__).resolve().parents[1] / "demo" / "index.html").read_text()
+_HTML = (Path(__file__).resolve().parents[1] / "demo" / "index.html").read_text(encoding="utf-8")
 
 
 def test_rail_form_asks_which_camera():

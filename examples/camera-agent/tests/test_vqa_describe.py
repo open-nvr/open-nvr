@@ -40,7 +40,7 @@ def _tools(caption_client):
     ctx.register_frame_source("cam1", _FakeSource())
     return CameraTools(
         context=ctx, detection_client=None, caption_client=caption_client,
-        recognition_client=None, footage_index=None,
+        recognition_client=None,
     )
 
 

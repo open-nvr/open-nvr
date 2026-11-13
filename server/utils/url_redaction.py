@@ -83,6 +83,31 @@ def redact_url_query(url: str | None) -> str | None:
     )
 
 
+#: Path prefix of signed media URLs (HA-112). What follows it is the whole
+#: credential: anyone holding the token fetches the media without logging in.
+SIGNED_MEDIA_PREFIX = "/api/v1/media/s/"
+
+
+def redact_signed_media_path(path_or_url: str | None) -> str | None:
+    """Return ``path_or_url`` with a signed media token replaced by ``<redacted>``.
+
+    ``/api/v1/media/s/m1.<payload>.<sig>`` is a bearer credential in the
+    PATH, not the query string, so :func:`redact_url_query` never sees it
+    and the request log would otherwise hold a working link for as long as
+    the token lives (up to seven days). Accepts a bare path or a full URL:
+    everything after the prefix is masked, query string included (a signed
+    URL carries nothing else worth keeping), and anything that is not a
+    signed media path passes through unchanged. A plain substring cut, so
+    it cannot raise on odd input; it runs on every request.
+    """
+    if not path_or_url:
+        return path_or_url
+    idx = path_or_url.find(SIGNED_MEDIA_PREFIX)
+    if idx < 0:
+        return path_or_url
+    return f"{path_or_url[:idx]}{SIGNED_MEDIA_PREFIX}<redacted>"
+
+
 def redact_url_credentials(url: str | None) -> str | None:
     """Return ``url`` with basic-auth userinfo and the query string replaced by
     ``<redacted>`` placeholders.

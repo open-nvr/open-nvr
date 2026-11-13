@@ -42,6 +42,24 @@ from models import Camera
 faststart_logger = logging.getLogger("opennvr.faststart")
 
 
+def absolute_segment_path(segment_path: str) -> str:
+    """The segment path as a path THIS process can open.
+
+    MediaMTX reports MTX_SEGMENT_PATH exactly as ``recordPath`` spells it,
+    and the shipped config spells it relative (``./app/recordings/…``),
+    relative to MediaMTX's own working directory, which is ``/``. Opened
+    as given from core's working directory (``/app``) that became
+    ``/app/app/recordings/…``: no file, so every segment was indexed with
+    no size and no codec, the rotation read "0 GB of recordings" and
+    playback probed what the webhook had already read (Ventuno Q,
+    2026-11-07: 1,051 of 1,051 rows). Both containers share the same
+    ``/app/recordings`` mount, so a relative path resolves from ``/``."""
+    s = (segment_path or "").replace("\\", "/")
+    if s and not os.path.isabs(s):
+        s = os.path.normpath(os.path.join("/", s))
+    return s
+
+
 def validate_segment_path(segment_path: str) -> str:
     """
     Validate that the segment path is safe and free of directory traversal attacks.
@@ -190,6 +208,7 @@ async def hook_segment_create(
     # SECURITY FIX: Validate path for directory traversal
     if segment_path:
         validate_segment_path(segment_path)
+        segment_path = absolute_segment_path(segment_path)
 
     # For create event, we can just acknowledge; details are available on complete
     return {
@@ -261,9 +280,17 @@ async def hook_segment_complete(
     if not _verify_hook_token(request):
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    # SECURITY FIX: Validate path for directory traversal
+    # SECURITY FIX: Validate path for directory traversal — then the path
+    # as THIS process can open it. MediaMTX spells MTX_SEGMENT_PATH as the
+    # shipped recordPath does, relative to its own cwd (/): resolved from
+    # core's /app it was /app/app/recordings/…, so os.stat failed and
+    # every row landed with no file_size and no codec (the reconciler
+    # back-filled them 15 min later, too late for the segment-health
+    # check, which needs the size at the moment the segment closes —
+    # Ventuno Q, 2026-11-09: 9,400 rows, all NULL at insert).
     if segment_path:
-        segment_path = validate_segment_path(segment_path)
+        validate_segment_path(segment_path)
+        segment_path = absolute_segment_path(segment_path)
 
     from models import Recording
 
@@ -299,9 +326,9 @@ async def hook_segment_complete(
             duration_sec = None
 
     recording_id: int | None = None
+    file_size: int | None = None
     if cam and identity_ok:
         try:
-            file_size = None
             mtime = None
             try:
                 st = os.stat(segment_path)
@@ -409,6 +436,31 @@ async def hook_segment_complete(
         except Exception as e:
             # Log error but don't fail the webhook
             faststart_logger.error(f"Error storing recording: {e}")
+            db.rollback()
+
+        # Is the segment video? Bytes against duration says: a fat file that
+        # covers almost no time is a stream whose timestamps stopped (RTP
+        # clock wrap behind a relay, Ventuno Q 2026-11-09). The recording
+        # watchdog cannot see this — segments keep arriving — so it is judged
+        # here, where both numbers are, and published like a stall is.
+        try:
+            from services.segment_health import note_segment
+
+            transition = note_segment(db, cam, duration_sec, file_size)
+            if transition:
+                from services.event_bus_service import publish_camera_event
+
+                await publish_camera_event(
+                    camera_id=cam.id,
+                    event_type=transition["event_type"],
+                    payload={
+                        "state": transition["event_state"],
+                        "description": transition["description"],
+                        "camera_name": transition.get("camera_name"),
+                    },
+                )
+        except Exception as e:
+            faststart_logger.warning(f"Segment health check failed: {e}")
             db.rollback()
 
     # Mirror to cloud recording server if configured (with BYOK TLS support)

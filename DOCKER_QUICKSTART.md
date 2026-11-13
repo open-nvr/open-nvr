@@ -148,7 +148,7 @@ overlay using repeated `-f` flags and the overlay's `--profile`.
 | File | What it is | How to use |
 |---|---|---|
 | `docker-compose.yml` | **Core stack** — Postgres, MediaMTX, NATS, the YOLOv8 adapter, `opennvr-core` (backend + frontend + KAI-C), and nginx. | `docker compose -f docker-compose.yml up -d` |
-| `docker-compose.apps.yml` | **Detector apps overlay** — the example SDK apps (intrusion, loitering, LPR, …). Two of them — occupancy-counting and footage-search — are ON BY DEFAULT via `start.sh`/`start.ps1` (profile `default-apps`; they ride the always-on Tier-0 stream, no extra adapter/model/GPU; opt out with `OPENNVR_DEFAULT_APPS=off` in `.env`). | everything else: add `-f docker-compose.apps.yml --profile apps` |
+| `docker-compose.apps.yml` | **Detector apps overlay** — every App Catalog app (intrusion, loitering, LPR, …), each also under its own profile (`--profile license-plate-recognition` starts that app and its adapters alone — what the installer's app picker persists). Two of them — occupancy-counting and footage-search — are ON BY DEFAULT via `start.sh`/`start.ps1` (profile `default-apps`; neither needs an extra adapter, model or GPU — occupancy-counting rides the always-on Tier-0 stream, footage-search consumes nothing at all and just queries the event store; opt out with `OPENNVR_DEFAULT_APPS=off` in `.env`). | everything else: add `-f docker-compose.apps.yml --profile apps` |
 | `docker-compose.camera-agent.yml` | **Camera-agent overlay** — the voice/chat agent plus its Whisper/Piper/caption/Ollama adapters. | add `-f docker-compose.camera-agent.yml --profile camera-agent` (or `camera-agent-chat`) |
 | `docker-compose.installer.yml` | **App-installer** — the single privileged reconciler for one-click installs (holds the Docker socket). Opt-in only. | add `-f docker-compose.installer.yml --profile app-installer` |
 
@@ -165,13 +165,55 @@ docker compose -f docker-compose.yml down
 docker compose -f docker-compose.yml logs -f
 docker compose -f docker-compose.yml logs -f opennvr-core
 
-# Refresh to the latest published images
-docker compose -f docker-compose.yml pull
-docker compose -f docker-compose.yml up -d
-
 # Restart a single service after editing .env
 docker compose -f docker-compose.yml restart opennvr-core
 ```
+
+### Upgrading to a new release
+
+`.env` pins the images to a release (`CORE_TAG`, `ADAPTER_TAG`), so
+`docker compose pull` alone re-fetches the version you already run. A
+release also changes the compose files, so the checkout moves with it.
+Replace `X.Y.Z` with the release you are moving to, and read its
+**Upgrading** note in [`CHANGELOG.md`](CHANGELOG.md) first: some releases
+need a new `.env` value.
+
+```bash
+# 1. Back up the database. Dump inside the container and copy the file
+#    out (in PowerShell, never redirect pg_dump with ">": it corrupts it).
+docker exec opennvr_db sh -c 'pg_dump -U "$POSTGRES_USER" -Fc -d "$POSTGRES_DB" -f /tmp/opennvr.dump'
+docker cp opennvr_db:/tmp/opennvr.dump ./opennvr-before-X.Y.Z.dump
+
+# 2. Move the checkout to the release. Git refuses if you changed a
+#    tracked file; keep your change somewhere else first.
+git fetch --tags
+git checkout -B opennvr-release vX.Y.Z
+
+# 3. In .env, pin the images to that release:
+#      CORE_TAG=X.Y.Z
+#      ADAPTER_TAG=X.Y.Z
+
+# 4. Start it. Images are pulled and the database migrates on boot.
+./start.sh up            # Windows: .\start.ps1 up
+
+# 5. Once it is up, drop the previous release's image tags. Nothing
+#    removes them otherwise, and three releases fill a small disk.
+./start.sh prune
+```
+
+To go back, restore the dump into a stopped core, check out the previous
+tag and set the previous pins:
+`docker exec -i opennvr_db sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists' < opennvr-before-X.Y.Z.dump`
+(from bash; in PowerShell, `docker cp` the file into the container and
+restore from there).
+
+## Connect Home Assistant
+
+Once the stack is up: create an API token (*Settings → API Tokens*, the
+Home Assistant preset), add an **MQTT** integration in OpenNVR pointing at
+the broker Home Assistant uses, with discovery on — and Home Assistant
+lists every camera, zone and app as a device. Details, automations and
+troubleshooting: [docs/HOME_ASSISTANT_USER_GUIDE.md](docs/HOME_ASSISTANT_USER_GUIDE.md).
 
 ## Customisation
 

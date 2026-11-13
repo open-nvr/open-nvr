@@ -35,8 +35,9 @@ the JS client.
 """
 from __future__ import annotations
 
+import json
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 # Wrapped in try so the module remains importable in test environments
 # that don't have Pipecat installed.
@@ -47,11 +48,11 @@ try:  # pragma: no cover — import-time only
         OutputAudioRawFrame,
         StartFrame,
         TTSAudioRawFrame,
+        OutputTransportMessageFrame,
+        OutputTransportMessageUrgentFrame,
     )
-    from pipecat.serializers.base_serializer import (
-        FrameSerializer,
-        FrameSerializerType,
-    )
+    from pipecat.serializers.base_serializer import FrameSerializer
+    _MESSAGE_FRAMES: tuple = (OutputTransportMessageFrame, OutputTransportMessageUrgentFrame)
 except Exception:  # pragma: no cover
     # Test envs that haven't installed Pipecat get a no-op stub.
     Frame = object  # type: ignore
@@ -59,13 +60,11 @@ except Exception:  # pragma: no cover
     OutputAudioRawFrame = object  # type: ignore
     StartFrame = object  # type: ignore
     TTSAudioRawFrame = object  # type: ignore
+    _MESSAGE_FRAMES = ()
 
     class FrameSerializer:  # type: ignore
-        pass
-
-    class FrameSerializerType:  # type: ignore
-        BINARY = "binary"
-        TEXT = "text"
+        def __init__(self, *a, **k):
+            pass
 
 
 logger = logging.getLogger(__name__)
@@ -84,41 +83,43 @@ class RawPcmSerializer(FrameSerializer):
         output_sample_rate: int = 22050,
         num_channels: int = 1,
     ) -> None:
+        # FrameSerializer is a BaseObject (task manager, events) since 1.x.
+        super().__init__()
         self._input_sample_rate = input_sample_rate
         self._output_sample_rate = output_sample_rate
         self._num_channels = num_channels
 
-    @property
-    def type(self):  # type: ignore[override]
-        return FrameSerializerType.BINARY
-
-    async def setup(self, frame: "StartFrame") -> None:  # type: ignore[override]
-        # Honour the StartFrame's negotiated sample rates if Pipecat
-        # set them — keeps the serializer in sync with what the
-        # transport actually plumbed through.
-        #
-        # Field names pinned to pipecat-ai 0.0.5x — if upstream
-        # renames ``audio_in_sample_rate`` / ``audio_out_sample_rate``
-        # in a future release, the getattr() silently falls back to
-        # the constructor defaults and audio still flows at the
-        # original rates. Bump this when you bump Pipecat.
-        rate_in = getattr(frame, "audio_in_sample_rate", None)
-        rate_out = getattr(frame, "audio_out_sample_rate", None)
+    async def setup(self, setup: Any) -> None:  # type: ignore[override]
+        # Honour the pipeline's negotiated sample rates (1.x hands the
+        # serializer a FrameProcessorSetup with audio_in/out rates;
+        # earlier releases passed the StartFrame — both carry the same
+        # two fields). The getattr() falls back to the constructor
+        # defaults if the fields move again.
+        try:
+            await super().setup(setup)
+        except Exception:  # pragma: no cover — stub base in test envs
+            pass
+        rate_in = getattr(setup, "audio_in_sample_rate", None)
+        rate_out = getattr(setup, "audio_out_sample_rate", None)
         if isinstance(rate_in, int) and rate_in > 0:
             self._input_sample_rate = rate_in
         if isinstance(rate_out, int) and rate_out > 0:
             self._output_sample_rate = rate_out
 
-    async def serialize(self, frame: "Frame") -> Optional[bytes]:  # type: ignore[override]
-        # Only audio gets serialised onto the wire. Everything else
-        # (system frames, LLM text frames, control frames) is
-        # consumed entirely server-side — the demo browser doesn't
-        # render transcripts. A production UI would extend this.
+    async def serialize(self, frame: "Frame"):  # type: ignore[override]
         if isinstance(frame, (TTSAudioRawFrame, OutputAudioRawFrame)):
             audio = getattr(frame, "audio", None)
             if not isinstance(audio, (bytes, bytearray)) or not audio:
                 return None
             return bytes(audio)
+        # Audio goes out as bytes. Transport messages (services.StreamEvents:
+        # transcript, reply sentences, turn and speaking state, interruptions)
+        # go out as JSON TEXT frames; the page tells them apart by frame type.
+        if _MESSAGE_FRAMES and isinstance(frame, _MESSAGE_FRAMES):
+            try:
+                return json.dumps(getattr(frame, "message", None))
+            except (TypeError, ValueError):
+                return None
         return None
 
     async def deserialize(self, data) -> Optional["Frame"]:  # type: ignore[override]

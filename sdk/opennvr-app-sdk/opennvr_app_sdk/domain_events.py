@@ -105,5 +105,31 @@ class DomainEventPublisher:
         )
         return self._channel.publish_json(subject, envelope)
 
+    def publish_typed(self, payload: Any, *, camera_id: str,
+                      correlation_id: str | None = None) -> bool:
+        """Publish a typed payload (``event_types``): the schema is the
+        class's, the wire payload is ``to_payload()``."""
+        from .event_types import is_typed_payload
+
+        if not is_typed_payload(payload):
+            raise TypeError(f"publish_typed needs a typed event payload, got {type(payload).__name__}")
+        return self.publish(type(payload).SCHEMA, camera_id=camera_id,
+                            payload=payload.to_payload(), correlation_id=correlation_id)
+
+    def publish_overlay(self, camera_id: str, boxes: list[dict[str, Any]], *,
+                        frame: dict[str, int] | None = None,
+                        seq: int | None = None) -> bool:
+        """Ask core to draw ``boxes`` over ``camera_id``'s live video.
+
+        Sugar over ``publish_typed(OverlayBoxes(...))``. Drawn only if the
+        operator enabled this app's overlay in the App Catalog; otherwise
+        the event is published and ignored, so an app can call this
+        unconditionally. Never raises on bus trouble."""
+        from .event_types import OverlayBoxes
+
+        return self.publish_typed(
+            OverlayBoxes(boxes=list(boxes), frame=frame, seq=seq),
+            camera_id=camera_id)
+
     def close(self) -> None:
         self._channel.close()

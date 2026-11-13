@@ -1,0 +1,26 @@
+# Build + sign the catalog image through OpenNVR's build-from-source
+# workflow. It checks out THIS repository at the pushed ref, builds the
+# Dockerfile for amd64 + arm64, pushes ghcr.io/open-nvr/__APP_ID__ and
+# signs the digest (Sigstore keyless). The job summary prints the
+# ``image_digest:`` line for the listing entry.
+#
+# Runs on every push to main and every v* tag. Requires this repository
+# to live under the open-nvr organisation (the workflow refuses others).
+name: publish
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    uses: open-nvr/open-nvr/.github/workflows/build-catalog-app.yml@main
+    with:
+      app_id: __APP_ID__
+      title: __APP_NAME__
+    permissions:
+      contents: read
+      packages: write
+      id-token: write

@@ -1,169 +1,102 @@
-# Intrusion-detection example app
+# Intrusion Detection
 
-The first first-party OpenNVR example app per §12 of the [AI Adapter Contract](../../docs/AI_ADAPTER_CONTRACT.md). Watches one or more cameras for persons/vehicles entering operator-defined restricted zones during operator-defined restricted hours, and fires alerts to stdout and (optionally) a webhook.
+The perimeter alarm. A drawn zone is **armed** — on a schedule, around
+the clock, or on command — and when a watched class enters it the site
+goes to **alarm**: the fence line at night, the yard behind the shutter,
+the plant room, the roof, the bay that should be empty after the last
+shift.
 
-This is also the canonical **consumer-side** validation of the contract: every previous milestone built producer-side surface (adapters, KAI-C registry, audit, sovereignty). This example proves the whole chain works end-to-end as an operator-facing artifact.
-
-## What it does
-
-```
-┌──────────┐  every poll_interval_seconds
-│  Camera  │ ─────────────────────────────┐
-└──────────┘                              │
-                                          ▼
-                              ┌──────────────────────┐
-                              │ frame_sources.fetch  │  file:// or http(s)://
-                              └──────────┬───────────┘
-                                         │ raw JPEG bytes
-                                         ▼
-                              ┌──────────────────────┐
-                              │   KAI-C call         │  kaic_transport=http:
-                              │                      │    POST /api/v1/infer/
-                              │   (HTTP or WS,       │      {adapter}
-                              │    selected via      │  kaic_transport=ws:
-                              │    kaic_transport    │    WS /api/v1/infer/
-                              │    config field)     │      {adapter}/stream
-                              │                      │      (persistent, per-camera)
-                              │  X-Correlation-Id    │  Headers in both modes.
-                              │  X-Internal-Api-Key  │
-                              └──────────┬───────────┘
-                                         │ §5.1 DetectionResult
-                                         ▼
-                              ┌──────────────────────┐
-                              │ filter watch_labels  │
-                              │ → bbox_center        │
-                              │ → zone.contains?     │
-                              │ → restricted_hours?  │
-                              └──────────┬───────────┘
-                                         │ yes
-                                         ▼
-                              ┌──────────────────────┐
-                              │  AlertDispatcher     │  stdout (always)
-                              │                      │  + webhook (optional)
-                              │                      │  + NATS (optional)
-                              └──────────────────────┘
-```
-
-Every alert carries a `correlation_id` that joins back to KAI-C's audit log — an operator investigating an incident can pull the full causal chain: the alert → the KAI-C inference event → the adapter's audit line.
-
-**Alert fan-out via NATS**: set `nats_alerts_url` in `config.yml` to also publish each alert as JSON onto a NATS subject — `opennvr.alerts.{source.kind}.{source.name}.{camera_id}`, e.g. `opennvr.alerts.app.intrusion-detection.cam-front-door`. Downstream consumers (operator UI inbox, SIEM, Slack bridges) subscribe via wildcards like `opennvr.alerts.>` and fan out from one publish. See `examples/alerts-subscriber/` for the canonical consumer template, and the [§11.5.1 contract entry](../../docs/AI_ADAPTER_CONTRACT.md) for the full subject scheme and payload format.
-
-## Operational notes
-
-**Polling is serial across cameras.** With N cameras and per-camera inference latency L, the cycle takes ~N×L. If `request_timeout_seconds` (default 30s) is much greater than `poll_interval_seconds` (default 1s), one slow inference blocks the whole loop for the timeout. For N > ~10 cameras or when sub-second responsiveness matters, parallel polling is a planned follow-up.
-
-**Fail-fast on bad camera URLs.** `IntrusionDetector.__init__` raises on the first unsupported `frame_url`, so a single typo aborts startup before any detection runs. Operator notices the typo immediately rather than silently losing one camera in a fleet of ten — but the trade-off is real, so review the full config before deploying.
-
-**Restricted hours use the host timezone.** `datetime.now()` picks up the host TZ. DST transitions can cause one duplicated or skipped hour per year — operators in TZ-sensitive deployments should pin the container to UTC and translate their restricted-hours window accordingly.
-
-**Webhook payloads include topology metadata.** The §11.5 alert shape carries `correlation_id`, adapter name, model version, and camera_id. If the webhook URL is compromised (or pointed at an untrusted destination via config tampering), the attacker learns internal deployment topology. Treat the config file as a sensitive secret; restrict its filesystem permissions accordingly.
-
-## What's NOT in v1
-
-- **RTSP stream input** — only HTTP snapshot polling. RTSP needs an ffmpeg subprocess; planned follow-up.
-- **WebSocket streaming through KAI-C** — **available as opt-in via** `kaic_transport: ws` in config. KAI-C's WS proxy (`/api/v1/infer/{adapter}/stream`) bridges this example to the adapter's §6 streaming endpoint. Each camera holds one persistent WebSocket; per-frame latency drops from ~poll_interval to ~adapter inference time (~30-50 ms for YOLOv8 on CPU). HTTP polling stays the default for back-compat — most security-camera use cases don't need sub-second alerts.
-- **Tracking / persistence across frames** — every cycle is independent. Same person standing in a zone for 60s fires 60 alerts (unless you ack/snooze in the receiving system).
-- **Adapter discovery / multi-camera-per-adapter routing** — `kaic_adapter_name` is single-valued in config. Multi-adapter fanout is a planned follow-up.
-- **OpenNVR alerts API integration** — webhook + stdout for v1. Native OpenNVR alerts-inbox integration is a planned follow-up.
-
-## Quick start
-
-```bash
-# 1. Build & run the YOLOv8 adapter (the example talks to it via KAI-C).
-#    The Dockerfile ships in ai-adapter/adapters/yolov8/.
-cd ai-adapter
-docker build -f adapters/yolov8/Dockerfile -t opennvr/yolov8-adapter:local .
-docker run --rm -d --name yolov8 -p 9002:9002 \
-  -e OPENNVR_ADAPTER_TOKEN=$(openssl rand -hex 16) \
-  -v $(pwd)/model_weights:/weights:ro \
-  opennvr/yolov8-adapter:local
-
-# 2. Run KAI-C from source (a versioned image is a planned follow-up).
-#    Either `python -m uvicorn main:app --port 8100`
-#    from the kai-c/ directory, or build a local image from kai-c/Dockerfile.
-cd ../open-nvr/kai-c
-export INTERNAL_API_KEY=$(openssl rand -hex 32)
-AI_SOVEREIGNTY=local_only INTERNAL_API_KEY=$INTERNAL_API_KEY \
-  python -m uvicorn main:app --host 0.0.0.0 --port 8100 &
-
-# 3. Register the adapter with KAI-C
-curl -X POST http://localhost:8100/api/v1/adapters/register \
-  -H "X-Internal-Api-Key: $INTERNAL_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"name":"yolov8","url":"http://127.0.0.1:9002"}'
-
-# 4. Configure + run the intrusion detector
-cd ../examples/intrusion-detection
-cp config.example.yml config.yml
-# edit config.yml: kaic_api_key, camera frame_url, zone, restricted_hours
-python intrusion_detection.py --config config.yml
-```
-
-You'll see lines like:
+It is built on the vocabulary every operator already knows from an
+intrusion panel, not on a bare time window:
 
 ```
-2026-05-19T14:32:18+00:00 INFO intrusion-detection: intrusion-detection started: 2 cameras, poll=1.0s, watch=['person', 'car'], hours=22:00:00-06:00:00
-ALERT [HIGH] 2026-05-19T22:14:07+00:00 camera=cam-front-gate title='Person in restricted zone \'front-yard-restricted\'' correlation_id=a4f1b... alert_id=alrt_8c2d31
+disarmed ──arm──▶ arming (exit delay) ──▶ armed
+                                            │ watched class in the zone,
+                                            │ present min_presence_seconds
+                                            ▼
+                                       breach (entry delay, counting down)
+                                            │ still there when it expires
+                                            ▼
+                                          alarm ──▶ re-arms after
+                                                    alarm_reset_seconds
 ```
 
-## Config
+It rides the detection stream the platform already produces (Tier-0):
+no extra model, no GPU, and detections arrive at the detector's rate
+rather than a poll interval — an intruder who crosses the zone between
+two polls is no longer missed.
 
-Copy `config.example.yml` and edit. Required: `kaic_url`, `cameras` (with `camera_id`, `frame_url`, `zone`). See the config file's inline comments for every field.
+## What you get
 
-## Operate
-
-| Mode | Command |
+| | |
 |---|---|
-| Daemon (production) | `python intrusion_detection.py --config config.yml` |
-| One cycle per camera then exit (testing) | `python intrusion_detection.py --config config.yml --once` |
-| Verbose | `python intrusion_detection.py --config config.yml --log-level DEBUG` |
+| **Arming, four ways** | `arm_mode` is `schedule` (armed inside `armed_hours` — the classic restricted hours, cross-midnight allowed), `always`, `manual` (only the buttons move it), or `off` (watch and report, never alarm). |
+| **Exit and entry delay** | `exit_delay_seconds` is the grace after arming, time to walk out. `entry_delay_seconds` is the grace between the breach and the alarm, time to be recognised or to disarm — the Perimeter page shows the countdown. Both 0 makes the perimeter instant, which is what a fence line wants. |
+| **Presence filter** | `min_presence_seconds` ignores a box that clips the zone edge for a frame. With tracking underneath it, this is what separates a perimeter alarm from a motion sensor. |
+| **One intruder, one alarm** | A breach belongs to a tracked object, so a person standing in the zone raises one alarm, not one per frame. `alarm_cooldown_seconds` merges a group coming over the fence into a single alarm per camera. |
+| **Escalation** | Still inside `escalate_after_seconds` after the alarm: `intrusion-escalated`, one severity step higher — the "they are not leaving" signal a monitoring desk acts on differently. |
+| **Bypass and override** | Bypass a camera for a stated number of minutes (contractors in the yard) — it stays on the page as *bypassed* rather than silently ignored, and un-bypasses itself. A manual arm/disarm holds for `override_minutes` and then the mode takes over again, so "disarm for the delivery" cannot be forgotten forever. |
+| **Operator actions** | Arm, Disarm, Bypass, Acknowledge (clear the alarm and re-arm without waiting for the reset timer), and Back to schedule — from the Perimeter page or any API client. |
+| **Verification** | Every alarm carries a snapshot from the camera, the track id, the class, how long they had been inside, the zone, and the model fingerprint. |
+| **Dashboard** | Cameras armed, cameras in alarm, breaches and alarms today, a per-camera state pill with its countdown, who is inside right now with their stage, and the app's alarms with their snapshots. |
 
-Send `SIGINT` (Ctrl-C) or `SIGTERM` to stop cleanly — the detector finishes its current cycle and exits.
+## Install
 
-## Layout
-
-```
-examples/intrusion-detection/
-├── intrusion_detection.py  Main loop + IntrusionDetector class + CLI
-├── zone.py                 Point-in-polygon (ray-cast) + bbox_center
-├── alerts.py               Alert dataclass + stdout/webhook channels
-├── frame_sources.py        file://, http(s):// — pluggable
-├── config.example.yml      Sample config with every option
-├── Dockerfile              Drop-in run-this
-├── pyproject.toml          Minimal deps (httpx, PyYAML, websockets)
-├── README.md               you are here
-└── tests/
-    ├── test_zone.py                  (11 tests)
-    ├── test_alerts.py                (12 tests)
-    ├── test_frame_sources.py         (14 tests)
-    ├── test_intrusion_detection.py   (19 tests)
-    └── test_ws_mode.py               (12 tests)
-```
-
-## Tests
+Pick the app in the installer, or:
 
 ```bash
-uv pip install -e ".[dev]"          # or: pip install -e ".[dev]"
-PYTHONPATH=. pytest tests/
+docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile intrusion-detection up -d
 ```
 
-68 tests total. Coverage: zone math (convex + concave + edge cases), alert routing (stdout + webhook + failure isolation), frame sources (file + HTTP + transport errors + unsupported schemes), and the full `IntrusionDetector.step()` loop with a stubbed KAI-C (alert paths, no-alert paths, restricted-hours edges, KAI-C errors, correlation_id threading).
+Then **App Catalog → Intrusion Detection → Configure**: tick the
+cameras, draw the zone on each (nothing drawn = the whole frame, and the
+page says so), choose the arm mode and hours, save. Everything applies
+live; nothing restarts. The **Perimeter** page appears under
+Applications as soon as the app is enabled.
 
-## Why this is a template
+## Tuning
 
-If you want to build a new monitoring app for OpenNVR — package detection, loitering detection, PPE compliance, fall detection, fire/smoke — copy this directory. Replace:
+| Place | Settings | Notes |
+|---|---|---|
+| Fence line, roof, plant room | `exit_delay: 0`, `entry_delay: 0`, `min_presence_seconds: 1` | Nobody arrives through a door. Instant alarm. |
+| Yard behind the shutter | `arm_mode: schedule`, `armed_hours: 19:00–07:00`, `entry_delay: 20` | Twenty seconds for the late shift to be recognised or to disarm. |
+| Loading bay, back office | `exit_delay: 45`, `entry_delay: 30`, `override_minutes: 60` | The panel pattern: arm on the way out, disarm on the way in. |
+| Long perimeter with a road behind it | `min_bbox_height: 0.1`, `watch_labels: [person]` | Drops far traffic and birds before anything else runs. |
 
-- `zone.py` with whatever spatial logic your task needs (line crossings? heatmaps? bounding-region intersection?)
-- The detection-filter logic in `IntrusionDetector.step()` with your task-specific predicate
-- Watch-labels + alert title/description for your domain
+Start with `min_presence_seconds` if you are getting false alarms and
+`entry_delay_seconds` if you are getting true ones you would rather
+handle yourself. Watch a night on `arm_mode: off` first — the page still
+counts breaches, so you can see what *would* have alarmed before you
+arm anything.
 
-Everything else — KAI-C call, correlation_id, audit trail, alert dispatch, frame fetching, config loading, SIGINT handling — is the same template.
+## How it decides
 
-The OpenNVR examples directory is structured as a first-class community contribution lane: anything that fits this template is welcome. Submit a PR adding your example under `examples/{your-slug}/` and you join the catalogue.
+Each camera holds one state. `tick()` runs every second on the wall
+clock and advances it: exit delays expire into `armed`, entry delays
+expire into `alarm`, an alarm escalates, a zone clear for
+`alarm_reset_seconds` returns to `armed`, bypasses and manual overrides
+expire on their own.
 
-## Roadmap
+Detections come in per `(camera, track_id)`. An object whose box centre
+sits inside the zone starts a presence clock; once it passes
+`min_presence_seconds` on an armed camera it is a breach, and the breach
+belongs to that track until it leaves. Tier-0 sends nothing for frames
+with no detections, so an emptying zone is silent — the wall-clock sweep
+in `tick()` is what notices the last intruder left, after
+`track_ttl_seconds`.
 
-- RTSP input via ffmpeg subprocess
-- OpenNVR backend snapshot URL (`opennvr://cameras/{id}/snapshot`)
-- Native OpenNVR alerts-API integration (replace webhook for OpenNVR deployments)
-- Per-detection deduplication (so a stationary person doesn't fire continuously)
+Identity is what makes one-alarm-per-intruder well-defined, so the stock
+config consumes Tier-0 (`consume_tier0: true`, subject
+`opennvr.inference.tier0.>`), which tracks. Without a `track_id` the app
+degrades to one presence per `(camera, label)` with a one-time warning.
+
+## Standalone
+
+```bash
+cp config.example.yml config.yml   # nats_url, cameras with pixel zones
+uv sync && uv run intrusion-detection --config config.yml
+uv run pytest
+```
+
+`config.example.yml` documents every key. With `opennvr_url` set and no
+`cameras:` list, cameras and zones come from the App Catalog.

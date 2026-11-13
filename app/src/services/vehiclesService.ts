@@ -23,11 +23,15 @@ import { api } from '../lib/api'
 // best-frame evidence photo — plus the aggregates endpoint for the
 // stat tiles. Owner-scoped server-side, same rule as everything else.
 export const vehiclesService = {
+  // The response is { events, count, total }: `count` is this page's
+  // length and `total` is how many reads match the filters, for the
+  // pager. `skip`/`limit` are the server's paging pair.
   getPlateEvents: (params: {
     plate?: string
     camera_id?: number
     from?: string
     to?: string
+    skip?: number
     limit?: number
   }) => api.get('/api/v1/events', { params: { has_plate: true, ...params } }),
 
@@ -64,8 +68,43 @@ export const vehiclesService = {
   getVehicleReport: (year: number, month: number) =>
     api.get('/api/v1/events/vehicle-report', { params: { year, month } }),
 
+  // Vehicles seen per camera per hour (or day) over the last `hours`,
+  // by type and colour — the count / type / colour report.
+  getVehicleCounts: (hours: number, bucket: 'hour' | 'day', cameraIds?: number[]) =>
+    api.get('/api/v1/events/vehicle-counts', {
+      params: { hours, bucket, camera_id: (cameraIds ?? []).join(',') },
+    }),
+
   // Evidence photos are auth-gated (JWT header), so a bare <img src>
   // can't load them — fetch as a blob and objectURL it (AuthedImage).
-  getEventEvidence: (eventId: number) =>
-    api.get(`/api/v1/events/${eventId}/evidence`, { responseType: 'blob' }),
+  //
+  // All four take an optional AbortSignal, which AuthedImage feeds from
+  // react-query. Without it an abandoned request — a row scrolled away,
+  // a filter changed mid-flight — still runs to completion on the
+  // server, holding a connection for a picture nobody will look at.
+  getEventEvidence: (eventId: number, signal?: AbortSignal) =>
+    api.get(`/api/v1/events/${eventId}/evidence`, { responseType: 'blob', signal }),
+
+  // The crop the PLATE was read from (#382). Multi-frame OCR reads
+  // candidate crops, not the vehicle-best frame, so this is the only
+  // image that actually shows the plate the row is captioned with.
+  // 404s when the read came from the evidence frame itself or predates
+  // the column — callers fall back to getEventEvidence.
+  getEventPlateEvidence: (eventId: number, signal?: AbortSignal) =>
+    api.get(`/api/v1/events/${eventId}/plate-evidence`, { responseType: 'blob', signal }),
+
+  // The WHOLE frame the vehicle crop was cut from. /evidence is framed
+  // for the subject — detection box plus a quarter-box margin — so it
+  // cannot show the lane, the gate, or what the car was next to. 404s
+  // for rows written before Tier-0 started sending it; callers fall
+  // back to getEventEvidence.
+  getEventSceneEvidence: (eventId: number, signal?: AbortSignal) =>
+    api.get(`/api/v1/events/${eventId}/scene-evidence`, { responseType: 'blob', signal }),
+
+  // The frame the plate crop was cut from. /evidence and
+  // /scene-evidence show the visit's best-thumbnail moment, which can
+  // be a DIFFERENT car when track association merged two vehicles into
+  // one visit; this is the vehicle the number actually belongs to.
+  getEventPlateFrame: (eventId: number, signal?: AbortSignal) =>
+    api.get(`/api/v1/events/${eventId}/plate-frame`, { responseType: 'blob', signal }),
 }

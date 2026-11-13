@@ -11,7 +11,8 @@
 # so they need a pre-built image that just `cp`s a known-good ONNX
 # into the weights volume. This workflow builds that image.
 #
-# The image is ~20 MB (alpine:3.20 base + yolov8n.onnx). Multi-stage
+# The image is ~20 MB (alpine:3.20 base + yolo26n.onnx; the image keeps
+# its yolov8 name because the adapter and the decode are the YOLOv8 ones). Multi-stage
 # build pulls ultralytics/ultralytics:8.3.40 to do the export, then
 # discards everything but the ONNX. Same Ultralytics tag the default
 # Tier 0 init container pins to, so adapter conformance kit results
@@ -52,9 +53,9 @@ on:
         # YOLOV8_WEIGHTS_IMAGE default (v8.3.0), so the workflow's
         # published image and the operator-facing compose
         # reference stay in lockstep automatically.
-        description: "YOLOv8 weights release tag (e.g. 8.3.0)"
+        description: "Image tag after the v: <ultralytics assets release>-<model> (e.g. 8.4.0-yolo26n)"
         required: false
-        default: "8.3.0"
+        default: "8.4.0-yolo26n"
 
 jobs:
   build:
@@ -118,7 +119,7 @@ jobs:
           # aligned with the YOLOV8_WEIGHTS_IMAGE default in
           # docker-compose.tier0.yml so operators get the image
           # their compose file expects.
-          WEIGHTS_TAG="${{ github.event.inputs.weights_tag || '8.3.0' }}"
+          WEIGHTS_TAG="${{ github.event.inputs.weights_tag || '8.4.0-yolo26n' }}"
           # On a tagged OpenNVR release, also publish :latest.
           if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
             EXTRA="ghcr.io/${{ github.repository_owner }}/yolov8-weights:latest"
@@ -153,7 +154,7 @@ jobs:
           # default Tier 0 init container uses, so the resulting
           # .onnx is byte-identical to what the export path produces.
           build-args: |
-            YOLOV8_PT_URL=https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n.pt
+            YOLOV8_PT_URL=https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26n.pt
           # BuildKit caching — Ultralytics base image is ~3 GB and
           # rarely changes between OpenNVR releases. GHA's cache
           # backend makes the second build ~30 sec instead of ~5 min.
@@ -170,7 +171,7 @@ jobs:
           docker pull "${{ steps.tags.outputs.primary }}"
           # Extract the .onnx and check its size + magic bytes.
           docker run --rm --entrypoint sh "${{ steps.tags.outputs.primary }}" \
-              -c 'wc -c < /yolov8n.onnx && head -c 4 /yolov8n.onnx | xxd | head -1'
+              -c 'wc -c < /yolo26n.onnx && head -c 4 /yolo26n.onnx | xxd | head -1'
           # ONNX files start with `\x08\x07` (protobuf varint for
           # ir_version field). If the file is empty or HTML (404
           # page), this dump will look obviously wrong.

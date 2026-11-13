@@ -42,3 +42,32 @@ export function rebaseToCurrentOrigin(url: string | undefined): string | undefin
     return url
   }
 }
+
+/**
+ * Resolve the WHEP session URL from the POST response's Location header.
+ *
+ * MediaMTX answers with a path relative to its own root
+ * (/cam-1/whep/<session>), but the browser reaches it through a proxy
+ * that strips a prefix (nginx and the Vite dev proxy both map
+ * /webrtc/cam-1/whep → /cam-1/whep). Used as-is, the Location resolves
+ * to /cam-1/whep/<session> on the SPA origin, which is core, not
+ * MediaMTX: the teardown DELETE gets a 405 and the session lingers until
+ * MediaMTX's ICE timeout. Put the stripped prefix back by matching the
+ * session's parent path against the tail of the URL we POSTed to.
+ */
+export function resolveWhepSessionUrl(location: string | null, whepUrl: string): string | null {
+  if (!location) return null
+  try {
+    const base = new URL(whepUrl, typeof window === 'undefined' ? undefined : window.location.origin)
+    if (location.startsWith('/') && !location.startsWith('//')) {
+      const parent = location.slice(0, location.lastIndexOf('/'))
+      const whepPath = base.pathname.replace(/\/+$/, '')
+      if (parent && whepPath.endsWith(parent)) {
+        return new URL(whepPath.slice(0, whepPath.length - parent.length) + location, base).toString()
+      }
+    }
+    return new URL(location, base).toString()
+  } catch {
+    return null
+  }
+}

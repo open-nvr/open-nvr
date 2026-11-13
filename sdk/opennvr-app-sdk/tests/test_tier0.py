@@ -150,3 +150,21 @@ def test_bridge_skips_malformed_tracks():
                               {"label": "car", "box": [0, 0, 960, 540]}])
     dets = tier0_to_detections(ev)
     assert [d["label"] for d in dets] == ["car"]
+
+
+@pytest.mark.asyncio
+async def test_latest_frame_fetch_asks_for_the_newest_decoded_frame():
+    from opennvr_app_sdk import make_latest_frame_fetch
+    seen = {}
+
+    async def http_get(url):
+        seen["url"] = url
+        return (200, b"LIVE") if "camera=7" in url else (404, b"")
+
+    fetch = make_latest_frame_fetch("http://tier0:9109/", resolve_camera=lambda c: "7",
+                                    http_get=http_get, max_age_s=2.5)
+    assert await fetch("front") == b"LIVE"
+    assert seen["url"] == "http://tier0:9109/latest_frame?camera=7&max_age=2.5"
+    client = BestFrameClient("http://t:9109", http_get=http_get)
+    assert await client.fetch_latest("front") is None      # 404: stale or unknown → the caller's own grab
+

@@ -110,6 +110,18 @@ class InferenceCompletedEvent(BaseModel):
         default=None,
         description="Operator-supplied camera identifier, if any.",
     )
+    track_id: int | None = Field(
+        default=None,
+        description="Tier-0 track the request was about, when Tier-1 "
+                    "dispatch sent it (echoed from the request, never "
+                    "interpreted). Joins the result back to the person or "
+                    "vehicle the pipeline is following.",
+    )
+    label: str | None = Field(
+        default=None,
+        description="Tier-0 class of that track (e.g. 'person'), echoed "
+                    "like track_id.",
+    )
     model_name: str = Field(description="Model name from the §3.5 InferResponse.")
     model_version: str = Field(description="Model version from the §3.5 InferResponse.")
     model_fingerprint: str | None = Field(

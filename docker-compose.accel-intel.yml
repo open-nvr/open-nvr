@@ -1,0 +1,52 @@
+# ==========================================
+# OpenNVR Accelerate — Intel flavour (iGPU decode, OpenVINO detector on NPU/iGPU)
+# ==========================================
+# start.sh adds this overlay when OPENNVR_ACCEL=intel, or on `auto` when it
+# finds an Intel render node. It swaps detect-pipeline and the ONNX adapters
+# for their ``-intel`` images (same code; carry the Intel VA-API, OpenCL and
+# NPU user-space), passes the devices through, and sets the device defaults.
+#
+# THIS FILE OVERRIDES ONLY SERVICES OF docker-compose.yml. The adapters that
+# docker-compose.apps.yml defines (pose, plates, faces, packages) are in
+# docker-compose.accel-intel-apps.yml, which start.sh appends only when that
+# file is in the set: an override of a service no file defines has no
+# image, and Compose 2.24 rejects the whole project for it.
+#
+# Running compose by hand instead of start.sh? Export the three DETECT_*
+# values below (or set them in .env) — an .env that still says
+# DETECT_HWACCEL=cpu wins over the defaults here, by compose's rules.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.accel-intel.yml \
+#       [-f docker-compose.accel-intel-npu.yml] up -d
+#
+# The NPU device is a separate overlay (accel-intel-npu.yml) because compose
+# refuses to start when a listed device is absent, and N100-class boxes have
+# the iGPU but no NPU.
+services:
+  detect-pipeline:
+    image: ${DETECT_PIPELINE_IMAGE:-ghcr.io/open-nvr/detect-pipeline:${CORE_TAG:-latest}-intel}
+    devices:
+      - /dev/dri:/dev/dri
+    environment:
+      - DETECT_HWACCEL=${DETECT_HWACCEL:-vaapi}
+      - DETECT_HWACCEL_DEVICE=${DETECT_HWACCEL_DEVICE:-/dev/dri/renderD128}
+      - DETECT_ONNX_BACKEND=${DETECT_ONNX_BACKEND:-ort}
+      # The iGPU; docker-compose.accel-intel-npu.yml overrides this to the
+      # NPU when the host has one. Pinned rather than AUTO: AUTO warms up on
+      # CPU and can stay there (measured: NPU 7.4 ms, iGPU 7.7, AUTO 17.0).
+      - DETECT_ONNX_PROVIDERS=${DETECT_ONNX_PROVIDERS:-OpenVINOExecutionProvider:GPU}
+  opennvr-core:
+    environment:
+      - DETECT_HWACCEL=${DETECT_HWACCEL:-vaapi}
+  # ── The always-on object-detection adapter (ai-adapter -intel flavour):
+  # OpenVINO on the iGPU. It follows YOLOV8_ONNX_PROVIDERS, then the shared
+  # ADAPTER_ONNX_PROVIDERS, then the iGPU (proven; docs/HARDWARE.md "What
+  # runs where"). An accelerator that cannot start falls back to CPU inside
+  # the adapter and /hardware/evaluation says so — a wrong value here never
+  # crashes a service. The other adapters: docker-compose.accel-intel-apps.yml.
+  yolov8-adapter:
+    image: ghcr.io/open-nvr/yolov8-adapter:${ADAPTER_TAG:-latest}-intel
+    devices:
+      - /dev/dri:/dev/dri
+    environment:
+      - ADAPTER_ONNX_PROVIDERS=${YOLOV8_ONNX_PROVIDERS:-${ADAPTER_ONNX_PROVIDERS:-OpenVINOExecutionProvider:GPU}}

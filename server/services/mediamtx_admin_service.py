@@ -40,6 +40,9 @@ This service maps our CameraConfig into PathConf fields and handles RTSP stream 
 NOTE: All public methods are async — callers must await them.
 """
 
+import re
+import threading
+import time
 from typing import Any
 
 import httpx
@@ -53,6 +56,139 @@ from utils.url_redaction import redact_url_credentials
 
 # Shared timeout for all MediaMTX Admin API calls (seconds)
 _TIMEOUT = httpx.Timeout(10.0)
+# /v3/paths/list paging: 1000 paths (500 cameras) per request, and a ceiling
+# so a misbehaving server can't keep the loop going forever.
+_PATHS_PAGE_SIZE = 1000
+_PATHS_MAX_PAGES = 50
+
+_DURATION_DAY_PREFIX = re.compile(r"^(-?[0-9]+)d")
+_DURATION_PART = re.compile(r"([0-9]+(?:\.[0-9]*)?|\.[0-9]+)(ns|us|\u00b5s|ms|s|m|h)")
+_DURATION_UNITS_NS = {
+    "ns": 1,
+    "us": 1_000,
+    "\u00b5s": 1_000,
+    "ms": 1_000_000,
+    "s": 1_000_000_000,
+    "m": 60_000_000_000,
+    "h": 3_600_000_000_000,
+}
+_MAX_DURATION_NS = (1 << 63) - 1
+_MIN_DURATION_NS = -(1 << 63)
+# Keep fractional parsing bounded consistently with the browser validator and
+# below Python's default integer-string conversion limit.
+_MAX_DURATION_FRACTION_DIGITS = 1_000
+_DURATION_FIELDS = (
+    "recordSegmentDuration",
+    "recordPartDuration",
+    "sourceOnDemandStartTimeout",
+    "sourceOnDemandCloseAfter",
+)
+
+
+def _parse_mediamtx_duration_ns(value: Any) -> int:
+    """Parse MediaMTX v1.15.4 duration syntax to signed 64-bit nanoseconds.
+
+    MediaMTX adds an optional integer-day prefix to Go's time.ParseDuration
+    syntax. Empty strings and zero are valid zero durations; negative values
+    are also accepted by the parser. Day prefixes whose nanosecond value is
+    outside int64 are rejected deliberately: MediaMTX v1.15.4's day arithmetic
+    can overflow because it ignores ParseInt errors and multiplies unchecked.
+    This keeps the accepted API range safe and identical in the UI and backend.
+    """
+    if value is None:
+        return 0
+    if not isinstance(value, str):
+        raise ValueError("must be a duration string")
+    if value == "" or value in {"0", "+0", "-0"}:
+        return 0
+
+    negative_days = False
+    days_ns = 0
+    day_match = _DURATION_DAY_PREFIX.match(value)
+    if day_match:
+        try:
+            days = int(day_match.group(1))
+        except ValueError as exc:
+            raise ValueError("contains an invalid day value") from exc
+        negative_days = days < 0
+        days_ns = abs(days) * 86_400_000_000_000
+        if days_ns > _MAX_DURATION_NS:
+            raise ValueError("exceeds the supported duration range")
+        value = value[day_match.end():]
+
+    if not value:
+        parsed_ns = 0
+    else:
+        sign = 1
+        if value.startswith(("+", "-")):
+            if value[0] == "-":
+                sign = -1
+            value = value[1:]
+        if not value:
+            raise ValueError("has invalid duration syntax or units")
+        if value == "0":
+            parsed_ns = 0
+        else:
+            parsed_ns = 0
+            position = 0
+            while position < len(value):
+                match = _DURATION_PART.match(value, position)
+                if match is None:
+                    raise ValueError("has invalid duration syntax or units")
+                whole, _, fraction = match.group(1).partition(".")
+                if len(fraction) > _MAX_DURATION_FRACTION_DIGITS:
+                    raise ValueError(
+                        f"fraction exceeds {_MAX_DURATION_FRACTION_DIGITS} digits"
+                    )
+                try:
+                    amount = int(whole or "0") * _DURATION_UNITS_NS[match.group(2)]
+                    if fraction:
+                        amount += int(fraction) * _DURATION_UNITS_NS[match.group(2)] // (10 ** len(fraction))
+                except ValueError as exc:
+                    raise ValueError("exceeds the supported duration range") from exc
+                parsed_ns += amount
+                if parsed_ns > _MAX_DURATION_NS + (1 if sign < 0 else 0):
+                    raise ValueError("exceeds the supported duration range")
+                position = match.end()
+            parsed_ns *= sign
+
+    if negative_days:
+        parsed_ns = -(days_ns + parsed_ns)
+    else:
+        parsed_ns += days_ns
+    if parsed_ns > _MAX_DURATION_NS or parsed_ns < _MIN_DURATION_NS:
+        raise ValueError("exceeds the supported duration range")
+    return int(parsed_ns)
+
+
+def _validate_pathdefaults_durations(payload: dict[str, Any]) -> None:
+    """Validate submitted duration fields using MediaMTX v1.15.4 semantics."""
+    for field in _DURATION_FIELDS:
+        if field not in payload:
+            continue
+        try:
+            duration_ns = _parse_mediamtx_duration_ns(payload[field])
+        except ValueError as exc:
+            raise ValueError(f"Invalid {field}: {exc}.") from exc
+        # MediaMTX v1.15.4's Path.Validate only bounds segment duration above.
+        if field == "recordSegmentDuration" and duration_ns > 86_400_000_000_000:
+            raise ValueError(
+                "Invalid recordSegmentDuration: maximum segment duration is 1 day."
+            )
+
+
+def _pathdefaults_patch_failure(result: dict[str, Any]) -> tuple[int, str] | None:
+    """Map a MediaMTX path-defaults result to an HTTP error, if it failed."""
+    if result.get("status") == "ok":
+        return None
+    details = result.get("details")
+    message = result.get("message")
+    if isinstance(details, dict):
+        message = details.get("error") or details.get("message") or message
+    if not message:
+        message = "MediaMTX rejected the path defaults update"
+    status_code = 503 if result.get("status") == "no_admin_api" else 502
+    return status_code, str(message)
 
 # Fields containing sensitive data (hooks with hardcoded secrets) - COMPLETELY HIDDEN from UI
 SENSITIVE_HOOK_FIELDS = [
@@ -222,11 +358,62 @@ def _validate_patch_payload(payload: dict[str, Any]) -> None:
 class MediaMtxAdminService:
     """Async HTTP client wrapper for MediaMTX admin API v3."""
 
-    @staticmethod
-    def _headers() -> dict[str, str]:
-        headers = {"Content-Type": "application/json"}
+    #: Cached admin JWT and the monotonic time it stops being usable.
+    #: create_admin_token() mints a 5-minute token and signing is RSA, so
+    #: minting one per call would put a signature on every path read.
+    #: Refreshed a minute early, because a token that expires in flight
+    #: is a 401 on a real operation.
+    _token: str | None = None
+    _token_until: float = 0.0
+    _token_lock = threading.Lock()
+
+    @classmethod
+    def _admin_token(cls) -> str | None:
+        """A JWT that authorises the Control API, or None if we cannot
+        mint one (no keys yet — core is still starting)."""
         if settings.mediamtx_admin_token:
-            headers["Authorization"] = f"Bearer {settings.mediamtx_admin_token}"
+            # An operator pointing at an EXTERNAL MediaMTX with its own
+            # static credential still wins: their token is not ours to
+            # replace.
+            return settings.mediamtx_admin_token
+        now = time.monotonic()
+        with cls._token_lock:
+            if cls._token and now < cls._token_until:
+                return cls._token
+            try:
+                from services.mediamtx_jwt_service import MediaMtxJwtService
+
+                cls._token = MediaMtxJwtService.create_admin_token(expiry_minutes=5)
+                cls._token_until = now + 240.0
+            except Exception as exc:  # noqa: BLE001
+                # Do not fail the call here — let MediaMTX answer 401 and
+                # the caller's own error path report it. The one time
+                # this legitimately happens is the first seconds after
+                # boot, before core has written its signing key.
+                mediamtx_logger.warning(
+                    "could not mint a MediaMTX admin token: %s", exc)
+                cls._token, cls._token_until = None, 0.0
+            return cls._token
+
+    @classmethod
+    def _headers(cls) -> dict[str, str]:
+        """Authorise every Control API call.
+
+        This used to send a bearer token only when
+        ``settings.mediamtx_admin_token`` was set, and nothing in the
+        deployment ever set it — so core talked to an API that was
+        simply unauthenticated, protected by "only we can reach it".
+        That stopped being true when mediamtx joined the apps network:
+        `/v3/config/pathdefaults/get` returns the hook commands, which
+        carry MEDIAMTX_SECRET, and `/v3/config/paths/add` accepts
+        runOnInit — arbitrary commands inside a container holding the
+        recordings volume. Every call site in this module goes through
+        here, so authorising it here authorises all of them.
+        """
+        headers = {"Content-Type": "application/json"}
+        token = cls._admin_token()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
         return headers
 
     @staticmethod
@@ -296,12 +483,25 @@ class MediaMtxAdminService:
     def _map_conf(config: dict[str, Any]) -> dict[str, Any]:
         """Map our CameraConfig dict to MediaMTX PathConf schema (flat fields)."""
         conf: dict[str, Any] = {}
-        source_url = config.get("source_url") or config.get("source")
-        if source_url:
-            conf["source"] = source_url
-        rtsp_transport = config.get("rtsp_transport") or config.get("rtspTransport")
-        if rtsp_transport:
-            conf["rtspTransport"] = rtsp_transport
+        if config.get("source_type") == "publisher":
+            # A webcam publishes INTO the path (browser WHIP, host helper):
+            # MediaMTX pulls nothing, so no source URL and no RTSP transport.
+            # Said explicitly rather than left to pathDefaults, so a replace
+            # of a path that once had a URL source really drops it.
+            conf["source"] = "publisher"
+            # A USB webcam MediaMTX serves itself (services/local_webcams):
+            # it runs the capture and restarts it when the camera is
+            # unplugged and plugged back.
+            if config.get("run_on_init"):
+                conf["runOnInit"] = str(config["run_on_init"])
+                conf["runOnInitRestart"] = True
+        else:
+            source_url = config.get("source_url") or config.get("source")
+            if source_url:
+                conf["source"] = source_url
+            rtsp_transport = config.get("rtsp_transport") or config.get("rtspTransport")
+            if rtsp_transport:
+                conf["rtspTransport"] = rtsp_transport
         # Recording
         recording_enabled = None
         record_path_value = None
@@ -470,17 +670,18 @@ class MediaMtxAdminService:
     @staticmethod
     async def pathdefaults_patch(payload: dict[str, Any]) -> dict[str, Any]:
         """Update path defaults configuration (validates that protected fields are not modified)."""
+        _validate_pathdefaults_durations(payload)
         if not MediaMtxAdminService.is_configured():
             return {
                 "status": "no_admin_api",
                 "message": "mediamtx_admin_api not configured",
             }
 
-        # Validate that user isn't trying to modify protected fields
+        # Preserve the result-dict contract used by non-router callers.
         try:
             _validate_patch_payload(payload)
-        except ValueError as e:
-            return {"status": "error", "message": str(e)}
+        except ValueError as exc:
+            return {"status": "error", "message": str(exc), "validation_error": True}
 
         url = MediaMtxAdminService._base() + "/config/pathdefaults/patch"
         try:
@@ -586,11 +787,37 @@ class MediaMtxAdminService:
                 "message": "mediamtx_admin_api not configured",
             }
 
+        # MediaMTX pages this list (100 items by default) and every camera
+        # holds two paths, main and -sub: reading one page saw ~50 cameras
+        # and the status reconciler marked the rest offline (#671). Walk
+        # every page and hand back one list, as if it were never paged.
         url = MediaMtxAdminService._base() + "/paths/list"
+        items: list[Any] = []
         try:
             async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-                resp = await client.get(url, headers=MediaMtxAdminService._headers())
-            return MediaMtxAdminService._to_result("paths", resp)
+                for page in range(_PATHS_MAX_PAGES):
+                    resp = await client.get(
+                        url,
+                        headers=MediaMtxAdminService._headers(),
+                        params={"itemsPerPage": _PATHS_PAGE_SIZE, "page": page},
+                    )
+                    result = MediaMtxAdminService._to_result("paths", resp)
+                    if result["status"] != "ok":
+                        # A partial list would read as cameras gone offline;
+                        # fail the whole call so callers skip this pass.
+                        return result
+                    details = result["details"] if isinstance(result["details"], dict) else {}
+                    items.extend(details.get("items") or [])
+                    if page + 1 >= int(details.get("pageCount") or 1):
+                        break
+                else:
+                    return {
+                        "status": "error",
+                        "message": f"paths/list still paging after {_PATHS_MAX_PAGES} pages",
+                    }
+            result["details"] = {**details, "items": items,
+                                 "itemCount": len(items), "pageCount": 1}
+            return result
         except Exception as e:
             return {"status": "error", "message": f"Request failed: {e!s}"}
 
@@ -800,33 +1027,14 @@ class MediaMtxAdminService:
         and so ``enable_recording`` keeps meaning what it says. Callers that
         provision a real camera (routers, CameraService) pass True.
         """
-        name = _build_stream_name(settings.mediamtx_stream_prefix, camera_id, camera_ip)
-
         # First provision the path with RTSP source
         config = {
             "source_url": rtsp_url,
             "rtsp_transport": rtsp_transport,
+            "recording": MediaMtxAdminService._recording_block(
+                enable_recording, recording_path, recording_segment_seconds
+            ),
         }
-
-        if enable_recording:
-            # Use custom recording path if provided, otherwise use default
-            if recording_path:
-                # Use the custom path provided by user
-                final_recording_path = recording_path
-            else:
-                # Get user-configured recording path and convert to container path
-                host_path = get_effective_recordings_base_path()
-                container_path = get_mediamtx_recording_path(host_path)
-                final_recording_path = f"{container_path}/%path/%Y-%m-%d/%H/%M-%S-%f"
-
-            config["recording"] = {
-                "enabled": True,
-                "path": final_recording_path,
-                "segment_seconds": recording_segment_seconds,
-                "format": "fmp4",  # Ensure format is fmp4
-            }
-        else:
-            config["recording"] = {"enabled": False}
 
         result = await MediaMtxAdminService.upsert_path(
             camera_id, camera_ip, config, transport_security=transport_security
@@ -841,6 +1049,93 @@ class MediaMtxAdminService:
             result["recording_segment_seconds"] = recording_segment_seconds
 
         return result
+
+    @staticmethod
+    def _recording_block(
+        enable_recording: bool,
+        recording_path: str | None,
+        recording_segment_seconds: int,
+    ) -> dict[str, Any]:
+        """The ``recording`` part of a path config, shared by both sources."""
+        if not enable_recording:
+            return {"enabled": False}
+        if recording_path:
+            final_recording_path = recording_path
+        else:
+            # User-configured recordings root, as MediaMTX sees it.
+            host_path = get_effective_recordings_base_path()
+            container_path = get_mediamtx_recording_path(host_path)
+            final_recording_path = f"{container_path}/%path/%Y-%m-%d/%H/%M-%S-%f"
+        return {
+            "enabled": True,
+            "path": final_recording_path,
+            "segment_seconds": recording_segment_seconds,
+            "format": "fmp4",
+        }
+
+    @staticmethod
+    async def push_publisher_path(
+        camera_id: int,
+        camera_ip: str,
+        enable_recording: bool = False,
+        recording_segment_seconds: int = settings.recording_segment_seconds,
+        recording_path: str | None = None,
+        run_on_init: str | None = None,
+        substream: bool = False,
+    ) -> dict[str, Any]:
+        """Provision a webcam camera's path: ``source: publisher``.
+
+        ``run_on_init`` is the capture command for a webcam MediaMTX serves
+        itself; ``substream`` also provisions ``<path>-sub`` as a publisher
+        path (the same ffmpeg feeds both: MediaMTX's own, or the host
+        agent's), with no recording. Both come from
+        ``local_webcams.provisioning_for``.
+
+        The path waits for a browser (WHIP) or the host agent (RTSP) to
+        publish into it; recording, hooks and readers work as for any camera.
+        No transport policy (there is no source URL to check).
+        """
+        config: dict[str, Any] = {
+            "source_type": "publisher",
+            "recording": MediaMtxAdminService._recording_block(
+                enable_recording, recording_path, recording_segment_seconds
+            ),
+        }
+        if run_on_init:
+            config["run_on_init"] = run_on_init
+        if substream:
+            # provision_path / replace_path create the sub through
+            # _provision_substream, as they do for every other caller.
+            config["substream"] = True
+        result = await MediaMtxAdminService.upsert_path(camera_id, camera_ip, config)
+        if result.get("status") == "ok":
+            result.setdefault("action", "publisher_path_pushed")
+            result["recording_enabled"] = enable_recording
+            result["recording_segment_seconds"] = recording_segment_seconds
+        return result
+
+    @staticmethod
+    async def _push_publisher_substream(camera_id: int, camera_ip: str) -> None:
+        """``<path>-sub`` for a webcam whose ffmpeg also publishes a sub
+        (MediaMTX's own for a Linux USB webcam, the host agent's on Docker
+        Desktop): a publisher path, no recording (a view-and-detect tap, like
+        an IP camera's sub). Add, or replace in place."""
+        from services.stream_service import substream_name
+        name = _build_stream_name(settings.mediamtx_stream_prefix, camera_id, camera_ip)
+        sub = substream_name(name)
+        payload = {"source": "publisher", "record": False}
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await client.post(
+                MediaMtxAdminService._base() + f"/config/paths/add/{sub}",
+                json=payload, headers=MediaMtxAdminService._headers())
+            if not resp.is_success and "already exists" in resp.text:
+                resp = await client.post(
+                    MediaMtxAdminService._base() + f"/config/paths/replace/{sub}",
+                    json=payload, headers=MediaMtxAdminService._headers())
+        mediamtx_logger.log_action(
+            "mediamtx.substream_provisioned", camera_id=camera_id,
+            message=f"Provisioned webcam substream path {sub}",
+            extra_data={"path": sub, "http_status": resp.status_code, "source": "publisher"})
 
     # === ORIGINAL METHODS ===
 
@@ -1113,6 +1408,25 @@ class MediaMtxAdminService:
                                 message=f"MediaMTX path config unchanged; replace skipped: {name}",
                                 extra_data={"path": name},
                             )
+                            # The MAIN path is unchanged; the SUB may not be.
+                            # An operator storing a substream URL on a camera
+                            # whose main URL stayed the same landed here, and
+                            # the sub path was never created — while the
+                            # Tier-0 tap listing already handed `{name}-sub`
+                            # to the detect-pipeline, which then found "path
+                            # not configured" every tick until the next core
+                            # restart. Same best-effort refresh as the
+                            # replace branch below (add, or replace in place).
+                            try:
+                                await MediaMtxAdminService._provision_substream(
+                                    camera_id, camera_ip, config
+                                )
+                            except Exception:  # pragma: no cover - defensive
+                                mediamtx_logger.warning(
+                                    f"substream refresh raised for {name}; main path unaffected",
+                                    extra={"camera_id": camera_id, "path": name,
+                                           "action": "mediamtx.substream_provision_error"},
+                                )
                             return {
                                 "status": "ok",
                                 "path": name,
@@ -1206,9 +1520,24 @@ class MediaMtxAdminService:
         """Add the low-res substream path ({main}-sub) for the agent live view.
         Source-on-demand: MediaMTX only pulls the sub from the camera while
         someone (the agent's WHEP) is actually watching it, so an idle camera
-        adds zero extra load. No recording on the sub — it's a view-only tap."""
+        adds zero extra load. No recording on the sub — it's a view-only tap.
+
+        A webcam (``source_type: publisher``) has no source to pull a sub
+        from: its sub is a second publisher path that the webcam's own
+        ffmpeg feeds, created when the config asks for it (``substream``,
+        from ``local_webcams.provisioning_for``). Handled here, the one place
+        every provisioner reaches — create, edit, the provision route, the
+        startup reconcile and core's boot loop — so none of them can leave
+        the sub out (#900). Never derived from ``substream_url``: a webcam's
+        row holds a marker naming its own sub path, and pulling from it
+        would point the sub at itself."""
         from services.camera_source_resolver import derive_substream_url
         from services.stream_service import substream_name
+
+        if isinstance(config, dict) and config.get("source_type") == "publisher":
+            if config.get("substream"):
+                await MediaMtxAdminService._push_publisher_substream(camera_id, camera_ip)
+            return
 
         main_source = (
             (config.get("source_url") or config.get("source"))
@@ -1235,6 +1564,13 @@ class MediaMtxAdminService:
                                if isinstance(config, dict) else None),
         })
         payload["sourceOnDemand"] = True   # only pull while the agent watches
+        # Never record the sub. pathDefaults has record: yes, so a path that
+        # does not say otherwise records whenever anything reads it — and
+        # Tier-0 reads every sub path all day. That recorded each camera
+        # twice, into cam-N-sub/ folders no camera owns: the segment hook
+        # gets camera_id null, so retention never ages them out, and
+        # pausing recording (which only touches main paths) did not stop it.
+        payload["record"] = False
         url = MediaMtxAdminService._base() + f"/config/paths/add/{sub}"
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             resp = await client.post(

@@ -1,0 +1,3761 @@
+{
+ "what": "tools/eval_harness.py over tools/eval_cases.yml, one run per (model, router setting)",
+ "hardware": {
+  "cpu": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+  "vcpus": 4,
+  "ram_gb": 17,
+  "accelerator": null,
+  "where": "cloud VM"
+ },
+ "runtime": {
+  "ollama": "0.40.0",
+  "mode": "text (/ask)",
+  "vision_adapters": "none (describe_camera/detect_objects return unavailable)",
+  "camera": "one file:// still image"
+ },
+ "config": {
+  "llm_temperature": 0.3,
+  "llm_max_tokens": 220,
+  "llm_num_ctx": 8192,
+  "system_prompt": "config.docker.chat.yml",
+  "enabled_tools": "config.docker.chat.yml"
+ },
+ "date": "2026-10-08",
+ "results": [
+  {
+   "model": "granite3.3:2b",
+   "router": {
+    "tier0": false,
+    "hints": false
+   },
+   "repeat": 5,
+   "resident_gb": 2.4,
+   "errored_runs": [],
+   "summary": {
+    "cases": {
+     "alarm-after-6pm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 15409
+     },
+     "monitor-crowd": {
+      "n": 5,
+      "errors": 0,
+      "pass": 1,
+      "pass_ci": [
+       0.03622316096978745,
+       0.6244717358814613
+      ],
+      "model": 1,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 17326
+     },
+     "overnight-summary": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 12875
+     },
+     "what-is-person-wearing": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 14987
+     },
+     "polite-close": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 17655
+     },
+     "greeting-no-tool": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 29952
+     },
+     "is-anyone-there": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 9875
+     },
+     "past-tense-goes-to-history": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 9706
+     },
+     "follow-up-alarm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 29295
+     }
+    },
+    "tiers": {
+     "tier2": {
+      "n": 45,
+      "pass": 21,
+      "model": 1,
+      "model_n": 45,
+      "pass_ci": [
+       0.3293490394201473,
+       0.6092279113758954
+      ]
+     }
+    }
+   },
+   "chosen_by": {
+    "alarm-after-6pm": [],
+    "monitor-crowd": [
+     "model"
+    ],
+    "overnight-summary": [
+     "forced"
+    ],
+    "what-is-person-wearing": [
+     "forced"
+    ],
+    "polite-close": [],
+    "greeting-no-tool": [],
+    "is-anyone-there": [
+     "forced"
+    ],
+    "past-tense-goes-to-history": [
+     "forced"
+    ],
+    "follow-up-alarm": []
+   }
+  },
+  {
+   "model": "granite3.3:2b",
+   "router": {
+    "tier0": true,
+    "hints": true
+   },
+   "repeat": 5,
+   "resident_gb": 2.4,
+   "errored_runs": [],
+   "summary": {
+    "cases": {
+     "alarm-after-6pm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 18767
+     },
+     "monitor-crowd": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 12286
+     },
+     "overnight-summary": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 13300
+     },
+     "what-is-person-wearing": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": null,
+      "model_n": 0,
+      "tier": 0,
+      "tiers": [
+       0
+      ],
+      "latency_ms_p50": 11299
+     },
+     "polite-close": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 15453
+     },
+     "greeting-no-tool": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 43989
+     },
+     "is-anyone-there": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": null,
+      "model_n": 0,
+      "tier": 0,
+      "tiers": [
+       0
+      ],
+      "latency_ms_p50": 5193
+     },
+     "past-tense-goes-to-history": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": null,
+      "model_n": 0,
+      "tier": 0,
+      "tiers": [
+       0
+      ],
+      "latency_ms_p50": 3008
+     },
+     "follow-up-alarm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 22969
+     }
+    },
+    "tiers": {
+     "tier0": {
+      "n": 15,
+      "pass": 15,
+      "model": 0,
+      "model_n": 0,
+      "pass_ci": [
+       0.7961107336956521,
+       1.0
+      ]
+     },
+     "tier2": {
+      "n": 30,
+      "pass": 5,
+      "model": 0,
+      "model_n": 30,
+      "pass_ci": [
+       0.07336434240351683,
+       0.33564705185680177
+      ]
+     }
+    }
+   },
+   "chosen_by": {
+    "alarm-after-6pm": [],
+    "monitor-crowd": [],
+    "overnight-summary": [
+     "forced"
+    ],
+    "what-is-person-wearing": [
+     "router"
+    ],
+    "polite-close": [],
+    "greeting-no-tool": [],
+    "is-anyone-there": [
+     "router"
+    ],
+    "past-tense-goes-to-history": [
+     "router"
+    ],
+    "follow-up-alarm": []
+   }
+  },
+  {
+   "model": "llama3.2:1b",
+   "router": {
+    "tier0": false,
+    "hints": false
+   },
+   "repeat": 5,
+   "resident_gb": 2.17,
+   "errored_runs": [],
+   "summary": {
+    "cases": {
+     "alarm-after-6pm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 20897
+     },
+     "monitor-crowd": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 19692
+     },
+     "overnight-summary": {
+      "n": 5,
+      "errors": 0,
+      "pass": 1,
+      "pass_ci": [
+       0.03622316096978745,
+       0.6244717358814613
+      ],
+      "model": 1,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 17316
+     },
+     "what-is-person-wearing": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 16610
+     },
+     "polite-close": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 22844
+     },
+     "greeting-no-tool": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 21067
+     },
+     "is-anyone-there": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 16690
+     },
+     "past-tense-goes-to-history": {
+      "n": 5,
+      "errors": 0,
+      "pass": 4,
+      "pass_ci": [
+       0.3755282641185388,
+       0.9637768390302125
+      ],
+      "model": 4,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 24199
+     },
+     "follow-up-alarm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 38048
+     }
+    },
+    "tiers": {
+     "tier2": {
+      "n": 45,
+      "pass": 5,
+      "model": 5,
+      "model_n": 45,
+      "pass_ci": [
+       0.04840400437825558,
+       0.23499375490890945
+      ]
+     }
+    }
+   },
+   "chosen_by": {
+    "alarm-after-6pm": [
+     "model"
+    ],
+    "monitor-crowd": [],
+    "overnight-summary": [
+     "model"
+    ],
+    "what-is-person-wearing": [],
+    "polite-close": [],
+    "greeting-no-tool": [],
+    "is-anyone-there": [],
+    "past-tense-goes-to-history": [
+     "model"
+    ],
+    "follow-up-alarm": []
+   }
+  },
+  {
+   "model": "llama3.2:1b",
+   "router": {
+    "tier0": true,
+    "hints": true
+   },
+   "repeat": 5,
+   "resident_gb": 2.17,
+   "errored_runs": [],
+   "summary": {
+    "cases": {
+     "alarm-after-6pm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 19302
+     },
+     "monitor-crowd": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 19647
+     },
+     "overnight-summary": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 17410
+     },
+     "what-is-person-wearing": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": null,
+      "model_n": 0,
+      "tier": 0,
+      "tiers": [
+       0
+      ],
+      "latency_ms_p50": 6510
+     },
+     "polite-close": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 26036
+     },
+     "greeting-no-tool": {
+      "n": 5,
+      "errors": 0,
+      "pass": 1,
+      "pass_ci": [
+       0.03622316096978745,
+       0.6244717358814613
+      ],
+      "model": 1,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 16810
+     },
+     "is-anyone-there": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": null,
+      "model_n": 0,
+      "tier": 0,
+      "tiers": [
+       0
+      ],
+      "latency_ms_p50": 3614
+     },
+     "past-tense-goes-to-history": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": null,
+      "model_n": 0,
+      "tier": 0,
+      "tiers": [
+       0
+      ],
+      "latency_ms_p50": 421
+     },
+     "follow-up-alarm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 10935
+     }
+    },
+    "tiers": {
+     "tier0": {
+      "n": 15,
+      "pass": 15,
+      "model": 0,
+      "model_n": 0,
+      "pass_ci": [
+       0.7961107336956521,
+       1.0
+      ]
+     },
+     "tier2": {
+      "n": 30,
+      "pass": 1,
+      "model": 1,
+      "model_n": 30,
+      "pass_ci": [
+       0.0059084379948573795,
+       0.16670751396958874
+      ]
+     }
+    }
+   },
+   "chosen_by": {
+    "alarm-after-6pm": [],
+    "monitor-crowd": [],
+    "overnight-summary": [],
+    "what-is-person-wearing": [
+     "router"
+    ],
+    "polite-close": [],
+    "greeting-no-tool": [],
+    "is-anyone-there": [
+     "router"
+    ],
+    "past-tense-goes-to-history": [
+     "router"
+    ],
+    "follow-up-alarm": []
+   }
+  },
+  {
+   "model": "llama3.2:3b",
+   "router": {
+    "tier0": false,
+    "hints": false
+   },
+   "repeat": 5,
+   "resident_gb": 3.48,
+   "errored_runs": [],
+   "summary": {
+    "cases": {
+     "alarm-after-6pm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 5,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 38747
+     },
+     "monitor-crowd": {
+      "n": 5,
+      "errors": 0,
+      "pass": 1,
+      "pass_ci": [
+       0.03622316096978745,
+       0.6244717358814613
+      ],
+      "model": 1,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 37288
+     },
+     "overnight-summary": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 40289
+     },
+     "what-is-person-wearing": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 5,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 41780
+     },
+     "polite-close": {
+      "n": 5,
+      "errors": 0,
+      "pass": 4,
+      "pass_ci": [
+       0.3755282641185388,
+       0.9637768390302125
+      ],
+      "model": 4,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 12966
+     },
+     "greeting-no-tool": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 40070
+     },
+     "is-anyone-there": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 5,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 40877
+     },
+     "past-tense-goes-to-history": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 5,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 32787
+     },
+     "follow-up-alarm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 5,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 76112
+     }
+    },
+    "tiers": {
+     "tier2": {
+      "n": 45,
+      "pass": 30,
+      "model": 30,
+      "model_n": 45,
+      "pass_ci": [
+       0.520702168092554,
+       0.7864130779272324
+      ]
+     }
+    }
+   },
+   "chosen_by": {
+    "alarm-after-6pm": [
+     "model"
+    ],
+    "monitor-crowd": [
+     "model"
+    ],
+    "overnight-summary": [],
+    "what-is-person-wearing": [
+     "model"
+    ],
+    "polite-close": [],
+    "greeting-no-tool": [],
+    "is-anyone-there": [
+     "model"
+    ],
+    "past-tense-goes-to-history": [
+     "model"
+    ],
+    "follow-up-alarm": [
+     "model"
+    ]
+   }
+  },
+  {
+   "model": "llama3.2:3b",
+   "router": {
+    "tier0": true,
+    "hints": true
+   },
+   "repeat": 5,
+   "resident_gb": 3.48,
+   "errored_runs": [],
+   "summary": {
+    "cases": {
+     "alarm-after-6pm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 5,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 38914
+     },
+     "monitor-crowd": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 36477
+     },
+     "overnight-summary": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 41554
+     },
+     "what-is-person-wearing": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": null,
+      "model_n": 0,
+      "tier": 0,
+      "tiers": [
+       0
+      ],
+      "latency_ms_p50": 7781
+     },
+     "polite-close": {
+      "n": 5,
+      "errors": 0,
+      "pass": 4,
+      "pass_ci": [
+       0.3755282641185388,
+       0.9637768390302125
+      ],
+      "model": 4,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 4199
+     },
+     "greeting-no-tool": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 39506
+     },
+     "is-anyone-there": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": null,
+      "model_n": 0,
+      "tier": 0,
+      "tiers": [
+       0
+      ],
+      "latency_ms_p50": 4513
+     },
+     "past-tense-goes-to-history": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": null,
+      "model_n": 0,
+      "tier": 0,
+      "tiers": [
+       0
+      ],
+      "latency_ms_p50": 1857
+     },
+     "follow-up-alarm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 5,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 40857
+     }
+    },
+    "tiers": {
+     "tier0": {
+      "n": 15,
+      "pass": 15,
+      "model": 0,
+      "model_n": 0,
+      "pass_ci": [
+       0.7961107336956521,
+       1.0
+      ]
+     },
+     "tier2": {
+      "n": 30,
+      "pass": 14,
+      "model": 14,
+      "model_n": 30,
+      "pass_ci": [
+       0.30232127224128236,
+       0.6385798671847496
+      ]
+     }
+    }
+   },
+   "chosen_by": {
+    "alarm-after-6pm": [
+     "model"
+    ],
+    "monitor-crowd": [],
+    "overnight-summary": [],
+    "what-is-person-wearing": [
+     "router"
+    ],
+    "polite-close": [],
+    "greeting-no-tool": [],
+    "is-anyone-there": [
+     "router"
+    ],
+    "past-tense-goes-to-history": [
+     "router"
+    ],
+    "follow-up-alarm": [
+     "model"
+    ]
+   }
+  },
+  {
+   "model": "phi4-mini:latest",
+   "router": {
+    "tier0": false,
+    "hints": false
+   },
+   "repeat": 5,
+   "resident_gb": 4.26,
+   "errored_runs": [],
+   "summary": {
+    "cases": {
+     "alarm-after-6pm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 22223
+     },
+     "monitor-crowd": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 16311
+     },
+     "overnight-summary": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 9683
+     },
+     "what-is-person-wearing": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 23520
+     },
+     "polite-close": {
+      "n": 5,
+      "errors": 0,
+      "pass": 2,
+      "pass_ci": [
+       0.1176182311592533,
+       0.769280067791163
+      ],
+      "model": 2,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 14275
+     },
+     "greeting-no-tool": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 31152
+     },
+     "is-anyone-there": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 13318
+     },
+     "past-tense-goes-to-history": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 13922
+     },
+     "follow-up-alarm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 33381
+     }
+    },
+    "tiers": {
+     "tier2": {
+      "n": 45,
+      "pass": 22,
+      "model": 2,
+      "model_n": 45,
+      "pass_ci": [
+       0.3495678935302451,
+       0.6299577567351026
+      ]
+     }
+    }
+   },
+   "chosen_by": {
+    "alarm-after-6pm": [],
+    "monitor-crowd": [],
+    "overnight-summary": [
+     "forced"
+    ],
+    "what-is-person-wearing": [
+     "forced"
+    ],
+    "polite-close": [],
+    "greeting-no-tool": [],
+    "is-anyone-there": [
+     "forced"
+    ],
+    "past-tense-goes-to-history": [
+     "forced"
+    ],
+    "follow-up-alarm": []
+   }
+  },
+  {
+   "model": "phi4-mini:latest",
+   "router": {
+    "tier0": true,
+    "hints": true
+   },
+   "repeat": 5,
+   "resident_gb": 4.26,
+   "errored_runs": [],
+   "summary": {
+    "cases": {
+     "alarm-after-6pm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 54725
+     },
+     "monitor-crowd": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 16998
+     },
+     "overnight-summary": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 16269
+     },
+     "what-is-person-wearing": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": null,
+      "model_n": 0,
+      "tier": 0,
+      "tiers": [
+       0
+      ],
+      "latency_ms_p50": 9038
+     },
+     "polite-close": {
+      "n": 5,
+      "errors": 0,
+      "pass": 3,
+      "pass_ci": [
+       0.23071993220883708,
+       0.8823817688407467
+      ],
+      "model": 3,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 8907
+     },
+     "greeting-no-tool": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 31006
+     },
+     "is-anyone-there": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": null,
+      "model_n": 0,
+      "tier": 0,
+      "tiers": [
+       0
+      ],
+      "latency_ms_p50": 4906
+     },
+     "past-tense-goes-to-history": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": null,
+      "model_n": 0,
+      "tier": 0,
+      "tiers": [
+       0
+      ],
+      "latency_ms_p50": 2090
+     },
+     "follow-up-alarm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 25477
+     }
+    },
+    "tiers": {
+     "tier0": {
+      "n": 15,
+      "pass": 15,
+      "model": 0,
+      "model_n": 0,
+      "pass_ci": [
+       0.7961107336956521,
+       1.0
+      ]
+     },
+     "tier2": {
+      "n": 30,
+      "pass": 8,
+      "model": 3,
+      "model_n": 30,
+      "pass_ci": [
+       0.14182495553910618,
+       0.4444830204431169
+      ]
+     }
+    }
+   },
+   "chosen_by": {
+    "alarm-after-6pm": [],
+    "monitor-crowd": [],
+    "overnight-summary": [
+     "forced"
+    ],
+    "what-is-person-wearing": [
+     "router"
+    ],
+    "polite-close": [],
+    "greeting-no-tool": [],
+    "is-anyone-there": [
+     "router"
+    ],
+    "past-tense-goes-to-history": [
+     "router"
+    ],
+    "follow-up-alarm": []
+   }
+  },
+  {
+   "model": "qwen2.5:0.5b",
+   "router": {
+    "tier0": false,
+    "hints": false
+   },
+   "repeat": 5,
+   "resident_gb": 0.75,
+   "errored_runs": [],
+   "summary": {
+    "cases": {
+     "alarm-after-6pm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 1619
+     },
+     "monitor-crowd": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 8037
+     },
+     "overnight-summary": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 5,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 1649
+     },
+     "what-is-person-wearing": {
+      "n": 5,
+      "errors": 0,
+      "pass": 4,
+      "pass_ci": [
+       0.3755282641185388,
+       0.9637768390302125
+      ],
+      "model": 3,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 8003
+     },
+     "polite-close": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 1922
+     },
+     "greeting-no-tool": {
+      "n": 5,
+      "errors": 0,
+      "pass": 2,
+      "pass_ci": [
+       0.1176182311592533,
+       0.769280067791163
+      ],
+      "model": 2,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 7404
+     },
+     "is-anyone-there": {
+      "n": 5,
+      "errors": 0,
+      "pass": 2,
+      "pass_ci": [
+       0.1176182311592533,
+       0.769280067791163
+      ],
+      "model": 2,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 7734
+     },
+     "past-tense-goes-to-history": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 8030
+     },
+     "follow-up-alarm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 13554
+     }
+    },
+    "tiers": {
+     "tier2": {
+      "n": 45,
+      "pass": 13,
+      "model": 12,
+      "model_n": 45,
+      "pass_ci": [
+       0.1772991803190016,
+       0.43368817472260224
+      ]
+     }
+    }
+   },
+   "chosen_by": {
+    "alarm-after-6pm": [],
+    "monitor-crowd": [],
+    "overnight-summary": [
+     "model"
+    ],
+    "what-is-person-wearing": [
+     "forced",
+     "model"
+    ],
+    "polite-close": [],
+    "greeting-no-tool": [],
+    "is-anyone-there": [
+     "model"
+    ],
+    "past-tense-goes-to-history": [],
+    "follow-up-alarm": []
+   }
+  },
+  {
+   "model": "qwen2.5:0.5b",
+   "router": {
+    "tier0": true,
+    "hints": true
+   },
+   "repeat": 5,
+   "resident_gb": 0.75,
+   "errored_runs": [],
+   "summary": {
+    "cases": {
+     "alarm-after-6pm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 2233
+     },
+     "monitor-crowd": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 7816
+     },
+     "overnight-summary": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 5,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 1621
+     },
+     "what-is-person-wearing": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": null,
+      "model_n": 0,
+      "tier": 0,
+      "tiers": [
+       0
+      ],
+      "latency_ms_p50": 6399
+     },
+     "polite-close": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 1866
+     },
+     "greeting-no-tool": {
+      "n": 5,
+      "errors": 0,
+      "pass": 3,
+      "pass_ci": [
+       0.23071993220883708,
+       0.8823817688407467
+      ],
+      "model": 3,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 936
+     },
+     "is-anyone-there": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": null,
+      "model_n": 0,
+      "tier": 0,
+      "tiers": [
+       0
+      ],
+      "latency_ms_p50": 3365
+     },
+     "past-tense-goes-to-history": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": null,
+      "model_n": 0,
+      "tier": 0,
+      "tiers": [
+       0
+      ],
+      "latency_ms_p50": 627
+     },
+     "follow-up-alarm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 8405
+     }
+    },
+    "tiers": {
+     "tier0": {
+      "n": 15,
+      "pass": 15,
+      "model": 0,
+      "model_n": 0,
+      "pass_ci": [
+       0.7961107336956521,
+       1.0
+      ]
+     },
+     "tier2": {
+      "n": 30,
+      "pass": 8,
+      "model": 8,
+      "model_n": 30,
+      "pass_ci": [
+       0.14182495553910618,
+       0.4444830204431169
+      ]
+     }
+    }
+   },
+   "chosen_by": {
+    "alarm-after-6pm": [],
+    "monitor-crowd": [],
+    "overnight-summary": [
+     "model"
+    ],
+    "what-is-person-wearing": [
+     "router"
+    ],
+    "polite-close": [],
+    "greeting-no-tool": [],
+    "is-anyone-there": [
+     "router"
+    ],
+    "past-tense-goes-to-history": [
+     "router"
+    ],
+    "follow-up-alarm": []
+   }
+  },
+  {
+   "model": "qwen2.5:1.5b",
+   "router": {
+    "tier0": false,
+    "hints": false
+   },
+   "repeat": 5,
+   "resident_gb": 1.58,
+   "errored_runs": [],
+   "summary": {
+    "cases": {
+     "alarm-after-6pm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 5054
+     },
+     "monitor-crowd": {
+      "n": 5,
+      "errors": 0,
+      "pass": 3,
+      "pass_ci": [
+       0.23071993220883708,
+       0.8823817688407467
+      ],
+      "model": 3,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 4305
+     },
+     "overnight-summary": {
+      "n": 5,
+      "errors": 0,
+      "pass": 3,
+      "pass_ci": [
+       0.23071993220883708,
+       0.8823817688407467
+      ],
+      "model": 3,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 6401
+     },
+     "what-is-person-wearing": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 9267
+     },
+     "polite-close": {
+      "n": 5,
+      "errors": 0,
+      "pass": 1,
+      "pass_ci": [
+       0.03622316096978745,
+       0.6244717358814613
+      ],
+      "model": 1,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 8842
+     },
+     "greeting-no-tool": {
+      "n": 5,
+      "errors": 0,
+      "pass": 1,
+      "pass_ci": [
+       0.03622316096978745,
+       0.6244717358814613
+      ],
+      "model": 1,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 9748
+     },
+     "is-anyone-there": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 4959
+     },
+     "past-tense-goes-to-history": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 2818
+     },
+     "follow-up-alarm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 12865
+     }
+    },
+    "tiers": {
+     "tier2": {
+      "n": 45,
+      "pass": 23,
+      "model": 8,
+      "model_n": 45,
+      "pass_ci": [
+       0.3700422432648975,
+       0.6504321064697549
+      ]
+     }
+    }
+   },
+   "chosen_by": {
+    "alarm-after-6pm": [],
+    "monitor-crowd": [
+     "model"
+    ],
+    "overnight-summary": [
+     "model"
+    ],
+    "what-is-person-wearing": [
+     "forced"
+    ],
+    "polite-close": [],
+    "greeting-no-tool": [],
+    "is-anyone-there": [
+     "forced"
+    ],
+    "past-tense-goes-to-history": [
+     "forced"
+    ],
+    "follow-up-alarm": []
+   }
+  },
+  {
+   "model": "qwen2.5:1.5b",
+   "router": {
+    "tier0": true,
+    "hints": true
+   },
+   "repeat": 5,
+   "resident_gb": 1.58,
+   "errored_runs": [],
+   "summary": {
+    "cases": {
+     "alarm-after-6pm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 5281
+     },
+     "monitor-crowd": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 4086
+     },
+     "overnight-summary": {
+      "n": 5,
+      "errors": 0,
+      "pass": 2,
+      "pass_ci": [
+       0.1176182311592533,
+       0.769280067791163
+      ],
+      "model": 2,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 4822
+     },
+     "what-is-person-wearing": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": null,
+      "model_n": 0,
+      "tier": 0,
+      "tiers": [
+       0
+      ],
+      "latency_ms_p50": 6992
+     },
+     "polite-close": {
+      "n": 5,
+      "errors": 0,
+      "pass": 4,
+      "pass_ci": [
+       0.3755282641185388,
+       0.9637768390302125
+      ],
+      "model": 4,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 818
+     },
+     "greeting-no-tool": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 10556
+     },
+     "is-anyone-there": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": null,
+      "model_n": 0,
+      "tier": 0,
+      "tiers": [
+       0
+      ],
+      "latency_ms_p50": 3527
+     },
+     "past-tense-goes-to-history": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": null,
+      "model_n": 0,
+      "tier": 0,
+      "tiers": [
+       0
+      ],
+      "latency_ms_p50": 469
+     },
+     "follow-up-alarm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 9279
+     }
+    },
+    "tiers": {
+     "tier0": {
+      "n": 15,
+      "pass": 15,
+      "model": 0,
+      "model_n": 0,
+      "pass_ci": [
+       0.7961107336956521,
+       1.0
+      ]
+     },
+     "tier2": {
+      "n": 30,
+      "pass": 6,
+      "model": 6,
+      "model_n": 30,
+      "pass_ci": [
+       0.09504978102401235,
+       0.37306047381027446
+      ]
+     }
+    }
+   },
+   "chosen_by": {
+    "alarm-after-6pm": [],
+    "monitor-crowd": [],
+    "overnight-summary": [
+     "model"
+    ],
+    "what-is-person-wearing": [
+     "router"
+    ],
+    "polite-close": [],
+    "greeting-no-tool": [],
+    "is-anyone-there": [
+     "router"
+    ],
+    "past-tense-goes-to-history": [
+     "router"
+    ],
+    "follow-up-alarm": []
+   }
+  },
+  {
+   "model": "qwen2.5:3b",
+   "router": {
+    "tier0": false,
+    "hints": false
+   },
+   "repeat": 5,
+   "resident_gb": 2.7,
+   "errored_runs": [],
+   "summary": {
+    "cases": {
+     "alarm-after-6pm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 9669
+     },
+     "monitor-crowd": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 8094
+     },
+     "overnight-summary": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 5,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 6366
+     },
+     "what-is-person-wearing": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 5,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 18608
+     },
+     "polite-close": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 13319
+     },
+     "greeting-no-tool": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 15678
+     },
+     "is-anyone-there": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 5,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 19000
+     },
+     "past-tense-goes-to-history": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 5,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 12277
+     },
+     "follow-up-alarm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 5,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 19993
+     }
+    },
+    "tiers": {
+     "tier2": {
+      "n": 45,
+      "pass": 25,
+      "model": 25,
+      "model_n": 45,
+      "pass_ci": [
+       0.4117588341636533,
+       0.6906129145096089
+      ]
+     }
+    }
+   },
+   "chosen_by": {
+    "alarm-after-6pm": [],
+    "monitor-crowd": [],
+    "overnight-summary": [
+     "model"
+    ],
+    "what-is-person-wearing": [
+     "model"
+    ],
+    "polite-close": [],
+    "greeting-no-tool": [],
+    "is-anyone-there": [
+     "model"
+    ],
+    "past-tense-goes-to-history": [
+     "model"
+    ],
+    "follow-up-alarm": [
+     "model"
+    ]
+   }
+  },
+  {
+   "model": "qwen2.5:3b",
+   "router": {
+    "tier0": true,
+    "hints": true
+   },
+   "repeat": 5,
+   "resident_gb": 2.7,
+   "errored_runs": [],
+   "summary": {
+    "cases": {
+     "alarm-after-6pm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 9846
+     },
+     "monitor-crowd": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 8323
+     },
+     "overnight-summary": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 5,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 6225
+     },
+     "what-is-person-wearing": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": null,
+      "model_n": 0,
+      "tier": 0,
+      "tiers": [
+       0
+      ],
+      "latency_ms_p50": 8814
+     },
+     "polite-close": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 13932
+     },
+     "greeting-no-tool": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 13930
+     },
+     "is-anyone-there": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": null,
+      "model_n": 0,
+      "tier": 0,
+      "tiers": [
+       0
+      ],
+      "latency_ms_p50": 3943
+     },
+     "past-tense-goes-to-history": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": null,
+      "model_n": 0,
+      "tier": 0,
+      "tiers": [
+       0
+      ],
+      "latency_ms_p50": 1804
+     },
+     "follow-up-alarm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 5,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 16630
+     }
+    },
+    "tiers": {
+     "tier0": {
+      "n": 15,
+      "pass": 15,
+      "model": 0,
+      "model_n": 0,
+      "pass_ci": [
+       0.7961107336956521,
+       1.0
+      ]
+     },
+     "tier2": {
+      "n": 30,
+      "pass": 10,
+      "model": 10,
+      "model_n": 30,
+      "pass_ci": [
+       0.19230295526846194,
+       0.5122027418616973
+      ]
+     }
+    }
+   },
+   "chosen_by": {
+    "alarm-after-6pm": [],
+    "monitor-crowd": [],
+    "overnight-summary": [
+     "model"
+    ],
+    "what-is-person-wearing": [
+     "router"
+    ],
+    "polite-close": [],
+    "greeting-no-tool": [],
+    "is-anyone-there": [
+     "router"
+    ],
+    "past-tense-goes-to-history": [
+     "router"
+    ],
+    "follow-up-alarm": [
+     "model"
+    ]
+   }
+  },
+  {
+   "model": "qwen3:0.6b",
+   "router": {
+    "tier0": false,
+    "hints": false
+   },
+   "repeat": 5,
+   "resident_gb": 1.53,
+   "errored_runs": [],
+   "summary": {
+    "cases": {
+     "alarm-after-6pm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 8387
+     },
+     "monitor-crowd": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 6741
+     },
+     "overnight-summary": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 3700
+     },
+     "what-is-person-wearing": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 9504
+     },
+     "polite-close": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 9095
+     },
+     "greeting-no-tool": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 9307
+     },
+     "is-anyone-there": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 6549
+     },
+     "past-tense-goes-to-history": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 3448
+     },
+     "follow-up-alarm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 14225
+     }
+    },
+    "tiers": {
+     "tier2": {
+      "n": 45,
+      "pass": 20,
+      "model": 0,
+      "model_n": 45,
+      "pass_ci": [
+       0.30938708549039107,
+       0.5882411658363468
+      ]
+     }
+    }
+   },
+   "chosen_by": {
+    "alarm-after-6pm": [],
+    "monitor-crowd": [],
+    "overnight-summary": [
+     "forced"
+    ],
+    "what-is-person-wearing": [
+     "forced"
+    ],
+    "polite-close": [],
+    "greeting-no-tool": [],
+    "is-anyone-there": [
+     "forced"
+    ],
+    "past-tense-goes-to-history": [
+     "forced"
+    ],
+    "follow-up-alarm": []
+   }
+  },
+  {
+   "model": "qwen3:0.6b",
+   "router": {
+    "tier0": true,
+    "hints": true
+   },
+   "repeat": 5,
+   "resident_gb": 1.53,
+   "errored_runs": [],
+   "summary": {
+    "cases": {
+     "alarm-after-6pm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 7949
+     },
+     "monitor-crowd": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 6501
+     },
+     "overnight-summary": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 3448
+     },
+     "what-is-person-wearing": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": null,
+      "model_n": 0,
+      "tier": 0,
+      "tiers": [
+       0
+      ],
+      "latency_ms_p50": 6843
+     },
+     "polite-close": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 9217
+     },
+     "greeting-no-tool": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 9853
+     },
+     "is-anyone-there": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": null,
+      "model_n": 0,
+      "tier": 0,
+      "tiers": [
+       0
+      ],
+      "latency_ms_p50": 3441
+     },
+     "past-tense-goes-to-history": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": null,
+      "model_n": 0,
+      "tier": 0,
+      "tiers": [
+       0
+      ],
+      "latency_ms_p50": 499
+     },
+     "follow-up-alarm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 10737
+     }
+    },
+    "tiers": {
+     "tier0": {
+      "n": 15,
+      "pass": 15,
+      "model": 0,
+      "model_n": 0,
+      "pass_ci": [
+       0.7961107336956521,
+       1.0
+      ]
+     },
+     "tier2": {
+      "n": 30,
+      "pass": 5,
+      "model": 0,
+      "model_n": 30,
+      "pass_ci": [
+       0.07336434240351683,
+       0.33564705185680177
+      ]
+     }
+    }
+   },
+   "chosen_by": {
+    "alarm-after-6pm": [],
+    "monitor-crowd": [],
+    "overnight-summary": [
+     "forced"
+    ],
+    "what-is-person-wearing": [
+     "router"
+    ],
+    "polite-close": [],
+    "greeting-no-tool": [],
+    "is-anyone-there": [
+     "router"
+    ],
+    "past-tense-goes-to-history": [
+     "router"
+    ],
+    "follow-up-alarm": []
+   }
+  },
+  {
+   "model": "qwen3:1.7b",
+   "router": {
+    "tier0": false,
+    "hints": false
+   },
+   "repeat": 5,
+   "resident_gb": 2.44,
+   "errored_runs": [],
+   "summary": {
+    "cases": {
+     "alarm-after-6pm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 5,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 8317
+     },
+     "monitor-crowd": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 8232
+     },
+     "overnight-summary": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 4135
+     },
+     "what-is-person-wearing": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 11138
+     },
+     "polite-close": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 12528
+     },
+     "greeting-no-tool": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 13935
+     },
+     "is-anyone-there": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 6932
+     },
+     "past-tense-goes-to-history": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 6997
+     },
+     "follow-up-alarm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 5,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 17621
+     }
+    },
+    "tiers": {
+     "tier2": {
+      "n": 45,
+      "pass": 30,
+      "model": 10,
+      "model_n": 45,
+      "pass_ci": [
+       0.520702168092554,
+       0.7864130779272324
+      ]
+     }
+    }
+   },
+   "chosen_by": {
+    "alarm-after-6pm": [
+     "model"
+    ],
+    "monitor-crowd": [],
+    "overnight-summary": [
+     "forced"
+    ],
+    "what-is-person-wearing": [
+     "forced"
+    ],
+    "polite-close": [],
+    "greeting-no-tool": [],
+    "is-anyone-there": [
+     "forced"
+    ],
+    "past-tense-goes-to-history": [
+     "forced"
+    ],
+    "follow-up-alarm": [
+     "model"
+    ]
+   }
+  },
+  {
+   "model": "qwen3:1.7b",
+   "router": {
+    "tier0": true,
+    "hints": true
+   },
+   "repeat": 5,
+   "resident_gb": 2.44,
+   "errored_runs": [],
+   "summary": {
+    "cases": {
+     "alarm-after-6pm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 5,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 8660
+     },
+     "monitor-crowd": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 8314
+     },
+     "overnight-summary": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 3977
+     },
+     "what-is-person-wearing": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": null,
+      "model_n": 0,
+      "tier": 0,
+      "tiers": [
+       0
+      ],
+      "latency_ms_p50": 7578
+     },
+     "polite-close": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 12954
+     },
+     "greeting-no-tool": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 13514
+     },
+     "is-anyone-there": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": null,
+      "model_n": 0,
+      "tier": 0,
+      "tiers": [
+       0
+      ],
+      "latency_ms_p50": 3845
+     },
+     "past-tense-goes-to-history": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": null,
+      "model_n": 0,
+      "tier": 0,
+      "tiers": [
+       0
+      ],
+      "latency_ms_p50": 1081
+     },
+     "follow-up-alarm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 5,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 12871
+     }
+    },
+    "tiers": {
+     "tier0": {
+      "n": 15,
+      "pass": 15,
+      "model": 0,
+      "model_n": 0,
+      "pass_ci": [
+       0.7961107336956521,
+       1.0
+      ]
+     },
+     "tier2": {
+      "n": 30,
+      "pass": 15,
+      "model": 10,
+      "model_n": 30,
+      "pass_ci": [
+       0.33153851227173764,
+       0.6684614877282624
+      ]
+     }
+    }
+   },
+   "chosen_by": {
+    "alarm-after-6pm": [
+     "model"
+    ],
+    "monitor-crowd": [],
+    "overnight-summary": [
+     "forced"
+    ],
+    "what-is-person-wearing": [
+     "router"
+    ],
+    "polite-close": [],
+    "greeting-no-tool": [],
+    "is-anyone-there": [
+     "router"
+    ],
+    "past-tense-goes-to-history": [
+     "router"
+    ],
+    "follow-up-alarm": [
+     "model"
+    ]
+   }
+  },
+  {
+   "model": "qwen3:4b",
+   "router": {
+    "tier0": false,
+    "hints": false
+   },
+   "repeat": 5,
+   "resident_gb": 4.25,
+   "errored_runs": [],
+   "summary": {
+    "cases": {
+     "alarm-after-6pm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 102827
+     },
+     "monitor-crowd": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 102208
+     },
+     "overnight-summary": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 98779
+     },
+     "what-is-person-wearing": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 105527
+     },
+     "polite-close": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 105233
+     },
+     "greeting-no-tool": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 107147
+     },
+     "is-anyone-there": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 102713
+     },
+     "past-tense-goes-to-history": {
+      "n": 5,
+      "errors": 0,
+      "pass": 5,
+      "pass_ci": [
+       0.5655085052479191,
+       1.0
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 98531
+     },
+     "follow-up-alarm": {
+      "n": 5,
+      "errors": 0,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.43449149475208104
+      ],
+      "model": 0,
+      "model_n": 5,
+      "tier": 2,
+      "tiers": [
+       2
+      ],
+      "latency_ms_p50": 214713
+     }
+    },
+    "tiers": {
+     "tier2": {
+      "n": 45,
+      "pass": 20,
+      "model": 0,
+      "model_n": 45,
+      "pass_ci": [
+       0.30938708549039107,
+       0.5882411658363468
+      ]
+     }
+    }
+   },
+   "chosen_by": {
+    "alarm-after-6pm": [],
+    "monitor-crowd": [],
+    "overnight-summary": [
+     "forced"
+    ],
+    "what-is-person-wearing": [
+     "forced"
+    ],
+    "polite-close": [],
+    "greeting-no-tool": [],
+    "is-anyone-there": [
+     "forced"
+    ],
+    "past-tense-goes-to-history": [
+     "forced"
+    ],
+    "follow-up-alarm": []
+   }
+  },
+  {
+   "model": "qwen3:4b",
+   "router": {
+    "tier0": true,
+    "hints": true
+   },
+   "repeat": 5,
+   "resident_gb": 4.25,
+   "errored_runs": [
+    {
+     "case": "alarm-after-6pm",
+     "error": "/ask got no answer (TimeoutError: timed out); the agent may still be running the turn and creating state \u2014 raise --timeout or check the agent"
+    }
+   ],
+   "summary": {
+    "cases": {
+     "alarm-after-6pm": {
+      "n": 0,
+      "errors": 1,
+      "pass": 0,
+      "pass_ci": [
+       0.0,
+       0.0
+      ],
+      "model": null,
+      "model_n": 0,
+      "tier": null,
+      "tiers": [],
+      "latency_ms_p50": null
+     }
+    },
+    "tiers": {}
+   },
+   "chosen_by": {
+    "alarm-after-6pm": []
+   }
+  }
+ ]
+}

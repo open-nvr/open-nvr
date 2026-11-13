@@ -51,7 +51,7 @@ The two doors differ only in **who configures it and for how long**:
 | Code you write | The `Detector` class + manifest | **Nothing extra** — same class, instantiated at runtime |
 
 Write your rule once and it is simultaneously an installable app card
-in Settings → App Catalog *and* a voice/chat skill the agent can
+in the App Catalog *and* a voice/chat skill the agent can
 invoke. You never touch the agent's codebase.
 
 ## 2. How capability matching works
@@ -207,9 +207,11 @@ both the catalog and the agent.
 
 On the server, this is one thin seam: `GET /api/v1/apps` and
 `GET /apps/{id}/status` accept the deployment's `X-Internal-Api-Key` (a
-read-only service principal, constant-time compared) as an alternative to a
-user JWT, exactly like `POST /apps/register` already does — while
-enable/disable/config **remain user-JWT-only**. The agent's registry client
+read-only service principal, constant-time compared) or an app's own key
+(see [APP_CREDENTIALS.md](APP_CREDENTIALS.md)) as an alternative to a user
+JWT, exactly like `POST /apps/register` already does — while enable/disable
+are **superuser-only** and `PUT /config` is superuser-only apart from the
+per-camera entries of cameras the caller may manage (per-camera RBAC). The agent's registry client
 is cached (60s TTL, negative-cached) and never raises: an unreachable or
 unconfigured registry degrades to a graceful "couldn't reach the app
 registry" message and simply omits the per-app skill entries, never a crash.

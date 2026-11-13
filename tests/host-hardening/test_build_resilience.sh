@@ -191,7 +191,7 @@ fi
 # runner, not operator-deploy time). But the *final stage* — the
 # one operators pull and run — must not have any RUN apk/apt/pip.
 # It's just an alpine base + COPY of the .onnx.
-start_test "GHA workflow publishes the tag docker-compose expects (v8.3.0)"
+start_test "GHA workflow publishes the tag docker-compose expects (v8.4.0-yolo26n)"
 # Regression for ISSUE-7 v3 fix: the first GHA build pushed
 # `:v8.3.40` (Python package version) while docker-compose.yml
 # expected `:v8.3.0` (weights release version). Operators got
@@ -203,7 +203,8 @@ root = sys.argv[1]
 
 # Extract `:vX.Y.Z` from the compose image default.
 compose_text = open(root + "/docker-compose.yml").read()
-m = re.search(r"ghcr\.io/open-nvr/yolov8-weights:v([0-9.]+)", compose_text)
+# The tag is <assets release>-<model> since YOLO26n (v8.4.0-yolo26n).
+m = re.search(r"ghcr\.io/open-nvr/yolov8-weights:v([0-9A-Za-z.-]+)\}", compose_text)
 compose_tag = m.group(1) if m else None
 
 # Parse the GHA workflow YAML and dig into workflow_dispatch.inputs.

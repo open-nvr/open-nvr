@@ -23,6 +23,28 @@ three rules, all here so no caller can get them wrong:
   every claim's set; any claim WITHOUT labels means "no restriction"
   and wins (a restriction other consumers didn't ask for must never
   hide their detections).
+* **App widening**: an app pick (consumer ``app:<id>``) carries the
+  app's manifest ``tier0_labels`` as its ``labels``, filled in here at
+  declare time and refreshed on re-registration. Tier-0 reads labels
+  on a NON-``object_detection`` entry as classes to ADD to the camera's
+  set, never as a replacement — see detect-pipeline's
+  ``_assignment_view`` and docs/tier0-consumption.md.
+* **Skills follow apps**: a pick ALSO projects the tasks the app's
+  manifest declares (``requires_tasks`` — what it cannot run without —
+  and ``enrich_tasks`` — what it uses when the box has it) as skill
+  entries of their own. A camera's skill set is therefore exactly the
+  union of the model skills the enabled apps using it bring: pick the
+  doorbell → ``face_recognition``; pick Footage Search →
+  ``image_captioning`` + ``embed``. Every compute gate reads that set
+  (``camera_skills``), so an enricher lights up because an app that
+  needs it was pointed at the camera, and for no other reason. Nothing
+  else writes skills: the camera page's editor is gone (its rows are
+  retired at startup, see ``reconcile_on_startup``).
+* **All-cameras apps**: a manifest with ``all_cameras: true`` (the
+  agent) holds a platform-maintained pick on every live camera —
+  written on registration and on camera creation, released with the
+  camera — so its skills ride the same table and the same
+  enable/disable/uninstall semantics as everyone else's.
 
 Vocabulary stays open (annotate, never gate): ``skill`` and
 ``consumer`` are free strings; validation is shape and bounds only.
@@ -65,14 +87,103 @@ def _labels_of(params: Optional[dict]) -> Optional[list[str]]:
     return cleaned or None
 
 
-def project_camera(db: Session, camera: Camera) -> None:
+#: Longest adapter name a claim may carry (KAI-C registry names are short).
+MAX_ADAPTER_LEN = 64
+
+
+def _adapters_of(params: Optional[dict]) -> list[str]:
+    """The adapters a claim names for its skill (``params.adapters``).
+
+    A face app claims ``face_recognition`` and names ITS face adapter: each
+    face app keeps its own gallery, so the platform cannot choose one
+    (docs/design/face-recognition-route.md). Names only, deduplicated."""
+    if not isinstance(params, dict):
+        return []
+    raw = params.get("adapters")
+    if not isinstance(raw, list):
+        return []
+    return sorted({str(a).strip() for a in raw
+                   if str(a).strip() and len(str(a).strip()) <= MAX_ADAPTER_LEN})
+
+
+def disabled_app_consumers(db: Session) -> frozenset[str]:
+    """The consumer strings of every installed app that is switched OFF.
+
+    A disabled app is not a consumer. Its picks stay in the table — the
+    operator's camera selection must survive a Disable, and an Enable
+    has to restore it exactly — but they contribute nothing to the
+    union while the app is off, which is what :func:`project_camera`
+    uses this for.
+    """
+    from models import InstalledApp
+
+    rows = (
+        db.query(InstalledApp.id)
+        .filter(InstalledApp.enabled.is_(False))
+        .all()
+    )
+    return frozenset(app_consumer(str(r[0])) for r in rows)
+
+
+def _canonical_task(name: str) -> str:
+    """An adapter-advertised or manifest-declared task name, canonicalised
+    through ``config/tasks.yml`` aliases (``scene_caption`` →
+    ``image_captioning``, ``visual_qa`` → ``vqa``) so a skill entry matches
+    the name every gate compares against."""
+    try:
+        from services.enrichment_plan import _canonical_tasks
+        return _canonical_tasks().get(str(name).strip().lower(), str(name).strip().lower())
+    except Exception:  # noqa: BLE001 — never fail a projection on a yaml hiccup
+        return str(name).strip().lower()
+
+
+def app_tasks(manifest: Any) -> list[str]:
+    """The model skills an app brings to a camera it is picked for:
+    ``requires_tasks`` (hard) + ``enrich_tasks`` (soft), canonical,
+    deduplicated, in declaration order."""
+    if not isinstance(manifest, dict):
+        return []
+    out: list[str] = []
+    for key in ("requires_tasks", "enrich_tasks"):
+        raw = manifest.get(key)
+        if not isinstance(raw, list):
+            continue
+        for item in raw:
+            task = _canonical_task(item) if isinstance(item, str) else ""
+            if task and task not in out:
+                out.append(task)
+    return out
+
+
+def app_manifests(db: Session) -> dict[str, dict]:
+    """``app id → manifest_json`` for every installed app — one query, so
+    projecting many cameras does not look each app up per camera."""
+    from models import InstalledApp
+
+    out: dict[str, dict] = {}
+    for row in db.query(InstalledApp.id, InstalledApp.manifest_json).all():
+        out[str(row[0])] = row[1] if isinstance(row[1], dict) else {}
+    return out
+
+
+def project_camera(db: Session, camera: Camera, *,
+                   disabled_consumers: Optional[frozenset[str]] = None,
+                   manifests: Optional[dict[str, dict]] = None) -> None:
     """Recompute ``camera.assignments`` from the table (no commit).
 
     Projection shape is exactly what the editor wrote historically:
     ``[{"skill": s} | {"skill": s, "labels": [...]}]`` — so every
     reader (Tier-0, SDK, internal endpoint, the editor's own prefill)
     is untouched.
+
+    Claims held by a DISABLED app are skipped (#539). Turning an app off
+    used to leave its picks in the projection, so every consumer that
+    reads the projection kept working: a disabled ANPR app went on
+    buying plate OCR on every vehicle, indefinitely and invisibly. Pass
+    ``disabled_consumers`` to project several cameras off one lookup.
     """
+    if disabled_consumers is None:
+        disabled_consumers = disabled_app_consumers(db)
     rows = (
         db.query(SkillAssignment)
         .filter(SkillAssignment.camera_id == camera.id)
@@ -80,22 +191,46 @@ def project_camera(db: Session, camera: Camera) -> None:
         .all()
     )
     merged: dict[str, Optional[set[str]]] = {}
-    for row in rows:
-        labels = _labels_of(row.params)
-        if row.skill not in merged:
-            merged[row.skill] = set(labels) if labels is not None else None
+    # skill -> adapters its claims name (union). Projected as an additive
+    # ``adapters`` key, only when some claim names one, so every entry
+    # without adapters stays byte-identical to what readers know.
+    adapters: dict[str, set[str]] = {}
+
+    def _merge(skill: str, labels: Optional[list[str]]) -> None:
+        if skill not in merged:
+            merged[skill] = set(labels) if labels is not None else None
         else:
-            current = merged[row.skill]
+            current = merged[skill]
             # None = unrestricted; unrestricted wins over any label set.
             if current is not None:
-                merged[row.skill] = (
-                    None if labels is None else current | set(labels)
-                )
+                merged[skill] = None if labels is None else current | set(labels)
+
+    app_ids: list[str] = []
+    for row in rows:
+        if row.consumer in disabled_consumers:
+            continue
+        _merge(row.skill, _labels_of(row.params))
+        named = _adapters_of(row.params)
+        if named:
+            adapters.setdefault(row.skill, set()).update(named)
+        if row.consumer.startswith(APP_CONSUMER_PREFIX):
+            app_ids.append(row.consumer[len(APP_CONSUMER_PREFIX):])
+    # Skills follow apps: each enabled pick brings the tasks its manifest
+    # declares. Derived entries are unrestricted — an app's tier0_labels
+    # ride its own pick entry, never the task's.
+    if app_ids:
+        if manifests is None:
+            manifests = app_manifests(db)
+        for app_id in app_ids:
+            for task in app_tasks(manifests.get(app_id)):
+                _merge(task, None)
     projection: list[dict[str, Any]] = []
     for skill in sorted(merged):
         entry: dict[str, Any] = {"skill": skill}
         if merged[skill] is not None:
             entry["labels"] = sorted(merged[skill])
+        if adapters.get(skill):
+            entry["adapters"] = sorted(adapters[skill])
         projection.append(entry)
     new_value = projection or None
     if (camera.assignments or None) != new_value:
@@ -119,6 +254,8 @@ def declare(
                 SkillAssignment.consumer == consumer)
         .first()
     )
+    if consumer.startswith(APP_CONSUMER_PREFIX) and _labels_of(params) is None:
+        params = _with_app_tier0_labels(db, consumer[len(APP_CONSUMER_PREFIX):], params)
     if row is None:
         row = SkillAssignment(
             skill=skill, camera_id=camera_id, consumer=consumer,
@@ -130,6 +267,93 @@ def declare(
     db.flush()
     project_camera(db, camera)
     return row
+
+
+def _manifest_tier0_labels(manifest: Any) -> list[str]:
+    """The ``tier0_labels`` an app's manifest declares, cleaned the way
+    the projection cleans labels (lowercased, deduplicated, sorted) so a
+    pick row carries exactly what Tier-0 will compare against."""
+    if not isinstance(manifest, dict):
+        return []
+    labels = manifest.get("tier0_labels")
+    if not isinstance(labels, list):
+        return []
+    return sorted({str(s).strip().lower() for s in labels if str(s).strip()})
+
+
+def _with_app_tier0_labels(
+    db: Session, app_id: str, params: Optional[dict],
+) -> Optional[dict]:
+    """A pick's params with the app's ``tier0_labels`` filled in as
+    ``labels`` — only when the caller passed none, so a caller that named
+    labels itself keeps them.
+
+    Tier-0 tracks only the deployment's global label set, so an app that
+    rides it for other classes (a bag, a parcel) sees nothing on a stock
+    install. Its manifest says which classes it needs; the pick is where
+    the platform learns WHICH cameras, so this is where the two meet.
+    Tier-0 reads the labels off the pick's projection entry (skill = the
+    app id) and widens that camera's set with them. An unknown app id or
+    a manifest without the field leaves the params untouched.
+    """
+    from models import InstalledApp
+
+    app = db.query(InstalledApp).filter(InstalledApp.id == app_id).first()
+    labels = _manifest_tier0_labels(app.manifest_json) if app is not None else []
+    if not labels:
+        return params
+    out = dict(params) if isinstance(params, dict) else {}
+    out["labels"] = labels
+    return out
+
+
+def sync_app_pick_labels(db: Session, app_id: str) -> int:
+    """Refresh ``labels`` on every pick the app holds from its CURRENT
+    manifest and re-project those cameras (no commit). Returns how many
+    pick rows changed.
+
+    Registration calls this so a manifest that GAINS ``tier0_labels``
+    widens the cameras picked before the upgrade — otherwise an operator
+    would have to unpick and re-pick every camera to see the new classes,
+    with nothing telling them so. The manifest is the source of truth for
+    a pick's labels both ways: a manifest that drops the field takes the
+    labels off the picks again.
+    """
+    from models import InstalledApp
+
+    app = db.query(InstalledApp).filter(InstalledApp.id == app_id).first()
+    labels = _manifest_tier0_labels(app.manifest_json) if app is not None else []
+    rows = (
+        db.query(SkillAssignment)
+        .filter(SkillAssignment.consumer == app_consumer(app_id))
+        .all()
+    )
+    changed = 0
+    cameras: set[int] = set()
+    for row in rows:
+        params = dict(row.params) if isinstance(row.params, dict) else {}
+        if labels:
+            if _labels_of(params) == labels:
+                continue
+            params["labels"] = labels
+        else:
+            if "labels" not in params:
+                continue
+            params.pop("labels")
+        row.params = params or None
+        changed += 1
+        cameras.add(row.camera_id)
+    if not changed:
+        return 0
+    db.flush()
+    disabled = disabled_app_consumers(db)
+    for camera in db.query(Camera).filter(Camera.id.in_(cameras)).all():
+        project_camera(db, camera, disabled_consumers=disabled)
+    logger.info(
+        "refreshed tier0 labels on %d camera pick(s) for app %s: %s",
+        changed, app_id, ", ".join(labels) or "-",
+    )
+    return changed
 
 
 def release(
@@ -157,37 +381,20 @@ def release(
     return True
 
 
-def set_operator_assignments(
-    db: Session, camera: Camera, entries: list[dict],
-) -> None:
-    """The camera-settings editor's write path (no commit).
-
-    Full-replace — but only of the OPERATOR's claims on this camera,
-    which preserves the editor's documented contract ("send the FULL
-    list each time") while other consumers' claims survive (decision
-    8). Entries are the validated CameraAssignment dicts
-    (``{"skill", "labels"?}``).
-    """
-    db.query(SkillAssignment).filter(
-        SkillAssignment.camera_id == camera.id,
-        SkillAssignment.consumer == OPERATOR_CONSUMER,
-    ).delete(synchronize_session=False)
-    db.flush()
-    for entry in entries or []:
-        skill = str(entry.get("skill") or "").strip()
-        if not skill:
-            continue
-        labels = entry.get("labels")
-        params = (
-            {"labels": list(labels)}
-            if isinstance(labels, list) and labels else None
-        )
-        db.add(SkillAssignment(
-            skill=skill, camera_id=camera.id,
-            consumer=OPERATOR_CONSUMER, params=params,
-        ))
-    db.flush()
-    project_camera(db, camera)
+def retire_operator_claims(db: Session) -> int:
+    """Drop every row the camera page's editor wrote (consumer
+    ``operator``). The editor is gone: skills are brought by apps and by
+    nothing else, so a lingering operator row would be a skill no app
+    holds — running inference nobody asked for, invisible to the App
+    Catalog. Idempotent; returns how many rows went (no commit)."""
+    n = (
+        db.query(SkillAssignment)
+        .filter(SkillAssignment.consumer == OPERATOR_CONSUMER)
+        .delete(synchronize_session=False)
+    )
+    if n:
+        logger.info("retired %d operator skill row(s): skills now follow apps", n)
+    return n
 
 
 def skill_view(db: Session, skill: str) -> dict[str, Any]:
@@ -196,7 +403,13 @@ def skill_view(db: Session, skill: str) -> dict[str, Any]:
 
     Live cameras only (#372) — the operator view must show the same
     union the consumers act on, or a binned camera's stale claim looks
-    like a working assignment."""
+    like a working assignment.
+
+    A DISABLED app's claim is shown (hiding it would make the pick
+    vanish from the view that exists so a release is never a surprise)
+    but carries ``"dormant": true`` and is left OUT of ``union``, which
+    has to mean the same thing here as it does in the projection: the
+    cameras this skill actually runs on (#539)."""
     rows = (
         db.query(SkillAssignment)
         .join(Camera, Camera.id == SkillAssignment.camera_id)
@@ -205,19 +418,55 @@ def skill_view(db: Session, skill: str) -> dict[str, Any]:
         .order_by(SkillAssignment.camera_id, SkillAssignment.consumer)
         .all()
     )
+    disabled = disabled_app_consumers(db)
     cameras: dict[int, list[dict[str, Any]]] = {}
+    union: set[int] = set()
     for row in rows:
-        cameras.setdefault(row.camera_id, []).append({
+        claim: dict[str, Any] = {
             "consumer": row.consumer,
             "params": row.params,
-        })
+        }
+        if row.consumer in disabled:
+            # Sparse on purpose: the key appears only where it says
+            # something, so every existing reader of this shape is
+            # untouched.
+            claim["dormant"] = True
+        else:
+            union.add(row.camera_id)
+        cameras.setdefault(row.camera_id, []).append(claim)
+    # Derived claims: apps whose manifest brings this task to the cameras
+    # they picked. Shown with ``"derived": true`` so a release is never a
+    # surprise — releasing the pick is what releases the skill.
+    wanted = (skill or "").strip().lower()
+    manifests = app_manifests(db)
+    bringing = {app_id for app_id, m in manifests.items() if wanted in app_tasks(m)}
+    if bringing:
+        picks = (
+            db.query(SkillAssignment)
+            .join(Camera, Camera.id == SkillAssignment.camera_id)
+            .filter(SkillAssignment.consumer.in_([app_consumer(a) for a in bringing]),
+                    Camera.deleted_at.is_(None))
+            .order_by(SkillAssignment.camera_id, SkillAssignment.consumer)
+            .all()
+        )
+        already = {(r.camera_id, r.consumer) for r in rows}
+        for row in picks:
+            if (row.camera_id, row.consumer) in already:
+                # ANPR: its pick skill IS the task it declares — one claim.
+                continue
+            claim = {"consumer": row.consumer, "params": None, "derived": True}
+            if row.consumer in disabled:
+                claim["dormant"] = True
+            else:
+                union.add(row.camera_id)
+            cameras.setdefault(row.camera_id, []).append(claim)
     return {
         "skill": (skill or "").strip(),
         "cameras": [
             {"camera_id": cid, "consumers": claims}
             for cid, claims in sorted(cameras.items())
         ],
-        "union": sorted(cameras),
+        "union": sorted(union),
     }
 
 
@@ -238,6 +487,12 @@ def release_camera_claims(db: Session, camera_id: int) -> int:
         .filter(SkillAssignment.camera_id == camera_id)
         .delete(synchronize_session=False)
     )
+    # The projection goes with the claims: assignments_by_skill reads the
+    # projection, and a binned camera's stale JSON would otherwise keep a
+    # skill "running" on a camera that has no claims left.
+    camera = db.query(Camera).filter(Camera.id == camera_id).first()
+    if camera is not None and camera.assignments is not None:
+        camera.assignments = None
     if removed:
         logger.info(
             "released %d skill claim(s) for deleted camera %s",
@@ -259,14 +514,275 @@ def assignments_by_skill(db: Session) -> dict[str, list[int]]:
     drops orphan rows whose camera was hard-deleted. When the last live
     assignment goes, the key disappears and the restriction correctly
     lifts (CAMERA_ASSIGNMENTS.md: 'the assignment list for that skill
-    is the whole truth' — the truth must not include tombstones)."""
+    is the whole truth' — the truth must not include tombstones).
+
+    A DISABLED app's claims are skipped for the same reason (#539).
+    This map is what the registry reports a skill as running on, and
+    compute follows the projection — which no longer counts a disabled
+    app. Reading the raw table here would have the registry call a skill
+    active on cameras where nothing is computing."""
     out: dict[str, set[int]] = {}
+    # The projection, not the raw table: derived skills (the tasks an
+    # app's manifest brings) live only there, and the projection already
+    # leaves a disabled app's claims out.
+    for camera in db.query(Camera).filter(Camera.deleted_at.is_(None)).all():
+        for skill in camera_skills(camera):
+            out.setdefault(skill, set()).add(camera.id)
+    return {k: sorted(v) for k, v in out.items()}
+
+
+# ── The eligibility rule, in one place ──────────────────────────────
+#
+# Two different questions get asked about a camera and a skill, and
+# conflating them is what made assignments advisory:
+#
+#   ELIGIBLE — may this skill be offered this camera? Open by default:
+#     a camera nobody has claimed can be picked by anyone. This is what
+#     a configuration picker asks.
+#   ADOPTED  — is this camera actually claimed by that skill? This is
+#     what COMPUTE asks, and it is never true by default. An unassigned
+#     camera is eligible everywhere and computes nowhere.
+#
+# Both read the denormalised ``Camera.assignments`` projection rather
+# than the claim table, because the hot path (plate ingest) already has
+# the camera row in hand and must not pay a second query per visit.
+
+
+def camera_skills(camera) -> set[str]:
+    """Skills claimed on a camera, from the JSON projection.
+
+    The projection is NULL when nothing is claimed and a list of
+    ``{"skill": ..., "labels"?: [...]}`` otherwise (see
+    :func:`project_camera`). Malformed entries are ignored rather than
+    raised on: this is read on the ingest path, and a bad row in the
+    column must not cost a visit.
+    """
+    entries = getattr(camera, "assignments", None)
+    if not isinstance(entries, list):
+        return set()
+    out: set[str] = set()
+    for entry in entries:
+        if isinstance(entry, dict):
+            skill = entry.get("skill")
+            if isinstance(skill, str) and skill.strip():
+                out.add(skill.strip().lower())
+    return out
+
+
+def camera_adopted(camera, skill: str) -> bool:
+    """Does this camera actually carry that skill? The COMPUTE gate.
+
+    False for an unassigned camera — that is the point. Inference for a
+    skill runs on the cameras an operator pointed it at, not on every
+    camera that happens to exist.
+    """
+    return skill.strip().lower() in camera_skills(camera)
+
+
+def camera_eligible(camera, skill: str) -> bool:
+    """May this skill be OFFERED this camera? The picker gate.
+
+    Always yes. Every camera is available to every app, and any number
+    of apps may pick the same one — one inference stream feeding many
+    apps is what the platform is built for.
+
+    It used to answer "only if nothing else claimed it", which made
+    every claim exclusive: a camera narrowed to ``object_detection``
+    labels vanished from every app's picker, and one app's pick would
+    have hidden the camera from all the others. Kept as a function so
+    the rule stays named in one place rather than inlined as ``True``.
+    """
+    return True
+
+
+# ── App picks ───────────────────────────────────────────────────────
+#
+# An app uses a camera because the app was POINTED at it, in the app's
+# own configuration — not because the camera page named it. A pick is an
+# ordinary claim with ``consumer="app:<app id>"`` and ``skill`` = the app
+# id with underscores, written through the same declare/release as every
+# other claim (the Vehicles page has always written ANPR's picks this
+# way). So:
+#
+#   * an app's roster is exactly its picks on live cameras — nothing
+#     picked, nothing read and nothing computed;
+#   * several apps may pick one camera (no exclusivity);
+#   * compute is unchanged: picks project into ``Camera.assignments``
+#     like any claim, so ANPR's picks (skill ``license_plate_recognition``)
+#     still switch plate OCR on through the existing gates.
+
+APP_CONSUMER_PREFIX = "app:"
+
+
+def app_consumer(app_id: str) -> str:
+    """The consumer a pick is stored under: ``app:<app id>``."""
+    return f"{APP_CONSUMER_PREFIX}{str(app_id).strip()}"
+
+
+def app_pick_skill(app_id: str) -> str:
+    """The skill a pick is stored under: the app id with underscores.
+
+    For ANPR that is ``license_plate_recognition`` — deliberately the
+    platform plate skill, so its picks keep turning plate OCR on."""
+    return str(app_id).strip().replace("-", "_")
+
+
+def picked_camera_ids(db: Session, app_id: str) -> set[int]:
+    """Live cameras this app picked. Empty = the app uses nothing."""
     rows = (
-        db.query(SkillAssignment)
+        db.query(SkillAssignment.camera_id)
         .join(Camera, Camera.id == SkillAssignment.camera_id)
-        .filter(Camera.deleted_at.is_(None))
+        .filter(SkillAssignment.consumer == app_consumer(app_id),
+                Camera.deleted_at.is_(None))
         .all()
     )
+    return {int(r[0]) for r in rows}
+
+
+def apps_using_camera(db: Session, camera_id: int) -> list[str]:
+    """App ids that picked this camera, for the camera page's "Used by"."""
+    rows = (
+        db.query(SkillAssignment.consumer)
+        .filter(SkillAssignment.camera_id == camera_id,
+                SkillAssignment.consumer.like(f"{APP_CONSUMER_PREFIX}%"))
+        .all()
+    )
+    return sorted({r[0][len(APP_CONSUMER_PREFIX):] for r in rows})
+
+
+def reproject_app_cameras(db: Session, app_id: str) -> int:
+    """Recompute the projection of every camera this app picked, and
+    return how many were touched (no commit).
+
+    Enable/Disable call this: the flag decides whether the app's picks
+    count towards each camera's union, so flipping it has to reach the
+    projection or nothing downstream notices. Tier-0 picks the change up
+    on its next reconcile tick, like any assignment change.
+    """
+    rows = (
+        db.query(SkillAssignment.camera_id)
+        .filter(SkillAssignment.consumer == app_consumer(app_id))
+        .all()
+    )
+    camera_ids = {int(r[0]) for r in rows}
+    if not camera_ids:
+        return 0
+    disabled = disabled_app_consumers(db)
+    cameras = db.query(Camera).filter(Camera.id.in_(camera_ids)).all()
+    for camera in cameras:
+        project_camera(db, camera, disabled_consumers=disabled)
+    return len(cameras)
+
+
+def release_app_picks(db: Session, app_id: str) -> int:
+    """Drop every pick an app holds and re-project those cameras (no
+    commit). Uninstall calls this: nothing should keep running for an
+    app that is gone."""
+    rows = (
+        db.query(SkillAssignment)
+        .filter(SkillAssignment.consumer == app_consumer(app_id))
+        .all()
+    )
+    camera_ids = {row.camera_id for row in rows}
     for row in rows:
-        out.setdefault(row.skill, set()).add(row.camera_id)
-    return {k: sorted(v) for k, v in out.items()}
+        db.delete(row)
+    db.flush()
+    if camera_ids:
+        disabled = disabled_app_consumers(db)
+        for camera in db.query(Camera).filter(Camera.id.in_(camera_ids)).all():
+            project_camera(db, camera, disabled_consumers=disabled)
+    if rows:
+        logger.info("released %d camera pick(s) for app %s", len(rows), app_id)
+    return len(rows)
+
+
+# ── All-cameras apps ─────────────────────────────────────────────────
+#
+# An app whose manifest says ``all_cameras: true`` (the agent: it shows
+# every user their own cameras, and its VLM describes every visit) does
+# not take a pick — the platform holds one on every live camera for it.
+# Same table, same consumer column, so disable/enable/uninstall and the
+# projection treat it exactly like a pick the operator made.
+
+
+def _all_cameras_allowlist() -> frozenset[str]:
+    """App ids the operator lets run on every camera (ALL_CAMERAS_APPS)."""
+    try:
+        from core.config import settings
+        raw = str(getattr(settings, "all_cameras_apps", "") or "")
+    except Exception:  # noqa: BLE001
+        raw = ""
+    return frozenset(s.strip() for s in raw.split(",") if s.strip())
+
+
+def _wants_all_cameras(app_id: str, manifest: Any) -> bool:
+    """The manifest asks for every camera AND the operator allows this
+    app to have them. A pick is what an app may read, so the manifest
+    alone must never be enough: an app that asks and is not listed is
+    refused, loudly, and gets exactly the cameras it is picked for."""
+    asks = isinstance(manifest, dict) and manifest.get("all_cameras") is True
+    if not asks:
+        return False
+    if str(app_id) in _all_cameras_allowlist():
+        return True
+    logger.warning(
+        "app %s asks to run on all cameras but is not in ALL_CAMERAS_APPS — "
+        "refused; it runs only on cameras picked for it", app_id,
+    )
+    return False
+
+
+def all_camera_app_ids(db: Session) -> list[str]:
+    return sorted(app_id for app_id, m in app_manifests(db).items()
+                  if _wants_all_cameras(app_id, m))
+
+
+def sync_all_camera_picks(db: Session, app_id: str) -> int:
+    """Give an ``all_cameras`` app a pick on every live camera it does not
+    hold one on yet (no commit). Registration calls this. Returns how many
+    picks were added; 0 for an app that does not want all cameras."""
+    from models import InstalledApp
+
+    app = db.query(InstalledApp).filter(InstalledApp.id == app_id).first()
+    if app is None or not _wants_all_cameras(app_id, app.manifest_json):
+        return 0
+    held = picked_camera_ids(db, app_id)
+    added = 0
+    for camera in db.query(Camera).filter(Camera.deleted_at.is_(None)).all():
+        if camera.id in held:
+            continue
+        declare(db, skill=app_pick_skill(app_id), camera_id=camera.id,
+                consumer=app_consumer(app_id))
+        added += 1
+    if added:
+        logger.info("app %s runs on all cameras: picked %d new camera(s)", app_id, added)
+    return added
+
+
+def adopt_new_camera(db: Session, camera_id: int) -> int:
+    """A camera just came into existence: every all-cameras app picks it
+    (no commit). Returns how many apps did."""
+    n = 0
+    for app_id in all_camera_app_ids(db):
+        declare(db, skill=app_pick_skill(app_id), camera_id=camera_id,
+                consumer=app_consumer(app_id))
+        n += 1
+    return n
+
+
+def reconcile_on_startup(db: Session) -> dict[str, int]:
+    """Bring the table and every projection in line with the rules above
+    (no commit): retire the camera page's rows, give all-cameras apps
+    their picks, and re-project every live camera so derived skills from
+    manifests registered before this code exist in the JSON the gates
+    read. Idempotent — a second run changes nothing."""
+    stats = {"retired_operator_rows": retire_operator_claims(db), "all_camera_picks": 0,
+             "cameras_projected": 0}
+    for app_id in all_camera_app_ids(db):
+        stats["all_camera_picks"] += sync_all_camera_picks(db, app_id)
+    disabled = disabled_app_consumers(db)
+    manifests = app_manifests(db)
+    for camera in db.query(Camera).filter(Camera.deleted_at.is_(None)).all():
+        project_camera(db, camera, disabled_consumers=disabled, manifests=manifests)
+        stats["cameras_projected"] += 1
+    return stats

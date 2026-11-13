@@ -137,6 +137,7 @@ def test_rollup_snapshot_with_no_samples_is_all_null():
         "series": [],
         "fingerprint_changes": [],
         "samples": 0,
+        "requests": 0,
     }
 
 
@@ -178,6 +179,25 @@ def test_rollup_window_is_delta_between_oldest_and_newest():
     # Outcomes are windowed counts (35−10, 5−0); gauges are latest.
     assert snap["outcomes"] == {"ok": 25, "model_error": 5}
     assert snap["inflight"] == 4
+    assert snap["requests"] == 30          # +Inf bucket delta: what was actually served
+
+
+def test_idle_window_reports_zero_requests_not_broken_percentiles():
+    """An adapter scraped every minute but asked nothing: 60 samples,
+    0 requests, null percentiles — and the UI must say so."""
+    rollup = MetricsRollup()
+    idle = (
+        'adapter_infer_latency_seconds_bucket{le="0.05"} 10\n'
+        'adapter_infer_latency_seconds_bucket{le="+Inf"} 10\n'
+        'adapter_infer_total{outcome="ok"} 10\n'
+        "adapter_inflight_requests 0\n"
+    )
+    for _ in range(3):
+        rollup.record_sample("yolov8", parse_adapter_metrics(idle))
+    snap = rollup.snapshot("yolov8")
+    assert snap["samples"] == 3 and snap["requests"] == 0
+    assert snap["latency_ms"] == {"p50": None, "p95": None, "p99": None}
+    assert sum(snap["outcomes"].values()) == 0
 
 
 def test_rollup_counter_reset_falls_back_to_newest_cumulative():

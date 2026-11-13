@@ -1,0 +1,32 @@
+# Tests on every push and PR. The publish workflow (publish.yml) builds
+# and signs the image through OpenNVR's build-catalog-app workflow.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Sync dependencies
+        run: uv sync
+      - name: Run pytest
+        run: uv run pytest -q
+      - name: Validate the listing entry
+        run: |
+          uv run python - <<'PY'
+          import yaml, sys
+          e = yaml.safe_load(open("apps-index-entry.yml"))
+          e = e[0] if isinstance(e, list) else e
+          missing = [k for k in ("id", "name", "author", "contact", "source", "network_egress", "image") if k not in e]
+          sys.exit(f"apps-index-entry.yml missing {missing}" if missing else 0)
+          PY

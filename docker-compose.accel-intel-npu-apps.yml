@@ -1,0 +1,16 @@
+# OpenNVR Accelerate — Intel NPU device for the pose adapter of
+# docker-compose.apps.yml. Added by start.sh after
+# docker-compose.accel-intel-npu.yml when /dev/accel/accel0 exists AND
+# docker-compose.apps.yml is in the set (the service must be defined for an
+# override of it to be valid; Compose 2.24 rejects the project otherwise).
+services:
+  yolo-pose-adapter:
+    # The pose model (yolo11n-pose) hard-reset an Arrow Lake host every time
+    # it was compiled for the iGPU — dynamic or pinned shape, 6.8 and 7.0
+    # kernels — while it runs cleanly on the NPU at ~19 ms/frame. So on a
+    # host with an NPU the pose adapter takes it. See docs/HARDWARE.md.
+    profiles: [apps, guard-scan-compliance]
+    devices:
+      - /dev/accel:/dev/accel
+    environment:
+      - ADAPTER_ONNX_PROVIDERS=${YOLO_POSE_ONNX_PROVIDERS:-${ADAPTER_ONNX_PROVIDERS:-OpenVINOExecutionProvider:NPU}}

@@ -24,10 +24,10 @@ nats_url: "nats://nats:4222"
 nats_token: "${INTERNAL_API_KEY}"
 
 # ── Camera scope ────────────────────────────────────────────────────
-# Default: cameras assigned the license_plate_recognition skill in the
-# assignment table (resolved via opennvr_url below, refreshed live).
-# An explicit list here overrides that; empty + no opennvr_url = alert
-# on every camera's plate events.
+# Select the cameras in the App Catalog → Configure → Cameras, or give a
+# camera a gate role on the Vehicles page (which selects it too). None
+# selected = no plates read and nothing alerted. A list here can only
+# NARROW the selection; run standalone (no opennvr_url) it is the whole scope.
 cameras: []
 
 # ── The app's job ───────────────────────────────────────────────────

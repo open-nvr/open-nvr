@@ -1,0 +1,94 @@
+# ==========================================
+# OpenNVR Accelerate — Qualcomm flavour (Tier-0 detector on the Hexagon NPU)
+# ==========================================
+# start.sh adds this overlay when OPENNVR_ACCEL=qualcomm, or on `auto` when it
+# finds the Hexagon compute DSP's fastrpc node (/dev/fastrpc-cdsp) on an arm64
+# host: Qualcomm Dragonwing (IQ8 / QCS8275, QCS6490 …) and Snapdragon boards
+# running Qualcomm's Ubuntu. It swaps detect-pipeline for the ``-qualcomm``
+# image (same code; carries the ONNX Runtime QNN plugin provider, which
+# bundles the Qualcomm AI Runtime user-space), lends it the DSP, and points
+# the detector at the HTP.
+#
+# THIS FILE OVERRIDES ONLY SERVICES OF docker-compose.yml. The flavour's
+# overrides of services that other files define live beside it, one
+# fragment per file, and start.sh appends each fragment only when its file
+# is in the set:
+#   docker-compose.accel-qualcomm-apps.yml   the adapters of docker-compose.apps.yml
+#                                            (pose, faces, packages, plates, the embedder)
+#   docker-compose.accel-qualcomm-agent.yml  the captioner and speech to text of
+#                                            docker-compose.camera-agent.yml
+# An override of a service no file in the set defines is a service with no
+# image, and Compose 2.24 (the board's distro package) rejects the whole
+# project for it — a plain install without the camera agent could not start
+# at all (reported 2026-11-12). Newer Compose skips services whose profile
+# is off, which is how it went unnoticed.
+#
+# What the host provides and why (measured on an Arduino Ventuno Q, QCS8275):
+#   /dev/fastrpc-cdsp        the compute DSP (the NPU) — one node, no /dev/dri
+#   /dev/dma_heap/system,    the DMA-BUF heaps the fastrpc client allocates
+#   /dev/dma_heap/qcom,system  shared buffers from; without them device
+#                            creation fails with QNN_DEVICE_ERROR_INVALID_CONFIG
+#   libcdsprpc.so            the fastrpc client the QNN HTP stub dlopens — by
+#                            that UNVERSIONED name, so the host's .so.1.0.0 is
+#                            mounted under it; libdmabufheap.so.0 is its one
+#                            dependency (both from Qualcomm's qcom-fastrpc1
+#                            package; not in Debian, so bind-mounted rather
+#                            than installed)
+#   groups fastrpc, dmaheap  the nodes are group-owned — FASTRPC_GID and
+#                            DMAHEAP_GID in .env if yours are not 125 / 989
+#                            (`getent group fastrpc dmaheap`; start.sh fills
+#                            them in on auto)
+# The DSP firmware and the fastrpc daemon (cdsprpcd) are the host's job, like
+# the Intel NPU firmware is on x86. Check: `ls /dev/fastrpc-cdsp /dev/dma_heap`
+# and `systemctl is-active cdsprpcd`.
+#
+# Running compose by hand instead of start.sh? Export the DETECT_* values
+# below (or set them in .env) — an .env that still says DETECT_ONNX_BACKEND=
+# cvdnn wins over the defaults here, by compose's rules.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.accel-qualcomm.yml up -d
+#
+# Decode stays in software: the Qualcomm video core is reachable only through
+# the vendor GStreamer stack, which ffmpeg does not use.
+services:
+  detect-pipeline:
+    image: ${DETECT_PIPELINE_IMAGE:-ghcr.io/open-nvr/detect-pipeline:${CORE_TAG:-latest}-qualcomm}
+    devices:
+      - /dev/fastrpc-cdsp:/dev/fastrpc-cdsp
+      - /dev/dma_heap/system:/dev/dma_heap/system
+      - /dev/dma_heap/qcom,system:/dev/dma_heap/qcom,system
+    group_add:
+      - "${FASTRPC_GID:-125}"
+      - "${DMAHEAP_GID:-989}"
+    volumes:
+      - ${QCOM_LIB_DIR:-/usr/lib/aarch64-linux-gnu}/libcdsprpc.so.1.0.0:/usr/lib/aarch64-linux-gnu/libcdsprpc.so:ro
+      - ${QCOM_LIB_DIR:-/usr/lib/aarch64-linux-gnu}/libdmabufheap.so.0:/usr/lib/aarch64-linux-gnu/libdmabufheap.so.0:ro
+    environment:
+      - DETECT_ONNX_BACKEND=${DETECT_ONNX_BACKEND:-ort}
+      # The Hexagon Tensor Processor. ``QNNExecutionProvider:cpu`` is the
+      # QNN reference CPU backend (slower than plain onnxruntime; debugging
+      # only). Per-provider knobs (htp_performance_mode, vtcm_mb …) go in
+      # DETECT_ONNX_PROVIDER_OPTIONS=key=value,key=value.
+      - DETECT_ONNX_PROVIDERS=${DETECT_ONNX_PROVIDERS:-QNNExecutionProvider:htp}
+      - DETECT_ONNX_PROVIDER_OPTIONS=${DETECT_ONNX_PROVIDER_OPTIONS:-}
+  # ── The always-on object-detection adapter (ai-adapter -qualcomm flavour):
+  # QNN on the Hexagon NPU. It follows YOLOV8_ONNX_PROVIDERS, then the shared
+  # ADAPTER_ONNX_PROVIDERS, then the NPU (docs/HARDWARE.md, 'what runs
+  # where'). The HTP is one device shared by everything on it; the Tier-0
+  # detector has first claim. Same host bits as detect-pipeline above. The
+  # other adapters are in docker-compose.accel-qualcomm-apps.yml.
+  yolov8-adapter:
+    image: ghcr.io/open-nvr/yolov8-adapter:${ADAPTER_TAG:-latest}-qualcomm
+    devices:
+      - /dev/fastrpc-cdsp:/dev/fastrpc-cdsp
+      - /dev/dma_heap/system:/dev/dma_heap/system
+      - /dev/dma_heap/qcom,system:/dev/dma_heap/qcom,system
+    group_add:
+      - "${FASTRPC_GID:-125}"
+      - "${DMAHEAP_GID:-989}"
+    volumes:
+      - ${QCOM_LIB_DIR:-/usr/lib/aarch64-linux-gnu}/libcdsprpc.so.1.0.0:/usr/lib/aarch64-linux-gnu/libcdsprpc.so:ro
+      - ${QCOM_LIB_DIR:-/usr/lib/aarch64-linux-gnu}/libdmabufheap.so.0:/usr/lib/aarch64-linux-gnu/libdmabufheap.so.0:ro
+    environment:
+      - ADAPTER_ONNX_PROVIDERS=${YOLOV8_ONNX_PROVIDERS:-${ADAPTER_ONNX_PROVIDERS:-QNNExecutionProvider:htp}}
+      - ADAPTER_ONNX_PROVIDER_OPTIONS=${ADAPTER_ONNX_PROVIDER_OPTIONS:-}

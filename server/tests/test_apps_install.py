@@ -86,10 +86,12 @@ from core.database import Base, get_db  # noqa: E402
 from models import (  # noqa: E402
     AppInstallIntent,
     AuditLog,
+    Camera,
     InstalledApp,
     Permission,
     Role,
     RolePermission,
+    SkillAssignment,
     User,
 )
 from routers import apps as apps_router  # noqa: E402
@@ -138,6 +140,9 @@ def _make_app():
             User.__table__,
             Permission.__table__,
             RolePermission.__table__,
+            # Uninstall releases the app's camera picks.
+            Camera.__table__,
+            SkillAssignment.__table__,
         ],
     )
     session_factory = sessionmaker(bind=engine)

@@ -44,6 +44,7 @@ async def list_audit_logs(
     user_id: int | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
+    correlation_id: str | None = Query(None, max_length=64),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_superuser),
 ):
@@ -58,6 +59,9 @@ async def list_audit_logs(
         filters.append(AuditLog.timestamp >= start)
     if end is not None:
         filters.append(AuditLog.timestamp <= end)
+    if correlation_id:
+        # Every row one external action (e.g. a Home Assistant automation) caused.
+        filters.append(AuditLog.correlation_id == correlation_id)
 
     q = db.query(AuditLog, User.username).outerjoin(User, AuditLog.user_id == User.id)
     if filters:
@@ -96,6 +100,7 @@ async def list_audit_logs(
             details=details_obj,
             ip=al.ip,
             user_agent=al.user_agent,
+            correlation_id=getattr(al, "correlation_id", None),
         )
 
     return AuditLogList(logs=[_convert(r) for r in rows], total=total)

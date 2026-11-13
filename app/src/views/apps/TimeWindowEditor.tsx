@@ -51,14 +51,14 @@ export function TimeWindowEditor({
     <div className="flex flex-wrap items-center gap-2 text-sm">
       <input
         type="time"
-        className="px-2 py-1 rounded border border-[var(--border)] bg-[var(--bg-2)]"
+        className="px-2 py-1 border border-[var(--border)] bg-[var(--bg-2)]"
         value={start}
         onChange={(e) => write(e.target.value, end)}
       />
       <span className="text-[var(--text-dim)]">to</span>
       <input
         type="time"
-        className="px-2 py-1 rounded border border-[var(--border)] bg-[var(--bg-2)]"
+        className="px-2 py-1 border border-[var(--border)] bg-[var(--bg-2)]"
         value={end}
         onChange={(e) => write(start, e.target.value)}
       />
@@ -66,7 +66,7 @@ export function TimeWindowEditor({
         <span className="text-xs text-[var(--text-dim)]">(overnight — spans midnight)</span>
       )}
       {start && end && start === end && (
-        <span className="text-xs text-amber-400">(start = end → the whole day)</span>
+        <span className="text-xs text-[var(--warn)]">(start = end → the whole day)</span>
       )}
     </div>
   )

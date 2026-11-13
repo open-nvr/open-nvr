@@ -1,0 +1,9 @@
+file,template,expect,inputs,note
+gate/0001.jpg,gate_who,delivery; company=swiggy,,orange bag on the scooter
+gate/0002.jpg,gate_who,cab,plate=KA01AB1234,white sedan at the barrier
+gate/0003.jpg,gate_who,visitor,,
+gate/0004.jpg,gate_who,resident,,
+yard/0001.jpg,yard_threat,who=guard,,night IR; vest visible
+yard/0002.jpg,yard_threat,alert; who=stranger,,
+yard/0003.jpg,yard_threat,who=animal,,dog by the fence
+yard/0004.jpg,yard_threat,who=nobody,,shadow of the gate post

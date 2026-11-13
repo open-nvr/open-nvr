@@ -196,8 +196,8 @@ Error shape: see §7 (failure envelope).
 ### 3.6 `POST /infer/stream` (WebSocket)
 
 Continuous bidirectional inference for camera feeds / audio streams /
-LLM token streaming. Required because the agent and intrusion-detection
-example apps depend on it; adapters whose models genuinely don't
+LLM token streaming. Required because the camera-agent example app
+depends on it; adapters whose models genuinely don't
 support streaming MUST refuse the WebSocket upgrade with HTTP 501
 (*before* the socket opens) and MUST declare
 `endpoints.infer_stream.supported = false` in `/capabilities`. The
@@ -463,6 +463,15 @@ A few notes on the shape:
   fingerprint (e.g., cloud-fronting adapters) omit the field; KAI-C
   surfaces "model identity not verifiable" in the UI rather than
   silently trusting.
+- `model.license` (optional, additive since adapter SDK 1.3) —
+  `{source, site_id, plan, expires_at}` when the loaded weights came
+  from a signed, licensed bundle (OpenNVR Models, or a site's own
+  signed fine-tune; [`design/models-service.md`](design/models-service.md)).
+  The adapter verified the bundle's Ed25519-signed manifest and every
+  file's hash before loading; `model.fingerprint` is then the manifest
+  hash, identifying weights, site and licence in one string. Absent for
+  stock weights. KAI-C ignores fields it does not know, so gateways
+  older than the field are unaffected.
 
 ### 4.1 The canonical task taxonomy — "curated + open"
 
@@ -1402,10 +1411,30 @@ The alert shape on the wire:
   },
   "camera_id": "cam-7",
   "correlation_id": "<uuid>",
-  "evidence": { ... },
+  "alert_type": "intrusion",
+  "evidence": { "images": { "face": "ab/<sha>.jpg" }, "...": "..." },
   "tags": ["intrusion", "after-hours"]
 }
 ```
+
+`alert_type` is the producer's own name for WHAT happened, where
+`severity` says only how loudly to ring. The inbox indexes it, so it is
+what an operator filters a month of history by.
+
+**Photos never travel inside an alert.** An alert is a NATS message, and
+the default payload ceiling is 1 MB: a couple of base64 crops exceed it,
+the broker rejects the publish, and the alert is never seen by anyone —
+silently. Upload each JPEG first and cite the paths:
+
+```python
+face = nvr.save_evidence(face_jpeg)        # -> "ab/<sha>.jpg"
+scene = nvr.save_evidence(scene_jpeg)
+dispatcher.fire(Alert(..., alert_type="scanner_flag",
+                      images={"face": face, "scene": scene}))
+```
+
+The operator UI shows a thumbnail per alert and opens the full set;
+the bytes are served camera-scoped, so a path is not an authorisation.
 
 **Alert channels** (configured per-deployment by the operator from
 the OpenNVR UI):
@@ -1554,12 +1583,12 @@ The catalogue covers the most-asked NVR + AI use cases. Each entry is a runnable
 
 | Slug | Use case | Adapters needed | Status |
 |---|---|---|---|
-| `intrusion-detection` | Person/vehicle in zone after-hours | object_detection | **Shipped (first reference example)** |
+| `intrusion-detection` | Person/vehicle in an armed zone (schedule, exit/entry delays, bypass) | object_detection + tracking | **Shipped (first reference example)** |
 | `loitering-detection` | Person stays in zone > N minutes | object_detection + tracking | **Shipped** |
 | `camera-agent` | Voice-interactive agent ("what's at the gate?") | ASR + TTS + LLM | **Shipped** |
 | `license-plate-recognition` | License-plate recognition (whitelist / denylist) | object_detection + LPR | **Shipped** |
 | `smart-doorbell` | Family vs stranger recognition + alert routing | face recognition | **Shipped** |
-| `package-delivery` | Porch package arrival + theft detection | object_detection + tracking | **Shipped** |
+| `package-delivery` | Porch package arrival, pick-up and theft, rated by evidence | object_detection + tracking (Tier-0) for who/when; package_detection, or VQA, on demand for what | **Shipped** |
 | `home-assistant-relay` | Bridge OpenNVR alerts to Home Assistant | n/a (subscriber) | **Shipped** |
 | `camera-health` | Detect blurry/obstructed/offline cameras | classification | Roadmap |
 | `crowd-count` | Headcount in zone (retail, public safety) | counting | Roadmap |
@@ -1632,7 +1661,7 @@ Seven adapters ship in v0.1, all conforming to this contract and pulled from `gh
 | InsightFace | IMAGE | face_detection, face_recognition | REST-based face DB (no shared-volume coupling). |
 | Whisper | AUDIO | speech_to_text | `faster-whisper` runtime, CPU + GPU. |
 | Piper | AUDIO | text_to_speech | Inline-audio response option for low-latency loops. |
-| fast-plate-ocr | IMAGE | license_plate_recognition | Two-stage chain candidate with YOLOv8. |
+| fast-plate-ocr | IMAGE | license_plate_recognition | Ships the two-stage chain: localises the plate (yolo-v9-t-384-license-plate-end2end) before OCR, and returns `plate_detection{found, box, confidence}` alongside `plate_text`. |
 | BLIP | IMAGE | image_captioning | Scene-caption adapter used by the camera-agent. |
 | ByteTrack | GENERIC | multi_object_tracking | First non-detection adapter — post-processor over an upstream detector's results. |
 
@@ -1659,7 +1688,7 @@ Three design choices that came up during review and how they landed in v0.1.
 
 ## 16. References
 
-- Zenodo paper, DOI [10.5281/zenodo.17261761](https://doi.org/10.5281/zenodo.17261761) — §3.4 / §4.1 customer-sovereignty principles inform §8 and §11.1.
+- Zenodo paper, DOI [10.5281/zenodo.22804254](https://doi.org/10.5281/zenodo.22804254) — §3.4 / §4.1 customer-sovereignty principles inform §8 and §11.1.
 - Reference adapter implementations: [`ai-adapter/adapters/`](https://github.com/open-nvr/ai-adapter/tree/main/adapters) in the sister repo.
 - KAI-C registry behaviour: [`kai-c/main.py`](https://github.com/open-nvr/open-nvr/blob/main/kai-c/main.py).
 - OpenNVR security architecture: [docs/SECURITY_ARCHITECTURE.md](./SECURITY_ARCHITECTURE.md) — sovereignty enforcement and the broader threat model.

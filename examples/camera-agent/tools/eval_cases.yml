@@ -1,0 +1,418 @@
+# Cases for tools/eval_harness.py — the live-eval tier in AGENT_DESIGN.md.
+#
+# A case is one question (`ask` + `expect`) or a conversation (`turns`,
+# each with an `ask` and, where it should be scored, an `expect`). Turns
+# of one case share chat history; every case starts from a cleared one.
+# `{camera}` is replaced with --camera.
+#
+# expect:
+#   tool:            the tool that should run; a list means any of them
+#   args:            fields its arguments must have, as the chooser asked
+#                    (before the handler normalises them). A list value
+#                    means any of those values; case-insensitive. A clock
+#                    time matches by the agent's own rules ("6pm" =
+#                    "18:00"; "after 6pm" is a window, not a time), and a
+#                    window's direction must agree. camera_id also matches
+#                    inside camera_ids.
+#   no_tool: true    no tool may run, and nothing may be created
+#   state:           an item that must be NEW afterwards, read back from
+#                    the agent: alarms / monitors / tasks / reports, each
+#                    a mapping of fields (same matching as args). A case
+#                    whose expected item already exists is not run.
+#   reply_contains:  a word (or list, any of) the reply must contain
+#   reply_source:    llm | tool_fallback | roster | none (or a list)
+#
+# Add a case whenever a live run shows a phrasing the agent gets wrong,
+# the same way tests/test_agent_evals.py grows for the deterministic tier.
+
+# ── from AGENT_DESIGN.md ──────────────────────────────────────────────
+
+- id: alarm-after-6pm
+  ask: "set an alarm if a person is seen on {camera} after 6pm"
+  expect:
+    tool: create_alarm
+    args:
+      target: person
+      after: "18:00"
+    state:
+      alarms: {target: person, window: "after 18:00"}
+
+- id: monitor-crowd
+  note: "A notify call with the threshold is fine: the agent makes it a count."
+  ask: "notify me when more than 3 people gather on {camera}"
+  expect:
+    tool: create_monitor
+    args: {target: person, max_count: 3}
+    state:
+      monitors: {kind: count, target: person, max_count: 3}
+
+- id: overnight-summary
+  note: "Must look it up, not make it up."
+  ask: "what did the cameras see overnight?"
+  expect:
+    tool: [create_background_task, recent_events, search_history, search_footage, describe_window]
+
+- id: what-is-person-wearing
+  ask: "what is the person on {camera} wearing?"
+  expect:
+    tool: describe_camera
+    args: {camera_id: "{camera}"}
+    reply_source: llm
+
+- id: polite-close
+  ask: "thanks, that's all"
+  expect:
+    no_tool: true
+    reply_source: llm
+
+# ── beyond the design doc ─────────────────────────────────────────────
+
+- id: greeting-no-tool
+  ask: "hi, what can you do?"
+  expect:
+    no_tool: true
+    reply_source: llm
+
+- id: is-anyone-there
+  ask: "is anyone on {camera} right now?"
+  expect:
+    tool: [detect_objects, describe_camera]
+    args: {camera_id: "{camera}"}
+    reply_source: llm
+
+- id: past-tense-goes-to-history
+  note: "A question about the past must not be answered from a live frame."
+  ask: "did anyone come by {camera} this morning?"
+  expect:
+    tool: [search_history, recent_events, search_footage, describe_window]
+
+- id: follow-up-alarm
+  note: "The second turn only makes sense with the first one's context."
+  turns:
+    - ask: "is anyone on {camera}?"
+    - ask: "ok, ring an alarm if a person shows up there after 10pm"
+      expect:
+        tool: create_alarm
+        args:
+          target: person
+          after: "22:00"
+        state:
+          alarms: {target: person, window: "after 22:00", camera_ids: "{camera}"}
+
+# ── the NPU set (7 November 2026) ─────────────────────────────────────
+# Added when the agent's LLM moved to the Hexagon on the qualcomm flavour
+# (bench/ventuno-q-npu-agent-llm-2026-11-07.md): thirty cases, so a run on
+# the CPU model and one on the NPU can be compared on more than nine
+# questions. Phrasings from the design doc's capability map and the
+# router's exemplars, in the words people use at a door or a gate.
+
+- id: count-people-live
+  ask: "how many people are at {camera} right now?"
+  expect:
+    tool: detect_objects
+    args: {camera_id: "{camera}"}
+
+- id: any-vehicles-live
+  ask: "are there any cars on {camera}?"
+  expect:
+    tool: detect_objects
+    args: {camera_id: "{camera}"}
+
+- id: generic-describe
+  ask: "what do you see on {camera}?"
+  expect:
+    tool: describe_camera
+    args: {camera_id: "{camera}"}
+    reply_source: llm
+
+- id: what-is-happening
+  ask: "what's happening at {camera}?"
+  expect:
+    tool: [describe_camera, detect_objects]
+    args: {camera_id: "{camera}"}
+
+- id: is-the-gate-clear
+  ask: "is {camera} clear?"
+  expect:
+    tool: [detect_objects, describe_camera]
+    args: {camera_id: "{camera}"}
+
+- id: anyone-anywhere
+  note: "No camera named and 'anywhere': every camera, not a guess at one."
+  ask: "is anyone anywhere right now?"
+  expect:
+    tool: [detect_objects, describe_camera]
+    args: {camera_id: [all, "{camera}"]}
+
+- id: white-van-yesterday
+  note: "A thing in the past: the history, with the thing as the label."
+  ask: "did a white van come to {camera} yesterday?"
+  expect:
+    tool: [search_history, search_footage]
+
+- id: last-night
+  ask: "what happened at {camera} last night?"
+  expect:
+    tool: [search_history, recent_events, describe_window, search_footage]
+
+- id: last-ten-minutes
+  ask: "anything on {camera} in the last 10 minutes?"
+  expect:
+    tool: [recent_events, search_history, detect_objects, describe_camera]
+
+- id: between-two-and-three
+  ask: "what happened on {camera} between 2pm and 3pm?"
+  expect:
+    tool: [describe_window, search_history, recent_events]
+
+- id: who-came-this-morning
+  note: "WHO: the history, matching faces if the agent can; never a live look."
+  ask: "who came to {camera} this morning?"
+  expect:
+    tool: [search_history, recent_events]
+
+- id: delivery-today
+  ask: "did a delivery come to {camera} today?"
+  expect:
+    tool: [search_history, recent_app_alerts, recent_events, search_footage]
+
+- id: notify-car-arrives
+  ask: "let me know when a car arrives at {camera}"
+  expect:
+    tool: create_monitor
+    args: {target: car, camera_id: "{camera}"}
+    state:
+      monitors: {target: car}
+
+- id: monitor-more-than-two
+  ask: "tell me if more than 2 people are at {camera}"
+  expect:
+    tool: create_monitor
+    args: {target: person, max_count: 2}
+    state:
+      monitors: {kind: count, target: person, max_count: 2}
+
+- id: alarm-before-6am
+  note: "Scored on the alarm that gets armed: the agent takes the window from the question's own words (Gemma put 06:00 in 'after' three times of three)."
+  ask: "sound the siren if anyone is at {camera} before 6am"
+  expect:
+    tool: create_alarm
+    args:
+      target: person
+    state:
+      alarms: {target: person, window: "before 06:00"}
+
+- id: alarm-silent
+  note: "The ring is part of the ask: a silent alarm must not blast the siren."
+  ask: "set a silent alarm for a person at {camera} after 11pm"
+  expect:
+    tool: create_alarm
+    args:
+      target: person
+      after: "23:00"
+      ring: silent
+
+- id: alarm-then-stop
+  note: "The second turn names nothing: the alarm it stops is the one just made."
+  turns:
+    - ask: "ring an alarm if a person is at {camera} after 9pm"
+      expect:
+        tool: create_alarm
+        args: {target: person, after: "21:00"}
+    - ask: "actually, cancel that alarm"
+      expect:
+        tool: stop_alarm
+
+- id: monitor-then-stop
+  turns:
+    - ask: "notify me when a person shows up at {camera}"
+      expect:
+        tool: create_monitor
+        args: {target: person}
+    - ask: "stop watching for that"
+      expect:
+        tool: stop_monitor
+
+- id: which-apps
+  ask: "which apps are running?"
+  expect:
+    tool: [list_apps, app_status]
+
+- id: plate-alerts
+  note: "Plates are an app's business: its alerts, not a live frame."
+  ask: "any number plates spotted today?"
+  expect:
+    tool: [recent_app_alerts, search_history, list_apps, app_status]
+
+- id: how-many-cameras
+  note: "The roster answers; the model never counts cameras."
+  ask: "how many cameras are configured?"
+  expect:
+    no_tool: true
+    reply_source: roster
+
+- id: good-morning
+  ask: "good morning"
+  expect:
+    no_tool: true
+    reply_source: llm
+
+- id: follow-up-same-camera
+  note: "A follow-up with no camera named keeps the camera of the turn before."
+  turns:
+    - ask: "is anyone on {camera}?"
+    - ask: "and any cars there?"
+      expect:
+        tool: detect_objects
+        args: {camera_id: "{camera}"}
+
+# ── from the Ventuno Q voice session of 2026-11-09 ───────────────────
+# Every one of these was answered with a description of the office, or
+# with a request for an alarm number the model was never given.
+
+- id: greeting-check-in-no-look
+  ask: "Hey, how are you doing?"
+  expect:
+    no_tool: true
+    reply_source: llm
+
+- id: weather-is-not-a-camera-question
+  ask: "how is the weather today?"
+  expect:
+    no_tool: true
+    reply_source: llm
+
+- id: fillers-then-goodbye-closes
+  ask: "Yeah, I'm good. Yeah. Um okay. Okay. Thank you. Bye."
+  expect:
+    no_tool: true
+    reply_contains: goodbye
+
+- id: alarm-then-remove-it
+  turns:
+    - ask: "the alarm — when you see any car on {camera}"
+      expect:
+        tool: create_alarm
+        args:
+          target: car
+    - ask: "can you remove it?"
+      expect:
+        tool: stop_alarm
+        reply_contains: removed
+
+- id: remove-the-notification-is-not-a-detection
+  turns:
+    - ask: "let me know whenever you see a car on {camera}"
+      expect:
+        tool: create_monitor
+    - ask: "okay then remove it, I don't need any notification when a car arrives"
+      expect:
+        tool: stop_monitor
+        reply_contains: [removed, stopped, cancelled, "no longer", "turned off"]
+
+- id: hourly-what-you-see-is-a-scene-report
+  note: "Scored on the report that exists afterwards, not the model's slots: Gemma writes 'every_hour' into `at` and the handler reads the schedule from the words (#847)."
+  ask: "every hour tell me what you see on {camera}"
+  expect:
+    tool: create_report
+    state:
+      reports: {schedule: "every 60 min"}
+
+# ── the agent about itself, and the system (2026-11-09) ──────────────
+# list_standing / system_status / show_camera are router-decided (Tier 0),
+# so these mostly check that the compose model SAYS what the tool found
+# and that nothing is armed by mistake.
+
+- id: what-alarms-do-i-have-is-a-listing
+  note: "Used to arm another alarm: the words matched a standing request."
+  turns:
+    - ask: "set an alarm if a person is seen on {camera} after 9pm"
+      expect:
+        tool: create_alarm
+        args: {target: person, after: "21:00"}
+    - ask: "what alarms do I have?"
+      expect:
+        tool: list_standing
+        args: {kind: alarm}
+        reply_contains: ["alarm", "9"]
+    - ask: "remove it"
+      expect:
+        tool: stop_alarm
+
+- id: nothing-set-up
+  ask: "what have I set up?"
+  expect:
+    tool: list_standing
+
+- id: which-reports-are-scheduled
+  ask: "which reports are scheduled?"
+  expect:
+    tool: list_standing
+    args: {kind: report}
+
+- id: is-everything-okay
+  ask: "is everything okay?"
+  expect:
+    tool: system_status
+    reply_contains: ["online", "camera", "recording", "reach", "fine", "okay", "ok", "disk", "floor"]
+
+- id: is-any-camera-offline
+  ask: "is any camera offline?"
+  expect:
+    tool: system_status
+
+- id: is-camera-recording
+  ask: "is {camera} recording?"
+  expect:
+    tool: system_status
+    args: {camera_id: "{camera}"}
+
+- id: disk-space
+  ask: "how much disk space is left?"
+  expect:
+    tool: system_status
+    reply_contains: ["GB", "disk", "space", "reach"]
+
+- id: are-you-working
+  ask: "are you working?"
+  expect:
+    tool: system_status
+
+- id: show-me-the-camera
+  note: "A view switch, not a look: no caption, nothing analysed."
+  ask: "show me {camera}"
+  expect:
+    tool: show_camera
+    args: {camera_id: "{camera}"}
+
+- id: show-me-whats-happening-is-a-look
+  ask: "show me what's happening on {camera}"
+  expect:
+    tool: describe_camera
+    args: {camera_id: "{camera}"}
+
+# ── router golden misses promoted to live cases ──────────────────────
+
+- id: how-many-cameras-is-a-roster-answer
+  note: "Was hinted to detect_objects: 'how many cameras' resembles 'how many people'."
+  ask: "how many cameras do you have?"
+  expect:
+    no_tool: true
+    reply_source: [roster, llm]
+
+- id: last-ten-minutes-spelled-out
+  ask: "what happened on {camera} in the last ten minutes?"
+  expect:
+    tool: [recent_events, search_history]
+
+- id: visitors-last-night
+  ask: "any visitors on {camera} last night?"
+  expect:
+    tool: [search_history, recent_events]
+    args: {label: person}
+
+- id: is-anyone-down-there-is-a-live-look
+  note: "'down' is a status word; 'anyone' makes it the scene."
+  ask: "is anyone down there on {camera}?"
+  expect:
+    tool: detect_objects

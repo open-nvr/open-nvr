@@ -1,0 +1,31 @@
+# Rendered to /app/config/config.yml by the config-init container.
+nats_url: "nats://nats:4222"
+nats_token: "${INTERNAL_API_KEY}"
+# Tier-0's tracked people, with each track's best crop kept by the pipeline.
+subject_pattern: "opennvr.inference.tier0.>"
+consume_tier0: true
+best_frame_url: "http://detect-pipeline:9109"
+
+webhook_url: null
+nats_alerts_url: "nats://nats:4222"
+nats_alerts_token: "${INTERNAL_API_KEY}"
+
+required_items: ["helmet", "vest"]
+min_item_score: 0.3
+min_person_score: 0.5
+min_person_height: 0.25
+confirm_checks: 2
+recheck_seconds: 15
+check_interval_seconds: 120
+alert_cooldown_seconds: 120
+look_timeout_seconds: 90
+detector_adapter: ""
+alert_severity: "high"
+attach_snapshot: true
+
+contract_port: 9216
+contract_bind_host: "0.0.0.0"
+contract_host: "ppe-check"   # the compose service name
+opennvr_url: "http://opennvr-core:8000"
+kaic_url: "http://opennvr-core:8100"
+kaic_api_key: "${INTERNAL_API_KEY}"

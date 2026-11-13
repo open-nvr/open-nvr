@@ -23,6 +23,7 @@
  */
 
 import { ReactNode } from 'react'
+import { useTranslation } from '../../i18n'
 
 // Inline SVG sparkline — no charting dependency for a 60-point trend.
 export function Sparkline({ points, height = 28, className }: {
@@ -30,9 +31,10 @@ export function Sparkline({ points, height = 28, className }: {
   height?: number
   className?: string
 }) {
+  const { t } = useTranslation()
   const vals = points.filter((v): v is number => v != null && Number.isFinite(v))
   if (vals.length < 2) {
-    return <div className="text-[11px] text-[var(--text-dim)]">not enough samples for a trend yet</div>
+    return <div className="text-[11px] text-[var(--text-dim)]">{t('shared.notEnoughSamples')}</div>
   }
   const min = Math.min(...vals)
   const max = Math.max(...vals)
@@ -67,7 +69,7 @@ export function SparkRow({ label, points, latest, labelClass = 'w-14' }: { label
 
 export function MetricPanel({ title, decision, children }: { title: string; decision: string; children: ReactNode }) {
   return (
-    <div className="border border-[var(--border)] rounded bg-[var(--bg-2)] p-3">
+    <div className="border border-[var(--border)] bg-[var(--bg-2)] p-3">
       <div className="text-[11px] uppercase tracking-wider text-[var(--text-dim)] mb-2 font-mono">{title}</div>
       {children}
       <div className="mt-2 text-[11px] text-[var(--text-dim)]">Decision: {decision}</div>
@@ -75,20 +77,47 @@ export function MetricPanel({ title, decision, children }: { title: string; deci
   )
 }
 
-export function StatTile({ label, value, sub, warn, crit }: {
-  label: string
-  value: string
-  sub?: string
+/**
+ * One headline number. The single stat card for the whole app: the seven
+ * per-page `Stat` copies, KpiCard and StatChip all migrate onto this.
+ * `warn`/`crit` colour the figure (and add a top edge, so the state is not
+ * carried by colour alone once an icon is given); `onClick` makes the whole
+ * tile a button leading to where the number can be acted on.
+ */
+export function StatTile({ label, value, sub, warn, crit, icon, unit, onClick, children }: {
+  label: ReactNode
+  value: ReactNode
+  sub?: ReactNode
   warn?: boolean
   crit?: boolean
+  icon?: ReactNode
+  /** Small suffix after the figure ("%", "/ 7"). */
+  unit?: ReactNode
+  onClick?: () => void
+  /** Anything under the figure: a sparkline, a meter. */
+  children?: ReactNode
 }) {
-  const valueClass = crit ? 'text-red-400' : warn ? 'text-amber-400' : 'text-[var(--text)]'
+  const valueClass = crit ? 'text-[var(--danger)]' : warn ? 'text-[var(--warn)]' : 'text-[var(--text)]'
+  const edge = crit ? 'var(--danger)' : warn ? 'var(--warn)' : null
+  const Comp = onClick ? 'button' : 'div'
   return (
-    <div className="border border-[var(--border)] rounded bg-[var(--bg-2)] p-3">
-      <div className="text-[11px] uppercase tracking-wider text-[var(--text-dim)] font-mono">{label}</div>
-      <div className={`font-mono text-lg font-bold tabular-nums mt-1 ${valueClass}`}>{value}</div>
+    <Comp
+      type={onClick ? 'button' : undefined}
+      onClick={onClick}
+      className={`block w-full text-left border border-[var(--border)] bg-[var(--bg-2)] p-3 ${onClick ? 'hover:bg-[var(--panel-2)] transition-colors' : ''}`}
+      style={edge ? { boxShadow: `inset 0 2px 0 ${edge}` } : undefined}
+    >
+      <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-[var(--text-dim)] font-mono">
+        {icon && <span className="flex shrink-0">{icon}</span>}
+        <span className="truncate">{label}</span>
+      </div>
+      <div className="flex items-baseline gap-1 mt-1">
+        <span className={`font-mono text-lg font-bold tabular-nums ${valueClass}`}>{value}</span>
+        {unit && <span className="font-mono text-[11px] text-[var(--text-dim)]">{unit}</span>}
+      </div>
       {sub && <div className="text-[11px] text-[var(--text-dim)] mt-0.5">{sub}</div>}
-    </div>
+      {children && <div className="mt-2">{children}</div>}
+    </Comp>
   )
 }
 
@@ -103,10 +132,10 @@ export function UsageBar({ used, total, warnAt = 0.8, critAt = 0.9 }: {
   critAt?: number
 }) {
   const frac = total > 0 ? Math.min(1, used / total) : 0
-  const color = frac >= critAt ? 'bg-red-500' : frac >= warnAt ? 'bg-amber-500' : 'bg-[var(--accent)]'
+  const color = frac >= critAt ? 'bg-[var(--danger)]' : frac >= warnAt ? 'bg-[var(--warn)]' : 'bg-[var(--accent)]'
   return (
-    <div className="h-2 rounded bg-[var(--panel-2)] overflow-hidden">
-      <div className={`h-full rounded ${color}`} style={{ width: `${Math.max(2, frac * 100)}%` }} />
+    <div className="h-2 bg-[var(--panel-2)] overflow-hidden">
+      <div className={`h-full ${color}`} style={{ width: `${Math.max(2, frac * 100)}%` }} />
     </div>
   )
 }

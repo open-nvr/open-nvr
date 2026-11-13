@@ -218,7 +218,8 @@ class KaicCapabilitiesClient(_ReusableClientMixin):
         ttl_seconds: float = 60.0,
         timeout_seconds: float = 5.0,
     ) -> None:
-        self._url = f"{kaic_url.rstrip('/')}/api/v1/ai/capabilities"
+        self._kaic_url = kaic_url.rstrip("/")
+        self._url = f"{self._kaic_url}/api/v1/ai/capabilities"
         self._api_key = api_key
         self._ttl = ttl_seconds
         self._timeout = timeout_seconds
@@ -252,12 +253,15 @@ class KaicCapabilitiesClient(_ReusableClientMixin):
         # to one attempt per TTL (negative caching).
         self._fetched_at = now
         try:
-            headers = {}
-            if self._api_key:
-                headers["X-Internal-Api-Key"] = self._api_key
-            resp = await self._client().get(self._url, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
+            # The fetch itself is the SDK's (opennvr_app_sdk.aio) — same
+            # route, header and degrade rule every async app gets; this
+            # class keeps only the agent-side TTL cache and the parse.
+            from opennvr_app_sdk.aio import AsyncAIAPI
+
+            data = await AsyncAIAPI(self._kaic_url, self._api_key or None,
+                                    self._timeout, client=self._client()).capabilities()
+            if data is None:
+                raise RuntimeError("capabilities unavailable")
             tasks: set[str] = set()
             gpu: dict[str, bool] = {}
             adapters = data.get("adapters") or {}
@@ -462,6 +466,11 @@ class WhisperClient(_ReusableClientMixin):
             # no segments"). The hallucination-token filter in
             # services.py handles the 'You'/'Thank you' noise case.
             "vad_filter": False,
+            # Greedy. The adapter's default beam of 5 costs 30-50% more CPU
+            # and buys nothing on a clean, VAD-trimmed utterance of a few
+            # seconds; STT is on the voice critical path (14 s of the 71 s
+            # field turn). Beam search is for offline transcription.
+            "beam_size": 1,
         }
         resp = await self._client().post(self._url, json=body, headers=headers)
         resp.raise_for_status()
@@ -656,6 +665,11 @@ class OpenAILLMClient(_ReusableClientMixin):
         self._model = model
         self._timeout = timeout_seconds
 
+    @property
+    def models_url(self) -> str:
+        """``GET /v1/models`` beside the chat URL: what /health probes."""
+        return self._url[: -len("/chat/completions")] + "/models"
+
     async def chat(
         self,
         *,
@@ -697,10 +711,14 @@ class PiperClient(_ReusableClientMixin):
         url: str,
         token: str,
         timeout_seconds: float = 120.0,
+        voice: str | None = None,
     ) -> None:
         self._url = url.rstrip("/") + "/infer"
         self._token = token
         self._timeout = timeout_seconds
+        # Asked for per request; None leaves the adapter's default. See
+        # AppConfig.piper_voice for why the default tier is "medium".
+        self._voice = voice or None
 
     async def synthesize(self, text: str) -> bytes:
         # Only send Authorization when a token is configured. Native
@@ -733,6 +751,8 @@ class PiperClient(_ReusableClientMixin):
             "text": text,
             "inline": True,
         }
+        if self._voice:
+            body["voice"] = self._voice
         client = self._client()
         resp = await client.post(self._url, json=body, headers=headers)
         resp.raise_for_status()
@@ -797,6 +817,18 @@ class PiperClient(_ReusableClientMixin):
         return b""
 
 
+class AuthUnavailable(Exception):
+    """OpenNVR could not be asked whether a token is valid.
+
+    Deliberately NOT the same thing as "the token is invalid" (#540). A
+    timeout on ``GET /api/v1/auth/me`` used to be swallowed into
+    ``None`` — the same answer the server gives for a rejected token —
+    so a loaded core signed operators out mid-session while their token
+    was still perfectly good. Callers turn this into a 503, which says
+    "ask again", where a 401 says "your session is over".
+    """
+
+
 class OpennvrAuthClient(_ReusableClientMixin):
     """The agent's auth delegation to the main OpenNVR server — the agent
     never mints or stores credentials of its own (no second user table,
@@ -812,22 +844,38 @@ class OpennvrAuthClient(_ReusableClientMixin):
     * :meth:`me`      → ``GET /me`` with the presented bearer token —
       the validation path, cached per token for ``ttl_seconds`` so a
       page full of polling widgets costs ~one upstream call a minute,
-      not one per request. 401 → None (cached briefly too, so a bad
-      token can't hammer the server through the agent).
+      not one per request. 401 → None (cached too, so a bad token can't
+      hammer the server through the agent). A server that cannot be
+      REACHED is not an answer at all: that raises
+      :class:`AuthUnavailable` and is never cached as a verdict.
     """
 
     def __init__(self, *, base_url: str, ttl_seconds: float = 60.0,
-                 timeout_seconds: float = 5.0) -> None:
+                 timeout_seconds: float = 5.0, grace_seconds: float = 120.0,
+                 unavailable_backoff: float = 2.0) -> None:
         self._root = base_url.rstrip("/")
         self._base = f"{self._root}/api/v1/auth"
         self._ttl = ttl_seconds
         self._timeout = timeout_seconds
+        # How long a token validated by the server stays usable once the
+        # server stops answering. A live session must not end because one
+        # round-trip was slow; a revoked one is still caught within the
+        # grace window, which is why it is minutes and not hours.
+        self._grace = grace_seconds
+        # After a transport failure, skip the upstream call for a moment
+        # instead of paying the full timeout on every request behind it.
+        self._unavailable_backoff = unavailable_backoff
+        self._unavailable_until = 0.0
         # token -> (checked_at_monotonic, user_payload_or_None)
         self._cache: dict[str, tuple[float, dict | None]] = {}
         self._cache_max = 256   # bound: distinct tokens seen per TTL window
         # device_token -> (checked_at_monotonic, allowed, negative_ttl_used)
         self._device_cache: dict[str, tuple[float, bool, float]] = {}
         self._device_fail_ttl = 10.0   # short: enforcement resumes fast after a blip
+        # token -> (written_at, visible server camera ids, ttl,
+        #           last_verified_at | None)
+        self._scope_cache: dict[
+            str, tuple[float, frozenset[int], float, float | None]] = {}
 
     async def login(self, username: str, password: str,
                     totp_code: str | None = None, *,
@@ -861,8 +909,10 @@ class OpennvrAuthClient(_ReusableClientMixin):
                 data = {"detail": resp.text[:200]}
             return resp.status_code, data
         except Exception as exc:
-            logger.warning("auth: login proxy failed: %s", exc)
-            return 502, {"detail": "OpenNVR server unreachable"}
+            logger.warning("auth: login proxy unreachable: %s",
+                           str(exc) or exc.__class__.__name__)
+            return 503, {"error": "core_unreachable",
+                         "detail": "OpenNVR server unreachable"}
 
     async def refresh(self, refresh_token: str) -> tuple[int, dict]:
         try:
@@ -874,32 +924,188 @@ class OpennvrAuthClient(_ReusableClientMixin):
                 data = {"detail": resp.text[:200]}
             return resp.status_code, data
         except Exception as exc:
-            logger.warning("auth: refresh proxy failed: %s", exc)
-            return 502, {"detail": "OpenNVR server unreachable"}
+            # 503, not 502: "ask again in a moment", not "your session is
+            # over" (#540). A 502 here read as a refused refresh, and the
+            # page raised its login card on a core that was merely busy.
+            logger.warning("auth: refresh proxy unreachable: %s",
+                           str(exc) or exc.__class__.__name__)
+            return 503, {"error": "core_unreachable",
+                         "detail": "OpenNVR server unreachable"}
 
     async def me(self, token: str) -> dict | None:
         """Validate a bearer token → the server's user payload, or None.
-        Cached per token (positive AND negative) for the TTL."""
+
+        ``None`` means the SERVER rejected the token. When the server
+        could not be asked at all, this raises :class:`AuthUnavailable`
+        rather than answering None — the two used to be the same answer,
+        which is how a slow core logged operators out (#540).
+
+        A token the server validated recently rides out a blip: within
+        ``grace_seconds`` of its last good check it is served from cache
+        while the server is unreachable, so a five-second hiccup costs
+        nobody their session. Answers from the server are cached per
+        token (positive AND negative) for the TTL as before.
+        """
         now = time.monotonic()
         hit = self._cache.get(token)
         if hit is not None and now - hit[0] < self._ttl:
             return hit[1]
-        user: dict | None = None
+        # A failure a moment ago: don't pay the timeout again on every
+        # request behind it. Known-good tokens ride the backoff; anything
+        # else gets the honest "can't say".
+        if now < self._unavailable_until:
+            return self._ride_or_raise(now, hit, "backing off",
+                                       extend=False, quiet=True)
         try:
             resp = await self._client().get(
                 f"{self._base}/me",
                 headers={"Authorization": f"Bearer {token}"})
-            if resp.status_code == 200:
-                user = resp.json()
         except Exception as exc:
-            logger.warning("auth: /me validation failed: %s", exc)
-            # Unreachable server → treat as invalid but DON'T cache long:
-            # drop through with user=None; the short negative cache below
-            # limits retry pressure while letting recovery be quick.
+            return self._ride_or_raise(
+                now, hit, str(exc) or exc.__class__.__name__)
+        if resp.status_code >= 500:
+            # Core answered, but not ABOUT this token. A 502/503/504 from
+            # core or the reverse proxy in front of it is "could not ask",
+            # exactly like a socket timeout — and behind a proxy it is the
+            # shape a slow core usually takes, which is how #540 survived
+            # a fix that only caught transport exceptions.
+            return self._ride_or_raise(now, hit, f"HTTP {resp.status_code}")
+        try:
+            user: dict | None = resp.json() if resp.status_code == 200 else None
+        except Exception as exc:
+            # A 200 we cannot read tells us nothing about the token.
+            return self._ride_or_raise(
+                now, hit, f"unreadable body: {exc.__class__.__name__}")
         if len(self._cache) >= self._cache_max:
             self._cache.clear()   # crude but bounded; refills within a TTL
         self._cache[token] = (now, user)
         return user
+
+    def _ride_or_raise(self, now: float, hit: "tuple[float, dict | None] | None",
+                       reason: str, *, extend: bool = True,
+                       quiet: bool = False) -> dict:
+        """No answer about a token: ride the last good check, or say so.
+
+        Never caches the non-answer. Marking a good token invalid for a
+        whole TTL because one round-trip failed is the bug itself; the
+        backoff is what keeps the retries cheap instead.
+
+        ``extend`` arms that backoff, and is False for callers already
+        INSIDE it — otherwise a steady stream of requests would push the
+        deadline forward on every one of them and core would never be
+        retried until the traffic paused.
+        """
+        if extend:
+            self._unavailable_until = now + self._unavailable_backoff
+        # The grace window runs from the last check the SERVER answered
+        # (``hit`` is only ever written from a real answer), so an outage
+        # can never keep renewing its own grace.
+        if hit is not None and hit[1] is not None and now - hit[0] < self._grace:
+            if not quiet:
+                logger.warning("auth: /me unreachable (%s); riding the last "
+                               "good check for this token", reason)
+            return hit[1]
+        if not quiet:
+            logger.warning("auth: /me unreachable: %s", reason)
+        raise AuthUnavailable(f"OpenNVR unreachable: {reason}")
+
+    async def visible_cameras(self, token: str,
+                              user: dict | None = None) -> set[int] | None:
+        """The server-side camera ids this bearer's user may SEE — the
+        server's own ``GET /api/v1/cameras`` (owned + granted; paused
+        cameras included since their history stays theirs) — or ``None``
+        for a superuser, who sees the fleet.
+
+        FAIL-CLOSED: an unreachable server or a non-200 yields the EMPTY
+        set, never "everything" — a hiccup must not widen what a guard can
+        watch. Cached per token for the TTL like ``me()``; the negative
+        result is cached only briefly so recovery is quick.
+
+        One exception, and it widens nothing: when the server cannot be
+        REACHED, a scope the server itself gave us within
+        ``grace_seconds`` is reused rather than collapsed to empty. It
+        pairs with ``me()``'s grace window — riding out a blip is no use
+        if every camera disappears from the page for the duration — and
+        it can only ever hand back what the server already said."""
+        if user is not None and user.get("is_superuser"):
+            return None
+        now = time.monotonic()
+        hit = self._scope_cache.get(token)
+        if hit is not None and now - hit[0] < hit[2]:
+            return set(hit[1])
+        # WHEN the server last told us this scope — kept apart from when
+        # the entry was written, because a cached ride-out is written
+        # too. Measuring grace from the write would let an outage renew
+        # its own grace for as long as it lasted.
+        verified_at = hit[3] if hit is not None else None
+        stale = (set(hit[1]) if verified_at is not None
+                 and now - verified_at < self._grace else None)
+
+        def _ride(reason: str) -> set[int]:
+            logger.warning("auth: camera-scope unreachable (%s); riding the "
+                           "last good scope", reason)
+            # Cached briefly: without this every request in the grace
+            # window re-issued the doomed call and blocked for the full
+            # timeout, which is the opposite of riding it out.
+            self._remember_scope(token, now, stale, self._device_fail_ttl,
+                                 verified_at)
+            return set(stale or ())
+
+        ids: set[int] = set()
+        ttl = self._ttl
+        try:
+            resp = await self._client().get(
+                f"{self._root}/api/v1/cameras/",
+                params={"limit": 1000, "active_only": "false"},
+                headers={"Authorization": f"Bearer {token}"})
+        except Exception as exc:
+            reason = str(exc) or exc.__class__.__name__
+            if stale is not None:
+                return _ride(reason)
+            logger.warning("auth: camera-scope unreachable (failing closed): %s",
+                           reason)
+            self._remember_scope(token, now, set(), self._device_fail_ttl,
+                                 verified_at)
+            return ids
+        if resp.status_code >= 500:
+            # Same reasoning as ``me()``: core answered, but not about
+            # this token's cameras.
+            if stale is not None:
+                return _ride(f"HTTP {resp.status_code}")
+            ttl = self._device_fail_ttl
+        elif resp.status_code == 200:
+            try:
+                data = resp.json()
+            except Exception as exc:
+                reason = f"unreadable body: {exc.__class__.__name__}"
+                if stale is not None:
+                    return _ride(reason)
+                logger.warning(
+                    "auth: camera-scope unreadable (failing closed): %s", reason)
+                self._remember_scope(token, now, set(),
+                                     self._device_fail_ttl, verified_at)
+                return ids
+            rows = data.get("cameras") if isinstance(data, dict) else data
+            for row in rows or []:
+                try:
+                    ids.add(int(row["id"]))
+                except (KeyError, TypeError, ValueError):
+                    continue
+            verified_at = now
+        else:
+            # The server answered ABOUT this token and it was not a
+            # scope (401/403). Forget what it said before, so a later
+            # outage cannot ride a scope the server has since refused.
+            verified_at = None
+            ttl = self._device_fail_ttl
+        self._remember_scope(token, now, ids, ttl, verified_at)
+        return ids
+
+    def _remember_scope(self, token: str, now: float, ids, ttl: float,
+                        verified_at: float | None) -> None:
+        if len(self._scope_cache) >= self._cache_max:
+            self._scope_cache.clear()
+        self._scope_cache[token] = (now, frozenset(ids or ()), ttl, verified_at)
 
     async def device_allowed(self, device_token: str | None) -> bool:
         """True iff the server's device firewall permits this browser.
@@ -1025,6 +1231,113 @@ class OpennvrRecordingsClient(_ReusableClientMixin):
         except Exception as exc:
             logger.warning("streams: info proxy failed: %s", exc)
             return 502, {"error": "OpenNVR server unreachable"}
+
+
+class CameraDescriptionClient(_ReusableClientMixin):
+    """Core's one shared "what is on this camera now" (RFC-0004 step 3):
+    ``GET {base}/api/v1/internal/camera-agent/cameras/{id}/description``
+    with ``max_age_s``. Core answers from the newest described visit when
+    it is fresh and nothing newer has started, else makes ONE gated look
+    shared by every asker, else says what it last knew and how old that
+    is. The agent's live look and the Mirror's scene line ask here
+    instead of the caption model (measured on a Ventuno Q, 2026-11-12:
+    those two loops were a third of the captioner's calls in a busy
+    hour). ``describe`` never raises; ``None`` means core did not answer
+    and the caller may fall back to its own look, saying so."""
+
+    def __init__(self, *, base_url: str, api_key: str = "", timeout_seconds: float = 45.0) -> None:
+        self._base = base_url.rstrip("/")
+        self._api_key = api_key
+        self._timeout = timeout_seconds
+
+    def _headers(self) -> dict[str, str]:
+        return {"X-Internal-Api-Key": self._api_key} if self._api_key else {}
+
+    async def describe(self, opennvr_camera_id: int, max_age_s: float) -> dict[str, Any] | None:
+        try:
+            resp = await self._client().get(
+                f"{self._base}/api/v1/internal/camera-agent/cameras/{int(opennvr_camera_id)}/description",
+                params={"max_age_s": f"{float(max_age_s):g}"}, headers=self._headers(),
+            )
+            if resp.status_code != 200:
+                logger.debug("camera description: core answered %s", resp.status_code)
+                return None
+            body = resp.json()
+            return body if isinstance(body, dict) else None
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("camera description: core unreachable (%s)", exc)
+            return None
+
+
+class SystemStatusClient(_ReusableClientMixin):
+    """Read-only view of the system as core sees it, for the agent's
+    ``system_status`` tool: ``GET {base}/api/v1/internal/camera-agent/status``
+    with the same ``X-Internal-Api-Key`` the app door uses — each active
+    camera's live connectivity and observed recording state, and the
+    recording disk against its purge floor.
+
+    ADVISORY like :class:`AppRegistryClient`: :meth:`status` never raises.
+    The result (or the failure) is cached for ``ttl_seconds`` (default
+    10 s — a status question is answered live, but a user repeating it
+    twice in a breath should not cost core two reads). ``None`` = core
+    unreachable / errored; the tool says it could not check.
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str = "",
+        ttl_seconds: float = 10.0,
+        timeout_seconds: float = 5.0,
+    ) -> None:
+        self._base = base_url.rstrip("/")
+        self._api_key = api_key
+        self._ttl = ttl_seconds
+        self._timeout = timeout_seconds
+        self._value: dict[str, Any] | None = None
+        self._fetched_at: float | None = None
+
+    def _headers(self) -> dict[str, str]:
+        return {"X-Internal-Api-Key": self._api_key} if self._api_key else {}
+
+    async def beacon(self, source: str = "camera-agent", *, every_s: float = 20.0) -> bool:
+        """Tell core a person is talking to the agent (POST
+        /api/v1/internal/camera-agent/interactive), so the enrichment
+        backfill stands aside. Sent at most once per ``every_s``; never
+        raises; True when a request went out."""
+        now = time.monotonic()
+        last = getattr(self, "_beacon_at", None)
+        if last is not None and now - last < every_s:
+            return False
+        self._beacon_at = now
+        try:
+            resp = await self._client().post(
+                f"{self._base}/api/v1/internal/camera-agent/interactive",
+                json={"source": source}, headers=self._headers(),
+            )
+            return resp.status_code in (200, 204)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("interactive beacon failed (%s)", exc)
+            return False
+
+    async def status(self) -> dict[str, Any] | None:
+        now = time.monotonic()
+        if self._fetched_at is not None and now - self._fetched_at < self._ttl:
+            return self._value
+        self._fetched_at = now
+        try:
+            resp = await self._client().get(
+                f"{self._base}/api/v1/internal/camera-agent/status",
+                headers=self._headers(),
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            self._value = data if isinstance(data, dict) else None
+        except Exception as exc:
+            logger.debug("system status read failed (%s)", exc)
+            self._value = None
+        return self._value
 
 
 class SkillsRegistryClient(_ReusableClientMixin):

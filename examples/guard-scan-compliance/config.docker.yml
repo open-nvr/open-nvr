@@ -1,0 +1,60 @@
+# Copyright (c) 2026 OpenNVR
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# guard-scan-compliance config, consumed by docker-compose.apps.yml.
+#
+# ${VAR} is substituted by the config-init container at compose-up time.
+# Do not edit substituted values here — change .env and re-run
+# ``docker compose up`` so the init container re-templates the file.
+
+# ── Inference ──────────────────────────────────────────────────────
+# Body keypoints come from the pose adapter through KAI-C, over the
+# WebSocket stream: at 10 fps a fresh HTTP request per frame spends more
+# time in setup than in the model.
+kaic_url: "http://opennvr-core:8100"
+kaic_api_key: "${INTERNAL_API_KEY}"
+
+# ── Video ──────────────────────────────────────────────────────────
+# Frames come from the camera's stream, through a grant core mints for
+# THIS app and THIS camera — there is no camera list here, because the
+# roster is whatever the operator assigned in the App Catalog.
+fps: 10.0
+frame_width: 640
+
+# ── The procedure ──────────────────────────────────────────────────
+# Empty means the shipped default: all four surfaces required, the
+# ORDER not scored. Order is off deliberately — on the entrance footage
+# this was built against, guards covered every surface but worked round
+# whichever side they were standing on, so scoring the sequence would
+# have alerted on scans that were perfectly good.
+# Set it per site from the App Catalog rather than here.
+procedure: {}
+dwell_s: 0.4
+step_hold_s: 0.0
+min_screen: 3.0
+session_gap: 8.0
+
+# ── The scanner's light ────────────────────────────────────────────
+# Only the area around the guard's scanning hand is examined — a
+# jewellery showroom is full of red, and searching the frame for it
+# would alarm on the furniture. Raise led_ratio if red clothing near
+# the wand still trips it.
+led_ratio: 0.08
+led_hits: 3
+led_window_s: 0.8
+
+# ── Where results go ───────────────────────────────────────────────
+webhook_url: null
+nats_alerts_url: "nats://nats-apps:4222"
+nats_alerts_token: "${INTERNAL_API_KEY}"
+session_log_dir: "/data/sessions"
+# Keep the per-frame keypoint logs this long. Core's 90-day ledger prune
+# cannot touch them — they are on this container's volume — so this is
+# the only thing bounding that volume. 0 keeps them for ever.
+session_log_days: 90
+
+# ── App contract (spec §03) ────────────────────────────────────────
+contract_port: 9210
+contract_bind_host: "0.0.0.0"
+contract_host: "guard-scan-compliance"
+opennvr_url: "http://opennvr-core:8000"

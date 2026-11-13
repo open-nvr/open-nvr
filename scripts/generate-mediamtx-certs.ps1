@@ -1,4 +1,4 @@
-# Copyright (c) 2026 OpenNVR
+﻿# Copyright (c) 2026 OpenNVR
 # Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0)
 #
 # OpenNVR — M1b-fixup H-3: generate a self-signed TLS cert pair for

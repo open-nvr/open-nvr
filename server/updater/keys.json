@@ -1,0 +1,6 @@
+{
+  "_comment": "Release keys this build trusts for update manifests (updater/manifest.py). Keep two entries during a rotation. Generate one with: python -m updater keygen --id opennvr-release-YYYY. The private half lives only in the RELEASE_SIGNING_KEY secret of the GitHub 'release' environment.",
+  "keys": [
+    {"id": "opennvr-release-2026", "public_key": "Ag5oMd4w9YN22Cj3wmtwmQP5VoWEoWl/409+711eano="}
+  ]
+}

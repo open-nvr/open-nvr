@@ -169,6 +169,7 @@ def test_db_supplied_image_is_ignored_in_favor_of_index(caplog):
     assert status_ == "applied"
     # The pin env is built from the CURATED entry, not the row.
     assert runner.envs[0] == {
+        "APPS_PULL_POLICY": "missing",   # a pin is pulled, never built over
         "LOITERING_DETECTION_IMAGE": (
             "ghcr.io/open-nvr/loitering-detection@sha256:" + "a" * 64
         )
@@ -220,11 +221,12 @@ def test_pending_installed_calls_compose_up_and_applies():
     argv = runner.calls[0]
     assert argv[:2] == ["docker", "compose"]
     assert "-f" in argv and "docker-compose.apps.yml" in argv
-    assert argv[-3:] == ["up", "-d", "loitering-detection"]
+    assert argv[-4:] == ["up", "-d", "egress-proxy", "loitering-detection"]
     assert argv == build_up_argv(intent)
     # A digest-bearing index entry → the runner is handed the pinned
     # image override env so compose actually deploys the pinned ref.
     assert runner.envs[0] == {
+        "APPS_PULL_POLICY": "missing",   # a pin is pulled, never built over
         "LOITERING_DETECTION_IMAGE": pinned_image_ref(intent)
     }
 
@@ -241,6 +243,7 @@ def test_digest_bearing_entry_passes_pinned_ref_env():
     _reconcile(intent, runner)
 
     assert runner.envs[0] == {
+        "APPS_PULL_POLICY": "missing",   # a pin is pulled, never built over
         "LICENSE_PLATE_RECOGNITION_IMAGE": (
             "ghcr.io/open-nvr/license-plate-recognition@sha256:" + "d" * 64
         )
@@ -427,7 +430,7 @@ def test_install_ups_required_adapters_ahead_of_the_app():
     # The adapter service is upped in the same command, BEFORE the app —
     # an already-running adapter is a compose no-op (reuse), a missing
     # service block fails the whole install loudly.
-    assert services == ["fast-plate-ocr-adapter", "license-plate-recognition"]
+    assert services == ["egress-proxy", "fast-plate-ocr-adapter", "license-plate-recognition"]
 
 
 def test_uninstall_releases_the_last_holders_adapter():

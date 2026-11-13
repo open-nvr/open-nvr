@@ -52,6 +52,35 @@ def test_resolve_list_dedupes_and_validates():
     assert rt.tools._resolve_cameras({"camera_ids": ["cam9"]}).startswith("ERROR:")
 
 
+@pytest.mark.parametrize("sent", [
+    "['cam2', 'cam1']",          # llama3.2:1b: the description's example, as text
+    '["cam2", "cam1"]',          # the same in JSON
+    "cam2, cam1",                # a comma list
+])
+def test_resolve_camera_ids_sent_as_text(sent):
+    rt = _runtime()
+    assert rt.tools._resolve_cameras({"camera_ids": sent}) == ["cam2", "cam1"]
+
+
+def test_resolve_camera_ids_text_that_is_not_a_list_of_names():
+    rt = _runtime()
+    assert rt.tools._resolve_cameras({"camera_ids": "cam3"}) == ["cam3"]
+    assert rt.tools._resolve_cameras({"camera_ids": "['all']"}) == ["cam1", "cam2", "cam3"]
+    for bad in ("[1, 2]", "[cam1", "{'items': ['cam1']}", "[" * 2000):
+        assert rt.tools._resolve_cameras({"camera_ids": bad}).startswith("ERROR:"), bad
+    # A literal is read, never run.
+    assert rt.tools._resolve_cameras(
+        {"camera_ids": "[__import__('os').system('true')]"}).startswith("ERROR:")
+
+
+def test_an_alarm_arms_when_camera_ids_comes_as_text():
+    rt = _runtime()
+    out = asyncio.run(rt._handle_create_alarm({"target": "person", "camera_ids": "['cam2']"}))
+    assert not out.startswith("ERROR"), out
+    (alarm,) = rt.alarms.list()
+    assert alarm["camera_ids"] == ["cam2"]
+
+
 def test_detect_objects_single_camera_phrasing():
     rt = _runtime(detections=[{"label": "person"}])
     out = asyncio.run(rt.tools.detect_objects({"camera_id": "cam1"}))

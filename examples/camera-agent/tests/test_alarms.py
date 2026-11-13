@@ -109,9 +109,14 @@ def test_alarm_silent_outside_time_window():
     rt = _runtime(detections=[{"label": "person"}])
 
     async def go():
-        # active only 00:00–00:01 — effectively never "now"
+        # A one-minute window two hours from now, so "now" is outside it
+        # whatever the clock says. (A fixed 00:00–00:01 window failed CI
+        # once a day: the run that started at one minute past midnight.)
+        import datetime as _dt
+        now = _dt.datetime.now().time()
+        start = (now.hour * 60 + now.minute + 120) % 1440
         alarm = rt.alarms.create(name="Night", target="person", camera_ids=["cam1"],
-                                 after_min=0, before_min=1)
+                                 after_min=start, before_min=(start + 1) % 1440)
         await asyncio.sleep(0.2)
         triggered = rt.alarms.list()[0]["triggered"]
         rt.alarms.stop(alarm.id)
@@ -1099,3 +1104,158 @@ def test_alarm_event_carries_the_sighting_time_not_the_ring_time():
         assert alarm.last_triggered > seen_at + 5
 
     asyncio.run(go())
+
+
+# ── the question's window over the model's ───────────────────────────
+
+
+def test_create_alarm_accepts_an_iso_timestamp_as_the_time_of_day():
+    rt = _runtime()
+
+    async def go():
+        msg = await rt._handle_create_alarm(
+            {"name": "Late", "target": "person", "camera_id": "cam1", "after": "2026-11-08T22:00:00+0000"})
+        assert "armed alarm" in msg.lower()
+        assert rt.alarms.list()[0]["window"] == "after 22:00"
+
+    asyncio.run(go())
+
+
+def test_create_alarm_takes_the_window_from_the_question_when_the_model_got_it_wrong():
+    """Measured on the NPU: 'before 6am' arrived as after='06:00'."""
+    rt = _runtime()
+    rt.tools.current_question = "sound the siren if anyone is at cam1 before 6am"
+
+    async def go():
+        await rt._handle_create_alarm(
+            {"name": "Early", "target": "person", "camera_id": "cam1", "after": "06:00"})
+        assert rt.alarms.list()[0]["window"] == "before 06:00"
+
+    asyncio.run(go())
+
+
+def test_create_alarm_drops_a_window_the_question_never_asked_for():
+    """'notify me when a person shows up' came back with after=00:00 — an
+    invented window. No clock words in the question, no window."""
+    rt = _runtime()
+    rt.tools.current_question = "notify me when a person shows up at cam1"
+
+    async def go():
+        await rt._handle_create_alarm(
+            {"name": "Person", "target": "person", "camera_id": "cam1", "after": "00:00"})
+        assert rt.alarms.list()[0]["window"] == "any time"
+
+    asyncio.run(go())
+
+
+def test_create_alarm_without_a_question_trusts_the_arguments():
+    """The /alarms endpoint and the UI call the handler with no turn: the
+    arguments are the operator's own and stay as given."""
+    rt = _runtime()
+    rt.tools.current_question = None
+
+    async def go():
+        await rt._handle_create_alarm(
+            {"name": "UI", "target": "person", "camera_id": "cam1", "after": "18:00", "before": "06:00"})
+        assert rt.alarms.list()[0]["window"] == "after 18:00, before 06:00" or "18:00" in rt.alarms.list()[0]["window"]
+
+    asyncio.run(go())
+
+
+# ── "remove it" without a number (2026-11-09) ─────────────────────────
+
+def test_stop_alarm_without_an_id_takes_the_one_just_armed():
+    rt = _runtime()
+    asyncio.run(rt._handle_create_alarm({"name": "Car Arrival", "target": "car", "camera_id": "cam1"}))
+    assert rt.last_standing == ("alarm", 1)
+    msg = asyncio.run(rt._handle_stop_alarm({}))
+    assert "removed alarm #1" in msg.lower() and "car arrival" in msg.lower()
+    assert rt.alarms.list() == [] and rt.last_standing is None
+
+
+def test_stop_alarm_without_an_id_and_nothing_armed_says_so():
+    rt = _runtime()
+    assert "no alarms" in asyncio.run(rt._handle_stop_alarm({})).lower()
+
+
+def test_stop_alarm_without_an_id_removes_all_when_asked_for_all():
+    rt = _runtime()
+    asyncio.run(rt._handle_create_alarm({"name": "Car", "target": "car", "camera_id": "cam1"}))
+    asyncio.run(rt._handle_create_alarm({"name": "Porch", "target": "person", "camera_id": "cam1"}))
+    rt.tools.current_question = "I'm asking you to remove the alarms, right?"
+    try:
+        msg = asyncio.run(rt._handle_stop_alarm({}))
+    finally:
+        rt.tools.current_question = None          # a context variable shared by every runtime in this thread
+    assert "removed 2 alarms" in msg.lower() and rt.alarms.list() == []
+
+
+def test_stop_alarm_without_an_id_lists_the_choices_when_ambiguous():
+    rt = _runtime()
+    asyncio.run(rt._handle_create_alarm({"name": "Car", "target": "car", "camera_id": "cam1"}))
+    asyncio.run(rt._handle_create_alarm({"name": "Porch", "target": "person", "camera_id": "cam1"}))
+    rt.last_standing = None                                  # a restart forgot which came last
+    rt.tools.current_question = "stop the alarm"
+    try:
+        msg = asyncio.run(rt._handle_stop_alarm({}))
+    finally:
+        rt.tools.current_question = None
+    assert "which alarm" in msg.lower() and "#1" in msg and "#2" in msg and len(rt.alarms.list()) == 2
+
+
+def test_an_explicit_id_still_wins():
+    rt = _runtime()
+    asyncio.run(rt._handle_create_alarm({"name": "Car", "target": "car", "camera_id": "cam1"}))
+    asyncio.run(rt._handle_create_alarm({"name": "Porch", "target": "person", "camera_id": "cam1"}))
+    msg = asyncio.run(rt._handle_stop_alarm({"alarm_id": 1}))
+    assert "removed alarm #1" in msg.lower() and [a["id"] for a in rt.alarms.list()] == [2]
+
+
+def test_the_stop_tools_no_longer_require_an_id():
+    import camera_agent as ca
+    for tool in (ca._stop_alarm_tool(), ca._stop_monitor_tool(), ca._stop_report_tool()):
+        assert tool["function"]["parameters"]["required"] == []
+
+
+# ── "remove that alarm" when the thing standing is a watch (2026-11-10) ──
+
+def test_stop_alarm_with_no_alarm_stops_the_one_watch_that_is_standing():
+    rt = _runtime()
+    asyncio.run(rt._handle_create_monitor({"kind": "notify", "target": "person", "camera_id": "cam1"}))
+    assert len(rt.monitors.list()) == 1 and rt.alarms.list() == []
+    msg = asyncio.run(rt._handle_stop_alarm({}))
+    low = msg.lower()
+    assert "no alarm" in low and "watch #1" in low and "stopped and removed watch #1" in low
+    assert rt.monitors.list() == [], "the watch the operator meant is gone"
+
+
+def test_stop_watch_with_no_watch_stops_the_one_report_or_alarm_standing():
+    rt = _runtime()
+    asyncio.run(rt._handle_create_report({"name": "morning", "query": "summarise overnight", "at": "08:00"}))
+    msg = asyncio.run(rt._handle_stop_monitor({}))
+    assert "no watch" in msg.lower() and "report #1" in msg.lower() and rt.reports.list() == []
+    asyncio.run(rt._handle_create_alarm({"name": "Car Arrival", "target": "car", "camera_id": "cam1"}))
+    msg = asyncio.run(rt._handle_stop_report({}))
+    assert "no report" in msg.lower() and "alarm #1" in msg.lower() and rt.alarms.list() == []
+
+
+def test_stop_alarm_with_no_alarm_and_several_things_standing_lists_them():
+    rt = _runtime()
+    asyncio.run(rt._handle_create_monitor({"kind": "notify", "target": "person", "camera_id": "cam1"}))
+    asyncio.run(rt._handle_create_report({"name": "morning", "query": "summarise overnight", "at": "08:00"}))
+    msg = asyncio.run(rt._handle_stop_alarm({}))
+    low = msg.lower()
+    assert "no alarm" in low and "watch #1" in low and "report #1" in low and "say which" in low
+    assert len(rt.monitors.list()) == 1 and len(rt.reports.list()) == 1, "nothing stopped on a guess"
+
+
+def test_silencing_with_no_alarm_never_stops_a_watch():
+    rt = _runtime()
+    asyncio.run(rt._handle_create_monitor({"kind": "notify", "target": "person", "camera_id": "cam1"}))
+    msg = asyncio.run(rt._handle_stop_alarm({"action": "silence"}))
+    assert "no alarms" in msg.lower() and len(rt.monitors.list()) == 1
+
+
+def test_stop_alarm_with_nothing_standing_at_all_still_says_no_alarms():
+    rt = _runtime()
+    assert "no alarms" in asyncio.run(rt._handle_stop_alarm({})).lower()

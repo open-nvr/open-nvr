@@ -27,6 +27,8 @@
  */
 
 /** Epoch ms of local midnight beginning `date` (YYYY-MM-DD). */
+import type { DateFormatters } from '../i18n'
+
 export function localDayStart(date: string): number {
   const [y, m, d] = date.split('-').map(Number)
   return new Date(y, m - 1, d).getTime()
@@ -69,4 +71,60 @@ export function browserTz(): string {
   } catch {
     return 'UTC'
   }
+}
+
+/**
+ * A timestamp for a dense operator table: `10 Sep 06:50:23`, carrying the
+ * year only when it is not the current one.
+ *
+ * Always dated. An earlier version dropped the date for today's rows to
+ * save width, which read fine at a glance and badly in practice — a row
+ * showing `06:50:23` gives no clue whether it is from this morning or
+ * three weeks ago once the range is 7 or 30 days, and this column is
+ * exported as evidence. Pair it with `tabular-nums` so the digits line
+ * up down the column.
+ *
+ * Returns '' for a missing/unparseable value; callers show their own
+ * placeholder. `seenAtTitle` gives the full localised value for the
+ * cell's tooltip.
+ */
+export function formatSeenAt(
+  iso: string | null | undefined, fmt: DateFormatters, now = new Date(),
+): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  // The language decides 12- or 24-hour, as on every other screen: this
+  // column alone used to force 24-hour, so the same read showed 16:54 here
+  // and 04:54 PM on Search. 2-digit parts keep every row the same width.
+  const time = fmt.time(d, {
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  })
+  const date = fmt.date(d, {
+    day: '2-digit',
+    month: 'short',
+    ...(d.getFullYear() === now.getFullYear() ? {} : { year: 'numeric' }),
+  })
+  return `${date} ${time}`
+}
+
+/**
+ * The first tick at or after `startMs` on a grid of `intervalMs` laid in
+ * LOCAL time. Ticks on multiples of the interval since the epoch sit on UTC
+ * hours, which a +5:30 zone labels 02:30, 05:30… instead of 03:00, 06:00….
+ * The offset is taken at `startMs`; a DST change inside the window shifts
+ * later ticks by that hour, which a day-long axis can live with.
+ */
+export function firstLocalTick(startMs: number, intervalMs: number): number {
+  const offset = -new Date(startMs).getTimezoneOffset() * 60_000
+  return Math.ceil((startMs + offset) / intervalMs) * intervalMs - offset
+}
+
+/** The unabbreviated timestamp, for the tooltip on a compact cell. */
+export function seenAtTitle(
+  iso: string | null | undefined, fmt: DateFormatters,
+): string | undefined {
+  if (!iso) return undefined
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime()) ? undefined : fmt.dateTime(d)
 }

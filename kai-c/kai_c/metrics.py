@@ -481,6 +481,7 @@ class MetricsRollup:
         outcomes: dict[str, int] = {}
         inflight: int | None = None
         queue_depth: int | None = None
+        requests = 0
 
         if samples:
             newest = samples[-1]
@@ -496,6 +497,8 @@ class MetricsRollup:
                 latency_ms[key] = round(seconds * 1000.0, 3) if seconds is not None else None
             inflight = newest.inflight
             queue_depth = newest.queue_depth
+            inf_count = buckets.get(math.inf)
+            requests = int(inf_count) if inf_count is not None else int(sum(outcomes.values()))
 
         # Per-sample series for the UI's sparklines ("over the period of
         # time"): point-in-time gauges verbatim; rate + interval p95
@@ -605,5 +608,12 @@ class MetricsRollup:
             },
             "series": series,
             "fingerprint_changes": fingerprint_changes,
+            # "samples" is the number of /metrics SCRAPES in the window (one a
+            # minute), not inferences — the UI used to print it as if it
+            # were, next to all-null percentiles. "requests" is what was
+            # actually served in the window: the +Inf bucket delta, else the
+            # outcome counters. 0 ⇒ the percentiles are null because there
+            # was nothing to measure, not because anything is broken.
             "samples": len(samples),
+            "requests": requests,
         }

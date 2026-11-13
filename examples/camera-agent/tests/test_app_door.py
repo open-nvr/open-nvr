@@ -325,7 +325,7 @@ def test_skills_payload_includes_app_entries_when_installed_and_reachable():
     assert entry["name"] == "Loitering Detection"
     assert entry["uses"].startswith("installed app — ")
     assert entry["enabled"] is True
-    assert entry["read_only"] is True
+    assert entry["read_only"] is False   # ✕ mutes it in the agent; the app keeps running
     assert entry["emits"] == ["loitering"]
     # A disabled installed app is NOT surfaced as a skill.
     assert "app:occupancy-counting" not in skills

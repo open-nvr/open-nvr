@@ -8,7 +8,7 @@ camera feeds via tool calling.
 Pipeline:
     WebSocket transport (browser ⇄ server raw PCM 16k mono)
         ↓
-    SileroVADAnalyzer (turn detection)
+    Silero VAD (turn start) + Smart Turn v3 (semantic end of turn)
         ↓
     OpenNvrWhisperSTT (Whisper adapter → text)
         ↓
@@ -27,6 +27,20 @@ Then visit http://localhost:9100/demo in your browser, click "Start",
 and speak.
 """
 from __future__ import annotations
+
+import os
+
+# Math-library thread caps — set BEFORE anything imports numpy (Pipecat
+# pulls it in lazily). Smart Turn v3's feature step (an 8 s Whisper
+# log-mel computed in numpy) otherwise fans out across every core through
+# OpenBLAS/OpenMP; on a 4-core box that made one end-of-turn verdict
+# SLOWER (90–130 ms) than single-threaded (~60 ms) while stealing cores
+# from Whisper and Piper next door. onnxruntime keeps its own pool, sized
+# by ``turn_cpu_threads``. An operator's explicit value in the
+# environment always wins (setdefault).
+for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_var, "1")
+del _var
 
 import argparse
 import asyncio
@@ -52,7 +66,9 @@ from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from adapter_clients import (
+    CameraDescriptionClient,
     AppRegistryClient,
+    AuthUnavailable,
     KaicAdapterClient,
     KaicCapabilitiesClient,
     OllamaClient,
@@ -62,17 +78,63 @@ from adapter_clients import (
     PiperClient,
     SkillsRegistryClient,
     SyntheticDetectionClient,
+    SystemStatusClient,
     WhisperClient,
 )
 from context import (
     CameraContext,
     CameraSpec,
+    camera_in_scope,
+    camera_scope,
+    reset_camera_scope,
     run_app_alert_subscriber,
+    run_core_tracks_subscriber,
     run_event_subscriber,
+    scoped_cameras,
+    set_camera_scope,
+    spawn_unscoped,
+    TURN_TRACE as _TURN_TRACE,
 )
 from frame_sources import build_frame_source, discover_local_cameras
 from monitor_host import MonitorHost
 from tools import CameraTools, build_tool_definitions
+# The question-shape helpers (what a camera question looks like, which
+# camera it names, which tool answers it) live in router.py and are
+# imported HERE — never the other way round: this file is __main__ in
+# the container, and a module that imports camera_agent executes it a
+# second time. They keep their names in this namespace for the tests
+# and the forced-grounding path.
+import prompt_budget as _prompt_budget
+from router import clock_window_from_text
+from router import is_closing as _router_is_closing
+from router import is_dispute as _router_is_dispute
+from router import (  # noqa: F401 — re-exported
+    _CAMERA_WORDS,
+    _CAMERA_RE,
+    _looks_like_camera_question,
+    _DETECTION_WORDS,
+    _DETECTION_RE,
+    _DESCRIBE_WORDS,
+    _DESCRIBE_RE,
+    _COUNT_RE,
+    _pick_forced_tool,
+    _PAST_RE,
+    _WINDOW_RE,
+    _HISTORY_LABELS,
+    _ATTR_WORDS,
+    _ATTR_ALIASES,
+    _attr_words,
+    _is_past_question,
+    _CLOCK_RANGE_RE,
+    _window_from_text,
+    _pick_forced_call,
+    _CONFIG_RE,
+    _is_config_question,
+    _pick_camera,
+    _is_small_talk,
+    _should_force_grounding,
+    _count_thresholds_from_text,
+)
 
 logger = logging.getLogger("camera-agent")
 
@@ -144,11 +206,86 @@ class AppConfig:
     llm_api_key: str | None = None
     piper_url: str = "http://127.0.0.1:9001"
     piper_token: str = ""
+    # Which Piper voice to ask for, per request (the adapter honours a
+    # ``voice`` key). Empty = the adapter's own default. The compose
+    # stack passes PIPER_VOICE, whose default is a MEDIUM-tier voice: on
+    # CPU the tier is the cost — libritts-high took ~4 cores and 25 s
+    # for two sentences on the field box; a medium voice is 2-3x cheaper
+    # and as intelligible.
+    piper_voice: str = ""
 
     # LLM tuning.
-    llm_model: str = "qwen2.5:1.5b"
+    llm_model: str = "granite4:micro"
     llm_temperature: float = 0.4
     llm_max_tokens: int = 256
+
+    # Turn-taking (Pipecat's user aggregator). Silero VAD opens a turn; Smart Turn v3
+    # (semantic end-of-turn, bundled, CPU) closes it. The VAD stop window
+    # is short on purpose — the model judges the pause, the VAD only
+    # notices it. turn_stop_secs: silence after which Smart Turn is
+    # consulted for an "incomplete" verdict again / a fallback stop;
+    # turn_max_secs: the longest single utterance; turn_stop_timeout_secs:
+    # the aggregator's last resort so a turn can never hang.
+    vad_confidence: float = 0.55
+    vad_start_secs: float = 0.15
+    vad_stop_secs: float = 0.2
+    vad_min_volume: float = 0.08
+    # Silence appended to each utterance before Whisper hears it, so the
+    # model hears the end of speech and finishes the last word (pipecat's
+    # segmented STT, since 1.10). Half a second on a three-second clip is
+    # a few percent of the transcription; 0 disables it.
+    stt_trailing_silence_secs: float = 0.5
+    turn_stop_secs: float = 1.0
+    # Smart Turn v3 only ever looks at the LAST 8 s of a turn (it pads or
+    # truncates to the model window), so buffering more is pure cost.
+    turn_max_secs: float = 8.0
+    turn_stop_timeout_secs: float = 6.0
+    # Hardware fit. turn_detector: "smart" (Smart Turn v3), "timer" (a
+    # plain silence timer, no model — for single-core boxes), or "auto"
+    # (smart when ≥2 cores are available to this process, else timer).
+    # turn_cpu_threads: onnxruntime threads for one Smart Turn verdict;
+    # None = auto (1 thread up to 7 cores — measured fastest — 2 from 8).
+    # turn_timer_secs: the silence that ends a turn in timer mode.
+    turn_detector: str = "auto"
+    turn_cpu_threads: int | None = None
+    turn_timer_secs: float = 0.8
+    # Interruptions on the streaming (/ws) pipeline — turns.py. "gated"
+    # (default): while the agent speaks, only a phrase that is real speech
+    # of at least interrupt_min_ms, holds interrupt_min_words words once
+    # backchannels ("mm-hm", "okay") are stripped, and — when
+    # interrupt_addressee is on — reads as said TO the agent, cuts it off;
+    # everything else is ignored and the agent keeps talking. "off": the
+    # agent always finishes (the pre-1.8 behaviour). "eager": any speech
+    # interrupts (plain VAD).
+    interruptions: str = "gated"
+    interrupt_min_ms: float = 300.0
+    interrupt_min_words: int = 2
+    interrupt_addressee: bool = True
+    # Thinking aloud (fillers.py): when a voice question needs a slow tool,
+    # the agent says what it is about to do ("let me check the gate camera
+    # between 2 and 3") while it does it. One sentence shape per tool with
+    # the tool call's own arguments slotted in — no LLM; Piper synthesis
+    # cached by text and run in parallel with the tool; at most one per
+    # turn; only when the expected wait (this site's own recent stage
+    # timings) is at least filler_min_ms. filler_source "model" asks the
+    # LLM to write the line in the SAME first pass (a few extra output
+    # tokens), template as fallback.
+    #
+    # OFF by default since 2026-11-09. It was built for the CPU-only box,
+    # where a tool turn took 5–10 s and the silence needed filling. On the
+    # NPU the answer lands in one or two seconds, so "Let me check the
+    # office camera" arrives as an unexpected extra reply right before the
+    # real one (Varun, morning test 2026-11-09). Turn it on for a slow box.
+    thinking_aloud: bool = False
+    # The router (router.py): decide simple camera questions before the
+    # LLM sees them. router_tier0 — when every slot resolves (camera,
+    # tool, label, window), call the tool now and ask the model only to
+    # SAY the answer; router_hints — otherwise append the likely tool to
+    # the user message and run the full turn unchanged.
+    router_tier0: bool = True
+    router_hints: bool = True
+    filler_min_ms: float = 1500.0
+    filler_source: str = "template"
     # Reasoning toggle for "thinking" models (Qwen3 etc.). Leave None for
     # non-thinking models (no effect). Set False to force snappy, non-thinking
     # tool-calling (appends Qwen3's ``/no_think`` switch); True to allow it.
@@ -158,10 +295,30 @@ class AppConfig:
     # faster prefill, but must hold the prompt).
     llm_num_threads: int | None = None
     llm_num_ctx: int = 4096
+    # A window the runtime cannot grow (a model compiled for an NPU: the
+    # Gemma bundle on a Ventuno Q holds 4,096 tokens and refuses a longer
+    # prompt). When set, each turn sends only the tool schemas the question
+    # is likely to need and the newest history, so the prompt and the
+    # answer fit (prompt_budget.py). 0 = the runtime manages the window.
+    llm_window_tokens: int = 0
+    # When the LLM is an OpenAI-compatible endpoint that can go away (the
+    # NPU adapter restarting, its model reloading), an Ollama to answer
+    # from meanwhile: slower, but an answer. None = no fallback, the turn
+    # fails as before. The qualcomm fill points this at the host Ollama
+    # when .env names one (OLLAMA_EXTERNAL_URL).
+    llm_fallback_url: str | None = None
+    llm_fallback_model: str = "granite4:micro"
     # How long Ollama keeps the model resident (sent on every request so a
     # host-run Ollama stays warm even without OLLAMA_KEEP_ALIVE in its env).
     # -1 = forever (default). A duration string like "5m" frees RAM when idle.
     llm_keep_alive: str | float = -1
+    # Send the system prompt and tool schemas to the LLM once at start so
+    # the first real question skips the cold prefill. Worth it on a GPU;
+    # on an 8-core ARM box it is about four minutes of six cores at every
+    # restart (Ventuno Q, 2026-11-06: one 3 m 50 s chat call), paying up
+    # front a cost that would otherwise land on the first question. The
+    # installer sets LLM_PREWARM=false where the LLM runs on the CPU.
+    llm_prewarm: bool = True
 
     # Text/chat mode: the UI defaults to a text box (no mic) and the voice
     # adapters (Whisper/Piper) aren't required. The lighter on-ramp — used by
@@ -180,13 +337,6 @@ class AppConfig:
     # Optional NATS for the recent_events tool.
     nats_inference_url: str | None = None
     nats_inference_token: str | None = None
-
-    # Optional path to the footage-search SQLite index. When set and the
-    # file exists, the agent gains a ``search_footage`` tool that answers
-    # natural-language questions about the recorded past ("did a red
-    # truck come by earlier?"). Build the index with the footage-search
-    # example's ``index`` subcommand.
-    footage_index_path: str | None = None
 
     # Labels the deployment's detection adapter can see BEYOND the standard
     # YOLOv8/COCO-80 set. Alarm presets (GET /alarm-presets) are greyed out
@@ -241,12 +391,34 @@ class AppConfig:
     # arms its after-hours person alarm as  person: siren . An explicit
     # ring on the alarm always wins; this only decides the DEFAULT.
     alarm_ring_defaults: dict[str, str] | None = None
+    # SITE FALLBACK for which relayed APP alerts the voice UI speaks aloud
+    # (they always land in the feed with a chime): "all", "important"
+    # (high/critical only) or "none".
+    #
+    # "none" is the default, and the default changed: "important" used to
+    # be, but app alerts are mostly high/critical — so ANPR narrated every
+    # plate and occupancy called every count, mid-conversation. Speaking is
+    # opt-in now.
+    #
+    # This is only the fallback. A per-app decision from the Skills panel
+    # (persisted as `app_announce`) beats it in both directions.
+    # Operator-editable in the UI (Automations → ⚙); the UI choice persists
+    # in the state file and wins over this.
+    announce_app_alerts: str = "none"
 
     # Public base URL of THIS agent (e.g. "https://agent.nvr.example"), used
     # only to put a tap-to-open deep link (/demo/camera/{id}) into outgoing
     # notifications — a phone push lands on the right camera's screen.
     # Unset = notifications carry no link.
     agent_public_url: str | None = None
+    # The base URL CORE reaches this agent at on the compose network —
+    # what the agent registers with the App Catalog as its contract URL
+    # (core probes {url}/health and {url}/state from there). Must be the
+    # compose service name, which is also in the TLS certificate's SAN
+    # (``https://camera-agent:9100``). Unset = this container's hostname,
+    # which under compose is the bare container id: not resolvable by
+    # other containers, and not in any certificate.
+    agent_contract_url: str | None = None
 
     # Optional base URL of the main OpenNVR UI (e.g. "https://nvr.example"),
     # used only to build a deep link into the AI Adapters view when a skill is
@@ -325,9 +497,10 @@ class AppConfig:
 
 
 _DEFAULT_SYSTEM_PROMPT = (
-    "You are a concise voice assistant for a home security camera system. "
-    "You have NO knowledge of what any camera currently shows — the ONLY way "
-    "to know is to call a tool.\n\n"
+    "You are a concise voice assistant for a camera system. You have NO "
+    "knowledge of what any camera currently shows — the ONLY way to know is "
+    "to call a tool; if you have not called one this turn, you do not know, "
+    "and you never describe a camera from imagination.\n\n"
     "RULES:\n"
     "- For ANY question about what a camera sees, what is happening, who or "
     "what is present, or how many of something, you MUST call a tool BEFORE "
@@ -342,9 +515,6 @@ _DEFAULT_SYSTEM_PROMPT = (
     "'which cars entered today?', 'was a dog here yesterday?') call "
     "search_history — the NVR remembers every visit with a photo and can "
     "name recognised people.\n"
-    "- NEVER invent, guess, or describe what is on a camera from imagination. "
-    "If you have not called a tool this turn, you do not know.\n"
-    "- Base your answer ONLY on the tool result, in 1-2 short spoken sentences.\n"
     "- If a tool says a camera cannot be reached, tell the user that camera "
     "appears to be offline."
 )
@@ -441,7 +611,13 @@ SKILL_TOOLS: dict[str, list[str]] = {
     "report": ["create_report", "stop_report"],
     "task": ["create_background_task"],
     "apps": ["list_apps", "app_status", "recent_app_alerts"],
+    "status": ["system_status"],
 }
+#: Tools that belong to no skill: always advertised (subject to
+#: ``enabled_tools``), read-only, and safe for every tier. list_standing
+#: reads the agent's own alarm / watch / report lists; show_camera only
+#: switches the page's view.
+ALWAYS_ON_TOOLS: tuple[str, ...] = ("list_standing", "show_camera")
 # id, icon, name, example question, requirement key ("" = always available)
 _SKILL_META: list[tuple[str, str, str, str, str]] = [
     ("see", "🎥", "See what's happening now",
@@ -464,6 +640,8 @@ _SKILL_META: list[tuple[str, str, str, str, str]] = [
      "Check every camera for anyone in a red shirt.", ""),
     ("apps", "🧩", "Query installed catalog apps",
      "What apps are running, and is the loitering detector healthy?", "apps"),
+    ("status", "🩺", "Check system health",
+     "Is every camera online and recording? How much disk is left?", "status"),
 ]
 # Which KAI-C task strings (``tasks_advertised``, aggregated live from
 # GET /api/v1/ai/capabilities) back each skill. Advisory display data
@@ -512,7 +690,7 @@ def _derive_skill_backing_tasks() -> dict[str, list[str]]:
     missing file, bad YAML — falls back to the hardcoded map so the agent
     never fails to start over a taxonomy file."""
     try:
-        raw = yaml.safe_load(TASKS_REGISTRY_PATH.read_text()) or []
+        raw = yaml.safe_load(TASKS_REGISTRY_PATH.read_text(encoding="utf-8")) or []
         derived: dict[str, list[str]] = {}
         for entry in raw:
             skill = entry.get("agent_skill")
@@ -551,7 +729,7 @@ def _derive_skill_suggested_adapters() -> dict[str, list[str]]:
     skills (``_SKILL_TASK_INHERITS``) pick up their source's adapters. On any
     error the map is simply empty — a missing suggestion never breaks the UI."""
     try:
-        raw = yaml.safe_load(TASKS_REGISTRY_PATH.read_text()) or []
+        raw = yaml.safe_load(TASKS_REGISTRY_PATH.read_text(encoding="utf-8")) or []
         by_task: dict[str, list[str]] = {}
         for entry in raw:
             names = [entry["task"], *(entry.get("aliases") or [])]
@@ -592,7 +770,7 @@ def _derive_skill_suggested_apps() -> dict[str, list[str]]:
     skills (``_SKILL_TASK_INHERITS``) pick up their source's apps. On any
     error the map is empty — a missing suggestion never breaks the UI."""
     try:
-        raw = yaml.safe_load(TASKS_REGISTRY_PATH.read_text()) or []
+        raw = yaml.safe_load(TASKS_REGISTRY_PATH.read_text(encoding="utf-8")) or []
         by_task: dict[str, list[str]] = {}
         for entry in raw:
             names = [entry["task"], *(entry.get("aliases") or [])]
@@ -619,6 +797,38 @@ def _derive_skill_suggested_apps() -> dict[str, list[str]]:
 _SKILL_SUGGESTED_APPS: dict[str, list[str]] = _derive_skill_suggested_apps()
 
 
+#: ONNX Runtime provider (as the detector's backend gauge spells it) → device.
+_TIER0_PROVIDER_DEVICE = {
+    "QNNExecutionProvider": "Qualcomm Hexagon NPU",
+    "OpenVINOExecutionProvider:NPU": "Intel NPU",
+    "OpenVINOExecutionProvider:GPU": "Intel GPU",
+    "CUDAExecutionProvider": "NVIDIA GPU",
+    "TensorrtExecutionProvider": "NVIDIA GPU",
+    "CoreMLExecutionProvider": "Apple Neural Engine",
+}
+
+
+def accelerator_from_tier0(metrics_text: str) -> str | None:
+    """The device named by ``tier0_detector_backend{effective="…"} 1`` in
+    the pipeline's metrics, or None (CPU, or no gauge). The effective list
+    reads like ``QNNExecutionProvider, CPUExecutionProvider``: the first
+    entry is the device, the rest the fallback for unsupported nodes."""
+    for line in (metrics_text or "").splitlines():
+        if not line.startswith("tier0_detector_backend{") or not line.rstrip().endswith(" 1"):
+            continue
+        m = re.search(r'effective="([^"]*)"', line)
+        if not m:
+            continue
+        first = m.group(1).split(",")[0].strip()
+        if first.startswith("OpenVINOExecutionProvider"):
+            dev = first[len("OpenVINOExecutionProvider"):].strip(":() ").split(",")[0].upper() or "CPU"
+            return _TIER0_PROVIDER_DEVICE.get(f"OpenVINOExecutionProvider:{dev}")
+        for sep in (":", "("):
+            first = first.split(sep, 1)[0]
+        return _TIER0_PROVIDER_DEVICE.get(first.strip())
+    return None
+
+
 def _derive_skill_hardware() -> dict[str, list[dict[str, Any]]]:
     """The ``hardware`` blocks of every task backing each skill, from the
     bundled task registry — ``skill id -> [{task, label, adapters, min,
@@ -631,7 +841,7 @@ def _derive_skill_hardware() -> dict[str, list[dict[str, Any]]]:
     (``_SKILL_TASK_INHERITS``) pick up their source's rows. On any error
     the map is empty — a missing hint never breaks the UI."""
     try:
-        raw = yaml.safe_load(TASKS_REGISTRY_PATH.read_text()) or []
+        raw = yaml.safe_load(TASKS_REGISTRY_PATH.read_text(encoding="utf-8")) or []
         derived: dict[str, list[dict[str, Any]]] = {}
         for entry in raw:
             skill = entry.get("agent_skill")
@@ -673,6 +883,28 @@ _STT_NOISE_PHRASES = frozenset({
 })
 
 
+_ENGLISH_HINTS = frozenset("""
+the a an and or but if so is are was were be been am do does did have has had
+i you he she it we they me him her us them my your his its our their this that
+these those there here what which who whom whose when where why how can could
+will would shall should may might must not no yes please ok okay thanks thank
+to of in on at by for with from about into over under up down out off any some
+all many much more most few less now then today tonight yesterday tomorrow
+morning afternoon evening night last next again still just only also very
+see look show tell me check count find watch want know think say said
+one two three four five six seven eight nine ten
+""".split())
+
+
+def _english_hint(word: str) -> bool:
+    w = word.strip(".,!?;:\"'()[]").lower().replace("'", "")
+    if not w:
+        return False
+    if w in _ENGLISH_HINTS or w.rstrip("s") in _ENGLISH_HINTS:
+        return True
+    return bool(_CAMERA_RE.search(w) or _DETECTION_RE.search(w) or _DESCRIBE_RE.search(w))
+
+
 def looks_like_noise(transcript: str) -> bool:
     """True if a transcript is almost certainly a noise/silence hallucination
     rather than a real spoken question — so the voice loop can ignore it and
@@ -686,7 +918,16 @@ def looks_like_noise(transcript: str) -> bool:
     letters = [c for c in t if c.isalpha()]
     if len(letters) < 2:                       # punctuation / single letter
         return True
+    # Garbled: a multilingual STT model hallucinating another language from
+    # ambient or accented speech ("Que ela é mamadura? Oh!" in the office
+    # session of 2026-11-08, answered with a look at the camera). Letters
+    # outside ASCII in a fifth of the text, or three-plus words none of
+    # which is an English function word or a word the agent knows.
+    if sum(1 for c in letters if ord(c) > 127) > 0.2 * len(letters):
+        return True
     words = norm.split()
+    if len(words) >= 3 and not any(_english_hint(w) for w in words):
+        return True
     if len(words) <= 2 and all(w in _STT_NOISE_PHRASES for w in words):
         return True
     # Repetition hallucination: Whisper on sustained background noise loops a
@@ -890,7 +1131,7 @@ def _frames_for(runtime, max_frames: int = 3) -> list[dict]:
     so the UI can SHOW what the agent saw in the chat. Reads the per-turn frame
     cache (populated by the vision tools) for the cameras in last_cameras_used —
     no extra fetch. Capped in count and size to keep the response small."""
-    roles = {c.camera_id: c.role for c in runtime.cfg.cameras}
+    roles = {c.camera_id: c.role for c in runtime.visible_cameras()}
     out: list[dict] = []
     seen: set[str] = set()
     for cid in getattr(runtime.tools, "last_cameras_used", []) or []:
@@ -921,14 +1162,37 @@ def _frames_for(runtime, max_frames: int = 3) -> list[dict]:
     return out
 
 
-def greeting_for(name: str | None = None) -> str:
+def time_of_day_salutation(hour: int | None = None) -> str:
+    """"Good morning" / "Good afternoon" / "Good evening" for ``hour``
+    (0–23; the OPERATOR's local hour when the browser sent one, else this
+    process's local clock — the site's TZ under compose). Late night
+    (00:00–04:59) says "Hello" rather than a "Good morning" nobody means."""
+    from datetime import datetime as _dt
+
+    if hour is None:
+        hour = _dt.now().hour
+    try:
+        hour = int(hour) % 24
+    except (TypeError, ValueError):
+        hour = _dt.now().hour
+    if 5 <= hour < 12:
+        return "Good morning"
+    if 12 <= hour < 17:
+        return "Good afternoon"
+    if 17 <= hour < 22:
+        return "Good evening"
+    return "Hello"
+
+
+def greeting_for(name: str | None = None, hour: int | None = None) -> str:
     # No persona name by design — the agent introduces itself by the product
     # name, "the OpenNVR Agent" (formerly "Camera Agent"), described as your
     # camera agent. (``name`` is accepted for call-site compat.)
-    # Short by design: this is SPOKEN (Piper) before the first
-    # interaction — every extra word delays the user's first question.
+    # Short by design: this is SPOKEN (Piper) when the page opens — every
+    # extra word delays the user's first question. Opens with the time of
+    # day like a person would.
     return (
-        "Hi, I'm the OpenNVR Agent — your camera agent. "
+        f"{time_of_day_salutation(hour)}, I'm the OpenNVR Agent — your camera agent. "
         "Ask me anything about your cameras; I can also set alarms, "
         "watches, and reports."
     )
@@ -986,7 +1250,7 @@ class TaskManager:
         while len(self._order) > self._max:
             old = self._order.pop(0)
             self._tasks.pop(old, None)
-        asyncio.create_task(self._run(task), name=f"agent-task-{task.id}")
+        spawn_unscoped(self._run(task), name=f"agent-task-{task.id}")
         logger.info("task #%d queued: %r", task.id, task.query)
         return task
 
@@ -1040,6 +1304,11 @@ class Monitor:
     active: bool = True
     created_at: float = 0.0
     line: list[float] | None = None   # crossing: [x1,y1,x2,y2] normalized
+    # count: alert when MORE than max_count / FEWER than min_count are seen
+    # at once ("more than 3 people gather" → max_count=3). None = a silent
+    # tally, as before.
+    max_count: int | None = None
+    min_count: int | None = None
     current: dict[str, int] = field(default_factory=dict)
     peak: dict[str, int] = field(default_factory=dict)
     # Per-camera LineCounter — LEGACY-loop crossing monitors only. Converged
@@ -1057,6 +1326,10 @@ class Monitor:
         }
         if self.line:
             d["line"] = self.line
+        if self.max_count is not None:
+            d["max_count"] = self.max_count
+        if self.min_count is not None:
+            d["min_count"] = self.min_count
         return d
 
 
@@ -1151,6 +1424,7 @@ class MonitorManager:
 
     def find_duplicate(self, *, kind: str, camera_ids: list[str],
                        target: str, line: list[float] | None = None,
+                       max_count: int | None = None, min_count: int | None = None,
                        ) -> "Monitor | None":
         """An ACTIVE watch with the same kind, target, camera set (and
         line, for crossings). Same rationale as AlarmManager: slow
@@ -1158,10 +1432,11 @@ class MonitorManager:
         just a list entry — for converged kinds it is a SECOND hosted
         rule instance doing double inference and double notifications."""
         want = (kind, target.strip().lower(), frozenset(camera_ids),
-                tuple(line) if line else None)
+                tuple(line) if line else None, max_count, min_count)
         for m in self._monitors.values():
             if m.active and (m.kind, m.target, frozenset(m.camera_ids),
-                             tuple(m.line) if m.line else None) == want:
+                             tuple(m.line) if m.line else None,
+                             m.max_count, m.min_count) == want:
                 return m
         return None
 
@@ -1176,7 +1451,8 @@ class MonitorManager:
 
     def create(self, *, kind: str, camera_ids: list[str], target: str,
                description: str = "", interval_s: float | None = None,
-               line: list[float] | None = None) -> Monitor:
+               line: list[float] | None = None, max_count: int | None = None,
+               min_count: int | None = None) -> Monitor:
         import time
 
         mon = Monitor(
@@ -1184,6 +1460,7 @@ class MonitorManager:
             target=target.strip().lower(), description=description.strip(),
             interval_s=float(interval_s or self._default_interval),
             created_at=time.time(), line=line,
+            max_count=max_count, min_count=min_count,
         )
         if kind in self._CONVERGED:
             # SDK front door (§07): instantiate the example app's rule
@@ -1195,6 +1472,12 @@ class MonitorManager:
             }
             if kind == "crossing":
                 params["line"] = list(line or [])
+            # A threshold turns the occupancy rule's over/under alerts on
+            # (MonitorHost._wants_alerts); without one it stays a tally.
+            if max_count is not None:
+                params["max_count"] = max_count
+            if min_count is not None:
+                params["min_count"] = min_count
 
             def _sink(cam: str, current: int, peak_candidate: int,
                       _mon: Monitor = mon) -> None:
@@ -1214,7 +1497,7 @@ class MonitorManager:
             self._monitors.pop(old, None)
         if kind not in self._CONVERGED:
             # Legacy poll loop — only kind="notify" lands here now.
-            self._tasks[mon.id] = asyncio.create_task(self._loop(mon), name=f"monitor-{mon.id}")
+            self._tasks[mon.id] = spawn_unscoped(self._loop(mon), name=f"monitor-{mon.id}")
         logger.info("monitor #%d (%s %r on %s) started", mon.id, kind, target, camera_ids)
         return mon
 
@@ -1258,7 +1541,8 @@ class MonitorManager:
 
     def export(self) -> list[dict[str, Any]]:
         return [{"kind": m.kind, "camera_ids": m.camera_ids, "target": m.target,
-                 "interval_s": m.interval_s, "line": m.line}
+                 "interval_s": m.interval_s, "line": m.line,
+                 "max_count": m.max_count, "min_count": m.min_count}
                 for m in self._monitors.values() if m.active]
 
     def restore(self, specs: list[dict[str, Any]]) -> None:
@@ -1270,7 +1554,8 @@ class MonitorManager:
         for s in specs or []:
             key = (str(s.get("kind")), str(s.get("target")),
                    frozenset(s.get("camera_ids") or []),
-                   tuple(s.get("line") or ()))
+                   tuple(s.get("line") or ()),
+                   s.get("max_count"), s.get("min_count"))
             if key in seen:
                 skipped += 1
                 continue
@@ -1278,7 +1563,8 @@ class MonitorManager:
             try:
                 self.create(kind=s["kind"], camera_ids=s["camera_ids"],
                             target=s["target"], interval_s=s.get("interval_s"),
-                            line=s.get("line"))
+                            line=s.get("line"), max_count=s.get("max_count"),
+                            min_count=s.get("min_count"))
             except Exception:  # pragma: no cover
                 logger.exception("monitor restore failed for %r", s)
         if skipped:
@@ -1418,20 +1704,32 @@ def _create_monitor_tool(camera_enum_all: list[str]) -> dict[str, Any]:
             "description": (
                 "Set up a STANDING watch on one or more cameras (or 'all'). "
                 "kind='notify' alerts when the target appears; kind='count' "
-                "keeps a live snapshot count; kind='crossing' counts people/"
-                "objects crossing a line (needs a 'line'). Use for ongoing "
-                "requests like 'notify me when you see a person on cam1', "
-                "'count people on gate 2', 'count people entering at the door'. "
-                "NOT for one-off 'what do you see right now' questions."
+                "keeps a live snapshot count, and with max_count/min_count "
+                "alerts when there are more/fewer than that many at once; "
+                "kind='crossing' counts people/objects crossing a line (needs "
+                "a 'line'). Use for ongoing requests like 'notify me when you "
+                "see a person on cam1', 'count people on gate 2', 'tell me "
+                "when more than 3 people gather on cam1' (kind='count', "
+                "target='person', max_count=3), 'count people entering at the "
+                "door'. NOT for one-off 'what do you see right now' questions."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "kind": {"type": "string", "enum": ["notify", "count", "crossing"]},
                     "target": {"type": "string",
-                               "description": "What to watch for, e.g. 'person', 'car', 'dog'."},
+                               "description": "The KIND of object to watch for, as one "
+                                              "word: 'person', 'car', 'dog'. Never a "
+                                              "camera or a place — that goes in camera_id."},
                     "camera_id": {"type": "string", "enum": camera_enum_all,
                                   "description": "A camera id, or 'all'."},
+                    "max_count": {"type": "integer",
+                                  "description": "kind='count' only: alert when MORE than "
+                                                 "this many are seen at once ('more than 3 "
+                                                 "people' → 3)."},
+                    "min_count": {"type": "integer",
+                                  "description": "kind='count' only: alert when FEWER than "
+                                                 "this many are seen at once."},
                     "camera_ids": {"type": "array", "items": {"type": "string", "enum": camera_enum_all},
                                    "description": "Optional: several cameras at once."},
                     "line": {"type": "array", "items": {"type": "number"},
@@ -1448,11 +1746,13 @@ def _stop_monitor_tool() -> dict[str, Any]:
         "type": "function",
         "function": {
             "name": "stop_monitor",
-            "description": "Stop a standing monitor by its numeric id.",
+            "description": ("Stop (remove) a standing watch. Give monitor_id when the user named a "
+                            "number; otherwise leave it out — the watch just set up, the only one, "
+                            "or all of them is understood."),
             "parameters": {
                 "type": "object",
-                "properties": {"monitor_id": {"type": "integer"}},
-                "required": ["monitor_id"],
+                "properties": {"monitor_id": {"type": "integer", "description": "Only when the user said a number."}},
+                "required": [],
             },
         },
     }
@@ -1472,6 +1772,17 @@ def _parse_hhmm(value: Any) -> int | None:
     if not value:
         return None
     raw = str(value).strip().lower()
+    # A full timestamp ("2026-11-08T22:00:00+0000", what Gemma wrote for
+    # "after 10pm" once it knew the date) is its time of day.
+    m = re.match(r"^\d{4}-\d{2}-\d{2}[t ](\d{1,2}):(\d{2})(?::\d{2})?", raw)
+    if m:
+        raw = f"{m.group(1)}:{m.group(2)}"
+    elif re.match(r"^\d{1,2}:\d{2}:\d{2}$", raw):
+        raw = raw[:5]
+    if raw in ("midnight",):
+        return 0
+    if raw in ("noon", "midday"):
+        return 720
     meridian = None
     if raw.endswith(("am", "pm")):
         meridian = raw[-2:]
@@ -1704,7 +2015,7 @@ class AlarmManager:
             old = self._order.pop(0)
             self.stop(old)
             self._alarms.pop(old, None)
-        self._tasks[alarm.id] = asyncio.create_task(self._loop(alarm), name=f"alarm-{alarm.id}")
+        self._tasks[alarm.id] = spawn_unscoped(self._loop(alarm), name=f"alarm-{alarm.id}")
         logger.info("alarm #%d %r (%s on %s, %s) armed", alarm.id, alarm.name,
                     alarm.target, camera_ids, alarm.window_label())
         return alarm
@@ -2032,7 +2343,7 @@ def _create_alarm_tool(camera_enum_all: list[str]) -> dict[str, Any]:
                     "camera_id": {"type": "string", "enum": camera_enum_all, "description": "A camera id, or 'all'."},
                     "camera_ids": {"type": "array", "items": {"type": "string", "enum": camera_enum_all}},
                     "after": {"type": "string", "description": "Only active after this time of day, in the SITE's local time. 24h 'HH:MM' preferred (e.g. '18:00' for after 6pm; '12:10' for after 12:10 pm); '12:10 pm' style also accepted. The window repeats daily."},
-                    "before": {"type": "string", "description": "Only active before this time of day (site-local; 24h 'HH:MM' preferred). With 'after' later than 'before' the window wraps midnight."},
+                    "before": {"type": "string", "description": "Only active BEFORE this time of day (site-local; 24h 'HH:MM' preferred): 'before 6am' is before='06:00', never after. With 'after' later than 'before' the window wraps midnight."},
                     "ring": {"type": "string",
                              "enum": ["siren", "pulse", "chime", "silent"],
                              "description": "How it announces. 'siren' rings until "
@@ -2058,15 +2369,17 @@ def _stop_alarm_tool() -> dict[str, Any]:
         "type": "function",
         "function": {
             "name": "stop_alarm",
-            "description": "Disarm an alarm by its numeric id, or acknowledge/silence a ringing one.",
+            "description": ("Disarm (remove) an alarm, or silence a ringing one. Give alarm_id when "
+                            "the user named a number; otherwise leave it out — the alarm just set "
+                            "up, the only one, or all of them ('remove the alarms') is understood."),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "alarm_id": {"type": "integer"},
+                    "alarm_id": {"type": "integer", "description": "Only when the user said a number."},
                     "action": {"type": "string", "enum": ["disarm", "silence"],
                                "description": "'silence' stops the current ring but keeps the alarm armed; 'disarm' removes it."},
                 },
-                "required": ["alarm_id"],
+                "required": [],
             },
         },
     }
@@ -2279,6 +2592,39 @@ class ReportSchedule:
         }
 
 
+def scene_report_query(query: str, runtime: Any) -> str:
+    """The question a scheduled report actually asks the agent.
+
+    "Every hour tell me what you see" means a look at every camera, not
+    the people count the history tools default to (Ventuno Q, 2026-11-09:
+    an hourly "what you see" report came back as person visits only). A
+    query that asks to see or describe and names no detectable thing is
+    turned into an explicit scene round: describe each camera now, then
+    the visits since the last run. Anything else runs as written.
+    """
+    import router as _router
+
+    q = (query or "").strip()
+    if not q:
+        return q
+    names_object = bool(_router._DETECTION_RE.search(q))
+    # Only an explicit ask to SEE the cameras ("what you see", "what's
+    # happening", "describe the view") — not any descriptive word:
+    # "summarize overnight activity" is a history summary and runs as is.
+    scene_words = bool(_router._GENERIC_SEE_RE.search(q)
+                       or re.search(r"\b(what (?:you|the cameras?) (?:can )?sees?|what you can see"
+                                    r"|what(?: is|'?s) (?:happening|going on)|what the cameras? shows?"
+                                    r"|describe (?:the |each |every )?(?:cameras?|scene|view|room|picture)"
+                                    r"|look at (?:the |each |every |all )?cameras?|the (?:scene|view) (?:on|from|of))\b", q, re.I))
+    if names_object or not scene_words:
+        return q
+    cams = [c.camera_id for c in runtime.visible_cameras()] if hasattr(runtime, "visible_cameras") else []
+    where = ", ".join(cams) if cams else "every camera"
+    return (f"Scene report. Look at each camera now ({where}) with describe_camera and say in one "
+            f"sentence per camera what it shows. Then, if any visits were recorded in the last hour, "
+            f"say how many and of what. Nothing else. The request was: {q}")
+
+
 class ReportScheduler:
     """Runs recurring reports. One background loop ticks every
     ``check_interval`` and runs any schedule that's due. Each report is a
@@ -2389,7 +2735,7 @@ class ReportScheduler:
         sched.run_count += 1
         try:
             result = await _run_conversation_turn(
-                self._runtime, [], sched.query,
+                self._runtime, [], scene_report_query(sched.query, self._runtime),
                 tool_definitions=self._runtime.background_tool_definitions,
             )
         except Exception as exc:  # pragma: no cover - defensive
@@ -2407,7 +2753,7 @@ class ReportScheduler:
 
     def start(self) -> None:
         if self._task is None:
-            self._task = asyncio.create_task(self._loop(), name="report-scheduler")
+            self._task = spawn_unscoped(self._loop(), name="report-scheduler")
 
     def stop_all(self) -> None:
         if self._task:
@@ -2428,6 +2774,12 @@ class ReportScheduler:
             logger.exception("report scheduler loop crashed")
 
 
+#: Example phrasings in the create_report schema. A small model copies
+#: one as the query ("what the cameras saw overnight" for "every hour tell
+#: me what you see"); the handler then uses the question instead.
+_SCHEMA_EXAMPLE_QUERIES = frozenset({"what the cameras saw overnight", "overnight activity"})
+
+
 def _create_report_tool() -> dict[str, Any]:
     return {
         "type": "function",
@@ -2436,7 +2788,8 @@ def _create_report_tool() -> dict[str, Any]:
             "description": (
                 "Schedule a RECURRING summary report. Use for 'every morning "
                 "summarize overnight activity', 'give me a daily 7am rundown', "
-                "'every hour tell me how many people came by'. Provide a short "
+                "'every hour tell me how many people came by', 'every hour tell me "
+                "what you see' (a look at every camera). Provide a short "
                 "name and the query to summarize; set 'at' (HH:MM, daily) or "
                 "'every_minutes'."
             ),
@@ -2459,11 +2812,13 @@ def _stop_report_tool() -> dict[str, Any]:
         "type": "function",
         "function": {
             "name": "stop_report",
-            "description": "Cancel a scheduled report by its numeric id.",
+            "description": ("Cancel a scheduled report. Give report_id when the user named a number; "
+                            "otherwise leave it out — the report just set up, the only one, or all of "
+                            "them is understood."),
             "parameters": {
                 "type": "object",
-                "properties": {"report_id": {"type": "integer"}},
-                "required": ["report_id"],
+                "properties": {"report_id": {"type": "integer", "description": "Only when the user said a number."}},
+                "required": [],
             },
         },
     }
@@ -2702,8 +3057,100 @@ def _recent_app_alerts_tool() -> dict[str, Any]:
     }
 
 
+def _list_standing_tool() -> dict[str, Any]:
+    """Function schema for listing what the agent has standing: alarms,
+    watches (monitors) and scheduled reports — read-only."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "list_standing",
+            "description": (
+                "List what is currently set up in this agent: the armed "
+                "ALARMS, the standing WATCHES (monitors) and the scheduled "
+                "REPORTS, each with its number, what it watches for, which "
+                "cameras, and its schedule or time window. Use for 'what "
+                "alarms do I have?', 'what are you watching for?', 'which "
+                "reports are scheduled?', 'what have I set up?'. Read-only: "
+                "to change one, use the stop_* or create_* tools."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "enum": ["all", "alarm", "monitor", "report"],
+                        "description": "Which list; 'all' (default) for everything.",
+                    },
+                },
+            },
+        },
+    }
+
+
+def _system_status_tool() -> dict[str, Any]:
+    """Function schema for the system health read: core's view of each
+    camera's connectivity and recording, and the recording disk."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "system_status",
+            "description": (
+                "Check the SYSTEM, not the scene: which cameras are online "
+                "or offline, whether each is actually recording (recording, "
+                "stalled, never recorded, turned off), and how much space the "
+                "recording disk has left against its purge floor. Use for "
+                "'is everything okay?', 'is any camera offline?', 'is the "
+                "gate recording?', 'how much disk space is left?', 'are you "
+                "working?'. Read-only. For what a camera SEES use "
+                "describe_camera or detect_objects instead."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "camera_id": {
+                        "type": "string",
+                        "description": (
+                            "Optional: report on one camera only. Omit for "
+                            "the whole system."
+                        ),
+                    },
+                },
+            },
+        },
+    }
+
+
+def _show_camera_tool(camera_ids: list[str]) -> dict[str, Any]:
+    """Function schema for switching the page's live view to a camera."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "show_camera",
+            "description": (
+                "Put ONE camera's live view on the user's screen. Use when "
+                "the user asks to SEE a camera — 'show me the gate', 'open "
+                "the front door camera', 'switch to the yard' — and does NOT "
+                "ask what is in it. It only changes the view; it does not "
+                "look at the picture. For 'what do you see at the gate' use "
+                "describe_camera instead."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "camera_id": {
+                        "type": "string",
+                        "enum": [c for c in camera_ids if c != "all"],
+                        "description": "The camera to show.",
+                    },
+                },
+                "required": ["camera_id"],
+            },
+        },
+    }
+
+
 def load_config(path: str | Path) -> AppConfig:
-    raw = yaml.safe_load(Path(path).read_text())
+    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise SystemExit(f"config file {path} did not parse to a dict")
 
@@ -2716,6 +3163,22 @@ def load_config(path: str | Path) -> AppConfig:
     if _auth_mode == "opennvr" and not (raw.get("opennvr_api_url") or raw.get("opennvr_base_url")):
         raise SystemExit("config: auth_mode 'opennvr' requires opennvr_api_url "
                          "(the server that validates tokens)")
+
+    if raw.get("footage_index_path"):
+        # Retired with footage-search 2.0.0, which deleted the SQLite
+        # index this pointed at. Nothing writes that file any more, so
+        # the agent would be reading whatever happened to be true on the
+        # day of the upgrade — and reading it during an outage, when
+        # nobody is positioned to notice the dates are months old. A
+        # stale answer presented as a current one is worse than no
+        # answer, so the key is ignored rather than honoured, and said
+        # out loud rather than ignored silently.
+        logger.warning(
+            "config: footage_index_path (%s) is no longer used. "
+            "footage-search 2.0.0 deleted the index it read; footage "
+            "search is answered from the OpenNVR event store "
+            "(opennvr_api_url). Remove the key.",
+            raw["footage_index_path"])
 
     _tls_cert = str(raw.get("tls_certfile") or "").strip() or None
     _tls_key = str(raw.get("tls_keyfile") or "").strip() or None
@@ -2790,6 +3253,13 @@ def load_config(path: str | Path) -> AppConfig:
         except (TypeError, ValueError):
             raise SystemExit(f"config: {key} must be a number; got {raw.get(key)!r}")
 
+    def _truthy(value: Any, default: bool) -> bool:
+        if value is None or value == "":
+            return default
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() not in ("0", "false", "no", "off")
+
     def _int(key: str, default: int) -> int:
         try:
             return int(raw.get(key, default))
@@ -2840,12 +3310,38 @@ def load_config(path: str | Path) -> AppConfig:
         llm_think=(None if raw.get("llm_think") is None else bool(raw.get("llm_think"))),
         llm_num_threads=(int(raw["llm_num_threads"]) if raw.get("llm_num_threads") else None),
         llm_num_ctx=int(raw.get("llm_num_ctx") or 4096),
+        llm_window_tokens=int(raw.get("llm_window_tokens") or 0),
+        llm_fallback_url=(str(raw.get("llm_fallback_url")).strip() or None) if raw.get("llm_fallback_url") else None,
+        llm_fallback_model=_str("llm_fallback_model", "granite4:micro"),
         llm_keep_alive=(raw["llm_keep_alive"] if raw.get("llm_keep_alive") is not None else -1),
+        llm_prewarm=_truthy(raw.get("llm_prewarm"), True),
         piper_url=_str("piper_url", "http://127.0.0.1:9001"),
         piper_token=_str("piper_token", ""),
-        llm_model=_str("llm_model", "qwen2.5:1.5b"),
+        piper_voice=_str("piper_voice", os.environ.get("PIPER_VOICE", "")),
+        llm_model=_str("llm_model", "granite4:micro"),
         llm_temperature=_float("llm_temperature", 0.4),
         llm_max_tokens=_int("llm_max_tokens", 256),
+        vad_confidence=_float("vad_confidence", 0.55),
+        vad_start_secs=_float("vad_start_secs", 0.15),
+        vad_stop_secs=_float("vad_stop_secs", 0.2),
+        vad_min_volume=_float("vad_min_volume", 0.08),
+        stt_trailing_silence_secs=_float("stt_trailing_silence_secs", 0.5),
+        turn_stop_secs=_float("turn_stop_secs", 1.0),
+        turn_max_secs=_float("turn_max_secs", 8.0),
+        turn_stop_timeout_secs=_float("turn_stop_timeout_secs", 6.0),
+        turn_detector=_str("turn_detector", "auto"),
+        turn_cpu_threads=(int(raw["turn_cpu_threads"]) if raw.get("turn_cpu_threads") else None),
+        turn_timer_secs=_float("turn_timer_secs", 0.8),
+        interruptions=_str("interruptions", "gated"),
+        interrupt_min_ms=_float("interrupt_min_ms", 300.0),
+        interrupt_min_words=_int("interrupt_min_words", 2),
+        interrupt_addressee=(True if raw.get("interrupt_addressee") is None
+                             else bool(raw.get("interrupt_addressee"))),
+        thinking_aloud=(False if raw.get("thinking_aloud") is None else bool(raw.get("thinking_aloud"))),
+        router_tier0=(True if raw.get("router_tier0") is None else bool(raw.get("router_tier0"))),
+        router_hints=(True if raw.get("router_hints") is None else bool(raw.get("router_hints"))),
+        filler_min_ms=_float("filler_min_ms", 1500.0),
+        filler_source=_str("filler_source", "template"),
         enabled_tools=(
             list(raw["enabled_tools"])
             if isinstance(raw.get("enabled_tools"), list)
@@ -2856,7 +3352,6 @@ def load_config(path: str | Path) -> AppConfig:
         event_ring_size=_int("event_ring_size", 256),
         nats_inference_url=raw.get("nats_inference_url"),
         nats_inference_token=raw.get("nats_inference_token"),
-        footage_index_path=raw.get("footage_index_path"),
         detector_extra_labels=[
             str(s).strip().lower()
             for s in (raw.get("detector_extra_labels") or [])
@@ -2869,6 +3364,8 @@ def load_config(path: str | Path) -> AppConfig:
         opennvr_ui_url=_opennvr_ui_url,
         auth_mode=str(raw.get("auth_mode") or "none").strip().lower(),
         agent_public_url=raw.get("agent_public_url"),
+        agent_contract_url=raw.get("agent_contract_url"),
+        announce_app_alerts=_str("announce_app_alerts", "none"),
         alarm_ring_defaults=(
             {str(k).strip().lower(): str(v).strip().lower()
              for k, v in raw["alarm_ring_defaults"].items()}
@@ -2916,31 +3413,26 @@ _OPENNVR_CAMERA_RECONCILE_SLOW = 30.0
 
 
 def _load_opennvr_cameras(*, url: str, api_key: str) -> list[CameraSpec]:
-    """Load frame sources from OpenNVR's internal camera-agent endpoint."""
-    import httpx
+    """Load frame sources from OpenNVR through the SDK's camera discovery.
 
-    headers = {"X-Internal-Api-Key": api_key}
-    try:
-        response = httpx.get(url, headers=headers, timeout=15.0, trust_env=False)
-        response.raise_for_status()
-        payload = response.json()
-    except Exception as exc:
-        logger.warning(
-            "config: could not load cameras from OpenNVR (%s): %s",
-            url,
-            exc,
-        )
-        return []
+    ``url`` is the configured ``opennvr_cameras_url`` (historically the
+    full internal-endpoint URL); the SDK takes the server base, so the
+    endpoint path is stripped when present. Never raises — an
+    unreachable core at boot is an empty roster and a warning, and the
+    reconcile loop keeps trying."""
+    from opennvr_app_sdk import discover_cameras
+    from opennvr_app_sdk.cameras import CAMERAS_PATH
 
-    raw_cameras = payload.get("cameras") if isinstance(payload, dict) else None
-    if not isinstance(raw_cameras, list):
-        logger.warning("config: OpenNVR cameras response had no 'cameras' list")
+    base = url.rstrip("/")
+    if base.endswith(CAMERAS_PATH):
+        base = base[: -len(CAMERAS_PATH)]
+    raw_cameras = discover_cameras(base, api_key=api_key or None, timeout=15.0)
+    if not raw_cameras:
+        logger.warning("config: no cameras loaded from OpenNVR (%s)", url)
         return []
 
     cameras: list[CameraSpec] = []
     for entry in raw_cameras:
-        if not isinstance(entry, dict):
-            continue
         cam_id = entry.get("camera_id")
         frame_url = entry.get("frame_url")
         if not cam_id or not frame_url:
@@ -2982,6 +3474,21 @@ class CameraAgentRuntime:
         # Set/cleared ONLY by the turn loop (real questions), never by
         # boot-time prewarm, whose transient failures are not a verdict.
         self.last_llm_error: str | None = None
+        # The fallback LLM (an Ollama) and whether we are on it: set when the
+        # primary refused a connection or had no model loaded, cleared when
+        # a probe of the primary answers again. The notice is spoken once
+        # per episode, at the start of the first reply the fallback gave.
+        self.llm_fallback = None
+        self.llm_degraded: bool = False
+        self.llm_degraded_since: float | None = None
+        self._llm_probe_at: float = 0.0
+        self._llm_notice_pending: bool = False
+        # The last detect/describe call a turn made (tool, args, at): a
+        # dispute of its answer repeats it instead of asking the model.
+        self.last_look: dict[str, Any] | None = None
+        # The last turn was a goodbye: the voice endpoints say so ("end")
+        # and the page leaves talk mode after the reply.
+        self.last_turn_closed: bool = False
 
         self.context = CameraContext(
             cameras=cfg.cameras,
@@ -3003,6 +3510,15 @@ class CameraAgentRuntime:
             )
             logger.info("LLM brain: OpenAI-compatible at %s (model=%s)",
                         cfg.llm_base_url or cfg.ollama_url, cfg.llm_model)
+            if cfg.llm_fallback_url:
+                _fb_think = False if "qwen3" in (cfg.llm_fallback_model or "").lower() else None
+                self.llm_fallback = OllamaClient(
+                    url=cfg.llm_fallback_url, token=cfg.ollama_token, model=cfg.llm_fallback_model,
+                    num_thread=cfg.llm_num_threads, num_ctx=cfg.llm_num_ctx,
+                    think=_fb_think, keep_alive=cfg.llm_keep_alive,
+                )
+                logger.info("LLM fallback: Ollama at %s (model=%s) when the brain is unreachable",
+                            cfg.llm_fallback_url, cfg.llm_fallback_model)
         else:
             # Auto-disable thinking for Qwen3 (a thinking model) unless the
             # operator set llm_think explicitly — on CPU, thinking burns the
@@ -3015,7 +3531,8 @@ class CameraAgentRuntime:
                 num_thread=cfg.llm_num_threads, num_ctx=cfg.llm_num_ctx,
                 think=_think, keep_alive=cfg.llm_keep_alive,
             )
-        self.piper = PiperClient(url=cfg.piper_url, token=cfg.piper_token)
+        self.piper = PiperClient(url=cfg.piper_url, token=cfg.piper_token,
+                                 voice=cfg.piper_voice)
 
         self.caption_client = KaicAdapterClient(
             kaic_url=cfg.kaic_url,
@@ -3052,6 +3569,8 @@ class CameraAgentRuntime:
         # else kaic_api_key, else the INTERNAL_API_KEY env var.
         self.app_registry: AppRegistryClient | None = None
         self.skills_registry: SkillsRegistryClient | None = None
+        self.status_client: SystemStatusClient | None = None
+        self.description_client: CameraDescriptionClient | None = None
         self._registry_key: str = ""
         if cfg.opennvr_api_url:
             import os
@@ -3072,6 +3591,17 @@ class CameraAgentRuntime:
             self.skills_registry = SkillsRegistryClient(
                 base_url=cfg.opennvr_api_url, api_key=app_key,
             )
+            # "Is everything okay?": core's own view of each camera's
+            # connectivity and recording state, and the recording disk.
+            self.status_client = SystemStatusClient(
+                base_url=cfg.opennvr_api_url, api_key=app_key,
+            )
+            # Core's one shared "what is on this camera now" (RFC-0004):
+            # the live look and the Mirror's scene line ask here, not
+            # the caption model.
+            self.description_client = CameraDescriptionClient(
+                base_url=cfg.opennvr_api_url, api_key=app_key,
+            )
             # Kept for contract-parity self-registration (RFC-0002 gap 8).
             self._registry_key = app_key
             logger.info(
@@ -3079,27 +3609,6 @@ class CameraAgentRuntime:
                 "(read-only — the agent never enables/disables/configures)",
                 cfg.opennvr_api_url,
             )
-
-        # Optional read-only footage-search index → enables search_footage.
-        self.footage_index = None
-        if cfg.footage_index_path:
-            from footage_index import FootageIndex
-
-            self.footage_index = FootageIndex(cfg.footage_index_path)
-            if self.footage_index.available:
-                logger.info(
-                    "camera-agent: footage index loaded from %s; "
-                    "search_footage tool enabled",
-                    cfg.footage_index_path,
-                )
-            else:
-                logger.info(
-                    "camera-agent: footage_index_path set (%s) but the index "
-                    "isn't readable yet — search_footage lights up "
-                    "automatically once the footage-search indexer has "
-                    "created it (the reader re-tries on every call)",
-                    cfg.footage_index_path,
-                )
 
         # Agent camera id → OpenNVR camera id (used on the Tier-0 bus subject,
         # the best-frame endpoint, and the events store). Resolved AT CALL TIME
@@ -3124,19 +3633,44 @@ class CameraAgentRuntime:
                     return str(cam.opennvr_camera_id)
             return cid
 
+        def _pipeline_camera(cid: str) -> str:
+            """The id Tier-0 (detect-pipeline) knows the camera by: ``cam<server
+            id>`` — its bus subjects, metrics, /best_frame and /latest_frame.
+            Not the bare server id: resolving to "23" made every pipeline
+            fetch a 404 and every live look a 6 s RTSP grab (Ventuno Q,
+            2026-11-08). A camera with no server id keeps its own handle."""
+            for cam in self.context.cameras:
+                if cam.camera_id == cid and cam.opennvr_camera_id is not None:
+                    return f"cam{cam.opennvr_camera_id}"
+            return cid
+
         # Best-frame fetch (optional): describe_camera runs the VLM on Tier-0's best
         # frame when the detect-pipeline origin is configured.
         best_frame_fetch = None
+        self.mirror_crops = None
         if cfg.bestframe_base_url:
             from tools import make_best_frame_fetch
             best_frame_fetch = make_best_frame_fetch(
-                cfg.bestframe_base_url, resolve_camera=_resolve_camera,
+                cfg.bestframe_base_url, resolve_camera=_pipeline_camera,
             )
+            # And the newest decoded frame for every live look (detect,
+            # describe with no active track, snapshots): the pipeline's
+            # /latest_frame instead of a fresh RTSP session of our own.
+            from opennvr_app_sdk import make_latest_frame_fetch
+            self.context.set_latest_frame_fetch(make_latest_frame_fetch(
+                cfg.bestframe_base_url, resolve_camera=_pipeline_camera,
+            ))
+            # Mirror cards describe a PERSON from Tier-0's best crop of that
+            # track — a tight, sharp picture of them, not the whole scene.
+            from opennvr_app_sdk.tier0 import BestFrameClient
+            self.mirror_crops = BestFrameClient(
+                cfg.bestframe_base_url, resolve_camera=_pipeline_camera)
 
         # Events store (the platform's memory, RFC-0001 C1): built whenever the
         # server API origin is configured — same origin + INTERNAL_API_KEY chain
         # the app door uses. Shared primitive from the SDK (Challenge-3 rule).
         events_client = None
+        timeline = None
         if cfg.opennvr_api_url:
             import os as _os
 
@@ -3148,21 +3682,47 @@ class CameraAgentRuntime:
                 or _os.environ.get("INTERNAL_API_KEY", ""),
             )
             logger.info("history enabled: events store at %s", cfg.opennvr_api_url)
+            # The platform's SEARCH over that same store. Constructed
+            # beside EventsClient and from the same credential, because
+            # search_footage now answers from the canonical store rather
+            # than the footage-search app's private SQLite index — the
+            # route (/api/v1/internal/app/search) and the SDK wrapper
+            # both already existed; the agent was simply pointed at the
+            # wrong store.
+            try:
+                from opennvr_app_sdk import OpenNVR
+
+                timeline = OpenNVR(
+                    cfg.opennvr_api_url,
+                    token=cfg.opennvr_api_key
+                    or cfg.kaic_api_key
+                    or _os.environ.get("INTERNAL_API_KEY", ""),
+                ).timeline
+            except Exception:
+                # Never fatal: an agent that cannot build a search client
+                # still has every live tool and the events store.
+                logger.warning("footage search unavailable", exc_info=True)
         # Kept on the runtime too: the events SKILL is served by two
         # independent backends (NATS ring → recent_events; events store →
         # search_history/describe_event/describe_window), and the skills
         # panel must gate + caption on what is ACTUALLY wired.
         self.events_client = events_client
+        # Same reasoning as events_client: the skills panel gates on what
+        # is ACTUALLY wired, and footage search is now served by the
+        # platform store with the local index only as a fallback.
+        self.timeline = timeline
 
         self.tools = CameraTools(
             context=self.context,
             caption_client=self.caption_client,
             detection_client=self.detection_client,
             recognition_client=self.recognition_client,
-            footage_index=self.footage_index,
             best_frame_fetch=best_frame_fetch,
             resolve_camera=_resolve_camera,
+            pipeline_camera=_pipeline_camera,
             events_client=events_client,
+            timeline=timeline,
+            description_fetch=self._core_description,
         )
         # Advertised tools are (re)built by _configure_tools from enabled_tools
         # minus any skills switched off at runtime. disabled_skills starts empty.
@@ -3181,6 +3741,37 @@ class CameraAgentRuntime:
         # LAST layer over config + built-ins in ring_defaults(); durable
         # via persist()/load_state like the skill toggles.
         self._ring_overrides: dict[str, str] = {}
+        self._announce_app_alerts: str | None = None   # UI override of cfg
+        # Per-app speech, set from the Skills panel: app_id -> bool. An
+        # entry here BEATS the global policy for that app, so an operator
+        # can let the doorbell speak while ANPR stays quiet. Absent = fall
+        # back to the global policy (which itself defaults to "none").
+        self._app_announce: dict[str, bool] = {}
+        # Interruption decisions on the streaming pipeline (turns.py): what
+        # was said over the agent, how long, and whether it yielded — the
+        # evidence to tune the gate from. GET /interruptions.
+        self.interruption_log: deque = deque(maxlen=200)
+        # Thinking aloud (fillers.py) + the push channel the demo page
+        # listens on (/updates): a "working" line is published the moment
+        # the first tool call is known, so the page can speak it while
+        # the tool runs.
+        from fillers import ThinkingAloud
+        self.thinking = ThinkingAloud(
+            min_ms=float(getattr(cfg, "filler_min_ms", 1500.0)),
+            source=str(getattr(cfg, "filler_source", "template") or "template"),
+            enabled=bool(getattr(cfg, "thinking_aloud", False)),
+        )
+        self._update_subscribers: set = set()
+        # OpenNVR Mirror: at most one live narration at a time (the model
+        # is the bottleneck; two pages share one loop by camera).
+        self.mirror = None
+        self.mirror_user_token: str | None = None
+        # The standing thing most recently set up — ("alarm" | "monitor" |
+        # "report", id). "Remove it" / "cancel that" name no id: the stop
+        # tools fall back to this, and the router's stop hint picks the
+        # matching tool (Ventuno Q, 2026-11-09: "can you remove it?" right
+        # after an alarm was armed got "I need an alarm number").
+        self.last_standing: tuple[str, int] | None = None
         self._configure_tools()
         self.tool_handlers = {
             "describe_camera": self.tools.describe_camera,
@@ -3206,11 +3797,20 @@ class CameraAgentRuntime:
             "list_apps": self._handle_list_apps,
             "app_status": self._handle_app_status,
             "recent_app_alerts": self._handle_recent_app_alerts,
+            "list_standing": self._handle_list_standing,
+            "system_status": self._handle_system_status,
+            "show_camera": self._handle_show_camera,
         }
 
-        # Pipeline trace of the most recent conversation turn (see
-        # _run_conversation_turn) — served to the UI by /ask and /converse.
+        # The trace of whichever conversation turn STARTED last, background
+        # turns included — for tests and debugging only. /ask and /converse
+        # serve their own turn's trace (see _run_conversation_turn); nothing
+        # that answers a person may read this, since a concurrent turn can
+        # replace it at any await.
         self.last_turn_trace: list[dict[str, Any]] = []
+        # Every turn's cost by tier and tool, for GET /turn-stats.
+        from turn_stats import TurnStats
+        self.turn_stats = TurnStats()
 
         self.agent_name = agent_name_for(cfg.agent_name)
         self.faces = FaceClient(url=cfg.faces_url, token=cfg.faces_token) if cfg.faces_url else None
@@ -3256,12 +3856,14 @@ class CameraAgentRuntime:
         # handlers degrade gracefully if the registry is momentarily down.
         if not self.skill_requirement_met("apps"):
             excluded.update(SKILL_TOOLS["apps"])
-        # Same principle for footage: with no footage_index_path configured
-        # there is nothing the tool could ever read, so the LLM shouldn't
-        # see it. When the path IS set, the tool stays advertised and
-        # degrades cleanly until the indexer has built the file.
+        # Same principle for footage: with no connection to the event
+        # store there is nothing the tool could ever read, so the LLM
+        # shouldn't see it. When core IS configured the tool stays
+        # advertised and degrades cleanly while core is unreachable.
         if not self.skill_requirement_met("footage"):
             excluded.update(SKILL_TOOLS["footage"])
+        if not self.skill_requirement_met("status"):
+            excluded.update(SKILL_TOOLS["status"])
         allow = None if self.cfg.enabled_tools is None else set(self.cfg.enabled_tools)
 
         def keep(defn: dict[str, Any]) -> bool:
@@ -3278,6 +3880,7 @@ class CameraAgentRuntime:
             _create_report_tool(), _stop_report_tool(),
             _enroll_face_tool(cam_all), _list_people_tool(), _forget_face_tool(),
             _list_apps_tool(), _app_status_tool(), _recent_app_alerts_tool(),
+            _list_standing_tool(), _system_status_tool(), _show_camera_tool(cam_all),
         ) if keep(t)]
         self.background_tool_definitions = base
         self.tool_definitions = base + control
@@ -3286,9 +3889,34 @@ class CameraAgentRuntime:
         # (arm alarms, create watches/tasks/reports, enroll/forget faces)
         # is operator+. Enforced at the TOOLSET so a viewer's chat can't
         # talk the agent into arming anything.
-        _viewer_safe = {"list_apps", "app_status", "recent_app_alerts", "list_people"}
+        _viewer_safe = {"list_apps", "app_status", "recent_app_alerts", "list_people",
+                        "list_standing", "system_status", "show_camera"}
         self.viewer_tool_definitions = base + [
             t for t in control if t["function"]["name"] in _viewer_safe]
+        self._rewarm_if_prefix_changed()
+
+    def _rewarm_if_prefix_changed(self) -> None:
+        """The cached prompt prefix embeds the tool schemas. When they are
+        rebuilt into something different after the LLM was warmed — a
+        skill toggled, a camera added — warm the new prefix now, in the
+        background, rather than on the next caller's turn."""
+        warm = getattr(self, "_warm_prefix", None)
+        if not warm:
+            return
+        try:
+            now = _prefix_fingerprint(self.build_system_prompt(clock=False), self.tool_definitions)
+        except Exception:  # noqa: BLE001 — a fingerprint is not worth a crash
+            return
+        if now == warm:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        logger.info("camera-agent: the tool schemas or the system prompt changed since the "
+                    "LLM pre-warm (%s/%s → %s/%s); re-warming the prefix.", *warm, *now)
+        self._warmup_task = loop.create_task(
+            self._prewarm_llm(), name="camera-agent-llm-rewarm")
 
     _RING_BUILTIN_DEFAULTS = {"fire": "siren", "smoke": "siren",
                               "flame": "siren", "gas": "siren"}
@@ -3373,6 +4001,194 @@ class CameraAgentRuntime:
                     merged[k] = v
         return merged
 
+    # ── push channel for the page (/updates) ─────────────────────────
+    def subscribe_updates(self) -> "asyncio.Queue":
+        q: asyncio.Queue = asyncio.Queue(maxsize=32)
+        self._update_subscribers.add(q)
+        return q
+
+    def unsubscribe_updates(self, q: "asyncio.Queue") -> None:
+        self._update_subscribers.discard(q)
+
+    def _relay_tracks(self, core_camera_id: int, frame: dict[str, Any]) -> None:
+        """Tier-0 tracks for core camera N → the agent camera that maps to
+        it, pushed to the demo as {"tracks": {camera, ...}}. Dropped when
+        no configured camera claims that core id — boxes for a camera this
+        agent does not know are not this agent's to show."""
+        cam = next((c.camera_id for c in self.cfg.cameras
+                    if getattr(c, "opennvr_camera_id", None) == core_camera_id), None)
+        if cam is None:
+            return
+        mirror = self.mirror
+        if mirror is not None and mirror.camera_id == cam:
+            mirror.observe_tracks(frame)
+        self.publish_update({"tracks": {"camera": cam, **frame}})
+
+    async def mirror_start(self, camera_id: str, *, voice: bool = True,
+                           scene_every_s: float | None = None,
+                           user_token: str | None = None):
+        """Start (or re-point) the Mirror narration for ``camera_id``. One
+        loop at a time: starting on another camera stops the first.
+        ``user_token`` is the page's OpenNVR login: with it the loop reads
+        the camera's full-resolution frame from core's capture pool (the
+        same snapshot the Live view's camera menu offers), which is what a
+        person's card is cut from."""
+        from mirror import MirrorSession, SCENE_EVERY_S
+
+        if self.mirror is not None and self.mirror.running \
+                and self.mirror.camera_id == camera_id:
+            self.mirror.voice = voice
+            self.mirror.heartbeat()
+            if user_token:
+                self.mirror_user_token = user_token
+            return self.mirror
+        if self.mirror is not None:
+            await self.mirror.stop()
+        self.mirror_user_token = user_token
+
+        async def _frame(cam: str) -> bytes | None:
+            try:
+                return await self.context.get_frame(cam, allow_pinned=False)
+            except Exception:  # noqa: BLE001 — offline camera: the loop idles
+                return None
+
+        crops = self.mirror_crops
+
+        async def _crop(cam: str, track_id: Any) -> bytes | None:
+            if crops is None:
+                return None
+            return await crops.fetch(cam, track_id)
+
+        async def _speech(text: str) -> bytes | None:
+            return await self.piper.synthesize(text)
+
+        spec = self.context.get_camera(camera_id)
+        oid = getattr(spec, "opennvr_camera_id", None) if spec is not None else None
+        api = (getattr(self.cfg, "opennvr_api_url", "") or "").rstrip("/")
+        hires = None
+        if oid is not None and api and user_token:
+            async def _hires(cam: str) -> bytes | None:
+                tok = self.mirror_user_token
+                if not tok:
+                    return None
+                try:
+                    async with httpx.AsyncClient(timeout=8.0, trust_env=False) as client:
+                        r = await client.get(f"{api}/api/v1/cameras/{oid}/snapshot",
+                                             headers={"Authorization": f"Bearer {tok}"})
+                    if r.status_code == 200 and r.content[:2] == b"\xff\xd8":
+                        return r.content
+                except Exception:  # noqa: BLE001 — the loop falls back to the detector's frame
+                    pass
+                return None
+            hires = _hires
+
+        description = None
+        if oid is not None and getattr(self, "description_client", None) is not None:
+            async def description(max_age_s: float) -> dict[str, Any] | None:
+                return await self.description_client.describe(int(oid), max_age_s)
+        self.mirror = MirrorSession(
+            camera_id, frame=_frame, crop=_crop if crops is not None else None,
+            vision=self.tools._vlm_caption, speech=_speech,
+            publish=self.publish_update, voice=voice, hires=hires, description=description,
+            scene_every_s=scene_every_s or getattr(self.cfg, "mirror_scene_every_s", None) or SCENE_EVERY_S)
+        self.mirror.start()
+        return self.mirror
+
+    async def _core_description(self, camera_id: str, max_age_s: float) -> dict[str, Any] | None:
+        """Core's shared description for one of this agent's cameras, or
+        None when the camera is not an OpenNVR camera or core is not
+        configured (the tool then takes its own look)."""
+        client = getattr(self, "description_client", None)
+        if client is None:
+            return None
+        spec = self.context.get_camera(camera_id)
+        oid = getattr(spec, "opennvr_camera_id", None) if spec is not None else None
+        if oid is None:
+            return None
+        return await client.describe(int(oid), max_age_s)
+
+    def publish_update(self, payload: dict[str, Any]) -> None:
+        for q in list(self._update_subscribers):
+            try:
+                q.put_nowait(payload)
+            except asyncio.QueueFull:
+                pass
+
+    async def say_working(self, text: str, *, voice: bool) -> None:
+        """Push a "working" line to the page — with audio for a voice turn
+        (Piper, cached by text, run here in parallel with the tool the
+        line announces); text only for a typed question. Never raises."""
+        audio_b64 = None
+        if voice:
+            try:
+                cache = self.thinking.audio
+                audio_b64 = cache.get(text)
+                if audio_b64 is None:
+                    audio = await self.piper.synthesize(text)
+                    if audio:
+                        audio_b64 = base64.b64encode(audio).decode("ascii")
+                        if len(cache) >= 64:
+                            cache.pop(next(iter(cache)))
+                        cache[text] = audio_b64
+            except Exception as exc:  # noqa: BLE001 — the line is optional
+                logger.debug("thinking aloud: TTS unavailable (%s); text only", exc)
+        self.publish_update({"working": {"text": text, "audio_b64": audio_b64, "ts": time.time()}})
+
+    ANNOUNCE_LEVELS = ("all", "important", "none")
+
+    def announce_app_alerts(self) -> str:
+        """Effective policy for speaking relayed app alerts: the UI
+        override when one was saved, else config, else "important"."""
+        for v in (self._announce_app_alerts, getattr(self.cfg, "announce_app_alerts", None)):
+            v = str(v or "").strip().lower()
+            if v in self.ANNOUNCE_LEVELS:
+                return v
+        return "important"
+
+    def set_announce_app_alerts(self, level: str) -> str:
+        level = str(level or "").strip().lower()
+        if level not in self.ANNOUNCE_LEVELS:
+            raise ValueError("announce_app_alerts must be all|important|none")
+        self._announce_app_alerts = level
+        self.persist()
+        return level
+
+    def app_announce_overrides(self) -> dict[str, bool]:
+        """Per-app speech decisions the operator has actually made."""
+        return dict(self._app_announce)
+
+    def set_app_announce(self, app_id: str, speak: bool | None) -> dict[str, bool]:
+        """Turn speech on/off for one app; ``None`` clears the override so
+        the app follows the global policy again."""
+        key = str(app_id or "").strip().lower()
+        if not key:
+            raise ValueError("app_id is required")
+        if speak is None:
+            self._app_announce.pop(key, None)
+        else:
+            self._app_announce[key] = bool(speak)
+        self.persist()
+        return self.app_announce_overrides()
+
+    def should_announce_app_alert(
+        self, severity: str | None, app_id: str | None = None
+    ) -> bool:
+        """Speak this relayed app alert?
+
+        A per-app decision wins outright — that is the point of it: the
+        operator silenced THIS app, or asked for it specifically, and a
+        global rule must not overrule either. Only when no such decision
+        exists does the site policy apply."""
+        key = str(app_id or "").strip().lower()
+        if key and key in self._app_announce:
+            return self._app_announce[key]
+        policy = self.announce_app_alerts()
+        if policy == "all":
+            return True
+        if policy == "none":
+            return False
+        return str(severity or "").strip().lower() in ("high", "critical")
+
     def set_ring_overrides(self, overrides: dict[str, str]) -> dict[str, str]:
         """Replace the UI-edited overrides (sanitized), persist, return
         the merged map. Junk levels and blank targets are dropped."""
@@ -3385,6 +4201,12 @@ class CameraAgentRuntime:
         self._ring_overrides = clean
         self.persist()
         return self.ring_defaults()
+
+    def visible_cameras(self) -> list[CameraSpec]:
+        """The roster as the CURRENT CALLER may see it — the full fleet
+        outside a scoped request (background loops, auth_mode none). Every
+        request-serving read of ``cfg.cameras`` goes through here."""
+        return scoped_cameras(self.cfg.cameras)
 
     def events_feed(self, limit: int = 50) -> list[dict[str, Any]]:
         """ONE feed of what happened — alarm rings, watch hits, and app
@@ -3407,7 +4229,10 @@ class CameraAgentRuntime:
                         "detail": str(al.summary or ""),
                         "severity": str(al.severity or "info"),
                         "kind": "app", "source": al.app_id})
-        out = [e for e in out if e.get("ts")]
+        # A caller sees the alarms/watches/alerts of THEIR cameras; an
+        # entry about no camera in particular reaches everyone.
+        out = [e for e in out if e.get("ts")
+               and (not e["camera_id"] or camera_in_scope(e["camera_id"]))]
         out.sort(key=lambda e: e["ts"], reverse=True)
         return out[:limit]
 
@@ -3436,12 +4261,25 @@ class CameraAgentRuntime:
             # the footage-search container creates AFTER the agent booted
             # lights the tool up without an agent restart. When the index
             # isn't readable yet the tool itself says so, cleanly.
-            return getattr(self, "footage_index", None) is not None
+            #
+            # EITHER backend now makes the skill usable, and the platform
+            # one is the default: footage search is answered from the
+            # canonical event store, so this is available wherever core
+            # is configured rather than only where somebody additionally
+            # installed the footage-search app and pointed the agent at
+            # its SQLite file. That file is the only other thing this
+            # ever read, and it no longer exists — so core is now the
+            # whole requirement.
+            return getattr(self, "timeline", None) is not None
         if req == "apps":
             # The app door is wired iff the OpenNVR server base URL is set —
             # then the AppRegistryClient exists. Configuration presence is the
             # gate; a momentarily-unreachable registry degrades at call time.
             return getattr(self, "app_registry", None) is not None
+        if req == "status":
+            # Same door as the apps: core's internal status read exists
+            # wherever opennvr_api_url is configured.
+            return getattr(self, "status_client", None) is not None
         return True   # no external requirement
 
     def skills_payload(self) -> list[dict[str, Any]]:
@@ -3489,8 +4327,9 @@ class CameraAgentRuntime:
             "faces": "Set faces_url to the recognition adapter to enable.",
             "events": ("Set nats_inference_url (live events) or "
                        "opennvr_api_url (visit history) to enable."),
-            "footage": "Set footage_index_path (built by the footage-search example).",
+            "footage": "Set opennvr_api_url so the agent can search the event store.",
             "apps": "Set opennvr_api_url to read installed catalog apps.",
+            "status": "Set opennvr_api_url to read camera and storage health.",
         }
         out: list[dict[str, Any]] = []
         for sid, icon, name, example, req in _SKILL_META:
@@ -3613,6 +4452,9 @@ class CameraAgentRuntime:
                 for e in (manifest.get("emits") or [])
                 if isinstance(e, dict) and e.get("name")
             ]
+            muted = self.app_muted(app_id)
+            _app_speech_override = self._app_announce.get(
+                str(app_id or "").strip().lower())
             entries.append({
                 "id": f"app:{app_id}",
                 "source": "app",           # clearly marks the app door origin
@@ -3624,12 +4466,33 @@ class CameraAgentRuntime:
                         else "installed app",
                 "summary": summary,
                 "emits": emits,
-                # Installed + enabled by an operator ⇒ enabled. The agent
-                # can query it (read-only); it can't toggle or configure it.
-                "enabled": True,
+                # Installed + enabled by an operator in the catalog ⇒ the
+                # agent may use it; ✕ here MUTES it in the agent only (no
+                # relay, not listed, not queried) — the app keeps running
+                # for the rest of OpenNVR. Re-add it from "+" any time.
+                "enabled": not muted,
                 "available": True,
-                "read_only": True,
-                "hint": "",
+                "read_only": False,
+                "hint": ("off in the agent — tap to add it back; the app "
+                         "itself keeps running" if muted else
+                         "installed app — tapping turns it off in the agent "
+                         "only; enable, disable or uninstall the app itself "
+                         "in the App Catalog"),
+                # Can this app speak AT ALL? Not "would this particular
+                # severity be spoken" — the chip has no alert in hand, and
+                # asking should_announce_app_alert() with no severity would
+                # answer False under the "important" policy, showing a
+                # muted speaker for an app whose critical alerts do speak.
+                # `speaks_override` is null when the operator has made no
+                # per-app decision and the app follows the site policy.
+                "speaks": (
+                    bool(_app_speech_override) if _app_speech_override is not None
+                    else self.announce_app_alerts() != "none"),
+                "speaks_override": _app_speech_override,
+                # Where the operator manages it (the app's catalog page).
+                "manage_url": (
+                    f"{self.cfg.opennvr_ui_url.rstrip('/')}/app-catalog/{app_id}"
+                    if getattr(self.cfg, "opennvr_ui_url", None) else None),
                 "backing_tasks": [],
                 "tasks_available": True,
             })
@@ -3638,6 +4501,20 @@ class CameraAgentRuntime:
     def set_skill_enabled(self, skill_id: str, enabled: bool) -> bool:
         """Turn a skill on/off and reconfigure the toolset. Returns False if the
         skill is unknown or can't be enabled (backend not configured)."""
+        if skill_id.startswith("app:"):
+            # An installed catalog app, muted or unmuted IN THE AGENT only:
+            # the app keeps running for the rest of OpenNVR (its own page,
+            # the inbox); the agent just stops relaying its alerts and
+            # stops counting it among the apps it queries. Same durable
+            # toggle set as the agent's own skills, same Restore defaults.
+            app_id = skill_id[4:].strip()
+            if not app_id or not self._app_known(app_id):
+                return False
+            if enabled:
+                self.disabled_skills.discard(skill_id)
+            else:
+                self.disabled_skills.add(skill_id)
+            return True
         if skill_id not in SKILL_TOOLS:
             return False
         if enabled:
@@ -3649,6 +4526,20 @@ class CameraAgentRuntime:
             self.disabled_skills.add(skill_id)
         self._configure_tools()
         return True
+
+    def _app_known(self, app_id: str) -> bool:
+        """Is ``app_id`` an installed app as far as the registry cache
+        knows? With the registry unreachable (cache None) the answer is
+        yes — a stale state file must still be able to restore a mute."""
+        registry = getattr(self, "app_registry", None)
+        apps = getattr(registry, "apps_cached", None) if registry is not None else None
+        if apps is None:
+            return True
+        return any(str(a.get("id") or "") == app_id for a in apps)
+
+    def app_muted(self, app_id: str | None) -> bool:
+        """Muted in the agent: alerts not relayed, not listed, not queried."""
+        return bool(app_id) and f"app:{app_id}" in self.disabled_skills
 
     def hardware_recommendation(self) -> dict[str, Any]:
         """What the ENABLED skills run on vs. what makes them fast — the
@@ -3683,12 +4574,59 @@ class CameraAgentRuntime:
             "note": "Memory-bandwidth-bound on CPU: a smaller model is both "
                     "lighter AND faster.",
         })
+        # What actually runs on an accelerator here. The detector says so
+        # itself (its backend gauge on the pipeline's metrics port: the ONNX
+        # Runtime provider in use, the same truth the dashboard shows); the
+        # NPU captioner is an NPU-only adapter; the language model is on the
+        # NPU when it is the caption adapter's chat endpoint. Before this the
+        # panel read "Running on CPU only — a CUDA GPU would speed up…" on a
+        # box whose detector, captioner and model all ran on the Hexagon
+        # (Ventuno Q, 2026-11-09).
+        accel = self.detector_accelerator()
+        npu_captioner = str(self.cfg.caption_adapter or "").lower() in ("litertlm", "litertlm-gemma-npu")
+        llm_on_npu = (self.cfg.llm_provider.strip().lower() == "openai"
+                      and "caption-adapter" in str(self.cfg.llm_base_url or ""))
+        accelerated: list[str] = []
+        # The NPU captioner has no CPU build, so its rows are accelerated
+        # whether or not the detector's gauge answered (the panel read
+        # "Visual Question Answering · moondream — faster with an NVIDIA
+        # GPU" on the Ventuno Q while Gemma on the Hexagon was answering
+        # every visual question, 2026-11-09): the probe only names the chip.
+        vision_tasks = ("image_captioning", "scene_caption", "vqa", "visual_question_answering")
+        npu_name = accel or "Qualcomm Hexagon NPU"
+        for row in rows:
+            task = str(row.get("task") or "")
+            on = ((accel is not None and task in ("object_detection", "detection"))
+                  or (npu_captioner and task in vision_tasks)
+                  or (llm_on_npu and task == "llm"))
+            row["accelerated"] = bool(on)
+            if on:
+                row["recommended"] = ""
+                if task in vision_tasks:
+                    row["adapters"] = [str(self.cfg.caption_adapter)]
+                    row["min"] = f"{npu_name} via the caption adapter"
+                    row["note"] = "Gemma on the NPU answers captions and visual questions alike."
+                elif task == "llm":
+                    row["min"] = f"{npu_name} via the caption adapter"
+                else:
+                    row["min"] = f"{accel}"
+                accelerated.append(str(row["label"]))
+        if llm_on_npu:
+            for row in rows:
+                if row.get("task") == "llm":
+                    row["adapters"] = ["caption-adapter (OpenAI-compatible)"]
         gpu_map = self.kaic_capabilities.gpu_adapters
         if gpu_map is None:
             running_on = "unknown"
         else:
             running_on = "gpu" if any(gpu_map.values()) else "cpu"
-        if running_on == "gpu":
+        still_cpu = [lbl for lbl in gpu_labels if lbl not in accelerated]
+        if accelerated:
+            running_on = "npu" if "NPU" in npu_name or "Neural" in npu_name else "gpu"
+            summary = f"Running on the {npu_name if (npu_captioner or llm_on_npu) and accel is None else accel}: {', '.join(accelerated)}."
+            if still_cpu:
+                summary += f" On the CPU: {', '.join(still_cpu[:3])}."
+        elif running_on == "gpu":
             on_gpu = sorted(a for a, g in (gpu_map or {}).items() if g)
             summary = f"Running on GPU ({', '.join(on_gpu)})."
         elif running_on == "cpu":
@@ -3699,19 +4637,43 @@ class CameraAgentRuntime:
             summary = "Adapter hardware not visible (KAI-C unreachable)"
             summary += (f" — a CUDA GPU is recommended for "
                         f"{', '.join(gpu_labels[:3])}." if gpu_labels else ".")
+        tips = ["Chat mode instead of voice skips Piper TTS — the measured "
+                "CPU hog (~4 cores while speaking)."]
+        if not llm_on_npu:
+            tips.append("On CPU the LLM is memory-bandwidth-bound: a smaller model "
+                        "is both lighter and faster.")
         return {
             "running_on": running_on,
+            "accelerator": accel,
             "gpu_adapters": sorted(a for a, g in (gpu_map or {}).items() if g),
-            "gpu_recommended": bool(gpu_labels),
+            "gpu_recommended": bool(still_cpu) and not accelerated or (bool(gpu_labels) and not accelerated),
             "summary": summary,
             "rows": rows,
-            "tips": [
-                "Chat mode instead of voice skips Piper TTS — the measured "
-                "CPU hog (~4 cores while speaking).",
-                "On CPU the LLM is memory-bandwidth-bound: a smaller model "
-                "is both lighter and faster.",
-            ],
+            "turn": turn_hardware_profile(self.cfg),
+            "tips": tips,
         }
+
+    _ACCEL_PROBE_TTL_S = 60.0
+
+    def detector_accelerator(self) -> str | None:
+        """The accelerator the Tier-0 detector runs on, from its own backend
+        gauge on the pipeline's metrics port (``bestframe_base_url``), or
+        None when it runs on the CPU or cannot be asked. Cached a minute."""
+        now = time.monotonic()
+        cached = getattr(self, "_accel_probe", None)
+        if cached and now - cached[0] < self._ACCEL_PROBE_TTL_S:
+            return cached[1]
+        result: str | None = None
+        base = (self.cfg.bestframe_base_url or "").rstrip("/")
+        if base:
+            try:
+                import httpx
+                text = httpx.get(f"{base}/metrics", timeout=1.5, trust_env=False).text
+                result = accelerator_from_tier0(text)
+            except Exception:  # noqa: BLE001 — the panel is advisory
+                result = None
+        self._accel_probe = (now, result)
+        return result
 
     def restore_default_skills(self) -> int:
         """Clear every runtime skill toggle — the fresh-boot default is
@@ -3757,6 +4719,24 @@ class CameraAgentRuntime:
             return cams
         after_min = _parse_hhmm(args.get("after"))
         before_min = _parse_hhmm(args.get("before"))
+        # The question's own clock words win over the model's slots. Measured
+        # (NPU eval, 2026-11-08): "before 6am" arrived as after='06:00' three
+        # times of three, and requests with no time at all arrived with an
+        # invented "after midnight". An alarm armed for the wrong hours is
+        # worse than none, so when a turn's question is known: a window it
+        # names replaces the model's; no clock words means no window.
+        question = getattr(getattr(self, "tools", None), "current_question", None) or ""
+        if question.strip():
+            q_after, q_before, mentioned = clock_window_from_text(question)
+            if mentioned:
+                if (q_after, q_before) != (after_min, before_min):
+                    logger.info("create_alarm: window from the question %s/%s replaces the model's %s/%s",
+                                q_after, q_before, after_min, before_min)
+                after_min, before_min = q_after, q_before
+            elif after_min is not None or before_min is not None:
+                logger.info("create_alarm: the question names no time; dropping the model's window %s/%s",
+                            after_min, before_min)
+                after_min = before_min = None
         contact = self._emergency_contact_for(name, target)
         ring = str(args.get("ring") or "").strip().lower()
         if ring not in ("siren", "pulse", "chime", "silent"):
@@ -3780,7 +4760,7 @@ class CameraAgentRuntime:
         # "all cameras" reads wrong on a single-camera install (the one
         # camera IS the fleet, but the operator armed it on THAT camera
         # and expects to hear its name back).
-        _fleet = {c.camera_id for c in self.cfg.cameras}
+        _fleet = {c.camera_id for c in self.visible_cameras()}
         where = ("all cameras" if len(_fleet) > 1 and set(cams) == _fleet
                  else ", ".join(cams))
         window = alarm.window_label()
@@ -3790,22 +4770,112 @@ class CameraAgentRuntime:
                  "pulse": "loud for a minute, then stands down",
                  "chime": "a single chime",
                  "silent": "silent — notifications only"}[alarm.ring]
+        self.last_standing = ("alarm", alarm.id)
         return (f"Armed alarm #{alarm.id} '{name}' ({style}) — I'll fire it "
                 f"if I see {target} on {where}{when}.{extra}")
 
-    async def _handle_stop_alarm(self, args: dict[str, Any]) -> str:
+    def _pick_standing(self, kind: str, raw_id: Any, items: list[dict[str, Any]],
+                       noun: str) -> tuple[list[int], str | None]:
+        """Which standing item(s) a stop request means: ``(ids, question)``.
+
+        An explicit id wins. Without one: "all" / "them" / the plural in
+        the question → every item; else the one set up most recently (if
+        it still exists); else the only one there is; else a question that
+        LISTS them by number, so the user can answer with one. The model
+        used to be left to guess an id it was never told (Ventuno Q,
+        2026-11-09: "I don't have an alarm ID to reference").
+        """
         try:
-            aid = int(args.get("alarm_id"))
+            if raw_id not in (None, "", "null"):
+                return [int(raw_id)], None
         except (TypeError, ValueError):
-            return "Which alarm? Tell me its number."
+            pass
+        if not items:
+            return [], f"There are no {noun}s set up right now."
+        q = (getattr(getattr(self, "tools", None), "current_question", None) or "").lower()
+        if len(items) > 1 and re.search(rf"\b(all|them|every|both|each|{noun}s)\b", q):
+            return [int(i["id"]) for i in items], None
+        last = self.last_standing
+        if last and last[0] == kind and any(int(i["id"]) == int(last[1]) for i in items):
+            return [int(last[1])], None
+        if len(items) == 1:
+            return [int(items[0]["id"])], None
+        listing = "; ".join(
+            f"#{i['id']} {i.get('name') or i.get('description') or i.get('target') or ''}".strip()
+            for i in items)
+        return [], f"Which {noun}? You have: {listing}. Say the number."
+
+    _STANDING_NOUNS = {"alarm": "alarm", "monitor": "watch", "report": "report"}
+
+    def _standing_items(self, kind: str) -> list[dict[str, Any]]:
+        store = {"alarm": self.alarms, "monitor": self.monitors, "report": self.reports}[kind]
+        return list(store.list())
+
+    async def _stop_other_kind(self, asked: str) -> str | None:
+        """The asked kind has nothing standing. People call a watch an
+        alarm and an alarm a reminder ("I remove that alarm" for a watch
+        on a person at cam 24 — Ventuno Q, 2026-11-10 — left the watch
+        running and the operator removing it by hand). If exactly ONE
+        thing of any kind is standing, that is what they mean: stop it and
+        say so. Several: list them by kind and number. Nothing at all:
+        None, and the caller keeps its own sentence."""
+        others = [(k, i) for k in ("alarm", "monitor", "report") if k != asked
+                  for i in self._standing_items(k)]
+        if not others:
+            return None
+        noun = self._STANDING_NOUNS[asked]
+        if len(others) == 1:
+            kind, item = others[0]
+            handler = {"alarm": self._handle_stop_alarm, "monitor": self._handle_stop_monitor,
+                       "report": self._handle_stop_report}[kind]
+            key = {"alarm": "alarm_id", "monitor": "monitor_id", "report": "report_id"}[kind]
+            done = await handler({key: int(item["id"])})
+            return (f"There's no {noun} set up — the one thing standing is "
+                    f"{self._STANDING_NOUNS[kind]} #{item['id']} "
+                    f"{self._describe_standing(item)}".rstrip() + f". {done}")
+        listing = "; ".join(
+            f"{self._STANDING_NOUNS[k]} #{i['id']} {self._describe_standing(i)}".rstrip()
+            for k, i in others)
+        return (f"There's no {noun} set up right now. Standing: {listing}. "
+                f"Say which one to stop.")
+
+    @staticmethod
+    def _describe_standing(item: dict[str, Any]) -> str:
+        name = item.get("name") or item.get("description") or ""
+        target = item.get("target") or ""
+        bits = [b for b in (f"'{name}'" if name else "", f"({target})" if target and target not in str(name) else "") if b]
+        return " ".join(bits)
+
+    async def _handle_stop_alarm(self, args: dict[str, Any]) -> str:
+        items = self.alarms.list()
+        ids, ask = self._pick_standing("alarm", args.get("alarm_id"), items, "alarm")
         action = str(args.get("action") or "disarm").strip().lower()
+        if ask and not items and action != "silence":
+            # "silence" means a ringing alarm; stopping a watch for it
+            # would be wrong. A disarm/remove with no alarm standing may
+            # mean the watch or report that is.
+            other = await self._stop_other_kind("alarm")
+            if other:
+                return other
+        if ask:
+            return ask
         if action == "silence":
-            return ("Silenced." if self.alarms.acknowledge(aid)
-                    else f"Alarm #{aid} isn't currently ringing.")
-        ok = self.alarms.remove(aid)
+            done = [i for i in ids if self.alarms.acknowledge(i)]
+            return ("Silenced." if done else
+                    ("Alarm #%d isn't currently ringing." % ids[0] if len(ids) == 1
+                     else "No alarm is ringing right now."))
+        by_id = {int(i["id"]): i for i in items}
+        removed = [i for i in ids if self.alarms.remove(i)]
         self.persist()
-        return (f"Disarmed and removed alarm #{aid}." if ok
-                else f"I don't have an alarm #{aid}.")
+        if self.last_standing and self.last_standing[0] == "alarm" and self.last_standing[1] in removed:
+            self.last_standing = None
+        if not removed:
+            return f"I don't have an alarm #{ids[0]}." if len(ids) == 1 else "I don't have those alarms."
+        if len(removed) == 1:
+            i = removed[0]
+            return f"Disarmed and removed alarm #{i} {self._describe_standing(by_id.get(i, {}))}".rstrip() + "."
+        return ("Disarmed and removed %d alarms: " % len(removed)
+                + ", ".join(f"#{i} {self._describe_standing(by_id.get(i, {}))}".rstrip() for i in removed) + ".")
 
     async def _handle_create_report(self, args: dict[str, Any]) -> str:
         name = str(args.get("name") or "").strip() or "Report"
@@ -3818,6 +4888,23 @@ class CameraAgentRuntime:
             every = int(every) if every else None
         except (TypeError, ValueError):
             every = None
+        import router as _router
+        q = getattr(getattr(self, "tools", None), "current_question", None) or ""
+        w_at, w_every = _router.schedule_from_text(q)
+        if every is None and w_every is not None:
+            # The question names an interval ("every hour"); a clock time
+            # the model put in `at` instead is not what was asked —
+            # granite wrote at="03:00" for "every hour tell me what you
+            # see" (Ventuno Q CPU eval, 2026-11-10), Gemma left both
+            # slots empty (NPU, 11-09). The words decide, the same way the
+            # alarm takes its window from them.
+            every, at_min = w_every, None
+        elif at_min is None and every is None:
+            at_min, every = w_at, w_every
+        if query.strip().lower().rstrip(".") in _SCHEMA_EXAMPLE_QUERIES and q.strip():
+            # The schema's example copied as the query: the question itself
+            # is what the report should answer.
+            query = q.strip()
         # Mirror create's own default so dedup compares what will be stored.
         _at = at_min if (at_min is not None or every) else 8 * 60
         dup = self.reports.find_duplicate(query=query, at_min=_at,
@@ -3826,19 +4913,29 @@ class CameraAgentRuntime:
             return (f"Report #{dup.id} '{dup.name}' already runs that exact "
                     f"query on that schedule; nothing new was added.")
         sched = self.reports.create(name=name, query=query, at_min=at_min, every_minutes=every)
+        self.last_standing = ("report", sched.id)
         self.persist()
         return (f"Scheduled report #{sched.id} '{name}' — {sched.schedule_label()}. "
                 f"I'll deliver it here (and to your alert channels) each time it runs.")
 
     async def _handle_stop_report(self, args: dict[str, Any]) -> str:
-        try:
-            rid = int(args.get("report_id"))
-        except (TypeError, ValueError):
-            return "Which report? Tell me its number."
-        ok = self.reports.remove(rid)
+        items = self.reports.list()
+        ids, ask = self._pick_standing("report", args.get("report_id"), items, "report")
+        if ask and not items:
+            other = await self._stop_other_kind("report")
+            if other:
+                return other
+        if ask:
+            return ask
+        removed = [i for i in ids if self.reports.remove(i)]
         self.persist()
-        return (f"Cancelled and removed report #{rid}." if ok
-                else f"I don't have a report #{rid}.")
+        if self.last_standing and self.last_standing[0] == "report" and self.last_standing[1] in removed:
+            self.last_standing = None
+        if not removed:
+            return f"I don't have a report #{ids[0]}." if len(ids) == 1 else "I don't have those reports."
+        if len(removed) == 1:
+            return f"Cancelled and removed report #{removed[0]}."
+        return "Cancelled and removed %d reports: %s." % (len(removed), ", ".join(f"#{i}" for i in removed))
 
     async def _handle_enroll_face(self, args: dict[str, Any]) -> str:
         if not self.faces:
@@ -3848,7 +4945,7 @@ class CameraAgentRuntime:
             return "What's the person's name?"
         cam = str(args.get("camera_id") or "").strip()
         if not self.context.known_camera(cam):
-            cams = [c.camera_id for c in self.cfg.cameras]
+            cams = [c.camera_id for c in self.visible_cameras()]
             return f"Which camera should I capture from? Available: {cams}."
         try:
             frame = await self.context.get_frame(cam)
@@ -3904,6 +5001,8 @@ class CameraAgentRuntime:
             # comes back on the next restart (its tools re-advertised).
             "disabled_skills": sorted(self.disabled_skills),
             "ring_overrides": dict(self._ring_overrides),
+            "announce_app_alerts": self._announce_app_alerts,
+            "app_announce": dict(self._app_announce),
         }
         try:
             d = os.path.dirname(self.cfg.state_path) or "."
@@ -3940,6 +5039,14 @@ class CameraAgentRuntime:
             self._ring_overrides = {
                 str(k).lower(): str(v).lower() for k, v in ro.items()
                 if str(v).lower() in ("siren", "pulse", "chime", "silent")}
+        aa = data.get("announce_app_alerts")
+        if isinstance(aa, str) and aa.lower() in self.ANNOUNCE_LEVELS:
+            self._announce_app_alerts = aa.lower()
+        ap = data.get("app_announce")
+        if isinstance(ap, dict):
+            self._app_announce = {
+                str(k).strip().lower(): bool(v) for k, v in ap.items()
+                if str(k).strip()}
         restored_disabled: list[str] = []
         for sid in (data.get("disabled_skills") or []):
             if self.set_skill_enabled(sid, False):
@@ -3965,6 +5072,35 @@ class CameraAgentRuntime:
         kind = str(args.get("kind") or "").strip().lower()
         if kind not in ("notify", "count", "crossing"):
             return "I can 'notify' you, keep a 'count', or count line 'crossing's — which would you like?"
+        thresholds: dict[str, int] = {}
+        for key in ("max_count", "min_count"):
+            raw = args.get(key)
+            if raw is None or raw == "":
+                continue
+            try:
+                value = int(float(raw))
+            except (TypeError, ValueError):
+                return f"How many should '{key}' be? I need a whole number."
+            if value < 0:
+                return f"'{key}' can't be negative — how many did you mean?"
+            thresholds[key] = value
+        if not thresholds and kind in ("count", "notify"):
+            # The model dropped the number the operator said ("more than 3
+            # people"): take it from the question, so the watch alerts as
+            # promised instead of tallying in silence.
+            thresholds = _count_thresholds_from_text(self.tools.current_question or "")
+        line_given = isinstance(args.get("line"), (list, tuple)) and len(args["line"]) == 4
+        if thresholds and kind == "crossing" and not line_given:
+            # "More than 3 people" with no line to cross is a count request
+            # that picked the wrong kind.
+            kind = "count"
+        if thresholds and kind == "notify":
+            # "Notify me when more than 3 people…": only a count watch can
+            # alert on a number, so a threshold makes it one.
+            kind = "count"
+        if thresholds and kind == "crossing":
+            return ("A line-crossing count doesn't take a threshold — did you "
+                    "mean to alert when too many are on camera at once?")
         raw_target = str(args.get("target") or "").strip()
         _extra = set(getattr(self.cfg, "detector_extra_labels", []) or [])
         _extra |= set(self.ring_defaults().keys())
@@ -3987,6 +5123,8 @@ class CameraAgentRuntime:
         dup = self.monitors.find_duplicate(
             kind=kind, camera_ids=cams, target=target,
             line=line if kind == "crossing" else None,
+            max_count=thresholds.get("max_count"),
+            min_count=thresholds.get("min_count"),
         )
         if dup is not None:
             return (f"Watch #{dup.id} already covers that — same kind, "
@@ -3997,7 +5135,10 @@ class CameraAgentRuntime:
                 kind=kind, camera_ids=cams, target=target,
                 description=str(args.get("description") or "").strip(),
                 line=line if kind == "crossing" else None,
+                max_count=thresholds.get("max_count"),
+                min_count=thresholds.get("min_count"),
             )
+            self.last_standing = ("monitor", mon.id)
         except ValueError as exc:
             # The SDK rule rejected the params (e.g. a degenerate line
             # whose two points coincide). Relay the reason so the LLM can
@@ -4017,7 +5158,7 @@ class CameraAgentRuntime:
         # "all cameras" reads wrong on a single-camera install (the one
         # camera IS the fleet, but the operator armed it on THAT camera
         # and expects to hear its name back).
-        _fleet = {c.camera_id for c in self.cfg.cameras}
+        _fleet = {c.camera_id for c in self.visible_cameras()}
         where = ("all cameras" if len(_fleet) > 1 and set(cams) == _fleet
                  else ", ".join(cams))
         if kind == "notify":
@@ -4026,18 +5167,38 @@ class CameraAgentRuntime:
         if kind == "crossing":
             return (f"Done — watch #{mon.id} is counting {target}s crossing the line "
                     f"on {where} (needs the tracking adapter for accurate counts).")
+        limits = []
+        if "max_count" in thresholds:
+            limits.append(f"more than {thresholds['max_count']}")
+        if "min_count" in thresholds:
+            limits.append(f"fewer than {thresholds['min_count']}")
+        if limits:
+            return (f"Done — watch #{mon.id} is counting {target}s on {where}; "
+                    f"I'll let you know when there are {' or '.join(limits)} at once.")
         return (f"Done — I'm now counting {target}s on {where} (watch #{mon.id}); "
                 f"you'll see a live tally in the panel.")
 
     async def _handle_stop_monitor(self, args: dict[str, Any]) -> str:
-        try:
-            mid = int(args.get("monitor_id"))
-        except (TypeError, ValueError):
-            return "Which watch should I stop? Tell me its number."
-        ok = self.monitors.remove(mid)
+        items = self.monitors.list()
+        ids, ask = self._pick_standing("monitor", args.get("monitor_id"), items, "watch")
+        if ask and not items:
+            other = await self._stop_other_kind("monitor")
+            if other:
+                return other
+        if ask:
+            return ask
+        by_id = {int(i["id"]): i for i in items}
+        removed = [i for i in ids if self.monitors.remove(i)]
         self.persist()
-        return (f"Stopped and removed watch #{mid}." if ok
-                else f"I don't have a watch #{mid} running.")
+        if self.last_standing and self.last_standing[0] == "monitor" and self.last_standing[1] in removed:
+            self.last_standing = None
+        if not removed:
+            return f"I don't have a watch #{ids[0]} running." if len(ids) == 1 else "I don't have those watches."
+        if len(removed) == 1:
+            i = removed[0]
+            return f"Stopped and removed watch #{i} {self._describe_standing(by_id.get(i, {}))}".rstrip() + "."
+        return ("Stopped and removed %d watches: " % len(removed)
+                + ", ".join(f"#{i} {self._describe_standing(by_id.get(i, {}))}".rstrip() for i in removed) + ".")
 
     # ── App door handlers (read-only) ─────────────────────────────
     # Relay installed catalog apps + their state. NO enable/disable/config
@@ -4057,8 +5218,15 @@ class CameraAgentRuntime:
         apps = await self.app_registry.list_apps()
         if apps is None:
             return self._APP_REGISTRY_UNREACHABLE
-        enabled = [a for a in apps if a.get("enabled")]
+        muted = [a for a in apps if a.get("enabled") and self.app_muted(str(a.get("id") or ""))]
+        enabled = [a for a in apps if a.get("enabled") and not self.app_muted(str(a.get("id") or ""))]
         if not enabled:
+            if muted:
+                return (
+                    "Every installed app is muted in this agent "
+                    f"({', '.join(str(a.get('name') or a.get('id')) for a in muted)}). "
+                    "The operator can add one back from the skills panel."
+                )
             if apps:
                 return (
                     "There are catalog apps installed, but none are currently "
@@ -4090,6 +5258,9 @@ class CameraAgentRuntime:
         app_id = str(args.get("app_id") or "").strip()
         if not app_id:
             return "Tell me which app — I need its id (from list_apps)."
+        if self.app_muted(app_id):
+            return (f"App '{app_id}' is muted in this agent — I don't relay or "
+                    "query it. The operator can add it back from the skills panel.")
         status = await self.app_registry.app_status(app_id)
         if status is None:
             return self._APP_REGISTRY_UNREACHABLE
@@ -4133,9 +5304,13 @@ class CameraAgentRuntime:
         else:
             app_id = str(app_arg).strip() or None
 
-        alerts = self.context.recent_app_alerts(
-            app_id=app_id, window_seconds=window
-        )
+        if app_id and self.app_muted(app_id):
+            return (f"App '{app_id}' is muted in this agent — its alerts aren't "
+                    "relayed here. The operator can add it back from the skills panel.")
+        alerts = [
+            a for a in self.context.recent_app_alerts(app_id=app_id, window_seconds=window)
+            if not self.app_muted(str(a.app_id))
+        ]
         if not alerts:
             scope = f"'{app_id}'" if app_id else "any app"
             mins = int(window / 60) or 1
@@ -4155,6 +5330,190 @@ class CameraAgentRuntime:
         ]
         return "Recent app alerts:\n" + "\n".join(lines)
 
+    # ── list_standing / system_status / show_camera ──────────────────
+
+    @staticmethod
+    def _state_words(state: str | None) -> str | None:
+        """Core's recording_state as a spoken phrase; None when fine."""
+        return {
+            "recording": None,
+            "off": "recording is turned off",
+            "never": "has never recorded",
+            "stalled": "recording has stalled",
+            "not_recording": "is not recording right now",
+        }.get(str(state or ""), f"recording state {state}" if state else None)
+
+    def _spoken_name(self, camera_id: str | None, *, core_id: str | None = None,
+                     fallback: str | None = None) -> str:
+        """A camera as the user says it: the roster role, else the name."""
+        specs = self.visible_cameras()
+        for spec in specs:
+            if camera_id and spec.camera_id == camera_id:
+                return spec.role or spec.camera_id
+            if core_id and spec.opennvr_camera_id is not None and str(spec.opennvr_camera_id) == str(core_id):
+                return spec.role or spec.camera_id
+        return fallback or camera_id or "that camera"
+
+    async def _handle_list_standing(self, args: dict[str, Any]) -> str:
+        kind = str(args.get("kind") or "all").strip().lower()
+        if kind in ("watch", "watches", "monitors", "notification", "notifications"):
+            kind = "monitor"
+        if kind in ("alarms",):
+            kind = "alarm"
+        if kind in ("reports",):
+            kind = "report"
+        want = {"alarm", "monitor", "report"} if kind == "all" else {kind}
+        if not want <= {"alarm", "monitor", "report"}:
+            want = {"alarm", "monitor", "report"}
+
+        def cams(ids: Any) -> str:
+            ids = [str(i) for i in (ids or [])]
+            if not ids:
+                return "all cameras"
+            if set(ids) >= set(self._camera_ids) and len(self._camera_ids) > 1:
+                return "all cameras"
+            return ", ".join(self._spoken_name(i) for i in ids)
+
+        sections: list[str] = []
+        if "alarm" in want:
+            items = self.alarms.list()
+            if items:
+                lines = []
+                for a in items:
+                    bits = [f"alarm #{a['id']} '{a.get('name') or a.get('target')}'",
+                            f"{a.get('target')} on {cams(a.get('camera_ids'))}"]
+                    if a.get("window") and a["window"] not in ("", "any time", "always"):
+                        bits.append(str(a["window"]))
+                    if not a.get("active", True):
+                        bits.append("disarmed")
+                    if a.get("triggered"):
+                        bits.append("ringing now")
+                    lines.append(" — ".join(bits))
+                sections.append(f"{len(items)} alarm{'s' if len(items) != 1 else ''}: " + "; ".join(lines))
+            elif kind != "all":
+                sections.append("No alarms are set.")
+        if "monitor" in want:
+            items = self.monitors.list()
+            if items:
+                lines = []
+                for m in items:
+                    what = m.get("description") or m.get("target")
+                    bits = [f"watch #{m['id']} '{what}'", f"{m.get('kind')} {m.get('target')} on {cams(m.get('camera_ids'))}"]
+                    if m.get("max_count") is not None:
+                        bits.append(f"more than {m['max_count']}")
+                    if m.get("min_count") is not None:
+                        bits.append(f"fewer than {m['min_count']}")
+                    if not m.get("active", True):
+                        bits.append(str(m.get("status") or "stopped"))
+                    lines.append(" — ".join(bits))
+                sections.append(f"{len(items)} watch{'es' if len(items) != 1 else ''}: " + "; ".join(lines))
+            elif kind != "all":
+                sections.append("No watches are running.")
+        if "report" in want:
+            items = self.reports.list()
+            if items:
+                lines = [f"report #{r['id']} '{r.get('name')}' — {r.get('schedule')} — {r.get('query')}"
+                         for r in items]
+                sections.append(f"{len(items)} scheduled report{'s' if len(items) != 1 else ''}: " + "; ".join(lines))
+            elif kind != "all":
+                sections.append("No reports are scheduled.")
+        if not sections:
+            return "Nothing is set up: no alarms, no watches, no scheduled reports."
+        return "\n".join(sections)
+
+    _STATUS_UNREACHABLE = ("I couldn't reach the OpenNVR server to check the system, "
+                           "so I can't tell whether the cameras are recording.")
+
+    async def _handle_system_status(self, args: dict[str, Any]) -> str:
+        if self.status_client is None:
+            return "System health isn't configured on this agent (no OpenNVR server URL)."
+        data = await self.status_client.status()
+        if data is None:
+            return self._STATUS_UNREACHABLE
+        rows = [r for r in (data.get("cameras") or []) if isinstance(r, dict)]
+        only = args.get("camera_id")
+        if isinstance(only, str) and only.strip() and only.strip().lower() not in ("all", "every", "any", "*", ""):
+            cid = only.strip()
+            spec = next((c for c in self.visible_cameras() if c.camera_id == cid), None)
+            core_id = str(spec.opennvr_camera_id) if spec and spec.opennvr_camera_id is not None else None
+            rows = [r for r in rows if r.get("camera_id") == cid or
+                    (core_id and str(r.get("open_nvr_camera_id")) == core_id)]
+            if not rows:
+                return f"I have no system status for {self._spoken_name(cid)}."
+
+        def name(r: dict[str, Any]) -> str:
+            return self._spoken_name(str(r.get("camera_id") or ""), core_id=str(r.get("open_nvr_camera_id") or ""),
+                                     fallback=str(r.get("name") or r.get("camera_id") or "a camera"))
+
+        offline = [name(r) for r in rows if r.get("online") is False]
+        unknown = [name(r) for r in rows if r.get("online") is None]
+        problems = []
+        for r in rows:
+            words = self._state_words(r.get("recording_state"))
+            if words and r.get("recording_state") != "off":
+                problems.append(f"{name(r)} {words}")
+        off = [name(r) for r in rows if r.get("recording_state") == "off"]
+        frozen = [name(r) for r in rows if r.get("picture") == "frozen"]
+        parts: list[str] = []
+        n = len(rows)
+        if n == 0:
+            parts.append("No active cameras.")
+        elif not offline and not unknown:
+            parts.append(f"All {n} cameras are online." if n != 1 else f"{name(rows[0])} is online.")
+        else:
+            parts.append(f"{n - len(offline) - len(unknown)} of {n} cameras online."
+                         + (f" Offline: {', '.join(offline)}." if offline else "")
+                         + (f" No signal yet from: {', '.join(unknown)}." if unknown else ""))
+        if frozen:
+            parts.append(("The picture has not changed on " if len(frozen) > 1 else "The picture has not changed on ")
+                         + ", ".join(frozen)
+                         + ": the same frame keeps coming back — a stuck stream or relay, or a looping file.")
+        if problems:
+            parts.append("Recording problems: " + "; ".join(problems) + ".")
+        elif rows:
+            rec = [r for r in rows if r.get("recording_state") == "recording"]
+            if rec:
+                parts.append(("Recording is fine on all of them." if len(rec) == n
+                              else f"{len(rec)} of {n} recording."))
+        if off:
+            parts.append(f"Recording is turned off for {', '.join(off)}.")
+        st = data.get("storage") or {}
+        free, total, floor = st.get("free_gb"), st.get("total_gb"), st.get("min_free_gb")
+        warning = False
+        if free is not None:
+            line = f"Disk: {free:g} GB free" + (f" of {total:g} GB" if total else "")
+            if floor is not None:
+                if free < floor:
+                    line += (f" — BELOW the {floor:g} GB floor, so the oldest recordings "
+                             "are being deleted to make room")
+                    warning = True
+                elif free < 2 * floor:
+                    line += f" — close to the {floor:g} GB floor; old recordings will be deleted soon"
+                    warning = True
+                else:
+                    line += f" (floor {floor:g} GB)"
+            line += "."
+        else:
+            line = "I couldn't read the recording disk."
+        # A disk warning goes FIRST: the compose model keeps the opening
+        # and drops the tail ("I see that everything is fine right now"
+        # with the disk 0.7 GB from the floor, Ventuno Q eval 2026-11-09).
+        if warning:
+            parts.insert(0, "WARNING, say this first: " + line)
+        else:
+            parts.append(line)
+        return " ".join(parts)
+
+    async def _handle_show_camera(self, args: dict[str, Any]) -> str:
+        cams = self.tools._resolve_cameras(args)
+        if isinstance(cams, str):
+            return cams
+        if len(cams) != 1:
+            return "Which camera should I show? " + ", ".join(self._spoken_name(c) for c in self._camera_ids) + "."
+        cam = cams[0]
+        self.publish_update({"show_camera": cam})
+        return f"Switched the screen to {self._spoken_name(cam)}. (The view changed; nothing was analysed.)"
+
     def _relay_app_alert(self, alert: Any) -> None:
         """Notification bridge (app-door ALERT RELAY): a subscribed app
         fired an alert. Push it into the SAME notification feed the demo
@@ -4173,6 +5532,9 @@ class CameraAgentRuntime:
         side is rate-limited."""
         import time as _t
 
+        if self.app_muted(str(alert.app_id)):
+            logger.debug("app alert dropped (muted in the agent): app:%s", alert.app_id)
+            return
         now = _t.time()
         key = (str(alert.app_id), str(alert.camera_id))
         if now - self._app_relay_last.get(key, 0.0) < self.monitors._cooldown:
@@ -4185,7 +5547,14 @@ class CameraAgentRuntime:
         self.monitors._notifications.append({
             "id": self.monitors._next_note_id,
             "source": f"app:{alert.app_id}",
-            "text": f"{alert.title} — {alert.summary}",
+            "text": relay_text(alert.title, alert.summary),
+            "severity": str(alert.severity or "info"),
+            "camera": alert.camera_id,
+            # The feed always shows it (with a chime); whether the voice
+            # UI also SPEAKS it is this app's own setting when the operator
+            # made one, else the site policy.
+            "announce": self.should_announce_app_alert(
+                alert.severity, alert.app_id),
             "ts": now,
         })
         self.monitors._next_note_id += 1
@@ -4388,7 +5757,27 @@ class CameraAgentRuntime:
 
         async def check_llm():
             if self.cfg.llm_provider.strip().lower() == "openai":
-                return OK, "external OpenAI-compatible endpoint (not probed)"
+                if self.llm_degraded and self.llm_fallback is not None:
+                    since = self.llm_degraded_since
+                    ago = f" for {int(time.time() - since) // 60} min" if since else ""
+                    return DEGRADED, (f"the LLM at {self.cfg.llm_base_url or self.cfg.ollama_url} is "
+                                      f"unreachable{ago}; answering on the backup model "
+                                      f"{self.cfg.llm_fallback_model} at {self.cfg.llm_fallback_url} (slower)")
+                murl = getattr(self.ollama, "models_url", None)
+                if not murl:
+                    return OK, "external OpenAI-compatible endpoint (not probed)"
+                headers = {}
+                key = self.cfg.llm_api_key or self.cfg.ollama_token
+                if key:
+                    headers["Authorization"] = f"Bearer {key}"
+                async with httpx.AsyncClient(timeout=8.0) as client:
+                    resp = await client.get(murl, headers=headers)
+                    resp.raise_for_status()
+                data = resp.json() if resp.content else {}
+                ids = [str(m.get("id")) for m in ((data or {}).get("data") or [])
+                       if isinstance(m, dict) and m.get("id")]
+                return OK, (f"OpenAI-compatible endpoint reachable"
+                            + (f"; models: {', '.join(ids[:5])}" if ids else ""))
             url = f"{self.cfg.ollama_url.rstrip('/')}/api/tags"
             async with httpx.AsyncClient(timeout=8.0) as client:
                 resp = await client.get(url)
@@ -4568,7 +5957,18 @@ class CameraAgentRuntime:
             },
             "llm_model": self.cfg.llm_model,
             "llm_error": getattr(self, "last_llm_error", None),
+            "llm_degraded": bool(getattr(self, "llm_degraded", False)),
             "vision_error": getattr(self.tools, "last_vision_error", None),
+            # Which store has answered footage search since start-up.
+            # This is here because a counter nobody can read is not
+            # evidence: the fallback logs a warning, but the reading the
+            # deletion question actually needs is index_fallback == 0,
+            # and zero events produce zero log lines. Without `canonical`
+            # beside it there is no way to tell "the index never served a
+            # query" from "nobody ever searched" or "this build was never
+            # deployed", and those are three different answers.
+            "footage_search": dict(
+                getattr(self.tools, "footage_search_sources", {}) or {}),
         }
 
     async def register_with_app_catalog(self) -> bool:
@@ -4583,12 +5983,11 @@ class CameraAgentRuntime:
             return False
         import socket
 
-        scheme = "https" if self.cfg.tls_certfile else "http"
         own_url = (
-            self.cfg.agent_public_url
-            or f"{scheme}://{socket.gethostname()}:{self.cfg.port}"
+            self.cfg.agent_contract_url
+            or f"{agent_scheme(self.cfg)}://{socket.gethostname()}:{self.cfg.port}"
         ).rstrip("/")
-        payload = {"url": own_url, "manifest": agent_manifest()}
+        payload = {"url": own_url, "manifest": agent_manifest(self.cfg)}
         headers: dict[str, str] = {}
         if self._registry_key:
             # Both header shapes, same reason as the SDK: one configured
@@ -4663,14 +6062,46 @@ class CameraAgentRuntime:
                 "recent_app_alerts tools will always report 'no events'"
             )
 
+        # Live detection overlay for the demo's own player. Fed from
+        # CORE's /events/ws, not from the bus: core's bridge is where the
+        # site switch, each app's overlay permission and the box maths are
+        # decided, and the agent must not re-derive any of that. Reads as a
+        # platform service (INTERNAL_API_KEY → unscoped ticket) and
+        # re-scopes every frame per viewer before it reaches a page — see
+        # _tracks_push_visible. Read/draw only.
+        if self.cfg.opennvr_api_url:
+            import os as _os
+
+            _core_key = (
+                self.cfg.opennvr_api_key
+                or self.cfg.kaic_api_key
+                or _os.environ.get("INTERNAL_API_KEY", "")
+            )
+            self._core_tracks_task = asyncio.create_task(
+                run_core_tracks_subscriber(
+                    base_url=self.cfg.opennvr_api_url,
+                    api_key=_core_key,
+                    stop_event=self._stop_event,
+                    on_tracks=self._relay_tracks,
+                ),
+                name="camera-agent-core-tracks-subscriber",
+            )
+            logger.info("camera-agent: overlay tracks subscriber started on %s",
+                        self.cfg.opennvr_api_url)
+
         # Pre-warm the LLM in the background so the FIRST real question
         # doesn't pay the ~80s cold-load (Ollama loads the model into RAM
         # + prefills on first inference). We fire a throwaway one-token
         # chat; with OLLAMA_KEEP_ALIVE=-1 the model then stays resident.
         # Best-effort: failures here must never block startup.
-        self._warmup_task = asyncio.create_task(
-            self._prewarm_llm(), name="camera-agent-llm-prewarm"
-        )
+        if self.cfg.llm_prewarm:
+            self._warmup_task = asyncio.create_task(
+                self._prewarm_llm(), name="camera-agent-llm-prewarm"
+            )
+        else:
+            self._warmup_task = None
+            logger.info("camera-agent: LLM pre-warm off (llm_prewarm: false); "
+                        "the first question pays the cold prefill instead.")
 
         # Pre-warm the vision detector so its model is loaded (and its
         # weights downloaded) BEFORE the first real question. This is the
@@ -4711,15 +6142,29 @@ class CameraAgentRuntime:
             # turns share the identical system+tools prefix, so even the FIRST
             # question skips the expensive cold prefill — not just the model
             # weight load. (KEEP_ALIVE=-1 keeps the cache resident.)
+            system = self.build_system_prompt(clock=False)
+            tools = self.tool_definitions
+            window = int(getattr(self.cfg, "llm_window_tokens", 0) or 0)
+            if window:
+                # The same cut a turn makes (prompt_budget): a fixed window
+                # refuses the whole list, and a refused warm-up warms nothing.
+                tools = _prompt_budget.fit(system=system, history=[], user_turn="hello",
+                                           tools=tools, window=window, max_tokens=1).tools
             await self.ollama.chat(
                 messages=[
-                    {"role": "system", "content": self.build_system_prompt()},
+                    {"role": "system", "content": system},
                     {"role": "user", "content": "hello"},
                 ],
-                tools=self.tool_definitions,
+                tools=tools,
                 max_tokens=1,
             )
-            logger.info("camera-agent: LLM warm — first question will be fast.")
+            # What was cached, so a turn that arrives with a DIFFERENT prefix
+            # says so instead of silently paying the prefill again. Measured
+            # on a CPU host: 4,958 tokens cached, a turn reusing 1,267 of
+            # them, 288 s of all eight cores — and nothing in the log.
+            self._warm_prefix = _prefix_fingerprint(system, tools)
+            logger.info("camera-agent: LLM warm — first question will be fast "
+                        "(prefix %s/%s).", *self._warm_prefix)
         except Exception as exc:
             logger.warning(
                 "camera-agent: LLM pre-warm failed (%s); the first question "
@@ -4861,50 +6306,88 @@ class CameraAgentRuntime:
             + "\n".join(lines)
         )
 
-    def build_system_prompt(self) -> str:
-        """Compose the system prompt the LLM sees: the agent's identity + the
-        operator's base prompt + a per-camera roster + task guidance."""
-        roster = "\n".join(
-            f"- {cam.camera_id}: {cam.role}" for cam in self.cfg.cameras
+    IDENTITY_LINE = (
+        "You are the OpenNVR Agent, this system's camera agent. Speak in "
+        "the FIRST person, never the third. When you have looked at a "
+        "camera, report it as 'I see…' or 'I'm watching…'. When you have "
+        "not looked — a greeting, a question you cannot answer, a request to "
+        "set or remove something — answer plainly and never begin with "
+        "'I see'. If asked your name, say you're the OpenNVR Agent."
+    )
+
+    def _roster_lines(self) -> str:
+        return "\n".join(
+            f"- {cam.camera_id}: {cam.role}" for cam in self.visible_cameras()
         )
-        # Per-turn wall clock, in the container's local timezone (TZ is passed
-        # through by the compose files). Without this the model cannot turn
-        # "today" or "the last 30 minutes" into the ISO 8601 window that
-        # search_history / describe_window take — it would have to guess the
-        # date, and small models guess their training cutoff.
+
+    @staticmethod
+    def _clock_line() -> str:
+        """Per-turn wall clock, in the container's local timezone (TZ is
+        passed through by the compose files). Without this the model cannot
+        turn "today" or "the last 30 minutes" into the ISO 8601 window that
+        search_history / describe_window take — it would have to guess the
+        date, and small models guess their training cutoff."""
         from datetime import datetime as _dt
         _now = _dt.now().astimezone()
-        clock_line = (
+        return (
             f"The current date and time is "
-            f"{_now.strftime('%A %Y-%m-%d %H:%M (UTC%z)')}. When a tool takes "
-            f"an ISO 8601 time window, compute it from THIS clock and include "
-            f"the timezone offset (e.g. {_now.strftime('%Y-%m-%dT%H:%M:00%z')})."
+            f"{_now.strftime('%A %Y-%m-%d %H:%M (UTC%z)')}. 'Yesterday', 'this "
+            f"morning', 'last night' and every other relative time are counted "
+            f"from THIS clock, never from memory. When a tool takes an ISO 8601 "
+            f"time window, compute it from this clock and include the timezone "
+            f"offset (e.g. {_now.strftime('%Y-%m-%dT%H:%M:00%z')})."
         )
+
+    def build_compose_prompt(self) -> str:
+        """The short system prompt for a routed turn (router.py, Tier 0):
+        the tool has already run; the model only says the answer."""
+        from router import compose_prompt
+
+        return compose_prompt(self.IDENTITY_LINE, self.cfg.system_prompt,
+                              self._roster_lines(), self._clock_line())
+
+    def build_system_prompt(self, *, clock: bool = True) -> str:
+        """Compose the system prompt the LLM sees: the agent's identity + the
+        operator's base prompt + a per-camera roster + task guidance.
+
+        ``clock=False`` leaves the per-turn clock OUT. Ollama's chat template
+        renders the tool schemas inside the system turn, AFTER this text, so
+        a clock anywhere in here sits before ~3.5k tokens of schemas and
+        changes every minute — the whole prefix re-prefilled per turn. The
+        JSON /converse path therefore carries the clock in the user turn
+        (see _user_turn); the streaming /ws path keeps it here because that
+        context is built once per session and stays byte-identical for the
+        session's length."""
+        roster = self._roster_lines()
+        clock_line = self._clock_line()
         # Which tools the LLM can actually call this turn — guidance below
         # must never route to a tool that isn't advertised (a small model
         # will either stall or 'improvise' with a live-scene tool instead).
         advertised = {
             t["function"]["name"] for t in (self.tool_definitions or ())
         }
+        # Nothing per-turn in here: everything below is byte-identical
+        # across turns, which is what lets Ollama keep its KV cache for the
+        # system text AND the tool schemas rendered after it.
         prompt = (
-            f"You are the OpenNVR Agent, this system's camera agent. Speak in "
-            f"the FIRST person — say 'I see…', 'I'm watching…', not in the "
-            f"third person. If asked your name, say you're the OpenNVR Agent.\n\n"
+            f"{self.IDENTITY_LINE}\n\n"
             f"{self.cfg.system_prompt.strip()}\n\n"
-            f"{clock_line}\n\n"
             f"Cameras available to you:\n{roster}\n\n"
             f"Always pass one of the camera_id values exactly as listed "
             f"when calling a tool.\n\n"
-            f"Your replies are SPOKEN ALOUD. Refer to each camera by its "
-            f"location (e.g. 'the front door'), never its raw id like "
-            f"'front_door'. Answer in 1-2 short, natural sentences a person "
-            f"would say out loud — no ids, colons, lists, or markdown.\n"
-            f"Give the ANSWER directly. Never reply with filler like 'I'll "
-            f"check', 'let me see', or 'one moment' — if you need to look, call "
-            f"the tool and then state what you found.\n\n"
+            f"Your replies are SPOKEN ALOUD and come ONLY from the tool result. "
+            f"Refer to each camera by its location (e.g. 'the front door'), "
+            f"never its raw id like 'front_door'. Answer in 1-2 short, natural "
+            f"sentences a person would say out loud — no ids, colons, lists, or "
+            f"markdown.\n"
+            f"Give the ANSWER directly. Never reply with filler INSTEAD of an "
+            f"answer ('I'll check', 'let me see', 'one moment') — if you need to "
+            f"look, call the tool and then state what you found.\n\n"
             f"You can look at ONE camera, SEVERAL, or 'all' of them — pass "
             f"camera_id='all' (or a camera_ids list) when the user asks about "
-            f"every camera or more than one."
+            f"every camera or more than one. If the user names NO camera and "
+            f"none is selected, look at all of them and say which camera each "
+            f"finding is on."
         )
         # Tool-specific guidance is emitted ONLY for tools the model can
         # actually call this turn. Teaching a small model a route to a tool
@@ -4966,7 +6449,23 @@ class CameraAgentRuntime:
         # Disable Qwen3-style "thinking" for snappy tool-calling when the
         # operator opted out. Only appended when llm_think is explicitly False,
         # so non-thinking models (qwen2.5, llama3.2, …) are unaffected.
-        if self.cfg.llm_think is False:
+        if getattr(self.cfg, "filler_source", "template") == "model" and getattr(self.cfg, "thinking_aloud", False):
+            prompt += (
+                "\n\nWhen you call a tool, also write ONE short sentence (under twelve "
+                "words) telling the user what you are about to check — for example "
+                "'Let me look at the gate camera between two and three.' That is the "
+                "one place such a sentence belongs: beside the tool call, never "
+                "instead of it. Never guess the answer in that sentence."
+            )
+        # Last of the prose when it is here at all (see the docstring). Only
+        # Qwen3's ``/no_think`` switch may follow: a control token the model
+        # wants at the very end, constant across turns.
+        if clock:
+            prompt += "\n\n" + clock_line
+        # Qwen3's switch, and Qwen3's only: granite and Gemma read it as a
+        # stray line of text at the end of their instructions (the NPU
+        # prompt dump, 2026-11-07).
+        if self.cfg.llm_think is False and "qwen" in (self.cfg.llm_model or "").lower():
             prompt += "\n\n/no_think"
         return prompt
 
@@ -4974,26 +6473,180 @@ class CameraAgentRuntime:
 # ── Pipecat pipeline factory ───────────────────────────────────────
 
 
-def build_pipeline_task(runtime: CameraAgentRuntime, transport: Any) -> Any:
-    """Construct one Pipecat pipeline per WebSocket conversation.
-    Imported here (not at module top) so the camera-agent module
-    stays importable in test environments without Pipecat."""
-    from pipecat.pipeline.pipeline import Pipeline
-    from pipecat.pipeline.task import PipelineParams, PipelineTask
-    from pipecat.processors.aggregators.openai_llm_context import (
-        OpenAILLMContext,
+def available_cores() -> int:
+    """CPU cores THIS process may actually use: the scheduler affinity
+    mask, further capped by a cgroup CPU quota (``docker run --cpus``,
+    compose ``cpus:``), which ``os.cpu_count()`` never reflects. Never
+    below 1."""
+    cores = None
+    try:
+        cores = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        pass
+    cores = cores or os.cpu_count() or 1
+    quota: float | None = None
+    try:  # cgroup v2
+        raw = Path("/sys/fs/cgroup/cpu.max").read_text().split()
+        if raw and raw[0] != "max":
+            quota = float(raw[0]) / float(raw[1])
+    except (OSError, ValueError, IndexError):
+        try:  # cgroup v1
+            q = float(Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us").read_text())
+            per = float(Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us").read_text())
+            if q > 0 and per > 0:
+                quota = q / per
+        except (OSError, ValueError):
+            pass
+    if quota:
+        cores = min(cores, max(1, int(math.ceil(quota))))
+    return max(1, int(cores))
+
+
+def turn_hardware_profile(cfg: Any, cores: int | None = None) -> dict[str, Any]:
+    """Resolve the turn-taking knobs against the hardware the agent is
+    running on. ``auto`` picks the semantic detector wherever it has a
+    core to run on, and one onnxruntime thread per verdict (measured
+    fastest on ≤4 cores: ~60 ms; two threads only pay off from 8 cores).
+    Explicit config values are honoured verbatim."""
+    cores = int(cores if cores is not None else available_cores())
+    wanted = str(getattr(cfg, "turn_detector", "auto") or "auto").strip().lower()
+    if wanted not in ("auto", "smart", "timer"):
+        logger.warning("turn_detector=%r is not auto|smart|timer; using auto", wanted)
+        wanted = "auto"
+    if wanted == "auto":
+        detector = "smart" if cores >= 2 else "timer"
+        why = ("auto: Smart Turn v3 has a core to run on" if detector == "smart"
+               else "auto: single core — silence timer, no model")
+    else:
+        detector, why = wanted, "set in config"
+    threads = getattr(cfg, "turn_cpu_threads", None)
+    if threads is None:
+        threads = 2 if cores >= 8 else 1
+    threads = max(1, min(int(threads), cores))
+    return {
+        "cores": cores,
+        "detector": detector,
+        "cpu_threads": threads,
+        "math_threads": os.environ.get("OMP_NUM_THREADS", "unset"),
+        "reason": why,
+    }
+
+
+def describe_turn_profile(cfg: Any) -> str:
+    p = turn_hardware_profile(cfg)
+    if p["detector"] == "smart":
+        return (f"Smart Turn v3 (semantic end-of-turn) on CPU, "
+                f"{p['cpu_threads']} onnxruntime thread(s), BLAS/OMP threads="
+                f"{p['math_threads']}; {p['cores']} core(s) available ({p['reason']})")
+    return (f"silence timer ({float(getattr(cfg, 'turn_timer_secs', 0.8)):.2f}s), "
+            f"no turn model; {p['cores']} core(s) available ({p['reason']})")
+
+
+def build_user_turn_params(cfg: Any, runtime: Any = None) -> Any:
+    """The user aggregator's parameters — where turn-taking lives in
+    Pipecat's user aggregator. Silero VAD opens a turn; **Smart Turn v3** (the
+    bundled semantic end-of-turn model, CPU) closes it; the aggregator's
+    ``user_turn_stop_timeout`` is the last resort so a turn never hangs.
+    Interruptions stay off (the demo client sends no cancel frames).
+
+    Sized to the hardware by ``turn_hardware_profile``: the model's
+    onnxruntime thread count follows the cores available, and a
+    single-core box gets a plain silence timer instead of the model."""
+    from pipecat.audio.vad.silero import SileroVADAnalyzer
+    from pipecat.processors.aggregators.llm_response_universal import LLMUserAggregatorParams
+    from pipecat.turns.user_start import VADUserTurnStartStrategy
+    from pipecat.turns.user_turn_strategies import UserTurnStrategies
+
+    profile = turn_hardware_profile(cfg)
+    start = build_interruption_strategy(cfg, runtime=runtime)
+    if profile["detector"] == "smart":
+        from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
+        from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
+        from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
+
+        stop = TurnAnalyzerUserTurnStopStrategy(
+            turn_analyzer=LocalSmartTurnAnalyzerV3(
+                cpu_count=int(profile["cpu_threads"]),
+                params=SmartTurnParams(
+                    stop_secs=float(getattr(cfg, "turn_stop_secs", 2.0)),
+                    max_duration_secs=float(getattr(cfg, "turn_max_secs", 8.0)),
+                ),
+            ),
+        )
+    else:
+        from pipecat.turns.user_stop import SpeechTimeoutUserTurnStopStrategy
+
+        stop = SpeechTimeoutUserTurnStopStrategy(
+            user_speech_timeout=float(getattr(cfg, "turn_timer_secs", 0.8)),
+        )
+
+    return LLMUserAggregatorParams(
+        vad_analyzer=SileroVADAnalyzer(params=turn_vad_params(cfg)),
+        user_turn_strategies=UserTurnStrategies(
+            start=[start],
+            stop=[stop],
+        ),
+        user_turn_stop_timeout=float(getattr(cfg, "turn_stop_timeout_secs", 6.0)),
     )
-    # Context-aware aggregators (not the message-list variants).
-    # The plain LLMUserResponseAggregator / LLMAssistantResponseAggregator
-    # accept a ``List[dict]`` and call .append() on it; passing an
-    # OpenAILLMContext to those crashes with AttributeError on the
-    # first turn. The *Context* variants below take ``context=...``
-    # and route .add_message() correctly, which also mirrors the
-    # final assistant turn back into the context for observers.
-    from pipecat.processors.aggregators.llm_response import (
-        LLMUserContextAggregator,
-        LLMAssistantContextAggregator,
+
+
+def interruption_gate(cfg: Any, runtime: Any = None) -> "Any":
+    """The rule set for ``turns.GatedInterruptionStartStrategy`` from
+    config: thresholds, the agent's name, and the site's own vocabulary
+    (camera ids, names and roles) so "the gate camera" reads as addressed
+    to the agent."""
+    from turns import InterruptionGate
+
+    site: list[str] = []
+    for cam in (getattr(cfg, "cameras", None) or []):
+        for attr in ("camera_id", "name", "role"):
+            v = getattr(cam, attr, None)
+            if v:
+                site.append(str(v))
+    site += ["camera", "cameras", "gate", "plate", "plates", "alarm", "alarms",
+             "recording", "recordings", "footage", "monitor", "watch", "zone"]
+    return InterruptionGate(
+        min_ms=float(getattr(cfg, "interrupt_min_ms", 300.0)),
+        min_words=max(1, int(getattr(cfg, "interrupt_min_words", 2))),
+        addressee=bool(getattr(cfg, "interrupt_addressee", True)),
+        agent_name=str(getattr(cfg, "agent_name", "") or ""),
+        site_words=tuple(site),
     )
+
+
+def build_interruption_strategy(cfg: Any, runtime: Any = None) -> Any:
+    """The user-turn START strategy for the streaming pipeline, by the
+    ``interruptions`` setting: gated (turns.py), eager (plain VAD, any
+    speech interrupts) or off (the agent always finishes)."""
+    from pipecat.turns.user_start import VADUserTurnStartStrategy
+
+    mode = str(getattr(cfg, "interruptions", "gated") or "gated").strip().lower()
+    if mode == "off":
+        return VADUserTurnStartStrategy(enable_interruptions=False)
+    if mode == "eager":
+        return VADUserTurnStartStrategy(enable_interruptions=True)
+    if mode != "gated":
+        logger.warning("interruptions=%r is not gated|eager|off; using gated", mode)
+    from turns import make_start_strategy
+
+    gate = interruption_gate(cfg, runtime)
+    log = getattr(runtime, "interruption_log", None) if runtime is not None else None
+
+    def _record(event: dict[str, Any]) -> None:
+        if log is not None:
+            log.append({"ts": time.time(), **event})
+
+    return make_start_strategy(gate, on_decision=_record)
+
+
+def build_core_processors(runtime: CameraAgentRuntime, *, user_params: Any = None) -> tuple[list, Any]:
+    """The processors between the transport's input and output —
+    STT → user aggregator → LLM → TTS — plus the assistant aggregator
+    that closes the loop, and the shared ``LLMContext``. Split from the
+    transport so a test can run the real pipeline without a WebSocket.
+    """
+    from pipecat.processors.aggregators.llm_context import LLMContext
+    from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
 
     from services import (
         OpenNvrOllamaLLM,
@@ -5001,45 +6654,108 @@ def build_pipeline_task(runtime: CameraAgentRuntime, transport: Any) -> Any:
         OpenNvrWhisperSTT,
     )
 
-    stt = OpenNvrWhisperSTT(client=runtime.whisper)
+    stt = OpenNvrWhisperSTT(
+        client=runtime.whisper,
+        trailing_silence_secs=runtime.cfg.stt_trailing_silence_secs,
+    )
     llm = OpenNvrOllamaLLM(
         client=runtime.ollama,
         tools=runtime.tool_definitions,
         tool_handlers=runtime.tool_handlers,
         temperature=runtime.cfg.llm_temperature,
         max_tokens=runtime.cfg.llm_max_tokens,
+        clock_line=getattr(runtime, "_clock_line", None),
+        # The real runtime answers a streamed turn with the same turn the
+        # request path runs (router, forced grounding, the window fit,
+        # the backup model, the reply guards); a bare test runtime keeps
+        # the service's inline loop.
+        turn_runner=_streaming_turn_runner(runtime) if isinstance(runtime, CameraAgentRuntime) else None,
     )
     tts = OpenNvrPiperTTS(client=runtime.piper)
 
-    context = OpenAILLMContext(messages=[
-        {"role": "system", "content": runtime.build_system_prompt()},
+    # No clock in the system prompt (see _user_turn): the voice service
+    # puts it in the user turn, after the cached system+tools prefix.
+    context = LLMContext(messages=[
+        {"role": "system", "content": runtime.build_system_prompt(clock=False)},
     ])
+    aggregators = LLMContextAggregatorPair(
+        context, user_params=user_params or build_user_turn_params(runtime.cfg, runtime),
+    )
+    return [stt, aggregators.user(), llm, tts, aggregators.assistant()], context
 
-    user_agg = LLMUserContextAggregator(context=context)
-    assistant_agg = LLMAssistantContextAggregator(context=context)
 
+def _streaming_turn_runner(runtime: CameraAgentRuntime):
+    """``async (history, text) -> reply`` for the streaming LLM service:
+    the agent's full turn, speaking its thinking-aloud lines as a voice
+    turn does (they reach the page over /updates with audio)."""
+    async def run(history: list[dict[str, str]], text: str):
+        reply = await _run_conversation_turn(runtime, list(history), text, speak_progress="voice")
+        # What text mode returns in its HTTP response — the frames the
+        # tools looked at and which cameras — goes to the page over
+        # /updates here, so a streamed answer shows its evidence too.
+        try:
+            runtime.publish_update({"turn": {
+                "reply": reply,
+                "cameras_used": list(getattr(runtime.tools, "last_cameras_used", []) or []),
+                "frames": _frames_for(runtime),
+            }})
+        except Exception:  # noqa: BLE001 — the page's extras never cost the answer
+            logger.debug("streaming turn: could not publish the turn's frames", exc_info=True)
+        return reply, {"end": bool(getattr(runtime, "last_turn_closed", False))}
+    return run
+
+
+def build_pipeline_task(runtime: CameraAgentRuntime, transport: Any) -> Any:
+    """Construct one Pipecat pipeline per WebSocket conversation.
+    Imported here (not at module top) so the camera-agent module
+    stays importable in test environments without Pipecat.
+
+    Turn-taking: Pipecat's user aggregator owns it. Silero VAD
+    opens a turn; **Smart Turn v3** — Pipecat's semantic end-of-turn
+    model, bundled with the wheel and run on CPU with onnxruntime —
+    closes it, so a pause mid-sentence ("show me the… gate camera") no
+    longer ends the turn the way a silence timer did, and background
+    noise that Whisper would transcribe as a phantom question is not
+    a turn at all. See ``build_user_turn_params``.
+    """
+    from pipecat.pipeline.pipeline import Pipeline
+    from pipecat.pipeline.task import PipelineParams, PipelineTask
+
+    from services import StreamEvents
+
+    core, _context = build_core_processors(runtime)
+    stt, user_agg, llm, tts, assistant_agg = core
     pipeline = Pipeline([
         transport.input(),
         stt,
         user_agg,
         llm,
         tts,
+        StreamEvents(),          # transcript / sentences / turn state as JSON beside the audio
         transport.output(),
         assistant_agg,
     ])
 
     return PipelineTask(
         pipeline,
-        params=PipelineParams(
-            # Interruptions are DISABLED for v0.1: the bundled demo client
-            # doesn't send proper cancel frames, so any speech/noise while
-            # the agent is thinking would otherwise cancel the in-flight
-            # reply before it reaches TTS. With this off, the agent always
-            # finishes its answer, then listens again. (See README "No real
-            # interrupts".)
-            allow_interruptions=False,
-            enable_metrics=True,
-        ),
+        params=PipelineParams(enable_metrics=True),
+        # The bundled demo client speaks raw PCM, not RTVI.
+        enable_rtvi=False,
+    )
+
+
+def turn_vad_params(cfg: Any) -> Any:
+    """Silero VAD parameters for turn *start* (Smart Turn decides the
+    end). The stop window is short on purpose — with a semantic
+    end-of-turn model the VAD only has to notice a pause, not judge
+    it; Pipecat's guidance is 0.2 s."""
+    from pipecat.audio.vad.vad_analyzer import VADParams
+
+    return VADParams(
+        confidence=float(getattr(cfg, "vad_confidence", 0.55)),
+        start_secs=float(getattr(cfg, "vad_start_secs", 0.15)),
+        stop_secs=float(getattr(cfg, "vad_stop_secs", 0.2)),
+        min_volume=float(getattr(cfg, "vad_min_volume", 0.08)),
     )
 
 
@@ -5049,7 +6765,42 @@ def build_pipeline_task(runtime: CameraAgentRuntime, transport: Any) -> Any:
 AGENT_VERSION = "1.0.0"
 
 
-def agent_manifest() -> dict[str, Any]:
+def relay_text(title: str | None, summary: str | None) -> str:
+    """One line for the feed / the voice: ``title — summary``, unless the
+    summary already restates the title (SDK alerts often do: "Monitored
+    plate X seen — Monitored plate X seen: License plate…"), in which
+    case the summary alone."""
+    t = " ".join(str(title or "").split())
+    m = " ".join(str(summary or "").split())
+    if not m:
+        return t
+    if not t:
+        return m
+    if m.lower().startswith(t.lower().rstrip(".:")):
+        return m
+    return f"{t} — {m}"
+
+
+def agent_scheme(cfg: Any) -> str:
+    return "https" if getattr(cfg, "tls_certfile", None) else "http"
+
+
+def agent_ui_url(cfg: Any | None) -> str:
+    """Where the catalog's "Open app" button sends the operator's
+    browser: the agent's own web UI (``/demo``). ``agent_public_url``
+    when the operator set one (a LAN hostname, a reverse proxy);
+    otherwise the catalog's ``{host}`` placeholder — the hostname the
+    operator is browsing OpenNVR from — on the agent's port, which is
+    how the compose overlay publishes it."""
+    if cfg is None:
+        return "http://{host}:9100/demo"
+    public = (getattr(cfg, "agent_public_url", None) or "").rstrip("/")
+    if public:
+        return f"{public}/demo"
+    return f"{agent_scheme(cfg)}://{{host}}:{getattr(cfg, 'port', 9100)}/demo"
+
+
+def agent_manifest(cfg: Any | None = None) -> dict[str, Any]:
     """RFC-0002 gap 8 (contract parity): the flagship app's identity, in
     the same shape every SDK app serves. AppManifest is an identity
     dataclass, not a base class — the agent still doesn't ride
@@ -5060,11 +6811,25 @@ def agent_manifest() -> dict[str, Any]:
     ``requires_tasks`` is empty on purpose: every capability degrades
     gracefully (that's the agent's whole design), so nothing is a hard
     requirement the catalog should warn about.
+
+    The agent is a full application with its own web UI, so the manifest
+    declares ``ui_mode="external"``: the catalog shows an "Open app"
+    button to ``ui_url`` instead of trying to embed a sandboxed ``/ui``.
     """
     from opennvr_app_sdk import AppManifest
 
     return AppManifest(
         id="camera-agent",
+        # No camera picker: the agent is a platform component on the site
+        # key, and every user already sees only their own cameras through it.
+        camera_picker=False,
+        # …and it runs on all of them: the platform holds a pick for the
+        # agent on every live camera, so the skills below are in every
+        # camera's set while the agent is enabled — captions and VQA on
+        # every visit, which is what "ask the agent about any camera"
+        # costs. Disable the agent and they leave every set.
+        all_cameras=True,
+        enrich_tasks=["image_captioning", "vqa"],
         name="OpenNVR Agent",
         version=AGENT_VERSION,
         category="assistant",
@@ -5074,7 +6839,25 @@ def agent_manifest() -> dict[str, Any]:
             "capability degrades gracefully when its backend is absent."
         ),
         requires_tasks=[],
+        has_ui=True,
+        ui_mode="external",
+        ui_url=agent_ui_url(cfg),
     ).to_dict()
+
+
+def _tracks_push_visible(pushed: Any) -> bool:
+    """May THIS session's socket receive ``pushed``?
+
+    A tracks push names a camera; it is honoured against the session's
+    per-camera scope exactly as the HTTP gate would honour a request, so
+    a viewer never receives boxes for a camera they may not watch. This
+    is the re-scoping the unscoped service ticket to core relies on.
+    Everything else on the socket is site-wide status and passes."""
+    tr = pushed.get("tracks") if isinstance(pushed, dict) else None
+    if not isinstance(tr, dict):
+        return True
+    scope = camera_scope()
+    return scope is None or tr.get("camera") in scope
 
 
 def build_app(runtime: CameraAgentRuntime) -> FastAPI:
@@ -5123,12 +6906,29 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             return "operator"       # arm/create/ack/remove verbs
         return "viewer"             # look + chat (/ask, /converse, /say, GETs)
 
+    def _scoped_rules(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Monitors/alarms the caller may see: every camera the rule
+        watches must be in their scope (a rule armed on the yard is not a
+        guard-of-the-gate's business, even if it also covers the gate)."""
+        return [r for r in rules
+                if all(camera_in_scope(str(c)) for c in (r.get("camera_ids") or []))]
+
+    def _rule_visible(rules: list[dict[str, Any]], rule_id: int) -> bool:
+        return any(int(r.get("id", -1)) == int(rule_id) for r in _scoped_rules(rules))
+
+    def _scoped_notes(notes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Alarm events / watch notifications for the caller's cameras
+        (an entry naming no camera reaches everyone)."""
+        return [n for n in notes
+                if not n.get("camera") or camera_in_scope(str(n.get("camera")))]
+
     @app.middleware("http")
     async def _auth_gate(request: Request, call_next):
         if runtime.cfg.auth_mode != "opennvr":
             return await call_next(request)
         path = request.url.path
-        if path in _OPEN_PATHS or path == "/demo" or path.startswith("/demo/"):
+        if path in _OPEN_PATHS or path == "/demo" or path.startswith("/demo/") \
+                or path == "/mirror":
             return await call_next(request)
         # Device firewall first (mirrors the server's device-before-auth
         # order, so a blocked browser can't probe credential validity).
@@ -5141,7 +6941,17 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                                 status_code=403)
         authz = request.headers.get("authorization", "")
         token = authz[7:].strip() if authz.lower().startswith("bearer ") else ""
-        user = await runtime.auth.me(token) if (token and runtime.auth) else None
+        try:
+            user = await runtime.auth.me(token) if (token and runtime.auth) else None
+        except AuthUnavailable:
+            # We could not ASK whether this token is good. 503 says "try
+            # again"; a 401 here told the page the session was over and
+            # sent the operator back to the login card while their token
+            # was still valid (#540).
+            return JSONResponse(
+                {"error": "core_unreachable",
+                 "detail": "OpenNVR is not answering; retrying"},
+                status_code=503, headers={"Retry-After": "2"})
         if user is None:
             return JSONResponse({"error": "authentication required"},
                                 status_code=401)
@@ -5153,7 +6963,23 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                 status_code=403)
         request.state.agent_user = user
         request.state.agent_tier = tier
-        return await call_next(request)
+        # Per-camera RBAC: bind the caller's visible cameras for the rest
+        # of this request (tools, rings, roster — see context.CAMERA_SCOPE).
+        # Agent cameras not linked to a server camera are superuser-only,
+        # like the server's own owner-less cameras.
+        scope_token = set_camera_scope(await _scope_for(token, user))
+        try:
+            return await call_next(request)
+        finally:
+            reset_camera_scope(scope_token)
+
+    async def _scope_for(token: str, user: dict[str, Any]) -> set[str] | None:
+        server_ids = await runtime.auth.visible_cameras(token, user)
+        if server_ids is None:
+            return None
+        return {c.camera_id for c in runtime.cfg.cameras
+                if c.opennvr_camera_id is not None
+                and int(c.opennvr_camera_id) in server_ids}
 
     # ── Interactive priority ───────────────────────────────────────
     # Bracket a discrete voice/chat turn so background detection loops
@@ -5217,11 +7043,23 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
     async def _health() -> dict[str, Any]:
         return {
             "status": "ok",
-            "cameras": [cam.camera_id for cam in runtime.cfg.cameras],
+            # A count, not the handles: /health is an OPEN path on a port
+            # the demo UI publishes, and the roster is what /cameras
+            # (authenticated, per-user) is for. /state — the contract
+            # door the App Catalog proxies and scopes per viewer — still
+            # carries the handle list, like every SDK app's does.
+            "camera_count": len(runtime.cfg.cameras),
             # The tools actually ADVERTISED to the LLM (honours enabled_tools),
             # not every registered handler (test-report #4).
             "tools": [t["function"]["name"] for t in runtime.tool_definitions],
             "llm_model": runtime.cfg.llm_model,
+            # What decides a turn besides the model — tools/eval_harness.py
+            # records these with every run, so two runs are only compared
+            # when they were configured alike (Discussion #607).
+            "llm_temperature": runtime.cfg.llm_temperature,
+            "llm_max_tokens": runtime.cfg.llm_max_tokens,
+            "router": {"tier0": runtime.cfg.router_tier0,
+                       "hints": runtime.cfg.router_hints},
             # For the demo header's health dot: the last describe attempt's
             # failure reason (None = last look succeeded or none ran yet) and
             # whether the events store (History) is wired.
@@ -5229,6 +7067,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             # The last LLM failure from a real turn (None = answering).
             # Issue #344: the brain crash-looped for days behind a green dot.
             "llm_error": getattr(runtime, "last_llm_error", None),
+            "llm_degraded": bool(getattr(runtime, "llm_degraded", False)),
             "history": getattr(runtime, "events_client", None) is not None,
         }
 
@@ -5239,7 +7078,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
 
     @app.get("/manifest")
     async def _manifest() -> dict[str, Any]:
-        return agent_manifest()
+        return agent_manifest(runtime.cfg)
 
     @app.get("/state")
     async def _state() -> dict[str, Any]:
@@ -5248,6 +7087,80 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
     @app.get("/demo", response_class=HTMLResponse)
     async def _demo() -> HTMLResponse:
         return HTMLResponse(_load_demo_html())
+
+    # ── OpenNVR Mirror: the booth page ─────────────────────────────
+    # The page is public like /demo (it logs in itself); every call below
+    # is behind the same gate and camera scope as the rest of the agent.
+
+    @app.get("/mirror", response_class=HTMLResponse)
+    async def _mirror_page() -> HTMLResponse:
+        return HTMLResponse(_load_mirror_html())
+
+    @app.get("/mirror/state")
+    async def _mirror_state() -> dict[str, Any]:
+        m = runtime.mirror
+        return {"mirror": m.to_wire() if m is not None else None,
+                "cameras": [c.camera_id for c in runtime.visible_cameras()]}
+
+    @app.post("/mirror/start")
+    async def _mirror_start(request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        cam = str((body or {}).get("camera") or "").strip()
+        if not cam or not runtime.context.known_camera(cam):
+            return JSONResponse({"error": "unknown camera"}, status_code=404)
+        if not camera_in_scope(cam):
+            return JSONResponse({"error": "camera not in scope"}, status_code=403)
+        voice = bool((body or {}).get("voice", True))
+        every = (body or {}).get("scene_every_s")
+        m = await runtime.mirror_start(
+            cam, voice=voice,
+            scene_every_s=float(every) if every not in (None, "") else None,
+            user_token=_bearer_of(request) or None)
+        return JSONResponse({"mirror": m.to_wire()})
+
+    @app.post("/mirror/stop")
+    async def _mirror_stop() -> dict[str, Any]:
+        m = runtime.mirror
+        if m is not None:
+            await m.stop()
+        return {"stopped": m is not None}
+
+    @app.post("/mirror/heartbeat")
+    async def _mirror_heartbeat(request: Request) -> dict[str, Any]:
+        m = runtime.mirror
+        if m is None or not m.running:
+            return {"running": False}
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if isinstance(body, dict) and "voice" in body:
+            m.voice = bool(body["voice"])
+        tok = _bearer_of(request)
+        if tok:
+            runtime.mirror_user_token = tok     # the page's token, kept fresh
+        m.heartbeat()
+        return {"running": True, "voice": m.voice}
+
+    @app.get("/mirror/crop/{camera_id}/{track_id}")
+    async def _mirror_crop(camera_id: str, track_id: str) -> Response:
+        """Tier-0's best crop of one track — the card's picture."""
+        if not runtime.context.known_camera(camera_id) or not camera_in_scope(camera_id):
+            return Response(status_code=404)
+        crops = runtime.mirror_crops
+        if crops is None:
+            return Response(status_code=404)
+        try:
+            jpeg = await crops.fetch(camera_id, track_id)
+        except Exception:  # noqa: BLE001
+            jpeg = None
+        if not jpeg:
+            return Response(status_code=404)
+        return Response(content=jpeg, media_type="image/jpeg",
+                        headers={"Cache-Control": "no-store"})
 
     @app.get("/system-check")
     async def _system_check() -> dict:
@@ -5336,13 +7249,39 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                 status_code=200), None
         return None, (token, path)
 
+    @app.get("/interruptions")
+    async def _interruptions() -> dict[str, Any]:
+        """The interruption gate on the streaming pipeline and its recent
+        decisions (viewer tier: look only). Tune from evidence: every
+        phrase spoken over the agent is here with why it did or did not
+        interrupt."""
+        cfg = runtime.cfg
+        return {
+            "mode": str(getattr(cfg, "interruptions", "gated")),
+            "min_ms": float(getattr(cfg, "interrupt_min_ms", 300.0)),
+            "min_words": int(getattr(cfg, "interrupt_min_words", 2)),
+            "addressee": bool(getattr(cfg, "interrupt_addressee", True)),
+            "recent": list(runtime.interruption_log)[-50:],
+        }
+
+    @app.get("/thinking-aloud")
+    async def _thinking_aloud() -> dict[str, Any]:
+        """The thinking-aloud gate and its recent decisions (viewer tier):
+        which tools got a line, which were too quick to need one."""
+        t = runtime.thinking
+        return {"enabled": t.enabled, "min_ms": t.min_ms, "source": t.source,
+                "expected_ms": {k: int(t.expected_wait_ms(k)) for k in
+                                ("describe_camera", "search_history", "search_footage", "recent_plates")},
+                "recent": list(t.recent)}
+
     @app.get("/alarm-defaults")
     async def _alarm_defaults() -> dict[str, Any]:
         """The merged target→level map + which entries are UI overrides
         (the editor edits ONLY the overrides; config/built-ins show as
         inherited)."""
         return {"defaults": runtime.ring_defaults(),
-                "overrides": dict(runtime._ring_overrides)}
+                "overrides": dict(runtime._ring_overrides),
+                "announce_app_alerts": runtime.announce_app_alerts()}
 
     @app.put("/alarm-defaults")
     async def _put_alarm_defaults(request: Request) -> JSONResponse:
@@ -5352,14 +7291,21 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             body = await request.json()
         except Exception:
             body = {}
-        overrides = (body or {}).get("overrides")
+        body = body or {}
+        overrides = body.get("overrides", dict(runtime._ring_overrides))
         if not isinstance(overrides, dict):
             return JSONResponse({"error": "overrides must be a mapping of "
                                           "target -> siren|pulse|chime|silent"},
                                 status_code=400)
+        if "announce_app_alerts" in body:
+            try:
+                runtime.set_announce_app_alerts(body.get("announce_app_alerts"))
+            except ValueError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
         merged = runtime.set_ring_overrides(overrides)
         return JSONResponse({"defaults": merged,
-                             "overrides": dict(runtime._ring_overrides)})
+                             "overrides": dict(runtime._ring_overrides),
+                             "announce_app_alerts": runtime.announce_app_alerts()})
 
     @app.get("/events")
     async def _events() -> dict[str, Any]:
@@ -5402,11 +7348,15 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             return {"available": True, "ok": False, "events": []}
         # Map server-side camera ids back to this agent's ids/roles so the
         # card can say "the front door", not "camera 7".
-        by_srv = {int(c.opennvr_camera_id): c for c in runtime.cfg.cameras
+        by_srv = {int(c.opennvr_camera_id): c for c in runtime.visible_cameras()
                   if c.opennvr_camera_id is not None}
         rows = []
         for e in events:
             spec = by_srv.get(int(e.camera_id))
+            if spec is None and camera_scope() is not None:
+                # The store is fleet-wide (internal key); a scoped caller
+                # gets only the visits on cameras they may see.
+                continue
             rows.append({
                 "id": e.id, "label": e.label,
                 "camera_id": spec.camera_id if spec else str(e.camera_id),
@@ -5514,7 +7464,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         return {
             "cameras": [
                 {"camera_id": cam.camera_id, "role": cam.role}
-                for cam in runtime.cfg.cameras
+                for cam in runtime.visible_cameras()
             ]
         }
 
@@ -5537,7 +7487,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         return {
             "added": [{"camera_id": c.camera_id, "frame_url": c.frame_url} for c in added],
             "cameras": [
-                {"camera_id": c.camera_id, "role": c.role} for c in runtime.cfg.cameras
+                {"camera_id": c.camera_id, "role": c.role} for c in runtime.visible_cameras()
             ],
         }
 
@@ -5603,6 +7553,31 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         return JSONResponse({"restored": restored,
                              "skills": runtime.skills_payload()})
 
+    @app.post("/skills/app/{app_id}/speech")
+    async def _skill_app_speech(app_id: str, request: Request) -> JSONResponse:
+        """Speak this app's relayed alerts, or don't.
+
+        Per-app because the site-wide policy is the wrong grain for the
+        problem it was causing: an operator wants the doorbell to speak
+        and ANPR to stay quiet, not one switch for both. Body
+        {"speak": true|false} sets it; {"speak": null} clears the
+        override so the app follows the site policy again."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        speak = (body or {}).get("speak", None)
+        if speak is not None and not isinstance(speak, bool):
+            return JSONResponse({"error": "speak must be true, false or null"},
+                                status_code=400)
+        try:
+            runtime.set_app_announce(app_id, speak)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        logger.info("app speech set: app:%s -> %s", app_id, speak)
+        return JSONResponse({"app_announce": runtime.app_announce_overrides(),
+                             "skills": runtime.skills_payload()})
+
     @app.post("/skills/{skill_id}/{action}")
     async def _skill_toggle(skill_id: str, action: str) -> JSONResponse:
         """Turn a skill on/off. This reconfigures the agent's live toolset, so
@@ -5612,12 +7587,19 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                                 status_code=400)
         await runtime.kaic_capabilities.refresh()   # 60s TTL; never raises
         ok = runtime.set_skill_enabled(skill_id, action == "enable")
+        if not ok and skill_id.startswith("app:"):
+            return JSONResponse({"error": f"no installed app {skill_id[4:]!r} — "
+                                          "install and enable it in the App Catalog first"},
+                                status_code=404)
         if not ok:
             # Unknown skill, or its backend isn't configured yet.
             skill = next((s for s in runtime.skills_payload() if s["id"] == skill_id), None)
             if skill is None:
                 return JSONResponse({"error": f"unknown skill {skill_id!r}"},
                                     status_code=404)
+            if action == "disable":
+                return JSONResponse({"error": "skill can't be disabled", "hint": skill["hint"]},
+                                    status_code=409)
             return JSONResponse(
                 {"error": "skill can't be enabled yet", "hint": skill["hint"]},
                 status_code=409)
@@ -5665,9 +7647,12 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         return JSONResponse({"delivered": ok, "channels": runtime.notifier.status()["channels"]})
 
     @app.get("/intro")
-    async def _intro() -> JSONResponse:
-        """The agent's greeting — text always; audio when Piper is reachable."""
-        greeting = greeting_for(runtime.agent_name)
+    async def _intro(hour: int | None = None) -> JSONResponse:
+        """The agent's greeting — text always; audio when Piper is reachable.
+        ``?hour=<0-23>`` is the operator's local hour (the browser's clock)
+        so a remote operator hears the right time of day; without it the
+        site's clock decides."""
+        greeting = greeting_for(runtime.agent_name, hour)
         audio_b64 = None
         try:
             audio = await runtime.piper.synthesize(greeting)
@@ -5720,8 +7705,8 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
     async def _monitors() -> dict[str, Any]:
         """Standing monitors + any new notifications (UI polls this)."""
         return {
-            "monitors": runtime.monitors.list(),
-            "notifications": runtime.monitors.notifications(),
+            "monitors": _scoped_rules(runtime.monitors.list()),
+            "notifications": _scoped_notes(runtime.monitors.notifications()),
         }
 
     @app.post("/monitors")
@@ -5734,12 +7719,16 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         msg = await runtime._handle_create_monitor(body or {})
         if msg.startswith("ERROR:") or msg.endswith("?"):
             return JSONResponse({"error": msg}, status_code=400)
-        return JSONResponse({"message": msg, "monitors": runtime.monitors.list()}, status_code=202)
+        return JSONResponse({"message": msg,
+                             "monitors": _scoped_rules(runtime.monitors.list())},
+                            status_code=202)
 
     @app.delete("/monitors/{monitor_id}")
     async def _stop_monitor(monitor_id: int) -> JSONResponse:
         """The UI's ✕: stop AND forget — idempotent, same contract as
         DELETE /alarms/{id} (already-gone is success)."""
+        if not _rule_visible(runtime.monitors.list(), monitor_id):
+            return JSONResponse({"stopped": False, "already_gone": True})
         ok = runtime.monitors.remove(monitor_id)
         runtime.persist()
         return JSONResponse({"stopped": ok, "already_gone": not ok})
@@ -5748,10 +7737,10 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
     async def _alarms() -> dict[str, Any]:
         """Armed alarms + recent trigger events (UI polls; rings while any
         alarm is triggered)."""
-        alarms = runtime.alarms.list()
+        alarms = _scoped_rules(runtime.alarms.list())
         return {
             "alarms": alarms,
-            "events": runtime.alarms.events(),
+            "events": _scoped_notes(runtime.alarms.events()),
             # Ring only for ACTIVE, triggered alarms. list() also returns
             # disarmed ones; without the active check a stale triggered flag on a
             # disarmed alarm left the siren banner up while the panel showed
@@ -5801,7 +7790,9 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         msg = await runtime._handle_create_alarm(body or {})
         if msg.startswith("ERROR:") or msg.endswith("?"):
             return JSONResponse({"error": msg}, status_code=400)
-        return JSONResponse({"message": msg, "alarms": runtime.alarms.list()}, status_code=202)
+        return JSONResponse({"message": msg,
+                             "alarms": _scoped_rules(runtime.alarms.list())},
+                            status_code=202)
 
     @app.post("/alarms/ack")
     async def _ack_alarms(request: Request) -> JSONResponse:
@@ -5811,7 +7802,14 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         except Exception:
             body = {}
         aid = body.get("alarm_id")
-        n = runtime.alarms.acknowledge(int(aid) if aid is not None else None)
+        if aid is not None:
+            if not _rule_visible(runtime.alarms.list(), int(aid)):
+                return JSONResponse({"silenced": 0})
+            return JSONResponse({"silenced": runtime.alarms.acknowledge(int(aid))})
+        # "Silence everything" silences MY alarms — the ones on cameras I
+        # can see; someone else's yard alarm keeps ringing for them.
+        n = sum(runtime.alarms.acknowledge(int(a["id"]))
+                for a in _scoped_rules(runtime.alarms.list()))
         return JSONResponse({"silenced": n})
 
     @app.delete("/alarms/{alarm_id}")
@@ -5824,9 +7822,18 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         'couldn't remove' six times for an alarm that WAS removed —
         alarming (sic) and wrong. Deletion's contract is 'make it not
         exist', and it already doesn't."""
+        if not _rule_visible(runtime.alarms.list(), alarm_id):
+            return JSONResponse({"stopped": False, "already_gone": True})
         ok = runtime.alarms.remove(alarm_id)
         runtime.persist()
         return JSONResponse({"stopped": ok, "already_gone": not ok})
+
+    @app.get("/turn-stats")
+    async def _turn_stats(recent: int = 20) -> dict[str, Any]:
+        """What turns cost, by tier and by tool, over the last ~1000 turns
+        in this process — p50/p95 wall time, LLM time, tool time, how
+        often each tool ran and failed, and the last few turns."""
+        return runtime.turn_stats.summary(recent=max(0, min(int(recent), 200)))
 
     @app.get("/reports")
     async def _reports() -> dict[str, Any]:
@@ -5916,7 +7923,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         if not text:
             return JSONResponse({"error": "text is required"}, status_code=400)
 
-        configured = {cam.camera_id for cam in runtime.cfg.cameras}
+        configured = {cam.camera_id for cam in runtime.visible_cameras()}
         camera_hint = None
         for part in str((body or {}).get("camera") or "").split(","):
             part = part.strip()
@@ -5956,16 +7963,22 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         pin_token: int | None = None
         if pinned_jpeg is not None:
             pin_token = runtime.context.pin_frame(camera_hint, pinned_jpeg)
+        # THIS turn's trace — a background task may replace the shared
+        # runtime.last_turn_trace while this one is in flight.
+        turn_trace: list[dict[str, Any]] = []
         try:
             reply = await _run_conversation_turn(
                 runtime, demo_history, text, preferred_camera=camera_hint,
                 tool_definitions=runtime.tools_for_tier(
                     getattr(request.state, "agent_tier", "admin")),
+                speak_progress="text",
+                trace=turn_trace,
             )
             # Capture "what I saw" while the pin is still visible — a
             # racing thumbnail fetch may have overwritten the cache seed,
             # and the chat must show the frame the answer was ABOUT.
             frames = _frames_for(runtime)
+            runtime.thinking.record_stages(turn_trace)
         except LLMTurnError as exc:
             # The diagnosis IS the message (issue #344): "model X not found,
             # try pulling it first" must reach the operator, not the log.
@@ -5988,8 +8001,9 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             "reply": reply,
             "cameras_used": list(runtime.tools.last_cameras_used),
             "frames": frames,
-            "trace": list(runtime.last_turn_trace),
+            "trace": list(turn_trace),
             "latency_ms": int((_t.perf_counter() - t0) * 1000),
+            "end": bool(getattr(runtime, "last_turn_closed", False)),
         })
 
     @app.post("/transcribe")
@@ -6036,7 +8050,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         # UI-selected camera hint: one id, a comma list, or "all". Use the
         # first concrete configured camera as the grounding default; "all"
         # or empty leaves it to the agent.
-        configured = {cam.camera_id for cam in runtime.cfg.cameras}
+        configured = {cam.camera_id for cam in runtime.visible_cameras()}
         raw_hint = request.query_params.get("camera") or ""
         camera_hint = None
         for part in raw_hint.split(","):
@@ -6120,6 +8134,9 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
         runtime.tools.last_cameras_used = []
         runtime.tools.last_evidence_frames = []
         armed = bool(require_wake and not question)
+        # THIS turn's trace. Empty for an armed turn (no LLM ran), so the
+        # previous turn's stages are never recorded twice.
+        turn_trace: list[dict[str, Any]] = []
         if armed:
             reply = "Yes?"
         else:
@@ -6131,6 +8148,8 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                 runtime, demo_history, question, preferred_camera=camera_hint,
                 tool_definitions=runtime.tools_for_tier(
                     getattr(request.state, "agent_tier", "admin")),
+                speak_progress="voice",
+                trace=turn_trace,
             ), name="converse-turn")
             _inflight["turn"] = turn
             try:
@@ -6194,6 +8213,7 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                         "adapter (docker logs, /health); text-only reply")
         _mark("tts", t3)
         timings["total"] = int((_t.perf_counter() - t0) * 1000)
+        runtime.thinking.record_stages(turn_trace, timings)
         # Log the per-stage breakdown so a slow turn can be diagnosed straight
         # from the agent logs (grep "converse: timings_ms") instead of only the
         # browser's Network tab: transcode / stt / llm / tts / total, in ms.
@@ -6203,9 +8223,11 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
             "transcript": transcript, "reply": reply, "audio_b64": audio_b64,
             "cameras_used": list(runtime.tools.last_cameras_used),
             "frames": _frames_for(runtime),
-            "trace": list(runtime.last_turn_trace) if not armed else [],
+            "trace": list(turn_trace),
             "timings_ms": timings, "invoked": True, "armed": armed,
             "tts_error": tts_error,
+            # A goodbye: the page leaves talk mode once this reply has played.
+            "end": bool(getattr(runtime, "last_turn_closed", False)),
         })
 
     @app.post("/converse/cancel")
@@ -6234,14 +8256,35 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                 await websocket.close(code=4403)   # 4403 = device blocked
                 return
             _tok = websocket.query_params.get("token", "")
-            _user = await runtime.auth.me(_tok) if (_tok and runtime.auth) else None
+            try:
+                _user = await runtime.auth.me(_tok) if (_tok and runtime.auth) else None
+            except AuthUnavailable:
+                # 1013 "try again later" — the socket is refused, not the
+                # session (#540): the page reconnects instead of logging out.
+                await websocket.close(code=1013)
+                return
             if _user is None:
                 await websocket.close(code=4401)   # 4401 = auth required
                 return
+            # Same per-camera scope as the HTTP gate, for the life of the
+            # voice session (the pipeline's tool calls run in this task).
+            set_camera_scope(await _scope_for(_tok, _user))
         await websocket.accept()
         last: str | None = None
+        inbox = runtime.subscribe_updates()
         try:
             while True:
+                # Anything published (a "working" line while a tool runs)
+                # goes out at once; the panel diff below every 2 s.
+                try:
+                    pushed = await asyncio.wait_for(inbox.get(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    pushed = None
+                if pushed is not None:
+                    if not _tracks_push_visible(pushed):
+                        continue
+                    await websocket.send_text(json.dumps(pushed, default=str))
+                    continue
                 alarms = runtime.alarms.list()
                 payload = {
                     "tasks": {"tasks": runtime.tasks.list()},
@@ -6269,11 +8312,12 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                 if text != last:
                     await websocket.send_text(text)
                     last = text
-                await asyncio.sleep(2.0)
         except Exception:
             # Disconnect (or send on a closed socket) ends the loop; the page
             # reconnects with backoff and polls in the meantime.
             return
+        finally:
+            runtime.unsubscribe_updates(inbox)
 
     @app.websocket("/ws")
     async def _ws(websocket: WebSocket) -> None:
@@ -6291,17 +8335,21 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                 await websocket.close(code=4403)   # 4403 = device blocked
                 return
             _tok = websocket.query_params.get("token", "")
-            _user = await runtime.auth.me(_tok) if (_tok and runtime.auth) else None
+            try:
+                _user = await runtime.auth.me(_tok) if (_tok and runtime.auth) else None
+            except AuthUnavailable:
+                # 1013 "try again later" — the socket is refused, not the
+                # session (#540): the page reconnects instead of logging out.
+                await websocket.close(code=1013)
+                return
             if _user is None:
                 await websocket.close(code=4401)   # 4401 = auth required
                 return
         # Lazy-imported so the module loads without Pipecat installed.
-        from pipecat.transports.network.fastapi_websocket import (
+        from pipecat.transports.websocket.fastapi import (
             FastAPIWebsocketParams,
             FastAPIWebsocketTransport,
         )
-        from pipecat.audio.vad.silero import SileroVADAnalyzer
-        from pipecat.audio.vad.vad_analyzer import VADParams
         from serializer import RawPcmSerializer
 
         await websocket.accept()
@@ -6321,24 +8369,15 @@ def build_app(runtime: CameraAgentRuntime) -> FastAPI:
                 audio_out_sample_rate=22050,
                 audio_out_channels=1,
                 add_wav_header=False,
-                vad_enabled=True,
-                vad_analyzer=SileroVADAnalyzer(
-                    sample_rate=16000,
-                    params=VADParams(
-                        confidence=0.55,
-                        start_secs=0.15,
-                        stop_secs=0.7,
-                        min_volume=0.08,
-                    ),
-                ),
-                vad_audio_passthrough=True,
+                # VAD and turn-taking live on the user aggregator now
+                # (build_pipeline_task) — the transport just moves audio.
                 serializer=RawPcmSerializer(),
             ),
         )
 
         task = build_pipeline_task(runtime, transport)
-        from pipecat.pipeline.runner import PipelineRunner
-        runner = PipelineRunner(handle_sigint=False)
+        from pipecat.workers.runner import WorkerRunner
+        runner = WorkerRunner(handle_sigint=False)
         try:
             await runner.run(task)
         except Exception:
@@ -6381,325 +8420,233 @@ def _transcode_to_wav16k(blob: bytes) -> bytes:
     return proc.stdout
 
 
-async def _invoke_tool(runtime: "CameraAgentRuntime", call: dict[str, Any]) -> tuple[str, str]:
-    """Run one tool call; return (name, result_string). Never raises."""
+#: Limits on what a traced argument may carry. The trace rides on every
+#: /ask and /converse response; a model that writes a multi-KB query, or
+#: a list of thousands of ids, must not make every reply carry it. The
+#: running turn's trace itself is ``context.TURN_TRACE`` (_TURN_TRACE).
+_TRACE_ARG_CHARS = 500
+_TRACE_ARG_ITEMS = 50
+
+
+#: Sentinel: arguments that are present but not an object (unparseable
+#: JSON, "[1]", "3", a parsed non-empty list) — distinct from "none".
+_MALFORMED = object()
+
+
+def _parse_tool_args(raw: Any) -> Any:
+    """A tool call's ``arguments`` as a dict, or ``_MALFORMED``.
+
+    One rule for every reader (the invoker and the thinking-aloud line):
+    a JSON string is parsed; absent, "", null and an empty list mean no
+    arguments — some OpenAI-compatible servers serialise an empty map as
+    [] — so a zero-argument tool still runs; anything else that is not an
+    object is malformed.
+    """
+    try:
+        args = (json.loads(raw) if raw.strip() else {}) if isinstance(raw, str) else raw
+    except (json.JSONDecodeError, ValueError):
+        return _MALFORMED
+    if args is None or (isinstance(args, list) and not args):
+        return {}
+    return dict(args) if isinstance(args, dict) else _MALFORMED
+
+
+async def _invoke_tool(runtime: "CameraAgentRuntime", call: dict[str, Any], *,
+                       by: str = "model", hint: str | None = None) -> tuple[str, str]:
+    """Run one tool call; return (name, result_string). Never raises.
+
+    ``by`` says who chose the call — "model", "router" (tier 0) or
+    "forced" (the anti-fabrication grounding) — and goes into the trace,
+    so an eval can tell what the model did from what the agent did for it.
+    ``hint`` is the tool a tier-1 router hint named in the user turn: a
+    model call to that tool is traced ``hinted`` — the model chose it, but
+    not unaided.
+    """
     func = call.get("function") or {}
     name = str(func.get("name") or "").strip()
     args_raw = func.get("arguments")
-    try:
-        if isinstance(args_raw, str):
-            args = json.loads(args_raw) if args_raw.strip() else {}
-        elif isinstance(args_raw, dict):
-            args = dict(args_raw)
-        else:
-            args = {}
-    except (json.JSONDecodeError, ValueError):
-        return name or "<unknown>", f"ERROR: tool '{name}' received malformed arguments."
+    _tool_t0 = time.perf_counter()
+    args = _parse_tool_args(args_raw)
+    if args is _MALFORMED:
+        # The handlers all take keyword-style dicts (see _parse_tool_args).
+        name = name or "<unknown>"
+        _trace_tool(runtime, name, {}, "malformed arguments", _tool_t0, by=by,
+                    asked={}, raw_args=args_raw, ran=False)
+        return name, f"ERROR: tool '{name}' received malformed arguments."
+    # As asked, before the handler normalises anything (_handle_create_alarm
+    # rewrites times and targets) — the eval scores the model on these.
+    # Only built inside a turn: outside one nothing is traced, and a large
+    # payload need not be serialised just to be thrown away.
+    asked = _cap_strings(_json_safe(args)) if _TURN_TRACE.get() is not None else None
+    hinted = bool(hint) and by == "model" and name == hint
     handler = runtime.tool_handlers.get(name)
     if handler is None:
+        _trace_tool(runtime, name or "<unknown>", args, "not registered", _tool_t0,
+                    by=by, asked=asked, ran=False, hinted=hinted)
         return name, f"ERROR: tool '{name}' is not registered."
-    _tool_t0 = time.perf_counter()
     try:
         result = await handler(args)
     except Exception:
         logger.exception("Tool %s raised", name)
-        _trace_tool(runtime, name, args, "ERROR", _tool_t0)
+        _trace_tool(runtime, name, args, "ERROR", _tool_t0, by=by, asked=asked,
+                    hinted=hinted)
         return name, f"ERROR: tool '{name}' failed unexpectedly."
     result = str(result)
-    _trace_tool(runtime, name, args, None, _tool_t0)
+    # Most handlers report failure by RETURNING "ERROR: …" (an unknown
+    # camera, history not configured), not by raising: not ok either. A
+    # create that answers with a question ("Which camera should I watch?")
+    # created nothing — the POST routes treat that reply as a failure too.
+    failed = result.lstrip().startswith("ERROR") or (
+        name.startswith("create_") and result.rstrip().endswith("?"))
+    _trace_tool(runtime, name, args, None, _tool_t0, by=by, asked=asked, hinted=hinted,
+                failed=failed)
+    # The last look, for a dispute ("there should be more than that"): the
+    # same call is made again and answered from its result, with no model.
+    if not failed and name in ("detect_objects", "describe_camera", "camera_snapshot"):
+        runtime.last_look = {"tool": name, "args": dict(args), "at": time.time()}
     if len(result) > 1200:
         result = result[:1200] + " …(truncated)"
     return name, result
 
 
-def _trace_tool(runtime, name: str, args: dict, note: str | None, t0: float) -> None:
-    """Append one tool execution to the current turn's pipeline trace."""
-    trace = getattr(runtime, "last_turn_trace", None)
+def _cap_strings(value: Any, limit: int = _TRACE_ARG_CHARS,
+                 items: int = _TRACE_ARG_ITEMS) -> Any:
+    """``value`` bounded for the trace: every string cut to ``limit``
+    characters (a cut one ends in "…"), every list and object to
+    ``items`` entries (a cut list ends in an "…(+N more)" marker)."""
+    if isinstance(value, str):
+        return value if len(value) <= limit else value[:limit] + "…"
+    if isinstance(value, dict):
+        kept = list(value.items())[:items]
+        out = {k: _cap_strings(v, limit, items) for k, v in kept}
+        if len(value) > items:
+            out["…"] = f"+{len(value) - items} more"
+        return out
+    if isinstance(value, list):
+        out = [_cap_strings(v, limit, items) for v in value[:items]]
+        if len(value) > items:
+            out.append(f"…(+{len(value) - items} more)")
+        return out
+    return value
+
+
+def _json_safe(value: Any) -> Any:
+    """A JSON-serialisable copy of tool arguments (they go out on /ask)."""
+    try:
+        return json.loads(json.dumps(value, default=str))
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _trace_tool(runtime, name: str, args: dict, note: str | None, t0: float, *,
+                by: str = "model", asked: Any = None, raw_args: Any = None,
+                ran: bool = True, hinted: bool = False, failed: bool = False) -> None:
+    """Append one tool execution to the current turn's pipeline trace.
+
+    Each tool step carries ``args`` (as the chooser asked, before the
+    handler touched them) and ``by`` (model / router / forced); a model
+    call to the tool a tier-1 hint named also carries ``hinted``.
+    """
+    trace = _TURN_TRACE.get()
     if trace is None:
-        return
-    detail = str(args.get("camera_id") or args.get("camera") or "").strip()
-    if name == "describe_camera":
-        # Name the path that actually answered: full vision, or the honest
-        # detector fallback (tools.last_vision_error is set per describe).
-        err = getattr(runtime.tools, "last_vision_error", None)
-        detail = (detail + (" · detector-fallback" if err else " · vlm")).strip(" ·")
+        return            # not inside a turn: nothing to attribute it to
+    # The camera as ASKED, like ``args`` below — a handler that resolves
+    # an alias in place must not make one step name two cameras.
+    source = asked if isinstance(asked, dict) else args
+    detail = str(source.get("camera_id") or source.get("camera") or "").strip()
+    if by == "forced":
+        detail = (detail + " · forced").strip(" ·")
+    if name == "describe_camera" and ran and note != "ERROR" and not failed:
+        # Name the path that actually answered (vlm / detector-fallback /
+        # no-frame), from THIS task's describe — never the site-wide
+        # last_vision_error a concurrent turn can set. Only for a call that
+        # completed: one that never ran or raised looked at nothing.
+        path = getattr(runtime.tools, "describe_path", None)
+        if path:
+            detail = (detail + f" · {path}").strip(" ·")
     if note:
         detail = (detail + f" · {note}").strip(" ·")
-    trace.append({"step": name, "detail": detail,
-                  "ms": int((time.perf_counter() - t0) * 1000)})
+    step: dict[str, Any] = {"step": name, "detail": detail, "by": by,
+                            "args": asked if asked is not None else {},
+                            # Did the call run and complete? Structured, so an
+                            # eval need not parse ``detail`` for "ERROR" or
+                            # infer "never ran" from a missing ``ms``.
+                            "ok": ran and note != "ERROR" and not failed}
+    if hinted:
+        step["hinted"] = True
+    if ran:
+        step["ms"] = int((time.perf_counter() - t0) * 1000)
+    # else no "ms": nothing ran, and a 0 ms entry would drag this tool's
+    # median down in fillers.record_stages.
+    if raw_args is not None:
+        # The JSON as sent; a value that arrived already parsed is dumped
+        # back to JSON (not a Python repr) so an eval can re-parse it.
+        if not isinstance(raw_args, str):
+            try:
+                raw_args = json.dumps(raw_args)
+            except (TypeError, ValueError):
+                raw_args = str(raw_args)
+        step["raw_args"] = _cap_strings(raw_args)
+    trace.append(step)
 
 
-# Words that mean "this is a question about a camera / the scene". If the
-# model answers an utterance containing any of these WITHOUT calling a tool,
-# we force a grounding detection (see _run_conversation_turn). Positive
-# matching (vs a chit-chat blocklist) avoids force-grounding closings like
-# "thanks, that's all" while still catching "is anyone there?".
-_CAMERA_WORDS: tuple[str, ...] = (
-    "see", "look", "watch", "watching", "camera", "cam",
-    "anyone", "anybody", "someone", "somebody", "nobody",
-    "person", "people", "man", "woman", "kid", "child", "face",
-    "door", "porch", "outside", "yard", "driveway", "garage", "street",
-    # scene locations
-    "gate", "window", "fence", "entrance", "hallway", "room", "kitchen",
-    "lot", "lobby", "stairs", "balcony",
-    "happening", "detect", "count", "package", "parcel", "delivery",
-    "dog", "dogs", "cat", "cats", "animal", "car", "cars", "truck", "trucks",
-    "vehicle", "bike", "people", "persons",
-    # visual-attribute verbs ("what is he wearing/doing?") — these are why a
-    # caption/VQA question still triggers grounding instead of a fabrication
-    "wearing", "wear", "dressed", "holding", "carrying", "doing",
-    "visible", "present", "moving", "movement", "motion",
-)
-_CAMERA_RE = re.compile(r"\b(" + "|".join(_CAMERA_WORDS) + r")\b", re.IGNORECASE)
+def _user_turn(runtime: "CameraAgentRuntime", user_text: str, *,
+               hint: str | None = None) -> str:
+    """The user message as the model sees it: the per-turn clock, the
+    router's hint when there is one (router.py, Tier 1), then the user's
+    own words.
+
+    The clock is NOT a system message after the history. Ollama's chat
+    path collects every system-role message into the one leading system
+    block (template.go ``collate``), which the Qwen and Llama templates
+    render BEFORE the tool schemas — so a "trailing" system clock still
+    lands ahead of ~3.5k cached tokens and re-prefills the prefix every
+    minute. Several OpenAI-compatible servers (Gemma, Mistral templates)
+    reject a system turn after the first outright. The user turn is the
+    one message that is rendered last, wherever it is sent; the clock
+    rides in it. History keeps the user's bare words (what the UI shows),
+    so only that short tail re-prefills, never the system + tools.
+    """
+    head = f"[{runtime._clock_line()}]"
+    if hint:
+        head += f"\n\n[{hint}]"
+    return f"{head}\n\n{user_text}"
 
 
-def _looks_like_camera_question(text: str) -> bool:
-    """True if the utterance is about a camera / the scene. Used only to
-    decide whether to force a grounding detection when the model failed to
-    call a tool itself — so a weak model can't fabricate "I see a dog"."""
-    return bool(_CAMERA_RE.search(text or ""))
+def _prefix_fingerprint(system_prompt: str, tools: Any) -> tuple[str, str]:
+    """Short hashes of the two parts of the prompt Ollama caches as one
+    prefix: the system text and the tool schemas rendered after it. Equal
+    tuples mean a cached prefill is reused; a differing part names what
+    changed."""
+    import hashlib
+    sys_h = hashlib.sha1((system_prompt or "").encode("utf-8")).hexdigest()[:10]
+    tools_h = hashlib.sha1(json.dumps(tools or [], sort_keys=True).encode("utf-8")).hexdigest()[:10]
+    return sys_h, tools_h
 
 
-# Presence/count questions about concrete objects ("is anyone there?",
-# "how many cars?", "any people?") must be answered by the object DETECTOR
-# (yolov8), NOT a scene caption — BLIP describes the scene ("a table with a
-# laptop") but can't reliably answer "is there a person?". Open "what's
-# there / describe it" questions, by contrast, are best served by the BLIP
-# caption. _pick_forced_tool routes the forced-grounding call accordingly.
-_DETECTION_WORDS: tuple[str, ...] = (
-    "person", "people", "anyone", "anybody", "someone", "somebody",
-    "nobody", "man", "woman", "kid", "child", "face", "count", "many",
-    "car", "cars", "truck", "vehicle", "bike", "bicycle", "motorcycle",
-    "dog", "cat", "animal", "package", "parcel", "delivery",
-)
-_DETECTION_RE = re.compile(r"\b(" + "|".join(_DETECTION_WORDS) + r")\b", re.IGNORECASE)
-
-# Attribute / activity / appearance questions ("what is he WEARING?", "what's
-# he DOING?", "DESCRIBE the scene", "what's HAPPENING?") want a scene
-# description (BLIP caption, or a VQA model), NOT the object detector — even
-# though they usually also contain an object noun like "man" that would
-# otherwise match _DETECTION_RE. These take precedence (test-report S-4/L-3/V-3).
-_DESCRIBE_WORDS: tuple[str, ...] = (
-    "describe", "description", "detail", "details", "wearing", "wear", "dressed",
-    "doing", "holding", "carrying", "looks like", "look like", "looking",
-    "appearance", "happening", "going on", "scene", "activity", "colour", "color",
-)
-_DESCRIBE_RE = re.compile(r"\b(" + "|".join(_DESCRIBE_WORDS) + r")\b", re.IGNORECASE)
-
-# Presence / count phrasing ("how many…", "are there any…", "is there a…",
-# "count…") → the detector, even when the object noun is a plural the detection
-# vocab doesn't list ("dogs"), or absent entirely ("are there any?").
-_COUNT_RE = re.compile(
-    r"\b(how many|how much|are there|is there|number of|count|anyone|anybody|"
-    r"\bany\b)\b", re.IGNORECASE)
-
-
-def _pick_forced_tool(text: str) -> str:
-    """Choose the forced-grounding tool by question type. Description/attribute/
-    activity questions → ``describe_camera`` (BLIP caption / VQA, which falls
-    back to the detector if no caption adapter is registered). Object presence/
-    count questions → ``detect_objects`` (yolov8). Describe takes precedence so
-    'what is the man wearing?' isn't routed to the detector just because it
-    contains 'man'."""
-    t = text or ""
-    if _DESCRIBE_RE.search(t):
-        return "describe_camera"
-    if _COUNT_RE.search(t) or _DETECTION_RE.search(t):
-        return "detect_objects"
-    return "describe_camera"
-
-
-# Past-tense / history phrasing. These questions are about what HAPPENED, not
-# what the current frame shows — so forced grounding must route them to the
-# HISTORY tools, never the live detector. The field bug this fixes: "did you
-# see a person today?" contains "person", _pick_forced_tool sent it to
-# detect_objects, and the user was told about a potted plant currently in view.
-_PAST_RE = re.compile(
-    r"\b(did|didn't|was|were|has|have|had)\b.{0,60}?"
-    r"\b(come|came|been|seen|see|visit|visited|enter|entered|arrive|arrived|"
-    r"pass|passed|show(?:ed)?\s+up|stop(?:ped)?\s+by|there)\b"
-    r"|\b(earlier|yesterday|last\s+night|this\s+morning|this\s+afternoon|"
-    r"this\s+evening|today|tonight|ago|so\s+far)\b"
-    r"|\b(last|past)\s+\d+\s*(minutes?|mins?|hours?|hrs?)\b"
-    r"|\b(in|over|during)\s+the\s+(last|past)\b"
-    r"|\b(recording|recordings|footage|history)\b",
-    re.IGNORECASE,
-)
-
-# "last/past 30 minutes", "last 2 hours" → a relative look-back in seconds.
-_WINDOW_RE = re.compile(
-    r"\b(?:last|past)\s+(\d+)\s*(minutes?|mins?|min|hours?|hrs?|hr)\b"
-    r"|\b(\d+)\s*(minutes?|mins?|min|hours?|hrs?|hr)\s+ago\b",
-    re.IGNORECASE,
-)
-
-# Detection noun → the events-store label search_history stores visits under.
-# Person-ish nouns collapse to "person"; unknown nouns fall back to "person"
-# (the store's own default) rather than guessing a label it never indexes.
-_HISTORY_LABELS: dict[str, str] = {
-    "car": "car", "cars": "car", "vehicle": "car", "truck": "truck",
-    "bike": "bicycle", "bicycle": "bicycle", "motorcycle": "motorcycle",
-    "dog": "dog", "cat": "cat",
-}
-
-
-def _is_past_question(text: str) -> bool:
-    """True when the utterance asks about history, not the current scene.
-
-    An absolute clock range ("from 2pm to 3pm") counts as history even
-    without past-tense wording — background-task queries are phrased that
-    way ("check the red truck on all cameras from 2pm to 3pm")."""
-    t = text or ""
-    return bool(_PAST_RE.search(t) or _CLOCK_RANGE_RE.search(t))
-
-
-# Absolute clock ranges: "from 2pm to 3pm", "between 1 and 2pm",
-# "13:00-14:00", "2 pm till 3 pm". The first time may omit its am/pm and
-# inherit it from the second ("between 1 and 2pm" → 13:00-14:00).
-_CLOCK_RANGE_RE = re.compile(
-    r"\b(?:from|between)?\s*"
-    r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*"
-    r"(?:to|till|until|and|[-–])\s*"
-    r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b",
-    re.IGNORECASE,
-)
-
-
-def _window_from_text(text: str, now=None
-                      ) -> tuple[str | None, str | None, int]:
-    """Best-effort time window from the utterance.
-
-    Returns ``(start_iso, end_iso, window_seconds)`` — ISO times (with tz
-    offset, as search_history requires) or None for an open bound, plus the
-    equivalent relative seconds for recent_events. All computed from the
-    LOCAL clock (the container's TZ), matching the clock line in the system
-    prompt."""
-    from datetime import datetime, timedelta
-
-    t = text or ""
-    now = now or datetime.now().astimezone()
-
-    def _hhmm(h, mnt, ampm):
-        h = int(h) % 24
-        if ampm:
-            h = h % 12 + (12 if ampm.lower() == "pm" else 0)
-        return now.replace(hour=h, minute=int(mnt or 0), second=0,
-                           microsecond=0)
-
-    # "from 2pm to 3pm" — an absolute range TODAY. The field bug this
-    # closes: these were the exact phrasings background tasks are given
-    # ("check the red truck on all cameras from 2pm to 3pm"), and the
-    # forced-grounding fallback used to drop the window entirely.
-    m = _CLOCK_RANGE_RE.search(t)
-    if m:
-        h1, m1, ap1, h2, m2, ap2 = m.groups()
-        start = _hhmm(h1, m1, ap1 or ap2)   # "between 1 and 2pm" → both pm
-        end = _hhmm(h2, m2, ap2)
-        if end <= start:                     # "11pm to 1am" → wraps midnight
-            end += timedelta(days=1)
-        return (start.isoformat(timespec="seconds"),
-                end.isoformat(timespec="seconds"),
-                max(60, int((now - start).total_seconds())))
-    m = _WINDOW_RE.search(t)
-    if m:
-        qty = int(m.group(1) or m.group(3))
-        unit = (m.group(2) or m.group(4) or "").lower()
-        secs = qty * (3600 if unit.startswith(("hour", "hr")) else 60)
-        return ((now - timedelta(seconds=secs)).isoformat(timespec="seconds"),
-                None, secs)
-    lowered = t.lower()
-    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    if "yesterday" in lowered or "last night" in lowered:
-        start = midnight - timedelta(days=1)
-        return (start.isoformat(timespec="seconds"),
-                midnight.isoformat(timespec="seconds"),
-                int((now - start).total_seconds()))
-    if "today" in lowered or "this morning" in lowered or "tonight" in lowered \
-            or "this afternoon" in lowered or "this evening" in lowered:
-        return (midnight.isoformat(timespec="seconds"), None,
-                int((now - midnight).total_seconds()))
-    # No parseable window: open start for search_history; recent_events gets
-    # a generous hour so "did anyone come?" still looks back meaningfully.
-    return None, None, 3600
-
-
-def _pick_forced_call(
-    text: str, cam: str, advertised: set[str], now=None
-) -> tuple[str, dict[str, Any]]:
-    """Choose the forced-grounding (tool, arguments) — history-aware.
-
-    Past-tense questions go to search_history (durable events store) when it
-    is advertised, else recent_events (in-memory ring) — never to a live
-    detector, which can only describe the CURRENT frame. Present-tense
-    questions keep the _pick_forced_tool routing. Only advertised tools are
-    ever picked, so forced grounding can't call something the operator's
-    enabled_tools hides from the model."""
-    if _is_past_question(text):
-        start_iso, end_iso, window_secs = _window_from_text(text, now=now)
-        if "search_history" in advertised:
-            args: dict[str, Any] = {"camera_id": cam}
-            m = _DETECTION_RE.search(text or "")
-            noun = (m.group(0).lower() if m else "")
-            args["label"] = _HISTORY_LABELS.get(noun, "person")
-            if start_iso:
-                args["start_time"] = start_iso
-            if end_iso:
-                args["end_time"] = end_iso
-            return "search_history", args
-        if "recent_events" in advertised:
-            return "recent_events", {
-                "camera_id": cam, "window_seconds": window_secs,
-            }
-        # No history tool advertised: fall through to the live routing —
-        # a wrong-tense answer beats no grounding at all, and the reply
-        # honestly describes what the tool actually looked at.
-    name = _pick_forced_tool(text)
-    if name not in advertised and "describe_camera" in advertised:
-        name = "describe_camera"
-    return name, {"camera_id": cam}
-
-
-# Questions about the camera ROSTER / system config ("how many cameras are
-# configured?", "which cameras do you have?", "list the cameras") are about
-# the SYSTEM, not what's visible — the model answers them correctly from its
-# prompt context, so forced grounding must NOT override them with an
-# (irrelevant) scene detection. Distinguished from scene questions by
-# "camera/cam" being the noun being counted/listed, not an object inside a
-# camera's view ("how many PEOPLE on the camera" stays a scene question).
-_CONFIG_RE = re.compile(
-    r"\b(how many|number of|which|what|list(?:\s+\w+){0,3})\s+(cameras?|cams?)\b"
-    r"|\b(cameras?|cams?)\s+(are|do you|configured|connected|available|set up|online|exist)\b",
-    re.IGNORECASE,
-)
-
-
-def _is_config_question(text: str) -> bool:
-    """True for questions about the camera roster/config (how many/which
-    cameras exist) rather than what's visible in one. Forced grounding skips
-    these so a correct context answer isn't clobbered by a scene detection."""
-    return bool(_CONFIG_RE.search(text or ""))
-
-
-def _pick_camera(text: str, cameras: list[str], preferred: str | None = None) -> str:
-    """Best-effort: which camera did the user mean? An explicit name in the
-    utterance wins; otherwise fall back to the UI-selected ``preferred``
-    camera, then to the first configured camera."""
-    t = text.lower().replace("-", " ")
-    compact = t.replace(" ", "")
-    for cam in cameras:
-        if cam.lower() in compact:  # "cam1", "camera1"
-            return cam
-    words = {"one": "1", "two": "2", "three": "3", "four": "4",
-             "first": "1", "second": "2", "third": "3"}
-    for word, n in words.items():
-        if re.search(rf"\b{word}\b", t) and f"cam{n}" in cameras:
-            return f"cam{n}"
-    for n in ("1", "2", "3", "4"):
-        if re.search(rf"\b{n}\b", t) and f"cam{n}" in cameras:
-            return f"cam{n}"
-    if preferred and preferred in cameras:
-        return preferred
-    return cameras[0]
+def _note_prefix_cache(runtime: Any, system_prompt: str, tools: Any,
+                       trace: list[dict[str, Any]] | None) -> None:
+    """Say so when this turn's prefix is not the one the LLM was warmed
+    with. The prefill is the whole cost of a turn on a CPU host (16 tokens
+    a second idle, under 5 beside twenty cameras), and a miss used to look
+    exactly like a slow model."""
+    warm = getattr(runtime, "_warm_prefix", None)
+    if not warm:
+        return
+    now = _prefix_fingerprint(system_prompt, tools)
+    if now == warm:
+        return
+    changed = [name for name, a, b in (("system prompt", now[0], warm[0]),
+                                       ("tool schemas", now[1], warm[1])) if a != b]
+    what = " and ".join(changed)
+    logger.warning(
+        "converse: the %s differ from the pre-warmed prefix — Ollama re-prefills the "
+        "whole system+tools prefix for this turn (minutes on a CPU host). A "
+        "per-caller camera scope or a tier-specific toolset does this; the "
+        "selected camera, the router hint and the clock already ride in the "
+        "user turn.", what)
+    if trace is not None:
+        trace.append({"step": "prefix", "detail": f"changed: {what}", "ms": 0})
 
 
 class LLMTurnError(RuntimeError):
@@ -6724,7 +8671,7 @@ async def _chat_or_explain(runtime: "CameraAgentRuntime", **kw: Any) -> dict[str
              if runtime.cfg.llm_provider.strip().lower() == "openai"
              else runtime.cfg.ollama_url)
     try:
-        response = await runtime.ollama.chat(**kw)
+        response, where = await _chat_with_fallback(runtime, where, **kw)
     except httpx.HTTPStatusError as exc:
         # The body is the diagnosis ("model X not found, try pulling it
         # first") — keep it. Cap it: error pages can be arbitrarily long.
@@ -6753,6 +8700,104 @@ async def _chat_or_explain(runtime: "CameraAgentRuntime", **kw: Any) -> dict[str
     return response
 
 
+async def _chat_within_window(
+    runtime: "CameraAgentRuntime",
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None,
+    *,
+    history_len: int,
+    user_text: str,
+    hint: str | None,
+    trace: list[dict[str, Any]],
+) -> tuple[dict[str, Any], list[dict[str, Any]] | None]:
+    """One LLM iteration that survives the runtime refusing the prompt as
+    too long (``context_length_exceeded``, which a fixed-window runtime
+    answers instead of truncating): a tool result mid-turn can push a
+    prompt that fitted over the edge. The history goes first, then all
+    but the three best-ranked tools (prompt_budget.shrink_for_retry);
+    ``messages`` is shrunk in place so the rest of the turn sees it.
+    Returns the response and the tools the turn should carry on with."""
+    for attempt in range(3):
+        try:
+            response = await _chat_or_explain(
+                runtime, messages=messages, tools=tools,
+                temperature=runtime.cfg.llm_temperature,
+                max_tokens=runtime.cfg.llm_max_tokens)
+            return response, tools
+        except LLMTurnError as exc:
+            if "context_length_exceeded" not in str(exc) or attempt == 2:
+                raise
+            shrunk = _prompt_budget.shrink_for_retry(
+                messages, tools, history_len=history_len, user_text=user_text, hint=hint)
+            if shrunk is None:
+                raise
+            new_messages, tools, what = shrunk
+            messages[:] = new_messages
+            history_len = 0
+            trace.append({"step": "prompt", "detail": f"too long for the window; {what}", "ms": 0})
+            logger.warning("converse: the prompt did not fit the LLM's window; %s and retrying", what)
+    raise AssertionError("unreachable")
+
+
+#: How often, while on the fallback, the primary LLM is tried again.
+LLM_PROBE_INTERVAL_S = 60.0
+
+
+def _is_llm_outage(exc: BaseException) -> bool:
+    """The failures that mean "the brain is not there", as opposed to a bad
+    request: no connection, a timeout, or a 5xx (the adapter answers 503
+    model_not_loaded while its engine comes up)."""
+    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.TimeoutException)):
+        return True
+    return isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code >= 500
+
+
+async def _chat_with_fallback(runtime: "CameraAgentRuntime", where: str, **kw: Any) -> tuple[dict[str, Any], str]:
+    """One LLM call on the primary, or on the fallback Ollama when the
+    primary is away: returns (response, the URL that answered).
+
+    The primary is tried first unless we are already on the fallback and
+    the last probe was under LLM_PROBE_INTERVAL_S ago — then the fallback
+    answers directly, and the primary is tried again on the next probe.
+    An outage on the primary (connection refused, timeout, 5xx) with a
+    fallback configured marks the episode (health DEGRADED, one spoken
+    notice) and the same request goes to the fallback; its errors, and
+    every non-outage error of the primary, propagate as before."""
+    fb = getattr(runtime, "llm_fallback", None)
+    if fb is None:
+        return await runtime.ollama.chat(**kw), where
+    now = time.monotonic()
+    fb_where = f"{runtime.cfg.llm_fallback_url} ({runtime.cfg.llm_fallback_model}, backup)"
+    if runtime.llm_degraded and now - runtime._llm_probe_at < LLM_PROBE_INTERVAL_S:
+        return await fb.chat(**kw), fb_where
+    try:
+        response = await runtime.ollama.chat(**kw)
+    except Exception as exc:  # noqa: BLE001 — classified below
+        if not _is_llm_outage(exc):
+            raise
+        runtime._llm_probe_at = now
+        if not runtime.llm_degraded:
+            runtime.llm_degraded = True
+            runtime.llm_degraded_since = time.time()
+            runtime._llm_notice_pending = True
+            logger.warning("LLM at %s unreachable (%s: %s); answering on the backup model at %s "
+                           "until it is back", where, type(exc).__name__, str(exc)[:120], fb_where)
+        return await fb.chat(**kw), fb_where
+    if runtime.llm_degraded:
+        logger.info("LLM at %s is back; leaving the backup model", where)
+        runtime.llm_degraded = False
+        runtime.llm_degraded_since = None
+    return response, where
+
+
+def _with_llm_notice(runtime: "CameraAgentRuntime", reply: str) -> str:
+    """The once-per-episode spoken notice that the backup model answered."""
+    if getattr(runtime, "_llm_notice_pending", False) and getattr(runtime, "llm_degraded", False):
+        runtime._llm_notice_pending = False
+        return f"I'm on my slower backup model for now. {reply}".strip()
+    return reply
+
+
 async def _run_conversation_turn(
     runtime: "CameraAgentRuntime",
     history: list[dict[str, str]],
@@ -6761,9 +8806,13 @@ async def _run_conversation_turn(
     max_iterations: int = 4,
     preferred_camera: str | None = None,
     tool_definitions: list[dict[str, Any]] | None = None,
+    speak_progress: str | None = None,
+    trace: list[dict[str, Any]] | None = None,
 ) -> str:
     """Run the tool-calling LLM loop for one user utterance and return the
-    final spoken reply. ``history`` holds prior user/assistant text turns
+    final spoken reply. ``speak_progress``: "voice" / "text" for an
+    interactive turn (the agent may think aloud — fillers.py — before a
+    slow tool; audio only for voice), None for background work. ``history`` holds prior user/assistant text turns
     (tool internals are kept turn-local, not persisted).
 
     Anti-fabrication guard: small CPU models sometimes answer a camera
@@ -6772,39 +8821,137 @@ async def _run_conversation_turn(
     and make the model answer from that result — so a reply about a camera
     is always grounded in an actual frame, never imagined.
     """
+    # Per-turn pipeline trace: ordered (step, detail, ms) of everything this
+    # turn executed — LLM iterations, every tool, forced groundings — so the
+    # UI can show "llm → describe_camera → llm" and a slow or degraded turn
+    # explains itself. The caller may pass its own list (the /ask and
+    # /converse endpoints do, and read THAT list back — never the shared
+    # runtime.last_turn_trace, which a background turn can replace).
+    if trace is None:
+        trace = []
+    runtime.last_turn_trace = trace
+    token = _TURN_TRACE.set(trace)
+    _turn_t0 = time.perf_counter()
+    if speak_progress is not None and getattr(runtime, "status_client", None) is not None:
+        # A person is talking: core holds its enrichment backfill so the
+        # answer never queues behind history on the shared adapters (and
+        # the one NPU). Fire and forget; rate-limited in the client.
+        try:
+            asyncio.get_running_loop().create_task(runtime.status_client.beacon())
+        except RuntimeError:
+            pass
+    try:
+        return await _conversation_turn_body(
+            runtime, history, user_text, trace,
+            max_iterations=max_iterations, preferred_camera=preferred_camera,
+            tool_definitions=tool_definitions, speak_progress=speak_progress)
+    finally:
+        _TURN_TRACE.reset(token)
+        stats = getattr(runtime, "turn_stats", None)
+        if stats is not None:
+            try:
+                stats.record(trace, int((time.perf_counter() - _turn_t0) * 1000), speak_progress)
+            except Exception:  # noqa: BLE001 — bookkeeping never fails a turn
+                logger.debug("turn stats: record failed", exc_info=True)
+
+
+async def _conversation_turn_body(
+    runtime: CameraAgentRuntime,
+    history: list[dict[str, str]],
+    user_text: str,
+    trace: list[dict[str, Any]],
+    *,
+    max_iterations: int,
+    preferred_camera: str | None,
+    tool_definitions: list[dict[str, Any]] | None,
+    speak_progress: str | None,
+) -> str:
+    """The turn itself; ``_run_conversation_turn`` owns its trace."""
     # Roster/config questions ("how many cameras are configured?") are answered
     # deterministically from the config — the model can't reliably count them and
     # tends to narrate a phantom tool. Short-circuit BEFORE the LLM loop so these
     # are instant: previously they ran the full tool loop (tens of seconds on a
     # CPU model) only to have the roster answer override the result at the end.
+    runtime.last_turn_closed = False
     if _is_config_question(user_text):
-        return _roster_answer(runtime.cfg.cameras)
+        trace.append({"step": "reply", "detail": "roster"})
+        return _roster_answer(runtime.visible_cameras())
+    # The user is done: a goodbye, no model. ("I don't want to talk more"
+    # drew "Understood. I will stop monitoring now." from the model — an
+    # action it never took.)
+    if _router_is_closing(user_text):
+        trace.append({"step": "reply", "detail": "closing"})
+        runtime.last_turn_closed = True
+        return "Alright, goodbye. I'll be here when you need me."
+    # The user doubts the last look: look again, the same way, and answer
+    # from what the look says — never from the user's number. (Told "there
+    # are three chairs", the model called the detector, was told one, and
+    # replied "I see three chairs".)
+    look = getattr(runtime, "last_look", None)
+    if look and _router_is_dispute(user_text) and time.time() - float(look.get("at") or 0) < LAST_LOOK_TTL_S:
+        call = {"id": "recheck-0", "type": "function",
+                "function": {"name": look["tool"], "arguments": dict(look["args"])}}
+        name, result = await _invoke_tool(runtime, call, by="recheck")
+        said = _humanize_for_speech(result, runtime.visible_cameras()).rstrip(".")
+        hedge = (" The detector can miss things that are partly hidden or overlapping."
+                 if name == "detect_objects" else "")
+        trace.append({"step": "reply", "detail": "recheck"})
+        logger.info("converse: RECHECK %s %s -> %s", name, look["args"], result[:120])
+        return f"Looking again: {said}.{hedge}"
 
+    # No clock in the system prompt: Ollama renders the tool schemas right
+    # after it, and a line that changes every minute in front of ~3.5k
+    # tokens of schemas re-prefilled the whole prefix on every turn — the
+    # 17 s "iter 1" of the field trace. The clock rides in the USER turn
+    # (see _user_turn), the last thing in the prompt.
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": runtime.build_system_prompt()}
+        {"role": "system", "content": runtime.build_system_prompt(clock=False)}
     ]
     tools = tool_definitions if tool_definitions is not None else runtime.tool_definitions
-    cameras = [cam.camera_id for cam in runtime.cfg.cameras]
+    cameras = [cam.camera_id for cam in runtime.visible_cameras()]
     # UI-selected camera: when the user doesn't name one, bias the model
-    # toward the camera the operator picked in the dropdown.
+    # toward the camera the operator picked in the dropdown. In the USER
+    # turn with the clock, never a second system message: Ollama collates
+    # every system message into the one leading block, BEFORE the tool
+    # schemas, so this one line in front of ~3.5k cached tokens re-prefilled
+    # the whole prefix on every turn that had a camera selected — measured:
+    # 1,267 of 4,958 tokens reused, 288 s on a CPU host.
+    turn_hints: list[str] = []
     if preferred_camera and preferred_camera in cameras:
-        messages.append({
-            "role": "system",
-            "content": (
-                f"The user is currently viewing camera '{preferred_camera}'. "
-                f"If they ask about a camera without naming one, assume they "
-                f"mean '{preferred_camera}'."
-            ),
-        })
+        turn_hints.append(
+            f"The user is currently viewing camera '{preferred_camera}'. If they "
+            f"ask about a camera without naming one, assume they mean "
+            f"'{preferred_camera}'.")
     messages.extend(history)
-    messages.append({"role": "user", "content": user_text})
+    messages.append({"role": "user", "content": _user_turn(
+        runtime, user_text, hint=" ".join(turn_hints) or None)})
+    # The question itself, for tools that decide by it (face matching only
+    # when somebody asked WHO — tools.search_history). Task-local: a
+    # background task's or a scheduled report's turn does not overwrite
+    # the one a person is waiting on.
+    runtime.tools.current_question = user_text
 
-    # Per-turn pipeline trace: ordered (step, detail, ms) of everything this
-    # turn executed — LLM iterations, every tool, forced groundings — so the
-    # UI can show "llm → describe_camera → llm" and a slow or degraded turn
-    # explains itself. Overwritten each turn (turns are serialized).
-    trace: list[dict[str, Any]] = []
-    runtime.last_turn_trace = trace
+    thinking = getattr(runtime, "thinking", None)
+    if thinking is not None:
+        thinking.new_turn()
+
+    def _think_aloud(call: dict[str, Any], model_line: str) -> None:
+        """Say what the first slow tool is about to do — in parallel with it."""
+        if thinking is None or not speak_progress:
+            return
+        func = call.get("function") or {}
+        name = str(func.get("name") or "")
+        args = _parse_tool_args(func.get("arguments"))
+        if args is _MALFORMED:
+            return        # the call will fail; say nothing about running it
+        try:
+            line = thinking.line_for(name, args, cameras=runtime.visible_cameras(), model_line=model_line)
+        except Exception:  # noqa: BLE001
+            line = None
+        if line:
+            logger.info("thinking aloud (%s): %r", name, line)
+            asyncio.create_task(runtime.say_working(line, voice=(speak_progress == "voice")),
+                                name="thinking-aloud")
 
     final = ""
     grounded = False   # did any tool actually run this turn?
@@ -6814,112 +8961,249 @@ async def _run_conversation_turn(
     #                        the model returns empty content on the compose turn
     #                        (small/thinking models sometimes do), so the user
     #                        gets the real detection/caption instead of "Sorry".
-    for iteration in range(max_iterations):
-        _llm_t0 = time.perf_counter()
-        response = await _chat_or_explain(
-            runtime,
-            messages=messages,
-            tools=tools,
-            temperature=runtime.cfg.llm_temperature,
-            max_tokens=runtime.cfg.llm_max_tokens,
-        )
-        trace.append({"step": "llm", "detail": f"iter {iteration + 1}",
-                      "ms": int((time.perf_counter() - _llm_t0) * 1000)})
-        message = response.get("message") or {}
-        tool_calls = message.get("tool_calls") or []
-        content = (message.get("content") or "").strip()
-        logger.info(
-            "converse: LLM iter %d content=%r tool_calls=%d",
-            iteration, content[:120], len(tool_calls),
-        )
+    # ── The router: decide before the model does (router.py) ─────────
+    # Tier 0 — every slot resolves: run the tool now and ask the model only
+    # to SAY the answer, with a ~200-token compose prompt and no tools.
+    # That skips the tool-calling iteration entirely (the 17 s "iter 1"
+    # of the field trace). Tier 1 — a likely tool but a missing slot: the
+    # full prompt goes out UNCHANGED (the prefix cache holds) with one
+    # line in the user turn. Tier 2 — the loop below, as is.
+    import router as _router
 
-        if tool_calls:
-            grounded = True
-            messages.append({
-                "role": "assistant", "content": content, "tool_calls": tool_calls,
-            })
-            for call in tool_calls:
-                name, result = await _invoke_tool(runtime, call)
-                logger.info("converse: tool %s -> %s", name, result[:120])
+    _advertised = {t["function"]["name"] for t in (tools or ())}
+    decision = _router.decide(
+        user_text, cameras=cameras, advertised=_advertised,
+        preferred=preferred_camera,
+        roles={c.camera_id: c.role for c in runtime.visible_cameras()},
+        tier0=bool(getattr(runtime.cfg, "router_tier0", True)),
+        hints=bool(getattr(runtime.cfg, "router_hints", True)),
+        last_kind=(getattr(runtime, "last_standing", None) or (None, None))[0],
+    )
+    trace.append({"step": "route", "detail": f"tier{decision.tier}"
+                  + (f" {decision.tool}" if decision.tool else "")
+                  + (f" hint={decision.hint}" if decision.hint else "")
+                  + (" ask" if decision.ask else ""), "ms": 0})
+    if decision.ask:
+        # No camera named, several to choose from, and a description of
+        # every one would be a caption per camera: ask, with the cameras
+        # by their locations. No model, no tool.
+        trace.append({"step": "reply", "detail": "router"})
+        return decision.ask
+    routed = decision.routed
+    small_talk = routed and decision.tool is None
+    direct_tool_reply = False
+    reasked = False
+    if small_talk:
+        # Small talk (router): the loop as usual, with NO tools, so the
+        # model cannot sweep the cameras on "thanks". A reply that claims
+        # a sighting anyway is a fabrication (nothing was looked at), and
+        # the answer to a goodbye is not a look: the model is asked once
+        # more, plainly, and failing that gets a fixed line. Measured:
+        # with the forced look kept, granite4:micro answered "thanks,
+        # that's all" with "I can't see right now" 5/5.
+        tools = None
+        routed = False
+    if routed:
+        call = {"id": "route-0", "type": "function",
+                "function": {"name": decision.tool, "arguments": dict(decision.args)}}
+        _think_aloud(call, "")
+        name, result = await _invoke_tool(runtime, call, by="router")
+        logger.info("converse: ROUTED %s %s -> %s", name, decision.args, result[:120])
+        grounded = True
+        tools_called += 1
+        last_tool_result = result or last_tool_result
+        if name in _DIRECT_SPEECH_TOOLS and result and not result.startswith("ERROR"):
+            # The tool already answered in a sentence ("Stopped and removed
+            # watch #1 'cars'."). Asking a model to restate it is only a
+            # chance to say the opposite — granite4:micro answered "I'm
+            # watching for cars" to that very result (Ventuno Q CPU eval,
+            # 2026-11-10), and cost 19 s doing it.
+            direct_tool_reply = True
+            final = result
+            trace.append({"step": "compose", "detail": "tier0 direct", "ms": 0})
+        else:
+            _llm_t0 = time.perf_counter()
+            response = await _chat_or_explain(
+                runtime,
+                messages=[
+                    {"role": "system", "content": runtime.build_compose_prompt()},
+                    *history,
+                    {"role": "user", "content": user_text},
+                    {"role": "assistant", "content": "", "tool_calls": [call]},
+                    {"role": "tool", "tool_call_id": "route-0", "name": name, "content": result},
+                ],
+                tools=None,
+                temperature=runtime.cfg.llm_temperature,
+                max_tokens=runtime.cfg.llm_max_tokens,
+            )
+            # Its own step name: fillers.py takes the median of "llm" to size
+            # the thinking-aloud wait, and a 1 s compose must not make a 17 s
+            # tool-calling iteration look short.
+            trace.append({"step": "compose", "detail": "tier0",
+                          "ms": int((time.perf_counter() - _llm_t0) * 1000)})
+            final = ((response.get("message") or {}).get("content") or "").strip()
+    elif decision.hint:
+        # In the user turn, next to the clock — the one message rendered
+        # last. Not a system message: Ollama would hoist it into the
+        # leading system block, ahead of the cached tool schemas.
+        assert messages[-1]["role"] == "user"
+        messages[-1] = {"role": "user", "content": _user_turn(
+            runtime, user_text,
+            hint=" ".join(turn_hints + [
+                f"This question most likely needs the {decision.hint} tool."]))}
+
+    # A window the runtime cannot grow (llm_window_tokens; the NPU bundle):
+    # send only the tool schemas this question is likely to need and the
+    # newest history, so the prompt and the answer fit. Decided AFTER the
+    # router so its hint is the first tool kept. Off (0), the prompt goes
+    # out whole and the Ollama prefix cache keeps working.
+    window = int(getattr(runtime.cfg, "llm_window_tokens", 0) or 0)
+    history_len = len(history)
+    if window and not routed:
+        fitted = _prompt_budget.fit(
+            system=messages[0]["content"], history=history,
+            user_turn=messages[-1]["content"], tools=tools, window=window,
+            max_tokens=runtime.cfg.llm_max_tokens, user_text=user_text,
+            hint=decision.hint)
+        if fitted.trimmed:
+            messages[:] = [messages[0], *fitted.history, messages[-1]]
+            if tools:
+                tools = fitted.tools
+            history_len = len(fitted.history)
+            detail = (f"window {window}: {len(fitted.tools)} of {len(tools or [])} tools, "
+                      f"{len(fitted.history)} of {len(history)} history, ~{fitted.tokens} tokens")
+            if fitted.dropped_tools:
+                detail += " (left out: " + ", ".join(fitted.dropped_tools) + ")"
+            trace.append({"step": "prompt", "detail": detail, "ms": 0})
+            logger.info("converse: prompt %s", detail)
+    elif not window:
+        _note_prefix_cache(runtime, messages[0]["content"], tools, trace)
+
+    if not routed:
+        for iteration in range(max_iterations):
+            _llm_t0 = time.perf_counter()
+            response, tools = await _chat_within_window(
+                runtime, messages, tools, history_len=history_len,
+                user_text=user_text, hint=decision.hint, trace=trace)
+            trace.append({"step": "llm", "detail": f"iter {iteration + 1}",
+                          "ms": int((time.perf_counter() - _llm_t0) * 1000)})
+            message = response.get("message") or {}
+            tool_calls = message.get("tool_calls") or []
+            content = (message.get("content") or "").strip()
+            logger.info(
+                "converse: LLM iter %d content=%r tool_calls=%d",
+                iteration, content[:120], len(tool_calls),
+            )
+
+            if tool_calls:
+                grounded = True
+                messages.append({
+                    "role": "assistant", "content": content, "tool_calls": tool_calls,
+                })
+                for call in tool_calls:
+                    _think_aloud(call, content)
+                    name, result = await _invoke_tool(runtime, call, hint=decision.hint)
+                    logger.info("converse: tool %s -> %s", name, result[:120])
+                    tools_called += 1
+                    last_tool_result = result or last_tool_result
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call.get("id", ""),
+                        "name": name,
+                        "content": result,
+                    })
+                continue
+
+            # No tool call. If the model tried to answer a camera question
+            # without looking — judged from EITHER the user's question or the
+            # model's own reply mentioning a camera/scene — force a grounding
+            # detection and re-ask. Checking the reply too catches cases where
+            # STT garbled the camera word (e.g. "what's on hammer 2") but the
+            # model still fabricated "camera 2 is ...". After pure small talk
+            # ("thanks", "hi, what can you do?") the reply must claim a
+            # sighting, not just mention cameras: small models answer "thanks"
+            # with "happy to help you monitor the cameras", and looking then
+            # turned a goodbye into "I can't see anything right now"
+            # (router._should_force_grounding; measured in MODELS_AND_LATENCY).
+            if small_talk and _should_force_grounding(user_text, content):
+                if not reasked:
+                    reasked = True
+                    messages.append({"role": "assistant", "content": content})
+                    messages.append({"role": "user", "content": (
+                        "That was only a greeting or a goodbye. Answer it in one "
+                        "short sentence and do not describe any camera.")})
+                    trace.append({"step": "reask", "detail": "small talk claimed a sighting"})
+                    continue
+                final = "Happy to help. Say the word when you want me to look at a camera."
+                break
+            if (
+                not grounded and not forced and cameras
+                and _should_force_grounding(user_text, content)
+            ):
+                forced = True
+                grounded = True
+                cam = _pick_camera(user_text, cameras, preferred_camera)
+                # Route to the detector for presence/count questions, to the
+                # BLIP caption for open "what's there?" questions, and — for
+                # PAST-TENSE questions — to the history tools (search_history /
+                # recent_events), never a live look. Small models often refuse
+                # or fabricate instead of calling a tool, so this forced path is
+                # what most camera questions actually hit — picking the RIGHT
+                # tool here is what makes "is there a person?" get a detector
+                # answer and "did you see a person today?" get the NVR's memory
+                # instead of whatever happens to be in the current frame.
+                tool_name, tool_args = _pick_forced_call(
+                    user_text, cam,
+                    {t["function"]["name"] for t in (tools or ())},
+                )
+                call = {
+                    "id": "forced-0", "type": "function",
+                    "function": {"name": tool_name, "arguments": tool_args},
+                }
+                _think_aloud(call, "")
+                name, result = await _invoke_tool(runtime, call, by="forced")
+                logger.info("converse: FORCED grounding (%s) on %s -> %s",
+                            tool_name, cam, result[:120])
                 tools_called += 1
                 last_tool_result = result or last_tool_result
+                messages.append({"role": "assistant", "content": "", "tool_calls": [call]})
                 messages.append({
-                    "role": "tool",
-                    "tool_call_id": call.get("id", ""),
-                    "name": name,
-                    "content": result,
+                    "role": "tool", "tool_call_id": "forced-0",
+                    "name": name, "content": result,
                 })
-            continue
+                continue
 
-        # No tool call. If the model tried to answer a camera question
-        # without looking — judged from EITHER the user's question or the
-        # model's own reply mentioning a camera/scene — force a grounding
-        # detection and re-ask. Checking the reply too catches cases where
-        # STT garbled the camera word (e.g. "what's on hammer 2") but the
-        # model still fabricated "camera 2 is ...".
-        if (
-            not grounded and not forced and cameras
-            and not _is_config_question(user_text)
-            and (
-                _looks_like_camera_question(user_text)
-                or _looks_like_camera_question(content)
-            )
-        ):
-            forced = True
-            grounded = True
-            cam = _pick_camera(user_text, cameras, preferred_camera)
-            # Route to the detector for presence/count questions, to the
-            # BLIP caption for open "what's there?" questions, and — for
-            # PAST-TENSE questions — to the history tools (search_history /
-            # recent_events), never a live look. Small models often refuse
-            # or fabricate instead of calling a tool, so this forced path is
-            # what most camera questions actually hit — picking the RIGHT
-            # tool here is what makes "is there a person?" get a detector
-            # answer and "did you see a person today?" get the NVR's memory
-            # instead of whatever happens to be in the current frame.
-            tool_name, tool_args = _pick_forced_call(
-                user_text, cam,
-                {t["function"]["name"] for t in (tools or ())},
-            )
-            call = {
-                "id": "forced-0", "type": "function",
-                "function": {"name": tool_name, "arguments": tool_args},
-            }
-            name, result = await _invoke_tool(runtime, call)
-            logger.info("converse: FORCED grounding (%s) on %s -> %s",
-                        tool_name, cam, result[:120])
-            tools_called += 1
-            last_tool_result = result or last_tool_result
-            messages.append({"role": "assistant", "content": "", "tool_calls": [call]})
-            messages.append({
-                "role": "tool", "tool_call_id": "forced-0",
-                "name": name, "content": result,
-            })
-            continue
-
-        # Accept the reply (genuine chit-chat, or already grounded).
-        final = content
-        break
-    else:
-        logger.warning("converse: tool loop exhausted")
+            # Accept the reply (genuine chit-chat, or already grounded).
+            final = content
+            break
+        else:
+            logger.warning("converse: tool loop exhausted")
 
     # Prefer the model's composed reply (stripped of <think> reasoning + ids).
     # If it's empty after stripping (a thinking model burned its budget on
-    # reasoning) but a tool ran, surface that result. For camera-roster/config
-    # questions, answer deterministically — small models often just deflect
-    # ("I'll check…") and there's no tool to ground them.
-    cleaned = _clean_for_speech(final, runtime.cfg.cameras)
-    if _is_config_question(user_text):
-        # Roster/config questions ("how many cameras are configured?") are
-        # answered deterministically and FIRST — the model can't reliably count
-        # the configured cameras and often narrates a tool it never called
-        # ("…calling detect_objects to check…"). The roster is authoritative, so
-        # don't let that narration through as the answer.
-        reply, source = _roster_answer(runtime.cfg.cameras), "roster"
+    # reasoning) but a tool ran, surface that result. Roster/config
+    # questions never reach here: they are answered before the loop.
+    cleaned = _clean_for_speech(final, runtime.visible_cameras())
+    extra_issues: list[str] = []
+    if direct_tool_reply:
+        # A stop or a view switch: the tool's own sentence, spoken as is.
+        reply, source = _humanize_for_speech(final, runtime.visible_cameras()), "tool"
     elif cleaned and not _is_deflection(cleaned):
         reply, source = cleaned, "llm"
+        # The reply must agree with the tool it rests on. A count the model
+        # states for a thing the detector just counted differently is the
+        # detector's count, hedged; an action the model claims when no tool
+        # ran did not happen.
+        corrected = _count_disagreement(cleaned, last_tool_result, runtime.visible_cameras())
+        if corrected:
+            reply, source = corrected, "tool_fallback"
+            extra_issues.append("count_mismatch")
+        elif tools_called == 0 and _claims_action(cleaned):
+            reply, source = ("Nothing has been changed. Say 'stop the monitor' or 'cancel the "
+                             "alarm' if that is what you want."), "none"
+            extra_issues.append("action_claim")
     elif last_tool_result:
-        reply, source = _humanize_for_speech(last_tool_result, runtime.cfg.cameras), "tool_fallback"
+        reply, source = _humanize_for_speech(last_tool_result, runtime.visible_cameras()), "tool_fallback"
     else:
         reply, source = (cleaned or "Sorry, I'm having trouble answering that right now."), "none"
 
@@ -6927,13 +9211,21 @@ async def _run_conversation_turn(
     # answer is diagnosable from the logs (camera offline, adapter down, the LLM
     # not calling tools, a deflection, etc.) without re-running.
     degraded = _degradation_reasons(last_tool_result, final, cleaned,
-                                    grounded, tools_called)
+                                    grounded, tools_called) + extra_issues
+    # Where the answer came from. No "ms": it is a label, not a stage, so
+    # the latency medians (fillers.record_stages) and the demo's flow line
+    # leave it out.
+    trace.append({"step": "reply", "detail": source})
     log = logger.warning if degraded else logger.info
     log("converse: TURN reply_source=%s grounded=%s forced=%s tools=%d "
         "issues=%s reply=%r", source, grounded, forced, tools_called,
         ",".join(degraded) or "none", reply[:90])
-    return reply
+    return _with_llm_notice(runtime, reply)
 
+
+#: Routed tools whose result is already the spoken answer: no compose
+#: model in between (see the routed branch of the turn).
+_DIRECT_SPEECH_TOOLS = frozenset({"stop_alarm", "stop_monitor", "stop_report", "show_camera"})
 
 # Hollow "acknowledgement" replies a small model emits instead of answering
 # ("I see… I'll check the camera.") — treat as no-answer so we ground/fallback.
@@ -6946,6 +9238,71 @@ _DEFLECTION_RE = re.compile(
 def _is_deflection(text: str) -> bool:
     t = (text or "").strip().lower().lstrip(".… ")
     return bool(_DEFLECTION_RE.match(t)) and len(t) < 80
+
+
+#: How long a look stays "the last look" a dispute refers to.
+LAST_LOOK_TTL_S = 180.0
+
+_NUMBER_WORDS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+                 "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12}
+_COUNT_RE = re.compile(r"\b(\d+|an?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+([a-z][a-z-]*)")
+_ACTION_CLAIM_RE = re.compile(
+    r"\bI(?:'ll| will| have|'ve| am|'m)?\s+(?:now\s+|just\s+)?(?:stop(?:ped)?|cancel(?:l?ed)?|disarm(?:ed)?|"
+    r"silenced?|arm(?:ed)?|set(?:\s+up)?|creat(?:e|ed)|start(?:ed)?|turn(?:ed)?\s+(?:on|off)|"
+    r"(?:am|will be)\s+monitoring|monitor(?:ing)?)\b", re.IGNORECASE)
+_OFFER_RE = re.compile(r"\b(?:can|could|would|if you|say the word|let me know)\b", re.IGNORECASE)
+
+
+def _singular(label: str) -> str:
+    w = label.lower()
+    irregular = {"people": "person", "men": "man", "women": "woman", "children": "child", "buses": "bus"}
+    if w in irregular:
+        return irregular[w]
+    if w.endswith("ies"):
+        return w[:-3] + "y"
+    if w.endswith("es") and w[:-2].endswith(("s", "x", "ch", "sh")):
+        return w[:-2]
+    if w.endswith("s") and not w.endswith("ss"):
+        return w[:-1]
+    return w
+
+
+def _counts_in(text: str) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for num, label in _COUNT_RE.findall((text or "").lower()):
+        n = int(num) if num.isdigit() else _NUMBER_WORDS.get(num)
+        if n is None:
+            continue
+        out[_singular(label)] = n
+    return out
+
+
+def _count_disagreement(reply: str, tool_result: str, cameras=None) -> str | None:
+    """When the model's reply states a different count than the detector's
+    result for the same thing, the detector's count, hedged — else None.
+    Only detector results carry counts ("On cam23: 2 chairs."); a caption
+    ("several chairs") is prose and is left alone."""
+    if not tool_result or "no objects" in tool_result or not re.match(r"^(On |Across )", tool_result or ""):
+        return None
+    tool_counts = _counts_in(tool_result)
+    if not tool_counts:
+        return None
+    said = _counts_in(reply)
+    clash = [label for label, n in said.items() if label in tool_counts and tool_counts[label] != n]
+    if not clash:
+        return None
+    seen = _humanize_for_speech(tool_result, cameras).rstrip(".")
+    return (f"I can make out {seen[0].lower() + seen[1:]}. The detector can miss things that are "
+            f"partly hidden or overlapping, so there may be more.")
+
+
+def _claims_action(reply: str) -> bool:
+    """The reply says an alarm, monitor or report was set, stopped or
+    changed — as a statement, not an offer or a question."""
+    r = (reply or "").strip()
+    if not r or r.endswith("?") or _OFFER_RE.search(r):
+        return False
+    return bool(_ACTION_CLAIM_RE.search(r))
 
 
 def _degradation_reasons(last_tool_result: str, final: str, cleaned: str,
@@ -6991,6 +9348,14 @@ def _load_demo_html() -> str:
     path = Path(__file__).parent / "demo" / "index.html"
     if not path.is_file():
         return "<h1>demo/index.html missing</h1>"
+    return path.read_text(encoding="utf-8")
+
+
+def _load_mirror_html() -> str:
+    """The Mirror page (demo/mirror.html), same arrangement as the demo."""
+    path = Path(__file__).parent / "demo" / "mirror.html"
+    if not path.is_file():
+        return "<h1>demo/mirror.html missing</h1>"
     return path.read_text(encoding="utf-8")
 
 
@@ -7050,6 +9415,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg = load_config(args.config)
     runtime = CameraAgentRuntime(cfg)
     app = build_app(runtime)
+    logger.info("turn-taking: %s", describe_turn_profile(cfg))
 
     import uvicorn
     config = uvicorn.Config(

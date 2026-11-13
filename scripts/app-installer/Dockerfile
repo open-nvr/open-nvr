@@ -42,7 +42,13 @@ WORKDIR /app
 RUN pip install --no-cache-dir \
         "sqlalchemy>=2,<3" "psycopg2-binary>=2.9" "PyYAML>=6.0,<7.0"
 
+# cosign, for verifying catalog image signatures before an install
+# (scripts/app-installer/signing.py). Taken from the Sigstore project's
+# own multi-arch image, pinned; no network fetch at build time.
+COPY --from=ghcr.io/sigstore/cosign/cosign:v2.4.1 /ko-app/cosign /usr/local/bin/cosign
+
 COPY scripts/app-installer/reconciler.py ./reconciler.py
+COPY scripts/app-installer/signing.py    ./signing.py
 COPY scripts/app-installer/store.py      ./store.py
 COPY scripts/app-installer/main.py       ./main.py
 

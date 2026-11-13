@@ -88,6 +88,10 @@ const REFRESH_COALESCE_MS = 750
 
 // Alert types that flip the persistent disk banner rather than just toasting.
 const DISK_CRITICAL_TYPES = new Set(['disk_low', 'disk_purge_exhausted'])
+// Camera-scoped recording health, published on the bus with the camera
+// event's task: the watchdog's stall and the segment-complete hook's
+// "segments arrive but hold no playable video" (recording_degraded).
+const RECORDING_HEALTH_TASKS = new Set(['recording_stalled', 'recording_degraded'])
 // Re-toasting the same still-active alert type is suppressed for this long
 // (a WS reconnect or a re-published purge event must not spam the operator).
 const TOAST_COOLDOWN_MS = 10 * 60 * 1000
@@ -208,7 +212,7 @@ export function CameraStatusProvider({ children }: { children: ReactNode }) {
 
       // A recording stall changes the Recording badge on the list, which is
       // served by the same query as the stream badge.
-      if (evt.event_type === 'camera_event' && evt.task === 'recording_stalled') {
+      if (evt.event_type === 'camera_event' && RECORDING_HEALTH_TASKS.has(evt.task ?? '')) {
         scheduleCameraRefresh()
       }
 
@@ -241,6 +245,28 @@ export function CameraStatusProvider({ children }: { children: ReactNode }) {
       }
     }
 
+    // An app alert reached the inbox: refresh what shows alarms, and
+    // say so once. The row itself is already stored — this only makes
+    // the browser notice now rather than on its next poll.
+    const handleAppAlert = (evt: CameraStatusEvent) => {
+      const p = (evt.payload ?? {}) as Record<string, unknown>
+      const severity = String(p.severity ?? 'high')
+      const title = String(p.title ?? 'New alert')
+
+      queryClient.invalidateQueries({ queryKey: ['alerts-inbox-unacked'] })
+      queryClient.invalidateQueries({ queryKey: ['alarms-page'] })
+
+      // Same cooldown discipline as host alerts: a burst of screenings
+      // must not become a wall of toasts.
+      const key = `app_alert:${String(p.alert_type ?? '')}:${evt.camera_id ?? ''}`
+      const nowMs = Date.now()
+      if (nowMs - (lastToastAt.current[key] || 0) < TOAST_COOLDOWN_MS) return
+      lastToastAt.current[key] = nowMs
+
+      if (severity === 'critical') toastRef.current.showError(title)
+      else toastRef.current.showWarning(title)
+    }
+
     const connect = async () => {
       let ticket: string
       try {
@@ -271,12 +297,18 @@ export function CameraStatusProvider({ children }: { children: ReactNode }) {
         let evt: CameraStatusEvent
         try { evt = JSON.parse(msg.data) as CameraStatusEvent } catch { return }
         if (evt.event_type === 'camera_status') { handleEvent(evt); return }
-        // Host alerts (disk/CPU/RAM/purge) + the recording watchdog's
-        // camera-scoped stall events surface app-wide, same as camera drops.
+        // Host alerts (disk/CPU/RAM/purge) + the camera-scoped recording
+        // health events (a stall from the watchdog, unplayable segments from
+        // the segment-complete hook) surface app-wide, same as camera drops.
         if (evt.event_type === 'system_alert' ||
-            (evt.event_type === 'camera_event' && evt.task === 'recording_stalled')) {
+            (evt.event_type === 'camera_event' && RECORDING_HEALTH_TASKS.has(evt.task ?? ''))) {
           handleSystemAlert(evt)
+          return
         }
+        // An app alert just landed in the inbox. The bell polls every
+        // 10s and would find it eventually; "someone walked in
+        // unscanned" is not a fact worth sitting on for ten seconds.
+        if (evt.event_type === 'app_alert') { handleAppAlert(evt); return }
       }
 
       ws.onclose = () => {

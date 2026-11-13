@@ -23,7 +23,12 @@ import { RolesManager } from './settings/RolesManager'
 import { PermissionsManager } from './settings/PermissionsManager'
 import { CameraConfigManager } from './settings/CameraConfigManager'
 import { CameraDeviceConfig } from './settings/CameraDeviceConfig'
+import { CameraZones } from './settings/CameraZones'
+import { CameraMasks } from './settings/CameraMasks'
+import { CameraDetectionSettings } from './settings/CameraDetectionSettings'
 import { DeviceFirewall } from './settings/DeviceFirewall'
+import { TwoFactorSettings } from './settings/TwoFactorSettings'
+import { ApiTokens } from './settings/ApiTokens'
 import { PasswordPolicy } from './settings/PasswordPolicy'
 import { WebRTCSettings } from './settings/WebRTCSettings'
 import { MediaSourceSettings } from './settings/MediaSourceSettings'
@@ -32,7 +37,10 @@ import { RecordingSettings } from './settings/RecordingSettings'
 import { DeletedCameras } from './settings/DeletedCameras'
 import { MoreUplink } from './settings/more/Uplink'
 import { WindowSettings } from './settings/more/WindowSettings'
+import { CameraTours } from './settings/more/CameraTours'
+import { OpenNvrUpdates } from './settings/OpenNvrUpdates'
 import { SystemHealthSettings } from './settings/SystemHealthSettings'
+import { useTranslation } from '../i18n'
 
 // Single settings registry: each tab owns its label and its subviews, and
 // each subview owns its slug, label, and panel. Tabs without subviews render
@@ -51,6 +59,9 @@ const SETTINGS_REGISTRY: TabEntry[] = [
     submenu: [
       { slug: 'device', label: 'Device Settings', panel: () => <CameraDeviceConfig /> },
       { slug: 'streaming', label: 'Streaming & Recording', panel: () => <CameraConfigManager /> },
+      { slug: 'zones', label: 'Zones', panel: () => <CameraZones /> },
+      { slug: 'masks', label: 'Masks', panel: () => <CameraMasks /> },
+      { slug: 'detection', label: 'Detection', panel: () => <CameraDetectionSettings /> },
     ],
   },
   { key: 'recording', label: 'Recording', panel: () => <RecordingSettings />, submenu: [] },
@@ -76,12 +87,19 @@ const SETTINGS_REGISTRY: TabEntry[] = [
     panel: () => <DeviceFirewall />,
     submenu: [],
   },
+  // Long-lived tokens for Home Assistant and other API clients.
+  { key: 'api-tokens', label: 'API Tokens', panel: () => <ApiTokens />, submenu: [] },
+  // Your own authenticator apps: add a new phone, retire an old one.
+  { key: 'two-factor', label: 'Two-factor sign-in', panel: () => <TwoFactorSettings />, submenu: [] },
+  // Updates to OpenNVR itself (not the host OS: that is Firmware).
+  { key: 'updates', label: 'OpenNVR Updates', panel: () => <OpenNvrUpdates />, submenu: [] },
   {
     key: 'more-settings',
     label: 'More Settings',
     submenu: [
       { slug: 'webrtc', label: 'WebRTC', panel: () => <WebRTCSettings /> },
       { slug: 'window-settings', label: 'Window Settings', panel: () => <WindowSettings /> },
+      { slug: 'camera-tours', label: 'Camera Tours', panel: () => <CameraTours /> },
       { slug: 'uplink', label: 'Uplink', panel: () => <MoreUplink /> },
       { slug: 'system-health', label: 'System Health', panel: () => <SystemHealthSettings /> },
     ],
@@ -94,7 +112,16 @@ const SETTINGS_REDIRECTS: Record<string, string> = {
   'more-settings/certificates': '/byok',
 }
 
+const SETTINGS_LABEL_KEYS: Record<string, string> = {
+  'Camera-Config': 'settings.cameraConfig', 'Device Settings': 'settings.deviceSettings', 'Streaming & Recording': 'settings.streamingRecording', Zones: 'settings.zones',
+  Recording: 'settings.recording', 'Deleted Cameras': 'settings.deletedCameras', 'Media-Source': 'settings.mediaSource',
+  Settings: 'settings.settings', 'Media Server Manager': 'settings.mediaServerManager', Firewall: 'settings.firewall', 'API Tokens': 'settings.apiTokens', 'Two-factor sign-in': 'settings.twoFactor', 'OpenNVR Updates': 'settings.updates',
+  'More Settings': 'settings.moreSettings', WebRTC: 'settings.webrtc', 'Window Settings': 'settings.windowSettings', 'Camera Tours': 'settings.cameraTours',
+  Uplink: 'settings.uplink', 'System Health': 'settings.systemHealth', Configuration: 'settings.breadcrumb',
+}
+
 export function Settings() {
+  const { t } = useTranslation()
   const location = useLocation()
   const navigate = useNavigate()
 
@@ -108,9 +135,11 @@ export function Settings() {
   }, [location.pathname])
 
   useEffect(() => {
-    // if no tab in URL, push default
+    // No tab in the URL: open the first tab's first sub-page. This used to
+    // push /settings/webrtc, which is not a tab key -- the page then fell
+    // back to Camera-Config with no tab highlighted and a doubled breadcrumb.
     if (!location.pathname.match(/\/settings\//)) {
-      navigate('/settings/webrtc', { replace: true })
+      navigate('/settings/camera-config/device', { replace: true })
     }
   }, [location.pathname, navigate])
 
@@ -125,30 +154,30 @@ export function Settings() {
     <section className="space-y-4">
       {/* Top Tabs */}
       <div className="bg-[var(--accent)] text-white px-3 py-2 text-sm flex items-center gap-4 overflow-x-auto">
-        {SETTINGS_REGISTRY.map((t) => (
+        {SETTINGS_REGISTRY.map((tab) => (
           <NavLink
-            key={t.key}
-            to={t.submenu.length === 0 ? `/settings/${t.key}` : `/settings/${t.key}/${t.submenu[0].slug}`}
-            className={() => `px-2 py-1 rounded whitespace-nowrap ${location.pathname.startsWith(`/settings/${t.key}`) ? 'bg-white/15' : 'opacity-90 hover:opacity-100'}`}
+            key={tab.key}
+            to={tab.submenu.length === 0 ? `/settings/${tab.key}` : `/settings/${tab.key}/${tab.submenu[0].slug}`}
+            className={() => `px-2 py-1  whitespace-nowrap ${location.pathname.startsWith(`/settings/${tab.key}`) ? 'bg-white/15' : 'opacity-90 hover:opacity-100'}`}
           >
-            {t.label}
+            {t(SETTINGS_LABEL_KEYS[tab.label] ?? tab.label)}
           </NavLink>
         ))}
       </div>
 
-      <div className="flex">
+      <div className="flex flex-col md:flex-row">
         {/* Dynamic Submenu (hidden for WebRTC tab) */}
         {submenu.length > 0 && (
-          <aside className="w-64 bg-[var(--bg-2)] p-3 text-sm">
+          <aside className="w-full md:w-64 shrink-0 bg-[var(--bg-2)] p-3 text-sm">
             {submenu.map((s) => {
               const active = location.pathname === `/settings/${tabDef.key}/${s.slug}`
               return (
                 <NavLink
                   key={s.slug}
                   to={`/settings/${tabDef.key}/${s.slug}`}
-                  className={`block px-2 py-2 rounded ${active ? 'bg-[var(--panel-2)] text-[var(--text)]' : 'text-[var(--text-dim)] hover:text-[var(--text)] hover:bg-[var(--panel-2)]'}`}
+                  className={`block px-2 py-2  ${active ? 'bg-[var(--panel-2)] text-[var(--text)]' : 'text-[var(--text-dim)] hover:text-[var(--text)] hover:bg-[var(--panel-2)]'}`}
                 >
-                  {s.label}
+                  {t(SETTINGS_LABEL_KEYS[s.label] ?? s.label)}
                 </NavLink>
               )
             })}
@@ -156,13 +185,13 @@ export function Settings() {
         )}
 
         {/* Content Area */}
-        <div className={`p-4 bg-[var(--panel)] flex-1`}>
+        <div className="p-4 bg-[var(--panel)] flex-1 min-w-0">
           <nav aria-label="Breadcrumb" className="text-xs text-[var(--text-dim)] mb-3">
-            Configuration <span className="mx-1">/</span> {tabDef.label}
+            {t('settings.breadcrumb')} <span className="mx-1">/</span> {t(SETTINGS_LABEL_KEYS[tabDef.label] ?? tabDef.label)}
             {activeSubKey && (
               <>
                 <span className="mx-1">/</span>
-                {activeSub?.label ?? activeSubKey}
+                {activeSub ? t(SETTINGS_LABEL_KEYS[activeSub.label] ?? activeSub.label) : activeSubKey}
               </>
             )}
           </nav>
@@ -171,7 +200,7 @@ export function Settings() {
           ) : panel ? (
             panel()
           ) : (
-            <Placeholder title={`${tabDef.label}${activeSubKey ? ` · ${activeSubKey}` : ''}`} />
+            <Placeholder title={`${t(SETTINGS_LABEL_KEYS[tabDef.label] ?? tabDef.label)}${activeSubKey ? ` · ${activeSubKey}` : ''}`} emptyMessage={t('settings.optionsWillAppear')} />
           )}
         </div>
       </div>
@@ -179,11 +208,11 @@ export function Settings() {
   )
 }
 
-function Placeholder({ title }: { title: string }) {
+function Placeholder({ title, emptyMessage }: { title: string; emptyMessage: string }) {
   return (
     <div className="text-sm text-[var(--text-dim)]">
       <div className="mb-2 font-medium text-[var(--text)]">{title}</div>
-      <div>Configuration options will appear here.</div>
+      <div>{emptyMessage}</div>
     </div>
   )
 }

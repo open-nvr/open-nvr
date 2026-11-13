@@ -51,10 +51,10 @@ def _visual_sample_entry(fourcc: bytes) -> bytes:
     return _box(fourcc, body + hvcc)
 
 
-def _audio_sample_entry() -> bytes:
+def _audio_sample_entry(fourcc: bytes = b"ipcm") -> bytes:
     body = (b"\x00" * 6 + struct.pack(">H", 1) + b"\x00" * 8
             + struct.pack(">HH", 1, 16) + b"\x00" * 4 + struct.pack(">H", 48000) + b"\x00\x00")
-    return _box(b"ipcm", body)
+    return _box(fourcc, body)
 
 
 def _trak(track_id: int, handler: bytes, sample_entry: bytes, timescale: int) -> bytes:
@@ -89,13 +89,13 @@ def _traf(track_id: int, data_offset: int, sizes: list[int], sync_first: bool) -
     return _box(b"traf", tfhd + _full(b"trun", 0, flags, payload))
 
 
-def _init_segment() -> bytes:
+def _init_segment(vcodec: bytes = b"hev1", acodec: bytes | None = b"ipcm") -> bytes:
     ftyp = _box(b"ftyp", b"isom" + struct.pack(">I", 0x200) + b"isomiso5")
     mvhd = _full(b"mvhd", 0, 0, struct.pack(">IIII", 0, 0, 1000, 0) + struct.pack(">IH", 0x10000, 0x0100)
                  + b"\x00" * 10 + struct.pack(">IIIIIIIII", 0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000)
                  + b"\x00" * 24 + struct.pack(">I", 3))
-    vtrak = _trak(1, b"vide", _visual_sample_entry(b"hev1"), 90000)
-    atrak = _trak(2, b"soun", _audio_sample_entry(), 48000)
+    vtrak = _trak(1, b"vide", _visual_sample_entry(vcodec), 90000)
+    atrak = _trak(2, b"soun", _audio_sample_entry(acodec), 48000) if acodec else b""
     mvex = _box(b"mvex", _trex(1) + _trex(2))
     return ftyp + _box(b"moov", mvhd + vtrak + atrak + mvex)
 
@@ -119,8 +119,9 @@ def _fragment(seq: int, video_samples: list[bytes], audio_samples: list[bytes]) 
     return moof + mdat
 
 
-def _build_fmp4(video_samples: list[bytes], audio_samples: list[bytes]) -> bytes:
-    return _init_segment() + _fragment(1, video_samples, audio_samples)
+def _build_fmp4(video_samples: list[bytes], audio_samples: list[bytes],
+                vcodec: bytes = b"hev1", acodec: bytes = b"ipcm") -> bytes:
+    return _init_segment(vcodec, acodec) + _fragment(1, video_samples, audio_samples)
 
 
 def _build_fmp4_multi(*frags: tuple[list[bytes], list[bytes]]) -> bytes:
@@ -143,6 +144,59 @@ def test_probe_and_compat_flags(tmp_path):
     assert hrs.is_browser_incompatible_video("hev1") is True
     assert hrs.is_browser_incompatible_video("avc1") is False
     assert hrs.is_browser_incompatible_video(None) is False
+
+
+def test_h264_with_g711_audio_needs_remux(tmp_path):
+    """MediaMTX writes a G.711 camera's audio as ipcm. The H.264 video is fine,
+    but MSE rejects the whole clip over that track, so it must be remuxed."""
+    src = tmp_path / "clip.mp4"
+    src.write_bytes(_build_fmp4([b"V"], [b"A"], vcodec=b"avc1", acodec=b"ipcm"))
+    assert hrs.probe_video_codec(src) == "avc1"
+    assert hrs.probe_audio_codec(src) == "ipcm"
+    assert hrs.needs_browser_remux("avc1", "ipcm") is True
+    # H.264 with browser-decodable audio, or none, keeps the HLS path.
+    assert hrs.needs_browser_remux("avc1", "mp4a") is False
+    assert hrs.needs_browser_remux("avc1", "opus") is False
+    assert hrs.needs_browser_remux("avc1", None) is False
+    assert hrs.needs_browser_remux("hev1", "mp4a") is True
+
+
+def test_probe_audio_codec_without_audio_track(tmp_path):
+    src = tmp_path / "video_only.mp4"
+    src.write_bytes(_init_segment(b"avc1", None))
+    assert hrs.probe_video_codec(src) == "avc1"
+    assert hrs.probe_audio_codec(src) is None
+
+
+def test_remux_h264_keeps_avc1_and_drops_pcm(tmp_path):
+    v0, v1 = b"IDR_BYTES_0", b"pframe1"
+    src = tmp_path / "in.mp4"
+    src.write_bytes(_build_fmp4([v0, v1], [b"PCM_A", b"PCM_B"], vcodec=b"avc1"))
+    dst = tmp_path / "out.mp4"
+
+    hrs.remux_to_browser_mp4(src, dst)
+    out = dst.read_bytes()
+
+    assert out.count(b"trak") == 1
+    assert b"ipcm" not in out
+    assert b"hvc1" not in out and b"hev1" not in out  # not mistaken for HEVC
+    assert hrs.probe_video_codec(dst) == "avc1"
+    assert out[out.find(b"mdat") + 4:] == v0 + v1
+
+
+@pytest.mark.parametrize("vcodec", [b"avc1", b"hev1"])
+def test_remux_track_header_carries_the_video_size(tmp_path, vcodec):
+    """Firefox rejects a video track whose tkhd says 0x0 (METADATA_ERR) even
+    though the sample entry has the real size; Chromium doesn't care, which is
+    how the zeros went unnoticed."""
+    src = tmp_path / "in.mp4"
+    src.write_bytes(_build_fmp4([b"IDR"], [b"A"], vcodec=vcodec))
+    out = hrs.build_remux_index(src).header
+
+    tkhd = out.find(b"tkhd") - 4
+    size = struct.unpack(">I", out[tkhd:tkhd + 4])[0]
+    width, height = struct.unpack(">II", out[tkhd + size - 8:tkhd + size])
+    assert (width >> 16, height >> 16) == (320, 240)
 
 
 def test_remux_produces_videoonly_hvc1_preserving_samples(tmp_path):

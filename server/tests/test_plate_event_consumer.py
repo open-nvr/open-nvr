@@ -55,6 +55,25 @@ import models  # noqa: E402
 from services.plate_event_consumer import apply_plate_event  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _clean_plate_sightings():
+    """The dedup sightings map is process-global on purpose (that IS the
+    feature) — which makes it cross-test state by accident. Every test
+    starts clean or the dedup round changes unrelated verdicts."""
+    import services.plate_enrichment as _pe
+
+    with _pe._sightings_lock:
+        _pe._recent_sightings.clear()
+    # Same for the sweep registry: a sweep run by another test file
+    # keeps its row for the echo grace, and this consumer would defer.
+    with _pe._sweeps_lock:
+        _pe._sweeping.clear()
+    yield
+    with _pe._sightings_lock:
+        _pe._recent_sightings.clear()
+
+
+
 def _envelope(event_id, plate="ABC1234", **overrides):
     env = {
         "id": "evt_0123456789ab",
@@ -166,8 +185,15 @@ def test_enrichment_fallback_threads_event_id():
     # KAI-C's normaliser can put it in the domain event. String-level on
     # the source (the function does live HTTP; its request-building isn't
     # separable without refactoring it — deliberately out of scope here).
+    # (Was `event_id=int(row.id)`. The sweep now RELEASES its session before
+    # the OCR loop — holding one across up to 4x15s of HTTP exhausted the
+    # pool — so `row` is not in scope there any more; the function's own
+    # event_id parameter is the same value that row.id was.)
     src = (_HERE / "services" / "plate_enrichment.py").read_text()
-    assert '"event_id": int(row.id)' in src, (
+    # Trailing comma, not a closing paren: the call also carries
+    # observed_at now (the capture time the domain event echoes), so
+    # pinning the whole call would break on every additive argument.
+    assert "await _ocr_jpeg(jpeg, camera_handle, event_id=event_id," in src, (
         "plate_enrichment no longer sends event_id with its OCR call — "
         "the plate.recognized.v1 it triggers can't be joined back to the "
         "visit row, so the bus consumer becomes a no-op for the fallback "
@@ -180,8 +206,33 @@ def test_enrichment_sends_the_camera_handle_not_the_numeric_id():
     # scoping to assigned cameras (the LPR app) compares against
     # handles — "3" != "cam3" would silently drop every
     # enrichment-produced event.
+    # (Was `f"cam{row.camera_id}"`. The sweep releases its session before
+    # OCR, so the numeric id is copied out in phase 1 — both halves of that
+    # chain are pinned here, since a handle built from the wrong value is
+    # exactly as invisible as no handle at all.)
     src = (_HERE / "services" / "plate_enrichment.py").read_text()
-    assert '"camera_id": f"cam{row.camera_id}"' in src, (
+    assert "camera_id = int(row.camera_id)" in src, (
+        "plate_enrichment no longer copies the numeric camera id out of the "
+        "row before releasing its session — the handle below is built from it")
+    assert 'camera_handle = f"cam{camera_id}"' in src, (
         "plate_enrichment no longer sends the camera handle — "
         "enrichment-produced plate.recognized.v1 events become "
         "invisible to camera-scoped consumers")
+
+
+def test_the_correlation_id_reaches_the_row_and_the_claim(db):
+    """The envelope's correlation_id is the join to KAI-C's audit line.
+    It used to reach a log statement and nothing else; a reader of the
+    store had no way back to the audit trail (0 of 1 695 claims carried
+    one on a live box)."""
+    from models import TimelineEvent, VisitDescriptor
+    SessionLocal, row_id = db
+    assert apply_plate_event(_envelope(row_id, correlation_id="corr-abc")) == "applied"
+    s = SessionLocal()
+    try:
+        row = s.get(TimelineEvent, row_id)
+        assert (row.payload or {}).get("correlation_id") == "corr-abc"
+        claim = s.query(VisitDescriptor).filter_by(event_id=row_id, kind="plate").one()
+        assert claim.correlation_id == "corr-abc"
+    finally:
+        s.close()

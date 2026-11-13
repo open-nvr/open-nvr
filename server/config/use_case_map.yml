@@ -17,11 +17,11 @@
   suggested_adapters: [insightface]
 
 - use_case: "Package watch"
-  intent: "Know when a package arrives, lingers, or disappears from the porch."
+  intent: "Know when a package arrives, lingers, or disappears from the porch — and who took it."
   needs_capability: object_detection
-  also_needs: [multi_object_tracking]
+  also_needs: [multi_object_tracking, package_detection]
   suggested_apps: [package-delivery]
-  suggested_adapters: [yolov8, bytetrack]
+  suggested_adapters: [yolov8, bytetrack, package-detection]
 
 - use_case: "How many people are in this space?"
   intent: "Track zone occupancy and alert when a threshold is crossed."
@@ -61,3 +61,27 @@
   also_needs: [speech_to_text, text_to_speech, object_detection]
   suggested_apps: [camera-agent]
   suggested_adapters: [blip, whisper, piper, yolov8]
+
+- use_case: "Is the camera still watching?"
+  intent: "Alert when a camera is covered, defocused, knocked out of position or its stream freezes."
+  needs_capability: null
+  suggested_apps: [camera-tamper]
+  suggested_adapters: []
+
+- use_case: "Was the gate left open?"
+  intent: "Alert when a gate, door or barrier stays open longer than allowed."
+  needs_capability: vqa
+  suggested_apps: [gate-watch]
+  suggested_adapters: [moondream]
+
+- use_case: "Is someone dumping garbage here?"
+  intent: "Alert when garbage appears in a no-dumping zone and say how much."
+  needs_capability: open_vocab_detection
+  suggested_apps: [garbage-dumping]
+  suggested_adapters: [open-vocab-detection]
+
+- use_case: "Is everyone wearing their safety kit?"
+  intent: "Alert when a person on camera is missing a required helmet, vest, gloves or boots."
+  needs_capability: open_vocab_detection
+  suggested_apps: [ppe-check]
+  suggested_adapters: [open-vocab-detection]

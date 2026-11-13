@@ -163,10 +163,14 @@ def build_frame_source(*, camera_id: str, url: str) -> CameraFrameSource:
             "camera's snapshot URL directly for now."
         )
     if scheme == "rtsp":
-        raise FrameSourceError(
-            "rtsp:// scheme requires the ffmpeg-based RTSP pipeline that lands in "
-            "a planned follow-up. For now use the camera's HTTP snapshot endpoint instead."
-        )
+        # Continuous video is a different shape from a snapshot poll —
+        # one long-lived decoder, newest-frame-wins — so it lives in
+        # `rtsp.py` and is used directly, not fetched per tick. This
+        # adapter exists so a FrameApp built around polling can still be
+        # pointed at a stream and get the latest frame each tick.
+        from .rtsp import RtspStillSource
+
+        return RtspStillSource(camera_id=camera_id, url=url)
     raise FrameSourceError(
         f"unsupported frame source scheme {scheme!r}; expected file/http/https."
     )
@@ -196,6 +200,31 @@ def dict_frame_source(sources: Mapping[str, CameraFrameSource]) -> FrameSource:
     return DictFrameSource(sources)
 
 
+class CoreSnapshotSource:
+    """Frames from OpenNVR itself, for any camera picked for this app.
+
+    ``get_frame("cam3")`` fetches the camera's current JPEG through core's
+    app snapshot route, which serves only the app's own picks — so an app
+    connected to core needs no hand-written ``frame_url`` per camera, and
+    cannot read a camera it wasn't given. Returns ``None`` when core has no
+    frame (camera offline, not picked, core unreachable); the poll loop
+    simply skips that camera for the tick.
+    """
+
+    def __init__(self, nvr=None) -> None:
+        self._nvr = nvr
+
+    def _client(self):
+        if self._nvr is None:
+            from .client import OpenNVR
+
+            self._nvr = OpenNVR()
+        return self._nvr
+
+    def get_frame(self, camera_id: str) -> bytes | None:
+        return self._client().snapshot(camera_id)
+
+
 __all__ = [
     "FrameSourceError",
     "CameraFrameSource",
@@ -204,4 +233,5 @@ __all__ = [
     "build_frame_source",
     "DictFrameSource",
     "dict_frame_source",
+    "CoreSnapshotSource",
 ]

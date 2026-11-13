@@ -197,8 +197,9 @@ async def test_host_param_validation_messages():
 async def test_occupancy_threshold_alert_routes_to_agent_notifications():
     rt = _runtime(detections=[{"label": "person", "bbox": {"x": 0.4, "y": 0.4, "w": 0.2, "h": 0.2}},
                               {"label": "person", "bbox": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}}])
-    # The threshold front door ("alert if more than 1 person"): programmatic
-    # params the create_monitor tool doesn't expose yet.
+    # The threshold front door ("alert if more than 1 person"), driven
+    # straight at the host; create_monitor's max_count/min_count reach the
+    # same params (tests/test_monitor_thresholds.py).
     mid = rt.monitors.host.create(
         "occupancy", ["cam1"],
         {"target": "person", "max_count": 1, "interval_s": 0.02},

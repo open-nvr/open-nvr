@@ -5,61 +5,47 @@
 #
 # Copy this file to ``config.yml``, fill in the values, and run:
 #
-#   python footage_search.py index  --config config.yml      # build the index
-#   python footage_search.py search --config config.yml "red truck yesterday"
-
-# ── Index location ────────────────────────────────────────────────
+#   python footage_search.py --config config.yml search "red truck yesterday"
+#   python footage_search.py --config config.yml serve     # the app contract
 #
-# SQLite file the indexer writes to and `search` reads from. Portable,
-# offline, no server. Point both subcommands at the same path.
-db_path: "footage_index.sqlite3"
+# Upgrading from 1.x? db_path, nats_url, nats_token, subject_pattern,
+# retention_days and coalesce_seconds are gone. This app no longer
+# keeps an index of its own — see the README for why.
 
-# ── NATS endpoint (KAI-C's event bus) — used by `index` ────────────
-nats_url: "nats://nats:4222"
-# nats_url: "nats://127.0.0.1:4222"   # bare-metal / host-mode
-nats_token: null
-
-# Subscribe to detector events (labels) AND captioner events (scene
-# text). The wildcard catches both; the indexer merges a detection
-# event and a caption event that share a correlation_id into one
-# searchable keyframe.
-subject_pattern: "opennvr.inference.>"
+# ── The store it searches ─────────────────────────────────────────
+#
+# Required. Both the registry this app registers with and the event
+# store it queries. Every other example app treats this as optional
+# because it can still do its job standalone; this one cannot, and
+# refuses to start rather than come up answering nothing.
+opennvr_url: "http://opennvr-core:8000"
+# opennvr_token: "oak_…"   # the app key, if not supplied by the env
 
 # ── Search vocabulary ─────────────────────────────────────────────
 #
 # extra_labels: object classes beyond the built-in COCO-ish vocabulary
-#   that your detector emits (so the parser treats them as labels, not
+#   that your detectors emit (so the parser treats them as labels, not
 #   free-text keywords). Everything else meaningful in a query becomes
-#   a caption keyword (colors, clothing, etc.).
+#   search text matched against captions and attributes.
 extra_labels:
   - "forklift"
   - "pallet"
 
-# camera_aliases: words a user might say mapped to the camera_id KAI-C
-#   uses. "the dock" → cam-dock, so "trucks at the dock" filters camera.
+# camera_aliases: words a user might say, mapped to a camera this app
+#   has been given — by NAME as it appears in OpenNVR. "the dock" →
+#   "Loading Dock", so "trucks at the dock" filters to that camera. An
+#   id ("3") or a handle ("cam3") works too.
+#
+#   An alias naming a camera this app does not hold is REFUSED, not
+#   widened: the operator asked about the gate, and answering with the
+#   loading dock is worse than saying there is no gate here.
 camera_aliases:
-  dock: "cam-dock"
-  lobby: "cam-lobby"
-  gate: "cam-gate"
+  dock: "Loading Dock"
+  lobby: "Lobby"
+  gate: "Front Gate"
 
 # Max results returned by a search.
 result_limit: 25
-
-# ── Retention ─────────────────────────────────────────────────────
-# Days of searchable history to keep. The index grows with every
-# detection and Tier-0 publishes continuously, so an unbounded index
-# is a slow disk leak on an active camera. Pruned on start and every
-# 6h. Set 0 to keep everything forever (you own the disk).
-retention_days: 30
-
-# One row per EPISODE, not per frame: Tier-0 publishes an event per
-# analyzed frame, so without this a person sitting in view at 2 fps is
-# 7,200 identical "person" rows an hour — and a search returns 25
-# consecutive frames instead of 25 distinct sightings. Caption-less
-# repeats of the same label set on a camera within this many seconds
-# merge into one row (its timestamp advances). Set 0 to index every
-# frame separately.
-coalesce_seconds: 60
 
 # ── Optional LLM query parsing (Ollama) ───────────────────────────
 #
@@ -68,7 +54,19 @@ coalesce_seconds: 60
 # phrasing ("someone in a hoodie hanging around the gate after dark").
 # Falls back to the heuristic parser automatically on any error, so
 # enabling it never makes search worse. No cloud, no API keys.
+#
+# It parses the SENTENCE and nothing else. What the results mean is
+# the store's answer, not the model's.
 ollama:
   enabled: false
   url: "http://ollama:11434"
   model: "llama3.2"
+
+# ── App contract (spec §03) ───────────────────────────────────────
+#
+# Serves /health /manifest /state and the POST /actions search surface,
+# and self-registers with the app registry so the catalog shows a live
+# status dot and the "Search footage" form. Omit contract_port to run
+# CLI-only.
+# contract_port: 9208
+# contract_host: "footage-search"

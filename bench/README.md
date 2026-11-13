@@ -46,3 +46,41 @@ query-only agent structurally cannot.
 
 The scoring/summary logic is stdlib-only and unit-tested (`test_bench.py`); the
 network parts need a running detector / backend.
+
+## Measured on hardware
+
+Reports taken on real boards, every number from a run on that board. The Arduino Ventuno Q
+in every report below was lent and supported by Indus Technologies
+(<https://www.industechno.com>); the summary for readers is on the blog:
+[the announcement](https://www.opennvr.org/blog/opennvr-on-the-arduino-ventuno-q) and
+[the benchmark post](https://www.opennvr.org/blog/ventuno-q-npu-benchmarks).
+
+- [`ventuno-q-benchmark-2026-10-30.md`](ventuno-q-benchmark-2026-10-30.md) — the Tier-0 detector on the
+  Hexagon NPU of an Arduino Ventuno Q (QCS8275) against the CPU: 8.6 ms an inference on the HTP, sixteen
+  cameras clean where the CPU managed four.
+- [`ventuno-q-npu-captioner-2026-11-05.md`](ventuno-q-npu-captioner-2026-11-05.md) — Gemma 4 E2B as the
+  caption / visual-question model on the same NPU through LiteRT-LM: 1.7 s a photo where a CPU vision model
+  took a minute, with the detector sharing the NPU.
+- [`ventuno-q-npu-agent-llm-2026-11-07.md`](ventuno-q-npu-agent-llm-2026-11-07.md) — the same Gemma bundle as
+  the camera agent's LLM: native tool calling, 10 of 10 tool choices right on the agent's evaluation questions
+  at 0.8–2.0 s a turn (20–25 s on the CPU), and the exact fit of the 4,096-token window (13 of 14 schemas, or
+  7 schemas plus eight turns of history).
+- [`ventuno-q-npu-agent-eval-2026-11-08.md`](ventuno-q-npu-agent-eval-2026-11-08.md) — the agent's 32-case
+  live eval on the NPU against the CPU default, same box, same cases: 85 of 96 turns right at 2–4 s a
+  model turn (22 of 25 at 52–194 s on the CPU), the eleven misses traced to two deterministic fixes, the
+  live look's 6 s found to be the RTSP grab, not the model — and the third run after the fixes: 96 of 96,
+  live looks 0.6–0.8 s, the whole 96 turns in under four minutes.
+- [`ventuno-q-stt-2026-11-09.md`](ventuno-q-stt-2026-11-09.md) — speech to text on the Hexagon
+  (Whisper-Small w8a16, `whisper_qnn`) against parakeet on the ARM cores: 361 ms vs 774 ms an
+  utterance, equal clean-speech accuracy, a working no-speech gate; why `STT_ADAPTER=auto` picks it.
+- [`ventuno-q-eval-cpu-vs-npu-2026-11-10.md`](ventuno-q-eval-cpu-vs-npu-2026-11-10.md) — the 52-case live eval on
+  granite4:micro (CPU) against Gemma on the NPU, same box, same cases: 50 of 52 vs 52 of 52, but 16 s / 195 s /
+  218 s a turn by tier against 0.6 / 3.1 / 3.2 s; the router carries granite, the ARM cores do not.
+- [`ventuno-q-npu-embedder-2026-11-10.md`](ventuno-q-npu-embedder-2026-11-10.md) — search's embedder on the
+  Hexagon (SigLIP2 w8a16): both graphs compiled in 11 s, text 4–6 ms and frames 6–8 ms, the ranking right on five
+  of five queries — and the frame-arm floor that had to drop from 0.22 to 0.08 to let any match through.
+- [`ventuno-q-text-embed-2026-11-10.md`](ventuno-q-text-embed-2026-11-10.md) — search's caption arm on a
+  sentence encoder (bge-small, CPU): 37.6 ms a caption on two ARM cores, and against the box's 805 captions a
+  caption that answers the query scores 0.75–0.83 where the best unrelated one scores 0.57–0.74; then the
+  labelled eval (`tools/search_eval.py`, 33 cases) before and after: MRR 0.46 → 0.71, hit@5 0.57 → 0.82, typos
+  0.07 → 0.67, and the floor settled at 0.65 by a sweep over the labelled pool.
