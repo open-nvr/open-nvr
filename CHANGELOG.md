@@ -14,7 +14,7 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.1.11] — 2026-11-14
 
-The Qualcomm NPU release. On the qualcomm flavour the detector, the captions (Gemma), the camera agent's LLM, the search embeddings (SigLIP 2 and a sentence model), speech to text (Whisper) and the plate reader all run on the Hexagon HTP, and a fresh install on a Dragonwing board starts with one setting: the flavour overlays are split per compose file so Compose 2.24 accepts a plain install, the tag the embedder fill finds is the tag asked for, and the discovery prober's Dockerfile reaches Docker intact. Detection boxes are on by default on every live picture. Search gained weighted fusion, synonyms and typo reading, a caption arm with its own model, voice search and a bounded re-rank, off by default. The workflow engine runs workflows and has an API. ANPR on a Qualcomm box: plate candidates at full resolution, consensus across looks, per-camera scan policy. USB webcams are cameras, served by MediaMTX on Linux; Add Camera finds ONVIF cameras by multicast. The camera agent serves OpenNVR Mirror. The dashboard shows the NPU and GPU beside CPU, memory and disk, and says when requests are queued. Adapter pins at `0.1.11` (`text_embed` on its own tag). App SDK stays 0.11.0.
+The Qualcomm NPU release. On the qualcomm flavour the detector, the captions (Gemma), the camera agent's LLM, the search embeddings (SigLIP 2 and a sentence model), speech to text (Whisper) and the plate reader all run on the Hexagon HTP, and a fresh install on a Dragonwing board starts with one setting: the flavour overlays are split per compose file so Compose 2.24 accepts a plain install, the tag the embedder fill finds is the tag asked for, and the discovery prober's Dockerfile reaches Docker intact. Detection boxes are on by default on every live picture. Search gained weighted fusion, synonyms and typo reading, a caption arm with its own model, voice search and a bounded re-rank, off by default. The workflow engine runs workflows and has an API. ANPR on a Qualcomm box: plate candidates at full resolution, consensus across looks, per-camera scan policy. USB webcams are cameras, served by MediaMTX on Linux; Add Camera finds ONVIF cameras by multicast. The camera agent serves OpenNVR Mirror. The dashboard shows the NPU and GPU beside CPU, memory and disk, and says when requests are queued. Adapter pins at `0.1.11` (`text_embed` on its own tag). App SDK 0.12.0 (`sdk-v0.12.0`).
 
 Between the release candidate and the tag, the enrichment tier was
 measured on the Ventuno Q and changed by the measurements: the governor
@@ -30,6 +30,13 @@ quality of an answer. The update runner is installed with OpenNVR, and a
 USB webcam on Windows goes live.
 
 ### Added
+
+- **App SDK 0.12.0.** Publishes what `main` carried since 0.11.0: the
+  typed `visit.enriched.v1` payload (`VisitEnriched`) and `face.recognized.v1`
+  (`FaceRecognized`), `BestFrameClient.fetch_latest` for the pipeline's
+  newest decoded frame, the workflow file validator
+  (`opennvr_app_sdk.workflows.validate`) and the scaffold's use of it.
+  Additive; nothing in 0.11.0 changes.
 
 - **Add Camera → Discover finds ONVIF cameras by multicast.** Core runs on
   a Docker bridge, where WS-Discovery never reaches the LAN, so Discover
