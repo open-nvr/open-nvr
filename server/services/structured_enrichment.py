@@ -84,20 +84,38 @@ def _question_for(kind: str) -> str:
     return _ASK_RE.sub("", text).strip()
 
 
+SUBJECT = {"vehicle": "the main vehicle (the largest or nearest one)",
+           "person": "the main person (the largest or nearest one)"}
+
+
+def _subject(kinds: list[str]) -> str:
+    return SUBJECT["person"] if any(k in ("clothing_top", "carrying", "gender",
+                                          "clothing_bottom", "headwear") for k in kinds) \
+        else SUBJECT["vehicle"]
+
+
 def build_prompt(kinds: list[str]) -> str:
-    """One prompt for a caption plus the given kinds. The vocabulary of
-    each kind is spelled out so the answers come back as words
-    ``normalise_answer`` can count."""
-    lines = [
-        "Look at this camera frame.",
-        "Write one short sentence describing what is in it (the \"caption\").",
-    ]
+    """One prompt for the kinds' answers and a caption.
+
+    The attribute keys come FIRST and the caption last. The model writes
+    its JSON in key order, and every later value is conditioned on the
+    earlier text: with the caption first, a frame holding a white van in
+    front of a yellow ambulance produced "yellow" for the van's colour
+    (measured 2026-11-13, six of six colour disagreements went that way).
+    Asked first, each attribute is answered from the image, as the
+    per-question path answers it. The subject is named so a crop with
+    two vehicles in it is answered for the one the visit is about, and
+    the caption asks for what the plain caption prompt asks for — who or
+    what, what they wear, what they do — so search loses no words."""
+    lines = ["Look at this camera frame."]
     if kinds:
-        lines.append("Then answer these questions with one word each:")
+        lines.append(f"Answer these questions about {_subject(kinds)} with one word each:")
         for kind in kinds:
             vocab = ", ".join(str(v) for v in KIND_QUESTIONS[kind].get("vocabulary") or [])
             lines.append(f'- "{kind}": {_question_for(kind)} One of: {vocab}; or "unknown".')
-    keys = ", ".join(['"caption": "..."'] + [f'"{k}": "..."' for k in kinds])
+    lines.append('Then write one sentence (the "caption") describing who or what is in the '
+                 "frame, what they wear and what they are doing. Plain words, no preamble.")
+    keys = ", ".join([f'"{k}": "..."' for k in kinds] + ['"caption": "..."'])
     lines.append("Reply with a JSON object only, no other text, with exactly these keys:")
     lines.append("{" + keys + "}")
     return "\n".join(lines)
