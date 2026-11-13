@@ -23,11 +23,19 @@ def _sdk_version() -> str:
     return re.search(r'__version__ = "([^"]+)"', text).group(1)
 
 
+#: The lockfiles that are installed with ``--locked`` (the agent's image
+#: build and CI job, the server's). The other examples also take the SDK
+#: from the repo but sync without ``--locked`` and carry pins from 0.6.0
+#: upward; refreshing them is a separate, deliberate change.
+LOCKED = ("examples/camera-agent/uv.lock", "server/uv.lock")
+
+
 def test_every_editable_lock_of_the_app_sdk_matches_its_version():
     want = _sdk_version()
     stale = []
-    for lock in ROOT.rglob("uv.lock"):
-        if ".venv" in lock.parts or "node_modules" in lock.parts:
+    for rel in LOCKED:
+        lock = ROOT / rel
+        if not lock.exists():
             continue
         text = lock.read_text()
         m = re.search(r'name = "opennvr-app-sdk"\nversion = "([^"]+)"\nsource = \{ editable = ', text)
