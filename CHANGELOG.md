@@ -8,6 +8,16 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The single structured call is removed, not left off.** One call that
+  asked the captioner for the sentence and the attributes together
+  (`EVENTS_ENRICHMENT_SINGLE_CALL`, off by default) halved the model's
+  time per visit and, measured on the labelled search set, lost the
+  specific words search depends on: "camouflage" became "beige
+  patterned", glasses and gestures went missing, recall@10 fell by a
+  third. Quality is not a knob, so the path and the flag are gone. What
+  survives of the idea is the batching of three or more descriptor
+  questions into one call, which was measured to keep the answers.
+
 - **Three or more descriptor questions go to the model as one call.** With
   the extended person questions on, a person visit cost the captioner one
   call a kind — five calls, 3.7 s on a Ventuno Q. From

@@ -82,7 +82,6 @@ def _box(monkeypatch, *, same_frame=True, first_has_caption=True, first_vqa_ran=
     monkeypatch.setattr(settings, reuse.SETTING, flag, raising=False)
     monkeypatch.setattr(settings, "events_caption_enrichment", True, raising=False)
     monkeypatch.setattr(settings, "events_descriptor_enrichment", True, raising=False)
-    monkeypatch.setattr(settings, "events_enrichment_single_call", False, raising=False)
     tmp = pathlib.Path(tempfile.mkdtemp()) / "e.jpg"
     tmp.write_bytes(b"\xff\xd8jpeg")
     monkeypatch.setattr(evidence_store, "resolve_evidence", lambda _p: tmp)

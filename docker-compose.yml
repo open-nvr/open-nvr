@@ -730,7 +730,6 @@ services:
       - EVENTS_DESCRIPTOR_BATCH_MIN_KINDS=${EVENTS_DESCRIPTOR_BATCH_MIN_KINDS:-}
       - EVENTS_ENRICHMENT_REUSE_SAME_FRAME=${EVENTS_ENRICHMENT_REUSE_SAME_FRAME:-}
       - EVENTS_FROZEN_PICTURE_REPEATS=${EVENTS_FROZEN_PICTURE_REPEATS:-}
-      - EVENTS_ENRICHMENT_SINGLE_CALL=${EVENTS_ENRICHMENT_SINGLE_CALL:-}
       # Semantic search. Off by default; without this line an operator
       # could set it in .env, restart, and still have no embeddings —
       # with nothing anywhere saying why.

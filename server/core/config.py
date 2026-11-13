@@ -450,17 +450,6 @@ class Settings(BaseSettings):
     # A live camera never repeats a frame; a frozen stream, a stuck relay
     # or a looping file does nothing else. 0 disables.
     events_frozen_picture_repeats: int = 5
-    # RFC-0004 step 1: ask the captioner ONCE per visit for the sentence
-    # and the descriptor answers together, as one JSON object, instead of
-    # a caption call and then one call per kind on the same frame (three
-    # calls a vehicle, up to six a person — measured on a Ventuno Q,
-    # 2026-11-12: 225 of 325 Gemma calls in ten busy minutes were the
-    # questions). The answers land in the same rows through the same
-    # vocabulary. A model that answers in prose keeps the prose as its
-    # caption and is asked the questions one by one on a later pass. Off
-    # until the measurement on the box says the attributes and the
-    # search eval hold up (bench/rfc-0004-infer-once-log.md).
-    events_enrichment_single_call: bool = False
     # Ask an adapter advertising `embed` for a vector of the visit's best
     # frame and store it in event_embeddings, so search can rank by
     # meaning as well as by words (services/search_service.py fuses the
