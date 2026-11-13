@@ -244,6 +244,26 @@ cannot find them by words until it does.
 3. The box keeps the flag on from here; the ledger's next entry is the
    search eval.
 
+Two things learnt about the brake itself while running C, recorded so
+nobody re-learns them:
+- **The detector's latency floor is per core process.** `accelerator_usage`
+  keeps "the lowest window seen" in memory, so every core recreate
+  re-baselines it at whatever the load is at the time (C started with a
+  ~90 ms floor, so the detector at 93 ms read as 1.05× and the latency
+  trigger was blind; A's 107 ms against the real 25 ms quiet floor would
+  have read 4.3×). Persisting the floor is not obviously right either: on
+  this box the detector sits at 3.7× its quiet floor because of the plate
+  reader and the clip decode, which pacing captions cannot change (B
+  against C: 91 against 93 ms). The honest next signal is effectiveness —
+  pace, and if the detector does not improve within a minute, stop pacing
+  and say so. Not built; noted.
+- **The device-busy trigger must count only what it can defer.** Fixed in
+  this PR: the trigger compares the line with the enrichment adapters'
+  own share (the monitor's per-user shares filtered by the gates that
+  exist), not the device total. With C's numbers (device 118 %, captioner
+  24 %) it stays NORMAL. Window D, flag on with the brake at defaults on
+  the fixed governor, is the check.
+
 **Done.** 2026-11-13, branch `feat/rfc-0004-single-call`:
 - `server/services/structured_enrichment.py` — prompt (caption + the
   kinds' questions with their vocabularies, JSON-only answer, `unknown`
