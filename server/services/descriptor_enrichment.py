@@ -466,6 +466,15 @@ async def enrich_event_descriptors(event_id: int, *,
         evidence_path = row.evidence_path
         already = set((row.payload or {}).get("enriched_by") or [])
         camera_handle = f"cam{row.camera_id}"
+        if VQA_TASK not in already:
+            # The same frame asked before (RFC-0004 step 2): its claims
+            # are this visit's claims; nothing to ask.
+            from services import enrichment_reuse
+
+            twin = enrichment_reuse.find_twin(db, row)
+            if twin is not None and enrichment_reuse.reuse_descriptors(db, row, twin):
+                db.commit()
+                return "done"
         if _single_call_carries(db, row, already, priority):
             # RFC-0004 step 1: the caption task asks the questions in the
             # same call as the sentence. Asking them here too would be

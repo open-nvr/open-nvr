@@ -333,6 +333,16 @@ async def enrich_event_caption(event_id: int,
         # catch-up do not ask about the same visit forever.
         if CAPTION_SKILL in ((row.payload or {}).get("enriched_by") or []):
             return
+        # The same frame described before (RFC-0004 step 2): take that
+        # visit's words and claims, do not call. Same pixels, same answer.
+        from services import enrichment_reuse
+
+        twin = enrichment_reuse.find_twin(db, row)
+        reused = False
+        if twin is not None:
+            reused = enrichment_reuse.reuse_caption(db, row, twin)
+            enrichment_reuse.reuse_descriptors(db, row, twin)
+            db.commit()
         evidence_path = row.evidence_path
         # Same derivation plate_enrichment uses (f"cam{camera_id}") — the
         # adapter-facing handle convention, not a DB column.
@@ -358,6 +368,11 @@ async def enrich_event_caption(event_id: int,
             }
     finally:
         db.close()
+    if reused:
+        # The caption is committed; its vector is the same best-effort
+        # step as after a fresh caption.
+        await _embed_caption(event_id)
+        return "done"
 
     # ── Phase 2: adapter call, no session held ──────────────────────
     jpeg = evidence_jpeg

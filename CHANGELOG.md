@@ -8,6 +8,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The same frame is not described twice.** The evidence store is
+  content-addressed, so two visits with the same evidence path are the
+  same pixels; the later one now takes the earlier one's caption and
+  descriptor claims instead of calling the model, and says so on the
+  visit (`reused_from`). Measured on a Ventuno Q: 9,921 of a day's 10,892
+  captioner calls went to a frame already captioned (a looping test clip
+  re-detecting the same frames), none on the real office camera — so it
+  costs a real camera nothing and removes nine calls in ten on a loop, a
+  static scene re-detected or a replayed recording, with no quality
+  question. Near-repeats (the same person in the same chair, a different
+  JPEG) are deliberately not reused: at a similarity safe enough to trust
+  a real camera offers 3 % of its visits. `EVENTS_ENRICHMENT_REUSE_SAME_FRAME`
+  turns it off; `events.evidence_path` gains an index for the lookup.
+
 - **The governor's device-busy trigger counts only the work it can defer.**
   It read the accelerator's total share, and on a box with a plate reader
   the total is mostly the detector and the plate reader: measured on a
