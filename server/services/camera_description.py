@@ -27,6 +27,17 @@ This is the one path for a live description:
    refused, the answer is the newest description stamped with its age
    and a reason — never an old frame presented as now.
 
+**Which answer a live question gets.** A visit's caption describes the
+best crop of ONE object — the man at the gate, not the gate. A person
+asking "what do you see on the gate camera" wants the whole frame: the
+two people, the parked car, the open door. So by default a live question
+is answered from a look at the current full frame (shared and cached as
+above), and the newest visit's caption is only the answer when the
+caller says ``prefer_store=True`` — an app that wants "what was just
+seen", a subtitle that follows the visits. Varun's rule (2026-11-13):
+no optimisation may lower the quality of an answer; removing the
+duplicate looks is the saving, narrowing the answer is not allowed.
+
 What a live look is NOT: a visit. It is kept in memory per camera, not
 written as an ``event_text`` row (there is no visit row for it), and the
 visit's own description still arrives through the enrichment tier when
@@ -146,9 +157,13 @@ async def _look(camera_id: int) -> tuple[str | None, str]:
     return str(text), "fresh look"
 
 
-async def describe(camera_id: int, max_age_s: float = 30.0) -> dict[str, Any]:
-    """See the module docstring. Never raises on a bus or model failure;
-    the answer then says what it is."""
+async def describe(camera_id: int, max_age_s: float = 30.0, *,
+                   prefer_store: bool = False) -> dict[str, Any]:
+    """See the module docstring. ``prefer_store`` lets the newest visit's
+    caption answer when it is fresh and nothing newer has started; by
+    default a live question gets a whole-frame look, shared and cached.
+    Never raises on a bus or model failure; the answer then says what it
+    is."""
     from core.database import SessionLocal
 
     now_mono = time.monotonic()
@@ -161,7 +176,7 @@ async def describe(camera_id: int, max_age_s: float = 30.0) -> dict[str, Any]:
     finally:
         db.close()
 
-    if newest is not None and not newest["newer_visit"]:
+    if prefer_store and newest is not None and not newest["newer_visit"]:
         age = (now - (newest["observed_at"].replace(tzinfo=UTC) if newest["observed_at"].tzinfo is None
                       else newest["observed_at"])).total_seconds()
         if 0 <= age <= max_age_s:
