@@ -36,6 +36,8 @@ export function MFAVerify() {
   const { username, password } = (state || {}) as LocationState
 
   const [code, setCode] = useState('')
+  // A one-time recovery code instead of the app's six digits.
+  const [useRecovery, setUseRecovery] = useState(false)
   const [retryAfterSeconds, setRetryAfterSeconds] = useState(0)
 
   const formatRetryTime = (seconds: number) => {
@@ -96,7 +98,7 @@ export function MFAVerify() {
         </span>
         <div className="space-y-1">
           <h1 className="text-lg font-semibold text-[var(--text)]">{t('mfa.verifyTitle')}</h1>
-          <p className="text-sm text-[var(--text-dim)]">{t('mfa.verifyHint')}</p>
+          <p className="text-sm text-[var(--text-dim)]">{useRecovery ? t('recoveryCodes.signInHint') : t('mfa.verifyHint')}</p>
         </div>
       </div>
 
@@ -111,15 +113,15 @@ export function MFAVerify() {
         <label htmlFor="mfa-code" className="sr-only">{t('mfa.code')}</label>
         <input
           id="mfa-code"
-          className="h-12 w-full border border-[#2a3a4f] bg-[#0f1720] px-3 text-center font-mono text-xl tracking-[0.5em] text-[var(--text)] outline-none transition-colors placeholder:text-[var(--text-dim)] focus:border-[#5eb3f6] focus:ring-2 focus:ring-[#5eb3f6]/20"
+          className={`h-12 w-full border border-[#2a3a4f] bg-[#0f1720] px-3 text-center font-mono text-[var(--text)] outline-none transition-colors placeholder:text-[var(--text-dim)] focus:border-[#5eb3f6] focus:ring-2 focus:ring-[#5eb3f6]/20 ${useRecovery ? 'text-base tracking-wider' : 'text-xl tracking-[0.5em]'}`}
           value={code}
           onChange={(e) => setCode(e.target.value.replace(/\s+/g, ''))}
-          inputMode="numeric"
-          autoComplete="one-time-code"
+          inputMode={useRecovery ? 'text' : 'numeric'}
+          autoComplete={useRecovery ? 'off' : 'one-time-code'}
           autoFocus
           minLength={6}
-          maxLength={8}
-          placeholder="000000"
+          maxLength={useRecovery ? 24 : 8}
+          placeholder={useRecovery ? 'XXXX-XXXX-XXXX-XXXX' : '000000'}
           required
         />
       </div>
@@ -137,7 +139,12 @@ export function MFAVerify() {
             : t('mfa.verify')}
       </button>
 
-      <div className="text-center">{backLink}</div>
+      <div className="flex flex-col items-center gap-2 text-center">
+        <button type="button" className={`text-sm ${authLink}`} onClick={() => { setUseRecovery((v) => !v); setCode('') }}>
+          {useRecovery ? t('recoveryCodes.useApp') : t('recoveryCodes.useCode')}
+        </button>
+        {backLink}
+      </div>
     </form>,
   )
 }

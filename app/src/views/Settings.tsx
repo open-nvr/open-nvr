@@ -27,6 +27,7 @@ import { CameraZones } from './settings/CameraZones'
 import { CameraMasks } from './settings/CameraMasks'
 import { CameraDetectionSettings } from './settings/CameraDetectionSettings'
 import { DeviceFirewall } from './settings/DeviceFirewall'
+import { TwoFactorSettings } from './settings/TwoFactorSettings'
 import { ApiTokens } from './settings/ApiTokens'
 import { PasswordPolicy } from './settings/PasswordPolicy'
 import { WebRTCSettings } from './settings/WebRTCSettings'
@@ -88,6 +89,8 @@ const SETTINGS_REGISTRY: TabEntry[] = [
   },
   // Long-lived tokens for Home Assistant and other API clients.
   { key: 'api-tokens', label: 'API Tokens', panel: () => <ApiTokens />, submenu: [] },
+  // Your own authenticator apps: add a new phone, retire an old one.
+  { key: 'two-factor', label: 'Two-factor sign-in', panel: () => <TwoFactorSettings />, submenu: [] },
   // Updates to OpenNVR itself (not the host OS: that is Firmware).
   { key: 'updates', label: 'OpenNVR Updates', panel: () => <OpenNvrUpdates />, submenu: [] },
   {
@@ -112,7 +115,7 @@ const SETTINGS_REDIRECTS: Record<string, string> = {
 const SETTINGS_LABEL_KEYS: Record<string, string> = {
   'Camera-Config': 'settings.cameraConfig', 'Device Settings': 'settings.deviceSettings', 'Streaming & Recording': 'settings.streamingRecording', Zones: 'settings.zones',
   Recording: 'settings.recording', 'Deleted Cameras': 'settings.deletedCameras', 'Media-Source': 'settings.mediaSource',
-  Settings: 'settings.settings', 'Media Server Manager': 'settings.mediaServerManager', Firewall: 'settings.firewall', 'API Tokens': 'settings.apiTokens', 'OpenNVR Updates': 'settings.updates',
+  Settings: 'settings.settings', 'Media Server Manager': 'settings.mediaServerManager', Firewall: 'settings.firewall', 'API Tokens': 'settings.apiTokens', 'Two-factor sign-in': 'settings.twoFactor', 'OpenNVR Updates': 'settings.updates',
   'More Settings': 'settings.moreSettings', WebRTC: 'settings.webrtc', 'Window Settings': 'settings.windowSettings', 'Camera Tours': 'settings.cameraTours',
   Uplink: 'settings.uplink', 'System Health': 'settings.systemHealth', Configuration: 'settings.breadcrumb',
 }

@@ -139,7 +139,7 @@ def env(monkeypatch):
     db.add(manage)
     db.flush()
     db.add(RolePermission(role_id=role.id, permission_id=manage.id))
-    owner = User(
+    owner = User(mfa_enabled=True, 
         username="owner",
         email="owner@example.com",
         hashed_password=get_password_hash(PASSWORD),

@@ -22,6 +22,7 @@ import { toDataURL } from 'qrcode'
 import { apiService } from '../lib/apiService'
 import { useAuth } from '../auth/AuthContext'
 import { useTranslation } from '../i18n'
+import { RecoveryCodesPanel } from '../components/RecoveryCodesPanel'
 
 export function MFASetup() {
   const { t } = useTranslation()
@@ -33,6 +34,7 @@ export function MFASetup() {
   const [loading, setLoading] = useState(true)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [qrDataUrl, setQrDataUrl] = useState<string>('')
+  const [recoveryCodes, setRecoveryCodes] = useState<string[] | null>(null)
   const navigate = useNavigate()
 
   useEffect(() => {
@@ -69,7 +71,13 @@ export function MFASetup() {
     e.preventDefault()
     setError(null)
     try {
-      await apiService.mfaVerify(code)
+      const { data } = await apiService.mfaVerify(code)
+      // Refreshing the account flips mfa_enabled and the app replaces this
+      // screen, so show the one-time recovery codes first.
+      if (data?.recovery_codes?.length) {
+        setRecoveryCodes(data.recovery_codes)
+        return
+      }
       await refreshUser()
       navigate('/')
     } catch (e: any) {
@@ -82,7 +90,14 @@ export function MFASetup() {
       <div className="w-full max-w-lg bg-[var(--panel)] border border-[var(--border)] p-4">
         <h1 className="text-lg font-semibold mb-1">{t('mfa.setup')}</h1>
         <p className="text-sm text-[var(--text-dim)] mb-3">Scan the QR code with your authenticator app (Google Authenticator, Authy, etc.), then enter the 6‑digit code to verify.</p>
-        {loading ? (
+        {recoveryCodes ? (
+          <RecoveryCodesPanel
+            codes={recoveryCodes}
+            username={user?.username}
+            doneLabel={t('recoveryCodes.continue')}
+            onDone={async () => { await refreshUser(); navigate('/') }}
+          />
+        ) : loading ? (
           <div className="text-sm">Loading…</div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-start">

@@ -20,12 +20,17 @@ Handles user creation, updates, authentication, and management.
 """
 
 from fastapi import HTTPException, status
-from sqlalchemy import and_, select, update
+from sqlalchemy import and_, delete, select, update
 from sqlalchemy.orm import Session
 
 from core.auth import get_password_hash, verify_password
 from models import PasswordPolicy, Role, User
 from schemas import UserCreate, UserUpdate
+
+
+# Rows that belong to the account itself (its second factors): removed with
+# the account rather than blocking its permanent deletion.
+ACCOUNT_OWNED_TABLES = ("user_mfa_factors", "user_recovery_codes")
 
 
 class UserService:
@@ -207,7 +212,7 @@ class UserService:
         nullable_references = []
         blocking_tables = set()
         for table in User.__table__.metadata.tables.values():
-            if table is User.__table__:
+            if table is User.__table__ or table.name in ACCOUNT_OWNED_TABLES:
                 continue
             for column in table.columns:
                 if not any(
@@ -236,6 +241,12 @@ class UserService:
                     .where(column == user_id)
                     .values({column.name: None})
                 )
+            # The account's own sign-in factors go with it (the foreign key
+            # cascades too; this also covers backends that don't enforce it).
+            for name in ACCOUNT_OWNED_TABLES:
+                table = User.__table__.metadata.tables.get(name)
+                if table is not None:
+                    db.execute(delete(table).where(table.c.user_id == user_id))
             db.delete(db_user)
             db.commit()
             return []
