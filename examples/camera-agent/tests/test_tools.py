@@ -75,6 +75,70 @@ def _build_tools(ctx: CameraContext, *,
 
 
 # ── describe_camera ────────────────────────────────────────────────
+@pytest.mark.asyncio
+async def test_describe_camera_asks_core_first_and_makes_no_call_of_its_own():
+    """RFC-0004 step 4: the plain look comes from core's shared
+    description; the caption client is not touched."""
+    ctx = _ctx_with_camera()
+    tools = _build_tools(ctx)
+    asked: list[tuple[str, float]] = []
+
+    async def _core(camera_id, max_age_s):
+        asked.append((camera_id, max_age_s))
+        return {"text": "A man in a red shirt at the gate.", "source": "visit", "model_called": False}
+
+    tools._description_fetch = _core
+    result = await tools.describe_camera({"camera_id": "front-porch"})
+    assert "front-porch" in result and "A man in a red shirt at the gate" in result
+    assert asked == [("front-porch", tools._DESCRIPTION_MAX_AGE_S)]
+    tools._caption.infer.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_stale_core_answer_is_given_with_its_age_not_as_now():
+    ctx = _ctx_with_camera()
+    tools = _build_tools(ctx)
+
+    async def _core(camera_id, max_age_s):
+        return {"text": "A parked car.", "source": "stale", "age_s": 95.0,
+                "reason": "no fresh frame from the camera", "model_called": False}
+
+    tools._description_fetch = _core
+    result = await tools.describe_camera({"camera_id": "front-porch"})
+    assert "as of 95 s ago" in result and "no fresh frame from the camera" in result
+    assert "A parked car" in result
+    tools._caption.infer.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_when_core_does_not_answer_the_tool_takes_its_own_look():
+    ctx = _ctx_with_camera()
+    tools = _build_tools(ctx)
+
+    async def _core(camera_id, max_age_s):
+        return None
+
+    tools._description_fetch = _core
+    result = await tools.describe_camera({"camera_id": "front-porch"})
+    assert "box on a doormat" in result
+    tools._caption.infer.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_a_question_still_goes_to_the_vision_model():
+    ctx = _ctx_with_camera()
+    tools = _build_tools(ctx, caption_response={"result": {"answer": "two"}})
+    calls: list = []
+
+    async def _core(camera_id, max_age_s):
+        calls.append(camera_id)
+        return {"text": "ignored", "source": "visit"}
+
+    tools._description_fetch = _core
+    result = await tools.describe_camera({"camera_id": "front-porch", "question": "how many people?"})
+    assert "two" in result and calls == []
+
+
 
 
 @pytest.mark.asyncio
