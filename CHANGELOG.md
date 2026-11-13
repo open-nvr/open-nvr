@@ -8,6 +8,16 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The single structured call is removed, not left off.** One call that
+  asked the captioner for the sentence and the attributes together
+  (`EVENTS_ENRICHMENT_SINGLE_CALL`, off by default) halved the model's
+  time per visit and, measured on the labelled search set, lost the
+  specific words search depends on: "camouflage" became "beige
+  patterned", glasses and gestures went missing, recall@10 fell by a
+  third. Quality is not a knob, so the path and the flag are gone. What
+  survives of the idea is the batching of three or more descriptor
+  questions into one call, which was measured to keep the answers.
+
 - **Three or more descriptor questions go to the model as one call.** With
   the extended person questions on, a person visit cost the captioner one
   call a kind — five calls, 3.7 s on a Ventuno Q. From
@@ -55,6 +65,17 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   so the agent, the Mirror and apps can subscribe to what the store knows
   instead of asking the caption model for it. The SDK types it
   (`VisitEnriched`). Without `NATS_URL` nothing changes.
+
+- **A camera whose picture has stopped changing is said so.** The
+  enrichment tier knows per visit whether the evidence frame is one it has
+  seen before (the store is content-addressed); a live camera never
+  repeats a frame, a frozen stream, a stuck relay or a looping file does
+  nothing else. After `EVENTS_FROZEN_PICTURE_REPEATS` (5) such visits in a
+  row the camera gets a `picture_frozen` alarm like the recording
+  watchdog's, cleared by the first new frame; the agent's status read
+  carries `picture: frozen` and says "the picture has not changed on the
+  gate camera". Camera 23 fed the same frame for hours on 2026-11-09 and
+  nothing said so.
 
 - **The same frame is not described twice.** The evidence store is
   content-addressed, so two visits with the same evidence path are the

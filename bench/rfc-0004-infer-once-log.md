@@ -12,7 +12,7 @@ or an estimate.
 | # | Item | PR | State |
 |---|---|---|---|
 | 0 | this ledger | — | written 2026-11-13 |
-| 1 | one structured call per best frame (caption + attributes in one answer; per-question fallback) | #909, #910 | measured 2026-11-13 (paired frames, windows A/B/C); flag on on the Ventuno Q; default flips after the search eval |
+| 1 | one structured call per best frame (caption + attributes in one answer; per-question fallback) | #909, #910, removed | measured 2026-11-13; lost caption words on the search set; **removed** (quality is not a knob). Batching ≥3 questions (#915) is what survives |
 | 2 | do not infer twice for the same frame (exact-frame reuse; near-repeat reuse measured and declined); `visit.enriched.v1` on the bus | reuse PR + bus PR | measured and built 2026-11-13; box measurement after deploy |
 | 3 | description channel: live tracks + freshest result; one shared gated call on a new track or a stale result | its PR | built 2026-11-13; measured with step 4 |
 | 4 | agent live look and Mirror onto 2 and 3; direct adapter calls removed | — | planned |
@@ -97,6 +97,15 @@ nothing changes. **To measure after deploy:** messages per visit on the
 box (expect 1 recorded + 1–2 enriched), and the captioner's calls per
 visit on the clip camera (expect ≈ 0.1) against the office camera
 (expect unchanged).
+
+**Closed 2026-11-13 by Varun's rule: an optimisation that lowers the
+quality of answers is the wrong path, whatever it saves.** The single
+structured call (caption + attributes in one answer) halved Gemma time
+per visit and lost the specific words search depends on; it is removed
+from the code, not left behind a flag. What survives: the batching of
+three or more descriptor questions into one call (measured to keep the
+answers), the same-frame reuse (identical pixels), the frozen-picture
+signal, and the bus events — none of which changes an answer.
 
 ## Step 3 — one shared live description per camera
 

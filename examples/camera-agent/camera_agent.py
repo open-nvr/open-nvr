@@ -5453,6 +5453,7 @@ class CameraAgentRuntime:
             if words and r.get("recording_state") != "off":
                 problems.append(f"{name(r)} {words}")
         off = [name(r) for r in rows if r.get("recording_state") == "off"]
+        frozen = [name(r) for r in rows if r.get("picture") == "frozen"]
         parts: list[str] = []
         n = len(rows)
         if n == 0:
@@ -5463,6 +5464,10 @@ class CameraAgentRuntime:
             parts.append(f"{n - len(offline) - len(unknown)} of {n} cameras online."
                          + (f" Offline: {', '.join(offline)}." if offline else "")
                          + (f" No signal yet from: {', '.join(unknown)}." if unknown else ""))
+        if frozen:
+            parts.append(("The picture has not changed on " if len(frozen) > 1 else "The picture has not changed on ")
+                         + ", ".join(frozen)
+                         + ": the same frame keeps coming back — a stuck stream or relay, or a looping file.")
         if problems:
             parts.append("Recording problems: " + "; ".join(problems) + ".")
         elif rows:

@@ -1391,8 +1391,12 @@ def camera_agent_system_status(
         )
     try:
         degraded_ids = degraded_cameras(db, ids) if ids else set()
+        from services.frame_health import frozen_cameras
+
+        frozen_ids = frozen_cameras(db, ids) if ids else set()
     except Exception:  # noqa: BLE001 - a status read must never raise
         degraded_ids = set()
+        frozen_ids = set()
     now = datetime.now(UTC)
     out: list[dict[str, object]] = []
     for cam in cameras:
@@ -1412,6 +1416,10 @@ def camera_agent_system_status(
             "recording_state": _derive_recording_state(
                 cam, enabled, last, now, online, up_since, degraded=cam.id in degraded_ids),
             "last_recording_at": last.isoformat() if last else None,
+            # "frozen": the same frame keeps coming back (a stuck stream
+            # or relay, a looping file); "live" otherwise. From the
+            # enrichment tier's own reuse signal, services/frame_health.py.
+            "picture": "frozen" if cam.id in frozen_ids else "live",
         })
     # The recording disk: free space against the retention floor. Never
     # fails the read — a missing path or settings row leaves the fields
