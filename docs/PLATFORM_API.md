@@ -25,9 +25,14 @@ Two other doors exist and are *not* this page:
 | Log in | `POST /auth/login` (form) / `POST /auth/login-json` | Returns access + refresh JWTs; MFA-enrolled users pass the TOTP too |
 | Refresh / log out | `POST /auth/refresh`, `POST /auth/logout` | |
 | Who am I | `GET /auth/me`, `GET /users/me/permissions` | The second one is what the UI uses to hide controls |
-| MFA | `POST /auth/mfa/setup`, `/mfa/verify`, `/mfa/disable` | |
+| MFA | `POST /auth/mfa/setup`, `/mfa/verify` | `/mfa/setup` only before enrolment (409 after); `/mfa/disable` is retired (410) |
+| Your authenticator apps | `GET /auth/mfa/factors`, `POST /auth/mfa/factors/totp`, `POST /auth/mfa/factors/{id}/confirm`, `PATCH`/`DELETE /auth/mfa/factors/{id}` | Several apps per account. Once you have a working one, adding, renaming, turning off or removing needs `current_password` in the body and a code in `X-MFA-Code`; the last working app can't be removed or turned off |
+| Recovery codes | `POST /auth/mfa/recovery-codes`; `/mfa/verify` and the first `/factors/{id}/confirm` return a set | 10 one-time codes, shown once, hashed at rest; a new set replaces the old. A code works as the `code` of `/auth/login-json` and in place of `X-MFA-Code` on `/auth/mfa/*` (used up either way), never for other MFA-gated actions |
+| Another user's 2FA (superuser) | `GET /users/{id}/mfa/factors`, `PATCH`/`DELETE /users/{id}/mfa/factors/{fid}`, `POST /users/{id}/mfa/reset` | Your own code in `X-MFA-Code`; not on yourself. Turning off or removing their last working app, or a reset, ends their sessions |
 
 Send `Authorization: Bearer <access token>` on every other call.
+
+Until a local account has a working authenticator app, its session reaches only `/auth/me`, `/auth/logout`, `/auth/mfa/*`, `/users/me` and `/users/me/permissions`; anything else answers 403 `{"error": "mfa_enrollment_required"}`.
 
 `POST /auth/register` — self-registration — is **closed by default**
 (403). An operator opens it with the `public_registration_enabled`

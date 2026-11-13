@@ -37,7 +37,6 @@ from core.auth import (
     get_current_active_user,
     get_mfa_provisioning_uri,
     get_password_hash,
-    verify_totp_code,
 )
 from core.config import settings
 from core.database import get_db
@@ -55,6 +54,7 @@ from schemas import (
     UserRegister,
     UserResponse,
 )
+from services import mfa_service
 from services.audit_service import write_audit_log
 from services.first_time_setup_service import (
     restore as _restore_setup_token,
@@ -149,8 +149,7 @@ async def first_time_setup(
 
         # Generate MFA secret
         mfa_secret = generate_mfa_secret()
-        user.mfa_secret = mfa_secret
-        user.mfa_enabled = True
+        mfa_service.enrol_confirmed(db, user, mfa_secret)
 
         db.commit()
     except Exception:
@@ -301,7 +300,7 @@ def _mfa_login_required(db: Session, user: User) -> bool:
     flag to False so the client shows the MFA-setup wall after this password
     login; /auth/mfa/verify turns it back on once enrollment completes.
     """
-    if user.mfa_enabled and not user.mfa_secret:
+    if user.mfa_enabled and not mfa_service.has_active_factor(db, user):
         user.mfa_enabled = False
         db.add(user)
         db.commit()
@@ -555,9 +554,20 @@ async def login_with_json(
         )
 
     if _mfa_login_required(db, user):
-        if not user_credentials.code or not verify_totp_code(
-            user.mfa_secret, user_credentials.code
-        ):
+        used = mfa_service.verify_login_code(db, user, user_credentials.code)
+        if used == "recovery":
+            try:
+                write_audit_log(
+                    db, action="mfa.recovery_code_used", user_id=user.id, entity_type="user",
+                    entity_id=user.id,
+                    details={"username": user.username,
+                             "remaining": mfa_service.recovery_codes_remaining(db, user)},
+                    ip=request.client.host if request and request.client else None,
+                    user_agent=request.headers.get("user-agent") if request else None,
+                )
+            except Exception as e:
+                auth_logger.error(f"Failed to write audit log: {e}", exc_info=True)
+        if not used:
             # Handle MFA failure as a failed login attempt
             user.failed_login_attempts += 1
 
@@ -643,11 +653,21 @@ async def login_with_json(
 async def mfa_setup(
     current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)
 ):
-    """Generate and return provisioning URI + secret for TOTP; store secret disabled until verify."""
-    secret = generate_mfa_secret()
-    current_user.mfa_secret = secret
-    current_user.mfa_enabled = False
-    db.commit()
+    """Generate and return provisioning URI + secret for TOTP; store secret disabled until verify.
+
+    Only for an account that has not enrolled yet (the enrolment wall). On an
+    enrolled account this would replace the authenticator and switch MFA off
+    on the strength of a session alone, so it is refused.
+    """
+    if mfa_service.has_active_factor(db, current_user):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Two-factor sign-in is already set up for this account. "
+                   "Add another authenticator under Settings > Two-factor sign-in.",
+        )
+    # The same pending enrolment comes back until it expires, so reloading the
+    # enrolment screen does not invalidate a QR code already scanned.
+    _factor, secret = mfa_service.begin_totp(db, current_user)
     otpauth_url = get_mfa_provisioning_uri(
         current_user.username, secret, issuer="OpenNVR Surveillance"
     )
@@ -661,13 +681,14 @@ async def mfa_verify(
     db: Session = Depends(get_db),
     request: Request = None,
 ):
-    """Verify user-provided TOTP code to enable MFA."""
-    if not current_user.mfa_secret:
+    """Verify a code from the pending enrolment to turn it into the account's
+    authenticator (the enrolment wall's second step)."""
+    if not mfa_service.factors(db, current_user, include_pending=True):
         raise HTTPException(status_code=400, detail="MFA not initialized")
-    if not verify_totp_code(current_user.mfa_secret, payload.code):
+    first = not mfa_service.has_active_factor(db, current_user)
+    if mfa_service.confirm_totp(db, current_user, payload.code) is None:
         raise HTTPException(status_code=400, detail="Invalid code")
-    current_user.mfa_enabled = True
-    db.commit()
+    codes = mfa_service.generate_recovery_codes(db, current_user) if first else None
     try:
         write_audit_log(
             db,
@@ -681,33 +702,19 @@ async def mfa_verify(
         )
     except Exception:
         pass
-    return {"message": "MFA enabled"}
+    # Recovery codes: shown this once, for signing in without the phone.
+    return {"message": "MFA enabled", "recovery_codes": codes}
 
 
 @router.post("/mfa/disable")
-async def mfa_disable(
-    current_user: User = Depends(get_current_active_user),
-    db: Session = Depends(get_db),
-    request: Request = None,
-):
-    """Disable MFA for current user."""
-    current_user.mfa_enabled = False
-    current_user.mfa_secret = None
-    db.commit()
-    try:
-        write_audit_log(
-            db,
-            action="mfa.disable",
-            user_id=current_user.id,
-            entity_type="user",
-            entity_id=current_user.id,
-            details={"username": current_user.username},
-            ip=request.client.host if request and request.client else None,
-            user_agent=request.headers.get("user-agent") if request else None,
-        )
-    except Exception:
-        pass
-    return {"message": "MFA disabled"}
+async def mfa_disable(current_user: User = Depends(get_current_active_user)):
+    """Retired. MFA is mandatory, and turning it off on a session alone undid
+    the second factor; an administrator resets a user's two-factor sign-in."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="Two-factor sign-in can no longer be switched off. "
+               "Ask an administrator to reset it.",
+    )
 
 
 @router.post("/refresh", response_model=Token)

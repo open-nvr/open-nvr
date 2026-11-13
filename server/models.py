@@ -24,6 +24,7 @@ import uuid
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     Column,
     DateTime,
@@ -37,6 +38,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     text,
+    true as sa_true,
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -67,6 +69,54 @@ class Role(Base):
     )
 
 
+class UserMfaFactor(Base):
+    """One second factor of an account: today an authenticator app (TOTP).
+
+    An account may hold several (an old phone and a new one while it
+    switches). ``confirmed_at`` NULL is an enrolment in progress: the QR code
+    was shown but no code from it has been verified yet; such a row never
+    verifies a sign-in. All changes go through services.mfa_service.
+    """
+
+    __tablename__ = "user_mfa_factors"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"),
+                     nullable=False, index=True)
+    kind = Column(String(16), nullable=False, default="totp", server_default="totp")
+    label = Column(String(64), nullable=False, default="Authenticator",
+                   server_default="Authenticator")
+    encrypted_secret = Column(String(500), nullable=False)
+    enabled = Column(Boolean, nullable=False, default=True, server_default=sa_true())
+    confirmed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    last_used_at = Column(DateTime(timezone=True), nullable=True)
+    # TOTP time step of the last code accepted at sign-in: the same code is
+    # never accepted for a second sign-in.
+    last_used_step = Column(BigInteger, nullable=True)
+
+    @property
+    def secret(self) -> str:
+        from utils.encryption import decrypt_value
+
+        return decrypt_value(self.encrypted_secret)
+
+
+class UserRecoveryCode(Base):
+    """A one-time recovery code: signs its account in once when no
+    authenticator app is at hand. Only a hash is stored; the codes are shown
+    once, when generated. A new set replaces the old one."""
+
+    __tablename__ = "user_recovery_codes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"),
+                     nullable=False, index=True)
+    code_hash = Column(String(64), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    used_at = Column(DateTime(timezone=True), nullable=True)
+
+
 class User(Base):
     """User model for authentication and user management."""
 
@@ -89,7 +139,11 @@ class User(Base):
     # account owner on first login, not assumed at creation.
     mfa_enabled = Column(Boolean, default=False)
 
-    # Store encrypted MFA secret
+    # The account's second factors live in user_mfa_factors (UserMfaFactor).
+    # This column is kept equal to the oldest confirmed, enabled factor's
+    # ciphertext (NULL when there is none) by services.mfa_service, so an
+    # older core started on this database still verifies the right secret.
+    # Nothing in this version verifies codes against it.
     encrypted_mfa_secret = Column(String(500), nullable=True)
     # Bumped on every password change or reset; tokens carry it as ``ver``
     # and stop working when it moves, so a reset ends the old sessions.
@@ -100,6 +154,22 @@ class User(Base):
     auth_provider = Column(String(16), nullable=True)
     oidc_issuer = Column(String(255), nullable=True)
     oidc_subject = Column(String(255), nullable=True, index=True)
+
+    @property
+    def mfa_factor_count(self) -> int:
+        """How many working authenticators the account has (confirmed and
+        enabled). Read for the users list; changes go through mfa_service."""
+        from sqlalchemy.orm import object_session
+
+        db = object_session(self)
+        if db is None or self.id is None:
+            return 0
+        n = (db.query(UserMfaFactor.id)
+             .filter(UserMfaFactor.user_id == self.id, UserMfaFactor.enabled.is_(True),
+                     UserMfaFactor.confirmed_at.isnot(None))
+             .count())
+        # A secret only in the legacy column (written by an older core) is one.
+        return n or (1 if self.mfa_enabled and self.encrypted_mfa_secret else 0)
 
     @property
     def mfa_secret(self):
