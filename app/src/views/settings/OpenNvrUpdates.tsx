@@ -147,7 +147,8 @@ export function OpenNvrUpdates() {
         <Notice tone="warning" icon={<AlertTriangle size={15} />}>
           <span>
             {t('upd.noRunner')}{' '}
-            <code className="font-mono text-[11px]">sudo ./start.sh auto-update enable</code>{' · '}
+            {/* not sudo: start.sh refuses it, and asks for sudo itself for the timer */}
+            <code className="font-mono text-[11px]">./start.sh auto-update enable</code>{' · '}
             <code className="font-mono text-[11px]">.\start.ps1 auto-update enable</code>
             {s.runner.last_seen && <> {t('upd.runnerLastSeen', { at: fmt.dateTime(s.runner.last_seen) })}</>}
           </span>

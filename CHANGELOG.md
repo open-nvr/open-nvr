@@ -32,6 +32,16 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   detector's latency, its floor and the ratio, so the operator reads
   "detector 67 ms a frame, 2.7× its 25 ms floor" rather than a tile at 100 %.
 
+- **The update runner is installed with OpenNVR.** Configuration → OpenNVR
+  Updates did nothing until someone ran `auto-update enable` on the host,
+  which few did. Now `up` installs the runner unless `UPDATE_RUNNER=off` in
+  `.env`, on a fresh install and on an existing site alike: on Linux it asks
+  for sudo once at a terminal, on macOS it needs nothing, on Windows it
+  needs an administrator PowerShell (a non-admin task would flash a console
+  every minute). The update policy still starts off: until it is changed in
+  the app the runner only checks in and fetches nothing.
+  `auto-update disable` turns it off and keeps it off.
+
 
 - **USB webcams are on by default on Linux (#904).** `.env.example` ships
   `WEBCAMS=on` and the installer's question defaults to yes; an `.env` that
@@ -49,6 +59,26 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   webcams, the host agent's) share one row design.
 
 ### Fixed
+
+- **`auto-update enable` works on Linux.** The command the app and the
+  script showed was `sudo ./start.sh auto-update enable`, which start.sh
+  refuses (it never runs under sudo), and without sudo the script refused
+  too. It now runs as the normal user and writes only the systemd unit
+  through sudo, like the host agent.
+
+
+- **Add Camera no longer prints a SOAP fault, and a camera whose clock is
+  off can still be added.** When a camera refused the ONVIF login the
+  dialog showed the raw `<s:Envelope … ter:NotAuthorized …>` text. A camera
+  answers the same fault to a correct password when its clock is more than
+  a few minutes from ours (WS-Security checks the `Created` timestamp), so
+  core now reads the camera's clock with the unauthenticated
+  GetSystemDateAndTime after both schemes refuse, retries once with the
+  timestamp in the camera's time when the clock is off, remembers the
+  offset for that camera, and otherwise answers a 401 that says what to
+  check: the ONVIF account (often separate from the web login, or ONVIF
+  turned off) and, when measured, the clock skew in minutes. The dialog
+  shows that sentence; any other camera error is reduced to its fault code.
 
 - **A USB webcam on a Docker Desktop machine goes live (#900).** The host
   agent's ffmpeg publishes the camera's path and its `-sub` from one

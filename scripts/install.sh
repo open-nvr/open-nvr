@@ -1467,6 +1467,15 @@ main() {
             env_set HOST_AGENT off; info "Host agent: off (later: ./start.sh host-agent install)"
         fi
     fi
+    # The runner behind OpenNVR Updates in the app: `up` installs it (one
+    # sudo on Linux). It only checks in until an update policy is chosen in
+    # the app, and the policy starts off, so nothing is fetched unasked.
+    if [[ "$(env_get UPDATE_RUNNER)" == "off" ]]; then
+        info "Update runner: off (later: ./start.sh auto-update enable)"
+    else
+        env_set UPDATE_RUNNER on
+        ok "Update runner: installed when OpenNVR starts; choose an update policy in Configuration → OpenNVR Updates"
+    fi
     printf '\n  Configuration and images are ready. Starting OpenNVR...\n\n'
     # Last word before exec — after this, compose owns the terminal and a
     # notice printed 200 lines ago is gone.
