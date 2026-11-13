@@ -65,6 +65,13 @@ def test_prompt_without_kinds_is_a_plain_caption_request():
     assert prompt.rstrip().endswith('{"caption": "..."}')
 
 
+def test_attributes_prompt_has_the_kinds_and_no_caption():
+    prompt = se.build_attributes_prompt(["colour", "vehicle_type"])
+    assert "caption" not in prompt.lower()
+    assert prompt.rstrip().endswith('{"colour": "...", "vehicle_type": "..."}')
+    assert "main vehicle" in prompt
+
+
 # ── the answer ────────────────────────────────────────────────────
 
 
