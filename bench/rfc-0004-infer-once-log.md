@@ -264,6 +264,45 @@ nobody re-learns them:
   24 %) it stays NORMAL. Window D, flag on with the brake at defaults on
   the fixed governor, is the check.
 
+**Measured — traffic window D, flag on, brake at its defaults on the fixed
+governor (2026-11-13 03:28–03:38 UTC, 9.8 min).** Core image d2e74a8f (main
+after #912), `EVENTS_ENRICHMENT_SINGLE_CALL=true`, the brake knobs at
+2× / 4× / 60 % / 6 s. **Not the same traffic as A–C:** the office camera
+woke up (09:00 IST; cam23 2,169 detector inferences against 0 in A–C),
+so two cameras fed the detector and the host load reached 6.4.
+
+| Measurement | D |
+|---|---|
+| visits | 119 |
+| captions written in the window | 76 (64 %); 44 visits still without one at the end |
+| descriptor rows a visit | 1.34 |
+| captioner calls, time, share | 77, 152 s, 26 % |
+| Gemma seconds a visit | 1.27 |
+| detector cam23 / cam26, mean latency | 62 ms / 94 ms |
+| gate drops logged | 2 |
+| governor | the device-busy trigger never fired (the fix holds: captioner 26 % < 60 %); the **latency trigger** went LIVE-ONLY four times (detector 76–173 ms against floors of 36–53 ms) and paced captions to one per 6 s |
+
+What D says: the #912 fix does what it was built for — with the captioner
+at a quarter of the device the busy trigger stays quiet. The pacing in D
+came from the latency trigger, on a floor that the recreate had just set
+(36–53 ms, the quiet start-up moment) and a detector at 2–3× that in the
+busiest traffic of the day. Whether that pacing helped the detector is
+unmeasured: cam26's mean (94 ms) is where it was in B and C with no
+pacing at all. That is the effectiveness question from the C lessons,
+now with a second data point behind it. The cost is plain: a third of
+the visits in a busy ten minutes wait for the backfill before search can
+find them by words.
+
+**Search eval, baseline for the prompt comparison (03:12 UTC, before any
+re-caption):** 33 cases, MRR 0.527, hit@5 0.607, P@5 0.32, negatives 1/5;
+median latency 1,336 ms. Down from 0.762 on 11-11 **for reasons unrelated
+to the prompt**: since that run the plate clip camera added ~9,900
+captioned car, truck and person visits to a pool that held 1,100, so the
+labelled targets sit among ten times more look-alikes, and five search
+commits landed in between. The comparison that matters is against this
+same pool with the 403 labelled visits re-captioned by the new prompt —
+which rewrites production rows and waits for the operator's yes.
+
 **Done.** 2026-11-13, branch `feat/rfc-0004-single-call`:
 - `server/services/structured_enrichment.py` — prompt (caption + the
   kinds' questions with their vocabularies, JSON-only answer, `unknown`
