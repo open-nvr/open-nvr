@@ -187,6 +187,9 @@ class AdapterGate:
         # stamped so a stale figure can be ignored.
         self.latency_ewma_s: float | None = None
         self.latency_updated_at: float | None = None
+        # When a call was last admitted (monotonic): the governor paces
+        # captions against it while the accelerator is contended.
+        self.last_admit_at: float | None = None
 
     # ── state ─────────────────────────────────────────────────────
 
@@ -277,6 +280,7 @@ class AdapterGate:
             self._probe_out = True
         self.inflight += 1
         self.admitted += 1
+        self.last_admit_at = _now()
         return True
 
     def release(self, outcome: Outcome, *, elapsed_s: float | None = None) -> None:

@@ -8,6 +8,30 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Enrichment yields to the detector on a shared accelerator.** On the
+  Ventuno Q the per-visit description questions (one for a vehicle, up to
+  five for a person, about 2 s each on Gemma) held the Hexagon 70 % of the
+  time during a busy hour, and the always-on detector, which needs 9 ms of
+  the device per frame, waited behind them: 67–119 ms a frame against a
+  25 ms floor, with the host CPU looking fine, so the CPU-shaped governor
+  never moved. The monitor's accelerator sample now carries the detector's
+  per-window mean latency and its floor (the lowest window seen, drifting
+  slowly so a lasting change re-baselines), and the governor reads the
+  ratio: at `EVENTS_ENRICHMENT_DETECTOR_SLOW_FACTOR` (2×) the live path
+  goes LIVE-ONLY in its accelerator form — embeddings as before, captions
+  at most one per `EVENTS_ENRICHMENT_PRESSURE_GAP_S` (6 s), descriptor
+  questions dropped — and at `EVENTS_ENRICHMENT_DETECTOR_PAUSE_FACTOR`
+  (4×) nothing is sent; it steps back after the usual calm period. The
+  device's own busy share is the second trigger: at
+  `EVENTS_ENRICHMENT_DEVICE_BUSY_PERCENT` (60, where the detector alone
+  measured 10–37 % and the questions pushed the sum to 85–100 %) no new
+  background call starts, since a running inference cannot be pre-empted
+  on an NPU and the only lever is not to start the next one. A dropped
+  visit keeps no caption row, which is what the backfill looks for.
+  The governor's snapshot and each `enrichment_throttled` event say the
+  detector's latency, its floor and the ratio, so the operator reads
+  "detector 67 ms a frame, 2.7× its 25 ms floor" rather than a tile at 100 %.
+
 - **The update runner is installed with OpenNVR.** Configuration → OpenNVR
   Updates did nothing until someone ran `auto-update enable` on the host,
   which few did. Now `up` installs the runner unless `UPDATE_RUNNER=off` in

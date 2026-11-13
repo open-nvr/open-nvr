@@ -9,6 +9,18 @@ already computes:
 
 * the host monitor's last CPU sample and its ``cpu_high`` alert
   (``system_monitor_service``, sampled every 15 s for the UI anyway);
+* the **accelerator's busy share** from the same sample: above
+  ``EVENTS_ENRICHMENT_DEVICE_BUSY_PERCENT`` the device has no room, and
+  background enrichment does not start a new call (a running inference
+  cannot be pre-empted on an NPU, so "pre-emptive" means at the call
+  boundary: do not start, keep units short, order by value);
+* the **detector's latency against its own floor**, from the same
+  monitor's accelerator sample (``accelerator_usage``): on a board where
+  the detector shares one NPU with the captioner, a detector running at
+  twice its quiet latency is a detector waiting behind Gemma, whatever
+  the CPU says. Measured on a Ventuno Q (2026-11-12): the description
+  questions held the Hexagon 70 % of the time and the detector went from
+  25 to 67–119 ms a frame while the host CPU looked fine;
 * each gate's smoothed latency, against ``EVENTS_ENRICHMENT_SLOW_CALL_S``
   — a model taking longer than that per call is behind the camera
   whatever the CPU figure says (a slow GPU model looks idle to psutil);
@@ -23,6 +35,14 @@ States, and what each one buys::
                nothing), VQA keeps half of it — the colour and type the
                filters match on are worth more than a sentence when
                there is budget for one call, not three; backfill held
+               When the reason is the DETECTOR (accelerator contended)
+               the ranking flips and a pace is added: embeddings as
+               before (milliseconds), captions at most one every
+               ``EVENTS_ENRICHMENT_PRESSURE_GAP_S``, descriptor questions
+               dropped — they are the bulk of the load (one to five
+               two-second questions a visit) and the least valuable per
+               second of the device. A dropped visit keeps no row and
+               the backfill finds it when the box is quiet.
     PAUSED     the monitor's own cpu_high alert, or a breaker open:
                nothing is sent, nothing waits; backfill held
 
@@ -99,6 +119,39 @@ def slow_call_s() -> float:
     return max(1.0, float(getattr(_settings(), "events_enrichment_slow_call_s", 20.0)))
 
 
+def detector_slow_factor() -> float:
+    """Detector latency, as a multiple of its floor, that throttles."""
+    return max(1.2, float(getattr(_settings(), "events_enrichment_detector_slow_factor", 2.0)))
+
+
+def detector_pause_factor() -> float:
+    """…and the multiple that pauses enrichment entirely."""
+    return max(detector_slow_factor(), float(getattr(_settings(), "events_enrichment_detector_pause_factor", 4.0)))
+
+
+def pressure_gap_s() -> float:
+    """Minimum seconds between two captions while the detector is contended."""
+    return max(0.0, float(getattr(_settings(), "events_enrichment_pressure_gap_s", 6.0)))
+
+
+#: A monitor sample older than this says nothing about the device now.
+PRESSURE_SAMPLE_TTL_S = 60.0
+
+
+def device_busy_percent() -> float:
+    """The accelerator busy share above which background enrichment does not
+    START a new call (the device signal; the detector's latency is the
+    other). Measured on a Ventuno Q, 2026-11-12: the detector alone took
+    10–37 % of the Hexagon across quiet and busy hours, and the description
+    questions pushed the sum to 85–100 %; 60 separates the two cleanly and
+    leaves a sixteen-camera detector (24 inferences/s × 25 ms = 60 %) at
+    the line, which is a device that genuinely has no room."""
+    return min(100.0, max(10.0, float(getattr(_settings(), "events_enrichment_device_busy_percent", 60.0))))
+#: Below this floor the ratio is noise (a CPU detector at 150 ms has a
+#: real floor; a stub at 0.1 ms does not).
+PRESSURE_MIN_FLOOR_MS = 5.0
+
+
 def backfill_idle_s() -> float:
     return max(0.0, float(getattr(_settings(), "events_enrichment_backfill_idle_s", 120)))
 
@@ -162,6 +215,57 @@ def host_cpu_percent() -> float | None:
         return None
 
 
+def detector_pressure() -> tuple[float, float, float] | None:
+    """(slowdown, mean_ms, floor_ms) of the detector over the monitor's
+    last accelerator window, or None: no accelerator in use, no window
+    yet, a stale sample, or a floor too small to mean anything."""
+    try:
+        from services.system_monitor_service import get_system_monitor
+
+        sample = get_system_monitor().latest_sample() or {}
+    except Exception:                              # noqa: BLE001
+        return None
+    ts = sample.get("ts")
+    if ts is not None and time.time() - float(ts) > PRESSURE_SAMPLE_TTL_S:
+        return None
+    worst: tuple[float, float, float] | None = None
+    for acc in sample.get("accelerators") or []:
+        ms, floor = acc.get("detector_ms"), acc.get("detector_floor_ms")
+        if ms is None or floor is None or float(floor) < PRESSURE_MIN_FLOOR_MS:
+            continue
+        slowdown = float(ms) / float(floor)
+        if worst is None or slowdown > worst[0]:
+            worst = (slowdown, float(ms), float(floor))
+    return worst
+
+
+def device_busy() -> tuple[float, str] | None:
+    """(busy_percent, device_name) of the accelerator the detector runs on
+    over the monitor's last window, or None: none in use, no window yet,
+    or a stale sample. An inference-time share counts waiting as well as
+    computing, so above ~100 it says "queued", which is busier still."""
+    try:
+        from services.system_monitor_service import get_system_monitor
+
+        sample = get_system_monitor().latest_sample() or {}
+    except Exception:                              # noqa: BLE001
+        return None
+    ts = sample.get("ts")
+    if ts is not None and time.time() - float(ts) > PRESSURE_SAMPLE_TTL_S:
+        return None
+    worst: tuple[float, str] | None = None
+    for acc in sample.get("accelerators") or []:
+        busy = acc.get("busy_percent")
+        if busy is None:
+            continue
+        inflight = acc.get("inflight")
+        # The capped share hides the queue; the in-flight count carries it.
+        share = max(float(busy), float(inflight) * 100.0 if inflight is not None else 0.0)
+        if worst is None or share > worst[0]:
+            worst = (share, str(acc.get("name") or acc.get("kind") or "accelerator"))
+    return worst
+
+
 def host_cpu_high() -> bool:
     try:
         from services.system_monitor_service import ALERT_CPU_HIGH, get_system_monitor
@@ -205,6 +309,11 @@ class Governor:
     def __init__(self) -> None:
         self.state = State.NORMAL
         self.reason = ""
+        #: True while the current state is the detector's doing (the
+        #: accelerator is contended): admit_live then paces captions and
+        #: drops descriptor questions instead of the CPU-shaped ranking.
+        self.pressure = False
+        self._wanted_pressure = False
         self._since = _now()          # when the current state began
         self._calmer_since: float | None = None
         self._last_wanted = State.NORMAL
@@ -212,11 +321,33 @@ class Governor:
 
     def _wanted(self) -> tuple[State, str]:
         """What the signals say right now, before hysteresis."""
+        self._wanted_pressure = False
         breaker = open_breaker()
         if breaker:
             return State.PAUSED, f"{breaker} breaker open"
         if host_cpu_high():
             return State.PAUSED, "host cpu_high alert active"
+        pressure = detector_pressure()
+        if pressure:
+            slowdown, ms, floor = pressure
+            if slowdown >= detector_pause_factor():
+                self._wanted_pressure = True
+                return State.PAUSED, (f"detector {ms:.0f} ms a frame, {slowdown:.1f}× its "
+                                      f"{floor:.0f} ms floor: the accelerator is contended")
+            if slowdown >= detector_slow_factor():
+                self._wanted_pressure = True
+                return State.LIVE_ONLY, (f"detector {ms:.0f} ms a frame, {slowdown:.1f}× its "
+                                         f"{floor:.0f} ms floor: the accelerator is contended")
+        busy = device_busy()
+        if busy and busy[0] >= device_busy_percent():
+            # The device has no room: do not START background work. Same
+            # yield order as the latency trigger (questions dropped,
+            # captions paced, embeddings through); the latency trigger
+            # above still decides a full pause, because a share figure
+            # that counts waiting cannot tell how long the detector waits.
+            self._wanted_pressure = True
+            return State.LIVE_ONLY, (f"{busy[1]} {busy[0]:.0f}% busy ≥ {device_busy_percent():.0f}%: "
+                                     "no room for background enrichment")
         cpu = host_cpu_percent()
         soft = soft_cpu_percent()
         if cpu is not None and cpu >= soft:
@@ -250,12 +381,14 @@ class Governor:
             self._calmer_since = None
             if reason and reason != self.reason:
                 self.reason = reason
+            self.pressure = self._wanted_pressure
         self._last_wanted = wanted
         return self.state
 
     def _set(self, state: State, reason: str, now: float) -> None:
         prev = self.state
         self.state, self.reason = state, reason
+        self.pressure = self._wanted_pressure and state is not State.NORMAL
         self._since = now
         self._calmer_since = None
         if state is State.NORMAL:
@@ -269,6 +402,9 @@ class Governor:
         logger.warning("enrichment governor: %s → %s (%s) — %s", prev.value,
                        state.value, reason,
                        "nothing is sent to the enrichers" if state is State.PAUSED
+                       else ("captions paced, descriptor questions dropped until the "
+                             "detector recovers; embeddings as before; backfill held")
+                       if self.pressure
                        else "captions and embeddings only when a slot is free; "
                             "VQA keeps a short line; backfill held")
         gate_mod.notify_edge(
@@ -283,8 +419,16 @@ class Governor:
         """Read-only: reports the state as last evaluated and never
         advances it. A status endpoint polling this must not be what
         moves the governor or records system events."""
+        pressure = detector_pressure()
+        busy = device_busy()
         return {"state": self.state.value, "reason": self.reason,
                 "stable_for_s": round(self.stable_for(), 1),
+                "pressure": self.pressure,
+                "device_busy_percent": None if busy is None else round(busy[0], 1),
+                "device_busy_line": device_busy_percent(),
+                "detector_slowdown": None if pressure is None else round(pressure[0], 2),
+                "detector_ms": None if pressure is None else round(pressure[1], 1),
+                "detector_floor_ms": None if pressure is None else round(pressure[2], 1),
                 "cpu_percent": host_cpu_percent(),
                 "soft_cpu_percent": soft_cpu_percent(),
                 "slow_call_s": slow_call_s(),
@@ -342,7 +486,23 @@ async def admit_live(gate: gate_mod.AdapterGate, kind: Kind,
         gate._note_drop(f"governor paused: {governor().reason}")
         return False
     if state is State.LIVE_ONLY and priority == "live":
-        # Under budget, the filters' claims outrank the sentence.
+        if governor().pressure:
+            # The detector is waiting on the device. Yield in value order:
+            # embeddings cost milliseconds and go through; captions are
+            # paced; the descriptor questions — the bulk of the load — are
+            # dropped. The visit keeps no row and the backfill finds it.
+            if kind == "vqa":
+                gate.dropped_open += 1
+                gate._note_drop("accelerator contended: descriptor questions yield to the detector")
+                return False
+            if kind == "caption":
+                last, gap = gate.last_admit_at, pressure_gap_s()
+                if last is not None and gap > 0 and (_now() - last) < gap:
+                    gate.dropped_open += 1
+                    gate._note_drop(f"accelerator contended: captions paced to one per {gap:.0f}s")
+                    return False
+            return await gate.admit(max_waiting=0)
+        # Under CPU budget, the filters' claims outrank the sentence.
         return await gate.admit(max_waiting=(gate.queue_depth // 2) if kind == "vqa" else 0)
     return await gate.admit()
 
