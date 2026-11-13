@@ -8,6 +8,17 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Visits and their enrichment are on the bus.** `visit.recorded.v1` has
+  been in the contracts and the SDK since RFC-0002 with core as its
+  producer, and nothing published it; it goes out now the moment a visit
+  row is committed. `visit.enriched.v1` (RFC-0004, step 2) goes out each
+  time a visit's caption or claims land — fresh or copied from an earlier
+  visit of the same frame — carrying the whole current state (caption,
+  every claim as `kind: value`, producer, `enriched_by`, `reused_from`),
+  so the agent, the Mirror and apps can subscribe to what the store knows
+  instead of asking the caption model for it. The SDK types it
+  (`VisitEnriched`). Without `NATS_URL` nothing changes.
+
 - **The same frame is not described twice.** The evidence store is
   content-addressed, so two visits with the same evidence path are the
   same pixels; the later one now takes the earlier one's caption and

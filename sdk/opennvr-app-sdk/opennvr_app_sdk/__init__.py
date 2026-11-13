@@ -110,7 +110,8 @@ from .domain_subscriber import (
 from .egress import connect_via_proxy, proxy_address
 from .event_types import (
     EVENT_TYPES, AccessDecided, DetectionObserved, OccupancyChanged, OccupancyFootfall, OverlayBoxes,
-    FaceRecognized, OccupancyHeatmap, PlateRecognized, ScreeningCompleted, TypedPayload, VisitRecorded,
+    FaceRecognized, OccupancyHeatmap, PlateRecognized, ScreeningCompleted, TypedPayload, VisitEnriched,
+    VisitRecorded,
     typed_payload,
 )
 from .tier0 import (
@@ -254,6 +255,7 @@ EVENTS: tuple[str, ...] = (
     "EVENT_TYPES",
     "DetectionObserved",
     "VisitRecorded",
+    "VisitEnriched",
     "PlateRecognized",
     "FaceRecognized",
     "AccessDecided",

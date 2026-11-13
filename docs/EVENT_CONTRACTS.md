@@ -160,10 +160,10 @@ boxes for a camera the viewer may not watch.
 
 Subject: `opennvr.events.visit.recorded.v1.<camera_id>`
 Producer: core (timeline ingestion), at the moment a finished visit
-row is persisted (`services/timeline_service.py::record_track_visit`).
-
-Today visits are DB rows only; this contract puts the fact on the bus
-so apps stop polling the timeline API for "something happened".
+row is persisted (`services/timeline_service.py::record_track_visit`,
+through `services/domain_bus.py`). Published since 0.1.12; before that
+the contract existed and nothing emitted it, and apps polled the
+timeline API for "something happened".
 
 `payload`:
 
@@ -174,15 +174,38 @@ so apps stop polling the timeline API for "something happened".
 | `started_at` / `ended_at` | string | ISO-8601 UTC visit bounds. |
 | `evidence_path` | string \| null | Best-frame evidence reference, resolvable via the evidence API (not a raw filesystem path promise). |
 
-### `visit.enriched.v1` — PROPOSED (RFC-0004), not yet published
+### `visit.enriched.v1`
 
-The result of the enrichment tier for a visit — caption, attribute
-claims, embedding reference — published once by core when it lands, so
-search, the camera agent, the Mirror and apps subscribe instead of
-polling the store, and no consumer runs the caption model itself. Shape
-and acceptance in [`rfcs/RFC-0004-infer-once-publish-once.md`](rfcs/RFC-0004-infer-once-publish-once.md).
-Until it ships, the store (`event_text`, `visit_descriptors`) is the only
-source, and `visit.recorded.v1` above is the signal that a visit exists.
+Subject: `opennvr.events.visit.enriched.v1.<camera_id>`
+Producer: core (the enrichment tier), each time a visit's caption or
+descriptor claims land in the store — fresh from the model, or copied
+from an earlier visit of the same evidence frame
+(`services/domain_bus.py::publish_visit_enriched`). Published since
+0.1.12 (RFC-0004, step 2).
+
+One message per landing; **every message carries the whole current
+state** of the visit's enrichment, so a subscriber that sees one knows
+everything the store knows at that moment and never has to merge. A
+visit whose caption lands first and whose claims land later produces
+two messages, the second a superset of the first. `ts` is the visit's
+end (its observation), not the publish time.
+
+`payload`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `event_id` | int | The timeline row id — join key for the REST API and for `visit.recorded.v1`. |
+| `label` | string | Track label (`person`, `car`, …). |
+| `caption` | string \| null | The visit's sentence, as `event_text` holds it; null when no caption has landed (claims only). |
+| `attributes` | object | Every descriptor claim as `kind: value` (`colour`, `vehicle_type`, `clothing_top`, `carrying`, …), the same vocabulary the attribute filter searches. Empty when none. |
+| `evidence_path` | string \| null | Best-frame evidence reference, as in `visit.recorded.v1`. |
+| `producer` | string \| null | The caption's adapter (`event_text.source`), for audit. |
+| `enriched_by` | string[] | The skills recorded as having looked (`image_captioning`, `vqa`, …), so "looked and found nothing" is distinguishable from "not yet". |
+| `reused_from` | int \| absent | Present when the caption and claims were copied from this earlier visit of the same frame (RFC-0004 step 2, exact-frame reuse); absent for a fresh look. |
+
+Consumers that need a question answered about a frame ask core, never
+an adapter (RFC-0004); this event is how they learn what core already
+knows, instead of asking the model again.
 
 ### `plate.recognized.v1`
 
