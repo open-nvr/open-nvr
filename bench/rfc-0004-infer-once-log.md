@@ -303,6 +303,49 @@ commits landed in between. The comparison that matters is against this
 same pool with the 403 labelled visits re-captioned by the new prompt —
 which rewrites production rows and waits for the operator's yes.
 
+**Measured — search eval after re-captioning the labelled visits with
+prompt v2 (2026-11-13 03:55–04:20 UTC).** The 403 visits in the labelled
+id range were backed up (captions, descriptor rows, enrichment marks),
+cleared, and re-captioned one by one through the caption task with the
+single call on: 403 done, 0 dropped, 0 failed, 1,301 s (3.2 s a visit
+including the caption vector, on a box at load 6). Then the 33 cases
+again, against the same pool.
+
+| | Before (old captions) | After (prompt v2 captions) |
+|---|---|---|
+| MRR | 0.527 | 0.493 |
+| hit@5 | 0.607 | **0.643** |
+| P@5 | 0.32 | 0.281 |
+| recall@10 | 0.457 | **0.32** |
+| attribute cases (9): MRR / hit@5 | 0.726 / 0.778 | 0.728 / 0.889 |
+| caption cases (11): MRR | 0.489 | 0.445 |
+| paraphrase cases (5): MRR | 0.37 | 0.27 |
+| negatives passed | 1/5 | 1/5 |
+| median latency | 1,336 ms | 2,406 ms (box at load 6, two cameras busy) |
+
+What moved, case by case: attribute queries held or improved ("man in a
+light blue shirt" 0.09 → 0.50, "person talking on a phone" 0 → 0.17,
+"man sitting on the floor with a laptop" 0.11 → 1.0); scene queries lost
+("someone pointing at the camera" 0.50 → 0.05, "person in camouflage"
+0.50 → 0.20 with recall 1.0 → 0.14, "white car parked in front of a
+building" 0.11 → 0, "person looking at a whiteboard" recall 1.0 → 0.6).
+The captions themselves say why: 23.1 words → 17.6; a colour word in
+383 of 403 against 190 before (the attribute gain); and the words most
+often lost are the scene — light/dark, chair, window, front, office,
+jeans, pants, hair, looking, monitor, camouflage. "A man in a light pink
+t-shirt is standing and looking up, with a laptop and a backpack on a
+wooden desk in front of him" became "A man wearing a pink t-shirt is
+standing and looking off to the side in an indoor setting."
+
+**Decision:** the default does not flip on this. The attributes and the
+colour words are better; the scene words that caption-style queries
+need are fewer, and recall@10 dropped by a third. The NPU saving stands
+(windows B–D). Next: prompt v3 asks for the caption as one or two
+sentences of 20–30 words including what is around the subject; measured
+first on the paired frames (words, colour words, latency — the cost is
+output tokens), then the same re-caption and eval cycle. The 403 old
+captions are in the backup if the cycle does not converge.
+
 **Done.** 2026-11-13, branch `feat/rfc-0004-single-call`:
 - `server/services/structured_enrichment.py` — prompt (caption + the
   kinds' questions with their vocabularies, JSON-only answer, `unknown`

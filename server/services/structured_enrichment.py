@@ -113,8 +113,9 @@ def build_prompt(kinds: list[str]) -> str:
         for kind in kinds:
             vocab = ", ".join(str(v) for v in KIND_QUESTIONS[kind].get("vocabulary") or [])
             lines.append(f'- "{kind}": {_question_for(kind)} One of: {vocab}; or "unknown".')
-    lines.append('Then write one sentence (the "caption") describing who or what is in the '
-                 "frame, what they wear and what they are doing. Plain words, no preamble.")
+    lines.append('Then write the "caption": one or two sentences, 20 to 30 words, saying who '
+                 "or what is in the frame, what they wear, what they are doing, and what is "
+                 "around them (objects, furniture, vehicles, the place). Plain words, no preamble.")
     keys = ", ".join([f'"{k}": "..."' for k in kinds] + ['"caption": "..."'])
     lines.append("Reply with a JSON object only, no other text, with exactly these keys:")
     lines.append("{" + keys + "}")
