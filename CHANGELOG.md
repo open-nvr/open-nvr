@@ -8,6 +8,18 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **One captioner call per visit, behind a flag (RFC-0004, step 1).** With
+  `EVENTS_ENRICHMENT_SINGLE_CALL=true` the caption task asks the model
+  once for the sentence and the descriptor answers together, as one JSON
+  object, instead of a caption call and then one call per kind on the
+  same frame (three calls a vehicle, up to six a person; on a Ventuno Q
+  225 of 325 Gemma calls in ten busy minutes were the questions). The
+  answers reach `visit_descriptors` through the same vocabulary, the
+  descriptor task leaves a visit alone when the caption task will carry
+  it, and a model that answers in prose keeps the prose as its caption
+  and is asked one by one on a later pass. Off by default until the
+  measurement on the box is in (`bench/rfc-0004-infer-once-log.md`).
+
 - **Enrichment yields to the detector on a shared accelerator.** On the
   Ventuno Q the per-visit description questions (one for a vehicle, up to
   five for a person, about 2 s each on Gemma) held the Hexagon 70 % of the

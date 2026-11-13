@@ -399,6 +399,37 @@ async def _ask(jpeg: bytes, adapter: str, question: str,
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
+def _single_call_carries(db, row, already: set[str], priority: str) -> bool:
+    """Will the caption task's one structured call carry this visit's
+    questions? Only when the single call is on, the caption lane will run
+    for this visit (its switch, its class, its camera assignment), and
+    nobody has captioned it yet. A visit that already has its sentence
+    — or that the captioner looked at and found nothing — is asked here
+    as before, so a model that answers in prose still gets its
+    attributes on the next pass."""
+    from services import structured_enrichment
+
+    if not structured_enrichment.enabled():
+        return False
+    from core.config import settings
+    from services.caption_enrichment import CAPTION_SKILL, CAPTIONABLE_LABELS
+
+    if priority != "requested" and not getattr(settings, "events_caption_enrichment", True):
+        return False
+    if (row.label or "").lower() not in CAPTIONABLE_LABELS:
+        return False
+    if CAPTION_SKILL in already:
+        return False
+    from models import Camera, EventText
+    from services.skill_assignments import camera_skills
+
+    camera = db.get(Camera, row.camera_id)
+    if camera is None or CAPTION_SKILL not in camera_skills(camera):
+        return False
+    text = db.get(EventText, row.id)
+    return text is None or not (text.caption or "").strip()
+
+
 async def enrich_event_descriptors(event_id: int, *,
                                    priority: str = "live") -> str | None:
     """Background task: ask the box what it can say about this visit.
@@ -435,6 +466,11 @@ async def enrich_event_descriptors(event_id: int, *,
         evidence_path = row.evidence_path
         already = set((row.payload or {}).get("enriched_by") or [])
         camera_handle = f"cam{row.camera_id}"
+        if _single_call_carries(db, row, already, priority):
+            # RFC-0004 step 1: the caption task asks the questions in the
+            # same call as the sentence. Asking them here too would be
+            # the duplicate the step exists to remove.
+            return
         # Kinds VQA already answered on this visit. A pass whose other
         # question was DROPPED leaves VQA un-ran (so it is asked again),
         # and the retry must not pay for the answers it already has.
