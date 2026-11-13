@@ -24,6 +24,7 @@ os.environ.setdefault("MEDIAMTX_SECRET", secrets.token_hex(32))
 os.environ.setdefault("INTERNAL_API_KEY", secrets.token_urlsafe(48))
 os.environ.setdefault("CREDENTIAL_ENCRYPTION_KEY", Fernet.generate_key().decode())
 
+from services.camera_source_resolver import path_suffix_substream_url  # noqa: E402
 from services.substream_discovery import (  # noqa: E402
     DiscoveredSubstream,
     discover_substream,
@@ -108,11 +109,37 @@ async def test_no_credentials_means_no_onvif_but_the_vendor_rule_still_runs():
 
 
 @pytest.mark.asyncio
+async def test_the_relay_path_sibling_is_the_last_guess_and_stored_only_when_it_answers():
+    """A camera behind a MediaMTX relay (the Ventuno Q's office camera,
+    2026-11-13: ``poe-cam1`` with ``poe-cam1-sub`` served beside it) has no
+    ONVIF and matches no vendor rule, so core stored no substream and the
+    pipeline decoded 1080p. The ``-sub`` sibling is now tried, after the
+    vendor rule, and kept only when it answers."""
+    relay = "rtsp://172.28.90.10:8554/poe-cam1"
+    probe = _prober({relay + "-sub": ("ok", (704, 576))})
+    found = await discover_substream(relay, "172.28.90.10", None, None, prober=probe)
+    assert found == DiscoveredSubstream(relay + "-sub", "path-sub", True, 704, 576)
+    assert probe.asked == [relay + "-sub"]
+    # a query string rides along; a path that is already a sub is not doubled
+    assert path_suffix_substream_url("rtsp://h:8554/cam?jwt=x") == "rtsp://h:8554/cam-sub?jwt=x"
+    assert path_suffix_substream_url("rtsp://h:8554/cam-sub") is None
+    assert path_suffix_substream_url("rtsp://h:8554/") is None
+    assert path_suffix_substream_url("http://h/cam") is None
+    # the vendor rule still comes first, and the sibling is never stored unverified
+    probe = _prober({HIK_SUB: ("refused", None), HIK_MAIN + "-sub": ("inconclusive", None)})
+    assert await discover_substream(HIK_MAIN, "192.168.1.64", "admin", "pw",
+                                    prober=probe, onvif=_no_onvif) is None
+    assert probe.asked == [HIK_SUB, HIK_MAIN + "-sub"]
+
+
+@pytest.mark.asyncio
 async def test_unknown_vendor_and_a_sub_equal_to_main_find_nothing():
+    # No vendor rule matches: only the MediaMTX-style sibling is tried, and a
+    # refusal stores nothing.
     probe = _prober({})
     assert await discover_substream("rtsp://u:p@10.0.0.9:554/live", "10.0.0.9", "u", "p",
                                     prober=probe, onvif=_no_onvif) is None
-    assert probe.asked == []
+    assert probe.asked == ["rtsp://u:p@10.0.0.9:554/live-sub"]
 
     async def same(ip, u, p):
         return HIK_MAIN

@@ -6,6 +6,21 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A camera behind a relay gets its substream.** Add Camera had no
+  substream field (only the Edit form did), and discovery knew two routes:
+  the device's ONVIF profiles and the Hikvision/Dahua URL conventions. A
+  camera reached through a MediaMTX relay (the office camera on the
+  Ventuno Q, `poe-cam1` with `poe-cam1-sub` served beside it) has no ONVIF
+  and matches no convention, so core stored nothing and the detector
+  decoded the 1080p main stream. Discovery now tries the MediaMTX-style
+  `<path>-sub` sibling last, probed and stored only when it answers, and
+  the Add Camera dialog carries the substream field with the reason a
+  substream matters: detection runs on it instead of the full picture,
+  around 5x less CPU per camera, while recording, live view and evidence
+  keep the main stream.
+
 ### Added
 
 ### Changed
