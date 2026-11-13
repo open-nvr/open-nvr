@@ -161,7 +161,7 @@ else fail "$(grep -E '^(EMBED_ADAPTER_TAG|EVENTS_EMBED_ENRICHMENT)=' .env | tr '
 
 # ── 8. The detector's crop budget follows the flavour (Ventuno Q, 2026-11-13:
 #    8 crops × 5 fps × 2 busy cameras pinned the Hexagon; 3 × 4 fps fitted) ──
-start_test "qualcomm overlay defaults DETECT_MAX_REGIONS to 3 and DETECT_FPS to 4; base compose to 4 crops; .env.example leaves both empty"
+start_test "qualcomm overlay defaults DETECT_MAX_REGIONS to 3 and DETECT_FPS to 4; base compose to 2 fps and 4 crops; .env.example leaves both empty"
 out=$(python3 - "$REPO_ROOT" <<'PY'
 import os, re, sys, yaml
 repo = sys.argv[1]
@@ -173,6 +173,7 @@ bad = []
 if qc.get("DETECT_MAX_REGIONS") != "${DETECT_MAX_REGIONS:-3}": bad.append(f"qualcomm DETECT_MAX_REGIONS={qc.get('DETECT_MAX_REGIONS')!r}")
 if qc.get("DETECT_FPS") != "${DETECT_FPS:-4}": bad.append(f"qualcomm DETECT_FPS={qc.get('DETECT_FPS')!r}")
 if base.get("DETECT_MAX_REGIONS") != "${DETECT_MAX_REGIONS:-4}": bad.append(f"base DETECT_MAX_REGIONS={base.get('DETECT_MAX_REGIONS')!r}")
+if base.get("DETECT_FPS") != "${DETECT_FPS:-2}": bad.append(f"base DETECT_FPS={base.get('DETECT_FPS')!r} (2 is what a CPU-only host sustains per busy camera, measured)")
 ex = open(os.path.join(repo, ".env.example")).read()
 for k in ("DETECT_MAX_REGIONS", "DETECT_FPS"):
     m = re.search(rf"^{k}=(.*)$", ex, re.M)

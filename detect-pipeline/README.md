@@ -219,7 +219,7 @@ with an env dial and a metric (never a silent cap):
 **Second dial: lower `DETECT_FPS`.**
 Detection runs on every analyzed frame (the gate skips alarms, not
 inference), so pipeline CPU scales almost linearly with the per-camera
-analysis rate — `DETECT_FPS`, default 5 (Frigate's default; 2 is the CPU-friendly setting that
+analysis rate — `DETECT_FPS`, default 2 on the CPU/GPU compose and 4 on the qualcomm overlay (5 is Frigate's default; 2 is the CPU-friendly setting that
 behaves well on laptops and any macOS/Windows Docker install, where the
 VM has no GPU). Servers with headroom — and especially `DETECT_HWACCEL`
 hosts — can raise it to 5-10 for finer motion/track granularity and a
@@ -452,7 +452,7 @@ the staged runbook in [ENABLEMENT.md](ENABLEMENT.md). Disable without a redeploy
 ```bash
 # .env
 DETECT_PIPELINE_ENABLED=false     # container stays up but idle
-DETECT_FPS=                       # frames analyzed /s /camera (1-30; empty = the flavour's default, 5, or 4 on qualcomm; 2 on a CPU-only box short of headroom) — the main CPU dial
+DETECT_FPS=                       # frames analyzed /s /camera (1-30; empty = the flavour's default: 2 on CPU/GPU, 4 on qualcomm) — the main CPU dial
 DETECT_DECODE_SKIP=nonref         # nonref (default, lossless) | bidir | nokey | none — dial 4
 DETECT_DECODE_THREADS=2           # ffmpeg decoder thread cap (0 = auto) — dial 5, lossless
 DETECT_DECODE_FAST=false          # true = skip h264 loop filter (opt-in, not bit-exact)

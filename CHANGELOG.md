@@ -8,16 +8,23 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- **The detector's crop budget follows the flavour.** `DETECT_MAX_REGIONS`
-  and `DETECT_FPS` ship empty in `.env.example`; the compose file sets 4
-  crops at 5 fps (what a CPU-only host sustains: each crop is a detector
-  pass), and the qualcomm overlay 3 crops at 4 fps. Measured on a
-  Dragonwing board: two busy cameras at 5 fps with the old default of 8
-  crops asked the Hexagon for ~80 inferences a second (~15 ms each) and
-  pinned it at 100 % with the plate reader and the captioner queued behind
-  it; 3 crops at 4 fps took ~40 % of the device at ~50 ms per frame per
-  camera, plates and captions flowing. A number in `.env` outranks every
-  flavour, so an existing install keeps what it set. (PR #392.)
+- **The detector's frame rate and crop budget follow the flavour.**
+  `DETECT_FPS` and `DETECT_MAX_REGIONS` ship empty in `.env.example`; the
+  compose file sets 2 fps and 4 crops, the qualcomm overlay 4 fps and 3
+  crops; a number in `.env` outranks both, so an existing install keeps
+  what it set. Both pairs are measured. CPU
+  (`bench/cpu-detector-defaults-2026-11-13.md`, an 8-core host with four
+  busy cameras): one yolo26n crop costs ~0.5 core-second whichever
+  backend, the host sustains ~2 frames/s per camera whatever is asked,
+  and the 5 fps 0.1.11 shipped dropped thousands of frames and two thirds
+  of the visits (7–15 a minute against 23–28 at 2 fps); the crop cap
+  barely matters under load. Hexagon (Ventuno Q): two busy cameras at
+  5 fps with 8 crops asked for ~80 inferences a second (~15 ms each) and
+  pinned the device at 100 % with the plate reader and the captioner
+  queued behind it; 3 crops at 4 fps took ~40 % at ~50 ms per frame per
+  camera, plates and captions flowing. The frame-counted dials lengthen
+  in seconds at 2 fps as they did before 0.1.11 (calibration deadline
+  150 frames ≈ 75 s, stationary re-check 50 frames ≈ 25 s). (PR #392.)
 
 ### Added
 
