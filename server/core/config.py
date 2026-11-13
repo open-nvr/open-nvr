@@ -438,6 +438,12 @@ class Settings(BaseSettings):
     # five extended person kinds cost 2.2 s as one call against 3.7 s as
     # five. 0 never batches.
     events_descriptor_batch_min_kinds: int = 3
+    # A visit whose evidence frame is byte-identical to an earlier visit's
+    # (the store is content-addressed) takes that visit's caption and
+    # descriptor claims instead of calling the model: same pixels, same
+    # answer. Measured on a Ventuno Q (2026-11-13): 91 % of a day's
+    # captioner calls on a looping test input, none on a real camera.
+    events_enrichment_reuse_same_frame: bool = True
     # RFC-0004 step 1: ask the captioner ONCE per visit for the sentence
     # and the descriptor answers together, as one JSON object, instead of
     # a caption call and then one call per kind on the same frame (three
