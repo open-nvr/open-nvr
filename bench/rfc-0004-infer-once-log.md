@@ -369,6 +369,55 @@ window B becomes about 2.3 s. The re-caption and eval cycle with v3 is
 the arbiter; if search recovers, the knee between words and tokens is
 the next thing to measure (a 15–25 word variant).
 
+**Measured — search eval after re-captioning with prompt v3 (2026-11-13
+04:33–04:52 UTC), same 403 visits, same pool.** 403 done, 0 dropped,
+1,066 s.
+
+| | old captions | v2 | v3 |
+|---|---|---|---|
+| MRR | 0.527 | 0.493 | **0.479** |
+| hit@5 | 0.607 | 0.643 | 0.607 |
+| recall@10 | 0.457 | 0.32 | **0.293** |
+
+Longer did not help. Reading the targets' three captions side by side
+says why, and it is not length:
+
+- **The attribute vocabulary anchors the caption.** With the colour
+  question answered first ("grey", "beige"), the caption describes the
+  same garment in the vocabulary's words: "a camouflage shirt" became
+  "a beige patterned shirt" on all three camouflage targets, "a striped
+  shirt" became "a grey patterned shirt". Across the 403 visits:
+  camouflage 7 → 1 → 2, plaid 9 → 3 → 3, striped 4 → 2 → 1, glasses
+  26 → 11 → 5, beard 30 → 15 → 12. The specific words search needs are
+  exactly what the coarse vocabulary displaces.
+- **"The main person" narrows the caption too.** The subject phrase was
+  added for the attributes (run 1's yellow-ambulance drift), but the
+  caption obeys it as well: "three men, one in a light blue shirt, one in
+  a striped shirt, and one in a yellow shirt" became "a man in a yellow
+  shirt is seen from the back". A gesture goes the same way: "pointing at
+  it" → "looking at a dark screen" (pointing 3 → 0 → 1).
+- A note on the labelled set: several cases were labelled from what the
+  old captions said ("strict — the two captions that say so"), so part
+  of every re-caption's loss is agreement with the old wording rather
+  than with the frame. The word counts above are the part that is real.
+
+Also measured and rejected: deriving the attributes from the plain
+caption's text instead of asking (zero extra calls). On the 70 paired
+frames, against the per-question answers: colour 30/40, vehicle type
+12/40, clothing 7/30, carrying 0/30. Not a producer.
+
+**Decision:** v3 is not it either. Two candidates, in the order they are
+measured: **v4** — the caption first, worded like the plain prompt and
+about the whole frame, then the attributes about the named subject
+(run 1 had the caption first but no subject phrase; the drift may have
+been the missing phrase, not the order); if v4's attributes hold at
+v2's level and its captions keep the plain prompt's specific words, it
+is one call with nothing lost. Else **two calls**: the plain caption
+unchanged (no search question by construction) plus one attributes-only
+structured call — two instead of three for a vehicle, two instead of six
+for a person with the extended questions.
+
+
 
 **Done.** 2026-11-13, branch `feat/rfc-0004-single-call`:
 - `server/services/structured_enrichment.py` — prompt (caption + the
