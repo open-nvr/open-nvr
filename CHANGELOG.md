@@ -8,6 +8,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Three or more descriptor questions go to the model as one call.** With
+  the extended person questions on, a person visit cost the captioner one
+  call a kind — five calls, 3.7 s on a Ventuno Q. From
+  `EVENTS_DESCRIPTOR_BATCH_MIN_KINDS` kinds (3) the questions go as one
+  call with a JSON answer, 2.2 s for the same five, with the same answers
+  where the crop allows one (paired runs 5 and 5b in
+  `bench/rfc-0004-infer-once-log.md`); two kinds cost the same either way
+  and stay single. A reply that is not JSON falls back to the single
+  questions. The caption call is untouched. The headwear question no
+  longer leads with "such as helmet, cap, …", which put a cap on bare
+  heads and on crops too small to tell; it now offers "nothing" and
+  "unknown" plainly.
+
 - **A camera whose picture has stopped changing is said so.** The
   enrichment tier knows per visit whether the evidence frame is one it has
   seen before (the store is content-addressed); a live camera never
