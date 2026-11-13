@@ -167,6 +167,33 @@ quiet camera therefore costs no call per question.
   asks core, never an adapter. The adapter endpoints stay reachable for
   the one legitimate direct user, KAI-C.
 
+## Pre-emption on an accelerator, as measured
+
+A running inference cannot be interrupted on the Hexagon: once Gemma holds
+the device for an answer, the detector waits for that answer. So "the
+detector pre-empts background work" means three things done at the call
+boundary, all of them in the enrichment governor:
+
+1. **Do not start.** Two triggers, both from the monitor's accelerator
+   sample: the detector's per-window latency at twice its floor, and the
+   device's busy share at `EVENTS_ENRICHMENT_DEVICE_BUSY_PERCENT` (60 %).
+   Either one stops new background calls: questions dropped, captions
+   paced to one per `EVENTS_ENRICHMENT_PRESSURE_GAP_S`, embeddings
+   through. The latency ratio alone decides a full pause (4×), because a
+   share that counts waiting cannot say how long the detector waits.
+   Shipped in #905. The 60 comes from the measurements: the detector
+   alone took 10–37 % of the device across quiet and busy hours, the
+   description questions pushed the sum to 85–100 %, and a sixteen-camera
+   detector sits at the line by itself (24 inferences/s × 25 ms).
+2. **Keep every unit short.** The litertlm adapter caps a caption or
+   question answer at 96 output tokens (`OPENNVR_LITERTLM_MAX_OUTPUT_TOKENS`),
+   which is the 1.6–2 s unit measured; the structured single call of §1
+   keeps that cap, so the detector's worst wait stays one unit whatever
+   the prompt returns.
+3. **Order by value per millisecond.** Embeddings (6–8 ms) are never
+   held back; captions before questions; the backfill only when the
+   governor has been normal and idle, and now only below the device line.
+
 ## What this does not decide
 
 - Which fields the structured answer carries beyond today's vocabulary.
