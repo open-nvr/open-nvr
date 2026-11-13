@@ -12,8 +12,8 @@ or an estimate.
 | # | Item | PR | State |
 |---|---|---|---|
 | 0 | this ledger | — | written 2026-11-13 |
-| 1 | one structured call per best frame (caption + attributes in one answer; per-question fallback) | this PR | code done 2026-11-13, flag off; box measurement next |
-| 2 | `visit.enriched.v1` on the bus; result cache (frame hash, model fingerprint, prompt) | — | planned |
+| 1 | one structured call per best frame (caption + attributes in one answer; per-question fallback) | #909, #910 | measured 2026-11-13 (paired frames, windows A/B/C); flag on on the Ventuno Q; default flips after the search eval |
+| 2 | do not infer twice for the same frame (exact-frame reuse; near-repeat reuse measured and declined); `visit.enriched.v1` on the bus | — | measured 2026-11-13; exact reuse in progress |
 | 3 | description channel: live tracks + freshest result; one shared gated call on a new track or a stale result | — | planned |
 | 4 | agent live look and Mirror onto 2 and 3; direct adapter calls removed | — | planned |
 | 5 | SDK frame-consumer rule (credits, latest frame wins, measured cadence, tracker continuity, skipped counter); KAI-C stream proxy adopts it | — | planned |
@@ -43,6 +43,49 @@ questions on, accurate plate mode.
 | Direct adapter callers outside the gate | the agent's live look; the Mirror's loop | code |
 | Enrichment results published on the bus | none (stored only) | `docs/EVENT_CONTRACTS.md` |
 
+## Step 2 — publish once, and do not infer twice for the same frame
+
+**Measured first (2026-11-13 06:40 UTC, on the box).** Where the
+captioner's calls went in the last 24 h:
+
+| Measurement | Value |
+|---|---|
+| captioner calls on a frame **byte-identical** to one already captioned | **9,921 of 10,892 (91 %)** |
+| the clip camera (cam26): visits / distinct evidence files | car 5,537 / 339; truck 4,303 / 79; person 908 / 28 |
+| the office camera (cam23): visits / distinct evidence files | person 454 / 454; car 150 / 150 |
+| one looping frame's caption count | 845 (the same JPEG, the same sentence, 845 times) |
+
+The evidence store is content-addressed (the path is the SHA-256 of the
+JPEG), so "the same frame" is one indexed lookup. On a looping or static
+input it removes nine calls in ten with no quality question at all —
+identical pixels, identical answer. On a real camera it removes nothing,
+so the second measurement is near-repeats there, from the SigLIP frame
+vectors the box already keeps (1,829 cam23/24 frames over 7 days):
+
+| earlier same-camera same-label frame within… | cosine ≥ 0.90 | ≥ 0.95 | ≥ 0.97 | ≥ 0.99 |
+|---|---|---|---|---|
+| 10 min | 57 % | 14 % | **3 %** | 0 % |
+| 60 min | 73 % | 20 % | 4 % | 0 % |
+| 24 h | 80 % | 22 % | 4 % | 0 % |
+
+At a threshold safe enough to reuse a caption (≥ 0.97: the same person in
+the same chair) a real camera offers 2–4 % of its visits; 0.90 is
+"similar scene", not "same frame", and reusing there would put one
+visit's words on another. **Decision:** exact-frame reuse ships now
+(caption, descriptors and marks copied from the earlier visit, no call);
+near-repeat reuse is not worth its quality risk at these rates and is
+not built.
+
+**What this says about "captions take the NPU".** On the real office
+camera: 604 visits a day = 25 an hour; at 1.2 s a caption that is 30 s
+of Gemma an hour, under 1 % of the device; with the two descriptor
+questions, about 2 %. Sixteen such cameras: 15–30 %, inside what the
+brake handles. The device was full today because of a clip that
+re-detects the same 450 frames ten thousand times a day, the per-person
+questions (up to five), and the agent's and the Mirror's own calls —
+not because a real camera's captions are expensive. So the quality of
+the plain caption is not what has to give; the duplicate work is.
+
 ## Step 1 — one structured call
 
 **Planned.** `caption_enrichment.enrich_event_caption` delegates, when
@@ -66,8 +109,61 @@ carry it, and asks as before for a visit that already has its caption.
   against per-question on the same hour of traffic.
 - JSON failure rate of the structured answer.
 
-**Measured.** _pending — the box runs the flag off until the two
-ten-minute windows below are taken._
+**Measured — paired frame comparison, run 1 (2026-11-13 01:47–01:56 UTC).**
+`tools/rfc0004_paired_compare.py` on the box, as a one-off container from
+the merged core image, calls sequential, through KAI-C's infer route like
+core itself. 70 evidence frames from the last 24 h: 27 car, 13 truck
+(all cam26, the plate clip), 30 person (11 cam23 office, 19 cam26).
+Arm A = plain caption call, B = one question per kind (2 per frame),
+C = the one structured call. The box was under its normal load (agent on,
+plate reader in accurate mode), so absolute times are a busy box's.
+
+| Measurement | Vehicle frames (40) | Person frames (30) |
+|---|---|---|
+| A, plain caption (adapter inference_ms, mean) | 1069 ms | 1418 ms |
+| B, two questions together | 1446 ms (723 each) | 1446 ms |
+| Old path A + B | 2515 ms, 3 calls | 2864 ms, 3 calls |
+| C, one structured call | 1782 ms | 1813 ms |
+| Saving per visit | 29 % of Gemma time, 2 calls fewer | 37 %, 2 calls fewer |
+
+Over all 70 frames: old 2665 ms, new 1796 ms, ratio 1.48. JSON parsed on
+70 of 70 (Gemma wraps it in a code fence; the parser takes that). No reply
+hit the 96-token cap (mean reply 120 characters). No call failed.
+
+| Kind | Frames | Agree | Differ | B only | C only | Neither |
+|---|---|---|---|---|---|---|
+| colour | 40 | 34 | 6 | 0 | 0 | 0 |
+| vehicle_type | 40 | 31 | 9 | 0 | 0 | 0 |
+| clothing_top | 30 | 30 | 0 | 0 | 0 | 0 |
+| carrying | 30 | 26 | 1 | 3 | 0 | 0 |
+
+Looked at the disputed frames: all six colour disagreements are one
+scene, a white van in front of a yellow ambulance, where B said white
+(right) and C said yellow; the type disagreements are a goods carrier
+(B truck, right; C bus), a white crossover (B suv, C van) and a black
+Maruti SUV the detector had labelled truck (B truck, C pickup, both
+wrong). The three "B only" carrying answers are C saying "unknown" where
+B said "nothing" — conservative, not wrong. Pattern: C's answers drift
+to the whole scene. The cause is order: the caption is generated first,
+and every attribute value is conditioned on it ("A yellow and white
+vehicle…" → colour yellow).
+
+Captions: A averages 17 words with a preamble ("A security camera view
+shows…"), C 9.7 words and terser — in one office frame A said "a man in
+a red shirt sitting in a chair", C said "a man is sitting at a desk with
+a laptop", losing the colour search would want.
+
+**Decision from run 1:** cost saving real but smaller than the call
+count suggests (1.5×, not 3×: a question is 0.7 s, a caption 1.1–1.4 s,
+the structured reply 1.8 s). Accuracy: attributes 90 % agreement on
+vehicles, 97 % on people, and where they differ the per-question answer
+is the right one. Not good enough to flip the default. Run 2 changes the
+prompt only: attribute keys first and caption last (so the answers are
+conditioned on the image, not on the caption), the subject named ("the
+main vehicle, the largest or nearest"), and the caption asked for with
+the plain prompt's instruction (who or what, what they wear, what they
+do) so search loses no words.
+
 
 Method for the measurement, so it is the same both times:
 1. Same traffic shape as the baseline: cam23 (office) + cam26 (plate clip
@@ -82,6 +178,365 @@ Method for the measurement, so it is the same both times:
    claims, captions).
 4. Search eval (33 cases) after an hour on each setting, operator login
    needed on the box.
+
+**Measured — paired frame comparison, run 2 (2026-11-13 01:58–02:07 UTC),
+same 70 frames, prompt revised as decided above.** The per-question arm
+answered identically in both runs (140 of 140), so the model is
+deterministic and the difference is the prompt.
+
+| Kind | Frames | Agree run 1 → run 2 | Differ | B only | What the differences are |
+|---|---|---|---|---|---|
+| colour | 40 | 34 → **40** | 0 | 0 | — |
+| vehicle_type | 40 | 31 → **36** | 4 | 0 | one white crossover, four frames: B suv, C van (toss-up on the frame) |
+| clothing_top | 30 | 30 → 29 | 1 | 0 | two people in the crop: B red (the one behind), C white (the nearer, as asked) |
+| carrying | 30 | 26 → 27 | 2 | 1 | a bag on the chair, not carried: B backpack, C nothing; B nothing, C unknown |
+
+Cost unchanged: A 1223 ms, a question 718 ms, C 1789 ms; old 2659 ms vs
+new 1789 ms, ratio 1.49; 70 of 70 JSON, none cut by the token cap.
+
+Captions, run 2: 10.8 words against A's 17, but A spends its words on a
+preamble ("A security camera view shows…", "The image is a blurry,
+low-resolution shot of…"). What search wants is there more often: a
+colour word in **70 of 70** C captions against 45 of 70 A captions (run 1's
+terse prompt: 59). The red-shirt frame now reads "A man wearing a red
+shirt is sitting in a chair and looking at a laptop"; the van-and-ambulance
+frame "A white van is parked on a dirt road".
+
+**Decision from run 2:** attributes match the per-question path on 132 of
+140 answers, and none of the 8 differences is a case where the
+per-question answer is clearly right and the structured one wrong. The
+caption carries the words search filters on more often than the plain
+prompt does. The prompt revision ships; the flag can go on for the
+traffic windows. The default flips only after window B and the 33-case
+search eval.
+
+**Measured — traffic window B, flag on, brake out of reach (2026-11-13
+02:33–02:43 UTC, 9.8 min).** Core image 36d042e5 (main after #910, so the
+run-2 prompt), `EVENTS_ENRICHMENT_SINGLE_CALL=true`. The new image also
+carries the #905 brake; its device-busy trigger cannot be switched off
+(the knob is clamped at 100 and the Hexagon reads 114–140 % busy because
+requests queue), so the governor sat in LIVE-ONLY throughout and the
+pacing gap was set to 0 so that state admitted every caption. Same box
+state otherwise: plate clip on cam26, cam23 idle, agent on, people
+questions on, accurate plate mode. Two core recreates happened in the 15
+minutes before the window (see the deploy notes), so the 15-minute load
+still carried them.
+
+| Measurement | Window A (flag off) | Window B (flag on) |
+|---|---|---|
+| visits | 94 | 96 |
+| captions written | 94 | 91 |
+| descriptor rows written | 202 (2.15 a visit) | 190 (1.98 a visit) |
+| captioner calls | 327 (3.48 a visit) | **92 (0.96 a visit)** |
+| captioner time | 327 s = 56 % of the window | **161 s = 27 % of the window** |
+| mean per call | captions 1234 ms, questions 905 ms | structured 1748 ms |
+| detector cam26, mean latency | 107 ms | **91 ms** |
+
+Gemma time per visit 3.48 s → 1.68 s (2.1× less; the paired frames said
+1.5× because there the per-question path had no agent questions beside
+it). The detector gained 16 ms a frame with no other change. Descriptor
+rows per visit 2.15 → 1.98: the structured call answers "unknown" where
+the per-question path forces a word (the paired run saw the same, three
+"unknown" against "nothing" for carrying). Five of 96 visits had no
+caption at the end of the window against none in A: the log shows one
+visit dropped by the gate ("wait line full" — a burst, not the brake),
+and the rest were still in flight when the snapshot was taken (the
+structured call takes 1.7 s and the window ends mid-burst).
+
+**Measured — traffic window C, flag on, brake at its defaults (2026-11-13
+02:45–02:55 UTC, 9.9 min).** The configuration a customer box would run
+after the default flips: `EVENTS_ENRICHMENT_SINGLE_CALL=true`, the #905
+knobs at 2× / 4× / 60 % / 6 s. Same box state as A and B.
+
+| Measurement | A: flag off | B: flag on, brake off | C: flag on, brake defaults |
+|---|---|---|---|
+| visits | 94 | 96 | 105 |
+| captions written in the window | 94 (100 %) | 91 (95 %) | **81 (77 %)** |
+| visits still without a caption at the end | 0 | 5 | **24** |
+| descriptor rows a visit | 2.15 | 1.98 | 1.63 |
+| captioner calls | 327 | 92 | 81 |
+| captioner time, share of the window | 327 s, 56 % | 161 s, 27 % | 141 s, 24 % |
+| Gemma seconds a visit | 3.48 | 1.68 | 1.34 |
+| detector cam26, mean latency | 107 ms | 91 ms | 93 ms |
+| gate drops logged | 0 | 1 (wait line full) | 1 |
+| governor | — | LIVE-ONLY throughout (busy share clamped) | NORMAL ↔ LIVE-ONLY six times |
+
+What C shows: the brake's device-busy trigger fires on the detector and
+plate reader's own share (the governor logged 77 %, 118 % and 139 % busy
+with Gemma at 24 % of the window), paces captions to one per 6 s, and a
+quarter of the visits in a burst get no caption in the window — for a
+detector gain of nothing (93 ms against B's 91 ms), because on this box
+Gemma was no longer what the detector waited behind. The paced visits are
+not lost (the backfill finds a visit with no caption row), but search
+cannot find them by words until it does.
+
+**Decisions from the windows:**
+1. The single call delivers: Gemma time per visit 3.48 s → 1.68 s (2.1×)
+   on live traffic, the detector 16 ms a frame faster, attributes the
+   same within the "unknown" margin. The default flips once the 33-case
+   search eval has run on captions from the new prompt (needs an operator
+   login on the box; pending).
+2. The brake's device-busy trigger needs a second look before it stays
+   at 60 on a box with a plate reader: it counts the detector's own share
+   against enrichment. Either subtract the detector's share from the busy
+   figure, or make the latency trigger (the detector's own wait, which is
+   what we care about) the only one that paces. Filed as the next step on
+   #905's thread; until then this box runs with the device-busy knob at
+   its ceiling and the pacing gap at 0 (window B's configuration), which
+   captioned 95 % of visits in the window.
+3. The box keeps the flag on from here; the ledger's next entry is the
+   search eval.
+
+Two things learnt about the brake itself while running C, recorded so
+nobody re-learns them:
+- **The detector's latency floor is per core process.** `accelerator_usage`
+  keeps "the lowest window seen" in memory, so every core recreate
+  re-baselines it at whatever the load is at the time (C started with a
+  ~90 ms floor, so the detector at 93 ms read as 1.05× and the latency
+  trigger was blind; A's 107 ms against the real 25 ms quiet floor would
+  have read 4.3×). Persisting the floor is not obviously right either: on
+  this box the detector sits at 3.7× its quiet floor because of the plate
+  reader and the clip decode, which pacing captions cannot change (B
+  against C: 91 against 93 ms). The honest next signal is effectiveness —
+  pace, and if the detector does not improve within a minute, stop pacing
+  and say so. Not built; noted.
+- **The device-busy trigger must count only what it can defer.** Fixed in
+  this PR: the trigger compares the line with the enrichment adapters'
+  own share (the monitor's per-user shares filtered by the gates that
+  exist), not the device total. With C's numbers (device 118 %, captioner
+  24 %) it stays NORMAL. Window D, flag on with the brake at defaults on
+  the fixed governor, is the check.
+
+**Measured — traffic window D, flag on, brake at its defaults on the fixed
+governor (2026-11-13 03:28–03:38 UTC, 9.8 min).** Core image d2e74a8f (main
+after #912), `EVENTS_ENRICHMENT_SINGLE_CALL=true`, the brake knobs at
+2× / 4× / 60 % / 6 s. **Not the same traffic as A–C:** the office camera
+woke up (09:00 IST; cam23 2,169 detector inferences against 0 in A–C),
+so two cameras fed the detector and the host load reached 6.4.
+
+| Measurement | D |
+|---|---|
+| visits | 119 |
+| captions written in the window | 76 (64 %); 44 visits still without one at the end |
+| descriptor rows a visit | 1.34 |
+| captioner calls, time, share | 77, 152 s, 26 % |
+| Gemma seconds a visit | 1.27 |
+| detector cam23 / cam26, mean latency | 62 ms / 94 ms |
+| gate drops logged | 2 |
+| governor | the device-busy trigger never fired (the fix holds: captioner 26 % < 60 %); the **latency trigger** went LIVE-ONLY four times (detector 76–173 ms against floors of 36–53 ms) and paced captions to one per 6 s |
+
+What D says: the #912 fix does what it was built for — with the captioner
+at a quarter of the device the busy trigger stays quiet. The pacing in D
+came from the latency trigger, on a floor that the recreate had just set
+(36–53 ms, the quiet start-up moment) and a detector at 2–3× that in the
+busiest traffic of the day. Whether that pacing helped the detector is
+unmeasured: cam26's mean (94 ms) is where it was in B and C with no
+pacing at all. That is the effectiveness question from the C lessons,
+now with a second data point behind it. The cost is plain: a third of
+the visits in a busy ten minutes wait for the backfill before search can
+find them by words.
+
+**Search eval, baseline for the prompt comparison (03:12 UTC, before any
+re-caption):** 33 cases, MRR 0.527, hit@5 0.607, P@5 0.32, negatives 1/5;
+median latency 1,336 ms. Down from 0.762 on 11-11 **for reasons unrelated
+to the prompt**: since that run the plate clip camera added ~9,900
+captioned car, truck and person visits to a pool that held 1,100, so the
+labelled targets sit among ten times more look-alikes, and five search
+commits landed in between. The comparison that matters is against this
+same pool with the 403 labelled visits re-captioned by the new prompt —
+which rewrites production rows and waits for the operator's yes.
+
+**Measured — search eval after re-captioning the labelled visits with
+prompt v2 (2026-11-13 03:55–04:20 UTC).** The 403 visits in the labelled
+id range were backed up (captions, descriptor rows, enrichment marks),
+cleared, and re-captioned one by one through the caption task with the
+single call on: 403 done, 0 dropped, 0 failed, 1,301 s (3.2 s a visit
+including the caption vector, on a box at load 6). Then the 33 cases
+again, against the same pool.
+
+| | Before (old captions) | After (prompt v2 captions) |
+|---|---|---|
+| MRR | 0.527 | 0.493 |
+| hit@5 | 0.607 | **0.643** |
+| P@5 | 0.32 | 0.281 |
+| recall@10 | 0.457 | **0.32** |
+| attribute cases (9): MRR / hit@5 | 0.726 / 0.778 | 0.728 / 0.889 |
+| caption cases (11): MRR | 0.489 | 0.445 |
+| paraphrase cases (5): MRR | 0.37 | 0.27 |
+| negatives passed | 1/5 | 1/5 |
+| median latency | 1,336 ms | 2,406 ms (box at load 6, two cameras busy) |
+
+What moved, case by case: attribute queries held or improved ("man in a
+light blue shirt" 0.09 → 0.50, "person talking on a phone" 0 → 0.17,
+"man sitting on the floor with a laptop" 0.11 → 1.0); scene queries lost
+("someone pointing at the camera" 0.50 → 0.05, "person in camouflage"
+0.50 → 0.20 with recall 1.0 → 0.14, "white car parked in front of a
+building" 0.11 → 0, "person looking at a whiteboard" recall 1.0 → 0.6).
+The captions themselves say why: 23.1 words → 17.6; a colour word in
+383 of 403 against 190 before (the attribute gain); and the words most
+often lost are the scene — light/dark, chair, window, front, office,
+jeans, pants, hair, looking, monitor, camouflage. "A man in a light pink
+t-shirt is standing and looking up, with a laptop and a backpack on a
+wooden desk in front of him" became "A man wearing a pink t-shirt is
+standing and looking off to the side in an indoor setting."
+
+**Decision:** the default does not flip on this. The attributes and the
+colour words are better; the scene words that caption-style queries
+need are fewer, and recall@10 dropped by a third. The NPU saving stands
+(windows B–D). Next: prompt v3 asks for the caption as one or two
+sentences of 20–30 words including what is around the subject; measured
+first on the paired frames (words, colour words, latency — the cost is
+output tokens), then the same re-caption and eval cycle. The 403 old
+captions are in the backup if the cycle does not converge.
+
+**Measured — paired frame comparison, run 3, prompt v3 (2026-11-13
+04:33–04:42 UTC), same 70 frames.** Caption asked for as one or two
+sentences of 20–30 words including what is around the subject.
+
+| | v2 (run 2) | v3 (run 3) |
+|---|---|---|
+| attributes agree with per-question | 132 / 140 | 133 / 140 (colour 40/40, type 36/40, clothing 30/30, carrying 27/30) |
+| caption words | 10.8 | **24.7** (plain prompt 17.0) |
+| captions naming a colour | 70 / 70 | 66 / 70 (plain 45 / 70) |
+| structured call, adapter time | 1,789 ms | **2,349 ms** |
+| old path (caption + 2 questions) | 2,659 ms | 2,747 ms |
+| saving per visit | 1.49× | **1.17×** |
+| JSON parsed / cut by the cap | 70 / 0 | 70 / 0 (reply 209 characters) |
+
+The scene is back ("A man in a red shirt is sitting in a chair, looking
+at a laptop on a desk in a room with a window") and the attributes did
+not move; the price is 560 ms of output tokens a visit. Against the
+baseline that is still one call instead of three and about 2.3 s of
+Gemma a visit against 3.5 s on live traffic (window A), but the 1.7 s of
+window B becomes about 2.3 s. The re-caption and eval cycle with v3 is
+the arbiter; if search recovers, the knee between words and tokens is
+the next thing to measure (a 15–25 word variant).
+
+**Measured — search eval after re-captioning with prompt v3 (2026-11-13
+04:33–04:52 UTC), same 403 visits, same pool.** 403 done, 0 dropped,
+1,066 s.
+
+| | old captions | v2 | v3 |
+|---|---|---|---|
+| MRR | 0.527 | 0.493 | **0.479** |
+| hit@5 | 0.607 | 0.643 | 0.607 |
+| recall@10 | 0.457 | 0.32 | **0.293** |
+
+Longer did not help. Reading the targets' three captions side by side
+says why, and it is not length:
+
+- **The attribute vocabulary anchors the caption.** With the colour
+  question answered first ("grey", "beige"), the caption describes the
+  same garment in the vocabulary's words: "a camouflage shirt" became
+  "a beige patterned shirt" on all three camouflage targets, "a striped
+  shirt" became "a grey patterned shirt". Across the 403 visits:
+  camouflage 7 → 1 → 2, plaid 9 → 3 → 3, striped 4 → 2 → 1, glasses
+  26 → 11 → 5, beard 30 → 15 → 12. The specific words search needs are
+  exactly what the coarse vocabulary displaces.
+- **"The main person" narrows the caption too.** The subject phrase was
+  added for the attributes (run 1's yellow-ambulance drift), but the
+  caption obeys it as well: "three men, one in a light blue shirt, one in
+  a striped shirt, and one in a yellow shirt" became "a man in a yellow
+  shirt is seen from the back". A gesture goes the same way: "pointing at
+  it" → "looking at a dark screen" (pointing 3 → 0 → 1).
+- A note on the labelled set: several cases were labelled from what the
+  old captions said ("strict — the two captions that say so"), so part
+  of every re-caption's loss is agreement with the old wording rather
+  than with the frame. The word counts above are the part that is real.
+
+Also measured and rejected: deriving the attributes from the plain
+caption's text instead of asking (zero extra calls). On the 70 paired
+frames, against the per-question answers: colour 30/40, vehicle type
+12/40, clothing 7/30, carrying 0/30. Not a producer.
+
+**Decision:** v3 is not it either. Two candidates, in the order they are
+measured: **v4** — the caption first, worded like the plain prompt and
+about the whole frame, then the attributes about the named subject
+(run 1 had the caption first but no subject phrase; the drift may have
+been the missing phrase, not the order); if v4's attributes hold at
+v2's level and its captions keep the plain prompt's specific words, it
+is one call with nothing lost. Else **two calls**: the plain caption
+unchanged (no search question by construction) plus one attributes-only
+structured call — two instead of three for a vehicle, two instead of six
+for a person with the extended questions.
+
+**Measured — paired runs 4 and 5 (2026-11-13 05:05–05:35 UTC), same 70
+frames.**
+
+| | v2 (attrs first + caption) | v4 (caption first + subject, then attrs) | v5 (attrs only, no caption) |
+|---|---|---|---|
+| colour agree | 40/40 | **34/40** | 40/40 |
+| vehicle_type agree | 36/40 | 35/40 | 36/40 |
+| clothing_top agree | 30/30 | 28/30 | 30/30 |
+| carrying agree / C "unknown" | 27/30 / 1 | **5/30 / 23** | 23/30 / 7 |
+| caption words | 10.8 | 25.2 | — |
+| structured call | 1,789 ms | 2,344 ms | **1,340 ms** |
+
+Run 4 settles the order question: caption first, even with the subject
+named, drifts the attributes again (the yellow-ambulance colour is back,
+and "carrying" collapses to "unknown" on 23 of 30). Attributes first
+anchors the caption to the vocabulary (v2/v3). **With this model one
+call cannot serve both.**
+
+Run 5 prices the two-call design: an attributes-only call costs 1,340 ms
+against 1,476 ms for the two single questions it replaces. Per visit,
+plain caption + attributes call = 2,423 ms for a vehicle against 2,592 ms
+for the three calls (−7 %), 2,841 against 2,933 for a person (−3 %).
+A question costs 0.74 s whatever it asks; the prompt's own tokens, not
+the image, are most of a call. Batching pays only when it replaces many
+questions: for the five extended person kinds, 5 × 0.74 = 3.7 s against
+one call — measured next.
+
+**Conclusion of step 1, as measured on Gemma 3n E2B on the Hexagon:**
+1. The single call (caption + attributes) halves Gemma time per visit on
+   live traffic (windows A→B) and keeps the attributes, but the caption
+   it produces loses the specific words search depends on (camouflage,
+   plaid, glasses, gestures, the second person). **The default stays
+   off.** The flag remains for sites where attributes matter more than
+   caption words (a plate-and-vehicle site), documented as such.
+2. For two kinds, batching the questions saves nothing worth a code
+   path. For the extended person kinds it should; measured in run 5b.
+3. The windows' captioner share (56 % → 24–27 %) was not the single call
+   alone: in window A 45 of the 233 questions were not the per-visit two
+   (the agent's and the request lane's), and in B–D the governor's
+   LIVE-ONLY state dropped VQA calls. The single call's own share of the
+   saving is about 120 s of A's 327 s (188 questions at 0.9 s minus the
+   longer caption call), roughly 56 % → 35 %.
+4. The 403 labelled visits were restored to their original captions,
+   descriptor rows and marks (verified: camouflage 7, glasses 26, 769
+   rows; the eval on the restored pool reads MRR 0.541, hit@5 0.643,
+   recall@10 0.457 — the baseline's 0.527 / 0.607 / 0.457 within the
+   pool's drift), and the box's flag is off again (05:45 UTC).
+**Measured — run 5b, the five extended person kinds (05:48–05:55 UTC,
+the 30 person frames):** five single questions 3,670 ms against one
+attributes-only call 2,173 ms; per visit with the plain caption 5,172 ms
+→ 3,675 ms (**−29 %**, two calls instead of six). Agreement: gender
+30/30, clothing_top 30/30, carrying 27/30, clothing_bottom 22/30 with
+the batched call saying "unknown" on the other 8 (legs cut by the crop),
+and **headwear 9/30**, where the two paths split 20 times: the single
+question said "cap", the batched call "nothing". Looked at: 19 of those
+20 frames are the same ~30-pixel rider on the plate clip, where no
+answer can be read off the crop — the single question invents a cap
+(its wording offers "such as cap, …"), the batched call invents
+"nothing" when it should say "unknown"; the one office frame among them
+is bare-headed, so there the single question is simply wrong. Neither
+path is trustworthy on a crop that small; the batched one is at least
+not adding a headwear claim. The single question's leading wording is
+worth fixing on its own wherever EVENTS_DESCRIPTOR_PEOPLE_EXTENDED is
+on, and a minimum crop size for the person kinds is worth a thought.
+
+**Decision:** batch the descriptor questions into one attributes-only
+call when a visit has three or more kinds to ask (the extended person
+set); two kinds stay as they are (run 5: no saving). The caption call is
+untouched, so search is untouched. Code next, measured on the box when
+the extended questions are turned on there.
+
+5. The accuracy-free wins of RFC-0004 are steps 2–4 (publish once; the
+   agent and the Mirror as subscribers instead of callers), and the
+   brake's effectiveness check. That is where the work goes next.
+
+
+
 
 **Done.** 2026-11-13, branch `feat/rfc-0004-single-call`:
 - `server/services/structured_enrichment.py` — prompt (caption + the
@@ -104,3 +559,9 @@ Method for the measurement, so it is the same both times:
   CHANGELOG entry, 16 tests in `server/tests/test_structured_enrichment.py`;
   the eight enrichment suites pass (178).
 - Not done: the box measurement; the default stays off until it is in.
+- 2026-11-13, branch `bench/rfc-0004-paired-compare`: `tools/rfc0004_paired_compare.py`
+  (the paired comparison above), `tools/rfc0004_window.sh` (one counter
+  snapshot for a traffic window), and the prompt revision from run 1
+  (attributes first, subject named, caption asked for with the plain
+  prompt's detail). Raw per-frame answers of both runs kept off the repo
+  (they describe people in the office).
