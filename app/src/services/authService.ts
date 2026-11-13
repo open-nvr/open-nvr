@@ -69,6 +69,8 @@ export const authService = {
     api.post(`/api/v1/auth/mfa/factors/${factorId}/confirm`, body),
   mfaUpdateFactor: (factorId: number, body: { label?: string; enabled?: boolean; current_password: string }, mfaCode: string) =>
     api.patch(`/api/v1/auth/mfa/factors/${factorId}`, body, { headers: { 'X-MFA-Code': mfaCode } }),
+  mfaRegenerateRecoveryCodes: (currentPassword: string, mfaCode: string) =>
+    api.post('/api/v1/auth/mfa/recovery-codes', { current_password: currentPassword }, { headers: { 'X-MFA-Code': mfaCode } }),
   mfaRemoveFactor: (factorId: number, currentPassword: string, mfaCode: string) =>
     api.delete(`/api/v1/auth/mfa/factors/${factorId}`, { headers: { 'X-MFA-Code': mfaCode } }, { current_password: currentPassword }),
   logout: () => api.post('/api/v1/auth/logout', ''),

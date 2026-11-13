@@ -29,6 +29,7 @@ import { Modal } from '../../components/Modal'
 import { apiService } from '../../lib/apiService'
 import { extractApiError } from '../../lib/apiError'
 import { useAuth } from '../../auth/AuthContext'
+import { RecoveryCodesPanel } from '../../components/RecoveryCodesPanel'
 import { useTranslation, useDateFormat } from '../../i18n'
 
 type Factor = {
@@ -47,6 +48,7 @@ type Pending =
   | { kind: 'rename'; factor: Factor }
   | { kind: 'toggle'; factor: Factor }
   | { kind: 'remove'; factor: Factor }
+  | { kind: 'codes' }
 
 type Enrolment = { factorId: number; secret: string; qr: string }
 
@@ -58,6 +60,8 @@ export function TwoFactorSettings() {
   const { user } = useAuth()
   const { showSuccess, showError } = useSnackbar()
   const [factors, setFactors] = useState<Factor[] | null>(null)
+  const [remaining, setRemaining] = useState<number | null>(null)
+  const [freshCodes, setFreshCodes] = useState<string[] | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [pending, setPending] = useState<Pending | null>(null)
   const [password, setPassword] = useState('')
@@ -73,6 +77,7 @@ export function TwoFactorSettings() {
       setLoadError(null)
       const { data } = await apiService.mfaFactors()
       setFactors((data?.factors ?? []) as Factor[])
+      setRemaining(typeof data?.recovery_codes_remaining === 'number' ? data.recovery_codes_remaining : null)
     } catch (e) {
       setLoadError(extractApiError(e, t('twoFactor.failedLoad')))
     }
@@ -111,6 +116,9 @@ export function TwoFactorSettings() {
       } else if (pending.kind === 'toggle') {
         await apiService.mfaUpdateFactor(pending.factor.id, { enabled: !pending.factor.enabled, current_password: password }, code.trim())
         showSuccess(pending.factor.enabled ? t('twoFactor.turnedOff', { label: pending.factor.label }) : t('twoFactor.turnedOn', { label: pending.factor.label }))
+      } else if (pending.kind === 'codes') {
+        const { data } = await apiService.mfaRegenerateRecoveryCodes(password, code.trim())
+        setFreshCodes(data.recovery_codes)
       } else {
         await apiService.mfaRemoveFactor(pending.factor.id, password, code.trim())
         showSuccess(t('twoFactor.removed', { label: pending.factor.label }))
@@ -129,8 +137,9 @@ export function TwoFactorSettings() {
     if (!enrolment) return
     setBusy(true)
     try {
-      await apiService.mfaConfirmTotp(enrolment.factorId, { code: newCode.trim() })
+      const { data } = await apiService.mfaConfirmTotp(enrolment.factorId, { code: newCode.trim() })
       setEnrolment(null)
+      if (data?.recovery_codes?.length) setFreshCodes(data.recovery_codes)
       showSuccess(t('twoFactor.addedToast'))
       await load()
     } catch (err) {
@@ -181,6 +190,10 @@ export function TwoFactorSettings() {
         </form>
       )}
 
+      {freshCodes && (
+        <RecoveryCodesPanel codes={freshCodes} username={user?.username} onDone={() => setFreshCodes(null)} />
+      )}
+
       {loadError ? (
         <ErrorCard message={loadError} onRetry={load} />
       ) : factors === null ? (
@@ -222,6 +235,18 @@ export function TwoFactorSettings() {
         </div>
       )}
 
+      {!freshCodes && confirmed.length > 0 && (
+        <div className="border border-[var(--border)] p-4 flex flex-wrap items-center justify-between gap-3" data-testid="recovery-codes-summary">
+          <div className="space-y-1">
+            <div className="text-sm font-medium">{t('recoveryCodes.heading')}</div>
+            <p className="text-xs text-[var(--text-dim)] max-w-2xl">
+              {remaining ? t('recoveryCodes.remaining', { count: remaining }) : t('recoveryCodes.noneLeft')}
+            </p>
+          </div>
+          <Button onClick={() => open({ kind: 'codes' })}>{t('recoveryCodes.generate')}</Button>
+        </div>
+      )}
+
       {pending && (
         <Modal
           open
@@ -229,7 +254,8 @@ export function TwoFactorSettings() {
             pending.kind === 'add' ? t('twoFactor.add')
               : pending.kind === 'rename' ? t('twoFactor.renameTitle', { label: pending.factor.label })
                 : pending.kind === 'toggle' ? (pending.factor.enabled ? t('twoFactor.turnOffTitle', { label: pending.factor.label }) : t('twoFactor.turnOnTitle', { label: pending.factor.label }))
-                  : t('twoFactor.removeTitle', { label: pending.factor.label })
+                  : pending.kind === 'codes' ? t('recoveryCodes.generateTitle')
+                    : t('twoFactor.removeTitle', { label: pending.factor.label })
           }</span>}
           onClose={close}
           widthClassName="w-[calc(100vw-2rem)] max-w-md"
@@ -253,13 +279,14 @@ export function TwoFactorSettings() {
             </label>
             <label className="block">
               <span className="text-xs text-[var(--text-dim)]">{t('twoFactor.currentCode')}</span>
-              <input className={`${inputCls} tracking-widest`} inputMode="numeric" autoComplete="one-time-code" maxLength={6}
-                placeholder="123456" value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))} required />
+              <input className={`${inputCls} tracking-widest`} autoComplete="one-time-code" maxLength={24}
+                placeholder="123456" value={code} onChange={(e) => setCode(e.target.value.trim())} required />
+              <span className="text-[11px] text-[var(--text-dim)]">{t('recoveryCodes.orCode')}</span>
             </label>
             <div className="flex justify-end gap-2 pt-1">
               <Button variant="outline" onClick={close}>{t('twoFactor.cancel')}</Button>
               <Button variant={pending.kind === 'remove' ? 'danger' : 'primary'} type="submit"
-                disabled={busy || !password || code.length !== 6 || (pending.kind === 'rename' && !label.trim())}>
+                disabled={busy || !password || code.length < 6 || (pending.kind === 'rename' && !label.trim())}>
                 {pending.kind === 'add' ? t('twoFactor.continue') : t('twoFactor.confirm')}
               </Button>
             </div>

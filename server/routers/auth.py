@@ -554,7 +554,20 @@ async def login_with_json(
         )
 
     if _mfa_login_required(db, user):
-        if not mfa_service.verify_login_code(db, user, user_credentials.code):
+        used = mfa_service.verify_login_code(db, user, user_credentials.code)
+        if used == "recovery":
+            try:
+                write_audit_log(
+                    db, action="mfa.recovery_code_used", user_id=user.id, entity_type="user",
+                    entity_id=user.id,
+                    details={"username": user.username,
+                             "remaining": mfa_service.recovery_codes_remaining(db, user)},
+                    ip=request.client.host if request and request.client else None,
+                    user_agent=request.headers.get("user-agent") if request else None,
+                )
+            except Exception as e:
+                auth_logger.error(f"Failed to write audit log: {e}", exc_info=True)
+        if not used:
             # Handle MFA failure as a failed login attempt
             user.failed_login_attempts += 1
 
@@ -672,8 +685,10 @@ async def mfa_verify(
     authenticator (the enrolment wall's second step)."""
     if not mfa_service.factors(db, current_user, include_pending=True):
         raise HTTPException(status_code=400, detail="MFA not initialized")
+    first = not mfa_service.has_active_factor(db, current_user)
     if mfa_service.confirm_totp(db, current_user, payload.code) is None:
         raise HTTPException(status_code=400, detail="Invalid code")
+    codes = mfa_service.generate_recovery_codes(db, current_user) if first else None
     try:
         write_audit_log(
             db,
@@ -687,7 +702,8 @@ async def mfa_verify(
         )
     except Exception:
         pass
-    return {"message": "MFA enabled"}
+    # Recovery codes: shown this once, for signing in without the phone.
+    return {"message": "MFA enabled", "recovery_codes": codes}
 
 
 @router.post("/mfa/disable")

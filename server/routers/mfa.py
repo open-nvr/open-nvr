@@ -37,10 +37,13 @@ from schemas import (
     MfaBeginRequest,
     MfaBeginResponse,
     MfaConfirmRequest,
+    MfaConfirmResponse,
     MfaFactorDelete,
     MfaFactorList,
     MfaFactorOut,
     MfaFactorPatch,
+    MfaRecoveryCodesRequest,
+    MfaRecoveryCodesResponse,
 )
 from services import mfa_service
 from services.audit_service import write_audit_log
@@ -66,9 +69,11 @@ def _refuse_sso(db: Session, user: User) -> None:
 
 
 def _step_up(db: Session, user: User, code: str | None, password: str | None) -> None:
-    """Password + code once the account has a working authenticator."""
+    """Password + code once the account has a working authenticator. A
+    recovery code stands in for the code here (and is used up): it is how
+    someone whose phone is gone adds the new one."""
     if mfa_service.has_active_factor(db, user):
-        require_reauth(user, code, password=password, need_password=True)
+        require_reauth(user, code, password=password, need_password=True, allow_recovery=True)
 
 
 def _audit(db, request, user: User, action: str, details: dict) -> None:
@@ -91,7 +96,8 @@ def list_factors(
     """Your authenticators (enrolments in progress included, marked unconfirmed)."""
     rows = mfa_service.factors(db, current_user, include_pending=True)
     db.commit()     # a legacy secret adopted on the way stays adopted
-    return MfaFactorList(factors=[factor_out(f) for f in rows])
+    return MfaFactorList(factors=[factor_out(f) for f in rows],
+                         recovery_codes_remaining=mfa_service.recovery_codes_remaining(db, current_user))
 
 
 @router.post("/factors/totp", response_model=MfaBeginResponse)
@@ -113,7 +119,7 @@ def begin_totp(
     )
 
 
-@router.post("/factors/{factor_id}/confirm", response_model=MfaFactorOut)
+@router.post("/factors/{factor_id}/confirm", response_model=MfaConfirmResponse)
 def confirm_totp(
     factor_id: int,
     body: MfaConfirmRequest,
@@ -121,13 +127,36 @@ def confirm_totp(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    """Finish adding an authenticator app with a code from it."""
+    """Finish adding an authenticator app with a code from it. For the
+    account's first app, the answer also carries a new set of recovery codes,
+    shown this once."""
+    first = not mfa_service.has_active_factor(db, current_user)
     f = mfa_service.confirm_totp(db, current_user, body.code, factor_id=factor_id, label=body.label)
     if f is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
                             detail="That code does not match. Check the app and try the current code.")
     _audit(db, request, current_user, "mfa.factor_added", {"factor_id": f.id, "label": f.label})
-    return factor_out(f)
+    codes = mfa_service.generate_recovery_codes(db, current_user) if first else None
+    return MfaConfirmResponse(**factor_out(f).model_dump(), recovery_codes=codes)
+
+
+@router.post("/recovery-codes", response_model=MfaRecoveryCodesResponse)
+def regenerate_recovery_codes(
+    body: MfaRecoveryCodesRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+    mfa_code: str | None = Header(None, alias="X-MFA-Code"),
+):
+    """A new set of recovery codes, replacing the old set (shown this once).
+    Needs your password and a current code."""
+    if not mfa_service.has_active_factor(db, current_user):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="Set up an authenticator app first.")
+    _step_up(db, current_user, mfa_code, body.current_password)
+    codes = mfa_service.generate_recovery_codes(db, current_user)
+    _audit(db, request, current_user, "mfa.recovery_codes_generated", {"count": len(codes)})
+    return MfaRecoveryCodesResponse(recovery_codes=codes)
 
 
 @router.patch("/factors/{factor_id}", response_model=MfaFactorOut)
