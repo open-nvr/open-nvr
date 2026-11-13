@@ -303,6 +303,198 @@ commits landed in between. The comparison that matters is against this
 same pool with the 403 labelled visits re-captioned by the new prompt —
 which rewrites production rows and waits for the operator's yes.
 
+**Measured — search eval after re-captioning the labelled visits with
+prompt v2 (2026-11-13 03:55–04:20 UTC).** The 403 visits in the labelled
+id range were backed up (captions, descriptor rows, enrichment marks),
+cleared, and re-captioned one by one through the caption task with the
+single call on: 403 done, 0 dropped, 0 failed, 1,301 s (3.2 s a visit
+including the caption vector, on a box at load 6). Then the 33 cases
+again, against the same pool.
+
+| | Before (old captions) | After (prompt v2 captions) |
+|---|---|---|
+| MRR | 0.527 | 0.493 |
+| hit@5 | 0.607 | **0.643** |
+| P@5 | 0.32 | 0.281 |
+| recall@10 | 0.457 | **0.32** |
+| attribute cases (9): MRR / hit@5 | 0.726 / 0.778 | 0.728 / 0.889 |
+| caption cases (11): MRR | 0.489 | 0.445 |
+| paraphrase cases (5): MRR | 0.37 | 0.27 |
+| negatives passed | 1/5 | 1/5 |
+| median latency | 1,336 ms | 2,406 ms (box at load 6, two cameras busy) |
+
+What moved, case by case: attribute queries held or improved ("man in a
+light blue shirt" 0.09 → 0.50, "person talking on a phone" 0 → 0.17,
+"man sitting on the floor with a laptop" 0.11 → 1.0); scene queries lost
+("someone pointing at the camera" 0.50 → 0.05, "person in camouflage"
+0.50 → 0.20 with recall 1.0 → 0.14, "white car parked in front of a
+building" 0.11 → 0, "person looking at a whiteboard" recall 1.0 → 0.6).
+The captions themselves say why: 23.1 words → 17.6; a colour word in
+383 of 403 against 190 before (the attribute gain); and the words most
+often lost are the scene — light/dark, chair, window, front, office,
+jeans, pants, hair, looking, monitor, camouflage. "A man in a light pink
+t-shirt is standing and looking up, with a laptop and a backpack on a
+wooden desk in front of him" became "A man wearing a pink t-shirt is
+standing and looking off to the side in an indoor setting."
+
+**Decision:** the default does not flip on this. The attributes and the
+colour words are better; the scene words that caption-style queries
+need are fewer, and recall@10 dropped by a third. The NPU saving stands
+(windows B–D). Next: prompt v3 asks for the caption as one or two
+sentences of 20–30 words including what is around the subject; measured
+first on the paired frames (words, colour words, latency — the cost is
+output tokens), then the same re-caption and eval cycle. The 403 old
+captions are in the backup if the cycle does not converge.
+
+**Measured — paired frame comparison, run 3, prompt v3 (2026-11-13
+04:33–04:42 UTC), same 70 frames.** Caption asked for as one or two
+sentences of 20–30 words including what is around the subject.
+
+| | v2 (run 2) | v3 (run 3) |
+|---|---|---|
+| attributes agree with per-question | 132 / 140 | 133 / 140 (colour 40/40, type 36/40, clothing 30/30, carrying 27/30) |
+| caption words | 10.8 | **24.7** (plain prompt 17.0) |
+| captions naming a colour | 70 / 70 | 66 / 70 (plain 45 / 70) |
+| structured call, adapter time | 1,789 ms | **2,349 ms** |
+| old path (caption + 2 questions) | 2,659 ms | 2,747 ms |
+| saving per visit | 1.49× | **1.17×** |
+| JSON parsed / cut by the cap | 70 / 0 | 70 / 0 (reply 209 characters) |
+
+The scene is back ("A man in a red shirt is sitting in a chair, looking
+at a laptop on a desk in a room with a window") and the attributes did
+not move; the price is 560 ms of output tokens a visit. Against the
+baseline that is still one call instead of three and about 2.3 s of
+Gemma a visit against 3.5 s on live traffic (window A), but the 1.7 s of
+window B becomes about 2.3 s. The re-caption and eval cycle with v3 is
+the arbiter; if search recovers, the knee between words and tokens is
+the next thing to measure (a 15–25 word variant).
+
+**Measured — search eval after re-captioning with prompt v3 (2026-11-13
+04:33–04:52 UTC), same 403 visits, same pool.** 403 done, 0 dropped,
+1,066 s.
+
+| | old captions | v2 | v3 |
+|---|---|---|---|
+| MRR | 0.527 | 0.493 | **0.479** |
+| hit@5 | 0.607 | 0.643 | 0.607 |
+| recall@10 | 0.457 | 0.32 | **0.293** |
+
+Longer did not help. Reading the targets' three captions side by side
+says why, and it is not length:
+
+- **The attribute vocabulary anchors the caption.** With the colour
+  question answered first ("grey", "beige"), the caption describes the
+  same garment in the vocabulary's words: "a camouflage shirt" became
+  "a beige patterned shirt" on all three camouflage targets, "a striped
+  shirt" became "a grey patterned shirt". Across the 403 visits:
+  camouflage 7 → 1 → 2, plaid 9 → 3 → 3, striped 4 → 2 → 1, glasses
+  26 → 11 → 5, beard 30 → 15 → 12. The specific words search needs are
+  exactly what the coarse vocabulary displaces.
+- **"The main person" narrows the caption too.** The subject phrase was
+  added for the attributes (run 1's yellow-ambulance drift), but the
+  caption obeys it as well: "three men, one in a light blue shirt, one in
+  a striped shirt, and one in a yellow shirt" became "a man in a yellow
+  shirt is seen from the back". A gesture goes the same way: "pointing at
+  it" → "looking at a dark screen" (pointing 3 → 0 → 1).
+- A note on the labelled set: several cases were labelled from what the
+  old captions said ("strict — the two captions that say so"), so part
+  of every re-caption's loss is agreement with the old wording rather
+  than with the frame. The word counts above are the part that is real.
+
+Also measured and rejected: deriving the attributes from the plain
+caption's text instead of asking (zero extra calls). On the 70 paired
+frames, against the per-question answers: colour 30/40, vehicle type
+12/40, clothing 7/30, carrying 0/30. Not a producer.
+
+**Decision:** v3 is not it either. Two candidates, in the order they are
+measured: **v4** — the caption first, worded like the plain prompt and
+about the whole frame, then the attributes about the named subject
+(run 1 had the caption first but no subject phrase; the drift may have
+been the missing phrase, not the order); if v4's attributes hold at
+v2's level and its captions keep the plain prompt's specific words, it
+is one call with nothing lost. Else **two calls**: the plain caption
+unchanged (no search question by construction) plus one attributes-only
+structured call — two instead of three for a vehicle, two instead of six
+for a person with the extended questions.
+
+**Measured — paired runs 4 and 5 (2026-11-13 05:05–05:35 UTC), same 70
+frames.**
+
+| | v2 (attrs first + caption) | v4 (caption first + subject, then attrs) | v5 (attrs only, no caption) |
+|---|---|---|---|
+| colour agree | 40/40 | **34/40** | 40/40 |
+| vehicle_type agree | 36/40 | 35/40 | 36/40 |
+| clothing_top agree | 30/30 | 28/30 | 30/30 |
+| carrying agree / C "unknown" | 27/30 / 1 | **5/30 / 23** | 23/30 / 7 |
+| caption words | 10.8 | 25.2 | — |
+| structured call | 1,789 ms | 2,344 ms | **1,340 ms** |
+
+Run 4 settles the order question: caption first, even with the subject
+named, drifts the attributes again (the yellow-ambulance colour is back,
+and "carrying" collapses to "unknown" on 23 of 30). Attributes first
+anchors the caption to the vocabulary (v2/v3). **With this model one
+call cannot serve both.**
+
+Run 5 prices the two-call design: an attributes-only call costs 1,340 ms
+against 1,476 ms for the two single questions it replaces. Per visit,
+plain caption + attributes call = 2,423 ms for a vehicle against 2,592 ms
+for the three calls (−7 %), 2,841 against 2,933 for a person (−3 %).
+A question costs 0.74 s whatever it asks; the prompt's own tokens, not
+the image, are most of a call. Batching pays only when it replaces many
+questions: for the five extended person kinds, 5 × 0.74 = 3.7 s against
+one call — measured next.
+
+**Conclusion of step 1, as measured on Gemma 3n E2B on the Hexagon:**
+1. The single call (caption + attributes) halves Gemma time per visit on
+   live traffic (windows A→B) and keeps the attributes, but the caption
+   it produces loses the specific words search depends on (camouflage,
+   plaid, glasses, gestures, the second person). **The default stays
+   off.** The flag remains for sites where attributes matter more than
+   caption words (a plate-and-vehicle site), documented as such.
+2. For two kinds, batching the questions saves nothing worth a code
+   path. For the extended person kinds it should; measured in run 5b.
+3. The windows' captioner share (56 % → 24–27 %) was not the single call
+   alone: in window A 45 of the 233 questions were not the per-visit two
+   (the agent's and the request lane's), and in B–D the governor's
+   LIVE-ONLY state dropped VQA calls. The single call's own share of the
+   saving is about 120 s of A's 327 s (188 questions at 0.9 s minus the
+   longer caption call), roughly 56 % → 35 %.
+4. The 403 labelled visits were restored to their original captions,
+   descriptor rows and marks (verified: camouflage 7, glasses 26, 769
+   rows; the eval on the restored pool reads MRR 0.541, hit@5 0.643,
+   recall@10 0.457 — the baseline's 0.527 / 0.607 / 0.457 within the
+   pool's drift), and the box's flag is off again (05:45 UTC).
+**Measured — run 5b, the five extended person kinds (05:48–05:55 UTC,
+the 30 person frames):** five single questions 3,670 ms against one
+attributes-only call 2,173 ms; per visit with the plain caption 5,172 ms
+→ 3,675 ms (**−29 %**, two calls instead of six). Agreement: gender
+30/30, clothing_top 30/30, carrying 27/30, clothing_bottom 22/30 with
+the batched call saying "unknown" on the other 8 (legs cut by the crop),
+and **headwear 9/30**, where the two paths split 20 times: the single
+question said "cap", the batched call "nothing". Looked at: 19 of those
+20 frames are the same ~30-pixel rider on the plate clip, where no
+answer can be read off the crop — the single question invents a cap
+(its wording offers "such as cap, …"), the batched call invents
+"nothing" when it should say "unknown"; the one office frame among them
+is bare-headed, so there the single question is simply wrong. Neither
+path is trustworthy on a crop that small; the batched one is at least
+not adding a headwear claim. The single question's leading wording is
+worth fixing on its own wherever EVENTS_DESCRIPTOR_PEOPLE_EXTENDED is
+on, and a minimum crop size for the person kinds is worth a thought.
+
+**Decision:** batch the descriptor questions into one attributes-only
+call when a visit has three or more kinds to ask (the extended person
+set); two kinds stay as they are (run 5: no saving). The caption call is
+untouched, so search is untouched. Code next, measured on the box when
+the extended questions are turned on there.
+
+5. The accuracy-free wins of RFC-0004 are steps 2–4 (publish once; the
+   agent and the Mirror as subscribers instead of callers), and the
+   brake's effectiveness check. That is where the work goes next.
+
+
+
+
 **Done.** 2026-11-13, branch `feat/rfc-0004-single-call`:
 - `server/services/structured_enrichment.py` — prompt (caption + the
   kinds' questions with their vocabularies, JSON-only answer, `unknown`
