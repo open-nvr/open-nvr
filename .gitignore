@@ -16,6 +16,10 @@ server/keys/*.cert
 server/keys/*.p12
 server/keys/*.pfx
 server/keys/*.jks
+# The JWT key service's flock file (mediamtx_jwt_service.LOCK_FILE_NAME); one
+# was committed by accident and every checkout that had made its own could
+# no longer `git pull` ("untracked working tree files would be overwritten").
+server/keys/.keys.lock
 !server/keys/.gitkeep
 byok-test-certs/
 
