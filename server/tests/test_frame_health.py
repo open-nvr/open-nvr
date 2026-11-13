@@ -126,7 +126,6 @@ def test_the_caption_task_notes_it_and_publishes_the_transition(monkeypatch, db)
 
     monkeypatch.setattr(core.database, "SessionLocal", lambda: _Shared(db))
     monkeypatch.setattr(settings, "events_caption_enrichment", True, raising=False)
-    monkeypatch.setattr(settings, "events_enrichment_single_call", False, raising=False)
     tmp = pathlib.Path(tempfile.mkdtemp()) / "e.jpg"
     tmp.write_bytes(b"\xff\xd8jpeg")
     monkeypatch.setattr(evidence_store, "resolve_evidence", lambda _p: tmp)
