@@ -25,7 +25,7 @@ Two other doors exist and are *not* this page:
 | Log in | `POST /auth/login` (form) / `POST /auth/login-json` | Returns access + refresh JWTs; MFA-enrolled users pass the TOTP too |
 | Refresh / log out | `POST /auth/refresh`, `POST /auth/logout` | |
 | Who am I | `GET /auth/me`, `GET /users/me/permissions` | The second one is what the UI uses to hide controls |
-| MFA | `POST /auth/mfa/setup`, `/mfa/verify`, `/mfa/disable` | |
+| MFA | `POST /auth/mfa/setup`, `/mfa/verify` | `/mfa/setup` only before enrolment (409 after); `/mfa/disable` is retired (410) |
 
 Send `Authorization: Bearer <access token>` on every other call.
 
