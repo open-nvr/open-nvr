@@ -461,7 +461,9 @@ one call — measured next.
    longer caption call), roughly 56 % → 35 %.
 4. The 403 labelled visits were restored to their original captions,
    descriptor rows and marks (verified: camouflage 7, glasses 26, 769
-   rows), and the box's flag is off again.
+   rows; the eval on the restored pool reads MRR 0.541, hit@5 0.643,
+   recall@10 0.457 — the baseline's 0.527 / 0.607 / 0.457 within the
+   pool's drift), and the box's flag is off again (05:45 UTC).
 5. The accuracy-free wins of RFC-0004 are steps 2–4 (publish once; the
    agent and the Mirror as subscribers instead of callers), and the
    brake's effectiveness check. That is where the work goes next.
