@@ -1233,6 +1233,42 @@ class OpennvrRecordingsClient(_ReusableClientMixin):
             return 502, {"error": "OpenNVR server unreachable"}
 
 
+class CameraDescriptionClient(_ReusableClientMixin):
+    """Core's one shared "what is on this camera now" (RFC-0004 step 3):
+    ``GET {base}/api/v1/internal/camera-agent/cameras/{id}/description``
+    with ``max_age_s``. Core answers from the newest described visit when
+    it is fresh and nothing newer has started, else makes ONE gated look
+    shared by every asker, else says what it last knew and how old that
+    is. The agent's live look and the Mirror's scene line ask here
+    instead of the caption model (measured on a Ventuno Q, 2026-11-12:
+    those two loops were a third of the captioner's calls in a busy
+    hour). ``describe`` never raises; ``None`` means core did not answer
+    and the caller may fall back to its own look, saying so."""
+
+    def __init__(self, *, base_url: str, api_key: str = "", timeout_seconds: float = 45.0) -> None:
+        self._base = base_url.rstrip("/")
+        self._api_key = api_key
+        self._timeout = timeout_seconds
+
+    def _headers(self) -> dict[str, str]:
+        return {"X-Internal-Api-Key": self._api_key} if self._api_key else {}
+
+    async def describe(self, opennvr_camera_id: int, max_age_s: float) -> dict[str, Any] | None:
+        try:
+            resp = await self._client().get(
+                f"{self._base}/api/v1/internal/camera-agent/cameras/{int(opennvr_camera_id)}/description",
+                params={"max_age_s": f"{float(max_age_s):g}"}, headers=self._headers(),
+            )
+            if resp.status_code != 200:
+                logger.debug("camera description: core answered %s", resp.status_code)
+                return None
+            body = resp.json()
+            return body if isinstance(body, dict) else None
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("camera description: core unreachable (%s)", exc)
+            return None
+
+
 class SystemStatusClient(_ReusableClientMixin):
     """Read-only view of the system as core sees it, for the agent's
     ``system_status`` tool: ``GET {base}/api/v1/internal/camera-agent/status``

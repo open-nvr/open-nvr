@@ -419,6 +419,8 @@ class PersonCard:
 @dataclass
 class MirrorStats:
     captions: int = 0
+    #: Scene lines answered by core's shared description (no call of our own).
+    core_answers: int = 0
     cards: int = 0
     spoken: int = 0
     vlm_ms_last: float | None = None
@@ -431,7 +433,8 @@ class MirrorStats:
                                 else 0.8 * self.vlm_ms_avg + 0.2 * ms)
 
     def to_wire(self) -> dict[str, Any]:
-        return {"captions": self.captions, "cards": self.cards, "spoken": self.spoken,
+        return {"captions": self.captions, "core_answers": self.core_answers,
+                "cards": self.cards, "spoken": self.spoken,
                 "vlm_ms_last": self.vlm_ms_last, "vlm_ms_avg": self.vlm_ms_avg,
                 "uptime_s": round(time.time() - self.started_at)}
 
@@ -441,6 +444,8 @@ Crop = Callable[[str, Any], Awaitable[bytes | None]]
 Vision = Callable[[bytes, str | None], Awaitable[str | None]]
 Speech = Callable[[str], Awaitable[bytes | None]]
 Publish = Callable[[dict[str, Any]], None]
+#: Core's shared description: async (max_age_s) -> dict | None (RFC-0004).
+Description = Callable[[float], Awaitable[dict[str, Any] | None]]
 
 
 class MirrorSession:
@@ -451,9 +456,15 @@ class MirrorSession:
     def __init__(self, camera_id: str, *, frame: Frame, crop: Crop | None,
                  vision: Vision, speech: Speech | None, publish: Publish,
                  voice: bool = True, clock: Callable[[], float] = time.monotonic,
-                 scene_every_s: float = SCENE_EVERY_S, hires: Frame | None = None) -> None:
+                 scene_every_s: float = SCENE_EVERY_S, hires: Frame | None = None,
+                 description: Description | None = None) -> None:
         self.camera_id = camera_id
         self._frame = frame
+        # The scene line comes from core's one shared description when
+        # wired (RFC-0004 step 4): the visit the enrichment tier just
+        # described, or one gated look shared with every other asker.
+        # Only the person confirmation look is still this loop's own.
+        self._description = description
         self._crop = crop
         # The main stream's full-resolution frame (core's capture pool,
         # ~0.15 s warm). A person is cut out of THIS, with a margin: the
@@ -679,7 +690,47 @@ class MirrorSession:
         finally:
             card.asking = False
 
+    async def _describe_scene_via_core(self) -> bool:
+        """The scene line from core. False when core did not answer, so
+        the loop takes its own look and the stats say it did."""
+        t0 = self._clock()
+        try:
+            body = await self._description(self._scene_every)
+        except Exception:  # noqa: BLE001
+            body = None
+        if not body or not body.get("text"):
+            return False
+        text = str(body["text"]).strip().strip('"')
+        ms = (self._clock() - t0) * 1000.0
+        if body.get("model_called"):
+            self.stats.note_vlm(ms)
+        self.stats.core_answers += 1
+        self.caption_at = self._clock()
+        if not text:
+            return True
+        if self.caption and same_sentence(text, self.caption) \
+                and self.caption_changed_at is not None \
+                and self._clock() - self.caption_changed_at < CAPTION_HOLD_S:
+            self._publish({"mirror": {"vlm_ms": round(ms), "stats": self.stats.to_wire(),
+                                      "same": True, "source": body.get("source")}})
+            return True
+        self.caption = text
+        self.caption_changed_at = self._clock()
+        self.stats.captions += 1
+        payload: dict[str, Any] = {"caption": text, "vlm_ms": round(ms),
+                                   "people": sum(1 for t in self.tracks if t.get("label") == "person"),
+                                   "stats": self.stats.to_wire(), "source": body.get("source")}
+        if body.get("source") == "stale":
+            payload["stale_s"] = body.get("age_s")
+        if self.should_speak(text) and body.get("source") != "stale":
+            await self._speak(text, payload)
+        self._publish({"mirror": payload})
+        return True
+
     async def _describe_scene(self) -> None:
+        if self._description is not None:
+            if await self._describe_scene_via_core():
+                return
         image = None
         if self._hires is not None:
             try:
