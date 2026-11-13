@@ -643,7 +643,18 @@ async def login_with_json(
 async def mfa_setup(
     current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)
 ):
-    """Generate and return provisioning URI + secret for TOTP; store secret disabled until verify."""
+    """Generate and return provisioning URI + secret for TOTP; store secret disabled until verify.
+
+    Only for an account that has not enrolled yet (the enrolment wall). On an
+    enrolled account this would replace the authenticator and switch MFA off
+    on the strength of a session alone, so it is refused.
+    """
+    if current_user.mfa_enabled and current_user.mfa_secret:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Two-factor sign-in is already set up for this account. "
+                   "Ask an administrator to reset it to enrol a different authenticator.",
+        )
     secret = generate_mfa_secret()
     current_user.mfa_secret = secret
     current_user.mfa_enabled = False
@@ -685,29 +696,14 @@ async def mfa_verify(
 
 
 @router.post("/mfa/disable")
-async def mfa_disable(
-    current_user: User = Depends(get_current_active_user),
-    db: Session = Depends(get_db),
-    request: Request = None,
-):
-    """Disable MFA for current user."""
-    current_user.mfa_enabled = False
-    current_user.mfa_secret = None
-    db.commit()
-    try:
-        write_audit_log(
-            db,
-            action="mfa.disable",
-            user_id=current_user.id,
-            entity_type="user",
-            entity_id=current_user.id,
-            details={"username": current_user.username},
-            ip=request.client.host if request and request.client else None,
-            user_agent=request.headers.get("user-agent") if request else None,
-        )
-    except Exception:
-        pass
-    return {"message": "MFA disabled"}
+async def mfa_disable(current_user: User = Depends(get_current_active_user)):
+    """Retired. MFA is mandatory, and turning it off on a session alone undid
+    the second factor; an administrator resets a user's two-factor sign-in."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="Two-factor sign-in can no longer be switched off. "
+               "Ask an administrator to reset it.",
+    )
 
 
 @router.post("/refresh", response_model=Token)
