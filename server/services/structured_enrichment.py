@@ -84,20 +84,57 @@ def _question_for(kind: str) -> str:
     return _ASK_RE.sub("", text).strip()
 
 
+SUBJECT = {"vehicle": "the main vehicle (the largest or nearest one)",
+           "person": "the main person (the largest or nearest one)"}
+
+
+def _subject(kinds: list[str]) -> str:
+    return SUBJECT["person"] if any(k in ("clothing_top", "carrying", "gender",
+                                          "clothing_bottom", "headwear") for k in kinds) \
+        else SUBJECT["vehicle"]
+
+
 def build_prompt(kinds: list[str]) -> str:
-    """One prompt for a caption plus the given kinds. The vocabulary of
-    each kind is spelled out so the answers come back as words
-    ``normalise_answer`` can count."""
-    lines = [
-        "Look at this camera frame.",
-        "Write one short sentence describing what is in it (the \"caption\").",
-    ]
+    """One prompt for the kinds' answers and a caption.
+
+    The attribute keys come FIRST and the caption last. The model writes
+    its JSON in key order, and every later value is conditioned on the
+    earlier text: with the caption first, a frame holding a white van in
+    front of a yellow ambulance produced "yellow" for the van's colour
+    (measured 2026-11-13, six of six colour disagreements went that way).
+    Asked first, each attribute is answered from the image, as the
+    per-question path answers it. The subject is named so a crop with
+    two vehicles in it is answered for the one the visit is about, and
+    the caption asks for what the plain caption prompt asks for — who or
+    what, what they wear, what they do — so search loses no words."""
+    lines = ["Look at this camera frame."]
     if kinds:
-        lines.append("Then answer these questions with one word each:")
+        lines.append(f"Answer these questions about {_subject(kinds)} with one word each:")
         for kind in kinds:
             vocab = ", ".join(str(v) for v in KIND_QUESTIONS[kind].get("vocabulary") or [])
             lines.append(f'- "{kind}": {_question_for(kind)} One of: {vocab}; or "unknown".')
-    keys = ", ".join(['"caption": "..."'] + [f'"{k}": "..."' for k in kinds])
+    lines.append('Then write one sentence (the "caption") describing who or what is in the '
+                 "frame, what they wear and what they are doing. Plain words, no preamble.")
+    keys = ", ".join([f'"{k}": "..."' for k in kinds] + ['"caption": "..."'])
+    lines.append("Reply with a JSON object only, no other text, with exactly these keys:")
+    lines.append("{" + keys + "}")
+    return "\n".join(lines)
+
+
+def build_attributes_prompt(kinds: list[str]) -> str:
+    """The kinds' questions as one call, with no caption in it. The plain
+    caption call stays as it is — its wording is what search was built
+    on — and this call replaces the N single questions. Measured on a
+    Ventuno Q (2026-11-13, paired runs 5 and 5b): for two kinds it costs
+    what the two questions cost (1,340 against 1,476 ms, no gain); for
+    the five extended person kinds 2,173 against 3,670 ms, with the same
+    answers where the crop allows one — so it is used from three kinds."""
+    lines = ["Look at this camera frame.",
+             f"Answer these questions about {_subject(kinds)} with one word each:"]
+    for kind in kinds:
+        vocab = ", ".join(str(v) for v in KIND_QUESTIONS[kind].get("vocabulary") or [])
+        lines.append(f'- "{kind}": {_question_for(kind)} One of: {vocab}; or "unknown".')
+    keys = ", ".join(f'"{k}": "..."' for k in kinds)
     lines.append("Reply with a JSON object only, no other text, with exactly these keys:")
     lines.append("{" + keys + "}")
     return "\n".join(lines)
@@ -186,11 +223,29 @@ async def ask_structured(jpeg: bytes, adapter: str, kinds: list[str],
     the gate refused it, None when the adapter never answered, and a
     :class:`Structured` otherwise — with ``json_ok`` False when the model
     answered in prose, which is then the caption and nothing more."""
+    return await _ask_json(build_prompt(kinds), jpeg, adapter, kinds, camera_handle, event_id,
+                           kind="caption", caller="structured enrichment", priority=priority)
+
+
+async def ask_attributes(jpeg: bytes, adapter: str, kinds: list[str],
+                         camera_handle: str, event_id: int, *,
+                         priority: str = "live") -> Structured | None:
+    """One gated call for the kinds alone — the batched form of the
+    descriptor enricher's questions, on its VQA lane. DROPPED / None /
+    :class:`Structured` as :func:`ask_structured`; ``json_ok`` False
+    means the caller should ask one by one."""
+    return await _ask_json(build_attributes_prompt(kinds), jpeg, adapter, kinds, camera_handle,
+                           event_id, kind="vqa", caller="descriptor enrichment (batched)",
+                           priority=priority)
+
+
+async def _ask_json(prompt: str, jpeg: bytes, adapter: str, kinds: list[str],
+                    camera_handle: str, event_id: int, *, kind: str, caller: str,
+                    priority: str) -> Structured | None:
     import base64
 
     from services.enrichment_gate import infer_through_gate
 
-    prompt = build_prompt(kinds)
     # The VQA shape — no "task" key, question and prompt both — for the
     # reason descriptor_enrichment._ask documents: that is what makes a
     # captioner answer the question instead of captioning regardless.
@@ -202,9 +257,8 @@ async def ask_structured(jpeg: bytes, adapter: str, kinds: list[str],
         "frame_b64": base64.b64encode(jpeg).decode("ascii"),
     }
     STATS["calls"] += 1
-    payload = await infer_through_gate(adapter, body, kind="caption", log=logger,
-                                       caller="structured enrichment",
-                                       priority=priority)
+    payload = await infer_through_gate(adapter, body, kind=kind, log=logger,
+                                       caller=caller, priority=priority)
     if payload is DROPPED:
         STATS["calls"] -= 1
         return DROPPED

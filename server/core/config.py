@@ -432,6 +432,18 @@ class Settings(BaseSettings):
     # a site that wants "woman in a red top with a helmet" searchable
     # pays for it knowingly. Off, people keep the two-question ceiling.
     events_descriptor_people_extended: bool = False
+    # From how many descriptor kinds a visit's questions go to the model
+    # as ONE call (a JSON answer) instead of one call a kind. Measured on
+    # a Ventuno Q (2026-11-13): two kinds cost the same either way; the
+    # five extended person kinds cost 2.2 s as one call against 3.7 s as
+    # five. 0 never batches.
+    events_descriptor_batch_min_kinds: int = 3
+    # A visit whose evidence frame is byte-identical to an earlier visit's
+    # (the store is content-addressed) takes that visit's caption and
+    # descriptor claims instead of calling the model: same pixels, same
+    # answer. Measured on a Ventuno Q (2026-11-13): 91 % of a day's
+    # captioner calls on a looping test input, none on a real camera.
+    events_enrichment_reuse_same_frame: bool = True
     # RFC-0004 step 1: ask the captioner ONCE per visit for the sentence
     # and the descriptor answers together, as one JSON object, instead of
     # a caption call and then one call per kind on the same frame (three
@@ -549,13 +561,17 @@ class Settings(BaseSettings):
     events_enrichment_detector_slow_factor: float = 2.0
     events_enrichment_detector_pause_factor: float = 4.0
     events_enrichment_pressure_gap_s: float = 6.0
-    # The accelerator's busy share (the dashboard's NPU figure, inference
-    # time over wall time, in-flight count when queued) above which
-    # background enrichment does not START a new call — the device-side
-    # trigger beside the detector-latency one. A running inference cannot
-    # be pre-empted on an NPU; this keeps new ones from starting while the
-    # device has no room. Measured on a Ventuno Q (2026-11-12): detector
-    # alone 10–37 %, with the description questions 85–100 %.
+    # The share of the accelerator held by the enrichment adapters the
+    # governor paces (captioner, VQA, embedder; the monitor's per-user
+    # shares, not the device total) above which background enrichment
+    # does not START a new call — the device-side trigger beside the
+    # detector-latency one. A running inference cannot be pre-empted on an
+    # NPU; this keeps new ones from starting while the work the governor
+    # can defer already fills the device. The detector's and the plate
+    # reader's shares are left out: they cannot be deferred, and counting
+    # them paced captions for no detector gain (Ventuno Q, 2026-11-13).
+    # Measured: the description questions held 48–70 % (2026-11-12), the
+    # single structured call 24 % (2026-11-13).
     events_enrichment_device_busy_percent: float = 60.0
     # The backfill sweeps history only after the governor has been NORMAL
     # this long with nothing live in hand — "when it finds resources".

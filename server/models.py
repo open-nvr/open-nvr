@@ -636,7 +636,7 @@ class TimelineEvent(Base):
     started_at = Column(DateTime(timezone=True), nullable=False)
     ended_at = Column(DateTime(timezone=True), nullable=True)
     recording_ref = Column(String(500), nullable=True)
-    evidence_path = Column(String(500), nullable=True)
+    evidence_path = Column(String(500), nullable=True, index=True)
     plate_text = Column(String(32), nullable=True)
     # The crop the plate was actually READ from (#382). Multi-frame OCR
     # reads plate-candidate crops, not the visit's vehicle-best frame —

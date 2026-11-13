@@ -8,6 +8,48 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Three or more descriptor questions go to the model as one call.** With
+  the extended person questions on, a person visit cost the captioner one
+  call a kind — five calls, 3.7 s on a Ventuno Q. From
+  `EVENTS_DESCRIPTOR_BATCH_MIN_KINDS` kinds (3) the questions go as one
+  call with a JSON answer, 2.2 s for the same five, with the same answers
+  where the crop allows one (paired runs 5 and 5b in
+  `bench/rfc-0004-infer-once-log.md`); two kinds cost the same either way
+  and stay single. A reply that is not JSON falls back to the single
+  questions. The caption call is untouched. The headwear question no
+  longer leads with "such as helmet, cap, …", which put a cap on bare
+  heads and on crops too small to tell; it now offers "nothing" and
+  "unknown" plainly.
+
+- **The same frame is not described twice.** The evidence store is
+  content-addressed, so two visits with the same evidence path are the
+  same pixels; the later one now takes the earlier one's caption and
+  descriptor claims instead of calling the model, and says so on the
+  visit (`reused_from`). Measured on a Ventuno Q: 9,921 of a day's 10,892
+  captioner calls went to a frame already captioned (a looping test clip
+  re-detecting the same frames), none on the real office camera — so it
+  costs a real camera nothing and removes nine calls in ten on a loop, a
+  static scene re-detected or a replayed recording, with no quality
+  question. Near-repeats (the same person in the same chair, a different
+  JPEG) are deliberately not reused: at a similarity safe enough to trust
+  a real camera offers 3 % of its visits. `EVENTS_ENRICHMENT_REUSE_SAME_FRAME`
+  turns it off; `events.evidence_path` gains an index for the lookup.
+
+- **The governor's device-busy trigger counts only the work it can defer.**
+  It read the accelerator's total share, and on a box with a plate reader
+  the total is mostly the detector and the plate reader: measured on a
+  Ventuno Q (window C in `bench/rfc-0004-infer-once-log.md`), 77–139 %
+  busy with the captioner at 24 %, so captions were paced to one per 6 s,
+  a quarter of the visits in a burst got no caption inside the window, and
+  the detector gained nothing, because neither the detector nor the plate
+  reader is something the governor can pace. The trigger now compares
+  `EVENTS_ENRICHMENT_DEVICE_BUSY_PERCENT` with the share held by the
+  enrichment adapters it admits calls to (the monitor's per-user shares
+  filtered by the gates that exist). The reason line and the snapshot
+  say both figures: "enrichment holds 24% of Qualcomm Hexagon NPU
+  (device 112% busy)". The latency trigger is unchanged and still
+  covers the queue a share cannot see.
+
 - **One captioner call per visit, behind a flag (RFC-0004, step 1).** With
   `EVENTS_ENRICHMENT_SINGLE_CALL=true` the caption task asks the model
   once for the sentence and the descriptor answers together, as one JSON
