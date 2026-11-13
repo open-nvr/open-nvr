@@ -346,6 +346,30 @@ first on the paired frames (words, colour words, latency — the cost is
 output tokens), then the same re-caption and eval cycle. The 403 old
 captions are in the backup if the cycle does not converge.
 
+**Measured — paired frame comparison, run 3, prompt v3 (2026-11-13
+04:33–04:42 UTC), same 70 frames.** Caption asked for as one or two
+sentences of 20–30 words including what is around the subject.
+
+| | v2 (run 2) | v3 (run 3) |
+|---|---|---|
+| attributes agree with per-question | 132 / 140 | 133 / 140 (colour 40/40, type 36/40, clothing 30/30, carrying 27/30) |
+| caption words | 10.8 | **24.7** (plain prompt 17.0) |
+| captions naming a colour | 70 / 70 | 66 / 70 (plain 45 / 70) |
+| structured call, adapter time | 1,789 ms | **2,349 ms** |
+| old path (caption + 2 questions) | 2,659 ms | 2,747 ms |
+| saving per visit | 1.49× | **1.17×** |
+| JSON parsed / cut by the cap | 70 / 0 | 70 / 0 (reply 209 characters) |
+
+The scene is back ("A man in a red shirt is sitting in a chair, looking
+at a laptop on a desk in a room with a window") and the attributes did
+not move; the price is 560 ms of output tokens a visit. Against the
+baseline that is still one call instead of three and about 2.3 s of
+Gemma a visit against 3.5 s on live traffic (window A), but the 1.7 s of
+window B becomes about 2.3 s. The re-caption and eval cycle with v3 is
+the arbiter; if search recovers, the knee between words and tokens is
+the next thing to measure (a 15–25 word variant).
+
+
 **Done.** 2026-11-13, branch `feat/rfc-0004-single-call`:
 - `server/services/structured_enrichment.py` — prompt (caption + the
   kinds' questions with their vocabularies, JSON-only answer, `unknown`
