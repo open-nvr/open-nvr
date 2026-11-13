@@ -27,6 +27,37 @@ that calls the caption model itself is a raw app, however good it is; it
 pays for the model a second time, outside the budget that protects the
 detector, and the next app pays a third time.
 
+## The principle: the platform is the only producer of inference
+
+Stated as policy, not convention (maintainer, 2026-11-13):
+
+1. **No app and no internal service runs a model on its own.** Every
+   inference — detection, caption, attributes, embedding, plate, face,
+   speech — is run by the platform's inference tier, once per best frame
+   (or once per utterance, per query), for everyone interested.
+2. **Interest, not calls.** A consumer declares what it wants: a skill
+   on a camera, a subscription to an event, a question through the
+   description channel. The platform decides when the model runs.
+3. **A result is published and cached.** The result goes on the bus and
+   into the store, and a cache keyed on the frame's evidence hash, the
+   model fingerprint and the prompt means a retry, a backfill or a second
+   asker never pays for the same answer twice.
+4. **Bring-your-own-model is still platform-run.** An app that ships a
+   model registers it as an adapter with a task; the platform runs it on
+   the best frame like any other adapter and publishes the result, so the
+   second app wanting that task gets it for free and the audit,
+   sovereignty and budget rules apply.
+5. **Enforced by the architecture.** With KAI-C's capability tokens
+   (RFC-0001, Challenge 2) an adapter accepts a call only with a token the
+   platform's inference tier minted. An app calling an adapter directly is
+   refused and audited. Until the tokens land, the SDK offers no adapter
+   client and the docs say why.
+
+What this buys: no duplicate calls for the same frame; one budget for
+the whole box, so the detector's brake (#905) governs every model call,
+not only the enrichers'; and the NPU share becomes a function of visits,
+not of how many consumers exist.
+
 ## Where the code stands, measured
 
 Ventuno Q, 2026-11-12, a busy office hour plus a looping plate clip
@@ -111,6 +142,17 @@ The call goes through the enrichment gate and the governor, so it pays
 into the same budget and yields to the detector like everything else.
 An interactive caller still never waits behind the backfill (the
 governor's `interactive` rule stands).
+
+**When the answer is the stored one and when a fresh look is made.** The
+detector is the real-time truth: "is anyone there now" is answered from
+the live tracks without a model call. The newest description is returned
+as-is, stamped with its age, when it is younger than `max_age_s` **and no
+new track has appeared on the camera since it was made**. A new track, or
+an older description, is what triggers the one shared call, on the
+pipeline's current frame, stamped with that frame's capture time. When
+enrichment is paused by the governor or the camera is down, the answer
+says "last seen N ago" rather than presenting an old frame as now. A
+quiet camera therefore costs no call per question.
 
 ### 4. The agent and the Mirror become subscribers
 
