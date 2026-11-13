@@ -12,7 +12,7 @@ or an estimate.
 | # | Item | PR | State |
 |---|---|---|---|
 | 0 | this ledger | — | written 2026-11-13 |
-| 1 | one structured call per best frame (caption + attributes in one answer; per-question fallback) | this PR | code done 2026-11-13, flag off; box measurement next |
+| 1 | one structured call per best frame (caption + attributes in one answer; per-question fallback) | #909, #910 | measured 2026-11-13 (paired frames, windows A/B/C); flag on on the Ventuno Q; default flips after the search eval |
 | 2 | `visit.enriched.v1` on the bus; result cache (frame hash, model fingerprint, prompt) | — | planned |
 | 3 | description channel: live tracks + freshest result; one shared gated call on a new track or a stale result | — | planned |
 | 4 | agent live look and Mirror onto 2 and 3; direct adapter calls removed | — | planned |
@@ -166,6 +166,83 @@ caption carries the words search filters on more often than the plain
 prompt does. The prompt revision ships; the flag can go on for the
 traffic windows. The default flips only after window B and the 33-case
 search eval.
+
+**Measured — traffic window B, flag on, brake out of reach (2026-11-13
+02:33–02:43 UTC, 9.8 min).** Core image 36d042e5 (main after #910, so the
+run-2 prompt), `EVENTS_ENRICHMENT_SINGLE_CALL=true`. The new image also
+carries the #905 brake; its device-busy trigger cannot be switched off
+(the knob is clamped at 100 and the Hexagon reads 114–140 % busy because
+requests queue), so the governor sat in LIVE-ONLY throughout and the
+pacing gap was set to 0 so that state admitted every caption. Same box
+state otherwise: plate clip on cam26, cam23 idle, agent on, people
+questions on, accurate plate mode. Two core recreates happened in the 15
+minutes before the window (see the deploy notes), so the 15-minute load
+still carried them.
+
+| Measurement | Window A (flag off) | Window B (flag on) |
+|---|---|---|
+| visits | 94 | 96 |
+| captions written | 94 | 91 |
+| descriptor rows written | 202 (2.15 a visit) | 190 (1.98 a visit) |
+| captioner calls | 327 (3.48 a visit) | **92 (0.96 a visit)** |
+| captioner time | 327 s = 56 % of the window | **161 s = 27 % of the window** |
+| mean per call | captions 1234 ms, questions 905 ms | structured 1748 ms |
+| detector cam26, mean latency | 107 ms | **91 ms** |
+
+Gemma time per visit 3.48 s → 1.68 s (2.1× less; the paired frames said
+1.5× because there the per-question path had no agent questions beside
+it). The detector gained 16 ms a frame with no other change. Descriptor
+rows per visit 2.15 → 1.98: the structured call answers "unknown" where
+the per-question path forces a word (the paired run saw the same, three
+"unknown" against "nothing" for carrying). Five of 96 visits had no
+caption at the end of the window against none in A: the log shows one
+visit dropped by the gate ("wait line full" — a burst, not the brake),
+and the rest were still in flight when the snapshot was taken (the
+structured call takes 1.7 s and the window ends mid-burst).
+
+**Measured — traffic window C, flag on, brake at its defaults (2026-11-13
+02:45–02:55 UTC, 9.9 min).** The configuration a customer box would run
+after the default flips: `EVENTS_ENRICHMENT_SINGLE_CALL=true`, the #905
+knobs at 2× / 4× / 60 % / 6 s. Same box state as A and B.
+
+| Measurement | A: flag off | B: flag on, brake off | C: flag on, brake defaults |
+|---|---|---|---|
+| visits | 94 | 96 | 105 |
+| captions written in the window | 94 (100 %) | 91 (95 %) | **81 (77 %)** |
+| visits still without a caption at the end | 0 | 5 | **24** |
+| descriptor rows a visit | 2.15 | 1.98 | 1.63 |
+| captioner calls | 327 | 92 | 81 |
+| captioner time, share of the window | 327 s, 56 % | 161 s, 27 % | 141 s, 24 % |
+| Gemma seconds a visit | 3.48 | 1.68 | 1.34 |
+| detector cam26, mean latency | 107 ms | 91 ms | 93 ms |
+| gate drops logged | 0 | 1 (wait line full) | 1 |
+| governor | — | LIVE-ONLY throughout (busy share clamped) | NORMAL ↔ LIVE-ONLY six times |
+
+What C shows: the brake's device-busy trigger fires on the detector and
+plate reader's own share (the governor logged 77 %, 118 % and 139 % busy
+with Gemma at 24 % of the window), paces captions to one per 6 s, and a
+quarter of the visits in a burst get no caption in the window — for a
+detector gain of nothing (93 ms against B's 91 ms), because on this box
+Gemma was no longer what the detector waited behind. The paced visits are
+not lost (the backfill finds a visit with no caption row), but search
+cannot find them by words until it does.
+
+**Decisions from the windows:**
+1. The single call delivers: Gemma time per visit 3.48 s → 1.68 s (2.1×)
+   on live traffic, the detector 16 ms a frame faster, attributes the
+   same within the "unknown" margin. The default flips once the 33-case
+   search eval has run on captions from the new prompt (needs an operator
+   login on the box; pending).
+2. The brake's device-busy trigger needs a second look before it stays
+   at 60 on a box with a plate reader: it counts the detector's own share
+   against enrichment. Either subtract the detector's share from the busy
+   figure, or make the latency trigger (the detector's own wait, which is
+   what we care about) the only one that paces. Filed as the next step on
+   #905's thread; until then this box runs with the device-busy knob at
+   its ceiling and the pacing gap at 0 (window B's configuration), which
+   captioned 95 % of visits in the window.
+3. The box keeps the flag on from here; the ledger's next entry is the
+   search eval.
 
 **Done.** 2026-11-13, branch `feat/rfc-0004-single-call`:
 - `server/services/structured_enrichment.py` — prompt (caption + the
