@@ -265,9 +265,14 @@ KIND_QUESTIONS: dict[str, dict[str, Any]] = {
     "headwear": {
         # "nothing" is stored, as with carrying: a bare head disagrees
         # with a helmet, and a PPE check needs the bare head counted.
+        # Asked with "if anything" and "nothing" offered plainly: the
+        # earlier wording ("such as helmet, cap, …") led the model to a
+        # cap on bare heads and on crops too small to tell (measured
+        # 2026-11-13, bench/rfc-0004-infer-once-log.md, run 5b).
         "question": (
-            "What is the person wearing on their head? Answer with one "
-            "word, such as helmet, cap, hat, hood, turban, scarf, or nothing."
+            "What, if anything, is the person wearing on their head? Answer "
+            "with one word: helmet, cap, hat, hood, turban or scarf; nothing "
+            "if the head is bare; unknown if you cannot tell."
         ),
         "vocabulary": [
             "nothing", "helmet", "cap", "hat", "hood", "turban", "scarf",
@@ -337,6 +342,17 @@ def normalise_answer(kind: str, answer: str) -> str | None:
         if token in words:
             return synonyms.get(token, token)
     return None
+
+
+def batch_min_kinds() -> int:
+    """From how many kinds the questions go as one call. 0 never batches."""
+    from core.config import settings
+
+    try:
+        n = int(getattr(settings, "events_descriptor_batch_min_kinds", 3))
+    except (TypeError, ValueError):
+        n = 3
+    return n if n > 0 else 10**6
 
 
 async def _plan_skills(label: str | None) -> list[dict[str, Any]]:
@@ -466,6 +482,15 @@ async def enrich_event_descriptors(event_id: int, *,
         evidence_path = row.evidence_path
         already = set((row.payload or {}).get("enriched_by") or [])
         camera_handle = f"cam{row.camera_id}"
+        if VQA_TASK not in already:
+            # The same frame asked before (RFC-0004 step 2): its claims
+            # are this visit's claims; nothing to ask.
+            from services import enrichment_reuse
+
+            twin = enrichment_reuse.find_twin(db, row)
+            if twin is not None and enrichment_reuse.reuse_descriptors(db, row, twin):
+                db.commit()
+                return "done"
         if _single_call_carries(db, row, already, priority):
             # RFC-0004 step 1: the caption task asks the questions in the
             # same call as the sentence. Asking them here too would be
@@ -531,7 +556,26 @@ async def enrich_event_descriptors(event_id: int, *,
 
     claims: list[Claim] = []
     dropped = 0
-    for kind in sorted(kinds):
+    kinds = sorted(kinds)
+    # Three or more kinds (the extended person set): ONE call for all of
+    # them instead of one a kind. Measured on a Ventuno Q (2026-11-13):
+    # the five extended questions cost 3.7 s as single calls and 2.2 s as
+    # one, with the same answers where the crop allows one; two kinds
+    # cost the same either way, so they stay single. A reply that is not
+    # JSON, or an adapter that did not answer, falls through to the
+    # single questions below; a DROPPED call is a drop.
+    if len(kinds) >= batch_min_kinds():
+        from services import structured_enrichment
+
+        batched = await structured_enrichment.ask_attributes(
+            jpeg, adapter, kinds, camera_handle, event_id, priority=priority)
+        if batched is DROPPED:
+            dropped += 1
+            kinds = []
+        elif batched is not None and batched.json_ok:
+            claims.extend(batched.claims)
+            kinds = []
+    for kind in kinds:
         spec = KIND_QUESTIONS[kind]
         answer = await _ask(jpeg, adapter, spec["question"],
                             camera_handle, event_id, priority=priority)

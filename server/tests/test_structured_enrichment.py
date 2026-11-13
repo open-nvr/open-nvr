@@ -53,13 +53,23 @@ def test_prompt_asks_for_the_caption_and_each_kind_with_its_vocabulary():
             assert word in prompt
     # The per-question "one word" instruction is replaced by the JSON one.
     assert "Answer with one word" not in prompt
-    assert prompt.rstrip().endswith('{"caption": "...", "colour": "...", "vehicle_type": "..."}')
+    # attributes first, caption last: each value is conditioned on the text
+    # before it, and the caption pulled the answers toward the whole scene
+    assert prompt.rstrip().endswith('{"colour": "...", "vehicle_type": "...", "caption": "..."}')
+    assert "main vehicle" in prompt
 
 
 def test_prompt_without_kinds_is_a_plain_caption_request():
     prompt = se.build_prompt([])
-    assert "questions" not in prompt
+    assert "questions" not in prompt and "One of:" not in prompt
     assert prompt.rstrip().endswith('{"caption": "..."}')
+
+
+def test_attributes_prompt_has_the_kinds_and_no_caption():
+    prompt = se.build_attributes_prompt(["colour", "vehicle_type"])
+    assert "caption" not in prompt.lower()
+    assert prompt.rstrip().endswith('{"colour": "...", "vehicle_type": "..."}')
+    assert "main vehicle" in prompt
 
 
 # ── the answer ────────────────────────────────────────────────────
