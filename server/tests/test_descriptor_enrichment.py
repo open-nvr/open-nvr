@@ -34,6 +34,7 @@ from services.descriptor_enrichment import (  # noqa: E402
     DESCRIBABLE_LABELS,
     DESCRIPTOR_SKILL,
     KIND_QUESTIONS,
+    PEOPLE_EXTENDED_SETTING,
     PEOPLE_SETTING,
     VQA_TASK,
     normalise_answer,
@@ -297,7 +298,8 @@ def test_the_vqa_call_sends_no_task_key_and_reads_answer(monkeypatch):
 
 def _asked_questions(label: str, *, people: bool, monkeypatch,
                      answer=None, out: dict | None = None,
-                     answered_kinds: tuple[str, ...] = ()) -> list[str]:
+                     answered_kinds: tuple[str, ...] = (),
+                     extended: bool = False, batch_min: int = 3, batched=None) -> list[str]:
     """Run the real enricher over one visit and report what it ASKED.
 
     The kind selection is the whole cost story, and it lives inside
@@ -372,7 +374,8 @@ def _asked_questions(label: str, *, people: bool, monkeypatch,
         # filtering decides what is asked.
         return [{"task": VQA_TASK, "healthy": True, "adapters": ["moondream"],
                  "descriptor_kinds": ["colour", "vehicle_type",
-                                      "clothing_top", "carrying", "face_id"]}]
+                                      "clothing_top", "carrying", "face_id",
+                                      "gender", "clothing_bottom", "headwear"]}]
 
     asked: list[str] = []
 
@@ -382,6 +385,22 @@ def _asked_questions(label: str, *, people: bool, monkeypatch,
 
     monkeypatch.setattr(mod, "_plan_skills", _plan)
     monkeypatch.setattr(mod, "_ask", _ask)
+    # The batched path is stubbed too, so a test that wants it says so
+    # through ``batched`` (a Structured, DROPPED or None) and the single
+    # questions still count what was asked one by one.
+    from services import structured_enrichment as se
+
+    batched_calls: list[list[str]] = []
+
+    async def _batched(jpeg, adapter, kinds, handle, event_id, **kw):
+        batched_calls.append(list(kinds))
+        return batched
+
+    monkeypatch.setattr(se, "ask_attributes", _batched)
+    monkeypatch.setattr(settings, "events_descriptor_batch_min_kinds", batch_min, raising=False)
+    monkeypatch.setattr(settings, PEOPLE_EXTENDED_SETTING, extended, raising=False)
+    if out is not None:
+        out["batched_calls"] = batched_calls
 
     loop = asyncio.new_event_loop()
     try:
@@ -412,6 +431,57 @@ def test_a_person_is_asked_the_person_questions(monkeypatch):
     joined = " ".join(asked).lower()
     assert "wearing" in joined and "carrying" in joined
     assert "vehicle" not in joined
+
+
+def test_five_kinds_go_as_one_call_and_land_as_claims(monkeypatch):
+    """The extended person set: one batched call, no single questions,
+    the answers in visit_descriptors, VQA recorded as ran."""
+    from services.structured_enrichment import Structured
+    from services.descriptor_enrichment import Claim
+
+    reply = Structured(claims=[Claim(kind="clothing_top", value="red", source_task=VQA_TASK,
+                                     source_adapter="moondream"),
+                               Claim(kind="gender", value="man", source_task=VQA_TASK,
+                                     source_adapter="moondream")], json_ok=True)
+    out: dict = {}
+    asked = _asked_questions("person", people=True, extended=True, monkeypatch=monkeypatch,
+                             batched=reply, out=out)
+    assert asked == [], "nothing asked one by one"
+    assert out["batched_calls"] == [["carrying", "clothing_bottom", "clothing_top", "gender", "headwear"]]
+    assert out["result"] == "done" and VQA_TASK in out["enriched_by"]
+
+
+def test_two_kinds_stay_single_questions(monkeypatch):
+    """Measured: two kinds cost the same as one batched call, so no
+    batched path for them (and a vehicle never sees the person kinds)."""
+    out: dict = {}
+    asked = _asked_questions("car", people=False, monkeypatch=monkeypatch, out=out)
+    assert len(asked) == 2 and out["batched_calls"] == []
+
+
+def test_a_batched_reply_that_is_not_json_falls_back_to_single_questions(monkeypatch):
+    from services.structured_enrichment import Structured
+
+    out: dict = {}
+    asked = _asked_questions("person", people=True, extended=True, monkeypatch=monkeypatch,
+                             batched=Structured(caption="A man.", json_ok=False), out=out)
+    assert len(asked) == 5 and len(out["batched_calls"]) == 1
+
+
+def test_a_dropped_batched_call_is_a_drop_not_five_more_calls(monkeypatch):
+    from services.enrichment_gate import DROPPED
+
+    out: dict = {}
+    asked = _asked_questions("person", people=True, extended=True, monkeypatch=monkeypatch,
+                             batched=DROPPED, out=out)
+    assert asked == [] and out["result"] == "dropped" and VQA_TASK not in out["enriched_by"]
+
+
+def test_batching_can_be_switched_off(monkeypatch):
+    out: dict = {}
+    asked = _asked_questions("person", people=True, extended=True, monkeypatch=monkeypatch,
+                             batch_min=0, out=out)
+    assert len(asked) == 5 and out["batched_calls"] == []
 
 
 def test_a_person_is_asked_nothing_while_the_flag_is_off(monkeypatch):
