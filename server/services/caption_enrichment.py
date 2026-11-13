@@ -337,6 +337,25 @@ async def enrich_event_caption(event_id: int,
         # Same derivation plate_enrichment uses (f"cam{camera_id}") — the
         # adapter-facing handle convention, not a DB column.
         camera_handle = f"cam{row.camera_id}"
+        # RFC-0004 step 1: when the single structured call is on, this
+        # task also carries the descriptor questions for the visit, so it
+        # needs what the descriptor enricher would have read — which
+        # kinds are already answered, and whether VQA already ran.
+        from services import structured_enrichment
+
+        single = structured_enrichment.enabled()
+        answered: set[str] = set()
+        vqa_done = False
+        if single:
+            from models import VisitDescriptor
+            from services.descriptor_enrichment import VQA_TASK
+
+            vqa_done = VQA_TASK in ((row.payload or {}).get("enriched_by") or [])
+            answered = {
+                k for (k,) in db.query(VisitDescriptor.kind)
+                .filter(VisitDescriptor.event_id == row.id,
+                        VisitDescriptor.source_task == VQA_TASK).all()
+            }
     finally:
         db.close()
 
@@ -359,8 +378,28 @@ async def enrich_event_caption(event_id: int,
     adapter = await _resolve_caption_adapter()
     if adapter is None:
         return
-    caption = await _caption_jpeg(jpeg, adapter, camera_handle, event_id=event_id,
-                                  priority=priority)
+    # One call for the sentence AND the attributes when the flag is on
+    # and this class has questions worth asking on this adapter (RFC-0004
+    # step 1). Otherwise the plain caption call, as before.
+    claims: list = []
+    json_ok = False
+    kinds: list[str] = []
+    if single and not vqa_done:
+        kinds = await structured_enrichment.kinds_for_visit(label, adapter, answered)
+    if kinds:
+        structured = await structured_enrichment.ask_structured(
+            jpeg, adapter, kinds, camera_handle, event_id, priority=priority)
+        if structured is DROPPED:
+            return "dropped"
+        if structured is None:
+            caption = None
+        else:
+            caption = structured.caption
+            claims = structured.claims
+            json_ok = structured.json_ok
+    else:
+        caption = await _caption_jpeg(jpeg, adapter, camera_handle, event_id=event_id,
+                                      priority=priority)
     if caption is DROPPED:
         return "dropped"
     if caption is None:
@@ -374,7 +413,8 @@ async def enrich_event_caption(event_id: int,
         return
     if not caption:
         _mark_attempted(event_id)
-        return "done"                 # looked; nothing to say — a result
+        if not (claims or json_ok):
+            return "done"             # looked; nothing to say — a result
 
     # ── Phase 3: reopen and write ───────────────────────────────────
     from datetime import UTC, datetime
@@ -388,6 +428,18 @@ async def enrich_event_caption(event_id: int,
         if row is None:
             # The visit was deleted by retention while we captioned it.
             return
+        if claims or json_ok:
+            # The structured call's answers: the same rows, the same
+            # ran_tasks rule as descriptor_enrichment — VQA counts as
+            # ran only when the model answered in JSON, so a prose reply
+            # leaves the questions for the per-question path.
+            from services.descriptor_enrichment import VQA_TASK
+            from services.descriptor_store import apply_descriptors
+
+            apply_descriptors(db, row, claims, [VQA_TASK] if json_ok else [])
+            db.commit()
+            if not caption:
+                return "done"
         existing = db.get(EventText, row.id)
         if existing is None:
             existing = EventText(event_id=row.id)
