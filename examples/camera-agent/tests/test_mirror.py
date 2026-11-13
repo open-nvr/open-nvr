@@ -113,6 +113,54 @@ def _person_frame(*ids, box=(0.3, 0.2, 0.2, 0.6)):
 
 
 @pytest.mark.asyncio
+async def test_the_scene_line_comes_from_core_when_wired_and_the_loop_makes_no_call():
+    """RFC-0004 step 4: the subtitle is core's shared description; the
+    loop's own vision call is not made for the scene."""
+    fake = Fake()
+    asked: list[float] = []
+
+    async def description(max_age_s):
+        asked.append(max_age_s)
+        return {"text": "A man in a red shirt waves at the camera.", "source": "visit",
+                "model_called": False, "age_s": 2.0}
+
+    s = _session(fake, description=description)
+    assert await s.step() is True
+    assert fake.asked == [] and asked == [s._scene_every]
+    assert s.caption == "A man in a red shirt waves at the camera."
+    m = fake.published[-1]["mirror"]
+    assert m["caption"] == s.caption and m["source"] == "visit" and m["spoken"] == s.caption
+    assert s.stats.core_answers == 1 and s.stats.captions == 1
+
+
+@pytest.mark.asyncio
+async def test_a_stale_core_answer_is_shown_but_not_spoken():
+    fake = Fake()
+
+    async def description(max_age_s):
+        return {"text": "A parked car.", "source": "stale", "age_s": 120.0,
+                "reason": "no fresh frame from the camera", "model_called": False}
+
+    s = _session(fake, description=description)
+    assert await s.step() is True
+    m = fake.published[-1]["mirror"]
+    assert m["caption"] == "A parked car." and m["stale_s"] == 120.0 and "spoken" not in m
+    assert fake.spoken == [] and fake.asked == []
+
+
+@pytest.mark.asyncio
+async def test_when_core_does_not_answer_the_loop_looks_itself():
+    fake = Fake()
+
+    async def description(max_age_s):
+        return None
+
+    s = _session(fake, description=description)
+    assert await s.step() is True
+    assert fake.asked == ["scene"] and s.caption == fake.caption_text and s.stats.core_answers == 0
+
+
+@pytest.mark.asyncio
 async def test_first_step_describes_the_scene_and_speaks_it():
     fake = Fake(); s = _session(fake)
     assert await s.step() is True

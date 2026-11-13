@@ -8,6 +8,16 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The camera agent's live look and the Mirror's scene line ask core,
+  not the caption model (RFC-0004, step 4).** "What do you see on the
+  gate" and the Mirror's running subtitle now come from core's one shared
+  description: the visit the enrichment tier just described, or one gated
+  look shared with every other asker, or the last thing known stamped
+  with its age. Neither calls the captioner for the scene any more; the
+  Mirror still makes its own confirmation look when a new person appears,
+  and a question about a frame still goes to the VQA model. When core
+  does not answer, the agent takes its own look and says so in its path.
+
 - **One shared "what is on this camera now".** Core answers
   `GET /internal/camera-agent/cameras/{id}/description?max_age_s=N` from
   one path (RFC-0004, step 3): the newest described visit when it is

@@ -183,8 +183,13 @@ class CameraTools:
         pipeline_camera: Any = None,
         events_client: Any = None,
         timeline: Any = None,
+        description_fetch: Any = None,
     ) -> None:
         self._ctx = context
+        # Core's shared live description (RFC-0004 step 3): async
+        # (camera_id, max_age_s) -> dict | None. The plain "what do you
+        # see" look goes there; a question still goes to the VQA model.
+        self._description_fetch = description_fetch
         self._caption = caption_client
         self._detect = detection_client
         self._recognise = recognition_client
@@ -313,9 +318,43 @@ class CameraTools:
             return None
         return await self._best_frame(camera_id)
 
+    #: How old core's description may be for "what do you see now".
+    _DESCRIPTION_MAX_AGE_S = 30.0
+
+    async def _describe_via_core(self, camera_id: str) -> str | None:
+        """The plain look, from core's one shared description. None when
+        core did not answer (the caller falls back to its own look and
+        says so in the path); a stale answer is given honestly, with its
+        age, rather than presenting an old frame as now."""
+        if self._description_fetch is None:
+            return None
+        try:
+            body = await self._description_fetch(camera_id, self._DESCRIPTION_MAX_AGE_S)
+        except Exception:  # noqa: BLE001
+            logger.debug("core description failed for %s", camera_id, exc_info=True)
+            return None
+        if not body or not body.get("text"):
+            return None
+        source = str(body.get("source") or "")
+        text = str(body["text"]).strip()
+        if source in ("visit", "fresh"):
+            _describe_path.set(f"core:{source}")
+            return f"{camera_id}: {text}"
+        if source == "stale":
+            age = body.get("age_s")
+            ago = f"{int(age)} s ago" if isinstance(age, (int, float)) else "earlier"
+            reason = str(body.get("reason") or "no fresh look")
+            _describe_path.set("core:stale")
+            return f"{camera_id} (as of {ago}; {reason}): {text}"
+        return None
+
     async def _describe_one(self, camera_id: str, question: str | None = None) -> str:
         self.last_vision_error = None    # per-call: set again only on fallback
         _describe_path.set(None)
+        if question is None:
+            answered = await self._describe_via_core(camera_id)
+            if answered is not None:
+                return answered
         # "What do you see now" must look at a FRESH LIVE frame. Tier-0's best
         # frame is a curated crop of a RECENT detection — a clean, cheap stand-in
         # only while a track is ACTIVE right now; for a quiet/static scene it is a

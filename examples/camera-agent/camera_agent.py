@@ -66,6 +66,7 @@ from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from adapter_clients import (
+    CameraDescriptionClient,
     AppRegistryClient,
     AuthUnavailable,
     KaicAdapterClient,
@@ -3569,6 +3570,7 @@ class CameraAgentRuntime:
         self.app_registry: AppRegistryClient | None = None
         self.skills_registry: SkillsRegistryClient | None = None
         self.status_client: SystemStatusClient | None = None
+        self.description_client: CameraDescriptionClient | None = None
         self._registry_key: str = ""
         if cfg.opennvr_api_url:
             import os
@@ -3592,6 +3594,12 @@ class CameraAgentRuntime:
             # "Is everything okay?": core's own view of each camera's
             # connectivity and recording state, and the recording disk.
             self.status_client = SystemStatusClient(
+                base_url=cfg.opennvr_api_url, api_key=app_key,
+            )
+            # Core's one shared "what is on this camera now" (RFC-0004):
+            # the live look and the Mirror's scene line ask here, not
+            # the caption model.
+            self.description_client = CameraDescriptionClient(
                 base_url=cfg.opennvr_api_url, api_key=app_key,
             )
             # Kept for contract-parity self-registration (RFC-0002 gap 8).
@@ -3714,6 +3722,7 @@ class CameraAgentRuntime:
             pipeline_camera=_pipeline_camera,
             events_client=events_client,
             timeline=timeline,
+            description_fetch=self._core_description,
         )
         # Advertised tools are (re)built by _configure_tools from enabled_tools
         # minus any skills switched off at runtime. disabled_skills starts empty.
@@ -4073,13 +4082,30 @@ class CameraAgentRuntime:
                 return None
             hires = _hires
 
+        description = None
+        if oid is not None and getattr(self, "description_client", None) is not None:
+            async def description(max_age_s: float) -> dict[str, Any] | None:
+                return await self.description_client.describe(int(oid), max_age_s)
         self.mirror = MirrorSession(
             camera_id, frame=_frame, crop=_crop if crops is not None else None,
             vision=self.tools._vlm_caption, speech=_speech,
-            publish=self.publish_update, voice=voice, hires=hires,
+            publish=self.publish_update, voice=voice, hires=hires, description=description,
             scene_every_s=scene_every_s or getattr(self.cfg, "mirror_scene_every_s", None) or SCENE_EVERY_S)
         self.mirror.start()
         return self.mirror
+
+    async def _core_description(self, camera_id: str, max_age_s: float) -> dict[str, Any] | None:
+        """Core's shared description for one of this agent's cameras, or
+        None when the camera is not an OpenNVR camera or core is not
+        configured (the tool then takes its own look)."""
+        client = getattr(self, "description_client", None)
+        if client is None:
+            return None
+        spec = self.context.get_camera(camera_id)
+        oid = getattr(spec, "opennvr_camera_id", None) if spec is not None else None
+        if oid is None:
+            return None
+        return await client.describe(int(oid), max_age_s)
 
     def publish_update(self, payload: dict[str, Any]) -> None:
         for q in list(self._update_subscribers):
