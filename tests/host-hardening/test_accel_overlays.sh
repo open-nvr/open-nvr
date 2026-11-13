@@ -159,6 +159,29 @@ reset_stale_accel_fills cpu >/dev/null 2>&1
 if [[ -z "$(get_env_var EMBED_ADAPTER_TAG)" && "$(get_env_var EVENTS_EMBED_ENRICHMENT)" == "false" ]]; then pass
 else fail "$(grep -E '^(EMBED_ADAPTER_TAG|EVENTS_EMBED_ENRICHMENT)=' .env | tr '\n' ' ')"; fi
 
+# ── 8. The detector's crop budget follows the flavour (Ventuno Q, 2026-11-13:
+#    8 crops × 5 fps × 2 busy cameras pinned the Hexagon; 3 × 4 fps fitted) ──
+start_test "qualcomm overlay defaults DETECT_MAX_REGIONS to 3 and DETECT_FPS to 4; base compose to 4 crops; .env.example leaves both empty"
+out=$(python3 - "$REPO_ROOT" <<'PY'
+import os, re, sys, yaml
+repo = sys.argv[1]
+def env(fn):
+    svc = (yaml.safe_load(open(os.path.join(repo, fn))) or {})["services"]["detect-pipeline"]
+    return {e.split("=", 1)[0]: e.split("=", 1)[1] for e in svc.get("environment") or [] if isinstance(e, str)}
+qc, base = env("docker-compose.accel-qualcomm.yml"), env("docker-compose.yml")
+bad = []
+if qc.get("DETECT_MAX_REGIONS") != "${DETECT_MAX_REGIONS:-3}": bad.append(f"qualcomm DETECT_MAX_REGIONS={qc.get('DETECT_MAX_REGIONS')!r}")
+if qc.get("DETECT_FPS") != "${DETECT_FPS:-4}": bad.append(f"qualcomm DETECT_FPS={qc.get('DETECT_FPS')!r}")
+if base.get("DETECT_MAX_REGIONS") != "${DETECT_MAX_REGIONS:-4}": bad.append(f"base DETECT_MAX_REGIONS={base.get('DETECT_MAX_REGIONS')!r}")
+ex = open(os.path.join(repo, ".env.example")).read()
+for k in ("DETECT_MAX_REGIONS", "DETECT_FPS"):
+    m = re.search(rf"^{k}=(.*)$", ex, re.M)
+    if not m or m.group(1).strip(): bad.append(f".env.example {k}={m.group(1) if m else '<missing>'!r} (must be empty: a value there outranks the flavour)")
+print("\n".join(bad))
+PY
+)
+if [[ -z "$out" ]]; then pass; else fail "$out"; fi
+
 echo ""
 echo "Tests run: $TESTS_RUN, failed: $TESTS_FAILED"
 [ "$TESTS_FAILED" -eq 0 ]

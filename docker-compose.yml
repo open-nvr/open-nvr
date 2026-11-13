@@ -497,7 +497,10 @@ services:
       #                       one is a part of it, not a second object
       - DETECT_LABELS=${DETECT_LABELS:-}
       - DETECT_CONF=${DETECT_CONF:-}
-      - DETECT_MAX_REGIONS=${DETECT_MAX_REGIONS:-}
+      # 4 = the count a CPU-only host sustains at DETECT_FPS 5 (each crop
+      # is a detector pass); the qualcomm overlay sets its own. See
+      # .env.example before raising it.
+      - DETECT_MAX_REGIONS=${DETECT_MAX_REGIONS:-4}
       - DETECT_MAX_TRACKS=${DETECT_MAX_TRACKS:-}
       - DETECT_TRACK_TTL=${DETECT_TRACK_TTL:-}
       - DETECT_MIN_SPAWN_SCORE=${DETECT_MIN_SPAWN_SCORE:-}

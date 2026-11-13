@@ -6,6 +6,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The detector's crop budget follows the flavour.** `DETECT_MAX_REGIONS`
+  and `DETECT_FPS` ship empty in `.env.example`; the compose file sets 4
+  crops at 5 fps (what a CPU-only host sustains: each crop is a detector
+  pass), and the qualcomm overlay 3 crops at 4 fps. Measured on a
+  Dragonwing board: two busy cameras at 5 fps with the old default of 8
+  crops asked the Hexagon for ~80 inferences a second (~15 ms each) and
+  pinned it at 100 % with the plate reader and the captioner queued behind
+  it; 3 crops at 4 fps took ~40 % of the device at ~50 ms per frame per
+  camera, plates and captions flowing. A number in `.env` outranks every
+  flavour, so an existing install keeps what it set. (PR #392.)
+
 ### Added
 
 ### Changed
