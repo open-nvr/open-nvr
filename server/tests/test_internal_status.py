@@ -66,7 +66,7 @@ def client(monkeypatch, tmp_path):
     factory = sessionmaker(bind=engine)
     s = factory()
     s.add(Role(id=1, name="admin"))
-    s.add(User(id=1, username="op", email="op@x", hashed_password="x", role_id=1))
+    s.add(User(mfa_enabled=True, id=1, username="op", email="op@x", hashed_password="x", role_id=1))
     s.add(Camera(id=1, name="Gate", ip_address="10.0.0.3", owner_id=1, is_active=True, created_at=NOW - timedelta(days=2),
                  rtsp_url="rtsp://u:p@10.0.0.3:554/a"))
     s.add(Camera(id=2, name="Yard", ip_address="10.0.0.4", owner_id=1, is_active=True, created_at=NOW - timedelta(days=2),

@@ -28,6 +28,10 @@ function toStringSafe(v: unknown): string {
   if (typeof v === 'object' && typeof (v as { msg?: unknown }).msg === 'string') {
     return (v as { msg: string }).msg.replace(/^(Value|Assertion) error, /, '')
   }
+  // Structured errors ({error, message, ...}: account locked, bad credentials).
+  if (typeof v === 'object' && typeof (v as { message?: unknown }).message === 'string') {
+    return (v as { message: string }).message
+  }
   try {
     return JSON.stringify(v)
   } catch {
