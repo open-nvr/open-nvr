@@ -417,6 +417,56 @@ unchanged (no search question by construction) plus one attributes-only
 structured call — two instead of three for a vehicle, two instead of six
 for a person with the extended questions.
 
+**Measured — paired runs 4 and 5 (2026-11-13 05:05–05:35 UTC), same 70
+frames.**
+
+| | v2 (attrs first + caption) | v4 (caption first + subject, then attrs) | v5 (attrs only, no caption) |
+|---|---|---|---|
+| colour agree | 40/40 | **34/40** | 40/40 |
+| vehicle_type agree | 36/40 | 35/40 | 36/40 |
+| clothing_top agree | 30/30 | 28/30 | 30/30 |
+| carrying agree / C "unknown" | 27/30 / 1 | **5/30 / 23** | 23/30 / 7 |
+| caption words | 10.8 | 25.2 | — |
+| structured call | 1,789 ms | 2,344 ms | **1,340 ms** |
+
+Run 4 settles the order question: caption first, even with the subject
+named, drifts the attributes again (the yellow-ambulance colour is back,
+and "carrying" collapses to "unknown" on 23 of 30). Attributes first
+anchors the caption to the vocabulary (v2/v3). **With this model one
+call cannot serve both.**
+
+Run 5 prices the two-call design: an attributes-only call costs 1,340 ms
+against 1,476 ms for the two single questions it replaces. Per visit,
+plain caption + attributes call = 2,423 ms for a vehicle against 2,592 ms
+for the three calls (−7 %), 2,841 against 2,933 for a person (−3 %).
+A question costs 0.74 s whatever it asks; the prompt's own tokens, not
+the image, are most of a call. Batching pays only when it replaces many
+questions: for the five extended person kinds, 5 × 0.74 = 3.7 s against
+one call — measured next.
+
+**Conclusion of step 1, as measured on Gemma 3n E2B on the Hexagon:**
+1. The single call (caption + attributes) halves Gemma time per visit on
+   live traffic (windows A→B) and keeps the attributes, but the caption
+   it produces loses the specific words search depends on (camouflage,
+   plaid, glasses, gestures, the second person). **The default stays
+   off.** The flag remains for sites where attributes matter more than
+   caption words (a plate-and-vehicle site), documented as such.
+2. For two kinds, batching the questions saves nothing worth a code
+   path. For the extended person kinds it should; measured in run 5b.
+3. The windows' captioner share (56 % → 24–27 %) was not the single call
+   alone: in window A 45 of the 233 questions were not the per-visit two
+   (the agent's and the request lane's), and in B–D the governor's
+   LIVE-ONLY state dropped VQA calls. The single call's own share of the
+   saving is about 120 s of A's 327 s (188 questions at 0.9 s minus the
+   longer caption call), roughly 56 % → 35 %.
+4. The 403 labelled visits were restored to their original captions,
+   descriptor rows and marks (verified: camouflage 7, glasses 26, 769
+   rows), and the box's flag is off again.
+5. The accuracy-free wins of RFC-0004 are steps 2–4 (publish once; the
+   agent and the Mirror as subscribers instead of callers), and the
+   brake's effectiveness check. That is where the work goes next.
+
+
 
 
 **Done.** 2026-11-13, branch `feat/rfc-0004-single-call`:
