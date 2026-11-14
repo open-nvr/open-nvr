@@ -406,6 +406,21 @@ export function Search() {
   voiceRef.current = voice
   const interimBusy = useRef(false)
   const voiceOk = voiceCaptureAvailable()
+  // The box says whether it can transcribe at all (a speech adapter is
+  // registered: VOICE_SEARCH=on, or the voice agent). Until it answers,
+  // or if it cannot be asked, the microphone shows as before; a clear no
+  // hides it — a microphone that said "no speech to text" after you had
+  // spoken was the wrong way to find out.
+  const sttQuery = useQuery({
+    queryKey: ['search-stt-status'],
+    queryFn: async () => {
+      const { data } = await api.get('/api/v1/search/transcribe/status')
+      return data as { available?: boolean; adapter?: string | null }
+    },
+    staleTime: 5 * 60 * 1000,
+    retry: 0,
+  })
+  const sttOk = sttQuery.data?.available !== false
 
   const transcribeClip = async (wav: Blob): Promise<{ query: string; transcript: string; changes: string[] } | null> => {
     const audio_b64 = await blobToBase64(wav)
@@ -1061,7 +1076,7 @@ export function Search() {
                     <SearchIcon size={13} />
                     {t('search.voice.searchNow')}
                   </button>
-                ) : (
+                ) : sttOk && (
                   <button
                     type="button"
                     onClick={() => { void toggleVoice() }}

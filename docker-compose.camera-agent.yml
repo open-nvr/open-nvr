@@ -53,50 +53,12 @@ services:
   # Whisper STT — VOICE only. Pulled from GHCR. The image eagerly loads the
   # selected model on boot; first run may download faster-whisper weights into
   # the persisted cache, then later boots reuse them.
-  # ──────────────────────────────────────────────────────────────
-  # The agent's speech-to-text slot. The SERVICE keeps the whisper name
-  # (the agent dials whisper_url = http://whisper-adapter:9003 and the
-  # register step calls it "whisper"); STT_ADAPTER picks the IMAGE, the
-  # same pattern as the captioner in docker-compose.apps.yml: `parakeet`
-  # (the default — Parakeet
-  # TDT 0.6B v3, WER 1.4 % at 0.31 s an utterance on four cores,
-  # English + 25 European languages, no translation) or `whisper`
-  # (faster-whisper base.en, 3.3 % at 1.42 s; Hindi, translation).
-  # Both serve the same §5.3 result on port 9003. Parakeet is newer
-  # than adapter release 0.1.7, so it rides its own tag variable.
-  # A third choice on Qualcomm boards: `whisper_qnn` (Whisper-Small w8a16
-  # as QNN context binaries on the Hexagon NPU; the default there through
-  # STT_ADAPTER=auto — start.sh fills the image/module/tag/provider below
-  # from the word on every start; the image name and the module name
-  # differ, hence the two derived variables).
-  whisper-adapter:
-    profiles: [camera-agent]
-    image: ghcr.io/open-nvr/${STT_ADAPTER_IMAGE:-${STT_ADAPTER:-parakeet}-adapter}:${STT_ADAPTER_TAG:-${ADAPTER_TAG:-latest}}
-    command: ["uvicorn", "${STT_ADAPTER_MODULE:-adapters.${STT_ADAPTER:-parakeet}.main}:app", "--host", "0.0.0.0", "--port", "9003"]
-    container_name: opennvr_whisper_adapter
-    logging: *svc-logs
-    restart: unless-stopped
-    environment:
-      - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
-      # English-only Whisper: faster on CPU and avoids the multilingual
-      # model hallucinating foreign-language tokens on noisy/quiet audio.
-      - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-base.en}
-      # CTranslate2 threads on CPU; empty = all cores. Adapter 1.0.1+.
-      - OPENNVR_WHISPER_CPU_THREADS=${WHISPER_CPU_THREADS:-}
-      # ONNX providers for an ONNX STT adapter; empty keeps the adapter's
-      # own default (parakeet: CPU; whisper_qnn: the Hexagon).
-      - ADAPTER_ONNX_PROVIDERS=${STT_ONNX_PROVIDERS:-}
-    volumes:
-      # Whisper's download cache; inert for parakeet (weights baked in).
-      - opennvr_whisper_models:/app/model_weights/whisper
-    networks:
-      - opennvr_internal
-    healthcheck:
-      test: ["CMD", "python", "-c", "import httpx, sys; sys.exit(0 if httpx.get('http://127.0.0.1:9003/health', timeout=2).status_code == 200 else 1)"]
-      interval: 15s
-      timeout: 5s
-      start_period: 300s
-      retries: 20
+  # The speech-to-text adapter (whisper-adapter) moved to
+  # docker-compose.apps.yml (2026-11-14): voice search on the search page
+  # needs it whether or not anyone runs the agent, so it starts from that
+  # file's `voice` profile as well as from `camera-agent`. The voice agent
+  # still depends on it; start.sh adds the apps file whenever this one is
+  # in the set.
 
   # ──────────────────────────────────────────────────────────────
   # Piper TTS — VOICE only. Pulled from GHCR. The default voice files live in
@@ -208,12 +170,13 @@ services:
   # is in the set. The agent's LLM on the qualcomm flavour is that same
   # container (LLM_BASE_URL=http://caption-adapter:9006).
 
-  # Register the voice adapters with KAI-C too. The camera agent calls
-  # whisper/piper DIRECTLY (not through KAI-C), so this registration is
-  # purely for OBSERVABILITY: registered adapters get the 60 s health +
-  # /metrics poll, show on the AI Adapters page (up/down, p95, domain
-  # series like audio realtime-factor), and count in kaic_adapter_up —
-  # a silently-503ing piper becomes a red row instead of a mystery.
+  # Register piper with KAI-C too (whisper has its own job beside it in
+  # docker-compose.apps.yml). The camera agent calls whisper/piper
+  # DIRECTLY (not through KAI-C), so this registration is purely for
+  # OBSERVABILITY: registered adapters get the 60 s health + /metrics
+  # poll, show on the AI Adapters page (up/down, p95, domain series like
+  # audio realtime-factor), and count in kaic_adapter_up — a
+  # silently-503ing piper becomes a red row instead of a mystery.
   voice-adapters-register:
     profiles: [camera-agent]
     image: alpine:3.20
@@ -222,8 +185,6 @@ services:
     restart: "no"
     depends_on:
       opennvr-core:
-        condition: service_healthy
-      whisper-adapter:
         condition: service_healthy
       piper-adapter:
         condition: service_healthy
@@ -249,7 +210,6 @@ services:
           echo "WARN: could not register '$$name' — it won't appear on the AI health panel." >&2
           return 0
         }
-        register whisper http://whisper-adapter:9003
         register piper http://piper-adapter:9001
     networks:
       - opennvr_internal
@@ -656,8 +616,6 @@ volumes:
   # the old volume with `docker volume rm opennvr_footage_search_data`.
   # Ollama model store — persisted so the LLM survives ``compose down``.
   opennvr_ollama_models:
-  # Faster-whisper model cache for the GHCR whisper adapter.
-  opennvr_whisper_models:
   # Piper writes generated WAVs here before optionally returning inline
   # base64 audio to the camera-agent.
   # Piper voice files, fetched once by piper-voices-init.

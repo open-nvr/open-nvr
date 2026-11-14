@@ -984,6 +984,25 @@ function Configure-DescriptionsAndSearch {
     } else {
         Set-EnvValue EVENTS_EMBED_ENRICHMENT 'false'; Info 'Search by meaning: off (later: EVENTS_EMBED_ENRICHMENT=true in .env, then .\start.ps1 up)'
     }
+    # Voice search: the speech adapter (docker-compose.apps.yml, profile
+    # `voice`) starts when VOICE_SEARCH=on; the voice agent carries it
+    # already. Mirrors configure_voice_search in install.sh.
+    if (@($script:ExampleProfile -split ',') -contains 'camera-agent') {
+        Set-EnvValue VOICE_SEARCH 'on'; Ok "Voice search: on (the Camera Agent's speech adapter serves the search page too)"
+        return
+    }
+    $curV = Get-EnvValue VOICE_SEARCH
+    if ($script:FreshEnv) { $curV = '' }
+    $defaultV = ($curV -eq 'on')
+    Write-Host ''
+    Explain 'Voice search: speak a search into the search page instead of typing it; the clip is transcribed on this box and nothing leaves it. The speech adapter runs in its own container, here a speech model on the CPU, loaded all the time for the odd spoken search - leave it off on a small box.' `
+        'no' $(if ($defaultV) { 'y' } else { 'n' }) `
+        'Turn on later: VOICE_SEARCH=on in .env, then .\start.ps1 up.'
+    if (Ask-YesNo 'Voice search (speak your searches)?' $defaultV) {
+        Set-EnvValue VOICE_SEARCH 'on'; Ok 'Voice search: on'
+    } else {
+        Set-EnvValue VOICE_SEARCH 'off'; Info 'Voice search: off (later: VOICE_SEARCH=on in .env, then .\start.ps1 up)'
+    }
 }
 
 function Pull-AndBuild {
