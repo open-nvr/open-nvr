@@ -707,6 +707,15 @@ compose_args() {
         [[ "$(get_env_var EVENTS_CAPTION_ENRICHMENT)" == true || "$(get_env_var EVENTS_DESCRIPTOR_ENRICHMENT)" == true ]] && want_captions=1
         case ",${example_profile}," in *,camera-agent,*|*,camera-agent-chat,*|*,enrichment,*|*,descriptions,*) want_captions=0 ;; esac
         [[ "$want_captions" == 1 ]] && args="$args --profile descriptions"
+        # Search by meaning needs the embedders running: the same rule for
+        # EVENTS_EMBED_ENRICHMENT and the `embeddings` profile (the
+        # qualcomm flavour's fill adds the profile to the picks itself;
+        # elsewhere the flag alone started nothing, and search matched
+        # labels and plates only — 2026-11-14).
+        local want_embeddings=0
+        [[ "$(get_env_var EVENTS_EMBED_ENRICHMENT)" == true ]] && want_embeddings=1
+        case ",${example_profile}," in *,embeddings,*|*,enrichment,*) want_embeddings=0 ;; esac
+        [[ "$want_embeddings" == 1 ]] && args="$args --profile embeddings"
     fi
     [[ -n "$accel_overlay" ]] && args="$args $accel_overlay"
     # A flavour overlay overrides only services of docker-compose.yml. Its

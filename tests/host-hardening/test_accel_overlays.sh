@@ -159,6 +159,25 @@ got=$(profiles_of "$(compose_args)")
 if ! printf '%s\n' "$got" | grep -qx 'descriptions'; then pass
 else fail "profiles: $(echo "$got" | tr '\n' ' ')"; fi
 
+# ── 4d. The embeddings flag starts the embedders ──
+start_test "EVENTS_EMBED_ENRICHMENT=true: --profile embeddings is added"
+printf 'OPENNVR_EXAMPLE_COMPOSE=\nOPENNVR_EXAMPLE_PROFILE=\nEVENTS_EMBED_ENRICHMENT=true\n' > .env
+got=$(profiles_of "$(compose_args)")
+if printf '%s\n' "$got" | grep -qx 'embeddings'; then pass
+else fail "profiles: $(echo "$got" | tr '\n' ' ')"; fi
+
+start_test "embeddings already picked (the qualcomm fill's way): no second --profile embeddings"
+printf 'OPENNVR_EXAMPLE_COMPOSE=\nOPENNVR_EXAMPLE_PROFILE=embeddings\nEVENTS_EMBED_ENRICHMENT=true\n' > .env
+got=$(profiles_of "$(compose_args)")
+if [[ "$(printf '%s\n' "$got" | grep -cx 'embeddings')" == 1 ]]; then pass
+else fail "profiles: $(echo "$got" | tr '\n' ' ')"; fi
+
+start_test "EVENTS_EMBED_ENRICHMENT=false: no --profile embeddings"
+printf 'OPENNVR_EXAMPLE_COMPOSE=\nOPENNVR_EXAMPLE_PROFILE=\nEVENTS_EMBED_ENRICHMENT=false\n' > .env
+got=$(profiles_of "$(compose_args)")
+if ! printf '%s\n' "$got" | grep -qx 'embeddings'; then pass
+else fail "profiles: $(echo "$got" | tr '\n' ' ')"; fi
+
 # ── 5. The intel flavour follows the same rule ──
 start_test "intel: the -apps fragment follows docker-compose.apps.yml"
 printf 'OPENNVR_EXAMPLE_COMPOSE=\nOPENNVR_EXAMPLE_PROFILE=\n' > .env

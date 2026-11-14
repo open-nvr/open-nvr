@@ -134,6 +134,9 @@ compose_args_run() {
             OPENNVR_EXAMPLE_PROFILE) printf "%s" "'"$2"'" ;;
             OPENNVR_DEFAULT_APPS) printf "%s" "'"${3:-}"'" ;;
             *) printf "" ;; esac; }
+        # Host probes compose_args calls that are not under test here.
+        webcams_usable() { return 1; }; lan_discovery_core_ok() { return 1; }
+        detect_accel() { echo cpu; }; accel_args() { :; }
         eval "$(awk "/^compose_args\(\)/,/^}/" start.sh)"
         compose_args'
 }

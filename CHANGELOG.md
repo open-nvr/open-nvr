@@ -20,6 +20,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Search by meaning can be switched on without editing .env, and the
+  flag now starts the embedders.** `EVENTS_EMBED_ENRICHMENT=true` alone
+  started nothing: only the qualcomm flavour added the `embeddings`
+  profile itself, and the installer never asked, so on a CPU install
+  semantic search was two hand edits away and search matched labels and
+  plates only. `start.sh` and `start.ps1` now enable the `embeddings`
+  profile wherever the flag is true, and both installers ask "Search by
+  meaning?" on every install (default on where the embedder has the
+  Qualcomm NPU, off on the CPU). The visit-description question moved
+  out of the Camera Agent's block for the same reason: with the captioner
+  in the apps overlay, a plain install that never answered it would have
+  kept the example file's "true" and run the CPU captioner on every
+  visit. Both questions are now asked on every install.
+
 - **Enter at the network menu now means Simple, as the menu says.**
   On a box with several routable interfaces (WiFi beside a cable, a VPN
   such as Tailscale) `./start.sh up` asks how the network is set up. An
