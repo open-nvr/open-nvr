@@ -86,6 +86,28 @@ def derive_substream_url(main_url: str | None) -> str | None:
     return None
 
 
+def path_suffix_substream_url(main_url: str | None) -> str | None:
+    """The ``<path>-sub`` sibling of a main-stream URL: the convention of a
+    MediaMTX server, which is what OpenNVR's own relays, its webcam server
+    and the fake-camera rig publish (``cam-1`` / ``cam-1-sub``). It is a
+    GUESS, not a vendor rule, and a camera reached through such a relay has
+    no ONVIF to ask — so this exists only as the last candidate of
+    ``services.substream_discovery``, which probes it and stores it only
+    when it answers. Returns None for a URL with no path, a path that is
+    already a ``-sub``, or anything unparseable.
+    """
+    if not main_url:
+        return None
+    try:
+        parts = urlparse(main_url)
+    except ValueError:
+        return None
+    path = parts.path or ""
+    if parts.scheme not in ("rtsp", "rtsps") or path in ("", "/") or path.endswith("-sub"):
+        return None
+    return urlunparse(parts._replace(path=path.rstrip("/") + "-sub"))
+
+
 # Scheme defaults for an rtsp(s) URL that omits the port (RFC 7826).
 _RTSP_DEFAULT_PORTS = {"rtsp": 554, "rtsps": 322}
 

@@ -212,6 +212,7 @@ export function AddCameraDialog({
     username: '',
     password: '',
     rtsp_url: '',
+    substream_url: '',
   })
 
   // The address, port and credentials are captured here and again inside the
@@ -675,6 +676,7 @@ export function AddCameraDialog({
       username: form.username || undefined,
       password: form.password || undefined,
       rtsp_url: form.rtsp_url || undefined,
+      substream_url: form.substream_url || undefined,
     })
   }
 
@@ -1399,6 +1401,22 @@ export function AddCameraDialog({
                         Scan QR
                       </Button>
                     </div>
+                  )}
+                </Field>
+                <Field
+                  label={`${t('cameraDialog.substreamUrl')} (optional)`}
+                  hint="The camera's low-res second stream. Detection runs on it instead of decoding the full picture, around 5x less CPU per camera, while recording, live view and evidence keep the main stream. Found by itself on ONVIF cameras; for a relay or a camera without ONVIF, type it (often the main path with -sub)."
+                  className="col-span-6"
+                >
+                  {(id, describedBy) => (
+                    <Input
+                      id={id}
+                      aria-describedby={describedBy}
+                      className="font-mono text-xs"
+                      placeholder="rtsp://192.168.1.100:554/stream2"
+                      value={form.substream_url}
+                      onChange={(e) => setForm(f => ({ ...f, substream_url: e.target.value }))}
+                    />
                   )}
                 </Field>
               </div>
