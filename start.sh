@@ -716,14 +716,21 @@ compose_args() {
         [[ "$(get_env_var EVENTS_EMBED_ENRICHMENT)" == true ]] && want_embeddings=1
         case ",${example_profile}," in *,embeddings,*|*,enrichment,*) want_embeddings=0 ;; esac
         [[ "$want_embeddings" == 1 ]] && args="$args --profile embeddings"
+        # Voice search needs the speech adapter running: VOICE_SEARCH=on
+        # (the installer's question) enables `voice` — the adapter and its
+        # registration job — unless the voice agent, which carries it,
+        # is already picked. The chat agent does not carry it.
+        if [[ "$(get_env_var VOICE_SEARCH)" == on ]]; then
+            case ",${example_profile}," in *,camera-agent,*|*,voice,*) ;; *) args="$args --profile voice" ;; esac
+        fi
     fi
     [[ -n "$accel_overlay" ]] && args="$args $accel_overlay"
     # A flavour overlay overrides only services of docker-compose.yml. Its
     # overrides of services that OTHER files define travel as fragments
     # beside it — <overlay>-apps.yml for docker-compose.apps.yml (pose,
-    # faces, plates, packages, the embedder, the captioner),
-    # <overlay>-agent.yml for docker-compose.camera-agent.yml (speech to
-    # text) —
+    # faces, plates, packages, the embedder, the captioner, speech to
+    # text), <overlay>-agent.yml for docker-compose.camera-agent.yml
+    # (none today; the mechanism stays) —
     # and each is appended only when its file is in the set. An override
     # of a service no file defines is a service with no image, and Compose
     # 2.24 (the board's distro package) rejected the whole project for it:

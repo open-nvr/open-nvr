@@ -1466,6 +1466,47 @@ configure_descriptions_and_search() {
         ENRICHMENT_ASKED=true
     fi
     configure_embeddings_flag
+    configure_voice_search
+}
+
+# configure_voice_search → writes VOICE_SEARCH. Speaking a search into the
+# search page needs the speech-to-text adapter (docker-compose.apps.yml,
+# profile `voice`), which start.sh starts when this is on. The voice
+# agent carries the same adapter, so with it picked the answer is on and
+# nothing is asked. Default on where the adapter has the Qualcomm NPU
+# (Whisper on the Hexagon, 361 ms an utterance measured on a Ventuno Q),
+# off on the CPU, where a speech model stays loaded for the odd spoken
+# search. An existing .env keeps the operator's last answer.
+configure_voice_search() {
+    if [[ ",${EXAMPLE_PROFILE:-}," == *,camera-agent,* ]]; then
+        env_set VOICE_SEARCH on
+        ok "Voice search: on (the Camera Agent's speech adapter serves the search page too)"
+        return 0
+    fi
+    local cur default="n" where
+    cur=$(env_get VOICE_SEARCH)
+    [[ "${FRESH_ENV:-false}" == "true" ]] && cur=""
+    if [[ -n "$cur" ]]; then
+        [[ "$cur" == "on" ]] && default="y"
+    elif [[ "${HW_ACCEL:-cpu}" == "qualcomm" ]]; then
+        default="y"
+    fi
+    if [[ "${HW_ACCEL:-cpu}" == "qualcomm" ]]; then
+        where="Whisper on the Hexagon NPU, under half a second an utterance"
+    else
+        where="a speech model on the CPU, loaded all the time for the odd spoken search — leave it off on a small box"
+    fi
+    printf '\n'
+    explain "Voice search: speak a search into the search page instead of typing it; the clip is transcribed on this box and nothing leaves it. The speech adapter runs in its own container, here ${where}." \
+        "no" "$default" \
+        "Hardware detected: ${HW_ACCEL:-cpu}. Turn on later: VOICE_SEARCH=on in .env, then ./start.sh up."
+    if ask_yes_no "Voice search (speak your searches)?" "$default"; then
+        env_set VOICE_SEARCH on
+        ok "Voice search: on"
+    else
+        env_set VOICE_SEARCH off
+        info "Voice search: off (later: VOICE_SEARCH=on in .env, then ./start.sh up)"
+    fi
 }
 
 # configure_embeddings_flag → writes EVENTS_EMBED_ENRICHMENT. One picture

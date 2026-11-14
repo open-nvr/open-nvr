@@ -704,7 +704,7 @@ export const translations: TranslationCatalog = {
   'search.voice.micDenied': 'Accès au micro refusé',
   'search.voice.nothing': 'Rien entendu — cliquez, parlez, puis cliquez à nouveau',
   'search.voice.heard': 'Entendu',
-  'search.voice.noStt': 'Aucun adaptateur de reconnaissance vocale sur ce boîtier ; l’agent caméra en apporte un',
+  'search.voice.noStt': 'Aucun adaptateur de transcription n\u2019est enregistré sur cette machine ; activez la recherche vocale (VOICE_SEARCH=on dans .env) ou lancez l\u2019agent caméra en mode voix',
   'search.voice.failed': 'Transcription impossible — réessayez',
   'search.answer.scopePage': 'Calculé sur les {{shown}} résultats de cette page, sur {{total}} correspondances',
   'search.answer.scopeAll': 'Calculé sur l’ensemble des {{total}} correspondances',

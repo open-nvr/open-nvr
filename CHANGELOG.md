@@ -8,6 +8,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Voice search without the Camera Agent.** The speech-to-text adapter
+  lived in the agent's compose file under its voice profile, so speaking
+  a search into the search page needed the agent installed in voice
+  mode, and the page showed a microphone that answered "no speech to
+  text" only after you had spoken. The adapter and its registration job
+  now live in the apps overlay under a `voice` profile; the installers
+  ask "Voice search?" (`VOICE_SEARCH=on`, default on where the adapter
+  has the Qualcomm NPU, off on the CPU, on without asking when the voice
+  agent is picked) and `start.sh` starts it from the answer. The page
+  asks the box first (`GET /search/transcribe/status`) and shows the
+  microphone only when an adapter can hear. The qualcomm flavour's
+  `-agent` fragment is gone: the agent's file defines no model service
+  of its own any more.
+
 - **One-click app install and removal, offered by the installer.** The
   installer asks "Install and remove apps with one click?" (default yes)
   and writes `APP_INSTALLER=on` and `APPS_INSTALL_ENABLED=true`; the
