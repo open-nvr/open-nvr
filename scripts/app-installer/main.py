@@ -37,9 +37,12 @@ Config (env):
                           it — intents are only selectors into this
                           index, never trusted for image/digest.
   INSTALLER_POLL_SECONDS — poll interval, default 10.
-  INSTALLER_COMPOSE_FILES — comma-separated compose files, default
-                          "docker-compose.yml,docker-compose.apps.yml".
-  INSTALLER_PROFILE     — compose profile, default "apps".
+  INSTALLER_COMPOSE_FILES — comma-separated compose files to name with
+                          -f. Unset by default: the reconciler runs in
+                          the checkout, whose .env carries COMPOSE_FILE
+                          and COMPOSE_PROFILES as start.sh resolved them.
+  INSTALLER_PROFILE     — compose profile to name with --profile; unset
+                          by default (naming a service enables its own).
   INSTALLER_SIGNATURES  — "require" (default: a pinned image must carry a
                           valid Sigstore signature from its expected
                           signer, checked with cosign before compose
@@ -59,6 +62,7 @@ import logging
 import os
 import sys
 import time
+from pathlib import Path
 
 from reconciler import (
     DEFAULT_COMPOSE_FILES,
@@ -89,10 +93,22 @@ logger = logging.getLogger("opennvr.app-installer")
 
 
 def _compose_files() -> tuple[str, ...]:
+    """Compose files to name on the command line. Unset (the default)
+    names none: the checkout's .env carries COMPOSE_FILE, the set
+    start.sh resolved, and Compose reads it from the working directory."""
     raw = os.environ.get("INSTALLER_COMPOSE_FILES")
     if not raw:
         return DEFAULT_COMPOSE_FILES
     return tuple(f.strip() for f in raw.split(",") if f.strip())
+
+
+def _project_env() -> str:
+    """The checkout's .env, for the teardown hint about what a restart
+    brings back. Best effort: unreadable means no hint."""
+    try:
+        return (Path.cwd() / ".env").read_text(encoding="utf-8")
+    except OSError:
+        return ""
 
 
 def main() -> int:
@@ -146,8 +162,8 @@ def main() -> int:
     logger.info(
         "app-installer starting: poll=%ss compose_files=%s profile=%s signatures=%s",
         poll_seconds,
-        list(compose_files),
-        profile,
+        list(compose_files) or "(the checkout's COMPOSE_FILE)",
+        profile or "(the checkout's COMPOSE_PROFILES)",
         signing_mode,
     )
 
@@ -170,6 +186,7 @@ def main() -> int:
                 compose_files=compose_files,
                 profile=profile,
                 signing=signing,
+                project_env=_project_env(),
             )
             for app_id, status_, message in outcomes:
                 logger.info(

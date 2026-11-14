@@ -40,4 +40,4 @@
             - ./config.yml:/app/config.yml:ro
           networks:
             - opennvr_apps
-    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d __APP_ID__
+    command: docker compose up -d __APP_ID__

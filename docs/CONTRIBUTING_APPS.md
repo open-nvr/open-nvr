@@ -228,7 +228,7 @@ fill every field. Here it is inline for reference:
             - "9210"
           networks:
             - opennvr_internal
-    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d my-app
+    command: docker compose up -d my-app
 ```
 
 Rules the validator enforces (details in step 4):
@@ -244,8 +244,10 @@ Rules the validator enforces (details in step 4):
   that overlay, so an entry without a service block is uninstallable for
   everyone and the gate refuses it.
 - `install.command` is **exactly** the canonical
-  `docker compose -f docker-compose.yml -f docker-compose.apps.yml
-  --profile apps up -d <your-id>` — nothing free-form. The store renders
+  `docker compose up -d <your-id>` — nothing free-form, and no `-f`: the
+  operator runs it in the checkout, where .env carries the compose file
+  set `start.sh` resolved (an explicit file list would replace that set
+  and recreate core and MediaMTX from the plain files). The store renders
   this with a Copy button, so it is operator-executed content.
 - `install.compose` must parse as YAML, may not use `privileged`,
   `cap_add`, `security_opt`, `network_mode`, `pid`, `ipc`, `devices`, or

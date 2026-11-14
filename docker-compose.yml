@@ -738,6 +738,12 @@ services:
       - EVENTS_DESCRIPTOR_ENRICHMENT=${EVENTS_DESCRIPTOR_ENRICHMENT:-}
       - EVENTS_DESCRIPTOR_PEOPLE=${EVENTS_DESCRIPTOR_PEOPLE:-}
       - EVENTS_DESCRIPTOR_PEOPLE_EXTENDED=${EVENTS_DESCRIPTOR_PEOPLE_EXTENDED:-}
+      # One-click app install/removal from the App Catalog: lets the web
+      # app record what an administrator clicks for the app-installer to
+      # apply (docs/APPS_INSTALL.md). The installer writes it to .env
+      # with APP_INSTALLER=on; absent means off. Without this line the
+      # documented opt-in never reached the container.
+      - APPS_INSTALL_ENABLED=${APPS_INSTALL_ENABLED:-}
       - EVENTS_DESCRIPTOR_BATCH_MIN_KINDS=${EVENTS_DESCRIPTOR_BATCH_MIN_KINDS:-}
       - EVENTS_ENRICHMENT_REUSE_SAME_FRAME=${EVENTS_ENRICHMENT_REUSE_SAME_FRAME:-}
       - EVENTS_FROZEN_PICTURE_REPEATS=${EVENTS_FROZEN_PICTURE_REPEATS:-}

@@ -31,7 +31,7 @@ Show: **Cameras → cam1** live, recording, detection boxes appearing.
 **App Catalog → ANPR → Install** (the card gives the command):
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d license-plate-recognition
+docker compose up -d license-plate-recognition
 ```
 
 **Applications → Vehicles → Configure → Cameras → select cam1.** That is

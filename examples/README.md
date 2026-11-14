@@ -62,8 +62,9 @@ deployment's `INTERNAL_API_KEY`, and appears in the **App Catalog**
 config form:
 
 ```bash
-# From the repo root, on top of the standard stack:
-docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d
+# From the repo root, on top of the standard stack (.env carries the compose
+# file set start.sh resolved, the apps overlay included):
+docker compose --profile apps up -d
 ```
 
 Every app listed in [`server/config/apps_index.yml`](../server/config/apps_index.yml)

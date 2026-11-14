@@ -975,6 +975,21 @@ Detect-Platform
 Check-Prerequisites
 Prepare-Environment
 Pull-AndBuild
+# One-click app install/removal from Settings > App Catalog (docs\APPS_INSTALL.md):
+# a small helper container, the app-installer, holds the Docker socket and
+# applies what an administrator clicks, for catalog apps only. Off, the
+# catalog shows the command to run. Mirrors ask_one_click_apps in install.sh.
+Write-Host ''
+Info 'Apps can be installed and removed with one click from Settings > App Catalog.'
+Info 'That runs a small helper container with access to Docker; it applies only apps from the curated catalog.'
+$ocDefault = (Get-EnvValue 'APP_INSTALLER') -ne 'off'
+if (Ask-YesNo 'Install and remove apps with one click?' $ocDefault) {
+    Set-EnvValue 'APP_INSTALLER' 'on'; Set-EnvValue 'APPS_INSTALL_ENABLED' 'true'
+    Ok 'One-click apps: on (the app-installer starts with OpenNVR)'
+} else {
+    Set-EnvValue 'APP_INSTALLER' 'off'; Set-EnvValue 'APPS_INSTALL_ENABLED' 'false'
+    Info 'One-click apps: off (later: APP_INSTALLER=on and APPS_INSTALL_ENABLED=true in .env, then .\start.ps1 up)'
+}
 # The host agent (docs\HOST_AGENT.md): USB webcams on this machine and its own
 # CPU/memory/disk readings. `up` installs it when HOST_AGENT=on.
 $haDefault = (Get-EnvValue 'HOST_AGENT') -ne 'off'

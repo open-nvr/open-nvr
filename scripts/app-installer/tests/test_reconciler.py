@@ -51,6 +51,7 @@ from reconciler import (  # noqa: E402
     pinned_image_ref,
     reconcile_intent,
     reconcile_once,
+    restart_hint,
 )
 
 # The test trust anchor — what the baked apps_index.yml provides in prod.
@@ -220,8 +221,12 @@ def test_pending_installed_calls_compose_up_and_applies():
     assert len(runner.calls) == 1
     argv = runner.calls[0]
     assert argv[:2] == ["docker", "compose"]
-    assert "-f" in argv and "docker-compose.apps.yml" in argv
-    assert argv[-4:] == ["up", "-d", "egress-proxy", "loitering-detection"]
+    # No -f and no --profile by default: the reconciler runs in the
+    # checkout, whose .env carries the compose set start.sh resolved.
+    # Naming the plain files replaced that set and recreated core and
+    # MediaMTX from them.
+    assert "-f" not in argv and "--profile" not in argv
+    assert argv == ["docker", "compose", "up", "-d", "egress-proxy", "loitering-detection"]
     assert argv == build_up_argv(intent)
     # A digest-bearing index entry → the runner is handed the pinned
     # image override env so compose actually deploys the pinned ref.
@@ -497,3 +502,58 @@ def test_shipped_index_carries_lpr_adapter_requirement():
     assert index["license-plate-recognition"].requires_adapters == (
         "fast_plate_ocr",)
     assert index["smart-doorbell"].requires_adapters == ("insightface",)
+
+
+# ── compose files and profile stay available as overrides ─────────────
+
+
+def test_named_compose_files_and_profile_are_passed_when_given():
+    """INSTALLER_COMPOSE_FILES / INSTALLER_PROFILE still work for a
+    checkout without a persisted compose set."""
+    intent = _intent()
+    argv = build_up_argv(
+        intent,
+        compose_files=("docker-compose.yml", "docker-compose.apps.yml"),
+        profile="apps",
+    )
+    assert argv[:7] == [
+        "docker", "compose", "-f", "docker-compose.yml",
+        "-f", "docker-compose.apps.yml", "--profile", "apps",
+    ][:7]
+    assert argv[-4:] == ["up", "-d", "egress-proxy", "loitering-detection"]
+    down = build_down_argv(intent, compose_files=("a.yml",), profile="p")
+    assert down == ["docker", "compose", "-f", "a.yml", "--profile", "p",
+                    "rm", "-s", "-f", "loitering-detection"]
+
+
+# ── the teardown message says what a restart brings back ──────────────
+
+
+def test_restart_hint_names_a_picked_app():
+    env = "OPENNVR_EXAMPLE=camera-agent,loitering-detection\nOPENNVR_EXAMPLE_PROFILE=camera-agent,loitering-detection\n"
+    hint = restart_hint("loitering-detection", env)
+    assert "OPENNVR_EXAMPLE_PROFILE" in hint and "loitering-detection" in hint
+    assert restart_hint("occupancy-counting", env).startswith(" Note: occupancy-counting is one of the two default apps")
+
+
+def test_restart_hint_is_quiet_when_nothing_restarts_the_app():
+    assert restart_hint("loitering-detection", "") == ""
+    assert restart_hint("loitering-detection", "OPENNVR_EXAMPLE_PROFILE=camera-agent\n") == ""
+    assert restart_hint("occupancy-counting", "OPENNVR_DEFAULT_APPS=off\n") == ""
+    # Quotes and comments in .env are read past.
+    assert restart_hint("footage-search", '# apps\nOPENNVR_DEFAULT_APPS="off"\n') == ""
+
+
+def test_teardown_message_carries_the_restart_hint():
+    runner = FakeRunner(RunResult(returncode=0, stdout="Removed"))
+    intent = _intent(desired="absent")
+    status_, message = reconcile_intent(
+        intent, runner, index=TEST_INDEX,
+        project_env="OPENNVR_EXAMPLE_PROFILE=loitering-detection\n",
+    )
+    assert status_ == "applied"
+    assert message.startswith("Removed")
+    assert "OPENNVR_EXAMPLE_PROFILE" in message
+    # Without the pick the message is compose's alone.
+    _, plain = reconcile_intent(intent, runner, index=TEST_INDEX)
+    assert plain == "Removed"

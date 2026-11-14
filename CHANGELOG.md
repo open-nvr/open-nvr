@@ -8,6 +8,40 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **One-click app install and removal, offered by the installer.** The
+  installer asks "Install and remove apps with one click?" (default yes)
+  and writes `APP_INSTALLER=on` and `APPS_INSTALL_ENABLED=true`; the
+  launchers then start the app-installer, the one container that holds
+  the Docker socket, with the rest of the stack. Before, the feature was
+  documented but needed two hand steps, and the `APPS_INSTALL_ENABLED`
+  line never reached the core container at all. The Camera Agent, which
+  ships its own overlay and so is not in the curated index, can now be
+  removed with one click like the catalog apps.
+
+### Fixed
+
+- **Uninstall on a catalog card with one-click off showed a note and no
+  command.** Disable then Uninstall ended at "One-click uninstall is
+  disabled by your operator" with nothing to run — the install dialog
+  had always shown its command, the installed card never had one. The
+  card and the app's page now show the removal command with a Copy
+  button, and say what a restart brings back (an app picked at install
+  time, or one of the two default apps, comes back at the next
+  `./start.sh up` until .env says otherwise). The reconciler says the
+  same in its status message after a teardown.
+
+- **The catalog's install commands recreated core and MediaMTX.** Every
+  command named the two plain compose files with `-f`, which replaced
+  the compose set `start.sh` persists in .env: Compose then saw core and
+  MediaMTX with a different configuration and recreated them from the
+  plain files, dropping the webcam and accelerator overlays (a Ventuno Q
+  lost its USB webcam this way). The commands are now
+  `docker compose up -d <id>` and `docker compose rm -s -f <id>`, run in
+  the checkout, and the reconciler names no files either; the index
+  validator enforces the new shape.
+
+### Added
+
 - Live view from anywhere (#925): a tile tries real-time video (WebRTC) and
   falls back to low-latency HLS by itself when no media path answers, within
   about eight seconds and with the spinner up, never an error. The browser

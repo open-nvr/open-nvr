@@ -342,26 +342,51 @@ contrast, never touches the socket at all.
 
 ## How to enable
 
-Deliberate operator decision — off by default.
+A deliberate operator decision. The installer asks it — "Install and
+remove apps with one click?", default yes — and writes the answer to
+`.env`:
 
 ```bash
-# 1. Opt in (gates the endpoints).
-echo "APPS_INSTALL_ENABLED=true" >> .env
+APP_INSTALLER=on            # start.sh adds docker-compose.installer.yml to the stack
+APPS_INSTALL_ENABLED=true   # the web app records what an administrator clicks
+```
 
-# 2. Grant the apps.install permission to the operator role(s)
-#    (Settings → Roles, or the permissions API). Admins already have it.
+`./start.sh up` (or `.\start.ps1 up`) then starts the reconciler with
+everything else. To switch it on later, set those two lines and run
+`./start.sh up`; the `apps.install` permission gates who may click
+(Settings → Roles; administrators already have it).
 
-# 3. Bring up the single privileged reconciler.
+To stop reconciling (this does **not** uninstall apps), set
+`APP_INSTALLER=off` and `APPS_INSTALL_ENABLED=false`, then `./start.sh up`.
+
+By hand, without the launcher, from the repo root:
+
+```bash
 docker compose -f docker-compose.yml -f docker-compose.installer.yml \
     --profile app-installer up -d app-installer
 ```
 
-To stop reconciling (this does **not** uninstall apps):
+The reconciler runs `docker compose` in the checkout, where `.env`
+carries `COMPOSE_FILE` / `COMPOSE_PROFILES` as `start.sh` resolved them,
+so an app comes up under the same overlays as the rest of the stack and
+core and MediaMTX are never recreated from the plain files. The same
+holds for the copy-paste commands the catalog shows: `docker compose up
+-d <id>` to install, `docker compose rm -s -f <id>` to remove — no `-f`.
 
-```bash
-docker compose -f docker-compose.yml -f docker-compose.installer.yml \
-    --profile app-installer down
-```
+**Removal covers one app the index does not list:** the Camera Agent
+ships its own overlay rather than a block in `docker-compose.apps.yml`,
+so it is not in the curated index, yet an administrator installs and
+removes it like any other app. One-click *removal* accepts it when it is
+registered on the box (`OFFICIAL_OVERLAY_APPS` in `routers/apps.py`;
+teardown only selects a service by id, and the id is pinned there).
+
+**What a restart brings back:** `rm` removes the container, but
+`./start.sh up` replays the picks in `.env`. An app named in
+`OPENNVR_EXAMPLE_PROFILE`, or one of the two default apps unless
+`OPENNVR_DEFAULT_APPS=off`, starts again at the next `up`. The reconciler
+cannot edit `.env` (the repo is mounted read-only), so its status message
+says so after such a teardown, and the catalog's by-hand instructions
+say the same.
 
 **If an install sits "pending":** the reconciler probably isn't running —
 the endpoints being enabled (`APPS_INSTALL_ENABLED`) and the installer

@@ -46,6 +46,9 @@ import {
   type AppStatusResp,
   type ManifestAction,
   UninstalledAppPage,
+  RemoveByHand,
+  isForbidden,
+  isNotFound,
 } from './AppCatalog'
 import { AppNoCamerasNotice } from './apps/AppSetup'
 import { skillLabel } from '../lib/skillNames'
@@ -167,14 +170,27 @@ export function AppView() {
     onError: (e) => showError(extractApiError(e, 'Failed to toggle app.')),
   })
 
+  // One-click removal refused (off, not permitted, or not a catalog app):
+  // the page shows the command to run instead of a toast that leaves the
+  // administrator with nothing to do.
+  const [removeNote, setRemoveNote] = useState<string | null>(null)
   const uninstall = useMutation({
     mutationFn: () => apiService.uninstallApp(appId),
+    onMutate: () => setRemoveNote(null),
     onSuccess: () => {
       showSuccess(`Uninstall requested for ${app?.name}`)
       queryClient.invalidateQueries({ queryKey: ['apps'] })
       navigate('/app-catalog')
     },
-    onError: (e) => showError(extractApiError(e, 'Failed to uninstall.')),
+    onError: (e) => {
+      if (isForbidden(e)) {
+        setRemoveNote(extractApiError(e, "One-click uninstall is disabled by your operator (or you don't have permission)."))
+      } else if (isNotFound(e)) {
+        setRemoveNote(`One-click removal covers catalog apps only; ${app?.name ?? 'this app'} was installed another way.`)
+      } else {
+        showError(extractApiError(e, 'Failed to uninstall.'))
+      }
+    },
   })
 
   if (appQuery.isPending) {
@@ -289,6 +305,7 @@ export function AppView() {
         {/* Same notice, same words as every app page's header. */}
         <AppNoCamerasNotice app={app} />
       </AppHeader>
+      {removeNote && <RemoveByHand app={app} reason={removeNote} />}
       {/* The app's cameras and the skills it brings them — on the app's page,
           like every other application page. */}
       <AppCamerasCard app={app} />
