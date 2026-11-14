@@ -2485,6 +2485,72 @@ services:
       - opennvr_internal
 
   # ──────────────────────────────────────────────────────────────
+  # Speech to text — for voice search on the search page (profile
+  # `voice`, which start.sh enables when VOICE_SEARCH=on) and for the
+  # camera agent's voice mode. It lived in docker-compose.camera-agent.yml
+  # until 2026-11-14, so voice search needed the agent installed in voice
+  # mode; here it starts with the apps file, which every stock install
+  # carries. The SERVICE keeps the whisper name (the agent dials
+  # whisper_url = http://whisper-adapter:9003 and the register job calls
+  # it "whisper"); STT_ADAPTER picks the IMAGE, the same pattern as the
+  # captioner above: `parakeet` (the default — Parakeet
+  # TDT 0.6B v3, WER 1.4 % at 0.31 s an utterance on four cores,
+  # English + 25 European languages, no translation) or `whisper`
+  # (faster-whisper base.en, 3.3 % at 1.42 s; Hindi, translation).
+  # Both serve the same §5.3 result on port 9003. Parakeet is newer
+  # than adapter release 0.1.7, so it rides its own tag variable.
+  # A third choice on Qualcomm boards: `whisper_qnn` (Whisper-Small w8a16
+  # as QNN context binaries on the Hexagon NPU; the default there through
+  # STT_ADAPTER=auto — start.sh fills the image/module/tag/provider below
+  # from the word on every start; the image name and the module name
+  # differ, hence the two derived variables).
+  whisper-adapter:
+    profiles: [camera-agent, voice]
+    image: ghcr.io/open-nvr/${STT_ADAPTER_IMAGE:-${STT_ADAPTER:-parakeet}-adapter}:${STT_ADAPTER_TAG:-${ADAPTER_TAG:-latest}}
+    command: ["uvicorn", "${STT_ADAPTER_MODULE:-adapters.${STT_ADAPTER:-parakeet}.main}:app", "--host", "0.0.0.0", "--port", "9003"]
+    container_name: opennvr_whisper_adapter
+    logging: *svc-logs
+    restart: unless-stopped
+    environment:
+      - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
+      # English-only Whisper: faster on CPU and avoids the multilingual
+      # model hallucinating foreign-language tokens on noisy/quiet audio.
+      - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-base.en}
+      # CTranslate2 threads on CPU; empty = all cores. Adapter 1.0.1+.
+      - OPENNVR_WHISPER_CPU_THREADS=${WHISPER_CPU_THREADS:-}
+      # ONNX providers for an ONNX STT adapter; empty keeps the adapter's
+      # own default (parakeet: CPU; whisper_qnn: the Hexagon).
+      - ADAPTER_ONNX_PROVIDERS=${STT_ONNX_PROVIDERS:-}
+    volumes:
+      # Whisper's download cache; inert for parakeet (weights baked in).
+      - opennvr_whisper_models:/app/model_weights/whisper
+    networks:
+      - opennvr_internal
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx, sys; sys.exit(0 if httpx.get('http://127.0.0.1:9003/health', timeout=2).status_code == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 300s
+      retries: 20
+
+  # KAI-C registration for the speech adapter: core's voice search finds
+  # it by the task it advertises (audio_transcription), so an
+  # unregistered adapter is a microphone that says "no speech to text".
+  whisper-register:
+    <<: *adapter-register
+    profiles: [camera-agent, voice]
+    container_name: opennvr_whisper_register
+    depends_on:
+      opennvr-core:
+        condition: service_healthy
+      whisper-adapter:
+        condition: service_healthy
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      - ADAPTER_NAME=whisper
+      - ADAPTER_URL=http://whisper-adapter:9003
+
+  # ──────────────────────────────────────────────────────────────
   # CLIP bakes its weights at build time and runs under HF_HUB_OFFLINE —
   # no egress at all, which is what lets adapters_index.yml declare
   # network_egress: [] for it. It is CPU-only and slow next to detection;
@@ -2627,6 +2693,8 @@ services:
 volumes:
   # Runtime cache for the selected caption/VQA adapter (caption-adapter).
   opennvr_caption_cache:
+  # Faster-whisper model cache for the speech adapter (whisper-adapter).
+  opennvr_whisper_models:
   # Attendly's own SQLite (students, rooms, classes, gates, bookings),
   # and its own InsightFace face database and model cache.
   opennvr_attendly_data:

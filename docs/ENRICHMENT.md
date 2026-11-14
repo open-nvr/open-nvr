@@ -45,8 +45,10 @@ enricher picks the change up on its next visit.
    else. No Camera Agent is needed; until 2026-11-14 the captioner was
    defined in the agent's file, and an install without the agent had none.
    The embedders (`clip` / `siglip` and the sentence model) are the
-   `embeddings` profile: add it to `OPENNVR_EXAMPLE_PROFILE` in `.env`
-   (the qualcomm flavour does this itself), or `enrichment` for all of them.
+   `embeddings` profile, enabled the same way on every `up` where
+   `EVENTS_EMBED_ENRICHMENT` is true. The installer asks both questions on
+   every install ("Describe every recorded visit?", "Search by meaning?");
+   `enrichment` in `OPENNVR_EXAMPLE_PROFILE` starts all of them by hand.
 3. `./start.sh up`, then check the adapters registered:
    `GET /api/v1/skills` lists `image_captioning` and `embed` with a provider.
 4. **Select the cameras** in the app that brings the skill (Footage Search for captions + embeddings; the Agent covers every camera) — see *The gate* above.

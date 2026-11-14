@@ -849,6 +849,20 @@ class TranscribeBody(BaseModel):
 MAX_VOICE_BYTES = 2 * 1024 * 1024
 
 
+@router.get("/search/transcribe/status")
+async def transcribe_status(
+    current_user: User = Depends(get_current_active_user),
+):
+    """Can a spoken search be transcribed here? ``{available, adapter}``.
+    The search page shows the microphone only on a yes: voice search
+    needs the speech adapter (VOICE_SEARCH=on, or the voice agent), and a
+    microphone that answers "no speech to text" after you spoke was the
+    wrong way to find out."""
+    from services.search_voice import voice_status
+
+    return await voice_status()
+
+
 @router.post("/search/transcribe")
 async def transcribe_search(
     body: TranscribeBody,
@@ -890,7 +904,8 @@ async def transcribe_search(
         raise HTTPException(status_code=503, detail={
             "reason": "no-stt",
             "message": "No speech-to-text adapter is registered on this box; "
-                       "the camera agent's whisper or parakeet adapter provides one."})
+                       "switch voice search on (VOICE_SEARCH=on in .env, then ./start.sh up) "
+                       "or run the camera agent in voice mode."})
     spoken = spoken_to_text(transcript or "")
     return {"transcript": transcript or "", "adapter": adapter, **spoken.as_dict()}
 

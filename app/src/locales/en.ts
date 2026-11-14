@@ -737,7 +737,7 @@ export const translations: TranslationCatalog = {
   'search.voice.micDenied': 'Microphone access was refused',
   'search.voice.nothing': 'Nothing was heard — hold the button while you speak, then click it again',
   'search.voice.heard': 'Heard',
-  'search.voice.noStt': 'No speech-to-text adapter is registered on this box; the camera agent brings one',
+  'search.voice.noStt': 'No speech-to-text adapter is registered on this box; switch voice search on (VOICE_SEARCH=on in .env) or run the camera agent in voice mode',
   'search.voice.failed': 'Could not transcribe that — try again',
   'search.answer.scopePage': 'Summary of the {{shown}} results on this page (of {{total}})',
   'search.answer.scopeAll': 'Summary of all {{total}} results',
