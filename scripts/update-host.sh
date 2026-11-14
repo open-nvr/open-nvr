@@ -254,11 +254,30 @@ upd_up() {
 }
 
 upd_verify() {
-    local manifest_dir="$1"
+    local manifest_dir="$1" cid
     upd_running_images > "$UPD_DIR/running.txt"
-    # The image now named in .env runs the check: the release verifies itself.
-    upd_run "" verify --manifest-dir "/work/$manifest_dir" --running /work/running.txt \
-        --platform "$PLATFORM" --timeout "${OPENNVR_UPDATE_VERIFY_TIMEOUT:-300}"
+    # The release verifies itself, from inside the core container that is
+    # running — not a one-off `compose run` container: on Compose 2.24 that
+    # one randomly comes up on a single network (docker/compose#11533) and
+    # then cannot reach the database, so a healthy rollback was reported as
+    # "does not check out" on the Ventuno Q (2026-11-14). The running core
+    # was re-attached by start.sh, and it IS the image under test. Core
+    # mounts the state folder at /app/update-state. What verify says is
+    # kept in verify-<candidate|installed>.log, which the app shows under a
+    # failed run: the terminal line is gone by the time anyone asks why it
+    # rolled back.
+    cid=$(upd_cid opennvr-core)
+    if [ -z "$cid" ] || [ "$(docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null)" != true ]; then
+        echo "the core container is not running" > "$UPD_DIR/verify-$manifest_dir.log"
+        upd_fail "the core container is not running"
+        return 1
+    fi
+    local pass=()
+    [ -f "$UPD_DIR/extra-keys.json" ] && pass+=(-e "OPENNVR_UPDATE_EXTRA_KEYS=/app/update-state/extra-keys.json")
+    docker exec "${pass[@]}" "$cid" python -m updater verify --manifest-dir "/app/update-state/$manifest_dir" \
+        --running /app/update-state/running.txt \
+        --platform "$PLATFORM" --timeout "${OPENNVR_UPDATE_VERIFY_TIMEOUT:-300}" 2>&1 | tee "$UPD_DIR/verify-$manifest_dir.log"
+    return "${PIPESTATUS[0]}"
 }
 
 upd_rollback() {
@@ -289,7 +308,9 @@ upd_rollback() {
         upd_fail "The old version did not start either. See $UPD_DIR/up.log; backup: $backup"
         return 1
     fi
-    if [ -f "$UPD_DIR/installed/release-manifest.json" ] && ! upd_verify installed; then
+    # An adopted site never matched the installed manifest (--adopt waived
+    # that), so after a rollback it is only required to come up, as it did.
+    if [ "$(upd_kv "$UPD_DIR/plan.env" ADOPTED)" != 1 ]         && [ -f "$UPD_DIR/installed/release-manifest.json" ] && ! upd_verify installed; then
         upd_end failed
         upd_fail "Rolled back, but the old version does not check out healthy. Backup: $backup"
         return 1

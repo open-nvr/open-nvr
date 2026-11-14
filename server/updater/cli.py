@@ -169,6 +169,9 @@ def _check(a: argparse.Namespace) -> int:
         "FROM_VERSION": result.from_version, "TO_VERSION": result.to_version, "KIND": result.kind,
         "GIT_COMMIT": result.git_commit, "GIT_TAG": result.git_tag, "FROM_COMMIT": result.from_commit,
         "DB_RESTORE_ON_ROLLBACK": "1" if result.db_restore_on_rollback else "0", "ROLLBACK": result.rollback,
+        # The site did not match the installed manifest (that is what --adopt
+        # waived), so a rollback must not be verified against it either.
+        "ADOPTED": "1" if a.adopt else "0",
     })
     envfile.write_kv(work / "pins.env", result.pins)
     (work / "images.txt").write_text(

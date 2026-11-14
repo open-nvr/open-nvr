@@ -284,6 +284,7 @@ def test_cli_check_writes_a_plan(tmp_path, monkeypatch, signed, capsys):
     code, work = run_check(tmp_path, monkeypatch, {None: new, "0.1.8": old})
     assert code == check.READY, capsys.readouterr()
     assert envfile.read_env(work / "plan.env")["TO_VERSION"] == "0.1.9"
+    assert envfile.read_env(work / "plan.env")["ADOPTED"] == "0"
     assert envfile.read_env(work / "pins.env") == {"CORE_TAG": "0.1.9", "ADAPTER_TAG": "0.1.9"}
     assert (work / "images.txt").read_text().splitlines()[0].startswith(f"{CORE}:0.1.9 {sha('d')} {sha('d')},{sha('e')}")
     assert (work / "installed" / "release-manifest.json").is_file()  # first use: fetched and kept
@@ -302,8 +303,9 @@ def test_cli_check_without_a_record_of_the_installed_release(tmp_path, monkeypat
     new = signed(release("0.1.9", NEW_C, "bbb"))
     code, _ = run_check(tmp_path, monkeypatch, {None: new})
     assert code == check.REFUSED and "--adopt" in capsys.readouterr().out
-    code, _ = run_check(tmp_path, monkeypatch, {None: new}, "--adopt")
+    code, work = run_check(tmp_path, monkeypatch, {None: new}, "--adopt")
     assert code == check.READY
+    assert envfile.read_env(work / "plan.env")["ADOPTED"] == "1"  # the host skips the post-rollback verify
 
 
 def test_cli_check_from_a_bundle_needs_no_network(tmp_path, monkeypatch, signed):
@@ -349,3 +351,60 @@ def test_keygen_makes_a_working_pair(capsys):
     p = Path(pytest.importorskip("tempfile").mkdtemp()) / "k.json"
     p.write_text(json.dumps({"keys": [entry]}))
     pub(p)["k1"].verify(k.sign(raw), raw)
+
+
+# ── hardware flavours: the site is planned and proved on the build it runs ──
+
+DETECT = "ghcr.io/open-nvr/detect-pipeline"
+FLAVOURED = manifest.parse(release("0.1.9", NEW_C, "bbb", alembic_revisions=["aaa", "bbb"], images=[
+    {"ref": f"{CORE}:0.1.9", "digest": sha("d"), "ids": {"linux/amd64": sha("e"), "linux/arm64/v8": sha("f")}},
+    {"ref": f"{DETECT}:0.1.9", "digest": sha("1"), "ids": {"linux/amd64": sha("2"), "linux/arm64/v8": sha("3")}},
+    {"ref": f"{DETECT}:0.1.9-intel", "digest": sha("4"), "ids": {"linux/amd64": sha("5")}},
+    {"ref": f"{DETECT}:0.1.9-qualcomm", "digest": sha("6"), "ids": {"linux/arm64/v8": sha("7")}},
+    {"ref": "postgres:15-alpine", "digest": sha("9"), "ids": {"linux/amd64": sha("8"), "linux/arm64/v8": sha("8")}},
+]))
+
+
+def test_flavour_of_reads_the_tag_suffix():
+    assert manifest.flavour_of(f"{DETECT}:0.1.9-qualcomm") == "-qualcomm"
+    assert manifest.flavour_of(f"{DETECT}:main-intel") == "-intel"
+    assert manifest.flavour_of(f"{DETECT}:0.1.9") == ""
+    assert manifest.flavour_of(f"{DETECT}:0.1.9-qualcomm@{sha('6')}") == "-qualcomm"
+    assert manifest.flavour_of("ghcr.io:5000/open-nvr/detect-pipeline") == ""
+
+
+def test_image_for_picks_the_flavour_the_site_runs():
+    assert FLAVOURED.image_for(DETECT).ref == f"{DETECT}:0.1.9"
+    assert FLAVOURED.image_for(DETECT, like=f"{DETECT}:main-qualcomm").ref == f"{DETECT}:0.1.9-qualcomm"
+    assert FLAVOURED.image_for(DETECT, like=f"{DETECT}:0.1.8-nvidia") is None  # not shipped: never the plain one instead
+
+
+def test_an_accelerated_site_fetches_and_proves_its_own_flavour():
+    plan = check.decide(site(platform="linux/arm64", installed=None, adopt=True, head="3" * 40,
+                             core_image_id=None, db_revision=None,
+                             site_images=(f"{CORE}:main", f"{DETECT}:main-qualcomm", "postgres:15-alpine")), FLAVOURED)
+    assert isinstance(plan, check.Plan)
+    assert [i.ref for i in plan.images] == [f"{CORE}:0.1.9", f"{DETECT}:0.1.9-qualcomm", "postgres:15-alpine"]
+    assert sha("7") in plan.images[1].accept and sha("2") not in plan.images[1].accept
+    # The plain build, for a plain site, exactly as before.
+    plan = check.decide(site(installed=None, adopt=True, head="3" * 40, core_image_id=None, db_revision=None,
+                             site_images=(f"{CORE}:main", f"{DETECT}:main", "postgres:15-alpine")), FLAVOURED)
+    assert [i.ref for i in plan.images][1] == f"{DETECT}:0.1.9"
+
+
+def test_a_flavour_the_release_does_not_ship_is_left_to_compose():
+    plan = check.decide(site(installed=None, adopt=True, head="3" * 40, core_image_id=None, db_revision=None,
+                             site_images=(f"{CORE}:main", f"{DETECT}:main-nvidia", "postgres:15-alpine")), FLAVOURED)
+    assert isinstance(plan, check.Plan)
+    assert [i.ref for i in plan.images] == [f"{CORE}:0.1.9", "postgres:15-alpine"]
+    assert any("no nvidia build" in w and DETECT in w for w in plan.warnings), plan.warnings
+
+
+def test_verify_proves_the_flavoured_container_not_the_plain_build():
+    ok = {"version": "0.1.9", "commit": NEW_C}
+    run = running(core_id=sha("f"))[:1] + [verify.Running("opennvr_detect_pipeline", sha("7"), f"{DETECT}:0.1.9-qualcomm")]
+    assert verify.problems(FLAVOURED, "linux/arm64", ok, "bbb", run) == []
+    # The plain image where the -qualcomm one should run is a problem, not a skip.
+    run = running(core_id=sha("f"))[:1] + [verify.Running("opennvr_detect_pipeline", sha("3"), f"{DETECT}:0.1.9-qualcomm")]
+    found = verify.problems(FLAVOURED, "linux/arm64", ok, "bbb", run)
+    assert found == [f"opennvr_detect_pipeline runs {sha('3')[:19]}, not the release's {DETECT}:0.1.9-qualcomm"]

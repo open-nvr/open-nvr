@@ -22,7 +22,7 @@ export interface UpdateStatus {
   installed: { version: string; commit: string | null }
   available: { version: string; notes_url: string | null; urgent: boolean; manual_steps: string[]; state_migrations: boolean } | null
   last_check: { at: string | null; result: 'available' | 'up_to_date' | 'refused' | 'needs_operator' | 'error'; message: string } | null
-  run: { from: string | null; to: string | null; step: string; started: string | null; finished: string | null; in_progress: boolean } | null
+  run: { from: string | null; to: string | null; step: string; started: string | null; finished: string | null; in_progress: boolean; message?: string } | null
   history: Array<{ finished: string; from: string; to: string; result: string }>
   runner: { last_seen: string | null; running: boolean }
   pending_request: { to: string; requested_by: string; requested_at: string } | null

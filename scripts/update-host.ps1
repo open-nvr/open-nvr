@@ -290,8 +290,29 @@ function Invoke-UpdUp {
 function Test-UpdVerify([string]$ManifestDir) {
     Write-UpdRunning
     $timeout = if ($env:OPENNVR_UPDATE_VERIFY_TIMEOUT) { $env:OPENNVR_UPDATE_VERIFY_TIMEOUT } else { "300" }
-    $code = Invoke-Updater "" @("verify", "--manifest-dir", "/work/$ManifestDir", "--running", "/work/running.txt",
-                                "--platform", $script:UpdPlatform, "--timeout", $timeout)
+    # The release verifies itself from inside the running core container,
+    # not a one-off `compose run` one: on Compose 2.24 that one randomly
+    # comes up on a single network (docker/compose#11533) and cannot reach
+    # the database. Core mounts the state folder at /app/update-state. The
+    # verdict is kept in verify-<candidate|installed>.log, which the app shows
+    # under a failed run, for whoever asks later why it rolled back.
+    $log = Join-Path (Get-Location).Path "$UpdDir\verify-$ManifestDir.log"
+    $cid = Get-UpdCid "opennvr-core"
+    $running = if ($cid) { docker inspect -f '{{.State.Running}}' $cid 2>$null } else { "" }
+    if ($running -ne "true") {
+        Write-UpdFail "the core container is not running"
+        [IO.File]::WriteAllLines($log, [string[]]@("the core container is not running"), $Utf8NoBom)
+        return $false
+    }
+    $pass = @()
+    if (Test-Path (Join-Path $UpdDir "extra-keys.json")) {
+        $pass += @("-e", "OPENNVR_UPDATE_EXTRA_KEYS=/app/update-state/extra-keys.json")
+    }
+    $out = @(docker exec @pass $cid python -m updater verify --manifest-dir "/app/update-state/$ManifestDir" `
+                 --running /app/update-state/running.txt --platform $script:UpdPlatform --timeout $timeout)
+    $code = $LASTEXITCODE
+    $out | Out-Host
+    [IO.File]::WriteAllLines($log, [string[]]$out, $Utf8NoBom)
     return ($code -eq 0)
 }
 
@@ -322,7 +343,9 @@ function Invoke-UpdRollback {
         Write-UpdFail "The old version did not start either. See $UpdDir\up.log; backup: $backup"
         return $false
     }
-    if ((Test-Path "$UpdDir\installed\release-manifest.json") -and -not (Test-UpdVerify "installed")) {
+    # An adopted site never matched the installed manifest (--adopt waived
+    # that), so after a rollback it is only required to come up, as it did.
+    if ((Get-UpdKV $plan ADOPTED) -ne "1" -and (Test-Path "$UpdDir\installed\release-manifest.json") -and -not (Test-UpdVerify "installed")) {
         Complete-UpdRun "failed"
         Write-UpdFail "Rolled back, but the old version does not check out healthy. Backup: $backup"
         return $false

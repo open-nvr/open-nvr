@@ -47,15 +47,23 @@ def problems(expected: Manifest, platform: str, health: dict | None, db_revision
     if health is None:
         found.append("core is not answering /health yet")
     else:
-        if health.get("version") != expected.version:
-            found.append(f"core reports version {health.get('version')}, not {expected.version}")
         commit = health.get("commit")
+        if expected.channel == "edge":
+            # An edge build is an untagged main commit: its image still says
+            # the base __version__, and the manifest's label (0.1.12-edge.N)
+            # is the manifest's own. Only the commit tells the build apart,
+            # so it has to be there.
+            if not commit:
+                found.append(f"core does not report the commit it was built from, "
+                             f"which is how the edge build {expected.version} is recognised")
+        elif health.get("version") != expected.version:
+            found.append(f"core reports version {health.get('version')}, not {expected.version}")
         if commit and commit != expected.git_commit:
             found.append(f"core was built from {commit[:12]}, not {expected.git_commit[:12]}")
     if db_revision != expected.alembic_head:
         found.append(f"the database is at migration {db_revision}, not {expected.alembic_head}")
     for c in running:
-        image = expected.image_for(repository(c.ref))
+        image = expected.image_for(repository(c.ref), like=c.ref)
         if image is None or c.ref != image.ref:
             continue  # not pinned by the release (built locally, or kept by the operator)
         if c.image_id not in accepted_ids(image, platform):
