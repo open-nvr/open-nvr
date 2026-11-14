@@ -93,6 +93,22 @@ def upgrade_kind(installed: str, candidate: str) -> str:
 # ── the manifest ─────────────────────────────────────────────────────
 
 
+#: Tag suffixes of the hardware flavours (docs/HARDWARE.md): the same
+#: repository ships ``…:0.1.9`` and ``…:0.1.9-qualcomm``, and a site runs
+#: the one its compose overlay names. Kept in step with FLAVOUR_SUFFIXES
+#: in scripts/release/make_manifest.py.
+FLAVOUR_SUFFIXES = ("-intel", "-qualcomm", "-nvidia", "-rocm")
+
+
+def flavour_of(ref: str) -> str:
+    """``"-qualcomm"`` for ``…:0.1.9-qualcomm`` (or ``…:main-qualcomm``),
+    ``""`` for a plain tag."""
+    ref = ref.split("@", 1)[0]
+    last = ref.rsplit("/", 1)[-1]
+    tag = last.rsplit(":", 1)[1] if ":" in last else ""
+    return next((s for s in FLAVOUR_SUFFIXES if tag.endswith(s)), "")
+
+
 @dataclass(frozen=True)
 class Image:
     #: Repository and tag as compose names it, e.g. ``ghcr.io/open-nvr/core:0.1.9``.
@@ -141,8 +157,14 @@ class Manifest:
     #: The whole parsed document, for fields this updater does not use yet.
     raw: dict = field(default_factory=dict, compare=False, repr=False)
 
-    def image_for(self, repository: str) -> Image | None:
-        return next((i for i in self.images if i.repository == repository), None)
+    def image_for(self, repository: str, *, like: str | None = None) -> Image | None:
+        """The release's image for *repository*: the plain build, or, given
+        *like* (a ref the site runs), the build of that ref's hardware
+        flavour. ``None`` when the release has no such build, so a site on
+        ``detect-pipeline:…-qualcomm`` is never planned, fetched or proved
+        against the plain image (which it does not run)."""
+        want = flavour_of(like) if like else ""
+        return next((i for i in self.images if i.repository == repository and flavour_of(i.ref) == want), None)
 
 
 def _need(doc: dict, key: str, kind: type | tuple):

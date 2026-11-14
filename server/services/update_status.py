@@ -104,6 +104,12 @@ def status(installed_version: str, installed_commit: str | None, *, now: datetim
         run = {"from": state.get("FROM"), "to": state.get("TO"), "step": state["STEP"],
                "started": state.get("STARTED"), "finished": state.get("FINISHED"),
                "in_progress": state["STEP"] not in FINISHED_STEPS}
+        # Why a run rolled back: what the release's own check said about the
+        # candidate (the host keeps it in verify-candidate.log). A run that
+        # never reached the check has none.
+        verdict = STATE_DIR / "verify-candidate.log"
+        if run["step"] in FINISHED_STEPS - {"succeeded"} and verdict.is_file():
+            run["message"] = verdict.read_text(encoding="utf-8", errors="replace")[-4000:]
 
     history = []
     log = STATE_DIR / "history.log"

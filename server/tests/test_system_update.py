@@ -188,3 +188,18 @@ def test_system_update_is_seeded_for_admins_only():
 
     perm = next(p for p in UPGRADE_PATH_PERMISSIONS if p.name == "system.update")
     assert perm.backfill_from is None  # a new ability: nobody gains it on upgrade
+
+
+def test_a_rolled_back_run_shows_what_the_check_said(env, host):  # noqa: F811
+    state, _ = host
+    _found(state)
+    (state / "state.env").write_text("FROM=0.1.8\nTO=0.1.9\nSTEP=switching\nSTEP=verifying\nSTEP=rolling_back\n"
+                                     "STEP=rolled_back\nFINISHED=2026-10-29T01:05:00Z\n")
+    (state / "verify-candidate.log").write_text("OpenNVR 0.1.9 did not come up right:\n"
+                                                "  - the database is at migration x, not y\n")
+    (state / "verify-installed.log").write_text("OpenNVR 0.1.8 is running and healthy.\n")
+    s = env.client.get(URL, headers=env.jwt("admin")).json()
+    assert s["run"]["step"] == "rolled_back"
+    assert s["run"]["message"].splitlines()[-1] == "  - the database is at migration x, not y"  # the candidate's, not the rollback's
+    (state / "state.env").write_text("FROM=0.1.8\nTO=0.1.9\nSTEP=switching\nSTEP=succeeded\n")
+    assert "message" not in env.client.get(URL, headers=env.jwt("admin")).json()["run"]

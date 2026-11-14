@@ -77,6 +77,18 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **An edge update can pass its own check, and a rollback no longer ends as
+  "failed".** The updater compared core's version string with the manifest's
+  label, which an edge build (an untagged main commit) never matches, so every
+  edge update rolled back; the commit decides now. A site taken over with
+  `--adopt` was then verified against a manifest it never matched and
+  reported as failed although it was up; that check is skipped for it. The
+  check itself runs inside the running core container instead of a one-off
+  `compose run` one, which Compose 2.24 can leave off the internal network.
+  Sites on a hardware flavour (`-qualcomm`, `-intel`) are planned, fetched and
+  proved on that flavour's image, not the plain one they do not run. What the
+  check said is kept in `data/updates/verify-candidate.log` and shown on the
+  Updates page under a failed or rolled-back run.
 - **A camera behind a relay gets its substream.** Add Camera had no
   substream field (only the Edit form did), and discovery knew two routes:
   the device's ONVIF profiles and the Hikvision/Dahua URL conventions. A

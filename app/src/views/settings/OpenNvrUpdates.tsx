@@ -216,6 +216,9 @@ export function OpenNvrUpdates() {
         {s.run && !s.run.in_progress && s.run.step !== 'succeeded' && (
           <Notice tone="warning" icon={<RotateCcw size={15} />}>
             {t(`upd.lastRun.${s.run.step}`, { from: s.run.from ?? '', to: s.run.to ?? '' })}
+            {s.run.message && (
+              <pre className="mt-1 whitespace-pre-wrap font-mono text-[11px] bg-[var(--panel)] p-2 border border-[var(--border)]" data-testid="upd-last-run-verdict">{s.run.message}</pre>
+            )}
           </Notice>
         )}
       </section>

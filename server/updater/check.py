@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from updater.manifest import Image, Manifest, parse_version, upgrade_kind
+from updater.manifest import Image, Manifest, flavour_of, parse_version, upgrade_kind
 
 # Exit codes the host scripts act on.
 READY = 0
@@ -203,11 +203,20 @@ def decide(site: Site, candidate: Manifest) -> Plan | Refusal:
     seen: set[str] = set()
     for ref in site.site_images:
         repo = repository(ref)
-        target = candidate.image_for(repo)
-        if target is None or repo in seen:
+        if candidate.image_for(repo) is None:
             continue  # built locally, or not part of the release (compose handles it)
-        seen.add(repo)
-        old = installed.image_for(repo) if keep_overrides else None
+        # The build of the flavour this site runs (``…-qualcomm``), never the
+        # plain one in its place: an accelerated site that fetched and proved
+        # the plain detect-pipeline ran an unverified image for its detector.
+        target = candidate.image_for(repo, like=ref)
+        if target is None:
+            warnings.append(f"{candidate.version} has no {flavour_of(ref).lstrip('-')} build of {repo}; "
+                            "compose will pull it as usual.")
+            continue
+        if target.ref in seen:
+            continue
+        seen.add(target.ref)
+        old = installed.image_for(repo, like=ref) if keep_overrides else None
         if old is not None and ref != old.ref:
             warnings.append(f"{ref} is not the image the release named ({old.ref}); left as it is.")
             continue
