@@ -28,10 +28,14 @@ FROM python:3.11-slim AS runtime
 
 # Docker CLI + compose plugin only (NOT the daemon) — the reconciler
 # drives the HOST daemon through the mounted /var/run/docker.sock.
+# Debian names them docker-cli and docker-compose (the Go compose v2,
+# installed as the ``docker compose`` CLI plugin). docker-compose-plugin
+# is the name in Docker Inc's own apt repository, which this image does
+# not add, and docker.io would pull in the whole daemon.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
-        docker.io \
-        docker-compose-plugin \
+        docker-cli \
+        docker-compose \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
