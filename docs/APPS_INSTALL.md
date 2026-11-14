@@ -327,7 +327,14 @@ The repo is mounted read-only **at the same path as on the host**
 binds like `./examples/…:/template` on the client side while the HOST
 daemon performs the mount. Identical paths keep those binds pointing at
 real host files. (Bring the installer up from the repo root, as every
-command in this doc already does.)
+command in this doc already does.) "Same path" is the path the *daemon*
+uses: on Linux and macOS that is `${PWD}`; under Docker Desktop on
+Windows the daemon runs in a VM that sees `D:\x\open-nvr` as
+`/run/desktop/mnt/host/d/x/open-nvr`, so `start.ps1` mounts the checkout
+there (`INSTALLER_REPO_PATH`) and the reconciler's compose works from it.
+The compose file set and profiles `start.ps1`/`start.sh` resolved are
+persisted to `.env` (`COMPOSE_FILE`, `COMPOSE_PROFILES`) so that nested
+compose sees the app services and the same overlays as the host did.
 
 The installer container **runs as root** (its Dockerfile sets no `USER`).
 This is deliberate and required: the bind-mounted `/var/run/docker.sock`
