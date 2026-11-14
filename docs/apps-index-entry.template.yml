@@ -98,4 +98,4 @@
             - "9210"               # your app's contract port
           networks:
             - opennvr_internal
-    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d my-app
+    command: docker compose up -d my-app

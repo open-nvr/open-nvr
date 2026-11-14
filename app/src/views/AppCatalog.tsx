@@ -279,6 +279,9 @@ export type RegisteredApp = {
   skills?: string[]
   /** How many live cameras are picked for this app (list endpoint only). */
   picked_cameras?: number
+  /** The copy-paste that removes this app's container from the OpenNVR
+   *  host, shown when one-click removal is off or refused. */
+  remove_command?: string | null
 }
 
 // GET /apps/{id}/egress — apps live on an internal network and leave it
@@ -378,8 +381,100 @@ const INSTALL_POLL_MAX_MS = 5 * 60 * 1000
 // The install/uninstall endpoints are opt-in + RBAC gated: a 403 is a normal,
 // expected path (operator disabled one-click, or caller lacks apps.install) —
 // NOT an error to toast. Callers treat it as "fall back to the command."
-function isForbidden(e: any): boolean {
+export function isForbidden(e: any): boolean {
   return e?.status === 403 || e?.response?.status === 403
+}
+
+// An app the one-click remover does not know: installed some other way
+// than the curated catalog (its own overlay, a developer's compose file).
+export function isNotFound(e: any): boolean {
+  return e?.status === 404 || e?.response?.status === 404
+}
+
+// Copies text to the clipboard, or falls back to execCommand: the
+// clipboard API is unavailable in non-secure (plain-HTTP) or sandboxed
+// contexts, and an operator on a LAN http:// deployment still needs to
+// copy the command.
+async function copyText(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text)
+    return
+  }
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.style.position = 'fixed'
+  ta.style.opacity = '0'
+  document.body.appendChild(ta)
+  ta.select()
+  const ok = document.execCommand('copy')
+  document.body.removeChild(ta)
+  if (!ok) throw new Error('copy command rejected')
+}
+
+// A command or file to copy, with its Copy button: the install modal's
+// command and compose block, and the removal command on an installed app.
+export function CopyBlock({ label, text, tall }: { label: string; text: string; tall?: boolean }) {
+  const { showSuccess, showError } = useSnackbar()
+  const [copied, setCopied] = useState(false)
+  const copy = async () => {
+    try {
+      await copyText(text)
+      setCopied(true)
+      showSuccess('Copied to clipboard')
+      window.setTimeout(() => setCopied(false), 1500)
+    } catch {
+      showError('Copy failed — select the text and copy manually')
+    }
+  }
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-1">
+        <span className="text-xs font-medium text-[var(--text-dim)]">{label}</span>
+        <Button variant="ghost" className="text-xs px-2 py-1" onClick={copy}>
+          {copied ? <Check size={12} /> : <Copy size={12} />} Copy
+        </Button>
+      </div>
+      <pre
+        className={`w-full border border-[var(--border)] bg-[var(--bg-2)] p-3 text-xs text-[var(--text)] font-mono ${
+          tall ? 'max-h-72 overflow-auto' : 'overflow-x-auto whitespace-pre-wrap'
+        }`}
+      >
+        {text}
+      </pre>
+    </div>
+  )
+}
+
+// What an administrator sees when one-click removal is off, not permitted,
+// or does not cover this app: the reason, and the command that removes it
+// by hand — the same fail-closed fallback the install dialog has had. The
+// server derives the command from the app id (its compose service name).
+export function RemoveByHand({ app, reason }: { app: RegisteredApp; reason: string }) {
+  const command = app.remove_command?.trim()
+  return (
+    <div className="border border-[var(--border)] bg-[var(--bg-2)] p-3 text-sm space-y-2">
+      <div className="text-[var(--warn)]">{reason}</div>
+      {command ? (
+        <>
+          <div className="text-[var(--text-dim)]">
+            Remove it by hand: run this in the OpenNVR checkout on the host. The card
+            disappears once the app stops answering.
+          </div>
+          <CopyBlock label="Command" text={command} />
+          <div className="text-xs text-[var(--text-dim)]">
+            If you picked this app when you installed OpenNVR, also take its id out of
+            OPENNVR_EXAMPLE_PROFILE in .env, or the next ./start.sh up starts it again
+            (the two default apps: OPENNVR_DEFAULT_APPS=off).
+          </div>
+        </>
+      ) : (
+        <div className="text-[var(--text-dim)]">
+          Remove it the way it was installed — its id is not a compose service name, so
+          there is no command to show.
+        </div>
+      )}
+    </div>
+  )
 }
 
 function useApps() {
@@ -1743,6 +1838,9 @@ function AppCard({ app, caps, tier0, skill }: { app: RegisteredApp; caps: Capabi
   const isAdmin = !!me?.is_superuser
   const [uninstallPollActive, setUninstallPollActive] = useState(false)
   const [uninstallNote, setUninstallNote] = useState<string | null>(null)
+  // One-click removal was refused (off, not permitted, or not a catalog
+  // app): show the command to run instead of a bare note.
+  const [removeByHand, setRemoveByHand] = useState(false)
   // Shown after THIS operator enables the app — a toast is gone in a few
   // seconds and an external app's URL is something you need to read,
   // click, or copy.
@@ -1801,7 +1899,10 @@ function AppCard({ app, caps, tier0, skill }: { app: RegisteredApp; caps: Capabi
   // one-click disabled and expects to run the removal command by hand.
   const uninstallMutation = useMutation({
     mutationFn: () => apiService.uninstallApp(app.id),
-    onMutate: () => setUninstallNote(null),
+    onMutate: () => {
+      setUninstallNote(null)
+      setRemoveByHand(false)
+    },
     onSuccess: () => {
       showSuccess(`Uninstall requested — ${app.name} will be removed once the reconciler applies it`)
       setUninstallPollActive(true)
@@ -1814,6 +1915,12 @@ function AppCard({ app, caps, tier0, skill }: { app: RegisteredApp; caps: Capabi
             "One-click uninstall is disabled by your operator (or you don't have permission)."
           )
         )
+        setRemoveByHand(true)
+      } else if (isNotFound(e)) {
+        // Installed some other way than the curated catalog — the
+        // reconciler has no entry for it.
+        setUninstallNote(`One-click removal covers catalog apps only; ${app.name} was installed another way.`)
+        setRemoveByHand(true)
       } else {
         setUninstallNote(extractApiError(e, `Failed to request uninstall of ${app.name}.`))
       }
@@ -1829,7 +1936,7 @@ function AppCard({ app, caps, tier0, skill }: { app: RegisteredApp; caps: Capabi
   const confirmUninstall = async () => {
     if (await confirm({
       title: `Uninstall ${app.name}?`,
-      message: 'This asks the reconciler to remove the app from this host.',
+      message: 'Removes the app from this host, with its settings and camera selection. With one-click off you get the command to run instead.',
       confirmLabel: 'Uninstall',
       danger: true,
     })) {
@@ -2008,13 +2115,14 @@ function AppCard({ app, caps, tier0, skill }: { app: RegisteredApp; caps: Capabi
           </div>
         )}
 
-        {uninstallNote && <div className="text-sm text-[var(--warn)]">{uninstallNote}</div>}
+        {uninstallNote && removeByHand && <RemoveByHand app={app} reason={uninstallNote} />}
+        {uninstallNote && !removeByHand && <div className="text-sm text-[var(--warn)]">{uninstallNote}</div>}
         {uninstallPollActive && uninstallStatus.data && <InstallStatusNote status={uninstallStatus.data} />}
         {uninstallStatus.timedOut && (
-          <div className="text-xs text-[var(--warn)]">
-            Still pending after 5 minutes — the app-installer service may not be
-            running (see docs/APPS_INSTALL.md).
-          </div>
+          <RemoveByHand
+            app={app}
+            reason="Still pending after 5 minutes — the app-installer service may not be running (APP_INSTALLER=on in .env, then ./start.sh up; see docs/APPS_INSTALL.md)."
+          />
         )}
       </CardContent>
       {activeAction && (
@@ -2042,8 +2150,7 @@ function InstallModal({
    *  watching the reconciler even after this dialog is dismissed. */
   onAccepted: (id: string) => void
 }) {
-  const { showSuccess, showError } = useSnackbar()
-  const [copied, setCopied] = useState<string | null>(null)
+  const { showSuccess } = useSnackbar()
   const [pollActive, setPollActive] = useState(false)
   const [forbidden, setForbidden] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -2086,32 +2193,6 @@ function InstallModal({
   const inFlight =
     installMutation.isPending || (status === 'pending' && !statusQuery.timedOut)
 
-  const copy = async (label: string, text: string) => {
-    try {
-      // navigator.clipboard is unavailable in non-secure (plain-HTTP) or
-      // sandboxed contexts — fall back to execCommand so an operator on a
-      // LAN http:// deployment can still copy the install command.
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(text)
-      } else {
-        const ta = document.createElement('textarea')
-        ta.value = text
-        ta.style.position = 'fixed'
-        ta.style.opacity = '0'
-        document.body.appendChild(ta)
-        ta.select()
-        const ok = document.execCommand('copy')
-        document.body.removeChild(ta)
-        if (!ok) throw new Error('copy command rejected')
-      }
-      setCopied(label)
-      showSuccess('Copied to clipboard')
-      window.setTimeout(() => setCopied((c) => (c === label ? null : c)), 1500)
-    } catch {
-      showError('Copy failed — select the text and copy manually')
-    }
-  }
-
   const command = app.install?.command?.trim()
   const compose = app.install?.compose?.trim()
 
@@ -2141,36 +2222,14 @@ function InstallModal({
         </div>
 
         <div className="text-sm text-[var(--text-dim)]">
-          Or run this on your OpenNVR host, then the app self-registers and appears under Installed.
+          Or run this in the OpenNVR checkout on your host, then the app self-registers and
+          appears under Installed. The checkout's .env carries the compose files the stack
+          runs with, so the command names none.
         </div>
 
-        {command && (
-          <div>
-            <div className="flex items-center justify-between mb-1">
-              <span className="text-xs font-medium text-[var(--text-dim)]">Command</span>
-              <Button variant="ghost" className="text-xs px-2 py-1" onClick={() => copy('command', command)}>
-                {copied === 'command' ? <Check size={12} /> : <Copy size={12} />} Copy
-              </Button>
-            </div>
-            <pre className="w-full overflow-x-auto border border-[var(--border)] bg-[var(--bg-2)] p-3 text-xs text-[var(--text)] font-mono whitespace-pre-wrap">
-              {command}
-            </pre>
-          </div>
-        )}
+        {command && <CopyBlock label="Command" text={command} />}
 
-        {compose && (
-          <div>
-            <div className="flex items-center justify-between mb-1">
-              <span className="text-xs font-medium text-[var(--text-dim)]">docker-compose.yml</span>
-              <Button variant="ghost" className="text-xs px-2 py-1" onClick={() => copy('compose', compose)}>
-                {copied === 'compose' ? <Check size={12} /> : <Copy size={12} />} Copy
-              </Button>
-            </div>
-            <pre className="w-full max-h-72 overflow-auto border border-[var(--border)] bg-[var(--bg-2)] p-3 text-xs text-[var(--text)] font-mono">
-              {compose}
-            </pre>
-          </div>
-        )}
+        {compose && <CopyBlock label="docker-compose.yml" text={compose} tall />}
 
         {!command && !compose && (
           <div className="text-sm text-[var(--text-dim)]">This entry provides no install instructions.</div>

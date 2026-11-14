@@ -26,8 +26,12 @@
 #
 # EVERY ENTRY IS INSTALLABLE, BY CONSTRUCTION. An entry's id MUST exist
 # as a service in docker-compose.apps.yml — the one-click reconciler and
-# the copy-paste command both run `docker compose … up -d <id>` against
-# that overlay, so a listing without a service block fails on install.
+# the copy-paste command both run `docker compose up -d <id>` in the
+# checkout, where .env carries the compose file set start.sh resolved
+# (that overlay included), so a listing without a service block fails
+# on install. The command names no compose file: an explicit -f list
+# replaces the persisted set and recreates core and MediaMTX from the
+# plain files (scripts/validate_apps_index.py explains).
 # scripts/validate_apps_index.py enforces this (a review found 8 of 10
 # original entries listed apps with no service block — every install
 # path failed with "no such service"; all 8 have since been restored
@@ -84,7 +88,7 @@
             - "9200"
           networks:
             - opennvr_internal
-    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d loitering-detection
+    command: docker compose up -d loitering-detection
 
 - id: occupancy-counting
   name: Occupancy Counting
@@ -119,7 +123,7 @@
             - "9201"
           networks:
             - opennvr_internal
-    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d occupancy-counting
+    command: docker compose up -d occupancy-counting
 
 - id: line-crossing
   name: Line Crossing
@@ -154,7 +158,7 @@
             - "9202"
           networks:
             - opennvr_internal
-    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d line-crossing
+    command: docker compose up -d line-crossing
 
 - id: abandoned-object
   name: Abandoned Object
@@ -189,7 +193,7 @@
             - "9203"
           networks:
             - opennvr_internal
-    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d abandoned-object
+    command: docker compose up -d abandoned-object
 
 - id: intrusion-detection
   name: Intrusion Detection
@@ -224,7 +228,7 @@
             - "9204"
           networks:
             - opennvr_internal
-    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d intrusion-detection
+    command: docker compose up -d intrusion-detection
 
 - id: camera-tamper
   name: Camera Tamper
@@ -259,7 +263,7 @@
             - "9212"
           networks:
             - opennvr_internal
-    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d camera-tamper
+    command: docker compose up -d camera-tamper
 
 - id: garbage-dumping
   name: Garbage Dumping
@@ -295,7 +299,7 @@
             - "9215"
           networks:
             - opennvr_internal
-    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d garbage-dumping
+    command: docker compose up -d garbage-dumping
 
 - id: ppe-check
   name: PPE Check
@@ -331,7 +335,7 @@
             - "9216"
           networks:
             - opennvr_internal
-    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d ppe-check
+    command: docker compose up -d ppe-check
 
 - id: gate-watch
   name: Gate Watch
@@ -367,7 +371,7 @@
             - "9214"
           networks:
             - opennvr_internal
-    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d gate-watch
+    command: docker compose up -d gate-watch
 
 - id: guard-scan-compliance
   name: Guard Scan Compliance
@@ -405,7 +409,7 @@
             - "9210"
           networks:
             - opennvr_apps
-    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d guard-scan-compliance
+    command: docker compose up -d guard-scan-compliance
 
 - id: license-plate-recognition
   # ANPR leads: it is the name most of the world uses for this (UK, EU,
@@ -454,7 +458,7 @@
             - "9205"
           networks:
             - opennvr_internal
-    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d license-plate-recognition
+    command: docker compose up -d license-plate-recognition
 
 - id: gate-controller
   name: Gate Controller
@@ -494,7 +498,7 @@
             - "9210"
           networks:
             - opennvr_internal
-    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d gate-controller
+    command: docker compose up -d gate-controller
 
 - id: alert-notifier
   name: Alert Notifier
@@ -540,7 +544,7 @@
             - "9211"
           networks:
             - opennvr_internal
-    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d alert-notifier
+    command: docker compose up -d alert-notifier
 
 - id: attendly
   name: Attendly
@@ -583,7 +587,7 @@
             - opennvr_attendly_data:/data
           networks:
             - opennvr_internal
-    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d attendly
+    command: docker compose up -d attendly
 
 - id: smart-doorbell
   name: Smart Doorbell
@@ -624,7 +628,7 @@
             - "9206"
           networks:
             - opennvr_internal
-    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d smart-doorbell
+    command: docker compose up -d smart-doorbell
 
 - id: package-delivery
   name: Package Delivery
@@ -660,7 +664,7 @@
             - "9207"
           networks:
             - opennvr_internal
-    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d package-delivery
+    command: docker compose up -d package-delivery
 
 - id: footage-search
   name: Footage Search
@@ -700,7 +704,7 @@
             - "9208"
           networks:
             - opennvr_internal
-    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d footage-search
+    command: docker compose up -d footage-search
 
 - id: home-assistant-relay
   name: Home Assistant Relay
@@ -737,4 +741,4 @@
             - "9209"
           networks:
             - opennvr_internal
-    command: docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d home-assistant-relay
+    command: docker compose up -d home-assistant-relay

@@ -4,7 +4,8 @@
 #
 # The field bug (Ventuno Q, 2026-11-12, a fresh plain install): the qualcomm
 # overlay overrode caption-adapter and whisper-adapter, services that only
-# docker-compose.camera-agent.yml defines. An install without the camera
+# docker-compose.camera-agent.yml defined then (the captioner has since
+# moved to docker-compose.apps.yml, 2026-11-14). An install without the camera
 # agent handed Compose two services with no image, and Compose 2.24 — the
 # package on the board's Ubuntu — rejected the whole project ("service
 # caption-adapter has neither an image nor a build context"). Newer Compose
@@ -87,10 +88,18 @@ eval "$FUNCS"
 
 # compose_args asks the host which flavour it is; the tests decide.
 detect_accel() { echo "${TEST_ACCEL:-qualcomm}"; }
+# Host probes compose_args calls that are not under test here: no USB
+# webcams, no multicast prober.
+webcams_usable() { return 1; }
+lan_discovery_core_ok() { return 1; }
 
 files_of() { # the -f files of an args string, in order, one per line
     local prev="" tok
     for tok in $1; do [[ "$prev" == -f ]] && echo "$tok"; prev="$tok"; done
+}
+profiles_of() { # the --profile values of an args string, one per line
+    local prev="" tok
+    for tok in $1; do [[ "$prev" == --profile ]] && echo "$tok"; prev="$tok"; done
 }
 
 # ── 2. A plain install: overlay + apps fragment, no agent fragment ──
@@ -119,6 +128,36 @@ if printf '%s\n' "$got" | grep -qx 'docker-compose.accel-qualcomm.yml' \
    && ! printf '%s\n' "$got" | grep -q 'accel-qualcomm-apps' \
    && ! printf '%s\n' "$got" | grep -q 'docker-compose.apps.yml'; then pass
 else fail "files: $(echo "$got" | tr '\n' ' ')"; fi
+
+# ── 4b. The agent brings the apps file: the captioner is defined there ──
+start_test "camera agent with OPENNVR_DEFAULT_APPS=off: docker-compose.apps.yml and its -apps fragment ride along (the captioner lives there)"
+printf 'OPENNVR_EXAMPLE_COMPOSE=docker-compose.camera-agent.yml\nOPENNVR_EXAMPLE_PROFILE=camera-agent-chat\nOPENNVR_DEFAULT_APPS=off\n' > .env
+got=$(files_of "$(compose_args)")
+ap=$(printf '%s\n' "$got" | grep -nx 'docker-compose.apps.yml' | cut -d: -f1)
+fr=$(printf '%s\n' "$got" | grep -nx 'docker-compose.accel-qualcomm-apps.yml' | cut -d: -f1)
+ov=$(printf '%s\n' "$got" | grep -nx 'docker-compose.accel-qualcomm.yml' | cut -d: -f1)
+if [[ -n "$ap" && -n "$fr" && -n "$ov" && "$ap" -lt "$ov" && "$fr" -gt "$ov" ]] \
+   && ! printf '%s\n' "$(profiles_of "$(compose_args)")" | grep -qx 'default-apps'; then pass
+else fail "files: $(echo "$got" | tr '\n' ' ')"; fi
+
+# ── 4c. The description flags start the captioner on a plain install ──
+start_test "EVENTS_CAPTION_ENRICHMENT=true and no agent: --profile descriptions is added"
+printf 'OPENNVR_EXAMPLE_COMPOSE=\nOPENNVR_EXAMPLE_PROFILE=\nEVENTS_CAPTION_ENRICHMENT=true\n' > .env
+got=$(profiles_of "$(compose_args)")
+if printf '%s\n' "$got" | grep -qx 'descriptions'; then pass
+else fail "profiles: $(echo "$got" | tr '\n' ' ')"; fi
+
+start_test "the agent profile already starts the captioner: no --profile descriptions on top"
+printf 'OPENNVR_EXAMPLE_COMPOSE=docker-compose.camera-agent.yml\nOPENNVR_EXAMPLE_PROFILE=camera-agent-chat\nEVENTS_CAPTION_ENRICHMENT=true\n' > .env
+got=$(profiles_of "$(compose_args)")
+if ! printf '%s\n' "$got" | grep -qx 'descriptions'; then pass
+else fail "profiles: $(echo "$got" | tr '\n' ' ')"; fi
+
+start_test "flags off: no --profile descriptions"
+printf 'OPENNVR_EXAMPLE_COMPOSE=\nOPENNVR_EXAMPLE_PROFILE=\nEVENTS_CAPTION_ENRICHMENT=false\nEVENTS_DESCRIPTOR_ENRICHMENT=false\n' > .env
+got=$(profiles_of "$(compose_args)")
+if ! printf '%s\n' "$got" | grep -qx 'descriptions'; then pass
+else fail "profiles: $(echo "$got" | tr '\n' ' ')"; fi
 
 # ── 5. The intel flavour follows the same rule ──
 start_test "intel: the -apps fragment follows docker-compose.apps.yml"

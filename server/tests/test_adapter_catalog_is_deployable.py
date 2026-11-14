@@ -87,7 +87,9 @@ def _repo(image: str) -> str:
 #: every adapter in the catalogue and would call whisper "deployable as
 #: the captioner". The candidates are the ones .env.example documents.
 SELECTABLE_SERVICES = {
-    "docker-compose.camera-agent.yml:caption-adapter": (
+    # The captioner rides the apps overlay (moved from the agent's file on
+    # 2026-11-14 so visit descriptions work without the agent).
+    "docker-compose.apps.yml:caption-adapter": (
         "CAPTION_ADAPTER", ("ollamavlm", "moondream", "blip", "litertlm")),
     "docker-compose.camera-agent.yml:whisper-adapter": (
         "STT_ADAPTER", ("parakeet", "whisper")),
@@ -245,9 +247,9 @@ def test_dedicated_instances_are_real_adapter_services():
 def test_the_enrichment_profile_actually_covers_enrichment():
     """The three things core's enrichment needs, all reachable from one
     profile — otherwise "turn on enrichment" is several lookups and an
-    operator gets some of them. Spans files deliberately: the embedder
-    and the captioner live in different overlays and that is invisible
-    from .env, which is exactly why this has to be checked."""
+    operator gets some of them. Spans files deliberately: where an
+    adapter is defined is invisible from .env, which is exactly why this
+    has to be checked."""
     tasks: set[str] = set()
     for _fname, _svc_name, svc in _adapter_services():
         if "enrichment" in (svc.get("profiles") or []):
@@ -279,3 +281,25 @@ def test_every_enrichment_adapter_has_a_registration_job():
             "registration job in any of those profiles")
 
 
+
+
+def test_the_captioner_is_defined_where_every_install_has_it():
+    """Core's visit descriptions need the captioner whether or not anyone
+    runs the camera agent. It lived in docker-compose.camera-agent.yml
+    until 2026-11-14, so a stock install (no agent) had no captioner and
+    the description flags described nothing — the Ventuno Q handover
+    install. The apps overlay is in every stock install's compose set."""
+    where = {f for f, s, _svc in _adapter_services() if s == "caption-adapter"}
+    assert where == {"docker-compose.apps.yml"}, where
+    agent = yaml.safe_load((ROOT / "docker-compose.camera-agent.yml").read_text()) or {}
+    assert "caption-adapter" not in (agent.get("services") or {})
+    # The agent still depends on it; start.sh brings the apps file with the
+    # agent's (compose_args), which this cannot see — so at least the
+    # dependency is still declared and the `descriptions` profile starts
+    # the captioner alone.
+    apps = yaml.safe_load((ROOT / "docker-compose.apps.yml").read_text()) or {}
+    captioner = apps["services"]["caption-adapter"]
+    assert "descriptions" in captioner["profiles"]
+    for svc in ("camera-agent", "camera-agent-chat"):
+        deps = (agent["services"][svc].get("depends_on") or {})
+        assert "caption-adapter" in deps, f"{svc} no longer depends on the captioner"

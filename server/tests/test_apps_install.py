@@ -436,3 +436,74 @@ def test_uninstall_deletes_registration_row(admin_client):
     # tears the container down from it).
     rows = _intents(admin_client)
     assert len(rows) == 1 and rows[0].desired == "absent"
+
+
+# ── Removal beyond the index, and the by-hand command ──────────────────
+
+
+def _register(client, app_id: str, name: str = "App") -> None:
+    s = client.session_factory()
+    try:
+        s.add(InstalledApp(
+            id=app_id, name=name, version="1.0.0",
+            url=f"http://{app_id}:9200", manifest_json={}, config_json={},
+        ))
+        s.commit()
+    finally:
+        s.close()
+
+
+def test_uninstall_accepts_a_registered_official_overlay_app(admin_client):
+    """The Camera Agent ships its own overlay, so it is not in the curated
+    index — yet an administrator removes it like any other app. Removal
+    (never install) accepts it when it is registered on this box, with
+    the image the pinned map records."""
+    _register(admin_client, "camera-agent", "Camera Agent")
+
+    resp = admin_client.post("/apps/index/camera-agent/uninstall")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["desired"] == "absent" and body["status"] == "pending"
+    assert body["image"] == apps_router.OFFICIAL_OVERLAY_APPS["camera-agent"]
+    # The status poll must not 404 on it either.
+    assert admin_client.get("/apps/index/camera-agent/install-status").status_code == 200
+    # And install stays index-only.
+    assert admin_client.post("/apps/index/camera-agent/install").status_code == 404
+
+
+def test_uninstall_of_an_overlay_app_needs_a_registration(admin_client):
+    """Not registered here → nothing to remove; the id alone is not enough."""
+    resp = admin_client.post("/apps/index/camera-agent/uninstall")
+    assert resp.status_code == 404
+
+
+def test_uninstall_404_for_a_registered_app_outside_the_pinned_map(admin_client):
+    """A registered app under any other name stays a 404: the widening
+    is the pinned map, not 'anything registered'."""
+    _register(admin_client, "some-dev-app")
+    resp = admin_client.post("/apps/index/some-dev-app/uninstall")
+    assert resp.status_code == 404
+    assert "command shown on its card" in resp.json()["detail"]
+
+
+def test_removal_command_is_derived_from_the_service_name():
+    assert apps_router.removal_command("loitering-detection") == (
+        "docker compose rm -s -f loitering-detection"
+    )
+    assert apps_router.removal_command("camera-agent") == "docker compose rm -s -f camera-agent"
+    # Not a compose service name — a flag, an upper-case id, a path:
+    # no command rather than one that cannot work.
+    for bad in ("--remove-orphans", "Loitering", "a/b", "", "a--b", "-x"):
+        assert apps_router.removal_command(bad) is None
+
+
+def test_installed_app_carries_its_removal_command():
+    """The wire shape of an installed app (list + register) carries the
+    command the card shows when one-click removal is refused."""
+    row = InstalledApp(
+        id=REAL_APP_ID, name="Loitering", version="1.0.0",
+        url="http://loitering:9200", manifest_json={}, config_json={},
+    )
+    assert apps_router._serialize_app(row)["remove_command"] == (
+        f"docker compose rm -s -f {REAL_APP_ID}"
+    )

@@ -90,6 +90,34 @@ function Get-ComposeArgs {
         }
         $args += @("--profile", "default-apps")
     }
+    # The camera agent depends on the captioner, which docker-compose.apps.yml
+    # defines: the agent's file always brings the apps file. Mirrors
+    # compose_args in start.sh.
+    if (($exampleComposeFiles -contains "docker-compose.camera-agent.yml") -and ($args -notcontains "docker-compose.apps.yml")) {
+        $args += @("-f", "docker-compose.apps.yml")
+    }
+    # Visit descriptions need the captioner running: when either flag is
+    # true and no profile already starts it, enable `descriptions` (the
+    # captioner and its registration job). Mirrors compose_args in start.sh.
+    if ($args -contains "docker-compose.apps.yml") {
+        $wantCaptions = ((Get-EnvVar "EVENTS_CAPTION_ENRICHMENT") -eq "true") -or ((Get-EnvVar "EVENTS_DESCRIPTOR_ENRICHMENT") -eq "true")
+        $profiles = @($exampleProfile -split "," | Where-Object { $_ })
+        foreach ($p in @("camera-agent", "camera-agent-chat", "enrichment", "descriptions")) { if ($profiles -contains $p) { $wantCaptions = $false } }
+        if ($wantCaptions) { $args += @("--profile", "descriptions") }
+    }
+    # One-click app install/removal from the App Catalog (docs/APPS_INSTALL.md):
+    # the app-installer overlay, the one container that holds the Docker
+    # socket. APP_INSTALLER=on in .env is the installer's answer. The overlay
+    # mounts the checkout at ${PWD}, a variable PowerShell does not export —
+    # set it for Compose. Mirrors compose_args in start.sh.
+    if ((Get-EnvVar "APP_INSTALLER") -eq "on") {
+        if (Test-Path "docker-compose.installer.yml") {
+            $env:PWD = (Get-Location).Path
+            $args += @("-f", "docker-compose.installer.yml", "--profile", "app-installer")
+        } else {
+            Write-Color "APP_INSTALLER=on but docker-compose.installer.yml is missing" Yellow
+        }
+    }
     # Opt-in host-side debug ports for mediamtx. Off by default because
     # Docker's publishing is all-or-nothing per container — see the header
     # of docker-compose.debug-ports.yml and #298. Mirrors compose_args

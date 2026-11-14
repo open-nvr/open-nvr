@@ -20,20 +20,23 @@
 #     network-facing: no published ports, no inbound network — it only
 #     reaches the DB and the Docker socket.
 #
-# Opt in (this is a deliberate operator decision — leave it off for
-# sovereign / air-gapped deployments):
+# Opt in (a deliberate operator decision — leave it off for sovereign /
+# air-gapped deployments): the installer asks "Install and remove apps
+# with one click?" and writes the answer to .env as
 #
-#   1. Set APPS_INSTALL_ENABLED=true in your .env (gates the endpoints).
-#   2. Grant the ``apps.install`` permission to the operator role(s).
-#   3. Bring up the installer:
+#   APP_INSTALLER=on            # start.sh adds this overlay to the stack
+#   APPS_INSTALL_ENABLED=true   # the web app records the clicks
+#
+# then ``./start.sh up`` (or ``.\start.ps1 up``) starts the reconciler
+# with everything else. The ``apps.install`` permission gates who may
+# click; administrators hold it. Turn it off the same way: APP_INSTALLER=
+# off, APPS_INSTALL_ENABLED=false, ``./start.sh up`` — this does NOT
+# uninstall apps, it only stops the reconciler.
+#
+# By hand, without start.sh, from the repo root:
 #
 #        docker compose -f docker-compose.yml -f docker-compose.installer.yml \
 #            --profile app-installer up -d app-installer
-#
-# Stop it (this does NOT uninstall apps — it just stops the reconciler):
-#
-#        docker compose -f docker-compose.yml -f docker-compose.installer.yml \
-#            --profile app-installer down
 #
 # See docs/APPS_INSTALL.md for the full design, the RBAC + digest-pinning
 # + audit guarantees, and the unpinned/air-gapped guidance.
@@ -58,12 +61,16 @@ services:
       # role with SELECT on app_install_intents and UPDATE of
       # status/message/updated_at only — the installer never INSERTs
       # intents (only the web app does).
-      - DATABASE_URL=${INSTALLER_DATABASE_URL:-${DATABASE_URL}}
+      - DATABASE_URL=${INSTALLER_DATABASE_URL:-postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}}
       - INSTALLER_POLL_SECONDS=${INSTALLER_POLL_SECONDS:-10}
-      # The compose files + profile the reconciler drives to bring apps
-      # up/down. Must match the app service blocks (docker-compose.apps.yml).
-      - INSTALLER_COMPOSE_FILES=docker-compose.yml,docker-compose.apps.yml
-      - INSTALLER_PROFILE=apps
+      # The reconciler runs ``docker compose`` in the checkout (mounted
+      # at its host path below, working_dir to match), where .env carries
+      # the compose file set and profiles start.sh resolved — so an app
+      # comes up under the same overlays as the rest of the stack, and
+      # core and MediaMTX are never recreated from the plain files. Name
+      # files only for a checkout without that persisted set:
+      #   - INSTALLER_COMPOSE_FILES=docker-compose.yml,docker-compose.apps.yml
+      #   - INSTALLER_PROFILE=apps
       # Image signatures: "require" (default) verifies every pinned image
       # with cosign against its expected signer — the org's CI for
       # ghcr.io/open-nvr images — before compose runs; "off" for an
@@ -98,7 +105,5 @@ services:
       - ${PWD}:${PWD}:ro
     working_dir: ${PWD}
 
-# Uses the opennvr_internal network defined by the base compose file.
-networks:
-  opennvr_internal:
-    external: true
+# The opennvr_internal network is the base file's; this overlay is never
+# used without it.

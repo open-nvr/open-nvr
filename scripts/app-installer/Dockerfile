@@ -12,9 +12,8 @@
 # Build (from the repo root):
 #   docker build -f scripts/app-installer/Dockerfile -t opennvr/app-installer:local .
 #
-# Opt in via the overlay (see docs/APPS_INSTALL.md):
-#   docker compose -f docker-compose.yml -f docker-compose.installer.yml \
-#       --profile app-installer up -d app-installer
+# Opt in: the installer's "Install and remove apps with one click?"
+# question, or APP_INSTALLER=on in .env and ./start.sh up (docs/APPS_INSTALL.md).
 
 FROM python:3.11-slim AS runtime
 
