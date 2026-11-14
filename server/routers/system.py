@@ -110,8 +110,9 @@ def _mqtt_discovery_active() -> bool:
 
 def _network_facts(db: Session) -> dict:
     """What a client on another machine can reach (docs/HOME_ASSISTANT.md):
-    whether MediaMTX advertises any WebRTC ICE host (configured or learned),
-    and whether RTSPS is published beyond loopback. Booleans only."""
+    whether MediaMTX advertises any WebRTC ICE host (the admin's public
+    address, the STUN-discovered IP or the LAN seed), and whether RTSPS is
+    published beyond loopback. Booleans only."""
     import ipaddress
     from urllib.parse import urlsplit
 

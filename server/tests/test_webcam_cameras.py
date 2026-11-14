@@ -449,11 +449,6 @@ def env(monkeypatch):
     monkeypatch.setattr(jwt_mod.MediaMtxJwtService, "create_publish_token",
                         classmethod(lambda cls, **kw: _token(**kw)))
 
-    async def _no_ice(*a, **k):
-        return None
-
-    monkeypatch.setattr(streams_router, "_learn_ice_host", _no_ice)
-
     eng = create_engine("sqlite://", connect_args={"check_same_thread": False},
                         poolclass=StaticPool)
     Base.metadata.create_all(eng)

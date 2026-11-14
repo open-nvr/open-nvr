@@ -667,13 +667,16 @@ services:
       - MEDIAMTX_EXTERNAL_BASE_URL=${MEDIAMTX_PUBLIC_URL:-https://localhost}/webrtc
       - MEDIAMTX_EXTERNAL_HLS_URL=${MEDIAMTX_PUBLIC_URL:-https://localhost}/hls
       - MEDIAMTX_EXTERNAL_PLAYBACK_URL=${MEDIAMTX_PUBLIC_URL:-https://localhost}/playback
-      # Seed for the ICE hosts MediaMTX advertises. The backend keeps the list
-      # in the DB and re-pushes it on every MediaMTX start, so a recreated
-      # container keeps it. It can also learn the address browsers reach, but
-      # not in this layout: nginx is on the bridge, so it only ever reports a
-      # container address. Without start.sh, set this in .env or live WebRTC
-      # from other machines fails (HLS still works).
+      # The LAN address MediaMTX advertises to browsers (start.sh detects it
+      # at each `up`). Core adds the public address (Settings → WebRTC, or
+      # found with STUN) and re-pushes the whole list on every MediaMTX
+      # start, so a recreated container keeps it. The web UI also tries the
+      # address it opened the page on, so a LAN viewer needs none of this;
+      # API clients (Home Assistant) do.
       - MEDIAMTX_WEBRTC_HOSTS=${MEDIAMTX_WEBRTC_HOSTS:-}
+      # The ICE media port as published on the host (the mediamtx service
+      # above): the player adds the page's own address on this port.
+      - WEBRTC_ICE_PORT=${WEBRTC_ICE_PORT:-8189}
       - KAI_C_URL=http://127.0.0.1:8100
       # Duplicate-sighting dedup for plate reads: a fragmented track
       # (moving camera, occlusion) re-reads the car just read; the same

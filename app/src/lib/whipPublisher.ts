@@ -71,11 +71,28 @@ export function preferH264(transceiver: RTCRtpTransceiver): boolean {
 
 const BACKOFF_SECONDS = [1, 2, 4, 8, 15, 30]
 
+/** Optional help from the app (lib/webcamSessions): extra ICE candidates
+ *  for MediaMTX's answer, and the media port to name when none connects. */
+export type PublisherExtras = {
+  augmentAnswer?: (sdp: string) => string
+  mediaPort?: () => number
+}
+
+/** ICE failed this many times without ever connecting: most likely the
+ *  media port is not reachable from this network, and the retry message
+ *  says so. Retrying goes on regardless (at the longest backoff), because
+ *  the same signal also comes from a MediaMTX restart or a network that is
+ *  still coming up, and a page left open should recover from those by
+ *  itself, as the viewer side does. */
+const ICE_FAILURES_BEFORE_NAMING_THE_PORT = 2
+
 export class WhipPublisher {
   private pc: RTCPeerConnection | null = null
   private resource: string | null = null
   private token: string | null = null
   private attempt = 0
+  private iceFailures = 0
+  private everLive = false
   private retryTimer: number | null = null
   private stopped = true
   private stream: MediaStream | null = null
@@ -84,12 +101,15 @@ export class WhipPublisher {
     private readonly getSession: () => Promise<WhipSession>,
     private readonly getIceConfig: () => Promise<RTCConfiguration>,
     private readonly onState: (s: PublisherState) => void,
+    private readonly extras: PublisherExtras = {},
   ) {}
 
   start(stream: MediaStream) {
     this.stream = stream
     this.stopped = false
     this.attempt = 0
+    this.iceFailures = 0
+    this.everLive = false
     void this.connect()
   }
 
@@ -182,8 +202,24 @@ export class WhipPublisher {
       if (this.pc !== pc) return
       if (pc.connectionState === 'connected') {
         this.attempt = 0
+        this.iceFailures = 0
+        this.everLive = true
         this.onState({ kind: 'live' })
       } else if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+        // Publishing has no HLS to fall back to. ICE failing before it ever
+        // connected usually means the media port cannot be reached from
+        // here: say so, slow the retries down to the longest backoff, and
+        // keep trying (a MediaMTX restart looks the same and heals).
+        if (!this.everLive && ++this.iceFailures >= ICE_FAILURES_BEFORE_NAMING_THE_PORT) {
+          const port = this.extras.mediaPort?.()
+          this.attempt = Math.max(this.attempt, BACKOFF_SECONDS.length - 1)
+          this.scheduleRetry(
+            'Real-time video cannot reach OpenNVR from this network' +
+              (port ? ` (UDP/TCP port ${port} may be blocked)` : '') +
+              '. Publishing a browser webcam needs that port; ask your administrator. Still trying.',
+          )
+          return
+        }
         this.scheduleRetry('Connection lost')
       } else if (pc.connectionState === 'disconnected') {
         // Often heals on its own; give ICE a moment before starting over.
@@ -218,7 +254,8 @@ export class WhipPublisher {
         return
       }
       this.resource = resolveWhepSessionUrl(resp.headers.get('Location'), url)
-      await pc.setRemoteDescription({ type: 'answer', sdp: await resp.text() })
+      const answer = await resp.text()
+      await pc.setRemoteDescription({ type: 'answer', sdp: this.extras.augmentAnswer?.(answer) ?? answer })
     } catch (e: any) {
       if (this.pc === pc) this.scheduleRetry(e?.message || 'Connection failed')
     }

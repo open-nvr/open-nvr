@@ -8,8 +8,55 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Live view from anywhere (#925): a tile tries real-time video (WebRTC) and
+  falls back to low-latency HLS by itself when no media path answers, within
+  about eight seconds and with the spinner up, never an error. The browser
+  remembers the fallback for the session so later tiles start on HLS at once,
+  probes WebRTC again every fifteen minutes and when the network comes back,
+  and shows a small "HLS" badge saying why. The player also adds the address
+  it opened the page on as a candidate, so a LAN viewer works whatever address
+  the launcher recorded at install, including `localhost` (sent as 127.0.0.1,
+  the one candidate a local browser has once MediaMTX stops advertising its
+  own interfaces).
+- A live tile survives the network changing under it. A VPN coming or going,
+  a Wi-Fi switch or a laptop lid leaves a WebRTC session that nothing can
+  renegotiate, so the tile rebuilds it: a frame watchdog counts decoded frames
+  every 3 s and rebuilds after 8 s without one (ICE can say "connected" long
+  after a route change), the bounded fast retries are followed by a slow
+  retry every 30 s for as long as the tile is on screen instead of a Retry
+  button, a tile that is not playing starts over at once when the browser
+  comes back online or the tab is shown again, and a tile on HLS by fallback
+  probes WebRTC again every fifteen minutes, soon after the network changed,
+  and at once when another tile's probe got through, then switches back.
+- Settings → WebRTC: a public address (IP or DNS name) and a public media
+  port, and the list of addresses the media server advertises with where each
+  came from. Core finds the public IP with the configured STUN server itself
+  and refreshes it every ten minutes, keeping the last answer through a round
+  that gets none; `GET /api/v1/webrtc/advertised` (admin) and the extra fields
+  on `GET /api/v1/webrtc/rtc-config`. Emptying either field clears it, a bad
+  address is refused with the reason (422), and the save answers at once with
+  the STUN round running behind it.
+
 ### Changed
 
+- Live HLS is served as low-latency HLS (`hlsVariant: lowLatency`, 200 ms
+  parts, nginx no longer buffers `/hls/`), which brings a fallen-back tile
+  from several seconds behind to one or two.
+- The browser sends its own ICE candidates with the WHEP offer (it used to
+  post the offer before gathering any), and no STUN server is built into the
+  web app: ICE servers come from Settings alone. STUN is sent to MediaMTX as
+  client-only, since its single-port listener cannot use a STUN-discovered
+  candidate; TURN stays shared.
+- MediaMTX no longer advertises its own container addresses
+  (`webrtcIPsFromInterfaces: no`); the reachable ones come from core.
+- The "learned hosts" mechanism (`X-Server-Addr`) is gone: on the compose
+  bridge it never learned anything. An existing `webrtc_ice_hosts` row is
+  moved into the public address setting once.
+- Publishing a browser webcam from a network where the media port is blocked
+  now says so (naming the port) after two failed connections, slows its
+  retries to the longest backoff and keeps trying, so a MediaMTX restart or a
+  network still coming up heals by itself; the same address-bar candidates
+  are added to its answer.
 - **The detector's frame rate and crop budget follow the flavour.**
   `DETECT_FPS` and `DETECT_MAX_REGIONS` ship empty in `.env.example`; the
   compose file sets 2 fps and 4 crops, the qualcomm overlay 4 fps and 3
