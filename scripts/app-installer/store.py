@@ -64,11 +64,24 @@ app_install_intents = Table(
 )
 
 
+def with_driver(database_url: str) -> str:
+    """Name the driver the image ships (psycopg2) on a bare ``postgresql://``
+    URL. Left to SQLAlchemy, the bare scheme means "its default driver",
+    which 2.1 moved from psycopg2 to psycopg 3 — and the installer then
+    died on import with ``No module named 'psycopg'``. A URL that already
+    names a driver (``postgresql+psycopg2://``, ``sqlite://``) is untouched.
+    """
+    bare = "postgresql://"
+    if database_url.startswith(bare):
+        return "postgresql+psycopg2://" + database_url[len(bare):]
+    return database_url
+
+
 class SqlIntentStore:
     """Production IntentStore over the app_install_intents table."""
 
     def __init__(self, database_url: str):
-        self._engine = create_engine(database_url, future=True)
+        self._engine = create_engine(with_driver(database_url), future=True)
 
     def list_intents(self) -> list[Intent]:
         stmt = select(

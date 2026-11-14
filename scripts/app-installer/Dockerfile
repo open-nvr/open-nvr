@@ -68,4 +68,7 @@ ENV PYTHONUNBUFFERED=1
 
 # No EXPOSE — the installer is never network-facing.
 
-ENTRYPOINT ["python", "main.py"]
+# Absolute: the overlay sets working_dir to the mounted checkout (the
+# reconciler's compose must run there), so a relative main.py would be
+# looked for in the repo root, not /app.
+ENTRYPOINT ["python", "/app/main.py"]
