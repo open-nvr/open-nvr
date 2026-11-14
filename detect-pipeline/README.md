@@ -186,10 +186,30 @@ with an env dial and a metric (never a silent cap):
   `DETECT_MIN_SPAWN_SCORE` (default `0.5`): it takes solid evidence to
   *create* a track, weaker evidence still *matches* one (Frigate-style
   hysteresis).
-* `DETECT_MAX_REGIONS` (default `8`) — hard per-frame budget of detector
-  crops. Motion regions win slots first; track re-verifies round-robin
-  the remainder across frames (skipped tracks coast, they don't age).
-  Capped frames count on `tier0_regions_capped_total`.
+* `DETECT_MAX_REGIONS` (built-in default `8`; the compose file sets `4`,
+  the qualcomm overlay `3` with `DETECT_FPS` `4`; `.env.example` leaves
+  it empty so the flavour's default applies, a number there outranks
+  every flavour) —
+  hard per-frame budget of detector crops. Motion regions win slots first;
+  track re-verifies round-robin the remainder across frames (skipped
+  tracks coast, they don't age). Capped frames count on
+  `tier0_regions_capped_total`.
+
+  Size it to the host: each region is a full detector pass, and the frame
+  budget is `1/DETECT_FPS` seconds. Configure more than the host sustains
+  and the budget controller sheds regions at runtime ("detector regions
+  cut to N" warnings) — coverage then rotates across frames, and a fast
+  object can cross the frame while its patch isn't scanned. The same
+  arithmetic holds on an NPU: on a Qualcomm Hexagon a crop is ~15 ms, and
+  two busy cameras at 5 fps with 8 crops each (~80 inferences/s) pinned
+  the device at 100 % by themselves (Ventuno Q, 2026-11-13); 3 crops at
+  4 fps fitted beside the plate reader and the captioner, and that is
+  the qualcomm overlay's default. A pinned
+  count the hardware actually delivers gives every frame the same
+  complete coverage; `4` is the CPU-only sweet spot (laptops,
+  macOS/Windows Docker VMs). With `DETECT_HWACCEL` and/or
+  `DETECT_ONNX_BACKEND=ort` on a GPU/NPU provider, raise it to `8`+ for
+  deeper coverage of small and distant objects.
 * `DETECT_MAX_TRACKS` (default `50`) + `DETECT_TRACK_TTL` (default
   `300` s) — a hard ceiling on live tracks, and a wall-clock TTL so a
   track that is never positively re-detected always drains (frame-based
@@ -199,7 +219,7 @@ with an env dial and a metric (never a silent cap):
 **Second dial: lower `DETECT_FPS`.**
 Detection runs on every analyzed frame (the gate skips alarms, not
 inference), so pipeline CPU scales almost linearly with the per-camera
-analysis rate — `DETECT_FPS`, default 5 (Frigate's default; 2 is the CPU-friendly setting that
+analysis rate — `DETECT_FPS`, default 2 on the CPU/GPU compose and 4 on the qualcomm overlay (5 is Frigate's default; 2 is the CPU-friendly setting that
 behaves well on laptops and any macOS/Windows Docker install, where the
 VM has no GPU). Servers with headroom — and especially `DETECT_HWACCEL`
 hosts — can raise it to 5-10 for finer motion/track granularity and a
@@ -432,7 +452,7 @@ the staged runbook in [ENABLEMENT.md](ENABLEMENT.md). Disable without a redeploy
 ```bash
 # .env
 DETECT_PIPELINE_ENABLED=false     # container stays up but idle
-DETECT_FPS=5                      # frames analyzed /s /camera (1-30, default 5; 2 on a CPU-only box) — the main CPU dial
+DETECT_FPS=                       # frames analyzed /s /camera (1-30; empty = the flavour's default: 2 on CPU/GPU, 4 on qualcomm) — the main CPU dial
 DETECT_DECODE_SKIP=nonref         # nonref (default, lossless) | bidir | nokey | none — dial 4
 DETECT_DECODE_THREADS=2           # ffmpeg decoder thread cap (0 = auto) — dial 5, lossless
 DETECT_DECODE_FAST=false          # true = skip h264 loop filter (opt-in, not bit-exact)
