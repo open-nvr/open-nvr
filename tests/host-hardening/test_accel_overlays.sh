@@ -111,14 +111,17 @@ if printf '%s\n' "$got" | grep -qx 'docker-compose.accel-qualcomm.yml' \
    && ! printf '%s\n' "$got" | grep -q 'accel-qualcomm-agent'; then pass
 else fail "files: $(echo "$got" | tr '\n' ' ')"; fi
 
-# ── 3. With the camera agent: the -agent fragment, after the overlay ──
-start_test "with docker-compose.camera-agent.yml: the -agent fragment is appended after the overlay"
+# ── 3. With the camera agent: no -agent fragment exists any more (the
+# captioner and speech to text ride the -apps fragment), and compose_args
+# never names a file that is not there ──
+start_test "with docker-compose.camera-agent.yml: every -f names an existing file; the -apps fragment follows the overlay"
 printf 'OPENNVR_EXAMPLE_COMPOSE=docker-compose.camera-agent.yml\nOPENNVR_EXAMPLE_PROFILE=camera-agent\n' > .env
 got=$(files_of "$(compose_args)")
+missing=""; for f in $got; do [[ -f "$f" ]] || missing="$missing $f"; done
 ov=$(printf '%s\n' "$got" | grep -nx 'docker-compose.accel-qualcomm.yml' | cut -d: -f1)
-ag=$(printf '%s\n' "$got" | grep -nx 'docker-compose.accel-qualcomm-agent.yml' | cut -d: -f1)
-if [[ -n "$ov" && -n "$ag" && "$ag" -gt "$ov" ]]; then pass
-else fail "files: $(echo "$got" | tr '\n' ' ')"; fi
+fr=$(printf '%s\n' "$got" | grep -nx 'docker-compose.accel-qualcomm-apps.yml' | cut -d: -f1)
+if [[ -z "$missing" && -n "$ov" && -n "$fr" && "$fr" -gt "$ov" ]]; then pass
+else fail "missing:$missing files: $(echo "$got" | tr '\n' ' ')"; fi
 
 # ── 4. No apps file at all: no -apps fragment ──
 start_test "OPENNVR_DEFAULT_APPS=off and no apps pick: the overlay alone, no -apps fragment"
@@ -157,6 +160,50 @@ start_test "flags off: no --profile descriptions"
 printf 'OPENNVR_EXAMPLE_COMPOSE=\nOPENNVR_EXAMPLE_PROFILE=\nEVENTS_CAPTION_ENRICHMENT=false\nEVENTS_DESCRIPTOR_ENRICHMENT=false\n' > .env
 got=$(profiles_of "$(compose_args)")
 if ! printf '%s\n' "$got" | grep -qx 'descriptions'; then pass
+else fail "profiles: $(echo "$got" | tr '\n' ' ')"; fi
+
+# ── 4d. The embeddings flag starts the embedders ──
+start_test "EVENTS_EMBED_ENRICHMENT=true: --profile embeddings is added"
+printf 'OPENNVR_EXAMPLE_COMPOSE=\nOPENNVR_EXAMPLE_PROFILE=\nEVENTS_EMBED_ENRICHMENT=true\n' > .env
+got=$(profiles_of "$(compose_args)")
+if printf '%s\n' "$got" | grep -qx 'embeddings'; then pass
+else fail "profiles: $(echo "$got" | tr '\n' ' ')"; fi
+
+start_test "embeddings already picked (the qualcomm fill's way): no second --profile embeddings"
+printf 'OPENNVR_EXAMPLE_COMPOSE=\nOPENNVR_EXAMPLE_PROFILE=embeddings\nEVENTS_EMBED_ENRICHMENT=true\n' > .env
+got=$(profiles_of "$(compose_args)")
+if [[ "$(printf '%s\n' "$got" | grep -cx 'embeddings')" == 1 ]]; then pass
+else fail "profiles: $(echo "$got" | tr '\n' ' ')"; fi
+
+start_test "EVENTS_EMBED_ENRICHMENT=false: no --profile embeddings"
+printf 'OPENNVR_EXAMPLE_COMPOSE=\nOPENNVR_EXAMPLE_PROFILE=\nEVENTS_EMBED_ENRICHMENT=false\n' > .env
+got=$(profiles_of "$(compose_args)")
+if ! printf '%s\n' "$got" | grep -qx 'embeddings'; then pass
+else fail "profiles: $(echo "$got" | tr '\n' ' ')"; fi
+
+# ── 4e. Voice search starts the speech adapter ──
+start_test "VOICE_SEARCH=on and no voice agent: --profile voice is added"
+printf 'OPENNVR_EXAMPLE_COMPOSE=\nOPENNVR_EXAMPLE_PROFILE=\nVOICE_SEARCH=on\n' > .env
+got=$(profiles_of "$(compose_args)")
+if printf '%s\n' "$got" | grep -qx 'voice'; then pass
+else fail "profiles: $(echo "$got" | tr '\n' ' ')"; fi
+
+start_test "VOICE_SEARCH=on with the chat agent: --profile voice is still added (chat carries no speech adapter)"
+printf 'OPENNVR_EXAMPLE_COMPOSE=docker-compose.camera-agent.yml\nOPENNVR_EXAMPLE_PROFILE=camera-agent-chat\nVOICE_SEARCH=on\n' > .env
+got=$(profiles_of "$(compose_args)")
+if printf '%s\n' "$got" | grep -qx 'voice'; then pass
+else fail "profiles: $(echo "$got" | tr '\n' ' ')"; fi
+
+start_test "VOICE_SEARCH=on with the voice agent: no --profile voice on top"
+printf 'OPENNVR_EXAMPLE_COMPOSE=docker-compose.camera-agent.yml\nOPENNVR_EXAMPLE_PROFILE=camera-agent\nVOICE_SEARCH=on\n' > .env
+got=$(profiles_of "$(compose_args)")
+if ! printf '%s\n' "$got" | grep -qx 'voice'; then pass
+else fail "profiles: $(echo "$got" | tr '\n' ' ')"; fi
+
+start_test "VOICE_SEARCH unset: no --profile voice"
+printf 'OPENNVR_EXAMPLE_COMPOSE=\nOPENNVR_EXAMPLE_PROFILE=\n' > .env
+got=$(profiles_of "$(compose_args)")
+if ! printf '%s\n' "$got" | grep -qx 'voice'; then pass
 else fail "profiles: $(echo "$got" | tr '\n' ' ')"; fi
 
 # ── 5. The intel flavour follows the same rule ──

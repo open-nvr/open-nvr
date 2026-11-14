@@ -203,6 +203,16 @@ async def resolve_stt_adapter() -> str | None:
     return found[0] if found else None
 
 
+async def voice_status() -> dict[str, Any]:
+    """Whether a spoken search can be transcribed on this box, and by
+    which adapter — asked by the search page before it shows the
+    microphone, so nobody is invited to speak to a box that cannot
+    listen (voice search needs the `voice` profile, VOICE_SEARCH=on, or
+    the voice agent)."""
+    adapter = await resolve_stt_adapter()
+    return {"available": adapter is not None, "adapter": adapter}
+
+
 async def transcribe(audio_bytes: bytes, *, language: str = "en") -> tuple[str | None, str | None]:
     """``(transcript, adapter)`` through KAI-C; ``(None, None)`` with no
     adapter, ``("", adapter)`` when it heard nothing."""

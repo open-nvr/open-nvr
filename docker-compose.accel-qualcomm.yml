@@ -14,11 +14,11 @@
 # fragment per file, and start.sh appends each fragment only when its file
 # is in the set:
 #   docker-compose.accel-qualcomm-apps.yml   the adapters of docker-compose.apps.yml
-#                                            (pose, faces, packages, plates, the embedder)
-#   docker-compose.accel-qualcomm-agent.yml  speech to text of
-#                                            docker-compose.camera-agent.yml
-#                                            (the captioner rides the -apps
-#                                            fragment with the apps file)
+#                                            (pose, faces, packages, plates, the
+#                                            embedder, the captioner, speech to text)
+# docker-compose.camera-agent.yml defines no model service of its own any
+# more (the captioner and speech to text moved to the apps file,
+# 2026-11-14), so there is no -agent fragment.
 # An override of a service no file in the set defines is a service with no
 # image, and Compose 2.24 (the board's distro package) rejects the whole
 # project for it — a plain install without the camera agent could not start

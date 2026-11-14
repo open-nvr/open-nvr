@@ -91,7 +91,9 @@ SELECTABLE_SERVICES = {
     # 2026-11-14 so visit descriptions work without the agent).
     "docker-compose.apps.yml:caption-adapter": (
         "CAPTION_ADAPTER", ("ollamavlm", "moondream", "blip", "litertlm")),
-    "docker-compose.camera-agent.yml:whisper-adapter": (
+    # Speech to text rides the apps overlay too (moved 2026-11-14 so voice
+    # search works without the agent).
+    "docker-compose.apps.yml:whisper-adapter": (
         "STT_ADAPTER", ("parakeet", "whisper")),
 }
 
@@ -303,3 +305,19 @@ def test_the_captioner_is_defined_where_every_install_has_it():
     for svc in ("camera-agent", "camera-agent-chat"):
         deps = (agent["services"][svc].get("depends_on") or {})
         assert "caption-adapter" in deps, f"{svc} no longer depends on the captioner"
+
+
+def test_speech_to_text_is_defined_where_every_install_has_it():
+    """Voice search on the search page needs the speech adapter whether or
+    not anyone runs the camera agent; it lived in the agent's file (voice
+    profile only) until 2026-11-14. The `voice` profile starts it alone;
+    the voice agent still depends on it."""
+    where = {f for f, s, _svc in _adapter_services() if s == "whisper-adapter"}
+    assert where == {"docker-compose.apps.yml"}, where
+    apps = yaml.safe_load((ROOT / "docker-compose.apps.yml").read_text()) or {}
+    stt = apps["services"]["whisper-adapter"]
+    assert {"voice", "camera-agent"} <= set(stt["profiles"])
+    assert "whisper-register" in apps["services"]
+    agent = yaml.safe_load((ROOT / "docker-compose.camera-agent.yml").read_text()) or {}
+    assert "whisper-adapter" not in (agent.get("services") or {})
+    assert "whisper-adapter" in (agent["services"]["camera-agent"].get("depends_on") or {})

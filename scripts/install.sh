@@ -1308,22 +1308,7 @@ choose_example() {
         elif [[ "$SUGGEST_CAPTION_ADAPTER" == "litertlm" ]]; then
             caption_default="litertlm"
         fi
-        configure_value CAPTION_ADAPTER "Scene-description model" "$caption_default" \
-            "Describes what a camera sees. moondream runs inside Docker (0.5B, answers questions, the right pick without a CUDA GPU — on CPU it is ~10x faster than Ollama's 1.8B moondream); blip runs inside Docker (plain captions only, fastest); ollamavlm proxies to your Ollama (only worth it on an NVIDIA GPU; needs an adapter tag newer than 0.1.3); litertlm runs Gemma 4 E2B on the Qualcomm Hexagon NPU (Dragonwing / Snapdragon boards only; a 2.7 GB one-time download; the -qualcomm image tag, which start.sh fills in)." "yes" \
-            "moondream | blip | ollamavlm | litertlm — all local."
-        if [[ "$(env_get CAPTION_ADAPTER)" == "litertlm" && -z "$(env_get CAPTION_ADAPTER_TAG)" ]]; then
-            # The NPU captioner is published only as a -qualcomm image. The
-            # installer pulls the camera-agent set a few lines below, and a
-            # pull of litertlm-adapter:<ADAPTER_TAG> (no suffix) aborts the
-            # whole pull with "not found" — the first fresh install of
-            # 0.1.11 on a Ventuno Q died exactly there (2026-11-13). So the
-            # tag is pinned here, where the choice is made, not deferred to
-            # start.sh (whose fill also skipped it, see fill_qualcomm_captioner).
-            local qtag; qtag="$(env_get ADAPTER_TAG)"
-            qtag="${qtag:-latest}-qualcomm"
-            env_set CAPTION_ADAPTER_TAG "$qtag"
-            info "litertlm runs from the -qualcomm image: CAPTION_ADAPTER_TAG=${qtag}."
-        fi
+        configure_caption_adapter "$caption_default"
         # ollamavlm chosen → suggest a VLM sized like the LLM was.
         if [[ "$(env_get CAPTION_ADAPTER)" == "ollamavlm" ]]; then
             # Chosen where it was not suggested (no CUDA GPU, or no RAM
@@ -1349,6 +1334,7 @@ choose_example() {
         # defaulting off, and a pre-existing .env keeps the last answer.
         # After CAPTION_ADAPTER on purpose: the answer depends on it.
         configure_enrichment_flags
+        ENRICHMENT_ASKED=true
     fi
     if [[ "$EXAMPLE_NAME" != "camera-agent" ]]; then
         # Catalog apps are not prompted here: their knobs (cameras, zones,
@@ -1427,6 +1413,137 @@ ask_one_click_apps() {
     fi
 }
 
+# configure_caption_adapter <default> → the "which captioner" question and,
+# for litertlm, the -qualcomm tag. Shared by the Camera Agent's block
+# (which sizes its default against the LLM) and the plain install.
+configure_caption_adapter() {
+    local caption_default="$1"
+    configure_value CAPTION_ADAPTER "Scene-description model" "$caption_default" \
+        "Describes what a camera sees. moondream runs inside Docker (0.5B, answers questions, the right pick without a CUDA GPU — on CPU it is ~10x faster than Ollama's 1.8B moondream); blip runs inside Docker (plain captions only, fastest); ollamavlm proxies to your Ollama (only worth it on an NVIDIA GPU; needs an adapter tag newer than 0.1.3, and OLLAMA_EXTERNAL_URL without the Camera Agent); litertlm runs Gemma 4 E2B on the Qualcomm Hexagon NPU (Dragonwing / Snapdragon boards only; a 2.7 GB one-time download; the -qualcomm image tag, which start.sh fills in)." "yes" \
+        "moondream | blip | ollamavlm | litertlm — all local."
+    if [[ "$(env_get CAPTION_ADAPTER)" == "litertlm" && -z "$(env_get CAPTION_ADAPTER_TAG)" ]]; then
+        # The NPU captioner is published only as a -qualcomm image. The
+        # installer pulls the picked set a few lines below, and a pull of
+        # litertlm-adapter:<ADAPTER_TAG> (no suffix) aborts the whole pull
+        # with "not found" — the first fresh install of 0.1.11 on a Ventuno
+        # Q died exactly there (2026-11-13). So the tag is pinned here,
+        # where the choice is made, not deferred to start.sh (whose fill
+        # also skipped it, see fill_qualcomm_captioner).
+        local qtag; qtag="$(env_get ADAPTER_TAG)"
+        qtag="${qtag:-latest}-qualcomm"
+        env_set CAPTION_ADAPTER_TAG "$qtag"
+        info "litertlm runs from the -qualcomm image: CAPTION_ADAPTER_TAG=${qtag}."
+    fi
+}
+
+# Visit descriptions and search by meaning are core features: the
+# captioner and the embedders run from docker-compose.apps.yml, which
+# every stock install carries, so they are asked on EVERY install. Until
+# the captioner moved there (2026-11-14) these questions lived inside the
+# Camera Agent's block only, and a plain install kept .env.example's
+# "true" for both description flags — harmless while nothing ran a
+# captioner, and a CPU captioner on every visit the moment one did.
+ENRICHMENT_ASKED=false
+configure_descriptions_and_search() {
+    if [[ "$ENRICHMENT_ASKED" != true ]]; then
+        [[ -n "${HW_ACCEL:-}" ]] || detect_llm_hardware container
+        # The captioner the flavour runs best, written only where .env has
+        # none yet (a fresh file carries .env.example's value, not an
+        # answer): Gemma on the Hexagon NPU on a Qualcomm board, the
+        # in-container moondream everywhere else — ollamavlm needs an
+        # Ollama, which without the agent means OLLAMA_EXTERNAL_URL.
+        local suggested="moondream"
+        [[ "$HW_ACCEL" == "qualcomm" ]] && suggested="litertlm"
+        if [[ "${FRESH_ENV:-false}" == "true" || -z "$(env_get CAPTION_ADAPTER)" ]]; then
+            env_set CAPTION_ADAPTER "$suggested"
+            [[ "$suggested" == "litertlm" ]] || env_set CAPTION_ADAPTER_TAG ""
+        fi
+        printf '\n  ── Visit descriptions and search ──────────────────────\n'
+        configure_enrichment_flags
+        if [[ "$(env_get EVENTS_CAPTION_ENRICHMENT)" == "true" ]]; then
+            configure_caption_adapter "$(env_get CAPTION_ADAPTER)"
+        fi
+        ENRICHMENT_ASKED=true
+    fi
+    configure_embeddings_flag
+    configure_voice_search
+}
+
+# configure_voice_search → writes VOICE_SEARCH. Speaking a search into the
+# search page needs the speech-to-text adapter (docker-compose.apps.yml,
+# profile `voice`), which start.sh starts when this is on. The voice
+# agent carries the same adapter, so with it picked the answer is on and
+# nothing is asked. Default on where the adapter has the Qualcomm NPU
+# (Whisper on the Hexagon, 361 ms an utterance measured on a Ventuno Q),
+# off on the CPU, where a speech model stays loaded for the odd spoken
+# search. An existing .env keeps the operator's last answer.
+configure_voice_search() {
+    if [[ ",${EXAMPLE_PROFILE:-}," == *,camera-agent,* ]]; then
+        env_set VOICE_SEARCH on
+        ok "Voice search: on (the Camera Agent's speech adapter serves the search page too)"
+        return 0
+    fi
+    local cur default="n" where
+    cur=$(env_get VOICE_SEARCH)
+    [[ "${FRESH_ENV:-false}" == "true" ]] && cur=""
+    if [[ -n "$cur" ]]; then
+        [[ "$cur" == "on" ]] && default="y"
+    elif [[ "${HW_ACCEL:-cpu}" == "qualcomm" ]]; then
+        default="y"
+    fi
+    if [[ "${HW_ACCEL:-cpu}" == "qualcomm" ]]; then
+        where="Whisper on the Hexagon NPU, under half a second an utterance"
+    else
+        where="a speech model on the CPU, loaded all the time for the odd spoken search — leave it off on a small box"
+    fi
+    printf '\n'
+    explain "Voice search: speak a search into the search page instead of typing it; the clip is transcribed on this box and nothing leaves it. The speech adapter runs in its own container, here ${where}." \
+        "no" "$default" \
+        "Hardware detected: ${HW_ACCEL:-cpu}. Turn on later: VOICE_SEARCH=on in .env, then ./start.sh up."
+    if ask_yes_no "Voice search (speak your searches)?" "$default"; then
+        env_set VOICE_SEARCH on
+        ok "Voice search: on"
+    else
+        env_set VOICE_SEARCH off
+        info "Voice search: off (later: VOICE_SEARCH=on in .env, then ./start.sh up)"
+    fi
+}
+
+# configure_embeddings_flag → writes EVENTS_EMBED_ENRICHMENT. One picture
+# vector per visit, so Footage Search finds "a person by the gate at
+# night" from the frame itself. The embedder is its own container in
+# docker-compose.apps.yml; start.sh starts it whenever the flag is true.
+# Default on where the embedder has an accelerator (the Qualcomm NPU,
+# where start.sh's fill switches it on anyway), off on the CPU, where it
+# is a model call per visit beside detection and recording. An existing
+# .env keeps the operator's last answer.
+configure_embeddings_flag() {
+    local cur default="n" where
+    cur=$(env_get EVENTS_EMBED_ENRICHMENT)
+    [[ "${FRESH_ENV:-false}" == "true" ]] && cur=""
+    if [[ -n "$cur" ]]; then
+        [[ "$cur" == "true" ]] && default="y"
+    elif [[ "${HW_ACCEL:-cpu}" == "qualcomm" ]]; then
+        default="y"
+    fi
+    if [[ "${HW_ACCEL:-cpu}" == "qualcomm" ]]; then
+        where="on the Hexagon NPU, cheap beside the detector"
+    else
+        where="on the CPU, a model call per visit beside detection and recording — leave it off unless traffic is light"
+    fi
+    printf '\n'
+    explain "Search by meaning: one picture vector per visit, so Footage Search finds 'a person by the gate at night' from the frame itself, not only from labels and plates. The embedder runs in its own container, here ${where}. Visits recorded while it is off can be embedded later from Footage Search -> Configure -> Backfill history." \
+        "no" "$default" \
+        "Hardware detected: ${HW_ACCEL:-cpu}. Turn on later: EVENTS_EMBED_ENRICHMENT=true in .env, then ./start.sh up. Cameras are picked in Footage Search -> Configure -> Cameras."
+    if ask_yes_no "Search by meaning (frame embeddings)?" "$default"; then
+        env_set EVENTS_EMBED_ENRICHMENT true
+        ok "Search by meaning: on (pick the cameras in Footage Search -> Configure -> Cameras)"
+    else
+        env_set EVENTS_EMBED_ENRICHMENT false
+        info "Search by meaning: off (later: EVENTS_EMBED_ENRICHMENT=true in .env, then ./start.sh up)"
+    fi
+}
+
 pull_and_build() {
     printf '\n'
     info "First-time setup downloads several container images (and, for the"
@@ -1439,6 +1556,7 @@ pull_and_build() {
     docker compose -f "$BASE_COMPOSE" pull --ignore-buildable
 
     choose_example
+    configure_descriptions_and_search
     ask_one_click_apps
     check_docker_vm_allowance
     COMPOSE_ARGS=(-f "$BASE_COMPOSE")

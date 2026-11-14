@@ -8,6 +8,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Voice search without the Camera Agent.** The speech-to-text adapter
+  lived in the agent's compose file under its voice profile, so speaking
+  a search into the search page needed the agent installed in voice
+  mode, and the page showed a microphone that answered "no speech to
+  text" only after you had spoken. The adapter and its registration job
+  now live in the apps overlay under a `voice` profile; the installers
+  ask "Voice search?" (`VOICE_SEARCH=on`, default on where the adapter
+  has the Qualcomm NPU, off on the CPU, on without asking when the voice
+  agent is picked) and `start.sh` starts it from the answer. The page
+  asks the box first (`GET /search/transcribe/status`) and shows the
+  microphone only when an adapter can hear. The qualcomm flavour's
+  `-agent` fragment is gone: the agent's file defines no model service
+  of its own any more.
+
 - **One-click app install and removal, offered by the installer.** The
   installer asks "Install and remove apps with one click?" (default yes)
   and writes `APP_INSTALLER=on` and `APPS_INSTALL_ENABLED=true`; the
@@ -19,6 +33,32 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   removed with one click like the catalog apps.
 
 ### Fixed
+
+- **Search by meaning can be switched on without editing .env, and the
+  flag now starts the embedders.** `EVENTS_EMBED_ENRICHMENT=true` alone
+  started nothing: only the qualcomm flavour added the `embeddings`
+  profile itself, and the installer never asked, so on a CPU install
+  semantic search was two hand edits away and search matched labels and
+  plates only. `start.sh` and `start.ps1` now enable the `embeddings`
+  profile wherever the flag is true, and both installers ask "Search by
+  meaning?" on every install (default on where the embedder has the
+  Qualcomm NPU, off on the CPU). The visit-description question moved
+  out of the Camera Agent's block for the same reason: with the captioner
+  in the apps overlay, a plain install that never answered it would have
+  kept the example file's "true" and run the CPU captioner on every
+  visit. Both questions are now asked on every install.
+
+- **Enter at the network menu now means Simple, as the menu says.**
+  On a box with several routable interfaces (WiFi beside a cable, a VPN
+  such as Tailscale) `./start.sh up` asks how the network is set up. An
+  empty answer was a hidden "skip for now": nginx bound to every
+  interface, but no stream address or WebRTC hosts were written, so the
+  stack came up with live view pointing at localhost and the menu asked
+  again at every start — and an operator who pressed Enter expecting
+  the default got a half-configured install with no error (the Ventuno Q
+  handover install). Enter now takes Simple, the prompt shows `[1]`, and
+  the three reads in that menu survive an end of input instead of
+  killing the launcher under `set -e`. Typing `l` still means "later".
 
 - **Visit descriptions no longer need the Camera Agent.** The captioner
   was defined in the agent's compose file, so an install without the

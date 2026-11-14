@@ -17,6 +17,7 @@ os.environ.setdefault("MEDIAMTX_SECRET", secrets.token_hex(32))
 os.environ.setdefault("INTERNAL_API_KEY", secrets.token_urlsafe(48))
 os.environ.setdefault("CREDENTIAL_ENCRYPTION_KEY", Fernet.generate_key().decode())
 
+from services import search_voice  # noqa: E402
 from services.search_voice import spoken_to_text, transcript_from  # noqa: E402
 
 
@@ -58,3 +59,20 @@ def test_transcript_from_reads_the_shapes_adapters_answer():
     assert transcript_from({"text": "flat"}) == "flat"
     assert transcript_from({"result": {"segments": [{"text": "a"}, {"text": "b"}]}}) == "a b"
     assert transcript_from({"result": {}}) == "" and transcript_from(None) == ""
+
+
+@pytest.mark.asyncio
+async def test_voice_status_says_whether_a_spoken_search_can_be_heard(monkeypatch):
+    """The search page shows the microphone only when an adapter advertises
+    speech to text; before this the page learnt it after the operator had
+    spoken (503 no-stt)."""
+    async def none():
+        return None
+
+    async def whisper():
+        return "whisper"
+
+    monkeypatch.setattr(search_voice, "resolve_stt_adapter", none)
+    assert await search_voice.voice_status() == {"available": False, "adapter": None}
+    monkeypatch.setattr(search_voice, "resolve_stt_adapter", whisper)
+    assert await search_voice.voice_status() == {"available": True, "adapter": "whisper"}

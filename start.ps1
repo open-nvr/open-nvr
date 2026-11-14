@@ -104,6 +104,16 @@ function Get-ComposeArgs {
         $profiles = @($exampleProfile -split "," | Where-Object { $_ })
         foreach ($p in @("camera-agent", "camera-agent-chat", "enrichment", "descriptions")) { if ($profiles -contains $p) { $wantCaptions = $false } }
         if ($wantCaptions) { $args += @("--profile", "descriptions") }
+        # Search by meaning: the embedders run whenever EVENTS_EMBED_ENRICHMENT
+        # is true. Mirrors compose_args in start.sh.
+        $wantEmbeddings = (Get-EnvVar "EVENTS_EMBED_ENRICHMENT") -eq "true"
+        foreach ($p in @("embeddings", "enrichment")) { if ($profiles -contains $p) { $wantEmbeddings = $false } }
+        if ($wantEmbeddings) { $args += @("--profile", "embeddings") }
+        # Voice search: VOICE_SEARCH=on starts the speech adapter unless the
+        # voice agent, which carries it, is picked. Mirrors compose_args.
+        if (((Get-EnvVar "VOICE_SEARCH") -eq "on") -and -not ($profiles -contains "camera-agent") -and -not ($profiles -contains "voice")) {
+            $args += @("--profile", "voice")
+        }
     }
     # One-click app install/removal from the App Catalog (docs/APPS_INSTALL.md):
     # the app-installer overlay, the one container that holds the Docker

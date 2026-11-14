@@ -895,6 +895,7 @@ function Choose-Example {
                 Set-EnvValue EVENTS_DESCRIPTOR_ENRICHMENT 'false'
             }
         }
+        $script:EnrichmentAsked = $true
     }
     if (($names -join ',') -ne 'camera-agent') {
         # Catalog apps are not prompted here: their knobs live in the App
@@ -936,6 +937,74 @@ function Check-DockerVmAllowance {
     }
 }
 
+# Visit descriptions and search by meaning are core features: the captioner
+# and the embedders run from docker-compose.apps.yml, which every stock
+# install carries, so they are asked on EVERY install, not only with the
+# Camera Agent (whose block above asks the description question with its
+# own sizing). Mirrors configure_descriptions_and_search in install.sh.
+$script:EnrichmentAsked = $false
+function Configure-DescriptionsAndSearch {
+    if (-not $script:EnrichmentAsked) {
+        # The in-container moondream is the captioner without a CUDA GPU;
+        # a fresh .env carries .env.example's value, not an answer.
+        if ($script:FreshEnv -or [string]::IsNullOrWhiteSpace((Get-EnvValue CAPTION_ADAPTER))) {
+            Set-EnvValue CAPTION_ADAPTER 'moondream'
+        }
+        $cur = Get-EnvValue EVENTS_CAPTION_ENRICHMENT
+        if ($script:FreshEnv) { $cur = '' }
+        $default = ($cur -eq 'true')
+        Write-Host ''
+        Explain "Describe every recorded visit in the background (a caption plus colour/type questions per visit) so search matches words like 'white van'. Here the captioner (moondream) runs on the CPU: it takes seconds per image and a busy camera outruns it, so the work burns CPU the detector and recorder need and saves nothing. Leave it off unless traffic is light. Anything recorded meanwhile can be described later: set both flags to true together with EVENTS_ENRICHMENT_BACKFILL=true." `
+            'no' $(if ($default) { 'y' } else { 'n' }) `
+            'Turn on later by setting EVENTS_CAPTION_ENRICHMENT=true and EVENTS_DESCRIPTOR_ENRICHMENT=true in .env.'
+        if (Ask-YesNo 'Describe every recorded visit in the background?' $default) {
+            Set-EnvValue EVENTS_CAPTION_ENRICHMENT 'true'
+            Set-EnvValue EVENTS_DESCRIPTOR_ENRICHMENT 'true'
+            Configure-Value CAPTION_ADAPTER 'Scene-description model' (Get-EnvValue CAPTION_ADAPTER) `
+                "Describes what a camera sees. moondream runs inside Docker (0.5B, answers questions, the right pick without a CUDA GPU); blip runs inside Docker (plain captions only, fastest); ollamavlm proxies to your Ollama (only worth it on an NVIDIA GPU; needs OLLAMA_EXTERNAL_URL without the Camera Agent)." 'yes' `
+                'moondream | blip | ollamavlm - all local.'
+        } else {
+            Set-EnvValue EVENTS_CAPTION_ENRICHMENT 'false'
+            Set-EnvValue EVENTS_DESCRIPTOR_ENRICHMENT 'false'
+        }
+        $script:EnrichmentAsked = $true
+    }
+    # Search by meaning: one picture vector per visit; the embedder runs in
+    # its own container whenever EVENTS_EMBED_ENRICHMENT is true. On the CPU
+    # it is a model call per visit beside detection and recording.
+    $curE = Get-EnvValue EVENTS_EMBED_ENRICHMENT
+    if ($script:FreshEnv) { $curE = '' }
+    $defaultE = ($curE -eq 'true')
+    Write-Host ''
+    Explain "Search by meaning: one picture vector per visit, so Footage Search finds 'a person by the gate at night' from the frame itself, not only from labels and plates. The embedder runs in its own container, here on the CPU, a model call per visit beside detection and recording - leave it off unless traffic is light. Visits recorded while it is off can be embedded later from Footage Search > Configure > Backfill history." `
+        'no' $(if ($defaultE) { 'y' } else { 'n' }) `
+        'Turn on later: EVENTS_EMBED_ENRICHMENT=true in .env, then .\start.ps1 up. Cameras are picked in Footage Search > Configure > Cameras.'
+    if (Ask-YesNo 'Search by meaning (frame embeddings)?' $defaultE) {
+        Set-EnvValue EVENTS_EMBED_ENRICHMENT 'true'; Ok 'Search by meaning: on (pick the cameras in Footage Search > Configure > Cameras)'
+    } else {
+        Set-EnvValue EVENTS_EMBED_ENRICHMENT 'false'; Info 'Search by meaning: off (later: EVENTS_EMBED_ENRICHMENT=true in .env, then .\start.ps1 up)'
+    }
+    # Voice search: the speech adapter (docker-compose.apps.yml, profile
+    # `voice`) starts when VOICE_SEARCH=on; the voice agent carries it
+    # already. Mirrors configure_voice_search in install.sh.
+    if (@($script:ExampleProfile -split ',') -contains 'camera-agent') {
+        Set-EnvValue VOICE_SEARCH 'on'; Ok "Voice search: on (the Camera Agent's speech adapter serves the search page too)"
+        return
+    }
+    $curV = Get-EnvValue VOICE_SEARCH
+    if ($script:FreshEnv) { $curV = '' }
+    $defaultV = ($curV -eq 'on')
+    Write-Host ''
+    Explain 'Voice search: speak a search into the search page instead of typing it; the clip is transcribed on this box and nothing leaves it. The speech adapter runs in its own container, here a speech model on the CPU, loaded all the time for the odd spoken search - leave it off on a small box.' `
+        'no' $(if ($defaultV) { 'y' } else { 'n' }) `
+        'Turn on later: VOICE_SEARCH=on in .env, then .\start.ps1 up.'
+    if (Ask-YesNo 'Voice search (speak your searches)?' $defaultV) {
+        Set-EnvValue VOICE_SEARCH 'on'; Ok 'Voice search: on'
+    } else {
+        Set-EnvValue VOICE_SEARCH 'off'; Info 'Voice search: off (later: VOICE_SEARCH=on in .env, then .\start.ps1 up)'
+    }
+}
+
 function Pull-AndBuild {
     Write-Host ''
     Info 'First-time setup downloads several container images (and, for the'
@@ -948,6 +1017,7 @@ function Pull-AndBuild {
     docker compose -f $BaseCompose pull --ignore-buildable
     if ($LASTEXITCODE -ne 0) { Fail 'Failed to pull the core stack' }
     Choose-Example
+    Configure-DescriptionsAndSearch
     Check-DockerVmAllowance
     $script:ComposeArgs = @('-f', $BaseCompose)
     if ($script:ExampleCompose) {
