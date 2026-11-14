@@ -20,6 +20,18 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Enter at the network menu now means Simple, as the menu says.**
+  On a box with several routable interfaces (WiFi beside a cable, a VPN
+  such as Tailscale) `./start.sh up` asks how the network is set up. An
+  empty answer was a hidden "skip for now": nginx bound to every
+  interface, but no stream address or WebRTC hosts were written, so the
+  stack came up with live view pointing at localhost and the menu asked
+  again at every start — and an operator who pressed Enter expecting
+  the default got a half-configured install with no error (the Ventuno Q
+  handover install). Enter now takes Simple, the prompt shows `[1]`, and
+  the three reads in that menu survive an end of input instead of
+  killing the launcher under `set -e`. Typing `l` still means "later".
+
 - **Visit descriptions no longer need the Camera Agent.** The captioner
   was defined in the agent's compose file, so an install without the
   agent had no captioner: the description flags described nothing, and

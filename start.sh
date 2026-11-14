@@ -1534,8 +1534,17 @@ prompt_nic_topology() {
     echo -e "    ${WHITE}3)${NC} ${WHITE}Not sure${NC} ${GRAY}— I'll pick the safe default (Simple) for you.${NC}" >&2
     echo "" >&2
 
+    # Enter takes Simple, the safe default the menu promises. An empty
+    # answer used to be a hidden "skip for now": nginx bound to 0.0.0.0
+    # but no stream address or WebRTC hosts were written, so the stack
+    # came up with live view pointing at localhost, and the menu asked
+    # again at every up. On a box with several interfaces (WiFi and a
+    # VPN) an operator who pressed Enter here got a half-configured
+    # install and no error (Ventuno Q, 2026-11-13). The read tolerates
+    # EOF (set -e; same rule as the installer's prompts).
     local choice
-    read -rp "  Your choice [1/2/3]: " choice
+    read -rp "  Your choice [1]: " choice || true
+    choice="${choice:-1}"
     choice=$(echo "$choice" | tr '[:upper:]' '[:lower:]')
     # Normalise numeric choices to letter aliases so the case block
     # below stays compact. "3" = Not sure → defaults to Simple (= 1 = s).
@@ -1590,8 +1599,8 @@ prompt_nic_topology() {
             ;;
         d)
             local cam_choice mgmt_choice cam_iface mgmt_iface mgmt_ip
-            read -rp "  Which number is the CAMERA-LAN side?     [1-${n}]: " cam_choice
-            read -rp "  Which number is the OPERATOR-UPLINK side? [1-${n}]: " mgmt_choice
+            read -rp "  Which number is the CAMERA-LAN side?     [1-${n}]: " cam_choice || true
+            read -rp "  Which number is the OPERATOR-UPLINK side? [1-${n}]: " mgmt_choice || true
             # Validation: numeric, in range, distinct.
             if ! [[ "$cam_choice" =~ ^[0-9]+$ ]] || \
                [ "$cam_choice" -lt 1 ] || [ "$cam_choice" -gt "$n" ]; then
@@ -1652,7 +1661,7 @@ prompt_nic_topology() {
                 echo -e "  ${GRAY}    ./scripts/revert-camera-vlan-hardening.sh${NC}" >&2
                 echo "" >&2
                 local apply_choice
-                read -rp "  Apply hardening now? [y/N]: " apply_choice
+                read -rp "  Apply hardening now? [y/N]: " apply_choice || true
                 if [[ "$apply_choice" =~ ^[Yy]$ ]]; then
                     bash "$harden_script" \
                         --camera-iface "$cam_iface" \
@@ -1664,7 +1673,9 @@ prompt_nic_topology() {
             fi
             return 0
             ;;
-        l|"")
+        l)
+            # "Later": bind to every interface, write nothing, ask again
+            # at the next up. Typed on purpose only — Enter is Simple.
             export NGINX_BIND_HOST="0.0.0.0"
             echo "" >&2
             echo -e "  ${GRAY}Skipping for now. nginx will bind to 0.0.0.0:443.${NC}" >&2
