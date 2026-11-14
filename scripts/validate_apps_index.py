@@ -140,10 +140,16 @@ _SECRETISH_KEY_RE = re.compile(
 # button in the store UI — it is operator-EXECUTED content, so anything
 # free-form here (a `curl … | sh`) is a supply-chain hole, not a style
 # choice. One id-parameterised shape, nothing else.
-_COMMAND_TEMPLATE = (
-    "docker compose -f docker-compose.yml -f docker-compose.apps.yml "
-    "--profile apps up -d {id}"
-)
+#
+# No ``-f`` and no ``--profile``: start.sh persists the resolved compose
+# file set and profiles in .env (COMPOSE_FILE / COMPOSE_PROFILES), and a
+# bare ``docker compose`` in the checkout reads them. Naming the two
+# plain files by hand REPLACED that set — Compose then saw core and
+# MediaMTX with a different configuration and recreated them from the
+# plain files, dropping every overlay the operator runs (the webcam and
+# accelerator overlays on a Ventuno Q, 2026-11-13). Naming a service
+# whose profile is off enables that profile for the command.
+_COMMAND_TEMPLATE = "docker compose up -d {id}"
 
 # Compose service keys that grant host-level or network-level power an
 # App Store entry must never carry. `ports` publishes to the host (apps

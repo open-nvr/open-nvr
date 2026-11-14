@@ -599,6 +599,18 @@ compose_args() {
     # USB webcams: see webcams_usable and apply_host_env (which says why when
     # WEBCAMS=on cannot be honoured; this runs in a subshell, so it stays quiet).
     webcams_usable && args="$args -f docker-compose.webcams.yml"
+    # One-click app install/removal from the App Catalog
+    # (docs/APPS_INSTALL.md): the app-installer, the one container that
+    # holds the Docker socket. The installer asks; APP_INSTALLER=on in
+    # .env is the answer. The overlay mounts this checkout at ${PWD}, so
+    # the launcher must run from the repo root (it always does).
+    if [[ "$(get_env_var APP_INSTALLER)" == "on" ]]; then
+        if [[ -f docker-compose.installer.yml ]]; then
+            args="$args -f docker-compose.installer.yml --profile app-installer"
+        else
+            echo "APP_INSTALLER=on but docker-compose.installer.yml is missing" >&2
+        fi
+    fi
     local example_compose example_profile
     example_compose=$(get_env_var "OPENNVR_EXAMPLE_COMPOSE")
     example_profile=$(get_env_var "OPENNVR_EXAMPLE_PROFILE")

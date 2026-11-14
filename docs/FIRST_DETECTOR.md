@@ -168,8 +168,9 @@ self-registers with the app registry so it shows up in **Settings → App
 Catalog**:
 
 ```bash
-# from the repo root, on top of the standard stack:
-docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d
+# from the repo root, on top of the standard stack (.env carries the compose
+# file set start.sh resolved, the apps overlay included):
+docker compose --profile apps up -d
 ```
 
 Uncomment the `contract_port` / `opennvr_url` block in `config.yml` (the

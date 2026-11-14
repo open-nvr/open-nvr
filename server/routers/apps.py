@@ -37,6 +37,8 @@ Routes (mounted under ``/api/v1``):
 import ipaddress
 import logging
 import secrets
+import re
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -747,7 +749,29 @@ def _serialize_app(row: InstalledApp) -> dict[str, Any]:
         # The model skills a pick of this app brings to a camera.
         "skills": _app_tasks_of(row),
         "hardware": _hardware_of(row),
+        # The copy-paste that removes this app's container when one-click
+        # removal is off or refused — the catalog shows it beside the
+        # refusal instead of a bare "disabled" note.
+        "remove_command": removal_command(row.id),
     }
+
+
+# A compose service name as the app blocks spell them: kebab-case, nothing
+# a shell or ``docker compose`` could read as a flag.
+_SERVICE_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+def removal_command(app_id: str) -> str | None:
+    """The command that removes one installed app's container from the
+    OpenNVR host: ``docker compose rm -s -f <id>`` in the checkout, where
+    .env carries the compose file set start.sh resolved, so Compose finds
+    the service whatever overlay defines it. No ``-f``: an explicit file
+    list replaces that set (see scripts/validate_apps_index.py). ``None``
+    for an id that is not a compose service name — the card then shows
+    no command rather than one that cannot work."""
+    if not _SERVICE_ID_RE.fullmatch(app_id or ""):
+        return None
+    return f"docker compose rm -s -f {app_id}"
 
 
 def _hardware_of(row: InstalledApp) -> dict[str, Any] | None:
@@ -1877,6 +1901,53 @@ def _index_entry_or_404(app_id: str) -> IndexEntry:
     )
 
 
+# Official apps that ship their own compose overlay instead of a block in
+# docker-compose.apps.yml, so they are not in the curated index yet an
+# administrator installs and removes them like any other app. One-click
+# REMOVAL (never install) accepts them when a registration row exists:
+# teardown only selects a service by id (the reconciler ignores the row's
+# image on ``rm``), and the id is pinned here, so this widens nothing —
+# an app registering under some other name still gets a 404.
+OFFICIAL_OVERLAY_APPS: dict[str, str] = {
+    "camera-agent": "ghcr.io/open-nvr/camera-agent",
+}
+
+
+@dataclass(frozen=True)
+class _Removable:
+    """What ``_write_intent`` needs of an entry: the id that selects the
+    compose service and the image the intent row records."""
+
+    id: str
+    image: str
+    image_digest: str | None = None
+
+
+def _removable_entry_or_404(app_id: str, db: Session) -> IndexEntry | _Removable:
+    """The curated entry for ``app_id``, or — for an official overlay app
+    that is registered on this box — a stand-in carrying its id and
+    image. 404 for anything else, as for install."""
+    try:
+        return _index_entry_or_404(app_id)
+    except HTTPException as e:
+        if e.status_code != status.HTTP_404_NOT_FOUND:
+            raise
+    image = OFFICIAL_OVERLAY_APPS.get(app_id)
+    registered = (
+        db.query(InstalledApp).filter(InstalledApp.id == app_id).first()
+        if image is not None else None
+    )
+    if registered is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                f"App '{app_id}' is not in the curated App Store index — "
+                "remove it with the command shown on its card"
+            ),
+        )
+    return _Removable(id=app_id, image=image)
+
+
 def _serialize_intent(row: AppInstallIntent) -> dict[str, Any]:
     """Wire shape of one desired-state install intent."""
     return {
@@ -1894,7 +1965,7 @@ def _serialize_intent(row: AppInstallIntent) -> dict[str, Any]:
 
 def _write_intent(
     db: Session,
-    entry: IndexEntry,
+    entry: IndexEntry | _Removable,
     *,
     desired: str,
     actor: str,
@@ -1991,12 +2062,13 @@ async def uninstall_app(
     """
     Opt-in one-click uninstall — flip the desired state to ``absent``.
 
-    Same gates as install (opt-in flag + apps.install + index-only).
-    Writes ``desired="absent"``, ``status="pending"`` on the intent row
-    and audits it; the reconciler brings the app's compose stack down.
+    Same gates as install (opt-in flag + apps.install + index-only, the
+    index widened by ``OFFICIAL_OVERLAY_APPS`` for removal). Writes
+    ``desired="absent"``, ``status="pending"`` on the intent row and
+    audits it; the reconciler brings the app's compose stack down.
     """
     _require_install_enabled()
-    entry = _index_entry_or_404(app_id)
+    entry = _removable_entry_or_404(app_id, db)
 
     row = _write_intent(
         db, entry, desired="absent", actor=current_user.username
@@ -2050,7 +2122,8 @@ async def get_install_status(
     has ever been written, returns ``desired=null, status="none"`` so the
     UI can distinguish "never requested" from "pending".
     """
-    _index_entry_or_404(app_id)  # index-only, even for reads
+    if app_id not in OFFICIAL_OVERLAY_APPS:
+        _index_entry_or_404(app_id)  # index-only, even for reads
 
     row = (
         db.query(AppInstallIntent)

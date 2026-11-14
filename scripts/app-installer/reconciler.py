@@ -81,13 +81,24 @@ logger = logging.getLogger("opennvr.app-installer")
 # against leading-dash flag injection like ``--remove-orphans``).
 _KEBAB_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
-# The compose files the reconciler drives, in overlay order. The apps
-# overlay carries the per-app service blocks; the base file carries the
-# core services they depend on / share a network with.
-DEFAULT_COMPOSE_FILES = ("docker-compose.yml", "docker-compose.apps.yml")
-# Compose profile the app service blocks live under (see
-# docker-compose.apps.yml — every app service is ``profiles: [apps]``).
-DEFAULT_PROFILE = "apps"
+# The compose files the reconciler names: NONE by default. It runs
+# ``docker compose`` in the checkout (the overlay mounts the repo at its
+# host path and sets working_dir), where .env carries the compose file
+# set and profiles start.sh resolved — COMPOSE_FILE / COMPOSE_PROFILES —
+# so an app comes up under the same overlays as the rest of the stack.
+# Naming the two plain files here REPLACED that set: Compose then saw
+# core and MediaMTX with a different configuration and recreated them
+# from the plain files, dropping the webcam and accelerator overlays on
+# a Ventuno Q (2026-11-13). INSTALLER_COMPOSE_FILES / INSTALLER_PROFILE
+# remain for a checkout that has no persisted set.
+DEFAULT_COMPOSE_FILES: tuple[str, ...] = ()
+# No ``--profile`` either: naming a service whose profile is off enables
+# that profile for the command (every app service is ``profiles: [apps,
+# <its id>, …]`` in docker-compose.apps.yml).
+DEFAULT_PROFILE = ""
+# The two apps a stock install runs (profile ``default-apps``); a restart
+# brings them back unless OPENNVR_DEFAULT_APPS=off.
+DEFAULT_APPS = ("occupancy-counting", "footage-search")
 # The egress proxy (scripts/egress-proxy) is upped with every install:
 # apps live on the internal ``opennvr_apps`` network and it is their
 # only way out. An already-running proxy is a no-op for compose.
@@ -268,8 +279,50 @@ def _compose_base(compose_files: tuple[str, ...], profile: str) -> list[str]:
     argv = ["docker", "compose"]
     for f in compose_files:
         argv += ["-f", f]
-    argv += ["--profile", profile]
+    if profile:
+        argv += ["--profile", profile]
     return argv
+
+
+def _env_values(env_text: str) -> dict[str, str]:
+    """``KEY=value`` lines of a .env file, quotes stripped; comments and
+    blank lines skipped. Enough for the two keys ``restart_hint`` reads."""
+    values: dict[str, str] = {}
+    for raw in env_text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+def restart_hint(app_id: str, env_text: str) -> str:
+    """What the operator must know after a teardown: ``rm`` removes the
+    container, but ``./start.sh up`` replays the picks in .env, so an app
+    named there comes back. The reconciler cannot edit .env (the repo is
+    mounted read-only), so it says so in the intent's message instead of
+    letting the app silently reappear. Empty when nothing restarts it."""
+    values = _env_values(env_text or "")
+    picked = {
+        p.strip()
+        for p in values.get("OPENNVR_EXAMPLE_PROFILE", "").split(",")
+        if p.strip()
+    }
+    if app_id in picked:
+        return (
+            f" Note: {app_id} is listed in OPENNVR_EXAMPLE_PROFILE in .env, "
+            "so the next ./start.sh up starts it again — remove it from "
+            "that line to keep it off."
+        )
+    default_apps = values.get("OPENNVR_DEFAULT_APPS", "").lower()
+    if app_id in DEFAULT_APPS and default_apps not in ("off", "false", "0", "no"):
+        return (
+            f" Note: {app_id} is one of the two default apps, so the next "
+            "./start.sh up starts it again — set OPENNVR_DEFAULT_APPS=off "
+            "in .env to keep both default apps off."
+        )
+    return ""
 
 
 def build_up_argv(
@@ -373,6 +426,7 @@ def reconcile_intent(
     compose_files: tuple[str, ...] = DEFAULT_COMPOSE_FILES,
     profile: str = DEFAULT_PROFILE,
     signing: SigningPolicy | None = None,
+    project_env: str = "",
 ) -> tuple[str, str]:
     """Reconcile ONE intent. Returns ``(status, message)``.
 
@@ -380,6 +434,9 @@ def reconcile_intent(
     pinned image must verify against its expected signer BEFORE compose
     runs; a refusal is a ``failed`` intent with the reason. ``None``
     (library default; main.py always passes one) skips the check.
+
+    ``project_env``: the text of the checkout's .env, read by the caller;
+    a teardown's message carries ``restart_hint`` from it.
 
     Pure except for the injected ``runner`` — no Docker, no DB. This is
     the function the unit tests drive with a fake runner.
@@ -474,7 +531,8 @@ def reconcile_intent(
         # No image override on teardown — ``rm`` doesn't resolve the image.
         result = runner(argv, None)
         if result.returncode == 0:
-            return "applied", (result.stdout or "compose down succeeded").strip()
+            message = (result.stdout or "compose down succeeded").strip()
+            return "applied", message + restart_hint(intent.id, project_env)
         return "failed", (
             result.stderr or f"compose down exited {result.returncode}"
         ).strip()
@@ -491,6 +549,7 @@ def reconcile_once(
     compose_files: tuple[str, ...] = DEFAULT_COMPOSE_FILES,
     profile: str = DEFAULT_PROFILE,
     signing: SigningPolicy | None = None,
+    project_env: str = "",
 ) -> list[tuple[str, str, str]]:
     """One reconcile sweep over every pending intent.
 
@@ -531,6 +590,7 @@ def reconcile_once(
             intent, runner,
             index=index, held_adapters=held,
             compose_files=compose_files, profile=profile, signing=signing,
+            project_env=project_env,
         )
         store.set_status(intent.id, status_, message, desired=intent.desired)
         outcomes.append((intent.id, status_, message))

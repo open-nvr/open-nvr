@@ -11,13 +11,20 @@
 # (Settings → App Catalog, backed by GET /api/v1/apps) with a live
 # status dot and an auto-generated config form.
 #
-# Run (from the repo root, on top of the standard stack):
+# Run (from the repo root, on top of the standard stack; .env carries the
+# compose file set start.sh resolved, this file included, so no -f — an
+# explicit file list replaces that set and recreates core and MediaMTX
+# from the plain files):
 #
-#     docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d
+#     docker compose --profile apps up -d
+#
+# One app, from the App Catalog's card:
+#
+#     docker compose up -d <id>            # remove: docker compose rm -s -f <id>
 #
 # Stop just the apps:
 #
-#     docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps down
+#     docker compose --profile apps stop
 #
 # One app (and only its adapters), by profile -- what scripts/install.sh
 # persists in OPENNVR_EXAMPLE_PROFILE when an operator picks apps at

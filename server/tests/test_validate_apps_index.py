@@ -80,10 +80,7 @@ _GOOD_ENTRY = {
             "    environment:\n"
             "      - OPENNVR_INTERNAL_API_KEY=${INTERNAL_API_KEY}\n"
         ),
-        "command": (
-            "docker compose -f docker-compose.yml -f docker-compose.apps.yml "
-            "--profile apps up -d sample-app"
-        ),
+        "command": "docker compose up -d sample-app",
     },
 }
 
@@ -368,10 +365,7 @@ def test_secret_in_command_fails(tmp_path):
     entry = dict(_GOOD_ENTRY)
     entry["install"] = dict(
         _GOOD_ENTRY["install"],
-        command=(
-            "docker compose -f docker-compose.yml -f docker-compose.apps.yml "
-            "--profile apps up -d sample-app"
-        ),
+        command="docker compose up -d sample-app",
     )
     # command must be canonical, so smuggle the secret check via a
     # canonical-shaped command failing the secret sniff separately:

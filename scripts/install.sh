@@ -1404,6 +1404,29 @@ check_docker_vm_allowance() {
     fi
 }
 
+# One-click app install/removal from Settings -> App Catalog
+# (docs/APPS_INSTALL.md): a small helper container, the app-installer,
+# holds the Docker socket and applies what an administrator clicks; the
+# web app itself never touches Docker, and the helper acts only on apps
+# from the curated catalog. Off, the catalog shows the command to run.
+ask_one_click_apps() {
+    local default=y
+    [[ "$(env_get APP_INSTALLER)" == "off" ]] && default=n
+    printf '\n  ── App Catalog ────────────────────────────────────────\n'
+    info "Apps can be installed and removed with one click from Settings -> App Catalog."
+    info "That runs a small helper container with access to Docker; it applies only"
+    info "apps from the curated catalog. Without it the catalog shows a command to run."
+    if ask_yes_no "Install and remove apps with one click?" "$default"; then
+        env_set APP_INSTALLER on
+        env_set APPS_INSTALL_ENABLED true
+        ok "One-click apps: on (the app-installer starts with OpenNVR)"
+    else
+        env_set APP_INSTALLER off
+        env_set APPS_INSTALL_ENABLED false
+        info "One-click apps: off (later: APP_INSTALLER=on and APPS_INSTALL_ENABLED=true in .env, then ./start.sh up)"
+    fi
+}
+
 pull_and_build() {
     printf '\n'
     info "First-time setup downloads several container images (and, for the"
@@ -1416,6 +1439,7 @@ pull_and_build() {
     docker compose -f "$BASE_COMPOSE" pull --ignore-buildable
 
     choose_example
+    ask_one_click_apps
     check_docker_vm_allowance
     COMPOSE_ARGS=(-f "$BASE_COMPOSE")
     if [[ -n "$EXAMPLE_COMPOSE" ]]; then
@@ -1431,6 +1455,11 @@ pull_and_build() {
         for p in ${EXAMPLE_PROFILE//,/ }; do COMPOSE_ARGS+=(--profile "$p"); done
         info "Pulling images for $EXAMPLE_NAME..."
         docker compose "${COMPOSE_ARGS[@]}" pull --ignore-buildable
+    fi
+    # The app-installer has no published image; build it here with the
+    # rest rather than at the first ``start.sh up``.
+    if [[ "$(env_get APP_INSTALLER)" == "on" && -f docker-compose.installer.yml ]]; then
+        COMPOSE_ARGS+=(-f docker-compose.installer.yml --profile app-installer)
     fi
     info "Building services that do not publish a pre-built image..."
     docker compose "${COMPOSE_ARGS[@]}" build
