@@ -80,7 +80,7 @@ else fail "$(grep -E 'FROM|COPY' <<<"$rendered")"; fi
 # ── The REAL start.sh functions ──
 extract() { awk "/^$1\\(\\) \\{/,/^\\}/" "$REPO_ROOT/start.sh"; }
 FUNCS=""
-for fn in get_env_var write_env_var set_env_var version_ge lan_discovery_core_ok accel_args compose_args captioner_file_in_set fill_qualcomm_captioner; do
+for fn in get_env_var write_env_var set_env_var version_ge lan_discovery_core_ok accel_args compose_args captioner_file_in_set fill_qualcomm_captioner prompt_nic_topology; do
     body=$(extract "$fn")
     if [[ -z "$body" ]]; then
         echo "✗ could not extract $fn from start.sh" >&2
@@ -165,6 +165,27 @@ printf 'CAPTION_ADAPTER=blip\nCAPTION_ADAPTER_TAG=\nADAPTER_TAG=0.1.11\nOPENNVR_
 fill_qualcomm_captioner >/dev/null 2>&1
 if [[ "$(get_env_var CAPTION_ADAPTER)" == "blip" && -z "$(get_env_var CAPTION_ADAPTER_TAG)" ]]; then pass
 else fail "$(grep -E '^(CAPTION_ADAPTER|CAPTION_ADAPTER_TAG)=' .env | tr '\n' ' ')"; fi
+
+# ── 4. The network menu: Enter is the safe default, not a hidden skip ──
+start_test "network menu: Enter takes Simple and writes the stream address and WebRTC hosts"
+printf 'OPENNVR_HOST_IP=\n' > .env
+detect_lan_ip() { echo 192.168.1.5; }
+WHITE=''
+rc=0; printf '\n' | prompt_nic_topology $'eth0:192.168.1.5\nwlan0:10.0.0.5' >/dev/null 2>&1 || rc=$?
+if [[ "$rc" == 0 && "$(get_env_var NGINX_BIND_HOST)" == "0.0.0.0" \
+   && "$(get_env_var MEDIAMTX_PUBLIC_URL)" == "https://192.168.1.5" \
+   && "$(get_env_var MEDIAMTX_WEBRTC_HOSTS)" == "192.168.1.5,10.0.0.5" ]]; then pass
+else fail "rc=$rc $(grep -E '^(NGINX_BIND_HOST|MEDIAMTX_PUBLIC_URL|MEDIAMTX_WEBRTC_HOSTS)=' .env | tr '\n' ' ')"; fi
+
+start_test "network menu: EOF on stdin (no terminal left) is the default too, not a dead launcher"
+printf 'OPENNVR_HOST_IP=\n' > .env
+rc=0; prompt_nic_topology $'eth0:192.168.1.5\nwlan0:10.0.0.5' </dev/null >/dev/null 2>&1 || rc=$?
+if [[ "$rc" == 0 && "$(get_env_var NGINX_BIND_HOST)" == "0.0.0.0" ]]; then pass
+else fail "rc=$rc $(grep -E '^NGINX_BIND_HOST=' .env)"; fi
+
+start_test "network menu: an answer nobody offered is refused"
+rc=0; printf '7\n' | prompt_nic_topology $'eth0:192.168.1.5\nwlan0:10.0.0.5' >/dev/null 2>&1 || rc=$?
+if [[ "$rc" != 0 ]]; then pass; else fail "accepted 7"; fi
 
 echo ""
 echo "Tests run: $TESTS_RUN, failed: $TESTS_FAILED"
