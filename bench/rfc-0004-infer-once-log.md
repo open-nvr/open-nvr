@@ -609,3 +609,39 @@ the extended questions are turned on there.
   (attributes first, subject named, caption asked for with the plain
   prompt's detail). Raw per-frame answers of both runs kept off the repo
   (they describe people in the office).
+
+## The detector's share of the device (2026-11-13, after the 0.1.11 fresh install)
+
+Not an RFC-0004 step, but the same question — what the accelerator is
+spent on — and it decided what the captioner gets. After the fresh
+install the Ventuno Q ran two busy cameras (the C270 webcam and the
+`demo1` traffic clip for the plate reader) with the shipped defaults,
+`DETECT_FPS=5` and `DETECT_MAX_REGIONS=8`, and the NPU tile sat at
+100 % with the Camera Agent disabled and the plate reader idle. The
+detector alone: 88–140 ms per frame per camera at 5 fps, with eight
+crops per frame at ~15 ms each on the HTP (two cameras × 5 fps × 8
+crops ≈ 80 inferences/s, more than the device finishes), and plate
+reads and captions queued behind it.
+
+Changed to `DETECT_MAX_REGIONS=3`, `DETECT_FPS=4` (Varun, in `.env`,
+`./start.sh`), measured over 90 s (`tier0_detector_latency_seconds_*`,
+read-only):
+
+| Camera | frames/s | mean per frame | device share |
+|---|---|---|---|
+| cam1 (webcam) | 3.8 | 54.4 ms | 21 % |
+| cam2 (demo1 clip) | 4.0 | 48.9 ms | 20 % |
+
+`tier0_regions_capped_total` rose on every frame of both cameras: the
+cap, not the budget controller, now decides, so coverage no longer
+rotates. In the same minutes: plate reads flowing on cam2 (alerts at
+10:40:10 and 10:40:11 UTC), the captioner answering (scene_caption mean
+1.6 s), whisper, piper and the SigLIP embedder up. Captions on cam2
+stopped at 10:27 UTC, the minute the Camera Agent app was disabled
+(its `all_cameras` claim had put captioning on the clip); the webcam
+keeps captions + embeddings from its Footage Search selection.
+
+**Carried into the point release:** PR #392 (`DETECT_MAX_REGIONS=4` in
+`.env.example` with the sizing comment, now with this measurement) —
+the shipped 8 is wrong for this board. The installer should also stop
+offering the agent's captioning on every camera as the default.

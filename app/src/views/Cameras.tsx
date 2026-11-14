@@ -1618,8 +1618,11 @@ export function Cameras() {
                 Editing either field updates the other — change the one that is wrong.
               </p>
             )}
-            <Field label="Substream URL">
-              <Input value={form.substream_url || ''} onChange={(e) => setForm({ ...form, substream_url: e.target.value })} placeholder="Optional low-res feed for the camera agent's live view" />
+            <Field
+              label="Substream URL"
+              hint="The camera's low-res second stream. Detection runs on it instead of decoding the full picture, around 5x less CPU per camera, while recording, live view and evidence keep the main stream. Found by itself on ONVIF cameras; for a relay or a camera without ONVIF, type it (often the main path with -sub)."
+            >
+              <Input value={form.substream_url || ''} onChange={(e) => setForm({ ...form, substream_url: e.target.value })} placeholder="rtsp://192.168.1.100:554/stream2" className="font-mono text-xs" />
             </Field>
             </>)}
 

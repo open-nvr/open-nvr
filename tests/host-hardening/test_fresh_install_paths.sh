@@ -138,6 +138,24 @@ if [[ "$(get_env_var CAPTION_ADAPTER)" == "litertlm" && "$(get_env_var EVENTS_CA
    && "$(get_env_var EVENTS_DESCRIPTOR_ENRICHMENT)" == "true" && "$(get_env_var EVENTS_DESCRIPTOR_PEOPLE)" == "true" ]]; then pass
 else fail "$(grep -E '^(CAPTION_ADAPTER|EVENTS_CAPTION_ENRICHMENT|EVENTS_DESCRIPTOR_ENRICHMENT|EVENTS_DESCRIPTOR_PEOPLE)=' .env | tr '\n' ' ')"; fi
 
+start_test "qualcomm captioner fill: litertlm already chosen with no tag → the -qualcomm tag is filled (the installer's case)"
+printf 'CAPTION_ADAPTER=litertlm\nCAPTION_ADAPTER_TAG=\nADAPTER_TAG=0.1.11\nEVENTS_CAPTION_ENRICHMENT=true\nEVENTS_DESCRIPTOR_ENRICHMENT=true\nEVENTS_DESCRIPTOR_PEOPLE=false\nOPENNVR_EXAMPLE_COMPOSE=docker-compose.camera-agent.yml\n' > .env
+fill_qualcomm_captioner >/dev/null 2>&1
+if [[ "$(get_env_var CAPTION_ADAPTER)" == "litertlm" && "$(get_env_var CAPTION_ADAPTER_TAG)" == "0.1.11-qualcomm" ]]; then pass
+else fail "$(grep -E '^(CAPTION_ADAPTER|CAPTION_ADAPTER_TAG)=' .env | tr '\n' ' ')"; fi
+
+start_test "qualcomm captioner fill: an operator's own tag is never touched"
+printf 'CAPTION_ADAPTER=litertlm\nCAPTION_ADAPTER_TAG=main-qualcomm\nADAPTER_TAG=0.1.11\nOPENNVR_EXAMPLE_COMPOSE=docker-compose.camera-agent.yml\n' > .env
+fill_qualcomm_captioner >/dev/null 2>&1
+if [[ "$(get_env_var CAPTION_ADAPTER_TAG)" == "main-qualcomm" ]]; then pass
+else fail "tag became $(get_env_var CAPTION_ADAPTER_TAG)"; fi
+
+start_test "qualcomm captioner fill: a CPU captioner the operator chose on purpose (blip) is left alone"
+printf 'CAPTION_ADAPTER=blip\nCAPTION_ADAPTER_TAG=\nADAPTER_TAG=0.1.11\nOPENNVR_EXAMPLE_COMPOSE=docker-compose.camera-agent.yml\n' > .env
+fill_qualcomm_captioner >/dev/null 2>&1
+if [[ "$(get_env_var CAPTION_ADAPTER)" == "blip" && -z "$(get_env_var CAPTION_ADAPTER_TAG)" ]]; then pass
+else fail "$(grep -E '^(CAPTION_ADAPTER|CAPTION_ADAPTER_TAG)=' .env | tr '\n' ' ')"; fi
+
 echo ""
 echo "Tests run: $TESTS_RUN, failed: $TESTS_FAILED"
 [ "$TESTS_FAILED" -eq 0 ]

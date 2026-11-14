@@ -170,10 +170,28 @@ testing — several are academic-use-only.
 
 ## 2. Start the rig
 
+On an installed box, add the rig to the stack's own file set and let
+`start.sh` bring it up — it is then part of every later start too:
+
+```bash
+# in .env: append the overlay and its profile to what the installer wrote
+sed -i 's/^OPENNVR_EXAMPLE_COMPOSE=\(.*\)$/OPENNVR_EXAMPLE_COMPOSE=\1,docker-compose.fakecams.yml/' .env
+sed -i 's/^OPENNVR_EXAMPLE_PROFILE=\(.*\)$/OPENNVR_EXAMPLE_PROFILE=\1,fakecams/' .env
+./start.sh
+docker logs opennvr_fakecams        # one "publishing ..." line per file
+```
+
+Do **not** start it with a hand-typed `docker compose -f docker-compose.yml
+-f docker-compose.fakecams.yml … up` on an installed box: Compose
+re-evaluates every service it is given with only those files, and
+MediaMTX comes back from the plain image — without the webcam overlay
+`start.sh` adds, so a USB webcam's launcher dies with "ffmpeg: executable
+file not found" until the next `./start.sh` (Ventuno Q, 2026-11-13). The
+one-liner is fine on a development checkout with nothing else running:
+
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.fakecams.yml \
     --profile fakecams up -d fakecams
-docker logs opennvr_fakecams        # one "publishing ..." line per file
 ```
 
 Sanity-check a stream from the host before going further:

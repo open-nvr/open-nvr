@@ -634,6 +634,7 @@ export const translations: TranslationCatalog = {
   'cameraDialog.ipAddress': 'IP Address',
   'cameraDialog.port': 'Port',
   'cameraDialog.rtspUrl': 'RTSP URL',
+  'cameraDialog.substreamUrl': 'Substream URL',
   'cameraDialog.scanQr': 'Scan QR',
   'cameraDialog.search': 'Search cameras…',
   'cameraDialog.chooseNetwork': 'Choose a detected network',
