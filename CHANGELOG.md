@@ -18,6 +18,16 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the launcher recorded at install, including `localhost` (sent as 127.0.0.1,
   the one candidate a local browser has once MediaMTX stops advertising its
   own interfaces).
+- A live tile survives the network changing under it. A VPN coming or going,
+  a Wi-Fi switch or a laptop lid leaves a WebRTC session that nothing can
+  renegotiate, so the tile rebuilds it: a frame watchdog counts decoded frames
+  every 3 s and rebuilds after 8 s without one (ICE can say "connected" long
+  after a route change), the bounded fast retries are followed by a slow
+  retry every 30 s for as long as the tile is on screen instead of a Retry
+  button, a tile that is not playing starts over at once when the browser
+  comes back online or the tab is shown again, and a tile on HLS by fallback
+  probes WebRTC again every fifteen minutes, soon after the network changed,
+  and at once when another tile's probe got through, then switches back.
 - Settings → WebRTC: a public address (IP or DNS name) and a public media
   port, and the list of addresses the media server advertises with where each
   came from. Core finds the public IP with the configured STUN server itself

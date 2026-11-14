@@ -45,6 +45,29 @@ export const PROBE_INTERVAL_MS = 15 * 60 * 1000
  *  Without STUN gathering finishes in well under 100 ms. */
 export const GATHER_WAIT_MS = 500
 
+/** After the bounded fast retries (2 s doubling to 30 s) a live tile keeps
+ *  trying this often, for as long as it is on screen. A VPN that comes back
+ *  after two minutes, a router reboot, a laptop lid: none of them should
+ *  leave a tile parked on a "Retry" button. */
+export const SLOW_RETRY_MS = 30000
+
+/** The WebRTC frame watchdog: inbound video frames are counted this often,
+ *  and a connection whose count has not moved for STALL_AFTER_MS is torn
+ *  down and rebuilt. ICE can stay "connected" for a long time after a route
+ *  change (consent checks still pass over the old path, or never fail at
+ *  all over TCP) while no media arrives; the frame count is the truth. */
+export const STALL_CHECK_MS = 3000
+export const STALL_AFTER_MS = 8000
+
+/** A tile that fell back to HLS probes WebRTC again this soon after the
+ *  network changed (browser `online`, the tab shown again). */
+export const RETURN_PROBE_DELAY_MS = 3000
+
+/** Fired on `window` by a tile whose probe reached WebRTC: every other tile
+ *  on HLS by fallback switches back at once instead of waiting for its own
+ *  probe. */
+export const WEBRTC_BACK_EVENT = 'opennvr:webrtc-back'
+
 export const MEMORY_KEY = 'opennvr.live.transport'
 
 export type Proto = 'udp' | 'tcp'
@@ -212,6 +235,25 @@ export function insertCandidates(sdp: string, lines: string[]): string {
 }
 
 // ---- decisions -----------------------------------------------------------
+
+/**
+ * Stall detection over a frame counter. Feed it the decoded-frame count and
+ * the time at each check; it answers true once the count has stood still for
+ * `afterMs`. The first call only records; a count that never moves from its
+ * first value (connected, nothing ever arrives) is a stall too.
+ */
+export function makeStallTracker(afterMs: number = STALL_AFTER_MS): (frames: number, now: number) => boolean {
+  let last = -1
+  let lastMoveAt = 0
+  return (frames: number, now: number) => {
+    if (frames !== last) {
+      last = frames
+      lastMoveAt = now
+      return false
+    }
+    return now - lastMoveAt >= afterMs
+  }
+}
 
 /** Worth sending the WHEP DELETE? Not for a session that never connected and
  *  that MediaMTX has already timed out: it can only answer 404. */

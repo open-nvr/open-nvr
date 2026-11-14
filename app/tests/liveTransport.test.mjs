@@ -12,6 +12,7 @@ import {
   hostCandidates,
   initialTransport,
   insertCandidates,
+  makeStallTracker,
   pagePortOf,
   parseExtras,
   readMemory,
@@ -135,6 +136,21 @@ test('nothing to insert, or no media section, leaves the SDP untouched', () => {
 })
 
 // ---- decisions -----------------------------------------------------------
+
+test('the frame watchdog trips only when the count stands still long enough', () => {
+  const stalled = makeStallTracker(8000)
+  assert.equal(stalled(0, 0), false, 'first sample only records')
+  assert.equal(stalled(0, 3000), false)
+  assert.equal(stalled(0, 7999), false)
+  assert.equal(stalled(0, 8000), true, 'connected and nothing ever arrived')
+  const live = makeStallTracker(8000)
+  live(10, 0)
+  assert.equal(live(40, 3000), false)
+  assert.equal(live(70, 6000), false)
+  assert.equal(live(70, 9000), false, 'three seconds still is not a stall')
+  assert.equal(live(70, 14000), true, 'eight seconds still is')
+  assert.equal(live(71, 15000), false, 'one new frame resets it')
+})
 
 test('no DELETE for a never-connected session MediaMTX has already dropped', () => {
   assert.equal(shouldDeleteSession(true, MEDIAMTX_HANDSHAKE_MS * 5), true)
