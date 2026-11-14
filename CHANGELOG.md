@@ -6,6 +6,28 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+### Changed
+
+- **The detector's frame rate and crop budget follow the flavour.**
+  `DETECT_FPS` and `DETECT_MAX_REGIONS` ship empty in `.env.example`; the
+  compose file sets 2 fps and 4 crops, the qualcomm overlay 4 fps and 3
+  crops; a number in `.env` outranks both, so an existing install keeps
+  what it set. Both pairs are measured. CPU
+  (`bench/cpu-detector-defaults-2026-11-13.md`, an 8-core host with four
+  busy cameras): one yolo26n crop costs ~0.5 core-second whichever
+  backend, the host sustains ~2 frames/s per camera whatever is asked,
+  and the 5 fps 0.1.11 shipped dropped thousands of frames and two thirds
+  of the visits (7–15 a minute against 23–28 at 2 fps); the crop cap
+  barely matters under load. Hexagon (Ventuno Q): two busy cameras at
+  5 fps with 8 crops asked for ~80 inferences a second (~15 ms each) and
+  pinned the device at 100 % with the plate reader and the captioner
+  queued behind it; 3 crops at 4 fps took ~40 % at ~50 ms per frame per
+  camera, plates and captions flowing. The frame-counted dials lengthen
+  in seconds at 2 fps as they did before 0.1.11 (calibration deadline
+  150 frames ≈ 75 s, stationary re-check 50 frames ≈ 25 s). (PR #392.)
+
 ### Fixed
 
 - **A camera behind a relay gets its substream.** Add Camera had no
@@ -21,11 +43,31 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   around 5x less CPU per camera, while recording, live view and evidence
   keep the main stream.
 
-### Added
-
-### Changed
-
-### Fixed
+- **A fresh install on a Qualcomm board with the NPU captioner pulls the
+  right image.** Choosing `litertlm` in the installer left
+  `CAPTION_ADAPTER_TAG` empty; the installer then pulled
+  `litertlm-adapter:0.1.11`, a tag that does not exist (the NPU-only
+  adapters are published only as `-qualcomm`), and the whole pull
+  aborted. `start.sh` did not recover it either: its fill ran only when it
+  was the one switching the captioner, and an adapter already set to
+  `litertlm` was left with the empty tag. The installer now pins the
+  `-qualcomm` tag where the choice is made, and the start script fills it
+  whoever chose litertlm (an operator's own tag is never touched). Found
+  on the first real fresh install of 0.1.11, Ventuno Q, 2026-11-13.
+- **Live video over a second interface.** In the network question's
+  Simple mode, MediaMTX advertised only the address shown in the UI URL
+  as its WebRTC candidate, so a browser reaching the box over a VPN or a
+  second NIC got a session and no picture ("deadline exceeded while
+  waiting connection"). Simple mode now advertises every routable
+  address; the browser keeps the one that answers.
+- **The fake-camera guide no longer knocks the webcam overlay out.** Its
+  hand-typed `docker compose … up -d fakecams` re-created MediaMTX from
+  the plain image on an installed box, and the USB webcam died with
+  "ffmpeg: executable file not found". The guide now adds the rig through
+  `.env` and `./start.sh`, and says why.
+- **A lockfile that pins the app SDK must match its version.** A test
+  fails the PR; the agent's image build on `main` failed after the 0.12.0
+  bump for exactly that.
 
 ## [0.1.11] — 2026-11-14
 
