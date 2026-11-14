@@ -1452,6 +1452,11 @@ pull_and_build() {
         if [[ -n "$(env_get OLLAMA_EXTERNAL_URL)" && "$EXAMPLE_COMPOSE" == *camera-agent.yml* ]]; then
             COMPOSE_ARGS+=(-f docker-compose.camera-agent.external-llm.yml)
         fi
+        # The agent depends on the captioner, defined in the apps file
+        # (same rule as compose_args in start.sh).
+        if [[ ",$EXAMPLE_COMPOSE," == *,docker-compose.camera-agent.yml,* && ",$EXAMPLE_COMPOSE," != *,docker-compose.apps.yml,* ]]; then
+            COMPOSE_ARGS+=(-f docker-compose.apps.yml)
+        fi
         for p in ${EXAMPLE_PROFILE//,/ }; do COMPOSE_ARGS+=(--profile "$p"); done
         info "Pulling images for $EXAMPLE_NAME..."
         docker compose "${COMPOSE_ARGS[@]}" pull --ignore-buildable
