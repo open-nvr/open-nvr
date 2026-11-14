@@ -57,7 +57,8 @@ services:
   # The agent's speech-to-text slot. The SERVICE keeps the whisper name
   # (the agent dials whisper_url = http://whisper-adapter:9003 and the
   # register step calls it "whisper"); STT_ADAPTER picks the IMAGE, the
-  # caption-adapter pattern below: `parakeet` (the default — Parakeet
+  # same pattern as the captioner in docker-compose.apps.yml: `parakeet`
+  # (the default — Parakeet
   # TDT 0.6B v3, WER 1.4 % at 0.31 s an utterance on four cores,
   # English + 25 European languages, no translation) or `whisper`
   # (faster-whisper base.en, 3.3 % at 1.42 s; Hindi, translation).
@@ -199,118 +200,13 @@ services:
       start_period: 60s
       retries: 10
 
-  # ──────────────────────────────────────────────────────────────
-  # Selectable caption/VQA adapter — VOICE + CHAT. CAPTION_ADAPTER chooses
-  # exactly one GHCR image: ``blip-adapter`` or ``moondream-adapter``.
-  # Both images are normalized to port 9006 so downstream wiring stays fixed.
-  # ──────────────────────────────────────────────────────────────
-  caption-adapter:
-    # ``enrichment`` / ``descriptions``: core's own caption and descriptor
-    # enrichment needs exactly this adapter, and needs it whether or not
-    # anyone runs the agent. It lives in this file for historical reasons
-    # — the agent needed a captioner first — and duplicating it into
-    # docker-compose.apps.yml (which an earlier version of that file did)
-    # means two adapters answering scene_caption, with KAI-C picking.
-    profiles: [camera-agent, camera-agent-chat, enrichment, descriptions]
-    # CAPTION_ADAPTER_TAG lets the caption image ride a different tag than
-    # the pinned ADAPTER_TAG. It existed because the default (ollamavlm)
-    # shipped only after 0.1.3; adapter releases from 0.1.4 on publish it,
-    # so .env.example now leaves this BLANK and every adapter rides one
-    # pin. Still here for pinning ADAPTER_TAG to something older than
-    # 0.1.4. Falls back to ADAPTER_TAG when unset/empty.
-    image: ghcr.io/open-nvr/${CAPTION_ADAPTER:-moondream}-adapter:${CAPTION_ADAPTER_TAG:-${ADAPTER_TAG:-latest}}
-    container_name: opennvr_caption_adapter
-    logging: *svc-logs
-    restart: unless-stopped
-    command: ["uvicorn", "adapters.${CAPTION_ADAPTER:-moondream}.main:app", "--host", "0.0.0.0", "--port", "9006"]
-    environment:
-      - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
-      # Consumed only by CAPTION_ADAPTER=ollamavlm (the Ollama-proxy VLM;
-      # ships in adapter releases from 0.1.4 on); inert for moondream/blip.
-      # Reuses OLLAMA_EXTERNAL_URL so the LLM and the VLM share one
-      # runtime: host Ollama when set (GPU on macOS/Windows), the bundled
-      # ollama container otherwise.
-      - OPENNVR_OLLAMA_VLM_URL=${OLLAMA_EXTERNAL_URL:-http://ollama:11434}
-      - OPENNVR_OLLAMA_VLM_MODEL=${OLLAMA_VLM_MODEL:-moondream}
-    extra_hosts:
-      # So host.docker.internal also resolves on Linux Docker Engine when
-      # OLLAMA_EXTERNAL_URL points at the host (Docker Desktop has it
-      # built in). Harmless otherwise.
-      - "host.docker.internal:host-gateway"
-    volumes:
-      - opennvr_caption_cache:/root/.cache/huggingface
-    networks:
-      - opennvr_internal
-    healthcheck:
-      test: ["CMD", "python", "-c", "import httpx, sys; sys.exit(0 if httpx.get('http://127.0.0.1:9006/health', timeout=2).status_code == 200 else 1)"]
-      interval: 15s
-      timeout: 5s
-      start_period: 120s
-      retries: 20
-
-  # ──────────────────────────────────────────────────────────────
-  # Caption-adapter auto-registration (test-report S-5) — VOICE + CHAT. On a
-  # clean install the caption adapter was NOT registered with KAI-C, so
-  # describe_camera silently fell back to the detector. This one-shot registers
-  # the adapter selected by CAPTION_ADAPTER — and then GRANTS its declared
-  # permissions (§8/§11): an adapter that declares scope (ollamavlm declares
-  # egress to the operator's own Ollama) otherwise sits pending_approval and
-  # 403s every inference on a fresh install, with the reason visible only in
-  # the audit trail. Running this profile IS the operator's install-time
-  # consent; the grant is issued with the operator's INTERNAL_API_KEY and
-  # lands in the audit log with actor=install, exactly as governance
-  # intends. Post-install scope changes still require a fresh grant: KAI-C
-  # re-pends an adapter that re-declares more scope than was approved.
-  # ──────────────────────────────────────────────────────────────
-  caption-adapter-register:
-    # Same four profiles as the adapter: an unregistered captioner is
-    # invisible to KAI-C, which is the whole failure this one-shot exists
-    # to prevent.
-    profiles: [camera-agent, camera-agent-chat, enrichment, descriptions]
-    image: alpine:3.20
-    container_name: opennvr_caption_register
-    logging: *svc-logs
-    restart: "no"
-    depends_on:
-      opennvr-core:
-        condition: service_healthy
-      caption-adapter:
-        condition: service_healthy
-    environment:
-      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
-      - CAPTION_ADAPTER=${CAPTION_ADAPTER:-moondream}
-    command:
-      - sh
-      - -c
-      - |
-        set -e
-        name="$${CAPTION_ADAPTER}"
-        url="http://caption-adapter:9006"
-        echo "Auto-registering caption adapter '$$name' -> $$url with KAI-C…"
-        i=0
-        while [ $$i -lt 30 ]; do
-          if wget -q -O- \
-               --header="Content-Type: application/json" \
-               --header="X-Internal-Api-Key: $${INTERNAL_API_KEY}" \
-               --post-data="{\"name\":\"$$name\",\"url\":\"$$url\"}" \
-               http://opennvr-core:8100/api/v1/adapters/register >/dev/null 2>&1; then
-            echo "Registered caption adapter '$$name'."
-            # Grant declared permissions (install-time operator consent —
-            # see the service comment). Best-effort: an adapter with no
-            # declared scope is already approved and this is a no-op.
-            if wget -q -O-                  --header="X-Internal-Api-Key: $${INTERNAL_API_KEY}"                  --header="X-Actor: install"                  --post-data=""                  "http://opennvr-core:8100/api/v1/adapters/$$name/permissions/approve-all" >/dev/null 2>&1; then
-              echo "Approved '$$name' declared permissions (install-time grant, audited)."
-            else
-              echo "WARN: could not approve '$$name' permissions — if inference 403s, grant them via the AI models page." >&2
-            fi
-            exit 0
-          fi
-          i=$$((i+1)); echo "register attempt $$i/30 failed (adapter warming up?); retry in 5s"; sleep 5
-        done
-        echo "WARN: could not register '$$name' after retries — describe_camera will fall back to the detector." >&2
-        exit 0
-    networks:
-      - opennvr_internal
+  # The captioner (caption-adapter) and its registration job moved to
+  # docker-compose.apps.yml: core's visit descriptions need it whether or
+  # not anyone runs the agent, and an install without this file had no
+  # captioner at all (Ventuno Q handover install, 2026-11-13). The agent
+  # still depends on it, so start.sh adds the apps file whenever this one
+  # is in the set. The agent's LLM on the qualcomm flavour is that same
+  # container (LLM_BASE_URL=http://caption-adapter:9006).
 
   # Register the voice adapters with KAI-C too. The camera agent calls
   # whisper/piper DIRECTLY (not through KAI-C), so this registration is
@@ -762,8 +658,6 @@ volumes:
   opennvr_ollama_models:
   # Faster-whisper model cache for the GHCR whisper adapter.
   opennvr_whisper_models:
-  # Runtime cache for the selected caption/VQA adapter.
-  opennvr_caption_cache:
   # Piper writes generated WAVs here before optionally returning inline
   # base64 audio to the camera-agent.
   # Piper voice files, fetched once by piper-voices-init.

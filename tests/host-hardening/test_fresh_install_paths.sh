@@ -13,7 +13,9 @@
 #     only 0.1.11 and newer carry; a checkout of main with the installer's
 #     older pin failed the same way for a different reason.
 #   * The qualcomm flavour switched visit descriptions on with no captioner
-#     in the install (the captioner lives in docker-compose.camera-agent.yml).
+#     in the install (the captioner lived in docker-compose.camera-agent.yml
+#     then; since 2026-11-14 it is in docker-compose.apps.yml, which every
+#     stock install carries).
 #
 # The rules these tests defend:
 #   * inside any dockerfile_inline, a variable Docker must expand is written
@@ -21,7 +23,8 @@
 #   * compose_args adds the discovery overlay only for a core pin that
 #     carries the prober's binary (0.1.11+, or a non-release tag);
 #   * fill_qualcomm_captioner turns the description flags on only when the
-#     camera-agent file is in the install.
+#     apps file (where the captioner is defined) is in the install: always,
+#     unless OPENNVR_DEFAULT_APPS=off keeps it out and no pick names it.
 set -u
 . "$(dirname "$0")/_lib.sh"
 require_python_yaml
@@ -77,7 +80,7 @@ else fail "$(grep -E 'FROM|COPY' <<<"$rendered")"; fi
 # ── The REAL start.sh functions ──
 extract() { awk "/^$1\\(\\) \\{/,/^\\}/" "$REPO_ROOT/start.sh"; }
 FUNCS=""
-for fn in get_env_var write_env_var set_env_var version_ge lan_discovery_core_ok accel_args compose_args fill_qualcomm_captioner; do
+for fn in get_env_var write_env_var set_env_var version_ge lan_discovery_core_ok accel_args compose_args captioner_file_in_set fill_qualcomm_captioner; do
     body=$(extract "$fn")
     if [[ -z "$body" ]]; then
         echo "✗ could not extract $fn from start.sh" >&2
@@ -124,11 +127,18 @@ if ! grep -q 'lan-discovery' <<<"$got"; then pass; else fail "files: $(tr '\n' '
 
 # ── 3. Descriptions only where a captioner runs ──
 accel_image_available() { return 0; }
-start_test "qualcomm captioner fill: no camera-agent file → adapter and tag filled, description flags left off"
-printf 'CAPTION_ADAPTER=ollamavlm\nCAPTION_ADAPTER_TAG=\nADAPTER_TAG=0.1.10\nEVENTS_CAPTION_ENRICHMENT=false\nEVENTS_DESCRIPTOR_ENRICHMENT=false\nEVENTS_DESCRIPTOR_PEOPLE=false\nOPENNVR_EXAMPLE_COMPOSE=\n' > .env
+start_test "qualcomm captioner fill: OPENNVR_DEFAULT_APPS=off and no pick (no apps file) → adapter and tag filled, description flags left off"
+printf 'CAPTION_ADAPTER=ollamavlm\nCAPTION_ADAPTER_TAG=\nADAPTER_TAG=0.1.10\nEVENTS_CAPTION_ENRICHMENT=false\nEVENTS_DESCRIPTOR_ENRICHMENT=false\nEVENTS_DESCRIPTOR_PEOPLE=false\nOPENNVR_EXAMPLE_COMPOSE=\nOPENNVR_DEFAULT_APPS=off\n' > .env
 fill_qualcomm_captioner >/dev/null 2>&1
 if [[ "$(get_env_var CAPTION_ADAPTER)" == "litertlm" && "$(get_env_var CAPTION_ADAPTER_TAG)" == "0.1.10-qualcomm" \
    && "$(get_env_var EVENTS_CAPTION_ENRICHMENT)" == "false" && "$(get_env_var EVENTS_DESCRIPTOR_ENRICHMENT)" == "false" ]]; then pass
+else fail "$(grep -E '^(CAPTION_ADAPTER|CAPTION_ADAPTER_TAG|EVENTS_CAPTION_ENRICHMENT|EVENTS_DESCRIPTOR_ENRICHMENT)=' .env | tr '\n' ' ')"; fi
+
+start_test "qualcomm captioner fill: a plain install (no pick, default apps on) → description flags on: the captioner is in the apps file"
+printf 'CAPTION_ADAPTER=ollamavlm\nCAPTION_ADAPTER_TAG=\nADAPTER_TAG=0.1.10\nEVENTS_CAPTION_ENRICHMENT=false\nEVENTS_DESCRIPTOR_ENRICHMENT=false\nEVENTS_DESCRIPTOR_PEOPLE=false\nOPENNVR_EXAMPLE_COMPOSE=\n' > .env
+fill_qualcomm_captioner >/dev/null 2>&1
+if [[ "$(get_env_var CAPTION_ADAPTER)" == "litertlm" && "$(get_env_var CAPTION_ADAPTER_TAG)" == "0.1.10-qualcomm" \
+   && "$(get_env_var EVENTS_CAPTION_ENRICHMENT)" == "true" && "$(get_env_var EVENTS_DESCRIPTOR_ENRICHMENT)" == "true" ]]; then pass
 else fail "$(grep -E '^(CAPTION_ADAPTER|CAPTION_ADAPTER_TAG|EVENTS_CAPTION_ENRICHMENT|EVENTS_DESCRIPTOR_ENRICHMENT)=' .env | tr '\n' ' ')"; fi
 
 start_test "qualcomm captioner fill: with the camera-agent file → description flags on"

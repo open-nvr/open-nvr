@@ -15,8 +15,10 @@
 # is in the set:
 #   docker-compose.accel-qualcomm-apps.yml   the adapters of docker-compose.apps.yml
 #                                            (pose, faces, packages, plates, the embedder)
-#   docker-compose.accel-qualcomm-agent.yml  the captioner and speech to text of
+#   docker-compose.accel-qualcomm-agent.yml  speech to text of
 #                                            docker-compose.camera-agent.yml
+#                                            (the captioner rides the -apps
+#                                            fragment with the apps file)
 # An override of a service no file in the set defines is a service with no
 # image, and Compose 2.24 (the board's distro package) rejects the whole
 # project for it — a plain install without the camera agent could not start

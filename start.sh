@@ -284,6 +284,17 @@ apply_accel_env() {
     resolve_stt_adapter "$accel"
     write_env_var OPENNVR_ACCEL_RESOLVED "$accel"
 }
+# Is docker-compose.apps.yml — where the captioner is defined — in the
+# compose set this .env resolves to? Yes unless the default apps are off
+# and no pick names the file or the camera agent (which brings it).
+captioner_file_in_set() {
+    local picks; picks=$(get_env_var OPENNVR_EXAMPLE_COMPOSE)
+    case ",${picks}," in *,docker-compose.apps.yml,*|*,docker-compose.camera-agent.yml,*) return 0 ;; esac
+    case "$(printf '%s' "$(get_env_var OPENNVR_DEFAULT_APPS)" | tr '[:upper:]' '[:lower:]')" in
+        off|false|0|no) return 1 ;;
+        *) return 0 ;;
+    esac
+}
 fill_qualcomm_captioner() {
     # Two cases fill here: the switch from a CPU captioner to litertlm, and
     # a litertlm the installer (or the operator) already chose but left
@@ -310,14 +321,15 @@ fill_qualcomm_captioner() {
             # switch from a CPU captioner — so a value the operator set
             # since is never touched; leaving the flavour resets them.
             # Only where the captioner will actually run: the service is
-            # defined by docker-compose.camera-agent.yml, so an install
-            # without that file (a plain install, no app picked) has no
-            # captioner, and flags switched on there describe nothing and
-            # tell the operator search by caption works when it cannot
-            # (fresh install, 2026-11-12). The adapter and tag are still
-            # filled, so picking the Camera Agent later is one `up` away.
-            if [[ ",$(get_env_var OPENNVR_EXAMPLE_COMPOSE)," != *,docker-compose.camera-agent.yml,* ]]; then
-                echo -e "${YELLOW}Accelerate:${NC} the NPU captioner (litertlm) is available but nothing in this install runs it. Pick the Camera Agent (./start.sh install) to describe visits and search them by caption." >&2
+            # defined by docker-compose.apps.yml (since 2026-11-14; before
+            # that by the camera agent's file, so a plain install had no
+            # captioner, and flags switched on there described nothing and
+            # told the operator search by caption works when it could not
+            # — fresh install, 2026-11-12). The apps file is in every set
+            # unless OPENNVR_DEFAULT_APPS=off and no pick names it or the
+            # agent. The adapter and tag are still filled either way.
+            if ! captioner_file_in_set; then
+                echo -e "${YELLOW}Accelerate:${NC} the NPU captioner (litertlm) is available but nothing in this install runs it: OPENNVR_DEFAULT_APPS=off keeps docker-compose.apps.yml, where it is defined, out of the stack. Add the file to OPENNVR_EXAMPLE_COMPOSE to describe visits and search them by caption." >&2
                 return 0
             fi
             case "$(get_env_var EVENTS_CAPTION_ENRICHMENT)" in ""|false) set_env_var EVENTS_CAPTION_ENRICHMENT true ;; esac
@@ -650,6 +662,12 @@ compose_args() {
     fi
     local p
     for p in ${example_profile//,/ }; do args="$args --profile $p"; done
+    # The camera agent depends on the captioner, which docker-compose.apps.yml
+    # defines (moved there 2026-11-14 so visit descriptions work without
+    # the agent). The agent's file therefore always brings the apps file;
+    # with no apps profile on, nothing but the captioner starts from it.
+    local agent_needs_apps=0
+    [[ ",$example_compose," == *,docker-compose.camera-agent.yml,* ]] && agent_needs_apps=1
     # Hardware flavour overlay (OpenNVR Accelerate) — see detect_accel above.
     # Resolved here so a missing overlay fails the command early, but
     # APPENDED LAST (below the apps file): Compose merges files in order
@@ -677,12 +695,26 @@ compose_args() {
             args="$args --profile default-apps"
             ;;
     esac
+    [[ "$agent_needs_apps" == 1 && " $args " != *" docker-compose.apps.yml "* ]] && args="$args -f docker-compose.apps.yml"
+    # Visit descriptions need the captioner running. When either flag is
+    # true and no profile already starts it (the agent's two, or
+    # enrichment / descriptions picked by hand), enable `descriptions`:
+    # the captioner and its registration job, nothing else. Before this
+    # the flags alone started nothing, and a stock install with captions
+    # "on" had no captioner (Ventuno Q handover install, 2026-11-13).
+    if [[ " $args " == *" docker-compose.apps.yml "* ]]; then
+        local want_captions=0
+        [[ "$(get_env_var EVENTS_CAPTION_ENRICHMENT)" == true || "$(get_env_var EVENTS_DESCRIPTOR_ENRICHMENT)" == true ]] && want_captions=1
+        case ",${example_profile}," in *,camera-agent,*|*,camera-agent-chat,*|*,enrichment,*|*,descriptions,*) want_captions=0 ;; esac
+        [[ "$want_captions" == 1 ]] && args="$args --profile descriptions"
+    fi
     [[ -n "$accel_overlay" ]] && args="$args $accel_overlay"
     # A flavour overlay overrides only services of docker-compose.yml. Its
     # overrides of services that OTHER files define travel as fragments
     # beside it — <overlay>-apps.yml for docker-compose.apps.yml (pose,
-    # faces, plates, packages, the embedder), <overlay>-agent.yml for
-    # docker-compose.camera-agent.yml (the captioner, speech to text) —
+    # faces, plates, packages, the embedder, the captioner),
+    # <overlay>-agent.yml for docker-compose.camera-agent.yml (speech to
+    # text) —
     # and each is appended only when its file is in the set. An override
     # of a service no file defines is a service with no image, and Compose
     # 2.24 (the board's distro package) rejected the whole project for it:

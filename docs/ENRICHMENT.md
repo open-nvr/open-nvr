@@ -33,18 +33,20 @@ enricher picks the change up on its next visit.
 
 ## Turning it on, in order
 
-1. **Start the adapters.** They are compose profiles, off by default because
-   they are CPU-heavy. In `.env`:
-   ```
-   OPENNVR_EXAMPLE_COMPOSE=docker-compose.camera-agent.yml,docker-compose.apps.yml
-   OPENNVR_EXAMPLE_PROFILE=descriptions,embeddings     # or: enrichment (both)
-   ```
-   `descriptions` is the captioner (`CAPTION_ADAPTER` picks the image;
-   `ollamavlm` needs a vision model pulled into Ollama — `OLLAMA_VLM_MODEL`).
-   `embeddings` is the CLIP adapter: CPU, weights baked in, ~3 minutes on
-   first boot, no volume.
-2. **Set the flags.** `EVENTS_CAPTION_ENRICHMENT=true`,
+1. **Set the flags.** `EVENTS_CAPTION_ENRICHMENT=true` (captions and the
+   colour/type questions, with `EVENTS_DESCRIPTOR_ENRICHMENT=true`) and
    `EVENTS_EMBED_ENRICHMENT=true`.
+2. **The adapters start with them.** Both live in `docker-compose.apps.yml`,
+   which every stock install carries. The captioner (`caption-adapter`;
+   `CAPTION_ADAPTER` picks the image, `ollamavlm` needs a vision model
+   pulled into Ollama — `OLLAMA_VLM_MODEL`) is enabled by `start.sh` on
+   every `up` where either description flag is true: profile
+   `descriptions`, the captioner and its registration job and nothing
+   else. No Camera Agent is needed; until 2026-11-14 the captioner was
+   defined in the agent's file, and an install without the agent had none.
+   The embedders (`clip` / `siglip` and the sentence model) are the
+   `embeddings` profile: add it to `OPENNVR_EXAMPLE_PROFILE` in `.env`
+   (the qualcomm flavour does this itself), or `enrichment` for all of them.
 3. `./start.sh up`, then check the adapters registered:
    `GET /api/v1/skills` lists `image_captioning` and `embed` with a provider.
 4. **Select the cameras** in the app that brings the skill (Footage Search for captions + embeddings; the Agent covers every camera) — see *The gate* above.

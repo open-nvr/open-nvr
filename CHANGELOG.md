@@ -20,6 +20,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Visit descriptions no longer need the Camera Agent.** The captioner
+  was defined in the agent's compose file, so an install without the
+  agent had no captioner: the description flags described nothing, and
+  Footage Search offered caption search it could not do (the Ventuno Q
+  handover install, 2026-11-13; the only way out was installing the agent
+  for its file). The captioner and its registration job now live in the
+  apps overlay, which every stock install carries, and `start.sh` enables
+  its `descriptions` profile on every `up` where either description flag
+  is true. The agent still depends on it, so its file always brings the
+  apps file. On the qualcomm flavour the captioner's NPU override moved
+  with it, and the "nothing in this install runs it" warning now fires
+  only when `OPENNVR_DEFAULT_APPS=off` keeps the apps file out.
+
 - **Uninstall on a catalog card with one-click off showed a note and no
   command.** Disable then Uninstall ended at "One-click uninstall is
   disabled by your operator" with nothing to run — the install dialog

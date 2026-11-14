@@ -2334,39 +2334,157 @@ services:
   # captions, zero non-plate claims, and a search that answered "red
   # van" with nothing — correctly, because nothing had ever looked.
   #
-  # ONLY THE EMBEDDER LIVES HERE, and that is the point.
+  # THE CAPTIONER AND THE EMBEDDERS LIVE HERE, ONCE EACH.
   #
-  # The first version of this block also shipped moondream and blip. It
-  # should not have: docker-compose.camera-agent.yml has ALWAYS had a
-  # `caption-adapter` service — one container whose image CAPTION_ADAPTER
-  # selects (moondream, blip or ollamavlm) — with its own registration
-  # job. On the box this was written for, that captioner had been up and
-  # healthy for fifteen hours. Adding a second one meant two adapters
-  # answering scene_caption, so which one described a visit came down to
-  # whichever KAI-C picked: a difference the operator cannot see and did
-  # not choose, and double the CPU for it.
-  #
-  # So captions and VQA are served by that one service, which now also
-  # carries the `enrichment` and `descriptions` profiles. Nothing about
-  # it requires the camera agent — the profiles start the adapter and its
-  # register job and nothing else. Its being in that file is history, not
-  # coupling.
+  # One captioner: the first version of this block shipped moondream and
+  # blip beside the captioner docker-compose.camera-agent.yml had always
+  # carried, so two adapters answered scene_caption and which one
+  # described a visit came down to whichever KAI-C picked — a difference
+  # the operator cannot see and did not choose, at double the CPU. The
+  # test test_adapter_catalog_is_deployable.py forbids that now. The
+  # captioner itself moved here on 2026-11-14: an install without the
+  # agent's file had no captioner, so the description flags described
+  # nothing (the Ventuno Q handover install). The agent depends on it and
+  # start.sh adds this file whenever the agent's is in the set.
   #
   # PROFILES
-  #   enrichment    everything core enrichment can use: the embedder here
-  #                 plus the captioner over there.
-  #   embeddings    the embedder alone. ALSO needs
+  #   enrichment    everything core enrichment can use: the captioner and
+  #                 the embedders.
+  #   embeddings    the embedders alone. ALSO needs
   #                 EVENTS_EMBED_ENRICHMENT=true — starting the adapter
   #                 does not flip it.
   #   descriptions  the captioner alone: scene_caption AND visual_qa,
   #                 which is what makes colour/type claims appear.
+  #                 start.sh enables it on every ``up`` where
+  #                 EVENTS_CAPTION_ENRICHMENT or
+  #                 EVENTS_DESCRIPTOR_ENRICHMENT is true and no agent
+  #                 profile already starts the captioner.
   #
   # Add the profile you want to OPENNVR_EXAMPLE_PROFILE in .env and
   # start.sh replays it on every ``up`` — same mechanism the apps use.
-  # `enrichment` and `descriptions` need docker-compose.camera-agent.yml
-  # in OPENNVR_EXAMPLE_COMPOSE too, because that is where the captioner
-  # is defined.
   #
+  # ──────────────────────────────────────────────────────────────
+  # The captioner — ONE container whose image CAPTION_ADAPTER selects
+  # (moondream, blip, ollamavlm, or litertlm on the Hexagon NPU), every
+  # image on port 9006 so downstream wiring stays fixed. Core's visit
+  # descriptions (EVENTS_CAPTION_ENRICHMENT / EVENTS_DESCRIPTOR_ENRICHMENT)
+  # and the camera agent's scene questions both use it; on the qualcomm
+  # flavour it is also the agent's LLM. It lived in
+  # docker-compose.camera-agent.yml until 2026-11-14, so an install
+  # without the agent had no captioner, flags on described nothing, and
+  # Footage Search promised caption search it could not do (Ventuno Q
+  # handover install, 2026-11-13). Here it starts with the apps file,
+  # which every stock install carries.
+  # ──────────────────────────────────────────────────────────────
+  caption-adapter:
+    # ``descriptions``: the captioner alone, which start.sh enables when
+    # either description flag is true and no agent profile is on.
+    # ``enrichment``: with the embedder below. The two agent profiles
+    # start it for the agent (which depends on it).
+    profiles: [camera-agent, camera-agent-chat, enrichment, descriptions]
+    # CAPTION_ADAPTER_TAG lets the caption image ride a different tag than
+    # the pinned ADAPTER_TAG. It existed because the default (ollamavlm)
+    # shipped only after 0.1.3; adapter releases from 0.1.4 on publish it,
+    # so .env.example now leaves this BLANK and every adapter rides one
+    # pin. Still here for pinning ADAPTER_TAG to something older than
+    # 0.1.4. Falls back to ADAPTER_TAG when unset/empty.
+    image: ghcr.io/open-nvr/${CAPTION_ADAPTER:-moondream}-adapter:${CAPTION_ADAPTER_TAG:-${ADAPTER_TAG:-latest}}
+    container_name: opennvr_caption_adapter
+    logging: *svc-logs
+    restart: unless-stopped
+    command: ["uvicorn", "adapters.${CAPTION_ADAPTER:-moondream}.main:app", "--host", "0.0.0.0", "--port", "9006"]
+    environment:
+      - OPENNVR_ADAPTER_TOKEN=${INTERNAL_API_KEY}
+      # Consumed only by CAPTION_ADAPTER=ollamavlm (the Ollama-proxy VLM;
+      # ships in adapter releases from 0.1.4 on); inert for moondream/blip
+      # and litertlm. Reuses OLLAMA_EXTERNAL_URL so the LLM and the VLM
+      # share one runtime: host Ollama when set (GPU on macOS/Windows),
+      # the bundled ollama container otherwise — which only the camera
+      # agent's file defines, so ollamavlm without the agent needs
+      # OLLAMA_EXTERNAL_URL.
+      - OPENNVR_OLLAMA_VLM_URL=${OLLAMA_EXTERNAL_URL:-http://ollama:11434}
+      - OPENNVR_OLLAMA_VLM_MODEL=${OLLAMA_VLM_MODEL:-moondream}
+    extra_hosts:
+      # So host.docker.internal also resolves on Linux Docker Engine when
+      # OLLAMA_EXTERNAL_URL points at the host (Docker Desktop has it
+      # built in). Harmless otherwise.
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - opennvr_caption_cache:/root/.cache/huggingface
+    networks:
+      - opennvr_internal
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx, sys; sys.exit(0 if httpx.get('http://127.0.0.1:9006/health', timeout=2).status_code == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 120s
+      retries: 20
+
+  # ──────────────────────────────────────────────────────────────
+  # Caption-adapter auto-registration (test-report S-5) — VOICE + CHAT. On a
+  # clean install the caption adapter was NOT registered with KAI-C, so
+  # describe_camera silently fell back to the detector. This one-shot registers
+  # the adapter selected by CAPTION_ADAPTER — and then GRANTS its declared
+  # permissions (§8/§11): an adapter that declares scope (ollamavlm declares
+  # egress to the operator's own Ollama) otherwise sits pending_approval and
+  # 403s every inference on a fresh install, with the reason visible only in
+  # the audit trail. Running this profile IS the operator's install-time
+  # consent; the grant is issued with the operator's INTERNAL_API_KEY and
+  # lands in the audit log with actor=install, exactly as governance
+  # intends. Post-install scope changes still require a fresh grant: KAI-C
+  # re-pends an adapter that re-declares more scope than was approved.
+  # ──────────────────────────────────────────────────────────────
+  caption-adapter-register:
+    # Same four profiles as the adapter: an unregistered captioner is
+    # invisible to KAI-C, which is the whole failure this one-shot exists
+    # to prevent.
+    profiles: [camera-agent, camera-agent-chat, enrichment, descriptions]
+    image: alpine:3.20
+    container_name: opennvr_caption_register
+    logging: *svc-logs
+    restart: "no"
+    depends_on:
+      opennvr-core:
+        condition: service_healthy
+      caption-adapter:
+        condition: service_healthy
+    environment:
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      - CAPTION_ADAPTER=${CAPTION_ADAPTER:-moondream}
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        name="$${CAPTION_ADAPTER}"
+        url="http://caption-adapter:9006"
+        echo "Auto-registering caption adapter '$$name' -> $$url with KAI-C…"
+        i=0
+        while [ $$i -lt 30 ]; do
+          if wget -q -O- \
+               --header="Content-Type: application/json" \
+               --header="X-Internal-Api-Key: $${INTERNAL_API_KEY}" \
+               --post-data="{\"name\":\"$$name\",\"url\":\"$$url\"}" \
+               http://opennvr-core:8100/api/v1/adapters/register >/dev/null 2>&1; then
+            echo "Registered caption adapter '$$name'."
+            # Grant declared permissions (install-time operator consent —
+            # see the service comment). Best-effort: an adapter with no
+            # declared scope is already approved and this is a no-op.
+            if wget -q -O-                  --header="X-Internal-Api-Key: $${INTERNAL_API_KEY}"                  --header="X-Actor: install"                  --post-data=""                  "http://opennvr-core:8100/api/v1/adapters/$$name/permissions/approve-all" >/dev/null 2>&1; then
+              echo "Approved '$$name' declared permissions (install-time grant, audited)."
+            else
+              echo "WARN: could not approve '$$name' permissions — if inference 403s, grant them via the AI models page." >&2
+            fi
+            exit 0
+          fi
+          i=$$((i+1)); echo "register attempt $$i/30 failed (adapter warming up?); retry in 5s"; sleep 5
+        done
+        echo "WARN: could not register '$$name' after retries — describe_camera will fall back to the detector." >&2
+        exit 0
+    networks:
+      - opennvr_internal
+
+  # ──────────────────────────────────────────────────────────────
   # CLIP bakes its weights at build time and runs under HF_HUB_OFFLINE —
   # no egress at all, which is what lets adapters_index.yml declare
   # network_egress: [] for it. It is CPU-only and slow next to detection;
@@ -2507,6 +2625,8 @@ services:
       - ADAPTER_URL=http://open-vocab-adapter:9012
 
 volumes:
+  # Runtime cache for the selected caption/VQA adapter (caption-adapter).
+  opennvr_caption_cache:
   # Attendly's own SQLite (students, rooms, classes, gates, bookings),
   # and its own InsightFace face database and model cache.
   opennvr_attendly_data:

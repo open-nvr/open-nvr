@@ -959,6 +959,11 @@ function Pull-AndBuild {
         if ((Get-EnvValue OLLAMA_EXTERNAL_URL) -and $script:ExampleCompose -like '*camera-agent.yml*') {
             $script:ComposeArgs += @('-f', 'docker-compose.camera-agent.external-llm.yml')
         }
+        # The agent depends on the captioner, defined in the apps file (same
+        # rule as Get-ComposeArgs in start.ps1).
+        if (($script:ExampleCompose -like '*camera-agent.yml*') -and ($script:ExampleCompose -notlike '*docker-compose.apps.yml*')) {
+            $script:ComposeArgs += @('-f', 'docker-compose.apps.yml')
+        }
         foreach ($p in @($script:ExampleProfile -split ',' | Where-Object { $_ })) { $script:ComposeArgs += @('--profile', $p) }
         Info "Pulling images for $script:ExampleName..."
         docker compose @script:ComposeArgs pull --ignore-buildable
