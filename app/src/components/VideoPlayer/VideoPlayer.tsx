@@ -274,7 +274,6 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     const whepConnectedRef = useRef(false)
     const iceDeadlineRef = useRef<number | null>(null)
     const manualChoiceRef = useRef(false)
-    const probingRef = useRef(initial.probing)
     const rtcExtrasRef = useRef<RtcExtras>(DEFAULT_EXTRAS)
     const giveUpRef = useRef<(reason: string) => void>(() => {})
     // Coded frame size of the incoming stream, read from the video metadata.
@@ -468,7 +467,6 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     const giveUpWebRTC = useCallback((reason: string) => {
       if (mode === 'live' && hlsUrl && !manualChoiceRef.current) {
         rememberHls(transportMemory(), reason, Date.now())
-        probingRef.current = false
         cleanup()
         setIsReconnecting(false)
         setAutoHls(true)
@@ -551,7 +549,6 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
             // WebRTC works from here: forget any earlier fallback so new
             // tiles start on it again.
             clearMemory(transportMemory())
-            probingRef.current = false
             setAutoHls(false)
           } else if (
             pc.connectionState === 'failed' ||

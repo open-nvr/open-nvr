@@ -15,12 +15,17 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   probes WebRTC again every fifteen minutes and when the network comes back,
   and shows a small "HLS" badge saying why. The player also adds the address
   it opened the page on as a candidate, so a LAN viewer works whatever address
-  the launcher recorded at install, including `localhost`.
+  the launcher recorded at install, including `localhost` (sent as 127.0.0.1,
+  the one candidate a local browser has once MediaMTX stops advertising its
+  own interfaces).
 - Settings → WebRTC: a public address (IP or DNS name) and a public media
   port, and the list of addresses the media server advertises with where each
   came from. Core finds the public IP with the configured STUN server itself
-  and refreshes it every ten minutes; `GET /api/v1/webrtc/advertised` (admin)
-  and the extra fields on `GET /api/v1/webrtc/rtc-config`.
+  and refreshes it every ten minutes, keeping the last answer through a round
+  that gets none; `GET /api/v1/webrtc/advertised` (admin) and the extra fields
+  on `GET /api/v1/webrtc/rtc-config`. Emptying either field clears it, a bad
+  address is refused with the reason (422), and the save answers at once with
+  the STUN round running behind it.
 
 ### Changed
 
@@ -38,8 +43,9 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   bridge it never learned anything. An existing `webrtc_ice_hosts` row is
   moved into the public address setting once.
 - Publishing a browser webcam from a network where the media port is blocked
-  now says so (naming the port) after two failed connections instead of
-  retrying for ever with the webcam light on; the same address-bar candidates
+  now says so (naming the port) after two failed connections, slows its
+  retries to the longest backoff and keeps trying, so a MediaMTX restart or a
+  network still coming up heals by itself; the same address-bar candidates
   are added to its answer.
 - **The detector's frame rate and crop budget follow the flavour.**
   `DETECT_FPS` and `DETECT_MAX_REGIONS` ship empty in `.env.example`; the

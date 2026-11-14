@@ -100,12 +100,17 @@ export function isIPv6(s: string): boolean {
  * be one. Only IP literals: browsers do not reliably resolve a domain name
  * in a remote candidate (the server list covers domains). Link-local and
  * unspecified addresses are useless; loopback is kept, because a page opened
- * on `localhost` reaches MediaMTX through Docker's loopback publication.
+ * on `localhost` reaches MediaMTX through Docker's loopback publication, and
+ * `localhost` itself becomes 127.0.0.1 for the same reason: MediaMTX no
+ * longer advertises its own loopback (webrtcIPsFromInterfaces is off), so
+ * on a box with no advertised list this candidate is the only one a local
+ * browser has.
  */
 export function addressBarHost(hostname: string | null | undefined): string | null {
   if (!hostname) return null
   let h = hostname.trim()
   if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1)
+  if (h.toLowerCase() === 'localhost') return '127.0.0.1'
   if (isIPv4(h)) {
     if (h.startsWith('169.254.') || h === '0.0.0.0') return null
     return h
@@ -207,13 +212,6 @@ export function insertCandidates(sdp: string, lines: string[]): string {
 }
 
 // ---- decisions -----------------------------------------------------------
-
-/** Give up on this WebRTC attempt: ICE failed, or it has had its time. */
-export function shouldGiveUp(connectionState: string, elapsedMs: number): boolean {
-  if (connectionState === 'connected' || connectionState === 'connecting' && elapsedMs < ICE_GIVE_UP_MS) return false
-  if (connectionState === 'failed' || connectionState === 'closed') return true
-  return elapsedMs >= ICE_GIVE_UP_MS
-}
 
 /** Worth sending the WHEP DELETE? Not for a session that never connected and
  *  that MediaMTX has already timed out: it can only answer 404. */

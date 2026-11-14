@@ -27,7 +27,7 @@ Security Architecture:
 - MediaMTX validates tokens via JWKS endpoint
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from core.auth import get_current_active_user
@@ -280,7 +280,6 @@ async def get_stream_info(
     camera_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
-    request: Request = None,
     include_sub: bool = False,
 ):
     """
@@ -422,7 +421,6 @@ async def get_whip_session(
     camera_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(_require_cameras_manage),
-    request: Request = None,
 ):
     """A WHIP endpoint and publish token for publishing a browser's webcam.
 

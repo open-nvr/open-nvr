@@ -101,6 +101,9 @@ class WebRTCIceHostService:
 
     _public = PublicIP()
     _refresher: asyncio.Task | None = None
+    #: The one-off round a settings save asks for (refresh_soon); kept so the
+    #: task is not garbage-collected mid-flight.
+    _pending_refresh: asyncio.Task | None = None
     _resolved: dict[str, tuple[float, list[str]]] = {}
 
     # ---- validation -------------------------------------------------
@@ -300,15 +303,32 @@ class WebRTCIceHostService:
 
     @classmethod
     async def refresh_public_ip(cls, db, force: bool = False) -> str | None:
-        """The STUN-discovered public IP, asked for again when stale."""
+        """The STUN-discovered public IP, asked for again when stale.
+
+        A round that gets no answer keeps the last address: one lost UDP
+        exchange or a STUN server having a bad minute must not take the
+        public candidate away from every remote viewer for the next
+        refresh interval. The address goes only when the admin removes the
+        STUN servers, or when a server answers with a different one.
+        """
         now = time.monotonic()
         if not force and cls._public.at and now - cls._public.at < STUN_REFRESH_S:
             return cls._public.ip
         servers = cls.stun_servers(db)
-        found = await cls.discover_public_ip(servers) if servers else None
-        previous = cls._public.ip
-        cls._public = PublicIP(found[0] if found else None, now, found[1] if found else None)
-        if cls._public.ip != previous:
+        previous = cls._public
+        if not servers:
+            cls._public = PublicIP(None, now, None)
+        else:
+            found = await cls.discover_public_ip(servers)
+            if found:
+                cls._public = PublicIP(found[0], now, found[1])
+            else:
+                cls._public = PublicIP(previous.ip, now, previous.server)
+                if previous.ip:
+                    logger.info(
+                        "STUN gave no answer; keeping the public IP %s for WebRTC", previous.ip
+                    )
+        if cls._public.ip != previous.ip:
             logger.info("Public IP for WebRTC (STUN): %s", cls._public.ip or "none")
         return cls._public.ip
 
@@ -404,32 +424,37 @@ class WebRTCIceHostService:
     # ---- application ------------------------------------------------
 
     @classmethod
-    async def apply_to_mediamtx(cls, db) -> bool:
-        """Build the list and push it to MediaMTX. Returns True if applied."""
+    async def apply_to_mediamtx(cls, db, stun: bool = True) -> bool:
+        """Build the list and push it to MediaMTX. Returns True if applied.
+
+        ``stun=False`` pushes what is known now without waiting on a STUN
+        round (each unreachable server costs STUN_TIMEOUT_S): the settings
+        save uses it and asks for the round in the background."""
         from services.mediamtx_admin_service import MediaMtxAdminService
 
         try:
             cls.migrate_legacy(db)
         except Exception as e:  # noqa: BLE001 - never block advertising on it
             logger.warning("Legacy WebRTC host migration failed: %s", e)
-        try:
-            await cls.refresh_public_ip(db)
-        except Exception as e:  # noqa: BLE001
-            logger.debug("STUN lookup failed: %s", e)
+        if stun:
+            try:
+                await cls.refresh_public_ip(db)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("STUN lookup failed: %s", e)
         cls.ensure_refresher()
 
         hosts = cls.resolve(db)
         if not hosts:
             # Made loud: with no advertisable host every WHEP session from
             # another machine dies on the ICE timeout, and the UI quietly
-            # takes the HLS rung.
+            # takes the HLS rung. The empty list is still pushed: an address
+            # the admin just cleared must stop being advertised.
             logger.warning(
                 "No WebRTC ICE host to advertise — live WebRTC from other machines "
                 "will fall back to HLS. Set a public address under Settings → WebRTC, "
                 "configure a STUN server there, or set MEDIAMTX_WEBRTC_HOSTS in .env "
                 "to this server's LAN IP (start.sh does this for you)."
             )
-            return False
         result = await MediaMtxAdminService.set_webrtc_additional_hosts(hosts)
         if result.get("status") == "ok":
             logger.info("Applied WebRTC ICE hosts to MediaMTX: %s", hosts)
@@ -450,21 +475,45 @@ class WebRTCIceHostService:
         cls._refresher = loop.create_task(cls._refresh_loop())
 
     @classmethod
-    async def _refresh_loop(cls) -> None:
+    async def refresh_once(cls) -> None:
+        """One forced STUN round on a session of its own; the list is pushed
+        again only when the public IP changed."""
         from core.database import SessionLocal
         from services.mediamtx_admin_service import MediaMtxAdminService
 
+        before = cls._public.ip
+        with SessionLocal() as db:
+            await cls.refresh_public_ip(db, force=True)
+            if cls._public.ip != before:
+                hosts = cls.resolve(db)
+                if hosts:
+                    await MediaMtxAdminService.set_webrtc_additional_hosts(hosts)
+                    logger.info("Re-applied WebRTC ICE hosts after public IP change: %s", hosts)
+
+    @classmethod
+    def refresh_soon(cls) -> None:
+        """Run ``refresh_once`` in the background: the settings save answers
+        at once and the STUN round, seconds long when a server is down,
+        catches up behind it."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        async def _run() -> None:
+            try:
+                await cls.refresh_once()
+            except Exception as e:  # best effort
+                logger.debug("WebRTC host refresh failed: %s", e)
+
+        cls._pending_refresh = loop.create_task(_run())
+
+    @classmethod
+    async def _refresh_loop(cls) -> None:
         while True:
             await asyncio.sleep(STUN_REFRESH_S)
             try:
-                before = cls._public.ip
-                with SessionLocal() as db:
-                    await cls.refresh_public_ip(db, force=True)
-                    if cls._public.ip != before:
-                        hosts = cls.resolve(db)
-                        if hosts:
-                            await MediaMtxAdminService.set_webrtc_additional_hosts(hosts)
-                            logger.info("Re-applied WebRTC ICE hosts after public IP change: %s", hosts)
+                await cls.refresh_once()
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001 - keep the loop alive

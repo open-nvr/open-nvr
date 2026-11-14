@@ -376,3 +376,116 @@ async def test_apply_pushes_the_resolved_list(db: FakeDB, monkeypatch) -> None:
 
     assert await WebRTCIceHostService.apply_to_mediamtx(db) is True
     assert pushed == [["nvr.example.org", "171.78.153.53", "192.168.2.51"]]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_stun_round_keeps_the_last_public_ip(db: FakeDB, monkeypatch) -> None:
+    """One lost STUN exchange must not take the public candidate away from
+    every remote viewer until the next refresh."""
+    db.set_webrtc(stun_servers=["stun:a"])
+    answers = iter([("1.2.3.4", "stun:a"), None, ("5.6.7.8", "stun:a")])
+
+    async def fake_discover(cls, servers, timeout=2.0):
+        return next(answers)
+
+    monkeypatch.setattr(WebRTCIceHostService, "discover_public_ip", classmethod(fake_discover))
+    WebRTCIceHostService._public = PublicIP()
+    assert await WebRTCIceHostService.refresh_public_ip(db, force=True) == "1.2.3.4"
+    assert await WebRTCIceHostService.refresh_public_ip(db, force=True) == "1.2.3.4"
+    assert WebRTCIceHostService.public_ip().server == "stun:a"
+    assert await WebRTCIceHostService.refresh_public_ip(db, force=True) == "5.6.7.8"
+
+
+@pytest.mark.asyncio
+async def test_removing_the_stun_servers_drops_the_public_ip(db: FakeDB, monkeypatch) -> None:
+    db.set_webrtc(stun_servers=["stun:a"])
+
+    async def fake_discover(cls, servers, timeout=2.0):
+        return ("1.2.3.4", "stun:a")
+
+    monkeypatch.setattr(WebRTCIceHostService, "discover_public_ip", classmethod(fake_discover))
+    WebRTCIceHostService._public = PublicIP()
+    assert await WebRTCIceHostService.refresh_public_ip(db, force=True) == "1.2.3.4"
+    db.set_webrtc(stun_servers=[])
+    assert await WebRTCIceHostService.refresh_public_ip(db, force=True) is None
+
+
+@pytest.mark.asyncio
+async def test_apply_without_stun_pushes_what_is_known(db: FakeDB, monkeypatch) -> None:
+    """The settings save re-advertises at once and never waits on a STUN round."""
+    from services.mediamtx_admin_service import MediaMtxAdminService
+
+    db.set_webrtc(stun_servers=["stun:a"], public_address="nvr.example.org")
+    pushed: list[list[str]] = []
+
+    async def fake_set(hosts):
+        pushed.append(list(hosts))
+        return {"status": "ok"}
+
+    async def never(cls, servers, timeout=2.0):
+        raise AssertionError("STUN must not be asked with stun=False")
+
+    monkeypatch.setattr(MediaMtxAdminService, "set_webrtc_additional_hosts", staticmethod(fake_set))
+    monkeypatch.setattr(WebRTCIceHostService, "discover_public_ip", classmethod(never))
+    monkeypatch.setattr(WebRTCIceHostService, "ensure_refresher", classmethod(lambda cls: None))
+    WebRTCIceHostService._public = PublicIP()
+    assert await WebRTCIceHostService.apply_to_mediamtx(db, stun=False) is True
+    assert pushed == [["nvr.example.org"]]
+
+
+def test_the_update_payload_refuses_a_bad_address_at_parse_time() -> None:
+    """A typo in the Settings page is a 422 with the validator's words, not a
+    500 from inside the route."""
+    import pytest as _pytest
+    from pydantic import ValidationError
+
+    from schemas import WebRTCSettingsUpdate
+
+    with _pytest.raises(ValidationError, match="IP address or a DNS name"):
+        WebRTCSettingsUpdate(public_address="https://nvr.example.org")
+    with _pytest.raises(ValidationError, match="other machines can reach"):
+        WebRTCSettingsUpdate(public_address="127.0.0.1")
+    assert WebRTCSettingsUpdate(public_address=" NVR.Example.org ").public_address == "nvr.example.org"
+    assert WebRTCSettingsUpdate(public_address=None).public_address is None
+    assert WebRTCSettingsUpdate(public_address="").public_address is None
+
+
+# ------------------------------------------------------- the settings route
+
+
+@pytest.mark.asyncio
+async def test_saving_null_clears_the_public_address_and_port(db: FakeDB, monkeypatch) -> None:
+    """The Settings page sends null for an emptied field; that must clear the
+    stored value, not keep the old one (the merge's "None keeps" rule is for
+    fields the payload left out)."""
+    import types
+
+    from routers import webrtc as webrtc_router
+    from schemas import WebRTCSettingsUpdate
+
+    pushed: list[list[str]] = []
+
+    async def fake_set(hosts):
+        pushed.append(list(hosts))
+        return {"status": "ok"}
+
+    monkeypatch.setattr(MediaMtxAdminService, "set_webrtc_additional_hosts", staticmethod(fake_set))
+    monkeypatch.setattr(WebRTCIceHostService, "refresh_soon", classmethod(lambda cls: None))
+    db.set_webrtc(public_address="nvr.example.org", public_ice_port=18189, stun_servers=["stun:a"])
+    user = types.SimpleNamespace(id=1)
+
+    # A payload that leaves the fields out keeps them.
+    out = await webrtc_router.update_webrtc_settings(
+        WebRTCSettingsUpdate(transport_policy="all"), db=db, current_user=user, request=None
+    )
+    assert out["public_address"] == "nvr.example.org"
+    assert out["public_ice_port"] == 18189
+
+    # Explicit nulls clear them, and the advertised list loses the address.
+    out = await webrtc_router.update_webrtc_settings(
+        WebRTCSettingsUpdate(public_address=None, public_ice_port=None), db=db, current_user=user, request=None
+    )
+    assert out["public_address"] is None
+    assert out["public_ice_port"] is None
+    assert db.webrtc()["public_address"] is None
+    assert pushed and "nvr.example.org" not in pushed[-1]

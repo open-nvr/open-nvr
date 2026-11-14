@@ -3,7 +3,6 @@ import test from 'node:test'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import {
-  ICE_GIVE_UP_MS,
   MEDIAMTX_HANDSHAKE_MS,
   PROBE_INTERVAL_MS,
   addressBarHost,
@@ -18,7 +17,6 @@ import {
   readMemory,
   rememberHls,
   shouldDeleteSession,
-  shouldGiveUp,
 } from '../src/lib/liveTransport.ts'
 
 const extras = (o = {}) => ({ icePort: 8189, publicIcePort: null, singlePortWebrtc: false, serverHosts: [], ...o })
@@ -37,7 +35,8 @@ test('the address bar host is used only when it is an IP literal', () => {
   assert.equal(addressBarHost('171.78.153.53'), '171.78.153.53')
   assert.equal(addressBarHost('[2001:db8::1]'), '2001:db8::1')
   assert.equal(addressBarHost('nvr.example.com'), null, 'domains are left to the server list')
-  assert.equal(addressBarHost('localhost'), null)
+  assert.equal(addressBarHost('localhost'), '127.0.0.1', 'the only candidate a local browser has when nothing is advertised')
+  assert.equal(addressBarHost('LOCALHOST'), '127.0.0.1')
   assert.equal(addressBarHost(''), null)
   assert.equal(addressBarHost(undefined), null)
 })
@@ -136,14 +135,6 @@ test('nothing to insert, or no media section, leaves the SDP untouched', () => {
 })
 
 // ---- decisions -----------------------------------------------------------
-
-test('give up on failed, or when the deadline passes without connected', () => {
-  assert.equal(shouldGiveUp('failed', 100), true)
-  assert.equal(shouldGiveUp('connecting', ICE_GIVE_UP_MS - 1), false)
-  assert.equal(shouldGiveUp('connecting', ICE_GIVE_UP_MS), true)
-  assert.equal(shouldGiveUp('new', ICE_GIVE_UP_MS), true)
-  assert.equal(shouldGiveUp('connected', ICE_GIVE_UP_MS * 2), false)
-})
 
 test('no DELETE for a never-connected session MediaMTX has already dropped', () => {
   assert.equal(shouldDeleteSession(true, MEDIAMTX_HANDSHAKE_MS * 5), true)

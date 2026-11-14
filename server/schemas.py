@@ -1086,35 +1086,50 @@ class WebRTCSettings(BaseModel):
     @field_validator("public_address")
     @classmethod
     def _public_address_ok(cls, v: str | None) -> str | None:
-        if v is None:
-            return None
-        v = v.strip().strip("[]")
-        if not v:
-            return None
-        import ipaddress
+        return _webrtc_public_address(v)
 
-        try:
-            ip = ipaddress.ip_address(v)
-        except ValueError:
-            # A hostname: labels of letters, digits and hyphens, dot-separated.
-            if not re.fullmatch(
-                r"(?=.{1,253}$)([A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*"
-                r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?",
-                v,
-            ) or v.lower() == "localhost":
-                raise ValueError("public_address must be an IP address or a DNS name")
-            return v.lower()
-        if ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
-            raise ValueError("public_address must be an address other machines can reach")
-        return str(ip)
+
+def _webrtc_public_address(v: str | None) -> str | None:
+    """An IP other machines can reach, or a DNS name, normalised; None for
+    empty. Shared by the stored settings and the update payload so a bad
+    value is refused at request parsing (422 with this message), never
+    inside the route."""
+    if v is None:
+        return None
+    v = v.strip().strip("[]")
+    if not v:
+        return None
+    import ipaddress
+
+    try:
+        ip = ipaddress.ip_address(v)
+    except ValueError:
+        # A hostname: labels of letters, digits and hyphens, dot-separated.
+        if not re.fullmatch(
+            r"(?=.{1,253}$)([A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*"
+            r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?",
+            v,
+        ) or v.lower() == "localhost":
+            raise ValueError("public_address must be an IP address or a DNS name")
+        return v.lower()
+    if ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+        raise ValueError("public_address must be an address other machines can reach")
+    return str(ip)
 
 
 class WebRTCSettingsUpdate(BaseModel):
     stun_servers: list[str] | None = None
     turn_servers: list[TurnServer] | None = None
     transport_policy: Literal["all", "relay"] | None = None
+    #: None in the payload clears the stored address (routers/webrtc.py keeps
+    #: None for this field and public_ice_port instead of the old value).
     public_address: str | None = Field(None, max_length=253)
     public_ice_port: int | None = Field(None, ge=1, le=65535)
+
+    @field_validator("public_address")
+    @classmethod
+    def _public_address_ok(cls, v: str | None) -> str | None:
+        return _webrtc_public_address(v)
 
 
 class WebRTCClientConfig(BaseModel):

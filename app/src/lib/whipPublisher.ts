@@ -78,9 +78,13 @@ export type PublisherExtras = {
   mediaPort?: () => number
 }
 
-/** ICE failed this many times without ever connecting: the media port is
- *  not reachable from this network, and more retries will not change that. */
-const ICE_FAILURES_BEFORE_GIVING_UP = 2
+/** ICE failed this many times without ever connecting: most likely the
+ *  media port is not reachable from this network, and the retry message
+ *  says so. Retrying goes on regardless (at the longest backoff), because
+ *  the same signal also comes from a MediaMTX restart or a network that is
+ *  still coming up, and a page left open should recover from those by
+ *  itself, as the viewer side does. */
+const ICE_FAILURES_BEFORE_NAMING_THE_PORT = 2
 
 export class WhipPublisher {
   private pc: RTCPeerConnection | null = null
@@ -203,18 +207,17 @@ export class WhipPublisher {
         this.onState({ kind: 'live' })
       } else if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
         // Publishing has no HLS to fall back to. ICE failing before it ever
-        // connected means the media port cannot be reached from here, so
-        // say that instead of retrying for ever with the webcam light on.
-        if (!this.everLive && ++this.iceFailures >= ICE_FAILURES_BEFORE_GIVING_UP) {
+        // connected usually means the media port cannot be reached from
+        // here: say so, slow the retries down to the longest backoff, and
+        // keep trying (a MediaMTX restart looks the same and heals).
+        if (!this.everLive && ++this.iceFailures >= ICE_FAILURES_BEFORE_NAMING_THE_PORT) {
           const port = this.extras.mediaPort?.()
-          this.stopped = true
-          this.teardown(false)
-          this.onState({
-            kind: 'error',
-            reason: 'Real-time video cannot reach OpenNVR from this network' +
-              (port ? ` (UDP/TCP port ${port} is blocked)` : '') +
-              '. Publishing a browser webcam needs that port; ask your administrator.',
-          })
+          this.attempt = Math.max(this.attempt, BACKOFF_SECONDS.length - 1)
+          this.scheduleRetry(
+            'Real-time video cannot reach OpenNVR from this network' +
+              (port ? ` (UDP/TCP port ${port} may be blocked)` : '') +
+              '. Publishing a browser webcam needs that port; ask your administrator. Still trying.',
+          )
           return
         }
         this.scheduleRetry('Connection lost')
