@@ -18,7 +18,10 @@ Candidates, in order:
    stream URI that differs from the main one (``_pick_substream_uri``), with
    the camera's credentials injected; needs credentials;
 2. the vendor-convention URL derived from the main one (Hikvision/Uniview
-   ``/101`` → ``/102``, Dahua/CP Plus ``subtype=0`` → ``subtype=1``).
+   ``/101`` → ``/102``, Dahua/CP Plus ``subtype=0`` → ``subtype=1``);
+3. the MediaMTX-style ``<path>-sub`` sibling — what OpenNVR's own relays,
+   its webcam server and the fake-camera rig publish, and the one shape a
+   camera reached through a relay (no ONVIF to ask) can still be found by.
 
 Each candidate is PROBED (ffprobe over RTSP/TCP, a few seconds) before it
 is stored. A candidate the camera refuses — 404 path, 401 after the
@@ -161,7 +164,10 @@ async def discover_substream(
     """
     if not main_url:
         return None
-    from services.camera_source_resolver import derive_substream_url
+    from services.camera_source_resolver import (
+        derive_substream_url,
+        path_suffix_substream_url,
+    )
 
     probe = prober or ffprobe_rtsp
     candidates: list[tuple[str, str]] = []
@@ -175,6 +181,9 @@ async def discover_substream(
     vendor = derive_substream_url(main_url)
     if vendor:
         candidates.append((vendor, "vendor"))
+    sibling = path_suffix_substream_url(main_url)
+    if sibling:
+        candidates.append((sibling, "path-sub"))
 
     seen: set[str] = {main_url}
     for url, source in candidates:

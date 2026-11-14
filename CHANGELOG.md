@@ -8,9 +8,113 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Live view from anywhere (#925): a tile tries real-time video (WebRTC) and
+  falls back to low-latency HLS by itself when no media path answers, within
+  about eight seconds and with the spinner up, never an error. The browser
+  remembers the fallback for the session so later tiles start on HLS at once,
+  probes WebRTC again every fifteen minutes and when the network comes back,
+  and shows a small "HLS" badge saying why. The player also adds the address
+  it opened the page on as a candidate, so a LAN viewer works whatever address
+  the launcher recorded at install, including `localhost` (sent as 127.0.0.1,
+  the one candidate a local browser has once MediaMTX stops advertising its
+  own interfaces).
+- A live tile survives the network changing under it. A VPN coming or going,
+  a Wi-Fi switch or a laptop lid leaves a WebRTC session that nothing can
+  renegotiate, so the tile rebuilds it: a frame watchdog counts decoded frames
+  every 3 s and rebuilds after 8 s without one (ICE can say "connected" long
+  after a route change), the bounded fast retries are followed by a slow
+  retry every 30 s for as long as the tile is on screen instead of a Retry
+  button, a tile that is not playing starts over at once when the browser
+  comes back online or the tab is shown again, and a tile on HLS by fallback
+  probes WebRTC again every fifteen minutes, soon after the network changed,
+  and at once when another tile's probe got through, then switches back.
+- Settings → WebRTC: a public address (IP or DNS name) and a public media
+  port, and the list of addresses the media server advertises with where each
+  came from. Core finds the public IP with the configured STUN server itself
+  and refreshes it every ten minutes, keeping the last answer through a round
+  that gets none; `GET /api/v1/webrtc/advertised` (admin) and the extra fields
+  on `GET /api/v1/webrtc/rtc-config`. Emptying either field clears it, a bad
+  address is refused with the reason (422), and the save answers at once with
+  the STUN round running behind it.
+
 ### Changed
 
+- Live HLS is served as low-latency HLS (`hlsVariant: lowLatency`, 200 ms
+  parts, nginx no longer buffers `/hls/`), which brings a fallen-back tile
+  from several seconds behind to one or two.
+- The browser sends its own ICE candidates with the WHEP offer (it used to
+  post the offer before gathering any), and no STUN server is built into the
+  web app: ICE servers come from Settings alone. STUN is sent to MediaMTX as
+  client-only, since its single-port listener cannot use a STUN-discovered
+  candidate; TURN stays shared.
+- MediaMTX no longer advertises its own container addresses
+  (`webrtcIPsFromInterfaces: no`); the reachable ones come from core.
+- The "learned hosts" mechanism (`X-Server-Addr`) is gone: on the compose
+  bridge it never learned anything. An existing `webrtc_ice_hosts` row is
+  moved into the public address setting once.
+- Publishing a browser webcam from a network where the media port is blocked
+  now says so (naming the port) after two failed connections, slows its
+  retries to the longest backoff and keeps trying, so a MediaMTX restart or a
+  network still coming up heals by itself; the same address-bar candidates
+  are added to its answer.
+- **The detector's frame rate and crop budget follow the flavour.**
+  `DETECT_FPS` and `DETECT_MAX_REGIONS` ship empty in `.env.example`; the
+  compose file sets 2 fps and 4 crops, the qualcomm overlay 4 fps and 3
+  crops; a number in `.env` outranks both, so an existing install keeps
+  what it set. Both pairs are measured. CPU
+  (`bench/cpu-detector-defaults-2026-11-13.md`, an 8-core host with four
+  busy cameras): one yolo26n crop costs ~0.5 core-second whichever
+  backend, the host sustains ~2 frames/s per camera whatever is asked,
+  and the 5 fps 0.1.11 shipped dropped thousands of frames and two thirds
+  of the visits (7–15 a minute against 23–28 at 2 fps); the crop cap
+  barely matters under load. Hexagon (Ventuno Q): two busy cameras at
+  5 fps with 8 crops asked for ~80 inferences a second (~15 ms each) and
+  pinned the device at 100 % with the plate reader and the captioner
+  queued behind it; 3 crops at 4 fps took ~40 % at ~50 ms per frame per
+  camera, plates and captions flowing. The frame-counted dials lengthen
+  in seconds at 2 fps as they did before 0.1.11 (calibration deadline
+  150 frames ≈ 75 s, stationary re-check 50 frames ≈ 25 s). (PR #392.)
+
 ### Fixed
+
+- **A camera behind a relay gets its substream.** Add Camera had no
+  substream field (only the Edit form did), and discovery knew two routes:
+  the device's ONVIF profiles and the Hikvision/Dahua URL conventions. A
+  camera reached through a MediaMTX relay (the office camera on the
+  Ventuno Q, `poe-cam1` with `poe-cam1-sub` served beside it) has no ONVIF
+  and matches no convention, so core stored nothing and the detector
+  decoded the 1080p main stream. Discovery now tries the MediaMTX-style
+  `<path>-sub` sibling last, probed and stored only when it answers, and
+  the Add Camera dialog carries the substream field with the reason a
+  substream matters: detection runs on it instead of the full picture,
+  around 5x less CPU per camera, while recording, live view and evidence
+  keep the main stream.
+
+- **A fresh install on a Qualcomm board with the NPU captioner pulls the
+  right image.** Choosing `litertlm` in the installer left
+  `CAPTION_ADAPTER_TAG` empty; the installer then pulled
+  `litertlm-adapter:0.1.11`, a tag that does not exist (the NPU-only
+  adapters are published only as `-qualcomm`), and the whole pull
+  aborted. `start.sh` did not recover it either: its fill ran only when it
+  was the one switching the captioner, and an adapter already set to
+  `litertlm` was left with the empty tag. The installer now pins the
+  `-qualcomm` tag where the choice is made, and the start script fills it
+  whoever chose litertlm (an operator's own tag is never touched). Found
+  on the first real fresh install of 0.1.11, Ventuno Q, 2026-11-13.
+- **Live video over a second interface.** In the network question's
+  Simple mode, MediaMTX advertised only the address shown in the UI URL
+  as its WebRTC candidate, so a browser reaching the box over a VPN or a
+  second NIC got a session and no picture ("deadline exceeded while
+  waiting connection"). Simple mode now advertises every routable
+  address; the browser keeps the one that answers.
+- **The fake-camera guide no longer knocks the webcam overlay out.** Its
+  hand-typed `docker compose … up -d fakecams` re-created MediaMTX from
+  the plain image on an installed box, and the USB webcam died with
+  "ffmpeg: executable file not found". The guide now adds the rig through
+  `.env` and `./start.sh`, and says why.
+- **A lockfile that pins the app SDK must match its version.** A test
+  fails the PR; the agent's image build on `main` failed after the 0.12.0
+  bump for exactly that.
 
 ## [0.1.11] — 2026-11-14
 

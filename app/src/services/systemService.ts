@@ -74,6 +74,7 @@ export const systemService = {
   getWebRTCSettings: () => api.get('/api/v1/webrtc/settings'),
   updateWebRTCSettings: (payload: any) => api.put('/api/v1/webrtc/settings', payload),
   getWebRTCClientConfig: () => api.get('/api/v1/webrtc/rtc-config'),
+  getWebRTCAdvertised: () => api.get('/api/v1/webrtc/advertised'),
 
   // Integrations
   getIntegrations: () => api.get('/api/v1/integrations/'),

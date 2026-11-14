@@ -477,7 +477,11 @@ services:
       - DETECT_REFRESH_SECONDS=${DETECT_REFRESH_SECONDS:-}
       # Per-camera analysis rate. Detection runs on every analyzed frame,
       # so this is the pipeline's main CPU dial — see .env.example.
-      - DETECT_FPS=${DETECT_FPS:-5}
+      # 2 = the rate a CPU-only host sustains per busy camera (measured
+      # 2026-11-13, bench/cpu-detector-defaults-2026-11-13.md: asking 5
+      # dropped thousands of frames and two thirds of the visits). The
+      # qualcomm overlay sets its own; a number in .env outranks both.
+      - DETECT_FPS=${DETECT_FPS:-2}
       # Re-verify stationary tracks every Nth frame instead of every frame
       # (staggered per track; motion near the object re-checks immediately).
       # 0 = pre-gating behavior. See .env.example.
@@ -497,7 +501,11 @@ services:
       #                       one is a part of it, not a second object
       - DETECT_LABELS=${DETECT_LABELS:-}
       - DETECT_CONF=${DETECT_CONF:-}
-      - DETECT_MAX_REGIONS=${DETECT_MAX_REGIONS:-}
+      # 4 = a count a CPU-only host settles under quickly (each crop is a
+      # detector pass; under load the budget controller sheds to 1 and a
+      # lower cap gets there with fewer dropped frames); the qualcomm
+      # overlay sets its own. See .env.example before raising it.
+      - DETECT_MAX_REGIONS=${DETECT_MAX_REGIONS:-4}
       - DETECT_MAX_TRACKS=${DETECT_MAX_TRACKS:-}
       - DETECT_TRACK_TTL=${DETECT_TRACK_TTL:-}
       - DETECT_MIN_SPAWN_SCORE=${DETECT_MIN_SPAWN_SCORE:-}
@@ -659,13 +667,16 @@ services:
       - MEDIAMTX_EXTERNAL_BASE_URL=${MEDIAMTX_PUBLIC_URL:-https://localhost}/webrtc
       - MEDIAMTX_EXTERNAL_HLS_URL=${MEDIAMTX_PUBLIC_URL:-https://localhost}/hls
       - MEDIAMTX_EXTERNAL_PLAYBACK_URL=${MEDIAMTX_PUBLIC_URL:-https://localhost}/playback
-      # Seed for the ICE hosts MediaMTX advertises. The backend keeps the list
-      # in the DB and re-pushes it on every MediaMTX start, so a recreated
-      # container keeps it. It can also learn the address browsers reach, but
-      # not in this layout: nginx is on the bridge, so it only ever reports a
-      # container address. Without start.sh, set this in .env or live WebRTC
-      # from other machines fails (HLS still works).
+      # The LAN address MediaMTX advertises to browsers (start.sh detects it
+      # at each `up`). Core adds the public address (Settings → WebRTC, or
+      # found with STUN) and re-pushes the whole list on every MediaMTX
+      # start, so a recreated container keeps it. The web UI also tries the
+      # address it opened the page on, so a LAN viewer needs none of this;
+      # API clients (Home Assistant) do.
       - MEDIAMTX_WEBRTC_HOSTS=${MEDIAMTX_WEBRTC_HOSTS:-}
+      # The ICE media port as published on the host (the mediamtx service
+      # above): the player adds the page's own address on this port.
+      - WEBRTC_ICE_PORT=${WEBRTC_ICE_PORT:-8189}
       - KAI_C_URL=http://127.0.0.1:8100
       # Duplicate-sighting dedup for plate reads: a fragmented track
       # (moving camera, occlusion) re-reads the car just read; the same

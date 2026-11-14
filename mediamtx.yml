@@ -222,7 +222,7 @@ hlsServerCert: /etc/mediamtx-certs/server.crt
 hlsAllowOrigins: ['*']
 hlsTrustedProxies: []
 hlsAlwaysRemux: no
-hlsVariant: fmp4
+hlsVariant: lowLatency
 hlsSegmentCount: 7
 hlsSegmentDuration: 1s
 hlsPartDuration: 200ms

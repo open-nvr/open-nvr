@@ -1075,19 +1075,75 @@ class WebRTCSettings(BaseModel):
     stun_servers: list[str] = ["stun:stun.l.google.com:19302"]
     turn_servers: list[TurnServer] = []
     transport_policy: Literal["all", "relay"] = "all"
+    #: The address viewers use from the internet (IP or DNS name). MediaMTX
+    #: advertises it on the ICE port; a DNS name is resolved by MediaMTX, so
+    #: a DDNS address keeps working. Empty: the STUN-discovered public IP.
+    public_address: str | None = Field(None, max_length=253)
+    #: The external port the router forwards to this server's ICE port, when
+    #: it is not the same number. None: same as WEBRTC_ICE_PORT.
+    public_ice_port: int | None = Field(None, ge=1, le=65535)
+
+    @field_validator("public_address")
+    @classmethod
+    def _public_address_ok(cls, v: str | None) -> str | None:
+        return _webrtc_public_address(v)
+
+
+def _webrtc_public_address(v: str | None) -> str | None:
+    """An IP other machines can reach, or a DNS name, normalised; None for
+    empty. Shared by the stored settings and the update payload so a bad
+    value is refused at request parsing (422 with this message), never
+    inside the route."""
+    if v is None:
+        return None
+    v = v.strip().strip("[]")
+    if not v:
+        return None
+    import ipaddress
+
+    try:
+        ip = ipaddress.ip_address(v)
+    except ValueError:
+        # A hostname: labels of letters, digits and hyphens, dot-separated.
+        if not re.fullmatch(
+            r"(?=.{1,253}$)([A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*"
+            r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?",
+            v,
+        ) or v.lower() == "localhost":
+            raise ValueError("public_address must be an IP address or a DNS name")
+        return v.lower()
+    if ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+        raise ValueError("public_address must be an address other machines can reach")
+    return str(ip)
 
 
 class WebRTCSettingsUpdate(BaseModel):
     stun_servers: list[str] | None = None
     turn_servers: list[TurnServer] | None = None
     transport_policy: Literal["all", "relay"] | None = None
+    #: None in the payload clears the stored address (routers/webrtc.py keeps
+    #: None for this field and public_ice_port instead of the old value).
+    public_address: str | None = Field(None, max_length=253)
+    public_ice_port: int | None = Field(None, ge=1, le=65535)
+
+    @field_validator("public_address")
+    @classmethod
+    def _public_address_ok(cls, v: str | None) -> str | None:
+        return _webrtc_public_address(v)
 
 
 class WebRTCClientConfig(BaseModel):
-    """Client-friendly config for RTCPeerConnection init."""
+    """Client-friendly config for RTCPeerConnection init, plus what the live
+    player needs to add its own candidates (app/src/lib/liveTransport.ts):
+    the ICE port, the public ICE port, whether nginx also carries ICE-TCP on
+    the HTTPS port, and the addresses the server advertises."""
 
     iceServers: list[dict[str, Any]]
     iceTransportPolicy: Literal["all", "relay"]
+    icePort: int = 8189
+    publicIcePort: int = 8189
+    singlePortWebrtc: bool = False
+    serverHosts: list[str] = []
 
 
 # Media Source (MediaMTX) settings schemas

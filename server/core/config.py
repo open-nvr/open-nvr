@@ -197,13 +197,20 @@ class Settings(BaseSettings):
     mediamtx_admin_token: str | None = None
     mediamtx_auto_provision: bool = True  # Enable/disable auto-provisioning on startup
 
-    # Seed for the ICE host addresses MediaMTX advertises to browsers
-    # (``webrtcAdditionalHosts``). Comma-separated. This is only a seed: the
-    # authoritative list lives in the DB and is learned from the address
-    # browsers actually reach this server on. See
-    # services/webrtc_ice_host_service.py for why the env var alone is not
-    # enough (it is baked in at container-create time and silently lost).
+    # The LAN address(es) MediaMTX advertises to browsers as ICE host
+    # candidates (``webrtcAdditionalHosts``), comma-separated; start.sh
+    # detects it at each `up`. Core adds the public address (set by the
+    # admin, or found with STUN) and pushes the whole list to MediaMTX at
+    # runtime, on every MediaMTX start. See services/webrtc_ice_host_service.py.
     mediamtx_webrtc_hosts: str = ""
+    # MediaMTX's ICE media port (UDP + TCP), as published on the host. The
+    # live player adds the address it opened the page on, on this port, as a
+    # candidate, so it must match WEBRTC_ICE_PORT in compose.
+    webrtc_ice_port: int = 8189
+    # nginx also hands non-TLS connections on the HTTPS port to MediaMTX's
+    # ICE-TCP listener (NGINX_SINGLE_PORT_WEBRTC); the player then adds the
+    # page's own host:port as a TCP candidate. Off until that nginx layout ships.
+    webrtc_single_port: bool = False
     #: Optional comma-separated allowlist of hosts an integration webhook
     #: may POST to (e.g. "hooks.slack.com,ntfy.local"). Empty = no
     #: restriction beyond the cloud-metadata deny that always applies.

@@ -71,6 +71,13 @@ services:
       # DETECT_ONNX_PROVIDER_OPTIONS=key=value,key=value.
       - DETECT_ONNX_PROVIDERS=${DETECT_ONNX_PROVIDERS:-QNNExecutionProvider:htp}
       - DETECT_ONNX_PROVIDER_OPTIONS=${DETECT_ONNX_PROVIDER_OPTIONS:-}
+      # The HTP is one device shared with the plate reader, the captioner
+      # and the embedder. A crop is ~15 ms there, and two busy cameras at
+      # 5 fps with 8 crops each pinned it at 100 % on their own (Ventuno Q,
+      # 2026-11-13); 3 crops at 4 fps took ~40 % and left the rest room.
+      # A number in .env outranks these.
+      - DETECT_MAX_REGIONS=${DETECT_MAX_REGIONS:-3}
+      - DETECT_FPS=${DETECT_FPS:-4}
   # ── The always-on object-detection adapter (ai-adapter -qualcomm flavour):
   # QNN on the Hexagon NPU. It follows YOLOV8_ONNX_PROVIDERS, then the shared
   # ADAPTER_ONNX_PROVIDERS, then the NPU (docs/HARDWARE.md, 'what runs
