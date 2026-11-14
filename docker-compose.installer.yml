@@ -76,6 +76,11 @@ services:
       # ghcr.io/open-nvr images — before compose runs; "off" for an
       # air-gapped deployment that cannot reach the Sigstore log.
       - INSTALLER_SIGNATURES=${INSTALLER_SIGNATURES:-require}
+      # The checkout's path as the reconciler's own ``docker compose``
+      # must see it (the mount target below). A container inherits no
+      # PWD, and this overlay is part of the persisted compose set that
+      # nested compose loads, so without this its ${PWD} would be blank.
+      - PWD=${INSTALLER_REPO_PATH:-${PWD}}
     volumes:
       # ── THE privilege ──────────────────────────────────────────────
       # The Docker socket is mounted into THIS tiny service and NOWHERE
@@ -102,8 +107,19 @@ services:
       # dirs and compose reads the repo-root .env for interpolation.
       # Requires the installer to be brought up from the repo root
       # (all documented commands already are).
-      - ${PWD}:${PWD}:ro
-    working_dir: ${PWD}
+      #
+      # "Same path" means the path the DAEMON uses. On Linux and macOS
+      # that is ${PWD}. Under Docker Desktop on Windows the daemon runs
+      # in a VM that sees D:\x\open-nvr as /run/desktop/mnt/host/d/x/
+      # open-nvr, so start.ps1 sets INSTALLER_REPO_PATH to that and the
+      # nested compose hands the daemon paths it can mount. Long syntax
+      # because a Windows source path carries a colon the short form
+      # splits on ("too many colons").
+      - type: bind
+        source: ${PWD}
+        target: ${INSTALLER_REPO_PATH:-${PWD}}
+        read_only: true
+    working_dir: ${INSTALLER_REPO_PATH:-${PWD}}
 
 # The opennvr_internal network is the base file's; this overlay is never
 # used without it.

@@ -34,6 +34,23 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The one-click app installer runs, and runs on Windows.** Its image
+  asked Debian for a package that only Docker's own repository has, its
+  entrypoint looked for `main.py` in the mounted checkout, and SQLAlchemy
+  2.1 answered its plain `postgresql://` URL with a driver the image does
+  not ship, so the container had never started anywhere. On Windows the
+  overlay's `${PWD}:${PWD}` mount broke on the drive letter's colon and
+  the daemon could not have mounted that path anyway: the checkout is now
+  mounted where the Docker Desktop VM sees it, and `start.ps1` persists
+  `COMPOSE_FILE` / `COMPOSE_PROFILES` to `.env` as `start.sh` does, so the
+  installer's own `docker compose` sees the app services.
+
+- **MediaMTX starts without a WebRTC host list.** Since it stopped
+  advertising its own interfaces, an empty `MEDIAMTX_WEBRTC_HOSTS` made it
+  refuse to start, which `start.ps1` (unlike `start.sh`) never set. Compose
+  falls back to loopback, `start.ps1` sets the detected LAN IPs, and core
+  pushes the real list at runtime as before.
+
 - **Search by meaning can be switched on without editing .env, and the
   flag now starts the embedders.** `EVENTS_EMBED_ENRICHMENT=true` alone
   started nothing: only the qualcomm flavour added the `embeddings`

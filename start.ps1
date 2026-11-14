@@ -48,6 +48,54 @@ function Get-EnvVar {
     return $null
 }
 
+# ── Write a value to .env (mirrors write_env_var in start.sh) ──
+# Updates ^KEY= in place, else uncomments a ^#KEY= placeholder, else
+# appends. Keeps the file's line endings and writes UTF-8 without a BOM.
+function Set-EnvVar {
+    param([string]$Key, [string]$Value)
+    $enc = New-Object Text.UTF8Encoding($false)
+    if (-not (Test-Path ".env")) {
+        [IO.File]::WriteAllText((Join-Path (Get-Location).Path ".env"), "${Key}=${Value}`r`n", $enc)
+        return
+    }
+    $path = (Resolve-Path ".env").Path
+    $text = [IO.File]::ReadAllText($path, $enc)
+    $nl = if ($text -match "`r`n") { "`r`n" } else { "`n" }
+    $lines = [Collections.Generic.List[string]]@($text -split "`r?`n")
+    $escaped = [regex]::Escape($Key)
+    $at = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -match "^${escaped}=") { $at = $i; break } }
+    if ($at -lt 0) {
+        for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -match "^#\s*${escaped}=") { $at = $i; break } }
+    }
+    if ($at -ge 0) {
+        $lines[$at] = "${Key}=${Value}"
+    } elseif ($lines.Count -gt 0 -and $lines[$lines.Count - 1] -eq "") {
+        $lines.Insert($lines.Count - 1, "${Key}=${Value}")
+    } else {
+        $lines.Add("${Key}=${Value}")
+    }
+    [IO.File]::WriteAllText($path, ($lines -join $nl), $enc)
+}
+
+# The compose file set and profiles this run resolved, written where every
+# `docker compose` in this directory reads them (Compose takes COMPOSE_FILE /
+# COMPOSE_PROFILES / COMPOSE_PATH_SEPARATOR from .env) — including the one
+# the app installer runs inside its container, which otherwise sees only
+# the plain base file and no app service. Mirrors persist_compose_set in
+# start.sh.
+function Save-ComposeSet {
+    param([string[]]$ComposeArgs)
+    $files = @(); $profiles = @(); $prev = ""
+    foreach ($tok in $ComposeArgs) {
+        if ($prev -eq "-f") { $files += $tok } elseif ($prev -eq "--profile") { $profiles += $tok }
+        $prev = $tok
+    }
+    Set-EnvVar "COMPOSE_PATH_SEPARATOR" ":"
+    Set-EnvVar "COMPOSE_FILE" ($files -join ":")
+    Set-EnvVar "COMPOSE_PROFILES" ($profiles -join ",")
+}
+
 # ── Build Compose profile args ─────────────────────────────
 function Get-ComposeArgs {
     $args = @("-f", $ComposeFile)
@@ -123,6 +171,13 @@ function Get-ComposeArgs {
     if ((Get-EnvVar "APP_INSTALLER") -eq "on") {
         if (Test-Path "docker-compose.installer.yml") {
             $env:PWD = (Get-Location).Path
+            # Under Docker Desktop on Windows the daemon runs in a VM that
+            # sees D:\x\open-nvr as /run/desktop/mnt/host/d/x/open-nvr. The
+            # installer's own `docker compose` must work from THAT path for
+            # the daemon to mount what it resolves (see the overlay).
+            if (-not $IsLinux -and -not $IsMacOS -and $env:PWD -match '^([A-Za-z]):\\(.*)$') {
+                $env:INSTALLER_REPO_PATH = "/run/desktop/mnt/host/" + $Matches[1].ToLower() + "/" + ($Matches[2] -replace '\\', '/')
+            }
             $args += @("-f", "docker-compose.installer.yml", "--profile", "app-installer")
         } else {
             Write-Color "APP_INSTALLER=on but docker-compose.installer.yml is missing" Yellow
@@ -711,7 +766,9 @@ function Set-HostIpEnv {
                  -not [string]::IsNullOrWhiteSpace((Get-EnvVar "OPENNVR_HOST_IP"))
     $lanIpsSet = -not [string]::IsNullOrWhiteSpace($env:OPENNVR_LAN_IPS) -or
                  -not [string]::IsNullOrWhiteSpace((Get-EnvVar "OPENNVR_LAN_IPS"))
-    if ($hostIpSet -and $lanIpsSet) { return }
+    $webrtcHostsSet = -not [string]::IsNullOrWhiteSpace($env:MEDIAMTX_WEBRTC_HOSTS) -or
+                      -not [string]::IsNullOrWhiteSpace((Get-EnvVar "MEDIAMTX_WEBRTC_HOSTS"))
+    if ($hostIpSet -and $lanIpsSet -and $webrtcHostsSet) { return }
     # @() so a single detected IP stays an array (see Get-LanIPs).
     $lanIps = @(Get-LanIPs)
     if ($lanIps.Count -eq 0) { return }
@@ -724,6 +781,15 @@ function Set-HostIpEnv {
     if (-not $lanIpsSet -and $lanIps.Count -gt 1) {
         $env:OPENNVR_LAN_IPS = ($lanIps -join ',')
         Write-Color "  Additional LAN NIC IP(s): $(($lanIps | Select-Object -Skip 1) -join ', ') (camera discovery scans these subnets too)" DarkGray
+    }
+    # The addresses MediaMTX advertises to browsers as WebRTC ICE host
+    # candidates (MTX_WEBRTCADDITIONALHOSTS). MediaMTX no longer advertises
+    # its own interfaces (mediamtx.docker.yml), so without this a LAN
+    # browser gets no reachable candidate. Mirrors configure_nginx_bind_host
+    # in start.sh; core re-pushes the list at runtime on every MediaMTX start.
+    if (-not $webrtcHostsSet) {
+        $env:MEDIAMTX_WEBRTC_HOSTS = ($lanIps -join ',')
+        Write-Color "  WebRTC ICE host(s): $($lanIps -join ', ')" DarkGray
     }
 }
 
@@ -831,6 +897,7 @@ function Invoke-Up {
     if (-not (Set-WebRtcIcePort)) { exit 1 }
     Write-NetHints
     $ca = Get-ComposeArgs
+    Save-ComposeSet $ca
     if (-not (Invoke-PreflightPublishedPorts -ComposeArgs $ca)) { exit 1 }
     Write-Color "  Starting all services ..." Green
     # The updater (scripts\update-host.ps1) runs `up` with KEEP_ORPHANS=1
@@ -865,6 +932,7 @@ function Invoke-Build {
     if (-not (Set-WebRtcIcePort)) { exit 1 }
     Write-NetHints
     $ca = Get-ComposeArgs
+    Save-ComposeSet $ca
     if (-not (Invoke-PreflightPublishedPorts -ComposeArgs $ca)) { exit 1 }
     Write-Color "  Building images and starting all services ..." Green
     docker compose @ca build

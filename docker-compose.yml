@@ -182,10 +182,12 @@ services:
       - MTX_AUTHJWTJWKS=http://${BACKEND_HOST:-opennvr_core}:${BACKEND_PORT:-8000}/.well-known/jwks.json
       - BACKEND_PORT=${BACKEND_PORT:-8000}
       # ICE candidate hosts advertised in the SDP answer (so the browser can
-      # reach UDP/8189). Set by start.sh from the detected topology. Empty =
-      # mediamtx sees only its bridge addresses, which a LAN browser can't
-      # reach; core pushes its own list at runtime (see opennvr_core below).
-      - MTX_WEBRTCADDITIONALHOSTS=${MEDIAMTX_WEBRTC_HOSTS:-}
+      # reach UDP/8189). Set by start.sh / start.ps1 from the detected
+      # topology; core pushes its own list at runtime (see opennvr_core
+      # below). MediaMTX refuses to start on an empty list now that it no
+      # longer advertises its own interfaces (mediamtx.docker.yml), so a
+      # bare `docker compose up` gets loopback until core's push lands.
+      - MTX_WEBRTCADDITIONALHOSTS=${MEDIAMTX_WEBRTC_HOSTS:-127.0.0.1}
       # ICE media listen port. Overridable because some Windows hosts have
       # 8189 inside a WinNAT/Hyper-V reserved range (netsh interface ipv4
       # show excludedportrange protocol=tcp), where Docker cannot bind it —
