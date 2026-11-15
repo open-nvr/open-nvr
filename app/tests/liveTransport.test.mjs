@@ -73,11 +73,30 @@ test('single-port mode adds TCP on the page port for the page host and every ser
   })
   const tcp443 = c.filter((x) => x.port === 13443).map((x) => x.ip)
   assert.deepEqual(tcp443, ['171.78.153.53', '192.168.2.51'], 'deduplicated; the domain is skipped')
-  assert.equal(c.filter((x) => x.port === 8189).length, 2)
+  assert.equal(c.filter((x) => x.port === 8189).length, 4, 'both IPs on the ICE port, UDP and TCP')
 })
 
-test('without single-port mode the server list adds nothing (MediaMTX advertises it itself)', () => {
-  const c = hostCandidates({ pageHost: null, pagePort: 443, extras: extras({ serverHosts: ['192.168.2.51'] }) })
+test('a page opened on a domain name still gets the server IPs on the ICE port', () => {
+  // vms.example.org in the address bar: addressBarHost is null, so the only
+  // public candidate the browser can get is the one core resolved.
+  const c = hostCandidates({ pageHost: null, pagePort: 443, extras: extras({ serverHosts: ['171.78.153.53', '192.168.2.51'] }) })
+  assert.deepEqual(c, [
+    { ip: '171.78.153.53', port: 8189, proto: 'udp' },
+    { ip: '171.78.153.53', port: 8189, proto: 'tcp' },
+    { ip: '192.168.2.51', port: 8189, proto: 'udp' },
+    { ip: '192.168.2.51', port: 8189, proto: 'tcp' },
+  ])
+})
+
+test('the page host ranks above the server list, with no duplicate when it is in it', () => {
+  const c = hostCandidates({ pageHost: '192.168.2.51', pagePort: 443, extras: extras({ serverHosts: ['171.78.153.53', '192.168.2.51'] }) })
+  assert.deepEqual(c.map((x) => `${x.proto}:${x.ip}`), [
+    'udp:192.168.2.51', 'tcp:192.168.2.51', 'udp:171.78.153.53', 'tcp:171.78.153.53',
+  ])
+})
+
+test('server entries that are not IPs, or loopback, add nothing', () => {
+  const c = hostCandidates({ pageHost: null, pagePort: 443, extras: extras({ serverHosts: ['nvr.example.com', 'localhost', '127.0.0.1', ''] }) })
   assert.deepEqual(c, [])
 })
 

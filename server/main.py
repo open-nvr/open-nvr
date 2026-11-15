@@ -465,6 +465,22 @@ async def lifespan(app: FastAPI):
                 f"[MTX] Background provisioning failed: {e}", exc_info=True
             )
         finally:
+            # Advertise the WebRTC ICE hosts from here, not only from the
+            # MediaMTX startup hook: compose starts core after MediaMTX is
+            # healthy, so on a cold start that hook fires before this
+            # container exists and nothing pushes the public address (STUN
+            # or Settings -> WebRTC). Retries in the background until
+            # MediaMTX takes the list.
+            if settings.mediamtx_admin_api:
+                try:
+                    from core.background_tasks import spawn_background as _spawn_ice
+                    from services.webrtc_ice_host_service import WebRTCIceHostService
+
+                    _spawn_ice(WebRTCIceHostService.apply_on_startup(),
+                               name="webrtc-ice-hosts")
+                except Exception as e:  # noqa: BLE001
+                    main_logger.error(f"[MTX] WebRTC ICE host apply failed to start: {e}",
+                                      exc_info=True)
             # Whatever provisioning did (ran, was disabled, or failed):
             # reschedule automatic recording resumes (HA-108) and resume the
             # overdue ones, so a restart never turns "pause for an hour"

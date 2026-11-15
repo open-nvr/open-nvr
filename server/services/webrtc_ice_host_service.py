@@ -462,6 +462,45 @@ class WebRTCIceHostService:
         logger.warning("Could not apply WebRTC ICE hosts %s: %s", hosts, result)
         return False
 
+    #: Startup apply: MediaMTX is normally healthy before core starts (compose
+    #: ordering), but a MediaMTX that is still coming up, or one being
+    #: recreated at the same moment, must not leave the list unapplied.
+    STARTUP_ATTEMPTS = 12
+    STARTUP_RETRY_S = 5.0
+
+    @classmethod
+    async def apply_on_startup(
+        cls, attempts: int | None = None, delay: float | None = None
+    ) -> bool:
+        """Apply the list from core's own startup, retrying until MediaMTX
+        takes it.
+
+        The MediaMTX ``runOnInit`` hook is the other startup trigger, and it
+        cannot be the only one: compose starts core only after MediaMTX is
+        healthy, so on a cold start the hook's request fires before the core
+        container exists and fails. Without this, every fresh install or full
+        restart advertised only the launcher's LAN seed until an admin
+        re-saved the WebRTC page, and remote viewers fell back to HLS."""
+        from core.database import SessionLocal
+
+        tries = attempts if attempts is not None else cls.STARTUP_ATTEMPTS
+        wait = delay if delay is not None else cls.STARTUP_RETRY_S
+        for i in range(1, max(1, tries) + 1):
+            try:
+                with SessionLocal() as db:
+                    if await cls.apply_to_mediamtx(db):
+                        return True
+            except Exception as e:  # noqa: BLE001 - keep retrying
+                logger.debug("Startup WebRTC ICE host apply failed: %s", e)
+            if i < tries:
+                await asyncio.sleep(wait)
+        logger.warning(
+            "WebRTC ICE hosts not applied after %d attempts; MediaMTX advertises "
+            "only what it started with until the next apply",
+            tries,
+        )
+        return False
+
     @classmethod
     def ensure_refresher(cls) -> None:
         """A background loop that re-asks STUN and re-applies the list when
