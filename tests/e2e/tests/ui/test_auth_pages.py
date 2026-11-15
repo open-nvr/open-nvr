@@ -6,10 +6,10 @@
 that an unauthenticated visitor is sent to the login page rather than into the
 app, and that the setup and MFA routes render rather than white-screening.
 
-First-time setup itself cannot be driven here without destroying the session
-every other test depends on -- the token is consumed on first use -- so the
-full claim-the-account journey stays in the API tier, which can assert it on a
-genuinely fresh database via ``--fresh``.
+First-time setup itself is driven in ``test_first_time_setup.py``, which runs
+before everything else on a fresh stack (the token is consumed on first use)
+and skips on a claimed one. The API tier asserts the same journey in
+``test_bootstrap.py``.
 """
 
 from __future__ import annotations

@@ -109,6 +109,12 @@ def test_mfa_was_enrolled_during_setup(admin):
     assert admin.evidence.mfa_secret_issued, "first-time-setup returned no MFA secret"
     assert admin.mfa_secret, "no MFA secret was retained for the session"
     assert admin.totp(), "could not derive a TOTP code from the issued secret"
+    # Setup is not complete until a code from the secret confirmed the
+    # authenticator; that step also hands out the recovery codes.
+    assert admin.evidence.mfa_confirmed, "the authenticator was never confirmed with a code"
+    assert admin.evidence.recovery_codes_issued == 10, (
+        f"expected 10 recovery codes, got {admin.evidence.recovery_codes_issued}"
+    )
 
 
 def test_setup_is_closed_afterwards(client):
