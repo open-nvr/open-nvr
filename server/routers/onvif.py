@@ -429,11 +429,61 @@ async def connect_device(
     _authorize_camera_ip(db, current_user, ip, action="view")
     try:
         result = await connect_and_get_profiles(ip, username, password, port)
-        return result
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    _mark_added_channels(db, current_user, result.get("channels") or [])
+    return result
+
+
+def _mark_added_channels(db: Session, user, channels: list[dict]) -> None:
+    """Badge each channel whose main stream is already a camera here.
+
+    Matched against every camera on the system, as the import does: an NVR
+    channel someone else added is "already here", not a second copy. The
+    camera's id and name are only told to a caller who may see that camera;
+    this endpoint needs no more than view rights on the IP, and another
+    owner's camera names must not leak through it.
+
+    Two matches: the exact stream (``stream_key``: login stripped, default
+    port spelled out, query kept), and, when the stored URL has no query,
+    the same scheme/host/port/path. Hikvision's GetStreamUri answers with
+    ``?transportmode=unicast&profile=…`` while the import's vendor template
+    writes the bare path; both are the same channel.
+    """
+    from models import Camera
+    from services.camera_io import stream_key
+    from services.camera_scope import visible_camera_ids
+
+    mains = [(ch, (ch.get("main") or {}).get("stream_uri")) for ch in channels]
+    for ch, _ in mains:
+        ch["already_added"] = False
+        ch["already_added_camera"] = None
+    if not any(uri for _, uri in mains):
+        return
+
+    by_key: dict[str, object] = {}
+    by_path: dict[str, object] = {}
+    for cam in db.query(Camera).filter(Camera.deleted_at.is_(None)).all():
+        if not cam.rtsp_url:
+            continue
+        key = stream_key(cam.rtsp_url)
+        by_key.setdefault(key, cam)
+        if "?" not in key:
+            by_path.setdefault(key, cam)
+
+    visible = visible_camera_ids(db, user)
+    for ch, uri in mains:
+        if not uri:
+            continue
+        key = stream_key(uri)
+        cam = by_key.get(key) or by_path.get(key.split("?", 1)[0])
+        if cam is None:
+            continue
+        ch["already_added"] = True
+        if visible is None or cam.id in visible:
+            ch["already_added_camera"] = {"id": cam.id, "name": cam.name}
 
 
 @router.get("/camera/{ip}/profiles")
