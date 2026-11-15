@@ -28,7 +28,8 @@
 #   volume     <project>_opennvr_* (the database, keys, every app's settings
 #              and data) or <project>_shared_frames
 #   network    <project>_opennvr_* or <project>_default
-#   image      ghcr.io/open-nvr/*, opennvr/*, or a <project>-* image one of
+#   image      ghcr.io/open-nvr/*, opennvr/*, one compose built for this
+#              project, or a <project>-* image one of
 #              the containers above ran. postgres, nginx, nats, alpine and the
 #              like stay: another stack may need them.
 #   footage    cam-<n>*, orphaned, .evidence, .hevc_cache under RECORDINGS_PATH;
@@ -127,7 +128,46 @@ function Get-SizeMB([string]$Text) {
     $v = [double]$Matches[1]
     switch ($Matches[2].ToUpper()) { 'TB' { return $v * 1048576 } 'GB' { return $v * 1024 } 'MB' { return $v } 'KB' { return $v / 1024 } default { return $v / 1048576 } }
 }
-function Get-ImagesGB { return ('{0:N1} GB' -f ($Found.ImagesMB / 1024)) }
+function Get-GB([double]$MB) { return ('{0:N1} GB' -f ($MB / 1024)) }
+function Get-ImagesGB { return (Get-GB ($Found.ImagesMB + $Found.BaseMB)) }
+function Get-ImagesCount { return ($Found.Images.Count + $Found.Base.Count) }
+# The plan's line about images: OpenNVR's own, and the base images with them.
+function Get-ImagesLine {
+    if ($Found.Images.Count -eq 0) { return "Base images only OpenNVR pulled ($($Found.Base.Count), $(Get-GB $Found.BaseMB))" }
+    if ($Found.Base.Count -eq 0) { return "OpenNVR images ($($Found.Images.Count), $(Get-GB $Found.ImagesMB))" }
+    return "OpenNVR images ($($Found.Images.Count), $(Get-GB $Found.ImagesMB)) and base images nothing else uses ($($Found.Base.Count), $(Get-GB $Found.BaseMB))"
+}
+
+# The third-party images this install names: image: lines of its compose
+# files, FROM and COPY --from of its Dockerfiles (inline ones included), with
+# ${VAR:-default} read as the default. Only exact repository:tag references.
+function Get-PinnedImages {
+    $refs = @()
+    $compose = @(Get-ChildItem -Path $Root -Filter 'docker-compose*.yml' -File -ErrorAction SilentlyContinue) +
+               @(Get-ChildItem -Path $Root -Filter 'compose*.yml' -File -ErrorAction SilentlyContinue)
+    foreach ($f in $compose) {
+        foreach ($l in @(Get-Content $f.FullName -ErrorAction SilentlyContinue)) {
+            if ($l -match '^\s*(-\s*)?image:\s*(.+)$') { $refs += $Matches[2] }
+            elseif ($l -match '^\s*FROM\s+(--platform=\S+\s+)?(\S+)') { $refs += $Matches[2] }
+        }
+    }
+    $dockerfiles = @(Get-ChildItem -Path (Join-Path $Root 'Dockerfile'), (Join-Path $Root '*\Dockerfile'), (Join-Path $Root 'examples\*\Dockerfile') -File -ErrorAction SilentlyContinue)
+    foreach ($f in $dockerfiles) {
+        foreach ($l in @(Get-Content $f.FullName -ErrorAction SilentlyContinue)) {
+            if ($l -match '^\s*FROM\s+(--platform=\S+\s+)?(\S+)') { $refs += $Matches[2] }
+            elseif ($l -match '^\s*COPY\s.*--from=(\S+)') { $refs += $Matches[1] }
+        }
+    }
+    $out = @()
+    foreach ($r in $refs) {
+        $r = (($r -replace '\s*#.*$', '') -replace '["'']', '').Trim()
+        $r = $r -replace '\$\{[A-Za-z_0-9]+:-([^{}]*)\}', '$1'
+        $r = $r -replace '\$\{[A-Za-z_0-9]+:-([^{}]*)\}', '$1'
+        if ($r -match '\$' -or $r -like 'ghcr.io/open-nvr/*' -or $r -like 'opennvr/*') { continue }
+        if ($r -cmatch '^[a-z0-9][a-z0-9._/-]*(:[A-Za-z0-9._-]+)?(@sha256:[0-9a-f]+)?$' -and $r -match '[:/]') { $out += $r }
+    }
+    return @($out | Sort-Object -Unique)
+}
 
 function Find-Install {
     $all = @(docker ps -a --format '{{.Names}}|{{.Image}}|{{.Labels}}') | Where-Object { $_ } | ForEach-Object {
@@ -147,15 +187,16 @@ function Find-Install {
         }
     }
 
-    $containers = @(); $elsewhere = @(); $used = @()
+    $containers = @(); $elsewhere = @(); $used = @(); $otherUsed = @()
     foreach ($c in @($all)) {
         if (-not $c) { continue }
         $fromHere = (Get-NormalPath $c.WorkDir) -ieq $here
         if ($c.Project -and ($projects -contains $c.Project) -and ($fromHere -or $c.Name -like "opennvr_*")) {
             $containers += $c.Name
             $used += $c.Image
-        } elseif ($c.Name -like "opennvr_*") {
-            $elsewhere += "$($c.Name) (project $($c.Project), $($c.WorkDir))"
+        } else {
+            $otherUsed += $c.Image
+            if ($c.Name -like "opennvr_*") { $elsewhere += "$($c.Name) (project $($c.Project), $($c.WorkDir))" }
         }
     }
 
@@ -168,12 +209,27 @@ function Find-Install {
             Where-Object { $_ -cmatch "^${q}_(opennvr_.*|default)$" }
     }
 
-    $images = @(); $imagesMB = 0.0
-    foreach ($row in @(docker images --format '{{.Repository}}:{{.Tag}}|{{.Size}}')) {
+    # Images compose built for one of our projects, by compose's own label;
+    # an untagged one (a rebuild left it) by its id.
+    $labelled = @()
+    foreach ($p in $projects) {
+        foreach ($row in @(docker images --filter "label=com.docker.compose.project=$p" --format '{{.Repository}}:{{.Tag}}|{{.ID}}|{{.Size}}')) {
+            if (-not $row) { continue }
+            $parts = $row -split '\|', 3
+            $labelled += $(if ($parts[0] -eq '<none>:<none>') { $parts[1] } else { $parts[0] })
+        }
+    }
+
+    $pinned = @(Get-PinnedImages)
+    $images = @(); $imagesMB = 0.0; $base = @(); $baseMB = 0.0
+    foreach ($row in @(docker images --format '{{.Repository}}:{{.Tag}}|{{.ID}}|{{.Size}}')) {
         if (-not $row) { continue }
-        $parts = $row -split '\|', 2
-        $line = $parts[0]; $size = if ($parts.Count -ge 2) { $parts[1] } else { '' }
-        $ours = ($line -like "ghcr.io/open-nvr/*" -or $line -like "opennvr/*")
+        $parts = $row -split '\|', 3
+        $line = $parts[0]; $size = if ($parts.Count -ge 3) { $parts[2] } else { '' }
+        if ($line -eq '<none>:<none>') { $line = $parts[1] }
+        # An image a container of another stack runs is never ours to remove.
+        if (($otherUsed -contains $line) -or ($otherUsed -contains ($line -replace ':latest$', ''))) { continue }
+        $ours = ($line -like "ghcr.io/open-nvr/*" -or $line -like "opennvr/*" -or ($labelled -contains $line))
         if (-not $ours) {
             # A locally built <project>-<service>: only one this install ran.
             foreach ($p in $projects) {
@@ -181,9 +237,10 @@ function Find-Install {
             }
         }
         if ($ours) { $images += $line; $imagesMB += Get-SizeMB $size }
+        elseif ($pinned -contains $line) { $base += $line; $baseMB += Get-SizeMB $size }
     }
 
-    return @{ Containers = @($containers); Elsewhere = @($elsewhere); Volumes = @($volumes); Networks = @($networks); Images = @($images); ImagesMB = $imagesMB }
+    return @{ Containers = @($containers); Elsewhere = @($elsewhere); Volumes = @($volumes); Networks = @($networks); Images = @($images); ImagesMB = $imagesMB; Base = @($base); BaseMB = $baseMB }
 }
 
 function Get-RecordingsRoot {
@@ -250,11 +307,11 @@ function Show-Plan {
         if ($DelBackups) { Write-Say "Update backups in .\backups" }
         else { Write-Say "Update backups in .\backups - KEPT (--keep-backups)" }
     }
-    if ($Found.Images.Count -gt 0) {
-        $n = "$($Found.Images.Count), $(Get-ImagesGB)"
-        if ($DelImages -eq $true) { Write-Say "OpenNVR images ($n)" }
-        elseif ($DelImages -eq $false) { Write-Say "OpenNVR images ($n) - KEPT for the next install (--keep-images)" }
-        else { Write-Say "OpenNVR images ($n) - you are asked; the default is to delete them" }
+    if ((Get-ImagesCount) -gt 0) {
+        if ($DelImages -eq $true) { Write-Say (Get-ImagesLine) }
+        elseif ($DelImages -eq $false) { Write-Say "$(Get-ImagesLine) - KEPT for the next install (--keep-images)" }
+        else { Write-Say "$(Get-ImagesLine) - you are asked; the default is to delete them" }
+        if ($Found.Base.Count -gt 0) { Write-Say "  base images: $($Found.Base -join ' ')" }
     }
     if (($Found.Containers.Count + $Found.Volumes.Count + $Found.Networks.Count + $files.Count -eq 0) -and -not $Runner -and -not $HostAgent) {
         Write-Say "(nothing: no OpenNVR install found for this folder)"
@@ -265,7 +322,7 @@ function Show-Kept {
     Write-Host ""
     Write-Host "  Left alone, always:"
     Write-Say "every other container, volume, network and image on this machine"
-    Write-Say "shared base images (postgres, nginx, nats, alpine, ...)"
+    Write-Say "any image a container of another stack runs, base images included"
     Write-Say "this source folder, and Ollama if it runs on this machine"
     $others = @(Get-NotFootage $RecRoot | ForEach-Object { $_.Name })
     if ($others.Count -gt 0) { Write-Say "other files in ${RecRoot}: $($others -join ' ')" }
@@ -299,7 +356,7 @@ function Show-Warning {
     Write-Say "  - the certificates and keys"
     if ($DelRec -and $footage.Count -gt 0) { Write-Say "  - all footage in $RecRoot ($($footage.Count) folder(s))" }
     if ($DelBackups -and (Test-Path "backups")) { Write-Say "  - the update backups in .\backups" }
-    if ($DelImages -eq $true -and $Found.Images.Count -gt 0) { Write-Say "  - OpenNVR's $($Found.Images.Count) images ($(Get-ImagesGB)); the next install downloads them again" }
+    if ($DelImages -eq $true -and (Get-ImagesCount) -gt 0) { Write-Say "  - $(Get-ImagesCount) images ($(Get-ImagesGB)): OpenNVR's and the base images only it uses; the next install downloads them again" }
     Write-Host "  There is no undo." -ForegroundColor Yellow
     Write-Host "  ============================================================" -ForegroundColor Yellow
 }
@@ -377,10 +434,11 @@ function Show-Sentence([string]$Sentence) {
 # Images hold no site data, so this is a choice, not part of the warning.
 # Default yes: a clean machine is what most people mean by uninstall.
 function Confirm-Images {
-    if ($null -ne $DelImages -or $Found.Images.Count -eq 0) { return }
+    if ($null -ne $DelImages -or (Get-ImagesCount) -eq 0) { return }
     Write-Host ""
-    Write-Say "Also delete OpenNVR's $($Found.Images.Count) images ($(Get-ImagesGB))? They hold no site data;"
+    Write-Say "Also delete OpenNVR's $(Get-ImagesCount) images ($(Get-ImagesGB))? They hold no site data;"
     Write-Say "the next install downloads them again."
+    if ($Found.Base.Count -gt 0) { Write-Say "That counts $($Found.Base.Count) base image(s) nothing else on this machine uses: $($Found.Base -join ' ')" }
     $answer = Read-Host "  Delete the images? [Y/n]"
     if ("$answer" -match '^\s*[Nn]') { $script:DelImages = $false; Write-Say "The images stay." }
     else { $script:DelImages = $true }
@@ -495,7 +553,12 @@ if ($DelImages) {
         docker image rm $item *> $null
         if ($LASTEXITCODE -ne 0) { Write-Warn2 "Image $item stays: it is still in use." }
     }
-    Write-Ok "OpenNVR images removed"
+    if ($Found.Images.Count -gt 0) { Write-Ok "OpenNVR images removed" }
+    foreach ($item in $Found.Base) {
+        docker image rm $item *> $null
+        if ($LASTEXITCODE -ne 0) { Write-Warn2 "Base image $item stays: something else uses it." }
+    }
+    if ($Found.Base.Count -gt 0) { Write-Ok "Base images removed" }
 }
 
 Write-Host ""

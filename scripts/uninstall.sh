@@ -29,9 +29,13 @@
 #   volume     <project>_opennvr_* (the database, keys, every app's settings
 #              and data) or <project>_shared_frames
 #   network    <project>_opennvr_* or <project>_default
-#   image      ghcr.io/open-nvr/*, opennvr/*, or a <project>-* image one of
-#              the containers above ran. postgres, nginx, nats, alpine and the
-#              like stay: another stack may need them.
+#   image      ghcr.io/open-nvr/*, opennvr/*, one compose built for this
+#              project (its label says so), or a <project>-* image one of the
+#              containers above ran. With them go the third-party images this
+#              install's compose files and Dockerfiles name (postgres, nginx,
+#              nats, alpine, ...) when no other container runs them; Docker
+#              refuses the rest, and so does the script. An image a container
+#              of another stack runs is never touched.
 #   footage    cam-<n>*, orphaned, .evidence, .hevc_cache under RECORDINGS_PATH;
 #              anything else in that folder stays, and so does the folder.
 #   host       the update runner and the host agent, only when they run from
@@ -125,7 +129,38 @@ size_mb() {
         | awk '{ v = $1 + 0; u = $2; if (u ~ /^T/) v *= 1048576; else if (u ~ /^G/) v *= 1024;
                  else if (u ~ /^k/) v /= 1024; else if (u ~ /^B/) v /= 1048576; printf "%d", v + 0.5 }'
 }
-images_gb() { awk -v mb="$IMAGES_MB" 'BEGIN { printf "%.1f GB", mb / 1024 }'; }
+mb_gb() { awk -v mb="$1" 'BEGIN { printf "%.1f GB", mb / 1024 }'; }
+images_gb() { mb_gb $((IMAGES_MB + BASE_MB)); }
+images_count() { echo $(( $(count_lines "$IMAGES") + $(count_lines "$BASE_IMAGES") )); }
+# The plan's line about images: OpenNVR's own, and the base images with them.
+images_line() {
+    if [ -z "$IMAGES" ]; then
+        printf 'Base images only OpenNVR pulled (%s, %s)' "$(count_lines "$BASE_IMAGES")" "$(mb_gb "$BASE_MB")"
+    elif [ -z "$BASE_IMAGES" ]; then
+        printf 'OpenNVR images (%s, %s)' "$(count_lines "$IMAGES")" "$(mb_gb "$IMAGES_MB")"
+    else
+        printf 'OpenNVR images (%s, %s) and base images nothing else uses (%s, %s)' \
+            "$(count_lines "$IMAGES")" "$(mb_gb "$IMAGES_MB")" "$(count_lines "$BASE_IMAGES")" "$(mb_gb "$BASE_MB")"
+    fi
+}
+
+# The third-party images this install names: `image:` lines of its compose
+# files, FROM and COPY --from of its Dockerfiles (inline ones included), with
+# ${VAR:-default} read as the default. Only exact repository:tag references.
+pinned_images() {
+    {
+        cat "$ROOT"/docker-compose*.yml "$ROOT"/compose*.yml 2>/dev/null \
+            | grep -E '^[[:space:]]*(-[[:space:]]*)?image:' | sed -E 's/^[^:]*image:[[:space:]]*//'
+        cat "$ROOT"/Dockerfile "$ROOT"/*/Dockerfile "$ROOT"/examples/*/Dockerfile "$ROOT"/docker-compose*.yml 2>/dev/null \
+            | grep -E '^[[:space:]]*(FROM[[:space:]]|COPY[[:space:]].*--from=)' \
+            | sed -E 's/^[[:space:]]*FROM[[:space:]]+(--platform=[^[:space:]]+[[:space:]]+)?//; s/^[[:space:]]*COPY[[:space:]].*--from=//; s/[[:space:]].*$//'
+    } | sed -E 's/[[:space:]]*#.*$//; s/["'"'"']//g; s/\$\{[A-Za-z_0-9]+:-([^{}]*)\}/\1/g; s/\$\{[A-Za-z_0-9]+:-([^{}]*)\}/\1/g; s/[[:space:]]+$//' \
+      | grep -vE '\$|^(ghcr\.io/open-nvr/|opennvr/)' \
+      | grep -E '^[a-z0-9][a-z0-9._/-]*(:[A-Za-z0-9._-]+)?(@sha256:[0-9a-f]+)?$' | grep -E '[:/]' | sort -u
+}
+
+# An image a container of another stack runs is never ours to remove.
+used_elsewhere() { in_lines "$OTHER_USED" "$1" || in_lines "$OTHER_USED" "${1%:latest}"; }
 
 collect() {
     local all name project workdir image p line
@@ -139,15 +174,18 @@ collect() {
         fi
     done <<< "$all"
 
-    CONTAINERS=""; ELSEWHERE=""; USED_IMAGES=""
+    CONTAINERS=""; ELSEWHERE=""; USED_IMAGES=""; OTHER_USED=""
     while IFS='|' read -r name project workdir image; do
         [ -n "$name" ] || continue
         if [ -n "$project" ] && in_lines "$PROJECTS" "$project" \
            && { [ "$workdir" = "$ROOT" ] || [[ "$name" == opennvr_* ]]; }; then
             CONTAINERS=$(add_line "$CONTAINERS" "$name")
             USED_IMAGES=$(add_line "$USED_IMAGES" "$image")
-        elif [[ "$name" == opennvr_* ]]; then
-            ELSEWHERE=$(add_line "$ELSEWHERE" "$name (project ${project:-none}, ${workdir:-no folder})")
+        else
+            OTHER_USED=$(add_line "$OTHER_USED" "$image")
+            if [[ "$name" == opennvr_* ]]; then
+                ELSEWHERE=$(add_line "$ELSEWHERE" "$name (project ${project:-none}, ${workdir:-no folder})")
+            fi
         fi
     done <<< "$all"
 
@@ -166,11 +204,27 @@ collect() {
         done <<< "$(docker network ls --filter "label=com.docker.compose.project=$p" --format '{{.Name}}')"
     done <<< "$PROJECTS"
 
-    IMAGES=""; IMAGES_MB=0
-    local ours size
-    while IFS='|' read -r line size; do
+    # Images compose built for one of our projects, by compose's own label;
+    # an untagged one (a rebuild left it) by its id.
+    local labelled="" id
+    while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        while IFS='|' read -r line id size; do
+            [ -n "$line" ] || continue
+            [ "$line" != "<none>:<none>" ] || line="$id"
+            labelled=$(add_line "$labelled" "$line")
+        done <<< "$(docker images --filter "label=com.docker.compose.project=$p" --format '{{.Repository}}:{{.Tag}}|{{.ID}}|{{.Size}}')"
+    done <<< "$PROJECTS"
+
+    IMAGES=""; IMAGES_MB=0; BASE_IMAGES=""; BASE_MB=0
+    local ours size pinned
+    pinned="$(pinned_images)"
+    while IFS='|' read -r line id size; do
         [ -n "$line" ] || continue
+        [ "$line" != "<none>:<none>" ] || line="$id"
+        used_elsewhere "$line" && continue
         ours=0
+        in_lines "$labelled" "$line" && ours=1
         case "$line" in
             ghcr.io/open-nvr/*|opennvr/*) ours=1 ;;
             *)
@@ -187,8 +241,11 @@ collect() {
         if [ "$ours" = 1 ]; then
             IMAGES=$(add_line "$IMAGES" "$line")
             IMAGES_MB=$((IMAGES_MB + $(size_mb "${size:-0}")))
+        elif in_lines "$pinned" "$line"; then
+            BASE_IMAGES=$(add_line "$BASE_IMAGES" "$line")
+            BASE_MB=$((BASE_MB + $(size_mb "${size:-0}")))
         fi
-    done <<< "$(docker images --format '{{.Repository}}:{{.Tag}}|{{.Size}}')"
+    done <<< "$(docker images --format '{{.Repository}}:{{.Tag}}|{{.ID}}|{{.Size}}')"
 }
 
 recordings_root() {
@@ -291,12 +348,13 @@ show_plan() {
         if [ "$DEL_BACKUPS" = 1 ]; then say "Update backups in ./backups"
         else say "Update backups in ./backups — KEPT (--keep-backups)"; fi
     fi
-    if [ -n "$IMAGES" ]; then
+    if [ -n "$IMAGES$BASE_IMAGES" ]; then
         case "$DEL_IMAGES" in
-            1) say "OpenNVR images ($(count_lines "$IMAGES"), $(images_gb))" ;;
-            0) say "OpenNVR images ($(count_lines "$IMAGES"), $(images_gb)) — KEPT for the next install (--keep-images)" ;;
-            *) say "OpenNVR images ($(count_lines "$IMAGES"), $(images_gb)) — you are asked; the default is to delete them" ;;
+            1) say "$(images_line)" ;;
+            0) say "$(images_line) — KEPT for the next install (--keep-images)" ;;
+            *) say "$(images_line) — you are asked; the default is to delete them" ;;
         esac
+        [ -z "$BASE_IMAGES" ] || say "  base images: $(printf '%s' "$BASE_IMAGES" | tr '\n' ' ')"
     fi
     if [ -z "$CONTAINERS$VOLUMES$NETWORKS$(existing_files)$RUNNER$HOST_AGENT" ]; then
         say "(nothing: no OpenNVR install found for this folder)"
@@ -306,7 +364,7 @@ show_plan() {
 show_kept() {
     printf '\n  Left alone, always:\n'
     say "every other container, volume, network and image on this machine"
-    say "shared base images (postgres, nginx, nats, alpine, ...)"
+    say "any image a container of another stack runs, base images included"
     say "this source folder, and Ollama if it runs on this machine"
     local others extra_env
     others=$(recordings_others "$REC_ROOT")
@@ -340,7 +398,7 @@ show_warning() {
     say "  - the certificates and keys"
     [ "$DEL_REC" = 1 ] && [ "$rec_count" -gt 0 ] && say "  - all footage in $REC_ROOT ($rec_count folder(s))"
     [ "$DEL_BACKUPS" = 1 ] && [ -d backups ] && say "  - the update backups in ./backups"
-    [ "$DEL_IMAGES" = 1 ] && [ -n "$IMAGES" ] && say "  - OpenNVR's $(count_lines "$IMAGES") images ($(images_gb)); the next install downloads them again"
+    [ "$DEL_IMAGES" = 1 ] && [ -n "$IMAGES$BASE_IMAGES" ] && say "  - $(images_count) images ($(images_gb)): OpenNVR's and the base images only it uses; the next install downloads them again"
     printf '  There is no undo.\n'
     printf '  ============================================================\n'
 }
@@ -445,11 +503,12 @@ draw_sentence() {
 # Images hold no site data, so this is a choice, not part of the warning.
 # Default yes: a clean machine is what most people mean by uninstall.
 ask_images() {
-    [ -z "$DEL_IMAGES" ] && [ -n "$IMAGES" ] || return 0
+    [ -z "$DEL_IMAGES" ] && [ -n "$IMAGES$BASE_IMAGES" ] || return 0
     local answer=""
     printf '\n'
-    say "Also delete OpenNVR's $(count_lines "$IMAGES") images ($(images_gb))? They hold no site data;"
+    say "Also delete OpenNVR's $(images_count) images ($(images_gb))? They hold no site data;"
     say "the next install downloads them again."
+    [ -z "$BASE_IMAGES" ] || say "That counts $(count_lines "$BASE_IMAGES") base image(s) nothing else on this machine uses: $(printf '%s' "$BASE_IMAGES" | tr '\n' ' ')"
     if [ -t 0 ]; then
         read -r -p "  Delete the images? [Y/n]: " answer || true
     else
@@ -636,7 +695,12 @@ if [ "$DEL_IMAGES" = 1 ]; then
         # Never -f: Docker refuses while any other container uses the image.
         docker image rm "$item" >/dev/null 2>&1 || warn "Image $item stays: it is still in use."
     done <<< "$IMAGES"
-    ok "OpenNVR images removed"
+    [ -z "$IMAGES" ] || ok "OpenNVR images removed"
+    while IFS= read -r item; do
+        [ -n "$item" ] || continue
+        docker image rm "$item" >/dev/null 2>&1 || warn "Base image $item stays: something else uses it."
+    done <<< "$BASE_IMAGES"
+    [ -z "$BASE_IMAGES" ] || ok "Base images removed"
 fi
 
 printf '\n'

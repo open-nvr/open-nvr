@@ -74,8 +74,19 @@ case "$1" in
             rm) drop "$S/networks" "$3" ;;
         esac
         ;;
-    images) if [[ "$fmt" == *Size* ]]; then sed 's/$/|1.5GB/' "$S/images"; else cat "$S/images"; fi ;;
-    image) drop "$S/images" "$3" ;;
+    images)
+        if [ -n "$filter" ]; then src=$(list_labelled "$S/image-labels"); else src=$(cat "$S/images"); fi
+        while IFS= read -r n; do
+            [ -n "$n" ] || continue
+            row="$n"; [[ "$fmt" == *ID* ]] && row="$row|abc123"; [[ "$fmt" == *Size* ]] && row="$row|1.5GB"
+            printf '%s\n' "$row"
+        done <<< "$src"
+        ;;
+    image)
+        # Like Docker: no removal while a container runs the image.
+        if cut -d'|' -f4 "$S/containers" | grep -qxF -e "$3" -e "${3%:latest}"; then exit 1; fi
+        drop "$S/images" "$3"
+        ;;
     run) ;;
     *) echo "fake docker: unexpected: $*" >&2; exit 99 ;;
 esac
@@ -106,7 +117,10 @@ fixture() {
     SITE="$WORK/s$n/mysite"; REC="$WORK/s$n/footage"; STATE="$WORK/s$n/state"
     mkdir -p "$SITE/scripts" "$REC" "$STATE"
     cp "$REPO_ROOT/scripts/uninstall.sh" "$REPO_ROOT/scripts/uninstall.ps1" "$SITE/scripts/"
-    touch "$SITE/docker-compose.yml" "$SITE/start.sh" "$SITE/start.ps1" "$SITE/.env.example"
+    touch "$SITE/start.sh" "$SITE/start.ps1" "$SITE/.env.example"
+    # What this install pins: postgres (a neighbour runs it too), alpine (nobody
+    # else), nats (not on this machine), and its own images.
+    printf 'services:\n  db:\n    image: postgres:15-alpine\n  helper:\n    image: "alpine:3.20"  # certs\n  bus:\n    image: nats:2-alpine\n  core:\n    image: ${CORE_TAG_IMAGE:-ghcr.io/open-nvr/core:${CORE_TAG:-latest}}\n' > "$SITE/docker-compose.yml"
     printf 'POSTGRES_PASSWORD=x\nRECORDINGS_PATH=%s\n' "${REC_LABEL:-$REC}" > "$SITE/.env"
     printf 'keep me\n' > "$SITE/.env.bak.mine"
     mkdir -p "$SITE/nginx-certs" "$SITE/mediamtx-certs" "$SITE/data/updates" "$SITE/data/update-requests" \
@@ -154,12 +168,20 @@ ghcr.io/open-nvr/core:0.1.10
 ghcr.io/open-nvr/attendly:0.3.0
 opennvr/app-installer:local
 mysite-whisper:latest
+mysite-mediamtx:latest
 mysite-unrelated:latest
 postgres:15-alpine
 nginx:1.27
 alpine:3.20
+busybox:1.36
 redis:7
 dpage/pgadmin4:8
+EOF
+    # Compose's project label: whisper and a mediamtx no container runs any
+    # more (a rebuild re-tagged it) are this project's; the stranger's is not.
+    cat > "$STATE/image-labels" <<'EOF'
+mysite-whisper:latest|mysite
+mysite-mediamtx:latest|mysite
 EOF
     : > "$STATE/calls.log"
 }
@@ -185,7 +207,7 @@ neighbours_missing() {
     for item in my_postgres my_cache loose pgadmin opennvr_old_db; do has containers "$item" || missing="$missing container:$item"; done
     for item in webapp_db oldsite_opennvr_db_data loose_data mysite_pgadmin_data; do has volumes "$item" || missing="$missing volume:$item"; done
     for item in webapp_default mysite_pgadmin; do has networks "$item" || missing="$missing network:$item"; done
-    for item in postgres:15-alpine nginx:1.27 alpine:3.20 redis:7 dpage/pgadmin4:8 mysite-unrelated:latest; do has images "$item" || missing="$missing image:$item"; done
+    for item in postgres:15-alpine nginx:1.27 busybox:1.36 redis:7 dpage/pgadmin4:8 mysite-unrelated:latest; do has images "$item" || missing="$missing image:$item"; done
     [ -f "$REC/holiday-photos/beach.jpg" ] || missing="$missing file:holiday-photos"
     [ -f "$REC/notes.txt" ] || missing="$missing file:notes.txt"
     [ -f "$SITE/.env.bak.mine" ] || missing="$missing file:.env.bak.mine"
@@ -235,7 +257,9 @@ suite() {
     # What each script says it leaves alone must not include the .env it removes.
     if printf '%s' "$out" | grep -E 'your own copies' | grep -qE ' \.env( |$)'; then missing="$missing listed:.env"; fi
     if [ $rc -eq 0 ] && [ -z "$missing" ] && untouched \
-       && printf '%s' "$out" | grep -q 'opennvr_attendly' && printf '%s' "$out" | grep -qE 'images \(4, 6\.0 GB\)' \
+       && printf '%s' "$out" | grep -q 'opennvr_attendly' \
+       && printf '%s' "$out" | grep -qE 'OpenNVR images \(5, 7\.5 GB\) and base images nothing else uses \(1, 1\.5 GB\)' \
+       && printf '%s' "$out" | grep -qE 'base images: alpine:3.20 *$' \
        && ! printf '%s' "$out" | grep -qE '^ +(my_postgres|pgadmin|webapp_db|mysite_pgadmin_data)$'; then pass
     else fail "rc=$rc missing=[$missing] $(grep -E 'rm ' "$STATE/calls.log" | head -3)"; fi
 
@@ -259,7 +283,7 @@ suite() {
        && printf '%s' "$out" | grep -q 'type the sentence drawn here' && drawn "$out"; then pass
     else fail "$out"; fi
 
-    start_test "$run: Enter + the typed sentence removes the install, apps, footage, backups, host agent files and images"
+    start_test "$run: Enter + the typed sentence removes the install, apps, footage, backups, host agent files and images, base images only it used included"
     fixture "${WD_LABEL:-}"
     typed "" "  Uninstall and  remove all data and recordings "   # images: Enter = yes; case and spacing forgiven
     out=$($run); rc=$?
@@ -269,7 +293,9 @@ suite() {
        && [ -d "$REC" ] && [ ! -e "$SITE/backups" ] \
        && ! has images ghcr.io/open-nvr/core:0.1.10 && ! has images ghcr.io/open-nvr/attendly:0.3.0 \
        && ! has images opennvr/app-installer:local && ! has images mysite-whisper:latest \
-       && printf '%s' "$out" | grep -q "Also delete OpenNVR's"; then pass
+       && ! has images mysite-mediamtx:latest && ! has images alpine:3.20 \
+       && has images postgres:15-alpine && has images busybox:1.36 \
+       && printf '%s' "$out" | grep -q "Also delete OpenNVR's 6 images" && printf '%s' "$out" | grep -q 'Base images removed'; then pass
     else fail "rc=$rc missing=[$missing] left=[$left]: $out"; fi
 
     start_test "$run: answering n to the images keeps them, and only them"
@@ -278,7 +304,7 @@ suite() {
     out=$($run); rc=$?
     missing=$(neighbours_missing); left=$(install_left)
     if [ $rc -eq 0 ] && [ -z "$missing" ] && [ -z "$left" ] && [ ! -e "$REC/cam-1" ] \
-       && has images ghcr.io/open-nvr/core:0.1.10 && has images ghcr.io/open-nvr/attendly:0.3.0 \
+       && has images ghcr.io/open-nvr/core:0.1.10 && has images ghcr.io/open-nvr/attendly:0.3.0 && has images alpine:3.20 \
        && printf '%s' "$out" | grep -q 'The images stay'; then pass
     else fail "rc=$rc missing=[$missing] left=[$left]: $out"; fi
 
@@ -288,7 +314,7 @@ suite() {
     out=$($run --yes); rc=$?
     missing=$(neighbours_missing); left=$(install_left)
     if [ $rc -eq 0 ] && [ -z "$missing" ] && [ -z "$left" ] && [ ! -e "$REC/cam-1" ] && [ ! -e "$SITE/backups" ] \
-       && ! has images ghcr.io/open-nvr/core:0.1.10 && has images postgres:15-alpine \
+       && ! has images ghcr.io/open-nvr/core:0.1.10 && ! has images alpine:3.20 && has images postgres:15-alpine \
        && printf '%s' "$out" | grep -q 'WARNING' && ! printf '%s' "$out" | grep -q "Also delete OpenNVR's"; then pass
     else fail "rc=$rc missing=[$missing] left=[$left]: $out"; fi
 

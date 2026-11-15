@@ -38,8 +38,11 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   copied from there (`--yes` for scripts, `--dry-run` to look).
   `--keep-recordings` and
   `--keep-backups` leave those for the next install. It asks whether
-  OpenNVR's own images go too, with their total size; the default is
-  yes, and `--keep-images` / `--delete-images` decide it for scripts.
+  OpenNVR's images go too, with their total size; the default is yes,
+  and `--keep-images` / `--delete-images` decide it for scripts. Those
+  are its own images, the ones compose built for it, and the base
+  images its compose files and Dockerfiles pin (postgres, nginx, nats,
+  alpine, ...) when no other container on the machine runs them.
   Nothing of any other stack on the machine is
   touched: every item is matched to this install's compose project and
   names, shared base images stay, and there is no prune and no forced
