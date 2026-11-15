@@ -1,17 +1,17 @@
 /**
  * Copyright (c) 2026 OpenNVR
  * This file is part of OpenNVR.
- * 
+ *
  * OpenNVR is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
- * 
+ *
  * OpenNVR is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU Affero General Public License
  * along with OpenNVR.  If not, see <https://www.gnu.org/licenses/>.
  */
@@ -22,9 +22,12 @@ import { toDataURL } from 'qrcode'
 import { apiService } from '../lib/apiService'
 import { useAuth } from '../auth/AuthContext'
 import {
-  AlertCircle, ArrowRight, Check, Copy, Eye, EyeOff, KeyRound, Loader2, Lock, UserRound,
+  AlertCircle, ArrowRight, Check, Copy, Eye, EyeOff, KeyRound, Loader2, Lock, ShieldCheck, UserRound,
 } from 'lucide-react'
 import { AuthAlert, AuthLayout, authButton, authFieldIcon, authInput, authLabel } from '../components/AuthLayout'
+import { RecoveryCodesPanel } from '../components/RecoveryCodesPanel'
+
+type SignIn = { access_token: string; refresh_token: string; device_token?: string | null }
 
 export function FirstTimeSetup() {
   const [password, setPassword] = useState('')
@@ -37,10 +40,21 @@ export function FirstTimeSetup() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [mfaSecret, setMfaSecret] = useState<string | null>(null)
-  const [mfaQrUri, setMfaQrUri] = useState<string | null>(null)
   const [qrDataUrl, setQrDataUrl] = useState<string>('')
+  // Step 2: the server hands the browser that claimed the account a session
+  // for confirming the authenticator; a code from the scanned QR finishes it.
+  const [setupSession, setSetupSession] = useState<string | null>(null)
+  const [code, setCode] = useState('')
+  const [verifying, setVerifying] = useState(false)
+  const [verifyError, setVerifyError] = useState<string | null>(null)
+  // Too many wrong codes, or the server restarted: the enrolment wall after
+  // a password sign-in finishes the same pending authenticator.
+  const [sessionEnded, setSessionEnded] = useState(false)
+  // Step 3: recovery codes, shown once, and the session the verify step opened.
+  const [recoveryCodes, setRecoveryCodes] = useState<string[] | null>(null)
+  const [signIn, setSignIn] = useState<SignIn | null>(null)
   const navigate = useNavigate()
-  const { checkSetupStatus, setupUsername } = useAuth()
+  const { checkSetupStatus, loginWithTokens, setupUsername } = useAuth()
   // The account to activate is the one the server created from
   // DEFAULT_ADMIN_USERNAME. Never assume 'admin': submitting a name with no
   // pending account is exactly how issue #632 locked operators out.
@@ -82,11 +96,11 @@ export function FirstTimeSetup() {
         password,
         setupToken.trim(),
       )
-      
+
       // Show MFA setup
       setMfaSecret(data.mfa_secret)
-      setMfaQrUri(data.mfa_qr_uri)
-      
+      setSetupSession(data.setup_session ?? null)
+
       // Generate QR code image from otpauth URI
       if (data.mfa_qr_uri) {
         const qrUrl = await toDataURL(data.mfa_qr_uri, { width: 220, margin: 2 })
@@ -100,10 +114,49 @@ export function FirstTimeSetup() {
     }
   }
 
-  const onComplete = async () => {
+  const onVerify = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setVerifyError(null)
+    if (!setupSession) {
+      setVerifyError('This setup session has ended. Sign in with your password to finish.')
+      setSessionEnded(true)
+      return
+    }
+    setVerifying(true)
+    try {
+      const { data } = await apiService.firstTimeSetupVerify(setupSession, code.replace(/\s+/g, ''))
+      setSignIn({
+        access_token: data.access_token,
+        refresh_token: data.refresh_token,
+        device_token: data.device_token,
+      })
+      setRecoveryCodes(data.recovery_codes ?? [])
+    } catch (e: any) {
+      setVerifyError(e?.data?.detail || e?.message || 'Could not verify the code')
+      if (e?.status === 403 || e?.status === 409) setSessionEnded(true)
+    } finally {
+      setVerifying(false)
+    }
+  }
+
+  const goToSignIn = async () => {
     // Refresh setup status so AuthContext knows setup is complete
     await checkSetupStatus()
     navigate('/login', { replace: true })
+  }
+
+  const onComplete = async () => {
+    // The verify step proved the password and the authenticator, and signed
+    // the operator in; the same code typed again at the login page would be
+    // refused as a replay.
+    if (signIn) {
+      try {
+        await loginWithTokens(signIn)
+        navigate('/', { replace: true })
+        return
+      } catch { /* the session did not take; the login page works as before */ }
+    }
+    await goToSignIn()
   }
 
   const [showPassword, setShowPassword] = useState(false)
@@ -120,23 +173,39 @@ export function FirstTimeSetup() {
 
   const step = (n: number, title: string, hint: string) => (
     <div className="space-y-1">
-      <div className="text-xs font-medium uppercase tracking-wider text-[#5eb3f6]">Step {n} of 2</div>
+      <div className="text-xs font-medium uppercase tracking-wider text-[#5eb3f6]">Step {n} of 3</div>
       <h1 className="text-lg font-semibold text-[var(--text)]">{title}</h1>
       <p className="text-sm text-[var(--text-dim)]">{hint}</p>
     </div>
   )
 
-  // Step 2: the account exists; bind an authenticator to it.
+  // Step 3: the authenticator is confirmed; the codes that replace it if the
+  // phone is lost are shown this once.
+  if (recoveryCodes) {
+    return (
+      <AuthLayout wide>
+        {step(3, 'Save your recovery codes', 'Two-step verification is on. If you lose your phone, one of these codes signs you in instead.')}
+        <RecoveryCodesPanel
+          codes={recoveryCodes}
+          username={username || undefined}
+          doneLabel="Continue to OpenNVR"
+          onDone={onComplete}
+        />
+      </AuthLayout>
+    )
+  }
+
+  // Step 2: the account exists; bind an authenticator to it and prove it works.
   if (mfaSecret && qrDataUrl) {
     return (
       <AuthLayout wide>
-        {step(2, 'Turn on two-step verification', 'Your admin account is created. Link an authenticator app to finish.')}
+        {step(2, 'Turn on two-step verification', 'Your admin account is created. Link an authenticator app and confirm it with a code to finish.')}
 
         <ol className="space-y-2 text-sm text-[var(--text)]">
           {[
             'Install an authenticator app (Google Authenticator, Microsoft Authenticator, Authy…).',
             'Scan the QR code below with it.',
-            'Sign in with your new password and the 6-digit code it shows.',
+            'Enter the 6-digit code it shows to confirm.',
           ].map((text, i) => (
             <li key={i} className="flex gap-3">
               <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-[#5eb3f6]/15 text-[11px] font-semibold text-[#5eb3f6]">
@@ -168,9 +237,47 @@ export function FirstTimeSetup() {
           </div>
         </div>
 
-        <button type="button" onClick={onComplete} className={authButton}>
-          Continue to sign in <ArrowRight size={16} />
-        </button>
+        {sessionEnded ? (
+          <div className="space-y-3">
+            <AuthAlert tone="error" icon={<AlertCircle size={16} />}>{verifyError}</AuthAlert>
+            <button type="button" onClick={goToSignIn} className={authButton}>
+              Continue to sign in <ArrowRight size={16} />
+            </button>
+          </div>
+        ) : (
+          <form onSubmit={onVerify} className="space-y-3">
+            {verifyError && <AuthAlert tone="error" icon={<AlertCircle size={16} />}>{verifyError}</AuthAlert>}
+
+            <div className="space-y-1.5">
+              <label htmlFor="setup-code" className={authLabel}>Code from the app</label>
+              <div className="relative">
+                <ShieldCheck size={16} className={authFieldIcon} />
+                <input
+                  id="setup-code"
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  className={`${authInput} font-mono tracking-widest`}
+                  value={code}
+                  onChange={(e) => setCode(e.target.value)}
+                  placeholder="123456"
+                  minLength={6}
+                  maxLength={8}
+                  autoFocus
+                  required
+                />
+              </div>
+              <p className="text-xs text-[var(--text-dim)]">
+                If you close this page first, sign in with your password; you will be asked to finish there.
+              </p>
+            </div>
+
+            <button type="submit" disabled={verifying || code.replace(/\s+/g, '').length < 6} className={authButton}>
+              {verifying && <Loader2 size={16} className="animate-spin" />}
+              {verifying ? 'Checking…' : 'Verify and finish'}
+            </button>
+          </form>
+        )}
       </AuthLayout>
     )
   }

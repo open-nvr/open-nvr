@@ -21,6 +21,11 @@ nobody can race the operator to claim the freshly-bootstrapped admin account.
 The token is a process-local singleton, printed to stdout + audit log once, and
 consumed on first successful (constant-time) use.
 See V-001 and DESIGN_NOTES: first-time-setup token.
+
+Spending the token claims the account but leaves its authenticator pending.
+The second step, POST /auth/first-time-setup/verify, carries an *enrolment
+session* minted here and handed only to the browser that spent the token; a
+code from the scanned QR confirms the authenticator and finishes setup.
 """
 
 from __future__ import annotations
@@ -150,7 +155,80 @@ def is_armed() -> bool:
 
 
 def clear() -> None:
-    """Test hook: clear the armed token. Not exposed to API surface."""
-    global _state
+    """Test hook: clear the armed token and any enrolment session."""
+    global _state, _enrolment
     with _lock:
         _state = None
+        _enrolment = None
+
+
+# ── enrolment session (step 2) ────────────────────────────────────────
+#
+# After the setup token is spent the account has a password but its
+# authenticator is still unconfirmed. The verify step is unauthenticated,
+# so it presents this session instead: a random token returned once from
+# POST /auth/first-time-setup. Wrong codes are counted and the session ends
+# after too many, which caps guessing at the 6-digit code; the operator
+# then finishes through the password login's enrolment wall, which the
+# login lockout protects. The session also ends on success or restart.
+
+_ENROLMENT_MAX_FAILURES = 10
+
+
+@dataclass
+class _EnrolmentState:
+    """The one pending step-2 enrolment. Module-private."""
+
+    token: str
+    user_id: int
+    failures: int = 0
+
+
+_enrolment: "_EnrolmentState | None" = None
+
+
+def open_enrolment(user_id: int) -> str:
+    """Start the step-2 session for ``user_id`` and return its token.
+
+    Replaces any earlier session: only the browser that just spent the
+    setup token may confirm the authenticator it was shown.
+    """
+    global _enrolment
+    token = secrets.token_urlsafe(_TOKEN_BYTES)
+    with _lock:
+        _enrolment = _EnrolmentState(token=token, user_id=user_id)
+    return token
+
+
+def enrolment_user_id(supplied: str | None) -> int | None:
+    """The user a valid session token belongs to, else None (constant-time)."""
+    if not supplied:
+        return None
+    with _lock:
+        if _enrolment is None:
+            return None
+        if hmac.compare_digest(_enrolment.token, supplied):
+            return _enrolment.user_id
+        return None
+
+
+def enrolment_failed(supplied: str | None) -> bool:
+    """Count a wrong code against the session. True when that ended it."""
+    global _enrolment
+    with _lock:
+        if _enrolment is None or not supplied:
+            return True
+        if not hmac.compare_digest(_enrolment.token, supplied):
+            return False
+        _enrolment.failures += 1
+        if _enrolment.failures >= _ENROLMENT_MAX_FAILURES:
+            _enrolment = None
+            return True
+        return False
+
+
+def close_enrolment() -> None:
+    """End the step-2 session (setup finished, or the account moved on)."""
+    global _enrolment
+    with _lock:
+        _enrolment = None

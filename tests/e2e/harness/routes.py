@@ -42,6 +42,7 @@ ABS_JWKS = "/.well-known/jwks.json"
 # ---------------------------------------------------------------------------
 AUTH_CHECK_SETUP = "/auth/check-setup"
 AUTH_FIRST_TIME_SETUP = "/auth/first-time-setup"
+AUTH_FIRST_TIME_SETUP_VERIFY = "/auth/first-time-setup/verify"
 AUTH_LOGIN = "/auth/login"
 AUTH_LOGIN_JSON = "/auth/login-json"
 AUTH_REFRESH = "/auth/refresh"

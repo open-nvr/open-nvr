@@ -815,6 +815,26 @@ class FirstTimeSetupResponse(BaseModel):
     mfa_required: bool
     mfa_secret: str | None = None
     mfa_qr_uri: str | None = None
+    # Presented to ``/auth/first-time-setup/verify`` with a code from the
+    # scanned QR; that step confirms the authenticator and finishes setup.
+    setup_session: str | None = None
+
+
+class FirstTimeSetupVerifyRequest(BaseModel):
+    setup_session: str = Field(..., min_length=8)
+    code: str = Field(..., min_length=6, max_length=8)
+
+
+class FirstTimeSetupVerifyResponse(BaseModel):
+    message: str
+    # Shown once; only hashes are kept.
+    recovery_codes: list[str]
+    # The operator just proved the password (step 1) and the authenticator
+    # (this step), so they are signed in without typing the code again.
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+    device_token: str | None = None
 
 
 class FirstTimeSetupCheckResponse(BaseModel):

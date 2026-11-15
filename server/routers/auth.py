@@ -32,7 +32,6 @@ from core.auth import (
     build_invalid_credentials_detail,
     create_access_token,
     create_refresh_token,
-    generate_mfa_secret,
     get_lockout_policy,
     get_current_active_user,
     get_mfa_provisioning_uri,
@@ -46,6 +45,8 @@ from schemas import (
     FirstTimeSetupCheckResponse,
     FirstTimeSetupRequest,
     FirstTimeSetupResponse,
+    FirstTimeSetupVerifyRequest,
+    FirstTimeSetupVerifyResponse,
     MfaSetupResponse,
     MfaVerifyRequest,
     Token,
@@ -57,6 +58,10 @@ from schemas import (
 from services import mfa_service
 from services.audit_service import write_audit_log
 from services.first_time_setup_service import (
+    close_enrolment as _close_enrolment,
+    enrolment_failed as _enrolment_failed,
+    enrolment_user_id as _enrolment_user_id,
+    open_enrolment as _open_enrolment,
     restore as _restore_setup_token,
     verify_and_consume as _verify_setup_token,
 )
@@ -99,7 +104,14 @@ async def first_time_setup(
     db: Session = Depends(get_db),
     request: Request = None,
 ):
-    """Complete first-time setup: set password and enable MFA."""
+    """Step 1 of first-time setup: claim the admin account.
+
+    Sets the password and starts an authenticator enrolment; the response
+    carries the secret to scan and a session for step 2
+    (``/first-time-setup/verify``), where a code from the app confirms it.
+    Until then the account signs in with the password alone and lands on
+    the enrolment wall, which finishes the same pending enrolment.
+    """
     # Gate on the one-time setup token (constant-time check + consume inside the
     # service). Done BEFORE the username lookup so this can't be used as a
     # user-existence oracle. See V-001.
@@ -147,18 +159,97 @@ async def first_time_setup(
         user.hashed_password = get_password_hash(payload.password)
         user.password_set = True
 
-        # Generate MFA secret
-        mfa_secret = generate_mfa_secret()
-        mfa_service.enrol_confirmed(db, user, mfa_secret)
-
-        db.commit()
+        # The authenticator stays pending until step 2 sees a code from it;
+        # begin_totp commits the password with it.
+        _factor, mfa_secret = mfa_service.begin_totp(db, user)
     except Exception:
         db.rollback()
         _restore_setup_token(payload.setup_token)
         raise
 
-    # Generate QR code URI for MFA setup
+    setup_session = _open_enrolment(user.id)
     mfa_qr_uri = get_mfa_provisioning_uri(user.username, mfa_secret)
+
+    auth_logger.log_action(
+        "auth.first_time_setup_account_claimed",
+        user_id=user.id,
+        message=f"First-time setup: password set for user {user.username}; "
+                "authenticator pending confirmation",
+        extra_data={"username": user.username, "mfa_enabled": False},
+        ip_address=request.client.host if request and request.client else None,
+        user_agent=request.headers.get("user-agent") if request else None,
+    )
+
+    return FirstTimeSetupResponse(
+        message="Account created. Scan the QR code, then confirm it with a code from the app.",
+        mfa_required=True,
+        mfa_secret=mfa_secret,
+        mfa_qr_uri=mfa_qr_uri,
+        setup_session=setup_session,
+    )
+
+
+@router.post("/first-time-setup/verify", response_model=FirstTimeSetupVerifyResponse)
+async def first_time_setup_verify(
+    payload: FirstTimeSetupVerifyRequest,
+    response: Response,
+    db: Session = Depends(get_db),
+    request: Request = None,
+):
+    """Step 2 of first-time setup: confirm the authenticator and finish.
+
+    A code from the QR scanned in step 1 turns the pending enrolment into
+    the account's authenticator and issues its recovery codes. The operator
+    proved the password a moment ago and the authenticator now, so the
+    response also signs them in; typing the same code again at the login
+    page would be refused as a replay.
+    """
+    refused = HTTPException(
+        status_code=403,
+        detail="This setup session has ended. Sign in with your password to "
+               "finish turning on two-step verification.",
+    )
+    user_id = _enrolment_user_id(payload.setup_session)
+    if user_id is None:
+        raise refused
+    user = db.query(User).filter(User.id == user_id).first()
+    if user is None or not user.password_set or not user.is_active:
+        _close_enrolment()
+        raise refused
+    if mfa_service.has_active_factor(db, user):
+        # Finished through the login enrolment wall meanwhile.
+        _close_enrolment()
+        raise HTTPException(
+            status_code=409,
+            detail="Two-step verification is already set up for this account. Sign in.",
+        )
+
+    if mfa_service.confirm_totp(db, user, payload.code) is None:
+        ended = _enrolment_failed(payload.setup_session)
+        try:
+            auth_logger.log_action(
+                "auth.first_time_setup_code_rejected",
+                user_id=user.id,
+                message=f"First-time setup: wrong authenticator code for {user.username}",
+                extra_data={"username": user.username, "session_ended": ended},
+                ip_address=request.client.host if request and request.client else None,
+                user_agent=request.headers.get("user-agent") if request else None,
+            )
+        except Exception:
+            pass
+        if ended:
+            raise HTTPException(
+                status_code=403,
+                detail="Too many wrong codes. Sign in with your password to "
+                       "finish turning on two-step verification.",
+            )
+        raise HTTPException(
+            status_code=400,
+            detail="That code did not match. Wait for the app to show a new one and try again.",
+        )
+
+    codes = mfa_service.generate_recovery_codes(db, user)
+    _close_enrolment()
 
     auth_logger.log_action(
         "auth.first_time_setup_complete",
@@ -169,11 +260,31 @@ async def first_time_setup(
         user_agent=request.headers.get("user-agent") if request else None,
     )
 
-    return FirstTimeSetupResponse(
-        message="Setup complete. Please scan QR code with authenticator app.",
-        mfa_required=True,
-        mfa_secret=mfa_secret,
-        mfa_qr_uri=mfa_qr_uri,
+    access_token = create_access_token(
+        data=_token_claims(user),
+        expires_delta=timedelta(minutes=settings.access_token_expire_minutes),
+    )
+    refresh_token = create_refresh_token(data=_token_claims(user))
+    try:
+        write_audit_log(
+            db,
+            action="login",
+            user_id=user.id,
+            entity_type="user",
+            entity_id=user.id,
+            details={"username": user.username, "method": "first_time_setup", "mfa": True},
+            ip=request.client.host if request and request.client else None,
+            user_agent=request.headers.get("user-agent") if request else None,
+        )
+    except Exception:
+        pass
+    device_token = _enroll_device(db, request, response, user.id)
+    return FirstTimeSetupVerifyResponse(
+        message="Two-step verification is on. Save your recovery codes.",
+        recovery_codes=codes,
+        access_token=access_token,
+        refresh_token=refresh_token,
+        device_token=device_token,
     )
 
 
