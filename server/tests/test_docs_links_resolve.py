@@ -51,6 +51,10 @@ _EXEMPT = {
 _PLACEHOLDER = re.compile(r"__[A-Z][A-Z0-9_]*__")
 
 
+#: `<a id="x">` / `<a name="x">` — an anchor written by hand.
+_EXPLICIT_ANCHOR = re.compile(r'''<a\s+(?:id|name)=["']([^"']+)["']''')
+
+
 def _slug(heading: str) -> str:
     """GitHub's anchor rules: lowercase, drop punctuation, then turn
     EACH remaining space into a hyphen.
@@ -115,8 +119,13 @@ def test_every_anchor_points_at_a_heading_that_exists():
                       else (path.parent / file_part).resolve())
             if not target.exists() or target.is_dir():
                 continue          # the link test above owns that failure
-            slugs = {_slug(h) for h in _HEADING.findall(
-                target.read_text(errors="ignore"))}
+            body = target.read_text(errors="ignore")
+            slugs = {_slug(h) for h in _HEADING.findall(body)}
+            # An explicit anchor (`<a id="trust"></a>` above a heading) is
+            # a target too, and the stable one: a heading that starts with
+            # an emoji slugs differently depending on the emoji, so the
+            # README names its sections instead of relying on that.
+            slugs |= {a.lower() for a in _EXPLICIT_ANCHOR.findall(body)}
             if anchor.lower() not in slugs:
                 broken.append(
                     f"{rel}: [{match.group(1)[:34]}] -> {raw} "
