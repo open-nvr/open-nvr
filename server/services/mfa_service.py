@@ -277,18 +277,6 @@ def confirm_totp(db: Session, user: User, code: str, *, factor_id: int | None = 
     return f
 
 
-def enrol_confirmed(db: Session, user: User, secret: str, label: str | None = None) -> UserMfaFactor:
-    """First-time setup: the administrator's factor, confirmed at once (they
-    scan the QR and then sign in with a code from it). Flushes; the caller
-    commits."""
-    f = UserMfaFactor(user_id=user.id, kind="totp", label=_clean_label(label),
-                      encrypted_secret=_encrypt(secret), enabled=True, confirmed_at=_now())
-    db.add(f)
-    db.flush()
-    _sync(db, user)
-    return f
-
-
 def _encrypt(secret: str) -> str:
     from utils.encryption import encrypt_value
 

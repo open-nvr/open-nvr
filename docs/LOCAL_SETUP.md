@@ -336,8 +336,10 @@ python -m adapter.main
 - **MediaMTX API**: http://localhost:9997
 
 **First login:** There is no default password. On first boot the backend prints a
-one-time setup token to its stdout/logs — paste it into the first-time-setup page
-and choose your admin password. See V-001 in `SECURITY_ARCHITECTURE.md`.
+one-time setup token to its stdout/logs — paste it into the first-time-setup page,
+choose your admin password, scan the QR code with an authenticator app and confirm
+it with the code the app shows. Save the recovery codes it then displays; they are
+shown once. See V-001 in `SECURITY_ARCHITECTURE.md`.
 
 ---
 

@@ -112,6 +112,21 @@ class Config:
         }
 
 
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """The browser setup journey goes first, after the shuffle has run.
+
+    It is the one test that must see the admin account unclaimed: the token
+    it spends is single-use, and the ``admin`` fixture would otherwise claim
+    the account through the API before it. It records the credentials it
+    sets, so everything after it logs in as usual. On a claimed stack it
+    skips, and the order makes no difference.
+    """
+    first = [i for i in items if i.get_closest_marker("setup_journey")]
+    if first:
+        items[:] = first + [i for i in items if not i.get_closest_marker("setup_journey")]
+
+
 @pytest.fixture(scope="session")
 def config() -> Config:
     artifacts = Path(os.environ.get("E2E_ARTIFACTS", "/work/tests/e2e/.artifacts"))

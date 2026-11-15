@@ -8,6 +8,17 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **First-time setup confirms the authenticator before it finishes.** The
+  setup page showed the QR code and sent the operator to sign in, counting
+  the authenticator as enrolled the moment the code was displayed. Closing
+  the tab before scanning, or a scan that did not take, locked the operator
+  out of the account they had just created. Setup now has a third step: a
+  code from the app confirms the authenticator, the recovery codes are
+  shown once and must be acknowledged as saved, and "Continue" lands in
+  OpenNVR signed in. Until the code is seen the account signs in with its
+  password and finishes on the usual enrolment screen. Scripted installs
+  call `POST /auth/first-time-setup/verify` with the `setup_session` that
+  step 1 now returns.
 - **Updates install by themselves by default.** A new site's update
   policy was *off*, so it never learned that a release existed. The
   default is now *automatic*: the host runner checks every few hours
@@ -20,7 +31,6 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   → OpenNVR Updates turns this down to notify-only or off. A site that
   saved a policy keeps it; the host treats a missing policy file as the
   default.
-
 - **A search result opens paused.** Clicking a result (or any link to an
   instant) opened the recording and played at once, so the moment was
   gone before the operator found the subject. It now opens paused on the

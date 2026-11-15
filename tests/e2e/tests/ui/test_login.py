@@ -21,7 +21,6 @@ wedge every later test in the run.
 from __future__ import annotations
 
 import re
-import time
 
 import pytest
 from playwright.sync_api import expect
@@ -29,21 +28,17 @@ from playwright.sync_api import expect
 pytestmark = pytest.mark.ui
 
 #: Standard TOTP step. A code is only valid inside its own 30s window.
-TOTP_STEP = 30
-
 
 def _fresh_totp(admin) -> str:
-    """A code with enough of its window left to survive the round trip.
+    """A code the server will take.
 
-    Submitting a code in its last second means the server may well validate it
-    in the next window and reject it -- burning one of the five attempts that
-    lock the account. Waiting for the next window costs a few seconds and
-    removes the whole class of flake.
+    Two things reject a code that is right: submitting it in its last second,
+    so the server validates it in the next window; and reusing the window the
+    session already signed in with (the ``admin`` fixture logs in to get its
+    tokens, and the server accepts each window once). Either burns one of the
+    five attempts that lock the account. ``fresh_totp`` waits out both.
     """
-    remaining = TOTP_STEP - (int(time.time()) % TOTP_STEP)
-    if remaining < 5:
-        time.sleep(remaining + 1)
-    return admin.totp()
+    return admin.fresh_totp()
 
 
 def test_the_login_page_is_reachable(ui_page):

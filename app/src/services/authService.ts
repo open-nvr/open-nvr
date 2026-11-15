@@ -34,6 +34,10 @@ export const authService = {
       password,
       setup_token,
     }),
+  // Step 2: a code from the scanned QR confirms the authenticator. Returns
+  // the recovery codes and a signed-in session.
+  firstTimeSetupVerify: (setup_session: string, code: string) =>
+    api.post('/api/v1/auth/first-time-setup/verify', { setup_session, code }),
   register: (username: string, email: string, password: string) =>
     api.post('/api/v1/auth/register', { username, email, password }),
   login: (username: string, password: string) => {

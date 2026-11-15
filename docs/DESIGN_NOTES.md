@@ -68,6 +68,18 @@ to stdout + the audit log once. `/auth/first-time-setup` requires that token
 bootstrap window; an operator who misses the printed value just restarts to
 re-arm. This avoids a migration and avoids persisting an ephemeral credential.
 
+**Step 2: the authenticator is confirmed, not assumed** — spending the token
+sets the password but leaves the authenticator pending (`mfa_service.begin_totp`).
+`POST /auth/first-time-setup/verify` takes a code from the scanned secret,
+confirms the factor, issues the recovery codes and signs the operator in. The
+request is unauthenticated, so it carries an in-memory *enrolment session*
+returned only to the browser that spent the token; ten wrong codes end it.
+Before this, the factor was confirmed the moment the QR was displayed, and an
+operator who closed the tab or whose scan failed was locked out of the account
+they had just created. An operator who abandons step 2 is not stranded either:
+a password sign-in lands on the enrolment wall, which continues the same
+pending enrolment under the login lockout.
+
 **Residual** — an attacker with read access to the process stdout or the audit
 log file is already a higher-privilege threat, out of scope for this gate;
 address it with deployment-side file-permission hardening.

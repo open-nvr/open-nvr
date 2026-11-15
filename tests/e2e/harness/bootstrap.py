@@ -6,14 +6,20 @@ OpenNVR ships no default password (V-001). A fresh database seeds an admin with
 ``password_set=False``, and every boot mints a one-time token which is printed
 to stdout and **nowhere else** — no API returns it. Claiming the account means:
 
-    GET  /auth/check-setup          -> setup_required?
-    POST /auth/first-time-setup     -> {username, password, setup_token}
-                                       returns the TOTP secret
-    POST /auth/login-json           -> {username, password, code}
+    GET  /auth/check-setup               -> setup_required?
+    POST /auth/first-time-setup          -> {username, password, setup_token}
+                                            returns the TOTP secret and a
+                                            setup session
+    POST /auth/first-time-setup/verify   -> {setup_session, code}
+                                            confirms the authenticator; returns
+                                            recovery codes and a signed-in session
+    POST /auth/login-json                -> {username, password, code}
+                                            on every later run
 
-That third step is not optional. ``first-time-setup`` sets ``mfa_enabled=True``
-with a real secret, and ``/auth/login`` refuses MFA accounts outright, so the
-suite computes TOTP codes like a real authenticator would.
+The confirm step is not optional: until a code from the secret has been seen
+the account has no working authenticator, and ``/auth/login`` refuses MFA
+accounts outright, so the suite computes TOTP codes like a real authenticator
+would.
 
 **Lockout is the trap here.** A wrong or missing MFA code counts as a failed
 login; five of them lock the account for three minutes and wedge the entire
@@ -49,6 +55,8 @@ _TOTP_STEP = 30
 
 #: The account the server seeds. server/core/config.py:default_admin_username.
 ADMIN_USERNAME = "admin"
+#: One TOTP window, in seconds.
+TOTP_STEP = 30
 
 
 class BootstrapError(RuntimeError):
@@ -70,6 +78,10 @@ class SetupEvidence:
     setup_was_required: bool | None = None
     #: Did first-time-setup return a usable TOTP secret?
     mfa_secret_issued: bool = False
+    #: Did a code from that secret confirm the authenticator (step 2)?
+    mfa_confirmed: bool = False
+    #: How many recovery codes step 2 handed out.
+    recovery_codes_issued: int = 0
     #: Did replaying the same token fail, proving it is single-use?
     token_rejected_on_reuse: bool | None = None
     #: Status code that replay returned, for the assertion message.
@@ -88,9 +100,33 @@ class AdminSession:
     refresh_token: str | None
     device_token: str | None
     evidence: SetupEvidence = field(default_factory=SetupEvidence)
+    #: The 30-second TOTP step whose code this session last spent on a login
+    #: or enrolment. The server accepts each step once per authenticator and
+    #: refuses anything at or before the last step it took (a replay), so a
+    #: code that must work comes from ``fresh_totp()``, not ``totp()``.
+    totp_used_step: int | None = None
 
     def totp(self) -> str | None:
+        """The current code. Fine for step-up headers and for asserting a
+        secret works; for a sign-in use ``fresh_totp()``."""
         return pyotp.TOTP(self.mfa_secret).now() if self.mfa_secret else None
+
+    def fresh_totp(self) -> str | None:
+        """A code the server has not seen yet, from a window after the one
+        this session last spent and with enough of it left to survive the
+        round trip. Blocks for at most one step. Records what it hands out,
+        so two sign-ins in a row never collide."""
+        if not self.mfa_secret:
+            return None
+        while True:
+            now = time.time()
+            step = int(now // TOTP_STEP)
+            remaining = TOTP_STEP - (now % TOTP_STEP)
+            unspent = self.totp_used_step is None or step > self.totp_used_step
+            if unspent and remaining >= 5:
+                self.totp_used_step = step
+                return pyotp.TOTP(self.mfa_secret).at(step * TOTP_STEP)
+            time.sleep(remaining + 0.5)
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +151,17 @@ def _save(artifacts: Path, session: AdminSession) -> None:
         path.chmod(0o600)
     except OSError:
         pass  # Windows bind mounts do not always support chmod
+
+
+def remember(artifacts: Path, *, username: str, password: str, mfa_secret: str | None) -> None:
+    """Record credentials obtained outside ``ensure_admin`` (the browser
+    journey in ``tests/ui/test_first_time_setup.py`` claims the account
+    through the page). The ``admin`` fixture then logs in with them instead
+    of finding the account taken."""
+    _save(artifacts, AdminSession(
+        username=username, password=password, mfa_secret=mfa_secret,
+        access_token="", refresh_token=None, device_token=None,
+    ))
 
 
 def _load(artifacts: Path) -> dict | None:
@@ -215,6 +262,7 @@ def _try_existing(http: httpx.Client, stored: dict) -> AdminSession | None:
         access_token=tokens["access_token"],
         refresh_token=tokens.get("refresh_token"),
         device_token=tokens.get("device_token"),
+        totp_used_step=tokens.get("_totp_step"),
         evidence=evidence,
     )
 
@@ -271,13 +319,36 @@ def _perform_setup(
             f"first-time-setup failed with {resp.status_code}: {resp.text}"
         )
 
-    mfa_secret = resp.json().get("mfa_secret")
+    setup = resp.json()
+    mfa_secret = setup.get("mfa_secret")
     evidence.mfa_secret_issued = bool(mfa_secret)
     if not mfa_secret:
         raise BootstrapError(
             "first-time-setup succeeded but returned no MFA secret, so no "
             "login is possible. This is a server-side contract break."
         )
+    setup_session = setup.get("setup_session")
+    if not setup_session:
+        raise BootstrapError(
+            "first-time-setup returned no setup_session, so the authenticator "
+            "cannot be confirmed. This is a server-side contract break."
+        )
+
+    # Step 2: prove the secret the way an operator does, with a code from it.
+    # The server accepts the current window and its neighbours, so a code
+    # computed now never needs a retry.
+    confirm = http.post(
+        routes.api(routes.AUTH_FIRST_TIME_SETUP_VERIFY),
+        json={"setup_session": setup_session, "code": pyotp.TOTP(mfa_secret).now()},
+    )
+    if confirm.status_code != 200:
+        raise BootstrapError(
+            f"first-time-setup/verify failed with {confirm.status_code}: {confirm.text}"
+        )
+    confirmed = confirm.json()
+    confirmed["_totp_step"] = int(time.time() // TOTP_STEP)
+    evidence.mfa_confirmed = True
+    evidence.recovery_codes_issued = len(confirmed.get("recovery_codes") or [])
 
     # Prove the token is single-use. Cheap here, and it is the security
     # property the whole one-time-token design exists for — worth asserting on
@@ -289,7 +360,9 @@ def _perform_setup(
     evidence.token_reuse_status = replay.status_code
     evidence.token_rejected_on_reuse = replay.status_code != 200
 
-    tokens = _login(http, username, password, mfa_secret)
+    # The verify step signs the operator in; a login with the same code now
+    # would be refused as a replay of the code that confirmed the enrolment.
+    tokens = confirmed
     session = AdminSession(
         username=username,
         password=password,
@@ -297,6 +370,7 @@ def _perform_setup(
         access_token=tokens["access_token"],
         refresh_token=tokens.get("refresh_token"),
         device_token=tokens.get("device_token"),
+        totp_used_step=tokens.get("_totp_step"),
         evidence=evidence,
     )
     _save(artifacts, session)
@@ -324,7 +398,10 @@ def _login(
 
         last = http.post(routes.api(routes.AUTH_LOGIN_JSON), json=payload)
         if last.status_code == 200:
-            return last.json()
+            tokens = last.json()
+            if mfa_secret:
+                tokens["_totp_step"] = int(time.time() // TOTP_STEP)
+            return tokens
         if last.status_code == 423:
             raise BootstrapError(
                 "The admin account is locked out.\n"

@@ -21,7 +21,7 @@ Two other doors exist and are *not* this page:
 | Step | Route | Notes |
 |---|---|---|
 | Is this a fresh install? | `POST /auth/check-setup` | Returns `needs_setup`, `registration_open` |
-| First administrator | `POST /auth/first-time-setup` | One-shot, needs the setup token printed by `init_db` |
+| First administrator | `POST /auth/first-time-setup`, then `POST /auth/first-time-setup/verify` | One-shot, needs the setup token printed by `init_db`. Step 1 sets the password and returns the TOTP secret plus a `setup_session`; step 2 takes that session and a code from the secret, confirms the authenticator, returns the recovery codes and signs the operator in. Until step 2 the account signs in with its password alone and lands on the MFA enrolment wall |
 | Log in | `POST /auth/login` (form) / `POST /auth/login-json` | Returns access + refresh JWTs; MFA-enrolled users pass the TOTP too |
 | Refresh / log out | `POST /auth/refresh`, `POST /auth/logout` | |
 | Who am I | `GET /auth/me`, `GET /users/me/permissions` | The second one is what the UI uses to hide controls |
