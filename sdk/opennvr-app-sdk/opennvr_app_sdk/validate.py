@@ -15,15 +15,23 @@ trip over, found on the developer's machine in a second:
   manifest — id, name, version, ``requires_tasks``, ``emits`` — and
   carries what the catalog policy requires (author, contact, source
   under the org, ``network_egress``, the org's image ref);
-* the **repository shape** — Dockerfile, tests, a licence.
+* the **repository shape** — Dockerfile, tests, a licence;
+* the **platform rules** (``docs/BUILDING_EFFICIENT_APPS.md``) — the
+  source is read, never run, for the patterns that make an app pay for
+  work the platform already did: opening a camera stream itself,
+  running a model inside the app, calling an adapter around KAI-C, a
+  model call on every polled frame, the wide inference subject.
 
-Errors fail the command (exit 1); warnings do not. The manifest is
+Errors fail the command (exit 1); warnings do not — unless ``--strict``
+is given, which fails on a platform-rule warning too (what a catalog
+review runs). The manifest is
 found by importing the app module named in ``pyproject.toml``'s
 ``[project.scripts]`` (or the one ``*.py`` that builds an
 ``AppManifest``), so run it in the app's own environment.
 """
 from __future__ import annotations
 
+import ast
 import importlib
 import importlib.util
 import inspect
@@ -76,6 +84,9 @@ class Report:
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    #: Platform-rule findings (:func:`check_platform_rules`). Each is
+    #: also in ``warnings``; ``--strict`` fails on these and only these.
+    rule_findings: list[str] = field(default_factory=list)
     manifest: AppManifest | None = None
     module_name: str = ""
 
@@ -91,6 +102,10 @@ class Report:
 
     def note(self, text: str) -> None:
         self.notes.append(text)
+
+    def rule(self, text: str) -> None:
+        self.rule_findings.append(text)
+        self.warnings.append(text)
 
 
 # ── finding the app ─────────────────────────────────────────────────
@@ -408,6 +423,216 @@ def check_repository(app_dir: Path, report: Report) -> None:
         report.warn("no LICENSE file — add AGPL-3.0 or Apache-2.0 (your copyright) before the first tag")
 
 
+# ── the platform rules ──────────────────────────────────────────────
+#
+# docs/BUILDING_EFFICIENT_APPS.md is the guide; these are its rules a
+# program can see. The source is parsed, never imported or run, and
+# every finding names the file and line. They are heuristics: a finding
+# is a question for the author, and a waiver answers it in the code —
+#
+#     cap = cv2.VideoCapture(path)   # opennvr: allow[own-decode] reads an uploaded file, not a camera
+#
+# on the flagged line or the line above. A waiver needs its reason; one
+# without is reported as it would have been.
+
+#: rule code -> (rule number in the guide, what to do instead).
+PLATFORM_RULES: dict[str, tuple[str, str]] = {
+    "own-decode": (
+        "1", "the app opens a camera stream or decodes video itself; the platform already "
+             "decodes every camera once. Take tracks from the bus and pictures from "
+             "nvr.snapshot() / timeline.evidence()"),
+    "own-model": (
+        "3", "the app loads a model runtime; a model inside an app is outside the box's "
+             "inference budget and invisible to every other app. Register it as an adapter "
+             "and call it through nvr.ai"),
+    "direct-adapter": (
+        "3", "the app addresses an adapter's /infer route; every model call goes through "
+             "KAI-C (nvr.ai.infer), which is where the queue, the audit line and the "
+             "sovereignty rules are"),
+    "per-frame-model": (
+        "2", "a model is called for every polled frame; call it on a trigger (a Tier-0 "
+             "track, a finished visit, a domain event) and on the best frame"),
+    "wide-subject": (
+        "1", "subscribes to 'opennvr.inference.>' — with Tier-0 consumed, the day a heavy "
+             "detector runs on the same camera every object arrives twice. Use "
+             "'opennvr.inference.tier0.>'"),
+}
+
+_MODEL_RUNTIMES = frozenset({
+    "ultralytics", "torch", "torchvision", "onnxruntime", "tensorflow", "tflite_runtime",
+    "openvino", "transformers", "open_clip", "easyocr", "paddleocr", "insightface",
+    "face_recognition", "mediapipe", "llama_cpp", "ctranslate2", "faster_whisper",
+})
+_DECODE_MODULES = frozenset({"av", "vlc", "imageio_ffmpeg"})
+_ADAPTER_URL_RE = re.compile(r"(?:^|/)infer(?:/stream|/local|/cloud)?/?$")
+_WAIVER_RE = re.compile(r"#\s*opennvr:\s*allow\[([a-z-]+)\]\s*(.*)$")
+_SKIP_DIRS = frozenset({"tests", "test", ".venv", "venv", "build", "dist", "node_modules",
+                        "__pycache__", ".git", "site-packages", "docs", "cookbook",
+                        # developer tooling beside the app, not the app
+                        "tools", "scripts", "bench"})
+
+
+def _app_sources(app_dir: Path) -> list[Path]:
+    out = []
+    for path in sorted(app_dir.rglob("*.py")):
+        rel = path.relative_to(app_dir).parts
+        if any(part in _SKIP_DIRS or part.startswith(".") for part in rel[:-1]):
+            continue
+        if rel[-1].startswith("test_") or rel[-1] == "conftest.py":
+            continue
+        out.append(path)
+    return out
+
+
+def _docstring_nodes(tree: ast.AST) -> set[int]:
+    """ids of the Constant nodes that are docstrings — prose, not code."""
+    out: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            body = getattr(node, "body", None) or []
+            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
+                    and isinstance(body[0].value.value, str):
+                out.add(id(body[0].value))
+    return out
+
+
+def _call_name(node: ast.Call) -> str:
+    """``cv2.VideoCapture`` for ``cv2.VideoCapture(...)``, ``infer`` for ``x.y.infer(...)``'s tail."""
+    parts: list[str] = []
+    cur: ast.AST = node.func
+    while isinstance(cur, ast.Attribute):
+        parts.append(cur.attr)
+        cur = cur.value
+    if isinstance(cur, ast.Name):
+        parts.append(cur.id)
+    return ".".join(reversed(parts))
+
+
+def _base_names(cls: ast.ClassDef) -> set[str]:
+    out = set()
+    for base in cls.bases:
+        if isinstance(base, ast.Name):
+            out.add(base.id)
+        elif isinstance(base, ast.Attribute):
+            out.add(base.attr)
+    return out
+
+
+def scan_source(source: str, filename: str = "<app>") -> list[tuple[str, int, str]]:
+    """The platform-rule findings in one Python source: ``(code, line,
+    what was seen)``. Waivers are not applied here."""
+    try:
+        tree = ast.parse(source, filename=filename)
+    except SyntaxError:
+        return []
+    docstrings = _docstring_nodes(tree)
+    found: list[tuple[str, int, str]] = []
+
+    def add(code: str, node: ast.AST, seen: str) -> None:
+        found.append((code, getattr(node, "lineno", 0), seen))
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            names = ([a.name for a in node.names] if isinstance(node, ast.Import)
+                     else [node.module or ""])
+            for name in names:
+                root = name.split(".")[0]
+                if root in _MODEL_RUNTIMES:
+                    add("own-model", node, f"import {root}")
+                elif root in _DECODE_MODULES:
+                    add("own-decode", node, f"import {root}")
+        elif isinstance(node, ast.Call):
+            name = _call_name(node)
+            tail = name.rsplit(".", 1)[-1]
+            if tail == "VideoCapture":
+                add("own-decode", node, f"{name}(...)")
+            elif tail in ("InferStream", "AsyncInferStream") or name.endswith("ai.stream"):
+                add("per-frame-model", node, f"{name}(...) — a per-frame inference session")
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) \
+                and id(node) not in docstrings:
+            text = node.value.strip()
+            low = text.lower()
+            if low.startswith(("rtsp://", "rtsps://")):
+                add("own-decode", node, "an rtsp:// address")
+            elif low in ("ffmpeg", "ffprobe", "gst-launch-1.0"):
+                add("own-decode", node, f"runs {low}")
+            elif " " not in low and _ADAPTER_URL_RE.search(low) and "/api/v1/infer" not in low:
+                add("direct-adapter", node, f"the route {text!r}")
+            elif text == "opennvr.inference.>":
+                add("wide-subject", node, "the subject 'opennvr.inference.>'")
+        elif isinstance(node, ast.ClassDef) and "FrameApp" in _base_names(node):
+            for item in node.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == "on_frame":
+                    for call in ast.walk(item):
+                        if isinstance(call, ast.Call) and _call_name(call).rsplit(".", 1)[-1] == "infer":
+                            add("per-frame-model", call,
+                                f"{node.name}.on_frame calls {_call_name(call)}(...)")
+                            break
+    return found
+
+
+def _waiver(lines: list[str], lineno: int, code: str) -> str | None:
+    """The reason of a waiver for ``code`` on this line or the one
+    above; ``""`` when the waiver is there with no reason; None when
+    there is none."""
+    for idx in (lineno - 1, lineno - 2):
+        if 0 <= idx < len(lines):
+            m = _WAIVER_RE.search(lines[idx])
+            if m and m.group(1) == code:
+                return m.group(2).strip()
+    return None
+
+
+def check_platform_rules(app_dir: Path, report: Report) -> None:
+    """Read the app's source for what the guide tells an app not to do."""
+    seen: set[tuple[str, str]] = set()
+    waived = 0
+    for path in _app_sources(app_dir):
+        try:
+            source = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        lines = source.splitlines()
+        rel = path.relative_to(app_dir).as_posix()
+        for code, lineno, what in scan_source(source, rel):
+            reason = _waiver(lines, lineno, code)
+            if reason:
+                waived += 1
+                report.note(f"{rel}:{lineno}: [{code}] waived — {reason}")
+                continue
+            if (code, rel) in seen:          # one finding per rule per file
+                continue
+            seen.add((code, rel))
+            number, advice = PLATFORM_RULES[code]
+            missing = " (the waiver on this line gives no reason)" if reason == "" else ""
+            report.rule(f"{rel}:{lineno}: [{code}] {what}{missing} — rule {number}: {advice}")
+    _check_config_subject(app_dir, report)
+    if not report.rule_findings:
+        report.note("platform rules: nothing found"
+                    + (f" ({waived} waived)" if waived else ""))
+
+
+def _check_config_subject(app_dir: Path, report: Report) -> None:
+    """The wide subject, where an operator would copy it from."""
+    for name in ("config.example.yml", "config.docker.yml"):
+        path = app_dir / name
+        if not path.exists():
+            continue
+        try:
+            import yaml
+
+            raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception:  # noqa: BLE001
+            continue
+        if not isinstance(raw, dict):
+            continue
+        if str(raw.get("subject_pattern") or "").strip() == "opennvr.inference.>" \
+                and raw.get("consume_tier0") is not False:
+            number, advice = PLATFORM_RULES["wide-subject"]
+            report.rule(f"{name}: [wide-subject] subject_pattern is 'opennvr.inference.>' "
+                        f"— rule {number}: {advice}")
+
+
 # ── entry point ─────────────────────────────────────────────────────
 
 
@@ -417,27 +642,36 @@ def validate_app(app_dir: Path) -> Report:
     if not app_dir.is_dir():
         report.error(f"{app_dir} is not a directory")
         return report
+    try:
+        _validate_declared(app_dir, report)
+    finally:
+        # The source is read, not imported, so the platform rules are
+        # checked even for an app this environment cannot import.
+        check_platform_rules(app_dir, report)
+    return report
+
+
+def _validate_declared(app_dir: Path, report: Report) -> None:
     module_name = find_app_module(app_dir)
     if module_name is None:
         report.error("no app module found — expected a [project.scripts] entry in pyproject.toml "
                      "or a top-level *.py that builds an AppManifest")
-        return report
+        return
     report.module_name = module_name
     try:
         manifest, module = load_manifest(app_dir, module_name)
     except Exception as exc:  # noqa: BLE001
         report.error(f"importing {module_name!r} failed: {exc.__class__.__name__}: {exc}")
-        return report
+        return
     if manifest is None:
         report.error(f"module {module_name!r} defines no AppManifest (module-level or on the app class)")
-        return report
+        return
     report.manifest = manifest
     cls = app_class(module, manifest)
     check_manifest(manifest, report, cls)
     check_config(app_dir, module, report)
     check_listing(app_dir, manifest, report)
     check_repository(app_dir, report)
-    return report
 
 
 def print_report(report: Report, app_dir: Path) -> None:

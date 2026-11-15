@@ -238,6 +238,10 @@ either door can actually open — is [`docs/TWO_DOORS.md`](TWO_DOORS.md).
 - [`docs/DEVELOPER_PROGRAM.md`](DEVELOPER_PROGRAM.md) — the deal: what
   the platform gives you, selling apps and models, the compatibility
   promise.
+- [`docs/BUILDING_EFFICIENT_APPS.md`](BUILDING_EFFICIENT_APPS.md) — **read
+  this before the rule grows**: the ten rules that keep an app from
+  paying again for work the platform already did. The scaffolded app
+  carries them as `AGENTS.md` for a coding assistant.
 - [`docs/SDK_REFERENCE.md`](SDK_REFERENCE.md) — every public SDK name,
   by task; [`docs/APP_PLATFORM.md`](APP_PLATFORM.md) — the `OpenNVR`
   client; [`docs/APP_CREDENTIALS.md`](APP_CREDENTIALS.md) — the app's

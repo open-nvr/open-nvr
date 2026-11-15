@@ -161,7 +161,7 @@ boxes for a camera the viewer may not watch.
 Subject: `opennvr.events.visit.recorded.v1.<camera_id>`
 Producer: core (timeline ingestion), at the moment a finished visit
 row is persisted (`services/timeline_service.py::record_track_visit`,
-through `services/domain_bus.py`). Published since 0.1.12; before that
+through `services/domain_bus.py`). Published since 0.1.11; before that
 the contract existed and nothing emitted it, and apps polled the
 timeline API for "something happened".
 
@@ -181,7 +181,7 @@ Producer: core (the enrichment tier), each time a visit's caption or
 descriptor claims land in the store — fresh from the model, or copied
 from an earlier visit of the same evidence frame
 (`services/domain_bus.py::publish_visit_enriched`). Published since
-0.1.12 (RFC-0004, step 2).
+0.1.11 (RFC-0004, step 2).
 
 One message per landing; **every message carries the whole current
 state** of the visit's enrichment, so a subscriber that sees one knows

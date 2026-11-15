@@ -1,9 +1,9 @@
 # __APP_NAME__
 
-An OpenNVR app: it subscribes to the platform's inference stream
-(`opennvr.inference.>`) and fires alerts on the detections it cares
-about — zero adapter GPU cost, it rides inference another app is
-already driving.
+An OpenNVR app: it subscribes to the detections the platform already
+publishes for every camera (`opennvr.inference.tier0.>`) and fires
+alerts on the ones it cares about. It decodes no video and runs no
+model of its own.
 
 Scaffolded by `opennvr-app new`. The walkthrough is
 [FIRST_DETECTOR.md](__DOCS__FIRST_DETECTOR.md).
@@ -61,6 +61,14 @@ nvr = OpenNVR()                       # OPENNVR_URL + the app's own key
 nvr.cameras(); nvr.snapshot(camera_id); nvr.state.get("last_seen")
 ```
 
+**The rules every app follows** — detections from the bus, a costly
+model only when something happened, every model call through the
+platform — are in
+[BUILDING_EFFICIENT_APPS.md](__DOCS__BUILDING_EFFICIENT_APPS.md).
+`uv run opennvr-app validate --strict` checks the ones a program can
+see. A coding assistant reads the same rules from [`AGENTS.md`](AGENTS.md)
+and `.claude/skills/opennvr-app/SKILL.md`.
+
 Reference: [APP_PLATFORM.md](__DOCS__APP_PLATFORM.md),
 [SDK_REFERENCE.md](__DOCS__SDK_REFERENCE.md),
 [APP_SURFACES.md](__DOCS__APP_SURFACES.md) (config form, state views,
@@ -74,7 +82,8 @@ __APP_ID__/
 ├── config.example.yml    What an operator configures
 ├── pyproject.toml        __PYPROJECT_HINT__
 ├── Dockerfile            __DOCKERFILE_HINT__
-└── tests/test_smoke.py   The parity bar — the rule fires an alert
+├── tests/test_smoke.py   The parity bar — the rule fires an alert
+└── AGENTS.md             The platform's rules, for a coding assistant
 ```
 
 ## List it in the App Catalog

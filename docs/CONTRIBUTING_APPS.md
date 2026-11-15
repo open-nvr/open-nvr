@@ -296,6 +296,13 @@ one topic per PR. Sign the [CLA](CLA.md) when the bot asks.
 
 **What reviewers check:**
 
+- **The app follows the platform's rules.**
+  [`BUILDING_EFFICIENT_APPS.md`](BUILDING_EFFICIENT_APPS.md): it takes
+  detections from the bus, calls a model only when something happened
+  and only through KAI-C, and reuses what the platform already computed.
+  Run `opennvr-app validate --strict` in the app's repository; a finding
+  is fixed or carries a waiver with its reason, and the reviewer reads
+  every waiver.
 - **Declared tasks are real / canonical.** `requires_tasks` names tasks an
   adapter can actually advertise — canonical where one fits
   (`use_case_map.yml`), and not a task nobody provides.
@@ -358,6 +365,9 @@ adopt it, and removed only if nobody does
 
 - [`docs/DEVELOPER_PROGRAM.md`](DEVELOPER_PROGRAM.md) — the deal for
   third-party developers: no fee, your licence, the compatibility promise.
+- [`docs/BUILDING_EFFICIENT_APPS.md`](BUILDING_EFFICIENT_APPS.md) — the
+  rules a listed app follows, and what `opennvr-app validate --strict`
+  checks.
 - [`docs/FIRST_DETECTOR.md`](FIRST_DETECTOR.md) — the on-ramp: scaffold a
   runnable app with the generator, fill in the rule, get its tests green, run
   it against the stack — then land here to publish it.

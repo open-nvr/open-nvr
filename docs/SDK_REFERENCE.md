@@ -181,6 +181,13 @@ def test_fires_on_a_person():
 
 ## Validating — `opennvr-app validate`
 
+It also reads the app's source, without running it, for the patterns
+[BUILDING_EFFICIENT_APPS.md](BUILDING_EFFICIENT_APPS.md) rules out
+(`own-decode`, `own-model`, `direct-adapter`, `per-frame-model`,
+`wide-subject`). Those are warnings; `--strict` fails on them. A real
+exception is waived in the code with
+`# opennvr: allow[<check>] <reason>`.
+
 `opennvr-app validate [path]` imports the app and checks what the
 catalog, the registry and a listing reviewer would trip over: the
 manifest (id, version, category, params and their defaults, alert

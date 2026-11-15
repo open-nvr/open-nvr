@@ -19,16 +19,13 @@
 # nats_token: null                   # the stack's INTERNAL_API_KEY
 # opennvr_url: "http://opennvr-core:8000"
 #
-# Subject pattern. ``opennvr.inference.>`` catches the always-on Tier-0
-# detector AND every adapter; narrow to e.g. ``opennvr.inference.yolov8.>``
-# to see one adapter only.
-# subject_pattern: "opennvr.inference.>"
-#
-# Tier-0 is the detector every camera runs all the time, and on a stock
-# install it is the ONLY detection stream on the bus. The App facade
-# consumes it by default; set this false if this app also drives a
-# heavy adapter and would otherwise see every object twice.
-# consume_tier0: true
+# Subject pattern. Tier-0 is the detector every camera runs all the
+# time, and on a stock install it is the ONLY detection stream on the
+# bus. Subscribe to it alone: with the wide ``opennvr.inference.>`` and
+# Tier-0 consumed, the day a heavy detector runs on the same camera
+# every object arrives twice (BUILDING_EFFICIENT_APPS.md, rule 1).
+subject_pattern: "opennvr.inference.tier0.>"
+consume_tier0: true
 
 # ── The rule's knobs ──────────────────────────────────────────────
 #

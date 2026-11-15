@@ -53,6 +53,29 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The rules for building an app, in one place, for people and for
+  coding assistants.** What makes an app cheap on an OpenNVR box
+  (detections from the bus, a costly model only when something happened
+  and on the best frame, every model call through KAI-C, reuse of what
+  the platform already computed) was spread over ten documents and the
+  history of the apps that were corrected. `docs/BUILDING_EFFICIENT_APPS.md`
+  now states ten rules, each with its reason, the measurement behind it
+  and the example app that does it correctly, and lists which examples
+  still do part of their work the old way. Three things follow from that
+  one page. An app scaffolded with `opennvr-app new` carries the rules as
+  `AGENTS.md` and as a Claude Code skill
+  (`.claude/skills/opennvr-app/SKILL.md`); both are generated from the
+  guide by `scripts/gen_app_agent_guide.py` and a test fails when they
+  drift. `opennvr-app validate` reads an app's source, without running
+  it, for the patterns a program can see (a camera stream opened by the
+  app, a model runtime imported, an adapter's `/infer` called around
+  KAI-C, a model call on every polled frame, the wide inference subject
+  with Tier-0 consumed) and names the file, the line and the rule;
+  `--strict` fails on them, and a real exception is waived in the code
+  with `# opennvr: allow[<check>] <reason>`, which the report lists. And
+  the scaffold's own example config now subscribes to
+  `opennvr.inference.tier0.>`, the subject the guide asks for.
+
 - **A recorder's channels, added in one go.** Discovering an NVR or DVR
   over ONVIF found it, but Connect then Add made one camera from its
   first stream, and every further channel meant a new discovery and an
