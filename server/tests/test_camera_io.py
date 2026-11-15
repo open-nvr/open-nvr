@@ -254,13 +254,19 @@ def env(monkeypatch, tmp_path):
     db.add_all([manage, role])
     db.flush()
     db.add(RolePermission(role_id=role.id, permission_id=manage.id))
+    viewer_role = Role(name="viewer", description="")
+    db.add(viewer_role)
+    db.flush()
     admin = User(username="admin", email="a@x", hashed_password="x", is_active=True,
                  is_superuser=True, password_set=True, role_id=role.id)
     operator = User(username="op", email="o@x", hashed_password="x", is_active=True,
                     is_superuser=False, password_set=True, role_id=role.id)
-    db.add_all([admin, operator])
+    # No cameras.manage: may neither import nor bulk-add.
+    viewer = User(username="viewer", email="v@x", hashed_password="x", is_active=True,
+                  is_superuser=False, password_set=True, role_id=viewer_role.id)
+    db.add_all([admin, operator, viewer])
     db.commit()
-    for u in (admin, operator):
+    for u in (admin, operator, viewer):
         db.refresh(u)
         _ = [p.name for p in (u.role.permissions or [])]
         db.expunge(u)
@@ -273,6 +279,9 @@ def env(monkeypatch, tmp_path):
         cam = Camera(name=camera_create.name, ip_address=camera_create.ip_address, port=camera_create.port,
                      rtsp_url=camera_create.rtsp_url, substream_url=camera_create.substream_url,
                      location=camera_create.location, username=camera_create.username,
+                     manufacturer=camera_create.manufacturer, model=camera_create.model,
+                     firmware_version=camera_create.firmware_version,
+                     serial_number=camera_create.serial_number, hardware_id=camera_create.hardware_id,
                      owner_id=owner_id, is_active=True)
         cam.password = camera_create.password
         db.add(cam)
@@ -296,7 +305,8 @@ def env(monkeypatch, tmp_path):
     app.dependency_overrides[get_db] = _db
     app.dependency_overrides[core_auth.get_current_active_user] = lambda: current["user"]
     with TestClient(app) as tc:
-        yield _types.SimpleNamespace(tc=tc, current=current, admin=admin, operator=operator, Session=Session)
+        yield _types.SimpleNamespace(tc=tc, current=current, admin=admin, operator=operator,
+                                     viewer=viewer, Session=Session)
 
 
 def _upload(text: str, name="cams.csv"):
@@ -400,3 +410,74 @@ def test_export_covers_only_cameras_the_caller_manages(env):
     env.current["user"] = env.operator
     body = env.tc.get("/api/v1/cameras/export").content.decode("utf-8-sig")
     assert "Gate" in body and "NVR South" not in body
+
+
+# ── Bulk add: an NVR's channels after an ONVIF connect ────────────────────
+
+NVR_IP = "192.168.3.40"
+
+
+def _channel_rows(*channels: int, prefix: str = "Yard NVR"):
+    return [
+        {
+            "name": f"{prefix} Ch {ch}", "ip_address": NVR_IP, "port": 554,
+            "username": "admin", "password": "pw",
+            "rtsp_url": f"rtsp://{NVR_IP}:554/Streaming/Channels/{ch}01?transportmode=unicast&profile=Profile_{ch}",
+            "substream_url": f"rtsp://{NVR_IP}:554/Streaming/Channels/{ch}02",
+            "manufacturer": "Acme", "model": "NVR-16", "serial_number": "SN-1",
+        }
+        for ch in channels
+    ]
+
+
+def _bulk(env, rows, **extra):
+    body = {"source": f"onvif:{NVR_IP}", "onvif_port": 8000, "control_scheme": "http", "cameras": rows, **extra}
+    r = env.tc.post("/api/v1/cameras/bulk", json=body)
+    assert r.status_code == 200, r.text
+    job = r.json()
+    for _ in range(200):
+        job = env.tc.get(f"/api/v1/cameras/import/jobs/{job['id']}").json()
+        if job["state"] == "done":
+            return job
+        time.sleep(0.05)
+    raise AssertionError("the bulk add did not finish")
+
+
+def test_bulk_add_creates_every_channel_with_its_identity_and_endpoint(env):
+    job = _bulk(env, _channel_rows(1, 2, 3))
+    assert job["counts"] == {"created": 3}
+    s = env.Session()
+    cams = s.query(Camera).filter(Camera.ip_address == NVR_IP).order_by(Camera.name).all()
+    assert [c.name for c in cams] == ["Yard NVR Ch 1", "Yard NVR Ch 2", "Yard NVR Ch 3"]
+    one = cams[0]
+    assert one.rtsp_url.startswith("rtsp://admin:pw@"), "the create path embeds the login"
+    assert one.substream_url == f"rtsp://admin:pw@{NVR_IP}:554/Streaming/Channels/102"
+    assert (one.manufacturer, one.model, one.serial_number) == ("Acme", "NVR-16", "SN-1")
+    assert (one.onvif_port, one.control_scheme) == (8000, "http")
+    s.close()
+
+
+def test_bulk_add_skips_a_channel_already_here_whoever_added_it(env):
+    _bulk(env, _channel_rows(1))
+    # Another operator adds the whole recorder: channel 1 is already here.
+    env.current["user"] = env.operator
+    job = _bulk(env, _channel_rows(1, 2))
+    assert job["counts"] == {"created": 1, "skipped": 1}
+    skipped = next(r for r in job["results"] if r["outcome"] == "skipped")
+    assert skipped["channel"] == 1
+    s = env.Session()
+    assert s.query(Camera).filter(Camera.ip_address == NVR_IP).count() == 2
+    s.close()
+
+
+def test_bulk_add_needs_cameras_manage(env):
+    env.current["user"] = env.viewer
+    r = env.tc.post("/api/v1/cameras/bulk", json={"source": "onvif:x", "cameras": _channel_rows(1)})
+    assert r.status_code == 403
+
+
+def test_bulk_add_refuses_an_empty_list_and_too_many(env):
+    r = env.tc.post("/api/v1/cameras/bulk", json={"source": "onvif:x", "cameras": []})
+    assert r.status_code == 422
+    r = env.tc.post("/api/v1/cameras/bulk", json={"source": "onvif:x", "cameras": _channel_rows(*range(1, cio.MAX_CHANNELS + 2))})
+    assert r.status_code == 422 and "at once" in r.json()["detail"].lower()

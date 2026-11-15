@@ -29,8 +29,19 @@ import { Field, Input } from './ui/form'
 import { Tabs } from './ui/Tabs'
 import { Camera, ChevronDown, CheckCircle, Loader2, Monitor, Plus, RefreshCw, Search, SearchX, Server, Video, X } from 'lucide-react'
 import { WebcamAddPanel } from './WebcamAddPanel'
+import { JobView, type Job } from './cameras/CameraImportExport'
 import { useTranslation } from '../i18n'
 import { extractApiError } from '../lib/apiError'
+import {
+  bulkRowsForChannels,
+  channelAddable,
+  channelCameraName,
+  channelSizeLabel,
+  defaultChannelSelection,
+  firstCreatedCameraId,
+  isMultiChannel,
+  type OnvifChannel,
+} from '../lib/onvifChannels'
 
 type DiscoveredCamera = {
   ip: string
@@ -194,6 +205,15 @@ export function AddCameraDialog({
   const [profiles, setProfiles] = useState<Array<{token: string, name: string, stream_uri?: string, width?: number, height?: number}>>([])
   const [selectedProfile, setSelectedProfile] = useState<string>('')
   const [rtspUrl, setRtspUrl] = useState('')
+  // The device's video channels (one for a camera, one per channel for an
+  // NVR). With more than one, the connect step shows a checklist and adds
+  // the ticked channels in one go through the import job (bulkJob).
+  const [channels, setChannels] = useState<OnvifChannel[]>([])
+  const [selectedChannels, setSelectedChannels] = useState<Set<number>>(new Set())
+  const [namePrefix, setNamePrefix] = useState('')
+  const [bulkJob, setBulkJob] = useState<Job | null>(null)
+  // The ONVIF control endpoint /connect resolved, stored on every channel.
+  const [controlEndpoint, setControlEndpoint] = useState<{ port?: number; scheme?: string }>({})
   const [scanQr, setScanQr] = useState(false)
   const [deviceInfo, setDeviceInfo] = useState<{
     manufacturer?: string
@@ -488,6 +508,11 @@ export function AddCameraDialog({
     setRtspUrl('')
     setDeviceInfo(null)
     setCameraName('')
+    setChannels([])
+    setSelectedChannels(new Set())
+    setNamePrefix('')
+    setBulkJob(null)
+    setControlEndpoint({})
     setLanPrompt(null)
     setLanPromptError(null)
     setError(null)
@@ -502,6 +527,9 @@ export function AddCameraDialog({
       setSelectedProfile('')
       setRtspUrl('')
       setDeviceInfo(null)
+      setChannels([])
+      setSelectedChannels(new Set())
+      setBulkJob(null)
     }
   }
 
@@ -534,6 +562,7 @@ export function AddCameraDialog({
       if (profileList.length > 0) {
         setProfiles(profileList)
         setDeviceInfo(data.device_info || null)
+        setControlEndpoint({ port: data.port, scheme: data.scheme })
 
         // Select first profile that has a stream URI
         const firstWithUri = profileList.find((p: any) => p.stream_uri) || profileList[0]
@@ -546,7 +575,17 @@ export function AddCameraDialog({
         const suggested = [di.manufacturer, di.model].filter(Boolean).join(' ') || selectedCamera.ip
         setCameraName(n => n || suggested)
 
-        if (!firstWithUri.stream_uri) {
+        // A recorder: its channels, every addable one ticked unless it is
+        // already a camera here. A single-channel device keeps the flow above.
+        const chans: OnvifChannel[] = Array.isArray(data.channels) ? data.channels : []
+        setChannels(chans)
+        setBulkJob(null)
+        if (isMultiChannel(chans)) {
+          setSelectedChannels(defaultChannelSelection(chans))
+          setNamePrefix(p => p || suggested)
+        }
+
+        if (!firstWithUri.stream_uri && !isMultiChannel(chans)) {
           setError('Could not get RTSP URL. Check camera settings.')
         }
       } else {
@@ -658,6 +697,64 @@ export function AddCameraDialog({
     })
   }
 
+  // Add the ticked channels of a recorder in one go. The server runs it as
+  // an import job: each channel goes through the same checks and
+  // provisioning as a camera added by hand, and a channel already on the
+  // system is skipped. Progress is polled below and shown in place.
+  const handleAddChannels = async () => {
+    if (!selectedCamera || selectedChannels.size === 0) return
+    const rows = bulkRowsForChannels(
+      channels, selectedChannels, namePrefix, selectedCamera.ip, credentials, deviceInfo,
+    )
+    if (rows.length === 0) return
+    setLoading(true)
+    setError(null)
+    try {
+      const { data } = await apiService.bulkCreateCameras({
+        source: `onvif:${selectedCamera.ip}`,
+        onvif_port: controlEndpoint.port,
+        control_scheme: controlEndpoint.scheme,
+        cameras: rows,
+      })
+      setBulkJob(data as Job)
+    } catch (e) {
+      setError(extractApiError(e, t('cameraDialog.addChannelsFailed')))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // Poll the running bulk job (same cadence as the import dialog).
+  useEffect(() => {
+    if (!bulkJob || bulkJob.state === 'done') return
+    const id = window.setTimeout(async () => {
+      try {
+        const { data } = await apiService.getCameraImportJob(bulkJob.id)
+        setBulkJob(data as Job)
+      } catch {
+        // A blip: the next poll tries again.
+        setBulkJob({ ...bulkJob })
+      }
+    }, 1000)
+    return () => window.clearTimeout(id)
+  }, [bulkJob])
+
+  // Leaving after a bulk add: the parents close the dialog on this callback
+  // and refresh their camera list; LiveView fills the tile it was editing
+  // with the camera id, so it gets the first channel that was created.
+  const finishBulk = () => {
+    onCameraAdded(firstCreatedCameraId(bulkJob?.results))
+  }
+
+  const toggleChannel = (index: number) => {
+    setSelectedChannels(s => {
+      const next = new Set(s)
+      if (next.has(index)) next.delete(index)
+      else next.add(index)
+      return next
+    })
+  }
+
   // Add manual camera
   const handleAddManualCamera = async () => {
     if (!form.name.trim() || !form.ip_address.trim()) {
@@ -741,6 +838,7 @@ export function AddCameraDialog({
   // Connect step is derived, not tracked: a selected camera means we're on
   // it, and profiles arriving means the connection succeeded.
   const connected = profiles.length > 0
+  const multiChannel = connected && isMultiChannel(channels)
 
   // Single primary footer action per screen state, so the CTA never jumps
   // between body and footer.
@@ -758,6 +856,20 @@ export function AddCameraDialog({
           label: authenticating ? 'Connecting...' : 'Connect',
           onClick: handleAuthenticate,
           disabled: authenticating || !credentials.username.trim() || lanPromptBusy,
+        }
+      : mode === 'discover' && selectedCamera && multiChannel && bulkJob
+      ? {
+          label: bulkJob.state === 'done' ? t('cameraDialog.done') : t('cameraDialog.adding'),
+          onClick: finishBulk,
+          disabled: bulkJob.state !== 'done',
+        }
+      : mode === 'discover' && selectedCamera && multiChannel
+      ? {
+          label: loading
+            ? t('cameraDialog.adding')
+            : t('cameraDialog.addChannels', { count: selectedChannels.size }),
+          onClick: handleAddChannels,
+          disabled: loading || selectedChannels.size === 0,
         }
       : mode === 'discover' && selectedCamera && connected
       ? {
@@ -799,7 +911,11 @@ export function AddCameraDialog({
           would just re-trigger the same 409). */}
       {!duplicatePrompt && (
         <div className="flex items-center justify-end gap-2">
-          <Button onClick={onClose}>{t('cameraDialog.cancel')}</Button>
+          {/* Once a bulk add has started the cameras exist whether or not the
+              operator waits, so leaving refreshes the parent like Done does. */}
+          {!(bulkJob && bulkJob.state === 'done') && (
+            <Button onClick={bulkJob ? finishBulk : onClose}>{t('cameraDialog.cancel')}</Button>
+          )}
           {primaryAction && (
             <Button
               variant="primary"
@@ -1161,12 +1277,16 @@ export function AddCameraDialog({
             primary CTA lives in the footer (Connect → Add Camera). */}
         {mode === 'discover' && selectedCamera && (
           <div className="space-y-4">
-            <button
-              className="text-xs text-[var(--accent)] flex items-center gap-1 hover:underline"
-              onClick={resetConnectStep}
-            >
-              ← Back to camera list
-            </button>
+            {/* Not while a bulk add runs: leaving then is Done/Cancel in the
+                footer, which refreshes the parent's camera list. */}
+            {!bulkJob && (
+              <button
+                className="text-xs text-[var(--accent)] flex items-center gap-1 hover:underline"
+                onClick={resetConnectStep}
+              >
+                ← Back to camera list
+              </button>
+            )}
 
             <div className="p-3 bg-[var(--bg-2)] border border-[var(--border)]">
               <div className="flex items-center gap-3">
@@ -1190,6 +1310,7 @@ export function AddCameraDialog({
                   type="text"
                   className="bg-[var(--bg-2)] border border-[var(--border)] px-3 py-2 text-sm"
                   value={credentials.username}
+                  disabled={!!bulkJob}
                   onChange={(e) => handleCredentialsChange({ username: e.target.value })}
                 />
               </label>
@@ -1201,6 +1322,7 @@ export function AddCameraDialog({
                   placeholder="Leave blank if none"
                   autoFocus
                   value={credentials.password}
+                  disabled={!!bulkJob}
                   onChange={(e) => handleCredentialsChange({ password: e.target.value })}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && !connected && credentials.username.trim() && !authenticating) {
@@ -1239,7 +1361,96 @@ export function AddCameraDialog({
               </div>
             )}
 
-            {connected && (
+            {/* A recorder: its channels as a checklist, then the job that
+                adds them. The single-camera fields below are not shown. */}
+            {multiChannel && bulkJob && (
+              <div className="max-h-[22rem] overflow-auto">
+                <JobView job={bulkJob} />
+              </div>
+            )}
+            {multiChannel && !bulkJob && (
+              <>
+                <div className="p-2.5 bg-[color-mix(in_oklab,var(--ok)_14%,transparent)] border border-[var(--ok)]">
+                  <div className="flex items-center gap-2 text-[var(--ok)] text-sm">
+                    <CheckCircle size={14} />
+                    {t('cameraDialog.recorderFound', { count: channels.length })}
+                  </div>
+                </div>
+
+                <label className="flex flex-col gap-1">
+                  <span className="text-xs text-[var(--text-dim)]">{t('cameraDialog.namePrefix')}</span>
+                  <input
+                    type="text"
+                    className="bg-[var(--bg-2)] border border-[var(--border)] px-3 py-2 text-sm"
+                    placeholder="e.g., Warehouse NVR"
+                    autoFocus
+                    value={namePrefix}
+                    onChange={(e) => setNamePrefix(e.target.value)}
+                  />
+                  <span className="text-xs text-[var(--text-dim)]">
+                    {t('cameraDialog.namePrefixHint', { example: channelCameraName(namePrefix, 1) })}
+                  </span>
+                </label>
+
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-[var(--text-dim)]">
+                    {t('cameraDialog.channelsSelected', { selected: selectedChannels.size, total: channels.length })}
+                  </span>
+                  <span className="flex gap-3">
+                    <button
+                      type="button"
+                      className="text-[var(--accent)] hover:underline"
+                      onClick={() => setSelectedChannels(new Set(channels.filter(channelAddable).map(c => c.index)))}
+                    >
+                      {t('cameraDialog.selectAll')}
+                    </button>
+                    <button
+                      type="button"
+                      className="text-[var(--accent)] hover:underline"
+                      onClick={() => setSelectedChannels(new Set())}
+                    >
+                      {t('cameraDialog.selectNone')}
+                    </button>
+                  </span>
+                </div>
+
+                <ul className="max-h-[14rem] overflow-auto border border-[var(--border)] divide-y divide-[var(--border)]" data-testid="onvif-channel-list">
+                  {channels.map((ch) => {
+                    const addable = channelAddable(ch)
+                    const size = channelSizeLabel(ch)
+                    return (
+                      <li key={ch.index}>
+                        <label
+                          className={`flex items-center gap-3 px-3 py-2 text-sm ${addable ? 'cursor-pointer hover:bg-[var(--panel-2)]' : 'opacity-60'}`}
+                          title={ch.source_token || undefined}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={selectedChannels.has(ch.index)}
+                            disabled={!addable}
+                            onChange={() => toggleChannel(ch.index)}
+                          />
+                          <span className="w-14 font-medium">{ch.name}</span>
+                          <span className="text-xs text-[var(--text-dim)] flex-1 truncate">
+                            {addable
+                              ? [size, ch.sub ? t('cameraDialog.hasSub') : null].filter(Boolean).join(' · ')
+                              : t('cameraDialog.noStream')}
+                          </span>
+                          {ch.already_added && (
+                            <Badge variant="info">
+                              {t('cameraDialog.alreadyAdded')}
+                              {ch.already_added_camera?.name ? `: ${ch.already_added_camera.name}` : ''}
+                            </Badge>
+                          )}
+                        </label>
+                      </li>
+                    )
+                  })}
+                </ul>
+              </>
+            )}
+
+            {connected && !multiChannel && (
               <>
                 <div className="p-2.5 bg-[color-mix(in_oklab,var(--ok)_14%,transparent)] border border-[var(--ok)]">
                   <div className="flex items-center gap-2 text-[var(--ok)] text-sm">

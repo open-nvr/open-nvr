@@ -310,3 +310,29 @@ async def test_resolve_onvif_substream_skips_duplicate_uri(monkeypatch):
 )
 def test_rtsp_port_from_url(url, expected):
     assert rtsp_port_from_url(url) == expected
+
+
+@pytest.mark.asyncio
+async def test_resolve_onvif_substream_stays_on_the_main_streams_channel(monkeypatch):
+    """On an NVR the smallest profile overall belongs to another channel. The
+    substream must come from the same video source as the main stream, or
+    detection watches a different picture than recording."""
+    async def fake_connect(ip, u, p, port=None, scheme=None):
+        return {
+            "port": 80, "scheme": "http", "device_info": {},
+            "profiles": [
+                {"token": "Profile_101", "video_source_token": "VideoSource_1", "width": 1920, "height": 1080,
+                 "stream_uri": "rtsp://10.0.0.9:554/Streaming/Channels/101"},
+                {"token": "Profile_102", "video_source_token": "VideoSource_1", "width": 704, "height": 576,
+                 "stream_uri": "rtsp://10.0.0.9:554/Streaming/Channels/102"},
+                {"token": "Profile_201", "video_source_token": "VideoSource_2", "width": 1920, "height": 1080,
+                 "stream_uri": "rtsp://10.0.0.9:554/Streaming/Channels/201"},
+                {"token": "Profile_202", "video_source_token": "VideoSource_2", "width": 352, "height": 288,
+                 "stream_uri": "rtsp://10.0.0.9:554/Streaming/Channels/202"},
+            ],
+        }
+
+    monkeypatch.setattr(ods, "connect_and_get_profiles", fake_connect)
+    r = await resolve_source("10.0.0.9", "admin", "pw", 554)
+    assert r["rtsp_url"].endswith("/101")
+    assert r["substream_url"].endswith("/102"), "not channel 2's smaller stream"

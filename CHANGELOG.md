@@ -43,6 +43,15 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A recorder's channels, added in one go.** Discovering an NVR or DVR
+  over ONVIF found it, but Connect then Add made one camera from its
+  first stream, and every further channel meant a new discovery and an
+  "already added" warning. The connect step now lists the recorder's
+  channels (size, whether it has a sub stream, and which are already
+  cameras here) with a name prefix, and adds the ticked ones as
+  "<prefix> Ch <n>" in one go, with progress and a result per channel.
+  Each camera gets its own channel's main and sub stream. A single
+  camera connects and adds exactly as before.
 - **`./start.sh uninstall` (`.\start.ps1 uninstall`): a clean slate.** It
   removes this install from the machine, every installed app and its
   data included: the containers, the volumes (database, keys, app
@@ -91,6 +100,14 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A recorder added by address took another channel's sub stream.**
+  Adding an NVR with its IP and credentials picked the smallest stream
+  across every channel as the camera's sub stream, so detection could
+  watch channel 9 while channel 1 was recorded. The sub stream now comes
+  from the same channel as the main stream. A sub stream URL given on
+  create (an import's recorder rows included) also gets the camera's
+  login embedded, as the main URL always did; without it the sub path
+  failed to authenticate while the main stream played.
 - **The one-click app installer runs, and runs on Windows.** Its image
   asked Debian for a package that only Docker's own repository has, its
   entrypoint looked for `main.py` in the mounted checkout, and SQLAlchemy
