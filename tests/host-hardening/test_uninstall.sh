@@ -217,10 +217,10 @@ untouched() {   # nothing at all changed
 }
 
 # The contract, whichever script is under test ($1 = run_sh | run_ps1).
-# The sentence is drawn, never printed: at least five wide rows after the
+# The sentence is drawn, never printed: at least three wide rows after the
 # prompt, and the sentence itself nowhere in the output as text.
 drawn() {
-    [ "$(printf '%s\n' "$1" | sed -n '/type the sentence/,$p' | awk 'length($0) >= 40' | wc -l)" -ge 5 ] \
+    [ "$(printf '%s\n' "$1" | sed -n '/type the sentence/,$p' | awk 'length($0) >= 30' | wc -l)" -ge 3 ] \
         && ! printf '%s\n' "$1" | grep -qiF "$PHRASE"
 }
 

@@ -309,37 +309,56 @@ function Show-Warning {
 function Get-Normalised([string]$Text) { return (($Text -replace '\s+', ' ').Trim().ToLowerInvariant()) }
 
 # The sentence is drawn, not printed, so it cannot be copied off the screen:
-# the operator reads it and types it. Capitals in 3x5 cells, two columns a
-# cell, wrapped by word to the window's width.
+# the operator reads it and types it. Capitals in a 3x5 pixel font (M and W
+# need five), two pixel rows to a terminal line with half blocks, wrapped by
+# word to the window's width.
 $Glyphs = @{
     "a" = ".#. #.# ### #.# #.#"; "b" = "##. #.# ##. #.# ##."; "c" = "### #.. #.. #.. ###"
     "d" = "##. #.# #.# #.# ##."; "e" = "### #.. ### #.. ###"; "f" = "### #.. ### #.. #.."
     "g" = "### #.. #.# #.# ###"; "h" = "#.# #.# ### #.# #.#"; "i" = "### .#. .#. .#. ###"
     "j" = "..# ..# ..# #.# ###"; "k" = "#.# #.# ##. #.# #.#"; "l" = "#.. #.. #.. #.. ###"
-    "m" = "#.# ### ### #.# #.#"; "n" = "### #.# #.# #.# #.#"; "o" = "### #.# #.# #.# ###"
+    "m" = "#...# ##.## #.#.# #...# #...#"; "n" = "### #.# #.# #.# #.#"; "o" = "### #.# #.# #.# ###"
     "p" = "### #.# ### #.. #.."; "q" = "### #.# #.# ### ..#"; "r" = "##. #.# ##. #.# #.#"
     "s" = "### #.. ### ..# ###"; "t" = "### .#. .#. .#. .#."; "u" = "#.# #.# #.# #.# ###"
-    "v" = "#.# #.# #.# #.# .#."; "w" = "#.# #.# ### ### #.#"; "x" = "#.# #.# .#. #.# #.#"
+    "v" = "#.# #.# #.# #.# .#."; "w" = "#...# #...# #.#.# ##.## #...#"; "x" = "#.# #.# .#. #.# #.#"
     "y" = "#.# #.# .#. .#. .#."; "z" = "### ..# .#. #.. ###"
 }
 
-# One line of words, five rows: 6 columns a letter, 1 between letters, 4 between words.
-function Show-Words([string]$Words) {
-    for ($row = 0; $row -lt 5; $row++) {
-        $line = "  "
-        foreach ($ch in $Words.ToCharArray()) {
-            if ($ch -eq ' ') { $line += "    "; continue }
-            $glyph = if ($Glyphs.ContainsKey("$ch")) { $Glyphs["$ch"] } else { "... ... ... ... ..." }
-            $cell = ($glyph -split ' ')[$row]
-            $line += ($cell -replace '#', '██' -replace '\.', '  ') + " "
-        }
-        Write-Host $line
+# One pixel row of a line of words: a blank column between letters, two
+# between words.
+function Get-BitmapRow([string]$Words, [int]$Row) {
+    $out = ""
+    foreach ($ch in $Words.ToCharArray()) {
+        if ($ch -eq ' ') { $out += ".."; continue }
+        $glyph = if ($Glyphs.ContainsKey("$ch")) { $Glyphs["$ch"] } else { "... ... ... ... ..." }
+        $out += ($glyph -split ' ')[$Row] + "."
     }
+    return $out
+}
+
+# Two pixel rows in one terminal line: ▀ top, ▄ bottom, █ both.
+function Show-Pair([string]$Top, [string]$Bottom) {
+    $line = "  "
+    for ($i = 0; $i -lt $Top.Length; $i++) {
+        $t = $Top[$i] -eq '#'; $b = $Bottom[$i] -eq '#'
+        if ($t -and $b) { $line += "█" } elseif ($t) { $line += "▀" } elseif ($b) { $line += "▄" } else { $line += " " }
+    }
+    Write-Host $line
+}
+
+function Show-Words([string]$Words) {   # one line of words, three terminal lines
+    $rows = 0..4 | ForEach-Object { Get-BitmapRow $Words $_ }
+    Show-Pair $rows[0] $rows[1]
+    Show-Pair $rows[2] $rows[3]
+    Show-Pair $rows[4] ($rows[4] -replace '#', '.')
 }
 
 function Get-WordsWidth([string]$Words) {
-    $spaces = @($Words.ToCharArray() | Where-Object { $_ -eq ' ' }).Count
-    return ($Words.Length - $spaces) * 7 + $spaces * 4 - 1
+    $w = 0
+    foreach ($ch in $Words.ToCharArray()) {
+        if ($ch -eq ' ') { $w += 2 } elseif ("$ch" -in 'm', 'w') { $w += 6 } else { $w += 4 }
+    }
+    return $w - 1
 }
 
 function Show-Sentence([string]$Sentence) {

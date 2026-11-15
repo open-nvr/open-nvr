@@ -350,10 +350,11 @@ show_warning() {
 normalise() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -s '[:space:]' ' ' | sed -E 's/^ //; s/ $//'; }
 
 # The sentence is drawn, not printed, so it cannot be copied off the screen:
-# the operator reads it and types it. Capitals in 3x5 cells, two columns a
-# cell, wrapped by word to the terminal's width.
-glyph_row() {   # letter, row 1-5 -> three cells
-    local g
+# the operator reads it and types it. Capitals in a 3x5 pixel font (M and W
+# need five), two pixel rows to a terminal line with half blocks, wrapped by
+# word to the terminal's width.
+glyph_row() {   # letter, row 1-5 -> the row's pixels, # and .
+    local row="$2" g
     case "$1" in
         a) g=".#. #.# ### #.# #.#" ;;  b) g="##. #.# ##. #.# ##." ;;
         c) g="### #.. #.. #.. ###" ;;  d) g="##. #.# #.# #.# ##." ;;
@@ -361,43 +362,67 @@ glyph_row() {   # letter, row 1-5 -> three cells
         g) g="### #.. #.# #.# ###" ;;  h) g="#.# #.# ### #.# #.#" ;;
         i) g="### .#. .#. .#. ###" ;;  j) g="..# ..# ..# #.# ###" ;;
         k) g="#.# #.# ##. #.# #.#" ;;  l) g="#.. #.. #.. #.. ###" ;;
-        m) g="#.# ### ### #.# #.#" ;;  n) g="### #.# #.# #.# #.#" ;;
+        m) g="#...# ##.## #.#.# #...# #...#" ;;
+        n) g="### #.# #.# #.# #.#" ;;
         o) g="### #.# #.# #.# ###" ;;  p) g="### #.# ### #.. #.." ;;
         q) g="### #.# #.# ### ..#" ;;  r) g="##. #.# ##. #.# #.#" ;;
         s) g="### #.. ### ..# ###" ;;  t) g="### .#. .#. .#. .#." ;;
         u) g="#.# #.# #.# #.# ###" ;;  v) g="#.# #.# #.# #.# .#." ;;
-        w) g="#.# #.# ### ### #.#" ;;  x) g="#.# #.# .#. #.# #.#" ;;
+        w) g="#...# #...# #.#.# ##.## #...#" ;;
+        x) g="#.# #.# .#. #.# #.#" ;;
         y) g="#.# #.# .#. .#. .#." ;;  z) g="### ..# .#. #.. ###" ;;
         *) g="... ... ... ... ..." ;;
     esac
-    printf '%s' "$g" | cut -d' ' -f"$2"
+    # shellcheck disable=SC2086
+    set -- $g
+    shift $((row - 1))
+    printf '%s' "$1"
 }
 
-# One line of words, five rows: 6 columns a letter, 1 between letters, 4 between words.
-draw_words() {
-    local row i ch cell line
-    for row in 1 2 3 4 5; do
-        line="  "
-        i=0
-        while [ "$i" -lt "${#1}" ]; do
-            ch="${1:$i:1}"
-            if [ "$ch" = " " ]; then
-                line="$line    "
-            else
-                cell="$(glyph_row "$ch" "$row")"
-                cell="${cell//#/██}"
-                line="$line${cell//./  } "
-            fi
-            i=$((i + 1))
-        done
-        printf '%s\n' "$line"
+# One pixel row of a line of words: a blank column between letters, two
+# between words.
+bitmap_row() {
+    local i=0 ch out=""
+    while [ "$i" -lt "${#1}" ]; do
+        ch="${1:$i:1}"
+        if [ "$ch" = " " ]; then out="$out.."; else out="$out$(glyph_row "$ch" "$2")."; fi
+        i=$((i + 1))
     done
+    printf '%s' "$out"
+}
+
+# Two pixel rows in one terminal line: ▀ top, ▄ bottom, █ both.
+draw_pair() {
+    local top="$1" bottom="$2" i=0 line="  " t b
+    while [ "$i" -lt "${#top}" ]; do
+        t="${top:$i:1}"; b="${bottom:$i:1}"
+        if [ "$t" = "#" ] && [ "$b" = "#" ]; then line="$line█"
+        elif [ "$t" = "#" ]; then line="$line▀"
+        elif [ "$b" = "#" ]; then line="$line▄"
+        else line="$line "; fi
+        i=$((i + 1))
+    done
+    printf '%s\n' "$line"
+}
+
+draw_words() {   # one line of words, three terminal lines
+    local r1 r2 r3 r4 r5
+    r1=$(bitmap_row "$1" 1); r2=$(bitmap_row "$1" 2); r3=$(bitmap_row "$1" 3)
+    r4=$(bitmap_row "$1" 4); r5=$(bitmap_row "$1" 5)
+    draw_pair "$r1" "$r2"; draw_pair "$r3" "$r4"; draw_pair "$r5" "${r5//#/.}"
 }
 
 words_width() {   # columns a line of words takes
-    local n=${#1} s
-    s=$(printf '%s' "$1" | tr -cd ' ' | wc -c)
-    echo $(( (n - s) * 7 + s * 4 - 1 ))
+    local i=0 w=0
+    while [ "$i" -lt "${#1}" ]; do
+        case "${1:$i:1}" in
+            " ") w=$((w + 2)) ;;
+            m|w) w=$((w + 6)) ;;
+            *)   w=$((w + 4)) ;;
+        esac
+        i=$((i + 1))
+    done
+    echo $((w - 1))
 }
 
 draw_sentence() {
