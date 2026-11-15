@@ -8,6 +8,19 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Updates install by themselves by default.** A new site's update
+  policy was *off*, so it never learned that a release existed. The
+  default is now *automatic*: the host runner checks every few hours
+  and installs a signed stable release by itself, fixes and new
+  features alike (never a new major version), any night between 02:00
+  and 04:00 site time, after the site's own delay of up to three days
+  that security fixes skip. Each install is backed up first and rolled
+  back if the new version is not healthy; a release that needs steps on
+  the host, or that cannot be rolled back, waits for a person. Settings
+  → OpenNVR Updates turns this down to notify-only or off. A site that
+  saved a policy keeps it; the host treats a missing policy file as the
+  default.
+
 - **The storage floor and the "Degraded" it caused.** The automatic
   rotation floor is now 5 % of the recordings disk, at least 5 GB and at
   most 20 GB (it was 2 GB or 2 %). On the boards we ship the recordings

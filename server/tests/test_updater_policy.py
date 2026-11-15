@@ -17,7 +17,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from updater import cli, envfile, manifest, source
-from updater.policy import MAX_DELAY_H, Policy, due, in_window, site_delay
+from updater.policy import DAYS, MAX_DELAY_H, Policy, due, in_window, site_delay
 
 # 2026-11-01 is a Sunday.
 SUN_0300 = datetime(2026, 11, 1, 3, 0)
@@ -50,10 +50,11 @@ def test_a_patch_in_the_window_after_the_delay_is_due():
     ({"candidate": man(channel="edge")}, "only releases"),
     ({"candidate": man(manual_steps=[{"id": "s", "text": "do it"}])}, "steps on the host"),
     ({"candidate": man(state_migrations=True)}, "cannot be rolled back"),
-    ({"candidate": man("0.2.0")}, "minor update is installed by hand"),
+    ({"candidate": man("0.2.0"), "policy": Policy(mode="auto", auto_scope="patch")}, "minor update is installed by hand"),
     ({"candidate": man("1.0.0"), "policy": Policy(mode="auto", auto_scope="minor")}, "major update"),
     ({"local": SUN_0300.replace(hour=5)}, "outside the maintenance window"),
-    ({"local": SUN_0300 + timedelta(days=1)}, "outside the maintenance window"),
+    ({"local": SUN_0300 + timedelta(days=1), "policy": Policy(mode="auto", window_days=("sun",))},
+     "outside the maintenance window"),
 ])
 def test_not_due(kw, words):
     ok, why = is_due(**kw)
@@ -93,7 +94,8 @@ def test_policy_from_the_mirrored_file():
                          "WINDOW_START": "01:00", "WINDOW_END": "02:30"})
     assert p == Policy(mode="auto", auto_scope="minor", window_days=("sat", "sun"),
                        window_start="01:00", window_end="02:30")
-    assert Policy.from_env({}).mode == "off"
+    assert Policy.from_env({}) == Policy(mode="auto", auto_scope="minor", window_days=DAYS)  # no file yet: the default
+    assert Policy.from_env({"WINDOW_DAYS": "bogus"}).window_days == DAYS
 
 
 # ── the CLI: due, and what check records for the app ────────────────────
