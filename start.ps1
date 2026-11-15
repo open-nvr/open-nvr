@@ -20,6 +20,7 @@
 #   .\start.ps1 update       # update to the latest release (scripts\update-host.ps1)
 #   .\start.ps1 auto-update enable|disable|status   # the runner for in-app updates
 #   .\start.ps1 host-agent install|uninstall|status|logs   # USB webcams + host monitoring
+#   .\start.ps1 uninstall    # remove OpenNVR, apps, data and footage (typed confirmation; --dry-run first)
 # ============================================================
 
 param(
@@ -1076,9 +1077,17 @@ switch ($Command) {
         Invoke-HostAgent $action
     }
 
+    "uninstall" {
+        # A clean slate: this install, every app, the database, keys, footage and
+        # backups, after the operator types the confirmation. Nothing of any
+        # other stack on the machine. Options: see scripts\uninstall.ps1.
+        & (Join-Path $PSScriptRoot "scripts\uninstall.ps1") @Rest
+        exit $LASTEXITCODE
+    }
+
     default {
         Write-Color "Unknown command: $Command" Red
-        Write-Color "Usage: .\start.ps1 [start|restart|up|build|down|logs|status|validate|token|refresh-net|install|reconfigure|update|auto-update|host-agent]"
+        Write-Color "Usage: .\start.ps1 [start|restart|up|build|down|logs|status|validate|token|refresh-net|install|reconfigure|update|auto-update|host-agent|uninstall]"
         exit 1
     }
 }
