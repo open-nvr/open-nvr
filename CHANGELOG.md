@@ -13,6 +13,20 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   gone before the operator found the subject. It now opens paused on the
   instant; play starts when the operator presses it. Picking a day on the
   playback page plays as before.
+- **The storage floor and the "Degraded" it caused.** The automatic
+  rotation floor is now 5 % of the recordings disk, at least 5 GB and at
+  most 20 GB (it was 2 GB or 2 %). On the boards we ship the recordings
+  share the disk with the OS, Docker and the database, and 2 GB left no
+  room to pull a core update. At the same time the health bar said
+  "Degraded · Storage" on every healthy box, because the monitor's
+  default "90 % used" alarm fired on a disk that rotation keeps full by
+  design. That alarm is off by default now. Unset, the monitor watches
+  the rotation floor itself: the `disk_low` alert fires when free space
+  falls a margin under the floor (rotation not keeping up, or the disk
+  full of other data) and clears above it. The dashboard shows a
+  rotating disk as "rotating", not as a warning, and treats the floor
+  the same way the server does. Operators who saved a disk threshold
+  keep it.
 
 ### Added
 

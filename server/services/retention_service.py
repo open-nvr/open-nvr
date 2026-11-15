@@ -37,15 +37,24 @@ from services.storage_service import get_effective_recordings_base_path
 
 RETENTION_SETTINGS_KEY = "recordings_retention"
 
-#: The free-space floor when the operator has not set one: 2 GB, or 2 % of
-#: the recordings volume if that is more (80 GB on a 4 TB disk). Below it
-#: core ROTATES: the oldest recordings go, oldest first, and recording never
-#: stops. The old default was "off", and a shipped box with a small disk
-#: sat at 10 GB free from an installer value it could never reach (Ventuno
-#: Q, 2026-11-04): the purge deleted every recording and every evidence
-#: photo, forever, and Search showed "no photo". 0 in the setting = off.
-DEFAULT_MIN_FREE_GB = 2.0
-DEFAULT_MIN_FREE_FRACTION = 0.02
+#: The free-space floor when the operator has not set one: 5 % of the
+#: recordings volume, at least 5 GB and at most 20 GB (5 GB on a 55 GB
+#: board, 12.8 GB on 256 GB, 20 GB from 400 GB up). Below it core ROTATES:
+#: the oldest recordings go, oldest first, and recording never stops.
+#: Why 5 GB: on the boards we ship the recordings share the disk with the
+#: OS, Docker and the database, and the floor is all the room those have
+#: between two rotation passes. At the old 2 GB / 2 % a core update could
+#: not even be pulled (Ventuno Q, 2026-11-10) and the box sat one hair
+#: from the 98 % critical line for good. Why a cap: a dedicated 4 TB disk
+#: has no other writers; 20 GB of headroom there is plenty, 200 GB would
+#: be a day of footage thrown away. Before that the default was "off", and
+#: a shipped box with a small disk sat at 10 GB free from an installer
+#: value it could never reach (Ventuno Q, 2026-11-04): the purge deleted
+#: every recording and every evidence photo, forever, and Search showed
+#: "no photo". 0 in the setting = off.
+DEFAULT_MIN_FREE_GB = 5.0
+DEFAULT_MIN_FREE_FRACTION = 0.05
+DEFAULT_MIN_FREE_CAP_GB = 20.0
 #: A rotation deletes past the floor by this much so the pressure loop does
 #: not thrash at the boundary: a quarter of the floor, at least 0.5 GB. It
 #: used to be a flat 5 GB, which with a 2 GB floor meant the first rotation
@@ -489,7 +498,8 @@ class RetentionService:
         total_gb = RetentionService._get_disk_total_gb(str(base_path))
         if total_gb is None:
             return DEFAULT_MIN_FREE_GB
-        return max(DEFAULT_MIN_FREE_GB, round(total_gb * DEFAULT_MIN_FREE_FRACTION, 1))
+        return min(DEFAULT_MIN_FREE_CAP_GB,
+                   max(DEFAULT_MIN_FREE_GB, round(total_gb * DEFAULT_MIN_FREE_FRACTION, 1)))
 
     @staticmethod
     def hysteresis_gb(min_free_gb: float) -> float:

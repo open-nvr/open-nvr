@@ -1321,8 +1321,13 @@ class SystemMonitoringSettings(BaseModel):
     memory_percent_threshold: int | None = Field(90, ge=1, le=100)
     # CPU/RAM must stay above threshold this long before an alert raises.
     sustained_seconds: int = Field(120, ge=15, le=3600)
+    # Disk: both None by default. The recordings disk is MEANT to be full
+    # (rotation keeps the floor, recording never stops), so a "90 % used"
+    # alarm rang on every healthy box for good. Unset, the monitor watches
+    # the rotation floor itself: it alerts when free space falls a margin
+    # below the floor, which is rotation not keeping up, not a full disk.
     disk_min_free_gb: float | None = Field(None, ge=1)
-    disk_used_percent_threshold: int | None = Field(90, ge=1, le=100)
+    disk_used_percent_threshold: int | None = Field(None, ge=1, le=100)
     # Alerts clear at threshold minus this (plus sustained window), so a
     # metric hovering at the boundary doesn't flap.
     resolve_hysteresis_percent: int = Field(5, ge=1, le=20)
