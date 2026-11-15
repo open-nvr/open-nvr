@@ -169,10 +169,33 @@ class SystemMonitorService:
                 "percent": round(stat.used / stat.total * 100, 1)
                 if stat.total
                 else 0.0,
+                **self._rotation_lines(db, base_path),
             }
         except Exception as e:
             out["disk_error"] = str(e)
         return out
+
+    @staticmethod
+    def _rotation_lines(db: Session, base_path: str) -> dict[str, Any]:
+        """The rotation floor in force and the line below it that means
+        "rotation is not keeping up": floor minus the rotation margin, so the
+        alarm cannot ring inside the band rotation itself works in (it
+        deletes down to floor + margin and lets the disk fill back to the
+        floor). None/absent when rotation is off or unreadable."""
+        try:
+            from services.retention_service import RetentionService
+
+            floor = RetentionService.effective_min_free_gb(
+                RetentionService._get_retention_settings(db), base_path
+            )
+        except Exception:  # the sample must never fail on this
+            return {}
+        if not floor:
+            return {"floor_gb": None, "alarm_gb": None}
+        return {
+            "floor_gb": round(float(floor), 1),
+            "alarm_gb": round(float(floor) - RetentionService.hysteresis_gb(floor), 1),
+        }
 
     @staticmethod
     def _apply_host_agent_metrics(out: dict[str, Any]) -> None:
@@ -278,7 +301,13 @@ class SystemMonitorService:
                 for k, v in sorted(self._active_info.items())
                 if (self._active or {}).get(k)
             ],
-            "thresholds": settings.model_dump(),
+            "thresholds": {
+                **settings.model_dump(),
+                # The lines the disk alarm really uses when the GB field is
+                # empty (see _rotation_lines); the dashboard reads them.
+                "disk_floor_gb": (base.get("disk") or {}).get("floor_gb"),
+                "disk_alarm_gb": (base.get("disk") or {}).get("alarm_gb"),
+            },
         }
 
     # ------------------------------------------------------------ state machine
@@ -414,6 +443,15 @@ class SystemMonitorService:
             used_pct = disk["percent"]
             pct_thr = settings.disk_used_percent_threshold
             gb_thr = settings.disk_min_free_gb
+            # No GB value set: watch the rotation floor. Alarm when free
+            # space is a margin below it (rotation not keeping up, or the
+            # disk full of other data); clear once it is back above the floor.
+            derived = gb_thr is None and disk.get("alarm_gb") is not None
+            if derived:
+                gb_thr = disk["alarm_gb"]
+                gb_clear = disk.get("floor_gb") or gb_thr
+            else:
+                gb_clear = (gb_thr + 2.0) if gb_thr is not None else None
             breach = False
             clear = True
             if pct_thr is not None:
@@ -421,7 +459,7 @@ class SystemMonitorService:
                 clear = clear and used_pct < pct_thr - hyst
             if gb_thr is not None:
                 breach = breach or free_gb < gb_thr
-                clear = clear and free_gb > gb_thr + 2.0
+                clear = clear and free_gb > gb_clear
             if pct_thr is not None or gb_thr is not None:
                 severity = (
                     "critical" if used_pct >= 98 or free_gb < 2.0 else "warning"
@@ -435,6 +473,9 @@ class SystemMonitorService:
                     now_ts=now_ts,
                     severity=severity,
                     description=(
+                        f"Recordings disk low: {free_gb:.1f} GB free, under the "
+                        f"{disk.get('floor_gb')} GB rotation floor ({used_pct:.0f}% used)"
+                        if derived else
                         f"Recordings disk low: {free_gb:.1f} GB free "
                         f"({used_pct:.0f}% used)"
                     ),

@@ -125,9 +125,9 @@ export function SystemHealthSettings() {
                 value={settings.disk_used_percent_threshold ?? ''}
                 onChange={(e) => set('disk_used_percent_threshold', numOrNull(e.target.value))}
                 className={inputClass}
-                placeholder="90 — empty disables"
+                placeholder="Empty disables"
               />
-              <p className="text-xs text-[var(--text-dim)] mt-1">Recordings volume. On by default so a filling disk is never silent.</p>
+              <p className="text-xs text-[var(--text-dim)] mt-1">Recordings volume. Off by default: a recorder's disk is meant to be full, rotation keeps the floor.</p>
             </div>
             <div>
               <label className="block text-sm font-medium mb-1">Warn when free space below (GB)</label>
@@ -136,10 +136,11 @@ export function SystemHealthSettings() {
                 value={settings.disk_min_free_gb ?? ''}
                 onChange={(e) => set('disk_min_free_gb', numOrNull(e.target.value))}
                 className={inputClass}
-                placeholder="Empty disables"
+                placeholder="Automatic: a margin under the rotation floor"
               />
               <p className="text-xs text-[var(--text-dim)] mt-1">
-                Alert only — set it above the retention purge threshold so the warning fires before footage is deleted.
+                Alert only. Empty watches the rotation floor from Recording settings: the alert fires when free space
+                falls a margin below it, which means rotation is not keeping up. A value here replaces that line.
               </p>
             </div>
             <div>

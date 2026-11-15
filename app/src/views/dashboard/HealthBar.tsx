@@ -104,17 +104,27 @@ export function HealthBar({ actions }: { actions?: ReactNode }) {
   const recLevel: Level = !cams.data ? 'unknown' : stalled > 0 ? 'warn' : 'ok'
 
   const disk = res.data?.disk
-  const diskThr = res.data?.thresholds?.disk_used_percent_threshold
-  const diskLevel: Level = !disk
-    ? (res.data?.disk_error ? 'crit' : 'unknown')
-    : disk.percent >= 98 ? 'crit'
-      : diskThr != null && disk.percent >= diskThr ? 'warn' : 'ok'
-  const resourceAlerts = res.data?.active_alerts?.length ?? 0
+  const thr = res.data?.thresholds
   // Disk rotation: core is deleting the oldest recordings to keep its
-  // headroom. Recording continues; the operator should know what the
-  // effective retention has become, or that the floor cannot be reached
-  // because the disk is full of other data.
+  // headroom. That is the normal state of a recorder, not a degradation:
+  // recording continues and the tile says "rotating" with the effective
+  // retention in its tooltip. The disk is a WARNING when free space is a
+  // margin under the floor (rotation not keeping up — the same line the
+  // server's disk_low alert uses), when the floor cannot be reached because
+  // the disk is full of other data, or past a threshold the operator set.
   const rotation = res.data?.rotation ?? null
+  const freeGb = disk ? disk.free / 1024 ** 3 : null
+  const alarmGb = thr?.disk_min_free_gb ?? thr?.disk_alarm_gb ?? null
+  const diskAlert = (res.data?.active_alerts ?? []).some((a) => a.alert_type === 'disk_low')
+  const diskLevel: Level = !disk || freeGb == null
+    ? (res.data?.disk_error ? 'crit' : 'unknown')
+    : disk.percent >= 98 || freeGb < 2 ? 'crit'
+      : diskAlert || rotation?.unreachable
+        || (alarmGb != null && freeGb < alarmGb)
+        || (thr?.disk_used_percent_threshold != null && disk.percent >= thr.disk_used_percent_threshold) ? 'warn'
+        : 'ok'
+  // CPU / memory alerts; the disk ones are the Storage tile's.
+  const resourceAlerts = (res.data?.active_alerts ?? []).filter((a) => !a.alert_type.startsWith('disk_')).length
   const rotationText = rotation
     ? rotation.unreachable
       ? t('dashboard.health.rotationUnreachable', { gb: rotation.min_free_gb ?? '' })
@@ -154,8 +164,7 @@ export function HealthBar({ actions }: { actions?: ReactNode }) {
   const warnings: string[] = []
   if (detLevel === 'warn') warnings.push(`${t('dashboard.health.detection')}: ${detValue}`)
   if (stalled > 0) warnings.push(t('dashboard.health.recording'))
-  if (diskLevel === 'warn') warnings.push(t('dashboard.health.storage'))
-  if (rotationText && diskLevel !== 'crit') warnings.push(rotationText)
+  if (diskLevel === 'warn') warnings.push(rotationText && rotation?.unreachable ? rotationText : t('dashboard.health.storage'))
   if (resourceAlerts > 0) warnings.push(t('dashboard.health.resources'))
   if (!socketUp) warnings.push(t('dashboard.health.liveEvents'))
 
@@ -226,7 +235,7 @@ export function HealthBar({ actions }: { actions?: ReactNode }) {
           to="/cameras"
         />
         <Chip
-          level={rotation && diskLevel === 'ok' ? 'warn' : diskLevel}
+          level={diskLevel}
           label={t('dashboard.health.storage')}
           value={disk ? `${formatBytes(disk.free)} ${t('dashboard.free')}${rotation ? ` · ${t('dashboard.health.rotatingShort')}` : ''}` : diskLevel === 'crit' ? t('dashboard.health.error') : '…'}
           title={rotation?.description ?? (disk ? `${disk.path} · ${Math.round(disk.percent)}% ${t('dashboard.used')}` : res.data?.disk_error ?? undefined)}

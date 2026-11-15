@@ -21,13 +21,15 @@ def test_the_floor_is_automatic_unless_set_and_zero_is_off(tmp_path, monkeypatch
     rs = _svc()
     S = rs.RetentionService
     monkeypatch.setattr(S, "_get_disk_total_gb", staticmethod(lambda _p: 55.0))
-    assert S.effective_min_free_gb({}, tmp_path) == 2.0, "small disk: 2 GB"
+    assert S.effective_min_free_gb({}, tmp_path) == 5.0, "small shared disk (a 55 GB board): 5 GB"
+    monkeypatch.setattr(S, "_get_disk_total_gb", staticmethod(lambda _p: 256.0))
+    assert S.effective_min_free_gb({}, tmp_path) == 12.8, "5 % of 256 GB"
     monkeypatch.setattr(S, "_get_disk_total_gb", staticmethod(lambda _p: 4000.0))
-    assert S.effective_min_free_gb({"min_free_space_gb": None}, tmp_path) == 80.0, "2 % of 4 TB"
+    assert S.effective_min_free_gb({"min_free_space_gb": None}, tmp_path) == 20.0, "capped: 4 TB does not need 200 GB spare"
     assert S.effective_min_free_gb({"min_free_space_gb": 10}, tmp_path) == 10.0, "the operator's value wins"
     assert S.effective_min_free_gb({"min_free_space_gb": 0}, tmp_path) is None, "0 = off"
     monkeypatch.setattr(S, "_get_disk_total_gb", staticmethod(lambda _p: None))
-    assert S.effective_min_free_gb({}, tmp_path) == 2.0, "no disk reading: the fixed default"
+    assert S.effective_min_free_gb({}, tmp_path) == 5.0, "no disk reading: the fixed default"
 
 
 def test_the_margin_is_a_quarter_of_the_floor_at_least_half_a_gb():
@@ -127,18 +129,18 @@ def test_check_disk_pressure_raises_and_clears_the_rotation_event(db, tmp_path, 
         db.add(Recording(filename=f.name, file_path=f"cam-1/{name}.mp4", file_size=3 * 1024 ** 3,
                          start_time=datetime.now(UTC) - timedelta(hours=hours), camera_id=1))
     db.commit()
-    # below the automatic 2 GB floor with recordings worth rotating: the
-    # oldest goes, the target clears, and rotation is raised with the
-    # retention the surviving footage gives
+    # below the automatic 5 GB floor (55 GB disk) with recordings worth
+    # rotating: the oldest goes, the target (floor + 1.25 GB margin) clears,
+    # and rotation is raised with the retention the surviving footage gives
     monkeypatch.setattr(S, "_get_disk_free_space_gb",
-                        staticmethod(lambda _p: 1.5 if all(f.exists() for f in files) else 2.6))
+                        staticmethod(lambda _p: 4.0 if all(f.exists() for f in files) else 6.5))
     stats = S.check_disk_pressure(db)
     assert stats["deleted_files"] == 1 and not files[0].exists() and files[1].exists()
     assert stats is not None
     rot = [e for e in events if e["event_type"] == rs.ROTATION_EVENT]
     assert rot and rot[-1]["active"] is True and "rotating" in rot[-1]["description"]
     # back above floor + margin: cleared
-    monkeypatch.setattr(S, "_get_disk_free_space_gb", staticmethod(lambda _p: 2.6))
+    monkeypatch.setattr(S, "_get_disk_free_space_gb", staticmethod(lambda _p: 6.5))
     assert S.check_disk_pressure(db) is None
     rot = [e for e in events if e["event_type"] == rs.ROTATION_EVENT]
     assert rot[-1]["active"] is False

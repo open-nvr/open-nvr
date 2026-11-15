@@ -271,6 +271,10 @@ export type SystemResourcesResp = {
     memory_percent_threshold?: number | null
     disk_min_free_gb?: number | null
     disk_used_percent_threshold?: number | null
+    /** The rotation floor in force and the line a margin below it where the
+     *  disk alarm rings when the GB field above is empty (null: rotation off). */
+    disk_floor_gb?: number | null
+    disk_alarm_gb?: number | null
   }
 }
 
