@@ -158,6 +158,7 @@ mine = nvr.alerts.inbox(unacked=True)
 
 * [Developer program](https://github.com/open-nvr/open-nvr/blob/main/docs/DEVELOPER_PROGRAM.md) — the deal: no fee, your licence, the compatibility promise.
 * [Your first detector](https://github.com/open-nvr/open-nvr/blob/main/docs/FIRST_DETECTOR.md) — scaffold, run against a stack, list in the catalog.
+* [Building efficient apps](https://github.com/open-nvr/open-nvr/blob/main/docs/BUILDING_EFFICIENT_APPS.md) — the ten rules every app follows, checked by `opennvr-app validate --strict` and shipped to coding assistants as `AGENTS.md` in every scaffolded app.
 * [SDK reference](https://github.com/open-nvr/open-nvr/blob/main/docs/SDK_REFERENCE.md) — every public name, by task.
 * [Platform client](https://github.com/open-nvr/open-nvr/blob/main/docs/APP_PLATFORM.md), [app surfaces](https://github.com/open-nvr/open-nvr/blob/main/docs/APP_SURFACES.md), [credentials](https://github.com/open-nvr/open-nvr/blob/main/docs/APP_CREDENTIALS.md), [event contracts](https://github.com/open-nvr/open-nvr/blob/main/docs/EVENT_CONTRACTS.md).
 * [Example apps](https://github.com/open-nvr/open-nvr/tree/main/examples) — thirteen first-party apps built on this SDK.

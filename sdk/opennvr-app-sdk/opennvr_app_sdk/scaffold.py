@@ -42,7 +42,8 @@ TEMPLATE_DIR = Path(__file__).resolve().parent / "templates" / "app"
 #: open-nvr/open-nvr's build-catalog-app.yml, the listing entry.
 REPO_TEMPLATE_DIR = Path(__file__).resolve().parent / "templates" / "repo"
 #: Dotfiles ship in the wheel under safe names and are renamed on output.
-_RENAME = {"_github": ".github", "_gitignore": ".gitignore", "_dockerignore": ".dockerignore"}
+_RENAME = {"_github": ".github", "_gitignore": ".gitignore", "_dockerignore": ".dockerignore",
+           "_claude": ".claude"}
 DOCS_URL = "https://github.com/open-nvr/open-nvr/blob/main/docs/"
 _KEBAB_RE = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$")
 _SKIP = {"__pycache__", ".venv", ".pytest_cache", "uv.lock"}
@@ -242,6 +243,9 @@ def print_next_steps(app_id: str, app_dir: Path, *, mode: str) -> None:
     print(f"  # open {module}.py and edit the @app.on_detection function — that's the rule")
     print("  cp config.example.yml config.yml   # then edit it")
     print(f"  uv run python {module}.py --config config.yml --once")
+    print("\nWorking with a coding assistant? The app carries the platform's rules for it:")
+    print("  AGENTS.md and .claude/skills/opennvr-app/SKILL.md")
+    print(f"  {docs}BUILDING_EFFICIENT_APPS.md   # the same rules, with the reasons")
     print("\nRun it against a stack, then list it in the App Catalog:")
     print(f"  {docs}FIRST_DETECTOR.md")
     print(f"  {docs}CONTRIBUTING_APPS.md")
@@ -269,6 +273,9 @@ def main(argv: list[str] | None = None, *, repo_root: Path | None = None,
                           "the App Catalog listing entry. Implies --sdk pypi.")
     val = sub.add_parser("validate", help="check an app's manifest, example config, listing and repository shape")
     val.add_argument("path", nargs="?", default=".", help="the app directory (default: current directory)")
+    val.add_argument("--strict", action="store_true",
+                     help="also fail on a platform-rule finding (own decode, own model, a direct "
+                          "adapter call, a model per frame, the wide subject) that carries no waiver.")
     spec = sub.add_parser("spec", help="print the app's OpenAPI 3.1 / AsyncAPI 3.0 document")
     spec.add_argument("path", nargs="?", default=".", help="the app directory (default: current directory)")
     spec.add_argument("--format", choices=("openapi", "asyncapi"), default="openapi",
@@ -325,6 +332,10 @@ def main(argv: list[str] | None = None, *, repo_root: Path | None = None,
 
         report = validate_app(Path(args.path).expanduser())
         print_report(report, Path(args.path))
+        if args.strict and report.rule_findings:
+            print(f"--strict: {len(report.rule_findings)} platform-rule finding(s) — fix them or "
+                  "waive each with '# opennvr: allow[<rule>] <reason>'")
+            return 1
         return 0 if report.ok else 1
 
     dest_dir = Path(args.dest).expanduser().resolve()

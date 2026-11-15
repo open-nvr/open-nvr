@@ -4,6 +4,12 @@ Every example here is a **copy-as-template** starting point — minimal, readabl
 and opinionated. Pick one that's close to what you want to build, copy the
 folder, and edit the predicate.
 
+> **Before you copy one:** the rules every app follows, and which
+> example is the reference for each, are in
+> [**Building efficient apps**](../docs/BUILDING_EFFICIENT_APPS.md). Some
+> examples predate those rules for part of what they do; that page's
+> *Where the examples stand* table says which part not to copy.
+
 > **Building a brand-new app?** Skip the copy-and-delete. A generator
 > scaffolds a minimal, runnable Detector app and you fill in one method —
 > the rule. Follow **[Your first OpenNVR detector in 15 minutes](../docs/FIRST_DETECTOR.md)**.
