@@ -21,7 +21,6 @@ the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as before. A config that names its own subject, or sets
   `consume_tier0: false`, is honoured; a facade app with Tier-0 off
   keeps the wide subject.
-
 - **First-time setup confirms the authenticator before it finishes.** The
   setup page showed the QR code and sent the operator to sign in, counting
   the authenticator as enrolled the moment the code was displayed. Closing
