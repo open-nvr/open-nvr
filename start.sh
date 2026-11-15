@@ -22,6 +22,7 @@
 #   ./start.sh update       # update to the latest release (scripts/update-host.sh)
 #   ./start.sh auto-update enable|disable|status   # the runner for in-app updates
 #   ./start.sh host-agent install|uninstall|status|logs   # USB webcams + host monitoring
+#   ./start.sh uninstall    # remove OpenNVR, apps, data and footage (typed confirmation; --dry-run first)
 # ============================================================
 
 set -e
@@ -2506,9 +2507,18 @@ case "$COMMAND" in
     run_host_agent "${2:-status}"
     ;;
 
+  uninstall)
+    # A clean slate: this install, every app, the database, keys, footage and
+    # backups, after the operator types the confirmation. Nothing of any
+    # other stack on the machine. Options (--dry-run, --keep-recordings, ...)
+    # are listed in the script's header.
+    shift
+    exec "$(dirname "$0")/scripts/uninstall.sh" "$@"
+    ;;
+
   *)
     echo -e "${RED}Unknown command: $COMMAND${NC}"
-    echo "Usage: ./start.sh [start|restart|up|build|down|logs|status|validate|prune|token|refresh-net|install|reconfigure|refresh-certs|update|auto-update|host-agent]"
+    echo "Usage: ./start.sh [start|restart|up|build|down|logs|status|validate|prune|token|refresh-net|install|reconfigure|refresh-certs|update|auto-update|host-agent|uninstall]"
     exit 1
     ;;
 esac

@@ -400,7 +400,8 @@ upd_queue() {
     fi
     local mode last now
     mode=$(upd_kv "$policy" MODE)
-    [ -n "$mode" ] && [ "$mode" != off ] || return 0
+    mode=${mode:-auto}  # nothing saved yet: the default, install releases by itself
+    [ "$mode" != off ] || return 0
     last=$(upd_kv "$UPD_DIR/check.env" CHECKED_EPOCH)
     now=$(date +%s)
     if [ -z "$last" ] || [ $((now - last)) -ge "${OPENNVR_UPDATE_CHECK_EVERY:-21600}" ]; then
@@ -438,7 +439,7 @@ run_update_runner_refresh() {
     upd_runner_registered && return 0
     if [ "$(uname -s)" = Darwin ] || { [ -t 0 ] && [ "${KEEP_ORPHANS:-}" != 1 ]; }; then
         upd_say "Installing the update runner, so OpenNVR Updates in the app can work"
-        upd_say "(it does nothing until an update policy is chosen there; opt out: ./start.sh auto-update disable)."
+        upd_say "(it installs releases by itself at night, with a backup and rollback; change that in the app, or opt out: ./start.sh auto-update disable)."
         ( run_auto_update enable ) || upd_warn "The update runner is not installed. Install it with: ./start.sh auto-update enable"
     else
         upd_warn "The update runner is not installed. Install it with: ./start.sh auto-update enable"
