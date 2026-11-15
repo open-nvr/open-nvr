@@ -149,6 +149,48 @@ def test_disk_low_by_percent_and_severity_escalation():
     assert out[0]["severity"] == "critical"  # >= 98% used
 
 
+def test_disk_defaults_are_off_and_the_floor_is_watched_instead():
+    """A recorder's disk is meant to be full: no "90 % used" alarm by default.
+    With no GB value set the alarm line is the rotation floor minus its
+    margin (the sample carries both), and it clears above the floor."""
+    s = SystemMonitoringSettings()
+    assert s.disk_used_percent_threshold is None and s.disk_min_free_gb is None
+    m = _mk_monitor()
+    s = _settings(cpu_percent_threshold=None)
+    gib = 1024 ** 3
+
+    def disk(free_gb: float):
+        return {"path": "/r", "total": 55 * gib, "used": (55 - free_gb) * gib,
+                "free": free_gb * gib, "percent": round((55 - free_gb) / 55 * 100, 1),
+                "floor_gb": 5.0, "alarm_gb": 3.8}
+
+    # 97 % used, 4.5 GB free, inside the band rotation works in: healthy.
+    m.evaluate(_sample(0, disk=disk(4.5)), s)
+    assert m.evaluate(_sample(15, disk=disk(4.5)), s) == []
+    # Under the alarm line: rotation is not keeping up.
+    m.evaluate(_sample(30, disk=disk(3.5)), s)
+    out = m.evaluate(_sample(45, disk=disk(3.5)), s)
+    assert [(e["event_type"], e["state"]) for e in out] == [(ALERT_DISK_LOW, "active")]
+    assert "rotation floor" in out[0]["description"] and out[0]["severity"] == "warning"
+    # Back between the alarm line and the floor: still active (no flap).
+    m.evaluate(_sample(60, disk=disk(4.5)), s)
+    assert m.evaluate(_sample(75, disk=disk(4.5)), s) == []
+    # Above the floor: resolved.
+    m.evaluate(_sample(90, disk=disk(5.5)), s)
+    out = m.evaluate(_sample(105, disk=disk(5.5)), s)
+    assert [(e["event_type"], e["state"]) for e in out] == [(ALERT_DISK_LOW, "inactive")]
+
+
+def test_disk_with_rotation_off_and_no_thresholds_never_alerts():
+    m = _mk_monitor()
+    s = _settings(cpu_percent_threshold=None)
+    gib = 1024 ** 3
+    disk = {"path": "/r", "total": 100 * gib, "used": 97 * gib, "free": 3 * gib,
+            "percent": 97.0, "floor_gb": None, "alarm_gb": None}
+    m.evaluate(_sample(0, disk=disk), s)
+    assert m.evaluate(_sample(15, disk=disk), s) == []
+
+
 def test_disk_stat_error_raises_and_resolves():
     m = _mk_monitor()
     s = _settings(cpu_percent_threshold=None)

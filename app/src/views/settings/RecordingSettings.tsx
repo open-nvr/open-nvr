@@ -78,8 +78,10 @@ export function RecordingSettings() {
     const [retentionDays, setRetentionDays] = useState(30)
     const [protectFlagged, setProtectFlagged] = useState(true)
     const [minFreeSpace, setMinFreeSpace] = useState<number | ''>('')
-    // The floor in force when the field is empty (automatic: 2 GB or 2 % of the disk).
+    // The floor in force when the field is empty (automatic: 5 % of the disk, 5 to 20 GB).
     const [autoFreeSpace, setAutoFreeSpace] = useState<number | null>(null)
+    // What the gauge marks: the operator's floor, else the automatic one; none when rotation is off (0).
+    const floorInForce = minFreeSpace !== '' ? (minFreeSpace > 0 ? minFreeSpace : null) : autoFreeSpace
     const [purgeOrphaned, setPurgeOrphaned] = useState(false)
 
     // Disk usage of the effective recordings volume (absent on older
@@ -300,8 +302,8 @@ export function RecordingSettings() {
                                 <UsageBar
                                     used={diskInfo.used}
                                     total={diskInfo.total}
-                                    warnAt={minFreeSpace !== '' ? Math.max(0, 1 - (2 * minFreeSpace * 1024 ** 3) / diskInfo.total) : 0.8}
-                                    critAt={minFreeSpace !== '' ? Math.max(0, 1 - (minFreeSpace * 1024 ** 3) / diskInfo.total) : 0.9}
+                                    warnAt={floorInForce != null ? Math.max(0, 1 - (2 * floorInForce * 1024 ** 3) / diskInfo.total) : 0.8}
+                                    critAt={floorInForce != null ? Math.max(0, 1 - (floorInForce * 1024 ** 3) / diskInfo.total) : 0.9}
                                 />
                             </div>
                         )}
@@ -381,8 +383,9 @@ export function RecordingSettings() {
                             />
                             <p className="text-xs text-[var(--text-dim)] mt-1">
                                 Below this much free space the oldest recordings are rotated out, oldest first, and recording
-                                continues. Leave empty for automatic: 2 GB or 2 % of the disk, whichever is more
-                                {autoFreeSpace != null ? ` (${autoFreeSpace} GB here)` : ''}. Photos of events are never
+                                continues. Leave empty for automatic: 5 % of the disk, at least 5 GB and at most 20 GB
+                                {autoFreeSpace != null ? ` (${autoFreeSpace} GB here)` : ''}. The floor is the room the
+                                system, its database and an update have on a shared disk. Photos of events are never
                                 deleted for space. Set 0 to turn rotation off.
                             </p>
                         </div>
